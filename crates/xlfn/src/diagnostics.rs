@@ -120,10 +120,7 @@ impl DiagnosticRouter {
             .retain(|worker| *worker != sink.worker_thread_id);
     }
 
-    #[allow(
-        dead_code,
-        reason = "trace setup is called by the runtime observer integration"
-    )]
+    #[cfg(any(test, feature = "refinement"))]
     fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
         self.observer.set_trace_sink(Arc::clone(&trace));
         if let Some(sink) = self.sink.load().as_ref() {
@@ -234,6 +231,7 @@ impl DiagnosticRouter {
         self.sink.load()
     }
 
+    #[cfg(any(test, feature = "refinement"))]
     fn trace_snapshot(&self) -> DiagnosticSnapshot {
         let sink = self.sink.load();
         DiagnosticSnapshot {
@@ -477,20 +475,14 @@ pub(crate) fn diagnostic_sink_running() -> bool {
     router().sink.load().is_some()
 }
 
-#[allow(
-    dead_code,
-    reason = "trace snapshot is consumed by the runtime observer integration"
-)]
+#[cfg(any(test, feature = "refinement"))]
 #[derive(Clone, Copy)]
 pub(crate) struct DiagnosticSnapshot {
     pub(crate) running: bool,
     pub(crate) pending: u64,
 }
 
-#[allow(
-    dead_code,
-    reason = "trace setup is consumed by the runtime observer integration"
-)]
+#[cfg(any(test, feature = "refinement"))]
 pub(crate) fn connect_trace<F>(
     trace: crate::shutdown_trace::ShutdownTraceHandle,
     initialize: F,

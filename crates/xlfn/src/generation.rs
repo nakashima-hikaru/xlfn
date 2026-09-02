@@ -213,10 +213,11 @@ impl TopicGeneration {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct ServerGeneration(NonZeroU64);
 
-#[allow(
-    dead_code,
-    reason = "constructed at the Windows RTD boundary and in tests"
-)]
+#[cfg(any(
+    all(test, feature = "rtd"),
+    feature = "bench-internals",
+    all(target_os = "windows", feature = "rtd")
+))]
 impl ServerGeneration {
     pub(crate) const fn new(raw: u64) -> Option<Self> {
         match NonZeroU64::new(raw) {
@@ -225,6 +226,7 @@ impl ServerGeneration {
         }
     }
 
+    #[cfg(all(target_os = "windows", feature = "rtd"))]
     pub(crate) const fn get(self) -> u64 {
         self.0.get()
     }

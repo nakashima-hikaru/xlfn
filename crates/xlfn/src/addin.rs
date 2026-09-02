@@ -1,11 +1,3 @@
-#![cfg_attr(
-    not(feature = "handles"),
-    allow(
-        dead_code,
-        unreachable_pub,
-        reason = "Optional RTD and handle configuration is hidden in core-only builds"
-    )
-)]
 
 use crate::call::CallScope;
 #[cfg(feature = "async")]

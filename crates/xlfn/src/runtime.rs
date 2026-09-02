@@ -648,11 +648,10 @@ impl<A: crate::Addin> Runtime<A> {
             .ok_or(XllError::Closing)?
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
-    #[allow(
-        dead_code,
-        reason = "helper is used only under specific feature combinations"
-    )]
+    #[cfg(all(
+        any(test, feature = "bench-internals"),
+        any(feature = "rtd", feature = "handles")
+    ))]
     pub(crate) fn with_generation_services<R>(
         &self,
         operation: impl FnOnce(&GenerationServices) -> R,

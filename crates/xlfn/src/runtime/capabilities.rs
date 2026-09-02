@@ -24,11 +24,7 @@ pub(crate) struct OpenDeps<'a, A: Addin> {
     addin_lifecycle: &'a ThreadAffineSlot<A::LifecycleState>,
     host: &'a HostLedger,
     returns: &'a ReturnProtocol,
-    #[cfg(feature = "async")]
-    #[allow(
-        dead_code,
-        reason = "the observer projects executor state only in refinement builds"
-    )]
+    #[cfg(all(feature = "async", any(test, feature = "refinement")))]
     executors: &'a RuntimeExecutors,
     quarantine: &'a QuarantineVault<A>,
     observer: &'a RuntimeObserver,
@@ -49,7 +45,7 @@ impl<'a, A: Addin> OpenDeps<'a, A> {
             addin_lifecycle: &runtime.addin_lifecycle,
             host: &runtime.host,
             returns: &runtime.return_protocol,
-            #[cfg(feature = "async")]
+            #[cfg(all(feature = "async", any(test, feature = "refinement")))]
             executors: &runtime.executors,
             quarantine: &runtime.quarantine,
             observer: &runtime.observer,
@@ -72,18 +68,12 @@ impl<'a, A: Addin> OpenDeps<'a, A> {
         self.returns
     }
 
-    #[allow(
-        dead_code,
-        reason = "open host state is projected only to the refinement observer"
-    )]
+    #[cfg(any(test, feature = "refinement"))]
     pub(in crate::runtime) fn host(&self) -> &'a HostLedger {
         self.host
     }
 
-    #[allow(
-        dead_code,
-        reason = "the observer samples generation services only for formal traces"
-    )]
+    #[cfg(all(any(test, feature = "refinement"), any(feature = "handles", feature = "rtd")))]
     pub(in crate::runtime) fn with_generation_services<R>(
         &self,
         operation: impl FnOnce(&GenerationServices) -> R,
@@ -91,11 +81,7 @@ impl<'a, A: Addin> OpenDeps<'a, A> {
         self.lifecycle.with_generation_services(operation)
     }
 
-    #[cfg(feature = "async")]
-    #[allow(
-        dead_code,
-        reason = "the observer projects executor state only in refinement builds"
-    )]
+    #[cfg(all(feature = "async", any(test, feature = "refinement")))]
     pub(in crate::runtime) fn executors(&self) -> &'a RuntimeExecutors {
         self.executors
     }

@@ -117,10 +117,7 @@ impl AsyncManager {
         Ok(())
     }
 
-    #[allow(
-        dead_code,
-        reason = "trace wiring is used only when the runtime observer is enabled"
-    )]
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
         self.observer.set_trace_sink(Arc::clone(&trace));
         let mut state = self.state.lock();
@@ -372,10 +369,7 @@ impl AsyncManager {
         matches!(*self.state.lock(), ExecutorState::Running(_))
     }
 
-    #[allow(
-        dead_code,
-        reason = "the observer samples executor state only in refinement builds"
-    )]
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn is_stopped(&self) -> bool {
         matches!(*self.state.lock(), ExecutorState::Stopped)
     }

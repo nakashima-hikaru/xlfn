@@ -1,6 +1,6 @@
 #![allow(
     unused_imports,
-    reason = "module boundary reexports are consumed through their parent"
+    reason = "diagnostic router facade re-exports items from the parent module for encapsulation"
 )]
 
 //! Internal diagnostic routing and worker lifecycle.
@@ -10,6 +10,7 @@ pub(crate) use super::{
     set_diagnostic_sink,
 };
 
+#[cfg(any(test, feature = "refinement"))]
 pub(crate) use super::connect_trace;
 
 #[cfg(test)]

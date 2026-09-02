@@ -86,13 +86,9 @@ impl DiagnosticObserver {
         0
     }
 
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn pending(&self) -> u64 {
-        #[cfg(any(test, feature = "refinement"))]
-        {
-            self.pending.load(Ordering::Acquire)
-        }
-        #[cfg(not(any(test, feature = "refinement")))]
-        0
+        self.pending.load(Ordering::Acquire)
     }
 }
 
@@ -141,6 +137,7 @@ impl AsyncDiagnosticSink {
         self.observer.set_trace_sink(trace);
     }
 
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn pending(&self) -> u64 {
         self.observer.pending()
     }

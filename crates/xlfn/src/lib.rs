@@ -137,9 +137,12 @@ pub(crate) mod test_callback {
     use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
     use std::sync::{Mutex, MutexGuard};
     use xlfn_sys::{
-        XL_ASYNC_RETURN, XL_FREE, XL_SHEET_ID, XL_SHEET_NM, XLF_CALLER, XLMREF12, XLOPER12,
-        XLOPER12MRef, XLOPER12SRef, XLOPER12Value, XLREF12, XLRET_ABORT, XLRET_FAILED,
-        XLRET_SUCCESS, XLTYPE_REF, XLTYPE_SREF, XLTYPE_STR,
+        XL_ASYNC_RETURN, XL_FREE, XLOPER12, XLRET_ABORT, XLRET_FAILED, XLRET_SUCCESS,
+    };
+    #[cfg(feature = "handles")]
+    use xlfn_sys::{
+        XLF_CALLER, XLMREF12, XLOPER12MRef, XLOPER12SRef, XLOPER12Value, XLREF12,
+        XLTYPE_REF, XLTYPE_SREF, XLTYPE_STR, XL_SHEET_ID, XL_SHEET_NM,
     };
 
     static TOTAL_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -150,9 +153,11 @@ pub(crate) mod test_callback {
     static TERMINAL_STATUS: AtomicI32 = AtomicI32::new(XLRET_ABORT);
     static TERMINAL_USED: AtomicBool = AtomicBool::new(false);
     static ASYNC_REJECTED: AtomicBool = AtomicBool::new(false);
+    #[cfg(feature = "handles")]
     static FORMULA_CALLER_KIND: AtomicI32 = AtomicI32::new(0);
     static CALLBACK_ORDER: Mutex<Vec<i32>> = Mutex::new(Vec::new());
     static CALLBACK_TEST_LOCK: Mutex<()> = Mutex::new(());
+    #[cfg(feature = "handles")]
     static FORMULA_CALLER_REFERENCES: XLMREF12 = XLMREF12 {
         count: 1,
         reftbl: [XLREF12 {
@@ -162,12 +167,10 @@ pub(crate) mod test_callback {
             col_last: 3,
         }],
     };
+    #[cfg(feature = "handles")]
     static FORMULA_SHEET_NAME: [u16; 6] = [5, 83, 104, 101, 101, 116];
 
-    #[allow(
-        dead_code,
-        reason = "test callback helpers used in specific feature configurations"
-    )]
+    #[cfg(feature = "handles")]
     pub(crate) enum FormulaCallerKind {
         Ref = 1,
         SRef = 2,
@@ -228,6 +231,7 @@ pub(crate) mod test_callback {
         TERMINAL_STATUS.store(XLRET_ABORT, Ordering::Relaxed);
         TERMINAL_USED.store(false, Ordering::Relaxed);
         ASYNC_REJECTED.store(false, Ordering::Relaxed);
+        #[cfg(feature = "handles")]
         FORMULA_CALLER_KIND.store(0, Ordering::Relaxed);
         CALLBACK_ORDER
             .lock()
@@ -247,10 +251,7 @@ pub(crate) mod test_callback {
         ASYNC_REJECTED.store(rejected, Ordering::Relaxed);
     }
 
-    #[allow(
-        dead_code,
-        reason = "test callback helpers used in specific feature configurations"
-    )]
+    #[cfg(feature = "handles")]
     pub(crate) fn set_formula_caller(kind: FormulaCallerKind) {
         FORMULA_CALLER_KIND.store(kind as i32, Ordering::Relaxed);
     }
@@ -282,10 +283,7 @@ pub(crate) mod test_callback {
             .clone()
     }
 
-    #[allow(
-        dead_code,
-        reason = "test callback helpers used in specific feature configurations"
-    )]
+    #[cfg(feature = "handles")]
     pub(crate) fn calls_for(function: i32) -> usize {
         CALLBACK_ORDER
             .lock()
@@ -310,6 +308,7 @@ pub(crate) mod test_callback {
             FREE_CALLS.fetch_add(1, Ordering::Relaxed);
             return XLRET_SUCCESS;
         }
+        #[cfg(feature = "handles")]
         match (FORMULA_CALLER_KIND.load(Ordering::Relaxed), function) {
             (kind, XLF_CALLER) if kind != 0 => {
                 // SAFETY: the test callback owns the static reference table for

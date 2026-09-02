@@ -1,8 +1,3 @@
-#![allow(
-    unreachable_pub,
-    dead_code,
-    reason = "Cancellation types are exported as public API when async feature is enabled; unused helpers are exercised under async or test configurations"
-)]
 
 use parking_lot::Mutex;
 use std::collections::HashMap;
