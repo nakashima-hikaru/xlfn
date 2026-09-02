@@ -1475,7 +1475,7 @@ fn refresh_data_preserves_every_rtd_scalar_variant_by_column_and_row() {
                     assert!(!bstr.is_null());
                     let length = SysStringLen(bstr) as usize;
                     let actual = String::from_utf16_lossy(std::slice::from_raw_parts(bstr, length));
-                    assert_eq!(actual, expected.as_str());
+                    assert_eq!(actual, expected.as_ref());
                 }
                 StoredRtdValue::Error(expected) => {
                     assert_eq!(value.Anonymous.Anonymous.vt, VT_ERROR);
@@ -2315,17 +2315,17 @@ fn idispatch_validates_flags_counts_types_and_reversed_arguments() {
 #[test]
 fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let subscriptions = SubscriptionRuntime::new();
     let disconnected = Arc::new(AtomicBool::new(false));
-    let source = Arc::new(DispatchTestSource {
+    let source = DispatchTestSource {
         sink: Mutex::new(None),
         disconnected: Arc::clone(&disconnected),
-    });
-    let source_handle = crate::subscription::RtdSourceHandle::for_internal_shared(
+    };
+    let (arena, source_handle) = crate::subscription::SourceArena::with_source(
         crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
-        Arc::clone(&source),
+        source,
     )
     .unwrap();
+    let subscriptions = SubscriptionRuntime::with_sources_for_internal(arena);
     let ensured = ensure_server_without_handles(Some(&subscriptions)).unwrap();
     let _generation = ensured.active.generation;
     let handle = ensured.subscription_server.as_ref().unwrap().clone();
@@ -2565,7 +2565,8 @@ fn existing_server_attaches_each_backend_without_replacement() {
 #[test]
 fn repeated_ensure_server_calls_do_not_rearm_subscription_notifications() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let subscriptions = SubscriptionRuntime::new();
+    let (arena, source, sink, _) = crate::subscription::tests::publishing_source::<f64>(None);
+    let subscriptions = SubscriptionRuntime::with_sources_for_internal(arena);
 
     let ensured = ensure_server_without_handles(Some(&subscriptions)).unwrap();
     let server = ensured.active.pointer as *mut RtdServer;
@@ -2587,7 +2588,6 @@ fn repeated_ensure_server_calls_do_not_rearm_subscription_notifications() {
         )))
         .unwrap();
 
-    let (source, sink, _) = crate::subscription::tests::publishing_source(None);
     let prepared = subscriptions
         .prepare(&source, RtdTopic::single("ensure-test").unwrap())
         .unwrap();
