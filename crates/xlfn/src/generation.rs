@@ -216,7 +216,7 @@ pub(crate) struct ServerGeneration(NonZeroU64);
 #[cfg(any(
     all(test, feature = "rtd"),
     feature = "bench-internals",
-    all(target_os = "windows", feature = "rtd")
+    all(target_os = "windows", any(feature = "rtd", feature = "handles"))
 ))]
 impl ServerGeneration {
     pub(crate) const fn new(raw: u64) -> Option<Self> {
@@ -226,7 +226,7 @@ impl ServerGeneration {
         }
     }
 
-    #[cfg(all(target_os = "windows", feature = "rtd"))]
+    #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
     pub(crate) const fn get(self) -> u64 {
         self.0.get()
     }
