@@ -90,6 +90,7 @@ pub(crate) struct SourceArena {
 }
 
 impl SourceArena {
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn empty(generation: RuntimeGeneration) -> Self {
         Self {
             generation,

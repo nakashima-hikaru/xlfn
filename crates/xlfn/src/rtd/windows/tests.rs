@@ -2323,11 +2323,7 @@ fn idispatch_validates_flags_counts_types_and_reversed_arguments() {
 
 #[test]
 fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
-    use std::io::Write;
     let _guard = TEST_LOCK.lock().unwrap();
-    let _ = writeln!(std::io::stderr(), "[TRACE] 1: start");
-    let _ = std::io::stderr().flush();
-
     let disconnected = Arc::new(AtomicBool::new(false));
     let source = DispatchTestSource::new(Arc::clone(&disconnected));
     let (arena, source_handle) = crate::subscription::SourceArena::with_source(
@@ -2339,9 +2335,6 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
     let ensured = ensure_server_without_handles(Some(&subscriptions)).unwrap();
     let _generation = ensured.active.generation;
     let handle = ensured.subscription_server.unwrap();
-
-    let _ = writeln!(std::io::stderr(), "[TRACE] 2: server ensured");
-    let _ = std::io::stderr().flush();
 
     let prepared = subscriptions
         .prepare(
@@ -2356,9 +2349,6 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
     conn.commit().unwrap();
     drop(prepared);
     assert_eq!(handle.pending_update_count(), 0);
-
-    let _ = writeln!(std::io::stderr(), "[TRACE] 3: prepared and connected");
-    let _ = std::io::stderr().flush();
 
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server while the
     // factory and dispatch interface are used.
@@ -2383,9 +2373,6 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
     let vtable = unsafe { server.as_ref().vtable };
     let null_iid = iid_null_from_fields();
 
-    let _ = writeln!(std::io::stderr(), "[TRACE] 4: factory and dispatch created");
-    let _ = std::io::stderr().flush();
-
     let mut topic_count = -1;
     let mut count_argument = VARIANT::default();
     count_argument.Anonymous.Anonymous.vt = VT_BYREF | VT_I4;
@@ -2402,12 +2389,6 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
     // and therefore is not a pending RefreshData row.
     source.publish(13.5).unwrap();
     assert!(handle.pending_update_count() > 0);
-
-    let _ = writeln!(
-        std::io::stderr(),
-        "[TRACE] 5: about to invoke DISPID_REFRESH_DATA 1"
-    );
-    let _ = std::io::stderr().flush();
 
     assert_eq!(
         // SAFETY: the server, IID, one-element argument array, and result
@@ -2428,12 +2409,6 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
         S_OK
     );
     assert_eq!(topic_count, 1);
-
-    let _ = writeln!(
-        std::io::stderr(),
-        "[TRACE] 6: invoked DISPID_REFRESH_DATA 1 ok"
-    );
-    let _ = std::io::stderr().flush();
 
     // SAFETY: successful RefreshData initialized result as a
     // VT_ARRAY|VT_VARIANT and transferred one owned SAFEARRAY into it.
@@ -2480,18 +2455,9 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
     }
     assert_eq!(handle.pending_update_count(), 0);
 
-    let _ = writeln!(std::io::stderr(), "[TRACE] 7: cleared result 1");
-    let _ = std::io::stderr().flush();
-
     source.publish(14.5).unwrap();
     assert!(handle.pending_update_count() > 0);
     topic_count = -1;
-
-    let _ = writeln!(
-        std::io::stderr(),
-        "[TRACE] 8: about to invoke DISPID_REFRESH_DATA 2"
-    );
-    let _ = std::io::stderr().flush();
 
     assert_eq!(
         // SAFETY: all inputs remain live. A null pVarResult asks Invoke to
@@ -2514,21 +2480,9 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
     assert_eq!(topic_count, 1);
     assert_eq!(handle.pending_update_count(), 0);
 
-    let _ = writeln!(
-        std::io::stderr(),
-        "[TRACE] 9: invoked DISPID_REFRESH_DATA 2 ok"
-    );
-    let _ = std::io::stderr().flush();
-
     parameters = DISPPARAMS::default();
     result.Anonymous.Anonymous.vt = VT_I4;
     result.Anonymous.Anonymous.Anonymous.lVal = 123;
-
-    let _ = writeln!(
-        std::io::stderr(),
-        "[TRACE] 10: about to invoke DISPID_SERVER_TERMINATE"
-    );
-    let _ = std::io::stderr().flush();
 
     assert_eq!(
         // SAFETY: the server remains live through its dispatch reference;
@@ -2553,27 +2507,10 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
     unsafe { assert_eq!(result.Anonymous.Anonymous.vt, VT_EMPTY) };
     assert!(disconnected.load(Ordering::Acquire));
 
-    let _ = writeln!(
-        std::io::stderr(),
-        "[TRACE] 11: invoked DISPID_SERVER_TERMINATE ok"
-    );
-    let _ = std::io::stderr().flush();
-
     drop(dispatch);
-    let _ = writeln!(std::io::stderr(), "[TRACE] 12: dropped dispatch");
-    let _ = std::io::stderr().flush();
-
     drop(factory);
-    let _ = writeln!(std::io::stderr(), "[TRACE] 13: dropped factory");
-    let _ = std::io::stderr().flush();
-
     drop(ensured);
-    let _ = writeln!(std::io::stderr(), "[TRACE] 14: dropped ensured");
-    let _ = std::io::stderr().flush();
-
     shutdown_subscriptions(&subscriptions).unwrap();
-    let _ = writeln!(std::io::stderr(), "[TRACE] 15: shutdown_subscriptions ok");
-    let _ = std::io::stderr().flush();
 }
 
 #[test]
@@ -2632,6 +2569,10 @@ fn existing_server_attaches_each_backend_without_replacement() {
             .as_ref()
             .is_some_and(|active| std::ptr::eq(&**active, &subscriptions))
     );
+    drop(backends);
+    drop(second);
+    drop(first);
+    shutdown(&handles).unwrap();
 }
 
 #[test]
