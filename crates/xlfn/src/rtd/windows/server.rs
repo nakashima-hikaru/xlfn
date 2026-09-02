@@ -236,7 +236,7 @@ pub(super) fn synchronize_callback_notification(
     server: &RtdServer,
     callback: Arc<RetainedUpdateCallback>,
 ) -> XllResult<()> {
-    let subscription_server = server.backends.lock().subscription_server.clone();
+    let subscription_server = server.backends.lock().subscription_server;
     let Some(subscription_server) = subscription_server else {
         return Ok(());
     };
@@ -254,7 +254,7 @@ impl Drop for RtdServer {
             // ACTIVE_SERVER reference.
             std::process::abort();
         }
-        let subscription_server = self.backends.lock().subscription_server.clone();
+        let subscription_server = self.backends.lock().subscription_server;
         if let Some(subscription_server) = subscription_server {
             subscription_server.detach_update_notifier();
         }
@@ -657,7 +657,7 @@ fn ensure_server_impl(
             if let Some(subscriptions) = subscriptions {
                 match backends.subscriptions.as_ref() {
                     Some(active) if std::ptr::eq(&**active, subscriptions) => {
-                        (None, backends.subscription_server.clone())
+                        (None, backends.subscription_server)
                     }
                     Some(_) => {
                         return Err(XllError::Internal {
@@ -667,12 +667,12 @@ fn ensure_server_impl(
                     None => {
                         let handle = subscriptions.register_server(existing.generation)?;
                         backends.subscriptions = Some(BackendSubscriptions::new(subscriptions));
-                        backends.subscription_server = Some(handle.clone());
-                        (Some(handle.clone()), Some(handle))
+                        backends.subscription_server = Some(handle);
+                        (Some(handle), Some(handle))
                     }
                 }
             } else {
-                (None, backends.subscription_server.clone())
+                (None, backends.subscription_server)
             };
 
         drop(backends);
@@ -734,7 +734,7 @@ fn ensure_server_impl(
         backends: Mutex::new(ServerBackends {
             handles: handles.map(BackendHandles::new),
             subscriptions: subscriptions.map(BackendSubscriptions::new),
-            subscription_server: subscription_handle.clone(),
+            subscription_server: subscription_handle,
         }),
         callbacks: Mutex::new(ServerCallbacks::default()),
         _module_lease: ComObjectLease::new(ComObjectKind::Server),
@@ -906,7 +906,7 @@ unsafe fn server_start_inner(this: *mut RtdServer, callback: *mut c_void, result
 
     // SAFETY: `this` was validated as non-null and COM keeps the server alive
     // for the duration of ServerStart.
-    let _subscription_server = unsafe { (*this).backends.lock().subscription_server.clone() };
+    let _subscription_server = unsafe { (*this).backends.lock().subscription_server };
 
     let callback_ptr = callback.cast::<RtdUpdateEvent>();
     let mut cookie = 0u32;
@@ -1049,9 +1049,9 @@ unsafe fn connect_data_inner(
         // SAFETY: `this` was validated as non-null and COM retains the server during ConnectData.
         let backends = unsafe { (*this).backends.lock() };
         (
-            backends.handles.clone(),
-            backends.subscriptions.clone(),
-            backends.subscription_server.clone(),
+            backends.handles,
+            backends.subscriptions,
+            backends.subscription_server,
         )
     };
 
@@ -1160,7 +1160,7 @@ unsafe fn refresh_data_inner(
 
     // SAFETY: `this` was validated as non-null and COM retains the server for
     // the duration of RefreshData.
-    let subscription_server = unsafe { (*this).backends.lock().subscription_server.clone() };
+    let subscription_server = unsafe { (*this).backends.lock().subscription_server };
 
     let Some(subscription_server) = subscription_server else {
         // SAFETY: `topic_count` and `result` are valid COM output parameters.
@@ -1214,10 +1214,7 @@ unsafe fn disconnect_data_inner(this: *mut RtdServer, topic_id: i32) -> i32 {
     let (handles, subscription_server) = {
         // SAFETY: `this` was validated as non-null and COM retains the server during DisconnectData.
         let backends = unsafe { (*this).backends.lock() };
-        (
-            backends.handles.clone(),
-            backends.subscription_server.clone(),
-        )
+        (backends.handles, backends.subscription_server)
     };
 
     // SAFETY: `this` remains valid for the duration of DisconnectData.
@@ -1257,8 +1254,7 @@ pub(super) unsafe extern "system" fn heartbeat(this: *mut RtdServer, result: *mu
 
         if !this.is_null() {
             // SAFETY: `this` was checked as non-null.
-            let subscription_server =
-                unsafe { (*this).backends.lock().subscription_server.clone() };
+            let subscription_server = unsafe { (*this).backends.lock().subscription_server };
             if let Some(subscription_server) = subscription_server {
                 let _ = subscription_server.pulse_notification();
             }
@@ -1407,10 +1403,7 @@ pub(super) unsafe fn teardown_server_resources(this: *mut RtdServer, remove_acti
     let (handles, subscription_server) = {
         // SAFETY: `this` is non-null when entering server teardown.
         let backends = unsafe { (*this).backends.lock() };
-        (
-            backends.handles.clone(),
-            backends.subscription_server.clone(),
-        )
+        (backends.handles, backends.subscription_server)
     };
 
     // SAFETY: `this` is non-null when entering server teardown.
