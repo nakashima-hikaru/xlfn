@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU64, Ordering};
-use xlfn_kernel::drain_gate::{StripedDrainGate, StripedDrainPermit};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use xlfn_kernel::drain_gate::{DEFAULT_STRIPE_COUNT, StripedDrainGate};
 
 trait EpochAtomic {
     fn new(value: u64) -> Self;
@@ -89,21 +89,34 @@ pub struct CacheEndpoint<Marker, K, V> {
 }
 
 pub struct CacheLease<'a, V> {
-    value: NonNull<V>,
-    _permit: StripedDrainPermit<'a, 32>,
+    node: NonNull<CacheNode<V>>,
+    _marker: PhantomData<&'a V>,
 }
 
-// SAFETY: StripedDrainPermit ensures V is not accessed after reclaim.
+// SAFETY: CacheLease provides shared access to V and is tied to the node's pin.
 unsafe impl<V: Send> Send for CacheLease<'_, V> {}
-// SAFETY: StripedDrainPermit ensures V is not accessed after reclaim.
+// SAFETY: CacheLease provides shared access to V and is tied to the node's pin.
 unsafe impl<V: Sync> Sync for CacheLease<'_, V> {}
 
 impl<V> std::ops::Deref for CacheLease<'_, V> {
     type Target = V;
 
     fn deref(&self) -> &Self::Target {
-        // SAFETY: self._permit ensures value is not reclaimed while lease is live.
-        unsafe { self.value.as_ref() }
+        // SAFETY: self.node is pinned for the lifetime of this CacheLease.
+        unsafe { &self.node.as_ref().value }
+    }
+}
+
+impl<V> Drop for CacheLease<'_, V> {
+    fn drop(&mut self) {
+        // SAFETY: self.node remains valid because a pin is held by this lease.
+        let node = unsafe { self.node.as_ref() };
+        if node.pins.fetch_sub(1, Ordering::AcqRel) == 1 {
+            // SAFETY: The last pin was dropped on a non-resident node; safe to reclaim.
+            unsafe {
+                drop(Box::from_raw(self.node.as_ptr()));
+            }
+        }
     }
 }
 
@@ -361,24 +374,27 @@ struct VersionedKey<K> {
     key: K,
 }
 
-struct ValuePtr<V>(NonNull<V>);
+struct NodePtr<V>(NonNull<CacheNode<V>>);
 
-impl<V> Clone for ValuePtr<V> {
+impl<V> Clone for NodePtr<V> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<V> Copy for ValuePtr<V> {}
+impl<V> Copy for NodePtr<V> {}
 
-// SAFETY: ValuePtr is internal to CalculationCache where V is Send + Sync.
-unsafe impl<V: Send> Send for ValuePtr<V> {}
-// SAFETY: ValuePtr is internal to CalculationCache where V is Send + Sync.
-unsafe impl<V: Sync> Sync for ValuePtr<V> {}
+// SAFETY: NodePtr is internal to CalculationCache where V is Send + Sync.
+unsafe impl<V: Send> Send for NodePtr<V> {}
+// SAFETY: NodePtr is internal to CalculationCache where V is Send + Sync.
+unsafe impl<V: Sync> Sync for NodePtr<V> {}
 
 struct CacheNode<V> {
-    _value: Box<V>,
-    epoch: u64,
+    value: Box<V>,
+    pins: AtomicUsize,
+    resident: AtomicBool,
+    generation: u64,
+    domain: NonNull<CacheLookupDomain>,
 }
 
 // SAFETY: Box<V> is Send if V: Send.
@@ -386,13 +402,73 @@ unsafe impl<V: Send> Send for CacheNode<V> {}
 // SAFETY: Box<V> is Sync if V: Sync.
 unsafe impl<V: Sync> Sync for CacheNode<V> {}
 
+struct CacheLookupDomain {
+    generations: [StripedDrainGate<DEFAULT_STRIPE_COUNT>; 2],
+    current: AtomicUsize,
+    reclaim_lock: Mutex<()>,
+    closed: AtomicBool,
+}
+
+impl CacheLookupDomain {
+    const fn new() -> Self {
+        Self {
+            generations: [StripedDrainGate::new_open(), StripedDrainGate::new_open()],
+            current: AtomicUsize::new(0),
+            reclaim_lock: Mutex::new(()),
+            closed: AtomicBool::new(false),
+        }
+    }
+
+    #[inline]
+    fn enter(&self) -> XllResult<CacheDomainPermit> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(XllError::Closing);
+        }
+        let gen_idx = self.current.load(Ordering::Acquire) & 1;
+        let stripe = xlfn_kernel::drain_gate::current_thread_stripe();
+        self.generations[gen_idx]
+            .try_acquire(stripe)
+            .map_err(|_| XllError::Closing)?;
+        Ok(CacheDomainPermit {
+            gate: NonNull::from(&self.generations[gen_idx]),
+            stripe,
+        })
+    }
+
+    fn quiesce(&self) {
+        let _reclaim = self.reclaim_lock.lock();
+        let old_gen = self.current.fetch_xor(1, Ordering::SeqCst) & 1;
+        self.generations[old_gen].wait_until_idle();
+    }
+
+    fn seal(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.generations[0].seal_and_wait();
+        self.generations[1].seal_and_wait();
+    }
+}
+
+struct CacheDomainPermit {
+    gate: NonNull<StripedDrainGate<DEFAULT_STRIPE_COUNT>>,
+    stripe: usize,
+}
+
+impl Drop for CacheDomainPermit {
+    #[inline]
+    fn drop(&mut self) {
+        // SAFETY: self.gate points to a StripedDrainGate within the enclosing CacheLookupDomain.
+        let gate = unsafe { self.gate.as_ref() };
+        gate.release(self.stripe);
+    }
+}
+
 pub struct CalculationCache<K, V> {
     weight_budget: usize,
     generation: CacheGeneration,
-    readers: StripedDrainGate<32>,
+    domain: Box<CacheLookupDomain>,
     clear_lock: Mutex<()>,
-    arena: Mutex<Vec<CacheNode<V>>>,
-    cache: Cache<VersionedKey<K>, (ValuePtr<V>, u32)>,
+    cache: Cache<VersionedKey<K>, (NodePtr<V>, u32)>,
+    clear_fn: Option<fn(*const ())>,
 }
 
 impl<K, V> CalculationCache<K, V>
@@ -414,14 +490,33 @@ where
         Self {
             weight_budget,
             generation: CacheGeneration::new(),
-            readers: StripedDrainGate::new_open(),
+            domain: Box::new(CacheLookupDomain::new()),
             clear_lock: Mutex::new(()),
-            arena: Mutex::new(Vec::new()),
             cache: Cache::builder()
                 .max_capacity(capacity)
-                .weigher(|_, entry: &(ValuePtr<V>, u32)| entry.1)
+                .weigher(|_, entry: &(NodePtr<V>, u32)| entry.1)
                 .support_invalidation_closures()
+                .eviction_listener(|_key, (node_ptr, _weight): (NodePtr<V>, u32), _cause| {
+                    // SAFETY: node_ptr points to an allocated CacheNode<V> managed by the cache.
+                    let node = unsafe { node_ptr.0.as_ref() };
+                    node.resident.store(false, Ordering::Release);
+                    if node.pins.fetch_sub(1, Ordering::AcqRel) == 1 {
+                        // SAFETY: node.domain points to the CalculationCache's domain which is still valid.
+                        let domain = unsafe { node.domain.as_ref() };
+                        domain.quiesce();
+                        // SAFETY: The last pin was dropped on a non-resident node; safe to reclaim.
+                        unsafe {
+                            drop(Box::from_raw(node_ptr.0.as_ptr()));
+                        }
+                    }
+                })
                 .build(),
+            clear_fn: Some(|ptr| {
+                // SAFETY: ptr points to a valid CalculationCache<K, V> during Drop.
+                let cache = unsafe { &*(ptr as *const Self) };
+                cache.domain.seal();
+                cache.clear();
+            }),
         }
     }
 
@@ -454,15 +549,6 @@ where
             .invalidate_entries_if(move |key, _| key.epoch < epoch)
             .expect("invalidation closures are enabled");
         self.cache.run_pending_tasks();
-
-        self.readers.seal_and_wait();
-        {
-            let mut arena = self.arena.lock();
-            arena.retain(|node| node.epoch >= epoch);
-        }
-        self.readers
-            .reopen()
-            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
     }
 
     fn invalidate_before(&self, epoch: u64) {
@@ -471,28 +557,41 @@ where
             .invalidate_entries_if(move |key, _| key.epoch < epoch)
             .expect("invalidation closures are enabled");
         self.cache.run_pending_tasks();
-
-        self.readers.seal_and_wait();
-        {
-            let mut arena = self.arena.lock();
-            arena.retain(|node| node.epoch >= epoch);
-        }
-        self.readers
-            .reopen()
-            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
     }
 
     pub fn get<'a>(&'a self, key: &K) -> Option<CacheLease<'a, V>> {
-        let permit = self.readers.try_enter_current().ok()?;
         let epoch = self.generation.snapshot();
+        self.get_at_epoch(key, epoch)
+    }
+
+    fn get_at_epoch<'a>(&'a self, key: &K, epoch: u64) -> Option<CacheLease<'a, V>> {
+        let permit = self.domain.enter().ok()?;
         let vkey = VersionedKey {
             epoch,
             key: key.clone(),
         };
-        let (ptr, _) = self.cache.get(&vkey)?;
+        let (node_ptr, _) = self.cache.get(&vkey)?;
+        // SAFETY: node_ptr is valid while holding domain permit.
+        let node = unsafe { node_ptr.0.as_ref() };
+        if node.generation != epoch {
+            drop(permit);
+            return None;
+        }
+        node.pins.fetch_add(1, Ordering::AcqRel);
+        if !node.resident.load(Ordering::Acquire) {
+            if node.pins.fetch_sub(1, Ordering::AcqRel) == 1 {
+                // SAFETY: The node was evicted and this was the last pin; safe to reclaim.
+                unsafe {
+                    drop(Box::from_raw(node_ptr.0.as_ptr()));
+                }
+            }
+            drop(permit);
+            return None;
+        }
+        drop(permit);
         Some(CacheLease {
-            value: ptr.0,
-            _permit: permit,
+            node: node_ptr.0,
+            _marker: PhantomData,
         })
     }
 
@@ -521,22 +620,13 @@ where
         F: FnOnce() -> XllResult<V>,
         W: FnOnce(&V) -> usize,
     {
-        let permit = self
-            .readers
-            .try_enter_current()
-            .map_err(|_| XllError::Closing)?;
-
-        let vkey = VersionedKey { epoch, key };
-        if let Some((ptr, _)) = self.cache.get(&vkey) {
-            return Ok(CacheLease {
-                value: ptr.0,
-                _permit: permit,
-            });
+        if let Some(lease) = self.get_at_epoch(&key, epoch) {
+            return Ok(lease);
         }
-        drop(permit);
 
         let _active = ActiveCacheGuard::enter()?;
-        let insertion_epoch = std::sync::atomic::AtomicU64::new(epoch);
+        let vkey = VersionedKey { epoch, key };
+        let domain_ptr = NonNull::from(&*self.domain);
         let initialized = self
             .cache
             .try_get_with(vkey.clone(), || {
@@ -544,35 +634,39 @@ where
                 let measured = weight(&value);
                 let w = u32::try_from(measured).unwrap_or(u32::MAX).max(1);
                 let boxed = Box::new(value);
-                let ptr = ValuePtr(NonNull::from(&*boxed));
-                let current_epoch = self.generation.snapshot();
-                insertion_epoch.store(current_epoch, std::sync::atomic::Ordering::Release);
-                self.arena.lock().push(CacheNode {
-                    _value: boxed,
-                    epoch: current_epoch,
+                let node = Box::new(CacheNode {
+                    value: boxed,
+                    pins: AtomicUsize::new(1),
+                    resident: AtomicBool::new(true),
+                    generation: epoch,
+                    domain: domain_ptr,
                 });
+                let ptr = NodePtr(NonNull::from(Box::leak(node)));
                 Ok::<_, XllError>((ptr, w))
             })
             .map_err(|error| (*error).clone())?;
+
+        let node_ptr = initialized.0;
+        // SAFETY: node_ptr originates from the Box<CacheNode<V>> returned by try_get_with.
+        let node = unsafe { node_ptr.0.as_ref() };
+        node.pins.fetch_add(1, Ordering::AcqRel);
 
         self.generation.discard_if_stale(epoch, || {
             self.cache.invalidate(&vkey);
         });
 
-        let permit = self
-            .readers
-            .try_enter_current()
-            .map_err(|_| XllError::Closing)?;
-
-        if self.generation.snapshot() != insertion_epoch.load(std::sync::atomic::Ordering::Acquire)
-        {
-            return Err(XllError::Closing);
-        }
-
         Ok(CacheLease {
-            value: initialized.0.0,
-            _permit: permit,
+            node: node_ptr.0,
+            _marker: PhantomData,
         })
+    }
+}
+
+impl<K, V> Drop for CalculationCache<K, V> {
+    fn drop(&mut self) {
+        if let Some(clean) = self.clear_fn {
+            clean(self as *const Self as *const ());
+        }
     }
 }
 
@@ -835,14 +929,25 @@ mod tests {
 
     #[test]
     fn eviction_drops_values_outside_the_cache_lock() {
-        let cache = CalculationCache::<u32, u32>::new(8);
+        static DROPPED: AtomicUsize = AtomicUsize::new(0);
+        struct TrackDrop(u32);
+        impl Drop for TrackDrop {
+            fn drop(&mut self) {
+                DROPPED.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        DROPPED.store(0, Ordering::SeqCst);
+        let cache = CalculationCache::<u32, TrackDrop>::new(8);
         for key in [1, 2] {
             let value = cache
-                .get_or_try_insert_with(key, |_| 8, || Ok(key * 10))
+                .get_or_try_insert_with(key, |_| 8, || Ok(TrackDrop(key * 10)))
                 .unwrap();
-            assert_eq!(*value, key * 10);
+            assert_eq!(value.0, key * 10);
+            drop(value);
         }
+        cache.cache.run_pending_tasks();
         assert_eq!(cache.len(), 1);
+        assert_eq!(DROPPED.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -1138,17 +1243,53 @@ mod tests {
             // Allow clear thread to run and enter readers.seal_and_wait()
             std::thread::sleep(Duration::from_millis(50));
 
-            // While lease is held, clear() MUST be blocked in seal_and_wait()
-            // and TrackDrop MUST NOT be dropped!
-            assert!(!DROPPED.load(Ordering::SeqCst));
-            assert!(clear_done_rx.try_recv().is_err());
+            // Wait for clear() to complete
+            clear_done_rx.recv().unwrap();
 
-            // Dropping lease permits seal_and_wait() to unblock
+            // While lease is held, TrackDrop MUST NOT be dropped!
+            assert!(!DROPPED.load(Ordering::SeqCst));
+
+            // Dropping lease drops the node!
             drop(lease);
 
-            clear_done_rx.recv().unwrap();
             assert!(DROPPED.load(Ordering::SeqCst));
         });
+    }
+
+    #[test]
+    fn independent_keys_reclaim_without_head_of_line_blocking() {
+        use std::sync::atomic::AtomicBool;
+
+        static DROPPED_A: AtomicBool = AtomicBool::new(false);
+        static DROPPED_B: AtomicBool = AtomicBool::new(false);
+        struct TrackDrop(&'static AtomicBool);
+        impl Drop for TrackDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        DROPPED_A.store(false, Ordering::SeqCst);
+        DROPPED_B.store(false, Ordering::SeqCst);
+        let cache = CalculationCache::<u32, TrackDrop>::new(1024);
+        let lease_a = cache
+            .get_or_try_insert_with(1, |_| 1, || Ok(TrackDrop(&DROPPED_A)))
+            .unwrap();
+        let lease_b = cache
+            .get_or_try_insert_with(2, |_| 1, || Ok(TrackDrop(&DROPPED_B)))
+            .unwrap();
+        drop(lease_b);
+
+        cache.clear();
+
+        // Key B had no lease, so it was dropped immediately upon clear()!
+        assert!(DROPPED_B.load(Ordering::SeqCst));
+        // Key A still has active lease_a, so it is NOT dropped!
+        assert!(!DROPPED_A.load(Ordering::SeqCst));
+
+        // Dropping lease_a drops Key A!
+        drop(lease_a);
+        assert!(DROPPED_A.load(Ordering::SeqCst));
     }
 
     #[test]
