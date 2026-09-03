@@ -5,12 +5,15 @@
 //! publication, then waits for every permit before transferring the `Box` to
 //! the teardown owner. No read capability participates in shared ownership.
 
-use crate::drain_gate::{DrainGate, DrainPermit};
+use crate::drain_gate::{DEFAULT_STRIPE_COUNT, StripedDrainGate, StripedDrainPermit};
 use parking_lot::{Condvar, Mutex};
 use std::mem::ManuallyDrop;
 use std::ops::Deref;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicPtr, Ordering};
+
+/// Number of reader stripes for the generation service slot.
+pub const SERVICE_READER_STRIPES: usize = DEFAULT_STRIPE_COUNT;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ServiceFault<E> {
@@ -47,7 +50,7 @@ pub enum GenerationServiceState<C, R, E> {
 /// A non-owning read capability over one published generation service.
 pub struct GenerationServiceRead<'slot, R> {
     pointer: NonNull<R>,
-    _permit: DrainPermit<'slot>,
+    _permit: StripedDrainPermit<'slot, SERVICE_READER_STRIPES>,
 }
 
 impl<R> Deref for GenerationServiceRead<'_, R> {
@@ -209,7 +212,7 @@ impl<C, R, E: Clone> Drop for SealingTxn<'_, C, R, E> {
 /// Common state-machine kernel for a generation-scoped lazy service.
 pub struct GenerationServiceSlot<C, R, E> {
     published: AtomicPtr<R>,
-    readers: DrainGate,
+    readers: StripedDrainGate<SERVICE_READER_STRIPES>,
     state: Mutex<GenerationServiceState<C, R, E>>,
     changed: Condvar,
 }
@@ -218,7 +221,7 @@ impl<C, R, E> GenerationServiceSlot<C, R, E> {
     pub const fn new() -> Self {
         Self {
             published: AtomicPtr::new(std::ptr::null_mut()),
-            readers: DrainGate::new_sealed(),
+            readers: StripedDrainGate::new_sealed(),
             state: Mutex::new(GenerationServiceState::Closed),
             changed: Condvar::new(),
         }
@@ -260,7 +263,7 @@ impl<C, R, E> GenerationServiceSlot<C, R, E> {
     }
 
     pub fn read_if_ready(&self) -> Option<GenerationServiceRead<'_, R>> {
-        let permit = self.readers.try_enter().ok()?;
+        let permit = self.readers.try_enter_current().ok()?;
         let pointer = NonNull::new(self.published.load(Ordering::Acquire));
         match pointer {
             Some(pointer) => Some(GenerationServiceRead {

@@ -9,7 +9,7 @@ use parking_lot::{Condvar, Mutex, MutexGuard};
 use std::mem;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
-use xlfn_kernel::drain_gate::{DrainGate, DrainPermit};
+use xlfn_kernel::drain_gate::{DEFAULT_STRIPE_COUNT, StripedDrainGate, StripedDrainPermit};
 
 #[cold]
 fn lifecycle_invariant_violation(message: &'static str) -> ! {
@@ -42,22 +42,22 @@ pub(crate) struct PublishedGeneration<A: crate::Addin> {
 }
 
 impl<A: crate::Addin> PublishedGeneration<A> {
-    fn new(root: &ExecutionGeneration<A>, services: &GenerationServices) -> Self {
+    pub(crate) fn new(root: &ExecutionGeneration<A>, services: &GenerationServices) -> Self {
         Self {
             root: NonNull::from(root),
             services: NonNull::from(services),
         }
     }
 
-    fn root(&self) -> &ExecutionGeneration<A> {
-        // SAFETY: OpenGeneration/ClosingGeneration own the stable Box and the
-        // publication is drained before either Box can be reclaimed.
+    pub(crate) fn root(&self) -> &ExecutionGeneration<A> {
+        // SAFETY: publication implies the generation root is valid for the
+        // duration of the read-side lease.
         unsafe { self.root.as_ref() }
     }
 
-    fn services(&self) -> &GenerationServices {
-        // SAFETY: identical to `root`; both pointers share one publication
-        // lifetime and are withdrawn as one coherent projection.
+    pub(crate) fn services(&self) -> &GenerationServices {
+        // SAFETY: publication implies generation services are valid for the
+        // duration of the read-side lease.
         unsafe { self.services.as_ref() }
     }
 }
@@ -69,19 +69,23 @@ unsafe impl<A: crate::Addin> Send for PublishedGeneration<A> {}
 // SAFETY: same invariant as Send; concurrent reads are synchronized by admission.
 unsafe impl<A: crate::Addin> Sync for PublishedGeneration<A> {}
 
-/// Read-side admission capability for one coherent open generation.
+/// A non-owning read lease that permits one call from the published generation.
 ///
-/// The admission publication is the sole hot-path witness that UDF calls may
+/// The lease holds a non-owning pointer to the root published by the current
+/// open generation. It is created only by `try_admit` and consumed only by
 /// enter. It is empty throughout opening and is cleared at the beginning of
 /// closing, so a loaded publication already carries the lifecycle decision;
 /// callers do not need to combine it with a separately observed phase.
 pub(crate) struct GenerationAdmission<'lifecycle, A: crate::Addin> {
     publication: NonNull<PublishedGeneration<A>>,
-    _permit: DrainPermit<'lifecycle>,
+    _permit: StripedDrainPermit<'lifecycle, DEFAULT_STRIPE_COUNT>,
 }
 
 impl<'lifecycle, A: crate::Addin> GenerationAdmission<'lifecycle, A> {
-    fn new(publication: NonNull<PublishedGeneration<A>>, permit: DrainPermit<'lifecycle>) -> Self {
+    fn new(
+        publication: NonNull<PublishedGeneration<A>>,
+        permit: StripedDrainPermit<'lifecycle, DEFAULT_STRIPE_COUNT>,
+    ) -> Self {
         Self {
             publication,
             _permit: permit,
@@ -1464,7 +1468,7 @@ impl<A: crate::Addin> LifecycleAccess<'_, A> {
 pub(crate) struct LifecycleCoordinator<A: crate::Addin> {
     phase: AtomicU8,
     publication: AtomicPtr<PublishedGeneration<A>>,
-    publication_readers: DrainGate,
+    publication_readers: StripedDrainGate<DEFAULT_STRIPE_COUNT>,
     core: Mutex<LifecycleCore<A>>,
     changed: Condvar,
     #[cfg(test)]
@@ -1495,7 +1499,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         Self {
             phase: AtomicU8::new(LifecyclePhase::Closed as u8),
             publication: AtomicPtr::new(std::ptr::null_mut()),
-            publication_readers: DrainGate::new_sealed(),
+            publication_readers: StripedDrainGate::new_sealed(),
             core: Mutex::new(LifecycleCore::new()),
             changed: Condvar::new(),
             #[cfg(test)]
@@ -1603,7 +1607,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     pub(crate) fn try_admit(&self) -> crate::XllResult<GenerationAdmission<'_, A>> {
         let permit = self
             .publication_readers
-            .try_enter()
+            .try_enter_current()
             .map_err(|_| crate::XllError::Closing)?;
         let Some(publication) = NonNull::new(self.publication.load(Ordering::Acquire)) else {
             drop(permit);
@@ -1619,7 +1623,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     ) -> crate::generation::ExecutionLease<A> {
         let permit = self
             .publication_readers
-            .try_enter_owned()
+            .try_enter_owned_current()
             .unwrap_or_else(|_| {
                 lifecycle_invariant_violation(
                     "async execution lease requested after generation admission closed",

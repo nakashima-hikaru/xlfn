@@ -6,25 +6,15 @@
 //! Excel-owned return-obligation ownership and quiescence accounting.
 
 use crate::{XllError, XllResult};
-use std::cell::Cell;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use xlfn_kernel::drain_gate::{StripedDrainGate, StripedDrainPermit};
+use xlfn_kernel::drain_gate::{
+    DEFAULT_STRIPE_COUNT, StripedDrainGate, StripedDrainPermit, current_thread_stripe,
+};
 
-const RETURN_STRIPE_COUNT: usize = 32;
-thread_local! {
-    static RETURN_STRIPE: Cell<usize> = const { Cell::new(usize::MAX) };
-}
+const RETURN_STRIPE_COUNT: usize = DEFAULT_STRIPE_COUNT;
 
-static NEXT_RETURN_STRIPE: AtomicUsize = AtomicUsize::new(0);
-
+#[inline]
 fn current_return_stripe() -> usize {
-    let current = RETURN_STRIPE.get();
-    if current != usize::MAX {
-        return current;
-    }
-    let assigned = NEXT_RETURN_STRIPE.fetch_add(1, Ordering::Relaxed) & (RETURN_STRIPE_COUNT - 1);
-    RETURN_STRIPE.set(assigned);
-    assigned
+    current_thread_stripe()
 }
 
 pub(crate) struct ReturnTracker {

@@ -66,7 +66,7 @@ impl SealableCounter {
             .state
             .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
                 let active = state & ACTIVE_COUNT_MASK;
-                (active != 0).then_some(state - 1)
+                (active != 0).then(|| state - 1)
             })
             .unwrap_or_else(|_| fail_stop());
 

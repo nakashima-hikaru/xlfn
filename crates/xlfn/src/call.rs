@@ -51,6 +51,7 @@ impl CallScratch {
 pub struct CallScope<'call> {
     callbacks: HostCallbackSession,
     scratch: CallScratch,
+    handle_permit: std::cell::OnceCell<crate::handle::HandleDomainPermit>,
     lifetime: PhantomData<&'call mut &'call ()>,
 }
 
@@ -59,6 +60,7 @@ impl<'call> CallScope<'call> {
         Self {
             callbacks: HostCallbackSession::new(),
             scratch: CallScratch::new(),
+            handle_permit: std::cell::OnceCell::new(),
             lifetime: PhantomData,
         }
     }
@@ -69,6 +71,19 @@ impl<'call> CallScope<'call> {
 
     pub(crate) fn scratch(&'call self) -> &'call CallScratch {
         &self.scratch
+    }
+
+    #[inline]
+    pub(crate) fn enter_handle_domain(
+        &self,
+        domain: &crate::handle::HandleReadDomain,
+    ) -> XllResult<()> {
+        if self.handle_permit.get().is_some() {
+            return Ok(());
+        }
+        let permit = domain.enter()?;
+        let _ = self.handle_permit.set(permit);
+        Ok(())
     }
 }
 

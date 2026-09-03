@@ -1,4 +1,3 @@
-use std::cell::Cell;
 #[cfg(test)]
 use std::sync::Condvar;
 use std::sync::Mutex;
@@ -9,30 +8,21 @@ use std::thread::ThreadId;
 use std::time::Duration;
 
 use crossbeam_utils::CachePadded;
-use xlfn_kernel::drain_gate::{StripedDrainGate, StripedDrainPermit};
+use xlfn_kernel::drain_gate::{
+    DEFAULT_STRIPE_COUNT, StripedDrainGate, StripedDrainPermit, current_thread_stripe,
+};
 
 pub(crate) const PHASE_OPENING: u8 = 0;
 pub(crate) const PHASE_OPEN: u8 = 1;
 pub(crate) const PHASE_CLOSING: u8 = 2;
 pub(crate) const PHASE_CLOSED: u8 = 3;
 
-const INGRESS_STRIPE_COUNT: usize = 32;
+const INGRESS_STRIPE_COUNT: usize = DEFAULT_STRIPE_COUNT;
 
-thread_local! {
-    static INGRESS_STRIPE: Cell<usize> = const { Cell::new(usize::MAX) };
-}
-
+#[inline]
 fn current_ingress_stripe() -> usize {
-    let current = INGRESS_STRIPE.get();
-    if current != usize::MAX {
-        return current;
-    }
-    let assigned = NEXT_INGRESS_STRIPE.fetch_add(1, Ordering::Relaxed) & (INGRESS_STRIPE_COUNT - 1);
-    INGRESS_STRIPE.set(assigned);
-    assigned
+    current_thread_stripe()
 }
-
-static NEXT_INGRESS_STRIPE: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug)]
 struct UdfStripe {

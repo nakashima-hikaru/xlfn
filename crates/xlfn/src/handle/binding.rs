@@ -10,6 +10,7 @@
     reason = "binding reads use audited non-owning pointers protected by per-record drain gates"
 )]
 
+use super::domain::{HandleDomainPermit, HandleReadDomain};
 use super::object::{ObjectBinding, ObjectCell};
 use super::token::HandleId;
 use crate::error::DomainErrorCode;
@@ -18,7 +19,6 @@ use crate::{XllError, XllResult};
 use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
-use xlfn_kernel::operation_gate::{OperationGate, OwnedOperationGuard};
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -39,18 +39,24 @@ impl BindingState {
 
 pub(crate) struct BindingRecord {
     pub(crate) id: HandleId,
+    cell: NonNull<ObjectCell>,
     object: Mutex<Option<ObjectBinding>>,
     pub(crate) state: AtomicU8,
-    readers: OperationGate,
 }
+
+// SAFETY: BindingRecord is uniquely owned by BindingTable and transferred across threads.
+unsafe impl Send for BindingRecord {}
+// SAFETY: BindingRecord is immutable during publication and thread-safe.
+unsafe impl Sync for BindingRecord {}
 
 impl BindingRecord {
     fn new(id: HandleId, object: ObjectBinding) -> Self {
+        let cell = NonNull::from(object.object());
         Self {
             id,
+            cell,
             object: Mutex::new(Some(object)),
             state: AtomicU8::new(BindingState::Live as u8),
-            readers: OperationGate::new(),
         }
     }
 
@@ -58,19 +64,11 @@ impl BindingRecord {
         BindingState::from_raw(self.state.load(Ordering::Acquire))
     }
 
+    #[inline(always)]
     pub(crate) fn object(&self) -> &ObjectCell {
-        let pointer = {
-            let object = self.object.lock();
-            NonNull::from(
-                object
-                    .as_ref()
-                    .expect("a live/read-admitted binding owns its object capability")
-                    .object(),
-            )
-        };
-        // SAFETY: callers hold this record's reader permit. Retirement waits
-        // for all such permits before taking and dropping ObjectBinding.
-        unsafe { pointer.as_ref() }
+        // SAFETY: callers are protected by the HandleReadDomain, which ensures
+        // the ObjectCell cannot be freed until all in-flight readers finish.
+        unsafe { self.cell.as_ref() }
     }
 
     fn duplicate_object_binding(&self) -> XllResult<ObjectBinding> {
@@ -118,24 +116,38 @@ pub(crate) struct BindingSnapshot {
 /// being retired while it is projected into a typed handle.
 pub(crate) struct BindingReadLease {
     record: BindingPtr,
-    _permit: OwnedOperationGuard,
+    _permit: Option<HandleDomainPermit>,
 }
 
 impl BindingReadLease {
-    pub(crate) fn new(snapshot: BindingSnapshot, id: HandleId) -> XllResult<Self> {
+    #[cfg(test)]
+    pub(crate) fn new(
+        snapshot: BindingSnapshot,
+        id: HandleId,
+        domain: &HandleReadDomain,
+    ) -> XllResult<Self> {
+        let permit = domain.enter()?;
         let record = snapshot.record.ok_or(XllError::StaleHandle)?;
         let record_ref = record.get();
-        // SAFETY: the record is a table-owned tombstone. Its gate is drained
-        // before the object capability is retired.
-        let permit =
-            unsafe { record_ref.readers.enter_owned() }.map_err(|_| XllError::StaleHandle)?;
         if record_ref.id != id || record_ref.state() != BindingState::Live {
-            drop(permit);
             return Err(XllError::StaleHandle);
         }
         Ok(Self {
             record,
-            _permit: permit,
+            _permit: Some(permit),
+        })
+    }
+
+    #[inline]
+    pub(crate) fn new_scoped(snapshot: BindingSnapshot, id: HandleId) -> XllResult<Self> {
+        let record = snapshot.record.ok_or(XllError::StaleHandle)?;
+        let record_ref = record.get();
+        if record_ref.id != id || record_ref.state() != BindingState::Live {
+            return Err(XllError::StaleHandle);
+        }
+        Ok(Self {
+            record,
+            _permit: None,
         })
     }
 
@@ -231,6 +243,7 @@ pub(crate) struct RegistryState {
 pub(crate) struct BindingTable {
     state: RwLock<RegistryState>,
     published: PublishedBindings,
+    read_domain: HandleReadDomain,
     maximum_bindings: u32,
 }
 
@@ -244,8 +257,13 @@ impl BindingTable {
                 records: Vec::new(),
             }),
             published: PublishedBindings::new(maximum_bindings),
+            read_domain: HandleReadDomain::new(),
             maximum_bindings,
         }
+    }
+
+    pub(crate) fn read_domain(&self) -> &HandleReadDomain {
+        &self.read_domain
     }
 
     pub(crate) fn reserve(&self) -> XllResult<BindingReservation<'_>> {
@@ -340,7 +358,6 @@ impl BindingTable {
                         .get()
                         .state
                         .store(BindingState::Retired as u8, Ordering::Release);
-                    record.get().readers.begin_close();
                     records.push(record);
                 }
                 if let Some(next) = slot.next_generation.next() {
@@ -356,8 +373,8 @@ impl BindingTable {
         }
         state.live_bindings = 0;
         drop(state);
+        self.read_domain.quiesce();
         for record in records {
-            record.get().readers.close_and_wait_begin().wait();
             retired.push(record.get().retire());
         }
         (live_bindings, retired)
@@ -437,7 +454,6 @@ impl BindingRemoval<'_> {
             .state
             .store(BindingState::Retired as u8, Ordering::Release);
         self.table.published.remove(self.id, self.record);
-        record.readers.begin_close();
         let slot = state
             .slots
             .get_mut(self.id.slot as usize)
@@ -461,7 +477,7 @@ impl BindingRemoval<'_> {
         }
         self.active = false;
         drop(state);
-        record.readers.close_and_wait_begin().wait();
+        self.table.read_domain.quiesce();
         drop(record.retire());
         reusable
     }

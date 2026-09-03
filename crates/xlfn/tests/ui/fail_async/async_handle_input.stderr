@@ -92,6 +92,39 @@ note: required by a bound in `xlfn::call_return::traits::assert_async_parameter`
    |     T: for<'call> ExcelParameter<'call, R::InputMode> + Send + 'static,
    |                                                         ^^^^ required by this bound in `assert_async_parameter`
 
+error[E0277]: `OnceCell<handle::domain::HandleDomainPermit>` cannot be shared between threads safely
+  --> tests/ui/fail_async/async_handle_input.rs:27:14
+   |
+27 |     dataset: Handle<'_, Dataset>,
+   |              ^^^^^^^^^^^^^^^^^^^ `OnceCell<handle::domain::HandleDomainPermit>` cannot be shared between threads safely
+   |
+   = help: within `xlfn::call::CallScope<'_>`, the trait `Sync` is not implemented for `OnceCell<handle::domain::HandleDomainPermit>`
+   = note: if you want to do aliasing and mutation between multiple threads, use `std::sync::OnceLock` instead
+note: required because it appears within the type `xlfn::call::CallScope<'_>`
+  --> src/call.rs
+   |
+   | pub struct CallScope<'call> {
+   |            ^^^^^^^^^
+   = note: required for `&xlfn::call::CallScope<'_>` to implement `Send`
+note: required because it appears within the type `PhantomData<&xlfn::call::CallScope<'_>>`
+  --> $RUST/core/src/marker.rs
+   |
+   | pub struct PhantomData<T: PointeeSized>;
+   |            ^^^^^^^^^^^
+note: required because it appears within the type `xlfn::handle::Handle<'_, Dataset>`
+  --> src/handle/typed.rs
+   |
+   | pub struct Handle<'call, T: ExcelHandleObject> {
+   |            ^^^^^^
+note: required by a bound in `xlfn::call_return::traits::assert_async_parameter`
+  --> src/call_return/traits.rs
+   |
+   | pub fn assert_async_parameter<R, T>()
+   |        ---------------------- required by a bound in this function
+...
+   |     T: for<'call> ExcelParameter<'call, R::InputMode> + Send + 'static,
+   |                                                         ^^^^ required by this bound in `assert_async_parameter`
+
 error[E0277]: `Rc<xlfn::host_callback::HostCallbackShared>` cannot be shared between threads safely
   --> tests/ui/fail_async/async_handle_input.rs:27:14
    |

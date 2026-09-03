@@ -286,6 +286,7 @@ impl HandleRegistry {
         let lease = BindingReadLease::new(
             self.bindings.published().load(verified.id.slot),
             verified.id,
+            self.bindings.read_domain(),
         )?;
         let record = lease.record();
         if record.state() != BindingState::Live {
@@ -300,7 +301,7 @@ impl HandleRegistry {
 
     pub(crate) fn lookup_handle<'call, T>(
         &self,
-        _scope: &'call crate::call::CallScope<'call>,
+        scope: &'call crate::call::CallScope<'call>,
         token: &str,
     ) -> XllResult<Handle<'call, T>>
     where
@@ -312,7 +313,8 @@ impl HandleRegistry {
         if !self.is_open() {
             return Err(XllError::Closing);
         }
-        let binding = BindingReadLease::new(
+        scope.enter_handle_domain(self.bindings.read_domain())?;
+        let binding = BindingReadLease::new_scoped(
             self.bindings.published().load(verified.id.slot),
             verified.id,
         )?;
@@ -440,6 +442,7 @@ impl HandleRegistry {
         }
         self.objects.seal();
         self.retire_values_for_seal();
+        self.bindings.read_domain().seal();
         self.phase
             .store(HandleRegistryPhase::Closed as u8, Ordering::Release);
         self.cleanup_result()?;

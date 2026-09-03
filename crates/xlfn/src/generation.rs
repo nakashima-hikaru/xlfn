@@ -64,7 +64,9 @@ pub(crate) enum ShutdownGeneration<A: crate::Addin> {
 /// UDF executions.
 pub struct ExecutionLease<A: crate::Addin> {
     generation: NonNull<ExecutionGeneration<A>>,
-    _permit: xlfn_kernel::drain_gate::OwnedDrainPermit,
+    _permit: xlfn_kernel::drain_gate::StripedOwnedDrainPermit<
+        { xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT },
+    >,
 }
 
 impl<A: crate::Addin> ExecutionLease<A> {
@@ -77,7 +79,9 @@ impl<A: crate::Addin> ExecutionLease<A> {
     #[cfg(feature = "async")]
     pub(crate) unsafe fn new(
         generation: NonNull<ExecutionGeneration<A>>,
-        permit: xlfn_kernel::drain_gate::OwnedDrainPermit,
+        permit: xlfn_kernel::drain_gate::StripedOwnedDrainPermit<
+            { xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT },
+        >,
     ) -> Self {
         Self {
             generation,

@@ -16,6 +16,7 @@
 
 mod binding;
 mod connection;
+mod domain;
 mod formula;
 mod lifetime;
 #[allow(unsafe_code, reason = "Stable typed object pointers are audited here")]
@@ -69,6 +70,7 @@ pub(crate) use binding::BindingState;
 #[cfg(any(target_os = "windows", test))]
 pub(crate) use connection::HandleConnection;
 pub(crate) use connection::{FormulaObserverId, Topic};
+pub(crate) use domain::{HandleDomainPermit, HandleReadDomain};
 #[cfg(any(test, feature = "bench-internals"))]
 pub(crate) use formula::FormulaCaller;
 #[cfg(any(test, feature = "refinement", feature = "bench-internals"))]

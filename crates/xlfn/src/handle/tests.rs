@@ -512,8 +512,9 @@ fn binding_read_lease_delays_object_reclamation_until_reader_exit() {
         )
         .unwrap();
     let snapshot = registry.bindings.published().load(parsed.id.slot);
-    let reader = super::binding::BindingReadLease::new(snapshot, parsed.id)
-        .expect("inserted handle must admit a binding reader");
+    let reader =
+        super::binding::BindingReadLease::new(snapshot, parsed.id, registry.bindings.read_domain())
+            .expect("inserted handle must admit a binding reader");
     assert_eq!(reader.record().state(), BindingState::Live);
 
     let removal_registry = Arc::clone(&registry);

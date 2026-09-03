@@ -1,13 +1,39 @@
 //! Single- and multi-stripe sealable admission gates.
 
+use std::cell::Cell;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use crossbeam_utils::CachePadded;
 use parking_lot::{Condvar, Mutex};
 
 use crate::sealable_counter::{ReleaseOutcome, ReopenError, SealableCounter, Sealed};
 
+/// Default stripe count for scalable concurrency without false sharing or cache-line bouncing.
+pub const DEFAULT_STRIPE_COUNT: usize = 32;
+
+thread_local! {
+    static THREAD_STRIPE: Cell<usize> = const { Cell::new(usize::MAX) };
+}
+static NEXT_STRIPE: AtomicUsize = AtomicUsize::new(0);
+
+/// Returns the assigned stripe index in `[0, DEFAULT_STRIPE_COUNT)` for the calling thread.
+///
+/// Threads lazily receive a round-robin stripe assignment on first access, cached in TLS.
+#[inline]
+pub fn current_thread_stripe() -> usize {
+    let current = THREAD_STRIPE.get();
+    if current != usize::MAX {
+        return current;
+    }
+    let assigned = NEXT_STRIPE.fetch_add(1, Ordering::Relaxed) & (DEFAULT_STRIPE_COUNT - 1);
+    THREAD_STRIPE.set(assigned);
+    assigned
+}
+
 /// A one-counter drain gate with lost-wakeup-safe waiting.
 pub struct DrainGate {
     counter: SealableCounter,
+    waiters: AtomicUsize,
     wait_lock: Mutex<()>,
     idle: Condvar,
 }
@@ -16,6 +42,7 @@ impl DrainGate {
     pub const fn new_open() -> Self {
         Self {
             counter: SealableCounter::new_open(),
+            waiters: AtomicUsize::new(0),
             wait_lock: Mutex::new(()),
             idle: Condvar::new(),
         }
@@ -24,6 +51,7 @@ impl DrainGate {
     pub const fn new_sealed() -> Self {
         Self {
             counter: SealableCounter::new_sealed(),
+            waiters: AtomicUsize::new(0),
             wait_lock: Mutex::new(()),
             idle: Condvar::new(),
         }
@@ -57,7 +85,7 @@ impl DrainGate {
     #[inline]
     pub fn release(&self) -> ReleaseOutcome {
         let outcome = self.counter.release();
-        if outcome == ReleaseOutcome::BecameIdle {
+        if self.waiters.load(Ordering::Relaxed) != 0 && outcome == ReleaseOutcome::BecameIdle {
             let _wait = self.wait_lock.lock();
             self.idle.notify_all();
         }
@@ -70,10 +98,16 @@ impl DrainGate {
     }
 
     pub fn wait_until_idle(&self) {
+        if self.active() == 0 {
+            return;
+        }
+        self.waiters.fetch_add(1, Ordering::SeqCst);
         let mut wait = self.wait_lock.lock();
         while self.active() != 0 {
             self.idle.wait(&mut wait);
         }
+        drop(wait);
+        self.waiters.fetch_sub(1, Ordering::SeqCst);
     }
 
     pub fn seal_and_wait(&self) {
@@ -134,6 +168,7 @@ impl Drop for OwnedDrainPermit {
 /// A striped drain gate. Stripe selection remains a policy of the caller.
 pub struct StripedDrainGate<const N: usize> {
     counters: [CachePadded<SealableCounter>; N],
+    waiters: AtomicUsize,
     wait_lock: Mutex<()>,
     idle: Condvar,
 }
@@ -142,6 +177,7 @@ impl<const N: usize> StripedDrainGate<N> {
     pub const fn new_open() -> Self {
         Self {
             counters: [const { CachePadded::new(SealableCounter::new_open()) }; N],
+            waiters: AtomicUsize::new(0),
             wait_lock: Mutex::new(()),
             idle: Condvar::new(),
         }
@@ -150,6 +186,7 @@ impl<const N: usize> StripedDrainGate<N> {
     pub const fn new_sealed() -> Self {
         Self {
             counters: [const { CachePadded::new(SealableCounter::new_sealed()) }; N],
+            waiters: AtomicUsize::new(0),
             wait_lock: Mutex::new(()),
             idle: Condvar::new(),
         }
@@ -167,10 +204,22 @@ impl<const N: usize> StripedDrainGate<N> {
         Ok(StripedDrainPermit { gate: self, stripe })
     }
 
+    /// Acquires one count on the given stripe without retaining an RAII permit.
+    ///
+    /// Callers using this form must pair it with [`StripedDrainGate::release`].
+    #[inline]
+    pub fn try_acquire(&self, stripe: usize) -> Result<(), Sealed> {
+        self.counter(stripe).try_acquire()
+    }
+
     #[inline]
     pub fn release(&self, stripe: usize) -> ReleaseOutcome {
-        let outcome = self.counter(stripe).release();
-        if outcome == ReleaseOutcome::BecameIdle && self.active() == 0 {
+        let counter = self.counter(stripe);
+        let outcome = counter.release();
+        if self.waiters.load(Ordering::Relaxed) != 0
+            && outcome == ReleaseOutcome::BecameIdle
+            && self.active() == 0
+        {
             let _wait = self.wait_lock.lock();
             self.idle.notify_all();
         }
@@ -184,10 +233,16 @@ impl<const N: usize> StripedDrainGate<N> {
     }
 
     pub fn wait_until_idle(&self) {
+        if self.active() == 0 {
+            return;
+        }
+        self.waiters.fetch_add(1, Ordering::SeqCst);
         let mut wait = self.wait_lock.lock();
         while self.active() != 0 {
             self.idle.wait(&mut wait);
         }
+        drop(wait);
+        self.waiters.fetch_sub(1, Ordering::SeqCst);
     }
 
     pub fn seal_and_wait(&self) {
@@ -224,6 +279,35 @@ impl<const N: usize> StripedDrainGate<N> {
     }
 }
 
+impl<const N: usize> StripedDrainGate<N> {
+    #[inline]
+    pub fn try_enter_owned(
+        &'static self,
+        stripe: usize,
+    ) -> Result<StripedOwnedDrainPermit<N>, Sealed> {
+        self.counter(stripe).try_acquire()?;
+        Ok(StripedOwnedDrainPermit { gate: self, stripe })
+    }
+}
+
+impl StripedDrainGate<DEFAULT_STRIPE_COUNT> {
+    /// Attempts to enter using the calling thread's assigned stripe.
+    #[inline]
+    pub fn try_enter_current(
+        &self,
+    ) -> Result<StripedDrainPermit<'_, DEFAULT_STRIPE_COUNT>, Sealed> {
+        self.try_enter(current_thread_stripe())
+    }
+
+    /// Attempts to enter and acquire an owned permit using the calling thread's assigned stripe.
+    #[inline]
+    pub fn try_enter_owned_current(
+        &'static self,
+    ) -> Result<StripedOwnedDrainPermit<DEFAULT_STRIPE_COUNT>, Sealed> {
+        self.try_enter_owned(current_thread_stripe())
+    }
+}
+
 impl<const N: usize> std::fmt::Debug for StripedDrainGate<N> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -243,6 +327,19 @@ pub struct StripedDrainPermit<'a, const N: usize> {
 }
 
 impl<const N: usize> Drop for StripedDrainPermit<'_, N> {
+    fn drop(&mut self) {
+        self.gate.release(self.stripe);
+    }
+}
+
+/// An owned active admission held in a [`StripedDrainGate`].
+#[derive(Debug)]
+pub struct StripedOwnedDrainPermit<const N: usize> {
+    gate: &'static StripedDrainGate<N>,
+    stripe: usize,
+}
+
+impl<const N: usize> Drop for StripedOwnedDrainPermit<N> {
     fn drop(&mut self) {
         self.gate.release(self.stripe);
     }
