@@ -1,5 +1,4 @@
 use super::executor::{Executor, ExecutorShared};
-use super::task::SpawnRejection;
 use super::worker::{cancel_source_no_unwind, cancel_tasks};
 use crate::cancellation::CancellationSource;
 #[cfg(test)]
@@ -72,6 +71,20 @@ impl Deref for ExecutorRead<'_> {
     }
 }
 
+pub(crate) struct ManagerSpawnReservation<'manager> {
+    _executor: ExecutorRead<'manager>,
+    reservation: super::executor::SpawnReservation<'manager>,
+}
+
+impl<'manager> ManagerSpawnReservation<'manager> {
+    pub(crate) fn commit<F>(self, future: F, cancellation: CancellationSource)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.reservation.commit(future, cancellation);
+    }
+}
+
 impl AsyncManager {
     pub(crate) const fn new() -> Self {
         Self {
@@ -98,7 +111,7 @@ impl AsyncManager {
             return match &*state {
                 ExecutorState::Running(_) => Ok(()),
                 ExecutorState::Closing(_) => Err(XllError::Closing),
-                ExecutorState::Stopped => unreachable!("executor state was checked above"),
+                ExecutorState::Stopped => unreachable!(),
             };
         }
         let executor = Executor::start(worker_count, self.current_generation())?;
@@ -165,6 +178,25 @@ impl AsyncManager {
         self.published_executor().ok_or((XllError::Closing, false))
     }
 
+    pub(crate) fn reserve_spawn(&self, generation: u64) -> XllResult<ManagerSpawnReservation<'_>> {
+        let target = self.published_executor();
+        #[cfg(test)]
+        if target.is_some() {
+            let hook = self.after_spawn_handle_snapshot_hook.lock().clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        let executor = target.ok_or(XllError::Closing)?;
+        // SAFETY: executor._permit keeps ExecutorShared live for the duration of the reservation.
+        let shared = unsafe { &*executor.shared.as_ptr() };
+        let reservation = shared.reserve_spawn(generation).map_err(|(err, _)| err)?;
+        Ok(ManagerSpawnReservation {
+            _executor: executor,
+            reservation,
+        })
+    }
+
     pub(crate) fn spawn<F>(
         &self,
         generation: u64,
@@ -182,28 +214,31 @@ impl AsyncManager {
                 hook();
             }
         }
-        let result = match target {
-            Some(shared) => shared.spawn(generation, future, cancellation),
-            None => Err(SpawnRejection {
-                error: XllError::Closing,
-                future,
-                cancellation,
-                cancel: false,
-            }),
-        };
-        match result {
-            Ok(()) => Ok(()),
-            Err(rejection) => {
-                if rejection.cancel {
-                    cancel_source_no_unwind(&rejection.cancellation);
-                }
-                // Rejected futures and their captured user values must be
-                // dropped after releasing all manager/lifecycle synchronization;
-                // Drop may legitimately re-enter runtime APIs.
-                drop(rejection.future);
-                Err(rejection.error)
+        let executor = match target {
+            Some(executor) => executor,
+            None => {
+                drop(future);
+                return Err(XllError::Closing);
             }
-        }
+        };
+        // SAFETY: executor._permit keeps ExecutorShared live for the duration of the reservation.
+        let shared = unsafe { &*executor.shared.as_ptr() };
+        let reservation = match shared.reserve_spawn(generation) {
+            Ok(reservation) => reservation,
+            Err((error, cancel)) => {
+                if cancel {
+                    cancel_source_no_unwind(&cancellation);
+                }
+                drop(future);
+                return Err(error);
+            }
+        };
+        let manager_reservation = ManagerSpawnReservation {
+            _executor: executor,
+            reservation,
+        };
+        manager_reservation.commit(future, cancellation);
+        Ok(())
     }
 
     #[cfg(test)]

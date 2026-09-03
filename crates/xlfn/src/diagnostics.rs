@@ -90,7 +90,7 @@ struct DiagnosticRouter {
     sink: ArcSwapOption<AsyncDiagnosticSink>,
     transition: Mutex<DiagnosticPhase>,
     retiring_workers: Mutex<Vec<std::thread::ThreadId>>,
-    observer: Arc<DiagnosticObserver>,
+    observer: Box<DiagnosticObserver>,
 }
 
 impl DiagnosticRouter {

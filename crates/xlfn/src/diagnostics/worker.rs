@@ -1,11 +1,16 @@
 //! Bounded diagnostic worker and owned event handoff.
 
+#![allow(
+    unsafe_code,
+    reason = "Diagnostic worker uses audited non-owning pointer joined before observer drop"
+)]
+
 use super::{DiagnosticEvent, DiagnosticInitError, DiagnosticShutdownError, DiagnosticSink};
 use crate::diagnostics::event::DROPPED_EVENTS;
 use parking_lot::Mutex;
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
+use std::ptr::NonNull;
 #[cfg(any(test, feature = "refinement"))]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -37,8 +42,16 @@ pub(crate) struct AsyncDiagnosticSink {
     pub(crate) sender: Mutex<Option<SyncSender<OwnedDiagnosticEvent>>>,
     pub(crate) worker: Mutex<Option<JoinHandle<()>>>,
     pub(crate) worker_thread_id: std::thread::ThreadId,
-    pub(crate) observer: Arc<DiagnosticObserver>,
+    pub(crate) observer: Box<DiagnosticObserver>,
 }
+
+#[derive(Clone, Copy)]
+pub(crate) struct DiagnosticObserverPtr(NonNull<DiagnosticObserver>);
+
+// SAFETY: DiagnosticObserver is Send and Sync, and its address is stable until worker joins.
+unsafe impl Send for DiagnosticObserverPtr {}
+// SAFETY: DiagnosticObserver is Send and Sync, and its address is stable until worker joins.
+unsafe impl Sync for DiagnosticObserverPtr {}
 
 pub(crate) struct DiagnosticObserver {
     #[cfg(any(test, feature = "refinement"))]
@@ -47,8 +60,8 @@ pub(crate) struct DiagnosticObserver {
 }
 
 impl DiagnosticObserver {
-    pub(crate) fn new() -> Arc<Self> {
-        Arc::new(Self {
+    pub(crate) fn new() -> Box<Self> {
+        Box::new(Self {
             #[cfg(any(test, feature = "refinement"))]
             pending: AtomicU64::new(0),
             sink: crate::shutdown_trace::ObservationSink::new(),
@@ -110,16 +123,18 @@ impl AsyncDiagnosticSink {
         let (sender, receiver) =
             mpsc::sync_channel::<OwnedDiagnosticEvent>(super::DIAGNOSTIC_QUEUE_CAPACITY);
         let observer = DiagnosticObserver::new();
-        let worker_observer = Arc::clone(&observer);
+        let observer_ptr = DiagnosticObserverPtr(NonNull::from(&*observer));
         let worker = std::thread::Builder::new()
             .name(worker_name.to_owned())
             .spawn(move || {
+                let worker_observer = observer_ptr;
                 while let Ok(event) = receiver.recv() {
                     event.deliver(&sink);
                     crate::ingress::with_diagnostic_linearization(|| {
-                        worker_observer
-                            .record(crate::shutdown_trace::ShutdownEvent::FlushDiagnostic);
-                        worker_observer.decrement_pending();
+                        // SAFETY: the observer lives until the worker thread joins in shutdown or drop
+                        let observer_ref = unsafe { worker_observer.0.as_ref() };
+                        observer_ref.record(crate::shutdown_trace::ShutdownEvent::FlushDiagnostic);
+                        observer_ref.decrement_pending();
                     });
                 }
             })
@@ -199,7 +214,7 @@ impl AsyncDiagnosticSink {
 impl Drop for AsyncDiagnosticSink {
     fn drop(&mut self) {
         if self.is_current_thread_worker() {
-            return;
+            xlfn_kernel::invariant::fail_stop();
         }
         self.sender.get_mut().take();
         if let Some(worker) = self.worker.get_mut().take()

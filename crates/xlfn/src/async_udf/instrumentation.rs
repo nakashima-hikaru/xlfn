@@ -5,19 +5,13 @@ use crate::execution::{
     CallMetadata, CallOutcome, CallTimer, UdfCompletionOutcome, UdfDeliveryOutcome, UdfLayerGuard,
     UdfTraceMetadata, safe_exit, trace,
 };
-use parking_lot::Mutex;
-use std::sync::Arc;
 
-/// Shared observation state for one async UDF invocation.
+/// Observation state for one async UDF invocation uniquely owned by the running task.
 ///
 /// The observation plane owns timing, layer guards, trace metadata, and the
 /// cancellation token needed to classify a forced task drop. It has no Excel
 /// handle or executor ownership.
 pub(crate) struct AsyncObservation<G: UdfLayerGuard> {
-    state: Arc<Mutex<ObservationState<G>>>,
-}
-
-struct ObservationState<G: UdfLayerGuard> {
     active: Option<ActiveUdfInstrumentation<G>>,
 }
 
@@ -33,14 +27,6 @@ pub(crate) struct ActiveUdfInstrumentation<G: UdfLayerGuard> {
     cancellation: CancellationToken,
 }
 
-impl<G: UdfLayerGuard> Clone for AsyncObservation<G> {
-    fn clone(&self) -> Self {
-        Self {
-            state: Arc::clone(&self.state),
-        }
-    }
-}
-
 impl<G: UdfLayerGuard> AsyncObservation<G> {
     pub(crate) fn new(
         metadata: &CallMetadata,
@@ -50,31 +36,28 @@ impl<G: UdfLayerGuard> AsyncObservation<G> {
         cancellation: CancellationToken,
     ) -> Self {
         Self {
-            state: Arc::new(Mutex::new(ObservationState {
-                active: Some(ActiveUdfInstrumentation {
-                    udf_id: metadata.udf_id,
-                    excel_name: metadata.excel_name,
-                    call_id: metadata.call_id,
-                    calculation_id: metadata.calculation_id,
-                    concurrent_calls: metadata.concurrent_calls,
-                    timer,
-                    layers,
-                    trace_enabled,
-                    cancellation,
-                }),
-            })),
+            active: Some(ActiveUdfInstrumentation {
+                udf_id: metadata.udf_id,
+                excel_name: metadata.excel_name,
+                call_id: metadata.call_id,
+                calculation_id: metadata.calculation_id,
+                concurrent_calls: metadata.concurrent_calls,
+                timer,
+                layers,
+                trace_enabled,
+                cancellation,
+            }),
         }
     }
 
-    pub(crate) fn finish(&self, completion: &AsyncCompletion) {
-        let active = self.state.lock().active.take();
-        if let Some(active) = active {
+    pub(crate) fn finish(mut self, completion: &AsyncCompletion) {
+        if let Some(active) = self.active.take() {
             finish_active(active, completion);
         }
     }
 }
 
-impl<G: UdfLayerGuard> Drop for ObservationState<G> {
+impl<G: UdfLayerGuard> Drop for AsyncObservation<G> {
     fn drop(&mut self) {
         if let Some(active) = self.active.take() {
             let completion = if active.cancellation.is_cancelled() {

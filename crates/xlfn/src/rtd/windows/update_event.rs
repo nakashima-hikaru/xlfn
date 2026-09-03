@@ -9,13 +9,22 @@ use std::ffi::c_void;
 use std::marker::PhantomData;
 use std::ptr::{self, NonNull};
 use std::rc::Rc;
+#[cfg(test)]
 use std::sync::Arc;
 
 #[derive(Default)]
 pub(super) struct ServerCallbacks {
-    active: Option<Arc<RetainedUpdateCallback>>,
-    retired: Vec<Arc<RetainedUpdateCallback>>,
+    pub(super) active: Option<CallbackPtr>,
+    pub(super) records: Vec<Box<RetainedUpdateCallback>>,
 }
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) struct CallbackPtr(pub(super) NonNull<RetainedUpdateCallback>);
+
+// SAFETY: RetainedUpdateCallback is Send and Sync, and its address is stable on heap.
+unsafe impl Send for CallbackPtr {}
+// SAFETY: RetainedUpdateCallback is Send and Sync, and its address is stable on heap.
+unsafe impl Sync for CallbackPtr {}
 
 struct ComApartmentGuard {
     should_uninit: bool,
@@ -199,42 +208,43 @@ impl Drop for RetainedUpdateCallback {
 
 pub(super) fn install_callback(
     callbacks: &Mutex<ServerCallbacks>,
-    callback: Arc<RetainedUpdateCallback>,
-) {
+    callback: Box<RetainedUpdateCallback>,
+) -> CallbackPtr {
     let mut callbacks = callbacks.lock();
-    if let Some(previous) = callbacks.active.replace(callback) {
-        // Revoking a GIT cookie can synchronously release arbitrary COM code.
-        // Keep replaced callbacks alive until the server operation barrier has
-        // reached quiescence instead of dropping one during ServerStart.
-        callbacks.retired.push(previous);
-    }
+    let ptr = CallbackPtr(NonNull::from(&*callback));
+    callbacks.records.push(callback);
+    callbacks.active = Some(ptr);
+    ptr
 }
 
-pub(super) fn active_callback(
-    callbacks: &Mutex<ServerCallbacks>,
-) -> Option<Arc<RetainedUpdateCallback>> {
-    callbacks.lock().active.clone()
+pub(super) fn active_callback(callbacks: &Mutex<ServerCallbacks>) -> Option<CallbackPtr> {
+    callbacks.lock().active
 }
 
 pub(super) fn drain_callbacks(callbacks: &Mutex<ServerCallbacks>) {
-    let retired = {
+    let records = {
         let mut callbacks = callbacks.lock();
-        let mut retired = std::mem::take(&mut callbacks.retired);
-        retired.extend(callbacks.active.take());
-        retired
+        callbacks.active = None;
+        std::mem::take(&mut callbacks.records)
     };
 
     // RetainedUpdateCallback::drop revokes a GIT cookie and can therefore run
     // external, reentrant COM code. The callback mutex must not be held here.
-    drop(retired);
+    drop(records);
     retry_git_revocation_debt();
 }
 
 #[cfg(not(test))]
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub(crate) struct RtdNotifier {
-    inner: Arc<RtdNotifierInner>,
+    callback: CallbackPtr,
+    operations: NonNull<ServerOperationBarrier>,
 }
+
+// SAFETY: RtdNotifier holds audited pointers into the server's stable lifetime.
+unsafe impl Send for RtdNotifier {}
+// SAFETY: RtdNotifier holds audited pointers into the server's stable lifetime.
+unsafe impl Sync for RtdNotifier {}
 
 #[cfg(test)]
 #[derive(Clone)]
@@ -245,42 +255,36 @@ pub(crate) struct RtdNotifier {
 #[cfg(test)]
 #[derive(Clone)]
 enum RtdNotifierKind {
-    Production(Arc<RtdNotifierInner>),
+    Production {
+        callback: CallbackPtr,
+        operations: NonNull<ServerOperationBarrier>,
+    },
     Test(Arc<crate::rtd::test_support::TestNotifierState>),
 }
 
-pub(super) struct RtdNotifierInner {
-    callback: Arc<RetainedUpdateCallback>,
-    operations: Arc<ServerOperationBarrier>,
-}
-
-impl RtdNotifierInner {
-    fn notify(&self) -> XllResult<()> {
-        let _operation = self
-            .operations
-            .enter_notification()
-            .ok_or(XllError::Closing)?;
-        self.callback.notify()
-    }
-}
+// SAFETY: RtdNotifier holds audited pointers into the server's stable lifetime.
+#[cfg(test)]
+unsafe impl Send for RtdNotifier {}
+// SAFETY: RtdNotifier holds audited pointers into the server's stable lifetime.
+#[cfg(test)]
+unsafe impl Sync for RtdNotifier {}
 
 impl RtdNotifier {
-    pub(super) fn new(
-        callback: Arc<RetainedUpdateCallback>,
-        operations: Arc<ServerOperationBarrier>,
-    ) -> Self {
-        let inner = Arc::new(RtdNotifierInner {
-            callback,
-            operations,
-        });
+    pub(super) fn new(callback: CallbackPtr, operations: NonNull<ServerOperationBarrier>) -> Self {
         #[cfg(not(test))]
         {
-            Self { inner }
+            Self {
+                callback,
+                operations,
+            }
         }
         #[cfg(test)]
         {
             Self {
-                inner: RtdNotifierKind::Production(inner),
+                inner: RtdNotifierKind::Production {
+                    callback,
+                    operations,
+                },
             }
         }
     }
@@ -295,12 +299,23 @@ impl RtdNotifier {
     pub(crate) fn notify(&self) -> XllResult<()> {
         #[cfg(not(test))]
         {
-            self.inner.notify()
+            let _operation = unsafe { self.operations.as_ref() }
+                .enter_notification()
+                .ok_or(XllError::Closing)?;
+            unsafe { self.callback.0.as_ref() }.notify()
         }
         #[cfg(test)]
         {
             match &self.inner {
-                RtdNotifierKind::Production(inner) => inner.notify(),
+                RtdNotifierKind::Production {
+                    callback,
+                    operations,
+                } => {
+                    let _operation = unsafe { operations.as_ref() }
+                        .enter_notification()
+                        .ok_or(XllError::Closing)?;
+                    unsafe { callback.0.as_ref() }.notify()
+                }
                 RtdNotifierKind::Test(state) => state.notify(),
             }
         }

@@ -82,7 +82,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 #[cfg(test)]
 use std::thread::{self, JoinHandle};
 #[cfg(test)]
-pub(crate) use task::{ActiveReservation, CompletionGuard, SpawnRejection, TaskControl};
+pub(crate) use task::{ActiveReservation, CompletionGuard, TaskControl};
 #[cfg(test)]
 pub(crate) use worker::{
     WorkerExitGuard, cancel_source_no_unwind, cancel_tasks, cancelled_calculation_error,

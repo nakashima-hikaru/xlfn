@@ -1,6 +1,6 @@
 use super::generation::{ControlPhase, ExecutorControl, GenerationState, task_shard};
 use super::queue::RunnableQueue;
-use super::task::{ActiveReservation, SpawnRejection, TaskControl};
+use super::task::{ActiveReservation, TaskControl};
 use super::worker::{cancelled_calculation_error, run_executor};
 use crate::addin::AsyncWorkerCount;
 use crate::cancellation::CancellationSource;
@@ -271,23 +271,76 @@ impl Executor {
     }
 }
 
-impl ExecutorShared {
-    pub(crate) fn spawn<F>(
-        &self,
-        generation: u64,
-        future: F,
-        cancellation: CancellationSource,
-    ) -> Result<(), SpawnRejection<F>>
+pub(crate) struct SpawnReservation<'a> {
+    pub(crate) shared: ExecutorPtr,
+    pub(crate) generation: NonNull<GenerationState>,
+    pub(crate) task_id: u64,
+    pub(crate) reservation: ActiveReservation<'a>,
+    pub(crate) admission: xlfn_kernel::operation_gate::OperationGuard<'a>,
+    pub(crate) committed: bool,
+}
+
+impl<'a> SpawnReservation<'a> {
+    pub(crate) fn commit<F>(mut self, future: F, cancellation: CancellationSource)
     where
         F: Future<Output = ()> + Send + 'static,
     {
+        self.committed = true;
+        // SAFETY: self.admission and self.shared protect the generation from reclamation until committed.
+        let generation = unsafe { self.generation.as_ref() };
+        let shared = self.shared.get();
+        let (abort, registration) = AbortHandle::new_pair();
+
+        let index = task_shard(self.task_id);
+        {
+            let mut tasks = generation.shards[index].tasks.lock();
+            let previous = tasks.insert(
+                self.task_id,
+                TaskControl {
+                    abort,
+                    cancellation,
+                },
+            );
+            debug_assert!(previous.is_none(), "task ID must be unique per generation");
+            generation.task_count.fetch_add(1, Ordering::AcqRel);
+        }
+
+        let completion = self.reservation.commit(shared, generation, self.task_id);
+
+        drop(self.admission);
+        shared
+            .observer
+            .record(crate::shutdown_trace::ShutdownEvent::StartAsyncTask);
+
+        let wrapped = async move {
+            let _completion = completion;
+            let result = Abortable::new(future, registration).await;
+            _completion.observation.finished(result.is_ok());
+        };
+        #[cfg(test)]
+        {
+            let hook = shared.before_task_schedule_hook.lock().clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        let shared_ptr = self.shared;
+        let schedule = move |runnable| {
+            shared_ptr.get().queue.schedule(runnable);
+        };
+        let (runnable, task) = async_task::spawn(wrapped, schedule);
+        task.detach();
+        runnable.schedule();
+    }
+}
+
+impl ExecutorShared {
+    pub(crate) fn reserve_spawn(
+        &self,
+        generation: u64,
+    ) -> Result<SpawnReservation<'_>, (XllError, bool)> {
         if self.closing.load(Ordering::Acquire) {
-            return Err(SpawnRejection {
-                error: XllError::Closing,
-                future,
-                cancellation,
-                cancel: true,
-            });
+            return Err((XllError::Closing, true));
         }
 
         let current_pointer = self.current.load(Ordering::Acquire);
@@ -308,12 +361,7 @@ impl ExecutorShared {
         }
 
         if current.id != generation {
-            return Err(SpawnRejection {
-                error: cancelled_calculation_error(),
-                future,
-                cancellation,
-                cancel: true,
-            });
+            return Err((cancelled_calculation_error(), true));
         }
 
         let Some(admission) = current.admission.enter().ok() else {
@@ -323,12 +371,7 @@ impl ExecutorShared {
                 cancelled_calculation_error()
             };
 
-            return Err(SpawnRejection {
-                error,
-                future,
-                cancellation,
-                cancel: true,
-            });
+            return Err((error, true));
         };
 
         #[cfg(test)]
@@ -341,57 +384,19 @@ impl ExecutorShared {
 
         let Some(reservation) = ActiveReservation::try_acquire(self) else {
             drop(admission);
-            return Err(SpawnRejection {
-                error: XllError::Overloaded,
-                future,
-                cancellation,
-                cancel: false,
-            });
+            return Err((XllError::Overloaded, false));
         };
 
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (abort, registration) = AbortHandle::new_pair();
+        let task_id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
-        let index = task_shard(id);
-        {
-            let mut tasks = current.shards[index].tasks.lock();
-            let previous = tasks.insert(
-                id,
-                TaskControl {
-                    abort,
-                    cancellation,
-                },
-            );
-            debug_assert!(previous.is_none(), "task ID must be unique per generation");
-            current.task_count.fetch_add(1, Ordering::AcqRel);
-        }
-
-        let completion = reservation.commit(self, current, id);
-
-        drop(admission);
-        self.observer
-            .record(crate::shutdown_trace::ShutdownEvent::StartAsyncTask);
-
-        let wrapped = async move {
-            let _completion = completion;
-            let result = Abortable::new(future, registration).await;
-            _completion.observation.finished(result.is_ok());
-        };
-        #[cfg(test)]
-        {
-            let hook = self.before_task_schedule_hook.lock().clone();
-            if let Some(hook) = hook {
-                hook();
-            }
-        }
-        let shared = ExecutorPtr::from_ref(self);
-        let schedule = move |runnable| {
-            shared.get().queue.schedule(runnable);
-        };
-        let (runnable, task) = async_task::spawn(wrapped, schedule);
-        task.detach();
-        runnable.schedule();
-        Ok(())
+        Ok(SpawnReservation {
+            shared: ExecutorPtr::from_ref(self),
+            generation: NonNull::from(current),
+            task_id,
+            reservation,
+            admission,
+            committed: false,
+        })
     }
 
     pub(crate) fn cancel_generation(&self, generation: u64) -> Vec<TaskControl> {

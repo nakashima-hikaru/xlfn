@@ -3,7 +3,6 @@ use super::generation::GenerationState;
 use super::manager::MAX_PENDING;
 use super::worker::release_active;
 use crate::cancellation::CancellationSource;
-use crate::error::XllError;
 use futures_util::future::AbortHandle;
 use std::ptr::NonNull;
 use std::sync::atomic::Ordering;
@@ -11,13 +10,6 @@ use std::sync::atomic::Ordering;
 pub(crate) struct TaskControl {
     pub(crate) abort: AbortHandle,
     pub(crate) cancellation: CancellationSource,
-}
-
-pub(crate) struct SpawnRejection<F> {
-    pub(crate) error: XllError,
-    pub(crate) future: F,
-    pub(crate) cancellation: CancellationSource,
-    pub(crate) cancel: bool,
 }
 
 pub(crate) struct ActiveReservation<'a> {

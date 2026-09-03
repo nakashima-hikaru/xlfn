@@ -12,8 +12,8 @@ use super::server_gate::{
     TerminationWorker,
 };
 use super::update_event::{
-    GitCookieLease, RetainedUpdateCallback, RtdNotifier, RtdUpdateEvent, ServerCallbacks,
-    active_callback, drain_callbacks, install_callback, retry_git_revocation_debt,
+    CallbackPtr, GitCookieLease, RetainedUpdateCallback, RtdNotifier, RtdUpdateEvent,
+    ServerCallbacks, active_callback, drain_callbacks, install_callback, retry_git_revocation_debt,
 };
 use super::{com_boundary, guid_eq};
 use crate::error::InputError;
@@ -31,6 +31,7 @@ use std::ffi::c_void;
 use std::num::NonZeroU32;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::{self, NonNull};
+#[cfg(test)]
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
@@ -101,7 +102,7 @@ pub(super) struct RtdServer {
     pub(super) references: AtomicU32,
     pub(super) start_state: AtomicU8,
     pub(super) generation: ServerGeneration,
-    pub(super) operations: Arc<ServerOperationBarrier>,
+    pub(super) operations: ServerOperationBarrier,
     pub(super) termination_worker: TerminationWorker,
     pub(super) backends: Mutex<ServerBackends>,
     pub(super) callbacks: Mutex<ServerCallbacks>,
@@ -234,14 +235,14 @@ pub(super) struct ServerBackends {
 
 pub(super) fn synchronize_callback_notification(
     server: &RtdServer,
-    callback: Arc<RetainedUpdateCallback>,
+    callback: CallbackPtr,
 ) -> XllResult<()> {
     let subscription_server = server.backends.lock().subscription_server;
     let Some(subscription_server) = subscription_server else {
         return Ok(());
     };
 
-    let notifier = RtdNotifier::new(callback, Arc::clone(&server.operations));
+    let notifier = RtdNotifier::new(callback, NonNull::from(&server.operations));
     subscription_server.attach_update_notifier(notifier)?;
     Ok(())
 }
@@ -681,7 +682,7 @@ fn ensure_server_impl(
             // SAFETY: `server` was validated as non-null and COM keeps the server alive.
             let callback = unsafe { active_callback(&(*server).callbacks) };
             if let Some(callback) = callback {
-                let notifier = RtdNotifier::new(callback, Arc::clone(operations));
+                let notifier = RtdNotifier::new(callback, NonNull::from(operations));
                 handle.attach_update_notifier(notifier)?;
             }
         }
@@ -729,7 +730,7 @@ fn ensure_server_impl(
         references: AtomicU32::new(1),
         start_state: AtomicU8::new(SERVER_NOT_STARTED),
         generation,
-        operations: Arc::new(operations),
+        operations,
         termination_worker: TerminationWorker::default(),
         backends: Mutex::new(ServerBackends {
             handles: handles.map(BackendHandles::new),
@@ -941,7 +942,7 @@ unsafe fn server_start_inner(this: *mut RtdServer, callback: *mut c_void, result
     // callback publication or notification work can run.
     let cookie = GitCookieLease::from_registered(cookie);
 
-    let callback = Arc::new(RetainedUpdateCallback {
+    let callback = Box::new(RetainedUpdateCallback {
         cookie: Some(cookie),
         #[cfg(test)]
         drop_hook: None,
@@ -949,13 +950,13 @@ unsafe fn server_start_inner(this: *mut RtdServer, callback: *mut c_void, result
 
     // SAFETY: `this` was validated as non-null and COM keeps the server alive
     // for the duration of ServerStart.
-    unsafe { install_callback(&(*this).callbacks, Arc::clone(&callback)) };
+    let callback_ptr = unsafe { install_callback(&(*this).callbacks, callback) };
     start_reservation.callback_published();
 
     // SAFETY: `this` remains live through the COM call. Re-reading backends
     // after installing the callback closes the race with a concurrently
     // attached subscription runtime.
-    if unsafe { synchronize_callback_notification(&*this, callback) }.is_err() {
+    if unsafe { synchronize_callback_notification(&*this, callback_ptr) }.is_err() {
         return E_FAIL;
     }
 

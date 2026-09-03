@@ -408,7 +408,7 @@ impl<A: crate::Addin> Runtime<A> {
         }
     }
 
-    #[cfg(all(test, feature = "rtd"))]
+    #[cfg(all(test, feature = "rtd", feature = "handles"))]
     pub(crate) fn publish_with_lifecycle_and_sources<'runtime>(
         &self,
         opening: OpeningTxn<'runtime, A, Begun>,

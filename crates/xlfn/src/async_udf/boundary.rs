@@ -183,24 +183,26 @@ unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
     .unwrap_or(Err(XllError::Panic));
     match future {
         Ok(future) => {
-            let observation_task = observation.clone();
+            let reservation = match runtime.async_manager().reserve_spawn(calculation_id.get()) {
+                Ok(reservation) => reservation,
+                Err(error) => {
+                    responder.set_fallback_error(error.clone());
+                    drop(responder);
+                    let completion = AsyncCompletion {
+                        completion: OwnedCompletionOutcome::Error(error),
+                        delivery: OwnedDeliveryOutcome::Unobserved,
+                    };
+                    report_completion(udf_id, &completion);
+                    observation.finish(&completion);
+                    return;
+                }
+            };
             let task = async move {
                 let completion = execute_async_udf(responder, token, future).await;
                 report_completion(udf_id, &completion);
-                observation_task.finish(&completion);
-            };
-            if let Err(error) =
-                runtime
-                    .async_manager()
-                    .spawn(calculation_id.get(), task, cancellation)
-            {
-                let completion = AsyncCompletion {
-                    completion: OwnedCompletionOutcome::Error(error),
-                    delivery: OwnedDeliveryOutcome::Unobserved,
-                };
-                report_completion(udf_id, &completion);
                 observation.finish(&completion);
-            }
+            };
+            reservation.commit(task, cancellation);
         }
         Err(error) => {
             responder.set_fallback_error(error.clone());
@@ -253,21 +255,24 @@ unsafe fn async_udf_boundary_uninstrumented<A, Start, Fut, T>(
     .unwrap_or(Err(XllError::Panic));
     match future {
         Ok(future) => {
+            let reservation = match runtime.async_manager().reserve_spawn(calculation_id.get()) {
+                Ok(reservation) => reservation,
+                Err(error) => {
+                    responder.set_fallback_error(error.clone());
+                    drop(responder);
+                    let completion = AsyncCompletion {
+                        completion: OwnedCompletionOutcome::Error(error),
+                        delivery: OwnedDeliveryOutcome::Unobserved,
+                    };
+                    report_completion(udf_id, &completion);
+                    return;
+                }
+            };
             let task = async move {
                 let completion = execute_async_udf(responder, token, future).await;
                 report_completion(udf_id, &completion);
             };
-            if let Err(error) =
-                runtime
-                    .async_manager()
-                    .spawn(calculation_id.get(), task, cancellation)
-            {
-                let completion = AsyncCompletion {
-                    completion: OwnedCompletionOutcome::Error(error),
-                    delivery: OwnedDeliveryOutcome::Unobserved,
-                };
-                report_completion(udf_id, &completion);
-            }
+            reservation.commit(task, cancellation);
         }
         Err(error) => {
             responder.set_fallback_error(error.clone());

@@ -834,7 +834,7 @@ fn deferred_termination_drains_callbacks_and_rejects_worker_self_close() {
             worker_self_close_rejected.store(rejected, Ordering::Release);
         })
     };
-    let callback = Arc::new(RetainedUpdateCallback {
+    let callback = Box::new(RetainedUpdateCallback {
         cookie: None,
         drop_hook: Some(drop_hook),
     });
@@ -1038,7 +1038,7 @@ fn retired_callback_drop_can_reenter_terminate_after_quiescence() {
         })
     };
 
-    let previous = Arc::new(RetainedUpdateCallback {
+    let previous = Box::new(RetainedUpdateCallback {
         cookie: None,
         drop_hook: Some(drop_hook),
     });
@@ -1049,7 +1049,7 @@ fn retired_callback_drop_can_reenter_terminate_after_quiescence() {
     // retained rather than released while this operation is in flight.
     // SAFETY: the retained server remains live.
     let operation = unsafe { (*server).operations.enter() }.unwrap();
-    let replacement = Arc::new(RetainedUpdateCallback {
+    let replacement = Box::new(RetainedUpdateCallback {
         cookie: None,
         drop_hook: None,
     });
@@ -1102,18 +1102,16 @@ fn callback_subscription_attach_handshake_covers_early_empty_snapshot() {
         // no callback exists yet.
         rendezvous.wait();
 
-        let callback = Arc::new(RetainedUpdateCallback {
+        let callback = Box::new(RetainedUpdateCallback {
             cookie: None,
             drop_hook: None,
         });
         // SAFETY: the retained server remains live.
-        unsafe { install_callback(&(*server).callbacks, Arc::clone(&callback)) };
+        let callback_ptr = unsafe { install_callback(&(*server).callbacks, callback) };
         // SAFETY: the same retained server remains live. This post-install
         // re-read must observe the attachment made before the barrier.
-        unsafe { synchronize_callback_notification(&*server, Arc::clone(&callback)) }.unwrap();
+        unsafe { synchronize_callback_notification(&*server, callback_ptr) }.unwrap();
 
-        // local + server active slot + SubscriptionRuntime notification.
-        assert_eq!(Arc::strong_count(&callback), 3);
         rendezvous.wait();
     });
 
@@ -2584,7 +2582,7 @@ fn repeated_ensure_server_calls_do_not_rearm_subscription_notifications() {
     let ensured = ensure_server_without_handles(Some(&subscriptions)).unwrap();
     let server = ensured.active.pointer as *mut RtdServer;
 
-    let callback = Arc::new(RetainedUpdateCallback {
+    let callback = Box::new(RetainedUpdateCallback {
         cookie: None,
         drop_hook: None,
     });
