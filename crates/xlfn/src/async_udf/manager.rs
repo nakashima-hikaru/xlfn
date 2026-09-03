@@ -1,5 +1,5 @@
 use super::executor::{Executor, ExecutorShared};
-use super::worker::{cancel_source_no_unwind, cancel_tasks};
+use super::worker::cancel_tasks;
 use crate::cancellation::CancellationSource;
 #[cfg(test)]
 use crate::diagnostics::id::DiagnosticId;
@@ -197,6 +197,7 @@ impl AsyncManager {
         })
     }
 
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn spawn<F>(
         &self,
         generation: u64,
@@ -206,6 +207,8 @@ impl AsyncManager {
     where
         F: Future<Output = ()> + Send + 'static,
     {
+        use super::worker::cancel_source_no_unwind;
+
         let target = self.published_executor();
         #[cfg(test)]
         if target.is_some() {
