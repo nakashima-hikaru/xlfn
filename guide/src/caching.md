@@ -30,7 +30,7 @@ let dataset = cache.get_or_try_insert_with(
 )?;
 ```
 
-The returned value is `Arc<V>`. Concurrent initializations for the same key are coalesced. A failed initialization is returned to its caller and is not cached.
+The returned value is `CacheLease<'_, V>`, which implements `Deref<Target = V>`. Concurrent initializations for the same key are coalesced. A failed initialization is returned to its caller and is not cached.
 
 The weight budget is an abstract integer. It can represent approximate bytes, external-resource units, or another monotone cost, but every call site for a cache must use one consistent definition. Zero is normalized to a minimum positive cache weight. A value heavier than the entire budget is returned but not retained.
 

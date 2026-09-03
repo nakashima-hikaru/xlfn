@@ -82,15 +82,20 @@ impl CancellationRegistry {
     }
 
     fn release(&self, slot_index: u32, expected_gen: u64) {
-        let mut state = self.state.lock();
-        let slot = &state.slots[slot_index as usize];
-        if slot.generation.load(Ordering::Acquire) == expected_gen {
-            slot.source_live.store(false, Ordering::Release);
-            let waiters = std::mem::take(&mut *slot.waiters.lock());
-            for (_, waker) in waiters {
-                let _ = catch_unwind(AssertUnwindSafe(|| waker.wake()));
+        let waiters = {
+            let mut state = self.state.lock();
+            let slot = &state.slots[slot_index as usize];
+            if slot.generation.load(Ordering::Acquire) == expected_gen {
+                slot.source_live.store(false, Ordering::Release);
+                let waiters = std::mem::take(&mut *slot.waiters.lock());
+                state.free.push(slot_index);
+                waiters
+            } else {
+                FxHashMap::default()
             }
-            state.free.push(slot_index);
+        };
+        for (_, waker) in waiters {
+            let _ = catch_unwind(AssertUnwindSafe(|| waker.wake()));
         }
     }
 }
@@ -470,5 +475,30 @@ mod tests {
         assert!(!token2.is_cancelled());
         assert!(token1.is_cancelled());
         drop(source2);
+    }
+
+    #[test]
+    fn wake_from_release_can_reenter_cancellation_registry_without_deadlock() {
+        struct ReentrantWake;
+        impl ArcWake for ReentrantWake {
+            fn wake_by_ref(_arc_self: &StdArc<Self>) {
+                let (source, token) =
+                    CancellationSource::new(CancellationGuarantee::CalculationScoped);
+                assert!(!token.is_cancelled());
+                drop(source);
+            }
+        }
+
+        let (source, token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
+        let mut future = std::pin::pin!(token.cancelled());
+        let reentrant_waker = waker(StdArc::new(ReentrantWake));
+        assert_eq!(
+            future
+                .as_mut()
+                .poll(&mut Context::from_waker(&reentrant_waker)),
+            Poll::Pending
+        );
+
+        drop(source);
     }
 }

@@ -521,18 +521,22 @@ where
         F: FnOnce() -> XllResult<V>,
         W: FnOnce(&V) -> usize,
     {
+        let permit = self
+            .readers
+            .try_enter_current()
+            .map_err(|_| XllError::Closing)?;
+
         let vkey = VersionedKey { epoch, key };
         if let Some((ptr, _)) = self.cache.get(&vkey) {
-            let permit = self
-                .readers
-                .try_enter_current()
-                .map_err(|_| XllError::Closing)?;
             return Ok(CacheLease {
                 value: ptr.0,
                 _permit: permit,
             });
         }
+        drop(permit);
+
         let _active = ActiveCacheGuard::enter()?;
+        let insertion_epoch = std::sync::atomic::AtomicU64::new(epoch);
         let initialized = self
             .cache
             .try_get_with(vkey.clone(), || {
@@ -541,9 +545,11 @@ where
                 let w = u32::try_from(measured).unwrap_or(u32::MAX).max(1);
                 let boxed = Box::new(value);
                 let ptr = ValuePtr(NonNull::from(&*boxed));
+                let current_epoch = self.generation.snapshot();
+                insertion_epoch.store(current_epoch, std::sync::atomic::Ordering::Release);
                 self.arena.lock().push(CacheNode {
                     _value: boxed,
-                    epoch,
+                    epoch: current_epoch,
                 });
                 Ok::<_, XllError>((ptr, w))
             })
@@ -557,6 +563,12 @@ where
             .readers
             .try_enter_current()
             .map_err(|_| XllError::Closing)?;
+
+        if self.generation.snapshot() != insertion_epoch.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(XllError::Closing);
+        }
+
         Ok(CacheLease {
             value: initialized.0.0,
             _permit: permit,
@@ -1091,5 +1103,82 @@ mod tests {
             200
         );
         assert_eq!(*endpoint.get(&1).unwrap(), 200);
+    }
+
+    #[test]
+    fn active_lease_keeps_value_alive_across_clear() {
+        use std::sync::atomic::AtomicBool;
+
+        static DROPPED: AtomicBool = AtomicBool::new(false);
+        struct TrackDrop;
+        impl Drop for TrackDrop {
+            fn drop(&mut self) {
+                DROPPED.store(true, Ordering::SeqCst);
+            }
+        }
+
+        DROPPED.store(false, Ordering::SeqCst);
+        let cache = CalculationCache::<u32, TrackDrop>::new(1024);
+        let lease = cache
+            .get_or_try_insert_with(1, |_| 1, || Ok(TrackDrop))
+            .unwrap();
+
+        let (clear_started_tx, clear_started_rx) = std::sync::mpsc::channel();
+        let (clear_done_tx, clear_done_rx) = std::sync::mpsc::channel();
+        let cache_ref = &cache;
+
+        std::thread::scope(|s| {
+            s.spawn(move || {
+                clear_started_tx.send(()).unwrap();
+                cache_ref.clear();
+                clear_done_tx.send(()).unwrap();
+            });
+
+            clear_started_rx.recv().unwrap();
+            // Allow clear thread to run and enter readers.seal_and_wait()
+            std::thread::sleep(Duration::from_millis(50));
+
+            // While lease is held, clear() MUST be blocked in seal_and_wait()
+            // and TrackDrop MUST NOT be dropped!
+            assert!(!DROPPED.load(Ordering::SeqCst));
+            assert!(clear_done_rx.try_recv().is_err());
+
+            // Dropping lease permits seal_and_wait() to unblock
+            drop(lease);
+
+            clear_done_rx.recv().unwrap();
+            assert!(DROPPED.load(Ordering::SeqCst));
+        });
+    }
+
+    #[test]
+    fn hit_path_and_clear_race_safety() {
+        let cache = CalculationCache::<u32, String>::new(1024);
+        assert_eq!(
+            *cache
+                .get_or_try_insert_with(1, |_| 10, || Ok("initial".to_string()))
+                .unwrap(),
+            "initial"
+        );
+
+        let cache_ref = &cache;
+        std::thread::scope(|s| {
+            for i in 0..20 {
+                let t1 = s.spawn(move || {
+                    for _ in 0..50 {
+                        if let Ok(lease) =
+                            cache_ref.get_or_try_insert_with(1, |_| 10, || Ok(format!("val_{i}")))
+                        {
+                            assert!(!lease.is_empty());
+                        }
+                    }
+                });
+                let t2 = s.spawn(move || {
+                    cache_ref.clear();
+                });
+                t1.join().unwrap();
+                t2.join().unwrap();
+            }
+        });
     }
 }
