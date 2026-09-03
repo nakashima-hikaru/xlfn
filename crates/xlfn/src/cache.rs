@@ -1193,20 +1193,20 @@ mod tests {
                 if self.closed.load(Ordering::Acquire) {
                     return false;
                 }
-                self.admissions.fetch_add(1, Ordering::SeqCst);
+                self.admissions.fetch_add(1, Ordering::AcqRel);
                 if self.closed.load(Ordering::Acquire) {
-                    self.admissions.fetch_sub(1, Ordering::SeqCst);
+                    self.admissions.fetch_sub(1, Ordering::AcqRel);
                     return false;
                 }
                 true
             }
 
             fn leave(&self) {
-                self.admissions.fetch_sub(1, Ordering::SeqCst);
+                self.admissions.fetch_sub(1, Ordering::AcqRel);
             }
 
             fn quiesce(&self) {
-                while self.admissions.load(Ordering::SeqCst) > 0 {
+                while self.admissions.load(Ordering::Acquire) > 0 {
                     thread::yield_now();
                 }
             }
@@ -1227,32 +1227,32 @@ mod tests {
             let reader = thread::spawn(move || {
                 // TR-LOOKUP-ENTER: Acquire admission domain first
                 if reader_dom.enter() {
-                    // TR-OBSERVE-POINTER: Pointer observed while admission held
-                    let ptr = reader_pub.load(Ordering::SeqCst);
+                    // TR-OBSERVE-POINTER: Pointer observed with Acquire while admission held
+                    let ptr = reader_pub.load(Ordering::Acquire);
                     if !ptr.is_null() {
                         // SAFETY: ptr was non-null and allocated at start of model run.
                         let n = unsafe { &*ptr };
-                        // TR-ACQUIRE-PIN: Increment pins while admission held
-                        n.pins.fetch_add(1, Ordering::SeqCst);
+                        // TR-ACQUIRE-PIN: Increment pins with AcqRel while admission held
+                        n.pins.fetch_add(1, Ordering::AcqRel);
                         if n.resident.load(Ordering::Acquire) {
                             // TR-LOOKUP-LEAVE: Leave admission
                             reader_dom.leave();
 
                             // TR-LEASE-1: Node MUST NOT be reclaimed while pin is held
                             assert!(
-                                !n.reclaimed.load(Ordering::SeqCst),
+                                !n.reclaimed.load(Ordering::Acquire),
                                 "UAF: node reclaimed while lease held"
                             );
 
-                            // Simulate lease drop:
-                            if n.pins.fetch_sub(1, Ordering::SeqCst) == 1 {
-                                n.reclaimed.store(true, Ordering::SeqCst);
+                            // Simulate lease drop with AcqRel:
+                            if n.pins.fetch_sub(1, Ordering::AcqRel) == 1 {
+                                n.reclaimed.store(true, Ordering::Release);
                             }
                             return;
                         } else {
                             // Evicted concurrently
-                            if n.pins.fetch_sub(1, Ordering::SeqCst) == 1 {
-                                n.reclaimed.store(true, Ordering::SeqCst);
+                            if n.pins.fetch_sub(1, Ordering::AcqRel) == 1 {
+                                n.reclaimed.store(true, Ordering::Release);
                             }
                         }
                     }
@@ -1263,17 +1263,17 @@ mod tests {
             let evictor_pub = Arc::clone(&published);
             let evictor_dom = Arc::clone(&domain);
             let evictor = thread::spawn(move || {
-                // TR-RETIRE-1: Evict pointer
-                let ptr = evictor_pub.swap(ptr::null_mut(), Ordering::SeqCst);
+                // TR-RETIRE-1: Evict pointer with AcqRel swap
+                let ptr = evictor_pub.swap(ptr::null_mut(), Ordering::AcqRel);
                 if !ptr.is_null() {
                     // SAFETY: ptr was non-null and allocated at start of model run.
                     let n = unsafe { &*ptr };
                     n.resident.store(false, Ordering::Release);
-                    // Decrement resident pin
-                    if n.pins.fetch_sub(1, Ordering::SeqCst) == 1 {
+                    // Decrement resident pin with AcqRel
+                    if n.pins.fetch_sub(1, Ordering::AcqRel) == 1 {
                         // TR-RECLAIM-1: Quiesce domain before reclaim
                         evictor_dom.quiesce();
-                        n.reclaimed.store(true, Ordering::SeqCst);
+                        n.reclaimed.store(true, Ordering::Release);
                     }
                 }
             });
@@ -1285,10 +1285,10 @@ mod tests {
             // SAFETY: node is valid until dropped below.
             let n = unsafe { &*node };
             assert!(
-                n.reclaimed.load(Ordering::SeqCst),
+                n.reclaimed.load(Ordering::Acquire),
                 "node should be reclaimed after reader and evictor finish"
             );
-            assert_eq!(n.pins.load(Ordering::SeqCst), 0);
+            assert_eq!(n.pins.load(Ordering::Acquire), 0);
 
             // SAFETY: node was allocated with Box::into_raw above and not dropped elsewhere.
             unsafe {
@@ -1324,15 +1324,15 @@ mod tests {
             }
 
             fn enter(&self) {
-                self.admissions.fetch_add(1, Ordering::SeqCst);
+                self.admissions.fetch_add(1, Ordering::AcqRel);
             }
 
             fn leave(&self) {
-                self.admissions.fetch_sub(1, Ordering::SeqCst);
+                self.admissions.fetch_sub(1, Ordering::AcqRel);
             }
 
             fn quiesce(&self) {
-                while self.admissions.load(Ordering::SeqCst) > 0 {
+                while self.admissions.load(Ordering::Acquire) > 0 {
                     thread::yield_now();
                 }
             }
@@ -1352,13 +1352,13 @@ mod tests {
             let reader_dom = Arc::clone(&domain);
             let reader = thread::spawn(move || {
                 // BUG: Pointer is observed BEFORE acquiring lookup admission permit!
-                let ptr = reader_pub.load(Ordering::SeqCst);
+                let ptr = reader_pub.load(Ordering::Acquire);
                 if !ptr.is_null() {
                     reader_dom.enter();
                     // SAFETY: ptr was non-null and points to model node.
                     let n = unsafe { &*ptr };
                     assert!(
-                        !n.reclaimed.load(Ordering::SeqCst),
+                        !n.reclaimed.load(Ordering::Acquire),
                         "UAF: pointer observed before admission was reclaimed by evictor!"
                     );
                     reader_dom.leave();
@@ -1368,15 +1368,15 @@ mod tests {
             let evictor_pub = Arc::clone(&published);
             let evictor_dom = Arc::clone(&domain);
             let evictor = thread::spawn(move || {
-                let ptr = evictor_pub.swap(ptr::null_mut(), Ordering::SeqCst);
+                let ptr = evictor_pub.swap(ptr::null_mut(), Ordering::AcqRel);
                 if !ptr.is_null() {
                     // SAFETY: ptr was non-null and points to model node.
                     let n = unsafe { &*ptr };
                     n.resident.store(false, Ordering::Release);
-                    if n.pins.fetch_sub(1, Ordering::SeqCst) == 1 {
+                    if n.pins.fetch_sub(1, Ordering::AcqRel) == 1 {
                         // Admissions was 0 when reader hadn't entered yet!
                         evictor_dom.quiesce();
-                        n.reclaimed.store(true, Ordering::SeqCst);
+                        n.reclaimed.store(true, Ordering::Release);
                     }
                 }
             });
