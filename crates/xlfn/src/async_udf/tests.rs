@@ -603,7 +603,7 @@ fn cancellation_token_is_signaled_before_task_abort() {
     let manager = AsyncManager::new();
     manager.start(1).unwrap();
     let (source, token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
-    let observed = token.clone();
+    let observed = token;
     manager
         .spawn(
             TEST_GENERATION,

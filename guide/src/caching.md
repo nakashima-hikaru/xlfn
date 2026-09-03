@@ -6,7 +6,7 @@ Import from:
 
 ```rust
 use xlfn::unstable::cache::{
-    BoundCacheEndpoint, CacheEndpoint, CacheRegistry, CalculationCache, CanonicalF64,
+    BoundCacheEndpoint, CacheEndpoint, CacheLease, CacheRegistry, CalculationCache, CanonicalF64,
 };
 ```
 
@@ -49,17 +49,17 @@ static LOOKUP_DATASETS: CacheEndpoint<
     Dataset,
 > = CacheEndpoint::new("lookup-datasets-v1");
 
-struct State {
-    datasets: BoundCacheEndpoint<LookupEndpoint, DatasetKey, Dataset>,
+struct State<'registry> {
+    datasets: BoundCacheEndpoint<'registry, LookupEndpoint, DatasetKey, Dataset>,
 }
 
-fn build_state(caches: &CacheRegistry) -> XllResult<State> {
+fn build_state<'registry>(caches: &'registry CacheRegistry) -> XllResult<State<'registry>> {
     Ok(State {
         datasets: caches.bind(&LOOKUP_DATASETS)?,
     })
 }
 
-fn cached_dataset(state: &State, key: DatasetKey) -> XllResult<Arc<Dataset>> {
+fn cached_dataset<'a>(state: &'a State<'_>, key: DatasetKey) -> XllResult<CacheLease<'a, Dataset>> {
     state.datasets.get_or_try_insert(
         key.clone(),
         |dataset| dataset.estimated_bytes(),

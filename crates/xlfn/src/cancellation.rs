@@ -1,9 +1,10 @@
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::future::Future;
+use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
@@ -22,65 +23,157 @@ pub enum CancellationGuarantee {
     SubscriptionScoped,
 }
 
-#[derive(Clone)]
-pub struct CancellationToken {
-    inner: Arc<CancellationState>,
-    guarantee: CancellationGuarantee,
-}
-
-struct CancellationState {
+struct CancellationSlot {
+    generation: AtomicU64,
+    source_live: AtomicBool,
     cancelled: AtomicBool,
     delivery_state: AtomicU8,
     next_waiter_id: AtomicU64,
-    waiters: Mutex<HashMap<u64, std::task::Waker>>,
+    waiters: Mutex<FxHashMap<u64, std::task::Waker>>,
 }
 
-#[cfg(feature = "async")]
+#[allow(
+    clippy::vec_box,
+    reason = "Boxes guarantee stable heap addresses when the slots vector grows"
+)]
+struct CancellationRegistryState {
+    slots: Vec<Box<CancellationSlot>>,
+    free: Vec<u32>,
+}
+
+pub(crate) struct CancellationRegistry {
+    state: Mutex<CancellationRegistryState>,
+}
+
+impl CancellationRegistry {
+    pub(crate) const fn new() -> Self {
+        Self {
+            state: parking_lot::const_mutex(CancellationRegistryState {
+                slots: Vec::new(),
+                free: Vec::new(),
+            }),
+        }
+    }
+
+    fn allocate(&self) -> (NonNull<CancellationSlot>, u64, u32) {
+        let mut state = self.state.lock();
+        if let Some(index) = state.free.pop() {
+            let slot = &state.slots[index as usize];
+            let generation = slot.generation.fetch_add(1, Ordering::SeqCst) + 1;
+            slot.source_live.store(true, Ordering::Release);
+            slot.cancelled.store(false, Ordering::Release);
+            slot.delivery_state.store(STATE_RUNNING, Ordering::Release);
+            slot.next_waiter_id.store(1, Ordering::Release);
+            (NonNull::from(&**slot), generation, index)
+        } else {
+            let index = state.slots.len() as u32;
+            let slot = Box::new(CancellationSlot {
+                generation: AtomicU64::new(1),
+                source_live: AtomicBool::new(true),
+                cancelled: AtomicBool::new(false),
+                delivery_state: AtomicU8::new(STATE_RUNNING),
+                next_waiter_id: AtomicU64::new(1),
+                waiters: Mutex::new(FxHashMap::default()),
+            });
+            let ptr = NonNull::from(&*slot);
+            state.slots.push(slot);
+            (ptr, 1, index)
+        }
+    }
+
+    fn release(&self, slot_index: u32, expected_gen: u64) {
+        let mut state = self.state.lock();
+        let slot = &state.slots[slot_index as usize];
+        if slot.generation.load(Ordering::Acquire) == expected_gen {
+            slot.source_live.store(false, Ordering::Release);
+            let waiters = std::mem::take(&mut *slot.waiters.lock());
+            for (_, waker) in waiters {
+                let _ = catch_unwind(AssertUnwindSafe(|| waker.wake()));
+            }
+            state.free.push(slot_index);
+        }
+    }
+}
+
+static CANCELLATION_REGISTRY: CancellationRegistry = CancellationRegistry::new();
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CancellationToken {
+    slot: NonNull<CancellationSlot>,
+    generation: u64,
+    guarantee: CancellationGuarantee,
+}
+
+// SAFETY: CancellationSlot is heap-stable and internally synchronized.
+unsafe impl Send for CancellationToken {}
+// SAFETY: CancellationSlot is heap-stable and internally synchronized.
+unsafe impl Sync for CancellationToken {}
+
 pub(crate) struct CancellationSource {
-    inner: Arc<CancellationState>,
+    slot: NonNull<CancellationSlot>,
+    generation: u64,
+    slot_index: u32,
 }
 
-#[cfg(feature = "async")]
+// SAFETY: CancellationSlot is heap-stable and internally synchronized.
+unsafe impl Send for CancellationSource {}
+// SAFETY: CancellationSlot is heap-stable and internally synchronized.
+unsafe impl Sync for CancellationSource {}
+
 impl CancellationSource {
     pub(crate) fn new(guarantee: CancellationGuarantee) -> (Self, CancellationToken) {
-        let inner = Arc::new(CancellationState {
-            cancelled: AtomicBool::new(false),
-            delivery_state: AtomicU8::new(STATE_RUNNING),
-            next_waiter_id: AtomicU64::new(1),
-            waiters: Mutex::new(HashMap::new()),
-        });
+        let (slot, generation, slot_index) = CANCELLATION_REGISTRY.allocate();
         (
             Self {
-                inner: Arc::clone(&inner),
+                slot,
+                generation,
+                slot_index,
             },
-            CancellationToken { inner, guarantee },
+            CancellationToken {
+                slot,
+                generation,
+                guarantee,
+            },
         )
     }
 
     pub(crate) fn cancel(&self) {
-        let _ = self.inner.delivery_state.compare_exchange(
+        // SAFETY: self.slot is valid for the lifetime of this CancellationSource.
+        let slot = unsafe { self.slot.as_ref() };
+        if slot.generation.load(Ordering::Acquire) != self.generation {
+            return;
+        }
+        let _ = slot.delivery_state.compare_exchange(
             STATE_RUNNING,
             STATE_CANCELED,
             Ordering::AcqRel,
             Ordering::Acquire,
         );
-        if !self.inner.cancelled.swap(true, Ordering::AcqRel) {
-            let waiters = std::mem::take(&mut *self.inner.waiters.lock());
+        if !slot.cancelled.swap(true, Ordering::AcqRel) {
+            let waiters = std::mem::take(&mut *slot.waiters.lock());
             for (_, waker) in waiters {
-                // Cancellation tokens may be polled by arbitrary executors.
-                // A broken Waker must not prevent the remaining waiters from
-                // observing cancellation or unwind an XLL lifecycle boundary.
                 let _ = catch_unwind(AssertUnwindSafe(|| waker.wake()));
             }
         }
     }
 }
 
+impl Drop for CancellationSource {
+    fn drop(&mut self) {
+        CANCELLATION_REGISTRY.release(self.slot_index, self.generation);
+    }
+}
+
 impl CancellationToken {
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        self.inner.cancelled.load(Ordering::Acquire)
-            || self.inner.delivery_state.load(Ordering::Acquire) == STATE_CANCELED
+        // SAFETY: slot memory is stable for the lifetime of the process.
+        let slot = unsafe { self.slot.as_ref() };
+        if slot.generation.load(Ordering::Acquire) != self.generation {
+            return true;
+        }
+        slot.cancelled.load(Ordering::Acquire)
+            || slot.delivery_state.load(Ordering::Acquire) == STATE_CANCELED
     }
 
     /// Linearizes delivery vs cancellation using CAS on the delivery state machine.
@@ -90,8 +183,12 @@ impl CancellationToken {
     #[cfg(feature = "async")]
     #[must_use]
     pub(crate) fn try_start_delivery(&self) -> bool {
-        self.inner
-            .delivery_state
+        // SAFETY: slot memory is stable for the lifetime of the process.
+        let slot = unsafe { self.slot.as_ref() };
+        if slot.generation.load(Ordering::Acquire) != self.generation {
+            return false;
+        }
+        slot.delivery_state
             .compare_exchange(
                 STATE_RUNNING,
                 STATE_DELIVERING,
@@ -103,9 +200,11 @@ impl CancellationToken {
 
     #[cfg(feature = "async")]
     pub(crate) fn finish_delivery(&self) {
-        self.inner
-            .delivery_state
-            .store(STATE_DONE, Ordering::Release);
+        // SAFETY: slot memory is stable for the lifetime of the process.
+        let slot = unsafe { self.slot.as_ref() };
+        if slot.generation.load(Ordering::Acquire) == self.generation {
+            slot.delivery_state.store(STATE_DONE, Ordering::Release);
+        }
     }
 
     #[must_use]
@@ -115,22 +214,29 @@ impl CancellationToken {
 
     pub fn cancelled(&self) -> Cancelled<'_> {
         Cancelled {
-            token: self,
+            token: *self,
             waiter_id: None,
+            _marker: PhantomData,
         }
     }
 }
 
 pub struct Cancelled<'token> {
-    token: &'token CancellationToken,
+    token: CancellationToken,
     waiter_id: Option<u64>,
+    _marker: PhantomData<&'token ()>,
 }
 
 impl Future for Cancelled<'_> {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.token.is_cancelled() {
+        // SAFETY: slot memory is stable for the lifetime of the process.
+        let slot = unsafe { self.token.slot.as_ref() };
+        if slot.generation.load(Ordering::Acquire) != self.token.generation
+            || self.token.is_cancelled()
+            || !slot.source_live.load(Ordering::Acquire)
+        {
             self.unregister();
             return Poll::Ready(());
         }
@@ -138,17 +244,16 @@ impl Future for Cancelled<'_> {
         let waiter_id = match self.waiter_id {
             Some(waiter_id) => waiter_id,
             None => {
-                let waiter_id = self
-                    .token
-                    .inner
-                    .next_waiter_id
-                    .fetch_add(1, Ordering::Relaxed);
+                let waiter_id = slot.next_waiter_id.fetch_add(1, Ordering::Relaxed);
                 self.waiter_id = Some(waiter_id);
                 waiter_id
             }
         };
-        let mut waiters = self.token.inner.waiters.lock();
-        if self.token.is_cancelled() {
+        let mut waiters = slot.waiters.lock();
+        if slot.generation.load(Ordering::Acquire) != self.token.generation
+            || self.token.is_cancelled()
+            || !slot.source_live.load(Ordering::Acquire)
+        {
             waiters.remove(&waiter_id);
             drop(waiters);
             self.waiter_id = None;
@@ -171,7 +276,12 @@ impl Future for Cancelled<'_> {
 impl Cancelled<'_> {
     fn unregister(&mut self) {
         if let Some(waiter_id) = self.waiter_id.take() {
-            self.token.inner.waiters.lock().remove(&waiter_id);
+            // SAFETY: slot memory is stable for the lifetime of the process.
+            let slot = unsafe { self.token.slot.as_ref() };
+            let mut waiters = slot.waiters.lock();
+            if slot.generation.load(Ordering::Acquire) == self.token.generation {
+                waiters.remove(&waiter_id);
+            }
         }
     }
 }
@@ -229,7 +339,7 @@ mod tests {
         let first_waker = waker(StdArc::clone(&first_count));
         let second_waker = waker(StdArc::clone(&second_count));
         let mut first = std::pin::pin!(token.cancelled());
-        let second_token = token.clone();
+        let second_token = token;
         let mut second = std::pin::pin!(second_token.cancelled());
 
         assert_eq!(
@@ -322,8 +432,43 @@ mod tests {
                 future.as_mut().poll(&mut Context::from_waker(&waker)),
                 Poll::Pending
             );
-            assert_eq!(token.inner.waiters.lock().len(), 1);
+            // SAFETY: slot memory is stable.
+            let slot = unsafe { token.slot.as_ref() };
+            assert_eq!(slot.waiters.lock().len(), 1);
         }
-        assert!(token.inner.waiters.lock().is_empty());
+        // SAFETY: slot memory is stable.
+        let slot = unsafe { token.slot.as_ref() };
+        assert!(slot.waiters.lock().is_empty());
+    }
+
+    #[test]
+    fn terminal_token_after_source_drop_is_ready_on_poll() {
+        let (source, token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
+        assert!(!token.is_cancelled());
+        drop(source);
+        assert!(!token.is_cancelled());
+
+        let mut future = std::pin::pin!(token.cancelled());
+        let waker = noop_waker();
+        assert_eq!(
+            future.as_mut().poll(&mut Context::from_waker(&waker)),
+            Poll::Ready(())
+        );
+    }
+
+    #[test]
+    fn slot_reuse_advances_generation_and_leaves_old_token_stale() {
+        let (source1, token1) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
+        let gen1 = token1.generation;
+        let slot_ptr1 = token1.slot;
+        drop(source1);
+        assert!(!token1.is_cancelled());
+
+        let (source2, token2) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
+        assert_eq!(token2.slot, slot_ptr1);
+        assert_eq!(token2.generation, gen1 + 1);
+        assert!(!token2.is_cancelled());
+        assert!(token1.is_cancelled());
+        drop(source2);
     }
 }

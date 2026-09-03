@@ -198,7 +198,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
 
         let identity = SubscriptionIdentity {
             source_id: SourceId(source.id),
-            topic: topic.clone(),
+            topic,
         };
 
         if let Some(existing_id) = catalog.identities.get_id(&identity) {
@@ -240,7 +240,8 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             });
         }
 
-        let (id, key) = catalog.insert_pending(self.runtime_id, source.id, topic, self.limits)?;
+        let (id, key) =
+            catalog.insert_pending(self.runtime_id, source.id, identity.topic, self.limits)?;
 
         Ok(PreparedSubscription {
             id,

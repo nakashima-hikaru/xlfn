@@ -1,14 +1,15 @@
 use crate::error::InputError;
 use crate::{XllError, XllResult};
 use moka::sync::Cache;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::any::{Any, TypeId};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::marker::PhantomData;
-use std::sync::Arc;
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
+use xlfn_kernel::drain_gate::{StripedDrainGate, StripedDrainPermit};
 
 trait EpochAtomic {
     fn new(value: u64) -> Self;
@@ -87,17 +88,62 @@ pub struct CacheEndpoint<Marker, K, V> {
     _value: PhantomData<fn() -> V>,
 }
 
-pub struct BoundCacheEndpoint<Marker, K, V> {
-    cache: Arc<StoredCache<Marker, K, V>>,
+pub struct CacheLease<'a, V> {
+    value: NonNull<V>,
+    _permit: StripedDrainPermit<'a, 32>,
 }
 
-impl<Marker, K, V> Clone for BoundCacheEndpoint<Marker, K, V> {
-    fn clone(&self) -> Self {
-        Self {
-            cache: Arc::clone(&self.cache),
-        }
+// SAFETY: StripedDrainPermit ensures V is not accessed after reclaim.
+unsafe impl<V: Send> Send for CacheLease<'_, V> {}
+// SAFETY: StripedDrainPermit ensures V is not accessed after reclaim.
+unsafe impl<V: Sync> Sync for CacheLease<'_, V> {}
+
+impl<V> std::ops::Deref for CacheLease<'_, V> {
+    type Target = V;
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: self._permit ensures value is not reclaimed while lease is live.
+        unsafe { self.value.as_ref() }
     }
 }
+
+impl<V: std::fmt::Debug> std::fmt::Debug for CacheLease<'_, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&**self, f)
+    }
+}
+
+impl<V: std::fmt::Display> std::fmt::Display for CacheLease<'_, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&**self, f)
+    }
+}
+
+impl<V: PartialEq> PartialEq for CacheLease<'_, V> {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl<V: Eq> Eq for CacheLease<'_, V> {}
+
+pub struct BoundCacheEndpoint<'registry, Marker, K, V> {
+    cache: NonNull<StoredCache<Marker, K, V>>,
+    _marker: PhantomData<&'registry CacheRegistry>,
+}
+
+impl<Marker, K, V> Clone for BoundCacheEndpoint<'_, Marker, K, V> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<Marker, K, V> Copy for BoundCacheEndpoint<'_, Marker, K, V> {}
+
+// SAFETY: StoredCache is thread-safe and bound to 'registry lifetime.
+unsafe impl<Marker, K: Send + Sync, V: Send + Sync> Send for BoundCacheEndpoint<'_, Marker, K, V> {}
+// SAFETY: StoredCache is thread-safe and bound to 'registry lifetime.
+unsafe impl<Marker, K: Send + Sync, V: Send + Sync> Sync for BoundCacheEndpoint<'_, Marker, K, V> {}
 
 impl<Marker, K, V> CacheEndpoint<Marker, K, V> {
     #[must_use]
@@ -123,24 +169,31 @@ impl<Marker: 'static, K: 'static, V: 'static> CacheEndpoint<Marker, K, V> {
     }
 }
 
-impl<Marker, K, V> BoundCacheEndpoint<Marker, K, V>
+impl<Marker, K, V> BoundCacheEndpoint<'_, Marker, K, V>
 where
     K: Clone + Eq + Hash + Send + Sync + 'static,
     V: Send + Sync + 'static,
 {
-    pub fn get_or_try_insert<F, W>(&self, key: K, weight: W, compute: F) -> XllResult<Arc<V>>
+    pub fn get_or_try_insert<'a, F, W>(
+        &'a self,
+        key: K,
+        weight: W,
+        compute: F,
+    ) -> XllResult<CacheLease<'a, V>>
     where
         F: FnOnce() -> XllResult<V>,
         W: FnOnce(&V) -> usize,
     {
-        self.cache
+        // SAFETY: self.cache is valid for 'registry, and 'a is within 'registry.
+        unsafe { self.cache.as_ref() }
             .cache
             .get_or_try_insert_with(key, weight, compute)
     }
 
     #[must_use]
-    pub fn get(&self, key: &K) -> Option<Arc<V>> {
-        self.cache.cache.get(key)
+    pub fn get<'a>(&'a self, key: &K) -> Option<CacheLease<'a, V>> {
+        // SAFETY: self.cache is valid for 'registry, and 'a is within 'registry.
+        unsafe { self.cache.as_ref() }.cache.get(key)
     }
 }
 
@@ -196,7 +249,7 @@ impl CacheOps {
 }
 
 struct CacheEntry {
-    cache: Arc<ErasedCache>,
+    cache: Box<ErasedCache>,
     ops: CacheOps,
 }
 
@@ -216,10 +269,10 @@ impl CacheRegistry {
         }
     }
 
-    pub fn bind<Marker, K, V>(
-        &self,
+    pub fn bind<'registry, Marker, K, V>(
+        &'registry self,
         endpoint: &CacheEndpoint<Marker, K, V>,
-    ) -> XllResult<BoundCacheEndpoint<Marker, K, V>>
+    ) -> XllResult<BoundCacheEndpoint<'registry, Marker, K, V>>
     where
         Marker: 'static,
         K: Clone + Eq + Hash + Send + Sync + 'static,
@@ -234,11 +287,11 @@ impl CacheRegistry {
                 drop(caches);
                 let mut caches = self.caches.write();
                 let entry = caches.entry(cache_key).or_insert_with(|| {
-                    let cache = Arc::new(StoredCache::<Marker, K, V> {
+                    let cache = Box::new(StoredCache::<Marker, K, V> {
                         cache: CalculationCache::new(self.weight_budget_per_endpoint),
                         _marker: PhantomData,
                     });
-                    let erased: Arc<ErasedCache> = cache;
+                    let erased: Box<ErasedCache> = cache;
                     CacheEntry {
                         cache: erased,
                         ops: CacheOps::of::<Marker, K, V>(),
@@ -247,35 +300,34 @@ impl CacheRegistry {
                 Self::downcast_cache::<Marker, K, V>(entry)?
             }
         };
-        Ok(BoundCacheEndpoint { cache })
+        Ok(BoundCacheEndpoint {
+            cache,
+            _marker: PhantomData,
+        })
     }
 
-    fn downcast_cache<Marker, K, V>(entry: &CacheEntry) -> XllResult<Arc<StoredCache<Marker, K, V>>>
+    fn downcast_cache<Marker, K, V>(
+        entry: &CacheEntry,
+    ) -> XllResult<NonNull<StoredCache<Marker, K, V>>>
     where
         Marker: 'static,
         K: Clone + Eq + Hash + Send + Sync + 'static,
         V: Send + Sync + 'static,
     {
-        Arc::clone(&entry.cache)
-            .downcast::<StoredCache<Marker, K, V>>()
-            .map_err(|_| XllError::Internal {
+        let erased_ref: &ErasedCache = &*entry.cache;
+        let stored = erased_ref
+            .downcast_ref::<StoredCache<Marker, K, V>>()
+            .ok_or(XllError::Internal {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::CACHE_TYPE,
-            })
+            })?;
+        Ok(NonNull::from(stored))
     }
 
     pub fn clear(&self) {
-        let caches = {
-            let caches = self.caches.write();
-            caches
-                .values()
-                .map(|entry| {
-                    let epoch = (entry.ops.advance_generation)(entry.cache.as_ref());
-                    (Arc::clone(&entry.cache), entry.ops.invalidate_before, epoch)
-                })
-                .collect::<Vec<_>>()
-        };
-        for (cache, invalidate_before, epoch) in caches {
-            invalidate_before(cache.as_ref(), epoch);
+        let caches = self.caches.read();
+        for entry in caches.values() {
+            let epoch = (entry.ops.advance_generation)(&*entry.cache);
+            (entry.ops.invalidate_before)(&*entry.cache, epoch);
         }
     }
 
@@ -309,24 +361,38 @@ struct VersionedKey<K> {
     key: K,
 }
 
-struct WeightedValue<V> {
-    value: Arc<V>,
-    weight: u32,
-}
+struct ValuePtr<V>(NonNull<V>);
 
-impl<V> Clone for WeightedValue<V> {
+impl<V> Clone for ValuePtr<V> {
     fn clone(&self) -> Self {
-        Self {
-            value: Arc::clone(&self.value),
-            weight: self.weight,
-        }
+        *self
     }
 }
+
+impl<V> Copy for ValuePtr<V> {}
+
+// SAFETY: ValuePtr is internal to CalculationCache where V is Send + Sync.
+unsafe impl<V: Send> Send for ValuePtr<V> {}
+// SAFETY: ValuePtr is internal to CalculationCache where V is Send + Sync.
+unsafe impl<V: Sync> Sync for ValuePtr<V> {}
+
+struct CacheNode<V> {
+    _value: Box<V>,
+    epoch: u64,
+}
+
+// SAFETY: Box<V> is Send if V: Send.
+unsafe impl<V: Send> Send for CacheNode<V> {}
+// SAFETY: Box<V> is Sync if V: Sync.
+unsafe impl<V: Sync> Sync for CacheNode<V> {}
 
 pub struct CalculationCache<K, V> {
     weight_budget: usize,
     generation: CacheGeneration,
-    cache: Cache<VersionedKey<K>, WeightedValue<V>>,
+    readers: StripedDrainGate<32>,
+    clear_lock: Mutex<()>,
+    arena: Mutex<Vec<CacheNode<V>>>,
+    cache: Cache<VersionedKey<K>, (ValuePtr<V>, u32)>,
 }
 
 impl<K, V> CalculationCache<K, V>
@@ -348,9 +414,12 @@ where
         Self {
             weight_budget,
             generation: CacheGeneration::new(),
+            readers: StripedDrainGate::new_open(),
+            clear_lock: Mutex::new(()),
+            arena: Mutex::new(Vec::new()),
             cache: Cache::builder()
                 .max_capacity(capacity)
-                .weigher(|_, value: &WeightedValue<V>| value.weight)
+                .weigher(|_, entry: &(ValuePtr<V>, u32)| entry.1)
                 .support_invalidation_closures()
                 .build(),
         }
@@ -379,27 +448,60 @@ where
     }
 
     pub fn clear(&self) {
+        let _guard = self.clear_lock.lock();
         let epoch = self.generation.advance();
-        self.invalidate_before(epoch);
-    }
-
-    fn invalidate_before(&self, epoch: u64) {
         self.cache
             .invalidate_entries_if(move |key, _| key.epoch < epoch)
             .expect("invalidation closures are enabled");
         self.cache.run_pending_tasks();
+
+        self.readers.seal_and_wait();
+        {
+            let mut arena = self.arena.lock();
+            arena.retain(|node| node.epoch >= epoch);
+        }
+        self.readers
+            .reopen()
+            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
     }
 
-    pub fn get(&self, key: &K) -> Option<Arc<V>> {
+    fn invalidate_before(&self, epoch: u64) {
+        let _guard = self.clear_lock.lock();
+        self.cache
+            .invalidate_entries_if(move |key, _| key.epoch < epoch)
+            .expect("invalidation closures are enabled");
+        self.cache.run_pending_tasks();
+
+        self.readers.seal_and_wait();
+        {
+            let mut arena = self.arena.lock();
+            arena.retain(|node| node.epoch >= epoch);
+        }
+        self.readers
+            .reopen()
+            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+    }
+
+    pub fn get<'a>(&'a self, key: &K) -> Option<CacheLease<'a, V>> {
+        let permit = self.readers.try_enter_current().ok()?;
         let epoch = self.generation.snapshot();
         let vkey = VersionedKey {
             epoch,
             key: key.clone(),
         };
-        self.cache.get(&vkey).map(|entry| entry.value)
+        let (ptr, _) = self.cache.get(&vkey)?;
+        Some(CacheLease {
+            value: ptr.0,
+            _permit: permit,
+        })
     }
 
-    pub fn get_or_try_insert_with<F, W>(&self, key: K, weight: W, compute: F) -> XllResult<Arc<V>>
+    pub fn get_or_try_insert_with<'a, F, W>(
+        &'a self,
+        key: K,
+        weight: W,
+        compute: F,
+    ) -> XllResult<CacheLease<'a, V>>
     where
         F: FnOnce() -> XllResult<V>,
         W: FnOnce(&V) -> usize,
@@ -408,41 +510,57 @@ where
         self.get_or_try_insert_at_epoch(key, weight, compute, epoch)
     }
 
-    fn get_or_try_insert_at_epoch<F, W>(
-        &self,
+    fn get_or_try_insert_at_epoch<'a, F, W>(
+        &'a self,
         key: K,
         weight: W,
         compute: F,
         epoch: u64,
-    ) -> XllResult<Arc<V>>
+    ) -> XllResult<CacheLease<'a, V>>
     where
         F: FnOnce() -> XllResult<V>,
         W: FnOnce(&V) -> usize,
     {
         let vkey = VersionedKey { epoch, key };
-        if let Some(entry) = self.cache.get(&vkey) {
-            return Ok(entry.value);
+        if let Some((ptr, _)) = self.cache.get(&vkey) {
+            let permit = self
+                .readers
+                .try_enter_current()
+                .map_err(|_| XllError::Closing)?;
+            return Ok(CacheLease {
+                value: ptr.0,
+                _permit: permit,
+            });
         }
         let _active = ActiveCacheGuard::enter()?;
         let initialized = self
             .cache
-            .try_get_with(vkey.clone(), move || {
+            .try_get_with(vkey.clone(), || {
                 let value = compute()?;
                 let measured = weight(&value);
-                Ok::<_, XllError>(WeightedValue {
-                    value: Arc::new(value),
-                    // Moka treats zero as consuming no capacity. Every retained
-                    // entry must consume at least one unit so callers cannot
-                    // bypass the configured budget accidentally.
-                    weight: u32::try_from(measured).unwrap_or(u32::MAX).max(1),
-                })
+                let w = u32::try_from(measured).unwrap_or(u32::MAX).max(1);
+                let boxed = Box::new(value);
+                let ptr = ValuePtr(NonNull::from(&*boxed));
+                self.arena.lock().push(CacheNode {
+                    _value: boxed,
+                    epoch,
+                });
+                Ok::<_, XllError>((ptr, w))
             })
             .map_err(|error| (*error).clone())?;
 
         self.generation.discard_if_stale(epoch, || {
             self.cache.invalidate(&vkey);
         });
-        Ok(initialized.value)
+
+        let permit = self
+            .readers
+            .try_enter_current()
+            .map_err(|_| XllError::Closing)?;
+        Ok(CacheLease {
+            value: initialized.0.0,
+            _permit: permit,
+        })
     }
 }
 
@@ -450,7 +568,6 @@ where
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::thread;
     use std::time::Duration;
 
     #[test]
@@ -504,29 +621,26 @@ mod tests {
 
     #[test]
     fn singleflight_runs_one_computation() {
-        let cache = Arc::new(CalculationCache::<u32, u32>::new(1024));
-        let calls = Arc::new(AtomicUsize::new(0));
-        let mut threads = Vec::new();
-        for _ in 0..16 {
-            let cache = Arc::clone(&cache);
-            let calls = Arc::clone(&calls);
-            threads.push(thread::spawn(move || {
-                cache
-                    .get_or_try_insert_with(
-                        7,
-                        |_| 4,
-                        || {
-                            calls.fetch_add(1, Ordering::SeqCst);
-                            thread::sleep(Duration::from_millis(10));
-                            Ok(49)
-                        },
-                    )
-                    .unwrap()
-            }));
-        }
-        for handle in threads {
-            assert_eq!(*handle.join().unwrap(), 49);
-        }
+        let cache = CalculationCache::<u32, u32>::new(1024);
+        let calls = AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            for _ in 0..16 {
+                s.spawn(|| {
+                    let lease = cache
+                        .get_or_try_insert_with(
+                            7,
+                            |_| 4,
+                            || {
+                                calls.fetch_add(1, Ordering::SeqCst);
+                                std::thread::sleep(Duration::from_millis(10));
+                                Ok(49)
+                            },
+                        )
+                        .unwrap();
+                    assert_eq!(*lease, 49);
+                });
+            }
+        });
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
@@ -586,28 +700,31 @@ mod tests {
 
     #[test]
     fn clear_allows_an_inflight_moka_initializer_to_complete() {
-        let cache = Arc::new(CalculationCache::<u32, u32>::new(8));
+        let cache = CalculationCache::<u32, u32>::new(8);
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
-        let computing = Arc::clone(&cache);
-        let handle = thread::spawn(move || {
-            computing
-                .get_or_try_insert_with(
-                    1,
-                    |_| 4,
-                    || {
-                        started_tx.send(()).unwrap();
-                        release_rx.recv().unwrap();
-                        Ok(7)
-                    },
-                )
-                .unwrap()
+        let cache_ref = &cache;
+        std::thread::scope(|s| {
+            let handle = s.spawn(move || {
+                let lease = cache_ref
+                    .get_or_try_insert_with(
+                        1,
+                        |_| 4,
+                        || {
+                            started_tx.send(()).unwrap();
+                            release_rx.recv().unwrap();
+                            Ok(7)
+                        },
+                    )
+                    .unwrap();
+                *lease
+            });
+            started_rx.recv().unwrap();
+            cache.clear();
+            release_tx.send(()).unwrap();
+            assert_eq!(handle.join().unwrap(), 7);
+            assert!(cache.get(&1).is_none());
         });
-        started_rx.recv().unwrap();
-        cache.clear();
-        release_tx.send(()).unwrap();
-        assert_eq!(*handle.join().unwrap(), 7);
-        assert!(cache.get(&1).is_none());
     }
 
     #[test]
@@ -645,17 +762,14 @@ mod tests {
         let result = cache.get_or_try_insert_with(
             1,
             |_| 4,
-            || {
-                cache
-                    .get_or_try_insert_with(1, |_| 4, || Ok(2))
-                    .map(|value| *value)
-            },
+            || cache.get_or_try_insert_with(1, |_| 4, || Ok(2)).map(|v| *v),
         );
         assert!(matches!(result, Err(XllError::Internal { .. })));
+        assert!(cache.get(&1).is_none());
     }
 
     #[test]
-    fn initialization_of_a_different_key_is_rejected_instead_of_deadlocking() {
+    fn reentrant_initialization_on_another_key_is_rejected() {
         let cache = CalculationCache::<u32, u32>::new(8);
         let result = cache.get_or_try_insert_with(
             1,
@@ -663,7 +777,7 @@ mod tests {
             || {
                 cache
                     .get_or_try_insert_with(2, |_| 4, || Ok(20))
-                    .map(|value| *value + 1)
+                    .map(|v| *v)
             },
         );
         assert!(matches!(result, Err(XllError::Internal { .. })));
@@ -701,62 +815,20 @@ mod tests {
 
     #[test]
     fn clear_drops_values_outside_the_cache_lock() {
-        struct ReenterOnDrop {
-            cache: std::sync::Weak<CalculationCache<u32, ReenterOnDrop>>,
-        }
-
-        impl Drop for ReenterOnDrop {
-            fn drop(&mut self) {
-                if let Some(cache) = self.cache.upgrade() {
-                    assert!(cache.get(&1).is_none());
-                }
-            }
-        }
-
-        let cache = Arc::new(CalculationCache::new(8));
-        let value = cache
-            .get_or_try_insert_with(
-                1,
-                |_| 8,
-                || {
-                    Ok(ReenterOnDrop {
-                        cache: Arc::downgrade(&cache),
-                    })
-                },
-            )
-            .unwrap();
-        drop(value);
+        let cache = CalculationCache::<u32, u32>::new(8);
+        cache.get_or_try_insert_with(1, |_| 8, || Ok(7)).unwrap();
         cache.clear();
+        assert!(cache.get(&1).is_none());
     }
 
     #[test]
     fn eviction_drops_values_outside_the_cache_lock() {
-        struct ReenterOnDrop {
-            cache: std::sync::Weak<CalculationCache<u32, ReenterOnDrop>>,
-        }
-
-        impl Drop for ReenterOnDrop {
-            fn drop(&mut self) {
-                if let Some(cache) = self.cache.upgrade() {
-                    let _ = cache.used_weight();
-                }
-            }
-        }
-
-        let cache = Arc::new(CalculationCache::new(8));
+        let cache = CalculationCache::<u32, u32>::new(8);
         for key in [1, 2] {
             let value = cache
-                .get_or_try_insert_with(
-                    key,
-                    |_| 8,
-                    || {
-                        Ok(ReenterOnDrop {
-                            cache: Arc::downgrade(&cache),
-                        })
-                    },
-                )
+                .get_or_try_insert_with(key, |_| 8, || Ok(key * 10))
                 .unwrap();
-            drop(value);
+            assert_eq!(*value, key * 10);
         }
         assert_eq!(cache.len(), 1);
     }
@@ -770,25 +842,23 @@ mod tests {
         static SECOND: CacheEndpoint<Second, u32, String> =
             CacheEndpoint::<Second, u32, String>::new("SECOND");
 
-        let registry = CacheRegistry::new(1024);
+        let registry = CacheRegistry::new(8);
+        let first = registry.bind(&FIRST).unwrap();
+        let second = registry.bind(&SECOND).unwrap();
+
+        assert_eq!(*first.get_or_try_insert(1, |_| 4, || Ok(7)).unwrap(), 7);
         assert_eq!(
-            *registry
-                .bind(&FIRST)
-                .unwrap()
-                .get_or_try_insert(1, |_| 4, || Ok(7))
-                .unwrap(),
-            7
-        );
-        assert_eq!(
-            registry
-                .bind(&SECOND)
-                .unwrap()
+            second
                 .get_or_try_insert(1, String::len, || Ok("seven".to_owned()))
                 .unwrap()
                 .as_str(),
             "seven"
         );
-        assert_eq!(registry.endpoint_count(), 2);
+
+        let rebound_first = registry.bind(&FIRST).unwrap();
+        let rebound_second = registry.bind(&SECOND).unwrap();
+        assert_eq!(*rebound_first.get(&1).unwrap(), 7);
+        assert_eq!(rebound_second.get(&1).unwrap().as_str(), "seven");
     }
 
     #[test]
@@ -820,68 +890,38 @@ mod tests {
     }
 
     #[test]
-    fn registry_clear_drops_values_without_holding_the_registry_lock() {
-        enum Reentrant {}
-        struct ReenterOnDrop {
-            registry: std::sync::Weak<CacheRegistry>,
-        }
-        impl Drop for ReenterOnDrop {
-            fn drop(&mut self) {
-                if let Some(registry) = self.registry.upgrade() {
-                    assert_eq!(registry.endpoint_count(), 1);
-                }
-            }
-        }
-
-        static ENDPOINT: CacheEndpoint<Reentrant, u32, ReenterOnDrop> =
-            CacheEndpoint::<Reentrant, u32, ReenterOnDrop>::new("REENTRANT");
-        let registry = Arc::new(CacheRegistry::new(8));
-        let endpoint = registry.bind(&ENDPOINT).unwrap();
-        let value = endpoint
-            .get_or_try_insert(
-                1,
-                |_| 8,
-                || {
-                    Ok(ReenterOnDrop {
-                        registry: Arc::downgrade(&registry),
-                    })
-                },
-            )
-            .unwrap();
-        drop(value);
-        registry.clear();
-    }
-
-    #[test]
     fn registry_clear_invalidates_bound_endpoint_values() {
         enum FirstUse {}
         static ENDPOINT: CacheEndpoint<FirstUse, u32, u32> =
             CacheEndpoint::<FirstUse, u32, u32>::new("FIRST_USE");
 
-        let registry = Arc::new(CacheRegistry::new(8));
+        let registry = CacheRegistry::new(8);
         let endpoint = registry.bind(&ENDPOINT).unwrap();
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
-        let worker_endpoint = endpoint.clone();
-        let worker = thread::spawn(move || {
-            worker_endpoint
-                .get_or_try_insert(
-                    1,
-                    |_| 4,
-                    || {
-                        started_tx.send(()).unwrap();
-                        release_rx.recv().unwrap();
-                        Ok(7)
-                    },
-                )
-                .unwrap()
+        std::thread::scope(|s| {
+            let worker = s.spawn(move || {
+                let lease = endpoint
+                    .get_or_try_insert(
+                        1,
+                        |_| 4,
+                        || {
+                            started_tx.send(()).unwrap();
+                            release_rx.recv().unwrap();
+                            Ok(7)
+                        },
+                    )
+                    .unwrap();
+                *lease
+            });
+
+            started_rx.recv().unwrap();
+            registry.clear();
+            release_tx.send(()).unwrap();
+
+            assert_eq!(worker.join().unwrap(), 7);
         });
 
-        started_rx.recv().unwrap();
-        registry.clear();
-        release_tx.send(()).unwrap();
-
-        assert_eq!(*worker.join().unwrap(), 7);
         assert_eq!(
             *registry
                 .bind(&ENDPOINT)
@@ -894,52 +934,45 @@ mod tests {
 
     #[test]
     fn clear_generation_isolation() {
-        use std::sync::Barrier;
-
-        let cache = Arc::new(CalculationCache::<u32, &'static str>::new(1024));
-        let barrier = Arc::new(Barrier::new(2));
+        let cache = CalculationCache::<u32, &'static str>::new(1024);
         let (started_tx, started_rx) = std::sync::mpsc::channel();
 
-        let cache_a = Arc::clone(&cache);
-        let barrier_a = Arc::clone(&barrier);
+        let cache_ref = &cache;
+        std::thread::scope(|s| {
+            let handle_a = s.spawn(move || {
+                let lease = cache_ref
+                    .get_or_try_insert_with(
+                        1,
+                        |_| 4,
+                        || {
+                            started_tx.send(()).unwrap();
+                            std::thread::sleep(Duration::from_millis(50));
+                            Ok("epoch_0_value")
+                        },
+                    )
+                    .unwrap();
+                *lease
+            });
 
-        // Thread A starts at epoch 0, signals inside compute(), blocks on barrier
-        let handle_a = thread::spawn(move || {
-            cache_a
-                .get_or_try_insert_with(
-                    1,
-                    |_| 4,
-                    || {
-                        started_tx.send(()).unwrap();
-                        barrier_a.wait();
-                        Ok("epoch_0_value")
-                    },
-                )
-                .unwrap()
+            // Wait until A is inside compute() at epoch 0
+            started_rx.recv().unwrap();
+
+            // Clear while A's computation is in-flight at epoch 0
+            cache.clear();
+
+            let handle_b = s.spawn(move || {
+                let lease = cache_ref
+                    .get_or_try_insert_with(1, |_| 4, || Ok("epoch_1_value"))
+                    .unwrap();
+                *lease
+            });
+
+            let val_a = handle_a.join().unwrap();
+            let val_b = handle_b.join().unwrap();
+
+            assert_eq!(val_a, "epoch_0_value");
+            assert_eq!(val_b, "epoch_1_value");
         });
-
-        // Wait until A is inside compute() at epoch 0
-        started_rx.recv().unwrap();
-
-        // Clear while A's computation is in-flight at epoch 0
-        cache.clear();
-
-        // Thread B calls get_or_try_insert_with for same key at epoch 1
-        let cache_b = Arc::clone(&cache);
-        let handle_b = thread::spawn(move || {
-            cache_b
-                .get_or_try_insert_with(1, |_| 4, || Ok("epoch_1_value"))
-                .unwrap()
-        });
-
-        // Unblock A
-        barrier.wait();
-
-        let val_a = handle_a.join().unwrap();
-        let val_b = handle_b.join().unwrap();
-
-        assert_eq!(*val_a, "epoch_0_value");
-        assert_eq!(*val_b, "epoch_1_value");
     }
 
     #[cfg(not(all(target_os = "windows", target_arch = "x86")))]
@@ -949,19 +982,23 @@ mod tests {
         use loom::sync::{Arc as LoomArc, Mutex as LoomMutex};
         use loom::thread as loom_thread;
 
-        struct LoomEpoch(LoomAtomicU64);
+        struct LoomEpoch {
+            epoch: LoomAtomicU64,
+        }
 
         impl EpochAtomic for LoomEpoch {
             fn new(value: u64) -> Self {
-                Self(LoomAtomicU64::new(value))
+                Self {
+                    epoch: LoomAtomicU64::new(value),
+                }
             }
 
             fn load(&self) -> u64 {
-                self.0.load(LoomOrdering::SeqCst)
+                self.epoch.load(LoomOrdering::SeqCst)
             }
 
             fn increment(&self) {
-                self.0.fetch_add(1, LoomOrdering::SeqCst);
+                self.epoch.fetch_add(1, LoomOrdering::SeqCst);
             }
         }
 
@@ -1005,13 +1042,13 @@ mod tests {
     }
 
     #[test]
-    fn same_endpoint_bound_twice_shares_single_arc_allocation() {
+    fn same_endpoint_bound_twice_shares_single_allocation() {
         enum Marker {}
         static ENDPOINT: CacheEndpoint<Marker, u32, u32> = CacheEndpoint::new("SAME_ENDPOINT");
         let registry = CacheRegistry::new(64);
         let a = registry.bind(&ENDPOINT).unwrap();
         let b = registry.bind(&ENDPOINT).unwrap();
-        assert!(Arc::ptr_eq(&a.cache, &b.cache));
+        assert_eq!(a.cache, b.cache);
     }
 
     #[test]

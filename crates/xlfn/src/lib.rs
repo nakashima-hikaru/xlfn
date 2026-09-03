@@ -42,6 +42,7 @@ mod async_udf;
 pub mod benchmark_support;
 mod boundary;
 #[cfg(feature = "unstable-cache")]
+#[allow(unsafe_code, reason = "Cache value arena and lease pointers")]
 mod cache;
 mod call;
 mod call_return;
@@ -53,6 +54,7 @@ mod callback_gate;
 )]
 mod callback_value;
 #[cfg(feature = "async")]
+#[allow(unsafe_code, reason = "Generational cancellation slot raw pointers")]
 mod cancellation;
 #[cfg(any(test, feature = "refinement"))]
 mod composition_refinement;
@@ -519,7 +521,8 @@ pub mod unstable {
     #[cfg(feature = "unstable-cache")]
     pub mod cache {
         pub use crate::cache::{
-            BoundCacheEndpoint, CacheEndpoint, CacheRegistry, CalculationCache, CanonicalF64,
+            BoundCacheEndpoint, CacheEndpoint, CacheLease, CacheRegistry, CalculationCache,
+            CanonicalF64,
         };
     }
 

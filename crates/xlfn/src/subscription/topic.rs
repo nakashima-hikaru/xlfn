@@ -3,7 +3,6 @@ use crate::{XllError, XllResult};
 use rustc_hash::FxHasher;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
-use std::sync::Arc;
 
 pub(crate) const MAX_RTD_TOPIC_PARTS: usize = 253;
 pub(crate) const MAX_RTD_TOPIC_BYTES: usize = 1024 * 1024;
@@ -226,7 +225,7 @@ fn parse_fixed_hex(value: &str) -> Option<u64> {
 
 #[derive(Clone, Debug)]
 pub struct RtdTopic {
-    parts: Arc<[String]>,
+    parts: Box<[String]>,
     byte_len: usize,
     hash: u64,
 }
@@ -273,7 +272,7 @@ impl RtdTopic {
             }
         }
         Ok(Self {
-            parts: Arc::from(normalized),
+            parts: normalized.into_boxed_slice(),
             byte_len,
             hash,
         })
@@ -295,8 +294,7 @@ impl RtdTopic {
 
 impl PartialEq for RtdTopic {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.parts, &other.parts)
-            || (self.hash == other.hash && self.parts == other.parts)
+        self.hash == other.hash && self.parts == other.parts
     }
 }
 

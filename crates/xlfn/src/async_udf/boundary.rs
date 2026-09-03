@@ -160,7 +160,7 @@ unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
         timer,
         layers,
         instrumentation.trace_enabled(),
-        token.clone(),
+        token,
     );
     // SAFETY: forwarded from this function's raw-handle contract.
     let mut responder = match unsafe { ExcelAsyncResponder::from_raw(udf_id, raw_handle) } {
@@ -178,7 +178,7 @@ unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
         }
     };
     let future = catch_unwind(AssertUnwindSafe(|| {
-        start(guard, runtime.execution_lease(guard), token.clone())
+        start(guard, runtime.execution_lease(guard), token)
     }))
     .unwrap_or(Err(XllError::Panic));
     match future {
@@ -250,7 +250,7 @@ unsafe fn async_udf_boundary_uninstrumented<A, Start, Fut, T>(
         }
     };
     let future = catch_unwind(AssertUnwindSafe(|| {
-        start(guard, runtime.execution_lease(guard), token.clone())
+        start(guard, runtime.execution_lease(guard), token)
     }))
     .unwrap_or(Err(XllError::Panic));
     match future {
