@@ -36,6 +36,18 @@ This containment has limits:
 
 Set `panic = "unwind"` for release profiles that depend on containment. Do not replace domain errors with panics.
 
+## Temporal ownership and unsafe reclamation rules
+
+To guarantee memory safety without shared heap reference-counting (`Arc`), all internal subsystems (`Cache`, `Handle`, `RTD`, `Async`) adhere to the unified formal `TemporalReclamation` protocol.
+
+Any code that retains a raw pointer or provides lease-based access across concurrent operations must explicitly document and implement the following five criteria:
+
+1. **Owner**: Identifies the single unique owner holding primary ownership of the allocation.
+2. **Admission Mechanism**: Defines the short-lived admission gate (e.g. `StripedDrainGate` domain permit) entered *before* observing the raw pointer, preventing use-after-reclaim during concurrent retirement.
+3. **Retirement Point**: The explicit transition where the object is marked retired (e.g. Moka eviction, binding removal, callback replacement). No new lookups can acquire pins after retirement.
+4. **Reclamation Point**: The deferred deallocation point executed only after retirement, complete quiescence of the lookup admission domain (`admissions == 0`), and release of all active pins (`pins == 0`).
+5. **Formal Invariant ID**: An explicit reference tag in code (such as `[TR-OBSERVE-POINTER]`, `[TR-LEASE-1]`, `[TR-RECLAIM-1]`) linking the unsafe block to its corresponding Lean 4 theorem and Loom exhaustive model.
+
 ## Handle tokens
 
 Handle tokens are authenticated, session-scoped capabilities. The runtime

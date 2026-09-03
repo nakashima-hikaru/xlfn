@@ -69,4 +69,5 @@ import XlFnFormal.Handle.Publication.Transition
 import XlFnFormal.Handle.Publication.Invariant
 import XlFnFormal.Handle.Publication.Safety
 import XlFnFormal.Handle.Publication.Refinement
+import XlFnFormal.TemporalReclamation
 

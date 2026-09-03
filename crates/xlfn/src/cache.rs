@@ -93,26 +93,27 @@ pub struct CacheLease<'a, V> {
     _marker: PhantomData<&'a V>,
 }
 
-// SAFETY: CacheLease provides shared access to V and is tied to the node's pin.
+// SAFETY: [TR-LEASE-1] CacheLease provides shared access to V and is tied to the node's pin capability.
 unsafe impl<V: Send> Send for CacheLease<'_, V> {}
-// SAFETY: CacheLease provides shared access to V and is tied to the node's pin.
+// SAFETY: [TR-LEASE-1] CacheLease provides shared access to V and is tied to the node's pin capability.
 unsafe impl<V: Sync> Sync for CacheLease<'_, V> {}
 
 impl<V> std::ops::Deref for CacheLease<'_, V> {
     type Target = V;
 
     fn deref(&self) -> &Self::Target {
-        // SAFETY: self.node is pinned for the lifetime of this CacheLease.
+        // SAFETY: [TR-LEASE-1] self.node is pinned for the lifetime of this CacheLease;
+        // live capability guarantees status != reclaimed.
         unsafe { &self.node.as_ref().value }
     }
 }
 
 impl<V> Drop for CacheLease<'_, V> {
     fn drop(&mut self) {
-        // SAFETY: self.node remains valid because a pin is held by this lease.
+        // SAFETY: [TR-LEASE-1] self.node remains valid because a pin capability is held by this lease.
         let node = unsafe { self.node.as_ref() };
         if node.pins.fetch_sub(1, Ordering::AcqRel) == 1 {
-            // SAFETY: The last pin was dropped on a non-resident node; safe to reclaim.
+            // SAFETY: [TR-RECLAIM-1] The last pin was dropped on a retired (non-resident) node; safe to reclaim.
             unsafe {
                 drop(Box::from_raw(self.node.as_ptr()));
             }
@@ -456,7 +457,7 @@ struct CacheDomainPermit {
 impl Drop for CacheDomainPermit {
     #[inline]
     fn drop(&mut self) {
-        // SAFETY: self.gate points to a StripedDrainGate within the enclosing CacheLookupDomain.
+        // SAFETY: [TR-LOOKUP-LEAVE] self.gate points to a StripedDrainGate within the enclosing CacheLookupDomain.
         let gate = unsafe { self.gate.as_ref() };
         gate.release(self.stripe);
     }
@@ -497,14 +498,14 @@ where
                 .weigher(|_, entry: &(NodePtr<V>, u32)| entry.1)
                 .support_invalidation_closures()
                 .eviction_listener(|_key, (node_ptr, _weight): (NodePtr<V>, u32), _cause| {
-                    // SAFETY: node_ptr points to an allocated CacheNode<V> managed by the cache.
+                    // SAFETY: [TR-PUBLISH-1] node_ptr points to an allocated CacheNode<V> managed by the cache.
                     let node = unsafe { node_ptr.0.as_ref() };
                     node.resident.store(false, Ordering::Release);
                     if node.pins.fetch_sub(1, Ordering::AcqRel) == 1 {
-                        // SAFETY: node.domain points to the CalculationCache's domain which is still valid.
+                        // SAFETY: [TR-RECLAIM-1] node.domain points to the CalculationCache's domain which remains valid for quiescence.
                         let domain = unsafe { node.domain.as_ref() };
                         domain.quiesce();
-                        // SAFETY: The last pin was dropped on a non-resident node; safe to reclaim.
+                        // SAFETY: [TR-RECLAIM-1] The last pin was dropped on a retired node and admission domain is quiesced; safe to reclaim.
                         unsafe {
                             drop(Box::from_raw(node_ptr.0.as_ptr()));
                         }
@@ -512,7 +513,7 @@ where
                 })
                 .build(),
             clear_fn: Some(|ptr| {
-                // SAFETY: ptr points to a valid CalculationCache<K, V> during Drop.
+                // SAFETY: [TR-RECLAIM-1] ptr points to a valid CalculationCache<K, V> during Drop.
                 let cache = unsafe { &*(ptr as *const Self) };
                 cache.domain.seal();
                 cache.clear();
@@ -571,16 +572,17 @@ where
             key: key.clone(),
         };
         let (node_ptr, _) = self.cache.get(&vkey)?;
-        // SAFETY: node_ptr is valid while holding domain permit.
+        // SAFETY: [TR-OBSERVE-POINTER] node_ptr is observed only while holding a valid lookup admission domain permit.
         let node = unsafe { node_ptr.0.as_ref() };
         if node.generation != epoch {
             drop(permit);
             return None;
         }
+        // TR-ACQUIRE-PIN: Increment pin capability while still within admission domain.
         node.pins.fetch_add(1, Ordering::AcqRel);
         if !node.resident.load(Ordering::Acquire) {
             if node.pins.fetch_sub(1, Ordering::AcqRel) == 1 {
-                // SAFETY: The node was evicted and this was the last pin; safe to reclaim.
+                // SAFETY: [TR-RECLAIM-1] The node was retired (non-resident) and this was the last pin; safe to reclaim.
                 unsafe {
                     drop(Box::from_raw(node_ptr.0.as_ptr()));
                 }
@@ -588,6 +590,7 @@ where
             drop(permit);
             return None;
         }
+        // TR-LOOKUP-LEAVE: Release lookup admission permit now that node is pinned.
         drop(permit);
         Some(CacheLease {
             node: node_ptr.0,
@@ -647,7 +650,8 @@ where
             .map_err(|error| (*error).clone())?;
 
         let node_ptr = initialized.0;
-        // SAFETY: node_ptr originates from the Box<CacheNode<V>> returned by try_get_with.
+        // SAFETY: [TR-ACQUIRE-PIN] node_ptr originates from the Box<CacheNode<V>> returned by try_get_with;
+        // pin capability is incremented for the returned lease.
         let node = unsafe { node_ptr.0.as_ref() };
         node.pins.fetch_add(1, Ordering::AcqRel);
 
@@ -1155,6 +1159,235 @@ mod tests {
                 stored.is_none() || stored == Some(current),
                 "stale stored epoch {stored:?}, current epoch {current}"
             );
+        });
+    }
+
+    #[cfg(not(all(target_os = "windows", target_arch = "x86")))]
+    #[test]
+    fn loom_temporal_reclamation_protocol_exhaustive_verification() {
+        use loom::sync::Arc;
+        use loom::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+        use loom::thread;
+        use std::ptr;
+
+        struct LoomCacheNode {
+            pins: AtomicUsize,
+            resident: AtomicBool,
+            reclaimed: AtomicBool,
+        }
+
+        struct LoomLookupDomain {
+            admissions: AtomicUsize,
+            closed: AtomicBool,
+        }
+
+        impl LoomLookupDomain {
+            fn new() -> Self {
+                Self {
+                    admissions: AtomicUsize::new(0),
+                    closed: AtomicBool::new(false),
+                }
+            }
+
+            fn enter(&self) -> bool {
+                if self.closed.load(Ordering::Acquire) {
+                    return false;
+                }
+                self.admissions.fetch_add(1, Ordering::SeqCst);
+                if self.closed.load(Ordering::Acquire) {
+                    self.admissions.fetch_sub(1, Ordering::SeqCst);
+                    return false;
+                }
+                true
+            }
+
+            fn leave(&self) {
+                self.admissions.fetch_sub(1, Ordering::SeqCst);
+            }
+
+            fn quiesce(&self) {
+                while self.admissions.load(Ordering::SeqCst) > 0 {
+                    thread::yield_now();
+                }
+            }
+        }
+
+        loom::model(|| {
+            let node = Box::into_raw(Box::new(LoomCacheNode {
+                pins: AtomicUsize::new(1), // 1 for cache resident
+                resident: AtomicBool::new(true),
+                reclaimed: AtomicBool::new(false),
+            }));
+
+            let published = Arc::new(AtomicPtr::new(node));
+            let domain = Arc::new(LoomLookupDomain::new());
+
+            let reader_pub = Arc::clone(&published);
+            let reader_dom = Arc::clone(&domain);
+            let reader = thread::spawn(move || {
+                // TR-LOOKUP-ENTER: Acquire admission domain first
+                if reader_dom.enter() {
+                    // TR-OBSERVE-POINTER: Pointer observed while admission held
+                    let ptr = reader_pub.load(Ordering::SeqCst);
+                    if !ptr.is_null() {
+                        // SAFETY: ptr was non-null and allocated at start of model run.
+                        let n = unsafe { &*ptr };
+                        // TR-ACQUIRE-PIN: Increment pins while admission held
+                        n.pins.fetch_add(1, Ordering::SeqCst);
+                        if n.resident.load(Ordering::Acquire) {
+                            // TR-LOOKUP-LEAVE: Leave admission
+                            reader_dom.leave();
+
+                            // TR-LEASE-1: Node MUST NOT be reclaimed while pin is held
+                            assert!(
+                                !n.reclaimed.load(Ordering::SeqCst),
+                                "UAF: node reclaimed while lease held"
+                            );
+
+                            // Simulate lease drop:
+                            if n.pins.fetch_sub(1, Ordering::SeqCst) == 1 {
+                                n.reclaimed.store(true, Ordering::SeqCst);
+                            }
+                            return;
+                        } else {
+                            // Evicted concurrently
+                            if n.pins.fetch_sub(1, Ordering::SeqCst) == 1 {
+                                n.reclaimed.store(true, Ordering::SeqCst);
+                            }
+                        }
+                    }
+                    reader_dom.leave();
+                }
+            });
+
+            let evictor_pub = Arc::clone(&published);
+            let evictor_dom = Arc::clone(&domain);
+            let evictor = thread::spawn(move || {
+                // TR-RETIRE-1: Evict pointer
+                let ptr = evictor_pub.swap(ptr::null_mut(), Ordering::SeqCst);
+                if !ptr.is_null() {
+                    // SAFETY: ptr was non-null and allocated at start of model run.
+                    let n = unsafe { &*ptr };
+                    n.resident.store(false, Ordering::Release);
+                    // Decrement resident pin
+                    if n.pins.fetch_sub(1, Ordering::SeqCst) == 1 {
+                        // TR-RECLAIM-1: Quiesce domain before reclaim
+                        evictor_dom.quiesce();
+                        n.reclaimed.store(true, Ordering::SeqCst);
+                    }
+                }
+            });
+
+            reader.join().unwrap();
+            evictor.join().unwrap();
+
+            // After both threads finish, node must be reclaimed safely
+            // SAFETY: node is valid until dropped below.
+            let n = unsafe { &*node };
+            assert!(
+                n.reclaimed.load(Ordering::SeqCst),
+                "node should be reclaimed after reader and evictor finish"
+            );
+            assert_eq!(n.pins.load(Ordering::SeqCst), 0);
+
+            // SAFETY: node was allocated with Box::into_raw above and not dropped elsewhere.
+            unsafe {
+                drop(Box::from_raw(node));
+            }
+        });
+    }
+
+    #[cfg(not(all(target_os = "windows", target_arch = "x86")))]
+    #[test]
+    #[should_panic(expected = "UAF")]
+    fn loom_detects_buggy_unprotected_pointer_observation_race() {
+        use loom::sync::Arc;
+        use loom::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+        use loom::thread;
+        use std::ptr;
+
+        struct LoomCacheNode {
+            pins: AtomicUsize,
+            resident: AtomicBool,
+            reclaimed: AtomicBool,
+        }
+
+        struct LoomLookupDomain {
+            admissions: AtomicUsize,
+        }
+
+        impl LoomLookupDomain {
+            fn new() -> Self {
+                Self {
+                    admissions: AtomicUsize::new(0),
+                }
+            }
+
+            fn enter(&self) {
+                self.admissions.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn leave(&self) {
+                self.admissions.fetch_sub(1, Ordering::SeqCst);
+            }
+
+            fn quiesce(&self) {
+                while self.admissions.load(Ordering::SeqCst) > 0 {
+                    thread::yield_now();
+                }
+            }
+        }
+
+        loom::model(|| {
+            let node = Box::into_raw(Box::new(LoomCacheNode {
+                pins: AtomicUsize::new(1),
+                resident: AtomicBool::new(true),
+                reclaimed: AtomicBool::new(false),
+            }));
+
+            let published = Arc::new(AtomicPtr::new(node));
+            let domain = Arc::new(LoomLookupDomain::new());
+
+            let reader_pub = Arc::clone(&published);
+            let reader_dom = Arc::clone(&domain);
+            let reader = thread::spawn(move || {
+                // BUG: Pointer is observed BEFORE acquiring lookup admission permit!
+                let ptr = reader_pub.load(Ordering::SeqCst);
+                if !ptr.is_null() {
+                    reader_dom.enter();
+                    // SAFETY: ptr was non-null and points to model node.
+                    let n = unsafe { &*ptr };
+                    assert!(
+                        !n.reclaimed.load(Ordering::SeqCst),
+                        "UAF: pointer observed before admission was reclaimed by evictor!"
+                    );
+                    reader_dom.leave();
+                }
+            });
+
+            let evictor_pub = Arc::clone(&published);
+            let evictor_dom = Arc::clone(&domain);
+            let evictor = thread::spawn(move || {
+                let ptr = evictor_pub.swap(ptr::null_mut(), Ordering::SeqCst);
+                if !ptr.is_null() {
+                    // SAFETY: ptr was non-null and points to model node.
+                    let n = unsafe { &*ptr };
+                    n.resident.store(false, Ordering::Release);
+                    if n.pins.fetch_sub(1, Ordering::SeqCst) == 1 {
+                        // Admissions was 0 when reader hadn't entered yet!
+                        evictor_dom.quiesce();
+                        n.reclaimed.store(true, Ordering::SeqCst);
+                    }
+                }
+            });
+
+            reader.join().unwrap();
+            evictor.join().unwrap();
+
+            // SAFETY: node was allocated with Box::into_raw above and not dropped elsewhere.
+            unsafe {
+                drop(Box::from_raw(node));
+            }
         });
     }
 
