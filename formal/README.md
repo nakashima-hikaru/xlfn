@@ -18,7 +18,8 @@ concurrency protocols implemented in `xlfn`:
   - Handle prepare accounting and call-scoped borrow lifetime tracking.
   - Handle topic ownership, reverse-mapping consistency, and Excel connection transactions.
   - Published-topic snapshots with lock-free warm reads and generation isolation.
-  - Published-handle snapshots with strong RCU roots and call-scoped borrows.
+  - Published-handle temporal ownership: Box-owned binding records, admission gates, and ObjectArena capability accounting.
+  - Generic temporal ownership: DrainGate, AtomicPtr, and Box reclamation algebra with GenerationServiceSlot refinement.
   - RTD server-generation isolation and atomic detach-and-drain transactions.
   - RTD wire serialization and parser injectivity.
 
@@ -249,31 +250,46 @@ refinement layer over the canonical topic state:
   and observation failure with `withdrawVisible`.
 - Disconnect and generation termination update both layers, while close delegates to `closeRegistry`.
 
-### Published-handle snapshots
+### Generic temporal ownership
 
-`XlFnFormal/Handle/Registry/Snapshot` formalizes the `BindingRecord`
-fast-lookup architecture as a snapshot-owning layer over canonical registry
-semantics:
+`XlFnFormal/TemporalOwnership` formalizes the reusable `DrainGate + AtomicPtr + Box`
+ownership algebra:
 
-- **Object payload model**: A published binding owns its `ObjectCell` payload
-  transitively through the immutable binding snapshot. A call-scoped
-  `Handle<'call, T>` therefore needs no epoch participant, retired queue, or
-  resurrection path. A long-lived `HandleLease<T>` is the only explicit
-  promotion and owns a shared object lease until it is dropped.
-- **Model & Invariants** (`Model.lean`): Tracks published objects, the current
-  immutable snapshot, and active call-scoped `Borrow` records. A publication
-  remains rooted after it becomes `stale` or `closing` until no borrow refers to
-  it; the snapshot itself supplies the object lifetime.
-- **Transitions & Checker** (`Transition.lean`, `Checker.lean`):
-  `observeBorrow` performs the snapshot lookup, generation/authentication and
-  `Live` check at the borrow linearization point. `releaseBorrow` ends the call
-  scope. Removal unpublishes the slot but does not destroy a borrowed object;
-  `retirePublication` is allowed only after both the snapshot and all borrows
-  have released it. Close clears the new-reader snapshot and marks remaining
-  publications closing without a second admission protocol.
-  The executable checker accepts exactly these transitions, and the safety
-  lemmas cover stale/closing rejection, borrow-root preservation, and
-  reclamation only after the last borrow returns.
+- **Concept**: A unique owner publishes an addressable pointer guarded by an admission gate.
+  Readers acquire counted drain permits before loading.
+- **Safety properties**:
+  - `readerImpliesOwned`: Active readers guarantee the unique owner is alive.
+  - `reclaimedImpliesNoReaders`: Reclaiming the owner is impossible while readers are active.
+  - `sealedImpliesNoNewReaders`: A sealed gate rejects admission of new readers.
+  - `reclaimRequiresUnpublishedAndDrained`: Owner reclamation requires an unpublished pointer and a fully drained gate.
+  - `noUseAfterReclaim`: Reclaimed resources cannot be accessed by readers.
+- **Service-slot refinement**: `GenerationServiceSlotRefinement.lean` provides a thin refinement
+  mapping `GenerationServiceSlot` states to this generic algebra, verifying that `Ready` corresponds
+  to an open gate with an owner, `Sealing` seals the gate, and `ServiceSeal` transfers `Box` ownership
+  only after readers have drained to zero.
+
+### Published handles and ObjectArena capabilities
+
+`XlFnFormal/Handle/Publication` formalizes the published binding and object capability
+architecture under the redesign:
+
+- **Ownership model**: `BindingTable` owns `Box<BindingRecord>`. `PublishedBindings` exposes an
+  `AtomicPtr<BindingRecord>`, and readers hold an `OwnedOperationGuard` (admission permit).
+  `ObjectArena` is the sole owner of each `ObjectCell`. A published `BindingRecord` holds a non-owning
+  `ObjectBinding` capability, while `HandleLease<T>` holds a counted `pin` capability.
+- **Retirement protocol**:
+  - `beginRetire`: Clears publication (`published = false`) and seals the admission gate.
+  - `retireCapability`: Waits for reader drain (`admitted = 0`) before retiring the object capability
+    and reclaiming the record.
+  - `reclaimObject`: An `ObjectCell` is reclaimed only when both capability counts reach zero
+    (`bindings = 0 ∧ pins = 0`).
+- **Safety theorems**:
+  - `readerImpliesOwned`: Call-scoped borrows imply the backing `BindingRecord` owner is alive.
+  - `borrowedObjectNotReclaimed`: An object with active readers cannot be destroyed.
+  - `pinnedObjectNotReclaimed`: An object held by a `HandleLease` pin cannot be destroyed.
+  - `reclaimRequiresNoCapabilities`: `ObjectCell` destruction requires all capabilities to be drained.
+  - Refinement to `TemporalOwnership`: Publication events simulate `TemporalOwnership.Step`.
+
 
 ### RTD server generations
 
@@ -338,10 +354,10 @@ The formal model covers the framework-owned concurrency and lifecycle
 protocols whose violations can produce stale handles, escaped resources,
 or unsafe shutdown.
 
-The formalization ends at the BindingRecord publication protocol. Rust memory safety,
-ArcSwap internals, atomic implementation semantics, scheduler fairness,
-Excel internals, COM implementation correctness, and arbitrary user code
-are outside the Lean model.
+The formalization ends at the temporal ownership and capability boundaries.
+Low-level NonNull address values, allocator implementation, atomic memory
+ordering/interleavings, scheduler fairness, Excel internals, COM implementation
+correctness, and arbitrary user code are outside the Lean model.
 
 Correspondence with the Rust implementation is checked by targeted
 concurrency tests and the retained feature-gated trace checkers; it is not

@@ -59,9 +59,14 @@ import XlFnFormal.Handle.Topics.Serialization.Safety
 import XlFnFormal.Handle.Topics.Serialization.Golden
 import XlFnFormal.Rtd.ServerGeneration.Model
 import XlFnFormal.Rtd.ServerGeneration.Safety
-import XlFnFormal.Handle.Registry.Snapshot.Model
-import XlFnFormal.Handle.Registry.Snapshot.Transition
-import XlFnFormal.Handle.Registry.Snapshot.Invariant
-import XlFnFormal.Handle.Registry.Snapshot.Safety
-import XlFnFormal.Handle.Registry.Snapshot.Checker
-import XlFnFormal.Handle.Registry.Snapshot.Trace
+import XlFnFormal.TemporalOwnership.Model
+import XlFnFormal.TemporalOwnership.Transition
+import XlFnFormal.TemporalOwnership.Invariant
+import XlFnFormal.TemporalOwnership.Safety
+import XlFnFormal.TemporalOwnership.ServiceSlotRefinement
+import XlFnFormal.Handle.Publication.Model
+import XlFnFormal.Handle.Publication.Transition
+import XlFnFormal.Handle.Publication.Invariant
+import XlFnFormal.Handle.Publication.Safety
+import XlFnFormal.Handle.Publication.Refinement
+
