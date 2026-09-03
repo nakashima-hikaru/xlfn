@@ -12,6 +12,10 @@ use std::rc::Rc;
 #[cfg(test)]
 use std::sync::Arc;
 
+#[allow(
+    clippy::vec_box,
+    reason = "Callback allocations act as heap-stable tombstones for the server lifetime"
+)]
 #[derive(Default)]
 pub(super) struct ServerCallbacks {
     pub(super) active: Option<CallbackPtr>,
@@ -262,13 +266,6 @@ enum RtdNotifierKind {
     Test(Arc<crate::rtd::test_support::TestNotifierState>),
 }
 
-// SAFETY: RtdNotifier holds audited pointers into the server's stable lifetime.
-#[cfg(test)]
-unsafe impl Send for RtdNotifier {}
-// SAFETY: RtdNotifier holds audited pointers into the server's stable lifetime.
-#[cfg(test)]
-unsafe impl Sync for RtdNotifier {}
-
 impl RtdNotifier {
     pub(super) fn new(callback: CallbackPtr, operations: NonNull<ServerOperationBarrier>) -> Self {
         #[cfg(not(test))]
@@ -299,9 +296,11 @@ impl RtdNotifier {
     pub(crate) fn notify(&self) -> XllResult<()> {
         #[cfg(not(test))]
         {
+            // SAFETY: operations points to the ServerOperationBarrier owned by RtdServer for the server lifetime.
             let _operation = unsafe { self.operations.as_ref() }
                 .enter_notification()
                 .ok_or(XllError::Closing)?;
+            // SAFETY: callback.0 points to RetainedUpdateCallback pinned in ServerCallbacks.records.
             unsafe { self.callback.0.as_ref() }.notify()
         }
         #[cfg(test)]
@@ -311,9 +310,11 @@ impl RtdNotifier {
                     callback,
                     operations,
                 } => {
+                    // SAFETY: operations points to the ServerOperationBarrier owned by RtdServer for the server lifetime.
                     let _operation = unsafe { operations.as_ref() }
                         .enter_notification()
                         .ok_or(XllError::Closing)?;
+                    // SAFETY: callback.0 points to RetainedUpdateCallback pinned in ServerCallbacks.records.
                     unsafe { callback.0.as_ref() }.notify()
                 }
                 RtdNotifierKind::Test(state) => state.notify(),
