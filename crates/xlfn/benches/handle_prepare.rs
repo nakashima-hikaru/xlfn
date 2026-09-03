@@ -46,7 +46,7 @@ fn handle_prepare_benchmarks(c: &mut Criterion) {
         bench.assert_warm_hit();
     }
 
-    // Cold growth at scale (measuring COW topic table insertion scaling)
+    // Cold growth at scale (measuring handle table insertion scaling)
     for size in COLD_GROW_SIZES {
         group.throughput(Throughput::Elements(size as u64));
         group.bench_with_input(BenchmarkId::new("cold_grow", size), &size, |b, &size| {

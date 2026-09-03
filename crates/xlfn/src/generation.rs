@@ -215,7 +215,7 @@ pub(crate) struct ServerGeneration(NonZeroU64);
 
 #[cfg(any(
     all(test, feature = "rtd"),
-    feature = "bench-internals",
+    all(feature = "bench-internals", feature = "rtd"),
     all(target_os = "windows", any(feature = "rtd", feature = "handles"))
 ))]
 impl ServerGeneration {

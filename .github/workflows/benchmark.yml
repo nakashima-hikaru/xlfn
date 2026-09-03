@@ -114,7 +114,7 @@ jobs:
         shell: bash
         run: just bench-pr
 
-      - name: Run full benchmarks without publishing
+      - name: Run benchmarks without publishing (main / nightly)
         if: steps.bencher-config.outputs.enabled != 'true' && github.event_name != 'pull_request'
         shell: bash
         run: just bench
