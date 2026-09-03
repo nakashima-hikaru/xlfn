@@ -729,30 +729,30 @@ fn sealing_a_closed_registry_is_idempotent_without_phase_regression() {
 #[test]
 #[ignore = "run in the dedicated Shuttle test step"]
 fn shuttle_insert_racing_close_never_leaves_a_live_handle() {
-    shuttle::check_random(
-        || {
-            let registry = shuttle::sync::Arc::new(HandleRegistry::new(2));
-            let inserting = shuttle::sync::Arc::clone(&registry);
-            let worker = shuttle::thread::spawn(move || {
-                shuttle::thread::yield_now();
-                insert_production(&inserting, Arc::new(42_u32))
-            });
-
+    let mut config = shuttle::Config::default();
+    config.stack_size = 0x80000;
+    let runner = shuttle::Runner::new(shuttle::scheduler::RandomScheduler::new(100), config);
+    runner.run(|| {
+        let registry = shuttle::sync::Arc::new(HandleRegistry::new(2));
+        let inserting = shuttle::sync::Arc::clone(&registry);
+        let worker = shuttle::thread::spawn(move || {
             shuttle::thread::yield_now();
-            registry.seal().map(|_| ()).unwrap();
-            let result = worker.join().expect("insertion thread panicked");
+            insert_production(&inserting, Arc::new(42_u32))
+        });
 
-            assert_eq!(registry.len(), 0);
-            match result {
-                Ok(token) => assert!(matches!(
-                    registry.lookup::<u32>(&token),
-                    Err(XllError::Closing)
-                )),
-                Err(error) => assert!(matches!(error, XllError::Closing)),
-            }
-        },
-        100,
-    );
+        shuttle::thread::yield_now();
+        registry.seal().map(|_| ()).unwrap();
+        let result = worker.join().expect("insertion thread panicked");
+
+        assert_eq!(registry.len(), 0);
+        match result {
+            Ok(token) => assert!(matches!(
+                registry.lookup::<u32>(&token),
+                Err(XllError::Closing)
+            )),
+            Err(error) => assert!(matches!(error, XllError::Closing)),
+        }
+    });
 }
 
 #[test]

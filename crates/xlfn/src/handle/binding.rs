@@ -243,7 +243,7 @@ pub(crate) struct RegistryState {
 pub(crate) struct BindingTable {
     state: RwLock<RegistryState>,
     published: PublishedBindings,
-    read_domain: HandleReadDomain,
+    read_domain: Box<HandleReadDomain>,
     maximum_bindings: u32,
 }
 
@@ -257,7 +257,7 @@ impl BindingTable {
                 records: Vec::new(),
             }),
             published: PublishedBindings::new(maximum_bindings),
-            read_domain: HandleReadDomain::new(),
+            read_domain: Box::new(HandleReadDomain::new()),
             maximum_bindings,
         }
     }
