@@ -105,11 +105,11 @@ check: fmt clippy features test bench-check deny semver
 
 # --- Benchmark recipes ---
 
-# Bencher continuous integration regression suite (~36 representative production cases).
+# Bencher continuous integration regression suite (representative production cases).
 # Used by default for main branch history tracking and pull request regression gating.
 bench: bench-ci
 
-# Canonical CI regression suite (~36 cases).
+# Canonical CI regression suite.
 bench-ci:
     just bench-one-filter async_spawn "^(async_spawn/per_iteration/(1|32)|async_spawn/matrix_reschedule/workers_4/16|async_spawn/spawn_and_drain/workers_4/16)\z" "bench-internals async"
     just bench-one-filter sync_boundary "^sync_boundary/(admission|scalar_return/no_subscriber)/(1|32)\z"
@@ -118,8 +118,9 @@ bench-ci:
     just bench-one-filter handle_lookup "^handle_lookup/(warm_same_token|distinct_tokens)/(1|32)\z"
     just bench-one formula_caller
     just bench-one-filter argument_ingress "^argument_ingress/(f64/with_identity|string_short/borrowed|matrix_string_10k/borrowed|matrix_f64_100k/with_identity|excel_value_matrix_100k/with_identity|handle/with_identity)\z"
-    just bench-one-filter rtd_publish "^rtd_publish/(number|string)/(changing|repeated_same)\z" "bench-internals rtd"
-    just bench-one-filter rtd_refresh "^rtd_refresh/(short_string/end_to_end/(sparse|medium|dense)|number/end_to_end/dense)\z" "bench-internals rtd"
+    just bench-one-filter array_string_output "^array_string_output/borrowed_str/16384\z"
+    just bench-one-filter rtd_publish "^rtd_publish/(number|string|string_8k)/(changing|same_value)\z" "bench-internals rtd"
+    just bench-one-filter rtd_refresh "^rtd_refresh/(number/end_to_end/dense|short_string/end_to_end/dense|string_8k/(collection|completion|end_to_end)/dense)\z" "bench-internals rtd"
     just bench-one-filter handle_call_resolution "^handle_call_resolution/handles/(1|8)\z"
 
 # Pull request benchmark gate (aliases bench-ci to ensure identical thresholds and history).
@@ -133,19 +134,10 @@ bench-scaling:
     just bench-one-filter handle_prepare "^handle_prepare/(distinct_key/(4|16)|cold_grow|revision_churn)"
     just bench-one-filter handle_lookup "^handle_lookup/(warm_same_token|distinct_tokens)/(4|16)\z"
     just bench-one-filter handle_call_resolution "^handle_call_resolution/handles/(2|4)\z"
-    just bench-one-filter rtd_publish "^rtd_publish/(number/drain_each|string/(drain_each|conversion|stored_publish))\z" "bench-internals rtd"
+    just bench-one-filter rtd_publish "^rtd_publish/string_8k/(changing|same_value)\z" "bench-internals rtd"
     just bench-one-filter rtd_refresh "^rtd_refresh/.+/end_to_end" "bench-internals rtd"
 
-# Diagnostic microbenchmarks for internal component decomposition and controls.
-# Run manually when investigating the root cause of a regression.
-bench-diagnostics:
-    just bench-one input_identity
-    just bench-one handle_lookup_arc_control
-    just bench-one-filter sync_boundary "^sync_boundary/(ingress_udf_only|return_tracker_only|scalar_return/udf_trace_enabled)"
-    just bench-one-filter handle_call_resolution "^handle_runtime_resolution/concurrent"
-    just bench-one-filter rtd_refresh "^rtd_refresh/.+/(publish_coalesce|planning|collection|reduction|completion)" "bench-internals rtd"
-
-# Full unfiltered benchmark suite (~175 cases across all 10 production benchmarks).
+# Full unfiltered benchmark suite.
 bench-full:
     just bench-one async_spawn "bench-internals async"
     just bench-one sync_boundary
@@ -154,6 +146,7 @@ bench-full:
     just bench-one handle_lookup
     just bench-one formula_caller
     just bench-one argument_ingress
+    just bench-one array_string_output
     just bench-one rtd_publish "bench-internals rtd"
     just bench-one rtd_refresh "bench-internals rtd"
     just bench-one handle_call_resolution

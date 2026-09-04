@@ -1224,7 +1224,7 @@ impl IntoExcel for &str {
     }
 
     fn write_into<S: output::ExcelCellSink>(self, sink: &mut S) -> XllResult<()> {
-        sink.push_string(self.to_owned())
+        sink.push_str(self)
     }
 }
 
@@ -1258,6 +1258,46 @@ mod tests {
     assert_impl_all!(
         XlArrayBuilder: std::panic::UnwindSafe, std::panic::RefUnwindSafe
     );
+
+    #[derive(Default)]
+    struct BorrowTrackingSink {
+        borrowed_string_calls: usize,
+    }
+
+    impl output::ExcelCellSink for BorrowTrackingSink {
+        fn push_cell(&mut self, _: ExcelCellOutput) -> XllResult<()> {
+            panic!("borrowed string conversion must not use the semantic fallback")
+        }
+
+        fn push_f64(&mut self, _: f64) -> XllResult<()> {
+            panic!("unexpected numeric output")
+        }
+
+        fn push_bool(&mut self, _: bool) -> XllResult<()> {
+            panic!("unexpected boolean output")
+        }
+
+        fn push_str(&mut self, value: &str) -> XllResult<()> {
+            assert_eq!(value, "borrowed-value");
+            self.borrowed_string_calls += 1;
+            Ok(())
+        }
+
+        fn push_string(&mut self, _: String) -> XllResult<()> {
+            panic!("&str direct-write must not allocate an owned String")
+        }
+
+        fn push_error(&mut self, _: crate::ExcelError) -> XllResult<()> {
+            panic!("unexpected error output")
+        }
+    }
+
+    #[test]
+    fn borrowed_str_direct_write_uses_borrowed_sink_path() {
+        let mut sink = BorrowTrackingSink::default();
+        "borrowed-value".write_into(&mut sink).unwrap();
+        assert_eq!(sink.borrowed_string_calls, 1);
+    }
 
     fn convert<T>(raw: &mut XLOPER12) -> XllResult<T>
     where

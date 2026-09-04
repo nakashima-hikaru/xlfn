@@ -351,7 +351,7 @@ fn mutation_from_invocation<T>(
 }
 
 fn decode_registration_id(
-    result: &mut ExcelCallbackValue,
+    result: &mut ExcelCallbackValue<'_>,
     excel_name: &'static str,
 ) -> XllResult<RegistrationId> {
     if result.value_type()? != XlValueType::Number {
@@ -367,7 +367,7 @@ fn decode_registration_id(
 }
 
 fn decode_registration_id_result(
-    result: &mut ExcelCallbackValue,
+    result: &mut ExcelCallbackValue<'_>,
     excel_name: &'static str,
 ) -> XllResult<Option<RegistrationId>> {
     match result.value_type()? {
@@ -391,13 +391,13 @@ fn decode_registration_id_result(
     }
 }
 
-fn error_code(result: &ExcelCallbackValue) -> XllResult<i32> {
+fn error_code(result: &ExcelCallbackValue<'_>) -> XllResult<i32> {
     let raw = result.raw()?;
     // SAFETY: the caller checked that the result has XLTYPE_ERR.
     Ok(unsafe { raw.value.error })
 }
 
-fn read_excel_bool(result: &ExcelCallbackValue, function: ExcelApiFunction) -> XllResult<bool> {
+fn read_excel_bool(result: &ExcelCallbackValue<'_>, function: ExcelApiFunction) -> XllResult<bool> {
     if result.value_type()? != XlValueType::Boolean {
         return Err(unexpected_result(function));
     }
@@ -406,7 +406,7 @@ fn read_excel_bool(result: &ExcelCallbackValue, function: ExcelApiFunction) -> X
     Ok(unsafe { raw.value.boolean } != 0)
 }
 
-fn read_applied_bool(result: &ExcelCallbackValue, function: ExcelApiFunction) -> XllResult<()> {
+fn read_applied_bool(result: &ExcelCallbackValue<'_>, function: ExcelApiFunction) -> XllResult<()> {
     if read_excel_bool(result, function)? {
         Ok(())
     } else {
@@ -414,7 +414,7 @@ fn read_applied_bool(result: &ExcelCallbackValue, function: ExcelApiFunction) ->
     }
 }
 
-fn decode_event_registration_id(result: &ExcelCallbackValue) -> XllResult<i32> {
+fn decode_event_registration_id(result: &ExcelCallbackValue<'_>) -> XllResult<i32> {
     if result.value_type()? != XlValueType::Integer {
         return Err(unexpected_result(ExcelApiFunction::EventRegister));
     }
@@ -430,7 +430,7 @@ fn decode_event_registration_id(result: &ExcelCallbackValue) -> XllResult<i32> {
     Ok(value)
 }
 
-fn validate_event_unregister_result(result: &ExcelCallbackValue) -> XllResult<()> {
+fn validate_event_unregister_result(result: &ExcelCallbackValue<'_>) -> XllResult<()> {
     let _ = decode_event_registration_id(result)?;
     Ok(())
 }

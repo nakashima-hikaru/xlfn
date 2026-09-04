@@ -71,22 +71,70 @@ unsafe impl Send for ErasedSink {}
 // SAFETY: ErasedSink accesses PublishCore via synchronized atomic/mutex methods.
 unsafe impl Sync for ErasedSink {}
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct VersionedRtdValue {
+    pub(crate) generation: ConnectionGeneration,
+    pub(crate) sequence: u64,
+    pub(crate) value: StoredRtdValue,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ValueSlot {
+    Empty,
+    Resident(VersionedRtdValue),
+    InFlight {
+        generation: ConnectionGeneration,
+        sequence: u64,
+    },
+}
+
+impl Default for ValueSlot {
+    #[inline]
+    fn default() -> Self {
+        Self::Empty
+    }
+}
+
 pub(crate) struct ActiveSubscription {
     pub(crate) id: SubscriptionId,
     pub(crate) generation: ConnectionGeneration,
     pub(crate) committed: bool,
-    /// The latest value published by this connection generation, if any.
-    ///
-    /// `None` is distinct from `StoredRtdValue::Empty`: an empty value is a
-    /// real first publication and must still be delivered once.
-    pub(crate) latest: Option<StoredRtdValue>,
+    /// Pending/refresh value slots corresponding to writer buffers 0 and 1.
+    pub(crate) values: [ValueSlot; 2],
+    /// Index (0 or 1) of the latest value slot for exact publication dedup.
+    pub(crate) latest_slot: Option<u8>,
+    pub(crate) next_sequence: u64,
     pub(crate) _permit: QuotaPermit,
+}
+
+impl ActiveSubscription {
+    #[inline]
+    pub(crate) fn allocate_sequence(&mut self) -> XllResult<u64> {
+        let sequence = self.next_sequence;
+        self.next_sequence = sequence.checked_add(1).ok_or(XllError::Internal {
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::REFERENCE_OVERFLOW,
+        })?;
+        Ok(sequence)
+    }
+
+    #[inline]
+    pub(crate) fn latest_slot_state(&self) -> Option<&ValueSlot> {
+        let slot = self.latest_slot? as usize;
+        self.values.get(slot)
+    }
+
+    #[inline]
+    pub(crate) fn latest_value(&self) -> Option<&StoredRtdValue> {
+        match self.latest_slot_state()? {
+            ValueSlot::Resident(versioned) => Some(&versioned.value),
+            ValueSlot::Empty | ValueSlot::InFlight { .. } => None,
+        }
+    }
 }
 
 pub(crate) struct QueuedUpdate {
     pub(crate) connection_generation: ConnectionGeneration,
     pub(crate) sequence: u64,
-    pub(crate) value: StoredRtdValue,
     pub(crate) _permit: QuotaPermit,
 }
 
@@ -94,6 +142,7 @@ pub(crate) struct RtdUpdate {
     pub(crate) sequence: u64,
     pub(crate) topic_id: i32,
     pub(crate) connection_generation: ConnectionGeneration,
+    pub(crate) buffer: u8,
     pub(crate) value: StoredRtdValue,
 }
 
@@ -104,8 +153,10 @@ pub(crate) struct RtdUpdate {
 /// - planning and collection never remove a pending update;
 /// - shard collection accepts only updates whose generation is still active;
 /// - completion retires only the same generation through the delivered sequence;
-/// - a newer sequence therefore survives completion of an older snapshot; and
-/// - collection order is not delivery order: reduction restores global sequence order.
+/// - a newer sequence therefore survives completion of an older snapshot;
+/// - collection order is not semantically significant across topics;
+/// - each refresh contains at most the newest eligible update for each topic; and
+/// - sequence numbers order updates only within one topic generation.
 ///
 /// A publish racing after planning may appear in this refresh or remain indexed
 /// for the next one. Either outcome is valid; losing the update is not.
@@ -132,6 +183,7 @@ impl RtdUpdate {
             topic_id,
             connection_generation: ConnectionGeneration::new(1)
                 .expect("test connection generation is non-zero"),
+            buffer: 0,
             value: value.into_stored().expect("test RTD value is valid"),
         }
     }

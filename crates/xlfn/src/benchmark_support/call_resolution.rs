@@ -9,24 +9,32 @@ pub struct MultiHandleCallBenchmark {
 
 impl MultiHandleCallBenchmark {
     pub fn new(count: usize) -> Self {
+        assert!(count > 0, "benchmark handle count must be non-zero");
         let runtime = get_benchmark_runtime();
         let (raw_tokens, storage) = runtime
             .with_formula_handle_service(|handle_runtime| {
                 let mut raw_tokens = Vec::with_capacity(count);
                 let mut storage = Vec::with_capacity(count);
-                for i in 0..count {
-                    let key = benchmark_revision_key("BENCH.MULTI.HANDLE", i as u64);
+
+                for index in 0..count {
+                    let key = benchmark_revision_key("BENCH.MULTI.HANDLE", index as u64);
                     let token = handle_runtime
                         .prepare_observed(
                             key,
-                            move || Ok(BenchHandleObject { _payload: i as u64 }),
+                            move || {
+                                Ok(BenchHandleObject {
+                                    _payload: index as u64,
+                                })
+                            },
                             |_, _| Ok(()),
                         )
                         .expect("benchmark handle preparation must succeed")
                         .into_token();
+
                     let mut u16_chars: Vec<u16> = Vec::with_capacity(token.len() + 1);
                     u16_chars.push(token.len() as u16);
                     u16_chars.extend(token.encode_utf16());
+
                     let raw = xlfn_sys::XLOPER12 {
                         value: xlfn_sys::XLOPER12Value {
                             string: u16_chars.as_ptr() as *mut u16,
@@ -36,6 +44,7 @@ impl MultiHandleCallBenchmark {
                     raw_tokens.push(raw);
                     storage.push(u16_chars);
                 }
+
                 (raw_tokens, storage)
             })
             .expect("benchmark handle runtime must initialize");

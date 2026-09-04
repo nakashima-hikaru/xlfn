@@ -12,11 +12,11 @@ publish = false
 sdk-bindgen = ["dep:bindgen"]
 
 [dependencies]
-xlfn-sys = { version = "0.2.0", path = "../../crates/xlfn-sys", features = ["abi-probe"] }
+xlfn-sys = { version = "=0.2.0", path = "../../crates/xlfn-sys", features = ["abi-probe"] }
 
 [build-dependencies]
 bindgen = { version = "0.72.1", optional = true }
-cc = "1.2.57"
+cc = "1.4.4"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

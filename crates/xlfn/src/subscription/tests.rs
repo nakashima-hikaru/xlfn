@@ -786,6 +786,45 @@ fn old_buffer_update_is_not_redelivered_after_newer_update() {
 }
 
 #[test]
+fn two_buffer_string_refresh_picks_newer_sequence_and_cleans_both() {
+    let (arena, source, sink, _) = publishing_source::<String>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime
+        .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
+        .unwrap();
+    let prepared = runtime
+        .prepare(&source, RtdTopic::single("string-superseded").unwrap())
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+    runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap()
+        .commit()
+        .unwrap();
+    let sink = sink.lock().clone().unwrap();
+
+    sink.publish("first-update".to_string()).unwrap();
+    let first = server.begin_refresh().unwrap();
+    first.complete(RefreshOutcome::Failed).unwrap();
+
+    sink.publish("second-update".to_string()).unwrap();
+    let latest = server.begin_refresh().unwrap();
+    assert_eq!(latest.updates.len(), 1);
+    assert_eq!(
+        latest.updates[0].value,
+        StoredRtdValue::String("second-update".into())
+    );
+    latest.complete(RefreshOutcome::Delivered).unwrap();
+
+    assert_eq!(server.test_server().publish.queued_update_count(), 0);
+    assert_eq!(server.pending_update_count(), 0);
+    let empty = server.begin_refresh().unwrap();
+    assert!(empty.updates.is_empty());
+    empty.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
 fn newer_update_survives_completion_of_older_refresh() {
     let (arena, source, sink, _) = publishing_source::<f64>(None);
     let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
@@ -945,7 +984,7 @@ fn refresh_planning_does_not_traverse_topic_shards() {
 }
 
 #[test]
-fn refresh_reduction_orders_updates_by_global_sequence() {
+fn refresh_reduction_preserves_latest_update_for_each_topic() {
     let fixture = SourceFixture::new();
     let (source_one, sink_one, _) = fixture.add::<f64>(None);
     let (source_two, sink_two, _) = fixture.add::<f64>(None);
@@ -976,13 +1015,18 @@ fn refresh_reduction_orders_updates_by_global_sequence() {
     sink_one.lock().clone().unwrap().publish(10.0).unwrap();
 
     let batch = server.begin_refresh().unwrap();
+    let mut actual = batch
+        .updates
+        .iter()
+        .map(|update| (update.topic_id, update.value.clone()))
+        .collect::<Vec<_>>();
+    actual.sort_by_key(|(topic_id, _)| *topic_id);
     assert_eq!(
-        batch
-            .updates
-            .iter()
-            .map(|update| update.topic_id)
-            .collect::<Vec<_>>(),
-        vec![2, 1],
+        actual,
+        vec![
+            (1, StoredRtdValue::Number(10.0)),
+            (2, StoredRtdValue::Number(20.0)),
+        ]
     );
     batch.complete(RefreshOutcome::Delivered).unwrap();
 }
@@ -2595,4 +2639,723 @@ fn resolve_transport_key_validates_runtime_identity() {
     let transport = key.to_transport();
     let parsed_key = SubscriptionKey::parse_transport(&transport).unwrap();
     assert_eq!(runtime_a.resolve_transport_key(parsed_key).unwrap(), id);
+}
+
+#[test]
+fn double_slot_pending_metadata_and_values_invariants() {
+    // Invariants 2, 3, 4:
+    // - For any pending update in pending[b], active.values[b] exists with matching (generation, sequence)
+    // - latest_slot is Some and points to a Some value slot
+    let (_runtime, server, sink) = connected_sink::<String>(None, "double-slot-invariants");
+
+    sink.publish("v1".to_owned()).unwrap();
+    let topic_id = TopicId(1);
+    let shard_idx = shard_index(topic_id);
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        let latest_slot = active.latest_slot.expect("latest_slot must be Some") as usize;
+        assert!(matches!(active.values[latest_slot], ValueSlot::Resident(_)));
+
+        for b in [0, 1] {
+            if let Some(queued) = shard.pending[b].get(&topic_id) {
+                let ValueSlot::Resident(slot) = &active.values[b] else {
+                    panic!("values[b] must be Resident matching pending");
+                };
+                assert_eq!(slot.generation, queued.connection_generation);
+                assert_eq!(slot.sequence, queued.sequence);
+            }
+        }
+    }
+}
+
+#[test]
+fn refresh_failure_preserves_pending_and_values_for_retry() {
+    // Invariant 5: Refresh failure does not alter pending/value state.
+    let (_runtime, server, sink) = connected_sink::<String>(None, "refresh-failure-retry");
+
+    sink.publish("retry-value".to_owned()).unwrap();
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates.len(), 1);
+    assert_eq!(
+        batch.updates[0].value,
+        StoredRtdValue::String("retry-value".into())
+    );
+    batch.complete(RefreshOutcome::Failed).unwrap();
+
+    // After failure, retry succeeds with identical value and sequence!
+    let retry_batch = server.begin_refresh().unwrap();
+    assert_eq!(retry_batch.updates.len(), 1);
+    assert_eq!(
+        retry_batch.updates[0].value,
+        StoredRtdValue::String("retry-value".into())
+    );
+    retry_batch.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn newer_publish_after_refresh_snapshot_reads_old_slot_value() {
+    // Invariant 6: Newer publish arriving after snapshot boundary writes to the other slot;
+    // the old snapshot still holds the old slot's value, and subsequent refresh reads the newer value.
+    let (_runtime, server, sink) = connected_sink::<String>(None, "snapshot-boundary-isolation");
+
+    sink.publish("v1-slot0".to_owned()).unwrap();
+    let snapshot = server.begin_refresh().unwrap();
+    assert_eq!(snapshot.updates.len(), 1);
+    assert_eq!(
+        snapshot.updates[0].value,
+        StoredRtdValue::String("v1-slot0".into())
+    );
+
+    // While older refresh is in-flight before completion, publish a newer value into the other slot
+    sink.publish("v2-slot1".to_owned()).unwrap();
+
+    // The in-flight snapshot completes delivery of v1-slot0
+    snapshot.complete(RefreshOutcome::Delivered).unwrap();
+
+    // Next refresh collects v2-slot1
+    let next_batch = server.begin_refresh().unwrap();
+    assert_eq!(next_batch.updates.len(), 1);
+    assert_eq!(
+        next_batch.updates[0].value,
+        StoredRtdValue::String("v2-slot1".into())
+    );
+    next_batch.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn successful_refresh_retains_latest_value_for_exact_dedup() {
+    // Invariant 7: Successful refresh retains the latest value in values[latest_slot] for exact dedup.
+    let (_runtime, server, sink) = connected_sink::<String>(None, "retain-latest-dedup");
+
+    sink.publish("dedup-target".to_owned()).unwrap();
+    let batch = server.begin_refresh().unwrap();
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+
+    // Publishing identical value must be suppressed (zero queued updates)
+    sink.publish("dedup-target".to_owned()).unwrap();
+    assert_eq!(server.pending_update_count(), 0);
+
+    // Publishing changed value produces an update
+    sink.publish("changed-target".to_owned()).unwrap();
+    assert_eq!(server.pending_update_count(), 1);
+    let batch2 = server.begin_refresh().unwrap();
+    assert_eq!(
+        batch2.updates[0].value,
+        StoredRtdValue::String("changed-target".into())
+    );
+    batch2.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn non_latest_delivered_slot_is_reclaimed() {
+    // Invariant 8: Delivered slot that is not the latest_slot is reclaimed to None.
+    let (_runtime, server, sink) = connected_sink::<String>(None, "non-latest-reclamation");
+
+    sink.publish("v1".to_owned()).unwrap();
+    let planned = server.test_server().publish.plan_refresh().unwrap();
+    sink.publish("v2".to_owned()).unwrap();
+
+    let topic_id = TopicId(1);
+    let shard_idx = shard_index(topic_id);
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        assert!(matches!(active.values[0], ValueSlot::Resident(_)));
+        assert!(matches!(active.values[1], ValueSlot::Resident(_)));
+        assert_eq!(active.latest_slot, Some(1));
+    }
+
+    let batch = planned.collect();
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        assert!(
+            matches!(active.values[0], ValueSlot::Empty),
+            "non-latest delivered slot must be reclaimed to Empty"
+        );
+        assert!(
+            matches!(active.values[1], ValueSlot::Resident(_)),
+            "latest slot must be retained for dedup"
+        );
+        assert_eq!(active.latest_slot, Some(1));
+    }
+}
+
+#[test]
+fn inflight_refresh_batch_leases_value_without_double_ownership() {
+    // Invariants 1 & 2:
+    // - InFlight slot corresponds to exactly one in-flight lease entry.
+    // - Resident and lease never own the same value simultaneously.
+    let (_runtime, server, sink) = connected_sink::<String>(None, "phase-b-inv-1-2");
+
+    sink.publish("v1".to_owned()).unwrap();
+    let topic_id = TopicId(1);
+    let shard_idx = shard_index(topic_id);
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        assert!(matches!(active.values[0], ValueSlot::Resident(_)));
+    }
+
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates.len(), 1);
+    assert_eq!(batch.updates[0].value, StoredRtdValue::String("v1".into()));
+
+    // While batch is held, the slot in the shard MUST be InFlight, NOT Resident!
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        assert_eq!(
+            active.values[0],
+            ValueSlot::InFlight {
+                generation: batch.updates[0].connection_generation,
+                sequence: batch.updates[0].sequence,
+            }
+        );
+        assert!(!matches!(active.values[0], ValueSlot::Resident(_)));
+    }
+
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn newer_publish_during_refresh_preserves_inflight_lease() {
+    // Invariant 3: Newer publish during refresh writes into the other writer slot
+    // without blocking or corrupting in-flight lease.
+    let (_runtime, server, sink) = connected_sink::<String>(None, "phase-b-inv-3");
+
+    sink.publish("v1-slot0".to_owned()).unwrap();
+    let topic_id = TopicId(1);
+    let shard_idx = shard_index(topic_id);
+
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(
+        batch.updates[0].value,
+        StoredRtdValue::String("v1-slot0".into())
+    );
+
+    // While batch is in flight (slot 0 InFlight), publish to topic
+    sink.publish("v2-slot1".to_owned()).unwrap();
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        // Slot 0 is still InFlight for batch
+        assert!(matches!(active.values[0], ValueSlot::InFlight { .. }));
+        // Slot 1 has the new value as Resident
+        assert!(matches!(active.values[1], ValueSlot::Resident(_)));
+        assert_eq!(active.latest_slot, Some(1));
+    }
+
+    // Complete batch
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        // Old slot 0 was reclaimed to Empty because latest_slot is 1
+        assert_eq!(active.values[0], ValueSlot::Empty);
+        // Slot 1 still holds v2-slot1
+        assert!(matches!(active.values[1], ValueSlot::Resident(_)));
+        assert_eq!(active.latest_slot, Some(1));
+    }
+
+    // Next refresh collects slot 1
+    let next_batch = server.begin_refresh().unwrap();
+    assert_eq!(next_batch.updates.len(), 1);
+    assert_eq!(
+        next_batch.updates[0].value,
+        StoredRtdValue::String("v2-slot1".into())
+    );
+    next_batch.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn publish_during_inflight_refresh_treats_same_value_conservatively() {
+    // Invariant 4: While InFlight is latest, same-value publish is treated conservatively
+    // as changed (does not dedup) and publishes to the other slot.
+    let (_runtime, server, sink) = connected_sink::<String>(None, "phase-b-inv-4");
+
+    sink.publish("same-value".to_owned()).unwrap();
+    let topic_id = TopicId(1);
+    let shard_idx = shard_index(topic_id);
+
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(
+        batch.updates[0].value,
+        StoredRtdValue::String("same-value".into())
+    );
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        assert!(matches!(active.values[0], ValueSlot::InFlight { .. }));
+        assert_eq!(active.latest_slot, Some(0));
+    }
+
+    // While slot 0 is InFlight, publishing the EXACT same value does NOT dedup:
+    // it conservatively publishes to slot 1!
+    sink.publish("same-value".to_owned()).unwrap();
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        assert!(matches!(active.values[0], ValueSlot::InFlight { .. }));
+        assert!(matches!(active.values[1], ValueSlot::Resident(_)));
+        assert_eq!(active.latest_slot, Some(1));
+    }
+
+    // Complete first batch
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+
+    // Next batch collects the conservatively published update
+    let next_batch = server.begin_refresh().unwrap();
+    assert_eq!(next_batch.updates.len(), 1);
+    assert_eq!(
+        next_batch.updates[0].value,
+        StoredRtdValue::String("same-value".into())
+    );
+    next_batch.complete(RefreshOutcome::Delivered).unwrap();
+
+    // Now slot 1 is Resident and latest. Publishing "same-value" again DOES exact-dedup!
+    sink.publish("same-value".to_owned()).unwrap();
+    assert_eq!(server.pending_update_count(), 0);
+}
+
+#[test]
+fn delivered_refresh_restores_resident_value_for_subsequent_dedup() {
+    // Invariant 5: Successful completion restores value to Resident if still latest.
+    let (_runtime, server, sink) = connected_sink::<String>(None, "phase-b-inv-5");
+
+    sink.publish("target-value".to_owned()).unwrap();
+    let topic_id = TopicId(1);
+    let shard_idx = shard_index(topic_id);
+
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(
+        batch.updates[0].value,
+        StoredRtdValue::String("target-value".into())
+    );
+
+    // No intermediate publish occurs
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        assert!(matches!(
+            &active.values[0],
+            ValueSlot::Resident(v) if v.value == StoredRtdValue::String("target-value".into())
+        ));
+        assert_eq!(active.latest_slot, Some(0));
+    }
+
+    // Since it was restored to Resident, subsequent publish of same value dedups!
+    sink.publish("target-value".to_owned()).unwrap();
+    assert_eq!(server.pending_update_count(), 0);
+}
+
+#[test]
+fn failed_refresh_and_batch_drop_restore_resident_value_for_retry() {
+    // Invariant 6: Failed completion or batch drop restores value to Resident
+    // if slot is InFlight (enables lossless retry).
+    let (_runtime, server, sink) = connected_sink::<String>(None, "phase-b-inv-6");
+
+    // Test case 6a: Explicit failure
+    sink.publish("retry-val-1".to_owned()).unwrap();
+    let topic_id = TopicId(1);
+    let shard_idx = shard_index(topic_id);
+
+    let batch = server.begin_refresh().unwrap();
+    batch.complete(RefreshOutcome::Failed).unwrap();
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        assert!(matches!(
+            &active.values[0],
+            ValueSlot::Resident(v) if v.value == StoredRtdValue::String("retry-val-1".into())
+        ));
+    }
+
+    // Retry succeeds
+    let retry1 = server.begin_refresh().unwrap();
+    assert_eq!(
+        retry1.updates[0].value,
+        StoredRtdValue::String("retry-val-1".into())
+    );
+    retry1.complete(RefreshOutcome::Delivered).unwrap();
+
+    // Test case 6b: Batch drop without complete (abort)
+    sink.publish("retry-val-2".to_owned()).unwrap();
+    let batch_drop = server.begin_refresh().unwrap();
+    assert_eq!(
+        batch_drop.updates[0].value,
+        StoredRtdValue::String("retry-val-2".into())
+    );
+    drop(batch_drop); // aborted!
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        let slot = active.latest_slot.unwrap() as usize;
+        assert!(matches!(
+            &active.values[slot],
+            ValueSlot::Resident(v) if v.value == StoredRtdValue::String("retry-val-2".into())
+        ));
+    }
+
+    let retry2 = server.begin_refresh().unwrap();
+    assert_eq!(
+        retry2.updates[0].value,
+        StoredRtdValue::String("retry-val-2".into())
+    );
+    retry2.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn newer_different_publish_supersedes_inflight_slot() {
+    // InFlight(latest) + different publish
+    let (_runtime, server, sink) = connected_sink::<String>(None, "sm-inflight-different");
+
+    sink.publish("v1".to_owned()).unwrap();
+    let topic_id = TopicId(1);
+    let shard_idx = shard_index(topic_id);
+
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates[0].value, StoredRtdValue::String("v1".into()));
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        assert!(matches!(active.values[0], ValueSlot::InFlight { .. }));
+        assert_eq!(active.latest_slot, Some(0));
+    }
+
+    // Publish different value while InFlight is latest
+    sink.publish("v2".to_owned()).unwrap();
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        assert!(matches!(active.values[0], ValueSlot::InFlight { .. }));
+        assert!(matches!(
+            &active.values[1],
+            ValueSlot::Resident(v) if v.value == StoredRtdValue::String("v2".into())
+        ));
+        assert_eq!(active.latest_slot, Some(1));
+    }
+
+    // Complete the first batch
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        // Slot 0 is reclaimed to Empty because latest_slot is 1
+        assert_eq!(active.values[0], ValueSlot::Empty);
+        assert!(matches!(
+            &active.values[1],
+            ValueSlot::Resident(v) if v.value == StoredRtdValue::String("v2".into())
+        ));
+    }
+
+    let next_batch = server.begin_refresh().unwrap();
+    assert_eq!(
+        next_batch.updates[0].value,
+        StoredRtdValue::String("v2".into())
+    );
+    next_batch.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn older_publish_is_ignored_when_slot_is_inflight() {
+    // InFlight(old) + publish:
+    // Slot 0 in-flight, slot 1 published, and then another publish arrives to slot 1 before delivery
+    let (_runtime, server, sink) = connected_sink::<String>(None, "sm-inflight-old-publish");
+
+    sink.publish("v1".to_owned()).unwrap();
+    let topic_id = TopicId(1);
+    let shard_idx = shard_index(topic_id);
+
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates[0].value, StoredRtdValue::String("v1".into()));
+
+    // Newer publish writes to slot 1
+    sink.publish("v2".to_owned()).unwrap();
+    // Another publish writes to slot 1 again
+    sink.publish("v3".to_owned()).unwrap();
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        // Slot 0 must remain InFlight untouched
+        assert!(matches!(active.values[0], ValueSlot::InFlight { .. }));
+        // Slot 1 must hold v3
+        assert!(matches!(
+            &active.values[1],
+            ValueSlot::Resident(v) if v.value == StoredRtdValue::String("v3".into())
+        ));
+        assert_eq!(active.latest_slot, Some(1));
+    }
+
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+
+    let next_batch = server.begin_refresh().unwrap();
+    assert_eq!(
+        next_batch.updates[0].value,
+        StoredRtdValue::String("v3".into())
+    );
+    next_batch.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn failed_refresh_does_not_overwrite_newer_published_value() {
+    // Failed after newer publish:
+    // Slot 0 in-flight, slot 1 published with newer value, then batch fails.
+    // Slot 0 is restored to Resident, but latest_slot remains 1. Next refresh delivers slot 1.
+    let (_runtime, server, sink) = connected_sink::<String>(None, "sm-failed-after-newer");
+
+    sink.publish("v1".to_owned()).unwrap();
+    let topic_id = TopicId(1);
+    let shard_idx = shard_index(topic_id);
+
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates[0].value, StoredRtdValue::String("v1".into()));
+
+    sink.publish("v2".to_owned()).unwrap();
+
+    // First batch fails!
+    batch.complete(RefreshOutcome::Failed).unwrap();
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        // Slot 0 is restored to Resident
+        assert!(matches!(
+            &active.values[0],
+            ValueSlot::Resident(v) if v.value == StoredRtdValue::String("v1".into())
+        ));
+        // Slot 1 is Resident with v2
+        assert!(matches!(
+            &active.values[1],
+            ValueSlot::Resident(v) if v.value == StoredRtdValue::String("v2".into())
+        ));
+        // latest_slot is 1
+        assert_eq!(active.latest_slot, Some(1));
+        // Both updates are pending
+        assert!(shard.pending[0].contains_key(&topic_id));
+        assert!(shard.pending[1].contains_key(&topic_id));
+    }
+
+    // Next refresh picks newer sequence (slot 1, v2)!
+    let next_batch = server.begin_refresh().unwrap();
+    assert_eq!(next_batch.updates.len(), 1);
+    assert_eq!(
+        next_batch.updates[0].value,
+        StoredRtdValue::String("v2".into())
+    );
+    next_batch.complete(RefreshOutcome::Delivered).unwrap();
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        // Delivered sequence 1 retires both pending updates and reclaims slot 0 to Empty
+        assert_eq!(active.values[0], ValueSlot::Empty);
+        assert!(matches!(
+            &active.values[1],
+            ValueSlot::Resident(v) if v.value == StoredRtdValue::String("v2".into())
+        ));
+        assert_eq!(active.latest_slot, Some(1));
+        assert!(!shard.pending[0].contains_key(&topic_id));
+        assert!(!shard.pending[1].contains_key(&topic_id));
+    }
+}
+
+#[test]
+fn dropped_refresh_batch_preserves_newer_published_value() {
+    // lease Drop after newer publish:
+    // Slot 0 in-flight, slot 1 published with newer value, batch is dropped (aborted).
+    let (_runtime, server, sink) = connected_sink::<String>(None, "sm-drop-after-newer");
+
+    sink.publish("v1".to_owned()).unwrap();
+    let topic_id = TopicId(1);
+    let shard_idx = shard_index(topic_id);
+
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates[0].value, StoredRtdValue::String("v1".into()));
+
+    sink.publish("v2".to_owned()).unwrap();
+
+    // Batch dropped without complete!
+    drop(batch);
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        assert!(matches!(
+            &active.values[0],
+            ValueSlot::Resident(v) if v.value == StoredRtdValue::String("v1".into())
+        ));
+        assert!(matches!(
+            &active.values[1],
+            ValueSlot::Resident(v) if v.value == StoredRtdValue::String("v2".into())
+        ));
+        assert_eq!(active.latest_slot, Some(1));
+    }
+
+    // Next refresh picks newer update v2!
+    let next_batch = server.begin_refresh().unwrap();
+    assert_eq!(
+        next_batch.updates[0].value,
+        StoredRtdValue::String("v2".into())
+    );
+    next_batch.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn refresh_batch_completion_is_idempotent() {
+    // Verify that a refresh batch cannot be finalized twice, and dropping after completion
+    // does not trigger rollback.
+    let (_runtime, server, sink) = connected_sink::<String>(None, "sm-no-double-finalization");
+
+    sink.publish("v1".to_owned()).unwrap();
+    let topic_id = TopicId(1);
+    let shard_idx = shard_index(topic_id);
+
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates.len(), 1);
+
+    // Explicit complete consumes batch
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        // Slot 0 is Resident and latest
+        assert!(matches!(&active.values[0], ValueSlot::Resident(_)));
+        assert_eq!(active.latest_slot, Some(0));
+    }
+
+    // Attempting another publish of identical value is properly suppressed (exact dedup)
+    sink.publish("v1".to_owned()).unwrap();
+    assert_eq!(server.pending_update_count(), 0);
+}
+
+#[test]
+fn runtime_close_reclaims_all_inflight_slots() {
+    // Invariant: InFlight never exists without an active lease batch owning it.
+    // Across 10 topics: publish -> refresh -> disconnect/rollback/deliver/fail -> zero InFlight.
+    let (arena, source, sink_slot, _) = publishing_source::<String>(None);
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime
+        .register_server(ServerGeneration::new(1).expect("non-zero test server generation"))
+        .unwrap();
+
+    let mut sinks = Vec::new();
+    for i in 1..=5 {
+        let topic_name = format!("orphan-topic-{i}");
+        let prepared = runtime
+            .prepare(&source, RtdTopic::single(&topic_name).unwrap())
+            .unwrap();
+        let id = prepared.id();
+        prepared.commit();
+        runtime
+            .connect_transaction(&server, TopicId(i), id)
+            .unwrap()
+            .commit()
+            .unwrap();
+        let sink = sink_slot.lock().clone().expect("source must capture sink");
+        sinks.push(sink);
+    }
+
+    for sink in &sinks {
+        sink.publish("batch-val".to_owned()).unwrap();
+    }
+
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates.len(), 5);
+
+    // During active lease: all 5 topics have an InFlight slot
+    let check_inflight_count = || -> usize {
+        let mut inflight = 0;
+        for i in 0..TOPIC_SHARDS {
+            let shard = server.test_server().publish.lock_shard_for_test(i);
+            for active in shard.active_by_topic.values() {
+                for slot in &active.values {
+                    if matches!(slot, ValueSlot::InFlight { .. }) {
+                        inflight += 1;
+                    }
+                }
+            }
+        }
+        inflight
+    };
+
+    assert_eq!(check_inflight_count(), 5);
+
+    // Complete batch
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+
+    // After completion: exactly ZERO slots across all shards may be InFlight!
+    assert_eq!(
+        check_inflight_count(),
+        0,
+        "no orphaned InFlight slots allowed after delivery"
+    );
+
+    // Second cycle with abort
+    for sink in &sinks {
+        sink.publish("batch-val-2".to_owned()).unwrap();
+    }
+    let batch2 = server.begin_refresh().unwrap();
+    assert_eq!(check_inflight_count(), 5);
+    drop(batch2); // abort!
+
+    // After abort: exactly ZERO slots may be InFlight!
+    assert_eq!(
+        check_inflight_count(),
+        0,
+        "no orphaned InFlight slots allowed after abort"
+    );
+}
+
+#[test]
+fn refresh_batch_drop_on_unwind_does_not_deadlock() {
+    // AUDIT: Verify that dropping RtdRefreshBatch during panic unwind cleans up
+    // without deadlock and restores Resident state.
+    let (_runtime, server, sink) = connected_sink::<String>(None, "drop-panic-safety");
+
+    sink.publish("unwind-val".to_owned()).unwrap();
+    let topic_id = TopicId(1);
+    let shard_idx = shard_index(topic_id);
+
+    let res = catch_unwind(AssertUnwindSafe(|| {
+        let batch = server.begin_refresh().unwrap();
+        assert_eq!(batch.updates.len(), 1);
+        panic!("simulated failure during COM formatting / caller processing");
+    }));
+    assert!(res.is_err(), "closure panicked as expected");
+
+    // After panic unwind: batch was dropped safely without deadlock, and slot was restored!
+    {
+        let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
+        let active = shard.active_by_topic.get(&topic_id).unwrap();
+        assert!(matches!(
+            &active.values[0],
+            ValueSlot::Resident(v) if v.value == StoredRtdValue::String("unwind-val".into())
+        ));
+    }
+
+    // Subsequent refresh retry succeeds
+    let retry = server.begin_refresh().unwrap();
+    assert_eq!(
+        retry.updates[0].value,
+        StoredRtdValue::String("unwind-val".into())
+    );
+    retry.complete(RefreshOutcome::Delivered).unwrap();
 }

@@ -37,7 +37,7 @@ impl<T: crate::subscription::IntoRtdValue + Clone + Send + Sync + 'static>
 
 pub struct RtdPublishNumberBenchmark {
     _runtime: Box<crate::subscription::SubscriptionRuntime>,
-    server: crate::subscription::SubscriptionServerHandle,
+    _server: crate::subscription::SubscriptionServerHandle,
     sink: crate::subscription::RtdSink<f64>,
 }
 
@@ -83,7 +83,7 @@ impl RtdPublishNumberBenchmark {
         let sink = sink_slot.lock().clone().expect("sink must be captured");
         Self {
             _runtime: runtime,
-            server,
+            _server: server,
             sink,
         }
     }
@@ -103,28 +103,14 @@ impl RtdPublishNumberBenchmark {
                 .expect("publish must succeed");
         }
     }
-
-    #[inline]
-    pub fn run_drain_each(&self, iterations: usize) {
-        for i in 0..iterations {
-            self.sink
-                .publish(12.5 + i as f64)
-                .expect("publish must succeed");
-            let batch = self
-                .server
-                .begin_refresh()
-                .expect("begin_refresh must succeed");
-            batch
-                .complete(crate::subscription::RefreshOutcome::Delivered)
-                .expect("complete must succeed");
-        }
-    }
 }
 
 pub struct RtdPublishStringBenchmark {
     _runtime: Box<crate::subscription::SubscriptionRuntime>,
-    server: crate::subscription::SubscriptionServerHandle,
+    _server: crate::subscription::SubscriptionServerHandle,
     sink: crate::subscription::RtdSink<String>,
+    first_value: String,
+    second_value: String,
 }
 
 impl Default for RtdPublishStringBenchmark {
@@ -135,6 +121,21 @@ impl Default for RtdPublishStringBenchmark {
 
 impl RtdPublishStringBenchmark {
     pub fn new() -> Self {
+        Self::with_values(
+            "stream_market_data_update_payload_a".to_owned(),
+            "stream_market_data_update_payload_b".to_owned(),
+        )
+    }
+
+    pub fn with_payload_len(payload_len: usize) -> Self {
+        assert!(payload_len > 0, "benchmark payload length must be non-zero");
+        Self::with_values(
+            benchmark_string_payload(payload_len, b'a'),
+            benchmark_string_payload(payload_len, b'b'),
+        )
+    }
+
+    fn with_values(first_value: String, second_value: String) -> Self {
         let generation =
             crate::generation::RuntimeGeneration::new(1).expect("benchmark generation is non-zero");
         let registration = crate::subscription::SourceRegistration::new(generation);
@@ -169,8 +170,10 @@ impl RtdPublishStringBenchmark {
         let sink = sink_slot.lock().clone().expect("sink must be captured");
         Self {
             _runtime: runtime,
-            server,
+            _server: server,
             sink,
+            first_value,
+            second_value,
         }
     }
 
@@ -178,7 +181,7 @@ impl RtdPublishStringBenchmark {
     pub fn run_repeated_same(&self, iterations: usize) {
         for _ in 0..iterations {
             self.sink
-                .publish("stream_market_data_update_payload".to_owned())
+                .publish(self.first_value.clone())
                 .expect("publish must succeed");
         }
     }
@@ -189,64 +192,13 @@ impl RtdPublishStringBenchmark {
         // without adding formatting overhead to the workload.
         for index in 0..iterations {
             let value = if index & 1 == 0 {
-                "stream_market_data_update_payload_a"
+                &self.first_value
             } else {
-                "stream_market_data_update_payload_b"
+                &self.second_value
             };
             self.sink
-                .publish(value.to_owned())
+                .publish(String::clone(value))
                 .expect("publish must succeed");
-        }
-    }
-
-    #[inline]
-    pub fn run_string_conversion(&self, iterations: usize) {
-        for _ in 0..iterations {
-            let stored = crate::subscription::RtdValue::String(
-                "stream_market_data_update_payload".to_owned(),
-            )
-            .into_stored()
-            .expect("string conversion must succeed");
-            std::hint::black_box(stored);
-        }
-    }
-
-    #[inline]
-    pub fn run_stored_publish(&self, iterations: usize) {
-        let first =
-            crate::subscription::RtdValue::String("stream_market_data_update_payload_a".to_owned())
-                .into_stored()
-                .expect("stored string conversion must succeed");
-        let second =
-            crate::subscription::RtdValue::String("stream_market_data_update_payload_b".to_owned())
-                .into_stored()
-                .expect("stored string conversion must succeed");
-        for index in 0..iterations {
-            let stored = if index & 1 == 0 {
-                first.clone()
-            } else {
-                second.clone()
-            };
-            self.sink
-                .sink
-                .publish_stored(stored)
-                .expect("stored publish must succeed");
-        }
-    }
-
-    #[inline]
-    pub fn run_drain_each(&self, iterations: usize) {
-        for _ in 0..iterations {
-            self.sink
-                .publish("stream_market_data_update_payload".to_owned())
-                .expect("publish must succeed");
-            let batch = self
-                .server
-                .begin_refresh()
-                .expect("begin_refresh must succeed");
-            batch
-                .complete(crate::subscription::RefreshOutcome::Delivered)
-                .expect("complete must succeed");
         }
     }
 }
@@ -255,6 +207,8 @@ impl RtdPublishStringBenchmark {
 pub enum RtdRefreshValueKind {
     Number,
     ShortString,
+    String1KiB,
+    String8KiB,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -288,7 +242,32 @@ pub const RTD_REFRESH_SCALING_CASES: [RtdRefreshScalingCase; 3] = [
 
 enum RtdRefreshSinks {
     Number(Vec<crate::subscription::RtdSink<f64>>),
-    ShortString(Vec<crate::subscription::RtdSink<String>>),
+    String {
+        sinks: Vec<crate::subscription::RtdSink<String>>,
+        first_value: String,
+        second_value: String,
+    },
+}
+
+fn string_refresh_sinks(
+    topic_ids: &[crate::subscription::TopicId],
+    first_value: String,
+    second_value: String,
+) -> (
+    Box<crate::subscription::SubscriptionRuntime>,
+    crate::subscription::SubscriptionServerHandle,
+    RtdRefreshSinks,
+) {
+    let (runtime, server, sinks) = build_refresh_topics::<String>(topic_ids);
+    (
+        runtime,
+        server,
+        RtdRefreshSinks::String {
+            sinks,
+            first_value,
+            second_value,
+        },
+    )
 }
 
 pub struct RtdRefreshScalingBenchmark {
@@ -313,10 +292,21 @@ impl RtdRefreshScalingBenchmark {
                 let (runtime, server, sinks) = build_refresh_topics::<f64>(&topic_ids);
                 (runtime, server, RtdRefreshSinks::Number(sinks))
             }
-            RtdRefreshValueKind::ShortString => {
-                let (runtime, server, sinks) = build_refresh_topics::<String>(&topic_ids);
-                (runtime, server, RtdRefreshSinks::ShortString(sinks))
-            }
+            RtdRefreshValueKind::ShortString => string_refresh_sinks(
+                &topic_ids,
+                "market-update-a".to_owned(),
+                "market-update-b".to_owned(),
+            ),
+            RtdRefreshValueKind::String1KiB => string_refresh_sinks(
+                &topic_ids,
+                benchmark_string_payload(1024, b'a'),
+                benchmark_string_payload(1024, b'b'),
+            ),
+            RtdRefreshValueKind::String8KiB => string_refresh_sinks(
+                &topic_ids,
+                benchmark_string_payload(8 * 1024, b'a'),
+                benchmark_string_payload(8 * 1024, b'b'),
+            ),
         };
         let updated_indices = (0..case.updated_topics).collect();
 
@@ -329,34 +319,11 @@ impl RtdRefreshScalingBenchmark {
         }
     }
 
-    #[inline]
-    pub fn publish_coalesced(&self) {
-        self.publish_updates();
-    }
-
-    pub fn measure_refresh_planning(&self, iterations: u64) -> Duration {
-        self.publish_updates();
-        let mut measured = Duration::ZERO;
-        for _ in 0..iterations {
-            let started = Instant::now();
-            let batch = self
-                .server
-                .server()
-                .expect("benchmark server remains registered")
-                .publish
-                .plan_refresh()
-                .expect("refresh planning must succeed");
-            measured += started.elapsed();
-            drop(batch);
-        }
-        measured
-    }
-
     pub fn measure_refresh_collection(&self, iterations: u64) -> Duration {
         self.publish_updates();
         let mut measured = Duration::ZERO;
         for _ in 0..iterations {
-            let planned = self
+            let mut planned = self
                 .server
                 .server()
                 .expect("benchmark server remains registered")
@@ -366,7 +333,10 @@ impl RtdRefreshScalingBenchmark {
             let started = Instant::now();
             let batches = planned.publish.collect_refresh_batches(&planned.plan);
             measured += started.elapsed();
-            drop(batches);
+            planned
+                .publish
+                .restore_refresh_batches(&planned.plan, batches);
+            planned.finished = true;
             drop(planned);
         }
         measured
@@ -376,7 +346,7 @@ impl RtdRefreshScalingBenchmark {
         self.publish_updates();
         let mut measured = Duration::ZERO;
         for _ in 0..iterations {
-            let planned = self
+            let mut planned = self
                 .server
                 .server()
                 .expect("benchmark server remains registered")
@@ -387,7 +357,10 @@ impl RtdRefreshScalingBenchmark {
             let started = Instant::now();
             let reduced = crate::subscription::reduce_refresh_batches(batches);
             measured += started.elapsed();
-            drop(reduced);
+            planned
+                .publish
+                .restore_refresh_updates(&planned.plan, reduced);
+            planned.finished = true;
             drop(planned);
         }
         measured
@@ -434,20 +407,32 @@ impl RtdRefreshScalingBenchmark {
                         .expect("number publish must succeed");
                 }
             }
-            RtdRefreshSinks::ShortString(sinks) => {
+            RtdRefreshSinks::String {
+                sinks,
+                first_value,
+                second_value,
+                ..
+            } => {
                 let value = if revision & 1 == 0 {
-                    "market-update-a"
+                    first_value
                 } else {
-                    "market-update-b"
+                    second_value
                 };
                 for &index in &self.updated_indices {
                     sinks[index]
-                        .publish(value.to_owned())
+                        .publish(value.as_str().to_owned())
                         .expect("string publish must succeed");
                 }
             }
         }
     }
+}
+
+fn benchmark_string_payload(payload_len: usize, suffix: u8) -> String {
+    debug_assert!(matches!(suffix, b'a' | b'b'));
+    let mut bytes = vec![b'x'; payload_len];
+    bytes[payload_len - 1] = suffix;
+    String::from_utf8(bytes).expect("benchmark payload is valid ASCII")
 }
 
 fn build_refresh_topics<T>(

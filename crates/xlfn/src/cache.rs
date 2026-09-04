@@ -112,11 +112,21 @@ impl<V> Drop for CacheLease<'_, V> {
     fn drop(&mut self) {
         // SAFETY: [TR-LEASE-1] self.node remains valid because a pin capability is held by this lease.
         let node = unsafe { self.node.as_ref() };
-        if node.pins.fetch_sub(1, Ordering::AcqRel) == 1 {
-            // SAFETY: [TR-RECLAIM-1] The last pin was dropped on a retired (non-resident) node; safe to reclaim.
-            unsafe {
-                drop(Box::from_raw(self.node.as_ptr()));
-            }
+        if node.pins.fetch_sub(1, Ordering::AcqRel) == 1
+            && node
+                .reclaimed
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            // SAFETY: [TR-RECLAIM-1] The last pin was dropped on a retired (non-resident) node.
+            let domain = unsafe { node.domain.as_ref() };
+            domain.enqueue_reclaim(self.node.as_ptr() as *mut ());
+            domain.quiesce_and_reclaim(|ptr| {
+                // SAFETY: [TR-RECLAIM-1] Quiesced domain guarantees no in-flight observers.
+                unsafe {
+                    drop(Box::from_raw(ptr as *mut CacheNode<V>));
+                }
+            });
         }
     }
 }
@@ -394,6 +404,7 @@ struct CacheNode<V> {
     value: Box<V>,
     pins: AtomicUsize,
     resident: AtomicBool,
+    reclaimed: AtomicBool,
     generation: u64,
     domain: NonNull<CacheLookupDomain>,
 }
@@ -403,10 +414,18 @@ unsafe impl<V: Send> Send for CacheNode<V> {}
 // SAFETY: Box<V> is Sync if V: Sync.
 unsafe impl<V: Sync> Sync for CacheNode<V> {}
 
+#[derive(Clone, Copy)]
+struct ReclaimEntry(*mut ());
+// SAFETY: ReclaimEntry holds a raw pointer to a retired CacheNode to be freed on a quiesced domain.
+unsafe impl Send for ReclaimEntry {}
+// SAFETY: ReclaimEntry is internal to CacheLookupDomain and only read on a quiesced domain.
+unsafe impl Sync for ReclaimEntry {}
+
 struct CacheLookupDomain {
     generations: [StripedDrainGate<DEFAULT_STRIPE_COUNT>; 2],
     current: AtomicUsize,
     reclaim_lock: Mutex<()>,
+    pending_reclaims: [Mutex<Vec<ReclaimEntry>>; 2],
     closed: AtomicBool,
 }
 
@@ -416,6 +435,7 @@ impl CacheLookupDomain {
             generations: [StripedDrainGate::new_open(), StripedDrainGate::new_open()],
             current: AtomicUsize::new(0),
             reclaim_lock: Mutex::new(()),
+            pending_reclaims: [Mutex::new(Vec::new()), Mutex::new(Vec::new())],
             closed: AtomicBool::new(false),
         }
     }
@@ -436,16 +456,60 @@ impl CacheLookupDomain {
         })
     }
 
-    fn quiesce(&self) {
+    fn enqueue_reclaim(&self, ptr: *mut ()) {
+        let gen_idx = self.current.load(Ordering::Acquire) & 1;
+        let mut queue = self.pending_reclaims[gen_idx].lock();
+        queue.push(ReclaimEntry(ptr));
+    }
+
+    fn quiesce_and_reclaim(&self, reclaim_fn: impl Fn(*mut ())) {
         let _reclaim = self.reclaim_lock.lock();
         let old_gen = self.current.fetch_xor(1, Ordering::SeqCst) & 1;
         self.generations[old_gen].wait_until_idle();
+        let items = {
+            let mut queue = self.pending_reclaims[old_gen].lock();
+            std::mem::take(&mut *queue)
+        };
+        for entry in items {
+            reclaim_fn(entry.0);
+        }
+    }
+
+    fn try_quiesce_and_reclaim(&self, reclaim_fn: impl Fn(*mut ())) {
+        let cur = self.current.load(Ordering::Acquire) & 1;
+        if self.pending_reclaims[cur].lock().is_empty() {
+            return;
+        }
+        let Some(_reclaim) = self.reclaim_lock.try_lock() else {
+            return;
+        };
+        let old_gen = self.current.fetch_xor(1, Ordering::SeqCst) & 1;
+        self.generations[old_gen].wait_until_idle();
+        let items = {
+            let mut queue = self.pending_reclaims[old_gen].lock();
+            std::mem::take(&mut *queue)
+        };
+        for entry in items {
+            reclaim_fn(entry.0);
+        }
     }
 
     fn seal(&self) {
         self.closed.store(true, Ordering::Release);
         self.generations[0].seal_and_wait();
         self.generations[1].seal_and_wait();
+    }
+
+    fn drain_all(&self, reclaim_fn: impl Fn(*mut ())) {
+        for gen_idx in 0..2 {
+            let items = {
+                let mut queue = self.pending_reclaims[gen_idx].lock();
+                std::mem::take(&mut *queue)
+            };
+            for entry in items {
+                reclaim_fn(entry.0);
+            }
+        }
     }
 }
 
@@ -501,14 +565,15 @@ where
                     // SAFETY: [TR-PUBLISH-1] node_ptr points to an allocated CacheNode<V> managed by the cache.
                     let node = unsafe { node_ptr.0.as_ref() };
                     node.resident.store(false, Ordering::Release);
-                    if node.pins.fetch_sub(1, Ordering::AcqRel) == 1 {
-                        // SAFETY: [TR-RECLAIM-1] node.domain points to the CalculationCache's domain which remains valid for quiescence.
+                    if node.pins.fetch_sub(1, Ordering::AcqRel) == 1
+                        && node
+                            .reclaimed
+                            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                            .is_ok()
+                    {
+                        // SAFETY: [TR-RECLAIM-1] Enqueue retired node with 0 pins for deferred quiescence and reclaim outside Moka maintenance locks.
                         let domain = unsafe { node.domain.as_ref() };
-                        domain.quiesce();
-                        // SAFETY: [TR-RECLAIM-1] The last pin was dropped on a retired node and admission domain is quiesced; safe to reclaim.
-                        unsafe {
-                            drop(Box::from_raw(node_ptr.0.as_ptr()));
-                        }
+                        domain.enqueue_reclaim(node_ptr.0.as_ptr() as *mut ());
                     }
                 })
                 .build(),
@@ -517,6 +582,12 @@ where
                 let cache = unsafe { &*(ptr as *const Self) };
                 cache.domain.seal();
                 cache.clear();
+                cache.domain.drain_all(|node_ptr| {
+                    // SAFETY: [TR-RECLAIM-1] Domain is sealed and all gates waited; safe to drop remaining nodes.
+                    unsafe {
+                        drop(Box::from_raw(node_ptr as *mut CacheNode<V>));
+                    }
+                });
             }),
         }
     }
@@ -529,12 +600,24 @@ where
     #[must_use]
     pub fn used_weight(&self) -> usize {
         self.cache.run_pending_tasks();
+        self.domain.try_quiesce_and_reclaim(|ptr| {
+            // SAFETY: [TR-RECLAIM-1] Quiesced domain guarantees no in-flight observers.
+            unsafe {
+                drop(Box::from_raw(ptr as *mut CacheNode<V>));
+            }
+        });
         usize::try_from(self.cache.weighted_size()).unwrap_or(usize::MAX)
     }
 
     #[must_use]
     pub fn len(&self) -> usize {
         self.cache.run_pending_tasks();
+        self.domain.try_quiesce_and_reclaim(|ptr| {
+            // SAFETY: [TR-RECLAIM-1] Quiesced domain guarantees no in-flight observers.
+            unsafe {
+                drop(Box::from_raw(ptr as *mut CacheNode<V>));
+            }
+        });
         usize::try_from(self.cache.entry_count()).unwrap_or(usize::MAX)
     }
 
@@ -550,6 +633,12 @@ where
             .invalidate_entries_if(move |key, _| key.epoch < epoch)
             .expect("invalidation closures are enabled");
         self.cache.run_pending_tasks();
+        self.domain.quiesce_and_reclaim(|ptr| {
+            // SAFETY: [TR-RECLAIM-1] Domain is quiesced outside Moka maintenance locks; safe to reclaim.
+            unsafe {
+                drop(Box::from_raw(ptr as *mut CacheNode<V>));
+            }
+        });
     }
 
     fn invalidate_before(&self, epoch: u64) {
@@ -558,6 +647,12 @@ where
             .invalidate_entries_if(move |key, _| key.epoch < epoch)
             .expect("invalidation closures are enabled");
         self.cache.run_pending_tasks();
+        self.domain.quiesce_and_reclaim(|ptr| {
+            // SAFETY: [TR-RECLAIM-1] Domain is quiesced outside Moka maintenance locks; safe to reclaim.
+            unsafe {
+                drop(Box::from_raw(ptr as *mut CacheNode<V>));
+            }
+        });
     }
 
     pub fn get<'a>(&'a self, key: &K) -> Option<CacheLease<'a, V>> {
@@ -574,20 +669,32 @@ where
         let (node_ptr, _) = self.cache.get(&vkey)?;
         // SAFETY: [TR-OBSERVE-POINTER] node_ptr is observed only while holding a valid lookup admission domain permit.
         let node = unsafe { node_ptr.0.as_ref() };
-        if node.generation != epoch {
+        if node.generation != epoch || !node.resident.load(Ordering::Acquire) {
             drop(permit);
             return None;
         }
         // TR-ACQUIRE-PIN: Increment pin capability while still within admission domain.
         node.pins.fetch_add(1, Ordering::AcqRel);
         if !node.resident.load(Ordering::Acquire) {
-            if node.pins.fetch_sub(1, Ordering::AcqRel) == 1 {
-                // SAFETY: [TR-RECLAIM-1] The node was retired (non-resident) and this was the last pin; safe to reclaim.
-                unsafe {
-                    drop(Box::from_raw(node_ptr.0.as_ptr()));
-                }
-            }
+            let was_last = node.pins.fetch_sub(1, Ordering::AcqRel) == 1;
+            let should_reclaim = was_last
+                && node
+                    .reclaimed
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok();
+            let domain_ptr = node.domain;
             drop(permit);
+            if should_reclaim {
+                // SAFETY: [TR-RECLAIM-1] The node was retired (non-resident) and this was the last pin.
+                let domain = unsafe { domain_ptr.as_ref() };
+                domain.enqueue_reclaim(node_ptr.0.as_ptr() as *mut ());
+                domain.quiesce_and_reclaim(|ptr| {
+                    // SAFETY: [TR-RECLAIM-1] Domain is quiesced; safe to reclaim.
+                    unsafe {
+                        drop(Box::from_raw(ptr as *mut CacheNode<V>));
+                    }
+                });
+            }
             return None;
         }
         // TR-LOOKUP-LEAVE: Release lookup admission permit now that node is pinned.
@@ -617,52 +724,75 @@ where
         key: K,
         weight: W,
         compute: F,
-        epoch: u64,
+        mut epoch: u64,
     ) -> XllResult<CacheLease<'a, V>>
     where
         F: FnOnce() -> XllResult<V>,
         W: FnOnce(&V) -> usize,
     {
-        if let Some(lease) = self.get_at_epoch(&key, epoch) {
-            return Ok(lease);
-        }
+        let mut compute_opt = Some(compute);
+        let mut weight_opt = Some(weight);
 
-        let _active = ActiveCacheGuard::enter()?;
-        let vkey = VersionedKey { epoch, key };
-        let domain_ptr = NonNull::from(&*self.domain);
-        let initialized = self
-            .cache
-            .try_get_with(vkey.clone(), || {
-                let value = compute()?;
-                let measured = weight(&value);
-                let w = u32::try_from(measured).unwrap_or(u32::MAX).max(1);
-                let boxed = Box::new(value);
-                let node = Box::new(CacheNode {
-                    value: boxed,
-                    pins: AtomicUsize::new(1),
-                    resident: AtomicBool::new(true),
-                    generation: epoch,
-                    domain: domain_ptr,
+        loop {
+            if let Some(lease) = self.get_at_epoch(&key, epoch) {
+                return Ok(lease);
+            }
+
+            let _active = ActiveCacheGuard::enter()?;
+            let vkey = VersionedKey {
+                epoch,
+                key: key.clone(),
+            };
+            let domain_ptr = NonNull::from(&*self.domain);
+            let mut created = false;
+
+            let initialized = self
+                .cache
+                .try_get_with(vkey.clone(), || {
+                    let compute_fn = compute_opt.take().expect("compute called once");
+                    let weight_fn = weight_opt.take().expect("weight called once");
+                    let value = compute_fn()?;
+                    let measured = weight_fn(&value);
+                    let w = u32::try_from(measured).unwrap_or(u32::MAX).max(1);
+                    let boxed = Box::new(value);
+                    let node = Box::new(CacheNode {
+                        value: boxed,
+                        pins: AtomicUsize::new(2), // 1 for Moka residency, 1 for creator lease
+                        resident: AtomicBool::new(true),
+                        reclaimed: AtomicBool::new(false),
+                        generation: epoch,
+                        domain: domain_ptr,
+                    });
+                    created = true;
+                    let ptr = NodePtr(NonNull::from(Box::leak(node)));
+                    Ok::<_, XllError>((ptr, w))
+                })
+                .map_err(|error| (*error).clone());
+
+            drop(_active);
+
+            let (node_ptr, _weight) = initialized?;
+
+            if created {
+                // SAFETY: [TR-ACQUIRE-PIN] node was allocated with pins = 2 (1 for Moka, 1 for this lease).
+                // Live pin guarantees node cannot be reclaimed by concurrent eviction or clear.
+                self.generation.discard_if_stale(epoch, || {
+                    self.cache.invalidate(&vkey);
                 });
-                let ptr = NodePtr(NonNull::from(Box::leak(node)));
-                Ok::<_, XllError>((ptr, w))
-            })
-            .map_err(|error| (*error).clone())?;
+                return Ok(CacheLease {
+                    node: node_ptr.0,
+                    _marker: PhantomData,
+                });
+            }
 
-        let node_ptr = initialized.0;
-        // SAFETY: [TR-ACQUIRE-PIN] node_ptr originates from the Box<CacheNode<V>> returned by try_get_with;
-        // pin capability is incremented for the returned lease.
-        let node = unsafe { node_ptr.0.as_ref() };
-        node.pins.fetch_add(1, Ordering::AcqRel);
+            // Another thread initialized the entry; acquire a pin safely through the admission domain.
+            if let Some(lease) = self.get_at_epoch(&key, epoch) {
+                return Ok(lease);
+            }
 
-        self.generation.discard_if_stale(epoch, || {
-            self.cache.invalidate(&vkey);
-        });
-
-        Ok(CacheLease {
-            node: node_ptr.0,
-            _marker: PhantomData,
-        })
+            // The entry was evicted or invalidated before we could acquire a pin; retry with fresh epoch.
+            epoch = self.generation.snapshot();
+        }
     }
 }
 
@@ -1539,19 +1669,33 @@ mod tests {
         std::thread::scope(|s| {
             for i in 0..20 {
                 let t1 = s.spawn(move || {
-                    for _ in 0..50 {
-                        if let Ok(lease) =
-                            cache_ref.get_or_try_insert_with(1, |_| 10, || Ok(format!("val_{i}")))
-                        {
+                    for j in 0..50 {
+                        if let Ok(lease) = cache_ref.get_or_try_insert_with(
+                            1,
+                            |_| 10,
+                            || Ok(format!("val_{i}_{j}")),
+                        ) {
                             assert!(!lease.is_empty());
                         }
                     }
                 });
                 let t2 = s.spawn(move || {
+                    for j in 0..50 {
+                        if let Ok(lease) = cache_ref.get_or_try_insert_with(
+                            1,
+                            |_| 10,
+                            || Ok(format!("val2_{i}_{j}")),
+                        ) {
+                            assert!(!lease.is_empty());
+                        }
+                    }
+                });
+                let t3 = s.spawn(move || {
                     cache_ref.clear();
                 });
                 t1.join().unwrap();
                 t2.join().unwrap();
+                t3.join().unwrap();
             }
         });
     }

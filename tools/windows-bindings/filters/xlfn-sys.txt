@@ -1,7 +1,6 @@
 --out crates/xlfn-sys/src/win32.rs
 --flat
 --sys
---no-deps
 --filter
-    Windows.Win32.System.LibraryLoader.GetModuleHandleW
-    Windows.Win32.System.LibraryLoader.GetProcAddress
+    Windows.Win32.GetModuleHandleW
+    Windows.Win32.GetProcAddress

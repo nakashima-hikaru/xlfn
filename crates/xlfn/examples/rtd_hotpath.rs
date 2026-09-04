@@ -29,12 +29,10 @@ fn main() {
         Some("string-sparse") => profile_string_sparse(multiplier),
         Some("string-same") => profile_string_repeated_same(multiplier),
         Some("string-changing") => profile_string_changing(multiplier),
-        Some("string-stored") => profile_string_stored(multiplier),
-        Some("string-conversion") => profile_string_conversion(multiplier),
         _ => panic!(
             "unknown RTD profiling scenario; expected one of: \
              number-dense, string-dense, number-sparse, string-sparse, string-same, \
-             string-changing, string-stored, string-conversion"
+             string-changing"
         ),
     }
 }
@@ -93,18 +91,6 @@ fn profile_string_repeated_same(multiplier: usize) {
 fn profile_string_changing(multiplier: usize) {
     let benchmark = RtdPublishStringBenchmark::new();
     benchmark.run_changing(scaled_iterations(PUBLISH_ITERATIONS, multiplier));
-}
-
-#[inline(never)]
-fn profile_string_stored(multiplier: usize) {
-    let benchmark = RtdPublishStringBenchmark::new();
-    benchmark.run_stored_publish(scaled_iterations(PUBLISH_ITERATIONS, multiplier));
-}
-
-#[inline(never)]
-fn profile_string_conversion(multiplier: usize) {
-    let benchmark = RtdPublishStringBenchmark::new();
-    benchmark.run_string_conversion(scaled_iterations(PUBLISH_ITERATIONS, multiplier));
 }
 
 fn refresh_case(name: &'static str) -> RtdRefreshScalingCase {

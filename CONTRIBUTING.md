@@ -93,12 +93,11 @@ Criterion benchmarks use the same recipes locally and in the benchmark
 workflow:
 
 ```console
-just bench             # Production regression suite (~36 cases tracked by Bencher)
-just bench-ci          # Canonical CI suite (aliased by `just bench` and `just bench-pr`)
-just bench-scaling     # Multi-threaded scaling and data size expansion curves
-just bench-diagnostics # Internal component breakdown and diagnostic controls
-just bench-full        # Complete unfiltered suite (~175 cases)
-just bench-check       # Clippy lint check across all benchmarks
+just bench         # Production regression suite (~36 cases tracked by Bencher)
+just bench-ci      # Canonical CI suite (aliased by `just bench` and `just bench-pr`)
+just bench-scaling # Multi-threaded scaling and data size expansion curves
+just bench-full    # Complete unfiltered suite (~175 cases)
+just bench-check   # Clippy lint check across all benchmarks
 ```
 
 Bencher is the long-term history store and the benchmark workflow maintains a

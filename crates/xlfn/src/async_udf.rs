@@ -44,8 +44,6 @@ use crate::runtime::Runtime;
 #[cfg(test)]
 use crate::{XllError, XllResult};
 #[cfg(test)]
-use arc_swap::{ArcSwapAny, ArcSwapOption};
-#[cfg(test)]
 use async_task::Runnable;
 #[cfg(test)]
 pub(crate) use boundary::AFTER_ASYNC_EVALUATION_HOOK;

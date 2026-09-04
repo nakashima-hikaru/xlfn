@@ -208,7 +208,7 @@ impl TokenCodec {
 }
 
 pub(crate) const HANDLE_TOKEN_LENGTH: usize = 82;
-const VERIFIED_TOKEN_CACHE_SIZE: usize = 8;
+const VERIFIED_TOKEN_CACHE_SIZE: usize = 16;
 
 struct VerifiedTokenCacheEntry {
     registry_address: usize,
@@ -232,10 +232,10 @@ fn verified_token_cache_index(bytes: &[u8]) -> Option<usize> {
     }
 
     // The final token byte is one hex nibble of the authenticated tag. It is
-    // used only to choose a direct-mapped cache bucket; the complete token,
+    // used directly to choose a direct-mapped cache bucket; the complete token,
     // registry identity, and secret are still checked before accepting a hit.
     let nibble = hex_nibble(bytes[HANDLE_TOKEN_LENGTH - 1])?;
-    Some(usize::from(nibble) & (VERIFIED_TOKEN_CACHE_SIZE - 1))
+    Some(usize::from(nibble))
 }
 
 pub(crate) fn verified_token_cache_lookup(
@@ -280,4 +280,33 @@ pub(crate) fn verified_token_cache_store(
             id,
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verified_token_cache_index_distinguishes_all_16_nibbles() {
+        let mut token = vec![b'a'; HANDLE_TOKEN_LENGTH];
+        let hex_chars = b"0123456789abcdef";
+        let mut seen = std::collections::HashSet::new();
+        for &ch in hex_chars {
+            token[HANDLE_TOKEN_LENGTH - 1] = ch;
+            let index = verified_token_cache_index(&token).expect("valid hex nibble index");
+            assert!(index < VERIFIED_TOKEN_CACHE_SIZE);
+            assert!(
+                seen.insert(index),
+                "no aliasing between distinct nibbles: {index}"
+            );
+        }
+        assert_eq!(seen.len(), 16);
+
+        // Specifically verify nibble '0' vs '8' (which previously aliased under & 7):
+        token[HANDLE_TOKEN_LENGTH - 1] = b'0';
+        let idx_0 = verified_token_cache_index(&token).unwrap();
+        token[HANDLE_TOKEN_LENGTH - 1] = b'8';
+        let idx_8 = verified_token_cache_index(&token).unwrap();
+        assert_ne!(idx_0, idx_8);
+    }
 }

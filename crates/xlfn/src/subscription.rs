@@ -83,7 +83,8 @@ pub(crate) use delivery::RtdUpdate;
 pub(crate) use delivery::{
     ActiveSubscription, DeliveryPhase, NotificationAttempt, NotificationCompletion,
     PreparedNotification, QueuedUpdate, RefreshState, SERVER_LIFECYCLE_CLOSING,
-    SERVER_LIFECYCLE_OPEN, SERVER_LIFECYCLE_TERMINATED, SignalState, TopicShard, shard_index,
+    SERVER_LIFECYCLE_OPEN, SERVER_LIFECYCLE_TERMINATED, SignalState, TopicShard, ValueSlot,
+    VersionedRtdValue, shard_index,
 };
 
 #[cfg(any(test, all(feature = "bench-internals", feature = "rtd")))]

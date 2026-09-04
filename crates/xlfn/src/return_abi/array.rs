@@ -107,9 +107,9 @@ impl XlArrayBuilder {
         self.push_oper(XLOPER12::error(value.code()))
     }
 
-    pub(crate) fn push_string(&mut self, text: String) -> XllResult<()> {
+    pub(crate) fn push_str(&mut self, text: &str) -> XllResult<()> {
         let utf16_length = crate::utf16::checked_utf16_len(
-            &text,
+            text,
             "<array output>",
             crate::utf16::EXCEL_STRING_LIMIT,
         )?;
@@ -142,7 +142,7 @@ impl XlArrayBuilder {
 
         let storage = self.storage.get_or_insert_with(ReturnStorage::new);
         let pointer = storage.alloc_counted_utf16_with_length(
-            &text,
+            text,
             "<array output>",
             crate::utf16::EXCEL_STRING_LIMIT,
             utf16_length,
@@ -154,6 +154,10 @@ impl XlArrayBuilder {
 
         self.payload_bytes = next_bytes;
         Ok(())
+    }
+
+    pub(crate) fn push_string(&mut self, text: String) -> XllResult<()> {
+        self.push_str(&text)
     }
 
     pub(crate) fn push_cell(&mut self, value: ExcelCellOutput) -> XllResult<()> {
@@ -208,6 +212,10 @@ impl crate::value::output::ExcelCellSink for XlArrayBuilder {
 
     fn push_bool(&mut self, value: bool) -> XllResult<()> {
         Self::push_bool(self, value)
+    }
+
+    fn push_str(&mut self, value: &str) -> XllResult<()> {
+        Self::push_str(self, value)
     }
 
     fn push_string(&mut self, value: String) -> XllResult<()> {

@@ -6,16 +6,18 @@ use id::DiagnosticId;
 
 use crate::error::IntoXllError;
 use crate::{XllError, XllResult};
-use arc_swap::ArcSwapOption;
 use parking_lot::Mutex;
 #[cfg(test)]
 use std::fs;
 #[cfg(test)]
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+#[cfg(any(test, feature = "refinement"))]
+use std::sync::Arc;
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock};
 use std::time::SystemTime;
+use xlfn_kernel::service_slot::ReplaceableServiceSlot;
 
 /// Public diagnostic events, sink configuration, and observable statistics.
 pub mod event;
@@ -87,7 +89,7 @@ impl IntoXllError for DiagnosticTerminalCloseError {
 }
 
 struct DiagnosticRouter {
-    sink: ArcSwapOption<AsyncDiagnosticSink>,
+    sink: ReplaceableServiceSlot<AsyncDiagnosticSink>,
     transition: Mutex<DiagnosticPhase>,
     retiring_workers: Mutex<Vec<std::thread::ThreadId>>,
     observer: Box<DiagnosticObserver>,
@@ -98,7 +100,7 @@ impl DiagnosticRouter {
         let current = std::thread::current().id();
         if self
             .sink
-            .load()
+            .read_if_ready()
             .as_ref()
             .is_some_and(|sink| sink.worker_thread_id == current)
         {
@@ -114,16 +116,16 @@ impl DiagnosticRouter {
         }
     }
 
-    fn unmark_retiring(&self, sink: &AsyncDiagnosticSink) {
+    fn unmark_retiring(&self, worker_thread_id: std::thread::ThreadId) {
         self.retiring_workers
             .lock()
-            .retain(|worker| *worker != sink.worker_thread_id);
+            .retain(|worker| *worker != worker_thread_id);
     }
 
     #[cfg(any(test, feature = "refinement"))]
     fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
         self.observer.set_trace_sink(Arc::clone(&trace));
-        if let Some(sink) = self.sink.load().as_ref() {
+        if let Some(sink) = self.sink.read_if_ready() {
             sink.set_trace_sink(trace);
         }
     }
@@ -139,7 +141,7 @@ impl DiagnosticRouter {
 
     fn replace_with<F, H>(&self, make_sink: F, on_published: H) -> Result<(), DiagnosticInitError>
     where
-        F: FnOnce() -> Result<Arc<AsyncDiagnosticSink>, DiagnosticInitError>,
+        F: FnOnce() -> Result<Box<AsyncDiagnosticSink>, DiagnosticInitError>,
         H: FnOnce(bool) -> Result<(), DiagnosticInitError>,
     {
         if self.caller_is_worker() {
@@ -154,86 +156,61 @@ impl DiagnosticRouter {
         if *phase != DiagnosticPhase::Open {
             return Err(DiagnosticInitError::RouterClosed);
         }
-        // Keep construction in the same linearization region as terminal
-        // close. A close that wins the transition lock therefore cannot race a
-        // worker that has been created but not yet published.
         let sink = make_sink()?;
         let previous = crate::ingress::with_diagnostic_linearization(|| {
-            let previous = self.sink.swap(Some(Arc::clone(&sink)));
-            if let Some(previous) = previous.as_ref() {
-                self.mark_retiring(previous);
-            }
-
-            if let Err(error) = on_published(previous.is_some()) {
-                let restored = self
-                    .sink
-                    .load()
-                    .as_ref()
-                    .is_some_and(|current| Arc::ptr_eq(current, &sink));
-                if restored {
-                    self.sink.store(previous.clone());
+            self.sink.replace_with(sink, |had_previous, old_service| {
+                if let Some(old) = old_service {
+                    self.mark_retiring(old);
                 }
-                if restored && let Some(previous) = previous.as_ref() {
-                    self.unmark_retiring(previous);
+                if let Err(error) = on_published(had_previous) {
+                    if let Some(old) = old_service {
+                        self.unmark_retiring(old.worker_thread_id);
+                    }
+                    return Err(error);
                 }
-                return Err(error);
-            }
-            Ok(previous)
-        });
-
-        let previous = match previous {
-            Ok(previous) => previous,
-            Err(error) => {
-                let _ = sink.shutdown();
-                return Err(error);
-            }
-        };
+                Ok(())
+            })
+        })?;
 
         let Some(previous) = previous else {
             return Ok(());
         };
-        match previous.shutdown() {
-            Ok(()) => {
-                self.unmark_retiring(&previous);
-                Ok(())
-            }
+
+        let old_sink = previous.into_inner();
+        let old_worker_id = old_sink.worker_thread_id;
+        let shutdown_result = old_sink.shutdown();
+        self.unmark_retiring(old_worker_id);
+
+        match shutdown_result {
+            Ok(()) => Ok(()),
             Err(DiagnosticShutdownError::ReentrantShutdown) => {
-                self.mark_retiring(&sink);
-                self.sink.store(Some(Arc::clone(&previous)));
-                self.unmark_retiring(&previous);
-                let _ = sink.shutdown();
-                self.unmark_retiring(&sink);
                 Err(DiagnosticInitError::ReentrantMutation)
             }
             Err(DiagnosticShutdownError::WorkerPanicked) => {
-                self.unmark_retiring(&previous);
                 self.observer
                     .record(crate::shutdown_trace::ShutdownEvent::RecordCleanupIssue);
-                sink.report(OwnedDiagnosticEvent {
-                    udf_id: "diagnostic sink replacement",
-                    argument: None,
-                    error: XllError::Panic,
-                    diagnostic_id: DiagnosticId::from_u64(NEXT_ID.fetch_add(1, Ordering::Relaxed)),
-                    timestamp: SystemTime::now(),
-                });
+                if let Some(sink) = self.sink.read_if_ready() {
+                    sink.report(OwnedDiagnosticEvent {
+                        udf_id: "diagnostic sink replacement",
+                        argument: None,
+                        error: XllError::Panic,
+                        diagnostic_id: DiagnosticId::from_u64(
+                            NEXT_ID.fetch_add(1, Ordering::Relaxed),
+                        ),
+                        timestamp: SystemTime::now(),
+                    });
+                }
                 Ok(())
             }
             Err(
                 DiagnosticShutdownError::RouterClosed | DiagnosticShutdownError::InvariantViolation,
-            ) => {
-                self.unmark_retiring(&previous);
-                Err(DiagnosticInitError::RouterClosed)
-            }
+            ) => Err(DiagnosticInitError::RouterClosed),
         }
-    }
-
-    fn current(&self) -> arc_swap::Guard<Option<Arc<AsyncDiagnosticSink>>> {
-        self.sink.load()
     }
 
     #[cfg(any(test, feature = "refinement"))]
     fn trace_snapshot(&self) -> DiagnosticSnapshot {
-        let sink = self.sink.load();
+        let sink = self.sink.read_if_ready();
         DiagnosticSnapshot {
             running: sink.is_some(),
             pending: sink.as_ref().map_or(0, |sink| sink.pending()),
@@ -266,40 +243,26 @@ impl DiagnosticRouter {
         }
         *phase = DiagnosticPhase::Closing;
 
-        let previous = crate::ingress::with_diagnostic_linearization(|| {
-            let previous = self.sink.swap(None);
-            if let Some(previous) = previous.as_ref() {
-                self.mark_retiring(previous);
-            }
-            previous
+        let retiring_worker = self.sink.read_if_ready().map(|sink| {
+            let id = sink.worker_thread_id;
+            self.mark_retiring(&sink);
+            id
         });
+
+        let previous = crate::ingress::with_diagnostic_linearization(|| self.sink.close());
 
         let result = match previous {
             None => Ok(()),
-            Some(previous) => match previous.shutdown() {
-                Ok(()) => {
-                    self.unmark_retiring(&previous);
-                    Ok(())
-                }
-                Err(DiagnosticShutdownError::ReentrantShutdown) => {
-                    crate::ingress::with_diagnostic_linearization(|| {
-                        self.sink.store(Some(Arc::clone(&previous)));
-                    });
-                    self.unmark_retiring(&previous);
-                    Err(DiagnosticShutdownError::ReentrantShutdown)
-                }
-                Err(error @ DiagnosticShutdownError::WorkerPanicked) => {
-                    self.unmark_retiring(&previous);
-                    Err(error)
-                }
-                Err(error) => {
-                    self.unmark_retiring(&previous);
-                    Err(error)
-                }
-            },
+            Some(previous) => {
+                let old_sink = previous.into_inner();
+                old_sink.shutdown()
+            }
         };
+        if let Some(id) = retiring_worker {
+            self.unmark_retiring(id);
+        }
         *phase = DiagnosticPhase::Open;
-        if result.is_ok() && self.sink.load().is_none() {
+        if result.is_ok() && !self.sink.is_active() {
             self.record_stop_diagnostics();
         } else if matches!(result, Err(DiagnosticShutdownError::WorkerPanicked)) {
             self.observer
@@ -325,7 +288,7 @@ impl DiagnosticRouter {
         }
         match *phase {
             DiagnosticPhase::Closed => {
-                if self.sink.load().is_some() || !self.retiring_workers.lock().is_empty() {
+                if self.sink.is_active() || !self.retiring_workers.lock().is_empty() {
                     return Err(DiagnosticTerminalCloseError::InvariantViolation);
                 }
                 return Ok(crate::shutdown::StopOutcome {
@@ -340,37 +303,37 @@ impl DiagnosticRouter {
         }
         *phase = DiagnosticPhase::Closing;
 
-        let previous = crate::ingress::with_diagnostic_linearization(|| {
-            let previous = self.sink.swap(None);
-            if let Some(previous) = previous.as_ref() {
-                self.mark_retiring(previous);
-            }
-            previous
+        let retiring_worker = self.sink.read_if_ready().map(|sink| {
+            let id = sink.worker_thread_id;
+            self.mark_retiring(&sink);
+            id
         });
+
+        let previous = crate::ingress::with_diagnostic_linearization(|| self.sink.close());
         let issues = Vec::new();
         if let Some(previous) = previous {
-            match previous.shutdown() {
+            let old_sink = previous.into_inner();
+            let res = old_sink.shutdown();
+            if let Some(id) = retiring_worker {
+                self.unmark_retiring(id);
+            }
+            match res {
                 Ok(()) => {}
                 Err(DiagnosticShutdownError::WorkerPanicked) => {
-                    self.unmark_retiring(&previous);
                     *phase = DiagnosticPhase::Closed;
                     return Err(DiagnosticTerminalCloseError::WorkerPanicked);
                 }
                 Err(DiagnosticShutdownError::ReentrantShutdown) => {
-                    crate::ingress::with_diagnostic_linearization(|| {
-                        self.sink.store(Some(Arc::clone(&previous)));
-                    });
-                    self.unmark_retiring(&previous);
                     return Err(DiagnosticTerminalCloseError::ReentrantShutdown);
                 }
                 Err(_) => {
-                    self.unmark_retiring(&previous);
                     return Err(DiagnosticTerminalCloseError::InvariantViolation);
                 }
             }
-            self.unmark_retiring(&previous);
+        } else if let Some(id) = retiring_worker {
+            self.unmark_retiring(id);
         }
-        if self.sink.load().is_some() || !self.retiring_workers.lock().is_empty() {
+        if self.sink.is_active() || !self.retiring_workers.lock().is_empty() {
             return Err(DiagnosticTerminalCloseError::InvariantViolation);
         }
         *phase = DiagnosticPhase::Closed;
@@ -383,20 +346,23 @@ impl DiagnosticRouter {
     fn reset(&self) -> XllResult<()> {
         let mut phase = self.transition.lock();
         if *phase != DiagnosticPhase::Closed
-            || self.sink.load().is_some()
+            || self.sink.is_active()
             || !self.retiring_workers.lock().is_empty()
         {
             return Err(XllError::Internal {
                 diagnostic_id: DiagnosticId::DIAGNOSTICS_RESET,
             });
         }
+        self.sink.reset().map_err(|_| XllError::Internal {
+            diagnostic_id: DiagnosticId::DIAGNOSTICS_RESET,
+        })?;
         *phase = DiagnosticPhase::Open;
         Ok(())
     }
 }
 
 static ROUTER: LazyLock<DiagnosticRouter> = LazyLock::new(|| DiagnosticRouter {
-    sink: ArcSwapOption::const_empty(),
+    sink: ReplaceableServiceSlot::new(),
     transition: Mutex::new(DiagnosticPhase::Closed),
     retiring_workers: Mutex::new(Vec::new()),
     observer: DiagnosticObserver::new(),
@@ -446,7 +412,7 @@ pub(crate) fn set_diagnostic_sink(sink: impl DiagnosticSink) -> Result<(), Diagn
     }
     router.replace_with(
         || {
-            let sink = Arc::new(AsyncDiagnosticSink::new(sink)?);
+            let sink = Box::new(AsyncDiagnosticSink::new(sink)?);
             if let Some(trace) = router.trace_handle() {
                 sink.set_trace_sink(trace);
             }
@@ -472,7 +438,7 @@ pub(crate) fn reset_diagnostic_router() -> XllResult<()> {
 }
 
 pub(crate) fn diagnostic_sink_running() -> bool {
-    router().sink.load().is_some()
+    router().sink.is_active()
 }
 
 #[cfg(any(test, feature = "refinement"))]
@@ -530,8 +496,8 @@ pub(crate) fn report_no_unwind(udf_id: &'static str, error: &XllError) -> Diagno
             error_debug = ?error,
             "XLL invocation failed"
         );
-        let current = router().current();
-        if let Some(sink) = current.as_ref() {
+        let read = router().sink.read_if_ready();
+        if let Some(sink) = read.as_deref() {
             sink.report(OwnedDiagnosticEvent {
                 udf_id,
                 argument,
@@ -715,18 +681,18 @@ mod tests {
         ingress.begin_close_with(|| {});
 
         let router = DiagnosticRouter {
-            sink: ArcSwapOption::const_empty(),
+            sink: ReplaceableServiceSlot::new(),
             transition: Mutex::new(DiagnosticPhase::Open),
             retiring_workers: Mutex::new(Vec::new()),
             observer: DiagnosticObserver::new(),
         };
         let result = router.replace_with(
-            || AsyncDiagnosticSink::new(CountingSink(Arc::new(AtomicUsize::new(0)))).map(Arc::new),
+            || AsyncDiagnosticSink::new(CountingSink(Arc::new(AtomicUsize::new(0)))).map(Box::new),
             |had_sink| admit_published_sink(&router, &ingress, had_sink),
         );
 
         assert!(matches!(result, Err(DiagnosticInitError::RouterClosed)));
-        assert!(router.current().is_none());
+        assert!(!router.sink.is_active());
     }
 
     #[test]
@@ -755,12 +721,12 @@ mod tests {
         let (sender, _receiver) = std::sync::mpsc::sync_channel(1);
         let worker = std::thread::spawn(|| panic!("injected diagnostic worker panic"));
         let worker_thread_id = worker.thread().id();
-        let sink = AsyncDiagnosticSink {
-            sender: Mutex::new(Some(sender)),
-            worker: Mutex::new(Some(worker)),
+        let sink = Box::new(AsyncDiagnosticSink {
+            sender: Some(sender),
+            worker: Some(worker),
             worker_thread_id,
             observer: DiagnosticObserver::new(),
-        };
+        });
         assert_eq!(
             sink.shutdown(),
             Err(DiagnosticShutdownError::WorkerPanicked)
@@ -780,19 +746,20 @@ mod tests {
         let first = Arc::new(AtomicUsize::new(0));
         let second = Arc::new(AtomicUsize::new(0));
         let router = DiagnosticRouter {
-            sink: ArcSwapOption::const_empty(),
+            sink: ReplaceableServiceSlot::new(),
             transition: Mutex::new(DiagnosticPhase::Open),
             retiring_workers: Mutex::new(Vec::new()),
             observer: DiagnosticObserver::new(),
         };
         router
             .replace_with(
-                || AsyncDiagnosticSink::new(CountingSink(Arc::clone(&first))).map(Arc::new),
+                || AsyncDiagnosticSink::new(CountingSink(Arc::clone(&first))).map(Box::new),
                 |_| Ok(()),
             )
             .unwrap();
         router
-            .current()
+            .sink
+            .read_if_ready()
             .as_ref()
             .unwrap()
             .report(OwnedDiagnosticEvent {
@@ -804,12 +771,13 @@ mod tests {
             });
         router
             .replace_with(
-                || AsyncDiagnosticSink::new(CountingSink(Arc::clone(&second))).map(Arc::new),
+                || AsyncDiagnosticSink::new(CountingSink(Arc::clone(&second))).map(Box::new),
                 |_| Ok(()),
             )
             .unwrap();
         router
-            .current()
+            .sink
+            .read_if_ready()
             .as_ref()
             .unwrap()
             .report(OwnedDiagnosticEvent {
@@ -842,7 +810,7 @@ mod tests {
     #[test]
     fn retiring_worker_reentry_is_rejected_before_waiting_for_transition() {
         let router = Arc::new(DiagnosticRouter {
-            sink: ArcSwapOption::const_empty(),
+            sink: ReplaceableServiceSlot::new(),
             transition: Mutex::new(DiagnosticPhase::Open),
             retiring_workers: Mutex::new(Vec::new()),
             observer: DiagnosticObserver::new(),
@@ -850,7 +818,7 @@ mod tests {
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
         let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
-        let old = Arc::new(
+        let old = Box::new(
             AsyncDiagnosticSink::new(RetiringReentrySink {
                 router: Arc::clone(&router),
                 started: started_tx,
@@ -861,7 +829,8 @@ mod tests {
         );
         router.replace_with(|| Ok(old), |_| Ok(())).unwrap();
         router
-            .current()
+            .sink
+            .read_if_ready()
             .as_ref()
             .unwrap()
             .report(OwnedDiagnosticEvent {
@@ -873,7 +842,7 @@ mod tests {
             });
         started_rx.recv().unwrap();
 
-        let replacement = Arc::new(
+        let replacement = Box::new(
             AsyncDiagnosticSink::new(CountingSink(Arc::new(AtomicUsize::new(0)))).unwrap(),
         );
         let replacing_router = Arc::clone(&router);
@@ -1007,7 +976,7 @@ mod tests {
     #[test]
     fn terminal_close_waiting_does_not_run_a_pending_install_factory() {
         let router = Arc::new(DiagnosticRouter {
-            sink: ArcSwapOption::const_empty(),
+            sink: ReplaceableServiceSlot::new(),
             transition: Mutex::new(DiagnosticPhase::Open),
             retiring_workers: Mutex::new(Vec::new()),
             observer: DiagnosticObserver::new(),
@@ -1022,13 +991,14 @@ mod tests {
                         started: started_tx,
                         release: Mutex::new(release_rx),
                     })
-                    .map(Arc::new)
+                    .map(Box::new)
                 },
                 |_| Ok(()),
             )
             .unwrap();
         router
-            .current()
+            .sink
+            .read_if_ready()
             .as_ref()
             .unwrap()
             .report(OwnedDiagnosticEvent {
@@ -1056,7 +1026,7 @@ mod tests {
                 || {
                     factory_calls_for_install.fetch_add(1, Ordering::AcqRel);
                     AsyncDiagnosticSink::new(CountingSink(Arc::new(AtomicUsize::new(0))))
-                        .map(Arc::new)
+                        .map(Box::new)
                 },
                 |_| Ok(()),
             )
@@ -1075,7 +1045,7 @@ mod tests {
             Err(DiagnosticInitError::RouterClosed)
         ));
         assert_eq!(factory_calls.load(Ordering::Acquire), 0);
-        assert!(router.current().is_none());
+        assert!(!router.sink.is_active());
         assert_eq!(router.phase(), DiagnosticPhase::Closed);
         assert!(router.retiring_workers.lock().is_empty());
         let _certificate = outcome.certificate;
@@ -1084,7 +1054,7 @@ mod tests {
     #[test]
     fn install_that_linearizes_first_is_joined_by_terminal_close() {
         let router = Arc::new(DiagnosticRouter {
-            sink: ArcSwapOption::const_empty(),
+            sink: ReplaceableServiceSlot::new(),
             transition: Mutex::new(DiagnosticPhase::Open),
             retiring_workers: Mutex::new(Vec::new()),
             observer: DiagnosticObserver::new(),
@@ -1098,7 +1068,7 @@ mod tests {
                     factory_entered_tx.send(()).unwrap();
                     release_factory_rx.recv().unwrap();
                     AsyncDiagnosticSink::new(CountingSink(Arc::new(AtomicUsize::new(0))))
-                        .map(Arc::new)
+                        .map(Box::new)
                 },
                 |_| Ok(()),
             )
@@ -1115,7 +1085,7 @@ mod tests {
         installing.join().unwrap().unwrap();
         let outcome = closing.join().unwrap().unwrap();
         assert!(outcome.issues.is_empty());
-        assert!(router.current().is_none());
+        assert!(!router.sink.is_active());
         assert_eq!(router.phase(), DiagnosticPhase::Closed);
         assert!(router.retiring_workers.lock().is_empty());
         let _certificate = outcome.certificate;
@@ -1124,7 +1094,7 @@ mod tests {
     #[test]
     fn reset_requires_a_terminally_closed_router_before_reinstall() {
         let router = DiagnosticRouter {
-            sink: ArcSwapOption::const_empty(),
+            sink: ReplaceableServiceSlot::new(),
             transition: Mutex::new(DiagnosticPhase::Open),
             retiring_workers: Mutex::new(Vec::new()),
             observer: DiagnosticObserver::new(),
@@ -1135,7 +1105,7 @@ mod tests {
         let result = router.replace_with(
             || {
                 factory_calls.fetch_add(1, Ordering::AcqRel);
-                AsyncDiagnosticSink::new(CountingSink(Arc::new(AtomicUsize::new(0)))).map(Arc::new)
+                AsyncDiagnosticSink::new(CountingSink(Arc::new(AtomicUsize::new(0)))).map(Box::new)
             },
             |_| Ok(()),
         );
@@ -1147,7 +1117,7 @@ mod tests {
             .replace_with(
                 || {
                     AsyncDiagnosticSink::new(CountingSink(Arc::new(AtomicUsize::new(0))))
-                        .map(Arc::new)
+                        .map(Box::new)
                 },
                 |_| Ok(()),
             )
@@ -1161,16 +1131,24 @@ mod tests {
         let worker_thread_id = worker.thread().id();
         let (sender, _receiver) = std::sync::mpsc::sync_channel(1);
         let router = DiagnosticRouter {
-            sink: ArcSwapOption::new(Some(Arc::new(AsyncDiagnosticSink {
-                sender: Mutex::new(Some(sender)),
-                worker: Mutex::new(Some(worker)),
-                worker_thread_id,
-                observer: DiagnosticObserver::new(),
-            }))),
+            sink: ReplaceableServiceSlot::new(),
             transition: Mutex::new(DiagnosticPhase::Open),
             retiring_workers: Mutex::new(Vec::new()),
             observer: DiagnosticObserver::new(),
         };
+        router
+            .replace_with(
+                || {
+                    Ok(Box::new(AsyncDiagnosticSink {
+                        sender: Some(sender),
+                        worker: Some(worker),
+                        worker_thread_id,
+                        observer: DiagnosticObserver::new(),
+                    }))
+                },
+                |_| Ok(()),
+            )
+            .unwrap();
 
         let error = match router.close_terminal() {
             Ok(_) => panic!("worker panic must fail terminal close"),
@@ -1180,7 +1158,7 @@ mod tests {
             error,
             DiagnosticTerminalCloseError::WorkerPanicked
         ));
-        assert!(router.current().is_none());
+        assert!(!router.sink.is_active());
         assert_eq!(router.phase(), DiagnosticPhase::Closed);
         assert!(router.retiring_workers.lock().is_empty());
     }
@@ -1189,12 +1167,14 @@ mod tests {
     fn full_diagnostic_queue_drops_instead_of_blocking_the_caller() {
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
-        let sink = AsyncDiagnosticSink::new(BlockingSink {
-            first: AtomicBool::new(true),
-            started: started_tx,
-            release: Mutex::new(release_rx),
-        })
-        .unwrap();
+        let sink = Box::new(
+            AsyncDiagnosticSink::new(BlockingSink {
+                first: AtomicBool::new(true),
+                started: started_tx,
+                release: Mutex::new(release_rx),
+            })
+            .unwrap(),
+        );
         let before = dropped_diagnostic_events();
 
         sink.report(OwnedDiagnosticEvent {

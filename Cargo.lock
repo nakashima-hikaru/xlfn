@@ -288,9 +288,12 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "constant_time_eq"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a1ec0cfec728a79a5109075543131387f911cb4d07716436d7ae20533657a96"
+checksum = "6187e670c346a04bcbf5def0393d57ec0e5ab56565cde6be4a7cbdb6cdc2f3f6"
+dependencies = [
+ "rustversion",
+]
 
 [[package]]
 name = "corosensei"
@@ -542,7 +545,7 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link",
+ "windows-link 0.2.1",
  "windows-result",
 ]
 
@@ -627,9 +630,9 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hotpath"
-version = "0.24.0"
+version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2645642a23d4061ec15a4a6e74f851a3145c3125356846cfc7772ff9c6f2737"
+checksum = "2ec7782e005cabd5eaf350febde384cd799faa3a0e624587aa8759c240e0b592"
 dependencies = [
  "arc-swap",
  "cfg-if",
@@ -637,7 +640,6 @@ dependencies = [
  "futures-util",
  "hdrhistogram",
  "hotpath-macros",
- "hotpath-meta",
  "libc",
  "pin-project-lite",
  "prettytable-rs",
@@ -651,28 +653,13 @@ dependencies = [
 
 [[package]]
 name = "hotpath-macros"
-version = "0.24.0"
+version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89a3d3cdf9b0d4d3d4f6d4a29798f3b9170401ba500eaa58dd8f890f926af0f1"
+checksum = "929b2285d2cd21b2733a7fb6ebc843bb4f83dbd1db0122f5f9ebb9567b1e2613"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "hotpath-macros-meta"
-version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e84cd2417fa60938241cf1cd6c03e09953f5c821122dc5da9b8f27975d136c5b"
-
-[[package]]
-name = "hotpath-meta"
-version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d2c145b67b1a4e7bcefa918995e212c30a49a85f05cc5962fe1f717878d560b"
-dependencies = [
- "hotpath-macros-meta",
 ]
 
 [[package]]
@@ -908,7 +895,7 @@ dependencies = [
  "libc",
  "redox_syscall",
  "smallvec",
- "windows-link",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -1399,9 +1386,9 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "smallvec"
-version = "1.15.2"
+version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+checksum = "b9be42f50aa861c555654aa3a37f52f4b1074bacf4e48fe0ef7fa584e80f1f0f"
 
 [[package]]
 name = "static_assertions"
@@ -1867,14 +1854,21 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "windows-bindgen"
-version = "0.66.0"
+version = "0.100.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81b7ec123a4eadd44d1f44f76804316b477b2537abed9a2ab950b3c54afa1fcf"
+checksum = "c6bb7c22ca81c6dc1554fd328c12697b4b0ad5c45081df2c3c9a3f89cc467da2"
 dependencies = [
- "serde",
- "serde_json",
- "windows-threading",
+ "proc-macro2",
+ "quote",
+ "windows-default",
+ "windows-metadata",
 ]
+
+[[package]]
+name = "windows-default"
+version = "0.100.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4882bb065b03115aa8891d44d076bbe843d286d8bfd0b55caaa4b049141a712"
 
 [[package]]
 name = "windows-link"
@@ -1883,12 +1877,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
 
 [[package]]
+name = "windows-link"
+version = "0.100.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b39de7c7fe78858b0144c50c3fc000bab3be17d5e9b85b1053871693c7f7415"
+
+[[package]]
+name = "windows-metadata"
+version = "0.100.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d3a758dc1da4ae61aa7f93afbb505d564c72dd6431e513ed581377857896a72"
+
+[[package]]
 name = "windows-result"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7781fa89eaf60850ac3d2da7af8e5242a5ea78d1a11c49bf2910bb5a73853eb5"
 dependencies = [
- "windows-link",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -1906,7 +1912,7 @@ version = "0.61.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
- "windows-link",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -1923,15 +1929,6 @@ dependencies = [
  "windows_x86_64_gnu",
  "windows_x86_64_gnullvm",
  "windows_x86_64_msvc",
-]
-
-[[package]]
-name = "windows-threading"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3949bd5b99cafdf1c7ca86b43ca564028dfe27d66958f2470940f73d86d75b37"
-dependencies = [
- "windows-link",
 ]
 
 [[package]]
@@ -2010,11 +2007,10 @@ dependencies = [
 name = "xlfn"
 version = "0.2.0"
 dependencies = [
- "arc-swap",
  "async-task",
  "blake3",
  "bumpalo",
- "constant_time_eq 0.5.0",
+ "constant_time_eq 0.6.0",
  "criterion",
  "crossbeam-deque",
  "crossbeam-utils",
@@ -2037,7 +2033,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tracing",
  "trybuild",
- "windows-link",
+ "windows-link 0.100.0",
  "xlfn-common",
  "xlfn-kernel",
  "xlfn-macros",
@@ -2082,7 +2078,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 2.0.20",
- "windows-link",
+ "windows-link 0.100.0",
  "xlfn-common",
 ]
 
@@ -2092,7 +2088,7 @@ version = "0.2.0"
 dependencies = [
  "smallvec",
  "static_assertions",
- "windows-link",
+ "windows-link 0.100.0",
 ]
 
 [[package]]

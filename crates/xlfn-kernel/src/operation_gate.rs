@@ -70,8 +70,8 @@ impl OperationGate {
 
     /// Releases a count acquired with [`OperationGate::acquire`].
     ///
-    /// This is used when the acquired operation owns an `Arc` rather than a
-    /// borrow of the gate and therefore cannot store [`OperationGuard`].
+    /// This is used when an acquired operation cannot store an [`OperationGuard`]
+    /// bound to the gate lifetime and manages the drain permit release manually.
     #[inline]
     pub fn release(&self) {
         self.drain.release();

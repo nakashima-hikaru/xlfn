@@ -1,4 +1,4 @@
-use crate::host_callback::{HostCallbackShared, HostCallbackState, observe_shared};
+use crate::host_callback::HostCallbackSession;
 use crate::return_abi::{CallbackCleanupDebt, ExcelCallbackStatus};
 use crate::value::{XlValueRef, XlValueType};
 use crate::{XllError, XllResult};
@@ -58,20 +58,20 @@ fn state_after_call(
 ///
 /// A live Excel-owned value gets at most one `xlFree` attempt. Terminal callback
 /// statuses suppress read access but still allow `xlFree` cleanup once per value
-/// during the active invocation lifetime. Once cleanup is indeterminate or the
-/// scope is closed, Excel is no longer called.
-pub(crate) struct ExcelCallbackValue {
+/// during the active invocation lifetime. Once cleanup is indeterminate,
+/// Excel is no longer called.
+pub(crate) struct ExcelCallbackValue<'session> {
     raw: XLOPER12,
     release_required: bool,
     audit_failures: bool,
     release_callback: ReleaseCallback,
     state: CallbackValueReleaseState,
-    session: Option<Rc<HostCallbackShared>>,
-    module_admission: bool,
+    session: Option<&'session HostCallbackSession>,
+    module_permit: Option<crate::callback_gate::ModuleCallbackPermit>,
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
-impl ExcelCallbackValue {
+impl ExcelCallbackValue<'static> {
     #[cfg(test)]
     pub(crate) const fn from_raw_for_test(raw: XLOPER12) -> Self {
         Self {
@@ -81,7 +81,7 @@ impl ExcelCallbackValue {
             release_callback: excel_free,
             state: CallbackValueReleaseState::Live,
             session: None,
-            module_admission: false,
+            module_permit: None,
             _not_send_or_sync: PhantomData,
         }
     }
@@ -92,15 +92,26 @@ impl ExcelCallbackValue {
         status: ExcelCallbackStatus,
         release_callback: ReleaseCallback,
     ) -> Self {
-        Self::from_callback_for_test_with_session(raw, status, release_callback, None)
+        Self {
+            raw,
+            release_required: true,
+            audit_failures: false,
+            release_callback,
+            state: state_after_call(true, status),
+            session: None,
+            module_permit: None,
+            _not_send_or_sync: PhantomData,
+        }
     }
+}
 
+impl<'session> ExcelCallbackValue<'session> {
     #[cfg(test)]
     fn from_callback_for_test_with_session(
         raw: XLOPER12,
         status: ExcelCallbackStatus,
         release_callback: ReleaseCallback,
-        session: Option<Rc<HostCallbackShared>>,
+        session: &'session HostCallbackSession,
     ) -> Self {
         Self {
             raw,
@@ -108,8 +119,28 @@ impl ExcelCallbackValue {
             audit_failures: false,
             release_callback,
             state: state_after_call(true, status),
-            session,
-            module_admission: false,
+            session: Some(session),
+            module_permit: None,
+            _not_send_or_sync: PhantomData,
+        }
+    }
+
+    #[cfg(test)]
+    fn from_callback_for_test_with_permit(
+        raw: XLOPER12,
+        status: ExcelCallbackStatus,
+        release_callback: ReleaseCallback,
+        session: &'session HostCallbackSession,
+        module_permit: Option<crate::callback_gate::ModuleCallbackPermit>,
+    ) -> Self {
+        Self {
+            raw,
+            release_required: true,
+            audit_failures: false,
+            release_callback,
+            state: state_after_call(true, status),
+            session: Some(session),
+            module_permit,
             _not_send_or_sync: PhantomData,
         }
     }
@@ -117,15 +148,19 @@ impl ExcelCallbackValue {
     pub(crate) unsafe fn call_with_session(
         function: i32,
         arguments: &[NonNull<XLOPER12>],
-        session: Rc<HostCallbackShared>,
+        session: &'session HostCallbackSession,
     ) -> Result<(i32, Self), crate::callback_gate::CallbackAdmissionSuppressed> {
         let callback_admission = crate::callback_gate::enter_callback()?;
         // SAFETY: The caller supplies live callback arguments.
         let (status, raw, callback_invoked) =
             unsafe { excel12_with_invocation(function, arguments) };
         let callback_status = ExcelCallbackStatus::from_raw(status);
-        drop(callback_admission);
-        observe_shared(&session.state, callback_status);
+        let module_permit = if callback_invoked {
+            Some(callback_admission)
+        } else {
+            drop(callback_admission);
+            None
+        };
         let state = state_after_call(callback_invoked, callback_status);
         Ok((
             status,
@@ -136,7 +171,7 @@ impl ExcelCallbackValue {
                 release_callback: excel_free,
                 state,
                 session: Some(session),
-                module_admission: true,
+                module_permit,
                 _not_send_or_sync: PhantomData,
             },
         ))
@@ -206,20 +241,9 @@ impl ExcelCallbackValue {
         }
 
         if !self.release_required {
+            drop(self.module_permit.take());
             self.state = CallbackValueReleaseState::Released;
             return Ok(());
-        }
-
-        if let Some(session) = &self.session {
-            match session.state() {
-                HostCallbackState::Available | HostCallbackState::Suppressed(_) => {}
-                HostCallbackState::Closed => {
-                    self.state = CallbackValueReleaseState::TerminalSuppressed {
-                        status: ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
-                    };
-                    return Ok(());
-                }
-            }
         }
 
         // Transition before invoking the host so unwinding can never leave the
@@ -228,29 +252,15 @@ impl ExcelCallbackValue {
             status: ExcelCallbackStatus::Failed(xlfn_sys::XLRET_FAILED),
         };
 
-        let raw_status = if self.module_admission {
-            let callback_admission = match crate::callback_gate::enter_cleanup() {
-                Ok(callback_admission) => callback_admission,
-                Err(suppressed) => {
-                    self.state = CallbackValueReleaseState::TerminalSuppressed {
-                        status: suppressed.status,
-                    };
-                    return Ok(());
-                }
-            };
-            // SAFETY: `Live` / `TerminalSuppressed` plus `release_required` means this exact XLOPER12
-            // was supplied as result storage to one completed callback.
-            let raw_status = unsafe { (self.release_callback)(&mut self.raw) };
-            drop(callback_admission);
-            raw_status
-        } else {
-            // SAFETY: test-created values use a non-host release callback and
-            // preserve the same one-release ownership invariant.
-            unsafe { (self.release_callback)(&mut self.raw) }
-        };
+        let permit = self.module_permit.take();
+        // SAFETY: `Live` / `TerminalSuppressed` plus `release_required` means this exact XLOPER12
+        // was supplied as result storage to one completed callback.
+        let raw_status = unsafe { (self.release_callback)(&mut self.raw) };
+        drop(permit);
+
         let status = ExcelCallbackStatus::from_raw(raw_status);
-        if let Some(session) = &self.session {
-            observe_shared(&session.state, status);
+        if let Some(session) = self.session {
+            session.observe(status);
         }
 
         if status == ExcelCallbackStatus::Success {
@@ -269,7 +279,7 @@ impl ExcelCallbackValue {
     }
 }
 
-impl Drop for ExcelCallbackValue {
+impl<'session> Drop for ExcelCallbackValue<'session> {
     fn drop(&mut self) {
         if let Err(error) = self.try_release() {
             crate::diagnostics::report_no_unwind("Excel callback result cleanup", &error);
@@ -281,9 +291,12 @@ impl Drop for ExcelCallbackValue {
 mod tests {
     use super::*;
     use crate::host_callback::HostCallbackSession;
+    use static_assertions::assert_not_impl_any;
     use std::cell::Cell;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use xlfn_sys::{XLRET_ABORT, XLRET_FAILED, XLRET_SUCCESS, XLRET_UNCALCED};
+
+    assert_not_impl_any!(ExcelCallbackValue<'static>: Send, Sync);
 
     static FREE_CALLS: AtomicUsize = AtomicUsize::new(0);
     static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -368,7 +381,7 @@ mod tests {
             XLOPER12::number(42.0),
             ExcelCallbackStatus::Success,
             aborting_free,
-            Some(session.shared_handle()),
+            &session,
         );
         assert!(register_result.try_release().is_err());
 
@@ -394,7 +407,7 @@ mod tests {
             XLOPER12::boolean(true),
             ExcelCallbackStatus::Success,
             uncalced_free,
-            Some(session.shared_handle()),
+            &session,
         );
         assert!(unregister_result.try_release().is_err());
 
@@ -420,35 +433,11 @@ mod tests {
             XLOPER12::integer(1),
             ExcelCallbackStatus::Success,
             successful_free,
-            Some(session.shared_handle()),
+            &session,
         );
         session.suppress_for_test(ExcelCallbackStatus::Abort);
         drop(caller);
         assert_eq!(FREE_CALLS.load(Ordering::Relaxed), 1);
-    }
-
-    #[test]
-    fn closed_scope_suppresses_cleanup_of_escaped_callback_values() {
-        let _test_guard = TEST_LOCK.lock().unwrap();
-        FREE_CALLS.store(0, Ordering::Relaxed);
-        let session = HostCallbackSession::new();
-        let mut value = ExcelCallbackValue::from_callback_for_test_with_session(
-            XLOPER12::integer(1),
-            ExcelCallbackStatus::Success,
-            successful_free,
-            Some(session.shared_handle()),
-        );
-        session.close();
-
-        value.try_release().unwrap();
-        assert!(matches!(
-            value.release_state(),
-            CallbackValueReleaseState::TerminalSuppressed {
-                status: ExcelCallbackStatus::Failed(XLRET_FAILED)
-            }
-        ));
-        drop(value);
-        assert_eq!(FREE_CALLS.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -460,19 +449,19 @@ mod tests {
             XLOPER12::integer(1),
             ExcelCallbackStatus::Success,
             aborting_free,
-            Some(session.shared_handle()),
+            &session,
         );
         let second = ExcelCallbackValue::from_callback_for_test_with_session(
             XLOPER12::integer(2),
             ExcelCallbackStatus::Success,
             successful_free,
-            Some(session.shared_handle()),
+            &session,
         );
         let third = ExcelCallbackValue::from_callback_for_test_with_session(
             XLOPER12::integer(3),
             ExcelCallbackStatus::Success,
             successful_free,
-            Some(session.shared_handle()),
+            &session,
         );
 
         assert!(first.try_release().is_err());
@@ -481,5 +470,30 @@ mod tests {
         drop(second);
         drop(third);
         assert_eq!(FREE_CALLS.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn callback_value_holding_module_permit_keeps_gate_closing_until_released() {
+        let _test_guard = TEST_LOCK.lock().unwrap();
+        crate::module_runtime::reset_callbacks_for_test();
+        let permit = crate::callback_gate::enter_callback().expect("open gate admits");
+        let session = HostCallbackSession::new();
+        let mut value = ExcelCallbackValue::from_callback_for_test_with_permit(
+            XLOPER12::integer(42),
+            ExcelCallbackStatus::Success,
+            successful_free,
+            &session,
+            Some(permit),
+        );
+
+        crate::module_runtime::close_callbacks_for_test();
+        // New callbacks are rejected while the gate is closing.
+        assert!(crate::callback_gate::enter_callback().is_err());
+
+        // Releasing the value releases the permit.
+        assert!(value.try_release().is_ok());
+
+        // Gate has fully closed once the permit is dropped.
+        assert!(crate::callback_gate::enter_callback().is_err());
     }
 }

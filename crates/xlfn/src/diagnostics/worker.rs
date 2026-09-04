@@ -7,7 +7,6 @@
 
 use super::{DiagnosticEvent, DiagnosticInitError, DiagnosticShutdownError, DiagnosticSink};
 use crate::diagnostics::event::DROPPED_EVENTS;
-use parking_lot::Mutex;
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::NonNull;
@@ -39,8 +38,8 @@ impl OwnedDiagnosticEvent {
 }
 
 pub(crate) struct AsyncDiagnosticSink {
-    pub(crate) sender: Mutex<Option<SyncSender<OwnedDiagnosticEvent>>>,
-    pub(crate) worker: Mutex<Option<JoinHandle<()>>>,
+    pub(crate) sender: Option<SyncSender<OwnedDiagnosticEvent>>,
+    pub(crate) worker: Option<JoinHandle<()>>,
     pub(crate) worker_thread_id: std::thread::ThreadId,
     pub(crate) observer: Box<DiagnosticObserver>,
 }
@@ -141,8 +140,8 @@ impl AsyncDiagnosticSink {
             .map_err(DiagnosticInitError::WorkerSpawn)?;
         let worker_thread_id = worker.thread().id();
         Ok(Self {
-            sender: Mutex::new(Some(sender)),
-            worker: Mutex::new(Some(worker)),
+            sender: Some(sender),
+            worker: Some(worker),
             worker_thread_id,
             observer,
         })
@@ -163,16 +162,14 @@ impl AsyncDiagnosticSink {
 
     pub(crate) fn report(&self, event: OwnedDiagnosticEvent) {
         let result = crate::ingress::with_diagnostic_linearization(|| {
-            let sender = self.sender.lock();
             self.observer.increment_pending();
-            let result = match sender.as_ref() {
+            let result = match self.sender.as_ref() {
                 Some(sender) => sender.try_send(event),
                 None => Err(TrySendError::Disconnected(event)),
             };
             if result.is_err() {
                 self.observer.decrement_pending();
             }
-            drop(sender);
             if result.is_ok() {
                 self.observer
                     .record(crate::shutdown_trace::ShutdownEvent::EnqueueDiagnostic);
@@ -184,14 +181,18 @@ impl AsyncDiagnosticSink {
         }
     }
 
-    pub(crate) fn shutdown(&self) -> Result<(), DiagnosticShutdownError> {
+    #[allow(
+        clippy::boxed_local,
+        reason = "Explicit Box<Self> represents unique retired ownership transferred from service slot"
+    )]
+    pub(crate) fn shutdown(mut self: Box<Self>) -> Result<(), DiagnosticShutdownError> {
         if self.is_current_thread_worker() {
             return Err(DiagnosticShutdownError::ReentrantShutdown);
         }
         crate::ingress::with_diagnostic_linearization(|| {
-            self.sender.lock().take();
+            self.sender.take();
         });
-        let worker = self.worker.lock().take();
+        let worker = self.worker.take();
         if let Some(worker) = worker {
             let result = worker.join();
             if result.is_err() {
@@ -216,8 +217,8 @@ impl Drop for AsyncDiagnosticSink {
         if self.is_current_thread_worker() {
             xlfn_kernel::invariant::fail_stop();
         }
-        self.sender.get_mut().take();
-        if let Some(worker) = self.worker.get_mut().take()
+        self.sender.take();
+        if let Some(worker) = self.worker.take()
             && worker.join().is_err()
         {
             let _ = catch_unwind(AssertUnwindSafe(|| {

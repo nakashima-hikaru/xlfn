@@ -48,6 +48,7 @@ mod formula_caller;
 mod handle;
 mod ingress;
 mod lookup;
+mod output;
 #[cfg(feature = "rtd")]
 mod rtd;
 mod sync_boundary;
@@ -66,6 +67,7 @@ pub use lookup::{
     ArcHandleLookupBenchmark, HandleDistinctKeyBenchmark, HandleLookupBenchCase,
     HandleLookupBenchmark,
 };
+pub use output::BorrowedStringArrayOutputBenchmark;
 #[cfg(feature = "rtd")]
 pub use rtd::{
     RTD_REFRESH_SCALING_CASES, RtdPublishNumberBenchmark, RtdPublishStringBenchmark,

@@ -66,7 +66,7 @@ impl<'call> ExcelHost<'call> {
         &self,
         function_id: i32,
         arguments: &[NonNull<XLOPER12>],
-        decode: impl FnOnce(&mut ExcelCallbackValue) -> XllResult<T>,
+        decode: impl FnOnce(&mut ExcelCallbackValue<'_>) -> XllResult<T>,
     ) -> HostInvocation<T> {
         // SAFETY: callers provide argument pointers that remain live and
         // stationary for the duration of this callback.
@@ -103,7 +103,7 @@ impl<'call> ExcelHost<'call> {
         function_id: i32,
         function: ExcelApiFunction,
         arguments: &[NonNull<XLOPER12>],
-        decode: impl FnOnce(&mut ExcelCallbackValue) -> XllResult<T>,
+        decode: impl FnOnce(&mut ExcelCallbackValue<'_>) -> XllResult<T>,
     ) -> XllResult<T> {
         match self.invoke_protocol(function_id, arguments, decode) {
             HostInvocation::Suppressed { status } => Err(XllError::ExcelApi {

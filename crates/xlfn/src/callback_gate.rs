@@ -3,8 +3,10 @@ use parking_lot::Mutex;
 use xlfn_sys::XLRET_FAILED;
 
 /// The module-wide callback lifecycle is independent from the state of any
-/// one Excel invocation. `Closing` rejects new callbacks but still permits
-/// cleanup for callbacks that were admitted before the close began.
+/// one Excel invocation. `Closing` rejects new callbacks while outstanding
+/// results hold their `ModuleCallbackPermit` until cleanup completes. Once all
+/// admitted callbacks and their results are released, the gate transitions to
+/// `Closed`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ModuleCallbackLifecycle {
     Open,
@@ -75,17 +77,9 @@ impl ModuleCallbackAdmission {
         }
     }
 
-    fn enter(
-        &'static self,
-        cleanup: bool,
-    ) -> Result<ModuleCallbackPermit, CallbackAdmissionSuppressed> {
+    fn enter(&'static self) -> Result<ModuleCallbackPermit, CallbackAdmissionSuppressed> {
         let mut state = self.state.lock();
-        let allowed = match state.lifecycle {
-            ModuleCallbackLifecycle::Open => true,
-            ModuleCallbackLifecycle::Closing => cleanup,
-            ModuleCallbackLifecycle::Closed => false,
-        };
-        if !allowed {
+        if state.lifecycle != ModuleCallbackLifecycle::Open {
             return Err(CallbackAdmissionSuppressed {
                 status: ExcelCallbackStatus::Failed(XLRET_FAILED),
             });
@@ -96,6 +90,11 @@ impl ModuleCallbackAdmission {
             std::process::abort();
         });
         Ok(ModuleCallbackPermit { admission: self })
+    }
+
+    #[cfg(test)]
+    fn lifecycle(&self) -> ModuleCallbackLifecycle {
+        self.state.lock().lifecycle
     }
 
     #[cfg(test)]
@@ -115,9 +114,10 @@ impl ModuleCallbackAdmission {
     }
 }
 
-/// One short-lived module admission. The token is dropped immediately after
-/// the raw Excel call returns, so no synchronization primitive is held across
-/// the host call.
+/// Module admission capability. For short-lived operations (like async return),
+/// the token is dropped after the host call returns. For callback results,
+/// ownership of the permit is transferred into `ExcelCallbackValue` to hold
+/// the module open until cleanup completes.
 pub(crate) struct ModuleCallbackPermit {
     admission: &'static ModuleCallbackAdmission,
 }
@@ -136,15 +136,7 @@ impl Drop for ModuleCallbackPermit {
 }
 
 pub(crate) fn enter_callback() -> Result<ModuleCallbackPermit, CallbackAdmissionSuppressed> {
-    crate::module_runtime::global()
-        .callback_admission()
-        .enter(false)
-}
-
-pub(crate) fn enter_cleanup() -> Result<ModuleCallbackPermit, CallbackAdmissionSuppressed> {
-    crate::module_runtime::global()
-        .callback_admission()
-        .enter(true)
+    crate::module_runtime::global().callback_admission().enter()
 }
 
 #[cfg(test)]
@@ -171,8 +163,8 @@ mod tests {
         let gate: &'static ModuleCallbackAdmission = Box::leak(Box::new(
             ModuleCallbackAdmission::new(ModuleCallbackLifecycle::Open),
         ));
-        let first = gate.enter(false).unwrap();
-        let second = gate.enter(false).unwrap();
+        let first = gate.enter().unwrap();
+        let second = gate.enter().unwrap();
         assert_eq!(gate.active(), 2);
         drop(first);
         drop(second);
@@ -190,13 +182,11 @@ mod tests {
         let gate: &'static ModuleCallbackAdmission = Box::leak(Box::new(
             ModuleCallbackAdmission::new(ModuleCallbackLifecycle::Open),
         ));
-        let first = gate.enter(false).unwrap();
+        let first = gate.enter().unwrap();
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
-            let second = gate
-                .enter(false)
-                .expect("callbacks are admitted concurrently");
+            let second = gate.enter().expect("callbacks are admitted concurrently");
             entered_tx.send(()).unwrap();
             release_rx.recv().unwrap();
             drop(second);
@@ -211,17 +201,18 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_is_allowed_until_the_last_admitted_callback_finishes() {
+    fn closing_waits_for_admitted_callback_permits_before_closed() {
         let gate = Box::leak(Box::new(ModuleCallbackAdmission::new(
             ModuleCallbackLifecycle::Open,
         )));
-        let callback = gate.enter(false).unwrap();
+        let callback = gate.enter().unwrap();
         gate.close();
-        assert!(gate.enter(false).is_err());
-        let cleanup = gate.enter(true).unwrap();
-        drop(cleanup);
-        assert!(gate.blocked_status().is_some());
+        assert!(gate.enter().is_err());
+        assert_eq!(gate.lifecycle(), ModuleCallbackLifecycle::Closing);
+        assert_eq!(gate.active(), 1);
         drop(callback);
+        assert_eq!(gate.lifecycle(), ModuleCallbackLifecycle::Closed);
+        assert_eq!(gate.active(), 0);
         assert_eq!(
             gate.blocked_status(),
             Some(ExcelCallbackStatus::Failed(XLRET_FAILED))

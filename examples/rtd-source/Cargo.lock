@@ -3,15 +3,6 @@
 version = 4
 
 [[package]]
-name = "arc-swap"
-version = "1.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
-dependencies = [
- "rustversion",
-]
-
-[[package]]
 name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -66,9 +57,12 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "constant_time_eq"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a1ec0cfec728a79a5109075543131387f911cb4d07716436d7ae20533657a96"
+checksum = "6187e670c346a04bcbf5def0393d57ec0e5ab56565cde6be4a7cbdb6cdc2f3f6"
+dependencies = [
+ "rustversion",
+]
 
 [[package]]
 name = "cpufeatures"
@@ -186,7 +180,7 @@ dependencies = [
  "libc",
  "redox_syscall",
  "smallvec",
- "windows-link",
+ "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -416,6 +410,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
 
 [[package]]
+name = "windows-link"
+version = "0.100.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b39de7c7fe78858b0144c50c3fc000bab3be17d5e9b85b1053871693c7f7415"
+
+[[package]]
 name = "winnow"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -428,10 +428,9 @@ dependencies = [
 name = "xlfn"
 version = "0.2.0"
 dependencies = [
- "arc-swap",
  "blake3",
  "bumpalo",
- "constant_time_eq 0.5.0",
+ "constant_time_eq 0.6.0",
  "crossbeam-utils",
  "getrandom",
  "inventory",
@@ -443,7 +442,7 @@ dependencies = [
  "smallvec",
  "thiserror",
  "tracing",
- "windows-link",
+ "windows-link 0.100.0",
  "xlfn-common",
  "xlfn-kernel",
  "xlfn-macros",
@@ -479,7 +478,7 @@ version = "0.2.0"
 dependencies = [
  "smallvec",
  "static_assertions",
- "windows-link",
+ "windows-link 0.100.0",
 ]
 
 [[package]]

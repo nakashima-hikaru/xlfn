@@ -13,6 +13,7 @@ pub trait ExcelCellSink {
     fn push_cell(&mut self, value: ExcelCellOutput) -> XllResult<()>;
     fn push_f64(&mut self, value: f64) -> XllResult<()>;
     fn push_bool(&mut self, value: bool) -> XllResult<()>;
+    fn push_str(&mut self, value: &str) -> XllResult<()>;
     fn push_string(&mut self, value: String) -> XllResult<()>;
     fn push_error(&mut self, value: crate::ExcelError) -> XllResult<()>;
 }
