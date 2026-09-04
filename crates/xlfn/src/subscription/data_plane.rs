@@ -656,7 +656,6 @@ impl<H: SubscriptionHost> PublishCore<H> {
         }))
     }
 
-    #[cfg_attr(feature = "hotpath", hotpath::measure(impl_type = "PublishCore"))]
     pub(crate) fn publish(
         &self,
         topic_id: TopicId,
@@ -820,7 +819,6 @@ impl<H: SubscriptionHost> PublishCore<H> {
         }
     }
 
-    #[cfg_attr(feature = "hotpath", hotpath::measure(impl_type = "PublishCore"))]
     pub(crate) fn complete_refresh_inner(
         &self,
         refresh_id: u64,
@@ -1092,7 +1090,6 @@ fn push_deliverable(
 }
 
 impl<H: SubscriptionHost> PublishCore<H> {
-    #[cfg_attr(feature = "hotpath", hotpath::measure(impl_type = "PublishCore"))]
     pub(crate) fn collect_shard(&self, shard_index: usize) -> Option<ShardRefreshBatch> {
         let mut shard = self.shards[shard_index].lock();
         if shard.deliverable_count == 0 {
@@ -1310,7 +1307,6 @@ impl<H: SubscriptionHost> Drop for RtdRefreshBatch<'_, H> {
     }
 }
 
-#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(crate) fn reduce_refresh_batches(batches: Vec<ShardRefreshBatch>) -> Vec<RtdUpdate> {
     let update_count = batches.iter().map(|batch| batch.updates.len()).sum();
     let mut updates = Vec::with_capacity(update_count);

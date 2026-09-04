@@ -199,7 +199,6 @@ impl<T> RtdSink<T>
 where
     T: IntoRtdValue,
 {
-    #[cfg_attr(feature = "hotpath", hotpath::measure(impl_type = "RtdSink"))]
     pub fn publish(&self, value: T) -> XllResult<()> {
         let value = value.into_rtd_value()?.into_stored()?;
         self.sink.publish_stored(value)

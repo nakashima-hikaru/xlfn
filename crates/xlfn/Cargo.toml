@@ -25,8 +25,6 @@ unstable-cache = ["dep:moka"]
 unstable-output = []
 refinement = []
 bench-internals = ["handles", "xlfn-sys/abi-probe"]
-hotpath = ["dep:hotpath", "hotpath/hotpath"]
-hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 
 [[bench]]
 name = "async_spawn"
@@ -93,10 +91,6 @@ name = "handle_call_resolution"
 harness = false
 required-features = ["bench-internals"]
 
-[[example]]
-name = "rtd_hotpath"
-required-features = ["bench-internals", "rtd", "hotpath"]
-
 [dependencies]
 xlfn-macros.workspace = true
 xlfn-sys.workspace = true
@@ -109,7 +103,6 @@ crossbeam-deque = { workspace = true, optional = true }
 crossbeam-utils.workspace = true
 futures-util = { workspace = true, optional = true }
 getrandom.workspace = true
-hotpath = { workspace = true, optional = true }
 moka = { workspace = true, optional = true }
 parking_lot.workspace = true
 scopeguard.workspace = true
