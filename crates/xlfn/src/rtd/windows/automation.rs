@@ -1,4 +1,7 @@
-use super::com_abi::IUnknown_Vtbl;
+use super::com_abi::{
+    IUnknown_Vtbl, VT_ARRAY, VT_BOOL, VT_BSTR, VT_BYREF, VT_DISPATCH, VT_EMPTY, VT_ERROR, VT_I4,
+    VT_R8, VT_UNKNOWN, VT_VARIANT,
+};
 use super::update_event::{OwnedRtdUpdateEvent, RtdUpdateEvent};
 use super::{
     IID_IRTD_UPDATE_EVENT, RtdServer, com_boundary, connect_data, disconnect_data, guid_eq,
@@ -12,14 +15,17 @@ use crate::win32::{
     E_FAIL, E_INVALIDARG, E_OUTOFMEMORY, E_POINTER, EXCEPINFO, GUID, S_OK, SAFEARRAY,
     SAFEARRAYBOUND, SafeArrayCreate, SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement,
     SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayGetVartype, SafeArrayPutElement,
-    SysAllocStringLen, SysFreeString, SysStringLen, VARIANT, VARIANT_BOOL, VT_ARRAY, VT_BOOL,
-    VT_BSTR, VT_BYREF, VT_DISPATCH, VT_EMPTY, VT_ERROR, VT_I4, VT_R8, VT_UNKNOWN, VT_VARIANT,
-    VariantClear,
+    SysAllocStringLen, SysFreeString, SysStringLen, VARIANT, VARIANT_BOOL, VariantClear,
 };
 use crate::{XllError, XllResult};
 use std::ptr::{self, NonNull};
 
-pub(super) const IID_NULL: super::GUID = super::GUID::from_u128(0);
+pub(super) const IID_NULL: super::GUID = super::GUID {
+    data1: 0,
+    data2: 0,
+    data3: 0,
+    data4: [0; 8],
+};
 
 pub(super) const DISPID_SERVER_START: i32 = 10;
 pub(super) const DISPID_CONNECT_DATA: i32 = 11;

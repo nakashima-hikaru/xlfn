@@ -16,13 +16,15 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use super::com_abi::{
+    VT_ARRAY, VT_BOOL, VT_BSTR, VT_BYREF, VT_EMPTY, VT_ERROR, VT_I4, VT_R8, VT_VARIANT,
+};
 use crate::win32::{
     CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, COINIT_MULTITHREADED, CoInitializeEx,
     CoUninitialize, DISP_E_BADPARAMCOUNT, DISP_E_MEMBERNOTFOUND, DISP_E_TYPEMISMATCH,
     DISP_E_UNKNOWNNAME, DISPATCH_METHOD, DISPID_UNKNOWN, RPC_E_CHANGED_MODE, S_FALSE, S_OK,
     SAFEARRAYBOUND, SafeArrayCreate, SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement,
     SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayPutElement, SysAllocStringLen, SysStringLen,
-    VT_ARRAY, VT_BOOL, VT_BSTR, VT_BYREF, VT_EMPTY, VT_ERROR, VT_I4, VT_R8, VT_VARIANT,
 };
 use static_assertions::assert_not_impl_any;
 
@@ -2516,7 +2518,10 @@ fn wrong_clsid_is_not_served() {
     let _guard = TEST_LOCK.lock().unwrap();
     let handles = FormulaHandleService::new(4);
     let _active = ensure_server(Some(&handles), None).unwrap();
-    let wrong = GUID::from_u128(1);
+    let wrong = GUID {
+        data1: 1,
+        ..GUID::default()
+    };
     let class_factory_iid = iid_iclass_factory_from_fields();
     let mut output = ptr::null_mut();
 
@@ -2650,9 +2655,9 @@ fn temporary_registration_mutex_serializes_other_threads() {
 fn scavenger_deletes_only_fully_marked_registration_for_same_module() {
     let _guard = TEST_LOCK.lock().unwrap();
     let _maintenance = REGISTRATION_MAINTENANCE.lock();
-    let mut owned_id = GUID::from_u128(0);
-    let mut foreign_id = GUID::from_u128(0);
-    let mut legacy_id = GUID::from_u128(0);
+    let mut owned_id = GUID::default();
+    let mut foreign_id = GUID::default();
+    let mut legacy_id = GUID::default();
 
     // SAFETY: each argument points to distinct writable GUID storage.
     unsafe {

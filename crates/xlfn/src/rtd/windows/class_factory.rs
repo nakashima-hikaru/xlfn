@@ -14,8 +14,12 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-pub(crate) const IID_ICLASS_FACTORY: GUID =
-    GUID::from_u128(0x0000_0001_0000_0000_c000_0000_0000_0046);
+pub(crate) const IID_ICLASS_FACTORY: GUID = GUID {
+    data1: 0x0000_0001,
+    data2: 0x0000,
+    data3: 0x0000,
+    data4: [0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
+};
 
 pub(super) static CLASS_FACTORY_VTABLE: ClassFactoryVtable = ClassFactoryVtable {
     query_interface: factory_query_interface,

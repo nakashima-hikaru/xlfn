@@ -36,11 +36,20 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::thread::ThreadId;
 
-pub(super) const IID_IDISPATCH: GUID = GUID::from_u128(0x0002_0400_0000_0000_c000_0000_0000_0046);
-pub(super) const IID_IRTD_SERVER: GUID = GUID::from_u128(0xec0e6191_db51_11d3_8f3e_00c04f3651b8);
+pub(super) const IID_IDISPATCH: GUID = crate::win32::IID_IDispatch;
+pub(super) const IID_IRTD_SERVER: GUID = GUID {
+    data1: 0xec0e6191,
+    data2: 0xdb51,
+    data3: 0x11d3,
+    data4: [0x8f, 0x3e, 0x00, 0xc0, 0x4f, 0x36, 0x51, 0xb8],
+};
 
-pub(super) const IID_IRTD_UPDATE_EVENT: GUID =
-    GUID::from_u128(0xa43788c1_d91b_11d3_8f39_00c04f3651b8);
+pub(super) const IID_IRTD_UPDATE_EVENT: GUID = GUID {
+    data1: 0xa43788c1,
+    data2: 0xd91b,
+    data3: 0x11d3,
+    data4: [0x8f, 0x39, 0x00, 0xc0, 0x4f, 0x36, 0x51, 0xb8],
+};
 pub(super) const SERVER_NOT_STARTED: u8 = 0;
 pub(super) const SERVER_STARTING: u8 = 1;
 pub(super) const SERVER_STARTED: u8 = 2;
@@ -696,7 +705,7 @@ fn ensure_server_impl(
         });
     }
 
-    let mut class_id = GUID::from_u128(0);
+    let mut class_id = GUID::default();
 
     // SAFETY: `class_id` points to writable GUID storage.
     let status = unsafe { CoCreateGuid(&mut class_id) };

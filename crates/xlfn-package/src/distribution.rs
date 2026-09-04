@@ -95,7 +95,7 @@ impl DistributionCommitGuard {
             use std::os::windows::fs::OpenOptionsExt;
 
             options
-                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT as u32)
                 .share_mode(0);
         }
 
@@ -221,7 +221,11 @@ pub fn atomic_replace_file(from: &Path, to: &Path) -> io::Result<()> {
     {
         use crate::win32::{MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
 
-        move_file_ex_with_retry(from, to, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)
+        move_file_ex_with_retry(
+            from,
+            to,
+            (MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) as u32,
+        )
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -252,8 +256,8 @@ pub fn sync_directory(path: &Path) -> io::Result<()> {
         let mut options = std::fs::OpenOptions::new();
         options
             .read(true)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+            .custom_flags((FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT) as u32)
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE) as u32);
         let directory = options.open(path)?;
         if !directory.metadata()?.is_dir() {
             return Err(io::Error::new(
@@ -325,11 +329,7 @@ fn retry_windows_path_operation(mut operation: impl FnMut() -> io::Result<()>) -
 }
 
 #[cfg(target_os = "windows")]
-fn move_file_ex_with_retry(
-    from: &Path,
-    to: &Path,
-    flags: crate::win32::MOVE_FILE_FLAGS,
-) -> io::Result<()> {
+fn move_file_ex_with_retry(from: &Path, to: &Path, flags: u32) -> io::Result<()> {
     use crate::win32::MoveFileExW;
     use std::os::windows::ffi::OsStrExt;
 

@@ -34,7 +34,7 @@ impl ModuleResidencyLease {
             // an address rather than dereferencing it as a UTF-16 string.
             let acquired = unsafe {
                 crate::win32::GetModuleHandleExW(
-                    crate::win32::GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                    crate::win32::GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS as u32,
                     anchor.cast(),
                     &mut module,
                 )

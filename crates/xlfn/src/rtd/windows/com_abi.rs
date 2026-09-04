@@ -5,7 +5,24 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use super::module_lifetime;
 
-pub(crate) const IID_IUNKNOWN: GUID = GUID::from_u128(0x0000_0000_0000_0000_c000_0000_0000_0046);
+// COM VARIANT vt (VARTYPE = u16) constants.
+//
+// In Windows metadata, `VARENUM` is typed as an i32 enum while `VARIANT::vt` and
+// `SafeArrayCreate` expect `VARTYPE` (u16). We provide typed u16 constants here
+// for ergonomic and type-safe COM VARIANT manipulation without pervasive casts.
+pub(crate) const VT_EMPTY: u16 = crate::win32::VT_EMPTY as u16;
+pub(crate) const VT_I4: u16 = crate::win32::VT_I4 as u16;
+pub(crate) const VT_R8: u16 = crate::win32::VT_R8 as u16;
+pub(crate) const VT_BSTR: u16 = crate::win32::VT_BSTR as u16;
+pub(crate) const VT_BOOL: u16 = crate::win32::VT_BOOL as u16;
+pub(crate) const VT_ERROR: u16 = crate::win32::VT_ERROR as u16;
+pub(crate) const VT_DISPATCH: u16 = crate::win32::VT_DISPATCH as u16;
+pub(crate) const VT_UNKNOWN: u16 = crate::win32::VT_UNKNOWN as u16;
+pub(crate) const VT_VARIANT: u16 = crate::win32::VT_VARIANT as u16;
+pub(crate) const VT_ARRAY: u16 = crate::win32::VT_ARRAY as u16;
+pub(crate) const VT_BYREF: u16 = crate::win32::VT_BYREF as u16;
+
+pub(crate) const IID_IUNKNOWN: GUID = crate::win32::IID_IUnknown;
 
 pub(crate) fn com_boundary(operation: &'static str, callback: impl FnOnce() -> i32) -> i32 {
     let (_module_call, accepted) = module_lifetime().enter_call();

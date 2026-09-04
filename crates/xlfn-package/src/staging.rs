@@ -134,7 +134,7 @@ pub(crate) fn open_bundle_source_for_snapshot(path: &Path) -> io::Result<std::fs
 
         // Other readers remain allowed, but writers and delete/rename operations
         // are rejected while this handle is alive.
-        options.share_mode(FILE_SHARE_READ);
+        options.share_mode(FILE_SHARE_READ as u32);
     }
 
     options.open(path)
@@ -165,8 +165,8 @@ pub(crate) fn open_commit_source_file(path: &Path) -> io::Result<std::fs::File> 
         // Windows still requires these descendant handles to be closed before
         // their non-empty parent directory can be renamed.
         options
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE);
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT as u32)
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_DELETE) as u32);
     }
 
     options.open(path)
@@ -214,12 +214,12 @@ pub(crate) fn open_staged_path_no_follow_with_kind(
             FILE_SHARE_READ
         };
         options
-            .custom_flags(flags)
+            .custom_flags(flags as u32)
             // Keep writers and deletion from racing the read. These handles
             // are closed before the directory rename. The long-lived
             // PrivateStagingDirectory capability deliberately permits the
             // owning process to rename the directory after verification.
-            .share_mode(share_mode);
+            .share_mode(share_mode as u32);
     }
 
     options.open(path)
@@ -307,7 +307,7 @@ pub(crate) fn current_windows_user_sid_string() -> PackageResult<String> {
     let process = unsafe { GetCurrentProcess() };
     // SAFETY: `process` is the current-process pseudo-handle and `token` points
     // to writable storage for the returned token handle.
-    let opened = unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) };
+    let opened = unsafe { OpenProcessToken(process, TOKEN_QUERY as u32, &mut token) };
     if opened == 0 {
         return Err(io::Error::last_os_error().into());
     }
@@ -441,7 +441,7 @@ pub(crate) fn create_private_windows_directory(path: &Path) -> PackageResult {
     let converted = unsafe {
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
             descriptor_string.as_ptr(),
-            SDDL_REVISION_1,
+            SDDL_REVISION_1 as u32,
             &mut descriptor,
             std::ptr::null_mut(),
         )
@@ -515,7 +515,7 @@ pub(crate) fn validate_private_windows_directory(path: &Path) -> PackageResult {
             GetNamedSecurityInfoW(
                 path_wide.as_ptr(),
                 SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION,
+                (DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION) as u32,
                 &mut owner,
                 std::ptr::null_mut(),
                 &mut dacl,
@@ -523,7 +523,7 @@ pub(crate) fn validate_private_windows_directory(path: &Path) -> PackageResult {
                 &mut security_descriptor as *mut *mut std::ffi::c_void,
             )
         };
-        if status != ERROR_SUCCESS {
+        if status != ERROR_SUCCESS as u32 {
             return Err(io::Error::from_raw_os_error(status as i32).into());
         }
 
@@ -531,7 +531,7 @@ pub(crate) fn validate_private_windows_directory(path: &Path) -> PackageResult {
         let process = unsafe { GetCurrentProcess() };
         // SAFETY: `process` is the current-process pseudo-handle and `token`
         // points to writable storage for the returned handle.
-        let opened = unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) };
+        let opened = unsafe { OpenProcessToken(process, TOKEN_QUERY as u32, &mut token) };
         if opened == 0 {
             return Err(io::Error::last_os_error().into());
         }
@@ -608,7 +608,7 @@ pub(crate) fn validate_private_windows_directory(path: &Path) -> PackageResult {
         let descriptor_ok = unsafe {
             GetSecurityDescriptorControl(security_descriptor, &mut control, &mut revision)
         };
-        if descriptor_ok == 0 || control & SE_DACL_PROTECTED == 0 {
+        if descriptor_ok == 0 || control & (SE_DACL_PROTECTED as u16) == 0 {
             return Err("private staging directory DACL is inherited or unavailable".into());
         }
         let mut dacl_present = 0;

@@ -2,9 +2,18 @@ use crate::win32::{CLSCTX_INPROC_SERVER, CoCreateInstance, E_POINTER, GUID, S_OK
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 
-const CLSID_STD_GLOBAL_INTERFACE_TABLE: GUID =
-    GUID::from_u128(0x00000323_0000_0000_c000_000000000046);
-const IID_IGLOBAL_INTERFACE_TABLE: GUID = GUID::from_u128(0x00000146_0000_0000_c000_000000000046);
+const CLSID_STD_GLOBAL_INTERFACE_TABLE: GUID = GUID {
+    data1: 0x00000323,
+    data2: 0x0000,
+    data3: 0x0000,
+    data4: [0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
+};
+const IID_IGLOBAL_INTERFACE_TABLE: GUID = GUID {
+    data1: 0x00000146,
+    data2: 0x0000,
+    data3: 0x0000,
+    data4: [0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
+};
 
 #[repr(C)]
 struct IGlobalInterfaceTable {
