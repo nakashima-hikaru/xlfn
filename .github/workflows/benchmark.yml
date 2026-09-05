@@ -41,7 +41,7 @@ jobs:
         uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d # just
 
       - name: Install Bencher CLI
-        uses: bencherdev/bencher@4c83b25441d145ee273adaf74be30f2382e6ba85 # v0.6.11
+        uses: bencherdev/bencher@8d75325c3bc59403a2186a056b472c4f49d42838 # v0.6.12
 
       - name: Check Bencher configuration
         id: bencher-config
@@ -130,7 +130,7 @@ jobs:
       contents: read
     steps:
       - name: Install Bencher CLI
-        uses: bencherdev/bencher@4c83b25441d145ee273adaf74be30f2382e6ba85 # v0.6.11
+        uses: bencherdev/bencher@8d75325c3bc59403a2186a056b472c4f49d42838 # v0.6.12
 
       - name: Archive PR benchmark branch
         shell: bash
