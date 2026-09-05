@@ -1,11 +1,11 @@
 use crate::error::InputError;
 use crate::{XllError, XllResult};
-use moka::sync::Cache;
+use moka::{Equivalent, sync::Cache};
 use parking_lot::{Mutex, RwLock};
 use std::any::{Any, TypeId};
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::hash::Hash;
+use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -385,6 +385,24 @@ struct VersionedKey<K> {
     key: K,
 }
 
+struct VersionedKeyRef<'a, K> {
+    epoch: u64,
+    key: &'a K,
+}
+
+impl<K: Hash> Hash for VersionedKeyRef<'_, K> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.epoch.hash(state);
+        self.key.hash(state);
+    }
+}
+
+impl<K: Eq> Equivalent<VersionedKey<K>> for VersionedKeyRef<'_, K> {
+    fn equivalent(&self, owned: &VersionedKey<K>) -> bool {
+        self.epoch == owned.epoch && self.key == &owned.key
+    }
+}
+
 struct NodePtr<V>(NonNull<CacheNode<V>>);
 
 impl<V> Clone for NodePtr<V> {
@@ -662,11 +680,8 @@ where
 
     fn get_at_epoch<'a>(&'a self, key: &K, epoch: u64) -> Option<CacheLease<'a, V>> {
         let permit = self.domain.enter().ok()?;
-        let vkey = VersionedKey {
-            epoch,
-            key: key.clone(),
-        };
-        let (node_ptr, _) = self.cache.get(&vkey)?;
+        let lookup = VersionedKeyRef { epoch, key };
+        let (node_ptr, _) = self.cache.get(&lookup)?;
         // SAFETY: [TR-OBSERVE-POINTER] node_ptr is observed only while holding a valid lookup admission domain permit.
         let node = unsafe { node_ptr.0.as_ref() };
         if node.generation != epoch || !node.resident.load(Ordering::Acquire) {
@@ -807,8 +822,39 @@ impl<K, V> Drop for CalculationCache<K, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::hash::{Hash, Hasher};
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
+
+    struct CloneCountedKey {
+        value: u64,
+        clones: Arc<AtomicUsize>,
+    }
+
+    impl Clone for CloneCountedKey {
+        fn clone(&self) -> Self {
+            self.clones.fetch_add(1, Ordering::SeqCst);
+            Self {
+                value: self.value,
+                clones: Arc::clone(&self.clones),
+            }
+        }
+    }
+
+    impl PartialEq for CloneCountedKey {
+        fn eq(&self, other: &Self) -> bool {
+            self.value == other.value
+        }
+    }
+
+    impl Eq for CloneCountedKey {}
+
+    impl Hash for CloneCountedKey {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            self.value.hash(state);
+        }
+    }
 
     #[test]
     fn canonical_float_normalizes_signed_zero_and_rejects_nan() {
@@ -857,6 +903,30 @@ mod tests {
             .unwrap();
         cache.cache.run_pending_tasks();
         assert_eq!(cache.used_weight(), 1);
+    }
+
+    #[test]
+    fn cache_hit_does_not_clone_key() {
+        let clones = Arc::new(AtomicUsize::new(0));
+        let cache = CalculationCache::<CloneCountedKey, u32>::new(8);
+        let key = CloneCountedKey {
+            value: 1,
+            clones: Arc::clone(&clones),
+        };
+
+        assert_eq!(
+            *cache.get_or_try_insert_with(key, |_| 1, || Ok(7)).unwrap(),
+            7
+        );
+
+        let lookup = CloneCountedKey {
+            value: 1,
+            clones: Arc::clone(&clones),
+        };
+        let clones_before_hit = clones.load(Ordering::SeqCst);
+
+        assert_eq!(*cache.get(&lookup).unwrap(), 7);
+        assert_eq!(clones.load(Ordering::SeqCst), clones_before_hit);
     }
 
     #[test]
