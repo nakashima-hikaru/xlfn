@@ -168,11 +168,9 @@ pub(crate) struct RefreshPlan {
     /// after this snapshot may be collected now or remain pending for the next
     /// refresh; the shard-local pending maps remain the source of truth.
     pub(crate) candidate_shards: u32,
-}
-
-pub(crate) struct ShardRefreshBatch {
-    pub(crate) shard_index: usize,
-    pub(crate) updates: Vec<RtdUpdate>,
+    /// Advisory capacity estimate captured at the control transition. Concurrent
+    /// publishes may make this estimate stale without affecting correctness.
+    pub(crate) estimated_updates: usize,
 }
 
 #[cfg(test)]

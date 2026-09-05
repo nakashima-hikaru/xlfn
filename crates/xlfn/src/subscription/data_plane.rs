@@ -5,8 +5,8 @@
 
 use super::delivery::{
     DeliveryPhase, NotificationAttempt, NotificationCompletion, QueuedUpdate, RefreshOutcome,
-    RefreshPlan, RefreshState, RtdUpdate, SERVER_LIFECYCLE_OPEN, ShardRefreshBatch, SignalState,
-    TopicShard, ValueSlot, VersionedRtdValue, shard_index,
+    RefreshPlan, RefreshState, RtdUpdate, SERVER_LIFECYCLE_OPEN, SignalState, TopicShard,
+    ValueSlot, VersionedRtdValue, shard_index,
 };
 use super::host::SubscriptionHost;
 use super::runtime_services::RuntimeServices;
@@ -1044,6 +1044,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
                 refresh_id,
                 epoch,
                 candidate_shards: self.ready_shards.load(Ordering::Acquire),
+                estimated_updates: self.deliverable_pending.load(Ordering::Acquire),
             }
         };
         Ok(PlannedRtdRefresh {
@@ -1090,27 +1091,25 @@ fn push_deliverable(
 }
 
 impl<H: SubscriptionHost> PublishCore<H> {
-    pub(crate) fn collect_shard(&self, shard_index: usize) -> Option<ShardRefreshBatch> {
+    fn collect_shard_into(&self, shard_index: usize, updates: &mut Vec<RtdUpdate>) {
         let mut shard = self.shards[shard_index].lock();
         if shard.deliverable_count == 0 {
-            return None;
+            return;
         }
 
         let TopicShard {
             active_by_topic,
             pending: [p0, p1],
-            deliverable_count,
             ..
         } = &mut *shard;
-        let mut updates = Vec::with_capacity(*deliverable_count);
 
         if p1.is_empty() {
             for (&topic_id, queued) in p0.iter() {
-                push_deliverable(active_by_topic, &mut updates, 0, topic_id, queued);
+                push_deliverable(active_by_topic, updates, 0, topic_id, queued);
             }
         } else if p0.is_empty() {
             for (&topic_id, queued) in p1.iter() {
-                push_deliverable(active_by_topic, &mut updates, 1, topic_id, queued);
+                push_deliverable(active_by_topic, updates, 1, topic_id, queued);
             }
         } else {
             for (&topic_id, queued_0) in p0.iter() {
@@ -1140,41 +1139,27 @@ impl<H: SubscriptionHost> PublishCore<H> {
                 };
 
                 let (buffer, queued) = selected;
-                push_deliverable(active_by_topic, &mut updates, buffer, topic_id, queued);
+                push_deliverable(active_by_topic, updates, buffer, topic_id, queued);
             }
 
             for (&topic_id, queued_1) in p1.iter() {
                 if !p0.contains_key(&topic_id) {
-                    push_deliverable(active_by_topic, &mut updates, 1, topic_id, queued_1);
+                    push_deliverable(active_by_topic, updates, 1, topic_id, queued_1);
                 }
             }
         }
-
-        if updates.is_empty() {
-            return None;
-        }
-        Some(ShardRefreshBatch {
-            shard_index,
-            updates,
-        })
     }
 
-    pub(crate) fn collect_refresh_batches(&self, plan: &RefreshPlan) -> Vec<ShardRefreshBatch> {
+    pub(crate) fn collect_refresh(&self, plan: &RefreshPlan) -> Vec<RtdUpdate> {
         debug_assert_eq!(self.publish_epoch.load(Ordering::Acquire), plan.epoch);
-        let mut candidate_shards = plan.candidate_shards;
-        let mut batches = Vec::with_capacity(candidate_shards.count_ones() as usize);
-        while candidate_shards != 0 {
-            let index = candidate_shards.trailing_zeros() as usize;
-            candidate_shards &= candidate_shards - 1;
-            if let Some(batch) = self.collect_shard(index) {
-                batches.push(batch);
-            }
+        let mut updates = Vec::with_capacity(plan.estimated_updates);
+        let mut shards = plan.candidate_shards;
+        while shards != 0 {
+            let index = shards.trailing_zeros() as usize;
+            shards &= shards - 1;
+            self.collect_shard_into(index, &mut updates);
         }
-        batches
-    }
-
-    fn collect_refresh(&self, plan: &RefreshPlan) -> Vec<RtdUpdate> {
-        reduce_refresh_batches(self.collect_refresh_batches(plan))
+        updates
     }
 
     pub(crate) fn begin_refresh(&self) -> XllResult<RtdRefreshBatch<'_, H>> {
@@ -1203,16 +1188,6 @@ impl<H: SubscriptionHost> PublishCore<H> {
     pub(crate) fn mark_closing_for_test(&self) {
         self.lifecycle
             .store(super::delivery::SERVER_LIFECYCLE_CLOSING, Ordering::Release);
-    }
-
-    #[cfg(feature = "bench-internals")]
-    pub(crate) fn restore_refresh_batches(
-        &self,
-        plan: &RefreshPlan,
-        batches: Vec<ShardRefreshBatch>,
-    ) {
-        let updates = reduce_refresh_batches(batches);
-        self.restore_refresh_updates(plan, updates);
     }
 
     #[cfg(feature = "bench-internals")]
@@ -1305,19 +1280,4 @@ impl<H: SubscriptionHost> Drop for RtdRefreshBatch<'_, H> {
             RefreshOutcome::Failed,
         );
     }
-}
-
-pub(crate) fn reduce_refresh_batches(batches: Vec<ShardRefreshBatch>) -> Vec<RtdUpdate> {
-    let update_count = batches.iter().map(|batch| batch.updates.len()).sum();
-    let mut updates = Vec::with_capacity(update_count);
-    for batch in batches {
-        debug_assert!(
-            batch
-                .updates
-                .iter()
-                .all(|update| { shard_index(TopicId(update.topic_id)) == batch.shard_index })
-        );
-        updates.extend(batch.updates);
-    }
-    updates
 }

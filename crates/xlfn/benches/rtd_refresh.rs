@@ -27,9 +27,6 @@ fn rtd_refresh_benchmarks(c: &mut Criterion) {
     group.bench_function(BenchmarkId::new("number/collection", "dense"), |b| {
         b.iter_custom(|iterations| num_dense.measure_refresh_collection(iterations));
     });
-    group.bench_function(BenchmarkId::new("number/reduction", "dense"), |b| {
-        b.iter_custom(|iterations| num_dense.measure_refresh_reduction(iterations));
-    });
     group.bench_function(BenchmarkId::new("number/completion", "dense"), |b| {
         b.iter_custom(|iterations| num_dense.measure_refresh_completion(iterations));
     });

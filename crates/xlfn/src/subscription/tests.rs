@@ -984,7 +984,7 @@ fn refresh_planning_does_not_traverse_topic_shards() {
 }
 
 #[test]
-fn refresh_reduction_preserves_latest_update_for_each_topic() {
+fn refresh_preserves_latest_update_for_each_topic() {
     let fixture = SourceFixture::new();
     let (source_one, sink_one, _) = fixture.add::<f64>(None);
     let (source_two, sink_two, _) = fixture.add::<f64>(None);

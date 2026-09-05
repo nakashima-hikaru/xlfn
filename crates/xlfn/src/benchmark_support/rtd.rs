@@ -338,37 +338,11 @@ impl RtdRefreshScalingBenchmark {
                 .plan_refresh()
                 .expect("refresh planning must succeed");
             let started = Instant::now();
-            let batches = planned.publish.collect_refresh_batches(&planned.plan);
+            let updates = planned.publish.collect_refresh(&planned.plan);
             measured += started.elapsed();
             planned
                 .publish
-                .restore_refresh_batches(&planned.plan, batches);
-            planned.finished = true;
-            drop(planned);
-        }
-        self.drain_pending_refresh();
-        measured
-    }
-
-    pub fn measure_refresh_reduction(&self, iterations: u64) -> Duration {
-        self.drain_pending_refresh();
-        self.publish_updates();
-        let mut measured = Duration::ZERO;
-        for _ in 0..iterations {
-            let mut planned = self
-                .server
-                .server()
-                .expect("benchmark server remains registered")
-                .publish
-                .plan_refresh()
-                .expect("refresh planning must succeed");
-            let batches = planned.publish.collect_refresh_batches(&planned.plan);
-            let started = Instant::now();
-            let reduced = crate::subscription::reduce_refresh_batches(batches);
-            measured += started.elapsed();
-            planned
-                .publish
-                .restore_refresh_updates(&planned.plan, reduced);
+                .restore_refresh_updates(&planned.plan, updates);
             planned.finished = true;
             drop(planned);
         }
