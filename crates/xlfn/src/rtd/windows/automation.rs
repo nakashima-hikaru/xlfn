@@ -1,6 +1,6 @@
 use super::com_abi::{
-    IUnknown_Vtbl, VT_ARRAY, VT_BOOL, VT_BSTR, VT_BYREF, VT_DISPATCH, VT_EMPTY, VT_ERROR, VT_I4,
-    VT_R8, VT_UNKNOWN, VT_VARIANT,
+    DISPATCH_METHOD, IUnknown_Vtbl, VT_ARRAY, VT_BOOL, VT_BSTR, VT_BYREF, VT_DISPATCH, VT_EMPTY,
+    VT_ERROR, VT_I4, VT_R8, VT_UNKNOWN, VT_VARIANT,
 };
 use super::update_event::{OwnedRtdUpdateEvent, RtdUpdateEvent};
 use super::{
@@ -11,11 +11,11 @@ use crate::error::InputError;
 use crate::subscription::{RtdUpdate, StoredRtdValue};
 use crate::win32::{
     DISP_E_BADPARAMCOUNT, DISP_E_MEMBERNOTFOUND, DISP_E_PARAMNOTFOUND, DISP_E_TYPEMISMATCH,
-    DISP_E_UNKNOWNINTERFACE, DISP_E_UNKNOWNNAME, DISPATCH_METHOD, DISPID_UNKNOWN, DISPPARAMS,
-    E_FAIL, E_INVALIDARG, E_OUTOFMEMORY, E_POINTER, EXCEPINFO, GUID, S_OK, SAFEARRAY,
-    SAFEARRAYBOUND, SafeArrayCreate, SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement,
-    SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayGetVartype, SafeArrayPutElement,
-    SysAllocStringLen, SysFreeString, SysStringLen, VARIANT, VARIANT_BOOL, VariantClear,
+    DISP_E_UNKNOWNINTERFACE, DISP_E_UNKNOWNNAME, DISPID_UNKNOWN, DISPPARAMS, E_FAIL, E_INVALIDARG,
+    E_OUTOFMEMORY, E_POINTER, EXCEPINFO, GUID, S_OK, SAFEARRAY, SAFEARRAYBOUND, SafeArrayCreate,
+    SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement, SafeArrayGetLBound, SafeArrayGetUBound,
+    SafeArrayGetVartype, SafeArrayPutElement, SysAllocStringLen, SysFreeString, SysStringLen,
+    VARIANT, VARIANT_BOOL, VariantClear,
 };
 use crate::{XllError, XllResult};
 use std::ptr::{self, NonNull};

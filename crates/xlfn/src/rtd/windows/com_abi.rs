@@ -22,6 +22,8 @@ pub(crate) const VT_VARIANT: u16 = crate::win32::VT_VARIANT as u16;
 pub(crate) const VT_ARRAY: u16 = crate::win32::VT_ARRAY as u16;
 pub(crate) const VT_BYREF: u16 = crate::win32::VT_BYREF as u16;
 
+pub(crate) const DISPATCH_METHOD: u16 = crate::win32::DISPATCH_METHOD as u16;
+
 pub(crate) const IID_IUNKNOWN: GUID = crate::win32::IID_IUnknown;
 
 pub(crate) fn com_boundary(operation: &'static str, callback: impl FnOnce() -> i32) -> i32 {

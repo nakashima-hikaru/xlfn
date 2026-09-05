@@ -146,7 +146,7 @@ impl CrossProcessRegistrationGuard {
 
         // SAFETY: `handle` is a live mutex handle returned by CreateMutexW.
         let wait = unsafe { WaitForSingleObject(handle, INFINITE) };
-        if !matches!(wait, WAIT_OBJECT_0 | WAIT_ABANDONED) {
+        if wait != (WAIT_OBJECT_0 as u32) && wait != (WAIT_ABANDONED as u32) {
             // SAFETY: `handle` is owned by this function and has not been closed.
             unsafe { CloseHandle(handle) };
             return Err(XllError::WindowsApi {
@@ -236,7 +236,7 @@ fn rtd_prog_ids() -> XllResult<Vec<String>> {
             HKEY_CURRENT_USER,
             classes_path.as_ptr(),
             0,
-            KEY_READ,
+            KEY_READ as u32,
             &mut classes,
         )
     };
@@ -305,7 +305,15 @@ pub(super) fn read_registry_string(path: &str, name: &str) -> XllResult<Option<S
 
     // SAFETY: `path` is NUL-terminated and `key` points to writable HKEY output
     // storage.
-    let status = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, path.as_ptr(), 0, KEY_READ, &mut key) };
+    let status = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            path.as_ptr(),
+            0,
+            KEY_READ as u32,
+            &mut key,
+        )
+    };
 
     if status == ERROR_FILE_NOT_FOUND {
         return Ok(None);
@@ -380,10 +388,10 @@ pub(super) fn read_registry_string(path: &str, name: &str) -> XllResult<Option<S
     Ok(Some(String::from_utf16_lossy(&value)))
 }
 
-fn registry_error(function: &'static str, status: u32) -> XllError {
+fn registry_error(function: &'static str, status: i32) -> XllError {
     XllError::WindowsApi {
         function,
-        code: status as i32,
+        code: status,
     }
 }
 
@@ -414,8 +422,8 @@ pub(super) fn set_registry_value(path: &str, name: Option<&str>, value: &str) ->
             path.as_ptr(),
             0,
             ptr::null(),
-            REG_OPTION_NON_VOLATILE,
-            KEY_WRITE,
+            REG_OPTION_NON_VOLATILE as u32,
+            KEY_WRITE as u32,
             ptr::null(),
             &mut key,
             &mut disposition,
@@ -425,7 +433,7 @@ pub(super) fn set_registry_value(path: &str, name: Option<&str>, value: &str) ->
     if status != ERROR_SUCCESS {
         return Err(XllError::WindowsApi {
             function: "RegCreateKeyExW",
-            code: status as i32,
+            code: status,
         });
     }
 

@@ -17,14 +17,15 @@ use std::thread;
 use std::time::Duration;
 
 use super::com_abi::{
-    VT_ARRAY, VT_BOOL, VT_BSTR, VT_BYREF, VT_EMPTY, VT_ERROR, VT_I4, VT_R8, VT_VARIANT,
+    DISPATCH_METHOD, VT_ARRAY, VT_BOOL, VT_BSTR, VT_BYREF, VT_EMPTY, VT_ERROR, VT_I4, VT_R8,
+    VT_VARIANT,
 };
 use crate::win32::{
     CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, COINIT_MULTITHREADED, CoInitializeEx,
     CoUninitialize, DISP_E_BADPARAMCOUNT, DISP_E_MEMBERNOTFOUND, DISP_E_TYPEMISMATCH,
-    DISP_E_UNKNOWNNAME, DISPATCH_METHOD, DISPID_UNKNOWN, RPC_E_CHANGED_MODE, S_FALSE, S_OK,
-    SAFEARRAYBOUND, SafeArrayCreate, SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement,
-    SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayPutElement, SysAllocStringLen, SysStringLen,
+    DISP_E_UNKNOWNNAME, DISPID_UNKNOWN, RPC_E_CHANGED_MODE, S_FALSE, S_OK, SAFEARRAYBOUND,
+    SafeArrayCreate, SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement, SafeArrayGetLBound,
+    SafeArrayGetUBound, SafeArrayPutElement, SysAllocStringLen, SysStringLen,
 };
 use static_assertions::assert_not_impl_any;
 

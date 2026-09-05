@@ -101,7 +101,7 @@ impl ManualResetEvent {
         // SAFETY: this RAII object owns a live event handle for the complete
         // wait. A coordinator thread has no STA work to dispatch.
         let status = unsafe { WaitForSingleObject(self.raw(), INFINITE) };
-        if status == WAIT_OBJECT_0 {
+        if status == WAIT_OBJECT_0 as u32 {
             Ok(())
         } else if status == WAIT_FAILED {
             // SAFETY: WaitForSingleObject just reported failure on this thread.
