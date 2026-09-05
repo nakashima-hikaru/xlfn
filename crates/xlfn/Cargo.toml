@@ -57,6 +57,11 @@ harness = false
 required-features = ["bench-internals"]
 
 [[bench]]
+name = "cache_lookup"
+harness = false
+required-features = ["bench-internals", "unstable-cache"]
+
+[[bench]]
 name = "input_identity"
 harness = false
 required-features = ["bench-internals"]

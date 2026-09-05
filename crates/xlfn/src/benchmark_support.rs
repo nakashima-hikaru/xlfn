@@ -42,6 +42,8 @@ use crate::host_callback::HostCallbackSession;
 use crate::input_identity::InputFingerprint;
 
 mod async_spawn;
+#[cfg(feature = "unstable-cache")]
+mod cache;
 mod call_resolution;
 mod formula;
 mod formula_caller;
@@ -55,6 +57,11 @@ mod sync_boundary;
 
 #[cfg(feature = "async")]
 pub use async_spawn::{AsyncSpawnBenchmark, AsyncSpawnKind, RescheduleFuture, SpawnBatchResult};
+#[cfg(feature = "unstable-cache")]
+pub use cache::{
+    ArcCacheBenchmark, ArcCacheEvictionBenchmark, CacheLookupBenchCase, CurrentCacheBenchmark,
+    CurrentCacheEvictionBenchmark, NoAdmissionCacheBenchmark, NoPinCacheBenchmark,
+};
 pub use call_resolution::{ConcurrentHandleResolutionBenchmark, MultiHandleCallBenchmark};
 pub use formula::{BenchmarkInputIdentity, FormulaRevisionBenchmark, SemanticIdentityBenchmark};
 pub use formula_caller::{FormulaCallerBenchCase, FormulaCallerBenchmark};
