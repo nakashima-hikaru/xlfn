@@ -9,7 +9,7 @@ import XlFnFormal.TemporalReclamation.Safety
     | Subsystem    | Admission / Domain Gate | Pin Capability | Retirement Point    | Reclamation Point   |
     |--------------|-------------------------|----------------|---------------------|---------------------|
     | Cache        | CacheLookupDomain permit| CacheLease pin | Moka eviction       | CacheNode drop      |
-    | Handle       | HandleReadDomain permit | HandleLease    | Binding removal     | ObjectArena remove  |
+    | Handle       | HandleReadDomain permit | scoped HandleLease | Binding removal  | ObjectArena remove  |
     | RTD Callback | ServerOperationBarrier  | (immediate)    | Callback replace    | Callback Box drop   |
     | Async        | Generation admission    | Active task    | Generation rollover | State Box drop      |
 -/

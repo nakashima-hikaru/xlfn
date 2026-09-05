@@ -43,7 +43,7 @@ pub(crate) async fn execute_async_udf<Fut, T>(
     future: Fut,
 ) -> AsyncCompletion
 where
-    Fut: Future<Output = XllResult<T>> + Send + 'static,
+    Fut: Future<Output = XllResult<T>> + Send,
     T: ExcelReturn + Send + 'static,
 {
     let evaluated = AssertUnwindSafe(future).catch_unwind().await;

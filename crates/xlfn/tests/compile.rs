@@ -41,6 +41,7 @@ fn trait_driven_function_signatures_compile() {
             tests.pass("tests/ui/pass_async/async_handle.rs");
             tests.compile_fail("tests/ui/fail_async/async_handle_input.rs");
             tests.compile_fail("tests/ui/fail_async/handle_return_async.rs");
+            tests.compile_fail("tests/ui/fail_async/handle_lease_*.rs");
         }
     }
 

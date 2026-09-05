@@ -7,7 +7,7 @@
       - `admissions`: short-lived lookup admission domain permits (e.g. `StripedDrainGate`)
       - `observing`: readers currently holding admission that have observed the raw pointer
         and are in the process of acquiring a pin
-      - `pins`: long-lived capabilities (e.g. `CacheLease`, `HandleLease`, active tasks)
+      - `pins`: capabilities (e.g. `CacheLease`, scoped `HandleLease`, active tasks)
 
     Core safety invariant:
       `live capability => status ≠ .reclaimed`

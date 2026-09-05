@@ -1032,24 +1032,24 @@ fn explicit_handle_argument_conversion_resolves_a_typed_token() {
 }
 
 #[test]
-fn explicit_handle_lease_argument_conversion_leases_the_payload() {
-    let (slot, handles) = armed_handle_slot();
+fn pending_handle_argument_conversion_leases_the_payload() {
+    let (_slot, handles) = armed_handle_slot();
     let token = handles
         .prepare(test_topic_key("async-argument"), || Ok(DataRecord(29)))
         .unwrap()
         .into_token();
-    let (_encoded, mut raw) = token_value(&token);
-
-    let resolved: HandleLease<DataRecord> = crate::call::with_excel_call_scope(|scope| {
-        // SAFETY: `raw` and its counted UTF-16 storage remain live for conversion.
-        unsafe { crate::value::argument_from_raw_with_context(scope, slot, "dataset", &mut raw) }
+    let resolved = crate::call::with_excel_call_scope(|scope| {
+        handles
+            .lookup::<DataRecord>(scope, &token)
+            .unwrap()
+            .into_pending(crate::generation::RuntimeGeneration::new(1).unwrap())
             .unwrap()
     });
     handles
         .store
         .registry
         .remove_and_drop(&token, "test remove async argument");
-    assert_eq!(resolved.0, 29);
+    assert_eq!(resolved.value.as_ref().0, 29);
     drop(resolved);
 }
 
@@ -1731,11 +1731,11 @@ fn handle_lease_keeps_payload_alive_after_binding_retirement() {
         .unwrap()
         .into_token();
 
-    let pinned: HandleLease<CountedDataRecord> = crate::value::with_excel_call_scope(|scope| {
+    let pinned = crate::value::with_excel_call_scope(|scope| {
         runtime
             .lookup::<CountedDataRecord>(scope, &token)
             .unwrap()
-            .pin()
+            .into_pending(crate::generation::RuntimeGeneration::new(1).unwrap())
             .unwrap()
     });
     runtime
@@ -1744,9 +1744,81 @@ fn handle_lease_keeps_payload_alive_after_binding_retirement() {
         .remove_and_drop(&token, "test remove while pinned");
 
     assert_eq!(drops.load(Ordering::SeqCst), 0);
-    assert_eq!(pinned.0.load(Ordering::SeqCst), 0);
+    assert_eq!(pinned.value.as_ref().0.load(Ordering::SeqCst), 0);
     drop(pinned);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+#[cfg(all(feature = "async", feature = "handles"))]
+#[test]
+fn scoped_handle_task_drain_releases_pin_before_handle_quiescence() {
+    use crate::async_udf::{HandleScopedTaskBuilder, ScopedTaskFuture};
+    use crate::cancellation::{CancellationGuarantee, CancellationSource};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    struct PendingTask {
+        pending: crate::handle::PendingHandleLease<CountedDataRecord>,
+        started: mpsc::Sender<()>,
+    }
+
+    impl HandleScopedTaskBuilder for PendingTask {
+        fn build_task<'generation>(
+            self,
+            scope: crate::async_udf::AsyncTaskScope<'generation>,
+        ) -> ScopedTaskFuture<'generation> {
+            let lease = self.pending.bind(scope);
+            Box::pin(async move {
+                self.started.send(()).unwrap();
+                let _lease = lease;
+                std::future::pending::<()>().await;
+            })
+        }
+    }
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let handles = FormulaHandleService::new(8);
+    let token = handles
+        .prepare(test_topic_key("scoped-task-drain"), || {
+            Ok(CountedDataRecord(Arc::clone(&drops)))
+        })
+        .unwrap()
+        .into_token();
+    let pending = crate::value::with_excel_call_scope(|scope| {
+        handles
+            .lookup::<CountedDataRecord>(scope, &token)
+            .unwrap()
+            .into_pending(crate::generation::RuntimeGeneration::new(1).unwrap())
+            .unwrap()
+    });
+    handles
+        .store
+        .registry
+        .remove_and_drop(&token, "test remove before scoped task");
+    assert_eq!(drops.load(Ordering::Acquire), 0);
+
+    let manager = crate::async_udf::AsyncManager::new();
+    manager.start(1).unwrap();
+    let reservation = manager.reserve_spawn(1).unwrap();
+    let (started_tx, started_rx) = mpsc::channel();
+    reservation.commit_handle_scoped(
+        crate::generation::RuntimeGeneration::new(1).unwrap(),
+        PendingTask {
+            pending,
+            started: started_tx,
+        },
+        CancellationSource::new(CancellationGuarantee::BestEffort).0,
+    );
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("scoped handle task should start");
+
+    manager.cancel_generation(1);
+    assert!(manager.close().issues.is_empty());
+    assert_eq!(drops.load(Ordering::Acquire), 1);
+
+    let sealed = handles.seal().unwrap();
+    handles.store.registry.finish_quiescence(&sealed).unwrap();
 }
 
 #[test]
@@ -1759,17 +1831,17 @@ fn handle_lease_survives_terminal_runtime_close() {
         .unwrap()
         .into_token();
 
-    let pinned: HandleLease<CountedDataRecord> = crate::value::with_excel_call_scope(|scope| {
+    let pinned = crate::value::with_excel_call_scope(|scope| {
         runtime
             .lookup::<CountedDataRecord>(scope, &token)
             .unwrap()
-            .pin()
+            .into_pending(crate::generation::RuntimeGeneration::new(1).unwrap())
             .unwrap()
     });
     let sealed = runtime.seal().unwrap();
 
     assert_eq!(drops.load(Ordering::SeqCst), 0);
-    assert_eq!(pinned.0.load(Ordering::SeqCst), 0);
+    assert_eq!(pinned.value.as_ref().0.load(Ordering::SeqCst), 0);
     assert!(matches!(
         runtime.store.registry.finish_quiescence(&sealed),
         Err(XllError::Internal { diagnostic_id })
@@ -1829,9 +1901,11 @@ fn pin_promotion_keeps_a_snapshot_owned_payload_without_a_binding() {
         .unwrap()
         .into_token();
 
-    let pinned: HandleLease<CountedDataRecord> = crate::value::with_excel_call_scope(|scope| {
+    let pinned = crate::value::with_excel_call_scope(|scope| {
         let handle = runtime.lookup::<CountedDataRecord>(scope, &token).unwrap();
-        handle.pin().unwrap()
+        handle
+            .into_pending(crate::generation::RuntimeGeneration::new(1).unwrap())
+            .unwrap()
     });
     runtime
         .store
@@ -1839,7 +1913,7 @@ fn pin_promotion_keeps_a_snapshot_owned_payload_without_a_binding() {
         .remove_and_drop(&token, "test remove before lease promotion");
 
     assert_eq!(drops.load(Ordering::SeqCst), 0);
-    assert_eq!(pinned.0.load(Ordering::SeqCst), 0);
+    assert_eq!(pinned.value.as_ref().0.load(Ordering::SeqCst), 0);
     drop(pinned);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }

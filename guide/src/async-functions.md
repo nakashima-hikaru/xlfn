@@ -52,23 +52,24 @@ The framework-owned future retains the open `ServiceAddin` generation lease and 
 
 ### Async handle inputs
 
-An async UDF that needs a formula-owned object must accept `HandleLease<T>`, not
+An async UDF that needs a formula-owned object must accept `HandleLease<'_, T>`, not
 `Handle<'_, T>`:
 
 ```rust
 #[excel_function(name = "DATASET.ASYNC_EVALUATE")]
-async fn async_evaluate(dataset: HandleLease<Dataset>, time: f64) -> XllResult<f64> {
+async fn async_evaluate(dataset: HandleLease<'_, Dataset>, time: f64) -> XllResult<f64> {
+    std::future::ready(()).await;
     dataset.evaluate(time)
 }
 ```
 
-`HandleLease<T>` is converted and leased before the future is scheduled, so it
-is an owned, call-independent value. Its registry pin remains active while the
-future owns the value and is released on normal completion, cancellation, or
-shutdown.
+`HandleLease<'generation, T>` is decoded into an internal pending pin before
+the Excel call ends, then branded at the single scoped-task construction point.
+Its registry pin remains active while the future owns the value and is released
+when the task completes, is cancelled, panics, or is dropped during shutdown.
 `Handle<'_, T>` remains call-scoped and is rejected by the async parameter
-assertion. Use `Handle::pin()` when an explicit synchronous call needs to
-promote a resolved handle before constructing a future.
+assertion. `Handle::pin()` is not available; synchronous code should use the
+token, formula binding, or `HandleAlias` instead.
 
 The add-in controls executor size:
 

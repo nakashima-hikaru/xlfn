@@ -1,0 +1,5 @@
+error: HandleLease cannot use the 'static lifetime
+  --> tests/ui/fail_async/handle_lease_static_parameter.rs:23:51
+   |
+23 | async fn static_handle_lease(dataset: HandleLease<'static, Dataset>) -> f64 {
+   |                                                   ^^^^^^^

@@ -39,7 +39,7 @@ inductive Step : State → Event → State → Prop where
       (hLive : s.status = .published ∨ s.status = .retired) :
       Step s .observePointer { s with observing := s.observing + 1 }
 
-  /-- TR-ACQUIRE-PIN: Reader with active observation acquires a long-lived pin. -/
+  /-- TR-ACQUIRE-PIN: Reader with active observation acquires a scoped task pin. -/
   | acquirePin
       {s : State}
       (hObs : s.observing > 0) :
@@ -51,7 +51,7 @@ inductive Step : State → Event → State → Prop where
       (hAdm : s.observing < s.admissions) :
       Step s .leaveLookup { s with admissions := s.admissions - 1 }
 
-  /-- TR-UNPIN: Active lease or reference drops its pin. -/
+  /-- TR-UNPIN: A cache lease or scoped handle task drops its pin. -/
   | unpin
       {s : State}
       (hPins : s.pins > 0) :

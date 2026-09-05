@@ -1,12 +1,18 @@
 use super::binding::BindingReadLease;
-use super::object::{ObjectBinding, ObjectLeaseGuard, TypedObjectProjection};
+use super::object::{ObjectBinding, RawObjectLeaseGuard, TypedObjectProjection};
 use super::token::ObjectId;
 use crate::XllResult;
+#[cfg(any(feature = "async", test))]
+use crate::generation::RuntimeGeneration;
 use std::marker::PhantomData;
 use std::ops::Deref;
 
 /// Marker implemented by `#[derive(ExcelHandleObject)]`.
 pub trait ExcelHandleObject: Send + Sync + 'static {}
+
+/// Compile-time brand used to keep a generated async handle lease inside the
+/// task that acquired its raw object pin.
+pub(crate) struct GenerationLeaseBrand;
 
 type HandleAliasMarker<'call, T> = (&'call crate::call::CallScope<'call>, fn() -> T);
 
@@ -25,10 +31,20 @@ impl HandleObjectId {
         }
     }
 
+    #[cfg(test)]
+    #[allow(
+        dead_code,
+        reason = "Handle identity accessors are used by protocol tests"
+    )]
     pub(crate) const fn session(self) -> u64 {
         self.session
     }
 
+    #[cfg(test)]
+    #[allow(
+        dead_code,
+        reason = "Handle identity accessors are used by protocol tests"
+    )]
     pub(crate) const fn sequence(self) -> u64 {
         self.sequence
     }
@@ -60,22 +76,20 @@ impl<'call, T: ExcelHandleObject> Handle<'call, T> {
         self.binding.object().id()
     }
 
-    /// Promotes this call-scoped capability to an owned handle lease.
-    ///
-    /// The lease contributes a pin capability to the shutdown certificate;
-    /// it never shares ownership of the payload allocation.
-    pub fn pin(self) -> XllResult<HandleLease<T>> {
+    /// Converts this call-scoped capability into the internal pending form
+    /// used by the generated async-UDF launch path.
+    #[cfg(any(feature = "async", test))]
+    pub(crate) fn into_pending(
+        self,
+        generation: RuntimeGeneration,
+    ) -> XllResult<PendingHandleLease<T>> {
         let object_id = self.binding.object().id();
         let lease = self.binding.acquire_object_lease()?;
-        let value = self
-            .binding
-            .object()
-            .typed_projection::<T>()
-            .expect("handle type was validated before promotion");
-        Ok(HandleLease {
+        Ok(PendingHandleLease {
             object_id,
-            value,
-            _lease: lease,
+            value: self.value,
+            lease,
+            generation,
         })
     }
 
@@ -103,22 +117,27 @@ impl<T: ExcelHandleObject> Deref for Handle<'_, T> {
     }
 }
 
-/// A long-lived handle lease. Use this when a handle must cross Excel calls or
-/// be moved into an asynchronous future.
-pub struct HandleLease<T: ExcelHandleObject> {
+/// A generation-scoped handle lease supplied to an async UDF.
+///
+/// The framework creates this value only after the generated task has been
+/// admitted. It is intentionally tied to the task's branded generation and
+/// cannot be returned from the UDF, stored in a `'static` location, or moved
+/// into an independently spawned thread.
+pub struct HandleLease<'generation, T: ExcelHandleObject> {
     pub(crate) object_id: ObjectId,
     pub(crate) value: TypedObjectProjection<T>,
-    pub(crate) _lease: ObjectLeaseGuard,
+    pub(crate) _lease: RawObjectLeaseGuard,
+    pub(crate) _generation: PhantomData<&'generation GenerationLeaseBrand>,
 }
 
-impl<T: ExcelHandleObject> HandleLease<T> {
+impl<T: ExcelHandleObject> HandleLease<'_, T> {
     /// Returns the stable session-scoped object identity.
     pub fn object_id(&self) -> HandleObjectId {
         HandleObjectId::from_object_id(self.object_id)
     }
 }
 
-impl<T: ExcelHandleObject> Deref for HandleLease<T> {
+impl<T: ExcelHandleObject> Deref for HandleLease<'_, T> {
     type Target = T;
 
     #[inline]
@@ -131,9 +150,49 @@ impl<T: ExcelHandleObject> Deref for HandleLease<T> {
 
 // SAFETY: the object cell and lease guard are Send/Sync, and T is constrained
 // by ExcelHandleObject.
-unsafe impl<T: ExcelHandleObject> Send for HandleLease<T> {}
+unsafe impl<T: ExcelHandleObject> Send for HandleLease<'_, T> {}
 // SAFETY: same invariant as `Send`.
-unsafe impl<T: ExcelHandleObject> Sync for HandleLease<T> {}
+unsafe impl<T: ExcelHandleObject> Sync for HandleLease<'_, T> {}
+
+/// Decode-time handle lease that owns the object pin before the Excel call
+/// returns. It is converted to [`HandleLease`] at the single async task
+/// boundary, once the generation brand is available.
+#[cfg(any(feature = "async", test))]
+#[doc(hidden)]
+#[allow(
+    dead_code,
+    reason = "The pending fields are consumed by the async scoped path"
+)]
+pub struct PendingHandleLease<T: ExcelHandleObject> {
+    pub(crate) object_id: ObjectId,
+    pub(crate) value: TypedObjectProjection<T>,
+    pub(crate) lease: RawObjectLeaseGuard,
+    pub(crate) generation: RuntimeGeneration,
+}
+
+#[cfg(all(feature = "async", feature = "handles"))]
+impl<T: ExcelHandleObject> PendingHandleLease<T> {
+    pub(crate) fn bind<'generation>(
+        self,
+        scope: crate::async_udf::AsyncTaskScope<'generation>,
+    ) -> HandleLease<'generation, T> {
+        debug_assert_eq!(self.generation, scope.generation());
+        HandleLease {
+            object_id: self.object_id,
+            value: self.value,
+            _lease: self.lease,
+            _generation: PhantomData,
+        }
+    }
+}
+
+// SAFETY: the projection is guarded by the arena pin, and the payload is
+// constrained by `ExcelHandleObject` to be Send/Sync.
+#[cfg(any(feature = "async", test))]
+unsafe impl<T: ExcelHandleObject> Send for PendingHandleLease<T> {}
+// SAFETY: same invariant as `Send`.
+#[cfg(any(feature = "async", test))]
+unsafe impl<T: ExcelHandleObject> Sync for PendingHandleLease<T> {}
 
 /// A call-scoped capability that creates a formula binding to an existing
 /// object. It carries the source binding snapshot directly, so address-reuse

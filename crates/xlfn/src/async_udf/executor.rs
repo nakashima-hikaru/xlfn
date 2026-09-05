@@ -6,11 +6,19 @@ use crate::addin::AsyncWorkerCount;
 use crate::cancellation::CancellationSource;
 use crate::diagnostics::id::DiagnosticId;
 use crate::error::DomainErrorCode;
+#[cfg(feature = "handles")]
+use crate::generation::RuntimeGeneration;
+#[cfg(feature = "handles")]
+use crate::handle::GenerationLeaseBrand;
 use crate::shutdown::CleanupIssueKind;
 use crate::{XllError, XllResult};
 use crossbeam_utils::sync::Parker;
 use futures_util::future::{AbortHandle, Abortable};
 use parking_lot::{Condvar, Mutex};
+#[cfg(feature = "handles")]
+use std::marker::PhantomData;
+#[cfg(feature = "handles")]
+use std::pin::Pin;
 use std::ptr::NonNull;
 #[cfg(test)]
 use std::sync::Arc;
@@ -280,6 +288,83 @@ pub(crate) struct SpawnReservation<'a> {
     pub(crate) committed: bool,
 }
 
+/// Narrow lifetime brand for the generated async handle path.
+///
+/// The scope carries no runtime borrow. Its lifetime is a compile-time token
+/// that the executor validates at the one point where the scoped task future
+/// is erased to the executor's existing `'static` task type.
+#[cfg(feature = "handles")]
+#[doc(hidden)]
+#[derive(Clone, Copy)]
+pub struct AsyncTaskScope<'generation> {
+    generation: RuntimeGeneration,
+    _brand: PhantomData<&'generation GenerationLeaseBrand>,
+}
+
+/// Generated-user-code builder for the narrow async handle path.
+///
+/// A trait method, rather than a general borrowed-future callback, gives the
+/// generated implementation an explicit late-bound lifetime for each task
+/// scope while keeping the rest of the executor `'static`-task based.
+#[cfg(feature = "handles")]
+#[doc(hidden)]
+pub trait HandleScopedBuilder<T> {
+    fn build<'generation>(
+        self,
+        scope: AsyncTaskScope<'generation>,
+    ) -> Pin<Box<dyn Future<Output = crate::XllResult<T>> + Send + 'generation>>;
+}
+
+#[cfg(feature = "handles")]
+pub(crate) trait HandleScopedTaskBuilder {
+    fn build_task<'generation>(
+        self,
+        scope: AsyncTaskScope<'generation>,
+    ) -> ScopedTaskFuture<'generation>;
+}
+
+#[cfg(feature = "handles")]
+impl<'generation> AsyncTaskScope<'generation> {
+    pub(crate) fn new(generation: RuntimeGeneration, _: &'generation GenerationLeaseBrand) -> Self {
+        Self {
+            generation,
+            _brand: PhantomData,
+        }
+    }
+
+    pub(crate) const fn generation(self) -> RuntimeGeneration {
+        self.generation
+    }
+}
+
+#[cfg(feature = "handles")]
+pub(crate) type ScopedTaskFuture<'generation> =
+    Pin<Box<dyn Future<Output = ()> + Send + 'generation>>;
+#[cfg(feature = "handles")]
+type ErasedTaskFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+
+/// Erases the compile-time handle-generation brand after the generated
+/// future has been constrained to contain only task-owned data.
+///
+/// # Safety
+///
+/// The caller must ensure that the future contains no borrow from the caller's
+/// stack whose validity depends on the scope brand. Generated async contexts
+/// may borrow the `ExecutionLease` and cancellation token moved into the same
+/// future; those references are therefore task-self-contained. The only
+/// external lifetime marker is the zero-sized `AsyncTaskScope`/`HandleLease`
+/// brand, while the object lifetime is protected independently by
+/// `RawObjectLeaseGuard`. The async shutdown pipeline drains these tasks
+/// before tearing down the formula-handle service and its arena.
+#[cfg(feature = "handles")]
+unsafe fn erase_scoped_task_future<'generation>(
+    future: ScopedTaskFuture<'generation>,
+) -> ErasedTaskFuture {
+    // SAFETY: upheld by `HandleScopedBuilder`'s late-bound method and the
+    // `'static` builder bound, plus the shutdown ordering documented above.
+    unsafe { std::mem::transmute::<ScopedTaskFuture<'generation>, ErasedTaskFuture>(future) }
+}
+
 impl<'a> SpawnReservation<'a> {
     pub(crate) fn commit<F>(mut self, future: F, cancellation: CancellationSource)
     where
@@ -331,6 +416,27 @@ impl<'a> SpawnReservation<'a> {
         let (runnable, task) = async_task::spawn(wrapped, schedule);
         task.detach();
         runnable.schedule();
+    }
+
+    #[cfg(feature = "handles")]
+    pub(crate) fn commit_handle_scoped<B>(
+        self,
+        runtime_generation: RuntimeGeneration,
+        build: B,
+        cancellation: CancellationSource,
+    ) where
+        B: HandleScopedTaskBuilder + Send + 'static,
+    {
+        let brand = GenerationLeaseBrand;
+        let scope = AsyncTaskScope::new(runtime_generation, &brand);
+        let future = build.build_task(scope);
+        // The scope brand is intentionally erased once, at this executor
+        // boundary. All task state remains owned or guarded by its pin.
+        // SAFETY: `HandleScopedTaskBuilder` is late-bound over the private
+        // scope brand, and the shutdown protocol drains this task before the
+        // pinned handle service can be reclaimed.
+        let future = unsafe { erase_scoped_task_future(future) };
+        self.commit(future, cancellation);
     }
 }
 

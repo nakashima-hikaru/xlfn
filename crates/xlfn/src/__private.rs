@@ -11,12 +11,14 @@ pub mod v1 {
 
     #[cfg(feature = "async")]
     use std::future::Future;
+    #[cfg(all(feature = "async", feature = "handles"))]
+    use std::pin::Pin;
 
     use crate::addin::{Addin, PhysicallyUnloadableAddin};
     use crate::boundary::host::{host_auto_close, host_auto_open, host_auto_remove};
     pub use crate::call::{CallScope, with_excel_call_scope};
     #[cfg(feature = "async")]
-    use crate::cancellation::CancellationToken;
+    pub use crate::cancellation::CancellationToken;
     use crate::error::{InputError, XllError, XllResult};
     use crate::reference::{ExcelReference, reference_from_raw};
     use crate::registration::{RegistrationDescriptor, RegistrationSignature};
@@ -108,6 +110,20 @@ pub mod v1 {
     pub use crate::value::input::CellPresence;
     pub use xlfn_common::{ExecutionKind, FunctionVisibility};
 
+    /// Boxes a future at the narrow generated async-task boundary while
+    /// preserving its inferred scope lifetime.
+    #[cfg(all(feature = "async", feature = "handles"))]
+    #[doc(hidden)]
+    pub fn box_scoped_future<'scope, T, F>(
+        _: AsyncTaskScope<'scope>,
+        future: F,
+    ) -> Pin<Box<dyn Future<Output = T> + Send + 'scope>>
+    where
+        F: Future<Output = T> + Send + 'scope,
+    {
+        Box::pin(future)
+    }
+
     /// Asserts at compile-time that `T` implements `ExcelParameter`.
     #[doc(hidden)]
     pub fn assert_excel_parameter<'call, R, T>(_: &CallFrame<'call, R::InputMode>)
@@ -157,6 +173,13 @@ pub mod v1 {
     #[doc(hidden)]
     pub use crate::generation::ExecutionLease;
 
+    #[cfg(all(feature = "async", feature = "handles"))]
+    #[doc(hidden)]
+    pub use crate::async_udf::{AsyncTaskScope, HandleScopedBuilder};
+    #[cfg(all(feature = "async", feature = "handles"))]
+    #[doc(hidden)]
+    pub use crate::handle::PendingHandleLease;
+
     /// Instantiates an [`AsyncContext`](crate::addin::AsyncContext) for generated UDFs.
     #[cfg(feature = "async")]
     #[doc(hidden)]
@@ -165,6 +188,41 @@ pub mod v1 {
         cancellation: &'call CancellationToken,
     ) -> crate::addin::AsyncContext<'call, A> {
         crate::addin::AsyncContext::new(lease.state(), cancellation)
+    }
+
+    /// Hidden type-level constructor used by the scoped handle codegen. The
+    /// extra trait indirection lets an add-in use a type alias for
+    /// `AsyncContext` without making the macro resolve that alias itself.
+    #[cfg(all(feature = "async", feature = "handles"))]
+    #[doc(hidden)]
+    pub trait AsyncContextFactory<'call, A: Addin>: Sized {
+        fn from_execution_lease(
+            lease: &'call crate::generation::ExecutionLease<A>,
+            cancellation: &'call CancellationToken,
+        ) -> Self;
+    }
+
+    #[cfg(all(feature = "async", feature = "handles"))]
+    impl<'call, A: Addin> AsyncContextFactory<'call, A> for crate::addin::AsyncContext<'call, A> {
+        fn from_execution_lease(
+            lease: &'call crate::generation::ExecutionLease<A>,
+            cancellation: &'call CancellationToken,
+        ) -> Self {
+            async_context(lease, cancellation)
+        }
+    }
+
+    #[cfg(all(feature = "async", feature = "handles"))]
+    #[doc(hidden)]
+    pub fn async_context_for<'call, A, C>(
+        lease: &'call crate::generation::ExecutionLease<A>,
+        cancellation: &'call CancellationToken,
+    ) -> C
+    where
+        A: Addin,
+        C: AsyncContextFactory<'call, A>,
+    {
+        C::from_execution_lease(lease, cancellation)
     }
 
     /// Opaque wrapper around the add-in [`Runtime`] for generated code.
@@ -459,6 +517,38 @@ pub mod v1 {
             }
         }
 
+        /// Decodes an async `HandleLease` argument while the Excel call is
+        /// still admitted. The returned pending pin is consumed only by the
+        /// generated scoped-task builder.
+        #[cfg(all(feature = "async", feature = "handles"))]
+        #[doc(hidden)]
+        #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
+        pub unsafe fn convert_handle_pending<A, T>(
+            &mut self,
+            index: usize,
+            name: &'static str,
+            raw: *mut xlfn_sys::XLOPER12,
+            lease: &crate::generation::ExecutionLease<A>,
+        ) -> XllResult<crate::handle::PendingHandleLease<T>>
+        where
+            A: Addin,
+            T: crate::handle::ExcelHandleObject,
+        {
+            // SAFETY: raw is supplied by Excel for this call.
+            let borrowed =
+                unsafe { crate::value::XlValueRef::from_raw(raw) }.map_err(
+                    |error| match error {
+                        XllError::Input { reason, .. } => XllError::Input {
+                            argument: name,
+                            reason,
+                        },
+                        other => other,
+                    },
+                )?;
+            self.arguments
+                .decode_pending_handle(index, name, borrowed, lease.generation())
+        }
+
         #[doc(hidden)]
         #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
         pub unsafe fn convert_reference(
@@ -497,6 +587,20 @@ pub mod v1 {
     {
         // SAFETY: caller guarantees raw is live for this call.
         unsafe { frame.convert_argument(index, name, raw) }
+    }
+
+    /// Binds one decode-time pending handle pin to the generated async task's
+    /// narrow lifetime brand.
+    #[cfg(all(feature = "async", feature = "handles"))]
+    #[doc(hidden)]
+    pub fn bind_handle_lease<'generation, T>(
+        pending: crate::handle::PendingHandleLease<T>,
+        scope: AsyncTaskScope<'generation>,
+    ) -> crate::handle::HandleLease<'generation, T>
+    where
+        T: crate::handle::ExcelHandleObject,
+    {
+        pending.bind(scope)
     }
 
     /// Helper free function to convert a reference argument from a raw pointer using the active call frame.
@@ -581,6 +685,48 @@ pub mod v1 {
                         let future = execute(call, lease, cancellation, &mut frame)?;
                         frame.arguments.finish()?;
                         Ok(future)
+                    })
+                },
+            )
+        }
+    }
+
+    /// Top-level asynchronous UDF execution boundary for generation-scoped
+    /// handle leases.
+    #[cfg(all(feature = "async", feature = "handles"))]
+    #[doc(hidden)]
+    #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
+    pub unsafe fn async_udf_handle<A, R, F, Build>(
+        runtime: &'static MacroRuntime<A>,
+        udf_id: &'static str,
+        excel_name: &'static str,
+        argument_count: usize,
+        async_handle: *mut xlfn_sys::XLOPER12,
+        execute: F,
+    ) where
+        A: Addin,
+        R: ExcelReturn + Send + 'static,
+        F: for<'call> FnOnce(
+            &'call crate::runtime::CallGuard<'call, A>,
+            crate::generation::ExecutionLease<A>,
+            CancellationToken,
+            &mut CallFrame<'call, R::InputMode>,
+        ) -> XllResult<Build>,
+        Build: HandleScopedBuilder<R> + Send + 'static,
+    {
+        // SAFETY: async_handle is supplied by Excel for this call.
+        unsafe {
+            crate::async_udf::async_udf_boundary_named_handle(
+                runtime.runtime(),
+                udf_id,
+                excel_name,
+                async_handle,
+                |call, lease, cancellation| {
+                    crate::call::with_excel_call_scope_and_call(call, |call, scope| {
+                        let mut frame = CallFrame::<R::InputMode>::new(call, scope, argument_count);
+                        let build = execute(call, lease, cancellation, &mut frame)?;
+                        frame.arguments.finish()?;
+                        Ok(build)
                     })
                 },
             )

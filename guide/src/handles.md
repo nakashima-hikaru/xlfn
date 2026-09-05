@@ -81,33 +81,33 @@ an async task.
 
 No `handle` argument attribute is required. Ordinary Rust trait resolution identifies `Handle<'_, T>`.
 
-## Explicit lifetime promotion
+## Async-scoped handle leases
 
-When an application must retain a handle beyond the current Excel call, promote
-it explicitly:
+An async UDF that needs an existing object accepts a generation-scoped lease:
 
 ```rust
-fn retain(dataset: Handle<'_, Dataset>) -> XllResult<HandleLease<Dataset>> {
-    dataset.pin()
+#[excel_function(name = "DATASET.ASYNC.EVALUATE")]
+async fn async_evaluate(
+    dataset: HandleLease<'_, Dataset>,
+    time: f64,
+) -> XllResult<f64> {
+    std::future::ready(()).await;
+    dataset.evaluate(time)
 }
 ```
 
-`HandleLease<T>` is the long-lived registry lease and may be moved into a
-`Send + 'static` future when `T` is safe for that future:
+`HandleLease<'generation, T>` is created only by the generated async boundary.
+The token is decoded and the object pin is acquired while the Excel call is
+still admitted; the pending pin is then branded when the async task is
+committed. The lease may be used before and after `.await`, but its generation
+brand prevents it from being returned, stored in `'static` state, or moved into
+an independently spawned thread.
 
-```rust
-fn retain_for_worker(dataset: Handle<'_, Dataset>) -> XllResult<HandleLease<Dataset>> {
-    dataset.pin()
-}
-```
-
-These types own an explicit registry lease backed by the shared handle object;
-xlfn never exposes the payload as an `Arc<T>`. A call-scoped binding snapshot
-keeps the object alive for `Handle` and `HandleAlias`, while `HandleLease`
-adds the long-lived lease needed across Excel calls or inside an asynchronous
-UDF. A lease may outlive formula disconnect and may remain alive while
-terminal close is being attempted, but a successful terminal close requires
-all leases to be dropped. `HandleLease` is not an Excel return value.
+`Handle::pin()` is not part of the public API. Synchronous code that needs to
+retain an object should keep using the token, formula binding, or
+`HandleAlias<'_, T>` publication path. This keeps call-scoped lookup separate
+from the async task lifetime and avoids adding a second lifetime to `Handle`.
+`HandleLease` is not an Excel return value.
 
 ## Re-evaluation semantics
 
@@ -208,10 +208,11 @@ A newly constructed handle object uses main-thread return semantics. Producers c
 `HandleAlias<'_, T>` uses main-thread return semantics. A borrowed
 `Handle<'_, T>` is an input capability only and is not a valid return type.
 
-`HandleLease<T>` is intentionally not call-borrowed: it is an owned input that
-pins the registry payload before an async future is scheduled. It can also be
-used synchronously; it does not make a borrowed `Handle<'_, T>` safe to capture
-without an explicit call to `Handle::pin()`.
+`HandleLease<'_, T>` is intentionally limited to generated async UDF inputs.
+The framework owns the raw pin and drains all scoped async tasks before
+tearing down the formula-handle service and object arena. Consequently, a
+non-zero pin count during final quiescence is a framework ordering invariant,
+not a recoverable user-held lease.
 
 ## Caller restrictions
 

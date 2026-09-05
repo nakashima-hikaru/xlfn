@@ -335,6 +335,9 @@ impl ExecutionDrained {
         let async_was_running = false;
         #[cfg(feature = "async")]
         let async_stopped = {
+            // Scoped async handle tasks are drained before generation
+            // services (including FormulaHandleService/ObjectArena) are
+            // sealed and consumed below.
             deps.async_manager().cancel_current_generation();
             let outcome = deps.async_manager().close();
             for issue in &outcome.issues {

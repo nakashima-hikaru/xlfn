@@ -359,6 +359,19 @@ impl<'call> CallContext<'call> {
         };
         handles.get()?.lookup(scope, token)
     }
+
+    /// Resolves and pins a handle during async-UDF argument decoding. The
+    /// pending value is not exposed to user code; the generated boundary
+    /// brands it immediately before committing the task.
+    #[cfg(all(feature = "async", feature = "handles"))]
+    pub(crate) fn resolve_pending_handle<T: crate::handle::ExcelHandleObject>(
+        &self,
+        token: &str,
+        generation: crate::generation::RuntimeGeneration,
+    ) -> XllResult<crate::handle::PendingHandleLease<T>> {
+        let handle = self.resolve_handle::<T>(token)?;
+        handle.into_pending(generation)
+    }
 }
 
 /// Call-scoped argument conversion and formula-revision identity collection.
@@ -431,6 +444,29 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
         let call = &self.call;
         M::with_argument(fingerprint, index, argument, |identity| {
             T::decode(value, argument, call, identity)
+        })
+    }
+
+    #[cfg(all(feature = "async", feature = "handles"))]
+    pub(crate) fn decode_pending_handle<T: crate::handle::ExcelHandleObject>(
+        &mut self,
+        index: usize,
+        argument: &'static str,
+        value: XlValueRef<'call>,
+        generation: crate::generation::RuntimeGeneration,
+    ) -> XllResult<crate::handle::PendingHandleLease<T>> {
+        let fingerprint = self.inputs.as_mut().ok_or(XllError::Internal {
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::INPUT_FINGERPRINT,
+        })?;
+        let call = &self.call;
+        M::with_argument(fingerprint, index, argument, |identity| {
+            let token = call
+                .scratch()
+                .decode_utf16(value.utf16(argument)?, argument)?;
+            let pending = call.resolve_pending_handle::<T>(token, generation)?;
+            M::u64(identity, pending.object_id.session());
+            M::u64(identity, pending.object_id.sequence());
+            Ok(pending)
         })
     }
 

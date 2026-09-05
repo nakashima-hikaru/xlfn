@@ -169,7 +169,8 @@ impl BindingReadLease {
         self.record().duplicate_object_binding()
     }
 
-    pub(crate) fn acquire_object_lease(&self) -> XllResult<super::object::ObjectLeaseGuard> {
+    #[cfg(any(feature = "async", test))]
+    pub(crate) fn acquire_object_lease(&self) -> XllResult<super::object::RawObjectLeaseGuard> {
         self.record().object.acquire_lease()
     }
 }

@@ -1,0 +1,65 @@
+error: `impl` item signature doesn't match `trait` item signature
+  --> tests/ui/fail_async/handle_lease_return.rs:22:1
+   |
+22 |   #[excel_function(name = "TEST.RETURNED.HANDLE.LEASE")]
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ found `fn(__XlfnHandleTaskBuilder, xlfn::async_udf::executor::AsyncTaskScope<'1>) -> Pin<Box<(dyn Future<Output = Result<xlfn::handle::HandleLease<'1, Dataset>, xlfn::XllError>> + Send + '1)>>`
+   |
+  ::: src/async_udf/executor.rs
+   |
+   | /     fn build<'generation>(
+   | |         self,
+   | |         scope: AsyncTaskScope<'generation>,
+   | |     ) -> Pin<Box<dyn Future<Output = crate::XllResult<T>> + Send + 'generation>>;
+   | |_________________________________________________________________________________- expected `fn(__XlfnHandleTaskBuilder, xlfn::async_udf::executor::AsyncTaskScope<'generation>) -> Pin<Box<(dyn Future<Output = Result<xlfn::handle::HandleLease<'1, Dataset>, xlfn::XllError>> + Send + 'generation)>>`
+   |
+   = note: expected signature `fn(__XlfnHandleTaskBuilder, xlfn::async_udf::executor::AsyncTaskScope<'generation>) -> Pin<Box<(dyn Future<Output = Result<xlfn::handle::HandleLease<'1, Dataset>, xlfn::XllError>> + Send + 'generation)>>`
+              found signature `fn(__XlfnHandleTaskBuilder, xlfn::async_udf::executor::AsyncTaskScope<'1>) -> Pin<Box<(dyn Future<Output = Result<xlfn::handle::HandleLease<'1, Dataset>, xlfn::XllError>> + Send + '1)>>`
+   = help: the lifetime requirements from the `impl` do not correspond to the requirements in the `trait`
+   = help: verify the lifetime relationships in the `trait` and `impl` between the `self` argument, the other inputs and its output
+   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `xlfn::handle::HandleLease<'_, Dataset>` cannot be converted into an Excel return value
+  --> tests/ui/fail_async/handle_lease_return.rs:22:1
+   |
+22 | #[excel_function(name = "TEST.RETURNED.HANDLE.LEASE")]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `xlfn::handle::HandleLease<'_, Dataset>` does not implement `IntoExcel`
+   |
+   = help: the trait `IntoExcel` is not implemented for `xlfn::handle::HandleLease<'_, Dataset>`
+   = note: implement `IntoExcel` for `xlfn::handle::HandleLease<'_, Dataset>` or return a supported type (e.g. `f64`, `bool`, `String`, `ExcelError`, or a custom handle)
+   = help: the following other types implement trait `IntoExcel`:
+             &str
+             ExcelCellOutput
+             ExcelErrorValue
+             ExcelSerialDate
+             bool
+             f64
+             i32
+             i64
+             std::string::String
+   = note: required for `xlfn::handle::HandleLease<'_, Dataset>` to implement `xlfn::call_return::traits::ExcelReturn`
+   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `xlfn::handle::HandleLease<'_, Dataset>` cannot be returned from an asynchronous Excel function
+  --> tests/ui/fail_async/handle_lease_return.rs:23:70
+   |
+23 | async fn returned_handle_lease(dataset: HandleLease<'_, Dataset>) -> HandleLease<'_, Dataset> {
+   |                                                                      ^^^^^^^^^^^^^^^^^^^^^^^^ `xlfn::handle::HandleLease<'_, Dataset>` is not a valid return type for an async UDF
+   |
+   = help: the trait `IntoExcel` is not implemented for `xlfn::handle::HandleLease<'_, Dataset>`
+   = note: return a type that implements `IntoExcel`, or implement `IntoExcel` for `xlfn::handle::HandleLease<'_, Dataset>`
+   = help: the following other types implement trait `IntoExcel`:
+             &str
+             ExcelCellOutput
+             ExcelErrorValue
+             ExcelSerialDate
+             bool
+             f64
+             i32
+             i64
+             std::string::String
+   = note: required for `xlfn::handle::HandleLease<'_, Dataset>` to implement `xlfn::call_return::traits::AsyncReturn`
+note: required by a bound in `xlfn::call_return::traits::assert_async_return`
+  --> src/call_return/traits.rs
+   |
+   | pub fn assert_async_return<T: AsyncReturn>() {}
+   |                               ^^^^^^^^^^^ required by this bound in `assert_async_return`

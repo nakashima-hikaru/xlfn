@@ -12,7 +12,7 @@ use crate::support::{doc_comment, extract_gating_attributes, resolve_crate_path}
 use crate::validation::validate_export_id;
 use proc_macro2::TokenStream;
 use quote::{ToTokens, format_ident};
-use syn::{Attribute, Expr, FnArg, Ident, ItemFn, Pat, Path, Type};
+use syn::{Attribute, Expr, FnArg, GenericArgument, Ident, ItemFn, Pat, Path, PathArguments, Type};
 
 /// Syntax extracted from one excel_function item.
 pub(super) struct ParsedUdf {
@@ -86,10 +86,12 @@ impl PresenceAction {
 }
 
 /// A conversion is either an ordinary Excel value conversion with normalized
-/// presence actions or a raw reference conversion.
+/// presence actions, a raw reference conversion, or an async-scoped handle
+/// lease conversion.
 pub(super) enum ArgumentConversion {
     Value(Box<ValueConversion>),
     Reference,
+    HandleLease { object: Box<Type> },
 }
 
 pub(super) struct ValueConversion {
@@ -102,9 +104,13 @@ impl ArgumentConversion {
         matches!(self, Self::Reference)
     }
 
+    pub(super) const fn is_handle_lease(&self) -> bool {
+        matches!(self, Self::HandleLease { .. })
+    }
+
     pub(super) const fn requires_presence_check(&self) -> bool {
         match self {
-            Self::Reference => false,
+            Self::Reference | Self::HandleLease { .. } => false,
             Self::Value(value) => {
                 value.blank.requires_presence_check() || value.missing.requires_presence_check()
             }
@@ -477,7 +483,27 @@ fn analyze_arguments(
             ));
         }
 
-        let conversion = if argument.options.reference {
+        let conversion = if let Some(object) = parse_handle_lease_type(&argument.ty)? {
+            if !execution.is_async() {
+                return Err(syn::Error::new_spanned(
+                    &argument.ty,
+                    "HandleLease arguments are only supported by async Excel functions",
+                ));
+            }
+            if argument.options.reference
+                || argument.options.default.is_some()
+                || argument.options.blank.is_some()
+                || argument.options.missing.is_some()
+            {
+                return Err(syn::Error::new_spanned(
+                    &function.sig.inputs,
+                    "HandleLease arguments cannot use reference, blank, missing, or default policies",
+                ));
+            }
+            ArgumentConversion::HandleLease {
+                object: Box::new(object),
+            }
+        } else if argument.options.reference {
             if argument.options.default.is_some()
                 || argument.options.blank.is_some()
                 || argument.options.missing.is_some()
@@ -554,6 +580,53 @@ fn analyze_arguments(
     }
 
     Ok(analyzed)
+}
+
+/// Recognizes the framework's two-parameter generation-scoped handle lease
+/// syntax without making the proc macro depend on the user's import path.
+fn parse_handle_lease_type(ty: &Type) -> syn::Result<Option<Type>> {
+    let Type::Path(path) = ty else {
+        return Ok(None);
+    };
+    let Some(segment) = path.path.segments.last() else {
+        return Ok(None);
+    };
+    if segment.ident != "HandleLease" {
+        return Ok(None);
+    }
+
+    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "HandleLease must specify a lifetime and payload type",
+        ));
+    };
+    if arguments.args.len() != 2 {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "HandleLease must have the form HandleLease<'generation, T>",
+        ));
+    }
+    let mut arguments = arguments.args.iter();
+    let Some(GenericArgument::Lifetime(lifetime)) = arguments.next() else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "HandleLease must specify its generation lifetime first",
+        ));
+    };
+    if lifetime.ident == "static" {
+        return Err(syn::Error::new_spanned(
+            lifetime,
+            "HandleLease cannot use the 'static lifetime",
+        ));
+    }
+    let Some(GenericArgument::Type(object)) = arguments.next() else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "HandleLease must specify an object payload type",
+        ));
+    };
+    Ok(Some(object.clone()))
 }
 
 fn analyze_presence(

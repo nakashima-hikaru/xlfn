@@ -94,6 +94,16 @@ impl<A: crate::Addin> ExecutionLease<A> {
         // SAFETY: construction couples the pointer to the owned drain permit.
         &unsafe { self.generation.as_ref() }.shared_state
     }
+
+    /// Returns the published runtime-generation identity carried by this
+    /// execution lease. This is consumed only by the hidden async-handle
+    /// launch boundary when it creates its compile-time scope brand.
+    #[cfg(all(feature = "async", feature = "handles"))]
+    pub(crate) fn generation(&self) -> RuntimeGeneration {
+        // SAFETY: the execution lease's owned drain permit keeps the
+        // generation root alive for the duration of this borrow.
+        unsafe { self.generation.as_ref() }.id()
+    }
 }
 
 // SAFETY: the generation payload is Send + Sync by the Addin contract and the

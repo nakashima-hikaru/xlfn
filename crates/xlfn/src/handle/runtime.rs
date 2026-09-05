@@ -680,8 +680,8 @@ impl super::lifetime::FormulaLifetimeBackend for FormulaHandleService {
 }
 
 /// The handle runtime has stopped accepting work and its registry has removed
-/// every live binding. The service keeps the generation alive until add-in
-/// state cleanup has completed and object/lease quiescence is certified.
+/// every live binding. The service keeps the generation alive until async
+/// scoped tasks have drained and object/pin quiescence is certified.
 enum FormulaHandleServiceSealed {
     Present {
         generation: RuntimeGeneration,
@@ -706,6 +706,9 @@ impl FormulaHandleServiceSealed {
 
 impl crate::shutdown::HandleStoreTeardown for FormulaHandleServiceSealed {
     fn finish(self: Box<Self>) -> XllResult<crate::shutdown::HandlesQuiescent> {
+        // `stop_producers` closes and drains the async manager before this
+        // service box can be consumed. Raw object pin guards therefore never
+        // outlive the arena reached by this teardown path.
         match *self {
             Self::Present {
                 generation,

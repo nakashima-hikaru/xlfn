@@ -121,7 +121,7 @@ an explicit Add-in contract:
 - ingress, external entries, calls, worksheet return blocks and free callbacks;
 - async tasks and executor state;
 - subscriptions, callbacks, RTD operations, factories, servers and locks;
-- call-scoped handle borrows, published handles, and long-lived registry pins;
+- call-scoped handle borrows, published handles, and pins owned by scoped async handle tasks;
 - registration state and callback-gate state;
 - `generationUnique`, `addinQuiesced`, and `generationOwnedByRuntime` for open generation reclamation;
 - diagnostics and cleanup-issue accounting.
@@ -136,14 +136,16 @@ servers, and server locks. `SubscriptionsDrained` owns the separate
 subscription/callback postcondition.
 
 Handle shutdown has three distinct obligations. `handles = 0` means that no
-formula binding roots remain; `handlePins = 0` means that no `HandleLease`
-can still retain a retired payload; and `handleObjects = 0` means that no
-published snapshot or pending ownership edge can still retain an
-`ObjectCell`. The model therefore permits
-the registry to be sealed before lease/object drain, but admits `handlesDrained` only
-after all three counters are zero. This matches the Rust order: `FormulaHandleService::seal`
-retires bindings, Add-in cleanup drops generation state, and only then can
-`HandleStoreQuiescent` be issued.
+formula binding roots remain; `handlePins = 0` means that no pending or
+generation-scoped async handle task can still retain a retired payload; and
+`handleObjects = 0` means that no published snapshot or pending ownership edge
+can still retain an `ObjectCell`. The model therefore permits the registry to
+be sealed before lease/object drain, but admits `handlesDrained` only after all
+three counters are zero. Safe user code cannot create a static `HandleLease`;
+therefore a non-zero pin at final quiescence represents a framework task-drain
+or service-teardown ordering violation. This matches the Rust order:
+`FormulaHandleService::seal` retires bindings, async scoped tasks are cancelled
+and drained, and only then can `HandleStoreQuiescent` be issued.
 
 The Rust shutdown refinement trace carries the same `handlePins` and
 `handleObjects` counters and their corresponding add/remove events, so the
@@ -276,7 +278,8 @@ architecture under the redesign:
 - **Ownership model**: each live `BindingTable` slot owns one `Box<BindingRecord>`. `PublishedBindings` exposes an
   `AtomicPtr<BindingRecord>`, and readers hold an `OwnedOperationGuard` (admission permit).
   `ObjectArena` is the sole owner of each `ObjectCell`. A published `BindingRecord` holds a non-owning
-  `ObjectBinding` capability, while `HandleLease<T>` holds a counted `pin` capability.
+  `ObjectBinding` capability, while a generation-scoped `HandleLease<'_, T>`
+  holds a counted pin owned by an async task.
 - **Retirement protocol**:
   - `beginRetire`: Clears publication (`published = false`) and seals the admission gate.
   - `retireCapability`: Waits for reader drain (`admitted = 0`) before retiring the object capability

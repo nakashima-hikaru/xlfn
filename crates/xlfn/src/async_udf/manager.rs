@@ -1,8 +1,12 @@
+#[cfg(feature = "handles")]
+use super::executor::HandleScopedTaskBuilder;
 use super::executor::{Executor, ExecutorShared};
 use super::worker::cancel_tasks;
 use crate::cancellation::CancellationSource;
 #[cfg(test)]
 use crate::diagnostics::id::DiagnosticId;
+#[cfg(feature = "handles")]
+use crate::generation::RuntimeGeneration;
 use crate::{XllError, XllResult};
 use futures_util::Future;
 use parking_lot::{Condvar, Mutex};
@@ -82,6 +86,19 @@ impl<'manager> ManagerSpawnReservation<'manager> {
         F: Future<Output = ()> + Send + 'static,
     {
         self.reservation.commit(future, cancellation);
+    }
+
+    #[cfg(feature = "handles")]
+    pub(crate) fn commit_handle_scoped<B>(
+        self,
+        runtime_generation: RuntimeGeneration,
+        build: B,
+        cancellation: CancellationSource,
+    ) where
+        B: HandleScopedTaskBuilder + Send + 'static,
+    {
+        self.reservation
+            .commit_handle_scoped(runtime_generation, build, cancellation);
     }
 }
 

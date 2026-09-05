@@ -1086,43 +1086,6 @@ where
     }
 }
 
-#[cfg(feature = "handles")]
-impl<'call, T, M> input::sealed::ExcelParameterSealed<'call, M> for crate::handle::HandleLease<T>
-where
-    M: InputMode,
-    T: crate::handle::ExcelHandleObject,
-{
-}
-
-#[cfg(feature = "handles")]
-impl<'call, T, M> ExcelParameter<'call, M> for crate::handle::HandleLease<T>
-where
-    M: InputMode,
-    T: crate::handle::ExcelHandleObject,
-{
-    fn decode(
-        value: XlValueRef<'call>,
-        argument: &'static str,
-        context: &CallContext<'call>,
-        identity: &mut M::Identity,
-    ) -> XllResult<Self> {
-        let token = context
-            .scratch()
-            .decode_utf16(value.utf16(argument)?, argument)?;
-        let handle = context.resolve_handle::<T>(token)?.pin()?;
-        let object_id = handle.object_id();
-        M::u64(identity, object_id.session());
-        M::u64(identity, object_id.sequence());
-        Ok(handle)
-    }
-
-    fn encode_decoded(&self, identity: &mut M::Identity) {
-        let object_id = self.object_id();
-        M::u64(identity, object_id.session());
-        M::u64(identity, object_id.sequence());
-    }
-}
-
 impl IntoExcel for ExcelCellOutput {
     fn into_excel(self) -> XllResult<ExcelCellOutput> {
         if matches!(self, Self::Number(value) if !value.is_finite()) {

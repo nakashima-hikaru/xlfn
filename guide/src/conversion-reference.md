@@ -16,7 +16,7 @@ This chapter summarizes the built-in worksheet conversion surface. The behaviora
 | `ExcelCellRef<'call>` | number, Boolean, string, error, or blank | zero-allocation cell view; synchronous UDFs only |
 | `ExcelSerialDate` | finite number | starts with `ExcelDateSystem::Workbook` |
 | `Handle<'_, T>` | string handle token | authenticates, checks generation, and checks object type; valid only for the active call |
-| `HandleLease<T>` | string handle token | authenticates and leases the typed object before an async future is scheduled; owned and call-independent |
+| `HandleLease<'_, T>` | string handle token | async-only; pins the typed object before task commit and carries a generation-scoped lifetime |
 | `Option<T>` | value, blank, or missing | blank and missing become `None` |
 | `OptionalExcelValue<T>` | value, blank, or missing | preserves all three states |
 | `XlArrayRef<'call>` | rectangular multi-value | zero-allocation borrowed cells; synchronous UDFs only |

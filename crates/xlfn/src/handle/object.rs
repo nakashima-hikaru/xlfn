@@ -158,7 +158,12 @@ impl ObjectArena {
         Ok(())
     }
 
-    fn acquire_pin(&self, id: ObjectId, cell: NonNull<ObjectCell>) -> XllResult<ObjectLeaseGuard> {
+    #[cfg(any(feature = "async", test))]
+    fn acquire_pin(
+        &self,
+        id: ObjectId,
+        cell: NonNull<ObjectCell>,
+    ) -> XllResult<RawObjectLeaseGuard> {
         let mut state = self.state.lock();
         if state.sealed {
             return Err(XllError::Closing);
@@ -175,7 +180,7 @@ impl ObjectArena {
         })?;
         drop(state);
         self.record(crate::shutdown_trace::ShutdownEvent::AddHandlePin);
-        Ok(ObjectLeaseGuard {
+        Ok(RawObjectLeaseGuard {
             arena: NonNull::from(self),
             id,
             armed: true,
@@ -267,6 +272,10 @@ impl ObjectArena {
     pub(crate) fn finish_quiescence(&self) -> XllResult<()> {
         let state = self.state.lock();
         if state.active_pins != 0 {
+            // A public `HandleLease` cannot outlive its generated async task.
+            // Reaching this branch after async shutdown is therefore a
+            // framework ordering violation, retained as a diagnostic so the
+            // existing close certificate reports the failed invariant.
             return Err(XllError::Internal {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_PINS,
             });
@@ -358,7 +367,8 @@ impl ObjectBinding {
         })
     }
 
-    pub(crate) fn acquire_lease(&self) -> XllResult<ObjectLeaseGuard> {
+    #[cfg(any(feature = "async", test))]
+    pub(crate) fn acquire_lease(&self) -> XllResult<RawObjectLeaseGuard> {
         // SAFETY: same lifetime invariant as `duplicate`.
         unsafe { self.arena.as_ref() }.acquire_pin(self.id, self.cell)
     }
@@ -379,13 +389,18 @@ unsafe impl Send for ObjectBinding {}
 // SAFETY: ObjectBinding immutable borrows can be shared across threads.
 unsafe impl Sync for ObjectBinding {}
 
-pub(crate) struct ObjectLeaseGuard {
+/// Internal pin capability held by a generated async handle task.
+///
+/// This type deliberately has no public lifetime-bearing API. Its raw arena
+/// pointer is safe only while the async task drain precedes handle-service
+/// teardown; the shutdown pipeline owns that ordering invariant.
+pub(crate) struct RawObjectLeaseGuard {
     arena: NonNull<ObjectArena>,
     id: ObjectId,
     armed: bool,
 }
 
-impl Drop for ObjectLeaseGuard {
+impl Drop for RawObjectLeaseGuard {
     fn drop(&mut self) {
         if self.armed {
             // SAFETY: an active pin prevents arena/service reclamation.
@@ -394,7 +409,7 @@ impl Drop for ObjectLeaseGuard {
     }
 }
 
-// SAFETY: ObjectLeaseGuard holds a pin count in a thread-safe arena and can be transferred.
-unsafe impl Send for ObjectLeaseGuard {}
-// SAFETY: ObjectLeaseGuard immutable borrows can be shared across threads.
-unsafe impl Sync for ObjectLeaseGuard {}
+// SAFETY: RawObjectLeaseGuard holds a pin count in a thread-safe arena and can be transferred.
+unsafe impl Send for RawObjectLeaseGuard {}
+// SAFETY: RawObjectLeaseGuard immutable borrows can be shared across threads.
+unsafe impl Sync for RawObjectLeaseGuard {}

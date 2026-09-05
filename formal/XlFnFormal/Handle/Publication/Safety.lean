@@ -56,7 +56,7 @@ theorem borrowedObjectNotReclaimed
   have ⟨obj, hObjMem, hId, hPres, hBindings⟩ := object_capability_sound hInv hMem hOwned
   exact ⟨obj, hObjMem, hId, hPres⟩
 
-/-- An object held by a long-lived pin (HandleLease) cannot be reclaimed. -/
+/-- An object held by a scoped async-task pin (HandleLease) cannot be reclaimed. -/
 theorem pinnedObjectNotReclaimed
     {s : State} (hInv : s.Invariant) {obj : ObjectState}
     (hMem : obj ∈ s.objects) (hPins : obj.pins > 0) :
