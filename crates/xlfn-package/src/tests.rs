@@ -1123,7 +1123,7 @@ fn snapshot_denies_in_place_writers() {
         .write(true)
         .open(&source)
         .unwrap_err();
-    assert_eq!(error.raw_os_error(), Some(ERROR_SHARING_VIOLATION as i32));
+    assert_eq!(error.raw_os_error(), Some(ERROR_SHARING_VIOLATION));
 
     release.wait();
     resolver.join().unwrap().unwrap();
@@ -1141,7 +1141,7 @@ fn snapshot_rejects_source_already_open_for_writing() {
 
     let _writer = std::fs::OpenOptions::new()
         .write(true)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE) as u32)
         .open(&source)
         .unwrap();
 

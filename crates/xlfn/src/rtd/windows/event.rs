@@ -79,13 +79,7 @@ impl ManualResetEvent {
         // Deliberately omit COWAIT_DISPATCH_WINDOW_MESSAGES so teardown cannot
         // run an arbitrary Windows message loop.
         let status = unsafe {
-            CoWaitForMultipleHandles(
-                COWAIT_DISPATCH_CALLS as u32,
-                INFINITE,
-                1,
-                &handle,
-                &mut index,
-            )
+            CoWaitForMultipleHandles(COWAIT_DISPATCH_CALLS, INFINITE, 1, &handle, &mut index)
         };
 
         if status < 0 {

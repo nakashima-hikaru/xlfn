@@ -773,7 +773,7 @@ pub(crate) fn map_snapshot_open_error(target: &str, path: &Path, error: io::Erro
     {
         use crate::win32::ERROR_SHARING_VIOLATION;
 
-        if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32) {
+        if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION) {
             return PackageError::BundleSourceBusy {
                 target: target.to_owned(),
                 path: path.to_owned(),
