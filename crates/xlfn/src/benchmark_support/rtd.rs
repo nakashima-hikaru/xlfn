@@ -319,7 +319,14 @@ impl RtdRefreshScalingBenchmark {
         }
     }
 
+    fn drain_pending_refresh(&self) {
+        if let Ok(batch) = self.server.begin_refresh() {
+            let _ = batch.complete(crate::subscription::RefreshOutcome::Delivered);
+        }
+    }
+
     pub fn measure_refresh_collection(&self, iterations: u64) -> Duration {
+        self.drain_pending_refresh();
         self.publish_updates();
         let mut measured = Duration::ZERO;
         for _ in 0..iterations {
@@ -339,10 +346,12 @@ impl RtdRefreshScalingBenchmark {
             planned.finished = true;
             drop(planned);
         }
+        self.drain_pending_refresh();
         measured
     }
 
     pub fn measure_refresh_reduction(&self, iterations: u64) -> Duration {
+        self.drain_pending_refresh();
         self.publish_updates();
         let mut measured = Duration::ZERO;
         for _ in 0..iterations {
@@ -363,6 +372,7 @@ impl RtdRefreshScalingBenchmark {
             planned.finished = true;
             drop(planned);
         }
+        self.drain_pending_refresh();
         measured
     }
 
