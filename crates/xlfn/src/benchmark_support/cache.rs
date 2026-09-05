@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 use xlfn_kernel::drain_gate::{DEFAULT_STRIPE_COUNT, StripedDrainGate, current_thread_stripe};
 
 const HOT_KEY: u64 = 42;
@@ -103,6 +104,19 @@ impl Drop for WorkerPool {
     }
 }
 
+fn warmed_calculation_cache(
+    case: CacheLookupBenchCase,
+    worker_count: usize,
+) -> Arc<CalculationCache<u64, u64>> {
+    let cache = Arc::new(CalculationCache::<u64, u64>::new(LOOKUP_WEIGHT_BUDGET));
+    for key in case.warm_keys(worker_count) {
+        cache
+            .get_or_try_insert_with(key, |_| ENTRY_WEIGHT as usize, move || Ok(key))
+            .expect("cache benchmark warm seed failed");
+    }
+    cache
+}
+
 /// Measures the current raw-pointer cache ownership path with persistent workers.
 pub struct CurrentCacheBenchmark {
     workers: WorkerPool,
@@ -118,12 +132,7 @@ impl CurrentCacheBenchmark {
         assert!(worker_count != 0);
         assert!(iterations_per_worker != 0);
 
-        let cache = Arc::new(CalculationCache::<u64, u64>::new(LOOKUP_WEIGHT_BUDGET));
-        for key in case.warm_keys(worker_count) {
-            cache
-                .get_or_try_insert_with(key, |_| ENTRY_WEIGHT as usize, move || Ok(key))
-                .expect("current cache benchmark warm seed failed");
-        }
+        let cache = warmed_calculation_cache(case, worker_count);
 
         let keys = Arc::new(case.keys(worker_count));
         let worker_cache = Arc::clone(&cache);
@@ -153,6 +162,202 @@ impl CurrentCacheBenchmark {
 
     pub const fn total_iterations(&self) -> usize {
         self.total_iterations
+    }
+}
+
+/// Measures scoped cache reads with one scope per lookup or per batch.
+pub struct ScopedDurationCacheBenchmark {
+    workers: WorkerPool,
+    total_iterations: usize,
+}
+
+impl ScopedDurationCacheBenchmark {
+    pub fn new(
+        case: CacheLookupBenchCase,
+        worker_count: usize,
+        scopes_per_batch: usize,
+        lookups_per_scope: usize,
+    ) -> Self {
+        assert!(worker_count != 0);
+        assert!(scopes_per_batch != 0);
+        assert!(lookups_per_scope != 0);
+
+        let cache = warmed_calculation_cache(case, worker_count);
+        let keys = Arc::new(case.keys(worker_count));
+        let worker_cache = Arc::clone(&cache);
+        let workers = WorkerPool::new(worker_count, move |worker, receiver, done| {
+            let key = keys[worker];
+            while receiver.recv().is_ok() {
+                for _ in 0..scopes_per_batch {
+                    let scope = worker_cache
+                        .read_scope()
+                        .expect("scoped cache benchmark admission failed");
+                    for _ in 0..lookups_per_scope {
+                        let value = scope
+                            .get(&key)
+                            .expect("scoped cache benchmark warm hit failed");
+                        std::hint::black_box(value);
+                    }
+                }
+                done.send(())
+                    .expect("cache benchmark driver received completion signal");
+            }
+        });
+
+        Self {
+            workers,
+            total_iterations: worker_count * scopes_per_batch * lookups_per_scope,
+        }
+    }
+
+    pub fn run(&self) {
+        self.workers.run();
+    }
+
+    pub const fn total_iterations(&self) -> usize {
+        self.total_iterations
+    }
+}
+
+/// Measures the pinless scoped path with one scope per lookup.
+pub struct ScopedPerLookupCacheBenchmark {
+    inner: ScopedDurationCacheBenchmark,
+}
+
+impl ScopedPerLookupCacheBenchmark {
+    pub fn new(
+        case: CacheLookupBenchCase,
+        worker_count: usize,
+        iterations_per_worker: usize,
+    ) -> Self {
+        Self {
+            inner: ScopedDurationCacheBenchmark::new(case, worker_count, iterations_per_worker, 1),
+        }
+    }
+
+    pub fn run(&self) {
+        self.inner.run();
+    }
+
+    pub const fn total_iterations(&self) -> usize {
+        self.inner.total_iterations()
+    }
+}
+
+/// Measures the pinless scoped path with one scope for the whole lookup batch.
+pub struct ScopedBatchCacheBenchmark {
+    inner: ScopedDurationCacheBenchmark,
+}
+
+impl ScopedBatchCacheBenchmark {
+    pub fn new(
+        case: CacheLookupBenchCase,
+        worker_count: usize,
+        iterations_per_worker: usize,
+    ) -> Self {
+        Self {
+            inner: ScopedDurationCacheBenchmark::new(case, worker_count, 1, iterations_per_worker),
+        }
+    }
+
+    pub fn run(&self) {
+        self.inner.run();
+    }
+
+    pub const fn total_iterations(&self) -> usize {
+        self.inner.total_iterations()
+    }
+}
+
+/// Measures `clear()` while a short-lived scoped reader is active.
+pub struct ConcurrentClearLatencyBenchmark {
+    cache: CalculationCache<u64, u64>,
+    scope_lookups: usize,
+}
+
+impl ConcurrentClearLatencyBenchmark {
+    pub fn new(scope_lookups: usize) -> Self {
+        assert!(scope_lookups != 0);
+        let cache = CalculationCache::new(LOOKUP_WEIGHT_BUDGET);
+        drop(
+            cache
+                .get_or_try_insert_with(HOT_KEY, |_| ENTRY_WEIGHT as usize, || Ok(HOT_KEY))
+                .expect("clear-latency benchmark warm seed failed"),
+        );
+        let _ = cache.len();
+        Self {
+            cache,
+            scope_lookups,
+        }
+    }
+
+    pub fn run(&self) -> Duration {
+        drop(
+            self.cache
+                .get_or_try_insert_with(HOT_KEY, |_| ENTRY_WEIGHT as usize, || Ok(HOT_KEY))
+                .expect("clear-latency benchmark warm reseed failed"),
+        );
+        let _ = self.cache.len();
+
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let (quiesce_tx, quiesce_rx) = std::sync::mpsc::sync_channel(0);
+        let (clear_done_tx, clear_done_rx) = std::sync::mpsc::sync_channel(0);
+        let cache = &self.cache;
+
+        std::thread::scope(|threads| {
+            threads.spawn(move || {
+                let scope = cache
+                    .read_scope()
+                    .expect("clear-latency benchmark admission failed");
+                let value = scope
+                    .get(&HOT_KEY)
+                    .expect("clear-latency benchmark warm hit failed");
+                std::hint::black_box(value);
+                ready_tx
+                    .send(())
+                    .expect("clear-latency benchmark reader did not start");
+                release_rx
+                    .recv()
+                    .expect("clear-latency benchmark reader was not released");
+                for _ in 0..self.scope_lookups {
+                    std::hint::black_box(scope.get(&HOT_KEY));
+                }
+                drop(scope);
+            });
+
+            ready_rx
+                .recv()
+                .expect("clear-latency benchmark reader did not become ready");
+
+            let clearer = threads.spawn(move || {
+                let started = Instant::now();
+                cache.clear_with_quiesce_hook(|| {
+                    quiesce_tx
+                        .send(())
+                        .expect("clear-latency benchmark did not reach quiescence");
+                });
+                clear_done_tx
+                    .send(started.elapsed())
+                    .expect("clear-latency benchmark did not report completion");
+            });
+
+            quiesce_rx
+                .recv()
+                .expect("clear-latency benchmark did not reach quiescence");
+            release_tx
+                .send(())
+                .expect("clear-latency benchmark reader release failed");
+
+            let clear_duration = clear_done_rx
+                .recv()
+                .expect("clear-latency benchmark did not finish");
+            clearer
+                .join()
+                .expect("clear-latency benchmark clearer panicked");
+
+            clear_duration
+        })
     }
 }
 

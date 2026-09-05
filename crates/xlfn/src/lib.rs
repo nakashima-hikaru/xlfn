@@ -520,6 +520,8 @@ pub mod unstable {
     /// Calculation-scoped caches.
     #[cfg(feature = "unstable-cache")]
     pub mod cache {
+        #[cfg(feature = "bench-internals")]
+        pub use crate::cache::CacheReadScope;
         pub use crate::cache::{
             BoundCacheEndpoint, CacheEndpoint, CacheLease, CacheRegistry, CalculationCache,
             CanonicalF64,

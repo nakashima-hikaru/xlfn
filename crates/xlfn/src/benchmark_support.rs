@@ -59,8 +59,10 @@ mod sync_boundary;
 pub use async_spawn::{AsyncSpawnBenchmark, AsyncSpawnKind, RescheduleFuture, SpawnBatchResult};
 #[cfg(feature = "unstable-cache")]
 pub use cache::{
-    ArcCacheBenchmark, ArcCacheEvictionBenchmark, CacheLookupBenchCase, CurrentCacheBenchmark,
-    CurrentCacheEvictionBenchmark, NoAdmissionCacheBenchmark, NoPinCacheBenchmark,
+    ArcCacheBenchmark, ArcCacheEvictionBenchmark, CacheLookupBenchCase,
+    ConcurrentClearLatencyBenchmark, CurrentCacheBenchmark, CurrentCacheEvictionBenchmark,
+    NoAdmissionCacheBenchmark, NoPinCacheBenchmark, ScopedBatchCacheBenchmark,
+    ScopedDurationCacheBenchmark, ScopedPerLookupCacheBenchmark,
 };
 pub use call_resolution::{ConcurrentHandleResolutionBenchmark, MultiHandleCallBenchmark};
 pub use formula::{BenchmarkInputIdentity, FormulaRevisionBenchmark, SemanticIdentityBenchmark};

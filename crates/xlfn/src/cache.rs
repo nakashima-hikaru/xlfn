@@ -8,6 +8,8 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::ptr::NonNull;
+#[cfg(feature = "bench-internals")]
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use xlfn_kernel::drain_gate::{DEFAULT_STRIPE_COUNT, StripedDrainGate};
 
@@ -151,6 +153,51 @@ impl<V: PartialEq> PartialEq for CacheLease<'_, V> {
 
 impl<V: Eq> Eq for CacheLease<'_, V> {}
 
+/// Benchmark-only scoped read capability for a resident cache value.
+///
+/// The scope keeps one lookup-domain permit for its entire lifetime, so a
+/// pointer observed through [`Self::get`] cannot be reclaimed before the
+/// returned reference expires. The type is intentionally neither `Send` nor
+/// `Sync`; keep the scope to a short lexical region containing cache reads.
+#[cfg(feature = "bench-internals")]
+#[must_use = "a CacheReadScope must stay alive while its references are used"]
+pub struct CacheReadScope<'cache, K, V> {
+    cache: &'cache CalculationCache<K, V>,
+    _permit: CacheDomainPermit,
+    _not_send_sync: PhantomData<Rc<()>>,
+}
+
+#[cfg(feature = "bench-internals")]
+impl<K, V> CacheReadScope<'_, K, V>
+where
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
+    /// Looks up a value while the scope's reclamation permit is held.
+    ///
+    /// This is the scoped counterpart to [`CalculationCache::get`]. It does
+    /// not acquire or release a per-node pin. Keep the returned reference and
+    /// the scope within a short lexical region because cache clear waits for
+    /// active scopes to leave the lookup domain.
+    #[must_use]
+    #[inline]
+    pub fn get<'scope>(&'scope self, key: &K) -> Option<&'scope V> {
+        let epoch = self.cache.generation.snapshot();
+        let lookup = VersionedKeyRef { epoch, key };
+        let (node_ptr, _) = self.cache.cache.get(&lookup)?;
+
+        // SAFETY: [TR-SCOPED-READ-1] The scope owns a CacheDomainPermit for
+        // its entire lifetime. The permit prevents the node's allocation from
+        // being reclaimed until this returned reference can no longer exist.
+        let node = unsafe { node_ptr.0.as_ref() };
+        if node.generation != epoch || !node.resident.load(Ordering::Acquire) {
+            return None;
+        }
+
+        Some(&node.value)
+    }
+}
+
 pub struct BoundCacheEndpoint<'registry, Marker, K, V> {
     cache: NonNull<StoredCache<Marker, K, V>>,
     _marker: PhantomData<&'registry CacheRegistry>,
@@ -218,6 +265,13 @@ where
     pub fn get<'a>(&'a self, key: &K) -> Option<CacheLease<'a, V>> {
         // SAFETY: self.cache is valid for 'registry, and 'a is within 'registry.
         unsafe { self.cache.as_ref() }.cache.get(key)
+    }
+
+    /// Opens a benchmark-only scoped read region for repeated cache hits.
+    #[cfg(feature = "bench-internals")]
+    pub fn read_scope<'a>(&'a self) -> XllResult<CacheReadScope<'a, K, V>> {
+        // SAFETY: self.cache is valid for 'registry, and 'a is within 'registry.
+        unsafe { self.cache.as_ref() }.cache.read_scope()
     }
 }
 
@@ -659,6 +713,25 @@ where
         });
     }
 
+    /// Benchmark-only synchronization hook for measuring a clear that reaches
+    /// reclamation while a scoped reader is still active.
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn clear_with_quiesce_hook(&self, before_quiesce: impl FnOnce()) {
+        let _guard = self.clear_lock.lock();
+        let epoch = self.generation.advance();
+        self.cache
+            .invalidate_entries_if(move |key, _| key.epoch < epoch)
+            .expect("invalidation closures are enabled");
+        self.cache.run_pending_tasks();
+        before_quiesce();
+        self.domain.quiesce_and_reclaim(|ptr| {
+            // SAFETY: [TR-RECLAIM-1] Domain is quiesced outside Moka maintenance locks; safe to reclaim.
+            unsafe {
+                drop(Box::from_raw(ptr as *mut CacheNode<V>));
+            }
+        });
+    }
+
     fn invalidate_before(&self, epoch: u64) {
         let _guard = self.clear_lock.lock();
         self.cache
@@ -676,6 +749,20 @@ where
     pub fn get<'a>(&'a self, key: &K) -> Option<CacheLease<'a, V>> {
         let epoch = self.generation.snapshot();
         self.get_at_epoch(key, epoch)
+    }
+
+    /// Opens a benchmark-only scoped read region for repeated cache hits.
+    ///
+    /// The scope holds one lookup-domain permit until it is dropped. It does
+    /// not alter the existing `CacheLease`-based insertion or miss path.
+    #[cfg(feature = "bench-internals")]
+    pub fn read_scope(&self) -> XllResult<CacheReadScope<'_, K, V>> {
+        let permit = self.domain.enter()?;
+        Ok(CacheReadScope {
+            cache: self,
+            _permit: permit,
+            _not_send_sync: PhantomData,
+        })
     }
 
     fn get_at_epoch<'a>(&'a self, key: &K, epoch: u64) -> Option<CacheLease<'a, V>> {
@@ -927,6 +1014,191 @@ mod tests {
 
         assert_eq!(*cache.get(&lookup).unwrap(), 7);
         assert_eq!(clones.load(Ordering::SeqCst), clones_before_hit);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn cache_read_scope_is_not_send_or_sync() {
+        static_assertions::assert_not_impl_any!(CacheReadScope<'static, u32, u32>: Send, Sync);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn bound_endpoint_exposes_scoped_reads() {
+        enum Marker {}
+        static ENDPOINT: CacheEndpoint<Marker, u32, u32> = CacheEndpoint::new("SCOPED_READ");
+
+        let registry = CacheRegistry::new(8);
+        let endpoint = registry.bind(&ENDPOINT).unwrap();
+        drop(endpoint.get_or_try_insert(1, |_| 1, || Ok(7)).unwrap());
+
+        let scope = endpoint.read_scope().unwrap();
+        assert_eq!(*scope.get(&1).unwrap(), 7);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn scoped_reference_survives_eviction_until_scope_drop() {
+        struct DropProbe {
+            value: u32,
+            drops: Arc<AtomicUsize>,
+        }
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let drops = Arc::new(AtomicUsize::new(0));
+        let cache = CalculationCache::<u32, DropProbe>::new(1);
+        drop(
+            cache
+                .get_or_try_insert_with(
+                    0,
+                    |_| 1,
+                    || {
+                        Ok(DropProbe {
+                            value: 7,
+                            drops: Arc::clone(&drops),
+                        })
+                    },
+                )
+                .unwrap(),
+        );
+
+        let scope = cache.read_scope().unwrap();
+        {
+            let value = scope.get(&0).unwrap();
+            assert_eq!(value.value, 7);
+
+            let (retired_tx, retired_rx) = std::sync::mpsc::sync_channel(0);
+            let (reclaim_done_tx, reclaim_done_rx) = std::sync::mpsc::sync_channel(0);
+            let cache_ref = &cache;
+
+            std::thread::scope(|threads| {
+                let reclaimer = threads.spawn(move || {
+                    let epoch = cache_ref.generation.advance();
+                    cache_ref
+                        .cache
+                        .invalidate_entries_if(move |key, _| key.epoch < epoch)
+                        .unwrap();
+                    cache_ref.cache.run_pending_tasks();
+                    assert!(
+                        cache_ref
+                            .domain
+                            .pending_reclaims
+                            .iter()
+                            .any(|queue| !queue.lock().is_empty())
+                    );
+                    retired_tx.send(()).unwrap();
+                    cache_ref.domain.quiesce_and_reclaim(|ptr| {
+                        // SAFETY: The domain is quiesced before reclaiming the retired node.
+                        unsafe {
+                            drop(Box::from_raw(ptr as *mut CacheNode<DropProbe>));
+                        }
+                    });
+                    reclaim_done_tx.send(()).unwrap();
+                });
+
+                retired_rx.recv().unwrap();
+                assert_eq!(drops.load(Ordering::SeqCst), 0);
+                assert!(reclaim_done_rx.try_recv().is_err());
+
+                drop(scope);
+                reclaim_done_rx.recv().unwrap();
+                reclaimer.join().unwrap();
+            });
+        }
+
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn scoped_reference_blocks_clear_until_scope_drop() {
+        struct DropProbe {
+            value: u32,
+            drops: Arc<AtomicUsize>,
+        }
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let drops = Arc::new(AtomicUsize::new(0));
+        let cache = CalculationCache::<u32, DropProbe>::new(8);
+        drop(
+            cache
+                .get_or_try_insert_with(
+                    0,
+                    |_| 1,
+                    || {
+                        Ok(DropProbe {
+                            value: 11,
+                            drops: Arc::clone(&drops),
+                        })
+                    },
+                )
+                .unwrap(),
+        );
+
+        let scope = cache.read_scope().unwrap();
+        {
+            let value = scope.get(&0).unwrap();
+            assert_eq!(value.value, 11);
+
+            let (clear_done_tx, clear_done_rx) = std::sync::mpsc::sync_channel(0);
+            let cache_ref = &cache;
+
+            std::thread::scope(|threads| {
+                let clearer = threads.spawn(move || {
+                    cache_ref.clear();
+                    clear_done_tx.send(()).unwrap();
+                });
+
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                while !cache
+                    .domain
+                    .pending_reclaims
+                    .iter()
+                    .any(|queue| !queue.lock().is_empty())
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::yield_now();
+                }
+                assert!(
+                    cache
+                        .domain
+                        .pending_reclaims
+                        .iter()
+                        .any(|queue| !queue.lock().is_empty())
+                );
+                assert!(clear_done_rx.try_recv().is_err());
+                assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+                drop(scope);
+                clear_done_rx.recv().unwrap();
+                clearer.join().unwrap();
+            });
+        }
+
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn scoped_read_uses_current_generation_for_each_lookup() {
+        let cache = CalculationCache::<u32, u32>::new(8);
+        drop(cache.get_or_try_insert_with(1, |_| 1, || Ok(23)).unwrap());
+
+        let scope = cache.read_scope().unwrap();
+        assert_eq!(*scope.get(&1).unwrap(), 23);
+        cache.generation.advance();
+        assert!(scope.get(&1).is_none());
+        drop(scope);
     }
 
     #[test]

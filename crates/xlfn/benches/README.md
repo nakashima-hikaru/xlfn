@@ -101,3 +101,35 @@ follow-up for the 32-worker rows. Values are batch medians:
 | disjoint, 32 workers | 4.2866 ms | 4.0903 ms | 3.9854 ms | 4.0644 ms |
 
 There is no `miss_singleflight` row in this benchmark yet.
+
+## Scoped-read diagnostic
+
+The benchmark also exercises the phase-1 `CacheReadScope` path. It is gated by
+`bench-internals` and is not part of the production cache API yet. The scope
+holds one lookup-domain permit, uses borrowed `VersionedKeyRef` lookups, and
+avoids per-node pin increments and decrements while the lexical scope is alive.
+
+- `scoped_per_lookup`: one scope for each hit;
+- `scoped_batch`: one scope for the whole 1,000-hit worker batch;
+- `scoped_duration/lookups_N`: one scope with `N` repeated hits, to expose the
+  cost of keeping an observation scope open;
+- `concurrent_clear_latency/scope_N`: clear reaches reclamation while the
+  scoped reader is held, then the reader is released through a benchmark-only
+  synchronization hook. Its time includes coordination overhead and is a
+  protocol diagnostic, not a production clear-latency SLA.
+
+One local 1 s / 50-sample warm-hit run measured 114.34 µs for `current`,
+110.99 µs for `scoped_per_lookup`, 108.03 µs for `scoped_batch`, and
+106.86 µs for `arc_control`. This suggests that batching the observation
+permit removes a small recurring cost, while a scope per lookup is only about
+3% faster than the current lease path in this setup. The 32-worker scoped rows
+were scheduler-sensitive and should be re-measured on the target host before
+they are used for a design decision.
+
+A separate 500 ms / 30-sample run measured `scoped_duration/lookups_N` at
+approximately 2.56 µs, 3.48 µs, 12.59 µs, and 97.98 µs for
+`N = 1, 10, 100, 1,000`, respectively. These are batch times for one worker;
+Criterion throughput normalizes them by the number of hits. A separate 250 ms
+/ 15-sample clear-latency run measured approximately 17.3 µs, 18.0 µs, 25.5
+µs, and 87.6 µs for the same `N` values, showing the expected cost of holding
+the active scope while it performs post-clear lookups.
