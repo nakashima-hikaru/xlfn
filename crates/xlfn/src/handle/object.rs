@@ -367,8 +367,8 @@ impl ObjectBinding {
 impl Drop for ObjectBinding {
     fn drop(&mut self) {
         if self.armed {
-            // SAFETY: registry sealing waits for binding retirement before
-            // reclaiming the boxed arena.
+            // SAFETY: binding retirement waits for the read-domain grace
+            // period before dropping this capability.
             unsafe { self.arena.as_ref() }.release_binding(self.id);
         }
     }

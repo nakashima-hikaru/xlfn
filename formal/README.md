@@ -273,7 +273,7 @@ ownership algebra:
 `XlFnFormal/Handle/Publication` formalizes the published binding and object capability
 architecture under the redesign:
 
-- **Ownership model**: `BindingTable` owns `Box<BindingRecord>`. `PublishedBindings` exposes an
+- **Ownership model**: each live `BindingTable` slot owns one `Box<BindingRecord>`. `PublishedBindings` exposes an
   `AtomicPtr<BindingRecord>`, and readers hold an `OwnedOperationGuard` (admission permit).
   `ObjectArena` is the sole owner of each `ObjectCell`. A published `BindingRecord` holds a non-owning
   `ObjectBinding` capability, while `HandleLease<T>` holds a counted `pin` capability.

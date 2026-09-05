@@ -511,10 +511,12 @@ fn binding_read_lease_delays_object_reclamation_until_reader_exit() {
             HandleToken::new(&token),
         )
         .unwrap();
-    let snapshot = registry.bindings.published().load(parsed.id.slot);
-    let reader =
-        super::binding::BindingReadLease::new(snapshot, parsed.id, registry.bindings.read_domain())
-            .expect("inserted handle must admit a binding reader");
+    let reader = super::binding::BindingReadLease::new(
+        registry.bindings.published(),
+        parsed.id,
+        registry.bindings.read_domain(),
+    )
+    .expect("inserted handle must admit a binding reader");
     assert_eq!(reader.record().state(), BindingState::Live);
 
     let removal_registry = Arc::clone(&registry);
@@ -534,6 +536,127 @@ fn binding_read_lease_delays_object_reclamation_until_reader_exit() {
     finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     removal.join().unwrap();
     assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn slot_reuse_can_publish_while_old_record_waits_for_grace() {
+    use std::time::{Duration, Instant};
+
+    struct Counted(&'static str, Arc<AtomicUsize>);
+    impl ExcelHandleObject for Counted {}
+    impl Drop for Counted {
+        fn drop(&mut self) {
+            self.1.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let registry = Arc::new(HandleRegistry::new(1));
+    let old_token =
+        insert_production(&registry, Arc::new(Counted("old", Arc::clone(&drops)))).unwrap();
+    let parsed_old = registry
+        .codec
+        .parse(
+            std::ptr::from_ref(&registry).addr(),
+            HandleToken::new(&old_token),
+        )
+        .unwrap();
+    let old_reader = super::binding::BindingReadLease::new(
+        registry.bindings.published(),
+        parsed_old.id,
+        registry.bindings.read_domain(),
+    )
+    .unwrap();
+
+    let removal_registry = Arc::clone(&registry);
+    let old_token_for_removal = old_token.clone();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    let removal = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        removal_registry
+            .remove::<Counted>(&old_token_for_removal)
+            .unwrap();
+        finished_tx.send(()).unwrap();
+    });
+    started_rx.recv().unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        if let Some(state) = registry.bindings.try_read_state()
+            && state.slots[parsed_old.id.slot as usize].record.is_none()
+            && state.free.contains(&(parsed_old.id.slot as usize))
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "removal did not detach its slot");
+        std::thread::yield_now();
+    }
+
+    let new_token = insert_production(&registry, Arc::new(Counted("new", Arc::clone(&drops))))
+        .expect("the detached slot can be reused before the old grace period ends");
+    let parsed_new = registry
+        .codec
+        .parse(
+            std::ptr::from_ref(&registry).addr(),
+            HandleToken::new(&new_token),
+        )
+        .unwrap();
+    assert_eq!(parsed_new.id.slot, parsed_old.id.slot);
+    assert_ne!(parsed_new.id.generation, parsed_old.id.generation);
+    assert_eq!(old_reader.record().state(), BindingState::Retired);
+    crate::value::with_excel_call_scope(|scope| {
+        assert!(matches!(
+            registry.lookup_handle::<Counted>(scope, &old_token),
+            Err(XllError::StaleHandle)
+        ));
+        assert_eq!(
+            registry
+                .lookup_handle::<Counted>(scope, &new_token)
+                .unwrap()
+                .0,
+            "new"
+        );
+    });
+    assert!(finished_rx.try_recv().is_err());
+
+    drop(old_reader);
+    finished_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("old removal must finish after its reader exits");
+    removal.join().unwrap();
+
+    registry.remove::<Counted>(&new_token).unwrap();
+    assert_eq!(drops.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn single_slot_churn_reclaims_binding_records() {
+    struct Counted(Arc<AtomicUsize>);
+    impl ExcelHandleObject for Counted {}
+    impl Drop for Counted {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let registry = HandleRegistry::new(1);
+    let iterations = 10_000;
+
+    for _ in 0..iterations {
+        let token = insert_production(&registry, Arc::new(Counted(Arc::clone(&drops))))
+            .expect("single binding slot must be reusable");
+        registry
+            .remove::<Counted>(&token)
+            .expect("published binding must be removable");
+    }
+
+    assert_eq!(drops.load(Ordering::Relaxed), iterations);
+    let state = registry.bindings.read_state();
+    assert_eq!(state.live_bindings, 0);
+    assert_eq!(state.slots.len(), 1);
+    assert!(state.slots[0].record.is_none());
 }
 
 #[test]

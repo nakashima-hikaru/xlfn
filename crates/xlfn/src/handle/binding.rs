@@ -1,13 +1,14 @@
 //! Formula-binding ownership and non-owning read-side publication.
 //!
-//! Every binding record is uniquely owned by this table and retained as a
-//! tombstone until service reclamation. Atomic publication exposes only a
-//! pointer; a per-record operation permit protects the binding's object
-//! capability while a call reads it.
+//! Every live binding slot uniquely owns its record. During removal the record
+//! is moved to a local owner until the read domain's grace period completes.
+//! Atomic publication exposes only a pointer; the call-scoped read domain
+//! protects that pointer and the record's object capability while a call reads
+//! it.
 
 #![allow(
     unsafe_code,
-    reason = "binding reads use audited non-owning pointers protected by per-record drain gates"
+    reason = "binding reads use audited non-owning pointers protected by the read domain"
 )]
 
 use super::domain::{HandleDomainPermit, HandleReadDomain};
@@ -16,7 +17,7 @@ use super::token::HandleId;
 use crate::error::DomainErrorCode;
 use crate::generation::BindingGeneration;
 use crate::{XllError, XllResult};
-use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
+use parking_lot::{RwLock, RwLockWriteGuard};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 
@@ -40,7 +41,7 @@ impl BindingState {
 pub(crate) struct BindingRecord {
     pub(crate) id: HandleId,
     cell: NonNull<ObjectCell>,
-    object: Mutex<Option<ObjectBinding>>,
+    object: ObjectBinding,
     pub(crate) state: AtomicU8,
 }
 
@@ -55,7 +56,7 @@ impl BindingRecord {
         Self {
             id,
             cell,
-            object: Mutex::new(Some(object)),
+            object,
             state: AtomicU8::new(BindingState::Live as u8),
         }
     }
@@ -72,18 +73,21 @@ impl BindingRecord {
     }
 
     fn duplicate_object_binding(&self) -> XllResult<ObjectBinding> {
-        self.object
-            .lock()
-            .as_ref()
-            .ok_or(XllError::StaleHandle)?
-            .duplicate()
+        self.object.duplicate()
     }
 
-    fn retire(&self) -> ObjectBinding {
-        self.object
-            .lock()
-            .take()
-            .expect("binding retirement consumes one object capability")
+    #[allow(
+        clippy::boxed_local,
+        reason = "consume the retired Box after grace-period ownership is established"
+    )]
+    fn into_object_binding(self: Box<Self>) -> ObjectBinding {
+        let Self {
+            id: _,
+            cell: _,
+            object,
+            state: _,
+        } = *self;
+        object
     }
 }
 
@@ -96,8 +100,9 @@ impl BindingPtr {
     }
 
     fn get(self) -> &'static BindingRecord {
-        // SAFETY: binding records are table-owned tombstones and are not
-        // reclaimed until every publication/read has been withdrawn.
+        // SAFETY: the caller holds a read-domain admission or the table write
+        // lock, and the owning slot/local retirement owner keeps the record
+        // alive until all published reads have drained.
         unsafe { self.0.as_ref() }
     }
 }
@@ -122,11 +127,12 @@ pub(crate) struct BindingReadLease {
 impl BindingReadLease {
     #[cfg(test)]
     pub(crate) fn new(
-        snapshot: BindingSnapshot,
+        published: &PublishedBindings,
         id: HandleId,
         domain: &HandleReadDomain,
     ) -> XllResult<Self> {
         let permit = domain.enter()?;
+        let snapshot = published.load(id.slot);
         let record = snapshot.record.ok_or(XllError::StaleHandle)?;
         let record_ref = record.get();
         if record_ref.id != id || record_ref.state() != BindingState::Live {
@@ -164,12 +170,7 @@ impl BindingReadLease {
     }
 
     pub(crate) fn acquire_object_lease(&self) -> XllResult<super::object::ObjectLeaseGuard> {
-        self.record()
-            .object
-            .lock()
-            .as_ref()
-            .ok_or(XllError::StaleHandle)?
-            .acquire_lease()
+        self.record().object.acquire_lease()
     }
 }
 
@@ -226,18 +227,13 @@ impl PublishedBindings {
 
 pub(crate) struct BindingSlot {
     pub(crate) next_generation: BindingGeneration,
-    pub(crate) record: Option<BindingPtr>,
+    pub(crate) record: Option<Box<BindingRecord>>,
 }
 
 pub(crate) struct RegistryState {
     pub(crate) slots: Vec<BindingSlot>,
     pub(crate) free: Vec<usize>,
     pub(crate) live_bindings: u32,
-    #[allow(
-        clippy::vec_box,
-        reason = "BindingRecord requires stable heap addresses for non-owning BindingPtr"
-    )]
-    records: Vec<Box<BindingRecord>>,
 }
 
 pub(crate) struct BindingTable {
@@ -254,7 +250,6 @@ impl BindingTable {
                 slots: Vec::new(),
                 free: Vec::new(),
                 live_bindings: 0,
-                records: Vec::new(),
             }),
             published: PublishedBindings::new(maximum_bindings),
             read_domain: Box::new(HandleReadDomain::new()),
@@ -331,7 +326,8 @@ impl BindingTable {
         let record = state
             .slots
             .get(id.slot as usize)
-            .and_then(|slot| slot.record)
+            .and_then(|slot| slot.record.as_deref())
+            .map(BindingPtr::from_ref)
             .filter(|record| record.get().id == id)
             .ok_or(XllError::StaleHandle)?;
         Ok(BindingRemoval {
@@ -343,22 +339,24 @@ impl BindingTable {
         })
     }
 
-    pub(crate) fn retire_all(&self) -> (u32, Vec<ObjectBinding>) {
+    #[allow(
+        clippy::vec_box,
+        reason = "retired records must retain stable heap ownership until the grace period drains"
+    )]
+    pub(crate) fn retire_all(&self) -> (u32, Vec<Box<BindingRecord>>) {
         let mut state = self.state.write();
         let live_bindings = state.live_bindings;
         let mut retired = Vec::with_capacity(live_bindings as usize);
         state.free.clear();
         self.published.clear();
-        let mut records = Vec::with_capacity(live_bindings as usize);
         for index in 0..state.slots.len() {
             let reusable = {
                 let slot = &mut state.slots[index];
                 if let Some(record) = slot.record.take() {
                     record
-                        .get()
                         .state
                         .store(BindingState::Retired as u8, Ordering::Release);
-                    records.push(record);
+                    retired.push(record);
                 }
                 if let Some(next) = slot.next_generation.next() {
                     slot.next_generation = next;
@@ -374,9 +372,6 @@ impl BindingTable {
         state.live_bindings = 0;
         drop(state);
         self.read_domain.quiesce();
-        for record in records {
-            retired.push(record.get().retire());
-        }
         (live_bindings, retired)
     }
 }
@@ -399,8 +394,7 @@ impl BindingReservation<'_> {
             .expect("binding reservation owns the table write lock");
         let record = Box::new(BindingRecord::new(self.id, object));
         let pointer = BindingPtr::from_ref(record.as_ref());
-        state.records.push(record);
-        state.slots[self.index].record = Some(pointer);
+        state.slots[self.index].record = Some(record);
         self.table.published.insert(self.id, pointer);
         state.live_bindings = state
             .live_bindings
@@ -458,8 +452,8 @@ impl BindingRemoval<'_> {
             .slots
             .get_mut(self.id.slot as usize)
             .expect("binding slot was validated");
-        let slot_record = slot.record.take().expect("binding record was validated");
-        if slot_record != self.record {
+        let retired = slot.record.take().expect("binding record was validated");
+        if BindingPtr::from_ref(retired.as_ref()) != self.record {
             xlfn_kernel::invariant::fail_stop();
         }
         let reusable = if let Some(next) = slot.next_generation.next() {
@@ -478,7 +472,7 @@ impl BindingRemoval<'_> {
         self.active = false;
         drop(state);
         self.table.read_domain.quiesce();
-        drop(record.retire());
+        drop(retired.into_object_binding());
         reusable
     }
 }

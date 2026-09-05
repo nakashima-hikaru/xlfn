@@ -36,9 +36,10 @@ impl HandleObjectId {
 
 /// A call-scoped read capability for an object owned by a formula binding.
 ///
-/// The binding read lease owns the immutable publication snapshot. That
-/// snapshot owns the binding record, which owns the `ObjectCell` containing
-/// the payload. A warm lookup therefore does not clone the object `Arc`.
+/// The binding read lease anchors the immutable publication snapshot. That
+/// snapshot points to a slot-owned binding record, which holds an
+/// `ObjectBinding` capability into the `ObjectArena`-owned `ObjectCell`.
+/// A warm lookup therefore does not clone the object `Arc`.
 pub struct Handle<'call, T: ExcelHandleObject> {
     pub(crate) binding: BindingReadLease,
     pub(crate) value: TypedObjectProjection<T>,

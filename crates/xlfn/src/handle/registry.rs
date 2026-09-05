@@ -1,9 +1,9 @@
 //! Lifecycle and orchestration for the formula-handle registry.
 //!
-//! `BindingTable` is the only mutable binding store. Each published record
-//! owns its `ObjectCell`, while immutable snapshots provide the call-scoped
-//! read capability. There is no second object registry, retired queue, or
-//! resurrection path to keep in sync.
+//! `BindingTable` is the only mutable binding store. Each live slot owns its
+//! `BindingRecord`, which holds an `ObjectBinding` capability; immutable
+//! snapshots provide the call-scoped read capability. There is no second
+//! record arena or resurrection path to keep in sync.
 
 use super::binding::{BindingReadLease, BindingState, BindingTable};
 use super::object::{ObjectArena, ObjectBinding};
@@ -284,7 +284,7 @@ impl HandleRegistry {
             return Err(XllError::Closing);
         }
         let lease = BindingReadLease::new(
-            self.bindings.published().load(verified.id.slot),
+            self.bindings.published(),
             verified.id,
             self.bindings.read_domain(),
         )?;
