@@ -57,13 +57,13 @@ impl HandleObjectId {
 /// `ObjectBinding` capability into the `ObjectArena`-owned `ObjectCell`.
 /// A warm lookup therefore does not clone the object `Arc`.
 pub struct Handle<'call, T: ExcelHandleObject> {
-    pub(crate) binding: BindingReadLease,
+    pub(crate) binding: BindingReadLease<'call>,
     pub(crate) value: TypedObjectProjection<T>,
     pub(crate) _call: PhantomData<&'call crate::call::CallScope<'call>>,
 }
 
 impl<'call, T: ExcelHandleObject> Handle<'call, T> {
-    pub(crate) fn new(binding: BindingReadLease, value: TypedObjectProjection<T>) -> Self {
+    pub(crate) fn new(binding: BindingReadLease<'call>, value: TypedObjectProjection<T>) -> Self {
         Self {
             binding,
             value,
@@ -198,7 +198,7 @@ unsafe impl<T: ExcelHandleObject> Sync for PendingHandleLease<T> {}
 /// object. It carries the source binding snapshot directly, so address-reuse
 /// and resurrection machinery are unnecessary.
 pub struct HandleAlias<'call, T: ExcelHandleObject> {
-    pub(crate) binding: BindingReadLease,
+    pub(crate) binding: BindingReadLease<'call>,
     pub(crate) _call: PhantomData<HandleAliasMarker<'call, T>>,
 }
 

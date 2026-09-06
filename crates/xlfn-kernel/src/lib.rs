@@ -8,6 +8,7 @@ pub mod drain_gate;
 pub mod invariant;
 pub mod operation_gate;
 pub mod quota;
+pub mod rotating_read_domain;
 pub mod sealable_counter;
 pub mod service_slot;
 pub mod thread_affine;

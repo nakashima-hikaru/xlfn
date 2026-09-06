@@ -317,6 +317,7 @@ impl HandleRegistry {
         let binding = BindingReadLease::new_scoped(
             self.bindings.published().load(verified.id.slot),
             verified.id,
+            scope,
         )?;
         let record = binding.record();
         if record.state() != BindingState::Live {

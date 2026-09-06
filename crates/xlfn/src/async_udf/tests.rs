@@ -1462,11 +1462,12 @@ fn rejection_priority_old_generation_over_max_pending() {
         let (source, _token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
         let _ = manager.spawn(TEST_GENERATION, std::future::pending::<()>(), source);
     }
-    let (source_curr, token_curr) =
-        CancellationSource::new(CancellationGuarantee::CalculationScoped);
-    let res_curr = manager.spawn(TEST_GENERATION, std::future::pending::<()>(), source_curr);
+    // The production boundary reserves capacity before it owns a cancellation
+    // source. Use that path here so the assertion does not observe a token
+    // whose source was dropped by the test-only `spawn` helper and whose slot
+    // may be reused by another parallel test.
+    let res_curr = manager.reserve_spawn(TEST_GENERATION).map(drop);
     assert!(matches!(res_curr, Err(XllError::Overloaded)));
-    assert!(!token_curr.is_cancelled());
 
     assert!(manager.advance_generation());
     let gen2 = TEST_GENERATION + 1;

@@ -81,7 +81,7 @@ impl<'call> CallScope<'call> {
         if self.handle_permit.get().is_some() {
             return Ok(());
         }
-        let permit = domain.enter()?;
+        let permit = domain.enter_owned()?;
         let _ = self.handle_permit.set(permit);
         Ok(())
     }

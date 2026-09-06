@@ -11,7 +11,7 @@
     reason = "binding reads use audited non-owning pointers protected by the read domain"
 )]
 
-use super::domain::{HandleDomainPermit, HandleReadDomain};
+use super::domain::{HandleBindingDomainPermit, HandleReadDomain};
 use super::object::{ObjectBinding, ObjectCell};
 use super::token::HandleId;
 use crate::error::DomainErrorCode;
@@ -119,17 +119,17 @@ pub(crate) struct BindingSnapshot {
 
 /// A call-scoped capability that prevents one binding's object reference from
 /// being retired while it is projected into a typed handle.
-pub(crate) struct BindingReadLease {
+pub(crate) struct BindingReadLease<'domain> {
     record: BindingPtr,
-    _permit: Option<HandleDomainPermit>,
+    _permit: Option<HandleBindingDomainPermit<'domain>>,
 }
 
-impl BindingReadLease {
+impl<'domain> BindingReadLease<'domain> {
     #[cfg(test)]
     pub(crate) fn new(
         published: &PublishedBindings,
         id: HandleId,
-        domain: &HandleReadDomain,
+        domain: &'domain HandleReadDomain,
     ) -> XllResult<Self> {
         let permit = domain.enter()?;
         let snapshot = published.load(id.slot);
@@ -145,7 +145,11 @@ impl BindingReadLease {
     }
 
     #[inline]
-    pub(crate) fn new_scoped(snapshot: BindingSnapshot, id: HandleId) -> XllResult<Self> {
+    pub(crate) fn new_scoped(
+        snapshot: BindingSnapshot,
+        id: HandleId,
+        _scope: &'domain crate::call::CallScope<'domain>,
+    ) -> XllResult<Self> {
         let record = snapshot.record.ok_or(XllError::StaleHandle)?;
         let record_ref = record.get();
         if record_ref.id != id || record_ref.state() != BindingState::Live {
@@ -209,14 +213,22 @@ impl PublishedBindings {
 
     fn remove(&self, id: HandleId, expected: BindingPtr) {
         let Some(entry) = self.entries.get(id.slot as usize) else {
-            return;
+            xlfn_kernel::invariant::fail_stop();
         };
-        let _ = entry.compare_exchange(
-            expected.0.as_ptr(),
-            std::ptr::null_mut(),
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
+        if entry
+            .compare_exchange(
+                expected.0.as_ptr(),
+                std::ptr::null_mut(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            // A removal is serialized with the binding table write lock and
+            // must clear the exact pointer it observed. Any mismatch means
+            // the publication invariant has already been violated.
+            xlfn_kernel::invariant::fail_stop();
+        }
     }
 
     fn clear(&self) {
