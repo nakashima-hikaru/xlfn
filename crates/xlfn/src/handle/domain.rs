@@ -22,13 +22,39 @@ use xlfn_kernel::rotating_read_domain::{
     RotatingReadDomain, RotatingReadOwnedPermit, RotatingReadPermit,
 };
 
+use std::marker::PhantomData;
+use std::ptr::NonNull;
+
 pub(crate) struct HandleReadDomain {
     domain: RotatingReadDomain<DEFAULT_STRIPE_COUNT>,
 }
 
 pub(crate) struct HandleDomainPermit {
+    pub(crate) domain: NonNull<HandleReadDomain>,
     _permit: RotatingReadOwnedPermit<DEFAULT_STRIPE_COUNT>,
 }
+
+#[derive(Clone, Copy)]
+pub(crate) struct HandleDomainWitness<'scope> {
+    domain: NonNull<HandleReadDomain>,
+    _marker: PhantomData<&'scope ()>,
+}
+
+impl<'scope> HandleDomainWitness<'scope> {
+    #[inline]
+    pub(crate) fn new(domain: NonNull<HandleReadDomain>) -> Self {
+        Self {
+            domain,
+            _marker: PhantomData,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn domain(&self) -> NonNull<HandleReadDomain> {
+        self.domain
+    }
+}
+
 pub(crate) type HandleBindingDomainPermit<'domain> =
     RotatingReadPermit<'domain, DEFAULT_STRIPE_COUNT>;
 
@@ -55,7 +81,10 @@ impl HandleReadDomain {
         unsafe {
             self.domain
                 .enter_owned_current_thread()
-                .map(|permit| HandleDomainPermit { _permit: permit })
+                .map(|permit| HandleDomainPermit {
+                    domain: NonNull::from(self),
+                    _permit: permit,
+                })
                 .map_err(|_| XllError::Closing)
         }
     }

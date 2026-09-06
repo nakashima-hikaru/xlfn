@@ -97,6 +97,29 @@ impl Drop for HandleInitializationGuard {
     }
 }
 
+thread_local! {
+    static CURRENT_THREAD_READING_TOPIC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) fn is_current_thread_reading_topic() -> bool {
+    CURRENT_THREAD_READING_TOPIC.get()
+}
+
+struct TopicReadGuard;
+
+impl TopicReadGuard {
+    fn enter() -> Self {
+        CURRENT_THREAD_READING_TOPIC.set(true);
+        Self
+    }
+}
+
+impl Drop for TopicReadGuard {
+    fn drop(&mut self) {
+        CURRENT_THREAD_READING_TOPIC.set(false);
+    }
+}
+
 /// Runtime-owned handle topics. Application code never inserts or removes
 /// entries directly; generated UDF boundaries and Excel RTD callbacks do so.
 pub(crate) struct FormulaHandleService {
@@ -180,8 +203,12 @@ impl FormulaHandleService {
         // fall back to the canonical single-flight path. Make it Live only
         // after the initialization marker is removed.
         let token_wire = self.refinement_token(&publication.token);
-        self.topics
-            .commit_publication(key, generation, initialization, publication, || {
+        self.topics.commit_publication(
+            key,
+            generation,
+            initialization.clone(),
+            publication,
+            || {
                 self.refinement.observe_commit_and_activate(
                     &key,
                     initialization.refinement_id,
@@ -189,7 +216,8 @@ impl FormulaHandleService {
                 );
                 self.refinement
                     .observe_finish_initializer(initialization.refinement_id);
-            })?;
+            },
+        )?;
 
         initialization.complete();
         Ok(())
@@ -320,7 +348,7 @@ impl FormulaHandleService {
         // Cold path: no existing topic, invoke the factory.
         //
         let publication_reservation =
-            PublicationReservation::new(self, key, generation, initialization);
+            PublicationReservation::new(self, key, generation, initialization.clone());
         let prepared = create()?;
         let InsertedPublication {
             transaction: publication_txn,
@@ -369,6 +397,12 @@ impl FormulaHandleService {
     where
         F: FnOnce(&str, &str) -> XllResult<()>,
     {
+        let permit = self
+            .topics
+            .read_domain()
+            .enter_current_thread()
+            .map_err(|_| XllError::Closing)?;
+        let _guard = TopicReadGuard::enter();
         let Some(publication) = self.topics.published().load(&key) else {
             return Ok(None);
         };
@@ -391,10 +425,12 @@ impl FormulaHandleService {
                 }
                 PublishedTopicState::Provisional => {}
             }
+            drop(_guard);
+            drop(permit);
             return Err(error);
         }
 
-        match publication.state() {
+        let result = match publication.state() {
             PublishedTopicState::Live => {
                 self.refinement.observe_finish_warm_read(reader_id);
                 Ok(Some(HandlePreparation::Reused {
@@ -409,7 +445,10 @@ impl FormulaHandleService {
                 self.refinement.observe_abandon_warm_read(reader_id);
                 Err(XllError::StaleHandle)
             }
-        }
+        };
+        drop(_guard);
+        drop(permit);
+        result
     }
 
     #[cfg(any(target_os = "windows", test))]
@@ -587,6 +626,9 @@ impl FormulaHandleService {
         // the close transition to leave before closing the registry.
         //
         self.prepares.wait_for_idle();
+
+        let retired_topics = self.topics.seal_and_drain();
+        drop(retired_topics);
 
         let result = self.store.seal();
         self.refinement.observe_close_registry();

@@ -3319,3 +3319,49 @@ fn handle_config_rejects_an_unbounded_dense_publication_table() {
     assert!(invalid_limit.is_err());
     assert!(slot.is_none());
 }
+
+#[test]
+fn topic_table_tombstones_are_bounded_and_reclaimed() {
+    let runtime = FormulaHandleService::new(16);
+
+    // 1. Transient initialization failures leave zero initializing tombstones.
+    for i in 0..50 {
+        let key = test_topic_key(&format!("fail-init-{i}"));
+        let result = runtime.prepare(key, || -> XllResult<DataRecord> {
+            Err(XllError::InvalidHandle)
+        });
+        assert!(result.is_err());
+    }
+    assert_eq!(runtime.topics.read().initializing.len(), 0);
+
+    // 2. Churning publications and rollbacks reclaims retired topics.
+    for i in 0..50 {
+        let key = test_topic_key(&format!("churn-{i}"));
+        let _token = runtime
+            .prepare(key, || Ok(DataRecord(i)))
+            .unwrap()
+            .into_token();
+        let lifetime_key = key.format_lifetime_key();
+        runtime.rollback(&lifetime_key);
+    }
+    assert_eq!(runtime.topics.read().by_key.len(), 0);
+    assert_eq!(runtime.topics.read().by_lifetime_key.len(), 0);
+
+    // Drain retired topics
+    let drained = runtime.topics.try_quiesce_and_drain();
+    drop(drained);
+}
+
+#[test]
+fn handle_domain_witness_records_exact_domain() {
+    let domain1 = HandleReadDomain::new();
+    let domain2 = HandleReadDomain::new();
+
+    crate::call::with_excel_call_scope(|scope| {
+        let witness1 = scope.enter_handle_domain(&domain1).unwrap();
+        assert_eq!(witness1.domain(), std::ptr::NonNull::from(&domain1));
+
+        let witness2 = scope.enter_handle_domain(&domain2).unwrap();
+        assert_eq!(witness2.domain(), std::ptr::NonNull::from(&domain2));
+    });
+}

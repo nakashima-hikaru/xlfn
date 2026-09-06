@@ -313,11 +313,12 @@ impl HandleRegistry {
         if !self.is_open() {
             return Err(XllError::Closing);
         }
-        scope.enter_handle_domain(self.bindings.read_domain())?;
+        let witness = scope.enter_handle_domain(self.bindings.read_domain())?;
         let binding = BindingReadLease::new_scoped(
             self.bindings.published().load(verified.id.slot),
             verified.id,
-            scope,
+            self.bindings.read_domain(),
+            witness,
         )?;
         let record = binding.record();
         if record.state() != BindingState::Live {

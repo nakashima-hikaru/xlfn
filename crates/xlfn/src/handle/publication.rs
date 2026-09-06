@@ -50,7 +50,7 @@ impl Drop for TopicReservation<'_> {
         if self
             .runtime
             .topics
-            .finish_initialization(self.key, self.initialization)
+            .finish_initialization(self.key, self.initialization.clone())
         {
             self.runtime
                 .refinement
@@ -269,7 +269,12 @@ impl ObservedPublicationTxn<'_> {
             provisional,
             reservation,
         } = self;
-        runtime.commit_publication(key, generation, reservation.initialization, publication)?;
+        runtime.commit_publication(
+            key,
+            generation,
+            reservation.initialization.clone(),
+            publication,
+        )?;
         provisional.commit();
         reservation.commit();
         Ok(())

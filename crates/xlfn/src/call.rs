@@ -47,11 +47,18 @@ impl CallScratch {
 }
 
 /// A generative lifetime token for one generated Excel call boundary.
+enum HandlePermits {
+    Empty,
+    Single(crate::handle::HandleDomainPermit),
+    Multiple(Vec<crate::handle::HandleDomainPermit>),
+}
+
+/// A generative lifetime token for one generated Excel call boundary.
 #[doc(hidden)]
 pub struct CallScope<'call> {
     callbacks: HostCallbackSession,
     scratch: CallScratch,
-    handle_permit: std::cell::OnceCell<crate::handle::HandleDomainPermit>,
+    handle_permits: std::cell::RefCell<HandlePermits>,
     lifetime: PhantomData<&'call mut &'call ()>,
 }
 
@@ -60,7 +67,7 @@ impl<'call> CallScope<'call> {
         Self {
             callbacks: HostCallbackSession::new(),
             scratch: CallScratch::new(),
-            handle_permit: std::cell::OnceCell::new(),
+            handle_permits: std::cell::RefCell::new(HandlePermits::Empty),
             lifetime: PhantomData,
         }
     }
@@ -74,16 +81,39 @@ impl<'call> CallScope<'call> {
     }
 
     #[inline]
-    pub(crate) fn enter_handle_domain(
-        &self,
+    pub(crate) fn enter_handle_domain<'scope>(
+        &'scope self,
         domain: &crate::handle::HandleReadDomain,
-    ) -> XllResult<()> {
-        if self.handle_permit.get().is_some() {
-            return Ok(());
+    ) -> XllResult<crate::handle::HandleDomainWitness<'scope>> {
+        let domain_ptr = std::ptr::NonNull::from(domain);
+        let mut permits = self.handle_permits.borrow_mut();
+        match &*permits {
+            HandlePermits::Empty => {}
+            HandlePermits::Single(permit) => {
+                if permit.domain == domain_ptr {
+                    return Ok(crate::handle::HandleDomainWitness::new(domain_ptr));
+                }
+            }
+            HandlePermits::Multiple(list) => {
+                if list.iter().any(|p| p.domain == domain_ptr) {
+                    return Ok(crate::handle::HandleDomainWitness::new(domain_ptr));
+                }
+            }
         }
         let permit = domain.enter_owned()?;
-        let _ = self.handle_permit.set(permit);
-        Ok(())
+        match std::mem::replace(&mut *permits, HandlePermits::Empty) {
+            HandlePermits::Empty => {
+                *permits = HandlePermits::Single(permit);
+            }
+            HandlePermits::Single(existing) => {
+                *permits = HandlePermits::Multiple(vec![existing, permit]);
+            }
+            HandlePermits::Multiple(mut list) => {
+                list.push(permit);
+                *permits = HandlePermits::Multiple(list);
+            }
+        }
+        Ok(crate::handle::HandleDomainWitness::new(domain_ptr))
     }
 }
 

@@ -10,7 +10,7 @@
     reason = "owned permits are audited non-owning temporal capabilities"
 )]
 
-use crate::drain_gate::{StripedDrainGate, current_thread_stripe};
+use crate::drain_gate::{DEFAULT_STRIPE_COUNT, StripedDrainGate, current_thread_stripe};
 use parking_lot::Mutex;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -89,12 +89,6 @@ impl<const N: usize> RotatingReadDomain<N> {
         self.enter_impl(stripe, |_| {})
     }
 
-    /// Enters using the calling thread's assigned stripe.
-    #[inline]
-    pub fn enter_current_thread(&self) -> Result<RotatingReadPermit<'_, N>, DomainClosed> {
-        self.enter(current_thread_stripe())
-    }
-
     /// Enters the currently published generation with a permit whose storage
     /// is independent of the borrow of this domain.
     ///
@@ -129,21 +123,6 @@ impl<const N: usize> RotatingReadDomain<N> {
                 Err(_) => return Err(DomainClosed),
             }
         }
-    }
-
-    /// Enters the current generation with an owned permit using the calling
-    /// thread's assigned stripe.
-    ///
-    /// # Safety
-    ///
-    /// The caller must keep this domain alive until the returned permit is
-    /// dropped.
-    #[inline]
-    pub unsafe fn enter_owned_current_thread(
-        &self,
-    ) -> Result<RotatingReadOwnedPermit<N>, DomainClosed> {
-        // SAFETY: delegated to the caller's obligation for the domain owner.
-        unsafe { self.enter_owned(current_thread_stripe()) }
     }
 
     #[inline]
@@ -219,6 +198,23 @@ impl<const N: usize> RotatingReadDomain<N> {
         Some(self.rotate_and_run_locked(operation))
     }
 
+    /// Non-blocking quiesce that only rotates and runs `operation` if the
+    /// current generation has no active readers.
+    pub fn try_quiesce_if_idle<R>(
+        &self,
+        operation: impl FnOnce(DrainedGeneration) -> R,
+    ) -> Option<Result<R, DomainClosed>> {
+        let _transition = self.transition.try_lock()?;
+        if self.closed.load(Ordering::Acquire) {
+            return Some(Err(DomainClosed));
+        }
+        let old = self.current_generation();
+        if self.generations[old.index()].active() != 0 {
+            return None;
+        }
+        Some(self.rotate_and_run_locked(operation))
+    }
+
     fn rotate_and_run_locked<R>(
         &self,
         operation: impl FnOnce(DrainedGeneration) -> R,
@@ -252,6 +248,31 @@ impl<const N: usize> RotatingReadDomain<N> {
         self.closed.store(true, Ordering::Release);
         self.generations[0].seal_and_wait();
         self.generations[1].seal_and_wait();
+    }
+}
+
+impl RotatingReadDomain<DEFAULT_STRIPE_COUNT> {
+    /// Enters using the calling thread's assigned stripe.
+    #[inline]
+    pub fn enter_current_thread(
+        &self,
+    ) -> Result<RotatingReadPermit<'_, DEFAULT_STRIPE_COUNT>, DomainClosed> {
+        self.enter(current_thread_stripe())
+    }
+
+    /// Enters the current generation with an owned permit using the calling
+    /// thread's assigned stripe.
+    ///
+    /// # Safety
+    ///
+    /// The caller must keep this domain alive until the returned permit is
+    /// dropped.
+    #[inline]
+    pub unsafe fn enter_owned_current_thread(
+        &self,
+    ) -> Result<RotatingReadOwnedPermit<DEFAULT_STRIPE_COUNT>, DomainClosed> {
+        // SAFETY: delegated to the caller's obligation for the domain owner.
+        unsafe { self.enter_owned(current_thread_stripe()) }
     }
 }
 
@@ -483,6 +504,22 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("second transition must wait for the first callback");
         second.join().unwrap();
+    }
+
+    #[test]
+    fn enter_current_thread_only_on_default_stripe_count() {
+        let domain = RotatingReadDomain::<DEFAULT_STRIPE_COUNT>::new();
+        let permit = domain.enter_current_thread().unwrap();
+        assert_eq!(permit.stripe, current_thread_stripe());
+    }
+
+    #[test]
+    fn try_quiesce_if_idle_skips_when_readers_active() {
+        let domain = RotatingReadDomain::<DEFAULT_STRIPE_COUNT>::new();
+        let permit = domain.enter_current_thread().unwrap();
+        assert!(domain.try_quiesce_if_idle(|_| ()).is_none());
+        drop(permit);
+        assert!(domain.try_quiesce_if_idle(|_| ()).is_some());
     }
 
     #[cfg(not(all(target_os = "windows", target_arch = "x86")))]

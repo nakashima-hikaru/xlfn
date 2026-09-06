@@ -70,7 +70,7 @@ pub(crate) use binding::BindingState;
 #[cfg(any(target_os = "windows", test))]
 pub(crate) use connection::HandleConnection;
 pub(crate) use connection::{FormulaObserverId, Topic};
-pub(crate) use domain::{HandleDomainPermit, HandleReadDomain};
+pub(crate) use domain::{HandleDomainPermit, HandleDomainWitness, HandleReadDomain};
 #[cfg(any(test, feature = "bench-internals"))]
 pub(crate) use formula::FormulaCaller;
 #[cfg(any(test, feature = "refinement", feature = "bench-internals"))]
@@ -113,6 +113,8 @@ pub(crate) use topic::{
 pub(crate) use typed::GenerationLeaseBrand;
 #[cfg(all(feature = "async", feature = "handles"))]
 pub use typed::PendingHandleLease;
+#[cfg(all(test, not(all(feature = "async", feature = "handles"))))]
+pub(crate) use typed::PendingHandleLease;
 #[cfg(not(feature = "handles"))]
 pub(crate) use typed::{ExcelHandleObject, Handle, HandleAlias};
 #[cfg(feature = "handles")]

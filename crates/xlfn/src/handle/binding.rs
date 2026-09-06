@@ -148,8 +148,12 @@ impl<'domain> BindingReadLease<'domain> {
     pub(crate) fn new_scoped(
         snapshot: BindingSnapshot,
         id: HandleId,
-        _scope: &'domain crate::call::CallScope<'domain>,
+        expected_domain: &super::HandleReadDomain,
+        witness: super::HandleDomainWitness<'domain>,
     ) -> XllResult<Self> {
+        if witness.domain() != NonNull::from(expected_domain) {
+            xlfn_kernel::invariant::fail_stop();
+        }
         let record = snapshot.record.ok_or(XllError::StaleHandle)?;
         let record_ref = record.get();
         if record_ref.id != id || record_ref.state() != BindingState::Live {

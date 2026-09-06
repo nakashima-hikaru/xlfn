@@ -3,13 +3,13 @@ use super::FormulaHandleService;
 use super::FormulaLifetimeGeneration;
 #[cfg(any(target_os = "windows", test))]
 use super::HandleTopicKey;
-use super::PublishedTopicPtr;
+use super::PublishedTopic;
 #[cfg(any(target_os = "windows", test))]
 use crate::XllResult;
 
 pub(crate) struct Topic {
-    /// Non-owning identity into the topic table's publication arena.
-    pub(crate) publication: PublishedTopicPtr,
+    /// Heap-allocated publication. Non-owning PublishedTopicPtr references this.
+    pub(crate) publication: Box<PublishedTopic>,
     #[cfg(any(target_os = "windows", test))]
     pub(crate) lifetime_generation: Option<FormulaLifetimeGeneration>,
     pub(crate) observer: Option<FormulaObserverId>,

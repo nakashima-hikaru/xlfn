@@ -92,14 +92,14 @@ note: required by a bound in `xlfn::call_return::traits::assert_async_parameter`
    |     T: for<'call> ExcelParameter<'call, R::InputMode> + Send + 'static,
    |                                                         ^^^^ required by this bound in `assert_async_parameter`
 
-error[E0277]: `OnceCell<handle::domain::HandleDomainPermit>` cannot be shared between threads safely
+error[E0277]: `RefCell<xlfn::call::HandlePermits>` cannot be shared between threads safely
   --> tests/ui/fail_async/async_handle_input.rs:27:14
    |
 27 |     dataset: Handle<'_, Dataset>,
-   |              ^^^^^^^^^^^^^^^^^^^ `OnceCell<handle::domain::HandleDomainPermit>` cannot be shared between threads safely
+   |              ^^^^^^^^^^^^^^^^^^^ `RefCell<xlfn::call::HandlePermits>` cannot be shared between threads safely
    |
-   = help: within `xlfn::call::CallScope<'_>`, the trait `Sync` is not implemented for `OnceCell<handle::domain::HandleDomainPermit>`
-   = note: if you want to do aliasing and mutation between multiple threads, use `std::sync::OnceLock` instead
+   = help: within `xlfn::call::CallScope<'_>`, the trait `Sync` is not implemented for `RefCell<xlfn::call::HandlePermits>`
+   = note: if you want to do aliasing and mutation between multiple threads, use `std::sync::RwLock` instead
 note: required because it appears within the type `xlfn::call::CallScope<'_>`
   --> src/call.rs
    |

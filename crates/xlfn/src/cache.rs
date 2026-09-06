@@ -7,6 +7,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::NonNull;
 #[cfg(feature = "bench-internals")]
 use std::rc::Rc;
@@ -113,6 +114,25 @@ impl<V> std::ops::Deref for CacheLease<'_, V> {
     }
 }
 
+unsafe fn reclaim_cache_node<V>(ptr: *mut ()) {
+    // SAFETY: ptr points to an allocated CacheNode<V> whose grace period has ended.
+    let node = unsafe { Box::from_raw(ptr as *mut CacheNode<V>) };
+    let value = node.value;
+    if catch_unwind(AssertUnwindSafe(|| drop(value))).is_err() {
+        let error = XllError::Panic;
+        crate::diagnostics::report_no_unwind("calculation cache value final drop", &error);
+    }
+}
+
+fn reclaim_cache_entries<V>(entries: Vec<ReclaimEntry>) {
+    for entry in entries {
+        // SAFETY: [TR-RECLAIM-1] entry.0 points to an allocated CacheNode<V> whose grace period has ended.
+        unsafe {
+            reclaim_cache_node::<V>(entry.0);
+        }
+    }
+}
+
 impl<V> Drop for CacheLease<'_, V> {
     fn drop(&mut self) {
         // SAFETY: [TR-LEASE-1] self.node remains valid because a pin capability is held by this lease.
@@ -126,12 +146,8 @@ impl<V> Drop for CacheLease<'_, V> {
             // SAFETY: [TR-RECLAIM-1] The last pin was dropped on a retired (non-resident) node.
             let domain = unsafe { node.domain.as_ref() };
             domain.enqueue_reclaim(self.node.as_ptr() as *mut ());
-            domain.quiesce_and_reclaim(|ptr| {
-                // SAFETY: [TR-RECLAIM-1] Quiesced domain guarantees no in-flight observers.
-                unsafe {
-                    drop(Box::from_raw(ptr as *mut CacheNode<V>));
-                }
-            });
+            let retired = domain.quiesce_and_drain();
+            reclaim_cache_entries::<V>(retired);
         }
     }
 }
@@ -552,49 +568,45 @@ impl CacheLookupDomain {
         }
     }
 
-    fn quiesce_and_reclaim(&self, reclaim_fn: impl Fn(*mut ())) {
-        let _ = self.domain.quiesce(|generation| {
-            self.drain_generation(generation, &reclaim_fn);
-        });
+    fn quiesce_and_drain(&self) -> Vec<ReclaimEntry> {
+        self.domain
+            .quiesce(|generation| self.drain_generation(generation))
+            .unwrap_or_default()
     }
 
-    fn try_quiesce_and_reclaim(&self, reclaim_fn: impl Fn(*mut ())) {
+    fn try_quiesce_and_drain(&self) -> Vec<ReclaimEntry> {
         let current = self.domain.current_generation();
         if self.pending_reclaims[current.index()].lock().is_empty() {
-            return;
+            return Vec::new();
         }
-        let Some(result) = self.domain.try_quiesce(|generation| {
-            self.drain_generation(generation, &reclaim_fn);
-        }) else {
-            return;
+        let Some(result) = self
+            .domain
+            .try_quiesce(|generation| self.drain_generation(generation))
+        else {
+            return Vec::new();
         };
-        let _ = result;
+        result.unwrap_or_default()
     }
 
-    fn drain_generation(&self, generation: DrainedGeneration, reclaim_fn: &impl Fn(*mut ())) {
-        let items = {
-            let mut queue = self.pending_reclaims[generation.index()].lock();
-            std::mem::take(&mut *queue)
-        };
-        for entry in items {
-            reclaim_fn(entry.0);
-        }
+    fn drain_generation(&self, generation: DrainedGeneration) -> Vec<ReclaimEntry> {
+        let mut queue = self.pending_reclaims[generation.index()].lock();
+        std::mem::take(&mut *queue)
     }
 
     fn seal(&self) {
         self.domain.seal_and_wait();
     }
 
-    fn drain_all(&self, reclaim_fn: impl Fn(*mut ())) {
+    fn drain_all(&self) -> Vec<ReclaimEntry> {
+        let mut all = Vec::new();
         for gen_idx in 0..2 {
             let items = {
                 let mut queue = self.pending_reclaims[gen_idx].lock();
                 std::mem::take(&mut *queue)
             };
-            for entry in items {
-                reclaim_fn(entry.0);
-            }
+            all.extend(items);
         }
+        all
     }
 }
 
@@ -653,12 +665,8 @@ where
                 let cache = unsafe { &*(ptr as *const Self) };
                 cache.domain.seal();
                 cache.clear();
-                cache.domain.drain_all(|node_ptr| {
-                    // SAFETY: [TR-RECLAIM-1] Domain is sealed and all gates waited; safe to drop remaining nodes.
-                    unsafe {
-                        drop(Box::from_raw(node_ptr as *mut CacheNode<V>));
-                    }
-                });
+                let retired = cache.domain.drain_all();
+                reclaim_cache_entries::<V>(retired);
             }),
         }
     }
@@ -671,24 +679,16 @@ where
     #[must_use]
     pub fn used_weight(&self) -> usize {
         self.cache.run_pending_tasks();
-        self.domain.try_quiesce_and_reclaim(|ptr| {
-            // SAFETY: [TR-RECLAIM-1] Quiesced domain guarantees no in-flight observers.
-            unsafe {
-                drop(Box::from_raw(ptr as *mut CacheNode<V>));
-            }
-        });
+        let retired = self.domain.try_quiesce_and_drain();
+        reclaim_cache_entries::<V>(retired);
         usize::try_from(self.cache.weighted_size()).unwrap_or(usize::MAX)
     }
 
     #[must_use]
     pub fn len(&self) -> usize {
         self.cache.run_pending_tasks();
-        self.domain.try_quiesce_and_reclaim(|ptr| {
-            // SAFETY: [TR-RECLAIM-1] Quiesced domain guarantees no in-flight observers.
-            unsafe {
-                drop(Box::from_raw(ptr as *mut CacheNode<V>));
-            }
-        });
+        let retired = self.domain.try_quiesce_and_drain();
+        reclaim_cache_entries::<V>(retired);
         usize::try_from(self.cache.entry_count()).unwrap_or(usize::MAX)
     }
 
@@ -698,51 +698,45 @@ where
     }
 
     pub fn clear(&self) {
-        let _guard = self.clear_lock.lock();
-        let epoch = self.generation.advance();
-        self.cache
-            .invalidate_entries_if(move |key, _| key.epoch < epoch)
-            .expect("invalidation closures are enabled");
-        self.cache.run_pending_tasks();
-        self.domain.quiesce_and_reclaim(|ptr| {
-            // SAFETY: [TR-RECLAIM-1] Domain is quiesced outside Moka maintenance locks; safe to reclaim.
-            unsafe {
-                drop(Box::from_raw(ptr as *mut CacheNode<V>));
-            }
-        });
+        let retired = {
+            let _guard = self.clear_lock.lock();
+            let epoch = self.generation.advance();
+            self.cache
+                .invalidate_entries_if(move |key, _| key.epoch < epoch)
+                .expect("invalidation closures are enabled");
+            self.cache.run_pending_tasks();
+            self.domain.quiesce_and_drain()
+        };
+        reclaim_cache_entries::<V>(retired);
     }
 
     /// Benchmark-only synchronization hook for measuring a clear that reaches
     /// reclamation while a scoped reader is still active.
     #[cfg(feature = "bench-internals")]
     pub(crate) fn clear_with_quiesce_hook(&self, before_quiesce: impl FnOnce()) {
-        let _guard = self.clear_lock.lock();
-        let epoch = self.generation.advance();
-        self.cache
-            .invalidate_entries_if(move |key, _| key.epoch < epoch)
-            .expect("invalidation closures are enabled");
-        self.cache.run_pending_tasks();
-        before_quiesce();
-        self.domain.quiesce_and_reclaim(|ptr| {
-            // SAFETY: [TR-RECLAIM-1] Domain is quiesced outside Moka maintenance locks; safe to reclaim.
-            unsafe {
-                drop(Box::from_raw(ptr as *mut CacheNode<V>));
-            }
-        });
+        let retired = {
+            let _guard = self.clear_lock.lock();
+            let epoch = self.generation.advance();
+            self.cache
+                .invalidate_entries_if(move |key, _| key.epoch < epoch)
+                .expect("invalidation closures are enabled");
+            self.cache.run_pending_tasks();
+            before_quiesce();
+            self.domain.quiesce_and_drain()
+        };
+        reclaim_cache_entries::<V>(retired);
     }
 
     fn invalidate_before(&self, epoch: u64) {
-        let _guard = self.clear_lock.lock();
-        self.cache
-            .invalidate_entries_if(move |key, _| key.epoch < epoch)
-            .expect("invalidation closures are enabled");
-        self.cache.run_pending_tasks();
-        self.domain.quiesce_and_reclaim(|ptr| {
-            // SAFETY: [TR-RECLAIM-1] Domain is quiesced outside Moka maintenance locks; safe to reclaim.
-            unsafe {
-                drop(Box::from_raw(ptr as *mut CacheNode<V>));
-            }
-        });
+        let retired = {
+            let _guard = self.clear_lock.lock();
+            self.cache
+                .invalidate_entries_if(move |key, _| key.epoch < epoch)
+                .expect("invalidation closures are enabled");
+            self.cache.run_pending_tasks();
+            self.domain.quiesce_and_drain()
+        };
+        reclaim_cache_entries::<V>(retired);
     }
 
     pub fn get<'a>(&'a self, key: &K) -> Option<CacheLease<'a, V>> {
@@ -789,12 +783,8 @@ where
                 // SAFETY: [TR-RECLAIM-1] The node was retired (non-resident) and this was the last pin.
                 let domain = unsafe { domain_ptr.as_ref() };
                 domain.enqueue_reclaim(node_ptr.0.as_ptr() as *mut ());
-                domain.quiesce_and_reclaim(|ptr| {
-                    // SAFETY: [TR-RECLAIM-1] Domain is quiesced; safe to reclaim.
-                    unsafe {
-                        drop(Box::from_raw(ptr as *mut CacheNode<V>));
-                    }
-                });
+                let retired = domain.quiesce_and_drain();
+                reclaim_cache_entries::<V>(retired);
             }
             return None;
         }
@@ -1037,7 +1027,7 @@ mod tests {
 
         let rotating_domain = Arc::clone(&domain);
         let rotator = std::thread::spawn(move || {
-            rotating_domain.quiesce_and_reclaim(|_| {});
+            let _ = rotating_domain.quiesce_and_drain();
             rotated_tx.send(()).unwrap();
         });
 
@@ -1050,7 +1040,7 @@ mod tests {
 
         assert!(domain.pending_reclaims[0].lock().is_empty());
         assert_eq!(domain.pending_reclaims[1].lock().len(), 1);
-        domain.drain_all(|_| {});
+        let _ = domain.drain_all();
     }
 
     #[cfg(feature = "bench-internals")]
@@ -1129,12 +1119,8 @@ mod tests {
                             .any(|queue| !queue.lock().is_empty())
                     );
                     retired_tx.send(()).unwrap();
-                    cache_ref.domain.quiesce_and_reclaim(|ptr| {
-                        // SAFETY: The domain is quiesced before reclaiming the retired node.
-                        unsafe {
-                            drop(Box::from_raw(ptr as *mut CacheNode<DropProbe>));
-                        }
-                    });
+                    let retired = cache_ref.domain.quiesce_and_drain();
+                    reclaim_cache_entries::<DropProbe>(retired);
                     reclaim_done_tx.send(()).unwrap();
                 });
 
@@ -2077,5 +2063,70 @@ mod tests {
                 t3.join().unwrap();
             }
         });
+    }
+
+    #[test]
+    fn reentrant_clear_in_destructor_does_not_deadlock() {
+        struct ReentrantClear {
+            cache: Arc<CalculationCache<u32, ReentrantClear>>,
+            cleared: Arc<AtomicBool>,
+        }
+
+        impl Drop for ReentrantClear {
+            fn drop(&mut self) {
+                // If clear_lock or transition lock were held during reclamation,
+                // this reentrant clear() would deadlock.
+                self.cache.clear();
+                self.cleared.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let cleared = Arc::new(AtomicBool::new(false));
+        let cache = Arc::new(CalculationCache::<u32, ReentrantClear>::new(10));
+        let cache_clone = Arc::clone(&cache);
+        let cleared_clone = Arc::clone(&cleared);
+
+        drop(
+            cache
+                .get_or_try_insert_with(
+                    1,
+                    |_| 1,
+                    move || {
+                        Ok(ReentrantClear {
+                            cache: cache_clone,
+                            cleared: cleared_clone,
+                        })
+                    },
+                )
+                .unwrap(),
+        );
+
+        cache.clear();
+        assert!(cleared.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn panicking_destructor_is_contained_during_lease_drop() {
+        struct PanickingDrop {
+            _unused: u32,
+        }
+
+        impl Drop for PanickingDrop {
+            fn drop(&mut self) {
+                panic!("deliberate panic inside V::drop");
+            }
+        }
+
+        let cache = CalculationCache::<u32, PanickingDrop>::new(10);
+        let lease = cache
+            .get_or_try_insert_with(1, |_| 1, || Ok(PanickingDrop { _unused: 42 }))
+            .unwrap();
+
+        // Evict/clear the cache entry while lease is held
+        cache.clear();
+
+        // Dropping the lease triggers retirement and reclamation of PanickingDrop.
+        // The panic in PanickingDrop::drop must be caught and must not unwind out of lease.drop().
+        drop(lease);
     }
 }

@@ -160,6 +160,7 @@ unsafe impl<T: ExcelHandleObject> Sync for HandleLease<'_, T> {}
 #[cfg(any(feature = "async", test))]
 #[doc(hidden)]
 #[allow(
+    unreachable_pub,
     dead_code,
     reason = "The pending fields are consumed by the async scoped path"
 )]
