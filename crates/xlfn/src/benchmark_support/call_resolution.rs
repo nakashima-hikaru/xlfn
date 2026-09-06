@@ -144,7 +144,7 @@ impl Drop for ConcurrentHandleResolutionBenchmark {
     fn drop(&mut self) {
         self.start_tx.clear();
         for worker in self.workers.drain(..) {
-            let _ = worker.join();
+            let _ = crate::panic_boundary::contain_panic(worker.join());
         }
     }
 }

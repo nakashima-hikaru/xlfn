@@ -101,8 +101,10 @@ pub struct CacheLease<'a, V> {
     _marker: PhantomData<&'a V>,
 }
 
-// SAFETY: [TR-LEASE-1] CacheLease provides shared access to V and is tied to the node's pin capability.
-unsafe impl<V: Send> Send for CacheLease<'_, V> {}
+// SAFETY: [TR-LEASE-1] Moving a lease permits shared access alongside other
+// leases (V: Sync), and its final drop may destroy V on that thread (V: Send).
+// The lease's lifetime keeps the owning cache and reclamation domain alive.
+unsafe impl<V: Send + Sync> Send for CacheLease<'_, V> {}
 // SAFETY: [TR-LEASE-1] CacheLease provides shared access to V and is tied to the node's pin capability.
 unsafe impl<V: Sync> Sync for CacheLease<'_, V> {}
 
@@ -376,7 +378,7 @@ impl CacheOps {
 }
 
 struct CacheEntry {
-    cache: Box<ErasedCache>,
+    cache: xlfn_kernel::published_owner::PublishedOwner<ErasedCache>,
     ops: CacheOps,
 }
 
@@ -420,7 +422,7 @@ impl CacheRegistry {
                     });
                     let erased: Box<ErasedCache> = cache;
                     CacheEntry {
-                        cache: erased,
+                        cache: xlfn_kernel::published_owner::PublishedOwner::from_box(erased),
                         ops: CacheOps::of::<Marker, K, V>(),
                     }
                 });
@@ -529,10 +531,12 @@ impl<V> Clone for NodePtr<V> {
 
 impl<V> Copy for NodePtr<V> {}
 
-// SAFETY: NodePtr is internal to CalculationCache where V is Send + Sync.
-unsafe impl<V: Send> Send for NodePtr<V> {}
-// SAFETY: NodePtr is internal to CalculationCache where V is Send + Sync.
-unsafe impl<V: Sync> Sync for NodePtr<V> {}
+// SAFETY: NodePtr shares a pinned node with other readers (V: Sync), and the
+// receiving thread may retire it and eventually destroy its value (V: Send).
+unsafe impl<V: Send + Sync> Send for NodePtr<V> {}
+// SAFETY: NodePtr is Copy, so sharing a reference also lets its recipient
+// obtain a capability whose eventual retirement can destroy V there.
+unsafe impl<V: Send + Sync> Sync for NodePtr<V> {}
 
 struct CacheNode<V> {
     value: Box<V>,
@@ -755,7 +759,7 @@ impl CacheLookupDomain {
 pub struct CalculationCache<K, V> {
     weight_budget: usize,
     generation: CacheGeneration,
-    domain: Box<CacheLookupDomain>,
+    domain: xlfn_kernel::published_owner::PublishedOwner<CacheLookupDomain>,
     clear_lock: Mutex<()>,
     mutations: AtomicUsize,
     cache: Cache<VersionedKey<K>, (NodePtr<V>, u32)>,
@@ -790,7 +794,7 @@ where
         Self {
             weight_budget,
             generation: CacheGeneration::new(),
-            domain: Box::new(CacheLookupDomain::new()),
+            domain: xlfn_kernel::published_owner::PublishedOwner::new(CacheLookupDomain::new()),
             clear_lock: Mutex::new(()),
             mutations: AtomicUsize::new(0),
             cache: Cache::builder()
@@ -1162,6 +1166,20 @@ mod tests {
         fn hash<H: Hasher>(&self, state: &mut H) {
             self.value.hash(state);
         }
+    }
+
+    #[test]
+    fn cache_capabilities_require_shareable_values_to_cross_threads() {
+        static_assertions::assert_impl_all!(CacheLease<'static, u32>: Send, Sync);
+        static_assertions::assert_impl_all!(NodePtr<u32>: Send, Sync);
+        // Cell can be moved, but shared access from independent leases would
+        // race. Guard the capability's own contract, not only its constructors.
+        static_assertions::assert_not_impl_any!(CacheLease<'static, Cell<u32>>: Send, Sync);
+        static_assertions::assert_not_impl_any!(NodePtr<Cell<u32>>: Send, Sync);
+        static_assertions::assert_not_impl_any!(
+            NodePtr<std::sync::MutexGuard<'static, ()>>: Send, Sync
+        );
+        static_assertions::assert_not_impl_any!(CacheLease<'static, std::rc::Rc<u32>>: Send, Sync);
     }
 
     #[test]

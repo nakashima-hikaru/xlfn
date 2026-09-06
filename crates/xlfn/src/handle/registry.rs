@@ -10,11 +10,12 @@ use super::object::{ObjectArena, ObjectBinding, PendingObjectBinding};
 use super::token::{HandleId, HandleToken, ObjectId, TokenCodec};
 use super::{ExcelHandleObject, Handle};
 use crate::error::DomainErrorCode;
+use crate::panic_boundary::catch_no_unwind;
 use crate::{XllError, XllResult};
 #[cfg(any(test, feature = "refinement"))]
 use parking_lot::Mutex;
 use std::any::{TypeId, type_name};
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
@@ -54,7 +55,7 @@ pub(crate) struct HandleRegistry {
     pub(super) codec: TokenCodec,
     pub(super) phase: AtomicU8,
     pub(super) bindings: BindingTable,
-    pub(super) objects: Box<ObjectArena>,
+    pub(super) objects: xlfn_kernel::published_owner::PublishedOwner<ObjectArena>,
     next_object_id: AtomicU64,
     #[cfg(any(test, feature = "refinement"))]
     pub(super) trace: Mutex<Option<crate::shutdown_trace::ShutdownTraceHandle>>,
@@ -82,7 +83,7 @@ impl HandleRegistry {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_ENTROPY,
             };
             if report_failure {
-                let _ = catch_unwind(AssertUnwindSafe(|| {
+                let _ = catch_no_unwind(AssertUnwindSafe(|| {
                     tracing::error!(
                         error = ?source,
                         diagnostic_id = crate::diagnostics::id::DiagnosticId::HANDLE_ENTROPY.as_u64(),
@@ -109,7 +110,7 @@ impl HandleRegistry {
             codec: TokenCodec::new(session, secret),
             phase: AtomicU8::new(HandleRegistryPhase::Open as u8),
             bindings: BindingTable::new(maximum_bindings),
-            objects: Box::new(ObjectArena::new()),
+            objects: xlfn_kernel::published_owner::PublishedOwner::new(ObjectArena::new()),
             next_object_id: AtomicU64::new(1),
             #[cfg(any(test, feature = "refinement"))]
             trace: Mutex::new(None),
@@ -242,7 +243,7 @@ impl HandleRegistry {
             return Ok(());
         }
         let actual_type = object.object().type_name();
-        let _ = catch_unwind(AssertUnwindSafe(|| {
+        let _ = catch_no_unwind(AssertUnwindSafe(|| {
             tracing::warn!(
                 expected_type = type_name::<T>(),
                 actual_type,
@@ -303,7 +304,7 @@ impl HandleRegistry {
         }
         let Some(value) = record.object().typed_projection::<T>() else {
             let actual_type = record.object().type_name();
-            let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _ = catch_no_unwind(AssertUnwindSafe(|| {
                 tracing::warn!(
                     expected_type = type_name::<T>(),
                     actual_type,

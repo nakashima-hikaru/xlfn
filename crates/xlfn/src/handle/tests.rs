@@ -489,7 +489,7 @@ fn one_call_scope_can_borrow_from_each_runtime() {
 }
 
 #[test]
-fn binding_read_lease_delays_object_reclamation_until_reader_exit() {
+fn miri_binding_read_lease_delays_object_reclamation_until_reader_exit() {
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -526,7 +526,15 @@ fn binding_read_lease_delays_object_reclamation_until_reader_exit() {
         finished_tx.send(()).unwrap();
     });
     started_rx.recv().unwrap();
-    assert!(finished_rx.recv_timeout(Duration::from_millis(20)).is_err());
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while reader.record().state() == BindingState::Live {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "removal did not retire its publication"
+        );
+        std::thread::yield_now();
+    }
+    assert!(finished_rx.try_recv().is_err());
     assert_eq!(reader.record().state(), BindingState::Retired);
     assert_eq!(drops.load(Ordering::Relaxed), 0);
 
@@ -915,10 +923,12 @@ fn close_drops_values_outside_registry_lock() {
 
 #[test]
 fn close_contains_panicking_destructors_and_continues_dropping() {
-    struct PanicOnDrop;
+    struct PanicOnDrop(Arc<AtomicUsize>);
     impl Drop for PanicOnDrop {
         fn drop(&mut self) {
-            panic!("injected handle destructor panic");
+            std::panic::panic_any(crate::panic_boundary::tests::PanickingPayload(Arc::clone(
+                &self.0,
+            )));
         }
     }
 
@@ -930,13 +940,15 @@ fn close_contains_panicking_destructors_and_continues_dropping() {
     }
 
     let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let payload_drops = Arc::new(AtomicUsize::new(0));
     let registry = HandleRegistry::new(2);
-    insert_production(&registry, Arc::new(PanicOnDrop)).unwrap();
+    insert_production(&registry, Arc::new(PanicOnDrop(Arc::clone(&payload_drops)))).unwrap();
     insert_production(&registry, Arc::new(CountOnDrop(Arc::clone(&drops)))).unwrap();
 
     assert!(matches!(registry.seal().map(|_| ()), Err(XllError::Panic)));
     assert_eq!(registry.len(), 0);
     assert_eq!(drops.load(Ordering::Relaxed), 1);
+    assert_eq!(payload_drops.load(Ordering::Acquire), 0);
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3067,18 +3079,25 @@ fn registry_close_drops_each_handle_exactly_once() {
 
 #[test]
 fn drop_panic_is_recorded_in_handle_cleanup_state() {
-    struct PanickingDrop;
+    struct PanickingDrop(Arc<AtomicUsize>);
     impl ExcelHandleObject for PanickingDrop {}
     impl Drop for PanickingDrop {
         fn drop(&mut self) {
-            panic!("intended destructor panic in test");
+            std::panic::panic_any(crate::panic_boundary::tests::PanickingPayload(Arc::clone(
+                &self.0,
+            )));
         }
     }
 
     let runtime = FormulaHandleService::new(16);
+    let payload_drops = Arc::new(AtomicUsize::new(0));
     let key = test_topic_key("drop_panic_test");
     let token = runtime
-        .prepare_observed(key, || Ok(PanickingDrop), |_, _| Ok(()))
+        .prepare_observed(
+            key,
+            || Ok(PanickingDrop(Arc::clone(&payload_drops))),
+            |_, _| Ok(()),
+        )
         .unwrap()
         .into_token();
 
@@ -3092,6 +3111,7 @@ fn drop_panic_is_recorded_in_handle_cleanup_state() {
         runtime.store.registry.cleanup_result(),
         Err(XllError::Panic)
     ));
+    assert_eq!(payload_drops.load(Ordering::Acquire), 0);
 }
 
 #[test]
@@ -3377,12 +3397,13 @@ fn handle_domain_witness_records_exact_domain() {
     let domain1 = HandleReadDomain::new();
     let domain2 = HandleReadDomain::new();
 
-    crate::call::with_excel_call_scope(|scope| {
-        let witness1 = scope.enter_handle_domain(&domain1).unwrap();
-        assert_eq!(witness1.domain(), std::ptr::NonNull::from(&domain1));
+    let domains = (domain1, domain2);
+    crate::call::with_excel_call_scope_and_state(&domains, |(domain1, domain2), scope| {
+        let witness1 = scope.enter_handle_domain(domain1).unwrap();
+        assert_eq!(witness1.domain(), std::ptr::NonNull::from(domain1));
 
-        let witness2 = scope.enter_handle_domain(&domain2).unwrap();
-        assert_eq!(witness2.domain(), std::ptr::NonNull::from(&domain2));
+        let witness2 = scope.enter_handle_domain(domain2).unwrap();
+        assert_eq!(witness2.domain(), std::ptr::NonNull::from(domain2));
     });
 }
 
@@ -3465,4 +3486,33 @@ fn rejects_object_binding_from_foreign_registry() {
         pending.publish::<DataRecord>(&second),
         Err(XllError::StaleHandle)
     ));
+}
+
+#[test]
+fn miri_topic_close_unpublishes_before_reclamation_can_run() {
+    let runtime = FormulaHandleService::new(4);
+    let key = test_topic_key("close_publication_order");
+    runtime
+        .prepare(key, || Ok(DataRecord(42)))
+        .unwrap()
+        .into_token();
+    let reclaim_count = std::cell::Cell::new(0);
+    let discovered_retired_topic = std::cell::Cell::new(false);
+
+    let initializations = runtime.topics.close_with_reclaim_hook(|| {
+        // Model a remover that already released the table write lock before
+        // close began, and now runs reclamation beside the close operation.
+        let retired = runtime.topics.try_quiesce_and_drain();
+        reclaim_count.set(reclaim_count.get() + retired.len());
+        drop(retired);
+
+        // A previously admitted prepare may enter the new read generation
+        // here. It must not discover any pointer whose owner was reclaimed.
+        let lease = runtime.topics.enter_read_lease().unwrap();
+        discovered_retired_topic.set(discovered_retired_topic.get() || lease.load(&key).is_some());
+    });
+
+    assert!(initializations.is_empty());
+    assert_eq!(reclaim_count.get(), 1);
+    assert!(!discovered_retired_topic.get());
 }

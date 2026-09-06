@@ -1603,14 +1603,23 @@ fn rollback_records_subscription_cleanup_error() {
     ));
 }
 
-struct PanickingCancelSubscription;
+struct PanickingCancelSubscription {
+    payload_drops: Arc<AtomicUsize>,
+    phases: Arc<AtomicUsize>,
+}
 // SAFETY: test subscription tests cancel panic handling without unsafe effects.
 unsafe impl RtdSubscription for PanickingCancelSubscription {
     fn request_cancel(&self) {
-        panic!("request_cancel panic test");
+        self.phases.fetch_add(1, Ordering::AcqRel);
+        std::panic::panic_any(crate::panic_boundary::tests::PanickingPayload(Arc::clone(
+            &self.payload_drops,
+        )));
     }
     fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
-        Ok(())
+        self.phases.fetch_add(1, Ordering::AcqRel);
+        std::panic::panic_any(crate::panic_boundary::tests::PanickingPayload(Arc::clone(
+            &self.payload_drops,
+        )));
     }
 }
 
@@ -1619,6 +1628,9 @@ fn request_cancel_panic_propagates_to_termination() {
     let (arena, source, _, _) = publishing_source(Some(0.0f64));
     let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime.register_test_server(1);
+
+    let payload_drops = Arc::new(AtomicUsize::new(0));
+    let phases = Arc::new(AtomicUsize::new(0));
 
     let prep = runtime
         .prepare(&source, RtdTopic::single("cancel_panic").unwrap())
@@ -1632,15 +1644,43 @@ fn request_cancel_panic_propagates_to_termination() {
     conn.commit().unwrap();
 
     {
-        server
-            .test_server()
-            .subscriptions
-            .lock()
-            .insert(TopicId(1), Box::new(PanickingCancelSubscription));
+        server.test_server().subscriptions.lock().insert(
+            TopicId(1),
+            Box::new(PanickingCancelSubscription {
+                payload_drops: Arc::clone(&payload_drops),
+                phases: Arc::clone(&phases),
+            }),
+        );
+        server.test_server().subscriptions.lock().insert(
+            TopicId(2),
+            Box::new(PanickingCancelSubscription {
+                payload_drops: Arc::clone(&payload_drops),
+                phases: Arc::clone(&phases),
+            }),
+        );
     }
 
     let res = server.terminate();
     assert!(matches!(res, Err(XllError::Panic)));
+    assert_eq!(phases.load(Ordering::Acquire), 4);
+    assert_eq!(payload_drops.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn notifier_drop_retains_panicking_payload() {
+    struct Notifier(Arc<AtomicUsize>);
+    impl Drop for Notifier {
+        fn drop(&mut self) {
+            std::panic::panic_any(crate::panic_boundary::tests::PanickingPayload(Arc::clone(
+                &self.0,
+            )));
+        }
+    }
+
+    let payload_drops = Arc::new(AtomicUsize::new(0));
+    let result = super::server::drop_notifier_no_unwind(Some(Notifier(Arc::clone(&payload_drops))));
+    assert!(matches!(result, Err(XllError::Panic)));
+    assert_eq!(payload_drops.load(Ordering::Acquire), 0);
 }
 
 struct DelayedSubscribeFailingSource {

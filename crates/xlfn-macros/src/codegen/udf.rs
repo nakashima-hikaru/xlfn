@@ -495,7 +495,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                 #(#raw_names: *mut #krate::__private::v1::XLOPER12,)*
                 __async_handle: *mut #krate::__private::v1::XLOPER12,
             ) {
-                #boundary
+                #krate::__private::v1::export_void_boundary(|| { #boundary });
             }
         }
     } else {
@@ -509,7 +509,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
             pub unsafe extern "system" fn #export_ident(
                 #(#raw_names: *mut #krate::__private::v1::XLOPER12),*
             ) -> *mut #krate::__private::v1::XLOPER12 {
-                #boundary
+                #krate::__private::v1::export_value_boundary(|| { #boundary })
             }
         }
     };

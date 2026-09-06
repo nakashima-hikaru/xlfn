@@ -1,0 +1,346 @@
+[
+  {
+    "path": "crates/xlfn-kernel/src/service_slot.rs",
+    "context": "# [ cfg ( test ) ] mod tests",
+    "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",
+    "count": 1,
+    "category": "test",
+    "reason": "Test-only import; each direct test call is separately inventoried by function, source context, and occurrence count."
+  },
+  {
+    "path": "crates/xlfn-kernel/src/service_slot.rs",
+    "context": "# [ cfg ( test ) ] mod tests / # [ test ] fn initialization_panic_is_retained_and_wakes_waiters",
+    "code": "let result = catch_unwind(AssertUnwindSafe(|| {",
+    "count": 1,
+    "category": "test",
+    "reason": "Observes the fixed string initialization panic escaping an intentionally propagating slot API."
+  },
+  {
+    "path": "crates/xlfn-kernel/src/service_slot.rs",
+    "context": "# [ cfg ( test ) ] mod tests / # [ test ] fn replaceable_slot_precommit_panic_leaves_active_and_inactive_intact",
+    "code": "let result = catch_unwind(AssertUnwindSafe(|| {",
+    "count": 1,
+    "category": "test",
+    "reason": "Observes the fixed string precommit panic and checks both slots remain valid."
+  },
+  {
+    "path": "crates/xlfn-kernel/src/service_slot.rs",
+    "context": "# [ cfg ( test ) ] mod tests / # [ test ] fn shutdown_panic_retains_runtime_as_teardown_fault",
+    "code": "let result = catch_unwind(AssertUnwindSafe(|| {",
+    "count": 1,
+    "category": "test",
+    "reason": "Observes the fixed string shutdown panic and checks the retained teardown-fault state."
+  },
+  {
+    "path": "crates/xlfn-package/src/tests.rs",
+    "context": "# [ test ] fn arbitrary_bytes_never_panic_the_pe_parser",
+    "code": "let result = std::panic::catch_unwind(|| parse_pe_bytes(&bytes));",
+    "count": 1,
+    "category": "test",
+    "reason": "Parser robustness regression asserts the data-only parser never unwinds."
+  },
+  {
+    "path": "crates/xlfn-package/src/tests.rs",
+    "context": "# [ test ] fn generated_bytes_never_panic_the_pe_parser",
+    "code": "prop_assert!(std::panic::catch_unwind(|| parse_pe_bytes(&bytes)).is_ok());",
+    "count": 1,
+    "category": "test",
+    "reason": "Property test asserts arbitrary generated parser input never unwinds."
+  },
+  {
+    "path": "crates/xlfn/benches/experiments/cache_node_layout.rs",
+    "context": "fn drop_boxed",
+    "code": "catch_unwind(AssertUnwindSafe(|| drop(value))).is_err()",
+    "count": 1,
+    "category": "experiment",
+    "reason": "Standalone cache-node layout experiment only; the fixture Drop and warmup panic with fixed standard string payloads. Never linked into the framework."
+  },
+  {
+    "path": "crates/xlfn/benches/experiments/cache_node_layout.rs",
+    "context": "fn drop_direct",
+    "code": "catch_unwind(AssertUnwindSafe(|| drop(node))).is_err()",
+    "count": 1,
+    "category": "experiment",
+    "reason": "Standalone cache-node layout experiment only; the fixture Drop and warmup panic with fixed standard string payloads. Never linked into the framework."
+  },
+  {
+    "path": "crates/xlfn/benches/experiments/cache_node_layout.rs",
+    "context": "fn main",
+    "code": "assert!(catch_unwind(|| panic!( )).is_err());",
+    "count": 1,
+    "category": "experiment",
+    "reason": "Standalone cache-node layout experiment only; the fixture Drop and warmup panic with fixed standard string payloads. Never linked into the framework."
+  },
+  {
+    "path": "crates/xlfn/benches/experiments/cache_node_layout.rs",
+    "context": "module root",
+    "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",
+    "count": 1,
+    "category": "experiment",
+    "reason": "Standalone cache-node layout experiment only; the fixture Drop and warmup panic with fixed standard string payloads. Never linked into the framework."
+  },
+  {
+    "path": "crates/xlfn/src/async_udf.rs",
+    "context": "# [ cfg ( test ) ]",
+    "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",
+    "count": 1,
+    "category": "test",
+    "reason": "Test-only import; each direct test call is separately inventoried by function, source context, and occurrence count."
+  },
+  {
+    "path": "crates/xlfn/src/async_udf/tests.rs",
+    "context": "# [ test ] fn async_udf_boundary_catches_unhandled_panics_at_ffi_boundary",
+    "code": "let result = catch_unwind(AssertUnwindSafe(|| unsafe {",
+    "count": 1,
+    "category": "test",
+    "reason": "Negative observer asserts the async boundary consumes its hostile fixture payload; an escaped panic is a test failure."
+  },
+  {
+    "path": "crates/xlfn/src/async_udf/tests.rs",
+    "context": "# [ test ] fn test_worker_panic_recovers_local_queue_tasks_to_injector",
+    "code": "let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {",
+    "count": 1,
+    "category": "test",
+    "reason": "Observes the fixed string worker fault to inspect recovered local tasks."
+  },
+  {
+    "path": "crates/xlfn/src/cache.rs",
+    "context": "# [ cfg ( test ) ] mod tests / # [ test ] fn panicking_computation_does_not_leave_a_stuck_singleflight",
+    "code": "let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {",
+    "count": 1,
+    "category": "test",
+    "reason": "Observes the fixed string computation panic intentionally propagated by the cache API."
+  },
+  {
+    "path": "crates/xlfn/src/cache.rs",
+    "context": "# [ cfg ( test ) ] mod tests / # [ test ] fn panicking_weight_does_not_leave_a_stuck_singleflight",
+    "code": "let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {",
+    "count": 1,
+    "category": "test",
+    "reason": "Observes the fixed string weight panic intentionally propagated by the cache API."
+  },
+  {
+    "path": "crates/xlfn/src/cancellation.rs",
+    "context": "# [ cfg ( test ) ] mod tests / # [ test ] fn panicking_waker_does_not_stop_later_cancellation_notifications",
+    "code": "std::panic::catch_unwind(AssertUnwindSafe(|| source.cancel())).is_ok(),",
+    "count": 1,
+    "category": "test",
+    "reason": "Negative observer asserts the cancellation loop contains the fixture waker panic."
+  },
+  {
+    "path": "crates/xlfn/src/diagnostics.rs",
+    "context": "# [ cfg ( test ) ]",
+    "code": "use std::panic::catch_unwind;",
+    "count": 1,
+    "category": "test",
+    "reason": "Test-only import; each direct test call is separately inventoried by function, source context, and occurrence count."
+  },
+  {
+    "path": "crates/xlfn/src/diagnostics.rs",
+    "context": "# [ cfg ( test ) ] mod tests / # [ test ] fn panicking_tracing_subscriber_does_not_unwind_report_no_unwind",
+    "code": "let result = catch_unwind(AssertUnwindSafe(|| {",
+    "count": 1,
+    "category": "test",
+    "reason": "Negative observer asserts the diagnostic reporting boundary contains the fixture tracing panic."
+  },
+  {
+    "path": "crates/xlfn/src/execution.rs",
+    "context": "# [ cfg ( test ) ]",
+    "code": "use std::panic::catch_unwind;",
+    "count": 1,
+    "category": "test",
+    "reason": "Test-only import; each direct test call is separately inventoried by function, source context, and occurrence count."
+  },
+  {
+    "path": "crates/xlfn/src/execution.rs",
+    "context": "# [ cfg ( test ) ] mod tests / # [ test ] fn panicking_layer_exit_does_not_skip_outer_layers",
+    "code": "let result = catch_unwind(AssertUnwindSafe(|| {",
+    "count": 1,
+    "category": "test",
+    "reason": "Negative observer asserts layer teardown contains the fixture panic while exiting all layers."
+  },
+  {
+    "path": "crates/xlfn/src/handle.rs",
+    "context": "# [ cfg ( test ) ]",
+    "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",
+    "count": 1,
+    "category": "test",
+    "reason": "Test-only import; each direct test call is separately inventoried by function, source context, and occurrence count."
+  },
+  {
+    "path": "crates/xlfn/src/handle/tests.rs",
+    "context": "# [ test ] fn panicking_factory_does_not_publish_a_topic",
+    "code": "let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {",
+    "count": 1,
+    "category": "test",
+    "reason": "Observes the fixed string factory panic intentionally propagated to the UDF caller."
+  },
+  {
+    "path": "crates/xlfn/src/panic_boundary.rs",
+    "context": "fn catch_no_unwind",
+    "code": "contain_panic(std::panic::catch_unwind(operation))",
+    "count": 1,
+    "category": "implementation",
+    "reason": "The sole shared consuming implementation immediately passes the raw result to contain_panic."
+  },
+  {
+    "path": "crates/xlfn/src/return_abi/mod.rs",
+    "context": "fn destroy_thread_local_return_block",
+    "code": "let result = catch_unwind(AssertUnwindSafe(|| {",
+    "count": 1,
+    "category": "resume",
+    "reason": "destroy_thread_local_return_block poisons partially destroyed TLS storage and resumes the original payload; free_return_boundary consumes it."
+  },
+  {
+    "path": "crates/xlfn/src/return_abi/mod.rs",
+    "context": "module root",
+    "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",
+    "count": 1,
+    "category": "resume",
+    "reason": "Import for the audited resume-only boundary. destroy_thread_local_return_block poisons partially destroyed TLS storage and resumes the original payload; free_return_boundary consumes it."
+  },
+  {
+    "path": "crates/xlfn/src/rtd/windows.rs",
+    "context": "# [ cfg ( test ) ]",
+    "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",
+    "count": 1,
+    "category": "test",
+    "reason": "Test-only import; each direct test call is separately inventoried by function, source context, and occurrence count."
+  },
+  {
+    "path": "crates/xlfn/src/rtd/windows/server.rs",
+    "context": "fn deferred_termination_worker",
+    "code": "let outcome = catch_unwind(AssertUnwindSafe(|| {",
+    "count": 1,
+    "category": "resume",
+    "reason": "deferred_termination_worker finishes phase/refcount cleanup and resumes the original payload; TerminationWorker::join consumes it before publishing Joined."
+  },
+  {
+    "path": "crates/xlfn/src/rtd/windows/server.rs",
+    "context": "module root",
+    "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",
+    "count": 1,
+    "category": "resume",
+    "reason": "Import for the audited resume-only boundary. deferred_termination_worker finishes phase/refcount cleanup and resumes the original payload; TerminationWorker::join consumes it before publishing Joined."
+  },
+  {
+    "path": "crates/xlfn/src/rtd/windows/tests.rs",
+    "context": "# [ test ] fn panicking_git_revocation_retry_requeues_claim",
+    "code": "let result = catch_unwind(AssertUnwindSafe(|| {",
+    "count": 1,
+    "category": "test",
+    "reason": "Observes a fixed string test-hook panic and checks the revocation claim is requeued."
+  },
+  {
+    "path": "crates/xlfn/src/subscription.rs",
+    "context": "# [ cfg ( test ) ]",
+    "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",
+    "count": 1,
+    "category": "test",
+    "reason": "Test-only import; each direct test call is separately inventoried by function, source context, and occurrence count."
+  },
+  {
+    "path": "crates/xlfn/src/subscription/channel.rs",
+    "context": "# [ cfg ( test ) ] mod tests",
+    "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",
+    "count": 1,
+    "category": "test",
+    "reason": "Test-only import; each direct test call is separately inventoried by function, source context, and occurrence count."
+  },
+  {
+    "path": "crates/xlfn/src/subscription/channel.rs",
+    "context": "# [ cfg ( test ) ] mod tests / # [ test ] fn publisher_only_setup_error_and_unwind_join_before_return",
+    "code": "let result = catch_unwind(AssertUnwindSafe(move || {",
+    "count": 1,
+    "category": "test",
+    "reason": "Observes the fixed string setup panic and verifies the owned worker is joined during unwind."
+  },
+  {
+    "path": "crates/xlfn/src/subscription/channel.rs",
+    "context": "# [ cfg ( test ) ] mod tests / # [ test ] fn unwinding_owner_joins_workers_before_losing_subscription",
+    "code": "catch_unwind(AssertUnwindSafe(move || {",
+    "count": 1,
+    "category": "test",
+    "reason": "Observes the fixed string owner panic after the subscription joins during unwind."
+  },
+  {
+    "path": "crates/xlfn/src/subscription/data_plane.rs",
+    "context": "fn drive_notification",
+    "code": "let res = catch_unwind(AssertUnwindSafe(|| self.host.notify(&attempt.notifier)));",
+    "count": 1,
+    "category": "resume",
+    "reason": "drive_notification records callback cleanup failure and resumes the original payload to the enclosing caller boundary."
+  },
+  {
+    "path": "crates/xlfn/src/subscription/data_plane.rs",
+    "context": "module root",
+    "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",
+    "count": 1,
+    "category": "resume",
+    "reason": "Import for the audited resume-only boundary. drive_notification records callback cleanup failure and resumes the original payload to the enclosing caller boundary."
+  },
+  {
+    "path": "crates/xlfn/src/subscription/runtime.rs",
+    "context": "fn connect_transaction",
+    "code": "let sub_res = catch_unwind(AssertUnwindSafe(|| source.subscribe(&topic, erased_sink)));",
+    "count": 1,
+    "category": "resume",
+    "reason": "connect_transaction rolls back the connection reservation and resumes the original subscribe payload to the enclosing caller boundary."
+  },
+  {
+    "path": "crates/xlfn/src/subscription/runtime.rs",
+    "context": "module root",
+    "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",
+    "count": 1,
+    "category": "resume",
+    "reason": "Import for the audited resume-only boundary. connect_transaction rolls back the connection reservation and resumes the original subscribe payload to the enclosing caller boundary."
+  },
+  {
+    "path": "crates/xlfn/src/subscription/tests.rs",
+    "context": "# [ test ] fn refresh_batch_drop_on_unwind_does_not_deadlock",
+    "code": "let res = catch_unwind(AssertUnwindSafe(|| {",
+    "count": 1,
+    "category": "test",
+    "reason": "Observes the fixed string caller panic and verifies refresh reservations roll back."
+  },
+  {
+    "path": "crates/xlfn/src/subscription/tests.rs",
+    "context": "# [ test ] fn server_notification_panic_records_cleanup_failure",
+    "code": "let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {",
+    "count": 1,
+    "category": "test",
+    "reason": "Observes the fixed string notifier panic intentionally resumed by drive_notification."
+  },
+  {
+    "path": "crates/xlfn/src/subscription/tests.rs",
+    "context": "# [ test ] fn server_terminate_owner_unwind_notifies_waiter",
+    "code": "let res_owner = catch_unwind(AssertUnwindSafe(|| owner.finish(cancel_res)));",
+    "count": 1,
+    "category": "test",
+    "reason": "Observes a fixed string termination test-hook panic and verifies waiter completion."
+  },
+  {
+    "path": "crates/xlfn/src/value.rs",
+    "context": "# [ cfg ( test ) ] # [ allow ( unsafe_code , reason = ) ] mod tests / # [ test ] fn matrix_index_rejects_each_out_of_bounds_dimension_before_flattening",
+    "code": "assert!(std::panic::catch_unwind(|| matrix[(0, 2)]).is_err());",
+    "count": 1,
+    "category": "test",
+    "reason": "Observes standard-library bounds assertion payloads from invalid matrix indices."
+  },
+  {
+    "path": "crates/xlfn/src/value.rs",
+    "context": "# [ cfg ( test ) ] # [ allow ( unsafe_code , reason = ) ] mod tests / # [ test ] fn matrix_index_rejects_each_out_of_bounds_dimension_before_flattening",
+    "code": "assert!(std::panic::catch_unwind(|| matrix[(2, 0)]).is_err());",
+    "count": 1,
+    "category": "test",
+    "reason": "Observes standard-library bounds assertion payloads from invalid matrix indices."
+  },
+  {
+    "path": "crates/xlfn/src/value.rs",
+    "context": "# [ cfg ( test ) ] # [ allow ( unsafe_code , reason = ) ] mod tests / # [ test ] fn matrix_index_rejects_each_out_of_bounds_dimension_before_flattening",
+    "code": "std::panic::catch_unwind(|| matrix[(usize::MAX, 2)]).is_err(),",
+    "count": 1,
+    "category": "test",
+    "reason": "Observes standard-library bounds assertion payloads from invalid matrix indices."
+  }
+]

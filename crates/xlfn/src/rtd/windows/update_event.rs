@@ -11,15 +11,12 @@ use std::ptr::{self, NonNull};
 use std::rc::Rc;
 #[cfg(test)]
 use std::sync::Arc;
+use xlfn_kernel::published_owner::PublishedOwner;
 
-#[allow(
-    clippy::vec_box,
-    reason = "Callback allocations act as heap-stable tombstones for the server lifetime"
-)]
 #[derive(Default)]
 pub(super) struct ServerCallbacks {
     pub(super) active: Option<CallbackPtr>,
-    pub(super) records: Vec<Box<RetainedUpdateCallback>>,
+    pub(super) records: Vec<PublishedOwner<RetainedUpdateCallback>>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -214,6 +211,7 @@ pub(super) fn install_callback(
     callbacks: &Mutex<ServerCallbacks>,
     callback: Box<RetainedUpdateCallback>,
 ) -> CallbackPtr {
+    let callback = PublishedOwner::from_box(callback);
     let mut callbacks = callbacks.lock();
     let ptr = CallbackPtr(NonNull::from(&*callback));
     callbacks.records.push(callback);

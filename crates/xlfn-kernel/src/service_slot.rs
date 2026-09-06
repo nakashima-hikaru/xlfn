@@ -6,11 +6,13 @@
 //! the teardown owner. No read capability participates in shared ownership.
 
 use crate::drain_gate::{DEFAULT_STRIPE_COUNT, StripedDrainGate, StripedDrainPermit};
+use crate::published_owner::PublishedOwner;
 use parking_lot::{Condvar, Mutex};
 use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 use std::ops::Deref;
 use std::ptr::NonNull;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 
 /// Number of reader stripes for the generation service slot.
@@ -36,15 +38,18 @@ pub enum GenerationServiceState<C, R, E> {
     },
     Initializing,
     Ready {
-        runtime: Box<R>,
+        runtime: PublishedOwner<R>,
     },
     Sealing,
     InitFaulted {
-        fault: ServiceFault<E>,
+        // Only fault snapshots use shared ownership: readers can clone E
+        // after unlocking, even if another transition removes the fault.
+        // This intentionally requires E: Sync for a thread-safe slot.
+        fault: Arc<ServiceFault<E>>,
     },
     TeardownFaulted {
-        fault: ServiceFault<E>,
-        runtime: ManuallyDrop<Box<R>>,
+        fault: Arc<ServiceFault<E>>,
+        runtime: ManuallyDrop<PublishedOwner<R>>,
     },
 }
 
@@ -91,8 +96,11 @@ impl<'slot, C, R, E: Clone> InitializingTxn<'slot, C, R, E> {
         runtime: Box<R>,
         on_initialized: impl FnOnce(&R),
     ) -> GenerationServiceRead<'slot, R> {
+        // Convert before publishing: moving a Box would retag its allocation
+        // while readers may still hold pointers into it.
+        let runtime = PublishedOwner::from_box(runtime);
         // Keep the callback outside the state lock. If it panics, Drop owns
-        // the transition to InitFaulted and the local Box is reclaimed.
+        // the transition to InitFaulted and the local owner is reclaimed.
         on_initialized(runtime.as_ref());
         let pointer = NonNull::from(runtime.as_ref());
 
@@ -109,13 +117,21 @@ impl<'slot, C, R, E: Clone> InitializingTxn<'slot, C, R, E> {
             .readers
             .reopen()
             .unwrap_or_else(|_| crate::invariant::fail_stop());
+        // Reserve the initializer's read under the lifecycle lock. A sealer
+        // cannot withdraw the just-published runtime between commit and read.
+        let permit = self
+            .slot
+            .readers
+            .try_enter_current()
+            .unwrap_or_else(|_| crate::invariant::fail_stop());
         self.committed = true;
         self.slot.changed.notify_all();
         drop(state);
 
-        self.slot
-            .read_if_ready()
-            .expect("a committed service is immediately readable")
+        GenerationServiceRead {
+            pointer,
+            _permit: permit,
+        }
     }
 
     fn fail(mut self, error: E) -> ServiceSlotError<E> {
@@ -125,6 +141,7 @@ impl<'slot, C, R, E: Clone> InitializingTxn<'slot, C, R, E> {
     }
 
     fn record_fault(&mut self, fault: ServiceFault<E>) {
+        let fault = Arc::new(fault);
         let mut state = self.slot.state.lock();
         if matches!(&*state, GenerationServiceState::Initializing) {
             *state = GenerationServiceState::InitFaulted { fault };
@@ -143,7 +160,7 @@ impl<C, R, E: Clone> Drop for InitializingTxn<'_, C, R, E> {
 
 struct SealingTxn<'slot, C, R, E: Clone> {
     slot: &'slot GenerationServiceSlot<C, R, E>,
-    runtime: Option<Box<R>>,
+    runtime: Option<PublishedOwner<R>>,
     committed: bool,
 }
 
@@ -157,10 +174,10 @@ impl<C, R, E: Clone> SealingTxn<'_, C, R, E> {
             .as_ref()
             .expect("a sealing transaction owns its runtime root");
         let result = shutdown(runtime.as_ref());
-        let mut state = self.slot.state.lock();
 
         match result {
             Ok(sealed) => {
+                let mut state = self.slot.state.lock();
                 *state = GenerationServiceState::Closed;
                 self.committed = true;
                 self.slot.changed.notify_all();
@@ -169,15 +186,21 @@ impl<C, R, E: Clone> SealingTxn<'_, C, R, E> {
                     .runtime
                     .take()
                     .expect("a successful seal transfers its runtime root");
-                Ok(ServiceSeal::Present { runtime, sealed })
+                Ok(ServiceSeal::Present {
+                    runtime: runtime.into_box(),
+                    sealed,
+                })
             }
             Err(error) => {
+                // E::clone is user code and must run outside the state mutex.
+                let fault = Arc::new(ServiceFault::Error(error.clone()));
+                let mut state = self.slot.state.lock();
                 let runtime = self
                     .runtime
                     .take()
                     .expect("a failed seal retains its runtime root");
                 *state = GenerationServiceState::TeardownFaulted {
-                    fault: ServiceFault::Error(error.clone()),
+                    fault,
                     runtime: ManuallyDrop::new(runtime),
                 };
                 self.committed = true;
@@ -191,10 +214,11 @@ impl<C, R, E: Clone> SealingTxn<'_, C, R, E> {
         let Some(runtime) = self.runtime.take() else {
             return;
         };
+        let fault = Arc::new(ServiceFault::Panicked);
         let mut state = self.slot.state.lock();
         if matches!(&*state, GenerationServiceState::Sealing) {
             *state = GenerationServiceState::TeardownFaulted {
-                fault: ServiceFault::Panicked,
+                fault,
                 runtime: ManuallyDrop::new(runtime),
             };
             self.slot.changed.notify_all();
@@ -248,8 +272,11 @@ impl<C, R, E> GenerationServiceSlot<C, R, E> {
         let mut state = self.state.lock();
         match &*state {
             GenerationServiceState::Cold { .. } | GenerationServiceState::InitFaulted { .. } => {
-                *state = GenerationServiceState::Closed;
+                let retired = std::mem::replace(&mut *state, GenerationServiceState::Closed);
                 self.changed.notify_all();
+                drop(state);
+                // Config and error destructors may inspect or reenter the slot.
+                drop(retired);
                 Ok(())
             }
             GenerationServiceState::Closed => Ok(()),
@@ -325,7 +352,9 @@ impl<C, R, E: Clone> GenerationServiceSlot<C, R, E> {
                 }
                 GenerationServiceState::InitFaulted { fault }
                 | GenerationServiceState::TeardownFaulted { fault, .. } => {
-                    return Err(ServiceSlotError::Fault(fault.clone()));
+                    let fault = Arc::clone(fault);
+                    drop(state);
+                    return Err(ServiceSlotError::Fault(fault.as_ref().clone()));
                 }
                 GenerationServiceState::Initializing | GenerationServiceState::Sealing => {
                     self.changed.wait(&mut state);
@@ -380,6 +409,12 @@ impl<C, R, E: Clone> GenerationServiceSlot<C, R, E> {
                 self.changed.wait(&mut state);
             }
 
+            if let GenerationServiceState::TeardownFaulted { fault, .. } = &*state {
+                let fault = Arc::clone(fault);
+                drop(state);
+                return Err(ServiceSlotError::Fault(fault.as_ref().clone()));
+            }
+
             match std::mem::replace(&mut *state, GenerationServiceState::Sealing) {
                 GenerationServiceState::Ready { runtime } => {
                     self.readers.seal();
@@ -387,24 +422,18 @@ impl<C, R, E: Clone> GenerationServiceSlot<C, R, E> {
                         .store(std::ptr::null_mut(), Ordering::Release);
                     runtime
                 }
-                GenerationServiceState::Cold { .. }
-                | GenerationServiceState::InitFaulted { .. } => {
+                retired @ (GenerationServiceState::Cold { .. }
+                | GenerationServiceState::InitFaulted { .. }
+                | GenerationServiceState::Closed) => {
                     *state = GenerationServiceState::Closed;
                     self.changed.notify_all();
+                    drop(state);
+                    drop(retired);
                     return Ok(ServiceSeal::Empty(empty()));
                 }
-                GenerationServiceState::Closed => {
-                    *state = GenerationServiceState::Closed;
-                    return Ok(ServiceSeal::Empty(empty()));
-                }
-                GenerationServiceState::TeardownFaulted { fault, runtime } => {
-                    *state = GenerationServiceState::TeardownFaulted {
-                        fault: fault.clone(),
-                        runtime,
-                    };
-                    return Err(ServiceSlotError::Fault(fault));
-                }
-                GenerationServiceState::Initializing | GenerationServiceState::Sealing => {
+                GenerationServiceState::Initializing
+                | GenerationServiceState::Sealing
+                | GenerationServiceState::TeardownFaulted { .. } => {
                     unreachable!()
                 }
             }
@@ -469,7 +498,7 @@ impl<R> Deref for RetiredService<R> {
 pub struct ReplaceableLane<R> {
     published: AtomicPtr<R>,
     readers: StripedDrainGate<SERVICE_READER_STRIPES>,
-    owner: Mutex<Option<Box<R>>>,
+    owner: Mutex<Option<PublishedOwner<R>>>,
     _runtime: PhantomData<R>,
 }
 
@@ -606,6 +635,7 @@ impl<R> ReplaceableServiceSlot<R> {
 
         precommit(had_previous, current_ref)?;
 
+        let candidate = PublishedOwner::from_box(candidate);
         let pointer = {
             let mut owner = target_lane.owner.lock();
             let slot = owner.insert(candidate);
@@ -634,14 +664,14 @@ impl<R> ReplaceableServiceSlot<R> {
                 .lock()
                 .take()
                 .unwrap_or_else(|| crate::invariant::fail_stop());
-            Ok(Some(RetiredService::new(old)))
+            Ok(Some(RetiredService::new(old.into_box())))
         } else {
             Ok(None)
         }
     }
 
     /// Closes the active lane, drains all active readers, unlinks the service,
-    /// and returns the retired Box<R> if any was active.
+    /// and returns the retired `Box<R>` if any was active.
     pub fn close(&self) -> Option<RetiredService<R>> {
         let _guard = self.transition.lock();
         let current_index = self.active.load(Ordering::Acquire);
@@ -661,7 +691,7 @@ impl<R> ReplaceableServiceSlot<R> {
             .lock()
             .take()
             .unwrap_or_else(|| crate::invariant::fail_stop());
-        Some(RetiredService::new(old))
+        Some(RetiredService::new(old.into_box()))
     }
 
     /// Validates the reset invariant:
@@ -719,6 +749,9 @@ mod tests {
     assert_impl_all!(GenerationServiceSlot<(), u32, ()>: Send, Sync);
     assert_impl_all!(GenerationServiceSlot<(), Cell<u32>, ()>: Send);
     assert_not_impl_any!(GenerationServiceSlot<(), Cell<u32>, ()>: Sync);
+    // Fault snapshots may be read concurrently after the lifecycle lock is
+    // released, so a shared slot requires a Sync error payload as well.
+    assert_not_impl_any!(GenerationServiceSlot<(), u32, Cell<u32>>: Send, Sync);
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct TestError(&'static str);
@@ -727,6 +760,160 @@ mod tests {
     struct Service;
 
     type Slot = GenerationServiceSlot<NonCopyConfig, Service, TestError>;
+
+    #[test]
+    fn miri_generation_read_remains_valid_while_seal_moves_the_owner() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let slot = GenerationServiceSlot::<(), AtomicUsize, ()>::new();
+        slot.arm(()).unwrap();
+        let read = slot
+            .read(|_| Ok(Box::new(AtomicUsize::new(4))), |_| {})
+            .unwrap();
+        std::thread::scope(|scope| {
+            let sealer = scope.spawn(|| slot.seal(|| (), |_| Ok(())).unwrap());
+            while !slot.readers.is_sealed() {
+                std::thread::yield_now();
+            }
+            // Seal has withdrawn publication and moved the unique owner into
+            // its transaction, but the outstanding capability remains valid.
+            assert_eq!(read.fetch_add(1, Ordering::Relaxed), 4);
+            drop(read);
+            let (runtime, ()) = sealer.join().unwrap().into_parts();
+            assert_eq!(runtime.unwrap().load(Ordering::Relaxed), 5);
+        });
+    }
+
+    #[test]
+    fn miri_replaceable_read_remains_valid_during_replacement_and_close() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let slot = ReplaceableServiceSlot::<AtomicUsize>::new();
+        slot.replace_with(Box::new(AtomicUsize::new(4)), |_, _| Ok::<_, ()>(()))
+            .unwrap();
+        let read = slot.read_if_ready().unwrap();
+        std::thread::scope(|scope| {
+            let replacer = scope.spawn(|| {
+                slot.replace_with(Box::new(AtomicUsize::new(9)), |_, _| Ok::<_, ()>(()))
+                    .unwrap()
+                    .unwrap()
+            });
+            while !slot.lanes[0].readers.is_sealed() {
+                std::thread::yield_now();
+            }
+            assert_eq!(read.fetch_add(1, Ordering::Relaxed), 4);
+            drop(read);
+            assert_eq!(replacer.join().unwrap().load(Ordering::Relaxed), 5);
+        });
+        let read = slot.read_if_ready().unwrap();
+        std::thread::scope(|scope| {
+            let closer = scope.spawn(|| slot.close().unwrap());
+            while slot.is_active() {
+                std::thread::yield_now();
+            }
+            assert_eq!(read.fetch_add(1, Ordering::Relaxed), 9);
+            drop(read);
+            assert_eq!(closer.join().unwrap().load(Ordering::Relaxed), 10);
+        });
+    }
+
+    #[test]
+    fn miri_cold_config_drop_and_empty_callback_can_inspect_the_slot() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        struct Config(Box<dyn Fn() + Send + Sync>);
+        impl Drop for Config {
+            fn drop(&mut self) {
+                (self.0)();
+            }
+        }
+        let drops = Arc::new(AtomicUsize::new(0));
+        for disarm in [false, true] {
+            let slot = Arc::new(GenerationServiceSlot::<Config, (), ()>::new());
+            let weak = Arc::downgrade(&slot);
+            let drops = Arc::clone(&drops);
+            slot.arm(Config(Box::new(move || {
+                let slot = weak.upgrade().unwrap();
+                assert!(
+                    slot.state.try_lock().is_some(),
+                    "config Drop ran under the state lock"
+                );
+                assert!(slot.is_none());
+                drops.fetch_add(1, Ordering::Relaxed);
+            })))
+            .unwrap();
+            if disarm {
+                slot.disarm().unwrap();
+            } else {
+                slot.seal(
+                    || {
+                        assert!(
+                            slot.state.try_lock().is_some(),
+                            "empty callback ran under the state lock"
+                        );
+                        assert!(slot.is_none());
+                    },
+                    |_| Ok(()),
+                )
+                .unwrap();
+            }
+            slot.seal(
+                || {
+                    assert!(
+                        slot.state.try_lock().is_some(),
+                        "closed callback ran under the state lock"
+                    );
+                    assert!(slot.is_none());
+                },
+                |_| Ok(()),
+            )
+            .unwrap();
+        }
+        assert_eq!(drops.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn miri_fault_clones_can_inspect_the_slot_outside_the_state_lock() {
+        use std::sync::{
+            Arc, Weak,
+            atomic::{AtomicUsize, Ordering},
+        };
+        #[derive(Debug)]
+        struct Error {
+            slot: Weak<GenerationServiceSlot<(), (), Error>>,
+            clones: Arc<AtomicUsize>,
+        }
+        impl Clone for Error {
+            fn clone(&self) -> Self {
+                let slot = self.slot.upgrade().unwrap();
+                assert!(
+                    slot.state.try_lock().is_some(),
+                    "error Clone ran under the state lock"
+                );
+                let _ = slot.is_none();
+                self.clones.fetch_add(1, Ordering::Relaxed);
+                Self {
+                    slot: Weak::clone(&self.slot),
+                    clones: Arc::clone(&self.clones),
+                }
+            }
+        }
+        let slot = Arc::new(GenerationServiceSlot::<(), (), Error>::new());
+        let clones = Arc::new(AtomicUsize::new(0));
+        let error = || Error {
+            slot: Arc::downgrade(&slot),
+            clones: Arc::clone(&clones),
+        };
+        slot.arm(()).unwrap();
+        assert!(slot.read(|_| Err(error()), |_| {}).is_err());
+        assert!(slot.read(|_| Ok(Box::new(())), |_| {}).is_err());
+        slot.disarm().unwrap();
+        slot.arm(()).unwrap();
+        drop(slot.read(|_| Ok(Box::new(())), |_| {}).unwrap());
+        assert!(slot.seal(|| (), |_| Err(error())).is_err());
+        assert!(slot.seal(|| (), |_| Ok(())).is_err());
+        assert_eq!(clones.load(Ordering::Relaxed), 4);
+    }
 
     #[test]
     fn initialization_moves_a_non_copy_config_once() {
@@ -759,8 +946,8 @@ mod tests {
         assert!(matches!(
             &*slot.state.lock(),
             GenerationServiceState::InitFaulted {
-                fault: ServiceFault::Panicked,
-            }
+                fault,
+            } if matches!(fault.as_ref(), ServiceFault::Panicked)
         ));
         assert!(matches!(
             slot.read(|_| Ok(Box::new(Service)), |_| {}),
@@ -799,9 +986,9 @@ mod tests {
         assert!(matches!(
             &*slot.state.lock(),
             GenerationServiceState::TeardownFaulted {
-                fault: ServiceFault::Panicked,
+                fault,
                 ..
-            }
+            } if matches!(fault.as_ref(), ServiceFault::Panicked)
         ));
         assert!(matches!(
             slot.seal(|| (), |_| Ok(())),

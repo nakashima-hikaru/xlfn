@@ -8,6 +8,7 @@ use std::pin::Pin;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::task::{Context, Poll};
+use xlfn_kernel::published_owner::PublishedOwner;
 
 const STATE_RUNNING: u8 = 0;
 const STATE_CANCELED: u8 = 1;
@@ -40,12 +41,8 @@ struct SlotWaiters {
     entries: FxHashMap<u64, std::task::Waker>,
 }
 
-#[allow(
-    clippy::vec_box,
-    reason = "Boxes guarantee stable heap addresses when the slots vector grows"
-)]
 struct CancellationRegistryState {
-    slots: Vec<Box<CancellationSlot>>,
+    slots: Vec<PublishedOwner<CancellationSlot>>,
     free: Vec<u32>,
 }
 
@@ -83,7 +80,7 @@ impl CancellationRegistry {
         } else {
             let index =
                 u32::try_from(state.slots.len()).expect("cancellation slot index exhausted");
-            let slot = Box::new(CancellationSlot {
+            let slot = PublishedOwner::new(CancellationSlot {
                 generation: AtomicU64::new(1),
                 source_live: AtomicBool::new(true),
                 cancelled: AtomicBool::new(false),
@@ -692,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn repoll_across_slot_reuse_preserves_new_generation_waiter() {
+    fn miri_repoll_across_slot_reuse_preserves_new_generation_waiter() {
         // Cover both a previously registered waiter (the ID collision) and a
         // first poll that reaches registration only after the slot is reused.
         for already_registered in [false, true] {

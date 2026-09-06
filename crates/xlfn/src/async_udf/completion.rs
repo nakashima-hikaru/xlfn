@@ -2,10 +2,11 @@ use super::excel_handle::ExcelAsyncResponder;
 use crate::call_return::{ExcelReturn, ReturnContext};
 use crate::cancellation::CancellationToken;
 use crate::error::ExcelCallbackStatus;
+use crate::panic_boundary::catch_no_unwind;
 use crate::return_abi::AsyncReturnPointer;
 use crate::{XllError, XllResult};
-use futures_util::{Future, FutureExt};
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use futures_util::Future;
+use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 use xlfn_sys::{XLOPER12, XLTYPE_BOOL};
 
@@ -46,7 +47,19 @@ where
     Fut: Future<Output = XllResult<T>> + Send,
     T: ExcelReturn + Send + 'static,
 {
-    let evaluated = AssertUnwindSafe(future).catch_unwind().await;
+    let evaluated = {
+        let mut future = std::pin::pin!(future);
+        futures_util::future::poll_fn(|context| {
+            // Consume the payload before any future wrapper is dropped or
+            // cancellation can take an early return from this function.
+            match catch_no_unwind(AssertUnwindSafe(|| future.as_mut().poll(context))) {
+                Ok(std::task::Poll::Ready(value)) => std::task::Poll::Ready(Ok(value)),
+                Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+                Err(panic) => std::task::Poll::Ready(Err(panic)),
+            }
+        })
+        .await
+    };
     #[cfg(test)]
     if let Some(hook) = *super::boundary::AFTER_ASYNC_EVALUATION_HOOK.lock() {
         hook();
@@ -68,7 +81,7 @@ where
 
     let (pointer, completion) = match evaluated {
         Ok(Ok(value)) => {
-            let result = catch_unwind(AssertUnwindSafe(|| {
+            let result = catch_no_unwind(AssertUnwindSafe(|| {
                 let mut return_context = ReturnContext::new();
                 let value = T::invoke(&mut return_context, || Ok(value))?;
                 AsyncReturnPointer::from_value(value)

@@ -2,6 +2,7 @@ use crate::call_return::{ExcelReturn, ReturnContext, ReturnPayload};
 use crate::execution::{CallId, CallMetadata, CallOutcome};
 #[cfg(test)]
 use crate::execution::{UdfCompletionOutcome, UdfDeliveryOutcome, UdfErrorKind};
+use crate::panic_boundary::catch_no_unwind;
 use crate::runtime::Runtime;
 use crate::value::ExcelCellOutput;
 use crate::{XllError, XllResult};
@@ -9,6 +10,7 @@ use std::cell::{Cell, UnsafeCell};
 use std::mem::MaybeUninit;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::NonNull;
+use xlfn_kernel::published_owner::PublishedOwner;
 
 #[cfg(test)]
 use std::sync::atomic::Ordering;
@@ -51,7 +53,7 @@ struct ReturnBlock {
     // xlAutoFree12 casts it back to ReturnBlock.
     oper: XLOPER12,
     storage: Option<ReturnStorage>,
-    array: Option<Box<[XLOPER12]>>,
+    array: Option<PublishedOwner<[XLOPER12]>>,
     ownership: ReturnOwnership,
     magic: u64,
     backing: ReturnBlockBacking,
@@ -125,7 +127,7 @@ thread_local! {
 struct PreparedReturn {
     oper: XLOPER12,
     storage: Option<ReturnStorage>,
-    array: Option<Box<[XLOPER12]>>,
+    array: Option<PublishedOwner<[XLOPER12]>>,
 }
 
 impl PreparedReturn {
@@ -163,9 +165,11 @@ impl PreparedReturn {
             code: crate::error::DomainErrorCode::Overflow,
         })?;
 
-        let mut cells = encoded.cells;
+        // Establish the non-retagging owner before deriving the ABI pointer:
+        // PreparedReturn and ReturnBlock both move after cells are published.
+        let cells = PublishedOwner::from_box(encoded.cells);
         let storage = encoded.storage;
-        let pointer = cells.as_mut_ptr();
+        let pointer = cells.as_ptr().cast::<XLOPER12>();
 
         Ok(Self {
             oper: XLOPER12 {
@@ -272,6 +276,10 @@ impl Drop for ReturnBlock {
                 RETURN_BLOCKS_WITH_ARRAY.fetch_add(1, Ordering::Relaxed);
             }
             let _ = xlfn_kernel::invariant::checked_atomic_dec(&LIVE_BLOCKS);
+            let payload = PANICKING_RETURN_DROP_PAYLOAD.lock().unwrap().take();
+            if let Some(payload) = payload {
+                std::panic::panic_any(payload);
+            }
             if PANIC_ON_RETURN_BLOCK_DROP.swap(false, Ordering::SeqCst) {
                 panic!("injected ReturnBlock drop panic");
             }
@@ -446,7 +454,7 @@ where
     let Some(mut producer) = runtime.enter_return_producer() else {
         return closing_error_pointer();
     };
-    match catch_unwind(AssertUnwindSafe(|| {
+    match catch_no_unwind(AssertUnwindSafe(|| {
         let mut context = ReturnContext::new();
         let value = T::invoke(&mut context, operation)?;
         allocate_excel_owned(value, &mut producer)
@@ -481,7 +489,7 @@ pub(crate) fn ffi_boundary_void<A: crate::Addin>(runtime: &Runtime<A>, operation
         Ok(call) => call,
         Err(_) => return,
     };
-    let _ = catch_unwind(AssertUnwindSafe(operation));
+    let _ = catch_no_unwind(AssertUnwindSafe(operation));
 }
 
 /// Runs a generated UDF boundary and reports detailed failures to the configured sink.
@@ -514,7 +522,7 @@ where
     let Some(mut producer) = runtime.enter_return_producer() else {
         return closing_error_pointer();
     };
-    let result = match catch_unwind(AssertUnwindSafe(|| {
+    let result = match catch_no_unwind(AssertUnwindSafe(|| {
         udf_boundary_named_inner(runtime, &call, &mut producer, udf_id, excel_name, operation)
     })) {
         Ok(pointer) => pointer,
@@ -581,7 +589,7 @@ where
         &'call crate::runtime::CallGuard<'call, A>,
     ) -> XllResult<ReturnPayload>,
 {
-    let prepared = catch_unwind(AssertUnwindSafe(|| {
+    let prepared = catch_no_unwind(AssertUnwindSafe(|| {
         PreparedReturn::encode(operation(guard.state(), guard)?)
     }))
     .unwrap_or(Err(XllError::Panic));
@@ -656,7 +664,7 @@ where
         None
     };
 
-    let prepared = catch_unwind(AssertUnwindSafe(|| {
+    let prepared = catch_no_unwind(AssertUnwindSafe(|| {
         PreparedReturn::encode(operation(guard.state(), guard)?)
     }))
     .unwrap_or(Err(XllError::Panic));
@@ -708,7 +716,7 @@ pub(crate) unsafe fn free_return(pointer: *mut XLOPER12) {
 pub(crate) unsafe fn free_return_boundary(pointer: *mut XLOPER12) -> ReturnFreeBoundaryGuard {
     // SAFETY: caller contract guarantees pointer is a live return pointer or null.
     let operation = unsafe { enter_return_free_operation(pointer) };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    let _ = catch_no_unwind(AssertUnwindSafe(|| {
         // SAFETY: caller contract guarantees pointer is a live return pointer or null.
         unsafe { free_return_block(pointer, operation.as_ref()) };
     }));
@@ -823,6 +831,10 @@ static RETURN_BLOCKS_WITH_ARRAY: std::sync::atomic::AtomicUsize =
 #[cfg(test)]
 static PANIC_ON_RETURN_BLOCK_DROP: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+static PANICKING_RETURN_DROP_PAYLOAD: std::sync::Mutex<
+    Option<crate::panic_boundary::tests::PanickingPayload>,
+> = std::sync::Mutex::new(None);
 
 #[cfg(all(feature = "async", test))]
 pub(crate) fn live_return_blocks() -> usize {
@@ -1082,6 +1094,69 @@ mod tests {
     }
 
     #[test]
+    fn miri_array_cells_remain_readable_in_tls_and_heap_returns() {
+        let _test = test_lock();
+        let tracker_owner = Box::into_raw(Box::new(ReturnTracker::new_closed()));
+        // SAFETY: the tracker is retained until the worker joins and all
+        // published return obligations have been released below.
+        let tracker: &'static ReturnTracker = unsafe { &*tracker_owner };
+        tracker.reopen_admission().unwrap();
+        std::thread::spawn(move || {
+            let matrix = || {
+                let matrix = Matrix::new(
+                    1,
+                    2,
+                    vec![
+                        ExcelCellOutput::Number(17.0),
+                        ExcelCellOutput::String("日本語 😀".to_owned()),
+                    ],
+                )
+                .unwrap();
+                let value =
+                    <Matrix<_> as ExcelReturn>::into_excel(matrix, &mut ReturnContext::new())
+                        .unwrap();
+                let mut producer = tracker.try_enter_producer().unwrap();
+                allocate_excel_owned(value, &mut producer).unwrap()
+            };
+            let first = matrix();
+            let second = matrix();
+            assert_eq!(backing_of(first), ReturnBlockBacking::ThreadLocal);
+            assert_eq!(backing_of(second), ReturnBlockBacking::Heap);
+            for pointer in [second, first] {
+                // SAFETY: this thread owns both live matrix return blocks.
+                let oper = unsafe { &*pointer };
+                assert_eq!(oper.base_type(), XLTYPE_MULTI);
+                // SAFETY: the checked root type selects the array member.
+                let array = unsafe { oper.value.array };
+                assert_eq!((array.rows, array.columns), (1, 2));
+                // SAFETY: the output array contains exactly two initialized cells.
+                let cells = unsafe { std::slice::from_raw_parts(array.values, 2) };
+                assert_eq!(cells[0].base_type(), XLTYPE_NUM);
+                // SAFETY: the first cell's checked type selects its number.
+                assert_eq!(unsafe { cells[0].value.number }, 17.0);
+                assert_eq!(cells[1].base_type(), XLTYPE_STR);
+                // SAFETY: the second cell's checked type selects counted UTF-16.
+                let text = unsafe { cells[1].value.string };
+                // SAFETY: text starts with its initialized count prefix.
+                let length = unsafe { *text } as usize;
+                // SAFETY: the counted allocation includes its prefix unit.
+                let content = unsafe { text.add(1) };
+                // SAFETY: the arena retains all counted UTF-16 units.
+                let units = unsafe { std::slice::from_raw_parts(content, length) };
+                assert_eq!(String::from_utf16(units).unwrap(), "日本語 😀");
+                // SAFETY: the block and its cells have not been freed before.
+                unsafe { free_return(pointer) };
+            }
+        })
+        .join()
+        .unwrap();
+        assert!(tracker.is_quiescent());
+        // SAFETY: the worker has joined and no return block or producer
+        // retains the tracker; reclaim its original allocation exactly once.
+        unsafe { drop(Box::from_raw(tracker_owner)) };
+    }
+
+    #[test]
     fn encoded_array_buffer_is_adopted_without_copying_cells() {
         let _test = test_lock();
         let fixture = open_static_test_runtime();
@@ -1180,6 +1255,77 @@ mod tests {
         assert_eq!(unsafe { (*pointer).base_type() }, XLTYPE_ERR);
         // SAFETY: pointer has not yet been freed.
         unsafe { free_return(pointer) };
+    }
+
+    #[test]
+    fn sync_boundaries_retain_panicking_payloads() {
+        use crate::panic_boundary::tests::PanickingPayload;
+        use std::sync::atomic::AtomicUsize;
+
+        struct PanickingReturn(PanickingPayload);
+        impl crate::call_return::ExcelReturnSealed for PanickingReturn {}
+        impl ExcelReturn for PanickingReturn {
+            type InputMode = crate::value::PlainInputMode;
+            fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<ReturnPayload> {
+                std::panic::panic_any(self.0)
+            }
+        }
+
+        let _test = test_lock();
+        let fixture = open_static_test_runtime();
+        let runtime = fixture.runtime();
+        let dropped = Arc::new(AtomicUsize::new(0));
+        for pointer in [
+            ffi_boundary(runtime, || -> XllResult<f64> {
+                std::panic::panic_any(PanickingPayload(Arc::clone(&dropped)))
+            }),
+            udf_boundary_named(
+                runtime,
+                "payload",
+                "PAYLOAD",
+                |_, _| -> XllResult<ReturnPayload> {
+                    std::panic::panic_any(PanickingPayload(Arc::clone(&dropped)))
+                },
+            ),
+            ffi_boundary(runtime, || {
+                Ok(PanickingReturn(PanickingPayload(Arc::clone(&dropped))))
+            }),
+        ] {
+            // SAFETY: each boundary produced a live Excel error owned by this test.
+            assert_eq!(unsafe { (*pointer).base_type() }, XLTYPE_ERR);
+            // SAFETY: each distinct pointer is freed exactly once.
+            unsafe { free_return(pointer) };
+        }
+        assert_eq!(dropped.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn free_boundary_retains_panicking_payload_and_poisons_tls_slot() {
+        use crate::panic_boundary::tests::PanickingPayload;
+        use std::sync::atomic::AtomicUsize;
+
+        let _test = test_lock();
+        let fixture = open_static_test_runtime();
+        let runtime = fixture.runtime();
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&dropped);
+        let worker = std::thread::spawn(move || {
+            let pointer = ffi_boundary(runtime, || Ok(42.0));
+            assert_eq!(backing_of(pointer), ReturnBlockBacking::ThreadLocal);
+            *PANICKING_RETURN_DROP_PAYLOAD.lock().unwrap() = Some(PanickingPayload(observed));
+            // SAFETY: pointer is the live return produced above.
+            let free_guard = unsafe { free_return_boundary(pointer) };
+            RETURN_BLOCK_SLOT.with(|slot| {
+                assert_eq!(slot.state.get(), ReturnBlockSlotState::Poisoned);
+            });
+            let next = ffi_boundary(runtime, || Ok(43.0));
+            assert_eq!(backing_of(next), ReturnBlockBacking::Heap);
+            // SAFETY: next is a distinct live return and the hook was consumed.
+            unsafe { free_return(next) };
+            drop(free_guard);
+        });
+        worker.join().unwrap();
+        assert_eq!(dropped.load(Ordering::Acquire), 0);
     }
 
     #[test]
@@ -1363,11 +1509,16 @@ mod tests {
             assert_eq!(recorded[0].2, 1);
         }
 
+        let payload_dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let panic_pointer = udf_boundary_named(
             runtime,
             "test_panic",
             "TEST.PANIC",
-            |_, _| -> XllResult<ReturnPayload> { panic!("injected UDF panic") },
+            |_, _| -> XllResult<ReturnPayload> {
+                std::panic::panic_any(crate::panic_boundary::tests::PanickingPayload(Arc::clone(
+                    &payload_dropped,
+                )))
+            },
         );
         // SAFETY: this test owns the live return pointer.
         unsafe { free_return(panic_pointer) };
@@ -1376,6 +1527,7 @@ mod tests {
         assert_eq!(recorded.len(), 2);
         assert_eq!(recorded[1].0, "test_panic");
         assert_eq!(recorded[1].1, UdfErrorKind::Panic);
+        assert_eq!(payload_dropped.load(Ordering::Acquire), 0);
     }
 
     #[test]

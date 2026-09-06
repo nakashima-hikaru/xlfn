@@ -104,7 +104,7 @@ where
 {
     std::hint::black_box(crate::crt::effective_crt_policy());
     let removal_epoch = runtime.removal_epoch();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let result = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
         if runtime.phase() == crate::lifecycle::LifecyclePhase::OpenRollbackPending {
             let mut callbacks = HostCallbackSession::new();
             let outcome = rollback_open::<A>(

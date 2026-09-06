@@ -1,10 +1,9 @@
 use super::executor::{ExecutorPtr, ExecutorShared};
-use super::generation::GenerationState;
+use super::generation::GenerationPin;
 use super::manager::MAX_PENDING;
 use super::worker::release_active;
 use crate::cancellation::CancellationSource;
 use futures_util::future::AbortHandle;
-use std::ptr::NonNull;
 use std::sync::atomic::Ordering;
 
 pub(crate) struct TaskControl {
@@ -35,14 +34,14 @@ impl<'a> ActiveReservation<'a> {
     pub(crate) fn commit(
         mut self,
         shared: &ExecutorShared,
-        generation: &GenerationState,
+        generation: GenerationPin,
         id: u64,
     ) -> CompletionGuard {
         self.armed = false;
 
         CompletionGuard {
             shared: ExecutorPtr::from_ref(shared),
-            generation: NonNull::from(generation),
+            generation: Some(generation),
             id,
             observation: CompletionObservation::new(),
         }
@@ -59,23 +58,28 @@ impl<'a> Drop for ActiveReservation<'a> {
 
 pub(crate) struct CompletionGuard {
     pub(crate) shared: ExecutorPtr,
-    pub(crate) generation: NonNull<GenerationState>,
+    pub(crate) generation: Option<GenerationPin>,
     pub(crate) id: u64,
     pub(crate) observation: CompletionObservation,
 }
 
 impl Drop for CompletionGuard {
     fn drop(&mut self) {
-        // SAFETY: generation contributes to active counts and remains valid through Drop.
-        let generation = unsafe { self.generation.as_ref() };
+        let generation = self
+            .generation
+            .take()
+            .expect("completion owns its generation pin");
         // SAFETY: executor shared state remains valid through Drop.
         let shared = unsafe { self.shared.get() };
-        generation.remove_task(self.id);
+        generation.get().remove_task(self.id);
         shared
             .observer
             .record(crate::shutdown_trace::ShutdownEvent::EndAsyncTask(
                 self.observation.completion(),
             ));
+        // Release the generation before active: shutdown may reclaim the
+        // entire executor immediately after the last active task departs.
+        drop(generation);
         release_active(shared);
     }
 }

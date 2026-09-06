@@ -22,6 +22,13 @@ use crate::ingress::ExportIngress;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[cfg(any(
+    test,
+    all(target_os = "windows", any(feature = "rtd", feature = "handles"))
+))]
+#[path = "rtd/counted_string.rs"]
+mod counted_string;
+
 #[path = "rtd/host.rs"]
 mod host;
 #[cfg(feature = "rtd")]

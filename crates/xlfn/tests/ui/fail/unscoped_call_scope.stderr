@@ -1,0 +1,5 @@
+error[E0425]: cannot find function `new_call_scope` in module `xlfn::__private::handle_test`
+ --> tests/ui/fail/unscoped_call_scope.rs:7:47
+  |
+7 |     let scope = xlfn::__private::handle_test::new_call_scope();
+  |                                               ^^^^^^^^^^^^^^ not found in `xlfn::__private::handle_test`

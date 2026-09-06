@@ -76,8 +76,10 @@ impl Deref for ExecutorRead<'_> {
 }
 
 pub(crate) struct ManagerSpawnReservation<'manager> {
-    _executor: ExecutorRead<'manager>,
+    // A dropped, uncommitted reservation still accesses executor/generation
+    // counters. Release it before the publication reader permits reclamation.
     reservation: super::executor::SpawnReservation<'manager>,
+    _executor: ExecutorRead<'manager>,
 }
 
 impl<'manager> ManagerSpawnReservation<'manager> {
@@ -290,19 +292,20 @@ impl AsyncManager {
         }
         let _generation_transition = self.generation_transition.lock();
         let current = self.current_generation();
+        let Some(next) = current.checked_add(1) else {
+            return false;
+        };
         let Some(executor) = self.published_executor() else {
             let state = self.state.lock();
             return match &*state {
                 ExecutorState::Stopped => {
-                    self.current_generation
-                        .store(current.wrapping_add(1), Ordering::Release);
+                    self.current_generation.store(next, Ordering::Release);
                     true
                 }
                 ExecutorState::Running(_) | ExecutorState::Closing(_) => false,
             };
         };
         let executor_pointer = NonNull::from(&*executor);
-        let next = current.wrapping_add(1);
         let transitioned = executor.advance_generation(next);
         drop(executor);
         let advanced = if !transitioned {

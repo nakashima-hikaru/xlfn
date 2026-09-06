@@ -461,13 +461,17 @@ macro_rules! __xlfn_private_async_exports {
         #[doc(hidden)]
         #[unsafe(no_mangle)]
         pub extern "system" fn __xlfn_calculation_canceled() {
-            $crate::__private::v1::cancel_async_calculation($runtime);
+            $crate::__private::v1::export_void_boundary(|| {
+                $crate::__private::v1::cancel_async_calculation($runtime);
+            });
         }
 
         #[doc(hidden)]
         #[unsafe(no_mangle)]
         pub extern "system" fn __xlfn_calculation_ended() {
-            $crate::__private::v1::end_async_calculation($runtime);
+            $crate::__private::v1::export_void_boundary(|| {
+                $crate::__private::v1::end_async_calculation($runtime);
+            });
         }
     };
 }
@@ -497,17 +501,25 @@ macro_rules! __xlfn_private_excel_rtd_exports {
             __interface_id: *const ::core::ffi::c_void,
             __output: *mut *mut ::core::ffi::c_void,
         ) -> i32 {
-            // SAFETY: Excel/COM supplies the three live ABI pointers for this
-            // entry point, and the boundary validates their use.
-            unsafe {
-                $crate::__private::v1::dll_get_class_object(__class_id, __interface_id, __output)
-            }
+            $crate::__private::v1::export_status_boundary(0x8000_FFFF_u32 as i32, || {
+                // SAFETY: Excel/COM supplies the three live ABI pointers for this
+                // entry point, and the boundary validates their use.
+                unsafe {
+                    $crate::__private::v1::dll_get_class_object(
+                        __class_id,
+                        __interface_id,
+                        __output,
+                    )
+                }
+            })
         }
 
         #[doc(hidden)]
         #[unsafe(no_mangle)]
         pub extern "system" fn DllCanUnloadNow() -> i32 {
-            $crate::__private::v1::dll_can_unload_now($runtime)
+            $crate::__private::v1::export_status_boundary(1, || {
+                $crate::__private::v1::dll_can_unload_now($runtime)
+            })
         }
     };
 }

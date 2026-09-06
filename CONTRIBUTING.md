@@ -14,7 +14,7 @@ just quick
 just check
 ```
 
-`just quick` runs formatting, workspace Clippy, and the default nextest
+`just quick` runs formatting, the panic-boundary audit, workspace Clippy, and the default nextest
 profile. `just check` additionally runs the cargo-hack feature powerset,
 benchmark compilation, cargo-deny, and the public API compatibility audit.
 Use `just test-libtest` when validating same-process libtest behavior, which is
@@ -26,12 +26,14 @@ the execution model retained by the Windows artifact job.
 against the published `0.1.0` tag. The CI checkout fetches the full history so
 that this baseline is available in pull requests as well as on `main`.
 
-The current `0.2.0` line is pre-1.0 and intentionally permits breaking public
-API cleanup, including the typed cache endpoint redesign. `just semver` uses
-the strict major compatibility mode so removed APIs are reported unless the
-change is intentional and documented. Future patch releases should preserve
-the supported Rust API; another intentional breaking change should be paired
-with the appropriate version and semver audit update. CLI behavior and
+The tool derives compatibility requirements from each crate's actual version.
+The `0.1.0` to `0.2.0` transition permits breaking changes, including the typed
+cache endpoint redesign; the tool skips compatibility lints for those crates.
+Crates that remain on `0.1.x` still receive compatibility checks. Do not force
+a workspace-wide `--release-type major`, which would also skip those checks.
+After the next release, advance the baseline to its tag so patch releases are
+checked within that compatibility line. Intentional breaking changes require
+the appropriate version change and documentation. CLI behavior and
 procedural-macro diagnostics are separate compatibility contracts and are not
 covered by this audit.
 
@@ -71,6 +73,24 @@ Use Loom or another model checker for small synchronization cores where
 practical, and retain ordinary stress tests for integration pressure. The
 `formal/` Lean model is an executable abstraction of the shutdown protocol; it
 is evidence for the model, not a proof of the entire Rust implementation.
+
+Every boundary that consumes a panic must use `panic_boundary::catch_no_unwind`
+or `contain_panic` for a thread join. A caught payload is arbitrary user data;
+discarding a raw `catch_unwind` or `JoinHandle::join` result can run a panicking
+destructor. The shared policy safely destroys exact standard string payloads
+and deliberately retains custom payloads without calling their destructors.
+It cannot contain aborting panics, a panicking panic hook, or a double panic
+before the unwind reaches the boundary.
+
+Run `just panic-boundaries` after changing panic handling. The independent CI
+job checks all Rust source, including imports, test functions, and generated
+macro token streams, against an occurrence-specific allowlist. New consuming
+calls use the helper; intentional resume-only exceptions require a specific
+reason and inventory update. See the [boundary and join audit](tools/panic-boundary-audit.md).
+
+The [2026-09-07 soundness audit](tools/soundness-audit-2026-09-07.md) maps
+publication and reclamation obligations to their regression checks and records
+the limits of local Miri, model-checking, and Windows validation.
 
 ## Windows artifacts and ABI
 

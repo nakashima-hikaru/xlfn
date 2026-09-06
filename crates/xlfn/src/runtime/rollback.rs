@@ -10,10 +10,11 @@ use crate::boundary::{report_boundary_error, report_cleanup_issue};
 use crate::error::IntoXllError;
 use crate::generation::RuntimeGeneration;
 use crate::host_callback::HostCallbackSession;
+use crate::panic_boundary::catch_no_unwind;
 use crate::registration::{HostRegistrar, RegistrationHost};
 use crate::runtime::shutdown::{self as teardown, OpenRollback, drain_execution};
 use crate::runtime::{AddinLifecycleAccess, Runtime};
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 
 use crate::lifecycle::lifecycle_access_error;
 
@@ -199,7 +200,7 @@ where
     let addin = if let Some(opening) = runtime.lifecycle_orchestrator().take_opening_for_rollback()
     {
         let (mut shared_state, layers, _config) = opening.into_parts();
-        let quiesce = catch_unwind(AssertUnwindSafe(|| {
+        let quiesce = catch_no_unwind(AssertUnwindSafe(|| {
             runtime
                 .with_addin_lifecycle(lifecycle, |lifecycle_state| {
                     runtime.quiesce_addin(&mut shared_state, lifecycle_state)

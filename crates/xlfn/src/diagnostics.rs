@@ -778,7 +778,9 @@ mod tests {
             sender: Some(sender),
             worker: Some(worker),
             worker_thread_id,
-            observer: DiagnosticObserver::new(),
+            observer: xlfn_kernel::published_owner::PublishedOwner::from_box(
+                DiagnosticObserver::new(),
+            ),
         });
         assert_eq!(
             sink.shutdown(),
@@ -792,6 +794,26 @@ mod tests {
         fn report(&self, _: &DiagnosticEvent<'_>) {
             self.0.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    #[test]
+    fn miri_worker_observer_survives_sink_ownership_moves() {
+        let reports = Arc::new(AtomicUsize::new(0));
+        let sink = AsyncDiagnosticSink::new(CountingSink(Arc::clone(&reports))).unwrap();
+        let mut owners = vec![sink];
+        owners.reserve(16);
+        let sink = Box::new(owners.pop().unwrap());
+        for id in 1..=8 {
+            sink.report(OwnedDiagnosticEvent {
+                udf_id: "observer ownership",
+                argument: None,
+                error: XllError::Panic,
+                diagnostic_id: DiagnosticId::from_u64(id),
+                timestamp: SystemTime::UNIX_EPOCH,
+            });
+        }
+        sink.shutdown().unwrap();
+        assert_eq!(reports.load(Ordering::Acquire), 8);
     }
 
     #[test]
@@ -1196,7 +1218,9 @@ mod tests {
                         sender: Some(sender),
                         worker: Some(worker),
                         worker_thread_id,
-                        observer: DiagnosticObserver::new(),
+                        observer: xlfn_kernel::published_owner::PublishedOwner::from_box(
+                            DiagnosticObserver::new(),
+                        ),
                     }))
                 },
                 |_| Ok(()),

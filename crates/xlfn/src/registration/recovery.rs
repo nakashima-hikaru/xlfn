@@ -4,9 +4,10 @@ use super::host::{RegistrationHost, RegistrationMutation};
 use super::{ExcelNameKey, MetadataDebt, MetadataDebtRetryResult};
 use crate::XllResult;
 use crate::host_callback::HostCallbackSession;
+use crate::panic_boundary::catch_no_unwind;
 use crate::runtime_components::HostLedger;
 use std::collections::BTreeMap;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 
 /// Retries metadata cleanup without making the lifecycle domain aware of
 /// registration policy or host-side recovery details.
@@ -35,7 +36,7 @@ pub(crate) fn retry_metadata_debt(
     }
     if ledger.has_metadata_debt() {
         let count = ledger.metadata_debt_snapshot().len();
-        let _ = catch_unwind(AssertUnwindSafe(|| {
+        let _ = catch_no_unwind(AssertUnwindSafe(|| {
             tracing::warn!(count, "Excel metadata debt remains after retry");
         }));
     }

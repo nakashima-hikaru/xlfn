@@ -94,9 +94,11 @@ impl<const N: usize> RotatingReadDomain<N> {
     /// Enters the currently published generation with a permit whose storage
     /// is independent of the borrow of this domain.
     ///
-    /// The caller must keep this domain alive until the returned permit is
-    /// dropped. Call-scope owners satisfy that condition by being nested
-    /// inside the generation owner that contains this domain.
+    /// The caller must keep this domain alive through every access by the
+    /// returned permit, including its final release notification. Call-scope
+    /// owners satisfy that condition by being nested inside the generation
+    /// owner that contains this domain. Permanent seal-and-drain synchronizes
+    /// with that final access before the owner may be reclaimed.
     ///
     /// # Safety
     ///
@@ -288,8 +290,8 @@ impl RotatingReadDomain<DEFAULT_STRIPE_COUNT> {
     ///
     /// # Safety
     ///
-    /// The caller must keep this domain alive until the returned permit is
-    /// dropped.
+    /// The caller must keep this domain alive through the permit's final
+    /// release notification, as described by [`Self::enter_owned`].
     #[inline]
     pub unsafe fn enter_owned_current_thread(
         &self,
@@ -338,9 +340,9 @@ unsafe impl<const N: usize> Sync for RotatingReadOwnedPermit<N> {}
 impl<const N: usize> Drop for RotatingReadOwnedPermit<N> {
     #[inline]
     fn drop(&mut self) {
-        // SAFETY: `gate` points into the domain that the caller must keep
-        // alive until this permit is dropped.
-        unsafe { self.gate.as_ref() }.release(self.stripe);
+        // SAFETY: the caller retains the domain through this final release;
+        // its drain wait synchronizes with the last notification-field access.
+        unsafe { StripedDrainGate::release_owned(self.gate, self.stripe) };
     }
 }
 
@@ -415,6 +417,20 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("owned permit must release the old generation on drop");
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn miri_owned_permit_allows_immediate_domain_reclamation_after_drain() {
+        for _ in 0..8 {
+            let owner = crate::published_owner::PublishedOwner::new(RotatingReadDomain::<2>::new());
+            // SAFETY: sealing and draining retains the allocation until the
+            // permit's final atomic/notification field access is complete.
+            let permit = unsafe { owner.enter_owned(0) }.unwrap();
+            let worker = std::thread::spawn(move || drop(permit));
+            owner.seal_and_wait();
+            drop(owner);
+            worker.join().unwrap();
+        }
     }
 
     #[test]

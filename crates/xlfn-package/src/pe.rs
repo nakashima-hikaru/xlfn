@@ -764,7 +764,7 @@ where
                 }
             };
 
-            export_targets.insert(ordinal_index, Some(executable));
+            export_targets.insert(ordinal_index, Some((executable, exported_ordinal)));
         }
 
         for (name_pointer, ordinal_index) in table.name_iter() {
@@ -773,12 +773,21 @@ where
                 .get(&ordinal_index)
                 .copied()
                 .ok_or_else(|| PackageError::Message("invalid PE export ordinal index".into()))?;
-            let Some(executable) = target else {
+            let Some((executable, exported_ordinal)) = target else {
                 // A name attached to a zero EAT entry is not a resolvable
                 // export and must not satisfy lifecycle or import validation.
                 continue;
             };
             let name = std::str::from_utf8(table.name_from_pointer(name_pointer)?)?.to_owned();
+            // A name is an alias of its EAT ordinal, including forwarding.
+            // Preserve that edge so named chains and cycles are validated
+            // exactly like ordinal imports instead of appearing terminal.
+            if let Some(forwarded) = forwarded_exports
+                .get(&ExportSymbol::Ordinal(exported_ordinal))
+                .cloned()
+            {
+                forwarded_exports.insert(ExportSymbol::Name(name.clone()), forwarded);
+            }
             if executable {
                 executable_exports.insert(name.clone());
             }

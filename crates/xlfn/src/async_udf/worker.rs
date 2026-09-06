@@ -2,10 +2,11 @@ use super::executor::{ExecutorPtr, ExecutorShared};
 use super::task::TaskControl;
 use crate::XllError;
 use crate::cancellation::CancellationSource;
+use crate::panic_boundary::catch_no_unwind;
 use async_task::Runnable;
 use crossbeam_deque::Worker;
 use crossbeam_utils::sync::Parker;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::Ordering;
 
 pub(crate) struct WorkerExitGuard {
@@ -74,12 +75,12 @@ pub(crate) fn cancel_tasks(tasks: Vec<TaskControl>) {
         // panic; one such panic must not prevent this or later tasks from being
         // aborted, especially while AsyncManager owns a Closing executor.
         cancel_source_no_unwind(&cancellation);
-        let _ = catch_unwind(AssertUnwindSafe(|| abort.abort()));
+        let _ = catch_no_unwind(AssertUnwindSafe(|| abort.abort()));
     }
 }
 
 pub(crate) fn cancel_source_no_unwind(cancellation: &CancellationSource) {
-    let _ = catch_unwind(AssertUnwindSafe(|| cancellation.cancel()));
+    let _ = catch_no_unwind(AssertUnwindSafe(|| cancellation.cancel()));
 }
 
 fn find_task(
@@ -120,10 +121,7 @@ pub(crate) fn run_executor(
             continue;
         }
 
-        shared_ref
-            .queue
-            .idle_workers
-            .fetch_or(my_bit, Ordering::AcqRel);
+        shared_ref.queue.announce_idle(my_bit);
 
         let local_ref = exit_guard.local.as_ref().unwrap();
         if let Some(runnable) = find_task(worker_index, shared_ref, local_ref) {

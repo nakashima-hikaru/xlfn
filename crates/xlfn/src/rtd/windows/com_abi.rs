@@ -1,7 +1,8 @@
 use crate::XllError;
+use crate::panic_boundary::catch_no_unwind;
 use crate::win32::{CO_E_SERVER_STOPPING, E_UNEXPECTED, GUID};
 use std::ffi::c_void;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 
 use super::module_lifetime;
 
@@ -27,15 +28,42 @@ pub(crate) const DISPATCH_METHOD: u16 = crate::win32::DISPATCH_METHOD as u16;
 pub(crate) const IID_IUNKNOWN: GUID = crate::win32::IID_IUnknown;
 
 pub(crate) fn com_boundary(operation: &'static str, callback: impl FnOnce() -> i32) -> i32 {
-    let (_module_call, accepted) = module_lifetime().enter_call();
-    if !accepted {
-        return CO_E_SERVER_STOPPING;
-    }
-    match catch_unwind(AssertUnwindSafe(callback)) {
+    com_boundary_with_admission(
+        operation,
+        Some(CO_E_SERVER_STOPPING),
+        E_UNEXPECTED,
+        callback,
+    )
+}
+
+/// COM ownership operations must remain callable after ingress is closed.
+/// Their admission observation and final guard Drop still belong inside the
+/// same consuming boundary as the method body.
+pub(super) fn com_lifetime_boundary<T: Copy>(
+    operation: &'static str,
+    failure: T,
+    callback: impl FnOnce() -> T,
+) -> T {
+    com_boundary_with_admission(operation, None, failure, callback)
+}
+
+fn com_boundary_with_admission<T: Copy>(
+    operation: &'static str,
+    closing: Option<T>,
+    failure: T,
+    callback: impl FnOnce() -> T,
+) -> T {
+    match catch_no_unwind(AssertUnwindSafe(|| {
+        let (_module_call, accepted) = module_lifetime().enter_call();
+        if !accepted && let Some(closing) = closing {
+            return closing;
+        }
+        callback()
+    })) {
         Ok(status) => status,
         Err(_) => {
             crate::diagnostics::report_no_unwind(operation, &XllError::Panic);
-            E_UNEXPECTED
+            failure
         }
     }
 }

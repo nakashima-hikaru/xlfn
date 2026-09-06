@@ -4,11 +4,12 @@ use xlfn::prelude::*;
 struct TestObj(i32);
 
 fn main() {
-    xlfn::__private::v1::with_excel_call_scope(|scope| {
+    let scope = xlfn::__private::handle_test::new_call_scope();
+    {
         let registry = xlfn::__private::handle_test::HandleRegistry::new(16);
         let token = registry.insert_object(TestObj(42)).unwrap();
-        let handle = registry.lookup_handle::<TestObj>(scope, &token).unwrap();
+        let handle = registry.lookup_handle::<TestObj>(&scope, &token).unwrap();
         drop(handle);
-        // The scope retains its admission permit after the handle is dropped.
-    });
+    }
+    drop(scope);
 }

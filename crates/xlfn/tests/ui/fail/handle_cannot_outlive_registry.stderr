@@ -1,12 +1,16 @@
 error[E0597]: `registry` does not live long enough
-  --> tests/ui/fail/handle_cannot_outlive_registry.rs:11:9
+  --> tests/ui/fail/handle_cannot_outlive_registry.rs:10:22
    |
- 8 |     let handle = {
-   |         ------ borrow later stored here
- 9 |         let registry = xlfn::__private::handle_test::HandleRegistry::new(16);
+ 7 |     xlfn::__private::v1::with_excel_call_scope(|scope| {
+   |                                                 ----- has type `&'1 xlfn::call::CallScope<'1>`
+ 8 |         let registry = xlfn::__private::handle_test::HandleRegistry::new(16);
    |             -------- binding `registry` declared here
-10 |         let token = registry.insert_object(TestObj(42)).unwrap();
-11 |         registry.lookup_handle::<TestObj>(&scope, &token).unwrap()
-   |         ^^^^^^^^ borrowed value does not live long enough
-12 |     };
+ 9 |         let token = registry.insert_object(TestObj(42)).unwrap();
+10 |         let handle = registry.lookup_handle::<TestObj>(scope, &token).unwrap();
+   |                      ^^^^^^^^----------------------------------------
+   |                      |
+   |                      borrowed value does not live long enough
+   |                      argument requires that `registry` is borrowed for `'1`
+...
+13 |     });
    |     - `registry` dropped here while still borrowed

@@ -245,10 +245,6 @@ pub(crate) struct OwnedPublishOperation<H: SubscriptionHost> {
     _runtime_drop_trace: DropTrace,
 }
 
-// SAFETY: the nested runtime and server operation guards admit execution
-// across thread boundaries for the duration of the owned operation.
-unsafe impl<H: SubscriptionHost> Send for OwnedPublishOperation<H> {}
-
 pub(crate) struct PublishTerminationStart<'a, H: SubscriptionHost> {
     wait: TerminationWaitGuard<'a>,
     notifier: Option<H::Notifier>,

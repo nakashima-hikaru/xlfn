@@ -58,9 +58,10 @@ impl OperationGate {
     ///
     /// # Safety
     ///
-    /// The gate owner must not reclaim the gate until the returned guard has
-    /// been dropped. Shutdown should seal and drain this same gate before
-    /// reclaiming its owner.
+    /// The owner must retain the gate through all accesses by the returned
+    /// guard, including its final release notification. Sealing and draining
+    /// this same gate synchronizes with that final access; the owner may then
+    /// be reclaimed if no other capability can access it.
     pub unsafe fn enter_owned(&self) -> Result<OwnedOperationGuard, GateClosed> {
         self.acquire()?;
         Ok(OwnedOperationGuard {
@@ -95,7 +96,13 @@ impl Drop for OwnedOperationGuard {
     fn drop(&mut self) {
         // SAFETY: guaranteed by `OperationGate::enter_owned`; this guard is
         // itself the outstanding operation that delays owner reclamation.
-        unsafe { self.gate.as_ref() }.release();
+        // Project the drain field without passing &OperationGate across its
+        // final release: a waiter may reclaim the owner immediately after it.
+        let drain = unsafe { std::ptr::addr_of_mut!((*self.gate.as_ptr()).drain) };
+        // SAFETY: a field of the live, non-null gate is itself non-null.
+        let drain = unsafe { NonNull::new_unchecked(drain) };
+        // SAFETY: this guard owns the live count for the projected gate.
+        unsafe { DrainGate::release_owned(drain) };
     }
 }
 
@@ -136,5 +143,19 @@ mod tests {
         gate.begin_close();
         drop(operation);
         gate.close_and_wait_begin().wait();
+    }
+
+    #[test]
+    fn miri_owned_operation_drains_before_reclaiming_its_gate() {
+        for _ in 0..8 {
+            let owner = crate::published_owner::PublishedOwner::new(OperationGate::new());
+            // SAFETY: sealing and waiting retains the owner through the
+            // permit's final gate access, including its notification tail.
+            let permit = unsafe { owner.enter_owned() }.unwrap();
+            let worker = std::thread::spawn(move || drop(permit));
+            owner.close_and_wait_begin().wait();
+            drop(owner);
+            worker.join().unwrap();
+        }
     }
 }

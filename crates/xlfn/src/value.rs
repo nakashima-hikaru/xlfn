@@ -317,6 +317,82 @@ impl ExcelInputIdentity for ExcelSerialDate {
     }
 }
 
+/// Accounts for both the host array and converted Rust data before allocation.
+/// All collection conversion paths share this policy, including call-local
+/// borrowed slices and owned callback values.
+struct ArrayInputBudget {
+    argument: &'static str,
+    referenced_bytes: usize,
+}
+
+impl ArrayInputBudget {
+    fn new<T>(element_count: usize, argument: &'static str) -> XllResult<Self> {
+        let output_bytes = element_count
+            .checked_mul(std::mem::size_of::<T>())
+            .ok_or_else(|| {
+                XllError::input(argument, InputError::Malformed("output byte-size overflow"))
+            })?;
+        let referenced_bytes = element_count
+            .checked_mul(std::mem::size_of::<XLOPER12>())
+            .and_then(|bytes| bytes.checked_add(output_bytes))
+            .ok_or_else(|| {
+                XllError::input(argument, InputError::Malformed("array byte-size overflow"))
+            })?;
+        let budget = Self {
+            argument,
+            referenced_bytes,
+        };
+        budget.check_limit()?;
+        Ok(budget)
+    }
+
+    fn include(&mut self, element: XlValueRef<'_>) -> XllResult<()> {
+        if element.value_type() == XlValueType::Multi {
+            return Err(XllError::input(
+                self.argument,
+                InputError::Malformed("nested arrays are not supported"),
+            ));
+        }
+        if element.value_type() == XlValueType::String {
+            // UTF-16 source storage plus the maximum UTF-8 bytes per unit.
+            let string_bytes = element
+                .utf16(self.argument)?
+                .len()
+                .checked_mul(std::mem::size_of::<u16>() + 3)
+                .ok_or_else(|| {
+                    XllError::input(
+                        self.argument,
+                        InputError::Malformed("array string byte-size overflow"),
+                    )
+                })?;
+            self.referenced_bytes =
+                self.referenced_bytes
+                    .checked_add(string_bytes)
+                    .ok_or_else(|| {
+                        XllError::input(
+                            self.argument,
+                            InputError::Malformed("array byte-size overflow"),
+                        )
+                    })?;
+            self.check_limit()?;
+        }
+        Ok(())
+    }
+
+    fn check_limit(&self) -> XllResult<()> {
+        if self.referenced_bytes > MAX_ARRAY_BYTES {
+            return Err(XllError::input(
+                self.argument,
+                InputError::TooLarge {
+                    limit: MAX_ARRAY_BYTES,
+                    actual: self.referenced_bytes,
+                },
+            ));
+        }
+        Ok(())
+    }
+}
+
 fn convert_grid_elements<'call, T, M>(
     grid: &GridView<'call>,
     argument: &'static str,
@@ -327,64 +403,13 @@ where
     M: InputMode,
     T: ExcelParameter<'call, M>,
 {
-    let (rows, columns) = grid.shape();
-    let element_count = rows * columns;
-    let output_bytes = element_count
-        .checked_mul(std::mem::size_of::<T>())
-        .ok_or_else(|| {
-            XllError::input(argument, InputError::Malformed("output byte-size overflow"))
-        })?;
-    let mut referenced_bytes = element_count
-        .checked_mul(std::mem::size_of::<XLOPER12>())
-        .and_then(|bytes| bytes.checked_add(output_bytes))
-        .ok_or_else(|| {
-            XllError::input(argument, InputError::Malformed("array byte-size overflow"))
-        })?;
-    if referenced_bytes > MAX_ARRAY_BYTES {
-        return Err(XllError::input(
-            argument,
-            InputError::TooLarge {
-                limit: MAX_ARRAY_BYTES,
-                actual: referenced_bytes,
-            },
-        ));
-    }
-
-    let mut data = Vec::with_capacity(element_count);
-    for element in grid.cells().iter().map(XlValueRef::from_array_cell) {
+    let cells = grid.cells();
+    let mut budget = ArrayInputBudget::new::<T>(cells.len(), argument)?;
+    let mut data = Vec::with_capacity(cells.len());
+    for element in cells.iter().map(XlValueRef::from_array_cell) {
         let element = element?;
-        if element.value_type() == XlValueType::Multi {
-            return Err(XllError::input(
-                argument,
-                InputError::Malformed("nested arrays are not supported"),
-            ));
-        }
-        if element.value_type() == XlValueType::String {
-            let string_bytes = element
-                .utf16(argument)?
-                .len()
-                .checked_mul(std::mem::size_of::<u16>() + 3)
-                .ok_or_else(|| {
-                    XllError::input(
-                        argument,
-                        InputError::Malformed("array string byte-size overflow"),
-                    )
-                })?;
-            referenced_bytes = referenced_bytes.checked_add(string_bytes).ok_or_else(|| {
-                XllError::input(argument, InputError::Malformed("array byte-size overflow"))
-            })?;
-            if referenced_bytes > MAX_ARRAY_BYTES {
-                return Err(XllError::input(
-                    argument,
-                    InputError::TooLarge {
-                        limit: MAX_ARRAY_BYTES,
-                        actual: referenced_bytes,
-                    },
-                ));
-            }
-        }
-        let converted = T::decode(element, argument, context, identity)?;
-        data.push(converted);
+        budget.include(element)?;
+        data.push(T::decode(element, argument, context, identity)?);
     }
     Ok(data)
 }
@@ -399,63 +424,11 @@ where
     M: InputMode,
     T: ExcelParameter<'call, M> + Copy,
 {
-    let (rows, columns) = grid.shape();
-    let element_count = rows.checked_mul(columns).ok_or_else(|| {
-        XllError::input(argument, InputError::Malformed("array dimension overflow"))
-    })?;
-    let output_bytes = element_count
-        .checked_mul(std::mem::size_of::<T>())
-        .ok_or_else(|| {
-            XllError::input(argument, InputError::Malformed("output byte-size overflow"))
-        })?;
-    let mut referenced_bytes = element_count
-        .checked_mul(std::mem::size_of::<XLOPER12>())
-        .and_then(|bytes| bytes.checked_add(output_bytes))
-        .ok_or_else(|| {
-            XllError::input(argument, InputError::Malformed("array byte-size overflow"))
-        })?;
-    if referenced_bytes > MAX_ARRAY_BYTES {
-        return Err(XllError::input(
-            argument,
-            InputError::TooLarge {
-                limit: MAX_ARRAY_BYTES,
-                actual: referenced_bytes,
-            },
-        ));
-    }
-
-    context.scratch().collect_copy(element_count, |index| {
-        let element = XlValueRef::from_array_cell(&grid.cells()[index])?;
-        if element.value_type() == XlValueType::Multi {
-            return Err(XllError::input(
-                argument,
-                InputError::Malformed("nested arrays are not supported"),
-            ));
-        }
-        if element.value_type() == XlValueType::String {
-            let string_bytes = element
-                .utf16(argument)?
-                .len()
-                .checked_mul(std::mem::size_of::<u16>() + 3)
-                .ok_or_else(|| {
-                    XllError::input(
-                        argument,
-                        InputError::Malformed("array string byte-size overflow"),
-                    )
-                })?;
-            referenced_bytes = referenced_bytes.checked_add(string_bytes).ok_or_else(|| {
-                XllError::input(argument, InputError::Malformed("array byte-size overflow"))
-            })?;
-            if referenced_bytes > MAX_ARRAY_BYTES {
-                return Err(XllError::input(
-                    argument,
-                    InputError::TooLarge {
-                        limit: MAX_ARRAY_BYTES,
-                        actual: referenced_bytes,
-                    },
-                ));
-            }
-        }
+    let cells = grid.cells();
+    let mut budget = ArrayInputBudget::new::<T>(cells.len(), argument)?;
+    context.scratch().collect_copy(cells.len(), |index| {
+        let element = XlValueRef::from_array_cell(&cells[index])?;
+        budget.include(element)?;
         T::decode(element, argument, context, identity)
     })
 }
@@ -942,64 +915,12 @@ fn convert_owned_grid_elements<'call, T>(
 where
     T: FromExcel<'call>,
 {
-    let (rows, columns) = grid.shape();
-    let element_count = rows.checked_mul(columns).ok_or_else(|| {
-        XllError::input(argument, InputError::Malformed("array dimension overflow"))
-    })?;
-    let output_bytes = element_count
-        .checked_mul(std::mem::size_of::<T>())
-        .ok_or_else(|| {
-            XllError::input(argument, InputError::Malformed("output byte-size overflow"))
-        })?;
-    let mut referenced_bytes = element_count
-        .checked_mul(std::mem::size_of::<XLOPER12>())
-        .and_then(|bytes| bytes.checked_add(output_bytes))
-        .ok_or_else(|| {
-            XllError::input(argument, InputError::Malformed("array byte-size overflow"))
-        })?;
-    if referenced_bytes > MAX_ARRAY_BYTES {
-        return Err(XllError::input(
-            argument,
-            InputError::TooLarge {
-                limit: MAX_ARRAY_BYTES,
-                actual: referenced_bytes,
-            },
-        ));
-    }
-
-    let mut data = Vec::with_capacity(element_count);
-    for element in grid.cells().iter().map(XlValueRef::from_array_cell) {
+    let cells = grid.cells();
+    let mut budget = ArrayInputBudget::new::<T>(cells.len(), argument)?;
+    let mut data = Vec::with_capacity(cells.len());
+    for element in cells.iter().map(XlValueRef::from_array_cell) {
         let element = element?;
-        if element.value_type() == XlValueType::Multi {
-            return Err(XllError::input(
-                argument,
-                InputError::Malformed("nested arrays are not supported"),
-            ));
-        }
-        if element.value_type() == XlValueType::String {
-            let string_bytes = element
-                .utf16(argument)?
-                .len()
-                .checked_mul(std::mem::size_of::<u16>() + 3)
-                .ok_or_else(|| {
-                    XllError::input(
-                        argument,
-                        InputError::Malformed("array string byte-size overflow"),
-                    )
-                })?;
-            referenced_bytes = referenced_bytes.checked_add(string_bytes).ok_or_else(|| {
-                XllError::input(argument, InputError::Malformed("array byte-size overflow"))
-            })?;
-            if referenced_bytes > MAX_ARRAY_BYTES {
-                return Err(XllError::input(
-                    argument,
-                    InputError::TooLarge {
-                        limit: MAX_ARRAY_BYTES,
-                        actual: referenced_bytes,
-                    },
-                ));
-            }
-        }
+        budget.include(element)?;
         data.push(T::from_excel(element, argument)?);
     }
     Ok(data)
@@ -1340,6 +1261,52 @@ mod tests {
         let (_, integer_identity) = convert_with_identity::<i32>(&mut integer).unwrap();
         let (_, number_identity) = convert_with_identity::<i32>(&mut number).unwrap();
         assert_eq!(integer_identity, number_identity);
+    }
+
+    #[test]
+    fn array_input_budget_checks_host_and_converted_storage_before_allocation() {
+        let per_cell = std::mem::size_of::<XLOPER12>() + std::mem::size_of::<f64>();
+        let maximum = MAX_ARRAY_BYTES / per_cell;
+        assert!(ArrayInputBudget::new::<f64>(maximum, "values").is_ok());
+        assert!(matches!(
+            ArrayInputBudget::new::<f64>(maximum + 1, "values"),
+            Err(XllError::Input {
+                argument: "values",
+                reason: InputError::TooLarge { limit: MAX_ARRAY_BYTES, actual },
+            }) if actual == (maximum + 1) * per_cell
+        ));
+        assert!(matches!(
+            ArrayInputBudget::new::<f64>(usize::MAX, "values"),
+            Err(XllError::Input {
+                reason: InputError::Malformed("output byte-size overflow"),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn array_input_budget_counts_source_and_decoded_text() {
+        let mut text = [1_u16, u16::from(b'x')];
+        let raw = XLOPER12 {
+            value: XLOPER12Value {
+                string: text.as_mut_ptr(),
+            },
+            xltype: XLTYPE_STR,
+        };
+        let value = XlValueRef::from_array_cell(&raw).unwrap();
+        let mut budget = ArrayInputBudget {
+            argument: "values",
+            referenced_bytes: MAX_ARRAY_BYTES - 5,
+        };
+        assert!(budget.include(value).is_ok());
+        assert_eq!(budget.referenced_bytes, MAX_ARRAY_BYTES);
+        assert!(matches!(
+            budget.include(value),
+            Err(XllError::Input {
+                argument: "values",
+                reason: InputError::TooLarge { limit: MAX_ARRAY_BYTES, actual },
+            }) if actual == MAX_ARRAY_BYTES + 5
+        ));
     }
 
     #[test]

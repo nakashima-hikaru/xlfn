@@ -9,7 +9,7 @@ use crate::options::{
     parse_context_attribute, parse_function_options,
 };
 use crate::support::{doc_comment, extract_gating_attributes, resolve_crate_path};
-use crate::validation::validate_export_id;
+use crate::validation::{validate_export_id, validate_registration_string};
 use proc_macro2::TokenStream;
 use quote::{ToTokens, format_ident};
 use syn::{Attribute, Expr, FnArg, GenericArgument, Ident, ItemFn, Pat, Path, PathArguments, Type};
@@ -358,6 +358,14 @@ pub(super) fn analyze(parsed: ParsedUdf) -> syn::Result<UdfSpec> {
             .unwrap_or_else(|| doc_comment(&function.attrs)),
         help_topic: options.help_topic.clone().unwrap_or_default(),
     };
+    for (field, value) in [
+        ("Excel function name", metadata.excel_name.as_str()),
+        ("Excel function category", metadata.category.as_str()),
+        ("Excel function description", metadata.description.as_str()),
+        ("Excel function help topic", metadata.help_topic.as_str()),
+    ] {
+        validate_registration_string(field, value, &function_ident)?;
+    }
 
     Ok(UdfSpec {
         function,
@@ -544,10 +552,16 @@ fn analyze_arguments(
             ArgumentConversion::Value(Box::new(ValueConversion { blank, missing }))
         };
 
+        let description = argument.options.description.unwrap_or_default();
+        validate_registration_string(
+            "Excel argument description",
+            &description,
+            &function.sig.inputs,
+        )?;
         analyzed.push(ArgumentSpec {
             ty: argument.ty,
             excel_name,
-            description: argument.options.description.unwrap_or_default(),
+            description,
             conversion,
         });
     }

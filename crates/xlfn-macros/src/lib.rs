@@ -140,7 +140,8 @@ fn expand_excel_addin(
         #(#gating)*
         #[unsafe(no_mangle)]
         pub extern "system" fn xlAutoOpen() -> i32 {
-            #krate::__private::v1::open_generated_addin::<#ident>(
+            #krate::__private::v1::export_status_boundary(0, || {
+                #krate::__private::v1::open_generated_addin::<#ident>(
                 &crate::__XLFN_RUNTIME,
                 #id,
                 #display_name,
@@ -148,19 +149,24 @@ fn expand_excel_addin(
                 env!("CARGO_PKG_VERSION"),
                 #krate::__private::v1::BUILD_TARGET,
                 xlAutoOpen as *const (),
-            )
+                )
+            })
         }
 
         #(#gating)*
         #[unsafe(no_mangle)]
         pub extern "system" fn xlAutoClose() -> i32 {
-            #krate::__private::v1::auto_close_generated_addin::<#ident>(&crate::__XLFN_RUNTIME)
+            #krate::__private::v1::export_status_boundary(0, || {
+                #krate::__private::v1::auto_close_generated_addin::<#ident>(&crate::__XLFN_RUNTIME)
+            })
         }
 
         #(#gating)*
         #[unsafe(no_mangle)]
         pub extern "system" fn xlAutoRemove() -> i32 {
-            #krate::__private::v1::auto_remove_generated_addin::<#ident>(&crate::__XLFN_RUNTIME)
+            #krate::__private::v1::export_status_boundary(0, || {
+                #krate::__private::v1::auto_remove_generated_addin::<#ident>(&crate::__XLFN_RUNTIME)
+            })
         }
 
         /// Releases one return pointer supplied back by Excel.
@@ -172,8 +178,10 @@ fn expand_excel_addin(
         pub unsafe extern "system" fn xlAutoFree12(
             __pointer: *mut #krate::__private::v1::XLOPER12,
         ) {
-            // SAFETY: Excel passes the live return pointer produced by this XLL.
-            unsafe { #krate::__private::v1::free_generated_return(__pointer) };
+            #krate::__private::v1::export_void_boundary(|| {
+                // SAFETY: Excel passes the live return pointer produced by this XLL.
+                unsafe { #krate::__private::v1::free_generated_return(__pointer) };
+            });
         }
 
         /// Supplies Add-in metadata to Excel's Add-in Manager.
@@ -185,14 +193,16 @@ fn expand_excel_addin(
         pub unsafe extern "system" fn xlAddInManagerInfo12(
             __action: *mut #krate::__private::v1::XLOPER12,
         ) -> *mut #krate::__private::v1::XLOPER12 {
-            // SAFETY: Excel supplies `__action` as a live XLOPER12 for this ABI call.
-            unsafe {
-                #krate::__private::v1::addin_manager_info(
-                    &crate::__XLFN_RUNTIME,
-                    #display_name,
-                    __action,
-                )
-            }
+            #krate::__private::v1::export_value_boundary(|| {
+                // SAFETY: Excel supplies `__action` as a live XLOPER12 for this ABI call.
+                unsafe {
+                    #krate::__private::v1::addin_manager_info(
+                        &crate::__XLFN_RUNTIME,
+                        #display_name,
+                        __action,
+                    )
+                }
+            })
         }
 
     })
@@ -205,6 +215,86 @@ mod tests {
 
     fn function(source: proc_macro2::TokenStream) -> ItemFn {
         syn::parse2(source).unwrap()
+    }
+
+    fn assert_outer_abi_boundary(item: &ItemFn, expected: &str) {
+        assert!(
+            item.sig.abi.is_some(),
+            "fixture must inspect an actual extern function"
+        );
+        let [syn::Stmt::Expr(syn::Expr::Call(call), _)] = item.block.stmts.as_slice() else {
+            panic!("an exported body must consist only of its outer panic boundary");
+        };
+        let syn::Expr::Path(path) = call.func.as_ref() else {
+            panic!("exported boundary must be called directly");
+        };
+        assert_eq!(path.path.segments.last().unwrap().ident, expected);
+        assert!(matches!(call.args.last(), Some(syn::Expr::Closure(_))));
+    }
+
+    #[test]
+    fn generated_udf_and_lifecycle_exports_wrap_the_complete_body() {
+        for (source, expected) in [
+            (
+                quote!(
+                    fn value() -> f64 {
+                        1.0
+                    }
+                ),
+                "export_value_boundary",
+            ),
+            (
+                quote!(
+                    async fn value() -> f64 {
+                        1.0
+                    }
+                ),
+                "export_void_boundary",
+            ),
+        ] {
+            let expanded = expand_excel_function(quote!(), function(source)).unwrap();
+            let file: syn::File = syn::parse2(expanded).unwrap();
+            let exported: Vec<_> = file
+                .items
+                .iter()
+                .filter_map(|item| {
+                    if let syn::Item::Fn(function) = item
+                        && function.sig.abi.is_some()
+                    {
+                        Some(function)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(exported.len(), 1);
+            assert_outer_abi_boundary(exported[0], expected);
+        }
+
+        let expanded = expand_excel_addin(
+            quote!(),
+            syn::parse_quote!(
+                struct TestAddin;
+            ),
+        )
+        .unwrap();
+        let file: syn::File = syn::parse2(expanded).unwrap();
+        let mut exports = 0;
+        for item in &file.items {
+            if let syn::Item::Fn(function) = item
+                && function.sig.abi.is_some()
+            {
+                let expected = match function.sig.ident.to_string().as_str() {
+                    "xlAutoOpen" | "xlAutoClose" | "xlAutoRemove" => "export_status_boundary",
+                    "xlAutoFree12" => "export_void_boundary",
+                    "xlAddInManagerInfo12" => "export_value_boundary",
+                    name => panic!("unexpected generated lifecycle export {name}"),
+                };
+                assert_outer_abi_boundary(function, expected);
+                exports += 1;
+            }
+        }
+        assert_eq!(exports, 5);
     }
 
     #[test]
@@ -256,6 +346,75 @@ mod tests {
         assert!(expanded.contains("CellPresence :: Blank"));
         assert!(expanded.contains("CellPresence :: Missing"));
         assert!(expanded.contains("\"Factor\""));
+    }
+
+    #[test]
+    fn registration_metadata_is_validated_before_codegen() {
+        let too_long = "😀".repeat(xlfn_common::EXCEL_STRING_LIMIT / 2 + 1);
+        for value in ["embedded\0nul", too_long.as_str()] {
+            for key in ["name", "category", "description", "help_topic"] {
+                let key = syn::Ident::new(key, proc_macro2::Span::call_site());
+                let error = expand_excel_function(
+                    quote!(#key = #value),
+                    function(quote!(
+                        fn metadata() -> f64 {
+                            0.0
+                        }
+                    )),
+                )
+                .unwrap_err();
+                assert!(error.to_string().starts_with("invalid Excel function"));
+            }
+        }
+
+        let maximum = "x".repeat(xlfn_common::EXCEL_STRING_LIMIT);
+        assert!(
+            expand_excel_function(
+                quote!(description = #maximum),
+                function(quote!(
+                    fn metadata() -> f64 {
+                        0.0
+                    }
+                )),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn argument_descriptions_use_the_runtime_counted_string_rules() {
+        let too_long = "x".repeat(xlfn_common::EXCEL_STRING_LIMIT + 1);
+        for description in ["embedded\0nul", too_long.as_str()] {
+            let error = expand_excel_function(
+                quote!(),
+                function(quote!(
+                    fn metadata(#[excel_arg(description = #description)] value: f64) -> f64 {
+                        value
+                    }
+                )),
+            )
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .starts_with("invalid Excel argument description")
+            );
+        }
+    }
+
+    #[test]
+    fn addin_metadata_rejects_nul_and_shared_windows_device_names() {
+        for attributes in [
+            quote!(name = "embedded\0nul"),
+            quote!(category = "embedded\0nul"),
+            quote!(id = "con"),
+            quote!(id = "lPt9"),
+        ] {
+            let item = syn::parse_quote!(
+                struct TestAddin;
+            );
+            assert!(expand_excel_addin(attributes, item).is_err());
+        }
     }
 
     #[test]

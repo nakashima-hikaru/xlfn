@@ -12,6 +12,7 @@ use crate::subscription::{
 use std::marker::PhantomData;
 use std::ptr;
 use std::rc::Rc;
+use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -1265,6 +1266,46 @@ fn com_boundary_converts_panics_to_e_unexpected() {
         com_boundary("test COM boundary", || panic!("injected COM panic")),
         E_UNEXPECTED
     );
+}
+
+#[test]
+fn com_abi_retains_panicking_payload() {
+    extern "system" fn trampoline(dropped: &Arc<AtomicUsize>) -> i32 {
+        com_boundary("panicking payload COM boundary", || {
+            std::panic::panic_any(crate::panic_boundary::tests::PanickingPayload(Arc::clone(
+                dropped,
+            )))
+        })
+    }
+    extern "system" fn release_trampoline(dropped: &Arc<AtomicUsize>) -> u32 {
+        super::com_abi::com_lifetime_boundary("panicking payload COM release", 0, || {
+            std::panic::panic_any(crate::panic_boundary::tests::PanickingPayload(Arc::clone(
+                dropped,
+            )))
+        })
+    }
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    let dropped = Arc::new(AtomicUsize::new(0));
+    assert_eq!(trampoline(&dropped), E_UNEXPECTED);
+    assert_eq!(release_trampoline(&dropped), 0);
+    assert_eq!(dropped.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn termination_worker_join_retains_panicking_payload_and_completes() {
+    let worker = TerminationWorker::default();
+    let start = worker.reserve_start().unwrap();
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let payload = crate::panic_boundary::tests::PanickingPayload(Arc::clone(&dropped));
+    start.commit(std::thread::spawn(move || std::panic::panic_any(payload)));
+    assert!(matches!(
+        worker.join(),
+        Err(ServerCloseError::WorkerPanicked)
+    ));
+    assert_eq!(worker.state.lock().status, TerminationWorkerStatus::Joined);
+    assert_eq!(dropped.load(Ordering::Acquire), 0);
+    assert!(worker.join().is_ok());
 }
 
 #[test]

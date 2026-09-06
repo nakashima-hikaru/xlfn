@@ -7,6 +7,7 @@ use super::server::{
 #[cfg(feature = "handles")]
 use crate::XllError;
 use crate::XllResult;
+use crate::excel_rtd::counted_string::CountedString;
 #[cfg(feature = "handles")]
 use crate::handle::{FormulaLifetimeBackend, FormulaLifetimeGeneration};
 use crate::host_api::ExcelHost;
@@ -16,7 +17,7 @@ use crate::subscription::{RtdValue, SubscriptionRuntime};
 use crate::value::ExcelValue;
 use std::ptr::NonNull;
 use std::sync::atomic::Ordering;
-use xlfn_sys::{XLF_RTD, XLOPER12, XLOPER12Value, XLTYPE_STR};
+use xlfn_sys::{XLF_RTD, XLOPER12};
 
 #[cfg(feature = "handles")]
 pub(crate) fn observe<H: FormulaLifetimeBackend + 'static>(
@@ -181,30 +182,4 @@ pub(crate) fn observe_subscription(
 
 fn module_path(host: ExcelHost<'_>) -> XllResult<String> {
     host.module_path()
-}
-
-struct CountedString {
-    units: Box<[u16]>,
-    oper: XLOPER12,
-}
-
-impl CountedString {
-    fn new(value: &str) -> XllResult<Self> {
-        let units =
-            crate::utf16::encode_counted(value, "RTD topic", crate::utf16::EXCEL_STRING_LIMIT)?;
-        let mut units = units.into_boxed_slice();
-        let oper = XLOPER12 {
-            value: XLOPER12Value {
-                string: units.as_mut_ptr(),
-            },
-            xltype: XLTYPE_STR,
-        };
-
-        Ok(Self { units, oper })
-    }
-
-    fn pointer(&mut self) -> NonNull<XLOPER12> {
-        let _keep_alive = &self.units;
-        NonNull::from_mut(&mut self.oper)
-    }
 }

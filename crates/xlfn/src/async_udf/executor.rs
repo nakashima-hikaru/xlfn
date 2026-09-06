@@ -1,4 +1,6 @@
-use super::generation::{ControlPhase, ExecutorControl, GenerationState, task_shard};
+use super::generation::{
+    ControlPhase, ExecutorControl, GenerationPin, GenerationState, task_shard,
+};
 use super::queue::RunnableQueue;
 use super::task::{ActiveReservation, TaskControl};
 use super::worker::{cancelled_calculation_error, run_executor};
@@ -26,16 +28,17 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 #[cfg(test)]
 use std::time::{Duration, Instant};
+use xlfn_kernel::published_owner::PublishedOwner;
 
 pub(crate) struct Executor {
-    pub(crate) shared: Box<ExecutorShared>,
+    pub(crate) shared: PublishedOwner<ExecutorShared>,
     pub(crate) workers: Vec<JoinHandle<()>>,
 }
 
 /// Non-owning executor capability used by workers and detached async tasks.
 ///
-/// The unique `Box<ExecutorShared>` remains in `Executor`. Shutdown drains all
-/// tasks and joins every worker before reclaiming that Box.
+/// The unique allocation remains in `Executor`. Shutdown drains all tasks and
+/// joins every worker before reclaiming it.
 #[derive(Clone, Copy)]
 pub(crate) struct ExecutorPtr(NonNull<ExecutorShared>);
 
@@ -67,7 +70,8 @@ unsafe impl Sync for ExecutorPtr {}
 ///
 /// Ownership invariants:
 ///
-/// - Each `Executor` uniquely owns one stable `Box<ExecutorShared>`.
+/// - Each `Executor` uniquely owns one `PublishedOwner<ExecutorShared>` whose
+///   movements do not invalidate published readers.
 /// - `AsyncManager` publishes only a non-owning pointer protected by spawn
 ///   admission; publication never participates in ownership.
 /// - Workers and active tasks carry non-owning capabilities. Global active
@@ -82,7 +86,9 @@ unsafe impl Sync for ExecutorPtr {}
 /// I2. When `control.phase == ControlPhase::Running`, `current.admission` is the admission authority for the current generation.
 /// I3. When `control.phase == ControlPhase::Advancing { from, to }`, `current.id == from` and `current.admission` is closed.
 /// I4. After `control.phase == ControlPhase::Closing`, no new `GenerationState` is ever published to `current`.
-/// I5. A `GenerationState` may be removed from `control.generations` only when `generation != next` and `task_count == 0`.
+/// I5. Generation publication, pin acquisition, and reclamation serialize on
+/// `generation_publication`. Only non-current generations with zero pins may
+/// be reclaimed; canceled task controls do not determine task lifetimes.
 ///
 /// Two-Stage Shutdown & Queue Invariants (Q1–Q5):
 /// - Q1: New `Runnable`s can only be enqueued while `queue.schedule_admission` is OPEN.
@@ -104,6 +110,9 @@ pub(crate) struct ExecutorShared {
     /// spawn reads only this atomic.
     pub(crate) closing: AtomicBool,
     pub(crate) current: std::sync::atomic::AtomicPtr<GenerationState>,
+    /// Protects only pointer publication and lifetime-pin acquisition. Never
+    /// held while waiting for admission or executing task/user code.
+    generation_publication: Mutex<()>,
     /// Cold lifecycle state. Never acquired by spawn/completion.
     pub(crate) control: Mutex<ExecutorControl>,
     pub(crate) wait_lock: Mutex<()>,
@@ -154,9 +163,9 @@ impl Executor {
         }
 
         let queue = RunnableQueue::new(stealers.into_boxed_slice(), unparkers.into_boxed_slice());
-        let initial_generation = Box::new(GenerationState::new(generation));
+        let initial_generation = PublishedOwner::new(GenerationState::new(generation));
         let initial_pointer = NonNull::from(initial_generation.as_ref());
-        let shared = Box::new(ExecutorShared {
+        let shared = PublishedOwner::new(ExecutorShared {
             queue,
             next_id: AtomicU64::new(1),
             active: AtomicUsize::new(0),
@@ -164,6 +173,7 @@ impl Executor {
             fatal_worker_failure: AtomicBool::new(false),
             closing: AtomicBool::new(false),
             current: std::sync::atomic::AtomicPtr::new(initial_pointer.as_ptr()),
+            generation_publication: Mutex::new(()),
             control: Mutex::new(ExecutorControl {
                 phase: ControlPhase::Running,
                 generations: [(generation, initial_generation)].into_iter().collect(),
@@ -185,7 +195,7 @@ impl Executor {
                 // SAFETY: workers are joined before the Box<ExecutorShared> is reclaimed.
                 unsafe { shared_pointer.get() }.queue.seal_and_wake_all();
                 while let Some(worker) = workers.pop() {
-                    drop(worker.join());
+                    let _ = crate::panic_boundary::contain_panic(worker.join());
                 }
             },
         );
@@ -265,16 +275,22 @@ impl Executor {
         );
         self.shared.queue.seal_and_wake_all();
         while let Some(runnable) = self.shared.queue.drain_abandoned() {
-            drop(runnable);
+            let _ = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+                drop(runnable);
+            }));
         }
         self.shared.active.load(Ordering::Acquire) == 0
     }
 
     pub(crate) fn finish_close(mut self) -> Vec<crate::shutdown::CleanupIssue> {
         self.shared.queue.seal_and_wake_all();
+        self.join_workers()
+    }
+
+    fn join_workers(&mut self) -> Vec<crate::shutdown::CleanupIssue> {
         let mut issues = Vec::new();
         for worker in self.workers.drain(..) {
-            if worker.join().is_err() {
+            if crate::panic_boundary::contain_panic(worker.join()).is_err() {
                 issues.push(crate::shutdown::CleanupIssue {
                     component: "async worker",
                     kind: CleanupIssueKind::WorkerPanickedAfterJoin,
@@ -286,13 +302,31 @@ impl Executor {
     }
 }
 
+impl Drop for Executor {
+    fn drop(&mut self) {
+        if self.workers.is_empty() {
+            return;
+        }
+        // Owning this allocation also owns the shutdown obligation. An
+        // unwinding caller or a forgotten explicit close must never detach
+        // workers that still hold non-owning executor/generation pointers.
+        let tasks = self.shared.request_close();
+        super::worker::cancel_tasks(tasks);
+        if !self.wait_for_idle() && !self.drain_after_worker_failure() {
+            xlfn_kernel::invariant::fail_stop();
+        }
+        self.shared.queue.seal_and_wake_all();
+        let _ = self.join_workers();
+    }
+}
+
 pub(crate) struct SpawnReservation<'a> {
     pub(crate) shared: ExecutorPtr,
-    pub(crate) generation: NonNull<GenerationState>,
     pub(crate) task_id: u64,
-    pub(crate) reservation: ActiveReservation<'a>,
+    // Drop admission before its generation pin, then release executor activity.
     pub(crate) admission: xlfn_kernel::operation_gate::OperationGuard<'a>,
-    pub(crate) committed: bool,
+    pub(crate) generation: GenerationPin,
+    pub(crate) reservation: ActiveReservation<'a>,
 }
 
 /// Narrow lifetime brand for the generated async handle path.
@@ -373,13 +407,13 @@ unsafe fn erase_scoped_task_future<'generation>(
 }
 
 impl<'a> SpawnReservation<'a> {
-    pub(crate) fn commit<F>(mut self, future: F, cancellation: CancellationSource)
+    pub(crate) fn commit<F>(self, future: F, cancellation: CancellationSource)
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        self.committed = true;
-        // SAFETY: self.admission and self.shared protect the generation from reclamation until committed.
-        let generation = unsafe { self.generation.as_ref() };
+        // SAFETY: the pin protects the generation throughout commit and is
+        // transferred to completion before admission is released.
+        let generation = unsafe { self.generation.pointer().as_ref() };
         // SAFETY: self.admission protects the executor from reclamation until committed.
         let shared = unsafe { self.shared.get() };
         let (abort, registration) = AbortHandle::new_pair();
@@ -398,7 +432,9 @@ impl<'a> SpawnReservation<'a> {
             generation.task_count.fetch_add(1, Ordering::AcqRel);
         }
 
-        let completion = self.reservation.commit(shared, generation, self.task_id);
+        let completion = self
+            .reservation
+            .commit(shared, self.generation, self.task_id);
 
         drop(self.admission);
         shared
@@ -458,14 +494,22 @@ impl ExecutorShared {
             return Err((XllError::Closing, true));
         }
 
-        let current_pointer = self.current.load(Ordering::Acquire);
-        if current_pointer.is_null() {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        // SAFETY: the pointer names a generation Box owned by `control`.
-        // Generation admission is closed and drained before a non-current,
-        // task-free generation can be reclaimed.
-        let current = unsafe { &*current_pointer };
+        let generation_pin = {
+            let _publication = self.generation_publication.lock();
+            let current_pointer = self.current.load(Ordering::Acquire);
+            if current_pointer.is_null() {
+                xlfn_kernel::invariant::fail_stop();
+            }
+            // SAFETY: publication and reclamation hold this same mutex. The
+            // caller's executor admission protects ExecutorShared itself.
+            let current = unsafe { &*current_pointer };
+            // SAFETY: the publication lock and caller's executor admission
+            // satisfy the pin's allocation and lifetime preconditions.
+            unsafe { GenerationPin::acquire(current) }
+        };
+        // SAFETY: generation_pin remains live until after admission, and is
+        // transferred to the returned reservation/completion guard.
+        let current = unsafe { generation_pin.pointer().as_ref() };
 
         #[cfg(test)]
         {
@@ -502,15 +546,17 @@ impl ExecutorShared {
             return Err((XllError::Overloaded, false));
         };
 
-        let task_id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let task_id = self
+            .next_id
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .map_err(|_| (XllError::Overloaded, false))?;
 
         Ok(SpawnReservation {
             shared: ExecutorPtr::from_ref(self),
-            generation: NonNull::from(current),
+            generation: generation_pin,
             task_id,
             reservation,
             admission,
-            committed: false,
         })
     }
 
@@ -567,14 +613,15 @@ impl ExecutorShared {
             let next_generation = control
                 .generations
                 .entry(next)
-                .or_insert_with(|| Box::new(GenerationState::new(next)));
+                .or_insert_with(|| PublishedOwner::new(GenerationState::new(next)));
             NonNull::from(next_generation.as_ref())
         };
 
+        let _publication = self.generation_publication.lock();
         self.current.store(next_pointer.as_ptr(), Ordering::Release);
 
         control.generations.retain(|generation, state| {
-            *generation == next || state.task_count.load(Ordering::Acquire) != 0
+            *generation == next || state.pins.load(Ordering::Acquire) != 0
         });
 
         control.phase = ControlPhase::Running;

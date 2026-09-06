@@ -125,7 +125,7 @@ impl Drop for HandleLookupBenchmark {
     fn drop(&mut self) {
         self.start_tx.clear();
         for worker in self.workers.drain(..) {
-            let _ = worker.join();
+            let _ = crate::panic_boundary::contain_panic(worker.join());
         }
         cleanup_handle_runtime(&self.runtime);
     }
@@ -208,7 +208,7 @@ impl Drop for ArcHandleLookupBenchmark {
     fn drop(&mut self) {
         self.start_tx.clear();
         for worker in self.workers.drain(..) {
-            let _ = worker.join();
+            let _ = crate::panic_boundary::contain_panic(worker.join());
         }
     }
 }
@@ -327,7 +327,7 @@ impl Drop for HandleDistinctKeyBenchmark {
     fn drop(&mut self) {
         self.start_tx.clear();
         for worker in self.workers.drain(..) {
-            let _ = worker.join();
+            let _ = crate::panic_boundary::contain_panic(worker.join());
         }
         cleanup_handle_runtime(&self.runtime);
     }

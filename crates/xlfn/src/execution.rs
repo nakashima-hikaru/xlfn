@@ -1,6 +1,9 @@
+use crate::panic_boundary::catch_no_unwind;
 use crate::{XllError, XllResult};
 use std::marker::PhantomData;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
+#[cfg(test)]
+use std::panic::catch_unwind;
 use std::time::{Duration, Instant, SystemTime};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -51,7 +54,7 @@ pub(crate) fn udf_trace_enabled() -> bool {
     if !tracing::dispatcher::has_been_set() {
         return tracing::enabled!(target: UDF_TRACE_TARGET, tracing::Level::INFO);
     }
-    catch_unwind(AssertUnwindSafe(
+    catch_no_unwind(AssertUnwindSafe(
         || tracing::enabled!(target: UDF_TRACE_TARGET, tracing::Level::INFO),
     ))
     .unwrap_or(false)
@@ -266,11 +269,11 @@ pub(crate) fn exit_layers<G: UdfLayerGuard>(guards: G, outcome: &CallOutcome<'_>
 }
 
 pub(crate) fn safe_enter<L: UdfLayer>(layer: &L, metadata: &CallMetadata) -> XllResult<L::Guard> {
-    catch_unwind(AssertUnwindSafe(|| layer.enter(metadata))).unwrap_or(Err(XllError::Panic))
+    catch_no_unwind(AssertUnwindSafe(|| layer.enter(metadata))).unwrap_or(Err(XllError::Panic))
 }
 
 pub(crate) fn safe_exit<G: UdfLayerGuard>(guard: G, outcome: &CallOutcome<'_>) {
-    drop(catch_unwind(AssertUnwindSafe(|| guard.exit(outcome))));
+    let _ = catch_no_unwind(AssertUnwindSafe(|| guard.exit(outcome)));
 }
 
 impl private::UdfLayersImpl for () {
@@ -392,7 +395,7 @@ pub(crate) fn classify_error(error: &XllError) -> (UdfErrorKind, Option<i32>) {
 }
 
 pub(crate) fn trace(metadata: &UdfTraceMetadata, outcome: &CallOutcome<'_>) {
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    let _ = catch_no_unwind(AssertUnwindSafe(|| {
         tracing::event!(
             target: UDF_TRACE_TARGET,
             tracing::Level::INFO,

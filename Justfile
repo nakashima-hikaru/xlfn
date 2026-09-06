@@ -7,6 +7,11 @@ default:
 fmt:
     cargo fmt --all -- --check
 
+# Audit every direct catch reference, including test and macro token streams.
+panic-boundaries:
+    python3 -B -m unittest discover -s tools -p test_check_panic_boundaries.py
+    python3 -B tools/check_panic_boundaries.py
+
 clippy:
     cargo clippy \
         --workspace \
@@ -44,6 +49,7 @@ test-all: test-libtest
 miri:
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +nightly miri test -p xlfn-kernel --lib -- miri_
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +nightly miri test -p xlfn --no-default-features --features handles --lib -- miri_
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +nightly miri test -p xlfn --no-default-features --features async --lib -- miri_
 
 test-core:
     cargo test \
@@ -85,28 +91,27 @@ features:
         --package xlfn \
         --feature-powerset \
         --depth 2 \
-        --no-dev-deps
+        --lib \
+        --locked
 
 deny:
     cargo deny check
 
 semver:
-    # The current pre-1.0 release intentionally permits breaking public API
-    # cleanup, including the CacheRegistry endpoint redesign. Use the strict
-    # major compatibility mode so removed APIs cannot be mistaken for a
-    # compatible refactor.
+    # Derive compatibility requirements from each crate's actual version.
+    # A workspace-wide major override would skip checks even for crates
+    # whose compatibility line has not changed.
     cargo semver-checks \
         --workspace \
         --exclude xlfn-kernel \
-        --baseline-rev 0.1.0 \
-        --release-type major
+        --baseline-rev 0.1.0
 
 publish-check:
     cargo publish --workspace --dry-run --locked
 
-quick: fmt clippy test
+quick: fmt panic-boundaries clippy test
 
-check: fmt clippy features test bench-check deny semver
+check: fmt panic-boundaries clippy features test bench-check deny semver
 
 # --- Benchmark recipes ---
 

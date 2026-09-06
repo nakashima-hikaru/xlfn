@@ -99,7 +99,7 @@ impl Drop for WorkerPool {
     fn drop(&mut self) {
         self.start_tx.clear();
         for worker in self.workers.drain(..) {
-            let _ = worker.join();
+            let _ = crate::panic_boundary::contain_panic(worker.join());
         }
     }
 }
@@ -352,8 +352,7 @@ impl ConcurrentClearLatencyBenchmark {
             let clear_duration = clear_done_rx
                 .recv()
                 .expect("clear-latency benchmark did not finish");
-            clearer
-                .join()
+            crate::panic_boundary::contain_panic(clearer.join())
                 .expect("clear-latency benchmark clearer panicked");
 
             clear_duration

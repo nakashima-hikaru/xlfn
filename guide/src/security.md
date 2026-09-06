@@ -38,7 +38,11 @@ Set `panic = "unwind"` for release profiles that depend on containment. Do not r
 
 ## Temporal ownership and unsafe reclamation rules
 
-To guarantee memory safety without shared heap reference-counting (`Arc`), all internal subsystems (`Cache`, `Handle`, `RTD`, `Async`) adhere to the unified formal `TemporalReclamation` protocol.
+Cache, handle, RTD, and async publication use unique owners and counted read
+capabilities. The temporal ownership models describe the required lifetime
+protocol; their proofs do not establish Rust pointer provenance or atomic
+memory ordering. Those obligations also require implementation review, Loom
+models, and Miri tests.
 
 Any code that retains a raw pointer or provides lease-based access across concurrent operations must explicitly document and implement the following five criteria:
 
@@ -47,6 +51,20 @@ Any code that retains a raw pointer or provides lease-based access across concur
 3. **Retirement Point**: The explicit transition where the object is marked retired (e.g. Moka eviction, binding removal, callback replacement). No new lookups can acquire pins after retirement.
 4. **Reclamation Point**: The deferred deallocation point executed only after retirement, complete quiescence of the lookup admission domain (`admissions == 0`), and release of all active pins (`pins == 0`).
 5. **Formal Invariant ID**: An explicit reference tag in code (such as `[TR-OBSERVE-POINTER]`, `[TR-LEASE-1]`, `[TR-RECLAIM-1]`) linking the unsafe block to its corresponding Lean 4 theorem and Loom exhaustive model.
+
+Published allocations whose owners can move use the kernel's
+`PublishedOwner<T>`. It retains unique allocation ownership as a raw pointer,
+exposes shared access, and recovers a `Box` only after the relevant readers
+have drained. A stable heap address alone is insufficient: moving a `Box`
+while raw readers use its allocation can invalidate their aliasing permissions.
+
+Drain gates register their notification requirement in the same atomic state
+as the active count. A notifying final release holds the wait mutex before
+publishing zero, and a drain waiter synchronizes with that release's final
+access. Async generation snapshots acquire a lifetime pin before dereferencing
+the current generation; completion retains the pin even after cancellation
+removes the task's control entry. Executor destruction cancels, drains, and
+joins workers before reclaiming their shared allocation.
 
 ## Handle tokens
 

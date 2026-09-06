@@ -9,9 +9,10 @@
 use super::certificate::TerminalCertificateKind;
 use super::owner::RemovalOwner;
 use crate::addin::Addin;
+use crate::panic_boundary::catch_no_unwind;
 use crate::runtime::capabilities::ShutdownDeps;
 use std::marker::PhantomData;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 
 /// The single terminal shutdown proof carried across the lifecycle boundary.
 ///
@@ -99,7 +100,7 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
             return Ok(CleanedAddin::issued());
         };
 
-        let cleanup = catch_unwind(AssertUnwindSafe(|| {
+        let cleanup = catch_no_unwind(AssertUnwindSafe(|| {
             self.deps
                 .with_addin_lifecycle(lifecycle, |lifecycle_state| {
                     let mut reporter = crate::shutdown::CleanupReporter::new(report);
@@ -122,7 +123,7 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
 
         let lifecycle_dropped = match self.deps.take_addin_lifecycle(lifecycle) {
             Ok(lifecycle_state) => {
-                if catch_unwind(AssertUnwindSafe(|| drop(lifecycle_state))).is_err() {
+                if catch_no_unwind(AssertUnwindSafe(|| drop(lifecycle_state))).is_err() {
                     report.push(
                         "Addin::LifecycleState::drop",
                         crate::shutdown::CleanupIssueKind::DisposalPanicked,
@@ -151,7 +152,7 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::LIFECYCLE_SLOT,
             });
         }
-        let shared_state_dropped = catch_unwind(AssertUnwindSafe(|| drop(shared_state))).is_ok();
+        let shared_state_dropped = catch_no_unwind(AssertUnwindSafe(|| drop(shared_state))).is_ok();
         if !shared_state_dropped {
             report.push(
                 "Addin::SharedState::drop",

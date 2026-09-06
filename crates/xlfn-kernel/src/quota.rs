@@ -35,7 +35,7 @@ impl Quota {
     pub unsafe fn try_acquire(&self) -> Result<QuotaPermit, QuotaExceeded> {
         self.used
             .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                (used < self.limit).then_some(used + 1)
+                (used < self.limit).then(|| used + 1)
             })
             .map_err(|_| QuotaExceeded)?;
 
@@ -67,3 +67,36 @@ impl Drop for QuotaPermit {
 unsafe impl Send for QuotaPermit {}
 // SAFETY: Quota is thread-safe and immutable borrows can be shared across threads.
 unsafe impl Sync for QuotaPermit {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exhausted_maximum_quota_does_not_overflow() {
+        let quota = Quota::new(usize::MAX);
+        quota.used.store(usize::MAX, Ordering::Relaxed);
+        // SAFETY: the quota stays alive through the attempt. No permit is
+        // created for the synthetic exhausted state.
+        assert!(unsafe { quota.try_acquire() }.is_err());
+        assert_eq!(quota.used(), usize::MAX);
+    }
+
+    #[test]
+    fn miri_quota_enforces_zero_and_bounded_limits_and_reuses_released_capacity() {
+        let zero = Quota::new(0);
+        // SAFETY: both quota owners outlive every permit in this test.
+        assert!(unsafe { zero.try_acquire() }.is_err());
+        let quota = Quota::new(1);
+        // SAFETY: the permit is explicitly dropped before quota.
+        let permit = unsafe { quota.try_acquire() }.unwrap();
+        assert_eq!(quota.used(), 1);
+        // SAFETY: the owner outlives this rejected attempt.
+        assert!(unsafe { quota.try_acquire() }.is_err());
+        drop(permit);
+        assert_eq!(quota.used(), 0);
+        // SAFETY: the temporary permit is dropped before quota.
+        drop(unsafe { quota.try_acquire() }.unwrap());
+        assert_eq!(quota.used(), 0);
+    }
+}

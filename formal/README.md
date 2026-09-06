@@ -18,7 +18,7 @@ concurrency protocols implemented in `xlfn`:
   - Handle prepare accounting and call-scoped borrow lifetime tracking.
   - Handle topic ownership, reverse-mapping consistency, and Excel connection transactions.
   - Published-topic snapshots with lock-free warm reads and generation isolation.
-  - Published-handle temporal ownership: Box-owned binding records, admission gates, and ObjectArena capability accounting.
+  - Published-handle temporal ownership: uniquely owned binding records, admission gates, and ObjectArena capability accounting.
   - Generic temporal ownership: DrainGate, AtomicPtr, and Box reclamation algebra with GenerationServiceSlot refinement.
   - RTD server-generation isolation and atomic detach-and-drain transactions.
   - RTD wire serialization and parser injectivity.
@@ -127,9 +127,10 @@ an explicit Add-in contract:
 - diagnostics and cleanup-issue accounting.
 
 Arbitrary user threads and native callbacks are not represented by unverifiable
-ghost counters. `Arc::try_unwrap(generation)` establishes `generationUnique`,
-`Addin::quiesce` establishes `addinQuiesced`, and consuming the runtime root
-establishes `generationOwnedByRuntime = false`.
+ghost counters. Draining publication readers before recovering the uniquely
+owned generation establishes `generationUnique`; `Addin::quiesce` establishes
+`addinQuiesced`, and consuming the runtime root establishes
+`generationOwnedByRuntime = false`.
 
 `RtdDrained` is intentionally limited to RTD operations, class factories,
 servers, and server locks. `SubscriptionsDrained` owns the separate
@@ -254,7 +255,7 @@ refinement layer over the canonical topic state:
 
 ### Generic temporal ownership
 
-`XlFnFormal/TemporalOwnership` formalizes the reusable `DrainGate + AtomicPtr + Box`
+`XlFnFormal/TemporalOwnership` formalizes the reusable `DrainGate + AtomicPtr + unique owner`
 ownership algebra:
 
 - **Concept**: A unique owner publishes an addressable pointer guarded by an admission gate.
@@ -265,7 +266,7 @@ ownership algebra:
   - `sealedImpliesNoNewReaders`: A sealed gate rejects admission of new readers.
   - `reclaimRequiresUnpublishedAndDrained`: Owner reclamation requires an unpublished pointer and a fully drained gate.
   - `noUseAfterReclaim`: Reclaimed resources cannot be accessed by readers.
-- **Service-slot refinement**: `GenerationServiceSlotRefinement.lean` provides a thin refinement
+- **Service-slot refinement**: `ServiceSlotRefinement.lean` provides a thin refinement
   mapping `GenerationServiceSlot` states to this generic algebra, verifying that `Ready` corresponds
   to an open gate with an owner, `Sealing` seals the gate, and `ServiceSeal` transfers `Box` ownership
   only after readers have drained to zero.
@@ -275,7 +276,7 @@ ownership algebra:
 `XlFnFormal/Handle/Publication` formalizes the published binding and object capability
 architecture under the redesign:
 
-- **Ownership model**: each live `BindingTable` slot owns one `Box<BindingRecord>`. `PublishedBindings` exposes an
+- **Ownership model**: each live `BindingTable` slot owns one `PublishedOwner<BindingRecord>`. `PublishedBindings` exposes an
   `AtomicPtr<BindingRecord>`, and readers hold an `OwnedOperationGuard` (admission permit).
   `ObjectArena` is the sole owner of each `ObjectCell`. A published `BindingRecord` holds a non-owning
   `ObjectBinding` capability, while a generation-scoped `HandleLease<'_, T>`
@@ -361,6 +362,14 @@ The formalization ends at the temporal ownership and capability boundaries.
 Low-level NonNull address values, allocator implementation, atomic memory
 ordering/interleavings, scheduler fairness, Excel internals, COM implementation
 correctness, and arbitrary user code are outside the Lean model.
+
+In Rust, movable owners of published allocations use `PublishedOwner<T>` so
+moving an owner does not introduce a `Box` unique retag while raw readers are
+live. The drain gates and async worker notification handshake have Loom models
+for their concrete atomic protocol. `just miri` exercises owner movement,
+retirement while readers are active, final-release notification lifetime, and
+async generation cancellation/completion. These checks complement the abstract
+model; none is a proof of the entire Rust program or its dependencies.
 
 Correspondence with the Rust implementation is checked by targeted
 concurrency tests and the retained feature-gated trace checkers; it is not

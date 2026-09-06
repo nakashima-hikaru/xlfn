@@ -523,7 +523,7 @@ impl TerminationWorker {
                 }
             };
 
-            let outcome = handle.join();
+            let outcome = crate::panic_boundary::contain_panic(handle.join());
             let mut state = self.state.lock();
             state.status = TerminationWorkerStatus::Joined;
             state.thread_id = None;

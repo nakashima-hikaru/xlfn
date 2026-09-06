@@ -13,6 +13,27 @@ concurrency:
     cancel-in-progress: true
 
 jobs:
+    panic-boundaries:
+        name: Panic boundary inventory
+        runs-on: ubuntu-latest
+        steps:
+            - name: Check out repository
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+            - name: Set up Python
+              uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+              with:
+                  python-version: "3.13"
+
+            - name: Install Just
+              uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
+              with:
+                  tool: just
+                  fallback: none
+
+            - name: Reject unreviewed direct panic boundaries
+              run: just panic-boundaries
+
     portable-quality:
         name: Portable quality and tooling
         runs-on: ubuntu-latest

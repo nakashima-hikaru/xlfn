@@ -9,9 +9,10 @@ use crate::XllError;
 use crate::addin::Addin;
 use crate::boundary::{fail_stop_invariant, report_boundary_error};
 use crate::generation::RuntimeGeneration;
+use crate::panic_boundary::catch_no_unwind;
 use crate::runtime::Runtime;
 use crate::runtime::transactions::{RemovalControl, RemovalSuccess};
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 
 #[cold]
 pub(crate) fn handle_unload_hazard<A: Addin>(
@@ -20,7 +21,7 @@ pub(crate) fn handle_unload_hazard<A: Addin>(
     boundary: &'static str,
     error: &XllError,
 ) -> RemovalControl {
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    let _ = catch_no_unwind(AssertUnwindSafe(|| {
         tracing::error!(?hazard, %error, "unload safety could not be established");
     }));
     if hazard == crate::shutdown::UnloadHazard::CloseInvariantViolation {
@@ -89,7 +90,7 @@ pub(crate) fn quarantine_runtime_resources<A: Addin>(runtime: &Runtime<A>) {
             },
         );
     }
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    let _ = catch_no_unwind(AssertUnwindSafe(|| {
         if let Some(module_cleanup_authority) = module_cleanup_authority {
             module_cleanup_authority.finish();
         }

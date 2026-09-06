@@ -970,6 +970,28 @@ pub(crate) mod tests {
 
     pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    #[test]
+    fn miri_published_generation_remains_readable_through_close_transition() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let runtime = Runtime::<TestU32Addin>::new();
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish(opening, 23_u32, ());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let admission = runtime.lifecycle.try_admit().unwrap();
+
+        // Closing moves the complete ownership bundle between lifecycle
+        // variants while previously admitted raw readers remain active.
+        let close = runtime.begin_final_removal().unwrap();
+        assert_eq!(runtime.phase(), LifecyclePhase::Closing);
+        assert_eq!(admission.generation().shared_state, 23);
+        #[cfg(feature = "handles")]
+        assert!(admission.services().formula_handle_service().is_ok());
+        drop(admission);
+
+        assert_eq!(runtime.take_current_generation().unwrap().shared_state, 23);
+        finish_test_close(&runtime, close);
+    }
+
     #[cfg(feature = "handles")]
     #[test]
     fn runtime_can_open_close_and_reopen() {

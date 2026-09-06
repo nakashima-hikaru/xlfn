@@ -1,16 +1,15 @@
+use super::com_abi::com_lifetime_boundary;
 use super::module_lifetime;
 use super::module_state::{ComObjectKind, ComObjectLease};
 use super::{
     ACTIVE_SERVER, IID_IUNKNOWN, RtdServer, com_boundary, guid_eq, server_add_ref,
     server_query_interface, server_release,
 };
-use crate::XllError;
 use crate::win32::{
     CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_FAIL, E_NOINTERFACE, E_POINTER,
     E_UNEXPECTED, GUID, S_OK,
 };
 use std::ffi::c_void;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -133,68 +132,77 @@ unsafe extern "system" fn factory_query_interface(
     interface_id: *const GUID,
     output: *mut *mut c_void,
 ) -> i32 {
-    let _module_call = module_lifetime().enter_call();
-    if output.is_null() {
-        return E_POINTER;
-    }
-
-    // SAFETY: `output` was validated as non-null and points to writable storage.
-    unsafe { *output = ptr::null_mut() };
-
-    if this.is_null() || interface_id.is_null() {
-        return E_POINTER;
-    }
-
-    // SAFETY: `interface_id` was validated as non-null and COM supplies a
-    // readable GUID for the duration of this method.
-    let interface_id = unsafe { *interface_id };
-
-    if guid_eq(interface_id, IID_IUNKNOWN) || guid_eq(interface_id, IID_ICLASS_FACTORY) {
-        // SAFETY: `output` is writable and `this` is a live factory pointer.
-        // AddRef creates the reference returned through `output`.
-        unsafe {
-            *output = this.cast();
-            factory_add_ref(this);
+    com_lifetime_boundary("IClassFactory::QueryInterface", E_UNEXPECTED, || {
+        if output.is_null() {
+            return E_POINTER;
         }
 
-        S_OK
-    } else {
-        E_NOINTERFACE
-    }
+        // SAFETY: `output` was validated as non-null and points to writable storage.
+        unsafe { *output = ptr::null_mut() };
+
+        if this.is_null() || interface_id.is_null() {
+            return E_POINTER;
+        }
+
+        // SAFETY: `interface_id` was validated as non-null and COM supplies a
+        // readable GUID for the duration of this method.
+        let interface_id = unsafe { *interface_id };
+
+        if guid_eq(interface_id, IID_IUNKNOWN) || guid_eq(interface_id, IID_ICLASS_FACTORY) {
+            // SAFETY: `output` is writable and `this` is a live factory pointer.
+            // AddRef creates the reference returned through `output`.
+            unsafe {
+                *output = this.cast();
+                factory_add_ref(this);
+            }
+
+            S_OK
+        } else {
+            E_NOINTERFACE
+        }
+    })
 }
 
 unsafe extern "system" fn factory_add_ref(this: *mut ClassFactory) -> u32 {
-    let _module_call = module_lifetime().enter_call();
-    // SAFETY: COM calls AddRef only on a live object pointer. The atomic update
-    // preserves the shared COM reference count.
-    unsafe { (*this).references.fetch_add(1, Ordering::Relaxed) + 1 }
+    com_lifetime_boundary("IClassFactory::AddRef", 0, || {
+        // SAFETY: COM calls AddRef only on a live object pointer. The atomic update
+        // preserves the shared COM reference count.
+        let references = unsafe { &(*this).references };
+        references
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                count.checked_add(1)
+            })
+            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop())
+            + 1
+    })
 }
 
 pub(super) unsafe extern "system" fn factory_release(this: *mut ClassFactory) -> u32 {
-    let _module_call = module_lifetime().enter_call();
-    let Some(this) = NonNull::new(this) else {
-        return 0;
-    };
+    com_lifetime_boundary("IClassFactory::Release", 0, || {
+        let Some(this) = NonNull::new(this) else {
+            return 0;
+        };
 
-    // SAFETY: COM calls Release only on a live object. A zero previous count
-    // is an invariant violation and must never wrap to `u32::MAX`.
-    let previous = unsafe { this.as_ref().references.fetch_sub(1, Ordering::AcqRel) };
-    if previous == 0 {
-        std::process::abort();
-    }
-    let remaining = previous - 1;
+        // SAFETY: COM calls Release only on a live object. A zero previous count
+        // is an invariant violation and must never wrap to `u32::MAX`.
+        let previous = unsafe { this.as_ref().references.fetch_sub(1, Ordering::AcqRel) };
+        if previous == 0 {
+            std::process::abort();
+        }
+        let remaining = previous - 1;
 
-    if remaining == 0 {
-        // SAFETY: observing the transition to zero proves this is the final
-        // reference and uniquely owns the original Box allocation.
-        let factory = unsafe { Box::from_raw(this.as_ptr()) };
+        if remaining == 0 {
+            // SAFETY: observing the transition to zero proves this is the final
+            // reference and uniquely owns the original Box allocation.
+            let factory = unsafe { Box::from_raw(this.as_ptr()) };
 
-        // SAFETY: each factory owns one server reference acquired when the
-        // factory was constructed.
-        unsafe { server_release(factory.server) };
-    }
+            // SAFETY: each factory owns one server reference acquired when the
+            // factory was constructed.
+            unsafe { server_release(factory.server) };
+        }
 
-    remaining
+        remaining
+    })
 }
 
 unsafe extern "system" fn factory_create_instance(
@@ -274,14 +282,7 @@ pub(super) unsafe extern "system" fn factory_lock_server(
     if lock == 0 {
         // Unlocking releases an existing module hold rather than admitting new
         // work. It must remain available after ingress enters CLOSING.
-        let (_module_call, _accepted) = module_lifetime().enter_call();
-        match catch_unwind(AssertUnwindSafe(operation)) {
-            Ok(status) => status,
-            Err(_) => {
-                crate::diagnostics::report_no_unwind("IClassFactory::LockServer", &XllError::Panic);
-                E_UNEXPECTED
-            }
-        }
+        com_lifetime_boundary("IClassFactory::LockServer", E_UNEXPECTED, operation)
     } else {
         // Acquiring another server lock is new work and remains subject to
         // normal ingress admission.

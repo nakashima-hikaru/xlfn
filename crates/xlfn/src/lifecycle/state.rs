@@ -10,6 +10,7 @@ use std::mem;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 use xlfn_kernel::drain_gate::{DEFAULT_STRIPE_COUNT, StripedDrainGate, StripedDrainPermit};
+use xlfn_kernel::published_owner::PublishedOwner;
 
 #[cold]
 fn lifecycle_invariant_violation(message: &'static str) -> ! {
@@ -36,33 +37,33 @@ use crate::runtime_components::GenerationServices;
 /// The root and its generation services are published together. A reader can
 /// therefore never observe a generation root from one open attempt with
 /// services from another attempt.
-pub(crate) struct PublishedGeneration<A: crate::Addin> {
+struct PublishedGeneration<A: crate::Addin> {
     root: NonNull<ExecutionGeneration<A>>,
     services: NonNull<GenerationServices>,
 }
 
 impl<A: crate::Addin> PublishedGeneration<A> {
-    pub(crate) fn new(root: &ExecutionGeneration<A>, services: &GenerationServices) -> Self {
+    fn new(root: &ExecutionGeneration<A>, services: &GenerationServices) -> Self {
         Self {
             root: NonNull::from(root),
             services: NonNull::from(services),
         }
     }
 
-    pub(crate) fn root(&self) -> &ExecutionGeneration<A> {
+    fn root(&self) -> &ExecutionGeneration<A> {
         // SAFETY: publication implies the generation root is valid for the
         // duration of the read-side lease.
         unsafe { self.root.as_ref() }
     }
 
-    pub(crate) fn services(&self) -> &GenerationServices {
+    fn services(&self) -> &GenerationServices {
         // SAFETY: publication implies generation services are valid for the
         // duration of the read-side lease.
         unsafe { self.services.as_ref() }
     }
 }
 
-// SAFETY: both pointers target uniquely owned, stable Boxes whose payloads are
+// SAFETY: both pointers target uniquely owned published allocations whose payloads are
 // Send + Sync by their contracts. Access is possible only while the
 // publication drain gate holds an admission.
 unsafe impl<A: crate::Addin> Send for PublishedGeneration<A> {}
@@ -93,7 +94,7 @@ impl<'lifecycle, A: crate::Addin> GenerationAdmission<'lifecycle, A> {
     }
 
     fn publication(&self) -> &PublishedGeneration<A> {
-        // SAFETY: the lifecycle owns the pointed-to Box and cannot reclaim it
+        // SAFETY: the lifecycle owns the pointed-to allocation and cannot reclaim it
         // before every publication permit has drained.
         unsafe { self.publication.as_ref() }
     }
@@ -114,18 +115,18 @@ impl<'lifecycle, A: crate::Addin> GenerationAdmission<'lifecycle, A> {
 
 /// The complete ownership bundle for a published generation.
 pub(crate) struct OpenGeneration<A: crate::Addin> {
-    generation: Box<ExecutionGeneration<A>>,
-    services: Box<GenerationServices>,
-    publication: Box<PublishedGeneration<A>>,
+    generation: PublishedOwner<ExecutionGeneration<A>>,
+    services: PublishedOwner<GenerationServices>,
+    publication: PublishedOwner<PublishedGeneration<A>>,
     module_epoch: ModuleEpochLease,
 }
 
 /// The generation resources retained after its module lease moves into the
 /// closing ownership slot.
 pub(crate) struct ClosingGeneration<A: crate::Addin> {
-    generation: Box<ExecutionGeneration<A>>,
-    services: Box<GenerationServices>,
-    publication: Box<PublishedGeneration<A>>,
+    generation: PublishedOwner<ExecutionGeneration<A>>,
+    services: PublishedOwner<GenerationServices>,
+    publication: PublishedOwner<PublishedGeneration<A>>,
 }
 
 /// Ownership retained after the generation root has been handed to the
@@ -133,8 +134,8 @@ pub(crate) struct ClosingGeneration<A: crate::Addin> {
 /// payload while the module authority remains in the lifecycle state.
 pub(crate) struct OpenRetirement<A: crate::Addin> {
     generation: RuntimeGeneration,
-    services: Box<GenerationServices>,
-    _publication: Box<PublishedGeneration<A>>,
+    services: PublishedOwner<GenerationServices>,
+    _publication: PublishedOwner<PublishedGeneration<A>>,
 }
 
 impl<A: crate::Addin> OpenGeneration<A> {
@@ -157,7 +158,9 @@ impl<A: crate::Addin> OpenGeneration<A> {
 }
 
 impl<A: crate::Addin> ClosingGeneration<A> {
-    fn into_retirement_with_generation(self) -> (Box<ExecutionGeneration<A>>, OpenRetirement<A>) {
+    fn into_retirement_with_generation(
+        self,
+    ) -> (PublishedOwner<ExecutionGeneration<A>>, OpenRetirement<A>) {
         let Self {
             generation,
             services,
@@ -703,7 +706,7 @@ impl<A: crate::Addin> CloseResources<A> {
         }
     }
 
-    fn into_retiring(self) -> (Option<Box<ExecutionGeneration<A>>>, Self) {
+    fn into_retiring(self) -> (Option<PublishedOwner<ExecutionGeneration<A>>>, Self) {
         match self {
             Self::AwaitingOpenAbort { .. } => (None, self),
             Self::Unowned {
@@ -927,7 +930,7 @@ impl<A: crate::Addin> ClosingState<A> {
         }
     }
 
-    fn into_retiring(self) -> (Option<Box<ExecutionGeneration<A>>>, Self) {
+    fn into_retiring(self) -> (Option<PublishedOwner<ExecutionGeneration<A>>>, Self) {
         match self {
             Self::OpeningActive {
                 attempt,
@@ -1630,8 +1633,8 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                 )
             });
         // SAFETY: the publication gate is owned by this process-lifetime
-        // coordinator and is drained before the unique generation Box moves
-        // to reclamation.
+        // coordinator and is drained before the published generation owner
+        // converts back into a Box for reclamation.
         unsafe { crate::generation::ExecutionLease::new(generation, permit) }
     }
 
@@ -2147,12 +2150,13 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                 layers,
                 init_config: _,
             } = opening;
-            let generation = Box::new(ExecutionGeneration {
+            let generation = PublishedOwner::new(ExecutionGeneration {
                 id: generation,
                 shared_state,
                 layers,
             });
-            let publication = Box::new(PublishedGeneration::new(
+            let services = PublishedOwner::from_box(services);
+            let publication = PublishedOwner::new(PublishedGeneration::new(
                 generation.as_ref(),
                 services.as_ref(),
             ));
@@ -2255,7 +2259,10 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         if generation.is_some() {
             self.publication_readers.wait_until_idle();
         }
-        generation
+        // Only restore Box's exclusive ownership after every raw publication
+        // lease has drained. Moving a Box earlier would invalidate those
+        // aliases even though the heap allocation stays at the same address.
+        generation.map(PublishedOwner::into_box)
     }
 
     #[cfg(test)]

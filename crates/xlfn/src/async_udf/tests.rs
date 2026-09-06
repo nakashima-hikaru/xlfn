@@ -721,6 +721,8 @@ fn spawn_and_cancel_are_linearized_by_generation_admission() {
 fn joined_worker_panic_is_a_cleanup_issue_with_a_stop_certificate() {
     let manager = AsyncManager::new();
     manager.start(1).unwrap();
+    let payload_dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let payload = crate::panic_boundary::tests::PanickingPayload(Arc::clone(&payload_dropped));
     let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
     manager
@@ -729,7 +731,7 @@ fn joined_worker_panic_is_a_cleanup_issue_with_a_stop_certificate() {
             async move {
                 started_tx.send(()).unwrap();
                 release_rx.recv().unwrap();
-                panic!("injected task panic");
+                std::panic::panic_any(payload);
             },
             test_cancellation_source(),
         )
@@ -744,6 +746,7 @@ fn joined_worker_panic_is_a_cleanup_issue_with_a_stop_certificate() {
     );
     let _stopped = outcome.certificate;
     assert!(manager.is_stopped());
+    assert_eq!(payload_dropped.load(Ordering::Acquire), 0);
 }
 
 #[test]
@@ -1520,7 +1523,7 @@ fn test_generation_state_sharded_removal_and_task_count() {
 }
 
 #[test]
-fn spawn_and_advance_linearization_case_a_advance_closes_before_admission() {
+fn miri_spawn_and_advance_linearization_case_a_advance_closes_before_admission() {
     let manager = Arc::new(AsyncManager::new());
     manager.start(1).unwrap();
     let (snapshot_tx, snapshot_rx) = std::sync::mpsc::sync_channel(1);
@@ -1562,6 +1565,14 @@ fn spawn_and_advance_linearization_case_a_advance_closes_before_admission() {
             .recv_timeout(Duration::from_secs(1))
             .unwrap()
     );
+    {
+        let reader = manager.snapshot_spawn_executor().unwrap();
+        let control = reader.control.lock();
+        assert!(
+            control.generations.contains_key(&TEST_GENERATION),
+            "a pre-admission snapshot must keep its generation alive"
+        );
+    }
     release_tx.send(()).unwrap();
 
     let spawn_res = spawn_result_rx
@@ -1576,7 +1587,161 @@ fn spawn_and_advance_linearization_case_a_advance_closes_before_admission() {
     spawning.join().unwrap();
     advancing.join().unwrap();
     manager.set_after_generation_snapshot_hook(None);
+    assert!(manager.advance_generation());
+    {
+        let reader = manager.snapshot_spawn_executor().unwrap();
+        let control = reader.control.lock();
+        assert_eq!(
+            control.generations.len(),
+            1,
+            "retired snapshots must be reclaimed on the next transition"
+        );
+    }
     assert!(manager.close().issues.is_empty());
+}
+
+#[test]
+fn miri_canceled_running_task_keeps_its_generation_until_completion() {
+    let manager = AsyncManager::new();
+    manager.start(1).unwrap();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    manager
+        .spawn(
+            TEST_GENERATION,
+            async move {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            },
+            test_cancellation_source(),
+        )
+        .unwrap();
+    entered_rx.recv().unwrap();
+    manager.cancel_current_generation();
+    assert!(manager.advance_generation());
+    {
+        let reader = manager.snapshot_spawn_executor().unwrap();
+        let control = reader.control.lock();
+        let old = control
+            .generations
+            .get(&TEST_GENERATION)
+            .expect("canceling controls must not free a running task's generation");
+        assert_eq!(old.task_count.load(Ordering::Acquire), 0);
+        assert_eq!(old.pins.load(Ordering::Acquire), 1);
+    }
+    release_tx.send(()).unwrap();
+    {
+        let state = manager.state.lock();
+        let ExecutorState::Running(executor) = &*state else {
+            unreachable!()
+        };
+        assert!(executor.wait_for_idle());
+    }
+    assert!(manager.advance_generation());
+    {
+        let reader = manager.snapshot_spawn_executor().unwrap();
+        assert_eq!(reader.control.lock().generations.len(), 1);
+    }
+    assert!(manager.close().issues.is_empty());
+}
+
+#[test]
+fn task_id_exhaustion_releases_reservation_without_reusing_identity() {
+    let manager = AsyncManager::new();
+    manager.start(1).unwrap();
+    {
+        let reader = manager.snapshot_spawn_executor().unwrap();
+        reader.next_id.store(u64::MAX, Ordering::Relaxed);
+        assert!(matches!(
+            reader.reserve_spawn(TEST_GENERATION),
+            Err((XllError::Overloaded, false))
+        ));
+        assert_eq!(reader.active.load(Ordering::Acquire), 0);
+        let control = reader.control.lock();
+        let generation = control.generations.get(&TEST_GENERATION).unwrap();
+        assert_eq!(generation.pins.load(Ordering::Acquire), 0);
+        assert_eq!(generation.admission.active(), 0);
+    }
+    assert!(manager.close().issues.is_empty());
+}
+
+#[test]
+fn miri_executor_drop_cancels_tasks_and_joins_workers() {
+    struct CountDrop(Arc<std::sync::atomic::AtomicUsize>);
+    impl Drop for CountDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let manager = AsyncManager::new();
+    manager.start(1).unwrap();
+    let guard = CountDrop(Arc::clone(&drops));
+    manager
+        .spawn(
+            TEST_GENERATION,
+            async move {
+                let _guard = guard;
+                std::future::pending::<()>().await;
+            },
+            test_cancellation_source(),
+        )
+        .unwrap();
+    drop(manager);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn generation_exhaustion_does_not_republish_an_old_identity() {
+    let manager = AsyncManager::new();
+    manager
+        .current_generation
+        .store(u64::MAX, Ordering::Release);
+    assert!(!manager.advance_generation());
+    manager.start(1).unwrap();
+    assert!(!manager.advance_generation());
+    assert_eq!(manager.current_generation(), u64::MAX);
+    assert!(manager.close().issues.is_empty());
+}
+
+#[test]
+fn removing_task_releases_cancellation_wakers_outside_task_lock() {
+    struct ReentrantWake(Arc<GenerationState>, Arc<AtomicBool>);
+    impl futures_util::task::ArcWake for ReentrantWake {
+        fn wake_by_ref(this: &Arc<Self>) {
+            let unlocked = this.0.shards[0].tasks.try_lock().is_some();
+            this.1.store(unlocked, Ordering::Release);
+            if unlocked {
+                assert!(!this.0.remove_task(0));
+            }
+        }
+    }
+    let generation = Arc::new(GenerationState::new(TEST_GENERATION));
+    let observed = Arc::new(AtomicBool::new(false));
+    let waker = futures_util::task::waker(Arc::new(ReentrantWake(
+        Arc::clone(&generation),
+        Arc::clone(&observed),
+    )));
+    let (source, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
+    let mut waiter = std::pin::pin!(token.cancelled());
+    assert!(
+        waiter
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(&waker))
+            .is_pending()
+    );
+    let (abort, _) = futures_util::future::AbortHandle::new_pair();
+    generation.shards[0].tasks.lock().insert(
+        0,
+        TaskControl {
+            abort,
+            cancellation: source,
+        },
+    );
+    generation.task_count.store(1, Ordering::Release);
+    assert!(generation.remove_task(0));
+    assert!(observed.load(Ordering::Acquire));
+    assert_eq!(generation.task_count.load(Ordering::Acquire), 0);
 }
 
 #[test]
@@ -1859,13 +2024,15 @@ fn close_preempts_in_progress_advance_generation() {
 
 #[test]
 fn async_udf_boundary_catches_unhandled_panics_at_ffi_boundary() {
-    struct PanickingLayer;
+    struct PanickingLayer(Arc<std::sync::atomic::AtomicUsize>);
     struct PanickingGuard;
 
     impl crate::execution::UdfLayer for PanickingLayer {
         type Guard = PanickingGuard;
         fn enter(&self, _: &CallMetadata) -> XllResult<Self::Guard> {
-            panic!("injected layer panic in outer boundary");
+            std::panic::panic_any(crate::panic_boundary::tests::PanickingPayload(Arc::clone(
+                &self.0,
+            )));
         }
     }
 
@@ -1892,7 +2059,12 @@ fn async_udf_boundary_catches_unhandled_panics_at_ffi_boundary() {
     let runtime = Box::leak(Box::new(Runtime::<PanickingAddin>::new()));
     let _guard = test_lock_for_runtime(runtime);
     let open_attempt = runtime.begin_open().unwrap();
-    let mut open_attempt = runtime.publish(open_attempt, 1_u32, (PanickingLayer,));
+    let payload_dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut open_attempt = runtime.publish(
+        open_attempt,
+        1_u32,
+        (PanickingLayer(Arc::clone(&payload_dropped)),),
+    );
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
     runtime.start_async(1).unwrap();
 
@@ -1925,6 +2097,63 @@ fn async_udf_boundary_catches_unhandled_panics_at_ffi_boundary() {
         "async_udf_boundary_named must catch panics at the FFI boundary"
     );
     assert!(runtime.close_async().issues.is_empty());
+    assert_eq!(payload_dropped.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn async_constructor_and_future_retain_panicking_payloads() {
+    use crate::panic_boundary::tests::PanickingPayload;
+    use std::sync::atomic::AtomicUsize;
+
+    async fn panic_future(payload: PanickingPayload) -> XllResult<f64> {
+        std::panic::panic_any(payload)
+    }
+
+    let runtime = Box::leak(Box::new(Runtime::<TestU32Addin>::new()));
+    let _guard = test_lock_for_runtime(runtime);
+    let open_attempt = runtime.begin_open().unwrap();
+    let mut open_attempt = runtime.publish(open_attempt, 7_u32, ());
+    runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+    runtime.start_async(1).unwrap();
+    let _callback_guard = reset_test_callback();
+    let dropped = Arc::new(AtomicUsize::new(0));
+
+    for (index, constructor) in [true, false].into_iter().enumerate() {
+        let mut bytes = [1_u8, 2, 3, 4];
+        let mut handle = XLOPER12 {
+            value: XLOPER12Value {
+                big_data: XLOPER12BigData {
+                    handle: XLOPER12BigDataHandle {
+                        data: bytes.as_mut_ptr(),
+                    },
+                    byte_count: bytes.len() as i32,
+                },
+            },
+            xltype: XLTYPE_BIG_DATA,
+        };
+        let payload = PanickingPayload(Arc::clone(&dropped));
+        // SAFETY: handle is valid for this synchronous call and copied before spawning.
+        unsafe {
+            async_udf_boundary_named(
+                runtime,
+                "payload",
+                "PAYLOAD",
+                &mut handle,
+                move |_, _, _| {
+                    if constructor {
+                        std::panic::panic_any(payload);
+                    }
+                    Ok(panic_future(payload))
+                },
+            );
+        }
+        wait_for_async_callback_count(index + 1);
+        assert_eq!(crate::test_callback::last_async_value(), -1);
+        assert_eq!(dropped.load(Ordering::Acquire), 0);
+    }
+    assert!(runtime.close_async().issues.is_empty());
+    assert_eq!(crate::test_callback::async_return_calls(), 2);
+    assert_eq!(dropped.load(Ordering::Acquire), 0);
 }
 
 #[test]

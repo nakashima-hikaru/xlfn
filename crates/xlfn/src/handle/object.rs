@@ -6,12 +6,14 @@
 //! zero, and its application destructor always runs outside the arena lock.
 
 use super::token::ObjectId;
+use crate::panic_boundary::catch_no_unwind;
 use crate::{XllError, XllResult};
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 use std::any::{Any, TypeId, type_name};
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
+use xlfn_kernel::published_owner::PublishedOwner;
 
 /// A type-checked, non-owning projection into an [`ObjectCell`].
 pub(crate) struct TypedObjectProjection<T: 'static> {
@@ -73,7 +75,7 @@ impl HandleCleanupState {
 }
 
 struct ObjectEntry {
-    cell: Box<ObjectCell>,
+    cell: PublishedOwner<ObjectCell>,
     bindings: usize,
     pins: usize,
 }
@@ -127,6 +129,7 @@ impl ObjectArena {
             type_name: type_name::<T>(),
         });
         cell.pointer = NonNull::from_ref(cell.owner.as_ref().unwrap().as_ref()).cast::<()>();
+        let cell = PublishedOwner::from_box(cell);
 
         let mut state = self.state.lock();
         if state.sealed {
@@ -179,6 +182,9 @@ impl ObjectArena {
         if state.sealed {
             return Err(XllError::Closing);
         }
+        let active_pins = state.active_pins.checked_add(1).ok_or(XllError::Domain {
+            code: crate::error::DomainErrorCode::Overflow,
+        })?;
         let entry = state.objects.get_mut(&id).ok_or(XllError::StaleHandle)?;
         if NonNull::from(entry.cell.as_ref()) != cell {
             return Err(XllError::StaleHandle);
@@ -186,9 +192,7 @@ impl ObjectArena {
         entry.pins = entry.pins.checked_add(1).ok_or(XllError::Domain {
             code: crate::error::DomainErrorCode::Overflow,
         })?;
-        state.active_pins = state.active_pins.checked_add(1).ok_or(XllError::Domain {
-            code: crate::error::DomainErrorCode::Overflow,
-        })?;
+        state.active_pins = active_pins;
         drop(state);
         self.record(crate::shutdown_trace::ShutdownEvent::AddHandlePin);
         Ok(RawObjectLeaseGuard {
@@ -258,12 +262,14 @@ impl ObjectArena {
         }
     }
 
-    fn destroy(&self, mut cell: Box<ObjectCell>) {
+    fn destroy(&self, cell: PublishedOwner<ObjectCell>) {
+        // Binding grace periods and the arena's pin count have both drained.
+        let mut cell = cell.into_box();
         let owner = cell
             .owner
             .take()
             .expect("object cell owner is consumed exactly once");
-        if catch_unwind(AssertUnwindSafe(|| drop(owner))).is_err() {
+        if catch_no_unwind(AssertUnwindSafe(|| drop(owner))).is_err() {
             let error = XllError::Panic;
             crate::diagnostics::report_no_unwind("handle object final drop", &error);
             self.cleanup.record(error);
@@ -494,3 +500,41 @@ impl Drop for RawObjectLeaseGuard {
 unsafe impl Send for RawObjectLeaseGuard {}
 // SAFETY: RawObjectLeaseGuard immutable borrows can be shared across threads.
 unsafe impl Sync for RawObjectLeaseGuard {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_pin_admission_preserves_both_counters() {
+        let arena = ObjectArena::new();
+        // SAFETY: all capabilities are dropped before this local arena.
+        let binding = unsafe { arena.insert(ObjectId::new(1, 1), 42_u32) }.unwrap();
+        for entry_overflow in [false, true] {
+            {
+                let mut state = arena.state.lock();
+                state.active_pins = if entry_overflow { 0 } else { usize::MAX };
+                state.objects.get_mut(&binding.id).unwrap().pins =
+                    if entry_overflow { usize::MAX } else { 0 };
+            }
+            let result = arena.acquire_pin(binding.id, binding.cell);
+            let mut state = arena.state.lock();
+            let total = state.active_pins;
+            let entry = state.objects.get_mut(&binding.id).unwrap();
+            let pins = entry.pins;
+            // Restore synthetic counts before assertions/fixture destruction.
+            entry.pins = 0;
+            state.active_pins = 0;
+            drop(state);
+            assert!(matches!(
+                result,
+                Err(XllError::Domain {
+                    code: crate::error::DomainErrorCode::Overflow,
+                })
+            ));
+            assert_eq!(total, if entry_overflow { 0 } else { usize::MAX });
+            assert_eq!(pins, if entry_overflow { usize::MAX } else { 0 });
+        }
+        drop(binding);
+    }
+}

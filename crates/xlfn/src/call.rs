@@ -63,7 +63,7 @@ pub struct CallScope<'call> {
 }
 
 impl<'call> CallScope<'call> {
-    pub(crate) fn new() -> Self {
+    fn new() -> Self {
         Self {
             callbacks: HostCallbackSession::new(),
             scratch: CallScratch::new(),
@@ -81,15 +81,17 @@ impl<'call> CallScope<'call> {
     }
 
     /// Enters the handle read domain for this call scope and returns a witness
-    /// valid for `'scope`.
+    /// valid for the scope's invariant `'call` lifetime.
     ///
-    /// Borrowing `domain` for `'scope` statically guarantees that `domain`
-    /// outlives the `CallScope` borrow and all permits retained within it.
+    /// Scopes can only be constructed by the generative closure entry points
+    /// below. Requiring the domain for that entire brand prevents owners
+    /// created inside the closure from being admitted: they could otherwise
+    /// be destroyed before the scope releases its retained reader permits.
     #[inline]
-    pub(crate) fn enter_handle_domain<'scope>(
-        &'scope self,
-        domain: &'scope crate::handle::HandleReadDomain,
-    ) -> XllResult<crate::handle::HandleDomainWitness<'scope>> {
+    pub(crate) fn enter_handle_domain(
+        &'call self,
+        domain: &'call crate::handle::HandleReadDomain,
+    ) -> XllResult<crate::handle::HandleDomainWitness<'call>> {
         let domain_ptr = std::ptr::NonNull::from(domain);
         let mut permits = self.handle_permits.borrow_mut();
         match &*permits {
@@ -97,7 +99,7 @@ impl<'call> CallScope<'call> {
             HandlePermits::Single(permit) => {
                 if permit.domain == domain_ptr {
                     // SAFETY: an active permit for `domain` is retained in `self.handle_permits`
-                    // for the lifetime `'scope` of this `CallScope`.
+                    // for the invariant brand lifetime of this `CallScope`.
                     return Ok(unsafe {
                         crate::handle::HandleDomainWitness::new_unchecked(domain_ptr)
                     });
@@ -106,16 +108,17 @@ impl<'call> CallScope<'call> {
             HandlePermits::Multiple(list) => {
                 if list.iter().any(|p| p.domain == domain_ptr) {
                     // SAFETY: an active permit for `domain` is retained in `self.handle_permits`
-                    // for the lifetime `'scope` of this `CallScope`.
+                    // for the invariant brand lifetime of this `CallScope`.
                     return Ok(unsafe {
                         crate::handle::HandleDomainWitness::new_unchecked(domain_ptr)
                     });
                 }
             }
         }
-        // SAFETY: `domain` is borrowed for `'scope`, which encompasses this call scope
-        // and all permits stored in `self.handle_permits`. All permits are dropped
-        // when `self` is dropped, which occurs before or at the end of `'scope`.
+        // SAFETY: the generative scope constructors keep this scope inside the
+        // operation's enclosing owner frame. Requiring `domain` for the
+        // invariant brand excludes owners local to that operation. The domain
+        // therefore remains alive until the constructor drops every permit.
         let permit = unsafe { domain.enter_owned()? };
         match std::mem::replace(&mut *permits, HandlePermits::Empty) {
             HandlePermits::Empty => {
@@ -130,7 +133,7 @@ impl<'call> CallScope<'call> {
             }
         }
         // SAFETY: `permit` was stored in `self.handle_permits` and remains active for
-        // the entire lifetime `'scope` of this `CallScope`.
+        // the entire invariant brand lifetime of this `CallScope`.
         Ok(unsafe { crate::handle::HandleDomainWitness::new_unchecked(domain_ptr) })
     }
 }

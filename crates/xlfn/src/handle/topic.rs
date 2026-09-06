@@ -1,18 +1,14 @@
-//! Runtime-owned topic and initializer arenas.
+//! Runtime-owned topic publications and shared initializer coordination.
 //!
-//! Published topic and single-flight initializer allocations are retained as
-//! tombstones until the handle service is reclaimed. Read-side maps publish
-//! copyable pointers only; they never share ownership or run reclamation.
+//! Read-side maps publish non-owning pointers to topics. Retired topic owners
+//! are reclaimed only after the rotating read domain completes their grace
+//! period. Single-flight initializers use separate Arc ownership so their
+//! owners and waiters can complete after the table removes an initializer.
 
 #![allow(
     unsafe_code,
     reason = "topic publication uses stable non-owning pointers into table-owned arenas"
 )]
-#![allow(
-    clippy::vec_box,
-    reason = "published topics must keep their stable heap address while deferred reclamation is pending"
-)]
-
 #[cfg(any(target_os = "windows", test))]
 use super::FormulaLifetimeGeneration;
 use super::{FormulaObserverId, HandleTopicKey, Topic};
@@ -32,6 +28,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::thread::ThreadId;
 use xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT;
+use xlfn_kernel::published_owner::PublishedOwner;
 use xlfn_kernel::rotating_read_domain::{
     DrainedGeneration, RotatingReadDomain, RotatingReadPermit,
 };
@@ -233,7 +230,7 @@ pub(crate) struct TopicTable {
     state: RwLock<TopicTableState>,
     published: PublishedTopics,
     read_domain: RotatingReadDomain<DEFAULT_STRIPE_COUNT>,
-    pending_reclaims: [Mutex<Vec<Box<PublishedTopic>>>; 2],
+    pending_reclaims: [Mutex<Vec<PublishedOwner<PublishedTopic>>>; 2],
 }
 
 impl TopicTable {
@@ -258,7 +255,7 @@ impl TopicTable {
         })
     }
 
-    fn enqueue_reclaim(&self, topic: Box<PublishedTopic>) {
+    fn enqueue_reclaim(&self, topic: PublishedOwner<PublishedTopic>) {
         loop {
             let generation = self.read_domain.current_generation();
             let mut queue = self.pending_reclaims[generation.index()].lock();
@@ -272,12 +269,15 @@ impl TopicTable {
         }
     }
 
-    fn drain_generation(&self, generation: DrainedGeneration) -> Vec<Box<PublishedTopic>> {
+    fn drain_generation(
+        &self,
+        generation: DrainedGeneration,
+    ) -> Vec<PublishedOwner<PublishedTopic>> {
         let mut queue = self.pending_reclaims[generation.index()].lock();
         std::mem::take(&mut *queue)
     }
 
-    pub(crate) fn try_quiesce_and_drain(&self) -> Vec<Box<PublishedTopic>> {
+    pub(crate) fn try_quiesce_and_drain(&self) -> Vec<PublishedOwner<PublishedTopic>> {
         if self.pending_reclaims[0].lock().is_empty() && self.pending_reclaims[1].lock().is_empty()
         {
             return Vec::new();
@@ -291,7 +291,7 @@ impl TopicTable {
         result.unwrap_or_default()
     }
 
-    pub(crate) fn seal_and_drain(&self) -> Vec<Box<PublishedTopic>> {
+    pub(crate) fn seal_and_drain(&self) -> Vec<PublishedOwner<PublishedTopic>> {
         self.read_domain.seal_and_wait();
         let mut queue0 = self.pending_reclaims[0].lock();
         let mut queue1 = self.pending_reclaims[1].lock();
@@ -513,7 +513,7 @@ impl TopicTable {
             });
         }
         let lifetime_key = publication.lifetime_key.clone();
-        let publication = Box::new(publication);
+        let publication = PublishedOwner::new(publication);
         state.by_key.insert(
             key,
             Topic {
@@ -602,7 +602,7 @@ impl TopicTable {
         &self,
         state: &mut TopicTableState,
         key: HandleTopicKey,
-    ) -> Option<(TopicRemoval, Box<PublishedTopic>)> {
+    ) -> Option<(TopicRemoval, PublishedOwner<PublishedTopic>)> {
         let topic = state.by_key.get(&key)?;
         let was_provisional = topic.publication.state() == PublishedTopicState::Provisional;
         let initialization_id = state
@@ -686,17 +686,32 @@ impl TopicTable {
     }
 
     pub(crate) fn close(&self) -> Vec<InitializationPtr> {
+        self.close_impl(|| {})
+    }
+
+    #[cfg(test)]
+    pub(crate) fn close_with_reclaim_hook(
+        &self,
+        after_enqueue: impl Fn(),
+    ) -> Vec<InitializationPtr> {
+        self.close_impl(after_enqueue)
+    }
+
+    fn close_impl(&self, after_enqueue: impl Fn()) -> Vec<InitializationPtr> {
         let mut state = self.state.write();
         state.closed = true;
         state.generation = state.generation.next().unwrap_or(state.generation);
+        // A remover may already be running reclamation outside the table lock.
+        // Unpublish every pointer before any owner enters a reclaim queue.
+        self.published.clear();
         for (_, topic) in state.by_key.drain() {
             topic
                 .publication
                 .state
                 .store(PublishedTopicState::Closing as u8, Ordering::Release);
             self.enqueue_reclaim(topic.publication);
+            after_enqueue();
         }
-        self.published.clear();
         state.by_lifetime_key.clear();
         state.by_observer_id.clear();
         state

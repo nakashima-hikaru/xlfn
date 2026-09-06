@@ -408,6 +408,28 @@ mod tests {
     }
 
     #[test]
+    fn miri_reentrant_access_cannot_alias_or_remove_a_mutably_borrowed_value() {
+        let slot = ThreadAffineSlot::<usize>::new();
+        let access = slot.bind_current().unwrap();
+        slot.install(&access, 1).unwrap();
+        slot.with_mut(&access, |value| {
+            assert_eq!(
+                slot.with_mut(&access, |_| ()),
+                Err(ThreadAffineError::ReentrantAccess)
+            );
+            assert_eq!(slot.take(&access), Err(ThreadAffineError::ReentrantAccess));
+            assert_eq!(
+                slot.release_empty_binding(&access),
+                Err(ThreadAffineError::ReentrantAccess)
+            );
+            *value += 1;
+        })
+        .unwrap();
+        assert_eq!(slot.take(&access).unwrap(), 2);
+        slot.release_empty_binding(&access).unwrap();
+    }
+
+    #[test]
     fn tls_destructor_forgets_unclaimed_value() {
         let slot = Arc::new(ThreadAffineSlot::<DropProbe>::new());
         let drops = Arc::new(AtomicUsize::new(0));

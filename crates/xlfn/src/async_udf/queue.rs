@@ -5,6 +5,40 @@ use crossbeam_deque::{Injector, Stealer, Worker};
 use crossbeam_utils::sync::Unparker;
 use xlfn_kernel::drain_gate::DrainGate;
 
+// Keep the memory-order handshake shared with the Loom model. Every work
+// publication and idle announcement must participate in the same RMW order.
+trait IdleWorkerMask {
+    fn publish_and_observe(&self, bits: u64) -> u64;
+    fn try_claim(&self, current: u64, next: u64) -> Result<u64, u64>;
+}
+
+impl IdleWorkerMask for AtomicU64 {
+    fn publish_and_observe(&self, bits: u64) -> u64 {
+        self.fetch_or(bits, Ordering::AcqRel)
+    }
+
+    fn try_claim(&self, current: u64, next: u64) -> Result<u64, u64> {
+        self.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire)
+    }
+}
+
+fn claim_idle_worker(mask: &impl IdleWorkerMask) -> Option<usize> {
+    // A load can miss a worker's concurrent idle announcement while its
+    // queue recheck misses our push (store buffering). An unconditional
+    // RMW joins the announcement's modification order: either we observe
+    // its bit and unpark it, or its later AcqRel announcement observes our
+    // release and must see the queued work before parking.
+    let mut idle = mask.publish_and_observe(0);
+    while idle != 0 {
+        let worker_index = idle.trailing_zeros() as usize;
+        match mask.try_claim(idle, idle & !(1u64 << worker_index)) {
+            Ok(_) => return Some(worker_index),
+            Err(actual) => idle = actual,
+        }
+    }
+    None
+}
+
 /// Concurrency invariants for `RunnableQueue`:
 ///
 /// - **Q1 (Schedule Gate Admission)**: New `Runnable` instances can only be enqueued while
@@ -52,25 +86,15 @@ impl RunnableQueue {
     }
 
     pub(crate) fn wake_one(&self) {
-        let mut idle = self.idle_workers.load(Ordering::Acquire);
-        while idle != 0 {
-            let worker_index = idle.trailing_zeros() as usize;
-            let mask = 1u64 << worker_index;
-            match self.idle_workers.compare_exchange_weak(
-                idle,
-                idle & !mask,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    if let Some(unparker) = self.unparkers.get(worker_index) {
-                        unparker.unpark();
-                    }
-                    return;
-                }
-                Err(actual) => idle = actual,
-            }
+        if let Some(worker_index) = claim_idle_worker(&self.idle_workers)
+            && let Some(unparker) = self.unparkers.get(worker_index)
+        {
+            unparker.unpark();
         }
+    }
+
+    pub(crate) fn announce_idle(&self, worker_bit: u64) {
+        self.idle_workers.publish_and_observe(worker_bit);
     }
 
     pub(crate) fn wake_all(&self) {
@@ -149,5 +173,47 @@ impl RunnableQueue {
             }
         }
         None
+    }
+}
+
+#[cfg(all(test, not(all(target_os = "windows", target_arch = "x86"))))]
+mod tests {
+    use super::{IdleWorkerMask, claim_idle_worker};
+    use loom::sync::Arc;
+    use loom::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    impl IdleWorkerMask for AtomicU64 {
+        fn publish_and_observe(&self, bits: u64) -> u64 {
+            self.fetch_or(bits, Ordering::AcqRel)
+        }
+
+        fn try_claim(&self, current: u64, next: u64) -> Result<u64, u64> {
+            self.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire)
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn loom_queue_publication_cannot_leave_work_behind_a_sleeping_worker() {
+        loom::model(|| {
+            let idle = Arc::new(AtomicU64::new(0));
+            let queued = Arc::new(AtomicBool::new(false));
+            let worker_idle = Arc::clone(&idle);
+            let worker_queue = Arc::clone(&queued);
+            let worker = loom::thread::spawn(move || {
+                if worker_queue.load(Ordering::Acquire) {
+                    return true;
+                }
+                worker_idle.publish_and_observe(1);
+                worker_queue.load(Ordering::Acquire)
+            });
+            queued.store(true, Ordering::Release);
+            let notified = claim_idle_worker(&*idle).is_some();
+            let found_work = worker.join().unwrap();
+            assert!(
+                found_work || notified,
+                "a worker must see queued work or receive a park token"
+            );
+        });
     }
 }

@@ -1,4 +1,4 @@
-//! Panic containment for cleanup paths that must continue calling other code.
+//! Shared panic policy for every boundary that consumes a panic.
 //!
 //! A caught panic's payload is arbitrary user data. Dropping it can panic
 //! again, including during cleanup of another panic, so ordinary `catch_unwind`
@@ -6,10 +6,11 @@
 //! destroy only the standard `&'static str` and `String` payloads. Arbitrary
 //! payloads are deliberately retained without running their destructors. This
 //! leaks custom payloads and their resources only on that exceptional path,
-//! in exchange for preserving notification and teardown progress.
+//! in exchange for preserving ABI, notification, and teardown progress.
 //!
-//! Use ordinary `catch_unwind` when a payload will be resumed or handed back to
-//! its caller. Apply this policy only where a panic is being consumed. It does
+//! Use ordinary `catch_unwind` only at audited boundaries that resume the
+//! original payload. All consuming catches and worker joins use these helpers.
+//! The exact exceptions are checked by `just panic-boundaries`. This policy does
 //! not contain aborting panics, panicking panic hooks, or double panics raised
 //! before unwinding reaches the boundary.
 

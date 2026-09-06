@@ -3,8 +3,8 @@ use super::automation::{
     write_refresh_data, write_value_variant,
 };
 use super::com_abi::IID_IUNKNOWN;
+use super::com_abi::com_lifetime_boundary;
 use super::global_interface_table::get_git;
-use super::module_lifetime;
 use super::module_state::{ComObjectKind, ComObjectLease};
 use super::registration::guid_compact;
 use super::server_gate::{
@@ -20,6 +20,7 @@ use crate::error::InputError;
 use crate::handle::{FormulaLifetimeBackend, FormulaLifetimeConnection, FormulaLifetimeGeneration};
 use crate::subscription::ServerGeneration;
 use crate::subscription::SubscriptionRuntime;
+use crate::win32::E_UNEXPECTED;
 use crate::win32::{
     CoCreateGuid, DISP_E_BADINDEX, DISPPARAMS, E_FAIL, E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL,
     E_POINTER, EXCEPINFO, GUID, S_OK, SAFEARRAY, VARIANT, VARIANT_BOOL, VARIANT_FALSE,
@@ -792,79 +793,89 @@ pub(super) unsafe extern "system" fn server_query_interface(
     interface_id: *const GUID,
     output: *mut *mut c_void,
 ) -> i32 {
-    let _module_call = module_lifetime().enter_call();
-    if output.is_null() {
-        return E_POINTER;
-    }
-
-    // SAFETY: `output` was validated as non-null and points to writable storage.
-    unsafe { *output = ptr::null_mut() };
-
-    if this.is_null() || interface_id.is_null() {
-        return E_POINTER;
-    }
-
-    // SAFETY: `interface_id` was validated as non-null and COM supplies a
-    // readable GUID for the duration of this method.
-    let interface_id = unsafe { *interface_id };
-
-    if guid_eq(interface_id, IID_IUNKNOWN)
-        || guid_eq(interface_id, IID_IDISPATCH)
-        || guid_eq(interface_id, IID_IRTD_SERVER)
-    {
-        // SAFETY: `output` is writable and `this` is a live server pointer.
-        // AddRef creates the reference returned through `output`.
-        unsafe {
-            *output = this.cast();
-            server_add_ref(this);
+    com_lifetime_boundary("IRtdServer::QueryInterface", E_UNEXPECTED, || {
+        if output.is_null() {
+            return E_POINTER;
         }
 
-        S_OK
-    } else {
-        E_NOINTERFACE
-    }
+        // SAFETY: `output` was validated as non-null and points to writable storage.
+        unsafe { *output = ptr::null_mut() };
+
+        if this.is_null() || interface_id.is_null() {
+            return E_POINTER;
+        }
+
+        // SAFETY: `interface_id` was validated as non-null and COM supplies a
+        // readable GUID for the duration of this method.
+        let interface_id = unsafe { *interface_id };
+
+        if guid_eq(interface_id, IID_IUNKNOWN)
+            || guid_eq(interface_id, IID_IDISPATCH)
+            || guid_eq(interface_id, IID_IRTD_SERVER)
+        {
+            // SAFETY: `output` is writable and `this` is a live server pointer.
+            // AddRef creates the reference returned through `output`.
+            unsafe {
+                *output = this.cast();
+                server_add_ref(this);
+            }
+
+            S_OK
+        } else {
+            E_NOINTERFACE
+        }
+    })
 }
 
 pub(super) unsafe extern "system" fn server_add_ref(this: *mut RtdServer) -> u32 {
-    let _module_call = module_lifetime().enter_call();
-    // SAFETY: COM and internal callers invoke AddRef only on a live RtdServer.
-    unsafe { (*this).references.fetch_add(1, Ordering::Relaxed) + 1 }
+    com_lifetime_boundary("IRtdServer::AddRef", 0, || {
+        // SAFETY: COM and internal callers invoke AddRef only on a live RtdServer.
+        let references = unsafe { &(*this).references };
+        references
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                count.checked_add(1)
+            })
+            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop())
+            + 1
+    })
 }
 
 pub(super) unsafe extern "system" fn server_release(this: *mut RtdServer) -> u32 {
-    let _module_call = module_lifetime().enter_call();
-    let Some(this) = NonNull::new(this) else {
-        return 0;
-    };
+    com_lifetime_boundary("IRtdServer::Release", 0, || {
+        let Some(this) = NonNull::new(this) else {
+            return 0;
+        };
 
-    // SAFETY: callers release only an outstanding reference to a live server.
-    // A zero previous count is an invariant violation and must never wrap to
-    // `u32::MAX`.
-    let previous = unsafe { this.as_ref().references.fetch_sub(1, Ordering::AcqRel) };
-    if previous == 0 {
-        std::process::abort();
-    }
-    let remaining = previous - 1;
+        // SAFETY: callers release only an outstanding reference to a live server.
+        // A zero previous count is an invariant violation and must never wrap to
+        // `u32::MAX`.
+        let previous = unsafe { this.as_ref().references.fetch_sub(1, Ordering::AcqRel) };
+        if previous == 0 {
+            std::process::abort();
+        }
+        let remaining = previous - 1;
 
-    if remaining == 0 {
-        // SAFETY: the transition to zero proves exclusive ownership of the Box
-        // allocation originally produced by Box::into_raw.
-        drop(unsafe { Box::from_raw(this.as_ptr()) });
-    }
+        if remaining == 0 {
+            // SAFETY: the transition to zero proves exclusive ownership of the Box
+            // allocation originally produced by Box::into_raw.
+            drop(unsafe { Box::from_raw(this.as_ptr()) });
+        }
 
-    remaining
+        remaining
+    })
 }
 
 unsafe extern "system" fn server_get_type_info_count(this: *mut RtdServer, count: *mut u32) -> i32 {
-    let _module_call = module_lifetime().enter_call();
-    if this.is_null() || count.is_null() {
-        return E_POINTER;
-    }
+    com_lifetime_boundary("IDispatch::GetTypeInfoCount", E_UNEXPECTED, || {
+        if this.is_null() || count.is_null() {
+            return E_POINTER;
+        }
 
-    // SAFETY: `count` was validated as non-null and is a writable COM output.
-    unsafe { *count = 0 };
+        // SAFETY: `count` was validated as non-null and is a writable COM output.
+        unsafe { *count = 0 };
 
-    S_OK
+        S_OK
+    })
 }
 
 unsafe extern "system" fn server_get_type_info(
@@ -873,25 +884,26 @@ unsafe extern "system" fn server_get_type_info(
     _locale: u32,
     output: *mut *mut c_void,
 ) -> i32 {
-    let _module_call = module_lifetime().enter_call();
-    if output.is_null() {
-        return E_POINTER;
-    }
+    com_lifetime_boundary("IDispatch::GetTypeInfo", E_UNEXPECTED, || {
+        if output.is_null() {
+            return E_POINTER;
+        }
 
-    // SAFETY: `output` was validated as non-null and COM supplied it as a
-    // writable output slot.
-    unsafe { *output = ptr::null_mut() };
+        // SAFETY: `output` was validated as non-null and COM supplied it as a
+        // writable output slot.
+        unsafe { *output = ptr::null_mut() };
 
-    if this.is_null() {
-        E_POINTER
-    } else if index != 0 {
-        DISP_E_BADINDEX
-    } else {
-        // GetTypeInfoCount reports zero. The RTD dispatch surface remains
-        // programmable through GetIDsOfNames/Invoke without a runtime type
-        // information object.
-        E_NOTIMPL
-    }
+        if this.is_null() {
+            E_POINTER
+        } else if index != 0 {
+            DISP_E_BADINDEX
+        } else {
+            // GetTypeInfoCount reports zero. The RTD dispatch surface remains
+            // programmable through GetIDsOfNames/Invoke without a runtime type
+            // information object.
+            E_NOTIMPL
+        }
+    })
 }
 
 pub(super) unsafe extern "system" fn server_start(

@@ -77,7 +77,7 @@ impl XlArrayBuilder {
         })
     }
 
-    fn push_oper(&mut self, oper: XLOPER12) -> XllResult<()> {
+    fn ensure_capacity(&self) -> XllResult<()> {
         if self.initialized == self.cells.len() {
             return Err(XllError::input(
                 "<array output>",
@@ -85,6 +85,11 @@ impl XlArrayBuilder {
             ));
         }
 
+        Ok(())
+    }
+
+    fn push_oper(&mut self, oper: XLOPER12) -> XllResult<()> {
+        self.ensure_capacity()?;
         self.cells[self.initialized].write(oper);
         self.initialized += 1;
 
@@ -108,6 +113,9 @@ impl XlArrayBuilder {
     }
 
     pub(crate) fn push_str(&mut self, text: &str) -> XllResult<()> {
+        // A rejected push must not allocate unaccounted arena storage. Check
+        // before encoding as well as at the final cell write.
+        self.ensure_capacity()?;
         let utf16_length = crate::utf16::checked_utf16_len(
             text,
             "<array output>",
@@ -173,6 +181,7 @@ impl XlArrayBuilder {
     }
 
     pub fn push<T: IntoExcel>(&mut self, value: T) -> XllResult<()> {
+        self.ensure_capacity()?;
         value.write_into(self)
     }
 
@@ -224,5 +233,59 @@ impl crate::value::output::ExcelCellSink for XlArrayBuilder {
 
     fn push_error(&mut self, value: crate::ExcelError) -> XllResult<()> {
         Self::push_error(self, value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejected_string_push_does_not_create_storage() {
+        let mut builder = XlArrayBuilder::new(1, 1).unwrap();
+        builder.push(7.0).unwrap();
+        let payload_bytes = builder.payload_bytes;
+        assert!(builder.push_str("extra cell").is_err());
+        assert!(builder.storage.is_none());
+        assert_eq!(builder.payload_bytes, payload_bytes);
+        assert_eq!(builder.initialized, 1);
+        assert!(builder.finish().is_ok());
+    }
+
+    #[test]
+    fn repeated_rejected_strings_leave_arena_and_payload_unchanged() {
+        let mut builder = XlArrayBuilder::new(1, 1).unwrap();
+        builder.push("first cell").unwrap();
+        let arena_bytes = builder.storage.as_ref().unwrap().arena.allocated_bytes();
+        let payload_bytes = builder.payload_bytes;
+        let text = "x".repeat(crate::utf16::EXCEL_STRING_LIMIT);
+        for _ in 0..8 {
+            assert!(builder.push_str(&text).is_err());
+        }
+        assert_eq!(
+            builder.storage.as_ref().unwrap().arena.allocated_bytes(),
+            arena_bytes
+        );
+        assert_eq!(builder.payload_bytes, payload_bytes);
+        assert_eq!(builder.initialized, 1);
+        assert!(builder.finish().is_ok());
+    }
+
+    #[test]
+    fn full_builder_does_not_invoke_custom_conversion() {
+        struct Conversion<'a>(&'a std::cell::Cell<usize>);
+        impl IntoExcel for Conversion<'_> {
+            fn into_excel(self) -> XllResult<ExcelCellOutput> {
+                self.0.set(self.0.get() + 1);
+                Ok(ExcelCellOutput::Boolean(true))
+            }
+        }
+
+        let converted = std::cell::Cell::new(0);
+        let mut builder = XlArrayBuilder::new(1, 1).unwrap();
+        builder.push(Conversion(&converted)).unwrap();
+        assert_eq!(converted.get(), 1);
+        assert!(builder.push(Conversion(&converted)).is_err());
+        assert_eq!(converted.get(), 1);
     }
 }

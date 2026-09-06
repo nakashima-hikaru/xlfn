@@ -20,6 +20,7 @@ use crate::{XllError, XllResult};
 use parking_lot::{RwLock, RwLockWriteGuard};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
+use xlfn_kernel::published_owner::PublishedOwner;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -199,7 +200,7 @@ impl PublishedBindings {
 
 pub(crate) struct BindingSlot {
     pub(crate) next_generation: BindingGeneration,
-    pub(crate) record: Option<Box<BindingRecord>>,
+    pub(crate) record: Option<PublishedOwner<BindingRecord>>,
 }
 
 pub(crate) struct RegistryState {
@@ -211,7 +212,7 @@ pub(crate) struct RegistryState {
 pub(crate) struct BindingTable {
     state: RwLock<RegistryState>,
     published: PublishedBindings,
-    read_domain: Box<HandleReadDomain>,
+    read_domain: PublishedOwner<HandleReadDomain>,
     maximum_bindings: u32,
 }
 
@@ -224,7 +225,7 @@ impl BindingTable {
                 live_bindings: 0,
             }),
             published: PublishedBindings::new(maximum_bindings),
-            read_domain: Box::new(HandleReadDomain::new()),
+            read_domain: PublishedOwner::new(HandleReadDomain::new()),
             maximum_bindings,
         }
     }
@@ -346,11 +347,7 @@ impl BindingTable {
         })
     }
 
-    #[allow(
-        clippy::vec_box,
-        reason = "retired records must retain stable heap ownership until the grace period drains"
-    )]
-    pub(crate) fn retire_all(&self) -> (u32, Vec<Box<BindingRecord>>) {
+    pub(crate) fn retire_all(&self) -> (u32, Vec<PublishedOwner<BindingRecord>>) {
         let mut state = self.state.write();
         let live_bindings = state.live_bindings;
         let mut retired = Vec::with_capacity(live_bindings as usize);
@@ -399,7 +396,7 @@ impl BindingReservation<'_> {
             .state
             .take()
             .expect("binding reservation owns the table write lock");
-        let record = Box::new(BindingRecord::new(self.id, object));
+        let record = PublishedOwner::new(BindingRecord::new(self.id, object));
         let slot = &mut state.slots[self.index];
         slot.record = Some(record);
         let pointer = BindingPtr::from_ref(slot.record.as_ref().unwrap().as_ref());
@@ -480,7 +477,7 @@ impl BindingRemoval<'_> {
         self.active = false;
         drop(state);
         self.table.read_domain.quiesce();
-        drop(retired.into_object_binding());
+        drop(retired.into_box().into_object_binding());
         reusable
     }
 }

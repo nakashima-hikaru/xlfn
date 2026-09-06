@@ -155,7 +155,8 @@ impl Drop for AsyncSpawnBenchmark {
     fn drop(&mut self) {
         self.start_tx.clear();
         for producer in self.producers.drain(..) {
-            producer.join().expect("benchmark producer panicked");
+            crate::panic_boundary::contain_panic(producer.join())
+                .expect("benchmark producer panicked");
         }
         let _ = self.manager.close();
     }

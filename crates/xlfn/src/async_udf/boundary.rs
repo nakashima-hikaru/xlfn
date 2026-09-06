@@ -8,12 +8,13 @@ use super::instrumentation::AsyncObservation;
 use crate::call_return::ExcelReturn;
 use crate::cancellation::{CancellationGuarantee, CancellationSource, CancellationToken};
 use crate::execution::{CallId, CallMetadata, InstrumentationPlan};
+use crate::panic_boundary::catch_no_unwind;
 use crate::runtime::Runtime;
 use crate::{XllError, XllResult};
 use futures_util::Future;
 #[cfg(test)]
 use parking_lot::Mutex;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 use xlfn_sys::XLOPER12;
 
 #[cfg(feature = "handles")]
@@ -110,7 +111,7 @@ pub(crate) unsafe fn async_udf_boundary_named<A, Start, Fut, T>(
         Err(_) => return,
     };
 
-    let result = catch_unwind(AssertUnwindSafe(|| {
+    let result = catch_no_unwind(AssertUnwindSafe(|| {
         // SAFETY: forwarded from this function's raw-handle contract.
         unsafe {
             async_udf_boundary_named_inner(runtime, &call, udf_id, excel_name, raw_handle, start);
@@ -236,7 +237,7 @@ unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
             return;
         }
     };
-    let future = catch_unwind(AssertUnwindSafe(|| {
+    let future = catch_no_unwind(AssertUnwindSafe(|| {
         start(guard, runtime.execution_lease(guard), token)
     }))
     .unwrap_or(Err(XllError::Panic));
@@ -308,7 +309,7 @@ unsafe fn async_udf_boundary_uninstrumented<A, Start, Fut, T>(
             return;
         }
     };
-    let future = catch_unwind(AssertUnwindSafe(|| {
+    let future = catch_no_unwind(AssertUnwindSafe(|| {
         start(guard, runtime.execution_lease(guard), token)
     }))
     .unwrap_or(Err(XllError::Panic));
@@ -380,7 +381,7 @@ pub(crate) unsafe fn async_udf_boundary_named_handle<A, Start, Build, T>(
         Err(_) => return,
     };
 
-    let result = catch_unwind(AssertUnwindSafe(|| {
+    let result = catch_no_unwind(AssertUnwindSafe(|| {
         // SAFETY: forwarded from this function's raw-handle contract.
         unsafe {
             async_udf_boundary_named_handle_inner(
@@ -509,7 +510,7 @@ unsafe fn async_udf_boundary_instrumented_handle<A, Start, Build, T>(
             return;
         }
     };
-    let prepared = catch_unwind(AssertUnwindSafe(|| {
+    let prepared = catch_no_unwind(AssertUnwindSafe(|| {
         let lease = runtime.execution_lease(guard);
         let generation = lease.generation();
         start(guard, lease, token).map(|build| (generation, build))
@@ -590,7 +591,7 @@ unsafe fn async_udf_boundary_uninstrumented_handle<A, Start, Build, T>(
             return;
         }
     };
-    let prepared = catch_unwind(AssertUnwindSafe(|| {
+    let prepared = catch_no_unwind(AssertUnwindSafe(|| {
         let lease = runtime.execution_lease(guard);
         let generation = lease.generation();
         start(guard, lease, token).map(|build| (generation, build))

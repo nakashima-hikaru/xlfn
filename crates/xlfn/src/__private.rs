@@ -9,6 +9,30 @@
 /// site instead of silently binding to a different set of symbols.
 pub mod v1 {
 
+    /// Final generated ABI boundary, including admission and guard teardown.
+    /// The fallback is a detached error value that needs no runtime ownership.
+    #[doc(hidden)]
+    pub fn export_value_boundary(
+        operation: impl FnOnce() -> *mut xlfn_sys::XLOPER12,
+    ) -> *mut xlfn_sys::XLOPER12 {
+        crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(operation))
+            .unwrap_or_else(|_| crate::return_abi::closing_error_pointer())
+    }
+
+    /// Final status-returning boundary for generated Excel and COM exports.
+    #[doc(hidden)]
+    pub fn export_status_boundary(failure: i32, operation: impl FnOnce() -> i32) -> i32 {
+        crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(operation))
+            .unwrap_or(failure)
+    }
+
+    /// Final void boundary, retaining custom panic payloads without invoking
+    /// their destructors before returning through the non-unwinding ABI.
+    #[doc(hidden)]
+    pub fn export_void_boundary(operation: impl FnOnce()) {
+        let _ = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(operation));
+    }
+
     #[cfg(feature = "async")]
     use std::future::Future;
     #[cfg(all(feature = "async", feature = "handles"))]
@@ -773,10 +797,6 @@ pub mod v1 {
         use crate::error::XllResult;
         use crate::handle::{ExcelHandleObject, Handle};
 
-        pub fn new_call_scope<'call>() -> CallScope<'call> {
-            CallScope::new()
-        }
-
         pub struct HandleRegistry(crate::handle::HandleRegistry);
 
         impl HandleRegistry {
@@ -804,3 +824,48 @@ pub mod v1 {
 #[cfg(feature = "handles")]
 #[doc(hidden)]
 pub use v1::handle_test;
+
+#[cfg(test)]
+mod tests {
+    use super::v1;
+    use crate::panic_boundary::tests::PanickingPayload;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn generated_export_boundaries_contain_guard_drop_panics() {
+        struct PanicGuard(Arc<AtomicUsize>);
+        impl Drop for PanicGuard {
+            fn drop(&mut self) {
+                std::panic::panic_any(PanickingPayload(Arc::clone(&self.0)));
+            }
+        }
+
+        // These non-unwinding entrypoints exercise the complete closure,
+        // including a guard destructor after its normal return expression.
+        extern "system" fn value(dropped: &Arc<AtomicUsize>) -> *mut xlfn_sys::XLOPER12 {
+            v1::export_value_boundary(|| {
+                let _guard = PanicGuard(Arc::clone(dropped));
+                std::ptr::null_mut()
+            })
+        }
+        extern "system" fn status(dropped: &Arc<AtomicUsize>) -> i32 {
+            v1::export_status_boundary(-1, || {
+                let _guard = PanicGuard(Arc::clone(dropped));
+                1
+            })
+        }
+        extern "system" fn void(dropped: &Arc<AtomicUsize>) {
+            v1::export_void_boundary(|| {
+                let _guard = PanicGuard(Arc::clone(dropped));
+            });
+        }
+
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let pointer = value(&dropped);
+        assert_eq!(pointer, crate::return_abi::closing_error_pointer());
+        assert_eq!(status(&dropped), -1);
+        void(&dropped);
+        assert_eq!(dropped.load(Ordering::Acquire), 0);
+    }
+}

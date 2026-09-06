@@ -164,7 +164,7 @@ impl Drop for SyncBoundaryWorkerPool {
         // Drop senders so workers exit their loops
         self.start_tx.clear();
         for worker in self.workers.drain(..) {
-            let _ = worker.join();
+            let _ = crate::panic_boundary::contain_panic(worker.join());
         }
         if matches!(
             crate::module_runtime::ingress().phase(),

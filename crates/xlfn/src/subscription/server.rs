@@ -13,10 +13,11 @@ use super::runtime::{SubscriptionConnection, SubscriptionRuntime};
 use super::source::RtdSubscription;
 use super::topic::{SubscriptionId, TopicId};
 use crate::generation::{ConnectionGeneration, ServerGeneration};
+use crate::panic_boundary::catch_no_unwind;
 use crate::{XllError, XllResult};
 use parking_lot::{Condvar, Mutex};
 use rustc_hash::FxHashMap;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 
 /// Generational, non-owning access to one server retained by a subscription
@@ -144,7 +145,7 @@ unsafe impl<H: SubscriptionHost> Sync for SubscriptionServerHandle<H> {}
 
 pub(crate) struct SubscriptionServer<H: SubscriptionHost> {
     pub(crate) generation: ServerGeneration,
-    pub(crate) publish: Box<PublishCore<H>>,
+    pub(crate) publish: xlfn_kernel::published_owner::PublishedOwner<PublishCore<H>>,
     pub(crate) subscriptions: Mutex<FxHashMap<TopicId, Box<dyn RtdSubscription>>>,
     pub(crate) termination_coordinator: TerminationCoordinator,
 }
@@ -351,7 +352,7 @@ impl Drop for TerminationCompletionGuard<'_> {
     reason = "RtdNotifier contains drop types on Windows/test configurations but may be uninhabited on non-Windows production"
 )]
 pub(crate) fn drop_notifier_no_unwind<N>(notifier: Option<N>) -> XllResult<()> {
-    catch_unwind(AssertUnwindSafe(|| drop(notifier))).map_err(|_| XllError::Panic)
+    catch_no_unwind(AssertUnwindSafe(|| drop(notifier))).map_err(|_| XllError::Panic)
 }
 
 thread_local! {
@@ -370,7 +371,7 @@ impl<H: SubscriptionHost> ServerTermination<'_, H> {
     pub(crate) fn request_cancel(&self) -> XllResult<()> {
         let mut first_error = None;
         for subscription in &self.initial_subscriptions {
-            if catch_unwind(AssertUnwindSafe(|| subscription.request_cancel())).is_err()
+            if catch_no_unwind(AssertUnwindSafe(|| subscription.request_cancel())).is_err()
                 && first_error.is_none()
             {
                 first_error = Some(XllError::Panic);
@@ -398,7 +399,8 @@ impl<H: SubscriptionHost> ServerTermination<'_, H> {
             first_error = Some(error);
         }
 
-        if catch_unwind(AssertUnwindSafe(|| self.wait.wait())).is_err() && first_error.is_none() {
+        if catch_no_unwind(AssertUnwindSafe(|| self.wait.wait())).is_err() && first_error.is_none()
+        {
             first_error = Some(XllError::Panic);
         }
 
@@ -468,7 +470,7 @@ impl<H: SubscriptionHost> ServerTermination<'_, H> {
 }
 
 pub(crate) fn disconnect_one_no_unwind(subscription: Box<dyn RtdSubscription>) -> XllResult<()> {
-    match catch_unwind(AssertUnwindSafe(|| subscription.disconnect_and_wait())) {
+    match catch_no_unwind(AssertUnwindSafe(|| subscription.disconnect_and_wait())) {
         Ok(result) => result,
         Err(_) => Err(XllError::Internal {
             diagnostic_id: crate::diagnostics::id::DiagnosticId::PANIC_DISCONNECT,

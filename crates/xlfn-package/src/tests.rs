@@ -418,6 +418,7 @@ enum SyntheticExportTarget<'a> {
     Zero,
     Direct,
     ForwardedOrdinal(&'a str, u32),
+    ForwardedName(&'a str, &'a str),
 }
 
 fn synthetic_export_pe(
@@ -505,6 +506,16 @@ fn synthetic_export_pe(
                 string_offset += bytes.len() + 1;
                 rva
             }
+            SyntheticExportTarget::ForwardedName(library, name) => {
+                let forward = format!("{library}.{name}");
+                let bytes = forward.as_bytes();
+                buf[export + string_offset..export + string_offset + bytes.len()]
+                    .copy_from_slice(bytes);
+                buf[export + string_offset + bytes.len()] = 0;
+                let rva = 0x1000 + string_offset as u32;
+                string_offset += bytes.len() + 1;
+                rva
+            }
         };
         let eat = export + 0x30 + index * 4;
         buf[eat..eat + 4].copy_from_slice(&target_rva.to_le_bytes());
@@ -560,7 +571,7 @@ fn export_validation_tracks_eat_slots_for_aliases_and_forwarders() {
     let forwarded = synthetic_export_pe(
         1,
         &[SyntheticExportTarget::ForwardedOrdinal("engine", 7)],
-        &[(0, "Forwarded")],
+        &[(0, "Forwarded"), (0, "SecondAlias")],
     );
     let info = parse_pe_bytes(&forwarded).unwrap();
     assert_eq!(info.exported_ordinals, BTreeSet::from([ExportOrdinal(1)]));
@@ -572,6 +583,14 @@ fn export_validation_tracks_eat_slots_for_aliases_and_forwarders() {
             symbol: ExportSymbol::Ordinal(ExportOrdinal(7)),
         })
     );
+    for alias in ["Forwarded", "SecondAlias"] {
+        assert_eq!(
+            info.forwarded_exports
+                .get(&ExportSymbol::Name(alias.to_owned())),
+            info.forwarded_exports
+                .get(&ExportSymbol::Ordinal(ExportOrdinal(1)))
+        );
+    }
 }
 
 #[test]
@@ -579,6 +598,49 @@ fn export_ordinal_overflow_is_rejected_instead_of_dropped() {
     let bytes = synthetic_export_pe(0x1_0000, &[SyntheticExportTarget::Direct], &[]);
     let error = parse_pe_bytes(&bytes).unwrap_err();
     assert!(error.to_string().contains("ordinal"), "{error}");
+}
+
+#[test]
+fn parsed_named_forwarder_cycles_are_rejected() {
+    let first = parse_pe_bytes(&synthetic_export_pe(
+        1,
+        &[SyntheticExportTarget::ForwardedName("second", "Entry")],
+        &[(0, "Entry")],
+    ))
+    .unwrap();
+    let second = parse_pe_bytes(&synthetic_export_pe(
+        1,
+        &[SyntheticExportTarget::ForwardedName("first", "Entry")],
+        &[(0, "Entry")],
+    ))
+    .unwrap();
+    let images = BTreeMap::from([
+        ("first.dll".to_owned(), ("First.dll".to_owned(), first)),
+        ("second.dll".to_owned(), ("Second.dll".to_owned(), second)),
+    ]);
+    let error = validate_dependency_graph(&images, &BTreeSet::new()).unwrap_err();
+    assert!(error.to_string().contains("cyclic forwarded export"));
+}
+
+#[test]
+fn parsed_named_forwarder_chain_reaches_a_direct_export() {
+    let first = parse_pe_bytes(&synthetic_export_pe(
+        1,
+        &[SyntheticExportTarget::ForwardedName("second", "Entry")],
+        &[(0, "Entry")],
+    ))
+    .unwrap();
+    let second = parse_pe_bytes(&synthetic_export_pe(
+        1,
+        &[SyntheticExportTarget::Direct],
+        &[(0, "Entry")],
+    ))
+    .unwrap();
+    let images = BTreeMap::from([
+        ("first.dll".to_owned(), ("First.dll".to_owned(), first)),
+        ("second.dll".to_owned(), ("Second.dll".to_owned(), second)),
+    ]);
+    validate_dependency_graph(&images, &BTreeSet::new()).unwrap();
 }
 
 fn graph_image(imports: &[&str], delay_imports: &[&str]) -> PeInfo {

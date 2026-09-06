@@ -16,6 +16,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::thread::JoinHandle;
+use xlfn_kernel::published_owner::PublishedOwner;
 
 pub(crate) struct OwnedDiagnosticEvent {
     pub(crate) udf_id: &'static str,
@@ -42,7 +43,7 @@ pub(crate) struct AsyncDiagnosticSink {
     pub(crate) sender: Option<SyncSender<OwnedDiagnosticEvent>>,
     pub(crate) worker: Option<JoinHandle<()>>,
     pub(crate) worker_thread_id: std::thread::ThreadId,
-    pub(crate) observer: Box<DiagnosticObserver>,
+    pub(crate) observer: PublishedOwner<DiagnosticObserver>,
 }
 
 #[derive(Clone, Copy)]
@@ -122,7 +123,7 @@ impl AsyncDiagnosticSink {
         }
         let (sender, receiver) =
             mpsc::sync_channel::<OwnedDiagnosticEvent>(super::DIAGNOSTIC_QUEUE_CAPACITY);
-        let observer = DiagnosticObserver::new();
+        let observer = PublishedOwner::from_box(DiagnosticObserver::new());
         let observer_ptr = DiagnosticObserverPtr(NonNull::from(&*observer));
         let worker = std::thread::Builder::new()
             .name(worker_name.to_owned())

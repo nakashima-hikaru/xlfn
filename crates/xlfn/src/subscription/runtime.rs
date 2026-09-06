@@ -41,7 +41,12 @@ pub(crate) struct SubscriptionRuntime<H: SubscriptionHost> {
     pub(crate) host: H,
     // Pointer-bearing server roots are declared before every field they
     // reference so Rust's declaration-order drop reclaims servers first.
-    pub(crate) servers: Mutex<FxHashMap<ServerGeneration, Box<SubscriptionServer<H>>>>,
+    pub(crate) servers: Mutex<
+        FxHashMap<
+            ServerGeneration,
+            xlfn_kernel::published_owner::PublishedOwner<SubscriptionServer<H>>,
+        >,
+    >,
     pub(crate) catalog: Mutex<SubscriptionCatalog>,
     pub(crate) sources: SourceArena,
     pub(crate) runtime_gate: OperationGate,
@@ -153,7 +158,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         // declaration order keeps every server/core alive before those fields
         // are reclaimed. `register_server` also carries the runtime lifetime
         // contract for the returned handle.
-        let publish = Box::new(unsafe {
+        let publish = xlfn_kernel::published_owner::PublishedOwner::new(unsafe {
             PublishCore::new(
                 self.host.clone(),
                 &self.runtime_gate,
@@ -162,7 +167,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
                 &self.services,
             )
         });
-        let server = Box::new(SubscriptionServer {
+        let server = xlfn_kernel::published_owner::PublishedOwner::new(SubscriptionServer {
             generation,
             publish,
             subscriptions: Mutex::new(FxHashMap::default()),

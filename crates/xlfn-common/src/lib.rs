@@ -135,7 +135,7 @@ pub fn validate_argument_names(names: &[&str]) -> Result<(), ArgumentNameError> 
     let joined_utf16_len = names
         .iter()
         .map(|name| name.encode_utf16().count())
-        .sum::<usize>()
+        .fold(0usize, usize::saturating_add)
         .saturating_add(names.len().saturating_sub(1));
     if joined_utf16_len > EXCEL_STRING_LIMIT {
         return Err(ArgumentNameError::CombinedTooLong);

@@ -3,6 +3,7 @@ use crate::addin::{Addin, BuildInfo, OpenContext, RuntimeConfig};
 use crate::error::IntoXllError;
 use crate::generation::RuntimeGeneration;
 use crate::host_callback::HostCallbackSession;
+use crate::panic_boundary::catch_no_unwind;
 use crate::registration::RegistrationDescriptor;
 use crate::registration::{HostRegistrar, RegistrationHost};
 use crate::runtime::capabilities::ShutdownDeps;
@@ -11,7 +12,7 @@ use crate::runtime::open_txn::{
 };
 use crate::runtime::shutdown::{ClosedWitness, FinalRemoval, RemovalOwner};
 use crate::runtime::{AddinLifecycleAccess, Runtime};
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 
 use crate::boundary::{report_boundary_error, report_cleanup_issue};
 use crate::lifecycle::lifecycle_access_error;
@@ -159,7 +160,7 @@ pub(crate) fn rollback_active_open<'runtime, A, S>(
         .lifecycle_control()
         .complete_open_abort(module_opening.rollback(|| {}));
     if disposition.requires_rollback() {
-        match catch_unwind(AssertUnwindSafe(|| {
+        match catch_no_unwind(AssertUnwindSafe(|| {
             rollback_open::<A>(runtime, lifecycle, &mut callbacks, generation)
         })) {
             Ok(outcome) if outcome.unload_safe() => {}
@@ -216,7 +217,7 @@ where
     if error.journal.is_unknown() {
         for unknown in &error.journal.unknown_registrations {
             let recovery_error = unknown.recovery_error.clone();
-            let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _ = catch_no_unwind(AssertUnwindSafe(|| {
                 tracing::error!(
                     export = unknown.export_name,
                     excel_name = unknown.excel_name,
@@ -237,7 +238,7 @@ pub(crate) fn remove_addin<A>(runtime: &Runtime<A>, lifecycle: &AddinLifecycleAc
 where
     A: Addin,
 {
-    let close_result = catch_unwind(AssertUnwindSafe(|| {
+    let close_result = catch_no_unwind(AssertUnwindSafe(|| {
         remove_addin_inner::<A>(runtime, lifecycle)
     }));
     let success = match close_result {
@@ -346,12 +347,9 @@ pub(crate) fn remove_addin_inner<'runtime, A>(
 where
     A: Addin,
 {
-    match catch_unwind(AssertUnwindSafe(|| {
-        remove_addin_inner_unchecked::<A>(runtime, lifecycle)
-    })) {
-        Ok(Ok(success)) => success,
-        Ok(Err(control)) => commit_removal_control(runtime, control),
-        Err(payload) => std::panic::resume_unwind(payload),
+    match remove_addin_inner_unchecked::<A>(runtime, lifecycle) {
+        Ok(success) => success,
+        Err(control) => commit_removal_control(runtime, control),
     }
 }
 
@@ -421,7 +419,7 @@ where
     runtime.observer().subscriptions_drained();
 
     let registrations = shutdown_deps.host().registrations_snapshot();
-    if let Ok(outcome) = catch_unwind(AssertUnwindSafe(|| {
+    if let Ok(outcome) = catch_no_unwind(AssertUnwindSafe(|| {
         let host = RegistrationHost::new(transaction.callbacks_mut());
         HostRegistrar::unregister_pending(&host, &registrations)
     })) {
@@ -462,7 +460,7 @@ where
             .retain_metadata_debt(outcome.metadata_debt);
         if shutdown_deps.host().has_metadata_debt() {
             let debt_count = shutdown_deps.host().metadata_debt_snapshot().len();
-            let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _ = catch_no_unwind(AssertUnwindSafe(|| {
                 tracing::warn!(
                     count = debt_count,
                     "xlAutoRemove completed with host metadata debt"
@@ -515,7 +513,7 @@ where
                 ));
             }
         }
-    } else if let Ok(event_outcome) = catch_unwind(AssertUnwindSafe(|| {
+    } else if let Ok(event_outcome) = catch_no_unwind(AssertUnwindSafe(|| {
         let host = RegistrationHost::new(transaction.callbacks_mut());
         HostRegistrar::unregister_events_detailed(&host, &event_registrations)
     })) {
@@ -575,7 +573,7 @@ where
         match generation {
             crate::generation::ShutdownGeneration::Open(generation) => {
                 let mut generation = *generation;
-                let quiesce = catch_unwind(AssertUnwindSafe(|| {
+                let quiesce = catch_no_unwind(AssertUnwindSafe(|| {
                     runtime
                         .with_addin_lifecycle(lifecycle, |lifecycle_state| {
                             runtime.quiesce_addin(&mut generation.shared_state, lifecycle_state)
@@ -608,7 +606,7 @@ where
             }
             crate::generation::ShutdownGeneration::Opening(opening) => {
                 let (mut shared_state, layers, _config) = opening.into_parts();
-                let quiesce = catch_unwind(AssertUnwindSafe(|| {
+                let quiesce = catch_no_unwind(AssertUnwindSafe(|| {
                     runtime
                         .with_addin_lifecycle(lifecycle, |lifecycle_state| {
                             runtime.quiesce_addin(&mut shared_state, lifecycle_state)

@@ -1,5 +1,14 @@
 //! Semantic validation shared by the macro front ends.
 
+pub(super) fn validate_registration_string(
+    field: &str,
+    value: &str,
+    span: &impl quote::ToTokens,
+) -> syn::Result<()> {
+    xlfn_common::validate_excel_string(value)
+        .map_err(|error| syn::Error::new_spanned(span, format!("invalid {field}: {error}")))
+}
+
 pub(super) fn validate_addin_metadata(
     display_name: &str,
     id: &str,
@@ -14,6 +23,7 @@ pub(super) fn validate_addin_metadata(
                 format!("add-in `{field}` must contain 1..=255 UTF-16 code units"),
             ));
         }
+        validate_registration_string(&format!("add-in `{field}`"), value, span)?;
     }
 
     let valid_slug = !id.is_empty()
@@ -25,13 +35,7 @@ pub(super) fn validate_addin_metadata(
         && id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
-    let upper = id.to_ascii_uppercase();
-    let reserved = matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || upper
-            .strip_prefix("COM")
-            .or_else(|| upper.strip_prefix("LPT"))
-            .is_some_and(|suffix| suffix.len() == 1 && matches!(suffix.as_bytes()[0], b'1'..=b'9'));
-    if !valid_slug || reserved {
+    if !valid_slug || xlfn_common::validate_windows_basename(id).is_err() {
         return Err(syn::Error::new_spanned(
             span,
             "add-in `id` must be a non-reserved ASCII slug beginning with a letter and containing only letters, digits, `-`, or `_`",
