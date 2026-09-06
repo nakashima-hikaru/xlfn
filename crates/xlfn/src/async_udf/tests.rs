@@ -2188,7 +2188,8 @@ fn test_worker_panic_recovers_local_queue_tasks_to_injector() {
         },
         {
             let shared = ExecutorPtr::from_ref(&executor);
-            move |r| shared.get().queue.schedule(r)
+            // SAFETY: test executor outlives this schedule closure.
+            move |r| unsafe { shared.get() }.queue.schedule(r)
         },
     );
     t1.detach();
@@ -2200,7 +2201,8 @@ fn test_worker_panic_recovers_local_queue_tasks_to_injector() {
         },
         {
             let shared = ExecutorPtr::from_ref(&executor);
-            move |r| shared.get().queue.schedule(r)
+            // SAFETY: test executor outlives this schedule closure.
+            move |r| unsafe { shared.get() }.queue.schedule(r)
         },
     );
     t2.detach();
@@ -2212,7 +2214,8 @@ fn test_worker_panic_recovers_local_queue_tasks_to_injector() {
         },
         {
             let shared = ExecutorPtr::from_ref(&executor);
-            move |r| shared.get().queue.schedule(r)
+            // SAFETY: test executor outlives this schedule closure.
+            move |r| unsafe { shared.get() }.queue.schedule(r)
         },
     );
     t3.detach();

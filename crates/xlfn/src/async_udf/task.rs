@@ -66,11 +66,10 @@ pub(crate) struct CompletionGuard {
 
 impl Drop for CompletionGuard {
     fn drop(&mut self) {
-        // SAFETY: this completion contributes to both the generation task
-        // count and executor active count. Reclamation waits for those counts
-        // to drain, so both pointers remain valid through this Drop.
+        // SAFETY: generation contributes to active counts and remains valid through Drop.
         let generation = unsafe { self.generation.as_ref() };
-        let shared = self.shared.get();
+        // SAFETY: executor shared state remains valid through Drop.
+        let shared = unsafe { self.shared.get() };
         generation.remove_task(self.id);
         shared
             .observer

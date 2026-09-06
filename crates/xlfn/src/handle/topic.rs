@@ -23,6 +23,7 @@ use parking_lot::{Condvar, Mutex, RwLock};
 use parking_lot::{RwLockReadGuard, RwLockWriteGuard};
 use rustc_hash::{FxHashMap, FxHasher};
 use std::hash::{Hash, Hasher};
+use std::marker::PhantomData;
 use std::ops::Deref;
 use std::ptr::NonNull;
 use std::sync::Arc;
@@ -31,7 +32,9 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::thread::ThreadId;
 use xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT;
-use xlfn_kernel::rotating_read_domain::{DrainedGeneration, RotatingReadDomain};
+use xlfn_kernel::rotating_read_domain::{
+    DrainedGeneration, RotatingReadDomain, RotatingReadPermit,
+};
 
 const MIN_PUBLISHED_TOPIC_SHARDS: usize = 64;
 const TARGET_TOPICS_PER_SHARD: usize = 64;
@@ -78,25 +81,11 @@ impl PublishedTopic {
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub(crate) struct PublishedTopicPtr(NonNull<PublishedTopic>);
+pub(crate) struct PublishedTopicPtr(pub(crate) NonNull<PublishedTopic>);
 
 impl PublishedTopicPtr {
-    fn from_ref(topic: &PublishedTopic) -> Self {
+    pub(crate) fn from_ref(topic: &PublishedTopic) -> Self {
         Self(NonNull::from(topic))
-    }
-
-    pub(crate) fn get(self) -> &'static PublishedTopic {
-        // SAFETY: TopicTable retains every publication allocation until the
-        // service is quiescent and reclaimed.
-        unsafe { self.0.as_ref() }
-    }
-}
-
-impl Deref for PublishedTopicPtr {
-    type Target = PublishedTopic;
-
-    fn deref(&self) -> &Self::Target {
-        self.get()
     }
 }
 
@@ -104,6 +93,52 @@ impl Deref for PublishedTopicPtr {
 unsafe impl Send for PublishedTopicPtr {}
 // SAFETY: PublishedTopic is thread-safe and immutable borrows can be shared.
 unsafe impl Sync for PublishedTopicPtr {}
+
+/// A scoped read capability that protects published topics from being reclaimed
+/// while they are being inspected.
+pub(crate) struct TopicReadLease<'a> {
+    _permit: RotatingReadPermit<'a, DEFAULT_STRIPE_COUNT>,
+    _guard: super::runtime::TopicReadGuard,
+}
+
+impl<'a> TopicReadLease<'a> {
+    pub(crate) fn new(permit: RotatingReadPermit<'a, DEFAULT_STRIPE_COUNT>) -> Self {
+        Self {
+            _permit: permit,
+            _guard: super::runtime::TopicReadGuard::enter(),
+        }
+    }
+
+    pub(crate) fn load(
+        &'a self,
+        topics: &'a PublishedTopics,
+        key: &HandleTopicKey,
+    ) -> Option<PublishedTopicRef<'a>> {
+        let ptr = topics.load(key)?;
+        Some(PublishedTopicRef {
+            ptr: ptr.0,
+            _marker: PhantomData,
+        })
+    }
+}
+
+/// A borrowed reference to a `PublishedTopic` whose lifetime is tied to an active
+/// `TopicReadLease`.
+pub(crate) struct PublishedTopicRef<'a> {
+    ptr: NonNull<PublishedTopic>,
+    _marker: PhantomData<&'a PublishedTopic>,
+}
+
+impl<'a> Deref for PublishedTopicRef<'a> {
+    type Target = PublishedTopic;
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: PublishedTopicRef is acquired from a live TopicReadLease,
+        // which holds an active read-domain permit. The read domain guarantees
+        // that PublishedTopic cannot be reclaimed until after the permit is dropped.
+        unsafe { self.ptr.as_ref() }
+    }
+}
 
 pub(crate) struct PublishedTopics {
     shards: Box<[RwLock<FxHashMap<HandleTopicKey, PublishedTopicPtr>>]>,
@@ -221,8 +256,12 @@ impl TopicTable {
         }
     }
 
-    pub(crate) fn read_domain(&self) -> &RotatingReadDomain<DEFAULT_STRIPE_COUNT> {
-        &self.read_domain
+    pub(crate) fn enter_read_lease(&self) -> XllResult<TopicReadLease<'_>> {
+        let permit = self
+            .read_domain
+            .enter_current_thread()
+            .map_err(|_| XllError::Closing)?;
+        Ok(TopicReadLease::new(permit))
     }
 
     fn enqueue_reclaim(&self, topic: Box<PublishedTopic>) {
@@ -509,17 +548,21 @@ impl TopicTable {
         if state.closed || state.generation != generation {
             return Err(XllError::Closing);
         }
-        if !state.by_key.get(&key).is_some_and(|topic| {
-            PublishedTopicPtr::from_ref(topic.publication.as_ref()) == publication
-        }) || state.initializing.get(&key) != Some(&initialization)
-        {
+        if state.initializing.get(&key) != Some(&initialization) {
             return Err(XllError::StaleHandle);
         }
-        self.published.insert(key, publication);
-        state.initializing.remove(&key);
-        publication
+        let Some(topic) = state.by_key.get_mut(&key) else {
+            return Err(XllError::StaleHandle);
+        };
+        if PublishedTopicPtr::from_ref(topic.publication.as_ref()) != publication {
+            return Err(XllError::StaleHandle);
+        }
+        topic
+            .publication
             .state
             .store(PublishedTopicState::Live as u8, Ordering::Release);
+        self.published.insert(key, publication);
+        state.initializing.remove(&key);
         on_linearized();
         Ok(())
     }

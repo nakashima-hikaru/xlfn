@@ -279,15 +279,12 @@ fn published_topic_keeps_identity_and_rtd_reverse_maps_consistent() {
     assert!(topics.by_observer_id.is_empty());
     drop(topics);
 
-    let publication = runtime
-        .topics
-        .published()
-        .load(&key)
+    let lease = runtime.topics.enter_read_lease().unwrap();
+    let publication = lease
+        .load(runtime.topics.published(), &key)
         .expect("successful observation must commit its published snapshot");
-    assert_eq!(
-        publication.state.load(Ordering::Acquire),
-        PublishedTopicState::Live as u8
-    );
+    assert_eq!(publication.state(), PublishedTopicState::Live);
+    drop(lease);
 
     runtime
         .connect(lifetime_generation(1), 41, &lifetime_key)

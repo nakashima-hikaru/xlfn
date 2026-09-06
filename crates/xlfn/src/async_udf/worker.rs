@@ -15,7 +15,8 @@ pub(crate) struct WorkerExitGuard {
 
 impl WorkerExitGuard {
     fn recover_local_queue(&mut self) {
-        let shared = self.shared.get();
+        // SAFETY: workers run while executor is live.
+        let shared = unsafe { self.shared.get() };
         if let Some(local) = self.local.take() {
             let mut returned = 0;
             while let Some(runnable) = local.pop() {
@@ -31,7 +32,8 @@ impl WorkerExitGuard {
 
 impl Drop for WorkerExitGuard {
     fn drop(&mut self) {
-        let shared = self.shared.get();
+        // SAFETY: worker exit runs while executor is live and joining workers.
+        let shared = unsafe { self.shared.get() };
         if std::thread::panicking() {
             self.recover_local_queue();
             shared.fatal_worker_failure.store(true, Ordering::Release);
@@ -103,7 +105,8 @@ pub(crate) fn run_executor(
     local: Worker<Runnable>,
     parker: Parker,
 ) {
-    let shared_ref = shared.get();
+    // SAFETY: workers are spawned and joined by the live executor.
+    let shared_ref = unsafe { shared.get() };
     let exit_guard = WorkerExitGuard {
         shared,
         local: Some(local),

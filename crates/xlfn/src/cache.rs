@@ -137,7 +137,7 @@ impl<V> Drop for CacheLease<'_, V> {
     fn drop(&mut self) {
         // SAFETY: [TR-LEASE-1] self.node remains valid because a pin capability is held by this lease.
         let node = unsafe { self.node.as_ref() };
-        if node.pins.fetch_sub(1, Ordering::AcqRel) == 1
+        if node.release_pin()
             && node
                 .reclaimed
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -505,6 +505,30 @@ unsafe impl<V: Send> Send for CacheNode<V> {}
 // SAFETY: Box<V> is Sync if V: Sync.
 unsafe impl<V: Sync> Sync for CacheNode<V> {}
 
+#[derive(Debug, PartialEq, Eq)]
+struct PinOverflow;
+
+impl<V> CacheNode<V> {
+    #[inline]
+    fn try_acquire_pin(&self) -> Result<(), PinOverflow> {
+        self.pins
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pins| {
+                pins.checked_add(1)
+            })
+            .map(|_| ())
+            .map_err(|_| PinOverflow)
+    }
+
+    #[inline]
+    fn release_pin(&self) -> bool {
+        let prev = self.pins.fetch_sub(1, Ordering::AcqRel);
+        if prev == 0 {
+            xlfn_kernel::invariant::fail_stop();
+        }
+        prev == 1
+    }
+}
+
 #[derive(Clone, Copy)]
 struct ReclaimEntry(*mut ());
 // SAFETY: ReclaimEntry holds a raw pointer to a retired CacheNode to be freed on a quiesced domain.
@@ -648,7 +672,7 @@ where
                     // SAFETY: [TR-PUBLISH-1] node_ptr points to an allocated CacheNode<V> managed by the cache.
                     let node = unsafe { node_ptr.0.as_ref() };
                     node.resident.store(false, Ordering::Release);
-                    if node.pins.fetch_sub(1, Ordering::AcqRel) == 1
+                    if node.release_pin()
                         && node
                             .reclaimed
                             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -769,9 +793,12 @@ where
             return None;
         }
         // TR-ACQUIRE-PIN: Increment pin capability while still within admission domain.
-        node.pins.fetch_add(1, Ordering::AcqRel);
+        if node.try_acquire_pin().is_err() {
+            drop(permit);
+            xlfn_kernel::invariant::fail_stop();
+        }
         if !node.resident.load(Ordering::Acquire) {
-            let was_last = node.pins.fetch_sub(1, Ordering::AcqRel) == 1;
+            let was_last = node.release_pin();
             let should_reclaim = was_last
                 && node
                     .reclaimed
@@ -2128,5 +2155,19 @@ mod tests {
         // Dropping the lease triggers retirement and reclamation of PanickingDrop.
         // The panic in PanickingDrop::drop must be caught and must not unwind out of lease.drop().
         drop(lease);
+    }
+
+    #[test]
+    fn cache_node_pin_overflow_is_prevented() {
+        let node = CacheNode {
+            value: Box::new(42u32),
+            pins: AtomicUsize::new(usize::MAX),
+            resident: AtomicBool::new(true),
+            reclaimed: AtomicBool::new(false),
+            generation: 1,
+            domain: NonNull::dangling(),
+        };
+        assert_eq!(node.try_acquire_pin(), Err(PinOverflow));
+        assert_eq!(node.pins.load(Ordering::SeqCst), usize::MAX);
     }
 }

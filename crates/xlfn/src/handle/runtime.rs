@@ -105,10 +105,10 @@ pub(crate) fn is_current_thread_reading_topic() -> bool {
     CURRENT_THREAD_READING_TOPIC.get()
 }
 
-struct TopicReadGuard;
+pub(crate) struct TopicReadGuard;
 
 impl TopicReadGuard {
-    fn enter() -> Self {
+    pub(crate) fn enter() -> Self {
         CURRENT_THREAD_READING_TOPIC.set(true);
         Self
     }
@@ -198,11 +198,12 @@ impl FormulaHandleService {
         generation: TopicGeneration,
         initialization: InitializationPtr,
         publication: PublishedTopicPtr,
+        token: &str,
     ) -> XllResult<()> {
         // A provisional snapshot lets readers that raced with the publication
         // fall back to the canonical single-flight path. Make it Live only
         // after the initialization marker is removed.
-        let token_wire = self.refinement_token(&publication.token);
+        let token_wire = self.refinement_token(token);
         self.topics.commit_publication(
             key,
             generation,
@@ -367,18 +368,19 @@ impl FormulaHandleService {
             self.refinement
                 .observe_insert_pending_fresh(&key, initialization.refinement_id);
         }
-        let publication = PublishedTopic::new(token.clone(), key.format_lifetime_key());
+        let lifetime_key = key.format_lifetime_key();
+        let publication = PublishedTopic::new(token.clone(), lifetime_key.clone());
         let publication_txn = publication_txn.publish_and_observe(
             publication,
             observe
                 .take()
                 .expect("the cold path owns the observation closure"),
-            |publication| {
+            |_publication| {
                 self.refinement.observe_publish_and_install(
                     &key,
                     initialization.refinement_id,
                     self.refinement_token(&token),
-                    &publication.lifetime_key,
+                    &lifetime_key,
                 );
             },
         )?;
@@ -397,13 +399,8 @@ impl FormulaHandleService {
     where
         F: FnOnce(&str, &str) -> XllResult<()>,
     {
-        let permit = self
-            .topics
-            .read_domain()
-            .enter_current_thread()
-            .map_err(|_| XllError::Closing)?;
-        let _guard = TopicReadGuard::enter();
-        let Some(publication) = self.topics.published().load(&key) else {
+        let lease = self.topics.enter_read_lease()?;
+        let Some(publication) = lease.load(self.topics.published(), &key) else {
             return Ok(None);
         };
         if publication.state() != PublishedTopicState::Live {
@@ -425,8 +422,7 @@ impl FormulaHandleService {
                 }
                 PublishedTopicState::Provisional => {}
             }
-            drop(_guard);
-            drop(permit);
+            drop(lease);
             return Err(error);
         }
 
@@ -446,8 +442,7 @@ impl FormulaHandleService {
                 Err(XllError::StaleHandle)
             }
         };
-        drop(_guard);
-        drop(permit);
+        drop(lease);
         result
     }
 

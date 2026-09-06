@@ -92,18 +92,11 @@ impl BindingRecord {
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub(crate) struct BindingPtr(NonNull<BindingRecord>);
+pub(crate) struct BindingPtr(pub(crate) NonNull<BindingRecord>);
 
 impl BindingPtr {
     fn from_ref(record: &BindingRecord) -> Self {
         Self(NonNull::from(record))
-    }
-
-    fn get(self) -> &'static BindingRecord {
-        // SAFETY: the caller holds a read-domain admission or the table write
-        // lock, and the owning slot/local retirement owner keeps the record
-        // alive until all published reads have drained.
-        unsafe { self.0.as_ref() }
     }
 }
 
@@ -134,7 +127,8 @@ impl<'domain> BindingReadLease<'domain> {
         let permit = domain.enter()?;
         let snapshot = published.load(id.slot);
         let record = snapshot.record.ok_or(XllError::StaleHandle)?;
-        let record_ref = record.get();
+        // SAFETY: permit guarantees the binding record cannot be reclaimed while entering.
+        let record_ref = unsafe { record.0.as_ref() };
         if record_ref.id != id || record_ref.state() != BindingState::Live {
             return Err(XllError::StaleHandle);
         }
@@ -155,7 +149,9 @@ impl<'domain> BindingReadLease<'domain> {
             xlfn_kernel::invariant::fail_stop();
         }
         let record = snapshot.record.ok_or(XllError::StaleHandle)?;
-        let record_ref = record.get();
+        // SAFETY: witness proves the calling scope holds an active permit for expected_domain,
+        // so the record is valid and cannot be reclaimed during 'domain.
+        let record_ref = unsafe { record.0.as_ref() };
         if record_ref.id != id || record_ref.state() != BindingState::Live {
             return Err(XllError::StaleHandle);
         }
@@ -166,7 +162,9 @@ impl<'domain> BindingReadLease<'domain> {
     }
 
     pub(crate) fn record(&self) -> &BindingRecord {
-        self.record.get()
+        // SAFETY: self holds a valid BindingReadLease protected by HandleReadDomain,
+        // guaranteeing that the BindingRecord has not been reclaimed.
+        unsafe { self.record.0.as_ref() }
     }
 
     pub(crate) fn object(&self) -> &ObjectCell {
@@ -344,8 +342,8 @@ impl BindingTable {
             .slots
             .get(id.slot as usize)
             .and_then(|slot| slot.record.as_deref())
+            .filter(|record| record.id == id)
             .map(BindingPtr::from_ref)
-            .filter(|record| record.get().id == id)
             .ok_or(XllError::StaleHandle)?;
         Ok(BindingRemoval {
             table: self,
@@ -452,7 +450,8 @@ pub(crate) struct BindingRemoval<'table> {
 impl BindingRemoval<'_> {
     #[cfg(test)]
     pub(crate) fn object(&self) -> &ObjectCell {
-        self.record.get().object()
+        // SAFETY: self owns the table write lock and the slot holds the live record.
+        unsafe { self.record.0.as_ref() }.object()
     }
 
     pub(crate) fn commit(mut self) -> bool {
@@ -460,11 +459,6 @@ impl BindingRemoval<'_> {
             .state
             .take()
             .expect("binding removal owns the table write lock");
-        let record = self.record.get();
-        record
-            .state
-            .store(BindingState::Retired as u8, Ordering::Release);
-        self.table.published.remove(self.id, self.record);
         let slot = state
             .slots
             .get_mut(self.id.slot as usize)
@@ -473,6 +467,10 @@ impl BindingRemoval<'_> {
         if BindingPtr::from_ref(retired.as_ref()) != self.record {
             xlfn_kernel::invariant::fail_stop();
         }
+        retired
+            .state
+            .store(BindingState::Retired as u8, Ordering::Release);
+        self.table.published.remove(self.id, self.record);
         let reusable = if let Some(next) = slot.next_generation.next() {
             slot.next_generation = next;
             true

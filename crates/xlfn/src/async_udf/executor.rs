@@ -44,9 +44,15 @@ impl ExecutorPtr {
         Self(NonNull::from(shared))
     }
 
-    pub(crate) fn get(self) -> &'static ExecutorShared {
-        // SAFETY: construction and use are confined to the executor temporal
-        // protocol documented on this capability and `Executor::finish_close`.
+    /// Borrows the shared executor state.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the backing `Executor` has not finished
+    /// its close sequence and reclaimed `ExecutorShared`.
+    #[inline]
+    pub(crate) unsafe fn get(self) -> &'static ExecutorShared {
+        // SAFETY: Delegated to the caller's guarantee that Executor is still alive.
         unsafe { self.0.as_ref() }
     }
 }
@@ -176,7 +182,8 @@ impl Executor {
         let mut workers = scopeguard::guard(
             Vec::<JoinHandle<()>>::with_capacity(worker_count),
             move |mut workers| {
-                shared_pointer.get().queue.seal_and_wake_all();
+                // SAFETY: workers are joined before the Box<ExecutorShared> is reclaimed.
+                unsafe { shared_pointer.get() }.queue.seal_and_wake_all();
                 while let Some(worker) = workers.pop() {
                     drop(worker.join());
                 }
@@ -373,7 +380,8 @@ impl<'a> SpawnReservation<'a> {
         self.committed = true;
         // SAFETY: self.admission and self.shared protect the generation from reclamation until committed.
         let generation = unsafe { self.generation.as_ref() };
-        let shared = self.shared.get();
+        // SAFETY: self.admission protects the executor from reclamation until committed.
+        let shared = unsafe { self.shared.get() };
         let (abort, registration) = AbortHandle::new_pair();
 
         let index = task_shard(self.task_id);
@@ -411,7 +419,8 @@ impl<'a> SpawnReservation<'a> {
         }
         let shared_ptr = self.shared;
         let schedule = move |runnable| {
-            shared_ptr.get().queue.schedule(runnable);
+            // SAFETY: task execution contributes to executor active count which prevents reclamation.
+            unsafe { shared_ptr.get() }.queue.schedule(runnable);
         };
         let (runnable, task) = async_task::spawn(wrapped, schedule);
         task.detach();

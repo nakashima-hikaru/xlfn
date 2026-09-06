@@ -522,6 +522,29 @@ mod tests {
         assert!(domain.try_quiesce_if_idle(|_| ()).is_some());
     }
 
+    #[test]
+    fn miri_temporal_pointer_reclamation_safety() {
+        let domain = RotatingReadDomain::<DEFAULT_STRIPE_COUNT>::new();
+        let val_ptr = Box::into_raw(Box::new(12345u64));
+        let permit = domain.enter_current_thread().unwrap();
+        // While permit is active, reading the pointer is safe
+        // SAFETY: Pointer was allocated above and grace period is active.
+        assert_eq!(unsafe { *val_ptr }, 12345);
+        // Quiescing while permit is active is skipped
+        assert!(domain.try_quiesce_if_idle(|_| ()).is_none());
+        // Release the permit
+        drop(permit);
+        // Quiesce succeeds now that reader has drained
+        let reclaimed = domain
+            .try_quiesce_if_idle(|_| {
+                // SAFETY: Quiesced and drained
+                unsafe { Box::from_raw(val_ptr) }
+            })
+            .expect("should rotate")
+            .expect("not closed");
+        assert_eq!(*reclaimed, 12345);
+    }
+
     #[cfg(not(all(target_os = "windows", target_arch = "x86")))]
     #[test]
     fn loom_generation_rotation_preserves_the_grace_period() {

@@ -228,6 +228,7 @@ impl<'runtime> ProvisionalPublicationTxn<'runtime> {
         on_linearized: impl FnOnce(PublishedTopicPtr),
     ) -> XllResult<ObservedPublicationTxn<'runtime>> {
         let token = &self.provisional.token;
+        let lifetime_key = publication.lifetime_key.clone();
         let publication = self.runtime.topics.insert_provisional(
             self.key,
             self.generation,
@@ -237,7 +238,7 @@ impl<'runtime> ProvisionalPublicationTxn<'runtime> {
         self.runtime
             .topics
             .is_current(self.key, self.generation, token)?;
-        observe(&publication.lifetime_key, token)?;
+        observe(&lifetime_key, token)?;
         self.runtime
             .topics
             .is_current(self.key, self.generation, token)?;
@@ -274,6 +275,7 @@ impl ObservedPublicationTxn<'_> {
             generation,
             reservation.initialization.clone(),
             publication,
+            &provisional.token,
         )?;
         provisional.commit();
         reservation.commit();
