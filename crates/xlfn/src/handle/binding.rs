@@ -118,49 +118,6 @@ pub(crate) struct BindingReadLease<'domain> {
 }
 
 impl<'domain> BindingReadLease<'domain> {
-    #[cfg(test)]
-    pub(crate) fn new(
-        published: &PublishedBindings,
-        id: HandleId,
-        domain: &'domain HandleReadDomain,
-    ) -> XllResult<Self> {
-        let permit = domain.enter()?;
-        let snapshot = published.load(id.slot);
-        let record = snapshot.record.ok_or(XllError::StaleHandle)?;
-        // SAFETY: permit guarantees the binding record cannot be reclaimed while entering.
-        let record_ref = unsafe { record.0.as_ref() };
-        if record_ref.id != id || record_ref.state() != BindingState::Live {
-            return Err(XllError::StaleHandle);
-        }
-        Ok(Self {
-            record,
-            _permit: Some(permit),
-        })
-    }
-
-    #[inline]
-    pub(crate) fn new_scoped(
-        snapshot: BindingSnapshot,
-        id: HandleId,
-        expected_domain: &super::HandleReadDomain,
-        witness: super::HandleDomainWitness<'domain>,
-    ) -> XllResult<Self> {
-        if witness.domain() != NonNull::from(expected_domain) {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        let record = snapshot.record.ok_or(XllError::StaleHandle)?;
-        // SAFETY: witness proves the calling scope holds an active permit for expected_domain,
-        // so the record is valid and cannot be reclaimed during 'domain.
-        let record_ref = unsafe { record.0.as_ref() };
-        if record_ref.id != id || record_ref.state() != BindingState::Live {
-            return Err(XllError::StaleHandle);
-        }
-        Ok(Self {
-            record,
-            _permit: None,
-        })
-    }
-
     pub(crate) fn record(&self) -> &BindingRecord {
         // SAFETY: self holds a valid BindingReadLease protected by HandleReadDomain,
         // guaranteeing that the BindingRecord has not been reclaimed.
@@ -276,6 +233,45 @@ impl BindingTable {
         &self.read_domain
     }
 
+    #[inline]
+    pub(crate) fn read_scoped<'domain>(
+        &self,
+        id: HandleId,
+        witness: super::HandleDomainWitness<'domain>,
+    ) -> XllResult<BindingReadLease<'domain>> {
+        if witness.domain() != NonNull::from(self.read_domain()) {
+            xlfn_kernel::invariant::fail_stop();
+        }
+        let snapshot = self.published.load(id.slot);
+        let record = snapshot.record.ok_or(XllError::StaleHandle)?;
+        // SAFETY: witness proves the calling scope holds an active permit for self.read_domain,
+        // and snapshot was loaded directly from self.published which is governed by self.read_domain.
+        let record_ref = unsafe { record.0.as_ref() };
+        if record_ref.id != id || record_ref.state() != BindingState::Live {
+            return Err(XllError::StaleHandle);
+        }
+        Ok(BindingReadLease {
+            record,
+            _permit: None,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn read_standalone(&self, id: HandleId) -> XllResult<BindingReadLease<'_>> {
+        let permit = self.read_domain.enter()?;
+        let snapshot = self.published.load(id.slot);
+        let record = snapshot.record.ok_or(XllError::StaleHandle)?;
+        // SAFETY: permit guarantees the binding record cannot be reclaimed while entering.
+        let record_ref = unsafe { record.0.as_ref() };
+        if record_ref.id != id || record_ref.state() != BindingState::Live {
+            return Err(XllError::StaleHandle);
+        }
+        Ok(BindingReadLease {
+            record,
+            _permit: Some(permit),
+        })
+    }
+
     pub(crate) fn reserve(&self) -> XllResult<BindingReservation<'_>> {
         let mut state = self.state.write();
         if state.live_bindings >= self.maximum_bindings {
@@ -330,10 +326,6 @@ impl BindingTable {
     #[cfg(test)]
     pub(crate) fn write_state(&self) -> parking_lot::RwLockWriteGuard<'_, RegistryState> {
         self.state.write()
-    }
-
-    pub(crate) fn published(&self) -> &PublishedBindings {
-        &self.published
     }
 
     pub(crate) fn begin_removal(&self, id: HandleId) -> XllResult<BindingRemoval<'_>> {

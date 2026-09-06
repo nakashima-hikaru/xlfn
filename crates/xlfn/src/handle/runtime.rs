@@ -400,7 +400,7 @@ impl FormulaHandleService {
         F: FnOnce(&str, &str) -> XllResult<()>,
     {
         let lease = self.topics.enter_read_lease()?;
-        let Some(publication) = lease.load(self.topics.published(), &key) else {
+        let Some(publication) = lease.load(&key) else {
             return Ok(None);
         };
         if publication.state() != PublishedTopicState::Live {

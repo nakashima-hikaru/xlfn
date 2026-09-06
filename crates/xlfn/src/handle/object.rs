@@ -32,10 +32,16 @@ impl<T: 'static> TypedObjectProjection<T> {
         self.pointer.addr().get()
     }
 
+    /// Returns a shared reference to the projected object.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the object's backing cell has not been reclaimed
+    /// and remains pinned, leased, or protected by an active read capability for the
+    /// entire duration of the returned borrow.
     #[inline]
-    pub(crate) fn as_ref(&self) -> &T {
-        // SAFETY: projections are constructed only after a TypeId check. The
-        // enclosing binding-read or pin capability delays object reclamation.
+    pub(crate) unsafe fn as_ref_unchecked(&self) -> &T {
+        // SAFETY: guaranteed by the caller per contract.
         unsafe { self.pointer.as_ref() }
     }
 }

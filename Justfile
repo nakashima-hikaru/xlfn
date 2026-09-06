@@ -40,6 +40,10 @@ test-libtest:
 
 test-all: test-libtest
 
+# Miri temporal pointer reclamation and domain safety regression tests.
+miri:
+    RUSTFLAGS="-A deprecated" cargo +nightly miri test -p xlfn-kernel --lib -- miri_
+
 test-core:
     cargo test \
         --package xlfn \

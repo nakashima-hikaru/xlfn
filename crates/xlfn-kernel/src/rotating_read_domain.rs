@@ -545,7 +545,61 @@ mod tests {
         assert_eq!(*reclaimed, 12345);
     }
 
+    #[test]
+    fn miri_cross_domain_permit_mismatch_fails_to_protect_alien_pointer() {
+        let domain_a = RotatingReadDomain::<DEFAULT_STRIPE_COUNT>::new();
+        let domain_b = RotatingReadDomain::<DEFAULT_STRIPE_COUNT>::new();
+
+        let val_b = Box::into_raw(Box::new(99999u64));
+
+        // Reader acquires permit on domain_a
+        let permit_a = domain_a.enter_current_thread().unwrap();
+
+        // domain_b is completely unaware of permit_a.
+        // Therefore, domain_b sees 0 readers and immediately quiesces and reclaims val_b!
+        let mut reclaimed_b = None;
+        let rotation = domain_b.try_quiesce_if_idle(|_| {
+            // SAFETY: domain_b believes all its readers drained.
+            reclaimed_b = Some(unsafe { Box::from_raw(val_b) });
+        });
+        assert!(
+            rotation.is_some(),
+            "domain_b should rotate because it has no permits"
+        );
+        drop(reclaimed_b); // val_b is now DEALLOCATED and RECLAIMED!
+
+        // In contrast, if the reader holds a permit on domain_b itself:
+        let val_b2 = Box::into_raw(Box::new(88888u64));
+        let permit_b = domain_b.enter_current_thread().unwrap();
+
+        // domain_b CANNOT quiesce because permit_b is active!
+        let blocked_rotation = domain_b.try_quiesce_if_idle(|_| {
+            unreachable!("domain_b must not reclaim while its own permit is alive");
+        });
+        assert!(
+            blocked_rotation.is_none(),
+            "domain_b quiesce must be blocked by permit_b"
+        );
+
+        // Reading val_b2 while holding permit_b is valid and protected.
+        // SAFETY: permit_b is active on domain_b, blocking quiescence and reclamation.
+        assert_eq!(unsafe { *val_b2 }, 88888);
+
+        // Once permit_b is dropped, domain_b can safely quiesce and reclaim val_b2.
+        drop(permit_b);
+        let mut reclaimed_b2 = None;
+        let successful_rotation = domain_b.try_quiesce_if_idle(|_| {
+            // SAFETY: permit_b was dropped and domain_b drained.
+            reclaimed_b2 = Some(unsafe { Box::from_raw(val_b2) });
+        });
+        assert!(successful_rotation.is_some());
+        assert_eq!(*reclaimed_b2.unwrap(), 88888);
+
+        drop(permit_a);
+    }
+
     #[cfg(not(all(target_os = "windows", target_arch = "x86")))]
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn loom_generation_rotation_preserves_the_grace_period() {
         use loom::sync::Arc as LoomArc;

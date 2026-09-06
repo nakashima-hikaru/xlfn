@@ -113,7 +113,7 @@ impl<T: ExcelHandleObject> Deref for Handle<'_, T> {
         // SAFETY: `value` points into the `ObjectCell` transitively owned by
         // `binding`, and that cell cannot be dropped while this binding lease
         // is alive.
-        self.value.as_ref()
+        unsafe { self.value.as_ref_unchecked() }
     }
 }
 
@@ -142,9 +142,9 @@ impl<T: ExcelHandleObject> Deref for HandleLease<'_, T> {
 
     #[inline]
     fn deref(&self) -> &Self::Target {
-        // SAFETY: `object` owns the payload for the entire lifetime of this
+        // SAFETY: `_lease` owns the raw object lease guard for the entire lifetime of this
         // lease, and `value` was created from that same object cell.
-        self.value.as_ref()
+        unsafe { self.value.as_ref_unchecked() }
     }
 }
 

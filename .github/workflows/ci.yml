@@ -57,6 +57,12 @@ jobs:
             - name: Validate the user guide
               run: python guide/check.py
 
+            - name: Install Miri
+              run: rustup toolchain install nightly --component miri
+
+            - name: Run Miri regression tests
+              run: just miri
+
     rust-quality-windows:
         name: Rust quality (windows-latest)
         runs-on: windows-latest

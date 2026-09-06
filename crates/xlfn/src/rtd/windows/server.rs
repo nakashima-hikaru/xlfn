@@ -196,14 +196,15 @@ impl BackendHandles {
         // SAFETY: `raw` originates from a valid reference and is non-null.
         unsafe { Self(NonNull::new_unchecked(raw)) }
     }
-}
 
-impl std::ops::Deref for BackendHandles {
-    type Target = dyn FormulaLifetimeBackend;
-
-    fn deref(&self) -> &Self::Target {
-        // SAFETY: Excel RTD server outlives or is bounded by the lifecycle coordinator
-        // which withdraws/shuts down the server before dropping the backend.
+    /// Accesses the underlying backend reference.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the backend remains alive (e.g., during
+    /// active server callback execution before shutdown completion).
+    pub(super) unsafe fn as_ref(&self) -> &(dyn FormulaLifetimeBackend + 'static) {
+        // SAFETY: guaranteed by caller contract.
         unsafe { self.0.as_ref() }
     }
 }
@@ -222,14 +223,15 @@ impl BackendSubscriptions {
         // SAFETY: `raw` originates from a valid reference and is non-null.
         unsafe { Self(NonNull::new_unchecked(raw)) }
     }
-}
 
-impl std::ops::Deref for BackendSubscriptions {
-    type Target = SubscriptionRuntime;
-
-    fn deref(&self) -> &Self::Target {
-        // SAFETY: Excel RTD server outlives or is bounded by the lifecycle coordinator
-        // which withdraws/shuts down the server before dropping the runtime.
+    /// Accesses the underlying subscription runtime reference.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the runtime remains alive (e.g., during
+    /// active server callback execution before shutdown completion).
+    pub(super) unsafe fn as_ref(&self) -> &SubscriptionRuntime {
+        // SAFETY: guaranteed by caller contract.
         unsafe { self.0.as_ref() }
     }
 }
@@ -392,14 +394,14 @@ pub(crate) fn shutdown<H: FormulaLifetimeBackend + 'static>(handles: &H) -> XllR
                 let server = entry.pointer as *mut RtdServer;
 
                 // SAFETY: ACTIVE_SERVER owns a live reference to this RtdServer
-                // while its mutex remains held.
+                // while its mutex remains held, and handles backend is alive while attached.
                 unsafe {
                     (*server)
                         .backends
                         .lock()
                         .handles
                         .as_ref()
-                        .is_some_and(|active| active.identity() == handles.identity())
+                        .is_some_and(|active| active.as_ref().identity() == handles.identity())
                 }
             })
             .cloned()
@@ -498,7 +500,7 @@ pub(crate) fn shutdown_subscriptions(subscriptions: &SubscriptionRuntime) -> Xll
                         .lock()
                         .subscriptions
                         .as_ref()
-                        .is_some_and(|active| std::ptr::eq(&**active, subscriptions))
+                        .is_some_and(|active| std::ptr::eq(active.0.as_ptr(), subscriptions))
                 }
             })
             .cloned()
@@ -649,11 +651,14 @@ fn ensure_server_impl(
 
         if let Some(handles) = handles {
             match backends.handles.as_ref() {
-                Some(active) if active.identity() == handles.identity() => {}
-                Some(_) => {
-                    return Err(XllError::Internal {
-                        diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_MULTI,
-                    });
+                Some(active) => {
+                    // SAFETY: active is attached to the server whose lock is held.
+                    let active_ref = unsafe { active.as_ref() };
+                    if active_ref.identity() != handles.identity() {
+                        return Err(XllError::Internal {
+                            diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_MULTI,
+                        });
+                    }
                 }
                 None => {
                     backends.handles = Some(BackendHandles::new(handles));
@@ -664,7 +669,7 @@ fn ensure_server_impl(
         let (newly_attached_subscriptions, subscription_handle) =
             if let Some(subscriptions) = subscriptions {
                 match backends.subscriptions.as_ref() {
-                    Some(active) if std::ptr::eq(&**active, subscriptions) => {
+                    Some(active) if std::ptr::eq(active.0.as_ptr(), subscriptions) => {
                         (None, backends.subscription_server)
                     }
                     Some(_) => {
@@ -1071,7 +1076,10 @@ unsafe fn connect_data_inner(
             return E_FAIL;
         };
 
-        match handles.connect_lifetime(lifetime_generation(generation), topic_id, rtd_key) {
+        // SAFETY: Excel RTD server outlives or is bounded by the lifecycle coordinator
+        // which withdraws/shuts down the server before dropping the backend.
+        let handles_ref = unsafe { handles.as_ref() };
+        match handles_ref.connect_lifetime(lifetime_generation(generation), topic_id, rtd_key) {
             Ok(connection) => ConnectDataTransaction::Handle(connection),
             Err(error) => {
                 crate::diagnostics::report_no_unwind("IRtdServer::ConnectData", &error);
@@ -1086,7 +1094,10 @@ unsafe fn connect_data_inner(
             return E_FAIL;
         };
 
-        let sub_id = match subscriptions.resolve_transport_key(sub_key) {
+        // SAFETY: Excel RTD server outlives or is bounded by the lifecycle coordinator
+        // which withdraws/shuts down the server before dropping the runtime.
+        let subscriptions_ref = unsafe { subscriptions.as_ref() };
+        let sub_id = match subscriptions_ref.resolve_transport_key(sub_key) {
             Ok(id) => id,
             Err(error) => {
                 crate::diagnostics::report_no_unwind("IRtdServer::ConnectData", &error);
@@ -1229,7 +1240,9 @@ unsafe fn disconnect_data_inner(this: *mut RtdServer, topic_id: i32) -> i32 {
     let generation = unsafe { (*this).generation };
 
     if let Some(handles) = handles {
-        handles.disconnect(lifetime_generation(generation), topic_id);
+        // SAFETY: Excel RTD server outlives or is bounded by the lifecycle coordinator
+        // which withdraws/shuts down the server before dropping the backend.
+        unsafe { handles.as_ref() }.disconnect(lifetime_generation(generation), topic_id);
     }
 
     if let Some(subscription_server) = subscription_server.as_ref() {
@@ -1426,7 +1439,9 @@ pub(super) unsafe fn teardown_server_resources(this: *mut RtdServer, remove_acti
     };
 
     if let Some(handles) = handles {
-        handles.terminate_topics(lifetime_generation(generation));
+        // SAFETY: Excel RTD server outlives or is bounded by the lifecycle coordinator
+        // which withdraws/shuts down the server before dropping the backend.
+        unsafe { handles.as_ref() }.terminate_topics(lifetime_generation(generation));
     }
 
     // SAFETY: the caller retains the server through callback revocation.

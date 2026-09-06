@@ -5,7 +5,7 @@
 //! snapshots provide the call-scoped read capability. There is no second
 //! record arena or resurrection path to keep in sync.
 
-use super::binding::{BindingReadLease, BindingState, BindingTable};
+use super::binding::{BindingState, BindingTable};
 use super::object::{ObjectArena, ObjectBinding};
 use super::token::{HandleId, HandleToken, ObjectId, TokenCodec};
 use super::{ExcelHandleObject, Handle};
@@ -273,6 +273,10 @@ impl HandleRegistry {
     }
 
     #[cfg(test)]
+    #[allow(
+        unsafe_code,
+        reason = "Test-only handle lookup clones value from lease"
+    )]
     pub(crate) fn lookup<T>(&self, token: &str) -> XllResult<T>
     where
         T: Send + Sync + Clone + 'static,
@@ -283,11 +287,7 @@ impl HandleRegistry {
         if !self.is_open() {
             return Err(XllError::Closing);
         }
-        let lease = BindingReadLease::new(
-            self.bindings.published(),
-            verified.id,
-            self.bindings.read_domain(),
-        )?;
+        let lease = self.bindings.read_standalone(verified.id)?;
         let record = lease.record();
         if record.state() != BindingState::Live {
             return Err(XllError::StaleHandle);
@@ -296,7 +296,9 @@ impl HandleRegistry {
             .object()
             .typed_projection::<T>()
             .ok_or(XllError::InvalidHandle)?;
-        Ok(value.as_ref().clone())
+        // SAFETY: lease ensures the binding and object cell remain alive for this read.
+        let object_ref = unsafe { value.as_ref_unchecked() };
+        Ok(object_ref.clone())
     }
 
     pub(crate) fn lookup_handle<'call, T>(
@@ -314,12 +316,7 @@ impl HandleRegistry {
             return Err(XllError::Closing);
         }
         let witness = scope.enter_handle_domain(self.bindings.read_domain())?;
-        let binding = BindingReadLease::new_scoped(
-            self.bindings.published().load(verified.id.slot),
-            verified.id,
-            self.bindings.read_domain(),
-            witness,
-        )?;
+        let binding = self.bindings.read_scoped(verified.id, witness)?;
         let record = binding.record();
         if record.state() != BindingState::Live {
             return Err(XllError::StaleHandle);

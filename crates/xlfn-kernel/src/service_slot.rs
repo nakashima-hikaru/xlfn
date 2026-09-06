@@ -606,8 +606,11 @@ impl<R> ReplaceableServiceSlot<R> {
 
         precommit(had_previous, current_ref)?;
 
-        let pointer = NonNull::from(candidate.as_ref());
-        *target_lane.owner.lock() = Some(candidate);
+        let pointer = {
+            let mut owner = target_lane.owner.lock();
+            let slot = owner.insert(candidate);
+            NonNull::from(slot.as_ref())
+        };
         target_lane
             .published
             .store(pointer.as_ptr(), Ordering::Release);

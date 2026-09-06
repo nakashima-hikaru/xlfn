@@ -281,7 +281,7 @@ fn published_topic_keeps_identity_and_rtd_reverse_maps_consistent() {
 
     let lease = runtime.topics.enter_read_lease().unwrap();
     let publication = lease
-        .load(runtime.topics.published(), &key)
+        .load(&key)
         .expect("successful observation must commit its published snapshot");
     assert_eq!(publication.state(), PublishedTopicState::Live);
     drop(lease);
@@ -508,12 +508,10 @@ fn binding_read_lease_delays_object_reclamation_until_reader_exit() {
             HandleToken::new(&token),
         )
         .unwrap();
-    let reader = super::binding::BindingReadLease::new(
-        registry.bindings.published(),
-        parsed.id,
-        registry.bindings.read_domain(),
-    )
-    .expect("inserted handle must admit a binding reader");
+    let reader = registry
+        .bindings
+        .read_standalone(parsed.id)
+        .expect("inserted handle must admit a binding reader");
     assert_eq!(reader.record().state(), BindingState::Live);
 
     let removal_registry = Arc::clone(&registry);
@@ -558,12 +556,7 @@ fn slot_reuse_can_publish_while_old_record_waits_for_grace() {
             HandleToken::new(&old_token),
         )
         .unwrap();
-    let old_reader = super::binding::BindingReadLease::new(
-        registry.bindings.published(),
-        parsed_old.id,
-        registry.bindings.read_domain(),
-    )
-    .unwrap();
+    let old_reader = registry.bindings.read_standalone(parsed_old.id).unwrap();
 
     let removal_registry = Arc::clone(&registry);
     let old_token_for_removal = old_token.clone();
@@ -1046,7 +1039,8 @@ fn pending_handle_argument_conversion_leases_the_payload() {
         .store
         .registry
         .remove_and_drop(&token, "test remove async argument");
-    assert_eq!(resolved.value.as_ref().0, 29);
+    // SAFETY: resolved holds an active decoded lease anchoring the object cell.
+    assert_eq!(unsafe { resolved.value.as_ref_unchecked() }.0, 29);
     drop(resolved);
 }
 
@@ -1741,7 +1735,13 @@ fn handle_lease_keeps_payload_alive_after_binding_retirement() {
         .remove_and_drop(&token, "test remove while pinned");
 
     assert_eq!(drops.load(Ordering::SeqCst), 0);
-    assert_eq!(pinned.value.as_ref().0.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        // SAFETY: pinned holds an active pin lease on the object cell.
+        unsafe { pinned.value.as_ref_unchecked() }
+            .0
+            .load(Ordering::SeqCst),
+        0
+    );
     drop(pinned);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
@@ -1838,7 +1838,13 @@ fn handle_lease_survives_terminal_runtime_close() {
     let sealed = runtime.seal().unwrap();
 
     assert_eq!(drops.load(Ordering::SeqCst), 0);
-    assert_eq!(pinned.value.as_ref().0.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        // SAFETY: pinned holds an active pin lease on the object cell.
+        unsafe { pinned.value.as_ref_unchecked() }
+            .0
+            .load(Ordering::SeqCst),
+        0
+    );
     assert!(matches!(
         runtime.store.registry.finish_quiescence(&sealed),
         Err(XllError::Internal { diagnostic_id })
@@ -1910,7 +1916,13 @@ fn pin_promotion_keeps_a_snapshot_owned_payload_without_a_binding() {
         .remove_and_drop(&token, "test remove before lease promotion");
 
     assert_eq!(drops.load(Ordering::SeqCst), 0);
-    assert_eq!(pinned.value.as_ref().0.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        // SAFETY: pinned holds an active pin lease on the object cell.
+        unsafe { pinned.value.as_ref_unchecked() }
+            .0
+            .load(Ordering::SeqCst),
+        0
+    );
     drop(pinned);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }

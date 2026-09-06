@@ -97,24 +97,14 @@ unsafe impl Sync for PublishedTopicPtr {}
 /// A scoped read capability that protects published topics from being reclaimed
 /// while they are being inspected.
 pub(crate) struct TopicReadLease<'a> {
+    published: &'a PublishedTopics,
     _permit: RotatingReadPermit<'a, DEFAULT_STRIPE_COUNT>,
     _guard: super::runtime::TopicReadGuard,
 }
 
 impl<'a> TopicReadLease<'a> {
-    pub(crate) fn new(permit: RotatingReadPermit<'a, DEFAULT_STRIPE_COUNT>) -> Self {
-        Self {
-            _permit: permit,
-            _guard: super::runtime::TopicReadGuard::enter(),
-        }
-    }
-
-    pub(crate) fn load(
-        &'a self,
-        topics: &'a PublishedTopics,
-        key: &HandleTopicKey,
-    ) -> Option<PublishedTopicRef<'a>> {
-        let ptr = topics.load(key)?;
+    pub(crate) fn load(&self, key: &HandleTopicKey) -> Option<PublishedTopicRef<'_>> {
+        let ptr = self.published.load(key)?;
         Some(PublishedTopicRef {
             ptr: ptr.0,
             _marker: PhantomData,
@@ -261,7 +251,11 @@ impl TopicTable {
             .read_domain
             .enter_current_thread()
             .map_err(|_| XllError::Closing)?;
-        Ok(TopicReadLease::new(permit))
+        Ok(TopicReadLease {
+            published: &self.published,
+            _permit: permit,
+            _guard: super::runtime::TopicReadGuard::enter(),
+        })
     }
 
     fn enqueue_reclaim(&self, topic: Box<PublishedTopic>) {
@@ -320,6 +314,7 @@ impl TopicTable {
         self.state.read().closed
     }
 
+    #[cfg(test)]
     pub(crate) fn published(&self) -> &PublishedTopics {
         &self.published
     }
