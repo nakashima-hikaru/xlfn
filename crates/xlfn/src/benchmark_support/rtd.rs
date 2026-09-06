@@ -63,12 +63,15 @@ impl RtdPublishNumberBenchmark {
                 registration.finish(),
             ),
         );
-        let server = runtime
-            .register_server(
-                crate::subscription::ServerGeneration::new(1)
-                    .expect("non-zero test server generation"),
-            )
-            .expect("server registration must succeed");
+        // SAFETY: `runtime` outlives `server` for the benchmark setup duration.
+        let server = unsafe {
+            runtime
+                .register_server(
+                    crate::subscription::ServerGeneration::new(1)
+                        .expect("non-zero test server generation"),
+                )
+                .expect("server registration must succeed")
+        };
         let topic = crate::subscription::RtdTopic::new(["BENCH", "NUMBER"])
             .expect("benchmark RTD topic must be valid");
         let prepared = runtime
@@ -150,12 +153,15 @@ impl RtdPublishStringBenchmark {
                 registration.finish(),
             ),
         );
-        let server = runtime
-            .register_server(
-                crate::subscription::ServerGeneration::new(1)
-                    .expect("non-zero test server generation"),
-            )
-            .expect("server registration must succeed");
+        // SAFETY: `runtime` outlives `server` for the benchmark setup duration.
+        let server = unsafe {
+            runtime
+                .register_server(
+                    crate::subscription::ServerGeneration::new(1)
+                        .expect("non-zero test server generation"),
+                )
+                .expect("server registration must succeed")
+        };
         let topic = crate::subscription::RtdTopic::new(["BENCH", "STRING"])
             .expect("benchmark RTD topic must be valid");
         let prepared = runtime
@@ -447,12 +453,15 @@ where
     let runtime = Box::new(
         crate::subscription::SubscriptionRuntime::with_sources_for_internal(registration.finish()),
     );
-    let server = runtime
-        .register_server(
-            crate::subscription::ServerGeneration::new(1)
-                .expect("non-zero benchmark server generation"),
-        )
-        .expect("server registration must succeed");
+    // SAFETY: `runtime` outlives `server` for the benchmark setup duration.
+    let server = unsafe {
+        runtime
+            .register_server(
+                crate::subscription::ServerGeneration::new(1)
+                    .expect("non-zero benchmark server generation"),
+            )
+            .expect("server registration must succeed")
+    };
     let sinks = registered
         .into_iter()
         .zip(topic_ids.iter().copied())

@@ -750,12 +750,15 @@ mod tests {
                 std::sync::Arc::new(crate::rtd::test_support::TestNotifierState::new());
             runtime
                 .with_subscriptions(|subscriptions| {
-                    let server = subscriptions
-                        .register_server(
-                            crate::subscription::ServerGeneration::new(1)
-                                .expect("non-zero test server generation"),
-                        )
-                        .unwrap();
+                    // SAFETY: `subscriptions` is owned by `runtime` which outlives this test closure.
+                    let server = unsafe {
+                        subscriptions
+                            .register_server(
+                                crate::subscription::ServerGeneration::new(1)
+                                    .expect("non-zero test server generation"),
+                            )
+                            .unwrap()
+                    };
                     server
                         .attach_update_notifier(crate::excel_rtd::RtdNotifier::for_test(
                             std::sync::Arc::clone(&notifier_state),
@@ -1554,12 +1557,15 @@ mod tests {
                 .unwrap();
             runtime
                 .with_subscriptions(|subscriptions| {
-                    let server = subscriptions
-                        .register_server(
-                            crate::subscription::ServerGeneration::new(1)
-                                .expect("non-zero test server generation"),
-                        )
-                        .unwrap();
+                    // SAFETY: `subscriptions` is owned by `runtime` which outlives this test closure.
+                    let server = unsafe {
+                        subscriptions
+                            .register_server(
+                                crate::subscription::ServerGeneration::new(1)
+                                    .expect("non-zero test server generation"),
+                            )
+                            .unwrap()
+                    };
                     let prepared = subscriptions
                         .prepare(
                             &source,

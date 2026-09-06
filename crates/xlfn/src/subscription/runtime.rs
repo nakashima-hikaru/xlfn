@@ -133,7 +133,14 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         self.runtime_gate.enter().map_err(|_| XllError::Closing)
     }
 
-    pub(crate) fn register_server(
+    /// Registers a server generation and returns a server handle.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `self` (the subscription runtime) outlives
+    /// all copies of the returned [`SubscriptionServerHandle`]. All operations
+    /// and handles must be drained or dropped before reclaiming the runtime.
+    pub(crate) unsafe fn register_server(
         &self,
         generation: ServerGeneration,
     ) -> XllResult<SubscriptionServerHandle<H>> {
@@ -162,9 +169,20 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             });
         }
         servers.insert(generation, server);
-        // SAFETY: `self` is the subscription runtime arena which outlives the server
-        // handle; shutdown drains all operations and handles before runtime reclamation.
+        // SAFETY: `self` is guaranteed to outlive the server handle by the caller's safety contract;
+        // shutdown drains all operations and handles before runtime reclamation.
         Ok(unsafe { SubscriptionServerHandle::new(self, generation) })
+    }
+
+    #[cfg(all(test, feature = "rtd"))]
+    pub(crate) fn register_test_server(&self, generation: u64) -> SubscriptionServerHandle<H> {
+        // SAFETY: test helper guarantees runtime outlives the server handle in the test.
+        unsafe {
+            self.register_server(
+                ServerGeneration::new(generation).expect("non-zero test server generation"),
+            )
+            .unwrap()
+        }
     }
 
     pub(crate) fn resolve_server(

@@ -83,14 +83,12 @@ impl<'call> CallScope<'call> {
     /// Enters the handle read domain for this call scope and returns a witness
     /// valid for `'scope`.
     ///
-    /// # Safety
-    ///
-    /// The caller must guarantee that `domain` outlives this [`CallScope`]
-    /// (or at least outlives until all permits retained by this scope are dropped).
+    /// Borrowing `domain` for `'scope` statically guarantees that `domain`
+    /// outlives the `CallScope` borrow and all permits retained within it.
     #[inline]
-    pub(crate) unsafe fn enter_handle_domain<'scope>(
+    pub(crate) fn enter_handle_domain<'scope>(
         &'scope self,
-        domain: &crate::handle::HandleReadDomain,
+        domain: &'scope crate::handle::HandleReadDomain,
     ) -> XllResult<crate::handle::HandleDomainWitness<'scope>> {
         let domain_ptr = std::ptr::NonNull::from(domain);
         let mut permits = self.handle_permits.borrow_mut();
@@ -115,8 +113,9 @@ impl<'call> CallScope<'call> {
                 }
             }
         }
-        // SAFETY: guaranteed by the caller's safety contract that `domain` outlives
-        // this `CallScope` and all permits held within it.
+        // SAFETY: `domain` is borrowed for `'scope`, which encompasses this call scope
+        // and all permits stored in `self.handle_permits`. All permits are dropped
+        // when `self` is dropped, which occurs before or at the end of `'scope`.
         let permit = unsafe { domain.enter_owned()? };
         match std::mem::replace(&mut *permits, HandlePermits::Empty) {
             HandlePermits::Empty => {
@@ -147,8 +146,7 @@ pub fn with_excel_call_scope<R>(
 
 /// Runs an operation under a fresh call scope while borrowing existing state.
 #[doc(hidden)]
-#[cfg(test)]
-pub(crate) fn with_excel_call_scope_and_state<S, R>(
+pub fn with_excel_call_scope_and_state<S, R>(
     state: &S,
     operation: impl for<'scope> FnOnce(&'scope S, &'scope CallScope<'scope>) -> R,
 ) -> R {

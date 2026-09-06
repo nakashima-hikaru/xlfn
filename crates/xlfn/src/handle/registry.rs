@@ -6,7 +6,7 @@
 //! record arena or resurrection path to keep in sync.
 
 use super::binding::{BindingState, BindingTable};
-use super::object::{ObjectArena, ObjectBinding};
+use super::object::{ObjectArena, ObjectBinding, PendingObjectBinding};
 use super::token::{HandleId, HandleToken, ObjectId, TokenCodec};
 use super::{ExcelHandleObject, Handle};
 use crate::error::DomainErrorCode;
@@ -15,6 +15,7 @@ use crate::{XllError, XllResult};
 use parking_lot::Mutex;
 use std::any::{TypeId, type_name};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 #[repr(u8)]
@@ -190,14 +191,23 @@ impl HandleRegistry {
             })
     }
 
-    pub(crate) fn new_object<T: Send + Sync + 'static>(
-        &self,
+    pub(crate) fn new_object<'registry, T: Send + Sync + 'static>(
+        &'registry self,
         value: T,
-    ) -> XllResult<ObjectBinding> {
+    ) -> XllResult<PendingObjectBinding<'registry>> {
         let object_id = self.allocate_object_id()?;
         // SAFETY: `self.objects` is owned by this `HandleRegistry`, which manages
         // the handle lifecycle and drains all bindings and pins before arena reclamation.
-        unsafe { self.objects.insert(object_id, value) }
+        let binding = unsafe { self.objects.insert(object_id, value) }?;
+        Ok(PendingObjectBinding::new(binding))
+    }
+
+    #[inline]
+    fn check_object_arena(&self, object: &ObjectBinding) -> XllResult<()> {
+        if object.arena() != NonNull::from(self.objects.as_ref()) {
+            return Err(XllError::StaleHandle);
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -206,7 +216,7 @@ impl HandleRegistry {
         T: Send + Sync + 'static,
     {
         let object = self.new_object(value.take().expect("pending handle value is armed"))?;
-        let mut object = PendingHandleValue::new(object);
+        let mut object = PendingHandleValue::new(object.into_inner());
         self.insert_pending_object_with_kind::<T>(object.slot())
             .map(|(token, _binding_id, _object_id, _reused)| token)
     }
@@ -222,6 +232,7 @@ impl HandleRegistry {
             return Err(XllError::Closing);
         }
         let object = value.as_ref().expect("pending handle object is armed");
+        self.check_object_arena(object)?;
         self.validate_type::<T>(object)?;
         let reservation = self.bindings.reserve()?;
         if !self.is_open() {
@@ -246,6 +257,7 @@ impl HandleRegistry {
         if !self.is_open() {
             return Err(XllError::Closing);
         }
+        self.check_object_arena(&object)?;
         self.validate_type::<T>(&object)?;
         let object_id = object.id();
         let reservation = self.bindings.reserve()?;
@@ -304,7 +316,7 @@ impl HandleRegistry {
     }
 
     pub(crate) fn lookup_handle<'call, T>(
-        &self,
+        &'call self,
         scope: &'call crate::call::CallScope<'call>,
         token: &str,
     ) -> XllResult<Handle<'call, T>>
@@ -317,9 +329,7 @@ impl HandleRegistry {
         if !self.is_open() {
             return Err(XllError::Closing);
         }
-        // SAFETY: `self.bindings.read_domain()` is owned by this `HandleRegistry`,
-        // which outlives the synchronous UDF invocation represented by `scope`.
-        let witness = unsafe { scope.enter_handle_domain(self.bindings.read_domain()) }?;
+        let witness = scope.enter_handle_domain(self.bindings.read_domain())?;
         let binding = self.bindings.read_scoped(verified.id, witness)?;
         let record = binding.record();
         if record.state() != BindingState::Live {

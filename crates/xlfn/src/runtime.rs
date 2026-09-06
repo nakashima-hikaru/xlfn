@@ -1017,20 +1017,26 @@ pub(crate) mod tests {
                     .unwrap()
                     .into_token();
                 assert_eq!(
-                    crate::value::with_excel_call_scope(|scope| {
-                        new_handles
-                            .lookup::<TestHandle>(scope, &new_token)
-                            .map(|value| value.0)
-                    })
+                    crate::call::with_excel_call_scope_and_state(
+                        new_handles,
+                        |new_handles, scope| {
+                            new_handles
+                                .lookup::<TestHandle>(scope, &new_token)
+                                .map(|value| value.0)
+                        }
+                    )
                     .unwrap(),
                     2
                 );
                 assert!(matches!(
-                    crate::value::with_excel_call_scope(|scope| {
-                        new_handles
-                            .lookup::<TestHandle>(scope, &old_token)
-                            .map(|_| ())
-                    }),
+                    crate::call::with_excel_call_scope_and_state(
+                        new_handles,
+                        |new_handles, scope| {
+                            new_handles
+                                .lookup::<TestHandle>(scope, &old_token)
+                                .map(|_| ())
+                        }
+                    ),
                     Err(XllError::StaleHandle | XllError::InvalidHandle)
                 ));
             })

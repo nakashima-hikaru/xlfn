@@ -51,7 +51,9 @@ fn with_handle<T, R>(
 where
     T: ExcelHandleObject,
 {
-    crate::value::with_excel_call_scope(|scope| runtime.lookup(scope, token).map(operation))
+    crate::call::with_excel_call_scope_and_state(runtime, |runtime, scope| {
+        runtime.lookup(scope, token).map(operation)
+    })
 }
 
 fn input_identity<'call, T: ExcelHandleObject>(value: &Handle<'call, T>) -> InputFingerprint {
@@ -440,7 +442,7 @@ fn generation_prevents_aba_and_lookup_keeps_value_alive() {
     let registry = HandleRegistry::new(4);
     let token = insert_production(&registry, Arc::new(TestObj("first"))).unwrap();
 
-    crate::value::with_excel_call_scope(|scope| {
+    crate::call::with_excel_call_scope_and_state(&registry, |registry, scope| {
         let borrowed = registry.lookup_handle::<TestObj>(scope, &token).unwrap();
         assert_eq!(borrowed.0, "first");
     });
@@ -454,7 +456,7 @@ fn generation_prevents_aba_and_lookup_keeps_value_alive() {
     let replacement = insert_production(&registry, Arc::new(TestObj("replacement"))).unwrap();
     assert_ne!(token, replacement);
 
-    crate::value::with_excel_call_scope(|scope| {
+    crate::call::with_excel_call_scope_and_state(&registry, |registry, scope| {
         let replacement_handle = registry
             .lookup_handle::<TestObj>(scope, &replacement)
             .unwrap();
@@ -472,7 +474,8 @@ fn one_call_scope_can_borrow_from_each_runtime() {
     let first_token = insert_production(&first, Arc::new(ScopeObject(1))).unwrap();
     let second_token = insert_production(&second, Arc::new(ScopeObject(2))).unwrap();
 
-    crate::value::with_excel_call_scope(|scope| {
+    let registries = (&first, &second);
+    crate::call::with_excel_call_scope_and_state(&registries, |(first, second), scope| {
         let first_handle = first
             .lookup_handle::<ScopeObject>(scope, &first_token)
             .expect("the first runtime publishes the handle");
@@ -595,7 +598,7 @@ fn slot_reuse_can_publish_while_old_record_waits_for_grace() {
     assert_eq!(parsed_new.id.slot, parsed_old.id.slot);
     assert_ne!(parsed_new.id.generation, parsed_old.id.generation);
     assert_eq!(old_reader.record().state(), BindingState::Retired);
-    crate::value::with_excel_call_scope(|scope| {
+    crate::call::with_excel_call_scope_and_state(&registry, |registry, scope| {
         assert!(matches!(
             registry.lookup_handle::<Counted>(scope, &old_token),
             Err(XllError::StaleHandle)
@@ -665,7 +668,7 @@ fn reused_slot_keeps_old_borrow_separate_from_new_generation() {
         )
         .unwrap();
 
-    crate::value::with_excel_call_scope(|scope| {
+    crate::call::with_excel_call_scope_and_state(&registry, |registry, scope| {
         let old = registry.lookup_handle::<TestObj>(scope, &token1).unwrap();
         assert_eq!(old.0, "first");
     });
@@ -683,7 +686,7 @@ fn reused_slot_keeps_old_borrow_separate_from_new_generation() {
     assert_eq!(parsed1.id.slot, parsed2.id.slot);
     assert_ne!(parsed1.id.generation, parsed2.id.generation);
 
-    crate::value::with_excel_call_scope(|scope| {
+    crate::call::with_excel_call_scope_and_state(&registry, |registry, scope| {
         assert!(matches!(
             registry.lookup_handle::<TestObj>(scope, &token1),
             Err(XllError::StaleHandle)
@@ -707,25 +710,26 @@ fn close_rejects_new_borrows_but_retires_after_existing_call_release() {
     let registry = Arc::new(HandleRegistry::new(2));
     let token = insert_production(&registry, Arc::new(TestObj("live"))).unwrap();
 
-    let (seal_handle, finished_rx) = crate::value::with_excel_call_scope(|scope| {
-        let borrowed = registry.lookup_handle::<TestObj>(scope, &token).unwrap();
-        assert_eq!(borrowed.0, "live");
+    let (seal_handle, finished_rx) =
+        crate::call::with_excel_call_scope_and_state(&registry, |registry, scope| {
+            let borrowed = registry.lookup_handle::<TestObj>(scope, &token).unwrap();
+            assert_eq!(borrowed.0, "live");
 
-        let reg_clone = Arc::clone(&registry);
-        let (started_tx, started_rx) = mpsc::channel();
-        let (finished_tx, finished_rx) = mpsc::channel();
-        let seal_handle = std::thread::spawn(move || {
-            started_tx.send(()).unwrap();
-            let res = reg_clone.seal().map(|_| ());
-            finished_tx.send(res).unwrap();
+            let reg_clone = Arc::clone(registry);
+            let (started_tx, started_rx) = mpsc::channel();
+            let (finished_tx, finished_rx) = mpsc::channel();
+            let seal_handle = std::thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                let res = reg_clone.seal().map(|_| ());
+                finished_tx.send(res).unwrap();
+            });
+            started_rx.recv().unwrap();
+
+            // While call scope is active, seal cannot complete because readers are active.
+            assert!(finished_rx.recv_timeout(Duration::from_millis(20)).is_err());
+            assert_eq!(borrowed.0, "live");
+            (seal_handle, finished_rx)
         });
-        started_rx.recv().unwrap();
-
-        // While call scope is active, seal cannot complete because readers are active.
-        assert!(finished_rx.recv_timeout(Duration::from_millis(20)).is_err());
-        assert_eq!(borrowed.0, "live");
-        (seal_handle, finished_rx)
-    });
 
     finished_rx
         .recv_timeout(Duration::from_secs(1))
@@ -1028,7 +1032,7 @@ fn pending_handle_argument_conversion_leases_the_payload() {
         .prepare(test_topic_key("async-argument"), || Ok(DataRecord(29)))
         .unwrap()
         .into_token();
-    let resolved = crate::call::with_excel_call_scope(|scope| {
+    let resolved = crate::call::with_excel_call_scope_and_state(&handles, |handles, scope| {
         handles
             .lookup::<DataRecord>(scope, &token)
             .unwrap()
@@ -1181,15 +1185,16 @@ fn existing_handle_publication_creates_an_independent_formula_owner() {
 
     let alias_key = test_topic_key("alias");
     let alias_lifetime_key = alias_key.format_lifetime_key();
-    let (alias_token, object_id) = crate::value::with_excel_call_scope(|scope| {
-        let resolved: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
-        let object_id = resolved.object_id();
-        let alias = runtime
-            .prepare_observed_alias::<DataRecord, _>(alias_key, resolved.alias(), |_, _| Ok(()))
-            .unwrap()
-            .into_token();
-        (alias, object_id)
-    });
+    let (alias_token, object_id) =
+        crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
+            let resolved: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
+            let object_id = resolved.object_id();
+            let alias = runtime
+                .prepare_observed_alias::<DataRecord, _>(alias_key, resolved.alias(), |_, _| Ok(()))
+                .unwrap()
+                .into_token();
+            (alias, object_id)
+        });
     runtime
         .connect(lifetime_generation(1), 2, &alias_lifetime_key)
         .unwrap();
@@ -1267,7 +1272,7 @@ fn aliased_binding_survives_source_retirement_and_drops_once() {
 
     let alias_key = test_topic_key("alias-binding-target");
     let alias_lifetime_key = alias_key.format_lifetime_key();
-    let alias_token = crate::value::with_excel_call_scope(|scope| {
+    let alias_token = crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
         let source: Handle<'_, DropTracked> = runtime.lookup(scope, &source_token).unwrap();
         runtime
             .prepare_observed_alias::<DropTracked, _>(alias_key, source.alias(), |_, _| Ok(()))
@@ -1328,7 +1333,7 @@ fn alias_publication_installs_an_independent_object_capability() {
     let source_token = source_preparation.into_token();
 
     let alias_key = test_topic_key("snapshot-alias");
-    let alias_token = crate::value::with_excel_call_scope(|scope| {
+    let alias_token = crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
         let source: Handle<'_, DropTracked> = runtime.lookup(scope, &source_token).unwrap();
         let object_id = source.object_id();
 
@@ -1380,7 +1385,7 @@ fn aliases_of_one_object_have_one_semantic_input_identity() {
         .unwrap();
 
     let alias_key = test_topic_key("identity-alias");
-    let alias_token = crate::value::with_excel_call_scope(|scope| {
+    let alias_token = crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
         let source: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
         runtime
             .prepare_observed_alias::<DataRecord, _>(alias_key, source.alias(), |_, _| Ok(()))
@@ -1403,7 +1408,7 @@ fn aliases_of_one_object_have_one_semantic_input_identity() {
         .connect(lifetime_generation(1), 7, &other_lifetime_key)
         .unwrap();
 
-    crate::value::with_excel_call_scope(|scope| {
+    crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
         let source: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
         let alias: Handle<'_, DataRecord> = runtime.lookup(scope, &alias_token).unwrap();
         let other: Handle<'_, DataRecord> = runtime.lookup(scope, &other_token).unwrap();
@@ -1438,7 +1443,7 @@ fn semantic_handle_identity_controls_formula_memoization() {
         .unwrap();
 
     let alias_key = test_topic_key("semantic-memo-alias");
-    let alias_token = crate::value::with_excel_call_scope(|scope| {
+    let alias_token = crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
         let source: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
         runtime
             .prepare_observed_alias::<DataRecord, _>(alias_key, source.alias(), |_, _| Ok(()))
@@ -1462,7 +1467,7 @@ fn semantic_handle_identity_controls_formula_memoization() {
         .unwrap();
 
     let (source_revision, alias_revision, other_revision) =
-        crate::value::with_excel_call_scope(|scope| {
+        crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
             let source: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
             let alias: Handle<'_, DataRecord> = runtime.lookup(scope, &alias_token).unwrap();
             let other: Handle<'_, DataRecord> = runtime.lookup(scope, &other_token).unwrap();
@@ -1722,7 +1727,7 @@ fn handle_lease_keeps_payload_alive_after_binding_retirement() {
         .unwrap()
         .into_token();
 
-    let pinned = crate::value::with_excel_call_scope(|scope| {
+    let pinned = crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
         runtime
             .lookup::<CountedDataRecord>(scope, &token)
             .unwrap()
@@ -1781,7 +1786,7 @@ fn scoped_handle_task_drain_releases_pin_before_handle_quiescence() {
         })
         .unwrap()
         .into_token();
-    let pending = crate::value::with_excel_call_scope(|scope| {
+    let pending = crate::call::with_excel_call_scope_and_state(&handles, |handles, scope| {
         handles
             .lookup::<CountedDataRecord>(scope, &token)
             .unwrap()
@@ -1828,7 +1833,7 @@ fn handle_lease_survives_terminal_runtime_close() {
         .unwrap()
         .into_token();
 
-    let pinned = crate::value::with_excel_call_scope(|scope| {
+    let pinned = crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
         runtime
             .lookup::<CountedDataRecord>(scope, &token)
             .unwrap()
@@ -1867,24 +1872,25 @@ fn binding_snapshot_blocks_object_quiescence_until_call_ends() {
         .unwrap()
         .into_token();
 
-    let (seal_handle, finished_rx) = crate::value::with_excel_call_scope(|scope| {
-        let handle = runtime.lookup::<DataRecord>(scope, &token).unwrap();
-        assert_eq!(handle.0, 42);
+    let (seal_handle, finished_rx) =
+        crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
+            let handle = runtime.lookup::<DataRecord>(scope, &token).unwrap();
+            assert_eq!(handle.0, 42);
 
-        let rt_clone = Arc::clone(&runtime);
-        let (started_tx, started_rx) = mpsc::channel();
-        let (finished_tx, finished_rx) = mpsc::channel();
-        let seal_handle = std::thread::spawn(move || {
-            started_tx.send(()).unwrap();
-            let sealed = rt_clone.seal();
-            finished_tx.send(sealed).unwrap();
+            let rt_clone = Arc::clone(runtime);
+            let (started_tx, started_rx) = mpsc::channel();
+            let (finished_tx, finished_rx) = mpsc::channel();
+            let seal_handle = std::thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                let sealed = rt_clone.seal();
+                finished_tx.send(sealed).unwrap();
+            });
+            started_rx.recv().unwrap();
+
+            // While handle is live in call scope, seal is waiting for readers to drain.
+            assert!(finished_rx.recv_timeout(Duration::from_millis(20)).is_err());
+            (seal_handle, finished_rx)
         });
-        started_rx.recv().unwrap();
-
-        // While handle is live in call scope, seal is waiting for readers to drain.
-        assert!(finished_rx.recv_timeout(Duration::from_millis(20)).is_err());
-        (seal_handle, finished_rx)
-    });
 
     let sealed = finished_rx
         .recv_timeout(Duration::from_secs(1))
@@ -1904,7 +1910,7 @@ fn pin_promotion_keeps_a_snapshot_owned_payload_without_a_binding() {
         .unwrap()
         .into_token();
 
-    let pinned = crate::value::with_excel_call_scope(|scope| {
+    let pinned = crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
         let handle = runtime.lookup::<CountedDataRecord>(scope, &token).unwrap();
         handle
             .into_pending(crate::generation::RuntimeGeneration::new(1).unwrap())
@@ -1976,24 +1982,25 @@ fn disconnect_waits_for_an_in_flight_consumer_and_drops_once() {
         .connect(lifetime_generation(1), 7, &lifetime_key)
         .unwrap();
 
-    let (disconnect_handle, finished_rx) = crate::value::with_excel_call_scope(|scope| {
-        let consumer: Handle<'_, CountedDataRecord> = runtime.lookup(scope, &token).unwrap();
-        assert_eq!(consumer.0.load(Ordering::Relaxed), 0);
+    let (disconnect_handle, finished_rx) =
+        crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
+            let consumer: Handle<'_, CountedDataRecord> = runtime.lookup(scope, &token).unwrap();
+            assert_eq!(consumer.0.load(Ordering::Relaxed), 0);
 
-        let rt_clone = Arc::clone(&runtime);
-        let (started_tx, started_rx) = mpsc::channel();
-        let (finished_tx, finished_rx) = mpsc::channel();
-        let disconnect_handle = std::thread::spawn(move || {
-            started_tx.send(()).unwrap();
-            rt_clone.disconnect(lifetime_generation(1), 7);
-            finished_tx.send(()).unwrap();
+            let rt_clone = Arc::clone(runtime);
+            let (started_tx, started_rx) = mpsc::channel();
+            let (finished_tx, finished_rx) = mpsc::channel();
+            let disconnect_handle = std::thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                rt_clone.disconnect(lifetime_generation(1), 7);
+                finished_tx.send(()).unwrap();
+            });
+            started_rx.recv().unwrap();
+
+            assert!(finished_rx.recv_timeout(Duration::from_millis(20)).is_err());
+            assert_eq!(drops.load(Ordering::Relaxed), 0);
+            (disconnect_handle, finished_rx)
         });
-        started_rx.recv().unwrap();
-
-        assert!(finished_rx.recv_timeout(Duration::from_millis(20)).is_err());
-        assert_eq!(drops.load(Ordering::Relaxed), 0);
-        (disconnect_handle, finished_rx)
-    });
 
     finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     disconnect_handle.join().unwrap();
@@ -2854,13 +2861,13 @@ fn handle_type_mismatch_returns_invalid_handle() {
         .into_token();
 
     // Looking up TypeA as TypeB must fail with InvalidHandle
-    crate::value::with_excel_call_scope(|scope| {
+    crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
         let result = runtime.lookup::<TypeB>(scope, &token);
         assert!(matches!(result, Err(XllError::InvalidHandle)));
     });
 
     // Looking up TypeA as TypeA must succeed
-    crate::value::with_excel_call_scope(|scope| {
+    crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
         let handle = runtime.lookup::<TypeA>(scope, &token).unwrap();
         assert_eq!(*handle, TypeA(42));
     });
@@ -2879,22 +2886,23 @@ fn alias_preserves_pointer_and_object_identity() {
         .unwrap()
         .into_token();
 
-    let (token2, object_id1, ptr1) = crate::value::with_excel_call_scope(|scope| {
-        let handle1 = runtime.lookup::<TrackedObj>(scope, &token1).unwrap();
-        let object_id = handle1.object_id();
-        let ptr = handle1.value.addr();
-        let alias = handle1.alias();
-        let key2 = test_topic_key("alias_identity_2");
-        let token2 = runtime
-            .prepare_observed_alias::<TrackedObj, _>(key2, alias, |_, _| Ok(()))
-            .unwrap()
-            .into_token();
-        (token2, object_id, ptr)
-    });
+    let (token2, object_id1, ptr1) =
+        crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
+            let handle1 = runtime.lookup::<TrackedObj>(scope, &token1).unwrap();
+            let object_id = handle1.object_id();
+            let ptr = handle1.value.addr();
+            let alias = handle1.alias();
+            let key2 = test_topic_key("alias_identity_2");
+            let token2 = runtime
+                .prepare_observed_alias::<TrackedObj, _>(key2, alias, |_, _| Ok(()))
+                .unwrap()
+                .into_token();
+            (token2, object_id, ptr)
+        });
 
     assert_ne!(token1, token2);
 
-    crate::value::with_excel_call_scope(|scope| {
+    crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
         let handle2 = runtime.lookup::<TrackedObj>(scope, &token2).unwrap();
         assert_eq!(handle2.object_id(), object_id1);
         assert_eq!(handle2.value.addr(), ptr1);
@@ -2934,7 +2942,7 @@ fn removing_original_binding_keeps_aliased_object_alive() {
         .into_token();
 
     let key2 = test_topic_key("retire_alias_2");
-    let token2 = crate::value::with_excel_call_scope(|scope| {
+    let token2 = crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
         let handle1 = runtime.lookup::<DropCounter>(scope, &token1).unwrap();
         let alias = handle1.alias();
         runtime
@@ -2951,7 +2959,7 @@ fn removing_original_binding_keeps_aliased_object_alive() {
     assert_eq!(drops.load(Ordering::SeqCst), 0);
 
     // Reading token2 must still work and access the same value
-    crate::value::with_excel_call_scope(|scope| {
+    crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
         let handle2 = runtime.lookup::<DropCounter>(scope, &token2).unwrap();
         assert_eq!(handle2._value, 999);
     });
@@ -2998,30 +3006,31 @@ fn call_borrow_keeps_value_alive_across_binding_retirement() {
         .unwrap()
         .into_token();
 
-    let (removal_handle, finished_rx) = crate::value::with_excel_call_scope(|scope| {
-        let handle = runtime.lookup::<DropCounter>(scope, &token).unwrap();
-        assert_eq!(handle.val, 777);
+    let (removal_handle, finished_rx) =
+        crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
+            let handle = runtime.lookup::<DropCounter>(scope, &token).unwrap();
+            assert_eq!(handle.val, 777);
 
-        let rt_clone = Arc::clone(&runtime);
-        let token_clone = token.clone();
-        let (started_tx, started_rx) = mpsc::channel();
-        let (finished_tx, finished_rx) = mpsc::channel();
-        let removal_handle = std::thread::spawn(move || {
-            started_tx.send(()).unwrap();
-            rt_clone
-                .store
-                .registry
-                .remove_and_drop(&token_clone, "test remove");
-            finished_tx.send(()).unwrap();
+            let rt_clone = Arc::clone(runtime);
+            let token_clone = token.clone();
+            let (started_tx, started_rx) = mpsc::channel();
+            let (finished_tx, finished_rx) = mpsc::channel();
+            let removal_handle = std::thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                rt_clone
+                    .store
+                    .registry
+                    .remove_and_drop(&token_clone, "test remove");
+                finished_tx.send(()).unwrap();
+            });
+            started_rx.recv().unwrap();
+
+            // While scope is active, removal waits for readers to drain.
+            assert!(finished_rx.recv_timeout(Duration::from_millis(20)).is_err());
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            assert_eq!(handle.val, 777);
+            (removal_handle, finished_rx)
         });
-        started_rx.recv().unwrap();
-
-        // While scope is active, removal waits for readers to drain.
-        assert!(finished_rx.recv_timeout(Duration::from_millis(20)).is_err());
-        assert_eq!(drops.load(Ordering::SeqCst), 0);
-        assert_eq!(handle.val, 777);
-        (removal_handle, finished_rx)
-    });
 
     finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     removal_handle.join().unwrap();
@@ -3098,20 +3107,21 @@ fn zero_sized_type_handle_lifecycle() {
         .unwrap()
         .into_token();
 
-    let (token2, object_id) = crate::value::with_excel_call_scope(|scope| {
-        let handle1 = runtime.lookup::<ZeroSized>(scope, &token1).unwrap();
-        assert_eq!(*handle1, ZeroSized);
-        let object_id = handle1.object_id();
-        let alias = handle1.alias();
-        let key2 = test_topic_key("zst_test_2");
-        let token2 = runtime
-            .prepare_observed_alias::<ZeroSized, _>(key2, alias, |_, _| Ok(()))
-            .unwrap()
-            .into_token();
-        (token2, object_id)
-    });
+    let (token2, object_id) =
+        crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
+            let handle1 = runtime.lookup::<ZeroSized>(scope, &token1).unwrap();
+            assert_eq!(*handle1, ZeroSized);
+            let object_id = handle1.object_id();
+            let alias = handle1.alias();
+            let key2 = test_topic_key("zst_test_2");
+            let token2 = runtime
+                .prepare_observed_alias::<ZeroSized, _>(key2, alias, |_, _| Ok(()))
+                .unwrap()
+                .into_token();
+            (token2, object_id)
+        });
 
-    crate::value::with_excel_call_scope(|scope| {
+    crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
         let handle2 = runtime.lookup::<ZeroSized>(scope, &token2).unwrap();
         assert_eq!(*handle2, ZeroSized);
         assert_eq!(handle2.object_id(), object_id);
@@ -3121,7 +3131,7 @@ fn zero_sized_type_handle_lifecycle() {
         .store
         .registry
         .remove_and_drop(&token1, "remove zst 1");
-    crate::value::with_excel_call_scope(|scope| {
+    crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
         let handle2 = runtime.lookup::<ZeroSized>(scope, &token2).unwrap();
         assert_eq!(*handle2, ZeroSized);
     });
@@ -3167,30 +3177,31 @@ fn alias_read_capability_delays_binding_retirement_until_scope_exit() {
         .unwrap()
         .into_token();
 
-    let (removal, finished_rx) = crate::value::with_excel_call_scope(|scope| {
-        let handle = runtime.lookup::<TrackedValue>(scope, &token).unwrap();
-        let alias = handle.alias();
+    let (removal, finished_rx) =
+        crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
+            let handle = runtime.lookup::<TrackedValue>(scope, &token).unwrap();
+            let alias = handle.alias();
 
-        let removal_runtime = Arc::clone(&runtime);
-        let (started_tx, started_rx) = mpsc::channel();
-        let (finished_tx, finished_rx) = mpsc::channel();
-        let removal = std::thread::spawn(move || {
-            started_tx.send(()).unwrap();
-            removal_runtime
-                .store
-                .registry
-                .remove_and_drop(&token, "remove original");
-            finished_tx.send(()).unwrap();
+            let removal_runtime = Arc::clone(runtime);
+            let (started_tx, started_rx) = mpsc::channel();
+            let (finished_tx, finished_rx) = mpsc::channel();
+            let removal = std::thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                removal_runtime
+                    .store
+                    .registry
+                    .remove_and_drop(&token, "remove original");
+                finished_tx.send(()).unwrap();
+            });
+            started_rx.recv().unwrap();
+
+            // Retirement withdraws the binding immediately but cannot reclaim its
+            // object capability until the alias's read permit leaves the scope.
+            assert!(finished_rx.recv_timeout(Duration::from_millis(20)).is_err());
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            assert_eq!(alias.object_id().sequence(), 1);
+            (removal, finished_rx)
         });
-        started_rx.recv().unwrap();
-
-        // Retirement withdraws the binding immediately but cannot reclaim its
-        // object capability until the alias's read permit leaves the scope.
-        assert!(finished_rx.recv_timeout(Duration::from_millis(20)).is_err());
-        assert_eq!(drops.load(Ordering::SeqCst), 0);
-        assert_eq!(alias.object_id().sequence(), 1);
-        (removal, finished_rx)
-    });
     finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     removal.join().unwrap();
     assert_eq!(drops.load(Ordering::SeqCst), 1);
@@ -3367,12 +3378,10 @@ fn handle_domain_witness_records_exact_domain() {
     let domain2 = HandleReadDomain::new();
 
     crate::call::with_excel_call_scope(|scope| {
-        // SAFETY: `domain1` outlives `scope` in this test.
-        let witness1 = unsafe { scope.enter_handle_domain(&domain1).unwrap() };
+        let witness1 = scope.enter_handle_domain(&domain1).unwrap();
         assert_eq!(witness1.domain(), std::ptr::NonNull::from(&domain1));
 
-        // SAFETY: `domain2` outlives `scope` in this test.
-        let witness2 = unsafe { scope.enter_handle_domain(&domain2).unwrap() };
+        let witness2 = scope.enter_handle_domain(&domain2).unwrap();
         assert_eq!(witness2.domain(), std::ptr::NonNull::from(&domain2));
     });
 }
@@ -3391,7 +3400,7 @@ fn miri_handle_scope_and_binding_lifecycle() {
     let registry = HandleRegistry::new(2);
     let token = insert_production(&registry, Arc::new(DataRecord(42))).unwrap();
 
-    crate::value::with_excel_call_scope(|scope| {
+    crate::call::with_excel_call_scope_and_state(&registry, |registry, scope| {
         let handle = registry.lookup_handle::<DataRecord>(scope, &token).unwrap();
         assert_eq!(handle.0, 42);
     });
@@ -3441,4 +3450,20 @@ fn miri_object_arena_lifecycle() {
     drop(binding);
     drop(dup);
     drop(arena);
+}
+
+#[test]
+fn rejects_object_binding_from_foreign_registry() {
+    let first = HandleRegistry::new(2);
+    let second = HandleRegistry::new(2);
+    let pending = first.new_object(DataRecord(42)).unwrap();
+    assert_eq!(
+        pending.arena(),
+        std::ptr::NonNull::from(first.objects.as_ref())
+    );
+    let binding = pending.into_inner();
+    assert!(matches!(
+        second.insert_existing_object_binding::<DataRecord>(binding),
+        Err(XllError::StaleHandle)
+    ));
 }

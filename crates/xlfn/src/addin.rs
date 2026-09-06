@@ -988,12 +988,15 @@ mod tests {
         let server = runtime
             .with_subscriptions(|subscriptions| {
                 let prepared = subscriptions.prepare(&source, topic.clone()).unwrap();
-                let server = subscriptions
-                    .register_server(
-                        crate::subscription::ServerGeneration::new(51)
-                            .expect("non-zero test server generation"),
-                    )
-                    .unwrap();
+                // SAFETY: `runtime` owns `subscriptions` and outlives `server` for the test duration.
+                let server = unsafe {
+                    subscriptions
+                        .register_server(
+                            crate::subscription::ServerGeneration::new(51)
+                                .expect("non-zero test server generation"),
+                        )
+                        .unwrap()
+                };
                 let id = prepared.id();
                 let key_obj = *prepared.key();
                 let conn = subscriptions
@@ -1015,7 +1018,7 @@ mod tests {
             .unwrap();
 
         let _state = ();
-        crate::value::with_excel_call_scope(|scope| {
+        crate::call::with_excel_call_scope(|scope| {
             runtime
                 .with_generation_services(|services| {
                     let context = MainThreadContext::<()>::new(

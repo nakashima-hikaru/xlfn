@@ -1399,7 +1399,7 @@ mod tests {
             .into_admitted()
             .expect("test call enters during OPEN");
         let call = runtime.enter(&ingress).unwrap();
-        crate::value::with_excel_call_scope(|scope| {
+        crate::call::with_excel_call_scope(|scope| {
             let mut context = ReturnContext::for_call(&call, "scalar", None, scope);
             let value =
                 <f64 as crate::call_return::ExcelReturn>::invoke(&mut context, || Ok(4.5)).unwrap();

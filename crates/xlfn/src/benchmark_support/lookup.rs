@@ -74,13 +74,16 @@ impl HandleLookupBenchmark {
                     let token_index = worker.min(worker_tokens.len() - 1);
                     let token = worker_tokens[token_index].as_ref();
                     for _ in 0..iterations_per_worker {
-                        let result = crate::value::with_excel_call_scope(|scope| {
-                            worker_runtime
-                                .lookup::<BenchHandleObject>(scope, token)
-                                .map(|handle| {
-                                    std::hint::black_box(&*handle);
-                                })
-                        });
+                        let result = crate::call::with_excel_call_scope_and_state(
+                            &worker_runtime,
+                            |worker_runtime, scope| {
+                                worker_runtime
+                                    .lookup::<BenchHandleObject>(scope, token)
+                                    .map(|handle| {
+                                        std::hint::black_box(&*handle);
+                                    })
+                            },
+                        );
                         let _ = std::hint::black_box(result);
                     }
                     done_tx

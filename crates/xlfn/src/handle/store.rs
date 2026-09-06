@@ -5,7 +5,7 @@
 //! [`super::runtime::FormulaHandleService`]; they use this façade instead of
 //! reaching into the registry lifecycle directly.
 
-use super::object::ObjectBinding;
+use super::object::{ObjectBinding, PendingObjectBinding};
 use super::registry::{HandleRegistry, HandleRegistrySealed, PendingHandleValue};
 use super::{ExcelHandleObject, Handle, HandleId, HandleToken, ObjectId, TokenWire};
 use crate::XllResult;
@@ -26,7 +26,10 @@ impl HandleStore {
         })
     }
 
-    pub(crate) fn erase<T: ExcelHandleObject>(&self, value: T) -> XllResult<ObjectBinding> {
+    pub(crate) fn erase<'store, T: ExcelHandleObject>(
+        &'store self,
+        value: T,
+    ) -> XllResult<PendingObjectBinding<'store>> {
         self.registry.new_object(value)
     }
 
@@ -51,7 +54,7 @@ impl HandleStore {
     }
 
     pub(crate) fn lookup<'call, T: ExcelHandleObject>(
-        &self,
+        &'call self,
         scope: &'call crate::call::CallScope<'call>,
         token: &str,
     ) -> XllResult<Handle<'call, T>> {

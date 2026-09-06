@@ -16,7 +16,7 @@ pub mod v1 {
 
     use crate::addin::{Addin, PhysicallyUnloadableAddin};
     use crate::boundary::host::{host_auto_close, host_auto_open, host_auto_remove};
-    pub use crate::call::{CallScope, with_excel_call_scope};
+    pub use crate::call::{CallScope, with_excel_call_scope, with_excel_call_scope_and_state};
     #[cfg(feature = "async")]
     pub use crate::cancellation::CancellationToken;
     use crate::error::{InputError, XllError, XllResult};
@@ -765,4 +765,44 @@ pub mod v1 {
             .publish_new_handle(operation)
             .map(|token| ExcelOutput::Scalar(ExcelCellOutput::String(token)))
     }
+
+    #[cfg(feature = "handles")]
+    #[doc(hidden)]
+    pub mod handle_test {
+        use crate::call::CallScope;
+        use crate::error::XllResult;
+        use crate::handle::{ExcelHandleObject, Handle};
+
+        pub fn new_call_scope<'call>() -> CallScope<'call> {
+            CallScope::new()
+        }
+
+        pub struct HandleRegistry(crate::handle::HandleRegistry);
+
+        impl HandleRegistry {
+            pub fn new(capacity: usize) -> Self {
+                Self(crate::handle::HandleRegistry::try_new(capacity).expect("valid registry"))
+            }
+
+            pub fn insert_object<T: ExcelHandleObject>(&self, value: T) -> XllResult<String> {
+                let pending = self.0.new_object(value)?;
+                let (token, ..) = self
+                    .0
+                    .insert_existing_object_binding::<T>(pending.into_inner())?;
+                Ok(token)
+            }
+
+            pub fn lookup_handle<'call, T: ExcelHandleObject>(
+                &'call self,
+                scope: &'call CallScope<'call>,
+                token: &str,
+            ) -> XllResult<Handle<'call, T>> {
+                self.0.lookup_handle::<T>(scope, token)
+            }
+        }
+    }
 }
+
+#[cfg(feature = "handles")]
+#[doc(hidden)]
+pub use v1::handle_test;

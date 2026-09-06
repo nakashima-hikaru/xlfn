@@ -242,7 +242,13 @@ pub(super) struct ServerBackends {
     pub(super) subscription_server: Option<crate::subscription::SubscriptionServerHandle>,
 }
 
-pub(super) fn synchronize_callback_notification(
+/// Attaches a new update notifier to the subscription server backend.
+///
+/// # Safety
+///
+/// The caller must ensure that `server` (and its contained `operations` barrier
+/// and pinned `callback`) outlives the update notifier attached to `subscription_server`.
+pub(super) unsafe fn synchronize_callback_notification(
     server: &RtdServer,
     callback: CallbackPtr,
 ) -> XllResult<()> {
@@ -251,8 +257,8 @@ pub(super) fn synchronize_callback_notification(
         return Ok(());
     };
 
-    // SAFETY: `callback` is pinned in `server.callbacks` and `server.operations`
-    // is owned by `RtdServer`, remaining valid for the server lifetime.
+    // SAFETY: caller guarantees `server` and its operations barrier outlive
+    // the notifier attached to the subscription server.
     let notifier = unsafe { RtdNotifier::new(callback, NonNull::from(&server.operations)) };
     subscription_server.attach_update_notifier(notifier)?;
     Ok(())
@@ -680,7 +686,9 @@ fn ensure_server_impl(
                         });
                     }
                     None => {
-                        let handle = subscriptions.register_server(existing.generation)?;
+                        // SAFETY: `subscriptions` is the active generation's subscription runtime which
+                        // outlives the RTD server lifecycle (protected by COM refcounting and shutdown barriers).
+                        let handle = unsafe { subscriptions.register_server(existing.generation)? };
                         backends.subscriptions = Some(BackendSubscriptions::new(subscriptions));
                         backends.subscription_server = Some(handle);
                         (Some(handle), Some(handle))
@@ -736,7 +744,9 @@ fn ensure_server_impl(
     })?;
 
     let subscription_handle = if let Some(subscriptions) = subscriptions {
-        Some(subscriptions.register_server(generation)?)
+        // SAFETY: `subscriptions` is the active generation's subscription runtime which
+        // outlives the RTD server lifecycle (protected by COM refcounting and shutdown barriers).
+        Some(unsafe { subscriptions.register_server(generation)? })
     } else {
         None
     };

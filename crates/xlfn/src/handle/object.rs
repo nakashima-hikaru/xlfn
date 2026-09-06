@@ -315,6 +315,15 @@ impl ObjectArena {
     }
 }
 
+impl Drop for ObjectArena {
+    fn drop(&mut self) {
+        let state = self.state.lock();
+        if !state.objects.is_empty() || state.active_pins != 0 {
+            xlfn_kernel::invariant::fail_stop();
+        }
+    }
+}
+
 pub(crate) struct ObjectCell {
     id: ObjectId,
     owner: Option<Box<dyn Any + Send + Sync>>,
@@ -357,6 +366,11 @@ pub(crate) struct ObjectBinding {
 }
 
 impl ObjectBinding {
+    #[inline]
+    pub(crate) fn arena(&self) -> NonNull<ObjectArena> {
+        self.arena
+    }
+
     pub(crate) fn id(&self) -> ObjectId {
         self.id
     }
@@ -382,6 +396,48 @@ impl ObjectBinding {
     pub(crate) fn acquire_lease(&self) -> XllResult<RawObjectLeaseGuard> {
         // SAFETY: same lifetime invariant as `duplicate`.
         unsafe { self.arena.as_ref() }.acquire_pin(self.id, self.cell)
+    }
+}
+
+/// An un-published object binding capability anchored to the borrow of its
+/// owning [`HandleRegistry`].
+pub(crate) struct PendingObjectBinding<'registry> {
+    binding: ObjectBinding,
+    _registry: std::marker::PhantomData<&'registry ()>,
+}
+
+impl<'registry> PendingObjectBinding<'registry> {
+    #[inline]
+    pub(crate) fn new(binding: ObjectBinding) -> Self {
+        Self {
+            binding,
+            _registry: std::marker::PhantomData,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn into_inner(self) -> ObjectBinding {
+        self.binding
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn id(&self) -> ObjectId {
+        self.binding.id()
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code, reason = "Test accessor fixture")]
+    #[inline]
+    pub(crate) fn object(&self) -> &ObjectCell {
+        self.binding.object()
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code, reason = "Test accessor fixture")]
+    #[inline]
+    pub(crate) fn arena(&self) -> NonNull<ObjectArena> {
+        self.binding.arena()
     }
 }
 

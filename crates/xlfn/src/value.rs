@@ -25,8 +25,6 @@ pub(crate) mod output;
 #[allow(unsafe_code, reason = "Raw XLOPER12 views are the value ABI leaf")]
 pub mod raw;
 
-#[cfg(any(test, feature = "bench-internals"))]
-pub(crate) use crate::call::with_excel_call_scope;
 pub use crate::input_identity::InputIdentityEncoder;
 #[cfg(any(test, feature = "handles", feature = "bench-internals"))]
 pub(crate) use input::FormulaInputMode;
@@ -1208,6 +1206,7 @@ impl IntoExcel for ExcelErrorValue {
 )]
 mod tests {
     use super::*;
+    use crate::call::with_excel_call_scope;
     use crate::call_return::{
         AsyncReturn, ExcelReturn, MacroSheetReturn, MainThreadReturn, ReturnContext, ReturnPayload,
         ThreadSafeReturn, VolatileReturn,
@@ -2220,18 +2219,19 @@ mod tests {
             .unwrap()
             .into_token();
 
-        let token_b = crate::value::with_excel_call_scope(|scope| {
-            let resolved: crate::handle::Handle<'_, SemanticHandleTestObj> =
-                handle_rt.lookup(scope, &token_a).unwrap();
-            handle_rt
-                .prepare_observed_alias::<SemanticHandleTestObj, _>(
-                    topic_b,
-                    resolved.alias(),
-                    |_, _| Ok(()),
-                )
-                .unwrap()
-                .into_token()
-        });
+        let token_b =
+            crate::call::with_excel_call_scope_and_state(&handle_rt, |handle_rt, scope| {
+                let resolved: crate::handle::Handle<'_, SemanticHandleTestObj> =
+                    handle_rt.lookup(scope, &token_a).unwrap();
+                handle_rt
+                    .prepare_observed_alias::<SemanticHandleTestObj, _>(
+                        topic_b,
+                        resolved.alias(),
+                        |_, _| Ok(()),
+                    )
+                    .unwrap()
+                    .into_token()
+            });
 
         assert_ne!(token_a, token_b);
 

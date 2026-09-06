@@ -240,7 +240,7 @@ impl FormulaHandleService {
                 create().map(|value| {
                     self.store
                         .erase(value)
-                        .map(|value| PreparedHandleObject::New(NewObject::new(value)))
+                        .map(|value| PreparedHandleObject::New(NewObject::new(value.into_inner())))
                 })?
             },
             observe,
@@ -585,7 +585,7 @@ impl FormulaHandleService {
     }
 
     pub(crate) fn lookup<'call, T>(
-        &self,
+        &'call self,
         scope: &'call crate::call::CallScope<'call>,
         token: &str,
     ) -> XllResult<Handle<'call, T>>
@@ -890,14 +890,27 @@ impl<'call> FormulaHandleServiceResolver<'call> {
         }
     }
 
-    /// Returns a shared reference to the `FormulaHandleService`.
+    /// Returns a shared reference to the `FormulaHandleService` valid for `'call`.
     ///
     /// The first call acquires a read permit; subsequent calls within the same
     /// UDF invocation return the cached guard without another admission.
     #[inline]
-    pub(crate) fn get(&self) -> XllResult<&FormulaHandleService> {
+    #[allow(
+        unsafe_code,
+        reason = "Extends FormulaHandleService reference to 'call anchored by OnceCell and StripedDrainPermit"
+    )]
+    pub(crate) fn get(&self) -> XllResult<&'call FormulaHandleService> {
         match self.resolved.get_or_init(|| self.slot.read()) {
-            Ok(runtime) => Ok(runtime),
+            Ok(runtime) => {
+                let service: &FormulaHandleService = runtime;
+                let ptr = std::ptr::NonNull::from(service);
+                // SAFETY: `self.slot` is borrowed for `'call`. The acquired
+                // `GenerationServiceRead<'call>` is retained in `self.resolved` for the
+                // lifetime of this resolver, keeping the read permit active. Extending
+                // the reference to `'call` is sound because the slot outlives `'call` and
+                // the permit prevents draining or sealing the service during the call.
+                Ok(unsafe { ptr.as_ref() })
+            }
             Err(error) => Err(error.clone()),
         }
     }
