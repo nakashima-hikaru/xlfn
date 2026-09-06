@@ -2565,13 +2565,14 @@ fn existing_server_attaches_each_backend_without_replacement() {
         backends
             .handles
             .as_ref()
-            .is_some_and(|active| active.identity() == handles.identity())
+            // SAFETY: backends lock is held on the active server.
+            .is_some_and(|active| unsafe { active.as_ref() }.identity() == handles.identity())
     );
     assert!(
         backends
             .subscriptions
             .as_ref()
-            .is_some_and(|active| std::ptr::eq(&**active, &subscriptions))
+            .is_some_and(|active| std::ptr::eq(active.0.as_ptr(), &subscriptions))
     );
     drop(backends);
     drop(second);
