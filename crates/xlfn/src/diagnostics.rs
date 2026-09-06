@@ -5,13 +5,16 @@ pub mod id;
 use id::DiagnosticId;
 
 use crate::error::IntoXllError;
+use crate::panic_boundary::catch_no_unwind;
 use crate::{XllError, XllResult};
 use parking_lot::Mutex;
 #[cfg(test)]
 use std::fs;
 #[cfg(test)]
 use std::io;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
+#[cfg(test)]
+use std::panic::catch_unwind;
 #[cfg(any(test, feature = "refinement"))]
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -486,7 +489,7 @@ pub(crate) fn report_no_unwind(udf_id: &'static str, error: &XllError) -> Diagno
         XllError::Input { argument, .. } => Some(*argument),
         _ => None,
     };
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    let _ = catch_no_unwind(AssertUnwindSafe(|| {
         tracing::event!(
             tracing::Level::ERROR,
             udf = udf_id,
@@ -511,7 +514,7 @@ pub(crate) fn report_no_unwind(udf_id: &'static str, error: &XllError) -> Diagno
 }
 
 fn deliver_no_unwind<S: DiagnosticSink>(sink: &S, event: &DiagnosticEvent<'_>) {
-    let _ = catch_unwind(AssertUnwindSafe(|| sink.report(event)));
+    let _ = catch_no_unwind(AssertUnwindSafe(|| sink.report(event)));
 }
 
 #[cfg(test)]
@@ -530,7 +533,7 @@ mod tests {
     #[test]
     fn panicking_tracing_subscriber_does_not_unwind_report_no_unwind() {
         let _router_guard = prepare_global_router();
-        struct PanickingSubscriber;
+        struct PanickingSubscriber(Option<Arc<AtomicUsize>>);
         impl tracing::Subscriber for PanickingSubscriber {
             fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
                 true
@@ -541,22 +544,32 @@ mod tests {
             fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
             fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
             fn event(&self, _: &tracing::Event<'_>) {
+                if let Some(payload_drops) = &self.0 {
+                    std::panic::panic_any(crate::panic_boundary::tests::PanickingPayload(
+                        Arc::clone(payload_drops),
+                    ));
+                }
                 panic!("injected tracing subscriber panic");
             }
             fn enter(&self, _: &tracing::span::Id) {}
             fn exit(&self, _: &tracing::span::Id) {}
         }
 
-        let dispatch = tracing::Dispatch::new(PanickingSubscriber);
-        let _guard = tracing::dispatcher::set_default(&dispatch);
-
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            report_no_unwind("panicking_subscriber_test", &XllError::Panic)
-        }));
-        assert!(
-            result.is_ok(),
-            "report_no_unwind must not unwind when tracing subscriber panics"
-        );
+        for custom_payload in [false, true] {
+            let payload_drops = Arc::new(AtomicUsize::new(0));
+            let subscriber =
+                PanickingSubscriber(custom_payload.then(|| Arc::clone(&payload_drops)));
+            let dispatch = tracing::Dispatch::new(subscriber);
+            let _guard = tracing::dispatcher::set_default(&dispatch);
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                report_no_unwind("panicking_subscriber_test", &XllError::Panic)
+            }));
+            assert!(
+                result.is_ok(),
+                "report_no_unwind must not unwind when tracing subscriber panics"
+            );
+            assert_eq!(payload_drops.load(Ordering::Acquire), 0);
+        }
     }
 
     struct ReentrantClearSink {
@@ -706,6 +719,46 @@ mod tests {
             timestamp: SystemTime::now(),
         };
         deliver_no_unwind(&PanickingSink, &event);
+    }
+
+    #[test]
+    fn custom_panic_payload_cannot_stop_later_diagnostic_deliveries() {
+        struct PayloadSink {
+            reports: Arc<AtomicUsize>,
+            payload_drops: Arc<AtomicUsize>,
+        }
+
+        impl DiagnosticSink for PayloadSink {
+            fn report(&self, _: &DiagnosticEvent<'_>) {
+                if self.reports.fetch_add(1, Ordering::AcqRel) == 0 {
+                    std::panic::panic_any(crate::panic_boundary::tests::PanickingPayload(
+                        Arc::clone(&self.payload_drops),
+                    ));
+                }
+            }
+        }
+
+        let reports = Arc::new(AtomicUsize::new(0));
+        let payload_drops = Arc::new(AtomicUsize::new(0));
+        let sink = Box::new(
+            AsyncDiagnosticSink::new(PayloadSink {
+                reports: Arc::clone(&reports),
+                payload_drops: Arc::clone(&payload_drops),
+            })
+            .unwrap(),
+        );
+        for id in 1..=3 {
+            sink.report(OwnedDiagnosticEvent {
+                udf_id: "panic payload delivery",
+                argument: None,
+                error: XllError::Panic,
+                diagnostic_id: DiagnosticId::from_u64(id),
+                timestamp: SystemTime::now(),
+            });
+        }
+        sink.shutdown().unwrap();
+        assert_eq!(reports.load(Ordering::Acquire), 3);
+        assert_eq!(payload_drops.load(Ordering::Acquire), 0);
     }
 
     #[test]

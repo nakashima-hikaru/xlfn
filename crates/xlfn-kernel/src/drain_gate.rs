@@ -232,6 +232,25 @@ impl<const N: usize> StripedDrainGate<N> {
         }
     }
 
+    /// Seals every stripe only if each is idle, without waiting for readers.
+    /// The caller must serialize this operation with other seal/reopen calls.
+    /// On failure, stripes sealed by this attempt are reopened before return.
+    pub(crate) fn try_seal_if_idle(&self) -> bool {
+        for (index, counter) in self.counters.iter().enumerate() {
+            if !counter.try_seal_if_idle() {
+                // Successfully sealed stripes cannot admit readers. They are
+                // still idle, so rollback never needs to wait for a drain.
+                for sealed in &self.counters[..index] {
+                    sealed
+                        .reopen()
+                        .unwrap_or_else(|_| crate::invariant::fail_stop());
+                }
+                return false;
+            }
+        }
+        true
+    }
+
     pub fn wait_until_idle(&self) {
         if self.active() == 0 {
             return;
@@ -380,5 +399,24 @@ mod tests {
         gate.wait_until_idle();
         gate.reopen().unwrap();
         assert_eq!(gate.active(), 0);
+    }
+
+    #[test]
+    fn miri_idle_seal_rolls_back_partial_progress_without_waiting() {
+        let gate = StripedDrainGate::<3>::new_open();
+        let permit = gate.try_enter(1).unwrap();
+
+        assert!(!gate.try_seal_if_idle());
+        assert!(gate.counters.iter().all(|counter| !counter.is_sealed()));
+        let first = gate.try_enter(0).expect("rolled-back stripe is open");
+        let last = gate.try_enter(2).expect("unvisited stripe stays open");
+        drop((first, last, permit));
+
+        assert!(gate.try_seal_if_idle());
+        assert!(gate.is_sealed());
+        assert_eq!(gate.active(), 0);
+        assert!(gate.try_enter(0).is_err());
+        gate.reopen().unwrap();
+        assert!(gate.try_enter(0).is_ok());
     }
 }

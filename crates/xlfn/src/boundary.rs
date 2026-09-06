@@ -8,7 +8,8 @@ pub(crate) mod host;
 
 use crate::diagnostics::AddinId;
 use crate::error::XllError;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use crate::panic_boundary::catch_no_unwind;
+use std::panic::AssertUnwindSafe;
 
 pub(crate) fn write_startup_log(addin_id: &AddinId, message: &str) {
     #[cfg(target_os = "windows")]
@@ -30,7 +31,7 @@ pub(crate) fn write_startup_log(addin_id: &AddinId, message: &str) {
 }
 
 pub(crate) fn report_cleanup_issue(issue: &crate::shutdown::CleanupIssue) {
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    let _ = catch_no_unwind(AssertUnwindSafe(|| {
         tracing::warn!(
             component = issue.component,
             kind = ?issue.kind,
@@ -46,7 +47,7 @@ pub(crate) fn report_cleanup_issue(issue: &crate::shutdown::CleanupIssue) {
     reason = "Windows diagnostic output is the host-boundary FFI leaf"
 )]
 pub(crate) fn report_boundary_error(boundary: &'static str, error: &XllError) {
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    let _ = catch_no_unwind(AssertUnwindSafe(|| {
         crate::diagnostics::report_no_unwind(boundary, error);
         let message = format!("xlfn {boundary}: {error}\n");
         #[cfg(target_os = "windows")]

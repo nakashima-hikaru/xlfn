@@ -5,7 +5,7 @@
 
 use super::ErasedSink;
 use super::topic::RtdTopic;
-use super::value::IntoRtdValue;
+use super::value::{IntoRtdValue, StoredRtdValue};
 use crate::generation::RuntimeGeneration;
 use crate::{XllError, XllResult};
 use parking_lot::Mutex;
@@ -129,6 +129,9 @@ impl std::fmt::Debug for SourceArena {
 
 /// A source that can issue non-owning sinks into its subscription workers.
 ///
+/// Prefer [`super::channel::RtdChannelSource`] for ordinary producers. It
+/// contains the sink lifetime proof within the framework.
+///
 /// # Safety
 ///
 /// An implementation must uphold the sink transfer protocol for every call
@@ -198,8 +201,14 @@ impl<S: RtdSource> RtdSourceHandle<S> {
 
 /// Typed non-owning publication capability issued by an active RTD server.
 pub struct RtdSink<T> {
-    pub(crate) sink: ErasedSink,
-    pub(crate) _value: PhantomData<fn(T)>,
+    sink: ErasedSink,
+    _value: PhantomData<fn(T)>,
+}
+
+impl<T> RtdSink<T> {
+    pub(super) fn publish_stored(&self, value: StoredRtdValue) -> XllResult<()> {
+        self.sink.publish_stored(value)
+    }
 }
 
 impl<T> Clone for RtdSink<T> {

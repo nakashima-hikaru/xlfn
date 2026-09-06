@@ -89,6 +89,7 @@ mod lifecycle;
 )]
 mod module_residency;
 mod module_runtime;
+mod panic_boundary;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 pub mod reference;
 mod registration;
@@ -527,8 +528,8 @@ pub mod unstable {
         #[cfg(feature = "bench-internals")]
         pub use crate::cache::CacheReadScope;
         pub use crate::cache::{
-            BoundCacheEndpoint, CacheEndpoint, CacheLease, CacheRegistry, CalculationCache,
-            CanonicalF64,
+            BoundCacheEndpoint, CacheEndpoint, CacheLease, CacheReclamationStats, CacheRegistry,
+            CalculationCache, CanonicalF64,
         };
     }
 
@@ -562,7 +563,9 @@ pub mod prelude {
     pub use crate::rtd::RtdCallContext;
     pub use crate::shutdown::{CleanupIssueKind, CleanupReporter};
     #[cfg(feature = "rtd")]
-    pub use crate::subscription::{RtdCapacity, RtdLimits, RtdSourceHandle, RtdTopic};
+    pub use crate::subscription::{
+        RtdCapacity, RtdChannelSource, RtdLimits, RtdSender, RtdSourceHandle, RtdTopic,
+    };
     pub use crate::value::{
         Column, ExcelCellRef, ExcelErrorValue, ExcelSerialDate, Matrix, MatrixRef,
         OptionalExcelValue, Row,

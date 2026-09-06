@@ -48,14 +48,16 @@ pub struct DomainClosed;
 
 /// A two-generation admission domain handle.
 ///
-/// While the domain is open, exactly one generation is open. A transition
+/// Between transitions, an open domain has exactly one open generation. A transition
 /// seals the current generation before publishing the replacement, waits for
 /// the sealed generation to become idle, and invokes its callback while the
 /// transition lock remains held.
 ///
 /// The protocol maintains these invariants:
 ///
-/// - D1: exactly one generation is open while the domain is not closed.
+/// - D1: at most one generation admits readers; between transitions, an open
+///   domain has exactly one open generation. Both may be sealed briefly while
+///   the replacement is being published.
 /// - D2: readers are admitted only through the published current generation.
 /// - D3: the current generation is sealed before the replacement is published.
 /// - D4: the sealed generation is idle before the transition callback runs.
@@ -187,9 +189,9 @@ impl<const N: usize> RotatingReadDomain<N> {
     /// Best-effort form of [`Self::quiesce`] for maintenance paths that must
     /// not wait for another transition already in progress.
     ///
-    /// `None` means the transition lock was busy or the domain was already
-    /// closed. The nested result reports the same closed condition when the
-    /// lock was acquired before closure was observed.
+    /// Once the lock is acquired, this may wait for the old readers to drain.
+    /// `None` means the transition lock was busy; `Some(Err(DomainClosed))`
+    /// means the lock was acquired and closure was observed.
     pub fn try_quiesce<R>(
         &self,
         operation: impl FnOnce(DrainedGeneration) -> R,
@@ -198,21 +200,36 @@ impl<const N: usize> RotatingReadDomain<N> {
         Some(self.rotate_and_run_locked(operation))
     }
 
-    /// Non-blocking quiesce that only rotates and runs `operation` if the
-    /// current generation has no active readers.
+    /// Attempts quiescence without waiting for the transition lock or readers.
+    ///
+    /// Each stripe's idle check and admission seal are atomic. A reader that
+    /// wins admission causes the attempt to return `None`, with the current
+    /// generation left open. On success, `operation` runs under the transition
+    /// lock after the old generation is sealed and idle. The callback itself
+    /// may block; callers needing bounded latency must keep it non-blocking.
     pub fn try_quiesce_if_idle<R>(
         &self,
         operation: impl FnOnce(DrainedGeneration) -> R,
+    ) -> Option<Result<R, DomainClosed>> {
+        self.try_quiesce_if_idle_impl(operation, || {})
+    }
+
+    fn try_quiesce_if_idle_impl<R>(
+        &self,
+        operation: impl FnOnce(DrainedGeneration) -> R,
+        before_seal: impl FnOnce(),
     ) -> Option<Result<R, DomainClosed>> {
         let _transition = self.transition.try_lock()?;
         if self.closed.load(Ordering::Acquire) {
             return Some(Err(DomainClosed));
         }
         let old = self.current_generation();
-        if self.generations[old.index()].active() != 0 {
+        before_seal();
+        if !self.generations[old.index()].try_seal_if_idle() {
             return None;
         }
-        Some(self.rotate_and_run_locked(operation))
+        self.publish_next_locked(old);
+        Some(Ok(operation(DrainedGeneration { index: old })))
     }
 
     fn rotate_and_run_locked<R>(
@@ -224,20 +241,26 @@ impl<const N: usize> RotatingReadDomain<N> {
         }
 
         let old = self.current_generation();
-        let next = GenerationIndex((old.index() ^ 1) as u8);
-
         // D3: seal before publishing the replacement, so a reader that
         // loaded `old` before this transition cannot enter it afterwards.
         self.generations[old.index()].seal();
-        self.generations[next.index()]
-            .reopen()
-            .unwrap_or_else(|_| crate::invariant::fail_stop());
-        self.current.store(next.index(), Ordering::Release);
+        self.publish_next_locked(old);
 
         // D4: the callback is entered only after all readers admitted to the
         // sealed generation have released their permits.
         self.generations[old.index()].wait_until_idle();
         Ok(operation(DrainedGeneration { index: old }))
+    }
+
+    /// Publishes the replacement after the caller has sealed `old` while
+    /// retaining the transition lock. The replacement's previous callback
+    /// completed before this lock was acquired, so it can be reopened safely.
+    fn publish_next_locked(&self, old: GenerationIndex) {
+        let next = GenerationIndex((old.index() ^ 1) as u8);
+        self.generations[next.index()]
+            .reopen()
+            .unwrap_or_else(|_| crate::invariant::fail_stop());
+        self.current.store(next.index(), Ordering::Release);
     }
 
     /// Permanently closes the domain and waits for both generations to drain.
@@ -523,6 +546,41 @@ mod tests {
     }
 
     #[test]
+    fn miri_idle_quiesce_does_not_wait_for_a_reader_admitted_during_transition() {
+        let domain = Arc::new(RotatingReadDomain::<2>::new());
+        let (locked_tx, locked_rx) = mpsc::sync_channel(0);
+        let (admitted_tx, admitted_rx) = mpsc::sync_channel(0);
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let rotating = Arc::clone(&domain);
+        let worker = std::thread::spawn(move || {
+            let attempt = rotating.try_quiesce_if_idle_impl(
+                |_| panic!("the admitted reader must prevent quiescence"),
+                || {
+                    locked_tx.send(()).unwrap();
+                    admitted_rx.recv().unwrap();
+                },
+            );
+            finished_tx.send(attempt.is_none()).unwrap();
+        });
+
+        locked_rx.recv().unwrap();
+        // Transition ownership alone does not exclude reader admission. Use
+        // a later stripe to also exercise rollback of the earlier idle one.
+        let permit = domain.enter(1).unwrap();
+        admitted_tx.send(()).unwrap();
+        let result = finished_rx.recv_timeout(Duration::from_secs(1));
+        // Always release the permit before asserting, so a regression that
+        // waits for readers can finish instead of hanging the test process.
+        drop(permit);
+        assert!(result.expect("quiesce must not wait for the reader"));
+        worker.join().unwrap();
+
+        assert_eq!(domain.current_generation().index(), 0);
+        assert!(domain.enter(0).is_ok(), "partial sealing was rolled back");
+        assert_eq!(domain.try_quiesce_if_idle(|old| old.index()), Some(Ok(0)));
+    }
+
+    #[test]
     fn miri_temporal_pointer_reclamation_safety() {
         let domain = RotatingReadDomain::<DEFAULT_STRIPE_COUNT>::new();
         let val_ptr = Box::into_raw(Box::new(12345u64));
@@ -651,6 +709,12 @@ mod tests {
                 self.state.fetch_or(SEALED, LoomOrdering::AcqRel);
             }
 
+            fn try_seal_if_idle(&self) -> bool {
+                self.state
+                    .compare_exchange(0, SEALED, LoomOrdering::AcqRel, LoomOrdering::Acquire)
+                    .is_ok()
+            }
+
             fn reopen(&self) {
                 self.state
                     .compare_exchange(SEALED, 0, LoomOrdering::AcqRel, LoomOrdering::Acquire)
@@ -688,40 +752,53 @@ mod tests {
                 }
             }
 
-            fn rotate_and_reclaim(&self) {
+            fn rotate_and_reclaim(&self, wait_for_readers: bool) {
                 let old = self.current.load(LoomOrdering::Acquire) & 1;
                 let next = old ^ 1;
-                self.generations[old].seal();
+                if wait_for_readers {
+                    self.generations[old].seal();
+                } else if !self.generations[old].try_seal_if_idle() {
+                    return;
+                }
                 self.generations[next].reopen();
                 self.current.store(next, LoomOrdering::Release);
-                while self.generations[old].active() != 0 {
-                    loom_thread::yield_now();
+                if wait_for_readers {
+                    while self.generations[old].active() != 0 {
+                        loom_thread::yield_now();
+                    }
+                } else {
+                    assert_eq!(self.generations[old].active(), 0);
                 }
                 self.reclaimed[old].store(true, LoomOrdering::Release);
             }
         }
 
-        loom::model(|| {
-            let domain = LoomArc::new(LoomReadDomain::new());
+        // Explore both the blocking grace period and the atomic idle-seal
+        // path: neither may reclaim while an admitted reader is still using
+        // the generation, even when admission races the seal operation.
+        for wait_for_readers in [true, false] {
+            loom::model(move || {
+                let domain = LoomArc::new(LoomReadDomain::new());
 
-            let reader_domain = LoomArc::clone(&domain);
-            let reader = loom_thread::spawn(move || {
-                if let Some(generation) = reader_domain.enter() {
-                    assert!(
-                        !reader_domain.reclaimed[generation].load(LoomOrdering::Acquire),
-                        "reader observed a generation after its grace period was reclaimed"
-                    );
-                    reader_domain.generations[generation].release();
-                }
+                let reader_domain = LoomArc::clone(&domain);
+                let reader = loom_thread::spawn(move || {
+                    if let Some(generation) = reader_domain.enter() {
+                        assert!(
+                            !reader_domain.reclaimed[generation].load(LoomOrdering::Acquire),
+                            "reader observed a generation after its grace period was reclaimed"
+                        );
+                        reader_domain.generations[generation].release();
+                    }
+                });
+
+                let reclaimer_domain = LoomArc::clone(&domain);
+                let reclaimer = loom_thread::spawn(move || {
+                    reclaimer_domain.rotate_and_reclaim(wait_for_readers);
+                });
+
+                reader.join().unwrap();
+                reclaimer.join().unwrap();
             });
-
-            let reclaimer_domain = LoomArc::clone(&domain);
-            let reclaimer = loom_thread::spawn(move || {
-                reclaimer_domain.rotate_and_reclaim();
-            });
-
-            reader.join().unwrap();
-            reclaimer.join().unwrap();
-        });
+        }
     }
 }

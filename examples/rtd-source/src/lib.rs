@@ -6,10 +6,8 @@ use xlfn::prelude::*;
 use xlfn::rtd::{RtdTopic, RtdValue};
 
 mod metric_source;
-mod metric_subscription;
 
-use metric_source::MetricSource;
-pub(crate) use metric_subscription::MetricSubscription;
+use metric_source::{MetricSource, metric_source};
 
 #[derive(Default)]
 pub(crate) struct Client;
@@ -36,11 +34,15 @@ impl Addin for RtdSourceExample {
     fn open(
         context: &OpenContext,
     ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
-        Ok(Opened::new(State {
-            metrics: context.rtd().register_source(MetricSource {
-                client: Arc::new(Client),
-            })?,
-        }, (), ()))
+        Ok(Opened::new(
+            State {
+                metrics: context
+                    .rtd()
+                    .register_source(metric_source(Arc::new(Client)))?,
+            },
+            (),
+            (),
+        ))
     }
 }
 

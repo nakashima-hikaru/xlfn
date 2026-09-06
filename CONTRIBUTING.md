@@ -115,12 +115,17 @@ repository-wide first guard rather than a per-family policy.
 
 ## CI command contract
 
-The Linux CI job routes formatting, Clippy, feature checks, benchmark checks,
-and nextest through the root `Justfile`. Keep those recipes authoritative so
-local and CI flags do not drift. The Windows artifact job remains on libtest
-because it validates the same-process execution model and emits the RTD
-shutdown trace. The nextest `windows-rtd` group therefore applies to nextest
-runs only; RTD tests also take their process-global test lock.
+CI uses separate Windows jobs for Clippy, feature checks, nextest, and the
+handle close-race model. Their matrix disables fail-fast so each check reports
+its own result. Benchmark lint and Criterion measurements also run in
+independent jobs; a lint failure must not suppress test or performance evidence.
+The Linux jobs cover portable tooling and Miri independently. Keep the root
+`Justfile` recipes authoritative so local and CI flags do not drift.
+
+The Windows artifact job remains on libtest because it validates the
+same-process execution model and emits the RTD shutdown trace. The nextest
+`windows-rtd` group therefore applies to nextest runs only; RTD tests also take
+their process-global test lock.
 
 When changing the guide, run the same mdBook build and validation used by CI.
 When changing generated Windows bindings, run the generator and verify that

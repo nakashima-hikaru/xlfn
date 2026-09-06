@@ -7,13 +7,16 @@ Real-Time Data (RTD) is the appropriate model for a formula that should update r
 ```text
 worksheet formula
     -> MainThreadContext::rtd().subscribe(&source_handle, topic)
-    -> RtdSource::subscribe(topic, sink)
-    -> background producer calls sink.publish(value)
+    -> RtdChannelSource starts a producer and publisher
+    -> producer calls sender.try_send(value)
+    -> framework publisher forwards queued values through RtdSink
     -> framework batches RefreshData
     -> Excel recalculates the dependent formula
 ```
 
-The initial subscription returns a current value. Later publications update the RTD topic and notify Excel.
+The initial subscription returns the current value, which can be empty while
+the asynchronous producer starts. Later publications update the RTD topic and
+notify Excel.
 
 ## Define a topic
 
@@ -37,29 +40,39 @@ The runtime also applies bounded admission limits. The standard limits are 253 t
 
 ## Implement a source
 
-`RtdSource` is an unsafe trait because `RtdSink` is a non-owning capability.
-An implementation must not let a sink escape an `Err` or panic path; on
-success, the returned `RtdSubscription` must stop and join every producer
-before `disconnect_and_wait` returns.
+Use `RtdChannelSource` for ordinary producers. Its callback runs on a
+framework-owned thread and receives only a typed, bounded `RtdSender`. A
+separate publisher thread owns the internal sink. The capacity passed to
+`RtdChannelSource::new` limits queued values per subscription.
 
 ```rust
 {{#include ../../examples/rtd-source/src/metric_source.rs}}
 ```
 
-The source's subscription path must be bounded. It may create a worker or register with an existing event loop, but it should not wait indefinitely for the first external message. In this illustrative loop, `try_next_metric` is a non-blocking poll; in production, prefer a cancellation-aware channel or event loop over periodic polling.
+In this illustrative loop, `try_next_metric` is a non-blocking poll and
+`wait_closed` makes the polling delay interruptible. Use bounded or
+cancellation-aware I/O so the callback returns promptly after admission
+closes. Callback errors and panics close the channel and are reported during
+disconnect; topic validation inside the callback also runs asynchronously.
 
-## Implement shutdown correctly
+## Shutdown and advanced sources
 
-```rust
-{{#include ../../examples/rtd-source/src/metric_subscription.rs}}
-```
+The channel adapter closes admission, discards pending values, and joins both
+workers during disconnect. Sender clones can remain alive afterward: their
+`try_send` calls return `XllError::Closing`, even after the RTD runtime has
+been reclaimed. They own only channel state and never receive a raw sink.
+Successful producer completion drains accepted values before the publisher
+stops. The producer must stop any additional threads or callbacks before it
+returns. A producer that ignores cancellation delays disconnect and unload.
 
-The `RtdSubscription` implementation controls whether the XLL can be safely
-unloaded. The two-part quiescence guarantee shown above ensures that
-`cancellation()` stops the sole producer, and `disconnect_and_wait` joins it
-before returning.
-
-Cancellation must be non-blocking, idempotent, panic-free, and must not call Excel or re-enter framework subscription APIs. `disconnect_and_wait` performs the quiescence barrier: when it returns, the source must no longer execute XLL code or publish through the sink.
+Each active channel subscription uses two threads. Advanced integrations that
+share an event loop can implement the existing unsafe `RtdSource` and
+`RtdSubscription` traits. In that path, a sink must not escape an `Err` or
+panic from `subscribe`; the returned subscription must stop every sink user
+before `disconnect_and_wait` returns. Cancellation must be bounded,
+idempotent, panic-free, and must not call Excel or re-enter framework
+subscription APIs. Sinks are non-owning capabilities, so this shutdown
+contract is a memory-safety requirement for the unsafe extension point.
 
 Do not implement a timeout that abandons an in-process callback and then permits the XLL to unload. Put uninterruptible producers in another process.
 
@@ -68,13 +81,13 @@ Do not implement a timeout that abandons an in-process callback and then permits
 Keep the source in add-in state and subscribe from a main-thread function:
 
 ```rust
-{{#include ../../examples/rtd-source/src/lib.rs:30:50}}
+{{#include ../../examples/rtd-source/src/lib.rs}}
 ```
 
 The source handle is the opaque RTD identity. Clone a handle when multiple
 functions should refer to the same source; registering a new source creates a
-distinct identity even when its value is equivalent. The handle keeps the
-source alive, while the runtime owns subscription identity and limits.
+distinct identity even when its value is equivalent. The runtime owns the
+source and subscription identity; handles do not extend its lifetime.
 Multiple formulas that observe the same active subscription share it; a failed
 new observation rolls back only the reservation created by that attempt, not
 an unrelated established subscriber. The complete compile-tested fixture,
@@ -98,7 +111,18 @@ RTD does not transport arrays. Publish a handle or another scalar identity and e
 
 ## Backpressure and errors
 
-`RtdSink::publish` can fail when the runtime is closing, the subscription is no longer active, the value is invalid, or the queued-update limit is exhausted. A producer must handle the error and stop or retry with a bounded policy. Do not loop tightly on a permanent error.
+`RtdSender::try_send` validates values before enqueueing and never waits for
+queue capacity. It returns `XllError::Overloaded` when the per-subscription
+queue is full and `XllError::Closing` after admission closes. Handle an error
+by stopping or retrying with a bounded policy. Enqueue success is not a
+delivery acknowledgement: disconnect can discard pending values. If the
+publisher encounters a runtime error, it closes admission, wakes the producer,
+and reports that error during disconnect. `Closing` is treated as normal
+shutdown.
+
+For an unsafe custom source, `RtdSink::publish` directly reports a closing
+runtime, an inactive subscription, invalid values, or exhaustion of the
+runtime's queued-update limit. Do not loop tightly on a permanent error.
 
 Publishing validates and queues a value; notification and `RefreshData` happen through the framework. User code must never call the COM update event directly.
 

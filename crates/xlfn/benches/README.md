@@ -133,3 +133,106 @@ Criterion throughput normalizes them by the number of hits. A separate 250 ms
 / 15-sample clear-latency run measured approximately 17.3 µs, 18.0 µs, 25.5
 µs, and 87.6 µs for the same `N` values, showing the expected cost of holding
 the active scope while it performs post-clear lookups.
+
+## `cache_reclamation`
+
+This benchmark measures eviction/reclamation through the ordinary
+`CalculationCache::get_or_try_insert_with` and `CacheLease::drop` APIs. It does
+not call `len`, `used_weight`, `clear`, or a benchmark-only read scope in any
+measured workload. Every operation uses a fresh, worker-disjoint key.
+
+The matrix contains 1, 8, and 32 persistent workers, each with 64-byte or
+64-KiB payloads, and two separate workloads:
+
+- `churn`: release each returned lease within the insertion operation;
+- `live_leases`: retain a ring of 32 leases per worker, releasing the displaced
+  lease within each insertion operation. The ring survives between batches.
+
+The resident weight budget is 16 payloads in every case. Retained leases can
+keep evicted values alive intentionally; `held_lease_payload_bytes` reports
+that population separately from pending reclamation. It can overlap resident
+values and must not be added to resident weight as if the two were disjoint.
+
+Each case emits one machine-readable `cache_reclamation_probe` JSON line
+before Criterion's measurements. The probes use separate batches:
+
+- `allocation_probe`: count allocator/reallocator requests and requested bytes
+  on the worker threads while they perform cache operations. Thread creation,
+  retention buffers, diagnostic buffers, and driver allocations are excluded.
+  Requested bytes are cumulative allocation traffic, including the new size
+  of reallocations, and are not live memory or process RSS.
+- `latency_probe`: report nearest-rank p50/p99/max over individual operations,
+  including allocation, insertion, lease displacement/drop, and any synchronous
+  reclamation they trigger. Allocation counting is disabled for this batch.
+  `reclamation_stats()` is sampled after each operation's timer stops; it only
+  reads counters and cannot advance Moka maintenance or a grace period.
+- `cache_lifetime_stats_after_probes`: report the cache's intrinsic peak
+  pending counts/weights, final pending values, reclaimed nodes, largest batch,
+  and cumulative grace-period time. These include the one warm-up batch and
+  both diagnostic batches. Sampled per-operation peaks may miss shorter spikes;
+  the cache's intrinsic peaks capture enqueue events between observations.
+
+Criterion separately times ordinary batches, without per-operation timers,
+allocation counting, or statistics sampling. Worker coordination is included
+in batch time, while thread startup and shutdown are excluded. The counting
+allocator's disabled TLS check remains present. Final retained leases are
+released at worker shutdown, outside measurement; steady-state displaced-lease
+release is included in both the operation and batch timings.
+
+Run the normal ten-second-per-case measurements with 256 operations per worker
+and 20 flat samples:
+
+```text
+cargo bench -p xlfn --bench cache_reclamation --features bench-internals,unstable-cache
+```
+
+For a short execution/metrics smoke check of all twelve cases, use 64
+operations per worker and Criterion's test mode:
+
+```text
+XLFN_CACHE_RECLAIM_OPERATIONS=64 cargo bench -p xlfn --bench cache_reclamation \
+  --features bench-internals,unstable-cache -- --test
+```
+
+`XLFN_CACHE_RECLAIM_OPERATIONS` accepts 64 through 65,536 operations per worker.
+For a brief timed exploration, `XLFN_BENCH_MEASUREMENT_MS=50` and
+`--warm-up-time 0.05 --noplot` reduce Criterion's measurement policy. Diagnostic
+probes still run for every matrix case, even when a Criterion name filter is
+supplied.
+
+Smoke p99 values contain only 64 samples for one worker and 2,048 for 32
+workers. They validate the instrumentation and expose obvious stalls; they do
+not establish production tail-latency bounds or a performance improvement over
+another implementation. The latency probe also perturbs scheduling through
+clock/statistics reads. Compare repeated full runs on the deployment host,
+with matching allocator, payloads, retention windows, and cache policy, before
+using the results for a design decision.
+
+### 2026-09-07 reclamation smoke result
+
+A local macOS arm64 release build completed all twelve cases in test mode,
+using 64 operations per worker. Each final pending-node count was zero after
+the diagnostic batches, without an observer-triggered cleanup. The table
+records one short run; allocator counts and p99 come from separate probes.
+Peak pending nodes cover warm-up plus both probes, while retained leases are
+reported at the end of the latency probe.
+
+| Workload | Payload | Workers | Allocation requests / batch | Operation p99 | Peak pending nodes | Retained leases |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| churn | 64 B | 1 | 1,173 | 13.8 µs | 31 | 0 |
+| churn | 64 B | 8 | 9,242 | 147.2 µs | 32 | 0 |
+| churn | 64 B | 32 | 36,868 | 1,120.9 µs | 154 | 0 |
+| churn | 64 KiB | 1 | 1,159 | 16.7 µs | 31 | 0 |
+| churn | 64 KiB | 8 | 9,217 | 218.8 µs | 65 | 0 |
+| churn | 64 KiB | 32 | 36,954 | 1,232.5 µs | 59 | 0 |
+| live leases | 64 B | 1 | 1,197 | 10.8 µs | 16 | 32 |
+| live leases | 64 B | 8 | 9,482 | 130.0 µs | 11 | 256 |
+| live leases | 64 B | 32 | 37,770 | 698.1 µs | 35 | 1,024 |
+| live leases | 64 KiB | 1 | 1,165 | 10.7 µs | 16 | 32 |
+| live leases | 64 KiB | 8 | 9,463 | 134.4 µs | 8 | 256 |
+| live leases | 64 KiB | 32 | 37,739 | 721.8 µs | 46 | 1,024 |
+
+This run did not compare an earlier implementation, and Criterion test mode
+does not produce throughput estimates or confidence intervals. The 32-worker
+p99 includes substantial contention/scheduling effects; it is a measurement
+starting point, not evidence that tail latency has improved.

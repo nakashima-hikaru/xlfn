@@ -1009,6 +1009,13 @@ pub(super) unsafe extern "system" fn connect_data(
     })
 }
 
+#[cfg_attr(
+    test,
+    allow(
+        clippy::large_enum_variant,
+        reason = "test-only operation drop traces enlarge the subscription variant; production needs no extra allocation"
+    )
+)]
 enum ConnectDataTransaction<'runtime> {
     Handle(Box<dyn FormulaLifetimeConnection + 'runtime>),
     Subscription(crate::subscription::SubscriptionConnection),

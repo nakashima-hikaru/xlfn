@@ -36,6 +36,30 @@ The weight budget is an abstract integer. It can represent approximate bytes, ex
 
 Metrics such as `len()` and `used_weight()` run pending Moka maintenance first, but should still be treated as operational estimates rather than transactional accounting.
 
+Eviction and memory reclamation are separate. A live lease intentionally keeps
+its value alive after eviction or `clear()`. Once the final pin is released,
+the value enters a retirement queue until readers that could have observed its
+pointer have finished. The eviction listener only queues work; it never waits
+for readers or runs a value destructor inside Moka maintenance.
+
+Ordinary reads attempt reclamation when work is queued, without waiting for
+readers. Initialization attempts flush Moka's pending work every 32 attempts.
+They also apply backpressure when queued retirement reaches 256 nodes or the
+endpoint's weight budget: the operation waits for existing readers before
+returning. This bounds accumulating debt during ongoing mutation, subject to
+concurrent operations; it is not a strict bound on process memory. A final lease
+drop and explicit clear also wait for reclamation. There is no background
+reclamation thread; idle caches can retain their last small batch until another
+operation or destruction.
+
+`reclamation_stats()` on a cache or bound endpoint returns approximate counters
+without performing maintenance: pending nodes and weight, their peak values,
+the number of nodes handed to reclamation, the largest batch, and cumulative
+grace-period time. Pending counts exclude resident entries and values retained
+by live leases. Use these counters with `used_weight()` to distinguish eviction
+capacity from retirement debt; caller-defined weights do not measure allocator
+overhead or the process's actual memory usage.
+
 ## Typed endpoint registry
 
 `CacheRegistry` creates caches lazily for static endpoints:
@@ -117,7 +141,10 @@ Prefer putting immutable dependency versions in the key. Broad clears are useful
 
 ## Reentry and computation rules
 
-Recursive initialization of the same cache key on the same thread is rejected rather than allowed to deadlock. A computation function should therefore not request the same key from the same cache. Decompose dependencies into separate endpoints or compute the lower layer directly.
+Starting another cache initialization on the same thread from a compute or
+weight function is rejected, including a different key or endpoint. Reading
+already-cached values is supported. Compute lower layers directly or resolve
+their cache dependencies before entering the initializer.
 
 The compute and weight functions execute application code. They must:
 

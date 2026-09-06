@@ -7,8 +7,9 @@
 
 use super::{DiagnosticEvent, DiagnosticInitError, DiagnosticShutdownError, DiagnosticSink};
 use crate::diagnostics::event::DROPPED_EVENTS;
+use crate::panic_boundary::{catch_no_unwind, contain_panic};
 use std::io;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 #[cfg(any(test, feature = "refinement"))]
 use std::sync::atomic::AtomicU64;
@@ -194,7 +195,7 @@ impl AsyncDiagnosticSink {
         });
         let worker = self.worker.take();
         if let Some(worker) = worker {
-            let result = worker.join();
+            let result = contain_panic(worker.join());
             if result.is_err() {
                 let discarded = self.observer.take_pending();
                 if discarded != 0 {
@@ -219,9 +220,9 @@ impl Drop for AsyncDiagnosticSink {
         }
         self.sender.take();
         if let Some(worker) = self.worker.take()
-            && worker.join().is_err()
+            && contain_panic(worker.join()).is_err()
         {
-            let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _ = catch_no_unwind(AssertUnwindSafe(|| {
                 tracing::error!("diagnostic logger worker panicked during drop");
             }));
         }

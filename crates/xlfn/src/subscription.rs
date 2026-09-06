@@ -19,6 +19,8 @@
 )]
 
 mod catalog;
+#[cfg(feature = "rtd")]
+mod channel;
 mod data_plane;
 mod delivery;
 mod host;
@@ -38,6 +40,8 @@ pub(crate) type SubscriptionConnection =
 pub(crate) type SubscriptionServerHandle =
     server::SubscriptionServerHandle<crate::excel_rtd::RtdSubscriptionHost>;
 
+#[cfg(feature = "rtd")]
+pub use channel::{RtdChannelSource, RtdChannelSubscription, RtdSender};
 #[cfg(feature = "rtd")]
 pub use source::{RtdSink, RtdSource, RtdSourceHandle, RtdSubscription};
 #[cfg(feature = "rtd")]

@@ -57,15 +57,28 @@ jobs:
             - name: Validate the user guide
               run: python guide/check.py
 
-            - name: Install Miri
-              run: rustup toolchain install nightly --component miri
-
-            - name: Run Miri regression tests
-              run: just miri
-
     rust-quality-windows:
-        name: Rust quality (windows-latest)
+        name: Rust ${{ matrix.check.name }} (windows-latest)
         runs-on: windows-latest
+        strategy:
+            fail-fast: false
+            matrix:
+                check:
+                    - name: lint
+                      command: just clippy
+                    - name: features
+                      command: just features
+                    - name: tests
+                      command: just test-ci
+                    - name: handle model
+                      command: >-
+                          cargo test
+                          --package xlfn
+                          --all-features
+                          shuttle_insert_racing_close_never_leaves_a_live_handle
+                          --locked
+                          --
+                          --ignored
         steps:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -76,37 +89,48 @@ jobs:
                   tool: just,cargo-nextest,cargo-hack
                   fallback: none
 
-            - name: Run Clippy
-              run: just clippy
+            - name: Run ${{ matrix.check.name }}
+              run: ${{ matrix.check.command }}
 
-            - name: Check feature combinations
-              run: just features
-
-            - name: Check benchmark compilation
-              run: just bench-check
-
-            - name: Run Rust tests
-              run: just test-ci
-
-            - name: Model-check handle close race
-              run: >-
-                  cargo test
-                  --package xlfn
-                  --all-features
-                  shuttle_insert_racing_close_never_leaves_a_live_handle
-                  --locked
-                  --
-                  --ignored
+    standalone-consumers:
+        name: Standalone consumers (windows-latest)
+        runs-on: windows-latest
+        steps:
+            - name: Check out repository
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
             - name: Check and lint standalone consumers
               shell: pwsh
               run: |
-                  cargo check --manifest-path examples/basic-xll/Cargo.toml --locked
-                  cargo clippy --manifest-path examples/basic-xll/Cargo.toml --all-targets --locked
-                  cargo check --manifest-path examples/rtd-source/Cargo.toml --locked
-                  cargo clippy --manifest-path examples/rtd-source/Cargo.toml --all-targets --locked
-                  cargo check --manifest-path tests/xlfn-e2e-fixture/Cargo.toml --locked
-                  cargo clippy --manifest-path tests/xlfn-e2e-fixture/Cargo.toml --all-targets --locked
+                  foreach ($manifest in @(
+                    "examples/basic-xll/Cargo.toml",
+                    "examples/rtd-source/Cargo.toml",
+                    "tests/xlfn-e2e-fixture/Cargo.toml"
+                  )) {
+                    cargo check --manifest-path $manifest --locked
+                    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                    cargo clippy --manifest-path $manifest --all-targets --locked
+                    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                  }
+
+    miri:
+        name: Miri regression tests
+        runs-on: ubuntu-latest
+        steps:
+            - name: Check out repository
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+            - name: Install just
+              uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
+              with:
+                  tool: just
+                  fallback: none
+
+            - name: Install Miri
+              run: rustup toolchain install nightly --component miri
+
+            - name: Run Miri regression tests
+              run: just miri
 
     windows-artifact:
         name: Windows artifact (${{ matrix.target }})

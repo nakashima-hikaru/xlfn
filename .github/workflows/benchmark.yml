@@ -23,6 +23,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  benchmark-lint:
+    name: Benchmark lint
+    if: github.event_name != 'pull_request' || github.event.action != 'closed'
+    runs-on: windows-2025
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install just
+        uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d # just
+
+      - name: Lint benchmark targets
+        shell: bash
+        run: just bench-check
+
   benchmark:
     name: Criterion benchmarks
     if: github.event_name != 'pull_request' || github.event.action != 'closed'
@@ -56,10 +73,6 @@ jobs:
             echo "enabled=false" >> "$GITHUB_OUTPUT"
             echo "::warning::Set the BENCHER_API_KEY secret and BENCHER_PROJECT repository variable to publish benchmark history."
           fi
-
-      - name: Check benchmark compilation
-        shell: bash
-        run: just bench-check
 
       - name: Track benchmarks with Bencher (main / nightly)
         if: steps.bencher-config.outputs.enabled == 'true' && github.event_name != 'pull_request'

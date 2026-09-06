@@ -679,7 +679,7 @@ impl<A: Addin> Clone for MainThreadContext<'_, A> {
 /// Call-scoped state and host callbacks for a macro-sheet UDF.
 ///
 /// This context is borrowed entirely from the active call. Unlike
-/// [`AsyncContext`], it cannot outlive the callback scope and therefore does
+/// `AsyncContext`, it cannot outlive the callback scope and therefore does
 /// not need an owned generation lease.
 pub struct MacroSheetContext<'call, A: Addin> {
     state: &'call A::SharedState,

@@ -82,6 +82,15 @@ impl SealableCounter {
         self.state.fetch_or(SEALED_BIT, Ordering::AcqRel);
     }
 
+    /// Seals an open, idle counter in one atomic operation. A failed attempt
+    /// leaves the counter unchanged, including when a reader won admission.
+    #[inline]
+    pub(crate) fn try_seal_if_idle(&self) -> bool {
+        self.state
+            .compare_exchange(0, SEALED_BIT, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
     pub fn reopen(&self) -> Result<(), ReopenError> {
         self.state
             .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
