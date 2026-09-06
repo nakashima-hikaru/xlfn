@@ -494,6 +494,13 @@ unsafe impl Send for ReclaimEntry {}
 unsafe impl Sync for ReclaimEntry {}
 
 struct CacheLookupDomain {
+    // R1: exactly one generation is open while the domain is not closed.
+    // R2: readers can only be admitted through the current generation.
+    // R3: a generation is sealed before it leaves `current`.
+    // R4: a sealed generation is drained before its retired nodes are freed.
+    // R5: a closed domain never reopens a generation.
+    // R6: a node is freed only after the grace period covering every reader
+    //     that could have observed its pointer has ended.
     generations: [StripedDrainGate<DEFAULT_STRIPE_COUNT>; 2],
     current: AtomicUsize,
     reclaim_lock: Mutex<()>,
@@ -504,7 +511,8 @@ struct CacheLookupDomain {
 impl CacheLookupDomain {
     const fn new() -> Self {
         Self {
-            generations: [StripedDrainGate::new_open(), StripedDrainGate::new_open()],
+            // R1: while the domain is open, exactly one generation is open.
+            generations: [StripedDrainGate::new_open(), StripedDrainGate::new_sealed()],
             current: AtomicUsize::new(0),
             reclaim_lock: Mutex::new(()),
             pending_reclaims: [Mutex::new(Vec::new()), Mutex::new(Vec::new())],
@@ -514,37 +522,66 @@ impl CacheLookupDomain {
 
     #[inline]
     fn enter(&self) -> XllResult<CacheDomainPermit> {
-        if self.closed.load(Ordering::Acquire) {
-            return Err(XllError::Closing);
-        }
-        let gen_idx = self.current.load(Ordering::Acquire) & 1;
+        self.enter_impl(|_| {})
+    }
+
+    #[cfg(test)]
+    #[inline]
+    fn enter_with_hook(
+        &self,
+        after_generation_load: impl Fn(usize),
+    ) -> XllResult<CacheDomainPermit> {
+        self.enter_impl(after_generation_load)
+    }
+
+    #[inline]
+    fn enter_impl(&self, after_generation_load: impl Fn(usize)) -> XllResult<CacheDomainPermit> {
         let stripe = xlfn_kernel::drain_gate::current_thread_stripe();
-        self.generations[gen_idx]
-            .try_acquire(stripe)
-            .map_err(|_| XllError::Closing)?;
-        Ok(CacheDomainPermit {
-            gate: NonNull::from(&self.generations[gen_idx]),
-            stripe,
-        })
+
+        // R2: a reader is admitted only to the generation selected by the
+        // current publication, retrying if that generation was sealed during
+        // the load/acquire window.
+        loop {
+            if self.closed.load(Ordering::Acquire) {
+                return Err(XllError::Closing);
+            }
+            let gen_idx = self.current.load(Ordering::Acquire) & 1;
+            after_generation_load(gen_idx);
+            match self.generations[gen_idx].try_acquire(stripe) {
+                Ok(()) => {
+                    return Ok(CacheDomainPermit {
+                        gate: NonNull::from(&self.generations[gen_idx]),
+                        stripe,
+                    });
+                }
+                Err(_) if !self.closed.load(Ordering::Acquire) => {
+                    std::hint::spin_loop();
+                }
+                Err(_) => return Err(XllError::Closing),
+            }
+        }
     }
 
     fn enqueue_reclaim(&self, ptr: *mut ()) {
-        let gen_idx = self.current.load(Ordering::Acquire) & 1;
-        let mut queue = self.pending_reclaims[gen_idx].lock();
-        queue.push(ReclaimEntry(ptr));
+        // The queue lock is the enqueue linearization point. Revalidate the
+        // generation while holding it so a rotation cannot drain the queue
+        // just before this retired node is appended.
+        loop {
+            let gen_idx = self.current.load(Ordering::Acquire) & 1;
+            let mut queue = self.pending_reclaims[gen_idx].lock();
+            if self.current.load(Ordering::Acquire) & 1 != gen_idx {
+                drop(queue);
+                std::hint::spin_loop();
+                continue;
+            }
+            queue.push(ReclaimEntry(ptr));
+            return;
+        }
     }
 
     fn quiesce_and_reclaim(&self, reclaim_fn: impl Fn(*mut ())) {
         let _reclaim = self.reclaim_lock.lock();
-        let old_gen = self.current.fetch_xor(1, Ordering::SeqCst) & 1;
-        self.generations[old_gen].wait_until_idle();
-        let items = {
-            let mut queue = self.pending_reclaims[old_gen].lock();
-            std::mem::take(&mut *queue)
-        };
-        for entry in items {
-            reclaim_fn(entry.0);
-        }
+        self.rotate_and_drain_locked(reclaim_fn);
     }
 
     fn try_quiesce_and_reclaim(&self, reclaim_fn: impl Fn(*mut ())) {
@@ -555,7 +592,34 @@ impl CacheLookupDomain {
         let Some(_reclaim) = self.reclaim_lock.try_lock() else {
             return;
         };
-        let old_gen = self.current.fetch_xor(1, Ordering::SeqCst) & 1;
+        let cur = self.current.load(Ordering::Acquire) & 1;
+        if self.pending_reclaims[cur].lock().is_empty() {
+            return;
+        }
+        self.rotate_and_drain_locked(reclaim_fn);
+    }
+
+    /// Rotates the admission generation and drains the retired queue for the
+    /// sealed generation. The caller must hold `reclaim_lock`.
+    fn rotate_and_drain_locked(&self, reclaim_fn: impl Fn(*mut ())) {
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+
+        // R3: the generation leaving `current` is sealed before publication
+        // of the replacement, so no late reader can enter the old generation.
+        let old_gen = self.current.load(Ordering::Acquire) & 1;
+        let next_gen = old_gen ^ 1;
+        self.generations[old_gen].seal();
+        // R1: `next_gen` was sealed and idle when the previous rotation left
+        // it inactive, so it is the only generation that can be reopened.
+        self.generations[next_gen]
+            .reopen()
+            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+        self.current.store(next_gen, Ordering::Release);
+
+        // R4: every reader admitted before the seal is counted here; do not
+        // reclaim any retired node until that generation reaches zero.
         self.generations[old_gen].wait_until_idle();
         let items = {
             let mut queue = self.pending_reclaims[old_gen].lock();
@@ -567,6 +631,9 @@ impl CacheLookupDomain {
     }
 
     fn seal(&self) {
+        let _reclaim = self.reclaim_lock.lock();
+        // R5: closing is serialized with rotation, so no transition can
+        // reopen a generation after the closed state becomes visible.
         self.closed.store(true, Ordering::Release);
         self.generations[0].seal_and_wait();
         self.generations[1].seal_and_wait();
@@ -910,8 +977,8 @@ impl<K, V> Drop for CalculationCache<K, V> {
 mod tests {
     use super::*;
     use std::hash::{Hash, Hasher};
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier, mpsc};
     use std::time::Duration;
 
     struct CloneCountedKey {
@@ -1014,6 +1081,95 @@ mod tests {
 
         assert_eq!(*cache.get(&lookup).unwrap(), 7);
         assert_eq!(clones.load(Ordering::SeqCst), clones_before_hit);
+    }
+
+    #[test]
+    fn cache_read_domain_starts_with_exactly_one_open_generation() {
+        let domain = CacheLookupDomain::new();
+
+        assert_eq!(domain.current.load(Ordering::Acquire), 0);
+        assert!(!domain.generations[0].is_sealed());
+        assert!(domain.generations[1].is_sealed());
+    }
+
+    #[test]
+    fn late_reader_cannot_enter_sealed_cache_generation() {
+        let domain = Arc::new(CacheLookupDomain::new());
+        let (loaded_tx, loaded_rx) = mpsc::sync_channel(0);
+        let (resume_tx, resume_rx) = mpsc::sync_channel(0);
+        let (rotated_tx, rotated_rx) = mpsc::sync_channel(0);
+
+        let reader_domain = Arc::clone(&domain);
+        let reader = std::thread::spawn(move || {
+            let first_load = std::cell::Cell::new(true);
+            let permit = reader_domain
+                .enter_with_hook(|generation| {
+                    if first_load.replace(false) {
+                        loaded_tx.send(generation).unwrap();
+                        resume_rx.recv().unwrap();
+                    }
+                })
+                .unwrap();
+            let entered_open_generation = !unsafe { permit.gate.as_ref() }.is_sealed();
+            drop(permit);
+            entered_open_generation
+        });
+
+        assert_eq!(loaded_rx.recv().unwrap(), 0);
+
+        let rotating_domain = Arc::clone(&domain);
+        let reclaimer = std::thread::spawn(move || {
+            rotating_domain.quiesce_and_reclaim(|_| {});
+            rotated_tx.send(()).unwrap();
+        });
+
+        rotated_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("rotation must finish before the paused reader resumes");
+        assert_eq!(domain.current.load(Ordering::Acquire) & 1, 1);
+        assert!(domain.generations[0].is_sealed());
+        assert!(!domain.generations[1].is_sealed());
+
+        resume_tx.send(()).unwrap();
+        assert!(
+            reader
+                .join()
+                .expect("reader thread must complete in the new generation")
+        );
+        reclaimer.join().unwrap();
+    }
+
+    #[test]
+    fn seal_racing_rotation_never_reopens_a_cache_generation() {
+        let domain = Arc::new(CacheLookupDomain::new());
+        let start = Arc::new(Barrier::new(3));
+
+        let rotating_domain = Arc::clone(&domain);
+        let rotating_start = Arc::clone(&start);
+        let rotator = std::thread::spawn(move || {
+            rotating_start.wait();
+            for _ in 0..16 {
+                rotating_domain.quiesce_and_reclaim(|_| {});
+            }
+        });
+
+        let closing_domain = Arc::clone(&domain);
+        let closing_start = Arc::clone(&start);
+        let closer = std::thread::spawn(move || {
+            closing_start.wait();
+            closing_domain.seal();
+        });
+
+        start.wait();
+        rotator.join().unwrap();
+        closer.join().unwrap();
+
+        assert!(domain.closed.load(Ordering::Acquire));
+        assert!(domain.generations[0].is_sealed());
+        assert!(domain.generations[1].is_sealed());
+        assert_eq!(domain.generations[0].active(), 0);
+        assert_eq!(domain.generations[1].active(), 0);
+        assert!(matches!(domain.enter(), Err(XllError::Closing)));
     }
 
     #[cfg(feature = "bench-internals")]
@@ -1766,6 +1922,138 @@ mod tests {
             unsafe {
                 drop(Box::from_raw(node));
             }
+        });
+    }
+
+    #[cfg(not(all(target_os = "windows", target_arch = "x86")))]
+    #[test]
+    fn loom_cache_generation_rotation_preserves_the_grace_period() {
+        use loom::sync::Arc as LoomArc;
+        use loom::sync::atomic::{AtomicBool, AtomicUsize, Ordering as LoomOrdering};
+        use loom::thread as loom_thread;
+
+        const SEALED: usize = 1;
+
+        struct LoomGate {
+            state: AtomicUsize,
+        }
+
+        impl LoomGate {
+            fn new_open() -> Self {
+                Self {
+                    state: AtomicUsize::new(0),
+                }
+            }
+
+            fn new_sealed() -> Self {
+                Self {
+                    state: AtomicUsize::new(SEALED),
+                }
+            }
+
+            fn try_acquire(&self) -> bool {
+                let mut state = self.state.load(LoomOrdering::Acquire);
+                loop {
+                    if state & SEALED != 0 {
+                        return false;
+                    }
+                    let next = state + 2;
+                    match self.state.compare_exchange_weak(
+                        state,
+                        next,
+                        LoomOrdering::AcqRel,
+                        LoomOrdering::Acquire,
+                    ) {
+                        Ok(_) => return true,
+                        Err(observed) => state = observed,
+                    }
+                }
+            }
+
+            fn release(&self) {
+                self.state.fetch_sub(2, LoomOrdering::AcqRel);
+            }
+
+            fn seal(&self) {
+                self.state.fetch_or(SEALED, LoomOrdering::AcqRel);
+            }
+
+            fn reopen(&self) {
+                assert_eq!(
+                    self.state
+                        .compare_exchange(SEALED, 0, LoomOrdering::AcqRel, LoomOrdering::Acquire,)
+                        .unwrap(),
+                    SEALED
+                );
+            }
+
+            fn active(&self) -> usize {
+                self.state.load(LoomOrdering::Acquire) >> 1
+            }
+        }
+
+        struct LoomCacheDomain {
+            generations: [LoomGate; 2],
+            current: AtomicUsize,
+            reclaimed: [AtomicBool; 2],
+        }
+
+        impl LoomCacheDomain {
+            fn new() -> Self {
+                Self {
+                    generations: [LoomGate::new_open(), LoomGate::new_sealed()],
+                    current: AtomicUsize::new(0),
+                    reclaimed: [AtomicBool::new(false), AtomicBool::new(false)],
+                }
+            }
+
+            fn enter(&self) -> Option<usize> {
+                loop {
+                    let generation = self.current.load(LoomOrdering::Acquire) & 1;
+                    // Model a reader being preempted after loading `current`
+                    // and before its gate acquisition.
+                    loom_thread::yield_now();
+                    if self.generations[generation].try_acquire() {
+                        return Some(generation);
+                    }
+                    loom_thread::yield_now();
+                }
+            }
+
+            fn rotate_and_reclaim(&self) {
+                let old = self.current.load(LoomOrdering::Acquire) & 1;
+                let next = old ^ 1;
+                self.generations[old].seal();
+                self.generations[next].reopen();
+                self.current.store(next, LoomOrdering::Release);
+                while self.generations[old].active() != 0 {
+                    loom_thread::yield_now();
+                }
+                self.reclaimed[old].store(true, LoomOrdering::Release);
+            }
+        }
+
+        loom::model(|| {
+            let domain = LoomArc::new(LoomCacheDomain::new());
+
+            let reader_domain = LoomArc::clone(&domain);
+            let reader = loom_thread::spawn(move || {
+                if let Some(generation) = reader_domain.enter() {
+                    assert!(
+                        !reader_domain.reclaimed[generation].load(LoomOrdering::Acquire),
+                        "a reader admitted to a generation after its grace period was reclaimed"
+                    );
+                    reader_domain.generations[generation].release();
+                }
+            });
+
+            let reclaimer_domain = LoomArc::clone(&domain);
+            let reclaimer = loom_thread::spawn(move || {
+                reclaimer_domain.rotate_and_reclaim();
+            });
+
+            reader.join().unwrap();
+            reclaimer.join().unwrap();
         });
     }
 
