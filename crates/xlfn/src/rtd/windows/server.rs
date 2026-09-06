@@ -251,7 +251,9 @@ pub(super) fn synchronize_callback_notification(
         return Ok(());
     };
 
-    let notifier = RtdNotifier::new(callback, NonNull::from(&server.operations));
+    // SAFETY: `callback` is pinned in `server.callbacks` and `server.operations`
+    // is owned by `RtdServer`, remaining valid for the server lifetime.
+    let notifier = unsafe { RtdNotifier::new(callback, NonNull::from(&server.operations)) };
     subscription_server.attach_update_notifier(notifier)?;
     Ok(())
 }
@@ -694,7 +696,9 @@ fn ensure_server_impl(
             // SAFETY: `server` was validated as non-null and COM keeps the server alive.
             let callback = unsafe { active_callback(&(*server).callbacks) };
             if let Some(callback) = callback {
-                let notifier = RtdNotifier::new(callback, NonNull::from(operations));
+                // SAFETY: `callback` is pinned in `callbacks` and `operations`
+                // remains valid for the server lifetime.
+                let notifier = unsafe { RtdNotifier::new(callback, NonNull::from(operations)) };
                 handle.attach_update_notifier(notifier)?;
             }
         }

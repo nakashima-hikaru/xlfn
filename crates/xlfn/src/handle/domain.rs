@@ -34,6 +34,20 @@ pub(crate) struct HandleDomainPermit {
     _permit: RotatingReadOwnedPermit<DEFAULT_STRIPE_COUNT>,
 }
 
+impl HandleDomainPermit {
+    #[allow(
+        dead_code,
+        reason = "Audited capability constructor for tests and scoped readers"
+    )]
+    #[inline]
+    pub(crate) fn witness<'scope>(&'scope self) -> HandleDomainWitness<'scope> {
+        HandleDomainWitness {
+            domain: self.domain,
+            _marker: PhantomData,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct HandleDomainWitness<'scope> {
     domain: NonNull<HandleReadDomain>,
@@ -41,8 +55,14 @@ pub(crate) struct HandleDomainWitness<'scope> {
 }
 
 impl<'scope> HandleDomainWitness<'scope> {
+    /// Constructs a witness representing an active read permit for `domain` throughout `'scope`.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that an active reader permit for `domain`
+    /// remains valid and will not be reclaimed for the duration of `'scope`.
     #[inline]
-    pub(crate) fn new(domain: NonNull<HandleReadDomain>) -> Self {
+    pub(crate) unsafe fn new_unchecked(domain: NonNull<HandleReadDomain>) -> Self {
         Self {
             domain,
             _marker: PhantomData,
@@ -73,11 +93,16 @@ impl HandleReadDomain {
             .map_err(|_| XllError::Closing)
     }
 
+    /// Enters the handle read domain and acquires an owned reader permit.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `self` outlives the returned [`HandleDomainPermit`].
+    /// All permits must be dropped before the domain is destroyed or moved.
     #[inline]
-    pub(crate) fn enter_owned(&self) -> XllResult<HandleDomainPermit> {
-        // SAFETY: every returned permit is stored in a CallScope that is
-        // nested within the generation owner containing this domain. The
-        // generation close path drains the domain before reclaiming it.
+    pub(crate) unsafe fn enter_owned(&self) -> XllResult<HandleDomainPermit> {
+        // SAFETY: guaranteed by caller's owner-lifetime contract;
+        // self outlives the returned permit and will be drained before reclamation.
         unsafe {
             self.domain
                 .enter_owned_current_thread()

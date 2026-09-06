@@ -267,7 +267,16 @@ enum RtdNotifierKind {
 }
 
 impl RtdNotifier {
-    pub(super) fn new(callback: CallbackPtr, operations: NonNull<ServerOperationBarrier>) -> Self {
+    /// Constructs a notifier capability linked to the server's update callback and barrier.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `callback` and `operations` remain valid and
+    /// dereferenceable for the entire lifetime of this `RtdNotifier`.
+    pub(super) unsafe fn new(
+        callback: CallbackPtr,
+        operations: NonNull<ServerOperationBarrier>,
+    ) -> Self {
         #[cfg(not(test))]
         {
             Self {

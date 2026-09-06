@@ -80,8 +80,15 @@ impl<'call> CallScope<'call> {
         &self.scratch
     }
 
+    /// Enters the handle read domain for this call scope and returns a witness
+    /// valid for `'scope`.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that `domain` outlives this [`CallScope`]
+    /// (or at least outlives until all permits retained by this scope are dropped).
     #[inline]
-    pub(crate) fn enter_handle_domain<'scope>(
+    pub(crate) unsafe fn enter_handle_domain<'scope>(
         &'scope self,
         domain: &crate::handle::HandleReadDomain,
     ) -> XllResult<crate::handle::HandleDomainWitness<'scope>> {
@@ -91,16 +98,26 @@ impl<'call> CallScope<'call> {
             HandlePermits::Empty => {}
             HandlePermits::Single(permit) => {
                 if permit.domain == domain_ptr {
-                    return Ok(crate::handle::HandleDomainWitness::new(domain_ptr));
+                    // SAFETY: an active permit for `domain` is retained in `self.handle_permits`
+                    // for the lifetime `'scope` of this `CallScope`.
+                    return Ok(unsafe {
+                        crate::handle::HandleDomainWitness::new_unchecked(domain_ptr)
+                    });
                 }
             }
             HandlePermits::Multiple(list) => {
                 if list.iter().any(|p| p.domain == domain_ptr) {
-                    return Ok(crate::handle::HandleDomainWitness::new(domain_ptr));
+                    // SAFETY: an active permit for `domain` is retained in `self.handle_permits`
+                    // for the lifetime `'scope` of this `CallScope`.
+                    return Ok(unsafe {
+                        crate::handle::HandleDomainWitness::new_unchecked(domain_ptr)
+                    });
                 }
             }
         }
-        let permit = domain.enter_owned()?;
+        // SAFETY: guaranteed by the caller's safety contract that `domain` outlives
+        // this `CallScope` and all permits held within it.
+        let permit = unsafe { domain.enter_owned()? };
         match std::mem::replace(&mut *permits, HandlePermits::Empty) {
             HandlePermits::Empty => {
                 *permits = HandlePermits::Single(permit);
@@ -113,7 +130,9 @@ impl<'call> CallScope<'call> {
                 *permits = HandlePermits::Multiple(list);
             }
         }
-        Ok(crate::handle::HandleDomainWitness::new(domain_ptr))
+        // SAFETY: `permit` was stored in `self.handle_permits` and remains active for
+        // the entire lifetime `'scope` of this `CallScope`.
+        Ok(unsafe { crate::handle::HandleDomainWitness::new_unchecked(domain_ptr) })
     }
 }
 

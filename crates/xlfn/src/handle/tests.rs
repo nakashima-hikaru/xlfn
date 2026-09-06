@@ -935,7 +935,7 @@ fn close_contains_panicking_destructors_and_continues_dropping() {
     assert_eq!(drops.load(Ordering::Relaxed), 1);
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct DataRecord(u32);
 
 impl ExcelHandleObject for DataRecord {}
@@ -3367,10 +3367,78 @@ fn handle_domain_witness_records_exact_domain() {
     let domain2 = HandleReadDomain::new();
 
     crate::call::with_excel_call_scope(|scope| {
-        let witness1 = scope.enter_handle_domain(&domain1).unwrap();
+        // SAFETY: `domain1` outlives `scope` in this test.
+        let witness1 = unsafe { scope.enter_handle_domain(&domain1).unwrap() };
         assert_eq!(witness1.domain(), std::ptr::NonNull::from(&domain1));
 
-        let witness2 = scope.enter_handle_domain(&domain2).unwrap();
+        // SAFETY: `domain2` outlives `scope` in this test.
+        let witness2 = unsafe { scope.enter_handle_domain(&domain2).unwrap() };
         assert_eq!(witness2.domain(), std::ptr::NonNull::from(&domain2));
     });
+}
+
+#[test]
+fn miri_domain_permit_witness_lifecycle() {
+    let domain = HandleReadDomain::new();
+    // SAFETY: domain outlives permit in this test scope.
+    let permit = unsafe { domain.enter_owned() }.unwrap();
+    let witness = permit.witness();
+    assert_eq!(witness.domain(), std::ptr::NonNull::from(&domain));
+}
+
+#[test]
+fn miri_handle_scope_and_binding_lifecycle() {
+    let registry = HandleRegistry::new(2);
+    let token = insert_production(&registry, Arc::new(DataRecord(42))).unwrap();
+
+    crate::value::with_excel_call_scope(|scope| {
+        let handle = registry.lookup_handle::<DataRecord>(scope, &token).unwrap();
+        assert_eq!(handle.0, 42);
+    });
+
+    registry.remove::<DataRecord>(&token).unwrap();
+    assert!(matches!(
+        registry.lookup::<DataRecord>(&token),
+        Err(XllError::StaleHandle)
+    ));
+}
+
+#[test]
+fn miri_topic_read_lease_lifecycle() {
+    let runtime = FormulaHandleService::new(4);
+    let key = test_topic_key("miri_topic");
+    let token = runtime
+        .prepare(key, || Ok(DataRecord(42)))
+        .unwrap()
+        .into_token();
+    assert!(!token.is_empty());
+
+    {
+        let lease = runtime.topics.enter_read_lease().unwrap();
+        let publication = lease
+            .load(&key)
+            .expect("topic must be present in read lease");
+        assert_eq!(publication.state(), PublishedTopicState::Live);
+    }
+
+    let lifetime_key = key.format_lifetime_key();
+    runtime.rollback(&lifetime_key);
+    assert_eq!(runtime.topics.read().by_key.len(), 0);
+    assert_eq!(runtime.topics.read().by_lifetime_key.len(), 0);
+}
+
+#[test]
+fn miri_object_arena_lifecycle() {
+    let arena = super::object::ObjectArena::new();
+    let id = ObjectId::new(1, 1);
+    // SAFETY: `arena` outlives `binding` and `dup` in this test scope.
+    let binding = unsafe { arena.insert(id, 12345i64) }.unwrap();
+    assert_eq!(binding.id(), id);
+
+    let dup = binding.duplicate().unwrap();
+    assert_eq!(dup.id(), id);
+
+    drop(binding);
+    drop(dup);
+    drop(arena);
 }

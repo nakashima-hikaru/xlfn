@@ -44,6 +44,10 @@ mod boundary;
 #[cfg(feature = "unstable-cache")]
 #[allow(unsafe_code, reason = "Cache value arena and lease pointers")]
 mod cache;
+#[allow(
+    unsafe_code,
+    reason = "Call-scoped read permits and domain witness capabilities"
+)]
 mod call;
 mod call_return;
 mod callback_gate;

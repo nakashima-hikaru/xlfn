@@ -106,39 +106,44 @@ impl ObjectArena {
         }
     }
 
-    pub(crate) fn insert<T: Send + Sync + 'static>(
+    /// Inserts a new object into the arena and returns an initial binding.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `self` (the arena) outlives all returned
+    /// [`ObjectBinding`] instances (and any [`RawObjectLeaseGuard`] acquired from them).
+    /// The owner must drain or drop all binding capabilities before reclaiming the arena.
+    pub(crate) unsafe fn insert<T: Send + Sync + 'static>(
         &self,
         id: ObjectId,
         value: T,
     ) -> XllResult<ObjectBinding> {
         let owner: Box<dyn Any + Send + Sync> = Box::new(value);
-        let pointer = NonNull::from_ref(owner.as_ref()).cast::<()>();
-        let cell = Box::new(ObjectCell {
+        let mut cell = Box::new(ObjectCell {
             id,
             owner: Some(owner),
-            pointer,
+            pointer: NonNull::dangling(),
             type_id: TypeId::of::<T>(),
             type_name: type_name::<T>(),
         });
-        let cell_pointer = NonNull::from(cell.as_ref());
+        cell.pointer = NonNull::from_ref(cell.owner.as_ref().unwrap().as_ref()).cast::<()>();
+
         let mut state = self.state.lock();
         if state.sealed {
             return Err(XllError::Closing);
         }
-        if state
-            .objects
-            .insert(
-                id,
-                ObjectEntry {
-                    cell,
-                    bindings: 1,
-                    pins: 0,
-                },
-            )
-            .is_some()
-        {
+        if state.objects.contains_key(&id) {
             xlfn_kernel::invariant::fail_stop();
         }
+        state.objects.insert(
+            id,
+            ObjectEntry {
+                cell,
+                bindings: 1,
+                pins: 0,
+            },
+        );
+        let cell_pointer = NonNull::from(state.objects.get(&id).unwrap().cell.as_ref());
         drop(state);
         self.record(crate::shutdown_trace::ShutdownEvent::AddHandleObject);
         Ok(ObjectBinding {

@@ -162,7 +162,9 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             });
         }
         servers.insert(generation, server);
-        Ok(SubscriptionServerHandle::new(self, generation))
+        // SAFETY: `self` is the subscription runtime arena which outlives the server
+        // handle; shutdown drains all operations and handles before runtime reclamation.
+        Ok(unsafe { SubscriptionServerHandle::new(self, generation) })
     }
 
     pub(crate) fn resolve_server(

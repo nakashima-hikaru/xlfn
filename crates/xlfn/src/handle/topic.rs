@@ -514,7 +514,6 @@ impl TopicTable {
         }
         let lifetime_key = publication.lifetime_key.clone();
         let publication = Box::new(publication);
-        let pointer = PublishedTopicPtr::from_ref(publication.as_ref());
         state.by_key.insert(
             key,
             Topic {
@@ -526,6 +525,8 @@ impl TopicTable {
                 observer_committed: false,
             },
         );
+        let pointer =
+            PublishedTopicPtr::from_ref(state.by_key.get(&key).unwrap().publication.as_ref());
         state.by_lifetime_key.insert(lifetime_key, key);
         on_linearized(pointer);
         Ok(pointer)

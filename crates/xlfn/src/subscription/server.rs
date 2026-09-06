@@ -35,7 +35,16 @@ impl<H: SubscriptionHost> Clone for SubscriptionServerHandle<H> {
 }
 
 impl<H: SubscriptionHost> SubscriptionServerHandle<H> {
-    pub(super) fn new(runtime: &SubscriptionRuntime<H>, generation: ServerGeneration) -> Self {
+    /// Constructs a generational handle to a registered subscription server.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `runtime` outlives all copies of the returned
+    /// `SubscriptionServerHandle`.
+    pub(super) unsafe fn new(
+        runtime: &SubscriptionRuntime<H>,
+        generation: ServerGeneration,
+    ) -> Self {
         Self {
             runtime: NonNull::from(runtime),
             generation,

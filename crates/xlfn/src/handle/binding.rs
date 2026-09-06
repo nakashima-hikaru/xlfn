@@ -400,8 +400,9 @@ impl BindingReservation<'_> {
             .take()
             .expect("binding reservation owns the table write lock");
         let record = Box::new(BindingRecord::new(self.id, object));
-        let pointer = BindingPtr::from_ref(record.as_ref());
-        state.slots[self.index].record = Some(record);
+        let slot = &mut state.slots[self.index];
+        slot.record = Some(record);
+        let pointer = BindingPtr::from_ref(slot.record.as_ref().unwrap().as_ref());
         self.table.published.insert(self.id, pointer);
         state.live_bindings = state
             .live_bindings

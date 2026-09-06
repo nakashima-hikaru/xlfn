@@ -43,6 +43,7 @@ test-all: test-libtest
 # Miri temporal pointer reclamation and domain safety regression tests.
 miri:
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +nightly miri test -p xlfn-kernel --lib -- miri_
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +nightly miri test -p xlfn --no-default-features --features handles --lib -- miri_
 
 test-core:
     cargo test \

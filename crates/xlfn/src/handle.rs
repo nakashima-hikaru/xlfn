@@ -27,6 +27,10 @@ mod publication;
 mod refinement;
 mod refinement_hooks;
 mod refinement_wire;
+#[allow(
+    unsafe_code,
+    reason = "Registry object and domain capability management"
+)]
 mod registry;
 mod runtime;
 mod store;

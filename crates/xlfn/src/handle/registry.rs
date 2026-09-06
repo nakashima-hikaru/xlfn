@@ -195,7 +195,9 @@ impl HandleRegistry {
         value: T,
     ) -> XllResult<ObjectBinding> {
         let object_id = self.allocate_object_id()?;
-        self.objects.insert(object_id, value)
+        // SAFETY: `self.objects` is owned by this `HandleRegistry`, which manages
+        // the handle lifecycle and drains all bindings and pins before arena reclamation.
+        unsafe { self.objects.insert(object_id, value) }
     }
 
     #[cfg(test)]
@@ -315,7 +317,9 @@ impl HandleRegistry {
         if !self.is_open() {
             return Err(XllError::Closing);
         }
-        let witness = scope.enter_handle_domain(self.bindings.read_domain())?;
+        // SAFETY: `self.bindings.read_domain()` is owned by this `HandleRegistry`,
+        // which outlives the synchronous UDF invocation represented by `scope`.
+        let witness = unsafe { scope.enter_handle_domain(self.bindings.read_domain()) }?;
         let binding = self.bindings.read_scoped(verified.id, witness)?;
         let record = binding.record();
         if record.state() != BindingState::Live {
