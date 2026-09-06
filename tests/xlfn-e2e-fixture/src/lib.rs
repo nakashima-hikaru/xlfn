@@ -126,7 +126,9 @@ impl RtdFixtureSource {
     }
 }
 
-impl RtdSource for RtdFixtureSource {
+// SAFETY: the fixture stores the sink in `FixtureCore::sinks`, and its
+// subscription removes that entry before `disconnect_and_wait` returns.
+unsafe impl RtdSource for RtdFixtureSource {
     type Value = i32;
     type Subscription = RtdFixtureSubscription;
 

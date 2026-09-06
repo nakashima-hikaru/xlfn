@@ -1197,6 +1197,7 @@ fn get_test_class_factory(active: &ActiveServer) -> TestClassFactory {
 }
 
 struct DispatchTestSubscription {
+    sink: Arc<Mutex<Option<RtdSink<f64>>>>,
     disconnected: Arc<AtomicBool>,
 }
 
@@ -1205,6 +1206,7 @@ unsafe impl RtdSubscription for DispatchTestSubscription {
     fn request_cancel(&self) {}
 
     fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
+        self.sink.lock().take();
         self.disconnected.store(true, Ordering::Release);
         Ok(())
     }
@@ -1235,7 +1237,9 @@ impl DispatchTestSource {
     }
 }
 
-impl RtdSource for DispatchTestSource {
+// SAFETY: the test source stores the sink in its shared slot, and the returned
+// subscription clears that slot before disconnect completes.
+unsafe impl RtdSource for DispatchTestSource {
     type Value = f64;
     type Subscription = DispatchTestSubscription;
 
@@ -1247,6 +1251,7 @@ impl RtdSource for DispatchTestSource {
         sink.publish(12.5)?;
         self.sink.lock().replace(sink);
         Ok(DispatchTestSubscription {
+            sink: Arc::clone(&self.sink),
             disconnected: Arc::clone(&self.disconnected),
         })
     }

@@ -127,7 +127,23 @@ impl std::fmt::Debug for SourceArena {
     }
 }
 
-pub trait RtdSource: Send + Sync + 'static {
+/// A source that can issue non-owning sinks into its subscription workers.
+///
+/// # Safety
+///
+/// An implementation must uphold the sink transfer protocol for every call
+/// to [`RtdSource::subscribe`]:
+///
+/// - if `subscribe` returns `Err` or unwinds, no clone of the supplied sink
+///   may escape the call or be used afterward;
+/// - if `subscribe` returns `Ok`, every sink clone that may still be used must
+///   be owned by the returned [`RtdSubscription`]'s cancellation and
+///   disconnection protocol; and
+/// - after `disconnect_and_wait` returns, no such sink clone may be used.
+///
+/// This contract is required because [`RtdSink`] is a lifetime-less,
+/// non-owning capability into a runtime-owned publish core.
+pub unsafe trait RtdSource: Send + Sync + 'static {
     type Value: IntoRtdValue + Send + 'static;
     type Subscription: RtdSubscription;
 

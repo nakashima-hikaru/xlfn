@@ -37,6 +37,11 @@ The runtime also applies bounded admission limits. The standard limits are 253 t
 
 ## Implement a source
 
+`RtdSource` is an unsafe trait because `RtdSink` is a non-owning capability.
+An implementation must not let a sink escape an `Err` or panic path; on
+success, the returned `RtdSubscription` must stop and join every producer
+before `disconnect_and_wait` returns.
+
 ```rust
 {{#include ../../examples/rtd-source/src/metric_source.rs}}
 ```

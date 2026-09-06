@@ -19,7 +19,9 @@ struct BenchmarkRtdSource<T> {
     sink: Arc<parking_lot::Mutex<Option<crate::subscription::RtdSink<T>>>>,
 }
 
-impl<T: crate::subscription::IntoRtdValue + Clone + Send + Sync + 'static>
+// SAFETY: the benchmark source stores its only retained sink in the shared
+// slot, and the benchmark does not use it after its runtime is dropped.
+unsafe impl<T: crate::subscription::IntoRtdValue + Clone + Send + Sync + 'static>
     crate::subscription::RtdSource for BenchmarkRtdSource<T>
 {
     type Value = T;

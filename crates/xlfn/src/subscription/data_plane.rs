@@ -15,13 +15,81 @@ use super::value::StoredRtdValue;
 use crate::generation::ConnectionGeneration;
 use crate::{XllError, XllResult};
 use parking_lot::Mutex;
+#[cfg(test)]
+use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::NonNull;
+#[cfg(test)]
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use xlfn_kernel::operation_gate::{
     OperationGate, OperationGuard, OwnedOperationGuard, TerminationWaitGuard,
 };
 use xlfn_kernel::quota::Quota;
+
+#[cfg(test)]
+type OperationDropTrace = Arc<Mutex<Vec<&'static str>>>;
+
+#[cfg(test)]
+thread_local! {
+    static OPERATION_DROP_TRACE: RefCell<Option<OperationDropTrace>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+struct DropTrace {
+    label: &'static str,
+    trace: Option<OperationDropTrace>,
+    recorded: bool,
+}
+
+#[cfg(test)]
+impl DropTrace {
+    fn new(label: &'static str) -> Self {
+        Self {
+            label,
+            trace: OPERATION_DROP_TRACE.with(|trace| trace.borrow().clone()),
+            recorded: false,
+        }
+    }
+
+    fn record(&mut self) {
+        if self.recorded {
+            return;
+        }
+        self.recorded = true;
+        if let Some(trace) = &self.trace {
+            trace.lock().push(self.label);
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for DropTrace {
+    fn drop(&mut self) {
+        self.record();
+    }
+}
+
+#[cfg(test)]
+struct OperationDropTraceScope {
+    previous: Option<OperationDropTrace>,
+}
+
+#[cfg(test)]
+impl Drop for OperationDropTraceScope {
+    fn drop(&mut self) {
+        OPERATION_DROP_TRACE.with(|trace| {
+            trace.replace(self.previous.take());
+        });
+    }
+}
+
+#[cfg(test)]
+fn with_operation_drop_trace<R>(trace: OperationDropTrace, operation: impl FnOnce() -> R) -> R {
+    let previous = OPERATION_DROP_TRACE.with(|current| current.replace(Some(trace)));
+    let _scope = OperationDropTraceScope { previous };
+    operation()
+}
 
 pub(crate) struct PublishCore<H: SubscriptionHost> {
     host: H,
@@ -148,17 +216,33 @@ impl<H: SubscriptionHost> std::fmt::Debug for PublishCore<H> {
 }
 
 pub(crate) struct ScopedPublishOperation<'a, H: SubscriptionHost> {
-    pub(crate) _runtime_guard: OperationGuard<'a>,
-    pub(crate) _server_guard: OperationGuard<'a>,
-    pub(crate) _host_guard: H::AdmissionGuard,
+    // Drop first while both operation gates still keep runtime services live.
     pub(crate) _observation: ServerOperationObservation,
+    pub(crate) _host_guard: H::AdmissionGuard,
+    #[cfg(test)]
+    _host_drop_trace: DropTrace,
+    // Drop server admission before runtime admission.
+    pub(crate) _server_guard: OperationGuard<'a>,
+    #[cfg(test)]
+    _server_drop_trace: DropTrace,
+    pub(crate) _runtime_guard: OperationGuard<'a>,
+    #[cfg(test)]
+    _runtime_drop_trace: DropTrace,
 }
 
 pub(crate) struct OwnedPublishOperation<H: SubscriptionHost> {
-    _runtime_guard: OwnedOperationGuard,
-    _server_guard: OwnedOperationGuard,
-    _host_guard: H::AdmissionGuard,
+    // Drop first while both operation gates still keep runtime services live.
     _observation: ServerOperationObservation,
+    _host_guard: H::AdmissionGuard,
+    #[cfg(test)]
+    _host_drop_trace: DropTrace,
+    // Drop server admission before runtime admission.
+    _server_guard: OwnedOperationGuard,
+    #[cfg(test)]
+    _server_drop_trace: DropTrace,
+    _runtime_guard: OwnedOperationGuard,
+    #[cfg(test)]
+    _runtime_drop_trace: DropTrace,
 }
 
 // SAFETY: the nested runtime and server operation guards admit execution
@@ -203,6 +287,8 @@ pub(crate) struct InstalledConnection {
 
 pub(crate) struct ServerOperationObservation {
     services: NonNull<RuntimeServices>,
+    #[cfg(test)]
+    drop_trace: DropTrace,
 }
 
 // SAFETY: RuntimeServices is thread-safe, and ServerOperationObservation is
@@ -214,12 +300,16 @@ impl ServerOperationObservation {
         services.record(crate::shutdown_trace::ShutdownEvent::BeginRtdOperation);
         Self {
             services: NonNull::from(services),
+            #[cfg(test)]
+            drop_trace: DropTrace::new("observation"),
         }
     }
 }
 
 impl Drop for ServerOperationObservation {
     fn drop(&mut self) {
+        #[cfg(test)]
+        self.drop_trace.record();
         // SAFETY: every observation is nested inside an admitted publish
         // operation, so runtime services cannot be reclaimed yet.
         unsafe { self.services.as_ref() }
@@ -460,10 +550,16 @@ impl<H: SubscriptionHost> PublishCore<H> {
         })?;
 
         Ok(ScopedPublishOperation {
-            _runtime_guard: runtime_guard.expect("host admission acquires the runtime gate"),
-            _server_guard: server_guard.expect("host admission acquires the server gate"),
-            _host_guard: host_guard,
             _observation: ServerOperationObservation::begin(self.services()),
+            _host_guard: host_guard,
+            #[cfg(test)]
+            _host_drop_trace: DropTrace::new("host"),
+            _server_guard: server_guard.expect("host admission acquires the server gate"),
+            #[cfg(test)]
+            _server_drop_trace: DropTrace::new("server"),
+            _runtime_guard: runtime_guard.expect("host admission acquires the runtime gate"),
+            #[cfg(test)]
+            _runtime_drop_trace: DropTrace::new("runtime"),
         })
     }
 
@@ -490,10 +586,16 @@ impl<H: SubscriptionHost> PublishCore<H> {
         let observation = ServerOperationObservation::begin(self.services());
 
         Ok(OwnedPublishOperation {
-            _runtime_guard: runtime_guard.expect("host admission acquires the runtime gate"),
-            _server_guard: server_guard.expect("host admission acquires the server gate"),
-            _host_guard: host_guard,
             _observation: observation,
+            _host_guard: host_guard,
+            #[cfg(test)]
+            _host_drop_trace: DropTrace::new("host"),
+            _server_guard: server_guard.expect("host admission acquires the server gate"),
+            #[cfg(test)]
+            _server_drop_trace: DropTrace::new("server"),
+            _runtime_guard: runtime_guard.expect("host admission acquires the runtime gate"),
+            #[cfg(test)]
+            _runtime_drop_trace: DropTrace::new("runtime"),
         })
     }
 
@@ -1313,5 +1415,53 @@ impl<H: SubscriptionHost> Drop for RtdRefreshBatch<'_, H> {
             updates,
             RefreshOutcome::Failed,
         );
+    }
+}
+
+#[cfg(all(test, feature = "rtd"))]
+mod tests {
+    use super::{OperationDropTrace, with_operation_drop_trace};
+    use crate::subscription::runtime::SubscriptionRuntime;
+    use std::sync::Arc;
+
+    fn assert_drop_order(run: impl FnOnce()) {
+        let trace: OperationDropTrace = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        with_operation_drop_trace(Arc::clone(&trace), run);
+        assert_eq!(
+            *trace.lock(),
+            vec!["observation", "host", "server", "runtime"]
+        );
+    }
+
+    #[test]
+    fn scoped_publish_operation_drops_observation_before_liveness_guards() {
+        let runtime = SubscriptionRuntime::<crate::excel_rtd::RtdSubscriptionHost>::new();
+        let server = runtime.register_test_server(1);
+
+        assert_drop_order(|| {
+            let operation = server
+                .test_server()
+                .enter_operation()
+                .expect("test server operation admission must succeed");
+            drop(operation);
+        });
+    }
+
+    #[test]
+    fn owned_publish_operation_drops_observation_before_liveness_guards() {
+        let runtime = SubscriptionRuntime::<crate::excel_rtd::RtdSubscriptionHost>::new();
+        let server = runtime.register_test_server(1);
+
+        assert_drop_order(|| {
+            // SAFETY: `runtime` and `server` remain live until the owned
+            // operation has been dropped in this scope.
+            let operation = unsafe {
+                server
+                    .test_server()
+                    .enter_owned_operation()
+                    .expect("owned test server operation admission must succeed")
+            };
+            drop(operation);
+        });
     }
 }

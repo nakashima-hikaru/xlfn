@@ -13,15 +13,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub(crate) struct TestSubscription {
     canceled: Arc<AtomicBool>,
     disconnected: Arc<AtomicBool>,
+    on_disconnect: Option<Box<dyn FnOnce() + Send>>,
 }
 
-// SAFETY: test subscription does not access external resources.
+// SAFETY: any retained test sink is cleared by the disconnect callback before
+// this subscription reports quiescence; no background producer remains.
 unsafe impl RtdSubscription for TestSubscription {
     fn request_cancel(&self) {
         self.canceled.store(true, Ordering::Release);
     }
 
-    fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
+    fn disconnect_and_wait(mut self: Box<Self>) -> XllResult<()> {
+        if let Some(on_disconnect) = self.on_disconnect.take() {
+            on_disconnect();
+        }
         self.disconnected.store(true, Ordering::Release);
         Ok(())
     }
@@ -35,7 +40,9 @@ pub(crate) struct PublishingSource<T = RtdValue, F = fn() -> XllResult<()>> {
     on_subscribe: Option<F>,
 }
 
-impl<T, F> RtdSource for PublishingSource<T, F>
+// SAFETY: the source stores the sink in `sink_slot`; the returned subscription
+// clears that slot before disconnect completes.
+unsafe impl<T, F> RtdSource for PublishingSource<T, F>
 where
     T: IntoRtdValue + Clone + Send + Sync + 'static,
     F: Fn() -> XllResult<()> + Send + Sync + 'static,
@@ -55,9 +62,13 @@ where
             sink.publish(initial)?;
         }
         *self.sink_slot.lock() = Some(sink);
+        let sink_slot = Arc::clone(&self.sink_slot);
         Ok(TestSubscription {
             canceled: Arc::clone(&self.canceled),
             disconnected: Arc::clone(&self.disconnected),
+            on_disconnect: Some(Box::new(move || {
+                sink_slot.lock().take();
+            })),
         })
     }
 }
@@ -1267,7 +1278,8 @@ fn inflight_prepare_waits_for_close() {
             self.0.store(true, Ordering::Release);
         }
     }
-    impl RtdSource for DroppingSource {
+    // SAFETY: this source never retains or uses the supplied sink.
+    unsafe impl RtdSource for DroppingSource {
         type Value = RtdValue;
         type Subscription = TestSubscription;
         fn subscribe(
@@ -1278,6 +1290,7 @@ fn inflight_prepare_waits_for_close() {
             Ok(TestSubscription {
                 canceled: Arc::new(AtomicBool::new(false)),
                 disconnected: Arc::new(AtomicBool::new(false)),
+                on_disconnect: None,
             })
         }
     }
@@ -1344,7 +1357,8 @@ fn reentrant_drop_safety() {
         }
     }
 
-    impl RtdSource for ReentrantSource {
+    // SAFETY: this source never retains or uses the supplied sink.
+    unsafe impl RtdSource for ReentrantSource {
         type Value = RtdValue;
         type Subscription = TestSubscription;
         fn subscribe(
@@ -1355,6 +1369,7 @@ fn reentrant_drop_safety() {
             Ok(TestSubscription {
                 canceled: Arc::new(AtomicBool::new(false)),
                 disconnected: Arc::new(AtomicBool::new(false)),
+                on_disconnect: None,
             })
         }
     }
@@ -1632,7 +1647,9 @@ struct DelayedSubscribeFailingSource {
     tx_entered: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
     rx_close: Mutex<std::sync::mpsc::Receiver<()>>,
 }
-impl RtdSource for DelayedSubscribeFailingSource {
+// SAFETY: this source only blocks before returning and never retains or uses
+// the supplied sink.
+unsafe impl RtdSource for DelayedSubscribeFailingSource {
     type Value = f64;
     type Subscription = FailingDisconnectSubscription;
     fn subscribe(
@@ -2395,7 +2412,9 @@ unsafe impl<T: Send + 'static> RtdSubscription for SinkHoldingSubscription<T> {
 
 struct SinkCapturingSource;
 
-impl RtdSource for SinkCapturingSource {
+// SAFETY: the returned subscription owns the sink and releases it only after
+// the runtime has completed disconnecting the subscription.
+unsafe impl RtdSource for SinkCapturingSource {
     type Value = f64;
     type Subscription = SinkHoldingSubscription<Self::Value>;
     fn subscribe(

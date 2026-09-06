@@ -18,7 +18,9 @@ pub(crate) struct MetricSource {
     pub(crate) client: Arc<Client>,
 }
 
-impl RtdSource for MetricSource {
+// SAFETY: the worker owns the sink until its join handle is joined by
+// `MetricSubscription::disconnect_and_wait`; no sink is retained on failure.
+unsafe impl RtdSource for MetricSource {
     type Value = RtdValue;
     type Subscription = MetricSubscription;
 

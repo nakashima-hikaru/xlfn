@@ -662,7 +662,9 @@ mod tests {
             sink: std::sync::Arc<std::sync::Mutex<Option<crate::subscription::RtdSink<f64>>>>,
         }
 
-        impl crate::subscription::RtdSource for TraceSource {
+        // SAFETY: the trace source stores the sink only in the test-owned slot;
+        // the ignored checker test does not use it after teardown.
+        unsafe impl crate::subscription::RtdSource for TraceSource {
             type Value = f64;
             type Subscription = TraceSubscription;
 
@@ -1476,7 +1478,8 @@ mod tests {
             events: std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
         }
 
-        impl crate::subscription::RtdSource for OrderedSource {
+        // SAFETY: this source does not retain or use the sink.
+        unsafe impl crate::subscription::RtdSource for OrderedSource {
             type Value = f64;
             type Subscription = OrderedSubscription;
 

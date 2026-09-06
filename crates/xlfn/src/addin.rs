@@ -953,7 +953,9 @@ mod tests {
             disconnected: Arc<AtomicBool>,
         }
 
-        impl crate::subscription::RtdSource for TestSource {
+        // SAFETY: this test source publishes synchronously and does not retain
+        // the sink after `subscribe` returns.
+        unsafe impl crate::subscription::RtdSource for TestSource {
             type Value = f64;
             type Subscription = TestSubscription;
 
