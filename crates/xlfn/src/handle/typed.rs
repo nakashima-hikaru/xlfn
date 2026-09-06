@@ -1,5 +1,6 @@
 use super::binding::BindingReadLease;
-use super::object::{ObjectBinding, RawObjectLeaseGuard, TypedObjectProjection};
+use super::object::{PendingObjectBinding, RawObjectLeaseGuard, TypedObjectProjection};
+use super::store::HandleStore;
 use super::token::ObjectId;
 use crate::XllResult;
 #[cfg(any(feature = "async", test))]
@@ -204,8 +205,11 @@ pub struct HandleAlias<'call, T: ExcelHandleObject> {
 }
 
 impl<T: ExcelHandleObject> HandleAlias<'_, T> {
-    pub(crate) fn into_object_binding(self) -> XllResult<ObjectBinding> {
-        self.binding.duplicate_object_binding()
+    pub(crate) fn into_pending_object_binding<'store>(
+        self,
+        store: &'store HandleStore,
+    ) -> XllResult<PendingObjectBinding<'store>> {
+        store.duplicate_binding(&self.binding)
     }
 
     #[cfg(test)]

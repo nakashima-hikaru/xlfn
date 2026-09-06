@@ -60,31 +60,6 @@ pub(crate) struct HandleRegistry {
     pub(super) trace: Mutex<Option<crate::shutdown_trace::ShutdownTraceHandle>>,
 }
 
-/// Owns an object until a binding reservation consumes it. If publication
-/// fails, dropping this guard releases the object through the same
-/// `ObjectCell` destructor path as every other ownership edge.
-pub(crate) struct PendingHandleValue {
-    value: Option<ObjectBinding>,
-}
-
-impl PendingHandleValue {
-    pub(crate) fn new(value: ObjectBinding) -> Self {
-        Self { value: Some(value) }
-    }
-
-    pub(crate) fn slot(&mut self) -> &mut Option<ObjectBinding> {
-        &mut self.value
-    }
-}
-
-impl Drop for PendingHandleValue {
-    fn drop(&mut self) {
-        if let Some(value) = self.value.take() {
-            drop(value);
-        }
-    }
-}
-
 impl HandleRegistry {
     pub(crate) fn try_new(maximum_bindings: usize) -> XllResult<Self> {
         Self::try_new_with(maximum_bindings, |entropy| getrandom::fill(entropy), true)
@@ -199,7 +174,12 @@ impl HandleRegistry {
         // SAFETY: `self.objects` is owned by this `HandleRegistry`, which manages
         // the handle lifecycle and drains all bindings and pins before arena reclamation.
         let binding = unsafe { self.objects.insert(object_id, value) }?;
-        Ok(PendingObjectBinding::new(binding))
+        PendingObjectBinding::new(self, binding)
+    }
+
+    #[inline]
+    pub(crate) fn owns_object_arena(&self, arena: NonNull<ObjectArena>) -> bool {
+        arena == NonNull::from(self.objects.as_ref())
     }
 
     #[inline]
@@ -216,9 +196,19 @@ impl HandleRegistry {
         T: Send + Sync + 'static,
     {
         let object = self.new_object(value.take().expect("pending handle value is armed"))?;
-        let mut object = PendingHandleValue::new(object.into_inner());
-        self.insert_pending_object_with_kind::<T>(object.slot())
+        object
+            .publish::<T>(self)
             .map(|(token, _binding_id, _object_id, _reused)| token)
+    }
+
+    pub(crate) fn publish_pending<'registry, T>(
+        &'registry self,
+        pending: PendingObjectBinding<'registry>,
+    ) -> XllResult<(String, HandleId, ObjectId, bool)>
+    where
+        T: Send + Sync + 'static,
+    {
+        pending.publish::<T>(self)
     }
 
     pub(crate) fn insert_pending_object_with_kind<T>(
@@ -241,30 +231,6 @@ impl HandleRegistry {
         }
         let object = value.take().expect("pending handle object is armed");
         let object_id = object.id();
-        let (id, reused) = reservation.publish(object);
-        #[cfg(any(test, feature = "refinement"))]
-        self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::AddHandle);
-        Ok((self.codec.format(id), id, object_id, reused))
-    }
-
-    pub(crate) fn insert_existing_object_binding<T>(
-        &self,
-        object: ObjectBinding,
-    ) -> XllResult<(String, HandleId, ObjectId, bool)>
-    where
-        T: Send + Sync + 'static,
-    {
-        if !self.is_open() {
-            return Err(XllError::Closing);
-        }
-        self.check_object_arena(&object)?;
-        self.validate_type::<T>(&object)?;
-        let object_id = object.id();
-        let reservation = self.bindings.reserve()?;
-        if !self.is_open() {
-            drop(reservation);
-            return Err(XllError::Closing);
-        }
         let (id, reused) = reservation.publish(object);
         #[cfg(any(test, feature = "refinement"))]
         self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::AddHandle);

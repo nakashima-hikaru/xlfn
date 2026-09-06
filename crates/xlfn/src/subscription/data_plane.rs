@@ -27,6 +27,7 @@ pub(crate) struct PublishCore<H: SubscriptionHost> {
     host: H,
     runtime_gate: NonNull<OperationGate>,
     server_gate: OperationGate,
+    active_quota: NonNull<Quota>,
     queued_update_quota: NonNull<Quota>,
     lifecycle: AtomicU8,
     publish_epoch: AtomicU64,
@@ -41,9 +42,18 @@ pub(crate) struct PublishCore<H: SubscriptionHost> {
 }
 
 impl<H: SubscriptionHost> PublishCore<H> {
-    pub(crate) fn new(
+    /// Creates a publish core whose non-owning capabilities point into one
+    /// subscription runtime.
+    ///
+    /// # Safety
+    ///
+    /// `runtime_gate`, `active_quota`, `queued_update_quota`, and `services`
+    /// must all belong to the same owner, and that owner must keep them
+    /// allocated until this core and every capability it mints are dropped.
+    pub(crate) unsafe fn new(
         host: H,
         runtime_gate: &OperationGate,
+        active_quota: &Quota,
         queued_update_quota: &Quota,
         services: &RuntimeServices,
     ) -> Self {
@@ -56,6 +66,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
             host,
             runtime_gate: NonNull::from(runtime_gate),
             server_gate: OperationGate::new(),
+            active_quota: NonNull::from(active_quota),
             queued_update_quota: NonNull::from(queued_update_quota),
             lifecycle: AtomicU8::new(SERVER_LIFECYCLE_OPEN),
             publish_epoch: AtomicU64::new(0),
@@ -77,6 +88,13 @@ impl<H: SubscriptionHost> PublishCore<H> {
     }
 
     #[inline]
+    fn active_quota(&self) -> &Quota {
+        // SAFETY: the runtime-owned active quota outlives this publish core
+        // and every active-subscription permit it creates.
+        unsafe { self.active_quota.as_ref() }
+    }
+
+    #[inline]
     fn queued_update_quota(&self) -> &Quota {
         // SAFETY: the runtime-owned quota outlives all publish cores and their
         // queued-update permits.
@@ -95,6 +113,17 @@ impl<H: SubscriptionHost> PublishCore<H> {
 unsafe impl<H: SubscriptionHost> Send for PublishCore<H> {}
 // SAFETY: PublishCore fields use atomic or mutex synchronization.
 unsafe impl<H: SubscriptionHost> Sync for PublishCore<H> {}
+
+impl<H: SubscriptionHost> Drop for PublishCore<H> {
+    fn drop(&mut self) {
+        // An owned operation keeps a raw server-gate pointer and must never
+        // survive reclamation of this core. Fail closed if the owner protocol
+        // is violated instead of allowing its guard to become a UAF.
+        if self.server_gate.active() != 0 {
+            xlfn_kernel::invariant::fail_stop();
+        }
+    }
+}
 
 impl<H: SubscriptionHost> std::fmt::Debug for PublishCore<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -438,7 +467,13 @@ impl<H: SubscriptionHost> PublishCore<H> {
         })
     }
 
-    pub(crate) fn enter_owned_operation(&self) -> XllResult<OwnedPublishOperation<H>> {
+    /// Enters an operation whose guard owns its gate admissions.
+    ///
+    /// # Safety
+    ///
+    /// The caller must keep this `PublishCore` and the runtime-owned fields
+    /// referenced by it allocated until the returned operation is dropped.
+    pub(crate) unsafe fn enter_owned_operation(&self) -> XllResult<OwnedPublishOperation<H>> {
         let mut runtime_guard = None;
         let mut server_guard = None;
         let host_guard = self.host.enter_with(|| {
@@ -467,7 +502,6 @@ impl<H: SubscriptionHost> PublishCore<H> {
         topic_id: TopicId,
         id: SubscriptionId,
         generation: ConnectionGeneration,
-        active_quota: &Quota,
     ) -> XllResult<()> {
         let shard_index = shard_index(topic_id);
         let mut shard = self.shards[shard_index].lock();
@@ -480,10 +514,10 @@ impl<H: SubscriptionHost> PublishCore<H> {
         }
         if let std::collections::hash_map::Entry::Vacant(topic_entry) = shard.topic_by_id.entry(id)
         {
-            // SAFETY: the runtime-owned active quota outlives every server and
-            // is reclaimed only after all connection permits are drained.
-            let permit =
-                unsafe { Quota::try_acquire(active_quota) }.map_err(|_| XllError::Overloaded)?;
+            // SAFETY: `active_quota` is the quota coupled to this core at
+            // construction, and the runtime reclaims it after its servers.
+            let permit = unsafe { Quota::try_acquire(self.active_quota()) }
+                .map_err(|_| XllError::Overloaded)?;
             topic_entry.insert(topic_id);
             shard.active_by_topic.insert(
                 topic_id,

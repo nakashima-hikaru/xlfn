@@ -34,6 +34,11 @@ impl OperationGate {
     }
 
     #[inline]
+    pub fn active(&self) -> usize {
+        self.drain.active()
+    }
+
+    #[inline]
     pub fn begin_close(&self) {
         self.drain.seal();
     }

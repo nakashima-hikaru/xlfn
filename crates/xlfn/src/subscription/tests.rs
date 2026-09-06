@@ -2282,7 +2282,9 @@ fn runtime_close_causes_fail_closed_on_server() {
         Err(XllError::Closing)
     ));
     assert!(matches!(
-        server.test_server().enter_owned_operation(),
+        // SAFETY: the runtime was closed above, so this call can only fail
+        // before minting an owned operation and the server remains allocated.
+        unsafe { server.test_server().enter_owned_operation() },
         Err(XllError::Closing)
     ));
     assert!(matches!(
@@ -2532,6 +2534,22 @@ fn resolve_transport_key_validates_runtime_identity() {
     let transport = key.to_transport();
     let parsed_key = SubscriptionKey::parse_transport(&transport).unwrap();
     assert_eq!(runtime_a.resolve_transport_key(parsed_key).unwrap(), id);
+}
+
+#[test]
+fn server_handle_cannot_cross_subscription_runtime_boundary() {
+    let runtime_a = Arc::new(SubscriptionRuntime::new());
+    let runtime_b = Arc::new(SubscriptionRuntime::new());
+    let server_a = runtime_a.register_test_server(1);
+
+    assert!(matches!(
+        runtime_b.connect_transaction(&server_a, TopicId(1), SubscriptionId(1)),
+        Err(XllError::StaleHandle)
+    ));
+    assert!(matches!(
+        runtime_b.disconnect(&server_a, TopicId(1)),
+        Err(XllError::StaleHandle)
+    ));
 }
 
 #[test]

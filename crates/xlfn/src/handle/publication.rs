@@ -178,17 +178,17 @@ impl<'runtime> PublicationReservation<'runtime> {
 
     pub(super) fn insert_object<T: ExcelHandleObject>(
         self,
-        prepared: PreparedHandleObject,
+        prepared: PreparedHandleObject<'runtime>,
     ) -> XllResult<InsertedPublication<'runtime>> {
         let (token, _binding_id, _object_id, reused) = match prepared {
             PreparedHandleObject::New(value) => self
                 .runtime
                 .store
-                .insert_pending::<T>(value.into_binding())?,
+                .insert_pending::<T>(value.into_pending())?,
             PreparedHandleObject::Existing(object) => self
                 .runtime
                 .store
-                .insert_existing::<T>(object.into_binding())?,
+                .insert_pending::<T>(object.into_pending())?,
         };
         let provisional = ProvisionalPublication::new(
             self.runtime,

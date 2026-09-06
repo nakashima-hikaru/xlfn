@@ -51,6 +51,11 @@ impl<H: SubscriptionHost> SubscriptionServerHandle<H> {
         }
     }
 
+    #[inline]
+    pub(super) fn belongs_to(&self, runtime: &SubscriptionRuntime<H>) -> bool {
+        self.runtime == NonNull::from(runtime)
+    }
+
     #[cfg(test)]
     #[inline]
     pub(crate) const fn generation(&self) -> ServerGeneration {
@@ -184,8 +189,18 @@ impl<H: SubscriptionHost> SubscriptionServer<H> {
     }
 
     #[inline]
-    pub(crate) fn enter_owned_operation(&self) -> XllResult<OwnedServerOperation<H>> {
-        let publish_operation = self.publish.enter_owned_operation()?;
+    /// Enters an operation whose guard is allowed to outlive this borrow.
+    ///
+    /// # Safety
+    ///
+    /// The caller must keep this server and its owning subscription runtime
+    /// allocated until the returned operation is dropped. In particular, the
+    /// runtime and server must seal and drain their operation gates before
+    /// reclaiming either object.
+    pub(crate) unsafe fn enter_owned_operation(&self) -> XllResult<OwnedServerOperation<H>> {
+        // SAFETY: upheld by this function's caller; the publish core is
+        // runtime-owned and its operation guard keeps both gates admitted.
+        let publish_operation = unsafe { self.publish.enter_owned_operation()? };
         Ok(OwnedServerOperation {
             server: NonNull::from(self),
             _publish_operation: publish_operation,

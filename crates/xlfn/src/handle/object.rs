@@ -403,21 +403,35 @@ impl ObjectBinding {
 /// owning [`HandleRegistry`].
 pub(crate) struct PendingObjectBinding<'registry> {
     binding: ObjectBinding,
-    _registry: std::marker::PhantomData<&'registry ()>,
+    _registry: std::marker::PhantomData<&'registry super::registry::HandleRegistry>,
 }
 
 impl<'registry> PendingObjectBinding<'registry> {
     #[inline]
-    pub(crate) fn new(binding: ObjectBinding) -> Self {
-        Self {
+    pub(super) fn new(
+        registry: &'registry super::registry::HandleRegistry,
+        binding: ObjectBinding,
+    ) -> XllResult<Self> {
+        if !registry.owns_object_arena(binding.arena()) {
+            return Err(XllError::StaleHandle);
+        }
+        Ok(Self {
             binding,
             _registry: std::marker::PhantomData,
-        }
+        })
     }
 
+    /// Publishes this capability directly into its registry owner.
+    ///
+    /// The lifetime anchor is consumed together with the binding; no
+    /// lifetime-less `ObjectBinding` is returned to the caller.
     #[inline]
-    pub(crate) fn into_inner(self) -> ObjectBinding {
-        self.binding
+    pub(super) fn publish<T: Send + Sync + 'static>(
+        self,
+        registry: &'registry super::registry::HandleRegistry,
+    ) -> XllResult<(String, super::token::HandleId, ObjectId, bool)> {
+        let mut binding = Some(self.binding);
+        registry.insert_pending_object_with_kind::<T>(&mut binding)
     }
 
     #[cfg(test)]

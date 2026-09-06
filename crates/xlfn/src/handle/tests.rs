@@ -3461,9 +3461,8 @@ fn rejects_object_binding_from_foreign_registry() {
         pending.arena(),
         std::ptr::NonNull::from(first.objects.as_ref())
     );
-    let binding = pending.into_inner();
     assert!(matches!(
-        second.insert_existing_object_binding::<DataRecord>(binding),
+        pending.publish::<DataRecord>(&second),
         Err(XllError::StaleHandle)
     ));
 }

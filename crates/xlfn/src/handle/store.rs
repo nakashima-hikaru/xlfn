@@ -5,8 +5,9 @@
 //! [`super::runtime::FormulaHandleService`]; they use this façade instead of
 //! reaching into the registry lifecycle directly.
 
-use super::object::{ObjectBinding, PendingObjectBinding};
-use super::registry::{HandleRegistry, HandleRegistrySealed, PendingHandleValue};
+use super::binding::BindingReadLease;
+use super::object::PendingObjectBinding;
+use super::registry::{HandleRegistry, HandleRegistrySealed};
 use super::{ExcelHandleObject, Handle, HandleId, HandleToken, ObjectId, TokenWire};
 use crate::XllResult;
 use crate::generation::RuntimeGeneration;
@@ -33,24 +34,23 @@ impl HandleStore {
         self.registry.new_object(value)
     }
 
+    pub(crate) fn duplicate_binding<'store>(
+        &'store self,
+        source: &BindingReadLease<'_>,
+    ) -> XllResult<PendingObjectBinding<'store>> {
+        let binding = source.duplicate_object_binding()?;
+        PendingObjectBinding::new(&self.registry, binding)
+    }
+
     pub(crate) const fn session(&self) -> u64 {
         self.registry.codec.session
     }
 
-    pub(crate) fn insert_pending<T: ExcelHandleObject>(
-        &self,
-        value: ObjectBinding,
+    pub(crate) fn insert_pending<'store, T: ExcelHandleObject>(
+        &'store self,
+        value: PendingObjectBinding<'store>,
     ) -> XllResult<(String, HandleId, ObjectId, bool)> {
-        let mut pending = PendingHandleValue::new(value);
-        self.registry
-            .insert_pending_object_with_kind::<T>(pending.slot())
-    }
-
-    pub(crate) fn insert_existing<T: ExcelHandleObject>(
-        &self,
-        object: ObjectBinding,
-    ) -> XllResult<(String, HandleId, ObjectId, bool)> {
-        self.registry.insert_existing_object_binding::<T>(object)
+        value.publish::<T>(&self.registry)
     }
 
     pub(crate) fn lookup<'call, T: ExcelHandleObject>(

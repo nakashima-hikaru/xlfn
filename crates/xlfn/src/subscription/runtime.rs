@@ -149,12 +149,19 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         if let Some(hook) = self.test_enter_hook.lock().as_ref().cloned() {
             hook();
         }
-        let publish = Box::new(PublishCore::new(
-            self.host.clone(),
-            &self.runtime_gate,
-            &self.queued_update_quota,
-            &self.services,
-        ));
+        // SAFETY: all referenced fields are owned by this runtime, and the
+        // declaration order keeps every server/core alive before those fields
+        // are reclaimed. `register_server` also carries the runtime lifetime
+        // contract for the returned handle.
+        let publish = Box::new(unsafe {
+            PublishCore::new(
+                self.host.clone(),
+                &self.runtime_gate,
+                &self.active_quota,
+                &self.queued_update_quota,
+                &self.services,
+            )
+        });
         let server = Box::new(SubscriptionServer {
             generation,
             publish,
@@ -329,8 +336,14 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         topic_id: TopicId,
         id: SubscriptionId,
     ) -> XllResult<SubscriptionConnection<H>> {
+        if !server_handle.belongs_to(self) {
+            return Err(XllError::StaleHandle);
+        }
         let server = server_handle.server()?;
-        let operation = server.enter_owned_operation()?;
+        // SAFETY: the exact handle/runtime identity was checked above; the
+        // runtime and its server arena remain allocated for this owned
+        // connection operation under the register/close lifecycle contract.
+        let operation = unsafe { server.enter_owned_operation()? };
         let conn_gen = ConnectionGeneration::new(
             self.next_connection_generation
                 .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -359,11 +372,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             .resolve(source_id)
             .ok_or(XllError::StaleHandle)?;
 
-        if let Err(error) =
-            server
-                .publish
-                .reserve_connection(topic_id, id, conn_gen, &self.active_quota)
-        {
+        if let Err(error) = server.publish.reserve_connection(topic_id, id, conn_gen) {
             self.rollback_catalog_connection_reservation(id, conn_gen);
             return Err(error);
         }
@@ -497,6 +506,9 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         server_handle: &SubscriptionServerHandle<H>,
         topic_id: TopicId,
     ) -> XllResult<()> {
+        if !server_handle.belongs_to(self) {
+            return Err(XllError::StaleHandle);
+        }
         let server = server_handle.server()?;
         let _operation = server.enter_operation()?;
         let subscription = server.subscriptions.lock().remove(&topic_id);
@@ -771,6 +783,9 @@ impl<H: SubscriptionHost> Drop for SubscriptionConnection<H> {
 
 impl<H: SubscriptionHost> Drop for SubscriptionRuntime<H> {
     fn drop(&mut self) {
-        self.runtime_gate.begin_close();
+        // `close` normally performs this drain explicitly. Keep the final
+        // owner-drop path safe for callers that only hold the runtime owner:
+        // every owned operation must release its raw gate pointers first.
+        self.runtime_gate.close_and_wait_begin().wait();
     }
 }

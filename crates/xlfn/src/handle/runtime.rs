@@ -1,9 +1,10 @@
+use super::object::PendingObjectBinding;
 use super::publication::{InsertedPublication, ObjectAllocation, PublicationReservation};
 use super::registry::HandleRegistrySealed;
 use super::{
     ExcelHandleObject, Handle, HandleAlias, HandlePrepareState, HandleRefinementHooks, HandleStore,
-    HandleTopicKey, Initialization, InitializationPtr, ObjectBinding, PrepareDecision,
-    PublishedTopic, PublishedTopicPtr, PublishedTopicState, TopicRemoval, TopicTable,
+    HandleTopicKey, Initialization, InitializationPtr, PrepareDecision, PublishedTopic,
+    PublishedTopicPtr, PublishedTopicState, TopicRemoval, TopicTable,
 };
 #[cfg(any(target_os = "windows", test))]
 use super::{FormulaLifetimeGeneration, FormulaObserverId, HandleConnection};
@@ -16,33 +17,33 @@ use std::cell::OnceCell;
 use std::cell::RefCell;
 use std::sync::atomic::AtomicBool;
 
-pub(crate) struct NewObject(ObjectBinding);
+pub(crate) struct NewObject<'registry>(PendingObjectBinding<'registry>);
 
-impl NewObject {
-    fn new(value: ObjectBinding) -> Self {
+impl<'registry> NewObject<'registry> {
+    fn new(value: PendingObjectBinding<'registry>) -> Self {
         Self(value)
     }
 
-    pub(super) fn into_binding(self) -> ObjectBinding {
+    pub(super) fn into_pending(self) -> PendingObjectBinding<'registry> {
         self.0
     }
 }
 
-pub(crate) struct ExistingObject(ObjectBinding);
+pub(crate) struct ExistingObject<'registry>(PendingObjectBinding<'registry>);
 
-impl ExistingObject {
-    fn new(object: ObjectBinding) -> Self {
+impl<'registry> ExistingObject<'registry> {
+    fn new(object: PendingObjectBinding<'registry>) -> Self {
         Self(object)
     }
 
-    pub(super) fn into_binding(self) -> ObjectBinding {
+    pub(super) fn into_pending(self) -> PendingObjectBinding<'registry> {
         self.0
     }
 }
 
-pub(crate) enum PreparedHandleObject {
-    New(NewObject),
-    Existing(ExistingObject),
+pub(crate) enum PreparedHandleObject<'registry> {
+    New(NewObject<'registry>),
+    Existing(ExistingObject<'registry>),
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -240,7 +241,7 @@ impl FormulaHandleService {
                 create().map(|value| {
                     self.store
                         .erase(value)
-                        .map(|value| PreparedHandleObject::New(NewObject::new(value.into_inner())))
+                        .map(|value| PreparedHandleObject::New(NewObject::new(value)))
                 })?
             },
             observe,
@@ -261,17 +262,17 @@ impl FormulaHandleService {
             key,
             || {
                 Ok(PreparedHandleObject::Existing(ExistingObject::new(
-                    object.into_object_binding()?,
+                    object.into_pending_object_binding(&self.store)?,
                 )))
             },
             observe,
         )
     }
 
-    fn prepare_observed_object<T, K>(
-        &self,
+    fn prepare_observed_object<'runtime, T, K>(
+        &'runtime self,
         key: K,
-        create: impl FnOnce() -> XllResult<PreparedHandleObject>,
+        create: impl FnOnce() -> XllResult<PreparedHandleObject<'runtime>>,
         observe: impl FnOnce(&str, &str) -> XllResult<()>,
     ) -> XllResult<HandlePreparation>
     where

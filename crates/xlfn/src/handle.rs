@@ -91,7 +91,6 @@ pub(crate) use lifetime::FormulaLifetimeBackend;
 #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles"),))]
 pub(crate) use lifetime::FormulaLifetimeConnection;
 pub(crate) use lifetime::FormulaLifetimeGeneration;
-pub(crate) use object::ObjectBinding;
 pub(crate) use prepare::HandlePrepareState;
 pub(crate) use refinement_hooks::HandleRefinementHooks;
 pub(crate) use refinement_wire::TokenWire;
@@ -99,8 +98,6 @@ pub(crate) use refinement_wire::TokenWire;
 pub(crate) use registry::HandleRegistry;
 #[cfg(test)]
 pub(crate) use registry::HandleRegistryPhase;
-#[cfg(test)]
-pub(crate) use registry::PendingHandleValue;
 #[cfg(any(test, feature = "bench-internals", target_os = "windows"))]
 pub(crate) use runtime::FormulaHandleService;
 #[cfg(all(feature = "handles", any(test, feature = "bench-internals")))]
