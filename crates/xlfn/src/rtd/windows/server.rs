@@ -183,7 +183,7 @@ impl Drop for OwnedServerReference {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct BackendHandles(NonNull<dyn FormulaLifetimeBackend>);
+pub(super) struct BackendHandles(pub(super) NonNull<dyn FormulaLifetimeBackend>);
 
 // SAFETY: FormulaLifetimeBackend is Send + Sync and remains valid while attached to the server.
 unsafe impl Send for BackendHandles {}
@@ -210,7 +210,7 @@ impl BackendHandles {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct BackendSubscriptions(NonNull<SubscriptionRuntime>);
+pub(super) struct BackendSubscriptions(pub(super) NonNull<SubscriptionRuntime>);
 
 // SAFETY: SubscriptionRuntime is Send + Sync and remains valid while attached to the server.
 unsafe impl Send for BackendSubscriptions {}
