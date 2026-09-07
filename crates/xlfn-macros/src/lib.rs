@@ -16,6 +16,7 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
+use syn::ext::IdentExt;
 use syn::{DeriveInput, ItemFn, ItemStruct, parse_macro_input};
 mod codegen;
 mod model;
@@ -104,10 +105,10 @@ fn expand_excel_addin(
         ));
     }
     let ident = &item.ident;
-    let display_name = options.name.unwrap_or_else(|| ident.to_string());
+    let display_name = options.name.unwrap_or_else(|| ident.unraw().to_string());
     let id = options
         .id
-        .unwrap_or_else(|| ident.to_string().to_ascii_lowercase());
+        .unwrap_or_else(|| ident.unraw().to_string().to_ascii_lowercase());
     let category = options.category.unwrap_or_else(|| display_name.clone());
     let runtime_constructor = if options.physical_unload {
         quote!(#krate::__private::v1::MacroRuntime::new_with_physical_unload())
@@ -215,6 +216,36 @@ mod tests {
 
     fn function(source: proc_macro2::TokenStream) -> ItemFn {
         syn::parse2(source).unwrap()
+    }
+
+    #[test]
+    fn raw_identifiers_use_unescaped_excel_metadata() {
+        let parsed = model::parse_udf(
+            quote!(),
+            function(quote!(
+                fn r#type(r#match: f64) -> f64 {
+                    r#match
+                }
+            )),
+        )
+        .unwrap();
+        let spec = model::analyze(parsed).unwrap();
+        assert_eq!(spec.metadata.id.as_str(), "type");
+        assert_eq!(spec.metadata.excel_name, "type");
+        assert_eq!(spec.arguments[0].excel_name, "match");
+
+        let parsed = model::parse_udf(
+            quote!(name = "r#type"),
+            function(quote!(
+                fn r#type(#[excel_arg(name = "r#match")] r#match: f64) -> f64 {
+                    r#match
+                }
+            )),
+        )
+        .unwrap();
+        let spec = model::analyze(parsed).unwrap();
+        assert_eq!(spec.metadata.excel_name, "r#type");
+        assert_eq!(spec.arguments[0].excel_name, "r#match");
     }
 
     fn assert_outer_abi_boundary(item: &ItemFn, expected: &str) {

@@ -1,4 +1,20 @@
-use crate::unstable::cache::CalculationCache;
+use crate::unstable::cache::{CacheBackend, CalculationCache};
+
+/// Selects only the resident backend in cache benchmark executables.
+pub fn benchmark_cache_backend() -> CacheBackend {
+    match std::env::var("XLFN_CACHE_BACKEND")
+        .as_deref()
+        .unwrap_or("moka")
+    {
+        "moka" => CacheBackend::Moka,
+        "sharded8" => CacheBackend::Sharded { shards: 8 },
+        "sharded16" => CacheBackend::Sharded { shards: 16 },
+        "sharded32" => CacheBackend::Sharded { shards: 32 },
+        "sharded64" => CacheBackend::Sharded { shards: 64 },
+        value => panic!("unknown XLFN_CACHE_BACKEND: {value}"),
+    }
+}
+
 use moka::{Equivalent, sync::Cache};
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
@@ -108,7 +124,10 @@ fn warmed_calculation_cache(
     case: CacheLookupBenchCase,
     worker_count: usize,
 ) -> Arc<CalculationCache<u64, u64>> {
-    let cache = Arc::new(CalculationCache::<u64, u64>::new(LOOKUP_WEIGHT_BUDGET));
+    let cache = Arc::new(CalculationCache::<u64, u64>::new_with_backend(
+        LOOKUP_WEIGHT_BUDGET,
+        benchmark_cache_backend(),
+    ));
     for key in case.warm_keys(worker_count) {
         cache
             .get_or_try_insert_with(key, |_| ENTRY_WEIGHT as usize, move || Ok(key))
@@ -278,7 +297,8 @@ pub struct ConcurrentClearLatencyBenchmark {
 impl ConcurrentClearLatencyBenchmark {
     pub fn new(scope_lookups: usize) -> Self {
         assert!(scope_lookups != 0);
-        let cache = CalculationCache::new(LOOKUP_WEIGHT_BUDGET);
+        let cache =
+            CalculationCache::new_with_backend(LOOKUP_WEIGHT_BUDGET, benchmark_cache_backend());
         drop(
             cache
                 .get_or_try_insert_with(HOT_KEY, |_| ENTRY_WEIGHT as usize, || Ok(HOT_KEY))
@@ -796,7 +816,10 @@ impl CurrentCacheEvictionBenchmark {
     pub fn new(iterations: usize) -> Self {
         assert!(iterations != 0);
         Self {
-            cache: CalculationCache::new(EVICTION_WEIGHT_BUDGET),
+            cache: CalculationCache::new_with_backend(
+                EVICTION_WEIGHT_BUDGET,
+                benchmark_cache_backend(),
+            ),
             iterations,
         }
     }
@@ -854,4 +877,53 @@ impl ArcCacheEvictionBenchmark {
     pub const fn total_iterations(&self) -> usize {
         self.iterations
     }
+}
+
+/// Runs a controlled full-cache retirement/drain probe with a scoped reference.
+/// The clear hook observes debt without advancing the read domain itself.
+pub fn cache_backend_debt_probe(backend: CacheBackend) -> serde_json::Value {
+    let cache = CalculationCache::new_with_backend(64 * 8, backend);
+    for key in 0_u64..64 {
+        drop(
+            cache
+                .get_or_try_insert_with(key, |_| 8, || Ok(key))
+                .unwrap(),
+        );
+    }
+    cache.maintenance();
+    let resident = cache.resident_stats();
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+    let started = Instant::now();
+    let pending = std::thread::scope(|threads| {
+        let cache = &cache;
+        threads.spawn(move || {
+            let scope = cache.read_scope().unwrap();
+            let reference = scope.get(&0).unwrap();
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            assert_eq!(*reference, 0);
+        });
+        ready_rx.recv().unwrap();
+        let mut pending = cache.reclamation_stats();
+        cache.clear_with_quiesce_hook(|| {
+            pending = cache.reclamation_stats();
+            release_tx.send(()).unwrap();
+        });
+        pending
+    });
+    cache.maintenance();
+    let drained = cache.reclamation_stats();
+    assert_eq!(drained.pending_nodes, 0);
+    assert_eq!(drained.pending_weight, 0);
+    serde_json::json!({
+        "resident_entries_before": resident.entries,
+        "pending_nodes_before_reader_release": pending.pending_nodes,
+        "pending_weight_before_reader_release": pending.pending_weight,
+        "peak_pending_nodes": drained.peak_pending_nodes,
+        "peak_pending_weight": drained.peak_pending_weight,
+        "pending_nodes_after_drain": drained.pending_nodes,
+        "pending_weight_after_drain": drained.pending_weight,
+        "elapsed_ns_including_thread_start": started.elapsed().as_nanos() as u64,
+    })
 }

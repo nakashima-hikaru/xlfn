@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use quote::quote;
+use syn::ext::IdentExt;
 use syn::{Data, DeriveInput, Expr, Fields};
 
 use crate::options::parse_expr_path;
@@ -65,7 +66,7 @@ pub(crate) fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::
                 }
             })?;
         }
-        let excel_name = excel_name.unwrap_or_else(|| variant.ident.to_string());
+        let excel_name = excel_name.unwrap_or_else(|| variant.ident.unraw().to_string());
         if excel_name.is_empty() {
             return Err(syn::Error::new_spanned(
                 &variant.ident,

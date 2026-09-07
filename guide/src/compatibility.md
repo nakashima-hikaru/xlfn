@@ -107,16 +107,16 @@ panic = "unwind"
 
 Do not switch an add-in to `panic = "abort"`; a panic would terminate Excel rather than being converted to a worksheet error and diagnostic event.
 
-## Crate-name requirement
+## Dependency names
 
-Procedural macro output currently refers to the framework as `::xlfn`. Use the canonical dependency name:
+Procedural macros resolve the framework's dependency name from `Cargo.toml`. Both the canonical name and a dependency alias are supported:
 
 ```toml
 [dependencies]
-xlfn = "0.2"
+my_xlfn = { package = "xlfn", version = "0.2" }
 ```
 
-Do not rename it with a dependency alias unless the macro implementation for the selected release explicitly documents alias resolution.
+Use `my_xlfn::prelude::*` with this declaration. When accessing the framework through a Rust re-export, override resolution with `crate = "path"` on the relevant macro; see the [attribute reference](attributes.md).
 
 ## Source and binary compatibility
 

@@ -62,7 +62,8 @@ pub use cache::{
     ArcCacheBenchmark, ArcCacheEvictionBenchmark, CacheLookupBenchCase,
     ConcurrentClearLatencyBenchmark, CurrentCacheBenchmark, CurrentCacheEvictionBenchmark,
     NoAdmissionCacheBenchmark, NoPinCacheBenchmark, ScopedBatchCacheBenchmark,
-    ScopedDurationCacheBenchmark, ScopedPerLookupCacheBenchmark,
+    ScopedDurationCacheBenchmark, ScopedPerLookupCacheBenchmark, benchmark_cache_backend,
+    cache_backend_debt_probe,
 };
 pub use call_resolution::{ConcurrentHandleResolutionBenchmark, MultiHandleCallBenchmark};
 pub use formula::{BenchmarkInputIdentity, FormulaRevisionBenchmark, SemanticIdentityBenchmark};

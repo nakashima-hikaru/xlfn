@@ -541,7 +541,10 @@ impl<A: crate::Addin> Runtime<A> {
     }
 
     #[cfg(feature = "async")]
-    pub(crate) fn execution_lease(&'static self, call: &CallGuard<'_, A>) -> ExecutionLease<A> {
+    pub(crate) fn execution_lease(
+        &'static self,
+        call: &CallGuard<'_, A>,
+    ) -> XllResult<ExecutionLease<A>> {
         self.lifecycle
             .acquire_execution_lease(call.admission.generation_pointer())
     }
@@ -1355,6 +1358,39 @@ pub(crate) mod tests {
         drop(ingress);
         receiver.recv_timeout(Duration::from_secs(1)).unwrap();
         handle.join().unwrap();
+    }
+
+    #[cfg(feature = "async")]
+    #[test]
+    fn execution_lease_rejects_close_race_without_invalidating_existing_leases() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let fixture = StaticTestRuntime::<TestU32Addin>::new();
+        let runtime = fixture.runtime();
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish(opening, 7_u32, ());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+
+        let ingress = admitted_export();
+        let call = runtime.enter(&ingress).unwrap();
+        let lease = runtime.execution_lease(&call).unwrap();
+        assert_eq!(*lease.state(), 7);
+
+        // Model removal winning between call admission and async launch.
+        let removal = runtime.begin_final_removal().unwrap();
+        assert!(matches!(
+            runtime.execution_lease(&call),
+            Err(XllError::Closing)
+        ));
+        assert_eq!(*call.state(), 7);
+        drop(call);
+        drop(ingress);
+
+        // A lease issued before closing still owns its generation lifetime
+        // even after the original call has returned.
+        assert_eq!(*lease.state(), 7);
+        drop(lease);
+        assert_eq!(runtime.take_current_generation().unwrap().shared_state, 7);
+        finish_test_close(runtime, removal);
     }
 
     #[test]

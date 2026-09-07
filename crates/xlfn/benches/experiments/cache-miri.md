@@ -49,3 +49,30 @@ safe nor establishes a production-use-after-free in xlfn. Keep this diagnostic
 separate from the kernel's passing Miri tests and from the native DropProbe,
 concurrency, and retirement-debt regressions. Revisit full-cache qualification
 when the dependency/toolchain combination can run it without these reports.
+
+## Sharded resident index baseline (2026-09-07)
+
+The initial `just miri-cache-sharded` baseline ran nine backend-common full-cache
+tests against all four shard counts (8/16/32/64). Both Stacked Borrows (84.37 s) and Tree
+Borrows (72.86 s) passed on the nightly above, with leak checking and alias
+validation enabled and without disabling isolation. This includes live leases,
+scoped-reference eviction, concurrent clear, generation rollover, duplicate
+initializers, reentrancy, failed/panicking initialization, weighted bounds,
+exactly-once destruction, concurrent reads/writes, and retirement-debt drain.
+Miri uses reduced operation/thread counts, while executing the actual cache.
+
+The [follow-up quality review](../../../../tools/quality-review-2026-09-07.md)
+added two backend-common regressions: draining retired values after an
+initializer panics, and deferring that cleanup while a reader is active.
+Both also passed separately under both borrow models with leak and alias
+validation enabled; the recipe now includes all eleven tests on future runs.
+
+`parking_lot_core 0.9.12` emitted an integer-to-pointer provenance warning in
+its contended lock path. Neither run reported an alias violation or a leak;
+the passing runs are not strict-provenance qualification of parking_lot.
+
+The Moka production configuration remains **unqualified for full-cache Miri**
+because of the dependency blocker described above. Only rerun that Moka
+qualification when Moka, crossbeam-epoch, Miri, or nightly changes. The native
+common regressions and the sharded Miri baseline remain separate evidence; do
+not exclude the failing dependency path and call the production cache Miri-clean.

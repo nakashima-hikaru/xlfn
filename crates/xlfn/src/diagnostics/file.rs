@@ -74,8 +74,6 @@ impl DiagnosticSink for FileDiagnosticSink {
 
 pub(crate) struct RotatingLog {
     pub(crate) path: PathBuf,
-    pub(crate) file: Option<fs::File>,
-    pub(crate) size: u64,
     pub(crate) maximum_bytes: u64,
     pub(crate) generations: usize,
 }
@@ -123,15 +121,12 @@ impl RotatingLog {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
-        let file = fs::OpenOptions::new()
+        fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)?;
-        let size = file.metadata()?.len();
         Ok(Self {
             path,
-            file: Some(file),
-            size,
             maximum_bytes,
             generations,
         })
@@ -146,23 +141,23 @@ impl RotatingLog {
             ));
         }
         let _lock = LogLock::acquire(&self.path)?;
-        if self.size > 0 && self.size.saturating_add(incoming) > self.maximum_bytes {
-            self.file.take();
+        // Another instance or process may have appended or rotated since the
+        // previous write. Resolve both the active file and its size while the
+        // shared lock is held; retaining a file handle would target an archive.
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        let size = file.metadata()?.len();
+        if size > 0 && size.saturating_add(incoming) > self.maximum_bytes {
+            drop(file);
             rotate_log_files(&self.path, self.generations)?;
-            self.file = Some(
-                fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&self.path)?,
-            );
-            self.size = 0;
+            file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)?;
         }
-        let file = self
-            .file
-            .as_mut()
-            .ok_or_else(|| io::Error::other("rotating log file is unavailable after rotation"))?;
         writeln!(file, "{line}")?;
-        self.size = self.size.saturating_add(incoming);
         Ok(())
     }
 }

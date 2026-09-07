@@ -28,8 +28,8 @@ use std::ptr::NonNull;
 #[cfg(test)]
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use xlfn_kernel::operation_gate::{OperationGate, OperationGuard};
-use xlfn_kernel::quota::Quota;
+use xlfn_kernel::operation_gate::OperationGuard;
+use xlfn_kernel::published_owner::PublishedOwner;
 
 #[cfg(test)]
 pub(crate) type OperationEnterHook = Arc<dyn Fn() + Send + Sync + 'static>;
@@ -49,12 +49,11 @@ pub(crate) struct SubscriptionRuntime<H: SubscriptionHost> {
     >,
     pub(crate) catalog: Mutex<SubscriptionCatalog>,
     pub(crate) sources: SourceArena,
-    pub(crate) runtime_gate: OperationGate,
-    pub(crate) active_quota: Quota,
-    pub(crate) queued_update_quota: Quota,
     pub(crate) next_connection_generation: AtomicU64,
     pub(crate) termination_coordinator: TerminationCoordinator,
-    pub(crate) services: RuntimeServices,
+    // Every raw publish capability targets this independent allocation, so
+    // final Drop can drain producers without invalidating their references.
+    pub(crate) services: PublishedOwner<RuntimeServices>,
     #[cfg(test)]
     pub(crate) test_enter_hook: Mutex<Option<OperationEnterHook>>,
 }
@@ -102,12 +101,9 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
                 next_subscription_id: 1,
             }),
             sources,
-            runtime_gate: OperationGate::new(),
-            active_quota: Quota::new(limits.max_active.get()),
-            queued_update_quota: Quota::new(limits.max_queued_updates.get()),
             next_connection_generation: AtomicU64::new(1),
             termination_coordinator: TerminationCoordinator::default(),
-            services: RuntimeServices::new(),
+            services: PublishedOwner::new(RuntimeServices::new(limits)),
             #[cfg(test)]
             test_enter_hook: Mutex::new(None),
         }
@@ -135,7 +131,10 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
     }
 
     pub(crate) fn enter_external_operation(&self) -> XllResult<OperationGuard<'_>> {
-        self.runtime_gate.enter().map_err(|_| XllError::Closing)
+        self.services
+            .runtime_gate
+            .enter()
+            .map_err(|_| XllError::Closing)
     }
 
     /// Registers a server generation and returns a server handle.
@@ -149,7 +148,11 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         &self,
         generation: ServerGeneration,
     ) -> XllResult<SubscriptionServerHandle<H>> {
-        let _operation = self.runtime_gate.enter().map_err(|_| XllError::Closing)?;
+        let _operation = self
+            .services
+            .runtime_gate
+            .enter()
+            .map_err(|_| XllError::Closing)?;
         #[cfg(test)]
         if let Some(hook) = self.test_enter_hook.lock().as_ref().cloned() {
             hook();
@@ -159,13 +162,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         // are reclaimed. `register_server` also carries the runtime lifetime
         // contract for the returned handle.
         let publish = xlfn_kernel::published_owner::PublishedOwner::new(unsafe {
-            PublishCore::new(
-                self.host.clone(),
-                &self.runtime_gate,
-                &self.active_quota,
-                &self.queued_update_quota,
-                &self.services,
-            )
+            PublishCore::new(self.host.clone(), &self.services)
         });
         let server = xlfn_kernel::published_owner::PublishedOwner::new(SubscriptionServer {
             generation,
@@ -218,7 +215,11 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
     where
         S: RtdSource,
     {
-        let _operation = self.runtime_gate.enter().map_err(|_| XllError::Closing)?;
+        let _operation = self
+            .services
+            .runtime_gate
+            .enter()
+            .map_err(|_| XllError::Closing)?;
         #[cfg(test)]
         if let Some(hook) = self.test_enter_hook.lock().as_ref().cloned() {
             hook();
@@ -401,12 +402,21 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             }
         };
 
-        let install_result = match server.publish.install_connection(topic_id, conn_gen) {
-            Ok(installed) => {
-                server.subscriptions.lock().insert(topic_id, subscription);
-                Ok((installed.latest, installed.observed_sequence))
+        let install_result = {
+            // Keep the owned subscription aligned with its published generation.
+            // Disconnect and rollback use this same lock before changing either.
+            let mut subscriptions = server.subscriptions.lock();
+            match server.publish.install_connection(topic_id, conn_gen) {
+                Ok(installed) => {
+                    subscriptions.insert(topic_id, subscription);
+                    // Installation owns a shutdown obligation before Excel commits.
+                    self.record_shutdown_event(
+                        crate::shutdown_trace::ShutdownEvent::AddSubscription,
+                    );
+                    Ok((installed.latest, installed.observed_sequence))
+                }
+                Err(_) => Err(subscription),
             }
-            Err(_) => Err(subscription),
         };
 
         let (latest_value, observed_sequence) = match install_result {
@@ -462,8 +472,6 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             server.publish.drive_notification(attempt);
         }
 
-        self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::AddSubscription);
-
         Ok(())
     }
 
@@ -474,8 +482,20 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         generation: ConnectionGeneration,
         id: SubscriptionId,
     ) -> XllResult<()> {
-        let subscription = server.subscriptions.lock().remove(&topic_id);
-        server.publish.rollback_connection(topic_id, generation, id);
+        let subscription = {
+            let mut subscriptions = server.subscriptions.lock();
+            let subscription = server
+                .publish
+                .rollback_connection(topic_id, generation, id)
+                .then(|| subscriptions.remove(&topic_id))
+                .flatten();
+            if subscription.is_some() {
+                self.record_shutdown_event(
+                    crate::shutdown_trace::ShutdownEvent::RemoveSubscription,
+                );
+            }
+            subscription
+        };
 
         {
             let mut catalog = self.catalog.lock();
@@ -516,14 +536,28 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         }
         let server = server_handle.server()?;
         let _operation = server.enter_operation()?;
-        let subscription = server.subscriptions.lock().remove(&topic_id);
-        let Some(retired) = server.publish.disconnect_connection(topic_id)? else {
-            return Ok(());
+        #[cfg(test)]
+        {
+            let hook = self.test_enter_hook.lock().clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        let (retired, subscription) = {
+            let mut subscriptions = server.subscriptions.lock();
+            let Some(retired) = server.publish.disconnect_connection(topic_id)? else {
+                return Ok(());
+            };
+            let subscription = subscriptions.remove(&topic_id);
+            if subscription.is_some() {
+                self.record_shutdown_event(
+                    crate::shutdown_trace::ShutdownEvent::RemoveSubscription,
+                );
+            }
+            (retired, subscription)
         };
         let id_to_clean = retired.id;
         let conn_gen = retired.generation;
-
-        self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::RemoveSubscription);
 
         {
             let mut catalog = self.catalog.lock();
@@ -564,7 +598,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             }
         }
 
-        let runtime_wait = self.runtime_gate.close_and_wait_begin();
+        let runtime_wait = self.services.runtime_gate.close_and_wait_begin();
         runtime_wait.wait();
 
         let server_pointers = {
@@ -616,16 +650,6 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
 
         {
             let mut catalog = self.catalog.lock();
-            for _ in 0..catalog
-                .entries
-                .values()
-                .filter(|entry| entry.is_connected())
-                .count()
-            {
-                self.record_shutdown_event(
-                    crate::shutdown_trace::ShutdownEvent::RemoveSubscription,
-                );
-            }
             catalog.identities.clear();
             catalog.pending_topic_bytes = 0;
             catalog.entries.clear();
@@ -788,9 +812,9 @@ impl<H: SubscriptionHost> Drop for SubscriptionConnection<H> {
 
 impl<H: SubscriptionHost> Drop for SubscriptionRuntime<H> {
     fn drop(&mut self) {
-        // `close` normally performs this drain explicitly. Keep the final
-        // owner-drop path safe for callers that only hold the runtime owner:
-        // every owned operation must release its raw gate pointers first.
-        self.runtime_gate.close_and_wait_begin().wait();
+        // Ownership includes joining every producer that can retain a raw sink.
+        // Dropping only the operation gates would leave idle producers able to
+        // access reclaimed publish cores after the server arena is destroyed.
+        let _ = self.close();
     }
 }

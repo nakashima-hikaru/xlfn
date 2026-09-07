@@ -210,7 +210,10 @@ impl WorkerPool {
         payload_bytes: usize,
         operations: usize,
     ) -> Self {
-        let cache = Arc::new(CalculationCache::new(RESIDENT_ENTRIES * payload_bytes));
+        let cache = Arc::new(CalculationCache::new_with_backend(
+            RESIDENT_ENTRIES * payload_bytes,
+            xlfn::benchmark_support::benchmark_cache_backend(),
+        ));
         let barrier = Arc::new(Barrier::new(worker_count + 1));
         let (done_tx, done) = std::sync::mpsc::sync_channel(worker_count);
         let mut start = Vec::with_capacity(worker_count);
@@ -342,6 +345,7 @@ fn report_probes(pool: &WorkerPool, workload: Workload, workers: usize, payload_
     println!(
         "cache_reclamation_probe {}",
         serde_json::json!({
+            "backend": format!("{:?}", xlfn::benchmark_support::benchmark_cache_backend()),
             "workload": workload.name(),
             "workers": workers,
             "payload_bytes": payload_bytes,
@@ -354,6 +358,7 @@ fn report_probes(pool: &WorkerPool, workload: Workload, workers: usize, payload_
             "latency_probe": {
                 "samples": latency.latencies_ns.len(),
                 "p50_ns": percentile(&latency.latencies_ns, 50),
+                "p95_ns": percentile(&latency.latencies_ns, 95),
                 "p99_ns": percentile(&latency.latencies_ns, 99),
                 "max_ns": latency.latencies_ns.last(),
                 "sampled_peak_pending_nodes": latency.sampled_peak_pending_nodes,

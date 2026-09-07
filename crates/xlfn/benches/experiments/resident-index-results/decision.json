@@ -1,0 +1,72 @@
+{
+  "sharded8": {
+    "qualifies": false,
+    "failures": [
+      "mixed32 throughput below 90%",
+      "mixed32 writer p99 above 125%",
+      "mixed32 median hit latency/tail above 110%",
+      "mixed32 hit rate below 99% of baseline",
+      "supplemental write/clear throughput below 90%",
+      "existing eviction/clear/reclamation throughput below 90%",
+      "peak retirement debt exceeds baseline"
+    ],
+    "lookup_geomean_slowdown": 0.40082707112878774,
+    "worst_lookup_slowdown": 1.0014854906476371,
+    "debt_failures": [
+      "Invalidate32:peak_pending_nodes=72>64",
+      "Invalidate32:peak_pending_weight=576>512"
+    ]
+  },
+  "sharded16": {
+    "qualifies": false,
+    "failures": [
+      "lookup case slowdown exceeds 10%",
+      "mixed32 throughput below 90%",
+      "mixed32 median hit latency/tail above 110%",
+      "supplemental write/clear throughput below 90%",
+      "existing eviction/clear/reclamation throughput below 90%",
+      "peak retirement debt exceeds baseline"
+    ],
+    "lookup_geomean_slowdown": 0.36844305437433345,
+    "worst_lookup_slowdown": 1.1694313309245976,
+    "debt_failures": [
+      "Invalidate32:peak_pending_nodes=83>64",
+      "Invalidate32:peak_pending_weight=664>512"
+    ]
+  },
+  "sharded32": {
+    "qualifies": false,
+    "failures": [
+      "mixed32 throughput below 90%",
+      "mixed32 median hit latency/tail above 110%",
+      "mixed32 hit rate below 99% of baseline",
+      "supplemental write/clear throughput below 90%",
+      "existing eviction/clear/reclamation throughput below 90%",
+      "peak retirement debt exceeds baseline"
+    ],
+    "lookup_geomean_slowdown": 0.33438551290643703,
+    "worst_lookup_slowdown": 0.9617753484008327,
+    "debt_failures": [
+      "Invalidate32:peak_pending_nodes=73>64",
+      "Invalidate32:peak_pending_weight=584>512"
+    ]
+  },
+  "sharded64": {
+    "qualifies": false,
+    "failures": [
+      "lookup case slowdown exceeds 10%",
+      "mixed32 throughput below 90%",
+      "mixed32 median hit latency/tail above 110%",
+      "mixed32 hit rate below 99% of baseline",
+      "supplemental write/clear throughput below 90%",
+      "existing eviction/clear/reclamation throughput below 90%",
+      "peak retirement debt exceeds baseline"
+    ],
+    "lookup_geomean_slowdown": 0.33271660927235674,
+    "worst_lookup_slowdown": 1.1727135988476576,
+    "debt_failures": [
+      "Invalidate32:peak_pending_nodes=74>64",
+      "Invalidate32:peak_pending_weight=592>512"
+    ]
+  }
+}

@@ -1751,6 +1751,7 @@ dependencies = [
  "crossbeam-utils",
  "futures-util",
  "getrandom 0.4.3",
+ "hashbrown",
  "inventory",
  "loom",
  "moka",

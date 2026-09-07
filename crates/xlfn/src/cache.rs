@@ -1,8 +1,11 @@
 use crate::error::InputError;
 use crate::panic_boundary::catch_no_unwind;
 use crate::{XllError, XllResult};
-use moka::{Equivalent, sync::Cache};
+#[cfg(all(test, feature = "bench-internals"))]
+mod backend_tests;
+mod resident_index;
 use parking_lot::{Mutex, RwLock};
+use resident_index::ResidentIndex;
 use std::any::{Any, TypeId};
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -229,7 +232,7 @@ where
     pub fn get<'scope>(&'scope self, key: &K) -> Option<&'scope V> {
         let epoch = self.cache.generation.snapshot();
         let lookup = VersionedKeyRef { epoch, key };
-        let (node_ptr, _) = self.cache.cache.get(&lookup)?;
+        let (node_ptr, _) = self.cache.index.get(&lookup)?;
 
         // SAFETY: [TR-SCOPED-READ-1] The scope owns a CacheDomainPermit for
         // its entire lifetime. The permit prevents the node's allocation from
@@ -515,12 +518,6 @@ impl<K: Hash> Hash for VersionedKeyRef<'_, K> {
     }
 }
 
-impl<K: Eq> Equivalent<VersionedKey<K>> for VersionedKeyRef<'_, K> {
-    fn equivalent(&self, owned: &VersionedKey<K>) -> bool {
-        self.epoch == owned.epoch && self.key == &owned.key
-    }
-}
-
 struct NodePtr<V>(NonNull<CacheNode<V>>);
 
 impl<V> Clone for NodePtr<V> {
@@ -537,6 +534,19 @@ unsafe impl<V: Send + Sync> Send for NodePtr<V> {}
 // SAFETY: NodePtr is Copy, so sharing a reference also lets its recipient
 // obtain a capability whose eventual retirement can destroy V there.
 unsafe impl<V: Send + Sync> Sync for NodePtr<V> {}
+
+// The resident index only selects entries to remove. The residency state,
+// pin release, and retirement enqueue remain owned by CalculationCache.
+fn retire_resident<V>(node_ptr: NodePtr<V>) {
+    // SAFETY: the index transfers its one outstanding residency obligation.
+    let node = unsafe { node_ptr.0.as_ref() };
+    node.resident.store(false, Ordering::Release);
+    if node.release_pin() {
+        // SAFETY: the cache retains its domain until every index entry retires.
+        let domain = unsafe { node.domain.as_ref() };
+        domain.enqueue_reclaim(node_ptr.0.as_ptr() as *mut (), node.weight);
+    }
+}
 
 struct CacheNode<V> {
     value: Box<V>,
@@ -756,13 +766,36 @@ impl CacheLookupDomain {
     }
 }
 
+/// Test/benchmark-only resident policy selection. Production uses Moka.
+#[cfg(feature = "bench-internals")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CacheBackend {
+    Moka,
+    Sharded { shards: usize },
+}
+
+/// Side-effect-free residency and approximate storage observations.
+#[cfg(feature = "bench-internals")]
+#[derive(Clone, Copy, Debug)]
+pub struct CacheResidentStats {
+    pub entries: u64,
+    pub weight: u64,
+    pub index_bytes_estimate: usize,
+    /// Moka does not expose policy/table allocation sizes; its estimate is a
+    /// lower bound that excludes opaque metadata. Key heap storage is excluded.
+    pub index_metadata_opaque: bool,
+    /// Resident node headers plus caller-reported payload weights. Excludes
+    /// live non-resident leases and queued retirement debt.
+    pub resident_node_bytes_estimate: u64,
+}
+
 pub struct CalculationCache<K, V> {
     weight_budget: usize,
     generation: CacheGeneration,
     domain: xlfn_kernel::published_owner::PublishedOwner<CacheLookupDomain>,
     clear_lock: Mutex<()>,
     mutations: AtomicUsize,
-    cache: Cache<VersionedKey<K>, (NodePtr<V>, u32)>,
+    index: ResidentIndex<K, V>,
     clear_fn: Option<fn(*const ())>,
 }
 
@@ -789,6 +822,30 @@ where
         weight_budget: usize,
         after_eviction: impl Fn() + Send + Sync + 'static,
     ) -> Self {
+        Self::with_index(weight_budget, |capacity| {
+            ResidentIndex::moka(capacity, move |(node_ptr, _weight)| {
+                retire_resident(node_ptr);
+                after_eviction();
+            })
+        })
+    }
+
+    /// Builds a candidate using the identical cache/lifetime implementation.
+    #[cfg(feature = "bench-internals")]
+    #[must_use]
+    pub fn new_with_backend(weight_budget: usize, backend: CacheBackend) -> Self {
+        Self::with_index(weight_budget, |capacity| match backend {
+            CacheBackend::Moka => ResidentIndex::moka(capacity, |entry| retire_resident(entry.0)),
+            CacheBackend::Sharded { shards } => {
+                ResidentIndex::sharded(capacity, shards, |entry| retire_resident(entry.0))
+            }
+        })
+    }
+
+    fn with_index(
+        weight_budget: usize,
+        make_index: impl FnOnce(u64) -> ResidentIndex<K, V>,
+    ) -> Self {
         let weight_budget = weight_budget.min(u32::MAX as usize);
         let capacity = u64::try_from(weight_budget).unwrap_or(u64::MAX);
         Self {
@@ -797,24 +854,7 @@ where
             domain: xlfn_kernel::published_owner::PublishedOwner::new(CacheLookupDomain::new()),
             clear_lock: Mutex::new(()),
             mutations: AtomicUsize::new(0),
-            cache: Cache::builder()
-                .max_capacity(capacity)
-                .weigher(|_, entry: &(NodePtr<V>, u32)| entry.1)
-                .support_invalidation_closures()
-                .eviction_listener(
-                    move |_key, (node_ptr, _weight): (NodePtr<V>, u32), _cause| {
-                        // SAFETY: [TR-PUBLISH-1] node_ptr points to an allocated CacheNode<V> managed by the cache.
-                        let node = unsafe { node_ptr.0.as_ref() };
-                        node.resident.store(false, Ordering::Release);
-                        if node.release_pin() {
-                            // SAFETY: [TR-RECLAIM-1] Enqueue retired node with 0 pins for deferred quiescence and reclaim outside Moka maintenance locks.
-                            let domain = unsafe { node.domain.as_ref() };
-                            domain.enqueue_reclaim(node_ptr.0.as_ptr() as *mut (), node.weight);
-                        }
-                        after_eviction();
-                    },
-                )
-                .build(),
+            index: make_index(capacity),
             clear_fn: Some(|ptr| {
                 // SAFETY: [TR-RECLAIM-1] ptr points to a valid CalculationCache<K, V> during Drop.
                 let cache = unsafe { &*(ptr as *const Self) };
@@ -822,10 +862,10 @@ where
                 // Drop has exclusive access, so no new generation can be
                 // published. Moka may time-limit a maintenance pass: keep
                 // driving invalidation until every resident pin is released.
-                cache.cache.invalidate_all();
+                cache.index.clear();
                 loop {
-                    cache.cache.run_pending_tasks();
-                    if cache.cache.entry_count() == 0 {
+                    cache.index.maintenance();
+                    if cache.index.resident_count() == 0 {
                         break;
                     }
                 }
@@ -847,6 +887,41 @@ where
         self.domain.stats()
     }
 
+    #[cfg(feature = "bench-internals")]
+    #[must_use]
+    pub fn resident_stats(&self) -> CacheResidentStats {
+        let entries = self.index.resident_count();
+        let weight = self.index.resident_weight();
+        let (index_bytes_estimate, index_metadata_opaque) = self.index.memory_estimate();
+        CacheResidentStats {
+            entries,
+            weight,
+            index_bytes_estimate,
+            index_metadata_opaque,
+            resident_node_bytes_estimate: entries
+                .saturating_mul(std::mem::size_of::<CacheNode<V>>() as u64)
+                .saturating_add(weight),
+        }
+    }
+
+    /// Removes one current-generation entry and services ordinary maintenance.
+    #[cfg(feature = "bench-internals")]
+    pub fn invalidate(&self, key: &K) {
+        self.index.invalidate(&VersionedKey {
+            epoch: self.generation.snapshot(),
+            key: key.clone(),
+        });
+        self.index.maintenance();
+        self.maintain(true);
+    }
+
+    /// Completes index maintenance and the pending reclamation grace period.
+    #[cfg(feature = "bench-internals")]
+    pub fn maintenance(&self) {
+        self.index.maintenance();
+        reclaim_cache_entries::<V>(self.domain.quiesce_and_drain());
+    }
+
     fn maintain(&self, mutation: bool) {
         // A read inside an initializer must not run another value's Drop
         // while Moka is still executing that initializer's singleflight.
@@ -857,7 +932,7 @@ where
             && self.mutations.fetch_add(1, Ordering::Relaxed) % MAINTENANCE_INTERVAL
                 == MAINTENANCE_INTERVAL - 1
         {
-            self.cache.run_pending_tasks();
+            self.index.maintenance();
         }
         let nodes = self.domain.pending_nodes.load(Ordering::Relaxed);
         if nodes == 0 {
@@ -879,18 +954,18 @@ where
 
     #[must_use]
     pub fn used_weight(&self) -> usize {
-        self.cache.run_pending_tasks();
+        self.index.maintenance();
         let retired = self.domain.try_quiesce_and_drain();
         reclaim_cache_entries::<V>(retired);
-        usize::try_from(self.cache.weighted_size()).unwrap_or(usize::MAX)
+        usize::try_from(self.index.resident_weight()).unwrap_or(usize::MAX)
     }
 
     #[must_use]
     pub fn len(&self) -> usize {
-        self.cache.run_pending_tasks();
+        self.index.maintenance();
         let retired = self.domain.try_quiesce_and_drain();
         reclaim_cache_entries::<V>(retired);
-        usize::try_from(self.cache.entry_count()).unwrap_or(usize::MAX)
+        usize::try_from(self.index.resident_count()).unwrap_or(usize::MAX)
     }
 
     #[must_use]
@@ -902,10 +977,8 @@ where
         let retired = {
             let _guard = self.clear_lock.lock();
             let epoch = self.generation.advance();
-            self.cache
-                .invalidate_entries_if(move |key, _| key.epoch < epoch)
-                .expect("invalidation closures are enabled");
-            self.cache.run_pending_tasks();
+            self.index.invalidate_before(epoch);
+            self.index.maintenance();
             self.domain.quiesce_and_drain()
         };
         reclaim_cache_entries::<V>(retired);
@@ -918,10 +991,8 @@ where
         let retired = {
             let _guard = self.clear_lock.lock();
             let epoch = self.generation.advance();
-            self.cache
-                .invalidate_entries_if(move |key, _| key.epoch < epoch)
-                .expect("invalidation closures are enabled");
-            self.cache.run_pending_tasks();
+            self.index.invalidate_before(epoch);
+            self.index.maintenance();
             before_quiesce();
             self.domain.quiesce_and_drain()
         };
@@ -931,10 +1002,8 @@ where
     fn invalidate_before(&self, epoch: u64) {
         let retired = {
             let _guard = self.clear_lock.lock();
-            self.cache
-                .invalidate_entries_if(move |key, _| key.epoch < epoch)
-                .expect("invalidation closures are enabled");
-            self.cache.run_pending_tasks();
+            self.index.invalidate_before(epoch);
+            self.index.maintenance();
             self.domain.quiesce_and_drain()
         };
         reclaim_cache_entries::<V>(retired);
@@ -964,7 +1033,7 @@ where
     fn get_at_epoch<'a>(&'a self, key: &K, epoch: u64) -> Option<CacheLease<'a, V>> {
         let permit = self.domain.enter().ok()?;
         let lookup = VersionedKeyRef { epoch, key };
-        let (node_ptr, _) = self.cache.get(&lookup)?;
+        let (node_ptr, _) = self.index.get(&lookup)?;
         // SAFETY: [TR-OBSERVE-POINTER] node_ptr is observed only while holding a valid lookup admission domain permit.
         let node = unsafe { node_ptr.0.as_ref() };
         if node.generation != epoch || !node.resident.load(Ordering::Acquire) {
@@ -1024,26 +1093,44 @@ where
         F: FnOnce() -> XllResult<V>,
         W: FnOnce(&V) -> usize,
     {
+        // This guard predates every initialization guard and singleflight
+        // frame below, so their unwind cleanup finishes before reclamation.
+        // Only drain already-retired nodes here: index maintenance could run
+        // unrelated key callbacks while propagating the original panic.
+        // Never wait for readers during unwinding: an outer lookup's key
+        // callback may have invoked this operation while holding a permit.
+        let _reclaim_on_unwind = scopeguard::guard_on_unwind(self, |cache| {
+            let _ = catch_no_unwind(AssertUnwindSafe(|| {
+                reclaim_cache_entries::<V>(cache.domain.try_quiesce_and_drain());
+            }));
+        });
         if self.weight_budget == 0 {
             // Moka disables its map at zero capacity and never invokes the
             // eviction listener. Do not create a residency pin that nobody
             // could release. The caller's lease uniquely owns this node.
             let active = ActiveCacheGuard::enter()?;
-            let value = compute()?;
-            let measured = weight(&value);
-            let node = Box::new(CacheNode {
-                value: Box::new(value),
-                pins: AtomicUsize::new(1),
-                resident: AtomicBool::new(false),
-                weight: u32::try_from(measured).unwrap_or(u32::MAX).max(1),
-                generation: epoch,
-                domain: NonNull::from(&*self.domain),
-            });
+            let initialized = (|| {
+                let value = compute()?;
+                let measured = weight(&value);
+                let node = Box::new(CacheNode {
+                    value: Box::new(value),
+                    pins: AtomicUsize::new(1),
+                    resident: AtomicBool::new(false),
+                    weight: u32::try_from(measured).unwrap_or(u32::MAX).max(1),
+                    generation: epoch,
+                    domain: NonNull::from(&*self.domain),
+                });
+                Ok(CacheLease {
+                    node: NonNull::from(Box::leak(node)),
+                    _marker: PhantomData,
+                })
+            })();
             drop(active);
-            return Ok(CacheLease {
-                node: NonNull::from(Box::leak(node)),
-                _marker: PhantomData,
-            });
+            // As with the resident path, callbacks may have dropped another
+            // lease whose reclamation was deferred by the initialization
+            // guard. Service that debt even if this initializer failed.
+            self.maintain(true);
+            return initialized;
         }
         let mut compute_opt = Some(compute);
         let mut weight_opt = Some(weight);
@@ -1064,8 +1151,8 @@ where
             let mut oversized = false;
 
             let initialized = self
-                .cache
-                .try_get_with(vkey.clone(), || {
+                .index
+                .insert(vkey.clone(), || {
                     let compute_fn = compute_opt.take().expect("compute called once");
                     let weight_fn = weight_opt.take().expect("weight called once");
                     let value = compute_fn()?;
@@ -1100,10 +1187,10 @@ where
                     // Compare the original estimate, before clamping it to
                     // Moka's u32 weigher. A larger value must not become a
                     // resident merely because its weight was saturated.
-                    self.cache.invalidate(&vkey);
+                    self.index.invalidate(&vkey);
                 } else {
                     self.generation.discard_if_stale(epoch, || {
-                        self.cache.invalidate(&vkey);
+                        self.index.invalidate(&vkey);
                     });
                 }
                 return Ok(CacheLease {
@@ -1227,7 +1314,7 @@ mod tests {
         cache
             .get_or_try_insert_with("first", |_| 0, || Ok::<_, XllError>(1_u32))
             .unwrap();
-        cache.cache.run_pending_tasks();
+        cache.index.maintenance();
         assert_eq!(cache.used_weight(), 1);
     }
 
@@ -1356,11 +1443,8 @@ mod tests {
             std::thread::scope(|threads| {
                 let reclaimer = threads.spawn(move || {
                     let epoch = cache_ref.generation.advance();
-                    cache_ref
-                        .cache
-                        .invalidate_entries_if(move |key, _| key.epoch < epoch)
-                        .unwrap();
-                    cache_ref.cache.run_pending_tasks();
+                    cache_ref.index.invalidate_before(epoch);
+                    cache_ref.index.maintenance();
                     assert!(
                         cache_ref
                             .domain
@@ -1694,7 +1778,7 @@ mod tests {
             assert_eq!(value.0, key * 10);
             drop(value);
         }
-        cache.cache.run_pending_tasks();
+        cache.index.maintenance();
         assert_eq!(cache.len(), 1);
         assert_eq!(DROPPED.load(Ordering::SeqCst), 1);
     }
@@ -2450,8 +2534,8 @@ mod tests {
                 .get_or_try_insert_with(1, |_| 3, || Ok(DropProbe(Arc::clone(&drops))))
                 .unwrap(),
         );
-        cache.cache.invalidate_all();
-        cache.cache.run_pending_tasks();
+        cache.index.clear();
+        cache.index.maintenance();
         let stats = cache.reclamation_stats();
         assert_eq!(stats.pending_nodes, 1);
         assert_eq!(stats.pending_weight, 3);
@@ -2482,6 +2566,231 @@ mod tests {
             assert_eq!(drops.load(Ordering::Relaxed), key as usize + 1);
         }
         assert_eq!(cache.reclamation_stats().pending_nodes, 0);
+    }
+
+    #[test]
+    fn zero_budget_initializer_reclaims_deferred_leases_after_success_or_failure() {
+        struct DropProbe(Arc<AtomicUsize>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                assert_eq!(ACTIVE_CACHE_INITIALIZATION_DEPTH.get(), 0);
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        for succeeds in [false, true] {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let cache = CalculationCache::new(0);
+            let previous = cache
+                .get_or_try_insert_with(1, |_| 1, || Ok(DropProbe(Arc::clone(&drops))))
+                .unwrap();
+            let initialized = cache.get_or_try_insert_with(
+                2,
+                |_| 1,
+                || {
+                    drop(previous);
+                    assert_eq!(drops.load(Ordering::Relaxed), 0);
+                    assert_eq!(cache.reclamation_stats().pending_nodes, 1);
+                    if succeeds {
+                        Ok(DropProbe(Arc::clone(&drops)))
+                    } else {
+                        Err(XllError::Closing)
+                    }
+                },
+            );
+
+            assert_eq!(initialized.is_ok(), succeeds);
+            assert_eq!(drops.load(Ordering::Relaxed), 1);
+            assert_eq!(cache.reclamation_stats().pending_nodes, 0);
+            drop(initialized);
+            assert_eq!(drops.load(Ordering::Relaxed), 1 + usize::from(succeeds));
+        }
+    }
+
+    #[test]
+    fn panicking_initializer_reclaims_deferred_leases_and_preserves_original_panic() {
+        struct DropProbe {
+            drops: Arc<AtomicUsize>,
+            payload_drops: Arc<AtomicUsize>,
+        }
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                assert_eq!(ACTIVE_CACHE_INITIALIZATION_DEPTH.get(), 0);
+                self.drops.fetch_add(1, Ordering::Relaxed);
+                std::panic::panic_any(crate::panic_boundary::tests::PanickingPayload(Arc::clone(
+                    &self.payload_drops,
+                )));
+            }
+        }
+
+        for capacity in [0, 8] {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let payload_drops = Arc::new(AtomicUsize::new(0));
+            let cache = CalculationCache::new(capacity);
+            let previous = cache
+                .get_or_try_insert_with(
+                    1,
+                    |_| 1,
+                    || {
+                        Ok(DropProbe {
+                            drops: Arc::clone(&drops),
+                            payload_drops: Arc::clone(&payload_drops),
+                        })
+                    },
+                )
+                .unwrap();
+            cache.clear();
+
+            let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                let _ = cache.get_or_try_insert_with(
+                    2,
+                    |_| 1,
+                    || {
+                        drop(previous);
+                        assert_eq!(drops.load(Ordering::Relaxed), 0);
+                        assert_eq!(cache.reclamation_stats().pending_nodes, 1);
+                        panic!("original initializer panic");
+                    },
+                );
+            }));
+            assert_eq!(
+                result.as_ref().unwrap_err().downcast_ref::<&str>(),
+                Some(&"original initializer panic")
+            );
+            assert!(crate::panic_boundary::contain_panic(result).is_err());
+            assert_eq!(drops.load(Ordering::Relaxed), 1);
+            assert_eq!(payload_drops.load(Ordering::Relaxed), 0);
+            assert_eq!(cache.reclamation_stats().pending_nodes, 0);
+        }
+    }
+
+    #[test]
+    fn panicking_initializer_reclaims_after_singleflight_unlock() {
+        struct DropAction {
+            cache: std::sync::Weak<CalculationCache<u32, DropProbe>>,
+            completed: Arc<AtomicBool>,
+            workers: Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>,
+        }
+        struct DropProbe(Option<DropAction>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                let Some(action) = self.0.take() else {
+                    return;
+                };
+                assert_eq!(ACTIVE_CACHE_INITIALIZATION_DEPTH.get(), 0);
+                let cache = action.cache.upgrade().unwrap();
+                let (finished_tx, finished_rx) = mpsc::channel();
+                let worker = std::thread::spawn(move || {
+                    let initialized =
+                        cache.get_or_try_insert_with(2, |_| 1, || Ok(DropProbe(None)));
+                    let _ = finished_tx.send(initialized.is_ok());
+                });
+                action.workers.lock().push(worker);
+                // Bound this wait so a regression releases the original
+                // singleflight and lets the worker finish before we assert.
+                action.completed.store(
+                    finished_rx.recv_timeout(Duration::from_secs(1)) == Ok(true),
+                    Ordering::Release,
+                );
+            }
+        }
+
+        let cache = Arc::new(CalculationCache::new(8));
+        let completed = Arc::new(AtomicBool::new(false));
+        let workers = Arc::new(Mutex::new(Vec::new()));
+        let previous = cache
+            .get_or_try_insert_with(
+                1,
+                |_| 1,
+                || {
+                    Ok(DropProbe(Some(DropAction {
+                        cache: Arc::downgrade(&cache),
+                        completed: Arc::clone(&completed),
+                        workers: Arc::clone(&workers),
+                    })))
+                },
+            )
+            .unwrap();
+        cache.clear();
+        assert!(
+            catch_no_unwind(AssertUnwindSafe(|| {
+                let _ = cache.get_or_try_insert_with(
+                    2,
+                    |_| 1,
+                    || {
+                        drop(previous);
+                        panic!("initializer panic before singleflight unlock");
+                    },
+                );
+            }))
+            .is_err()
+        );
+        for worker in std::mem::take(&mut *workers.lock()) {
+            assert!(crate::panic_boundary::contain_panic(worker.join()).is_ok());
+        }
+        assert!(completed.load(Ordering::Acquire));
+        assert_eq!(cache.reclamation_stats().pending_nodes, 0);
+    }
+
+    #[test]
+    fn nested_lookup_panic_defers_reclamation_until_outer_initializer_finishes() {
+        #[derive(Clone, Eq, PartialEq)]
+        struct Key {
+            value: u32,
+            panic_on_hash: bool,
+        }
+        impl Hash for Key {
+            fn hash<H: Hasher>(&self, state: &mut H) {
+                assert!(!self.panic_on_hash, "nested lookup panic");
+                self.value.hash(state);
+            }
+        }
+        struct DropProbe(Arc<AtomicUsize>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                assert_eq!(ACTIVE_CACHE_INITIALIZATION_DEPTH.get(), 0);
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let key = |value| Key {
+            value,
+            panic_on_hash: false,
+        };
+        let drops = Arc::new(AtomicUsize::new(0));
+        let cache = CalculationCache::new(8);
+        let previous = cache
+            .get_or_try_insert_with(key(1), |_| 1, || Ok(DropProbe(Arc::clone(&drops))))
+            .unwrap();
+        cache.clear();
+        let initialized = cache
+            .get_or_try_insert_with(
+                key(2),
+                |_| 1,
+                || {
+                    drop(previous);
+                    assert!(
+                        catch_no_unwind(AssertUnwindSafe(|| {
+                            let _ = cache.get_or_try_insert_with(
+                                Key {
+                                    value: 3,
+                                    panic_on_hash: true,
+                                },
+                                |_| 1,
+                                || panic!("nested initializer must not run"),
+                            );
+                        }))
+                        .is_err()
+                    );
+                    assert_eq!(drops.load(Ordering::Relaxed), 0);
+                    assert_eq!(cache.reclamation_stats().pending_nodes, 1);
+                    Ok(DropProbe(Arc::clone(&drops)))
+                },
+            )
+            .unwrap();
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert_eq!(cache.reclamation_stats().pending_nodes, 0);
+        drop(initialized);
     }
 
     #[test]

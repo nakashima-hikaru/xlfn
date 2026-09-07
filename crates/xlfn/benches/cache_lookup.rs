@@ -66,6 +66,10 @@ fn report_steady_state_allocations(label: &str, run: impl Fn()) {
 }
 
 fn cache_lookup_benchmarks(c: &mut Criterion) {
+    println!(
+        "cache_resident_backend {:?}",
+        xlfn::benchmark_support::benchmark_cache_backend()
+    );
     let mut group = c.benchmark_group("cache_lookup");
     group.measurement_time(benchmark_measurement_time());
 

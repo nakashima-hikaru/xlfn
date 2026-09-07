@@ -113,6 +113,14 @@
   },
   {
     "path": "crates/xlfn/src/cache.rs",
+    "context": "# [ cfg ( test ) ] mod tests / # [ test ] fn panicking_initializer_reclaims_deferred_leases_and_preserves_original_panic",
+    "code": "let result = std::panic::catch_unwind(AssertUnwindSafe(|| {",
+    "count": 1,
+    "category": "test",
+    "reason": "Verifies the fixed string initializer panic survives hostile value cleanup, then consumes the observed payload through contain_panic."
+  },
+  {
+    "path": "crates/xlfn/src/cache.rs",
     "context": "# [ cfg ( test ) ] mod tests / # [ test ] fn panicking_weight_does_not_leave_a_stuck_singleflight",
     "code": "let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {",
     "count": 1,

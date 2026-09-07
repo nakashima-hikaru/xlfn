@@ -1623,19 +1623,18 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     pub(crate) fn acquire_execution_lease(
         &'static self,
         generation: NonNull<ExecutionGeneration<A>>,
-    ) -> crate::generation::ExecutionLease<A> {
+    ) -> crate::XllResult<crate::generation::ExecutionLease<A>> {
+        // A call admitted before closing can still be preparing its async
+        // launch after the publication gate is sealed. Its existing lease
+        // keeps the generation alive, but a new launch must fail normally.
         let permit = self
             .publication_readers
             .try_enter_owned_current()
-            .unwrap_or_else(|_| {
-                lifecycle_invariant_violation(
-                    "async execution lease requested after generation admission closed",
-                )
-            });
+            .map_err(|_| crate::XllError::Closing)?;
         // SAFETY: the publication gate is owned by this process-lifetime
         // coordinator and is drained before the published generation owner
         // converts back into a Box for reclamation.
-        unsafe { crate::generation::ExecutionLease::new(generation, permit) }
+        Ok(unsafe { crate::generation::ExecutionLease::new(generation, permit) })
     }
 
     pub(in crate::lifecycle) fn set_host_intent(&self, intent: HostLifecycleIntent) {

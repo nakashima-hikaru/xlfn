@@ -50,6 +50,7 @@ miri:
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +nightly miri test -p xlfn-kernel --lib -- miri_
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +nightly miri test -p xlfn --no-default-features --features handles --lib -- miri_
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +nightly miri test -p xlfn --no-default-features --features async --lib -- miri_
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +nightly miri test -p xlfn --no-default-features --features rtd --lib -- miri_
 
 test-core:
     cargo test \
@@ -169,3 +170,12 @@ bench-one-filter name filter features="bench-internals":
 
 bench-check:
     cargo clippy --package xlfn --benches --all-features --locked
+
+# Full-cache sharded baseline; leak and alias validation remain enabled.
+miri-cache-sharded:
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="" cargo +nightly miri test -p xlfn --features "unstable-cache bench-internals" --lib cache::backend_tests --locked
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-tree-borrows" cargo +nightly miri test -p xlfn --features "unstable-cache bench-internals" --lib cache::backend_tests --locked
+
+# Ten-minute local qualification, with serial candidates and three repetitions.
+bench-cache-backends output="target/cache-backend-qualification":
+    python3 -B tools/qualify_cache_backends.py --output "{{output}}"

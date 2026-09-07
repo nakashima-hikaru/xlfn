@@ -543,6 +543,8 @@ pub mod unstable {
             BoundCacheEndpoint, CacheEndpoint, CacheLease, CacheReclamationStats, CacheRegistry,
             CalculationCache, CanonicalF64,
         };
+        #[cfg(feature = "bench-internals")]
+        pub use crate::cache::{CacheBackend, CacheResidentStats};
     }
 
     /// Explicit low-level array output construction.

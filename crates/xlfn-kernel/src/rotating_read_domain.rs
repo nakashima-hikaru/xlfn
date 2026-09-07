@@ -15,6 +15,18 @@ use parking_lot::Mutex;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+// Share the publication order with the Loom adapter. In particular, a reused
+// generation must not admit a delayed reader before it becomes current.
+fn publish_then_reopen(
+    publish: impl FnOnce(),
+    reopen: impl FnOnce(),
+    between_publish_steps: impl FnOnce(),
+) {
+    publish();
+    between_publish_steps();
+    reopen();
+}
+
 /// An opaque index identifying one of the two read generations.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct GenerationIndex(u8);
@@ -258,11 +270,25 @@ impl<const N: usize> RotatingReadDomain<N> {
     /// retaining the transition lock. The replacement's previous callback
     /// completed before this lock was acquired, so it can be reopened safely.
     fn publish_next_locked(&self, old: GenerationIndex) {
+        self.publish_next_locked_impl(old, || {});
+    }
+
+    fn publish_next_locked_impl(&self, old: GenerationIndex, between_publish_steps: impl FnOnce()) {
         let next = GenerationIndex((old.index() ^ 1) as u8);
-        self.generations[next.index()]
-            .reopen()
-            .unwrap_or_else(|_| crate::invariant::fail_stop());
-        self.current.store(next.index(), Ordering::Release);
+        // Publish while both gates are still sealed. A reader may have loaded
+        // `next` two rotations ago: reopening it before publication would let
+        // that delayed reader enter an unpublished generation. Retired work
+        // could then be queued in `old` and reclaimed without waiting for it.
+        // Readers that observe the new publication before reopening retry.
+        publish_then_reopen(
+            || self.current.store(next.index(), Ordering::Release),
+            || {
+                self.generations[next.index()]
+                    .reopen()
+                    .unwrap_or_else(|_| crate::invariant::fail_stop());
+            },
+            between_publish_steps,
+        );
     }
 
     /// Permanently closes the domain and waits for both generations to drain.
@@ -473,6 +499,64 @@ mod tests {
         resume_tx.send(()).unwrap();
         assert!(reader.join().unwrap());
         reclaimer.join().unwrap();
+    }
+
+    #[test]
+    fn miri_delayed_reader_cannot_enter_reused_generation_before_publication() {
+        #[derive(Debug, Eq, PartialEq)]
+        enum ReaderEvent {
+            LoadedInitial,
+            Retried,
+            Admitted,
+        }
+
+        let domain = Arc::new(RotatingReadDomain::<2>::new());
+        let (events_tx, events_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::sync_channel(0);
+        let reader_domain = Arc::clone(&domain);
+        let reader = std::thread::spawn(move || {
+            let attempts = Cell::new(0);
+            let permit = reader_domain
+                .enter_with_hook(0, |generation| {
+                    let attempt = attempts.replace(attempts.get() + 1);
+                    if attempt == 0 {
+                        assert_eq!(generation.index(), 0);
+                        events_tx.send(ReaderEvent::LoadedInitial).unwrap();
+                        resume_rx.recv().unwrap();
+                    } else if attempt == 1 {
+                        events_tx.send(ReaderEvent::Retried).unwrap();
+                    }
+                })
+                .unwrap();
+            events_tx.send(ReaderEvent::Admitted).unwrap();
+            drop(permit);
+        });
+
+        assert_eq!(events_rx.recv().unwrap(), ReaderEvent::LoadedInitial);
+        domain.quiesce(|_| {}).unwrap();
+
+        // Hold the second rotation between publication and gate reopening.
+        // The reader still carries zero from before the first rotation and
+        // must retry while the reused gate is sealed. Reopening first would
+        // admit it before zero is published, so retirement in generation one
+        // could reclaim a pointer without waiting for this reader.
+        let event = {
+            let _transition = domain.transition.lock();
+            let old = domain.current_generation();
+            domain.generations[old.index()].seal();
+            let mut event = None;
+            domain.publish_next_locked_impl(old, || {
+                resume_tx.send(()).unwrap();
+                event = Some(events_rx.recv_timeout(Duration::from_secs(1)).unwrap());
+            });
+            domain.generations[old.index()].wait_until_idle();
+            event.unwrap()
+        };
+
+        // Join before asserting so the regression cannot strand a reader.
+        reader.join().unwrap();
+        assert_eq!(event, ReaderEvent::Retried);
+        assert_eq!(events_rx.recv().unwrap(), ReaderEvent::Admitted);
     }
 
     #[test]
@@ -740,6 +824,10 @@ mod tests {
             fn active(&self) -> usize {
                 self.state.load(LoomOrdering::Acquire) >> 1
             }
+
+            fn is_sealed(&self) -> bool {
+                self.state.load(LoomOrdering::Acquire) & SEALED != 0
+            }
         }
 
         struct LoomReadDomain {
@@ -776,8 +864,11 @@ mod tests {
                 } else if !self.generations[old].try_seal_if_idle() {
                     return;
                 }
-                self.generations[next].reopen();
-                self.current.store(next, LoomOrdering::Release);
+                publish_then_reopen(
+                    || self.current.store(next, LoomOrdering::Release),
+                    || self.generations[next].reopen(),
+                    || {},
+                );
                 if wait_for_readers {
                     while self.generations[old].active() != 0 {
                         loom_thread::yield_now();
@@ -812,6 +903,35 @@ mod tests {
                     reclaimer_domain.rotate_and_reclaim(wait_for_readers);
                 });
 
+                reader.join().unwrap();
+                reclaimer.join().unwrap();
+            });
+        }
+
+        // Two rotations can reuse a generation selected by a delayed reader.
+        // Admission may straddle a later seal, but an admitted generation
+        // that is no longer current must already be sealed. An open gate in
+        // a noncurrent generation is the unsafe publication window.
+        for wait_for_readers in [true, false] {
+            loom::model(move || {
+                let domain = LoomArc::new(LoomReadDomain::new());
+                let reader_domain = LoomArc::clone(&domain);
+                let reader = loom_thread::spawn(move || {
+                    if let Some(generation) = reader_domain.enter() {
+                        if reader_domain.current.load(LoomOrdering::Acquire) != generation {
+                            assert!(
+                                reader_domain.generations[generation].is_sealed(),
+                                "reader entered a reused generation before publication"
+                            );
+                        }
+                        reader_domain.generations[generation].release();
+                    }
+                });
+                let reclaimer_domain = LoomArc::clone(&domain);
+                let reclaimer = loom_thread::spawn(move || {
+                    reclaimer_domain.rotate_and_reclaim(wait_for_readers);
+                    reclaimer_domain.rotate_and_reclaim(wait_for_readers);
+                });
                 reader.join().unwrap();
                 reclaimer.join().unwrap();
             });
