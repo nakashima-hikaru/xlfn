@@ -19,10 +19,6 @@ pub(crate) fn task_shard(id: u64) -> usize {
     (id as usize) & (TASK_SHARDS - 1)
 }
 
-pub(crate) struct TaskShard {
-    pub(crate) tasks: Mutex<FxHashMap<u64, TaskControl>>,
-}
-
 pub(crate) struct GenerationState {
     pub(crate) id: u64,
     pub(crate) admission: xlfn_kernel::operation_gate::OperationGate,
@@ -30,15 +26,13 @@ pub(crate) struct GenerationState {
     /// Reservations and completion guards, including canceled tasks whose
     /// controls have already been drained. This is the reclamation authority.
     pub(crate) pins: AtomicUsize,
-    pub(crate) shards: Box<[TaskShard]>,
+    pub(crate) shards: Box<[Mutex<FxHashMap<u64, TaskControl>>]>,
 }
 
 impl GenerationState {
     pub(crate) fn new(id: u64) -> Self {
         let shards = (0..TASK_SHARDS)
-            .map(|_| TaskShard {
-                tasks: Mutex::new(FxHashMap::default()),
-            })
+            .map(|_| Mutex::new(FxHashMap::default()))
             .collect::<Vec<_>>()
             .into_boxed_slice();
         Self {
@@ -53,7 +47,7 @@ impl GenerationState {
     pub(crate) fn remove_task(&self, id: u64) -> bool {
         let index = task_shard(id);
         let removed = {
-            let mut tasks = self.shards[index].tasks.lock();
+            let mut tasks = self.shards[index].lock();
             let removed = tasks.remove(&id);
             if removed.is_some() {
                 let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.task_count);
@@ -69,7 +63,7 @@ impl GenerationState {
     pub(crate) fn drain_tasks(&self) -> Vec<TaskControl> {
         let mut result = Vec::new();
         for shard in self.shards.iter() {
-            let mut tasks = shard.tasks.lock();
+            let mut tasks = shard.lock();
             let count = tasks.len();
             let drained = tasks.drain().map(|(_, task)| task).collect::<Vec<_>>();
             result.extend(drained);

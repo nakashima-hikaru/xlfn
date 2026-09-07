@@ -12,7 +12,7 @@ use xlfn::unstable::cache::{
 
 ## One typed cache
 
-`CalculationCache<K, V>` uses Moka's TinyLFU admission/eviction policy and a caller-defined weight:
+`CalculationCache<K, V>` uses Quick Cache's weighted admission/eviction policy with one native shard and a caller-defined weight:
 
 ```rust
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -30,21 +30,21 @@ let dataset = cache.get_or_try_insert_with(
 )?;
 ```
 
-The returned value is `CacheLease<'_, V>`, which implements `Deref<Target = V>`. Concurrent initializations for the same key are coalesced. A failed initialization is returned to its caller and is not cached.
+The returned value is `CacheLease<'_, V>`, which implements `Deref<Target = V>`. Concurrent initializations for the same versioned key share a short-lived flight owned by xlfn. All callers waiting on that flight receive the same initialization error; a later call can retry. If the initializer panics, waiting callers can retry leadership. Initializers run outside the flight and resident-index locks. Completed flights are immediately removed and hold no cache nodes.
 
-The weight budget is an abstract integer. It can represent approximate bytes, external-resource units, or another monotone cost, but every call site for a cache must use one consistent definition. Zero is normalized to a minimum positive cache weight. A value heavier than the entire budget is returned but not retained.
+The weight budget is an abstract integer. It can represent approximate bytes, external-resource units, or another monotone cost, but every call site for a cache must use one consistent definition. Zero entry weight is normalized to one. A zero cache budget bypasses residency. A value heavier than the entire budget is returned but not retained. Native admission may also reject smaller values: the budget is an upper bound, not a promise that a particular value remains cached. One shard preserves the exact global resident-weight limit without rounding per-shard quotas upward.
 
-Metrics such as `len()` and `used_weight()` run pending Moka maintenance first, but should still be treated as operational estimates rather than transactional accounting.
+`len()` and `used_weight()` observe native resident counts and opportunistically reclaim already-retired nodes. Individual snapshots are bounded, but concurrent mutations mean separate metric reads are not a transaction. Caller weights do not include index overhead, active flights or retained leases.
 
 Eviction and memory reclamation are separate. A live lease intentionally keeps
 its value alive after eviction or `clear()`. Once the final pin is released,
 the value enters a retirement queue until readers that could have observed its
-pointer have finished. The eviction listener only queues work; it never waits
-for readers or runs a value destructor inside Moka maintenance.
+pointer have finished. Native eviction only collects entries in a lifecycle
+request state. After the native lock is released, that state invokes xlfn's
+existing retirement callback; it never runs value destructors under the lock.
 
 Ordinary reads attempt reclamation when work is queued, without waiting for
-readers. Initialization attempts flush Moka's pending work every 32 attempts.
-They also apply backpressure when queued retirement reaches 256 nodes or the
+readers. Initialization attempts apply backpressure when queued retirement reaches 256 nodes or the
 endpoint's weight budget: the operation waits for existing readers before
 returning. This bounds accumulating debt during ongoing mutation, subject to
 concurrent operations; it is not a strict bound on process memory. A final lease

@@ -83,15 +83,15 @@ impl Addin for ServiceAddin {
     fn open(_: &OpenContext) -> XllResult<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>> {
         Ok(Opened::new(State::new(), (), ()).with_runtime_config(
             RuntimeConfig::new().with_async_worker_count(
-                AsyncWorkerCount::new(4).expect("4 is within the supported range"),
+                AsyncWorkerCount::new(4).expect("4 is a supported worker count"),
             ),
         ))
     }
 }
 ```
 
-`AsyncWorkerCount` accepts only values in `1..=32`; values outside that range
-are rejected. Choose the count from measured workload characteristics.
+`AsyncWorkerCount` accepts `1..=64`, matching the one-bit-per-worker wakeup
+mask. Zero and counts larger than that mask are rejected. Choose the count from measured workload characteristics.
 CPU-heavy work should usually use a dedicated bounded pool rather than
 occupying every async executor thread.
 

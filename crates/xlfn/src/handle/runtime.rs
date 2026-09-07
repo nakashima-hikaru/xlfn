@@ -2,9 +2,9 @@ use super::object::PendingObjectBinding;
 use super::publication::{InsertedPublication, ObjectAllocation, PublicationReservation};
 use super::registry::HandleRegistrySealed;
 use super::{
-    ExcelHandleObject, Handle, HandleAlias, HandlePrepareState, HandleRefinementHooks, HandleStore,
-    HandleTopicKey, Initialization, InitializationPtr, PrepareDecision, PublishedTopic,
-    PublishedTopicPtr, PublishedTopicState, TopicRemoval, TopicTable,
+    ExcelHandleObject, FormulaRevisionKey, Handle, HandleAlias, HandlePrepareState,
+    HandleRefinementHooks, HandleStore, Initialization, InitializationPtr, PrepareDecision,
+    PublishedTopic, PublishedTopicPtr, PublishedTopicState, TopicRemoval, TopicTable,
 };
 #[cfg(any(target_os = "windows", test))]
 use super::{FormulaLifetimeGeneration, FormulaObserverId, HandleConnection};
@@ -66,15 +66,15 @@ impl HandlePreparation {
 }
 
 thread_local! {
-    static ACTIVE_HANDLE_INITIALIZATION_KEYS: RefCell<Vec<HandleTopicKey>> = const { RefCell::new(Vec::new()) };
+    static ACTIVE_HANDLE_INITIALIZATION_KEYS: RefCell<Vec<FormulaRevisionKey>> = const { RefCell::new(Vec::new()) };
 }
 
 pub(crate) struct HandleInitializationGuard {
-    key: HandleTopicKey,
+    key: FormulaRevisionKey,
 }
 
 impl HandleInitializationGuard {
-    pub(crate) fn enter(key: HandleTopicKey) -> XllResult<Self> {
+    pub(crate) fn enter(key: FormulaRevisionKey) -> XllResult<Self> {
         ACTIVE_HANDLE_INITIALIZATION_KEYS.with(|active| {
             let mut active = active.borrow_mut();
             if active.contains(&key) {
@@ -175,14 +175,14 @@ impl FormulaHandleService {
     ) -> XllResult<HandlePreparation>
     where
         T: ExcelHandleObject,
-        K: Into<HandleTopicKey>,
+        K: Into<FormulaRevisionKey>,
     {
         self.prepare_observed(key, create, |_, _| Ok(()))
     }
 
     pub(crate) fn observe_existing(
         &self,
-        key: HandleTopicKey,
+        key: FormulaRevisionKey,
         lifetime_key: String,
         token: String,
         generation: TopicGeneration,
@@ -195,7 +195,7 @@ impl FormulaHandleService {
 
     pub(super) fn commit_publication(
         &self,
-        key: HandleTopicKey,
+        key: FormulaRevisionKey,
         generation: TopicGeneration,
         initialization: InitializationPtr,
         publication: PublishedTopicPtr,
@@ -233,7 +233,7 @@ impl FormulaHandleService {
     ) -> XllResult<HandlePreparation>
     where
         T: ExcelHandleObject,
-        K: Into<HandleTopicKey>,
+        K: Into<FormulaRevisionKey>,
     {
         self.prepare_observed_object::<T, K>(
             key,
@@ -256,7 +256,7 @@ impl FormulaHandleService {
     ) -> XllResult<HandlePreparation>
     where
         T: ExcelHandleObject,
-        K: Into<HandleTopicKey>,
+        K: Into<FormulaRevisionKey>,
     {
         self.prepare_observed_object::<T, K>(
             key,
@@ -277,7 +277,7 @@ impl FormulaHandleService {
     ) -> XllResult<HandlePreparation>
     where
         T: ExcelHandleObject,
-        K: Into<HandleTopicKey>,
+        K: Into<FormulaRevisionKey>,
     {
         let key = key.into();
         let _active_initialization = HandleInitializationGuard::enter(key)?;
@@ -394,7 +394,7 @@ impl FormulaHandleService {
     /// closure and the same call-scoped preparation admission.
     fn prepare_warm<F>(
         &self,
-        key: HandleTopicKey,
+        key: FormulaRevisionKey,
         observe: &mut Option<F>,
     ) -> XllResult<Option<HandlePreparation>>
     where
@@ -510,7 +510,7 @@ impl FormulaHandleService {
         lifetime_generation: FormulaLifetimeGeneration,
         topic_id: i32,
         lifetime_key: &str,
-    ) -> XllResult<(HandleTopicKey, String, bool)> {
+    ) -> XllResult<(FormulaRevisionKey, String, bool)> {
         let owner = FormulaObserverId {
             generation: lifetime_generation,
             topic_id,
@@ -531,7 +531,7 @@ impl FormulaHandleService {
     pub(crate) fn commit_connection(
         &self,
         owner: FormulaObserverId,
-        key: HandleTopicKey,
+        key: FormulaRevisionKey,
     ) -> XllResult<()> {
         self.topics.commit_connection(owner, key)?;
         self.refinement.observe_commit_connection(&key, owner);
@@ -539,7 +539,7 @@ impl FormulaHandleService {
     }
 
     #[cfg(any(target_os = "windows", test))]
-    pub(crate) fn rollback_connection(&self, owner: FormulaObserverId, key: HandleTopicKey) {
+    pub(crate) fn rollback_connection(&self, owner: FormulaObserverId, key: FormulaRevisionKey) {
         if !self.topics.rollback_connection(owner, key) {
             return;
         }
@@ -760,7 +760,7 @@ impl crate::shutdown::HandleStoreTeardown for FormulaHandleServiceSealed {
 #[cfg(feature = "handles")]
 pub(crate) struct FormulaHandleServiceSlot {
     service: xlfn_kernel::service_slot::GenerationServiceSlot<
-        crate::addin::HandleConfig,
+        crate::addin::HandleBindingLimit,
         FormulaHandleService,
         crate::XllError,
     >,
@@ -784,7 +784,7 @@ impl FormulaHandleServiceSlot {
         }
     }
 
-    pub(crate) fn arm(&self, config: crate::addin::HandleConfig) -> XllResult<()> {
+    pub(crate) fn arm(&self, config: crate::addin::HandleBindingLimit) -> XllResult<()> {
         self.service
             .arm(config)
             .map_err(crate::error::map_service_slot_error)
@@ -792,7 +792,7 @@ impl FormulaHandleServiceSlot {
 
     /// Construct and publish the handle service as part of generation open.
     ///
-    /// Handle service construction is deterministic from `HandleConfig` and
+    /// Handle service construction is deterministic from `HandleBindingLimit` and
     /// does not depend on a first UDF call.  Keeping the initialization at the
     /// open boundary makes a published generation a usable handle generation;
     /// the generic slot remains lazy for services whose construction is truly
@@ -832,7 +832,7 @@ impl FormulaHandleServiceSlot {
             .read(
                 |config| {
                     FormulaHandleService::try_new(
-                        usize::try_from(config.maximum_bindings())
+                        usize::try_from(config.get())
                             .expect("handle capacity fits the platform usize"),
                     )
                     .map(Box::new)

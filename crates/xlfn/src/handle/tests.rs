@@ -10,7 +10,7 @@ fn armed_handle_slot() -> (
 ) {
     let slot: &'static FormulaHandleServiceSlot =
         Box::leak(Box::new(FormulaHandleServiceSlot::new()));
-    slot.arm(crate::RuntimeConfig::new().handle_config())
+    slot.arm(crate::HandleBindingLimit::DEFAULT)
         .expect("test handle slot should arm");
     slot.initialize()
         .expect("test handle slot should initialize");
@@ -41,6 +41,14 @@ where
             .expect("test value is uniquely owned"),
     );
     registry.insert_pending(&mut value)
+}
+
+fn prepare_data_record(
+    runtime: &FormulaHandleService,
+    key: FormulaRevisionKey,
+    value: DataRecord,
+) -> String {
+    runtime.prepare(key, || Ok(value)).unwrap().into_token()
 }
 
 fn with_handle<T, R>(
@@ -80,8 +88,8 @@ fn reference_handle_identity(object_id: ObjectId) -> InputFingerprint {
     builder.finish().unwrap()
 }
 
-fn semantic_handle_key<T: ExcelHandleObject>(handle: &Handle<'_, T>) -> HandleTopicKey {
-    HandleTopicKey::Formula(FormulaRevisionKey::new(
+fn semantic_handle_key<T: ExcelHandleObject>(handle: &Handle<'_, T>) -> FormulaRevisionKey {
+    FormulaRevisionKey::new(
         FormulaCaller {
             sheet_id: 0,
             row: 20,
@@ -89,7 +97,7 @@ fn semantic_handle_key<T: ExcelHandleObject>(handle: &Handle<'_, T>) -> HandleTo
         },
         "TEST.SEMANTIC.HANDLE",
         input_identity(handle),
-    ))
+    )
 }
 
 #[derive(serde::Deserialize)]
@@ -1021,10 +1029,7 @@ fn repeated_formula_revision_runs_factory_exactly_once() {
 #[test]
 fn explicit_handle_argument_conversion_resolves_a_typed_token() {
     let (slot, handles) = armed_handle_slot();
-    let token = handles
-        .prepare(test_topic_key("argument"), || Ok(DataRecord(19)))
-        .unwrap()
-        .into_token();
+    let token = prepare_data_record(&handles, test_topic_key("argument"), DataRecord(19));
     let (_encoded, mut raw) = token_value(&token);
 
     crate::call::with_excel_call_scope(|scope| {
@@ -1040,10 +1045,7 @@ fn explicit_handle_argument_conversion_resolves_a_typed_token() {
 #[test]
 fn pending_handle_argument_conversion_leases_the_payload() {
     let (_slot, handles) = armed_handle_slot();
-    let token = handles
-        .prepare(test_topic_key("async-argument"), || Ok(DataRecord(29)))
-        .unwrap()
-        .into_token();
+    let token = prepare_data_record(&handles, test_topic_key("async-argument"), DataRecord(29));
     let resolved = crate::call::with_excel_call_scope_and_state(&handles, |handles, scope| {
         handles
             .lookup::<DataRecord>(scope, &token)
@@ -1065,10 +1067,7 @@ fn generic_handle_conversion_rejects_wrong_stale_foreign_and_tampered_tokens() {
     let (slot, handles) = armed_handle_slot();
     let key = test_topic_key("argument-errors");
     let lifetime_key = key.format_lifetime_key();
-    let token = handles
-        .prepare(key, || Ok(DataRecord(23)))
-        .unwrap()
-        .into_token();
+    let token = prepare_data_record(&handles, key, DataRecord(23));
     handles
         .connect(lifetime_generation(1), 91, &lifetime_key)
         .unwrap();
@@ -1187,10 +1186,7 @@ fn existing_handle_publication_creates_an_independent_formula_owner() {
     let runtime = FormulaHandleService::new(8);
     let source_key = test_topic_key("source");
     let source_lifetime_key = source_key.format_lifetime_key();
-    let source_token = runtime
-        .prepare(source_key, || Ok(DataRecord(31)))
-        .unwrap()
-        .into_token();
+    let source_token = prepare_data_record(&runtime, source_key, DataRecord(31));
     runtime
         .connect(lifetime_generation(1), 1, &source_lifetime_key)
         .unwrap();
@@ -1388,10 +1384,7 @@ fn aliases_of_one_object_have_one_semantic_input_identity() {
     let runtime = FormulaHandleService::new(8);
     let source_key = test_topic_key("identity-source");
     let source_lifetime_key = source_key.format_lifetime_key();
-    let source_token = runtime
-        .prepare(source_key, || Ok(DataRecord(91)))
-        .unwrap()
-        .into_token();
+    let source_token = prepare_data_record(&runtime, source_key, DataRecord(91));
     runtime
         .connect(lifetime_generation(1), 5, &source_lifetime_key)
         .unwrap();
@@ -1412,10 +1405,7 @@ fn aliases_of_one_object_have_one_semantic_input_identity() {
 
     let other_key = test_topic_key("identity-other");
     let other_lifetime_key = other_key.format_lifetime_key();
-    let other_token = runtime
-        .prepare(other_key, || Ok(DataRecord(91)))
-        .unwrap()
-        .into_token();
+    let other_token = prepare_data_record(&runtime, other_key, DataRecord(91));
     runtime
         .connect(lifetime_generation(1), 7, &other_lifetime_key)
         .unwrap();
@@ -1445,10 +1435,7 @@ fn semantic_handle_identity_controls_formula_memoization() {
     let runtime = FormulaHandleService::new(16);
 
     let source_key = test_topic_key("semantic-memo-source");
-    let source_token = runtime
-        .prepare(source_key, || Ok(DataRecord(91)))
-        .unwrap()
-        .into_token();
+    let source_token = prepare_data_record(&runtime, source_key, DataRecord(91));
     let source_lifetime_key = source_key.format_lifetime_key();
     runtime
         .connect(lifetime_generation(1), 50, &source_lifetime_key)
@@ -1469,10 +1456,7 @@ fn semantic_handle_identity_controls_formula_memoization() {
         .unwrap();
 
     let other_key = test_topic_key("semantic-memo-other");
-    let other_token = runtime
-        .prepare(other_key, || Ok(DataRecord(91)))
-        .unwrap()
-        .into_token();
+    let other_token = prepare_data_record(&runtime, other_key, DataRecord(91));
     let other_lifetime_key = other_key.format_lifetime_key();
     runtime
         .connect(lifetime_generation(1), 52, &other_lifetime_key)
@@ -1632,10 +1616,7 @@ fn uncommitted_connect_transaction_rolls_back_only_the_excel_connection() {
     let runtime = Arc::new(FormulaHandleService::new(8));
     let key = test_topic_key("transactional");
     let lifetime_key = key.format_lifetime_key();
-    let token = runtime
-        .prepare(key, || Ok(DataRecord(1)))
-        .unwrap()
-        .into_token();
+    let token = prepare_data_record(&runtime, key, DataRecord(1));
 
     let connection = runtime
         .connect_transaction(lifetime_generation(1), 10, &lifetime_key)
@@ -1687,10 +1668,7 @@ fn failed_repeated_connect_transaction_preserves_existing_connection() {
     let runtime = Arc::new(FormulaHandleService::new(8));
     let key = test_topic_key("existing-transaction");
     let lifetime_key = key.format_lifetime_key();
-    let token = runtime
-        .prepare(key, || Ok(DataRecord(2)))
-        .unwrap()
-        .into_token();
+    let token = prepare_data_record(&runtime, key, DataRecord(2));
     runtime
         .connect(lifetime_generation(1), 11, &lifetime_key)
         .unwrap();
@@ -1879,10 +1857,7 @@ fn binding_snapshot_blocks_object_quiescence_until_call_ends() {
 
     let runtime = Arc::new(FormulaHandleService::new(8));
     let key = test_topic_key("snapshot-quiescence");
-    let token = runtime
-        .prepare(key, || Ok(DataRecord(42)))
-        .unwrap()
-        .into_token();
+    let token = prepare_data_record(&runtime, key, DataRecord(42));
 
     let (seal_handle, finished_rx) =
         crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
@@ -1961,18 +1936,9 @@ fn different_formula_keys_create_distinct_handles() {
     let first_key = test_topic_key("sheet:A1:rate=1");
     let second_key = test_topic_key("sheet:A2:rate=1");
     let changed_key = test_topic_key("sheet:A1:rate=2");
-    let first = runtime
-        .prepare(first_key, || Ok(DataRecord(1)))
-        .unwrap()
-        .into_token();
-    let second = runtime
-        .prepare(second_key, || Ok(DataRecord(1)))
-        .unwrap()
-        .into_token();
-    let changed = runtime
-        .prepare(changed_key, || Ok(DataRecord(2)))
-        .unwrap()
-        .into_token();
+    let first = prepare_data_record(&runtime, first_key, DataRecord(1));
+    let second = prepare_data_record(&runtime, second_key, DataRecord(1));
+    let changed = prepare_data_record(&runtime, changed_key, DataRecord(2));
     assert_ne!(first, second);
     assert_ne!(first, changed);
 }
@@ -3290,7 +3256,7 @@ fn concurrent_first_use_initializes_exactly_once() {
     let slot: &'static FormulaHandleServiceSlot =
         Box::leak(Box::new(FormulaHandleServiceSlot::new()));
     assert!(slot.is_none());
-    slot.arm(crate::HandleConfig::default()).unwrap();
+    slot.arm(crate::HandleBindingLimit::default()).unwrap();
 
     let barrier = Arc::new(std::sync::Barrier::new(16));
     let handles: Vec<_> = (0..16)
@@ -3320,7 +3286,7 @@ fn close_resets_to_closed_for_reopen() {
     let slot = FormulaHandleServiceSlot::new();
     assert!(slot.is_none());
 
-    slot.arm(crate::HandleConfig::default()).unwrap();
+    slot.arm(crate::HandleBindingLimit::default()).unwrap();
     let session1 = slot.read().unwrap().store.session();
     assert!(!slot.is_none());
 
@@ -3329,7 +3295,7 @@ fn close_resets_to_closed_for_reopen() {
         .unwrap();
     assert!(slot.is_none());
 
-    slot.arm(crate::HandleConfig::default()).unwrap();
+    slot.arm(crate::HandleBindingLimit::default()).unwrap();
     let session2 = slot.read().unwrap().store.session();
     assert!(!slot.is_none());
 
@@ -3341,7 +3307,7 @@ fn handle_slot_seal_is_local_to_its_generation_bundle() {
     let slot = FormulaHandleServiceSlot::new();
     assert!(matches!(slot.read(), Err(XllError::Closing)));
 
-    slot.arm(crate::HandleConfig::default()).unwrap();
+    slot.arm(crate::HandleBindingLimit::default()).unwrap();
     assert!(slot.read().is_ok());
     assert!(matches!(slot.disarm(), Err(XllError::Closing)));
 
@@ -3354,7 +3320,7 @@ fn handle_slot_seal_is_local_to_its_generation_bundle() {
 fn handle_config_rejects_an_unbounded_dense_publication_table() {
     let slot = FormulaHandleServiceSlot::new();
     let invalid_limit =
-        crate::HandleBindingLimit::try_from(crate::HandleConfig::MAX_SUPPORTED_BINDINGS + 1);
+        crate::HandleBindingLimit::try_from(crate::HandleBindingLimit::MAX_SUPPORTED_BINDINGS + 1);
 
     assert!(invalid_limit.is_err());
     assert!(slot.is_none());
@@ -3377,10 +3343,7 @@ fn topic_table_tombstones_are_bounded_and_reclaimed() {
     // 2. Churning publications and rollbacks reclaims retired topics.
     for i in 0..50 {
         let key = test_topic_key(&format!("churn-{i}"));
-        let _token = runtime
-            .prepare(key, || Ok(DataRecord(i)))
-            .unwrap()
-            .into_token();
+        let _token = prepare_data_record(&runtime, key, DataRecord(i));
         let lifetime_key = key.format_lifetime_key();
         runtime.rollback(&lifetime_key);
     }
@@ -3437,10 +3400,7 @@ fn miri_handle_scope_and_binding_lifecycle() {
 fn miri_topic_read_lease_lifecycle() {
     let runtime = FormulaHandleService::new(4);
     let key = test_topic_key("miri_topic");
-    let token = runtime
-        .prepare(key, || Ok(DataRecord(42)))
-        .unwrap()
-        .into_token();
+    let token = prepare_data_record(&runtime, key, DataRecord(42));
     assert!(!token.is_empty());
 
     {
@@ -3492,10 +3452,7 @@ fn rejects_object_binding_from_foreign_registry() {
 fn miri_topic_close_unpublishes_before_reclamation_can_run() {
     let runtime = FormulaHandleService::new(4);
     let key = test_topic_key("close_publication_order");
-    runtime
-        .prepare(key, || Ok(DataRecord(42)))
-        .unwrap()
-        .into_token();
+    prepare_data_record(&runtime, key, DataRecord(42));
     let reclaim_count = std::cell::Cell::new(0);
     let discovered_retired_topic = std::cell::Cell::new(false);
 

@@ -48,31 +48,8 @@
     Windows.Win32.DISPATCH_METHOD
     Windows.Win32.DISPPARAMS
     Windows.Win32.EXCEPINFO
-    Windows.Win32.IDLDESC
-    Windows.Win32.TYPEDESC
-    Windows.Win32.TYPEKIND
-    Windows.Win32.TYPEATTR
-    Windows.Win32.ITypeComp
-    Windows.Win32.BINDPTR
-    Windows.Win32.DESCKIND
-    Windows.Win32.ELEMDESC
-    Windows.Win32.FUNCDESC
-    Windows.Win32.INVOKEKIND
-    Windows.Win32.FUNCKIND
-    Windows.Win32.CALLCONV
-    Windows.Win32.FUNCFLAGS
-    Windows.Win32.VARFLAGS
-    Windows.Win32.VARDESC
-    Windows.Win32.VARKIND
-    Windows.Win32.ITypeLib
-    Windows.Win32.TLIBATTR
-    Windows.Win32.SYSKIND
-    Windows.Win32.ITypeInfo
     Windows.Win32.SAFEARRAY
     Windows.Win32.SAFEARRAYBOUND
-    Windows.Win32.ARRAYDESC
-    Windows.Win32.PARAMDESCEX
-    Windows.Win32.PARAMDESC
     Windows.Win32.OutputDebugStringW
     Windows.Win32.FreeLibrary
     Windows.Win32.GetModuleHandleExW

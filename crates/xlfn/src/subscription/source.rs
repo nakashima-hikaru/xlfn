@@ -19,10 +19,14 @@ use std::marker::PhantomData;
 /// object participates in the ownership graph.
 /// # Safety
 ///
-/// `disconnect_and_wait` must not return until every callback and worker that
-/// can use any [`RtdSink`] clone issued to this subscription has stopped, and
-/// no sink clone may be used afterward. This is the temporal lifetime proof
-/// that allows sinks to remain non-owning capabilities.
+/// `disconnect_and_wait` must stop every callback and worker that can use any
+/// [`RtdSink`] clone issued to this subscription before control leaves the
+/// method, whether it returns `Ok`, returns `Err`, or unwinds. No sink clone
+/// may be used after any of those exits. Preserve this guarantee during
+/// unwinding, for example with a cleanup guard that joins every sink user.
+///
+/// The framework contains cleanup panics and may reclaim the publish core
+/// afterward. Neither an error nor a panic extends the lifetime of a sink.
 pub unsafe trait RtdSubscription: Send + 'static {
     fn request_cancel(&self);
     fn disconnect_and_wait(self: Box<Self>) -> XllResult<()>;
@@ -142,7 +146,8 @@ impl std::fmt::Debug for SourceArena {
 /// - if `subscribe` returns `Ok`, every sink clone that may still be used must
 ///   be owned by the returned [`RtdSubscription`]'s cancellation and
 ///   disconnection protocol; and
-/// - after `disconnect_and_wait` returns, no such sink clone may be used.
+/// - all sink users must stop before `disconnect_and_wait` returns `Ok`,
+///   returns `Err`, or unwinds, and no such sink clone may be used afterward.
 ///
 /// This contract is required because [`RtdSink`] is a lifetime-less,
 /// non-owning capability into a runtime-owned publish core.

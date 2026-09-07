@@ -193,6 +193,15 @@ mod tests {
     }
 
     #[test]
+    fn every_supported_worker_has_a_distinct_claimable_idle_bit() {
+        let mask = std::sync::atomic::AtomicU64::new(u64::MAX);
+        for index in 0..crate::AsyncWorkerCount::MAX {
+            assert_eq!(claim_idle_worker(&mask), Some(index));
+        }
+        assert_eq!(claim_idle_worker(&mask), None);
+    }
+
+    #[test]
     #[cfg_attr(miri, ignore)]
     fn loom_queue_publication_cannot_leave_work_behind_a_sleeping_worker() {
         loom::model(|| {

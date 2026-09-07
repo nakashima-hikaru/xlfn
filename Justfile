@@ -50,6 +50,18 @@ miri:
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +nightly miri test -p xlfn-kernel --lib -- miri_
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +nightly miri test -p xlfn --no-default-features --features handles --lib -- miri_
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +nightly miri test -p xlfn --no-default-features --features async --lib -- miri_
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +nightly miri test -p xlfn --no-default-features --features rtd --lib -- miri_
+    just miri-cache
+
+# Production full-cache and safe shared-flight regressions, both borrow models.
+miri-cache:
+    just miri-cache-model "-Zmiri-disable-isolation"
+    just miri-cache-model "-Zmiri-disable-isolation -Zmiri-tree-borrows"
+
+[private]
+miri-cache-model flags:
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="{{flags}}" cargo +nightly miri test -p xlfn --no-default-features --features "unstable-cache bench-internals" --locked --lib cache::protocol_tests -- --test-threads=1
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="{{flags}}" cargo +nightly miri test -p xlfn --no-default-features --features "unstable-cache bench-internals" --locked --lib cache::shared_flight::tests -- --test-threads=1
 
 test-core:
     cargo test \
@@ -132,6 +144,12 @@ bench-ci:
     just bench-one-filter rtd_publish "^rtd_publish/(number|string|string_8k)/(changing|same_value)\z" "bench-internals rtd"
     just bench-one-filter rtd_refresh "^rtd_refresh/(number/end_to_end/dense|short_string/end_to_end/dense|string_8k/(collection|completion|end_to_end)/dense)\z" "bench-internals rtd"
     just bench-one-filter handle_call_resolution "^handle_call_resolution/handles/(1|8)\z"
+    just bench-cache
+
+# Fresh Quick-only metric names start a new history, without Moka-relative gates.
+bench-cache:
+    just bench-one-filter cache_lookup "^cache_lookup/quick/(cache_hit/u64/current/warm|cache_hit_hot_key/current/threads_(1|8|32)/u64|cache_hit_disjoint/current/threads_(8|32)/u64|eviction_with_live_lease/current)\z" "unstable-cache bench-internals"
+    just bench-one-filter cache_reclamation "^cache_reclamation/quick/(churn|live_leases)/payload_64b/threads_(1|32)\z" "unstable-cache bench-internals"
 
 # Pull request benchmark gate (aliases bench-ci to ensure identical thresholds and history).
 bench-pr: bench-ci
@@ -160,6 +178,8 @@ bench-full:
     just bench-one rtd_publish "bench-internals rtd"
     just bench-one rtd_refresh "bench-internals rtd"
     just bench-one handle_call_resolution
+    just bench-one cache_lookup "unstable-cache bench-internals"
+    just bench-one cache_reclamation "unstable-cache bench-internals"
 
 bench-one name features="bench-internals":
     cargo bench --package xlfn --bench {{name}} --features "{{features}}" --locked

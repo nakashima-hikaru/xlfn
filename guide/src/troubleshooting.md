@@ -124,7 +124,7 @@ A cancellation token cannot interrupt a blocking foreign call. Instrument queue 
 - Confirm Excel calculation is enabled.
 - Test one, two, and three-topic batches; do not rely on a single happy path.
 - Check temporary COM registration access and stale-registration recovery.
-- Verify `request_cancel` does not block and `disconnect_and_wait` reaches quiescence.
+- Verify `request_cancel` does not block and `disconnect_and_wait` reaches quiescence on success, error, and unwinding.
 
 A tight retry loop after a permanent publish failure can create an error storm and fill diagnostics.
 

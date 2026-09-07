@@ -9,7 +9,6 @@ use xlfn_sys::{IDSHEET, XLOPER12, XLREF12};
 
 const EXCEL_MAX_ROW: i32 = 1_048_575;
 const EXCEL_MAX_COLUMN: i32 = 16_383;
-const MAX_REFERENCE_AREAS: usize = 1_024;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct SheetId(IDSHEET);
@@ -167,18 +166,21 @@ impl<'call> FromExcelReference<'call> for ExcelReference<'call> {
             XlValueType::Reference => {
                 // SAFETY: xltypeRef selects the mref union member.
                 let mref = unsafe { value.raw().value.mref };
-                // SAFETY: a valid xltypeRef contains a readable XLMREF12 table;
-                // null is handled as an input error before dereferencing it.
-                let table = unsafe { mref.references.as_ref() }
+                let table = NonNull::new(mref.references)
                     .ok_or_else(|| XllError::input(argument, InputError::NullPointer))?;
-                let count = usize::from(table.count);
-                if count == 0 || count > MAX_REFERENCE_AREAS {
+                // SAFETY: a valid xltypeRef contains a readable XLMREF12 header.
+                let count = usize::from(unsafe { (*table.as_ptr()).count });
+                if count == 0 {
                     return Err(XllError::input(
                         argument,
                         InputError::Malformed("invalid reference area count"),
                     ));
                 }
-                let first = table.reftbl.as_ptr();
+                // Keep the host allocation's provenance. Borrowing `reftbl`
+                // would restrict the pointer to the ABI's one-element tail,
+                // while the actual variable-length table can contain more.
+                // SAFETY: the non-null table points to the live host allocation.
+                let first = unsafe { (&raw const (*table.as_ptr()).reftbl).cast::<XLREF12>() };
                 // SAFETY: Excel's variable-length XLMREF12 table contains count entries.
                 let areas = unsafe { slice::from_raw_parts(first, count) };
                 for area in areas {
@@ -272,5 +274,86 @@ mod tests {
         });
         // SAFETY: raw is structurally readable, and validation rejects its range.
         assert!(unsafe { reference_from_raw::<ExcelReference<'_>>("cell", &mut raw) }.is_err());
+    }
+
+    #[test]
+    fn reference_area_count_uses_the_abi_bound() {
+        #[repr(C)]
+        struct ReferenceTable {
+            count: u16,
+            areas: [XLREF12; 1025],
+        }
+        // SAFETY: every field is an integer, so an all-zero table is valid.
+        let mut table = unsafe { Box::<ReferenceTable>::new_zeroed().assume_init() };
+        table.count = 1025;
+        let mut raw = XLOPER12 {
+            value: XLOPER12Value {
+                mref: xlfn_sys::XLOPER12MRef {
+                    references: (&raw mut *table).cast(),
+                    sheet_id: 42,
+                },
+            },
+            xltype: xlfn_sys::XLTYPE_REF,
+        };
+        // SAFETY: the full variable-length table remains live during conversion.
+        let reference: ExcelReference<'_> =
+            unsafe { reference_from_raw("areas", &mut raw) }.unwrap();
+        assert_eq!(reference.areas().count(), 1025);
+
+        table.count = 0;
+        // SAFETY: refresh the pointer after mutating the table; the live header is readable.
+        raw.value.mref.references = (&raw mut *table).cast();
+        // SAFETY: the live header is readable; zero areas must fail before reading the tail.
+        assert!(unsafe { reference_from_raw::<ExcelReference<'_>>("areas", &mut raw) }.is_err());
+    }
+
+    #[test]
+    fn miri_multi_area_reference_preserves_the_full_table() {
+        #[repr(C)]
+        struct ReferenceTable {
+            count: u16,
+            areas: [XLREF12; 2],
+        }
+
+        assert_eq!(
+            std::mem::offset_of!(ReferenceTable, areas),
+            std::mem::offset_of!(xlfn_sys::XLMREF12, reftbl),
+        );
+        let mut table = ReferenceTable {
+            count: 2,
+            areas: [
+                XLREF12 {
+                    rw_first: 2,
+                    rw_last: 4,
+                    col_first: 1,
+                    col_last: 3,
+                },
+                XLREF12 {
+                    rw_first: 8,
+                    rw_last: 9,
+                    col_first: 5,
+                    col_last: 7,
+                },
+            ],
+        };
+        let mut raw = XLOPER12 {
+            value: XLOPER12Value {
+                mref: xlfn_sys::XLOPER12MRef {
+                    references: (&raw mut table).cast(),
+                    sheet_id: 42,
+                },
+            },
+            xltype: xlfn_sys::XLTYPE_REF,
+        };
+        // SAFETY: raw and the two-area table remain live and unchanged for the borrow.
+        let reference: ExcelReference<'_> =
+            unsafe { reference_from_raw("areas", &mut raw) }.unwrap();
+        assert_eq!(reference.sheet_id().unwrap().get(), 42);
+        assert!(reference.is_multi_area());
+        let areas = reference.areas().collect::<Vec<_>>();
+        assert_eq!(areas.len(), 2);
+        assert_eq!((areas[0].first_row(), areas[0].last_row()), (2, 4));
+        assert_eq!((areas[1].first_row(), areas[1].last_row()), (8, 9));
+        assert_eq!((areas[1].first_column(), areas[1].last_column()), (5, 7));
     }
 }

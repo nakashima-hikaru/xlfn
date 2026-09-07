@@ -329,24 +329,32 @@ pub(crate) fn validate_dependency_graph(
     if let Some(name) = external_imports.intersection(&bundled_names).next() {
         return Err(format!("DLL `{name}` cannot be both bundled and external").into());
     }
+    let mut visited = BTreeSet::new();
     for root in images.keys() {
-        let mut path = vec![root.clone()];
-        validate_dependency_node(
-            root,
-            images,
-            external_imports,
-            &mut path,
-            &mut BTreeSet::new(),
-        )?;
+        validate_dependency_node(root, images, external_imports, &mut visited)?;
     }
     validate_forwarded_exports(images, external_imports)
 }
 
-pub(crate) fn validate_dependency_node(
+fn dependency_imports(
+    image: &PeInfo,
+) -> impl Iterator<Item = (&str, Option<&BTreeSet<ImportTarget>>)> {
+    image
+        .imports
+        .iter()
+        .map(|name| (name.as_str(), image.import_targets.get(name)))
+        .chain(
+            image
+                .delay_imports
+                .iter()
+                .map(|name| (name.as_str(), image.delay_import_targets.get(name))),
+        )
+}
+
+fn validate_dependency_node(
     current: &str,
     images: &BTreeMap<String, (String, PeInfo)>,
     external_imports: &BTreeSet<String>,
-    path: &mut Vec<String>,
     visited: &mut BTreeSet<String>,
 ) -> PackageResult {
     if !visited.insert(current.to_owned()) {
@@ -355,25 +363,24 @@ pub(crate) fn validate_dependency_node(
     let (_, image) = images
         .get(current)
         .ok_or_else(|| format!("internal dependency graph error for {current}"))?;
-    let imports = image
-        .imports
-        .iter()
-        .map(|name| (name, image.import_targets.get(name)))
-        .chain(
-            image
-                .delay_imports
-                .iter()
-                .map(|name| (name, image.delay_import_targets.get(name))),
-        );
-    for (imported_name, targets) in imports {
+    // Input-controlled dependency depth must not consume the call stack.
+    // Each frame retains its iterator so diagnostics still show the full path.
+    let mut stack = vec![(current, dependency_imports(image))];
+    while let Some((_, imports)) = stack.last_mut() {
+        let Some((imported_name, targets)) = imports.next() else {
+            stack.pop();
+            continue;
+        };
         let imported = windows_dll_name_key("PE import", imported_name)?;
         if is_system(&imported) || external_imports.contains(&imported) {
             continue;
         }
-        let Some((imported_display, imported_image)) = images.get(&imported) else {
-            let mut chain = path
+        let Some((imported_key, (imported_display, imported_image))) =
+            images.get_key_value(&imported)
+        else {
+            let mut chain = stack
                 .iter()
-                .filter_map(|name| images.get(name).map(|(display, _)| display.as_str()))
+                .filter_map(|(name, _)| images.get(*name).map(|(display, _)| display.as_str()))
                 .collect::<Vec<_>>();
             chain.push(imported.as_str());
             return Err(format!(
@@ -392,9 +399,11 @@ pub(crate) fn validate_dependency_node(
                         .contains(&ExportOrdinal(*ordinal)),
                 };
                 if !exists {
-                    let mut chain = path
+                    let mut chain = stack
                         .iter()
-                        .filter_map(|name| images.get(name).map(|(display, _)| display.clone()))
+                        .filter_map(|(name, _)| {
+                            images.get(*name).map(|(display, _)| display.clone())
+                        })
                         .collect::<Vec<_>>();
                     chain.push(format!("{imported_display}!{}", target.display()));
                     return Err(format!(
@@ -406,9 +415,9 @@ pub(crate) fn validate_dependency_node(
             }
         }
 
-        path.push(imported.clone());
-        validate_dependency_node(&imported, images, external_imports, path, visited)?;
-        path.pop();
+        if visited.insert(imported) {
+            stack.push((imported_key.as_str(), dependency_imports(imported_image)));
+        }
     }
     Ok(())
 }
@@ -420,68 +429,60 @@ pub(crate) fn validate_forwarded_exports(
     let mut resolved = BTreeSet::new();
     for (image_name, (_, image)) in images {
         for symbol in image.forwarded_exports.keys() {
-            let mut stack = Vec::new();
-            validate_forwarded_symbol(
-                image_name,
-                symbol,
-                images,
-                external_imports,
-                &mut stack,
-                &mut resolved,
-            )?;
+            validate_forwarded_symbol(image_name, symbol, images, external_imports, &mut resolved)?;
         }
     }
     Ok(())
 }
 
-pub(crate) fn validate_forwarded_symbol(
+fn validate_forwarded_symbol(
     image_name: &str,
     symbol: &ExportSymbol,
     images: &BTreeMap<String, (String, PeInfo)>,
     external_imports: &BTreeSet<String>,
-    stack: &mut Vec<(String, ExportSymbol)>,
     resolved: &mut BTreeSet<(String, ExportSymbol)>,
 ) -> PackageResult {
-    let node = (image_name.to_owned(), symbol.clone());
-    if resolved.contains(&node) {
-        return Ok(());
-    }
-    if let Some(position) = stack.iter().position(|entry| entry == &node) {
-        let mut cycle = stack[position..]
-            .iter()
-            .map(|(image, symbol)| format!("{image}!{}", format_export_symbol(symbol)))
-            .collect::<Vec<_>>();
-        cycle.push(format!("{image_name}!{}", format_export_symbol(symbol)));
-        return Err(format!("cyclic forwarded export: {}", cycle.join(" -> ")).into());
-    }
-
-    let (_, image) = images
-        .get(image_name)
-        .ok_or_else(|| format!("internal forwarded-export graph error for {image_name}"))?;
-    let Some(forwarded) = image.forwarded_exports.get(symbol) else {
-        if image.has_export_symbol(symbol) {
-            resolved.insert(node);
-            return Ok(());
+    let mut node = (image_name.to_owned(), symbol.clone());
+    let mut stack = Vec::new();
+    let mut positions = BTreeMap::new();
+    loop {
+        if resolved.contains(&node) {
+            break;
         }
-        return Err(format!(
-            "{} is missing forwarded export target {}",
-            images
-                .get(image_name)
-                .map_or(image_name, |(display, _)| display.as_str()),
-            format_export_symbol(symbol)
-        )
-        .into());
-    };
+        if let Some(&position) = positions.get(&node) {
+            let mut cycle = stack[position..]
+                .iter()
+                .map(|(image, symbol)| format!("{image}!{}", format_export_symbol(symbol)))
+                .collect::<Vec<_>>();
+            cycle.push(format!("{}!{}", node.0, format_export_symbol(&node.1)));
+            return Err(format!("cyclic forwarded export: {}", cycle.join(" -> ")).into());
+        }
 
-    stack.push(node.clone());
-    let target_library = forwarded.library.to_ascii_lowercase();
-    if !is_system(&target_library) && !external_imports.contains(&target_library) {
+        let (image_name, symbol) = &node;
+        let (display, image) = images
+            .get(image_name)
+            .ok_or_else(|| format!("internal forwarded-export graph error for {image_name}"))?;
+        let Some(forwarded) = image.forwarded_exports.get(symbol) else {
+            if image.has_export_symbol(symbol) {
+                resolved.insert(node);
+                break;
+            }
+            return Err(format!(
+                "{display} is missing forwarded export target {}",
+                format_export_symbol(symbol)
+            )
+            .into());
+        };
+
+        positions.insert(node.clone(), stack.len());
+        stack.push(node.clone());
+        let target_library = forwarded.library.to_ascii_lowercase();
+        if is_system(&target_library) || external_imports.contains(&target_library) {
+            break;
+        }
         let Some((target_display, target_image)) = images.get(&target_library) else {
             return Err(format!(
-                "unresolved forwarded export: {}!{} -> {}!{}",
-                images
-                    .get(image_name)
-                    .map_or(image_name, |(display, _)| display.as_str()),
+                "unresolved forwarded export: {display}!{} -> {}!{}",
                 format_export_symbol(symbol),
                 forwarded.library,
                 format_export_symbol(&forwarded.symbol)
@@ -490,26 +491,15 @@ pub(crate) fn validate_forwarded_symbol(
         };
         if !target_image.has_export_symbol(&forwarded.symbol) {
             return Err(format!(
-                "forwarded export target is missing: {}!{} -> {target_display}!{}",
-                images
-                    .get(image_name)
-                    .map_or(image_name, |(display, _)| display.as_str()),
+                "forwarded export target is missing: {display}!{} -> {target_display}!{}",
                 format_export_symbol(symbol),
                 format_export_symbol(&forwarded.symbol)
             )
             .into());
         }
-        validate_forwarded_symbol(
-            &target_library,
-            &forwarded.symbol,
-            images,
-            external_imports,
-            stack,
-            resolved,
-        )?;
+        node = (target_library, forwarded.symbol.clone());
     }
-    let _ = stack.pop();
-    resolved.insert(node);
+    resolved.extend(stack);
     Ok(())
 }
 

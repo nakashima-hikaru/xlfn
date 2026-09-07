@@ -41,7 +41,6 @@
     Windows.Win32.FILE_SHARE_READ
     Windows.Win32.FILE_SHARE_WRITE
     Windows.Win32.FILE_ID_INFO
-    Windows.Win32.FILE_INFO_BY_HANDLE_CLASS
     Windows.Win32.MOVEFILE_REPLACE_EXISTING
     Windows.Win32.MOVEFILE_WRITE_THROUGH
     Windows.Win32.MoveFileExW

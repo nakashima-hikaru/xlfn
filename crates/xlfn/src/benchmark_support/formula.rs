@@ -131,16 +131,16 @@ where
     }
 }
 
-fn formula_revision_key<T>(arguments: &T, caller: FormulaCaller) -> HandleTopicKey
+fn formula_revision_key<T>(arguments: &T, caller: FormulaCaller) -> FormulaRevisionKey
 where
     T: BenchmarkInputIdentity,
 {
     let inputs = fingerprint_argument(arguments);
-    HandleTopicKey::Formula(FormulaRevisionKey::new(
+    FormulaRevisionKey::new(
         caller,
         HANDLE_FORMULA_UDF_ID,
         InputFingerprint::from_bytes(inputs),
-    ))
+    )
 }
 
 impl<T> Drop for FormulaRevisionBenchmark<T> {

@@ -69,10 +69,14 @@ Each active channel subscription uses two threads. Advanced integrations that
 share an event loop can implement the existing unsafe `RtdSource` and
 `RtdSubscription` traits. In that path, a sink must not escape an `Err` or
 panic from `subscribe`; the returned subscription must stop every sink user
-before `disconnect_and_wait` returns. Cancellation must be bounded,
-idempotent, panic-free, and must not call Excel or re-enter framework
-subscription APIs. Sinks are non-owning capabilities, so this shutdown
-contract is a memory-safety requirement for the unsafe extension point.
+before `disconnect_and_wait` exits, whether it succeeds, returns an error,
+or unwinds. Preserve this guarantee during unwinding, for example with a
+cleanup guard that joins all sink users. The framework contains cleanup panics and
+may reclaim the runtime afterward; an error or panic does not extend sink
+lifetime. Cancellation must be bounded, idempotent, panic-free, and must not
+call Excel or re-enter framework subscription APIs. Sinks are non-owning
+capabilities, so this shutdown contract is a memory-safety requirement for
+the unsafe extension point.
 
 Do not implement a timeout that abandons an in-process callback and then permits the XLL to unload. Put uninterruptible producers in another process.
 

@@ -91,15 +91,20 @@ reason and inventory update. See the [boundary and join audit](tools/panic-bound
 The [2026-09-07 soundness audit](tools/soundness-audit-2026-09-07.md) maps
 publication and reclamation obligations to their regression checks and records
 the limits of local Miri, model-checking, and Windows validation.
+The [follow-up quality review](tools/quality-review-2026-09-07.md) records the
+subsequent concurrency, cleanup, conversion, and packaging regressions.
 
 ## Windows artifacts and ABI
 
 The Windows artifact job intentionally uses same-process libtest semantics:
 
 ```powershell
-cargo test --workspace --all-targets --all-features --target x86_64-pc-windows-msvc --locked
-cargo test --workspace --all-targets --all-features --target i686-pc-windows-msvc --locked
+cargo test --workspace --all-features --target x86_64-pc-windows-msvc --locked -- --test-threads=1
+cargo test --workspace --all-features --target i686-pc-windows-msvc --locked -- --test-threads=1
 ```
+
+Keep `--test-threads=1`: these fixtures share module-wide admission and callback
+state. Use nextest for parallel execution in isolated processes.
 
 The SDK-backed ABI probe is a separate boundary check. It must use the pinned
 Excel SDK headers and verify the SDK digest and publisher before extraction.

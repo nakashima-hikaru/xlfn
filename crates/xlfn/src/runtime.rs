@@ -4,15 +4,13 @@ use crate::XllResult;
 use crate::addin::PhysicallyUnloadableAddin;
 #[cfg(feature = "async")]
 use crate::generation::ExecutionLease;
-#[cfg(test)]
-use crate::generation::OpenAttemptId;
 #[cfg(any(test, feature = "bench-internals"))]
 use crate::generation::OpeningGeneration;
 #[cfg(test)]
 use crate::generation::ShutdownGeneration;
 use crate::generation::{ExecutionGeneration, RemovalEpoch, RuntimeGeneration};
 use crate::ingress::AdmittedExport;
-#[cfg(any(test, feature = "bench-internals"))]
+#[cfg(test)]
 use crate::registration::RegistrationId;
 #[cfg(test)]
 use std::sync::Arc;
@@ -33,12 +31,10 @@ mod rollback;
 mod shutdown;
 mod transactions;
 
-#[cfg(any(feature = "bench-internals", test,))]
-use crate::runtime_components::GenerationServices;
 #[cfg(feature = "async")]
-use crate::runtime_components::RuntimeExecutors;
-#[cfg(test)]
-use crate::runtime_components::SealedGenerationServices;
+use crate::async_udf::AsyncManager;
+#[cfg(any(feature = "bench-internals", all(test, feature = "rtd")))]
+use crate::runtime_components::GenerationServices;
 use crate::runtime_components::{
     HostLedger, ModuleResidency, QuarantineReason, QuarantineVault, ReturnProtocol,
 };
@@ -48,9 +44,7 @@ use observer::RuntimeObserver;
 use open_txn::LifecycleInstalled;
 use open_txn::{Begun, OpeningTxn};
 use shutdown::ClosedWitness;
-use xlfn_kernel::thread_affine::{
-    ThreadAffineAccess, ThreadAffineError, ThreadAffineInstallError, ThreadAffineSlot,
-};
+use xlfn_kernel::thread_affine::{ThreadAffineAccess, ThreadAffineError, ThreadAffineSlot};
 
 type QuiesceOperation<A> = fn(
     &mut <A as crate::Addin>::SharedState,
@@ -102,7 +96,7 @@ pub struct Runtime<A: crate::Addin> {
     host: HostLedger,
     return_protocol: ReturnProtocol,
     #[cfg(feature = "async")]
-    executors: RuntimeExecutors,
+    async_manager: AsyncManager,
     residency: ModuleResidency,
     unload_policy: UnloadPolicy<A>,
     quarantine: QuarantineVault<A>,
@@ -212,7 +206,7 @@ impl<A: crate::Addin> Runtime<A> {
             host: HostLedger::new(),
             return_protocol: ReturnProtocol::new(),
             #[cfg(feature = "async")]
-            executors: RuntimeExecutors::new(),
+            async_manager: AsyncManager::new(),
             residency: ModuleResidency::new(),
             unload_policy: UnloadPolicy::Logical,
             quarantine: QuarantineVault::new(),
@@ -234,7 +228,7 @@ impl<A: crate::Addin> Runtime<A> {
             host: HostLedger::new(),
             return_protocol: ReturnProtocol::new(),
             #[cfg(feature = "async")]
-            executors: RuntimeExecutors::new(),
+            async_manager: AsyncManager::new(),
             residency: ModuleResidency::new(),
             unload_policy: UnloadPolicy::Physical(physical_quiesce::<A>),
             quarantine: QuarantineVault::new(),
@@ -244,11 +238,6 @@ impl<A: crate::Addin> Runtime<A> {
 
     pub(crate) fn observer(&self) -> &RuntimeObserver {
         &self.observer
-    }
-
-    #[cfg(test)]
-    pub(crate) fn composition_trace(&self) -> &crate::composition_refinement::CompositionTrace {
-        self.observer.composition_trace()
     }
 
     // This is called by the explicit removal boundary after the terminal
@@ -303,18 +292,8 @@ impl<A: crate::Addin> Runtime<A> {
         self.quarantine.snapshot()
     }
 
-    #[cfg(test)]
-    pub(crate) fn last_committed_generation(&self) -> Option<RuntimeGeneration> {
-        self.lifecycle.access().last_committed_generation()
-    }
-
     pub(crate) fn protocol_generation(&self) -> Option<RuntimeGeneration> {
         self.lifecycle.access().protocol_generation()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn open_attempt(&self) -> Option<OpenAttemptId> {
-        self.lifecycle.access().open_attempt()
     }
 
     pub(crate) fn removal_epoch(&self) -> RemovalEpoch {
@@ -450,82 +429,6 @@ impl<A: crate::Addin> Runtime<A> {
         self.addin_lifecycle.bind_current()
     }
 
-    pub(in crate::runtime) fn install_addin_lifecycle(
-        &self,
-        access: &AddinLifecycleAccess<'_, A>,
-        state: A::LifecycleState,
-    ) -> Result<(), ThreadAffineInstallError<A::LifecycleState>> {
-        self.addin_lifecycle.install(access, state)
-    }
-
-    pub(in crate::runtime) fn with_addin_lifecycle<R>(
-        &self,
-        access: &AddinLifecycleAccess<'_, A>,
-        operation: impl FnOnce(&mut A::LifecycleState) -> R,
-    ) -> Result<R, ThreadAffineError> {
-        self.addin_lifecycle.with_mut(access, operation)
-    }
-
-    #[cfg(all(test, feature = "handles"))]
-    pub(in crate::runtime) fn take_addin_lifecycle(
-        &self,
-        access: &AddinLifecycleAccess<'_, A>,
-    ) -> Result<A::LifecycleState, ThreadAffineError> {
-        self.addin_lifecycle.take(access)
-    }
-
-    pub(in crate::runtime) fn release_empty_addin_lifecycle(
-        &self,
-        access: &AddinLifecycleAccess<'_, A>,
-    ) -> Result<(), ThreadAffineError> {
-        self.addin_lifecycle.release_empty_binding(access)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_addin_lifecycle_for_test<R>(
-        &self,
-        access: &AddinLifecycleAccess<'_, A>,
-        operation: impl FnOnce(&mut A::LifecycleState) -> R,
-    ) -> Result<R, ThreadAffineError> {
-        self.with_addin_lifecycle(access, operation)
-    }
-
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) fn has_opening_generation(&self) -> bool {
-        self.lifecycle.has_opening_generation()
-    }
-
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) fn has_current_generation(&self) -> bool {
-        self.lifecycle.has_current_generation()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn take_current_generation(&self) -> Option<Box<ExecutionGeneration<A>>> {
-        self.lifecycle.take_current_generation()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn take_generation_for_shutdown(&self) -> Option<ShutdownGeneration<A>> {
-        self.lifecycle.take_generation_for_shutdown()
-    }
-
-    #[cfg(any(test, feature = "bench-internals"))]
-    pub(crate) fn finish_open(
-        &self,
-        attempt: &mut OpeningTxn<'_, A, LifecycleInstalled>,
-        registrations: Vec<RegistrationId>,
-    ) -> XllResult<()> {
-        attempt.finish_in_place(registrations)
-    }
-
-    #[cfg(all(test, feature = "async", not(target_os = "windows")))]
-    pub(crate) fn merge_host_for_test(&self, journal: crate::registration::HostMutationJournal) {
-        self.host.merge(journal);
-    }
-
     pub(crate) fn enter<'call>(
         &'call self,
         ingress: &'call AdmittedExport<'call>,
@@ -541,7 +444,10 @@ impl<A: crate::Addin> Runtime<A> {
     }
 
     #[cfg(feature = "async")]
-    pub(crate) fn execution_lease(&'static self, call: &CallGuard<'_, A>) -> ExecutionLease<A> {
+    pub(crate) fn execution_lease(
+        &'static self,
+        call: &CallGuard<'_, A>,
+    ) -> XllResult<ExecutionLease<A>> {
         self.lifecycle
             .acquire_execution_lease(call.admission.generation_pointer())
     }
@@ -565,23 +471,6 @@ impl<A: crate::Addin> Runtime<A> {
         self.return_protocol.enter_producer()
     }
 
-    #[inline]
-    #[cfg(test)]
-    pub(crate) fn wait_for_returns(&self) {
-        self.return_protocol.wait_for_returns();
-    }
-
-    #[inline]
-    #[cfg(test)]
-    pub(crate) fn returns_are_quiescent(&self) -> bool {
-        self.return_protocol.returns_are_quiescent()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn disable_trace_for_test(&self) {
-        self.observer().disable_for_test();
-    }
-
     pub(crate) fn record_returned_success(&self, witness: ClosedWitness) {
         self.observer().mark_returned_success();
         if witness.is_committed() {
@@ -600,7 +489,8 @@ impl<A: crate::Addin> Runtime<A> {
 
     #[cfg(test)]
     pub(crate) fn composition_trace_json(&self) -> String {
-        self.composition_trace()
+        self.observer()
+            .composition_trace()
             .trace_json()
             .expect("composition trace serialization")
     }
@@ -611,15 +501,10 @@ impl<A: crate::Addin> Runtime<A> {
         self.return_protocol.next_call_id()
     }
 
-    #[cfg(test)]
-    pub(crate) fn peek_next_call_id(&self) -> u64 {
-        self.return_protocol.peek_next_call_id()
-    }
-
     pub(crate) fn calculation_id(&self) -> crate::execution::CalculationId {
         #[cfg(feature = "async")]
         {
-            crate::execution::CalculationId::new(self.executors.async_manager.current_generation())
+            crate::execution::CalculationId::new(self.async_manager.current_generation())
         }
         #[cfg(not(feature = "async"))]
         {
@@ -631,7 +516,7 @@ impl<A: crate::Addin> Runtime<A> {
 
     #[cfg(feature = "async")]
     pub(crate) fn finish_calculation(&self) {
-        let _ = self.executors.async_manager.advance_generation();
+        let _ = self.async_manager.advance_generation();
     }
 
     #[cfg(all(feature = "handles", any(test, feature = "bench-internals")))]
@@ -658,50 +543,6 @@ impl<A: crate::Addin> Runtime<A> {
             .ok_or(XllError::Closing)
     }
 
-    #[cfg(test)]
-    pub(crate) fn seal_generation_services(
-        &self,
-        subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
-    ) -> XllResult<SealedGenerationServices> {
-        let generation = self.protocol_generation();
-        let mut subscriptions_stopped = Some(subscriptions_stopped);
-        self.lifecycle
-            .with_generation_services(|services| {
-                services.seal(
-                    generation,
-                    subscriptions_stopped
-                        .take()
-                        .expect("generation services consume one subscription certificate"),
-                )
-            })
-            .unwrap_or_else(|| {
-                Ok(SealedGenerationServices::empty(
-                    generation,
-                    subscriptions_stopped
-                        .take()
-                        .expect("missing services preserve the subscription certificate"),
-                ))
-            })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn shutdown_handle_topics(&self) -> XllResult<()> {
-        self.lifecycle
-            .with_generation_services(GenerationServices::shutdown_handle_topics)
-            .unwrap_or(Ok(()))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn finish_generation_services(
-        &self,
-        sealed: SealedGenerationServices,
-    ) -> XllResult<(
-        crate::shutdown::HandlesQuiescent,
-        crate::shutdown::SubscriptionsStopped,
-    )> {
-        sealed.finish()
-    }
-
     #[inline]
     #[cfg(all(test, feature = "rtd"))]
     pub(crate) fn with_subscriptions<R>(
@@ -716,60 +557,19 @@ impl<A: crate::Addin> Runtime<A> {
         })?
     }
 
-    #[cfg(test)]
-    pub(crate) fn close_subscriptions(&self) -> XllResult<crate::shutdown::SubscriptionsStopped> {
-        #[cfg(not(feature = "rtd"))]
-        {
-            Ok(crate::excel_rtd::stopped_subscriptions(
-                self.protocol_generation(),
-            ))
-        }
-        #[cfg(feature = "rtd")]
-        {
-            let generation = self.protocol_generation();
-            let Some(result) = self
-                .lifecycle
-                .with_generation_services(|services| services.close_subscriptions(generation))
-            else {
-                #[cfg(test)]
-                {
-                    return Ok(crate::excel_rtd::stopped_subscriptions(generation));
-                }
-                #[cfg(not(test))]
-                {
-                    return Err(XllError::Closing);
-                }
-            };
-            result
-        }
-    }
-
     #[cfg(feature = "async")]
     pub(crate) fn start_async(&self, worker_count: usize) -> XllResult<()> {
-        self.executors.async_manager.start(worker_count)
+        self.async_manager.start(worker_count)
     }
 
     #[cfg(feature = "async")]
     pub(crate) fn cancel_async(&self) {
-        self.executors.async_manager.cancel_current_generation();
-    }
-
-    #[cfg(feature = "async")]
-    #[cfg(test)]
-    pub(crate) fn close_async(
-        &self,
-    ) -> crate::shutdown::StopOutcome<crate::shutdown::AsyncStopped> {
-        self.executors.async_manager.close()
+        self.async_manager.cancel_current_generation();
     }
 
     #[cfg(feature = "async")]
     pub(crate) fn async_manager(&self) -> &crate::async_udf::AsyncManager {
-        &self.executors.async_manager
-    }
-
-    #[cfg(test)]
-    pub(crate) fn release_test_module_lease(&self) {
-        drop(self.lifecycle.test_module_lease.lock().take());
+        &self.async_manager
     }
 }
 
@@ -917,17 +717,19 @@ pub(crate) mod tests {
         let (module_quiescent, _exports) = drained.certify();
         let module_epoch = module_quiescent.id();
         let subscriptions_stopped = runtime
+            .shutdown_deps()
             .close_subscriptions()
             .expect("test subscriptions stop");
-        let _ = runtime.shutdown_handle_topics();
+        let _ = runtime.shutdown_deps().shutdown_handle_topics();
         let sealed = runtime
+            .shutdown_deps()
             .seal_generation_services(subscriptions_stopped)
             .expect("test generation service seal");
-        let _ = runtime.finish_generation_services(sealed);
+        let _ = sealed.finish();
         // This helper validates Runtime's close certificate in isolation. It
         // deliberately does not synthesize lifecycle trace milestones; those
         // are exercised by the real lifecycle close path.
-        runtime.disable_trace_for_test();
+        runtime.observer().disable_for_test();
         let _rtd = crate::excel_rtd::wait_for_module_quiescence().expect("RTD module quiescence");
         let last_generation = runtime.lifecycle.access().last_committed_generation();
         let certificate = removal_attempt
@@ -940,7 +742,7 @@ pub(crate) mod tests {
         let (_witness, _removal_attempt) = certificate
             .finish()
             .unwrap_or_else(|(error, _certificate)| panic!("{error}"));
-        runtime.release_test_module_lease();
+        runtime.shutdown_deps().release_test_module_lease();
     }
 
     fn finish_test_open_rollback<'a, A: crate::Addin>(
@@ -964,7 +766,7 @@ pub(crate) mod tests {
         let rollback_attempt = certificate
             .finish()
             .unwrap_or_else(|(error, _certificate)| panic!("{error}"));
-        runtime.release_test_module_lease();
+        runtime.shutdown_deps().release_test_module_lease();
         rollback_attempt
     }
 
@@ -976,7 +778,7 @@ pub(crate) mod tests {
         let runtime = Runtime::<TestU32Addin>::new();
         let opening = runtime.begin_open().unwrap();
         let mut opening = runtime.publish(opening, 23_u32, ());
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        opening.finish_in_place(Vec::new()).unwrap();
         let admission = runtime.lifecycle.try_admit().unwrap();
 
         // Closing moves the complete ownership bundle between lifecycle
@@ -988,7 +790,15 @@ pub(crate) mod tests {
         assert!(admission.services().formula_handle_service().is_ok());
         drop(admission);
 
-        assert_eq!(runtime.take_current_generation().unwrap().shared_state, 23);
+        assert_eq!(
+            runtime
+                .shutdown_deps()
+                .lifecycle()
+                .take_current_generation()
+                .unwrap()
+                .shared_state,
+            23
+        );
         finish_test_close(&runtime, close);
     }
 
@@ -1002,7 +812,7 @@ pub(crate) mod tests {
         let runtime = Runtime::<TestU32Addin>::new();
         let open_attempt = runtime.begin_open().unwrap();
         let mut open_attempt = runtime.publish(open_attempt, 1_u32, ());
-        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+        open_attempt.finish_in_place(Vec::new()).unwrap();
         let ingress = admitted_export();
         assert_eq!(runtime.enter(&ingress).unwrap().state(), &1);
         let old_token = runtime
@@ -1015,21 +825,31 @@ pub(crate) mod tests {
         drop(ingress);
 
         let removal_attempt = runtime.begin_final_removal().unwrap();
-        assert_eq!(runtime.take_current_generation().unwrap().shared_state, 1);
+        assert_eq!(
+            runtime
+                .shutdown_deps()
+                .lifecycle()
+                .take_current_generation()
+                .unwrap()
+                .shared_state,
+            1
+        );
         finish_test_close(&runtime, removal_attempt);
         let lifecycle = runtime
             .bind_addin_lifecycle()
             .expect("test runtime lifecycle remains bound to the test thread");
         runtime
+            .shutdown_deps()
             .take_addin_lifecycle(&lifecycle)
             .expect("test close must release its lifecycle state");
         runtime
+            .shutdown_deps()
             .release_empty_addin_lifecycle(&lifecycle)
             .expect("test close must release its lifecycle binding");
 
         let open_attempt = runtime.begin_open().unwrap();
         let mut open_attempt = runtime.publish(open_attempt, 2_u32, ());
-        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+        open_attempt.finish_in_place(Vec::new()).unwrap();
         let ingress = admitted_export();
         assert_eq!(runtime.enter(&ingress).unwrap().state(), &2);
         runtime
@@ -1066,7 +886,15 @@ pub(crate) mod tests {
         drop(ingress);
 
         let removal_attempt = runtime.begin_final_removal().unwrap();
-        assert_eq!(runtime.take_current_generation().unwrap().shared_state, 2);
+        assert_eq!(
+            runtime
+                .shutdown_deps()
+                .lifecycle()
+                .take_current_generation()
+                .unwrap()
+                .shared_state,
+            2
+        );
         finish_test_close(&runtime, removal_attempt);
     }
 
@@ -1081,7 +909,7 @@ pub(crate) mod tests {
 
         let current = runtime.begin_open().unwrap();
         let mut current = runtime.publish(current, (), ());
-        runtime.finish_open(&mut current, Vec::new()).unwrap();
+        current.finish_in_place(Vec::new()).unwrap();
         assert_eq!(runtime.phase(), LifecyclePhase::Open);
     }
 
@@ -1095,13 +923,16 @@ pub(crate) mod tests {
         assert_eq!(runtime.phase(), LifecyclePhase::Opening);
 
         let mut first = runtime.publish(first, 11_u32, ());
-        runtime.finish_open(&mut first, Vec::new()).unwrap();
+        first.finish_in_place(Vec::new()).unwrap();
         assert_eq!(runtime.phase(), LifecyclePhase::Open);
         let ingress = admitted_export();
         assert_eq!(runtime.enter(&ingress).unwrap().state(), &11);
         drop(ingress);
         let close = runtime.begin_final_removal().unwrap();
-        let _ = runtime.take_current_generation();
+        let _ = runtime
+            .shutdown_deps()
+            .lifecycle()
+            .take_current_generation();
         finish_test_close(&runtime, close);
     }
 
@@ -1138,6 +969,7 @@ pub(crate) mod tests {
             closing_entered_tx.send(()).unwrap();
             closing_release_rx.recv().unwrap();
             let state = match closing_runtime
+                .shutdown_deps()
                 .take_generation_for_shutdown()
                 .expect("shutdown extracts generation")
             {
@@ -1156,10 +988,10 @@ pub(crate) mod tests {
         assert_eq!(runtime.phase(), LifecyclePhase::Closing);
         assert_ne!(runtime.removal_epoch(), removal_epoch);
         assert!(matches!(
-            runtime.finish_open(&mut opening, Vec::new()),
+            opening.finish_in_place(Vec::new()),
             Err(XllError::Closing)
         ));
-        assert_eq!(runtime.open_attempt(), None);
+        assert_eq!(runtime.open_deps().lifecycle_access().open_attempt(), None);
 
         closing_entered_rx.recv().unwrap();
         closing_release_tx.send(()).unwrap();
@@ -1175,23 +1007,30 @@ pub(crate) mod tests {
         let runtime = Arc::new(Runtime::<()>::new());
         let opening = runtime.begin_open().unwrap();
         let mut opening = runtime.publish(opening, (), ());
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        opening.finish_in_place(Vec::new()).unwrap();
 
         let mut removal_attempt = runtime.begin_final_removal().unwrap();
-        runtime.wait_for_returns();
-        let subscriptions_stopped = runtime.close_subscriptions().unwrap();
-        runtime.shutdown_handle_topics().unwrap();
+        runtime.open_deps().returns().wait_for_returns();
+        let subscriptions_stopped = runtime.shutdown_deps().close_subscriptions().unwrap();
+        runtime.shutdown_deps().shutdown_handle_topics().unwrap();
         let sealed = runtime
+            .shutdown_deps()
             .seal_generation_services(subscriptions_stopped)
             .unwrap();
-        runtime.finish_generation_services(sealed).unwrap();
-        assert!(runtime.take_current_generation().is_some());
+        sealed.finish().unwrap();
+        assert!(
+            runtime
+                .shutdown_deps()
+                .lifecycle()
+                .take_current_generation()
+                .is_some()
+        );
 
         let module_closing = removal_attempt.take_module_closing();
         let drained = module_closing.seal_and_drain();
         let (module_quiescent, _exports) = drained.certify();
         let module_epoch = module_quiescent.id();
-        runtime.disable_trace_for_test();
+        runtime.observer().disable_for_test();
         let _rtd = crate::excel_rtd::wait_for_module_quiescence().expect("RTD module quiescence");
         let certificate = removal_attempt
             .certify::<FinalRemoval>(
@@ -1265,13 +1104,16 @@ pub(crate) mod tests {
         let runtime = Arc::new(Runtime::<()>::new());
         let opening = runtime.begin_open().unwrap();
         let mut opening = runtime.publish(opening, (), ());
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        opening.finish_in_place(Vec::new()).unwrap();
 
         let first = runtime.begin_final_removal().unwrap();
         drop(first);
 
         let second = runtime.begin_final_removal().unwrap();
-        let _ = runtime.take_current_generation();
+        let _ = runtime
+            .shutdown_deps()
+            .lifecycle()
+            .take_current_generation();
         finish_test_close(&runtime, second);
         assert_eq!(runtime.phase(), LifecyclePhase::Closed);
     }
@@ -1294,16 +1136,17 @@ pub(crate) mod tests {
         let runtime = Runtime::<()>::new();
         let opening = runtime.begin_open().unwrap();
         let mut opening = runtime.publish(opening, (), ());
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        opening.finish_in_place(Vec::new()).unwrap();
 
         let removal_attempt = runtime.begin_final_removal().unwrap();
-        runtime.wait_for_returns();
-        let subscriptions_stopped = runtime.close_subscriptions().unwrap();
-        runtime.shutdown_handle_topics().unwrap();
+        runtime.open_deps().returns().wait_for_returns();
+        let subscriptions_stopped = runtime.shutdown_deps().close_subscriptions().unwrap();
+        runtime.shutdown_deps().shutdown_handle_topics().unwrap();
         let sealed = runtime
+            .shutdown_deps()
             .seal_generation_services(subscriptions_stopped)
             .unwrap();
-        runtime.finish_generation_services(sealed).unwrap();
+        sealed.finish().unwrap();
         let module_epoch = runtime
             .lifecycle
             .access()
@@ -1322,7 +1165,13 @@ pub(crate) mod tests {
         };
         assert_eq!(runtime.phase(), LifecyclePhase::Closing);
 
-        assert!(runtime.take_current_generation().is_some());
+        assert!(
+            runtime
+                .shutdown_deps()
+                .lifecycle()
+                .take_current_generation()
+                .is_some()
+        );
         finish_test_close(&runtime, removal_attempt);
         assert_eq!(runtime.phase(), LifecyclePhase::Closed);
     }
@@ -1333,7 +1182,7 @@ pub(crate) mod tests {
         let runtime = Arc::new(Runtime::<TestU32Addin>::new());
         let open_attempt = runtime.begin_open().unwrap();
         let mut open_attempt = runtime.publish(open_attempt, 7_u32, ());
-        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+        open_attempt.finish_in_place(Vec::new()).unwrap();
 
         let ingress = crate::module_runtime::ingress()
             .enter_with(|| {})
@@ -1355,6 +1204,47 @@ pub(crate) mod tests {
         drop(ingress);
         receiver.recv_timeout(Duration::from_secs(1)).unwrap();
         handle.join().unwrap();
+    }
+
+    #[cfg(feature = "async")]
+    #[test]
+    fn execution_lease_rejects_close_race_without_invalidating_existing_leases() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let fixture = StaticTestRuntime::<TestU32Addin>::new();
+        let runtime = fixture.runtime();
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish(opening, 7_u32, ());
+        opening.finish_in_place(Vec::new()).unwrap();
+
+        let ingress = admitted_export();
+        let call = runtime.enter(&ingress).unwrap();
+        let lease = runtime.execution_lease(&call).unwrap();
+        assert_eq!(*lease.state(), 7);
+
+        // Model removal winning between call admission and async launch.
+        let removal = runtime.begin_final_removal().unwrap();
+        assert!(matches!(
+            runtime.execution_lease(&call),
+            Err(XllError::Closing)
+        ));
+        assert_eq!(*call.state(), 7);
+        drop(call);
+        drop(ingress);
+
+        // A lease issued before closing still owns its generation lifetime
+        // even after the original call has returned.
+        assert_eq!(*lease.state(), 7);
+        drop(lease);
+        assert_eq!(
+            runtime
+                .shutdown_deps()
+                .lifecycle()
+                .take_current_generation()
+                .unwrap()
+                .shared_state,
+            7
+        );
+        finish_test_close(runtime, removal);
     }
 
     #[test]
@@ -1479,7 +1369,7 @@ pub(crate) mod tests {
         assert!(second_token.is_cancelled());
         assert!(!first_token.is_cancelled());
 
-        assert!(runtime.close_async().issues.is_empty());
+        assert!(runtime.async_manager().close().issues.is_empty());
         assert!(first_token.is_cancelled());
     }
 
@@ -1537,6 +1427,6 @@ pub(crate) mod tests {
         runtime
             .async_manager()
             .set_after_generation_publish_hook(None);
-        assert!(runtime.close_async().issues.is_empty());
+        assert!(runtime.async_manager().close().issues.is_empty());
     }
 }

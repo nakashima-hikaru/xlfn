@@ -6,7 +6,7 @@ depends on value size and alignment. Large inline arrays consumed more
 allocator space and took longer to construct and reclaim in this experiment.
 
 This is a standalone layout and allocation microbenchmark, **not a measurement
-of production cache performance**. It does not execute Moka, lookup admission,
+of production cache performance**. It does not execute the resident index, lookup admission,
 pins, eviction, or grace-period maintenance, and it is not a Cargo bench target.
 The executable mirrors the metadata fields of `CacheNode` while replacing its
 domain pointer's pointee with `()`; the pointer is never dereferenced. Recheck

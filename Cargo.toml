@@ -48,7 +48,7 @@ getrandom = "0.4.3"
 inventory = "0.3.24"
 libc = "0.2.189"
 loom = "0.7.2"
-moka = { version = "0.12", default-features = false, features = ["sync"] }
+quick-cache = { package = "quick_cache", version = "0.7" }
 object = { version = "0.40.0", default-features = false, features = ["pe", "read_core", "std"] }
 parking_lot = "0.12.5"
 proc-macro-crate = "3.5.0"

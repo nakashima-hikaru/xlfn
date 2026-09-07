@@ -176,7 +176,18 @@ Destructors must obey the same shutdown rules as any in-process code:
 - do not panic;
 - do not directly destroy a thread-affine application resource from an arbitrary handle destructor.
 
-The runtime supports at most 16,384 live handles per open generation. This is a safety bound, not a capacity target.
+The default limit is 16,384 live handles per open generation. Select a different
+limit directly on the runtime configuration:
+
+```rust
+RuntimeConfig::new().with_handle_binding_limit(
+    HandleBindingLimit::new(32_768).expect("supported handle binding limit"),
+)
+```
+
+The limit must be nonzero and no greater than
+`HandleBindingLimit::MAX_SUPPORTED_BINDINGS` (1,048,576), which bounds the dense
+publication table allocated when the generation opens.
 
 ## Resource-backed handle objects
 

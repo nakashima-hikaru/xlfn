@@ -4,7 +4,7 @@
 )]
 
 use super::refinement_wire::TokenWire;
-use super::{FormulaLifetimeGeneration, FormulaObserverId, FormulaRevisionKey, HandleTopicKey};
+use super::{FormulaLifetimeGeneration, FormulaObserverId, FormulaRevisionKey};
 use parking_lot::{Mutex, MutexGuard};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -243,7 +243,7 @@ impl Linearization<'_> {
 
     pub(crate) fn commit_and_activate(
         &mut self,
-        key: &HandleTopicKey,
+        key: &FormulaRevisionKey,
         runtime_id: u64,
         token: TokenWire,
     ) {
@@ -254,7 +254,7 @@ impl Linearization<'_> {
         });
     }
 
-    pub(crate) fn begin_warm_read(&mut self, key: &HandleTopicKey) -> u64 {
+    pub(crate) fn begin_warm_read(&mut self, key: &FormulaRevisionKey) -> u64 {
         let reader_id = self.machine.next_reader_id;
         self.machine.next_reader_id = reader_id.saturating_add(1);
         self.machine.push(Event::BeginWarmRead {
@@ -278,7 +278,7 @@ impl Linearization<'_> {
 
     pub(crate) fn withdraw_and_invalidate(
         &mut self,
-        key: &HandleTopicKey,
+        key: &FormulaRevisionKey,
         runtime_id: u64,
         token: TokenWire,
     ) {
@@ -289,7 +289,7 @@ impl Linearization<'_> {
         });
     }
 
-    pub(crate) fn disconnect(&mut self, key: &HandleTopicKey, owner: FormulaObserverId) {
+    pub(crate) fn disconnect(&mut self, key: &FormulaRevisionKey, owner: FormulaObserverId) {
         self.machine.push(Event::Disconnect {
             key: topic_key(key),
             owner: owner_wire(owner),
@@ -357,7 +357,7 @@ impl HandleRefinementTrace {
         id
     }
 
-    pub(crate) fn begin_initializer(&self, key: &HandleTopicKey, runtime_id: u64) {
+    pub(crate) fn begin_initializer(&self, key: &FormulaRevisionKey, runtime_id: u64) {
         let key = topic_key(key);
         let mut machine = self.inner.lock();
         machine.initializers.insert(key.clone(), runtime_id);
@@ -368,7 +368,7 @@ impl HandleRefinementTrace {
         self.linearize().finish_initializer(runtime_id);
     }
 
-    pub(crate) fn insert_pending_fresh(&self, key: &HandleTopicKey, runtime_id: u64) {
+    pub(crate) fn insert_pending_fresh(&self, key: &FormulaRevisionKey, runtime_id: u64) {
         self.inner.lock().push(Event::InsertPendingFresh {
             key: topic_key(key),
             runtime_id,
@@ -377,7 +377,7 @@ impl HandleRefinementTrace {
 
     pub(crate) fn insert_pending_reuse(
         &self,
-        key: &HandleTopicKey,
+        key: &FormulaRevisionKey,
         runtime_id: u64,
         slot: u64,
         generation: u64,
@@ -392,7 +392,7 @@ impl HandleRefinementTrace {
 
     pub(crate) fn publish_and_install(
         &self,
-        key: &HandleTopicKey,
+        key: &FormulaRevisionKey,
         runtime_id: u64,
         token: TokenWire,
         lifetime_key: &str,
@@ -407,7 +407,7 @@ impl HandleRefinementTrace {
 
     pub(crate) fn commit_and_activate(
         &self,
-        key: &HandleTopicKey,
+        key: &FormulaRevisionKey,
         runtime_id: u64,
         token: TokenWire,
     ) {
@@ -416,7 +416,7 @@ impl HandleRefinementTrace {
 
     pub(crate) fn withdraw_and_invalidate(
         &self,
-        key: &HandleTopicKey,
+        key: &FormulaRevisionKey,
         runtime_id: u64,
         token: TokenWire,
     ) {
@@ -429,7 +429,7 @@ impl HandleRefinementTrace {
 
     pub(crate) fn rollback_pending(
         &self,
-        key: &HandleTopicKey,
+        key: &FormulaRevisionKey,
         runtime_id: u64,
         reusable: bool,
         token: TokenWire,
@@ -449,7 +449,7 @@ impl HandleRefinementTrace {
         }
     }
 
-    pub(crate) fn begin_warm_read(&self, key: &HandleTopicKey) -> u64 {
+    pub(crate) fn begin_warm_read(&self, key: &FormulaRevisionKey) -> u64 {
         self.linearize().begin_warm_read(key)
     }
 
@@ -467,7 +467,7 @@ impl HandleRefinementTrace {
 
     pub(crate) fn claim_lifetime(
         &self,
-        key: &HandleTopicKey,
+        key: &FormulaRevisionKey,
         generation: FormulaLifetimeGeneration,
     ) {
         self.inner.lock().push(Event::ClaimServer {
@@ -476,7 +476,7 @@ impl HandleRefinementTrace {
         });
     }
 
-    pub(crate) fn begin_connection(&self, key: &HandleTopicKey, owner: FormulaObserverId) {
+    pub(crate) fn begin_connection(&self, key: &FormulaRevisionKey, owner: FormulaObserverId) {
         self.inner.lock().push(Event::BeginConnection {
             key: topic_key(key),
             owner: owner_wire(owner),
@@ -485,7 +485,7 @@ impl HandleRefinementTrace {
 
     pub(crate) fn reuse_committed_connection(
         &self,
-        key: &HandleTopicKey,
+        key: &FormulaRevisionKey,
         owner: FormulaObserverId,
     ) {
         self.inner.lock().push(Event::ReuseCommittedConnection {
@@ -494,21 +494,21 @@ impl HandleRefinementTrace {
         });
     }
 
-    pub(crate) fn commit_connection(&self, key: &HandleTopicKey, owner: FormulaObserverId) {
+    pub(crate) fn commit_connection(&self, key: &FormulaRevisionKey, owner: FormulaObserverId) {
         self.inner.lock().push(Event::CommitConnection {
             key: topic_key(key),
             owner: owner_wire(owner),
         });
     }
 
-    pub(crate) fn rollback_connection(&self, key: &HandleTopicKey, owner: FormulaObserverId) {
+    pub(crate) fn rollback_connection(&self, key: &FormulaRevisionKey, owner: FormulaObserverId) {
         self.inner.lock().push(Event::RollbackConnection {
             key: topic_key(key),
             owner: owner_wire(owner),
         });
     }
 
-    pub(crate) fn disconnect(&self, key: &HandleTopicKey, owner: FormulaObserverId) {
+    pub(crate) fn disconnect(&self, key: &FormulaRevisionKey, owner: FormulaObserverId) {
         self.linearize().disconnect(key, owner);
     }
 
@@ -576,19 +576,13 @@ impl HandleRefinementTrace {
     }
 }
 
-fn topic_key(key: &HandleTopicKey) -> FormulaRevisionKeyWire {
-    match key {
-        HandleTopicKey::Formula(FormulaRevisionKey {
-            caller,
-            udf_id,
-            inputs,
-        }) => FormulaRevisionKeyWire {
-            sheet_id: caller.sheet_id as u64,
-            row: caller.row,
-            column: caller.column,
-            udf_id: (*udf_id).to_owned(),
-            input_fingerprint: encode_digest(inputs.as_bytes()),
-        },
+fn topic_key(key: &FormulaRevisionKey) -> FormulaRevisionKeyWire {
+    FormulaRevisionKeyWire {
+        sheet_id: key.caller.sheet_id as u64,
+        row: key.caller.row,
+        column: key.caller.column,
+        udf_id: key.udf_id.to_owned(),
+        input_fingerprint: encode_digest(key.inputs.as_bytes()),
     }
 }
 

@@ -179,9 +179,14 @@ pub struct HandleBindingLimit(NonZeroU32);
 
 #[cfg(feature = "handles")]
 impl HandleBindingLimit {
+    pub const DEFAULT: Self =
+        Self(NonZeroU32::new(16_384).expect("default binding limit is non-zero"));
+    /// Bounds the dense publication table allocated when a generation opens.
+    pub const MAX_SUPPORTED_BINDINGS: u32 = 1_048_576;
+
     #[must_use]
     pub const fn new(value: u32) -> Option<Self> {
-        if value == 0 || value > HandleConfig::MAX_SUPPORTED_BINDINGS {
+        if value == 0 || value > Self::MAX_SUPPORTED_BINDINGS {
             None
         } else {
             Some(Self(
@@ -207,44 +212,9 @@ impl TryFrom<u32> for HandleBindingLimit {
 }
 
 #[cfg(feature = "handles")]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct HandleConfig {
-    maximum_bindings: HandleBindingLimit,
-}
-
-#[cfg(feature = "handles")]
-impl HandleConfig {
-    pub const DEFAULT_MAX_BINDINGS: u32 = 16_384;
-    /// Upper bound for the dense immutable publication table.
-    ///
-    /// The table is allocated when a handle generation is initialized, so an
-    /// unchecked `u32` would turn configuration input into an unbounded eager
-    /// allocation. The bound keeps the dense lookup policy explicit.
-    pub const MAX_SUPPORTED_BINDINGS: u32 = 1_048_576;
-
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            maximum_bindings: HandleBindingLimit::new(Self::DEFAULT_MAX_BINDINGS)
-                .expect("default handle limit is supported"),
-        }
-    }
-
-    #[must_use]
-    pub const fn with_binding_limit(mut self, maximum_bindings: HandleBindingLimit) -> Self {
-        self.maximum_bindings = maximum_bindings;
-        self
-    }
-
-    pub(crate) const fn maximum_bindings(self) -> u32 {
-        self.maximum_bindings.get()
-    }
-}
-
-#[cfg(feature = "handles")]
-impl Default for HandleConfig {
+impl Default for HandleBindingLimit {
     fn default() -> Self {
-        Self::new()
+        Self::DEFAULT
     }
 }
 
@@ -252,11 +222,11 @@ impl Default for HandleConfig {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeConfig {
     #[cfg(feature = "rtd")]
-    rtd: RtdConfig,
+    pub(crate) rtd_limits: RtdLimits,
     #[cfg(feature = "handles")]
-    handles: HandleConfig,
+    pub(crate) handle_binding_limit: HandleBindingLimit,
     #[cfg(feature = "async")]
-    async_runtime: AsyncRuntimeConfig,
+    pub(crate) async_worker_count: AsyncWorkerCount,
 }
 
 impl RuntimeConfig {
@@ -264,86 +234,37 @@ impl RuntimeConfig {
     pub const fn new() -> Self {
         Self {
             #[cfg(feature = "rtd")]
-            rtd: RtdConfig::new(),
+            rtd_limits: RtdLimits::standard(),
             #[cfg(feature = "handles")]
-            handles: HandleConfig::new(),
+            handle_binding_limit: HandleBindingLimit::DEFAULT,
             #[cfg(feature = "async")]
-            async_runtime: AsyncRuntimeConfig::new(),
+            async_worker_count: AsyncWorkerCount::DEFAULT,
         }
     }
 
     #[cfg(feature = "rtd")]
     #[must_use]
     pub const fn with_rtd_limits(mut self, limits: RtdLimits) -> Self {
-        self.rtd = self.rtd.with_limits(limits);
+        self.rtd_limits = limits;
         self
     }
 
     #[cfg(feature = "handles")]
     #[must_use]
-    pub const fn with_handle_config(mut self, handles: HandleConfig) -> Self {
-        self.handles = handles;
+    pub const fn with_handle_binding_limit(mut self, limit: HandleBindingLimit) -> Self {
+        self.handle_binding_limit = limit;
         self
     }
 
     #[cfg(feature = "async")]
     #[must_use]
     pub const fn with_async_worker_count(mut self, worker_count: AsyncWorkerCount) -> Self {
-        self.async_runtime = self.async_runtime.with_worker_count(worker_count);
+        self.async_worker_count = worker_count;
         self
-    }
-
-    #[cfg(feature = "rtd")]
-    pub(crate) const fn rtd_limits(self) -> RtdLimits {
-        self.rtd.limits()
-    }
-
-    #[cfg(feature = "handles")]
-    pub(crate) const fn handle_config(self) -> HandleConfig {
-        self.handles
-    }
-
-    #[cfg(feature = "async")]
-    pub(crate) const fn async_worker_count(self) -> usize {
-        self.async_runtime.worker_count()
     }
 }
 
 impl Default for RuntimeConfig {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// RTD-specific portion of [`RuntimeConfig`].
-#[cfg(feature = "rtd")]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RtdConfig {
-    limits: RtdLimits,
-}
-
-#[cfg(feature = "rtd")]
-impl RtdConfig {
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            limits: RtdLimits::standard(),
-        }
-    }
-
-    #[must_use]
-    pub const fn with_limits(mut self, limits: RtdLimits) -> Self {
-        self.limits = limits;
-        self
-    }
-
-    pub(crate) const fn limits(self) -> RtdLimits {
-        self.limits
-    }
-}
-
-#[cfg(feature = "rtd")]
-impl Default for RtdConfig {
     fn default() -> Self {
         Self::new()
     }
@@ -356,7 +277,8 @@ pub struct AsyncWorkerCount(NonZeroUsize);
 
 #[cfg(feature = "async")]
 impl AsyncWorkerCount {
-    pub const MAX: usize = 32;
+    /// One idle bit per worker in the executor's atomic wakeup mask.
+    pub const MAX: usize = u64::BITS as usize;
     pub const DEFAULT: Self = Self(NonZeroUsize::new(4).expect("default worker count is non-zero"));
 
     #[must_use]
@@ -384,40 +306,6 @@ impl TryFrom<usize> for AsyncWorkerCount {
         Self::new(worker_count).ok_or(crate::XllError::Domain {
             code: crate::error::DomainErrorCode::InvalidInput,
         })
-    }
-}
-
-/// Async worker portion of [`RuntimeConfig`].
-#[cfg(feature = "async")]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AsyncRuntimeConfig {
-    worker_count: AsyncWorkerCount,
-}
-
-#[cfg(feature = "async")]
-impl AsyncRuntimeConfig {
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            worker_count: AsyncWorkerCount::DEFAULT,
-        }
-    }
-
-    #[must_use]
-    pub const fn with_worker_count(mut self, worker_count: AsyncWorkerCount) -> Self {
-        self.worker_count = worker_count;
-        self
-    }
-
-    pub(crate) const fn worker_count(self) -> usize {
-        self.worker_count.get()
-    }
-}
-
-#[cfg(feature = "async")]
-impl Default for AsyncRuntimeConfig {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -844,7 +732,7 @@ mod tests {
         let runtime = crate::runtime::Runtime::<TestU32Addin>::new();
         let opening = runtime.begin_open().unwrap();
         let mut opening = runtime.publish(opening, state, ());
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        opening.finish_in_place(Vec::new()).unwrap();
         let thread_safe = ThreadSafeContext::<TestU32Addin>::new(&state);
         crate::call::with_excel_call_scope_and_state(&state, |state, scope| {
             #[cfg(feature = "rtd")]
@@ -918,7 +806,7 @@ mod tests {
             let runtime = crate::runtime::Runtime::<()>::new();
             let opening = runtime.begin_open().unwrap();
             let mut opening = runtime.publish(opening, (), ());
-            runtime.finish_open(&mut opening, Vec::new()).unwrap();
+            opening.finish_in_place(Vec::new()).unwrap();
             let context = MacroSheetContext::<()>::new(state, scope);
             assert!(context.sheet_name(&reference).is_err());
             let _ = context.coerce(&reference);
@@ -984,7 +872,7 @@ mod tests {
         let runtime = crate::runtime::Runtime::<()>::new();
         let opening = runtime.begin_open().unwrap();
         let mut opening = runtime.publish_with_sources(opening, (), (), arena);
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        opening.finish_in_place(Vec::new()).unwrap();
 
         let topic = crate::subscription::RtdTopic::single("shared-observation").unwrap();
         let server = runtime

@@ -11,7 +11,7 @@
 )]
 #[cfg(any(target_os = "windows", test))]
 use super::FormulaLifetimeGeneration;
-use super::{FormulaObserverId, HandleTopicKey, Topic};
+use super::{FormulaObserverId, FormulaRevisionKey, Topic};
 use crate::generation::TopicGeneration;
 use crate::{XllError, XllResult};
 use parking_lot::{Condvar, Mutex, RwLock};
@@ -100,7 +100,7 @@ pub(crate) struct TopicReadLease<'a> {
 }
 
 impl<'a> TopicReadLease<'a> {
-    pub(crate) fn load(&self, key: &HandleTopicKey) -> Option<PublishedTopicRef<'_>> {
+    pub(crate) fn load(&self, key: &FormulaRevisionKey) -> Option<PublishedTopicRef<'_>> {
         let ptr = self.published.load(key)?;
         Some(PublishedTopicRef {
             ptr: ptr.0,
@@ -128,7 +128,7 @@ impl<'a> Deref for PublishedTopicRef<'a> {
 }
 
 pub(crate) struct PublishedTopics {
-    shards: Box<[RwLock<FxHashMap<HandleTopicKey, PublishedTopicPtr>>]>,
+    shards: Box<[RwLock<FxHashMap<FormulaRevisionKey, PublishedTopicPtr>>]>,
     shard_mask: usize,
 }
 
@@ -143,17 +143,17 @@ impl PublishedTopics {
         }
     }
 
-    fn shard_index(&self, key: &HandleTopicKey) -> usize {
+    fn shard_index(&self, key: &FormulaRevisionKey) -> usize {
         let mut hasher = FxHasher::default();
         key.hash(&mut hasher);
         (hasher.finish() as usize) & self.shard_mask
     }
 
-    pub(crate) fn load(&self, key: &HandleTopicKey) -> Option<PublishedTopicPtr> {
+    pub(crate) fn load(&self, key: &FormulaRevisionKey) -> Option<PublishedTopicPtr> {
         self.shards[self.shard_index(key)].read().get(key).copied()
     }
 
-    fn insert(&self, key: HandleTopicKey, topic: PublishedTopicPtr) {
+    fn insert(&self, key: FormulaRevisionKey, topic: PublishedTopicPtr) {
         if self.shards[self.shard_index(&key)]
             .write()
             .insert(key, topic)
@@ -163,7 +163,7 @@ impl PublishedTopics {
         }
     }
 
-    fn remove(&self, key: HandleTopicKey) {
+    fn remove(&self, key: FormulaRevisionKey) {
         self.shards[self.shard_index(&key)].write().remove(&key);
     }
 
@@ -205,10 +205,10 @@ impl PartialEq for InitializationPtr {
 impl Eq for InitializationPtr {}
 
 pub(crate) struct TopicTableState {
-    pub(crate) by_key: FxHashMap<HandleTopicKey, Topic>,
-    pub(crate) by_lifetime_key: FxHashMap<String, HandleTopicKey>,
-    pub(crate) by_observer_id: FxHashMap<FormulaObserverId, HandleTopicKey>,
-    pub(crate) initializing: FxHashMap<HandleTopicKey, InitializationPtr>,
+    pub(crate) by_key: FxHashMap<FormulaRevisionKey, Topic>,
+    pub(crate) by_lifetime_key: FxHashMap<String, FormulaRevisionKey>,
+    pub(crate) by_observer_id: FxHashMap<FormulaObserverId, FormulaRevisionKey>,
+    pub(crate) initializing: FxHashMap<FormulaRevisionKey, InitializationPtr>,
     pub(crate) generation: TopicGeneration,
     pub(crate) closed: bool,
 }
@@ -321,7 +321,7 @@ impl TopicTable {
 
     pub(crate) fn prepare_decision(
         &self,
-        key: HandleTopicKey,
+        key: FormulaRevisionKey,
         owner: ThreadId,
         make_initialization: impl FnOnce() -> Initialization,
     ) -> XllResult<PrepareDecision> {
@@ -376,7 +376,7 @@ impl TopicTable {
         &self,
         lifetime_key: &str,
         lifetime_generation: FormulaLifetimeGeneration,
-    ) -> XllResult<HandleTopicKey> {
+    ) -> XllResult<FormulaRevisionKey> {
         let mut state = self.state.write();
         if state.closed {
             return Err(XllError::Closing);
@@ -403,7 +403,7 @@ impl TopicTable {
         lifetime_generation: FormulaLifetimeGeneration,
         owner: FormulaObserverId,
         lifetime_key: &str,
-    ) -> XllResult<(HandleTopicKey, String, bool)> {
+    ) -> XllResult<(FormulaRevisionKey, String, bool)> {
         let mut state = self.state.write();
         if state.closed {
             return Err(XllError::Closing);
@@ -452,7 +452,7 @@ impl TopicTable {
     pub(crate) fn commit_connection(
         &self,
         owner: FormulaObserverId,
-        key: HandleTopicKey,
+        key: FormulaRevisionKey,
     ) -> XllResult<()> {
         let mut state = self.state.write();
         if state.closed {
@@ -473,7 +473,7 @@ impl TopicTable {
     pub(crate) fn rollback_connection(
         &self,
         owner: FormulaObserverId,
-        key: HandleTopicKey,
+        key: FormulaRevisionKey,
     ) -> bool {
         let mut state = self.state.write();
         if state.by_observer_id.get(&owner) != Some(&key)
@@ -494,7 +494,7 @@ impl TopicTable {
 
     pub(crate) fn insert_provisional(
         &self,
-        key: HandleTopicKey,
+        key: FormulaRevisionKey,
         generation: TopicGeneration,
         publication: PublishedTopic,
         on_linearized: impl FnOnce(PublishedTopicPtr),
@@ -534,7 +534,7 @@ impl TopicTable {
 
     pub(crate) fn commit_publication(
         &self,
-        key: HandleTopicKey,
+        key: FormulaRevisionKey,
         generation: TopicGeneration,
         initialization: InitializationPtr,
         publication: PublishedTopicPtr,
@@ -565,7 +565,7 @@ impl TopicTable {
 
     pub(crate) fn finish_initialization(
         &self,
-        key: HandleTopicKey,
+        key: FormulaRevisionKey,
         initialization: InitializationPtr,
     ) -> bool {
         let mut state = self.state.write();
@@ -579,7 +579,7 @@ impl TopicTable {
 
     pub(crate) fn is_current(
         &self,
-        key: HandleTopicKey,
+        key: FormulaRevisionKey,
         generation: TopicGeneration,
         token: &str,
     ) -> XllResult<()> {
@@ -601,7 +601,7 @@ impl TopicTable {
     fn remove_topic_locked(
         &self,
         state: &mut TopicTableState,
-        key: HandleTopicKey,
+        key: FormulaRevisionKey,
     ) -> Option<(TopicRemoval, PublishedOwner<PublishedTopic>)> {
         let topic = state.by_key.get(&key)?;
         let was_provisional = topic.publication.state() == PublishedTopicState::Provisional;
@@ -662,7 +662,7 @@ impl TopicTable {
 
     pub(crate) fn remove_topic_if_token(
         &self,
-        key: HandleTopicKey,
+        key: FormulaRevisionKey,
         token: &str,
         on_linearized: impl FnOnce(),
     ) -> Option<TopicRemoval> {
@@ -777,7 +777,7 @@ impl TopicTable {
 
 pub(crate) struct TopicRemoval {
     pub(crate) token: String,
-    pub(crate) key: HandleTopicKey,
+    pub(crate) key: FormulaRevisionKey,
     pub(crate) was_provisional: bool,
     pub(crate) initialization_id: Option<u64>,
 }

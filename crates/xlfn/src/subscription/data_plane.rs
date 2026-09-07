@@ -115,16 +115,9 @@ impl<H: SubscriptionHost> PublishCore<H> {
     ///
     /// # Safety
     ///
-    /// `runtime_gate`, `active_quota`, `queued_update_quota`, and `services`
-    /// must all belong to the same owner, and that owner must keep them
-    /// allocated until this core and every capability it mints are dropped.
-    pub(crate) unsafe fn new(
-        host: H,
-        runtime_gate: &OperationGate,
-        active_quota: &Quota,
-        queued_update_quota: &Quota,
-        services: &RuntimeServices,
-    ) -> Self {
+    /// The owner must keep `services` at a stable address, without exclusive
+    /// borrows, until this core and every capability it mints are dropped.
+    pub(crate) unsafe fn new(host: H, services: &RuntimeServices) -> Self {
         let mut shards = Vec::with_capacity(super::delivery::TOPIC_SHARDS);
         for _ in 0..super::delivery::TOPIC_SHARDS {
             shards.push(Mutex::new(TopicShard::default()));
@@ -132,10 +125,10 @@ impl<H: SubscriptionHost> PublishCore<H> {
 
         Self {
             host,
-            runtime_gate: NonNull::from(runtime_gate),
+            runtime_gate: NonNull::from(&services.runtime_gate),
             server_gate: OperationGate::new(),
-            active_quota: NonNull::from(active_quota),
-            queued_update_quota: NonNull::from(queued_update_quota),
+            active_quota: NonNull::from(&services.active_quota),
+            queued_update_quota: NonNull::from(&services.queued_update_quota),
             lifecycle: AtomicU8::new(SERVER_LIFECYCLE_OPEN),
             publish_epoch: AtomicU64::new(0),
             notified_epoch: AtomicU64::new(u64::MAX),
@@ -176,8 +169,8 @@ impl<H: SubscriptionHost> PublishCore<H> {
     }
 }
 
-// SAFETY: every non-owning pointer targets an immutable-address field of the
-// owning SubscriptionRuntime, which drains and drops all servers first.
+// SAFETY: every non-owning pointer targets the stable RuntimeServices
+// allocation, which the runtime reclaims after draining all servers.
 unsafe impl<H: SubscriptionHost> Send for PublishCore<H> {}
 // SAFETY: PublishCore fields use atomic or mutex synchronization.
 unsafe impl<H: SubscriptionHost> Sync for PublishCore<H> {}
@@ -734,7 +727,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
         topic_id: TopicId,
         generation: ConnectionGeneration,
         id: SubscriptionId,
-    ) {
+    ) -> bool {
         let shard_index = shard_index(topic_id);
         let mut shard = self.shards[shard_index].lock();
 
@@ -745,11 +738,11 @@ impl<H: SubscriptionHost> PublishCore<H> {
             update.connection_generation == generation
         });
 
-        if shard
+        let removed = shard
             .active_by_topic
             .get(&topic_id)
-            .is_some_and(|active| active.generation == generation)
-        {
+            .is_some_and(|active| active.generation == generation);
+        if removed {
             shard.active_by_topic.remove(&topic_id);
         }
         if shard.topic_by_id.get(&id).is_some_and(|&tid| {
@@ -760,6 +753,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
         }) {
             shard.topic_by_id.remove(&id);
         }
+        removed
     }
 
     pub(crate) fn disconnect_connection(
@@ -1359,7 +1353,9 @@ impl<H: SubscriptionHost> Drop for PlannedRtdRefresh<'_, H> {
         if self.finished {
             return;
         }
-        self.publish.abort_refresh_no_unwind(self.plan.refresh_id);
+        let _ = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
+            self.publish.abort_refresh_no_unwind(self.plan.refresh_id);
+        }));
     }
 }
 
@@ -1406,11 +1402,15 @@ impl<H: SubscriptionHost> Drop for RtdRefreshBatch<'_, H> {
         }
         self.finished = true;
         let updates = std::mem::take(&mut self.updates);
-        let _ = self.publish.complete_refresh_inner(
-            self.plan.refresh_id,
-            updates,
-            RefreshOutcome::Failed,
-        );
+        let _ = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
+            if let Ok(Some(attempt)) = self.publish.complete_refresh_inner(
+                self.plan.refresh_id,
+                updates,
+                RefreshOutcome::Failed,
+            ) {
+                self.publish.drive_notification(attempt);
+            }
+        }));
     }
 }
 

@@ -219,7 +219,7 @@ impl RuntimeObserver {
             );
             #[cfg(feature = "async")]
             {
-                resources.async_executor_running = !deps.executors().async_manager.is_stopped();
+                resources.async_executor_running = !deps.async_manager().is_stopped();
             }
             let _ = crate::diagnostics::connect_trace(Arc::clone(&trace), |snapshot| {
                 resources.diagnostics_running = snapshot.running;
@@ -238,9 +238,7 @@ impl RuntimeObserver {
             })
             .expect("committed open generation publishes its services");
             #[cfg(feature = "async")]
-            deps.executors()
-                .async_manager
-                .set_trace_sink(Arc::clone(&trace));
+            deps.async_manager().set_trace_sink(Arc::clone(&trace));
             self.record_composition_event(
                 crate::composition_refinement::CompositionEvent::CommitOpen {
                     attempt: attempt.get(),

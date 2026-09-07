@@ -110,19 +110,20 @@ mod runtime_components;
 mod shutdown;
 mod shutdown_trace;
 mod subscription;
+mod typed_id;
 mod utf16;
 pub mod value;
 
+#[cfg(feature = "handles")]
+pub use addin::HandleBindingLimit;
+#[cfg(feature = "rtd")]
+pub use addin::RtdOpenContext;
 pub use addin::{
     Addin, BuildInfo, DiagnosticsSetup, MacroSheetContext, MainThreadContext, OpenContext, Opened,
     PhysicallyUnloadableAddin, RuntimeConfig, ThreadSafeContext,
 };
 #[cfg(feature = "async")]
-pub use addin::{AsyncContext, AsyncRuntimeConfig, AsyncWorkerCount};
-#[cfg(feature = "handles")]
-pub use addin::{HandleBindingLimit, HandleConfig};
-#[cfg(feature = "rtd")]
-pub use addin::{RtdConfig, RtdOpenContext};
+pub use addin::{AsyncContext, AsyncWorkerCount};
 #[cfg(feature = "async")]
 pub use cancellation::{CancellationGuarantee, CancellationToken, Cancelled};
 pub use error::{
@@ -562,11 +563,11 @@ pub mod prelude {
     pub use crate::ExcelHandleObject;
     #[cfg(feature = "async")]
     pub use crate::addin::AsyncContext;
+    #[cfg(feature = "handles")]
+    pub use crate::addin::HandleBindingLimit;
     #[cfg(feature = "rtd")]
     pub use crate::addin::RtdOpenContext;
     pub use crate::addin::{Addin, OpenContext, Opened, PhysicallyUnloadableAddin, RuntimeConfig};
-    #[cfg(feature = "handles")]
-    pub use crate::addin::{HandleBindingLimit, HandleConfig};
     pub use crate::addin::{MacroSheetContext, MainThreadContext, ThreadSafeContext};
     pub use crate::error::{ExcelError, XllError, XllResult};
     #[cfg(feature = "handles")]

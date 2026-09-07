@@ -1,8 +1,38 @@
-# Full-cache Miri qualification
+# Production full-cache Miri regressions
 
-The cache regression tests and the kernel's Miri tests are separate evidence.
-Do not describe the complete Moka-backed cache as Miri-clean with the current
-dependency/toolchain combination.
+The production cache uses Quick Cache with xlfn shared flights. Run:
+
+```sh
+just miri-cache
+```
+
+This recipe is part of `just miri` and CI. It runs `cache::protocol_tests`
+(the complete cache stack) and `cache::shared_flight::tests` under Stacked
+Borrows with `-Zmiri-disable-isolation`, then Tree Borrows with the additional
+`-Zmiri-tree-borrows` flag. Both use `--no-default-features`,
+`--features "unstable-cache bench-internals"` and `--locked`.
+Leak and alias checking remain on.
+The common tests keep the same reduced Miri concurrency bounds used in the
+previous qualification, without changing their native bounds or assertions.
+
+Coverage includes active leases/scoped references through eviction, concurrent
+clear/lookups, generation rollover, same-key initialization, shared errors,
+panic/retry, reentrancy, exactly-once payload destruction, capacity, mutation
+backpressure at both node/weight thresholds and full drain.
+These selected full-cache tests complement rather than replace kernel Miri tests.
+
+The production tests passed both models on nightly 1.100.0 (c656540d6,
+2026-08-21), but emitted an integer-to-pointer warning in `parking_lot_core`
+0.9.12, `word_lock.rs:320`. The diagnostic is not suppressed. Passing the tests
+is not a proof that every dependency operation is free of undefined behavior.
+
+Quick Cache removes the Moka/Crossbeam blocker from the cache path. The async
+feature still has its independent crossbeam-deque/crossbeam-epoch path.
+
+## Historical Moka blocker (superseded cache implementation)
+
+The following observations describe the removed backend, not the current
+production cache. Keep them as context for the dependency change.
 
 On 2026-09-07, using `rustc 1.100.0-nightly (c656540d6 2026-08-21)` on
 `aarch64-apple-darwin`, the following extra diagnostic was attempted:

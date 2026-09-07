@@ -51,7 +51,7 @@ for area in reference.areas() {
 }
 ```
 
-The framework validates Excel's worksheet bounds. A reference can contain at most 1,024 areas.
+The framework validates Excel's worksheet bounds. Multi-area references use the ABI’s nonzero 16-bit area count (up to 65,535 areas); each area is validated and borrowed without copying.
 
 `reference.sheet_id()` returns:
 

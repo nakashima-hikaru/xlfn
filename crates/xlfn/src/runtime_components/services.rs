@@ -63,13 +63,6 @@ pub(crate) struct SealedGenerationServices {
     subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
 }
 
-/// Runtime-owned executors whose lifecycle is independent from generation
-/// service arming.
-#[cfg(feature = "async")]
-pub(crate) struct RuntimeExecutors {
-    pub(crate) async_manager: crate::async_udf::AsyncManager,
-}
-
 /// Reservation for a generation-owned service bundle.
 ///
 /// Arming is a transaction: until the reservation is committed, dropping it
@@ -123,13 +116,13 @@ impl GenerationServices {
             },
         };
         #[cfg(feature = "handles")]
-        services.formula_handles.arm(_config.handle_config())?;
+        services.formula_handles.arm(_config.handle_binding_limit)?;
         #[cfg(feature = "rtd")]
         if let Err(error) =
             services
                 .rtd
                 .subscriptions
-                .arm(generation, _config.rtd_limits(), inputs.rtd_sources)
+                .arm(generation, _config.rtd_limits, inputs.rtd_sources)
         {
             services.disarm_or_abort();
             return Err(error);
@@ -265,14 +258,5 @@ impl SealedGenerationServices {
     )> {
         let handles_quiescent = self.handles.finish()?;
         Ok((handles_quiescent, self.subscriptions_stopped))
-    }
-}
-
-#[cfg(feature = "async")]
-impl RuntimeExecutors {
-    pub(crate) const fn new() -> Self {
-        Self {
-            async_manager: crate::async_udf::AsyncManager::new(),
-        }
     }
 }

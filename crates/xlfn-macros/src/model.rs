@@ -12,6 +12,7 @@ use crate::support::{doc_comment, extract_gating_attributes, resolve_crate_path}
 use crate::validation::{validate_export_id, validate_registration_string};
 use proc_macro2::TokenStream;
 use quote::{ToTokens, format_ident};
+use syn::ext::IdentExt;
 use syn::{Attribute, Expr, FnArg, GenericArgument, Ident, ItemFn, Pat, Path, PathArguments, Type};
 
 /// Syntax extracted from one excel_function item.
@@ -329,13 +330,13 @@ pub(super) fn analyze(parsed: ParsedUdf) -> syn::Result<UdfSpec> {
         options
             .id
             .clone()
-            .unwrap_or_else(|| function_ident.to_string()),
+            .unwrap_or_else(|| function_ident.unraw().to_string()),
         &function_ident,
     )?;
     let excel_name = options
         .name
         .clone()
-        .unwrap_or_else(|| function_ident.to_string());
+        .unwrap_or_else(|| function_ident.unraw().to_string());
     if excel_name.trim().is_empty() {
         return Err(syn::Error::new_spanned(
             &function_ident,
@@ -483,7 +484,7 @@ fn analyze_arguments(
             .options
             .name
             .clone()
-            .unwrap_or_else(|| argument.rust_name.to_string());
+            .unwrap_or_else(|| argument.rust_name.unraw().to_string());
         if xlfn_common::validate_argument_name(&excel_name).is_err() {
             return Err(syn::Error::new_spanned(
                 &function.sig.inputs,

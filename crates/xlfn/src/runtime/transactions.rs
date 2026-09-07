@@ -80,7 +80,7 @@ where
     if has_async_functions {
         #[cfg(feature = "async")]
         {
-            if let Err(error) = runtime.start_async(runtime_config.async_worker_count()) {
+            if let Err(error) = runtime.start_async(runtime_config.async_worker_count.get()) {
                 return Err(transaction.failure(error));
             }
             let event_result = {
@@ -132,7 +132,9 @@ pub(crate) fn rollback_active_open<'runtime, A, S>(
     let mut callbacks = callbacks;
     if let crate::runtime::open_txn::LifecycleOwnership::Owned(lifecycle_state) =
         lifecycle_ownership
-        && let Err(error) = runtime.install_addin_lifecycle(lifecycle, lifecycle_state)
+        && let Err(error) = runtime
+            .open_deps()
+            .install_addin_lifecycle(lifecycle, lifecycle_state)
     {
         let (lifecycle_state, reason) = error.into_parts();
         #[allow(
@@ -253,7 +255,9 @@ where
     match success {
         RemovalSuccess::AlreadyClosed => {
             if runtime.phase() == crate::lifecycle::LifecyclePhase::Closed
-                && let Err(error) = runtime.release_empty_addin_lifecycle(lifecycle)
+                && let Err(error) = runtime
+                    .shutdown_deps()
+                    .release_empty_addin_lifecycle(lifecycle)
             {
                 let error = lifecycle_access_error(error);
                 report_boundary_error("xlAutoRemove closed lifecycle binding", &error);
@@ -575,6 +579,7 @@ where
                 let mut generation = *generation;
                 let quiesce = catch_no_unwind(AssertUnwindSafe(|| {
                     runtime
+                        .shutdown_deps()
                         .with_addin_lifecycle(lifecycle, |lifecycle_state| {
                             runtime.quiesce_addin(&mut generation.shared_state, lifecycle_state)
                         })
@@ -608,6 +613,7 @@ where
                 let (mut shared_state, layers, _config) = opening.into_parts();
                 let quiesce = catch_no_unwind(AssertUnwindSafe(|| {
                     runtime
+                        .shutdown_deps()
                         .with_addin_lifecycle(lifecycle, |lifecycle_state| {
                             runtime.quiesce_addin(&mut shared_state, lifecycle_state)
                         })

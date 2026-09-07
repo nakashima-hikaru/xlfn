@@ -405,10 +405,6 @@ impl<H: SubscriptionHost> ServerTermination<'_, H> {
         }
 
         let (late_notifier, active_entries) = self.server.publish.finish_termination().into_parts();
-        for _ in 0..self.initial_subscriptions.len() {
-            self.runtime
-                .record_shutdown_event(crate::shutdown_trace::ShutdownEvent::RemoveSubscription);
-        }
         if let Err(error) = drop_notifier_no_unwind(late_notifier)
             && first_error.is_none()
         {
@@ -457,6 +453,10 @@ impl<H: SubscriptionHost> ServerTermination<'_, H> {
                     .map(|(_, subscription)| subscription),
             )
             .collect::<Vec<_>>();
+        for _ in 0..subscriptions.len() {
+            self.runtime
+                .record_shutdown_event(crate::shutdown_trace::ShutdownEvent::RemoveSubscription);
+        }
         if let Err(error) = disconnect_all_no_unwind(subscriptions)
             && first_error.is_none()
         {

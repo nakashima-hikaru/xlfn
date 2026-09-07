@@ -62,9 +62,7 @@ use futures_util::FutureExt;
 #[cfg(test)]
 use futures_util::future::{AbortHandle, Abortable};
 #[cfg(test)]
-pub(crate) use generation::{
-    ControlPhase, ExecutorControl, GenerationState, TaskShard, task_shard,
-};
+pub(crate) use generation::{ControlPhase, ExecutorControl, GenerationState, task_shard};
 #[cfg(test)]
 pub(crate) use manager::{ExecutorState, MAX_ASYNC_HANDLE_BYTES, MAX_PENDING};
 #[cfg(test)]

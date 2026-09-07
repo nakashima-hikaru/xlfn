@@ -2,7 +2,7 @@
 use super::FormulaHandleService;
 use super::FormulaLifetimeGeneration;
 #[cfg(any(target_os = "windows", test))]
-use super::HandleTopicKey;
+use super::FormulaRevisionKey;
 use super::PublishedTopic;
 #[cfg(any(target_os = "windows", test))]
 use crate::XllResult;
@@ -31,7 +31,7 @@ pub(crate) struct FormulaObserverId {
 pub(crate) struct HandleConnection<'runtime> {
     pub(crate) runtime: &'runtime FormulaHandleService,
     pub(crate) owner: FormulaObserverId,
-    pub(crate) key: HandleTopicKey,
+    pub(crate) key: FormulaRevisionKey,
     pub(crate) token: String,
     pub(crate) created: bool,
     pub(crate) finished: bool,

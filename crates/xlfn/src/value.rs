@@ -2153,16 +2153,15 @@ mod tests {
     #[cfg(feature = "handles")]
     #[test]
     fn handle_semantic_identity_matches_across_distinct_alias_tokens() {
-        use crate::handle::{FormulaCaller, FormulaRevisionKey, HandleTopicKey};
+        use crate::handle::{FormulaCaller, FormulaRevisionKey};
 
         let slot: &'static crate::handle::FormulaHandleServiceSlot =
             Box::leak(Box::new(crate::handle::FormulaHandleServiceSlot::new()));
-        slot.arm(crate::RuntimeConfig::new().handle_config())
-            .unwrap();
+        slot.arm(crate::HandleBindingLimit::DEFAULT).unwrap();
         slot.initialize().unwrap();
         let handle_rt = slot.read().unwrap();
 
-        let topic_a = HandleTopicKey::Formula(FormulaRevisionKey::new(
+        let topic_a = FormulaRevisionKey::new(
             FormulaCaller {
                 sheet_id: 1,
                 row: 1,
@@ -2170,8 +2169,8 @@ mod tests {
             },
             "FUNC.A",
             crate::input_identity::InputFingerprint::from_bytes([1; 32]),
-        ));
-        let topic_b = HandleTopicKey::Formula(FormulaRevisionKey::new(
+        );
+        let topic_b = FormulaRevisionKey::new(
             FormulaCaller {
                 sheet_id: 1,
                 row: 2,
@@ -2179,7 +2178,7 @@ mod tests {
             },
             "FUNC.B",
             crate::input_identity::InputFingerprint::from_bytes([2; 32]),
-        ));
+        );
 
         let token_a = handle_rt
             .prepare::<SemanticHandleTestObj, _>(topic_a, || Ok(SemanticHandleTestObj { data: 99 }))

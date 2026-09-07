@@ -29,11 +29,6 @@ const ALLOW_HEADER: &str = r#"#![allow(
 )]
 
 "#;
-const TLIBATTR_DEFAULT_DERIVE_LF: &str = "#[derive(Clone, Copy, Default)]\npub struct TLIBATTR";
-const TLIBATTR_DEFAULT_DERIVE_CRLF: &str = "#[derive(Clone, Copy, Default)]\r\npub struct TLIBATTR";
-const TLIBATTR_NO_DEFAULT_DERIVE_LF: &str = "#[derive(Clone, Copy)]\npub struct TLIBATTR";
-const TLIBATTR_NO_DEFAULT_DERIVE_CRLF: &str = "#[derive(Clone, Copy)]\r\npub struct TLIBATTR";
-
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -46,28 +41,6 @@ fn prepend_generated_allow_header(path: &Path) {
     let source = fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
     let patched = format!("{ALLOW_HEADER}{source}");
-    fs::write(path, patched)
-        .unwrap_or_else(|error| panic!("failed to write {}: {error}", path.display()));
-}
-
-fn remove_unused_tlibattr_default(path: &Path) {
-    // `TLIBATTR` is only used through ABI pointers in xlfn. The generated
-    // `Default` implementation is therefore unused, and it becomes invalid
-    // when the intentionally non-Default `GUID` field is generated alongside
-    // it.
-    let source = fs::read_to_string(path)
-        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-    let (needle, replacement) = if source.contains(TLIBATTR_DEFAULT_DERIVE_LF) {
-        (TLIBATTR_DEFAULT_DERIVE_LF, TLIBATTR_NO_DEFAULT_DERIVE_LF)
-    } else if source.contains(TLIBATTR_DEFAULT_DERIVE_CRLF) {
-        (
-            TLIBATTR_DEFAULT_DERIVE_CRLF,
-            TLIBATTR_NO_DEFAULT_DERIVE_CRLF,
-        )
-    } else {
-        return;
-    };
-    let patched = source.replacen(needle, replacement, 1);
     fs::write(path, patched)
         .unwrap_or_else(|error| panic!("failed to write {}: {error}", path.display()));
 }
@@ -85,6 +58,5 @@ fn main() {
         windows_bindgen::bindgen(["--etc", filter]);
         let output = Path::new(output);
         prepend_generated_allow_header(output);
-        remove_unused_tlibattr_default(output);
     }
 }

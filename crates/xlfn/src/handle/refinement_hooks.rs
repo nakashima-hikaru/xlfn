@@ -4,7 +4,7 @@
 //! trace machine's storage type.  Production builds retain no trace state;
 //! test and checker builds delegate to `refinement.rs`.
 
-use super::HandleTopicKey;
+use super::FormulaRevisionKey;
 use super::refinement_wire::TokenWire;
 #[cfg(any(target_os = "windows", test))]
 use super::{FormulaLifetimeGeneration, FormulaObserverId};
@@ -68,14 +68,14 @@ impl HandleRefinementHooks {
     }
 
     #[inline]
-    pub(crate) fn observe_begin_initializer(&self, key: &HandleTopicKey, runtime_id: u64) {
+    pub(crate) fn observe_begin_initializer(&self, key: &FormulaRevisionKey, runtime_id: u64) {
         #[cfg(any(test, feature = "refinement"))]
         self.trace.begin_initializer(key, runtime_id);
         let _ = (key, runtime_id);
     }
 
     #[inline]
-    pub(crate) fn observe_insert_pending_fresh(&self, key: &HandleTopicKey, runtime_id: u64) {
+    pub(crate) fn observe_insert_pending_fresh(&self, key: &FormulaRevisionKey, runtime_id: u64) {
         #[cfg(any(test, feature = "refinement"))]
         self.trace.insert_pending_fresh(key, runtime_id);
         let _ = (key, runtime_id);
@@ -84,7 +84,7 @@ impl HandleRefinementHooks {
     #[inline]
     pub(crate) fn observe_insert_pending_reuse(
         &self,
-        key: &HandleTopicKey,
+        key: &FormulaRevisionKey,
         runtime_id: u64,
         slot: u64,
         generation: u64,
@@ -98,7 +98,7 @@ impl HandleRefinementHooks {
     #[inline]
     pub(crate) fn observe_publish_and_install(
         &self,
-        key: &HandleTopicKey,
+        key: &FormulaRevisionKey,
         runtime_id: u64,
         token: TokenWire,
         lifetime_key: &str,
@@ -112,7 +112,7 @@ impl HandleRefinementHooks {
     #[inline]
     pub(crate) fn observe_commit_and_activate(
         &self,
-        key: &HandleTopicKey,
+        key: &FormulaRevisionKey,
         runtime_id: u64,
         token: TokenWire,
     ) {
@@ -133,7 +133,7 @@ impl HandleRefinementHooks {
     #[inline]
     pub(crate) fn observe_withdraw_and_invalidate(
         &self,
-        key: &HandleTopicKey,
+        key: &FormulaRevisionKey,
         runtime_id: u64,
         token: TokenWire,
     ) {
@@ -145,7 +145,7 @@ impl HandleRefinementHooks {
     #[inline]
     pub(crate) fn observe_rollback_pending(
         &self,
-        key: &HandleTopicKey,
+        key: &FormulaRevisionKey,
         runtime_id: u64,
         reusable: bool,
         token: TokenWire,
@@ -157,7 +157,7 @@ impl HandleRefinementHooks {
     }
 
     #[inline]
-    pub(crate) fn observe_begin_warm_read(&self, key: &HandleTopicKey) -> u64 {
+    pub(crate) fn observe_begin_warm_read(&self, key: &FormulaRevisionKey) -> u64 {
         #[cfg(any(test, feature = "refinement"))]
         return self.trace.begin_warm_read(key);
         #[cfg(not(any(test, feature = "refinement")))]
@@ -205,7 +205,7 @@ impl HandleRefinementHooks {
     #[cfg(any(target_os = "windows", test))]
     pub(crate) fn observe_claim_lifetime(
         &self,
-        key: &HandleTopicKey,
+        key: &FormulaRevisionKey,
         generation: FormulaLifetimeGeneration,
     ) {
         #[cfg(any(test, feature = "refinement"))]
@@ -214,7 +214,11 @@ impl HandleRefinementHooks {
     }
 
     #[cfg(any(target_os = "windows", test))]
-    pub(crate) fn observe_begin_connection(&self, key: &HandleTopicKey, owner: FormulaObserverId) {
+    pub(crate) fn observe_begin_connection(
+        &self,
+        key: &FormulaRevisionKey,
+        owner: FormulaObserverId,
+    ) {
         #[cfg(any(test, feature = "refinement"))]
         self.trace.begin_connection(key, owner);
         let _ = (key, owner);
@@ -223,7 +227,7 @@ impl HandleRefinementHooks {
     #[cfg(any(target_os = "windows", test))]
     pub(crate) fn observe_reuse_committed_connection(
         &self,
-        key: &HandleTopicKey,
+        key: &FormulaRevisionKey,
         owner: FormulaObserverId,
     ) {
         #[cfg(any(test, feature = "refinement"))]
@@ -232,7 +236,11 @@ impl HandleRefinementHooks {
     }
 
     #[cfg(any(target_os = "windows", test))]
-    pub(crate) fn observe_commit_connection(&self, key: &HandleTopicKey, owner: FormulaObserverId) {
+    pub(crate) fn observe_commit_connection(
+        &self,
+        key: &FormulaRevisionKey,
+        owner: FormulaObserverId,
+    ) {
         #[cfg(any(test, feature = "refinement"))]
         self.trace.commit_connection(key, owner);
         let _ = (key, owner);
@@ -241,7 +249,7 @@ impl HandleRefinementHooks {
     #[cfg(any(target_os = "windows", test))]
     pub(crate) fn observe_rollback_connection(
         &self,
-        key: &HandleTopicKey,
+        key: &FormulaRevisionKey,
         owner: FormulaObserverId,
     ) {
         #[cfg(any(test, feature = "refinement"))]
@@ -250,7 +258,7 @@ impl HandleRefinementHooks {
     }
 
     #[cfg(any(target_os = "windows", test))]
-    pub(crate) fn observe_disconnect(&self, key: &HandleTopicKey, owner: FormulaObserverId) {
+    pub(crate) fn observe_disconnect(&self, key: &FormulaRevisionKey, owner: FormulaObserverId) {
         #[cfg(any(test, feature = "refinement"))]
         self.trace.disconnect(key, owner);
         let _ = (key, owner);

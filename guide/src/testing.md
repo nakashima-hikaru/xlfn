@@ -136,3 +136,28 @@ Distinguish these statuses:
 
 Do not mark one status based on another. Publish the supported environment
 matrix and any known unqualified combinations with the release notes.
+
+### Cache reclamation regressions
+
+The cache uses Quick Cache for residency and xlfn's safe shared-flight layer.
+Its ownership and reclamation regressions
+run against that production implementation, including active leases, concurrent
+clear, generation rollover, and panic cleanup. Run them with:
+
+```sh
+cargo test -p xlfn --all-features --locked cache:: -- --test-threads=1
+```
+
+Run `just miri-cache` for the production full-cache and shared-flight tests under
+Stacked Borrows and Tree Borrows. This recipe is also part of `just miri` and CI.
+It retains leak and alias checking and covers capacity, error sharing,
+panic/retry, live leases, generation rollover, exactly-once destruction and
+final drain. The dependency diagnostic and historical Moka blocker are recorded
+in `crates/xlfn/benches/experiments/cache-miri.md`; passing these selected tests
+is separate from the kernel's Miri evidence.
+
+`just bench-cache` records representative production lookup and reclamation
+workloads under new `cache_lookup/quick` and `cache_reclamation/quick` metric
+names. CI uses the existing benchmark history and alert mechanism against this
+Quick baseline. The former Moka-relative selection gates are historical
+experiment rules, not production regression assertions.

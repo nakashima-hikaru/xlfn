@@ -185,7 +185,7 @@ pub(crate) fn run_wrapper() -> Result<ExitStatus> {
 }
 
 fn compiler_chain(args: &[OsString], upstream: Option<&OsStr>) -> Result<Command> {
-    if let Some(upstream) = upstream {
+    if let Some(upstream) = upstream.filter(|wrapper| !wrapper.is_empty()) {
         let mut command = Command::new(upstream);
         command.args(args);
         return Ok(command);
@@ -434,6 +434,15 @@ mod tests {
         let command = compiler_chain(&args, Some(OsStr::new("sccache"))).unwrap();
         assert_eq!(command.get_program(), "sccache");
         assert_eq!(command.get_args().collect::<Vec<_>>(), args);
+    }
+
+    #[test]
+    fn empty_upstream_wrapper_runs_the_compiler_directly() {
+        let args = vec!["rustc".into(), "--crate-name".into(), "demo".into()];
+        // Cargo uses an empty RUSTC_WRAPPER to disable a configured wrapper.
+        let command = compiler_chain(&args, Some(OsStr::new(""))).unwrap();
+        assert_eq!(command.get_program(), "rustc");
+        assert_eq!(command.get_args().collect::<Vec<_>>(), args[1..]);
     }
 
     #[test]

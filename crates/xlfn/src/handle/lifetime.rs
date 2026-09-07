@@ -6,30 +6,18 @@
 
 #[cfg(target_os = "windows")]
 use crate::XllResult;
-use std::num::NonZeroU64;
 
-/// Identity of one formula-lifetime observer generation.
-///
-/// The Windows adapter converts its COM server generation into this semantic
-/// handle-side identity at the private transport boundary.  Handle state does
-/// not depend on the transport's generation type.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct FormulaLifetimeGeneration(NonZeroU64);
-
-#[cfg(any(target_os = "windows", test))]
-impl FormulaLifetimeGeneration {
-    pub(crate) const fn new(raw: u64) -> Option<Self> {
-        match NonZeroU64::new(raw) {
-            Some(raw) => Some(Self(raw)),
-            None => None,
-        }
-    }
-}
-
-#[cfg(any(test, feature = "refinement"))]
-impl FormulaLifetimeGeneration {
-    pub(crate) const fn get(self) -> u64 {
-        self.0.get()
+crate::typed_id::nonzero_u64_id! {
+    /// Identity of one formula-lifetime observer generation.
+    ///
+    /// The Windows adapter converts its COM server generation into this semantic
+    /// handle-side identity at the private transport boundary.  Handle state does
+    /// not depend on the transport's generation type.
+    pub(crate) struct FormulaLifetimeGeneration {
+        #[cfg(any(target_os = "windows", test))]
+        pub(crate) fn new;
+        #[cfg(any(test, feature = "refinement"))]
+        pub(crate) fn get;
     }
 }
 

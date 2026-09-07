@@ -12,7 +12,7 @@ use crate::runtime_components::{GenerationServices, HostLedger, QuarantineVault,
 use xlfn_kernel::thread_affine::{ThreadAffineInstallError, ThreadAffineSlot};
 
 #[cfg(feature = "async")]
-use crate::runtime_components::RuntimeExecutors;
+use crate::async_udf::AsyncManager;
 
 /// Facilities needed by one open transaction.
 ///
@@ -25,7 +25,7 @@ pub(crate) struct OpenDeps<'a, A: Addin> {
     host: &'a HostLedger,
     returns: &'a ReturnProtocol,
     #[cfg(all(feature = "async", any(test, feature = "refinement")))]
-    executors: &'a RuntimeExecutors,
+    async_manager: &'a AsyncManager,
     quarantine: &'a QuarantineVault<A>,
     observer: &'a RuntimeObserver,
 }
@@ -46,7 +46,7 @@ impl<'a, A: Addin> OpenDeps<'a, A> {
             host: &runtime.host,
             returns: &runtime.return_protocol,
             #[cfg(all(feature = "async", any(test, feature = "refinement")))]
-            executors: &runtime.executors,
+            async_manager: &runtime.async_manager,
             quarantine: &runtime.quarantine,
             observer: &runtime.observer,
         }
@@ -60,11 +60,11 @@ impl<'a, A: Addin> OpenDeps<'a, A> {
         LifecycleControl::new(self.lifecycle)
     }
 
-    pub(in crate::runtime) fn lifecycle_access(&self) -> LifecycleAccess<'_, A> {
+    pub(crate) fn lifecycle_access(&self) -> LifecycleAccess<'_, A> {
         self.lifecycle.access()
     }
 
-    pub(in crate::runtime) fn returns(&self) -> &'a ReturnProtocol {
+    pub(crate) fn returns(&self) -> &'a ReturnProtocol {
         self.returns
     }
 
@@ -85,8 +85,8 @@ impl<'a, A: Addin> OpenDeps<'a, A> {
     }
 
     #[cfg(all(feature = "async", any(test, feature = "refinement")))]
-    pub(in crate::runtime) fn executors(&self) -> &'a RuntimeExecutors {
-        self.executors
+    pub(in crate::runtime) fn async_manager(&self) -> &'a AsyncManager {
+        self.async_manager
     }
 
     pub(in crate::runtime) fn quarantine(&self) -> &'a QuarantineVault<A> {
@@ -131,7 +131,7 @@ impl<'a, A: Addin> OpenDeps<'a, A> {
         self.lifecycle.access().protocol_generation()
     }
 
-    pub(in crate::runtime) fn merge_host(&self, journal: crate::registration::HostMutationJournal) {
+    pub(crate) fn merge_host(&self, journal: crate::registration::HostMutationJournal) {
         self.host.merge(journal);
     }
 
@@ -164,7 +164,7 @@ pub(crate) struct ShutdownDeps<'a, A: Addin> {
     host: &'a HostLedger,
     returns: &'a ReturnProtocol,
     #[cfg(feature = "async")]
-    executors: &'a RuntimeExecutors,
+    async_manager: &'a AsyncManager,
     quarantine: &'a QuarantineVault<A>,
     observer: &'a RuntimeObserver,
 }
@@ -185,13 +185,13 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
             host: &runtime.host,
             returns: &runtime.return_protocol,
             #[cfg(feature = "async")]
-            executors: &runtime.executors,
+            async_manager: &runtime.async_manager,
             quarantine: &runtime.quarantine,
             observer: &runtime.observer,
         }
     }
 
-    pub(in crate::runtime) fn lifecycle(&self) -> &'a LifecycleCoordinator<A> {
+    pub(crate) fn lifecycle(&self) -> &'a LifecycleCoordinator<A> {
         self.lifecycle
     }
 
@@ -205,7 +205,7 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
 
     #[cfg(feature = "async")]
     pub(in crate::runtime) fn async_manager(&self) -> &'a crate::async_udf::AsyncManager {
-        &self.executors.async_manager
+        self.async_manager
     }
 
     pub(in crate::runtime) fn quarantine(&self) -> &'a QuarantineVault<A> {
@@ -222,13 +222,11 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
         self.lifecycle.access().protocol_generation()
     }
 
-    pub(in crate::runtime) fn last_committed_generation(
-        &self,
-    ) -> Option<crate::generation::RuntimeGeneration> {
+    pub(crate) fn last_committed_generation(&self) -> Option<crate::generation::RuntimeGeneration> {
         self.lifecycle.access().last_committed_generation()
     }
 
-    pub(in crate::runtime) fn with_addin_lifecycle<R>(
+    pub(crate) fn with_addin_lifecycle<R>(
         &self,
         access: &AddinLifecycleAccess<'_, A>,
         operation: impl FnOnce(&mut A::LifecycleState) -> R,
@@ -337,7 +335,7 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
     }
 
     #[cfg(test)]
-    pub(in crate::runtime) fn release_test_module_lease(&self) {
+    pub(crate) fn release_test_module_lease(&self) {
         drop(self.lifecycle.test_module_lease.lock().take());
     }
 }

@@ -692,6 +692,73 @@ fn add_forwarded_export(
 }
 
 #[test]
+fn deep_dependency_chains_do_not_depend_on_thread_stack_size() {
+    std::thread::Builder::new()
+        .stack_size(128 * 1024)
+        .spawn(|| {
+            let mut images = BTreeMap::new();
+            for index in 0..4096 {
+                let name = format!("library{index:04}.dll");
+                let next = format!("library{:04}.dll", (index + 1) % 4096);
+                // Import cycles are valid; both eager and delayed edges must
+                // terminate without revisiting an already checked image.
+                let image = if index % 2 == 0 {
+                    graph_image(&[&next], &[])
+                } else {
+                    graph_image(&[], &[&next])
+                };
+                images.insert(name.clone(), (name, image));
+            }
+            validate_dependency_graph(&images, &BTreeSet::new()).unwrap();
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn deep_forwarder_chains_and_cycles_do_not_depend_on_thread_stack_size() {
+    std::thread::Builder::new()
+        .stack_size(128 * 1024)
+        .spawn(|| {
+            let mut image = graph_image(&[], &[]);
+            for ordinal in 1..=4096 {
+                image.exported_ordinals.insert(ExportOrdinal(ordinal));
+                if ordinal < 4096 {
+                    image.forwarded_exports.insert(
+                        ExportSymbol::Ordinal(ExportOrdinal(ordinal)),
+                        ForwardedExport {
+                            library: "library.dll".to_owned(),
+                            symbol: ExportSymbol::Ordinal(ExportOrdinal(ordinal + 1)),
+                        },
+                    );
+                }
+            }
+            let mut images =
+                BTreeMap::from([("library.dll".to_owned(), ("Library.dll".to_owned(), image))]);
+            validate_dependency_graph(&images, &BTreeSet::new()).unwrap();
+
+            images
+                .get_mut("library.dll")
+                .unwrap()
+                .1
+                .forwarded_exports
+                .insert(
+                    ExportSymbol::Ordinal(ExportOrdinal(4096)),
+                    ForwardedExport {
+                        library: "library.dll".to_owned(),
+                        symbol: ExportSymbol::Ordinal(ExportOrdinal(2048)),
+                    },
+                );
+            let error = validate_dependency_graph(&images, &BTreeSet::new()).unwrap_err();
+            assert!(error.to_string().contains("cyclic forwarded export"));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn dependency_graph_reports_the_full_missing_chain() {
     let images = BTreeMap::from([
         (

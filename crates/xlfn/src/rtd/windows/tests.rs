@@ -1179,6 +1179,24 @@ unsafe fn release_unknown(interface: NonNull<c_void>) -> u32 {
     unsafe { ((*vtable).Release)(interface.as_ptr()) }
 }
 
+fn create_test_dispatch(factory: &TestClassFactory) -> TestUnknownReference {
+    let dispatch_iid = iid_idispatch_from_fields();
+    let mut dispatch = ptr::null_mut();
+    assert_eq!(
+        // SAFETY: the factory owns a live COM reference; IID and output are live.
+        unsafe {
+            (factory.vtable().create_instance)(
+                factory.as_ptr(),
+                ptr::null_mut(),
+                &dispatch_iid,
+                &mut dispatch,
+            )
+        },
+        S_OK
+    );
+    TestUnknownReference::new(dispatch)
+}
+
 fn get_test_class_factory(active: &ActiveServer) -> TestClassFactory {
     let iid = iid_iclass_factory_from_fields();
     let mut output = ptr::null_mut();
@@ -1966,21 +1984,7 @@ fn idispatch_resolves_names_and_invokes_heartbeat() {
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server while its COM
     // interfaces are used below.
     let factory = get_test_class_factory(&ensured.active);
-    let dispatch_iid = iid_idispatch_from_fields();
-    let mut dispatch = ptr::null_mut();
-    assert_eq!(
-        // SAFETY: `factory`, the IID, and output are live for the call.
-        unsafe {
-            (factory.vtable().create_instance)(
-                factory.as_ptr(),
-                ptr::null_mut(),
-                &dispatch_iid,
-                &mut dispatch,
-            )
-        },
-        S_OK
-    );
-    let dispatch = TestUnknownReference::new(dispatch);
+    let dispatch = create_test_dispatch(&factory);
     let server = dispatch.cast::<RtdServer>();
     // SAFETY: the IDispatch pointer is the RtdServer's identity pointer.
     let vtable = unsafe { server.as_ref().vtable };
@@ -2139,21 +2143,7 @@ fn idispatch_validates_flags_counts_types_and_reversed_arguments() {
 
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server for the test.
     let factory = get_test_class_factory(&ensured.active);
-    let dispatch_iid = iid_idispatch_from_fields();
-    let mut dispatch = ptr::null_mut();
-    assert_eq!(
-        // SAFETY: `factory`, the IID, and output are live for the call.
-        unsafe {
-            (factory.vtable().create_instance)(
-                factory.as_ptr(),
-                ptr::null_mut(),
-                &dispatch_iid,
-                &mut dispatch,
-            )
-        },
-        S_OK
-    );
-    let dispatch = TestUnknownReference::new(dispatch);
+    let dispatch = create_test_dispatch(&factory);
     let server = dispatch.cast::<RtdServer>();
     // SAFETY: the IDispatch pointer is the RtdServer's identity pointer.
     let vtable = unsafe { server.as_ref().vtable };
@@ -2400,21 +2390,7 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server while the
     // factory and dispatch interface are used.
     let factory = get_test_class_factory(&ensured.active);
-    let dispatch_iid = iid_idispatch_from_fields();
-    let mut dispatch = ptr::null_mut();
-    assert_eq!(
-        // SAFETY: `factory`, the IID, and output slot remain live.
-        unsafe {
-            (factory.vtable().create_instance)(
-                factory.as_ptr(),
-                ptr::null_mut(),
-                &dispatch_iid,
-                &mut dispatch,
-            )
-        },
-        S_OK
-    );
-    let dispatch = TestUnknownReference::new(dispatch);
+    let dispatch = create_test_dispatch(&factory);
     let server = dispatch.cast::<RtdServer>();
     // SAFETY: CreateInstance returned the RtdServer identity pointer.
     let vtable = unsafe { server.as_ref().vtable };

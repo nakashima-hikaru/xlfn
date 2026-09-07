@@ -967,9 +967,7 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let sink = FileDiagnosticSink {
             log: Mutex::new(RotatingLog {
-                path: tempdir.path().join("unavailable.log"),
-                file: None,
-                size: 0,
+                path: tempdir.path().join("missing-directory/unavailable.log"),
                 maximum_bytes: LOG_MAX_BYTES,
                 generations: LOG_GENERATIONS,
             }),
@@ -1307,6 +1305,28 @@ mod tests {
 
         let error = log.write_line("1234").unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn rotating_log_writers_follow_each_others_rotation_and_size() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("diagnostics.log");
+        let mut first = RotatingLog::open_with_policy(path.clone(), 12, 2).unwrap();
+        let mut second = RotatingLog::open_with_policy(path.clone(), 12, 2).unwrap();
+
+        first.write_line("first").unwrap();
+        second.write_line("second").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "second\n");
+        first.write_line("third").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "third\n");
+        assert_eq!(
+            fs::read_to_string(path.with_file_name("diagnostics.log.1")).unwrap(),
+            "second\n"
+        );
+        assert_eq!(
+            fs::read_to_string(path.with_file_name("diagnostics.log.2")).unwrap(),
+            "first\n"
+        );
     }
 
     #[test]

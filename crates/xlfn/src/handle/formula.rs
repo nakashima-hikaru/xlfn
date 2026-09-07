@@ -66,23 +66,10 @@ impl FormulaRevisionKey {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum HandleTopicKey {
-    Formula(FormulaRevisionKey),
-}
-
-impl HandleTopicKey {
-    pub(crate) fn format_lifetime_key(&self) -> String {
-        match self {
-            Self::Formula(key) => key.format_lifetime_key(),
-        }
-    }
-}
-
 #[cfg(test)]
-pub(crate) fn test_topic_key(label: &str) -> HandleTopicKey {
+pub(crate) fn test_topic_key(label: &str) -> FormulaRevisionKey {
     let inputs = InputFingerprint::from_bytes(*blake3::hash(label.as_bytes()).as_bytes());
-    HandleTopicKey::Formula(FormulaRevisionKey::new(
+    FormulaRevisionKey::new(
         FormulaCaller {
             sheet_id: 0,
             row: 0,
@@ -90,7 +77,7 @@ pub(crate) fn test_topic_key(label: &str) -> HandleTopicKey {
         },
         "TEST.HANDLE",
         inputs,
-    ))
+    )
 }
 
 pub(crate) fn resolve_formula_caller(host: ExcelHost<'_>) -> XllResult<FormulaCaller> {
@@ -106,9 +93,7 @@ pub(crate) fn formula_revision_key(
     host: ExcelHost<'_>,
     udf_id: &'static str,
     inputs: InputFingerprint,
-) -> XllResult<HandleTopicKey> {
+) -> XllResult<FormulaRevisionKey> {
     let caller = resolve_formula_caller(host)?;
-    Ok(HandleTopicKey::Formula(FormulaRevisionKey::new(
-        caller, udf_id, inputs,
-    )))
+    Ok(FormulaRevisionKey::new(caller, udf_id, inputs))
 }

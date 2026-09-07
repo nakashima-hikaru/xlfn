@@ -10,6 +10,41 @@ static EVALUATION_BARRIER: Mutex<
     Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
 > = Mutex::new(None);
 
+// Own the payload alongside its ABI view. Refresh the pointer when borrowed,
+// so moving the fixture never leaves an earlier borrow embedded in the view.
+struct AsyncHandleFixture {
+    bytes: Box<[u8]>,
+    raw: XLOPER12,
+}
+
+impl AsyncHandleFixture {
+    fn new(bytes: impl Into<Box<[u8]>>) -> Self {
+        Self {
+            bytes: bytes.into(),
+            raw: XLOPER12::default(),
+        }
+    }
+
+    fn as_raw_mut(&mut self) -> &mut XLOPER12 {
+        self.raw = XLOPER12 {
+            value: XLOPER12Value {
+                big_data: XLOPER12BigData {
+                    handle: XLOPER12BigDataHandle {
+                        data: self.bytes.as_mut_ptr(),
+                    },
+                    byte_count: self
+                        .bytes
+                        .len()
+                        .try_into()
+                        .expect("test payload fits the ABI"),
+                },
+            },
+            xltype: XLTYPE_BIG_DATA,
+        };
+        &mut self.raw
+    }
+}
+
 struct AsyncTestGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
     cleanup: Option<Box<dyn FnOnce()>>,
@@ -38,7 +73,9 @@ fn test_lock() -> AsyncTestGuard {
 fn test_lock_for_runtime<A: Addin>(runtime: &'static Runtime<A>) -> AsyncTestGuard {
     AsyncTestGuard {
         _lock: TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner()),
-        cleanup: Some(Box::new(move || runtime.release_test_module_lease())),
+        cleanup: Some(Box::new(move || {
+            runtime.shutdown_deps().release_test_module_lease()
+        })),
     }
 }
 
@@ -536,31 +573,20 @@ fn close_allows_aborted_layer_cleanup_to_reenter_runtime() {
     });
     let open_attempt = runtime.begin_open().unwrap();
     let mut open_attempt = runtime.publish(open_attempt, 7_u32, (ReentrantLayer { on_exit },));
-    runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+    open_attempt.finish_in_place(Vec::new()).unwrap();
     runtime.start_async(1).unwrap();
     let _callback_guard = reset_test_callback();
 
     let (started_tx, started_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let mut bytes = vec![1_u8, 2, 3, 4];
-    let mut handle = XLOPER12 {
-        value: XLOPER12Value {
-            big_data: XLOPER12BigData {
-                handle: XLOPER12BigDataHandle {
-                    data: bytes.as_mut_ptr(),
-                },
-                byte_count: bytes.len() as i32,
-            },
-        },
-        xltype: XLTYPE_BIG_DATA,
-    };
-    // SAFETY: `handle` is a valid, stack-local XLOPER12 constructed above.
+    let mut handle = AsyncHandleFixture::new([1_u8, 2, 3, 4]);
+    // SAFETY: `handle` owns a valid XLOPER12 and its payload for this call.
     unsafe {
         async_udf_boundary_named(
             runtime,
             "test_async_reentrant_layer_close",
             "TEST.ASYNC.REENTRANT.LAYER.CLOSE",
-            &mut handle,
+            handle.as_raw_mut(),
             move |_, _, _| {
                 Ok(async move {
                     started_tx.send(()).unwrap();
@@ -870,28 +896,21 @@ fn production_close_waits_until_blocking_poll_returns() {
 }
 
 #[test]
-fn async_handle_payload_is_deep_copied() {
-    let mut bytes = vec![1_u8, 2, 3, 4];
-    let original = bytes.as_mut_ptr();
-    let mut raw = XLOPER12 {
-        value: XLOPER12Value {
-            big_data: XLOPER12BigData {
-                handle: XLOPER12BigDataHandle { data: original },
-                byte_count: bytes.len() as i32,
-            },
-        },
-        xltype: XLTYPE_BIG_DATA,
-    };
-    // SAFETY: raw is a live, well-formed test async handle.
+fn miri_async_handle_payload_is_deep_copied() {
+    let mut fixture = AsyncHandleFixture::new([1_u8, 2, 3, 4]);
+    let original = fixture.bytes.as_mut_ptr();
     let _callback_guard = reset_test_callback();
-    // SAFETY: raw is a live, well-formed test async handle.
-    let mut owned = unsafe { ExcelAsyncResponder::from_raw("test_payload", &mut raw) }.unwrap();
+    // SAFETY: the fixture owns a live, well-formed test async handle.
+    let mut owned =
+        unsafe { ExcelAsyncResponder::from_raw("test_payload", fixture.as_raw_mut()) }.unwrap();
+    // SAFETY: the responder and its refreshed ABI view remain live.
+    let raw = unsafe { owned.pointer().as_ref() };
     // SAFETY: the owned value remains XLTYPE_BIG_DATA with a positive size.
-    let big_data = unsafe { owned.raw.value.big_data };
+    let big_data = unsafe { raw.value.big_data };
     // SAFETY: the big_data union contains the raw byte pointer in `handle.data`.
     let copied = unsafe { big_data.handle.data };
     assert_ne!(copied, original);
-    bytes.fill(9);
+    fixture.bytes.fill(9);
     assert_eq!(
         // SAFETY: copied points to the owned four-byte payload.
         unsafe { std::slice::from_raw_parts(copied, 4) },
@@ -918,29 +937,18 @@ fn async_boundary_returns_completed_value_through_callback() {
     let _guard = test_lock_for_runtime(runtime);
     let open_attempt = runtime.begin_open().unwrap();
     let mut open_attempt = runtime.publish(open_attempt, 7_u32, ());
-    runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+    open_attempt.finish_in_place(Vec::new()).unwrap();
     runtime.start_async(2).unwrap();
 
     let _callback_guard = reset_test_callback();
-    let mut bytes = vec![1_u8, 2, 3, 4];
-    let mut handle = XLOPER12 {
-        value: XLOPER12Value {
-            big_data: XLOPER12BigData {
-                handle: XLOPER12BigDataHandle {
-                    data: bytes.as_mut_ptr(),
-                },
-                byte_count: bytes.len() as i32,
-            },
-        },
-        xltype: XLTYPE_BIG_DATA,
-    };
-    // SAFETY: `handle` is a valid, stack-local XLOPER12 constructed above.
+    let mut handle = AsyncHandleFixture::new([1_u8, 2, 3, 4]);
+    // SAFETY: `handle` owns a valid XLOPER12 and its payload for this call.
     unsafe {
         async_udf_boundary_named(
             runtime,
             "test_async",
             "TEST.ASYNC",
-            &mut handle,
+            handle.as_raw_mut(),
             |_, _, token| {
                 assert_eq!(token.guarantee(), CancellationGuarantee::BestEffort);
                 Ok(async { Ok::<_, XllError>(42.0) })
@@ -949,7 +957,7 @@ fn async_boundary_returns_completed_value_through_callback() {
     }
     assert_eq!(wait_for_async_callback(), 42);
     assert_eq!(crate::test_callback::free_calls(), 0);
-    assert!(runtime.close_async().issues.is_empty());
+    assert!(runtime.async_manager().close().issues.is_empty());
 }
 
 #[test]
@@ -1006,29 +1014,18 @@ fn async_boundary_reports_handler_failures_to_layers() {
     let (event_sender, event_receiver) = std::sync::mpsc::channel();
     let open_attempt = runtime.begin_open().unwrap();
     let mut open_attempt = runtime.publish(open_attempt, 7_u32, (Recorder(event_sender),));
-    runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+    open_attempt.finish_in_place(Vec::new()).unwrap();
     runtime.start_async(2).unwrap();
 
     let _callback_guard = reset_test_callback();
-    let mut bytes = vec![1_u8, 2, 3, 4];
-    let mut handle = XLOPER12 {
-        value: XLOPER12Value {
-            big_data: XLOPER12BigData {
-                handle: XLOPER12BigDataHandle {
-                    data: bytes.as_mut_ptr(),
-                },
-                byte_count: bytes.len() as i32,
-            },
-        },
-        xltype: XLTYPE_BIG_DATA,
-    };
-    // SAFETY: `handle` is a valid, stack-local XLOPER12 constructed above.
+    let mut handle = AsyncHandleFixture::new([1_u8, 2, 3, 4]);
+    // SAFETY: `handle` owns a valid XLOPER12 and its payload for this call.
     unsafe {
         async_udf_boundary_named(
             runtime,
             "test_async_failure",
             "TEST.ASYNC.FAILURE",
-            &mut handle,
+            handle.as_raw_mut(),
             |_, _, _| {
                 Ok(async {
                     Err::<f64, _>(XllError::Native {
@@ -1045,7 +1042,7 @@ fn async_boundary_reports_handler_failures_to_layers() {
     assert_eq!(event.1, Some(73));
     assert_eq!(event.2, 1);
 
-    assert!(runtime.close_async().issues.is_empty());
+    assert!(runtime.async_manager().close().issues.is_empty());
 }
 
 #[test]
@@ -1102,30 +1099,19 @@ fn async_boundary_records_delivery_rejection_as_failure() {
     let (event_sender, event_receiver) = std::sync::mpsc::channel();
     let open_attempt = runtime.begin_open().unwrap();
     let mut open_attempt = runtime.publish(open_attempt, 7_u32, (Recorder(event_sender),));
-    runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+    open_attempt.finish_in_place(Vec::new()).unwrap();
     runtime.start_async(1).unwrap();
     let _callback_guard = reset_test_callback();
     crate::test_callback::set_async_rejected(true);
 
-    let mut bytes = vec![1_u8, 2, 3, 4];
-    let mut handle = XLOPER12 {
-        value: XLOPER12Value {
-            big_data: XLOPER12BigData {
-                handle: XLOPER12BigDataHandle {
-                    data: bytes.as_mut_ptr(),
-                },
-                byte_count: bytes.len() as i32,
-            },
-        },
-        xltype: XLTYPE_BIG_DATA,
-    };
-    // SAFETY: `handle` is a valid, stack-local XLOPER12 constructed above.
+    let mut handle = AsyncHandleFixture::new([1_u8, 2, 3, 4]);
+    // SAFETY: `handle` owns a valid XLOPER12 and its payload for this call.
     unsafe {
         async_udf_boundary_named(
             runtime,
             "test_async_delivery_failure",
             "TEST.ASYNC.DELIVERY.FAILURE",
-            &mut handle,
+            handle.as_raw_mut(),
             |_, _, _| Ok(async { Ok::<_, XllError>(42.0) }),
         );
     }
@@ -1136,25 +1122,14 @@ fn async_boundary_records_delivery_rejection_as_failure() {
     );
 
     let callback_count = crate::test_callback::async_return_calls();
-    let mut bytes = vec![5_u8, 6, 7, 8];
-    let mut handle = XLOPER12 {
-        value: XLOPER12Value {
-            big_data: XLOPER12BigData {
-                handle: XLOPER12BigDataHandle {
-                    data: bytes.as_mut_ptr(),
-                },
-                byte_count: bytes.len() as i32,
-            },
-        },
-        xltype: XLTYPE_BIG_DATA,
-    };
-    // SAFETY: `handle` is a valid, stack-local XLOPER12 constructed above.
+    let mut handle = AsyncHandleFixture::new([5_u8, 6, 7, 8]);
+    // SAFETY: `handle` owns a valid XLOPER12 and its payload for this call.
     unsafe {
         async_udf_boundary_named(
             runtime,
             "test_async_combined_failure",
             "TEST.ASYNC.COMBINED.FAILURE",
-            &mut handle,
+            handle.as_raw_mut(),
             |_, _, _| {
                 Ok(async {
                     Err::<f64, _>(XllError::Native {
@@ -1171,7 +1146,7 @@ fn async_boundary_records_delivery_rejection_as_failure() {
         (Some(UdfErrorKind::Vendor), Some(73), true)
     );
     assert_eq!(crate::test_callback::async_return_calls(), 2);
-    assert!(runtime.close_async().issues.is_empty());
+    assert!(runtime.async_manager().close().issues.is_empty());
 }
 
 #[test]
@@ -1180,30 +1155,19 @@ fn async_boundary_returns_error_on_cancellation() {
     let _guard = test_lock_for_runtime(runtime);
     let open_attempt = runtime.begin_open().unwrap();
     let mut open_attempt = runtime.publish(open_attempt, 7_u32, ());
-    runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+    open_attempt.finish_in_place(Vec::new()).unwrap();
     runtime.start_async(2).unwrap();
 
     let _callback_guard = reset_test_callback();
-    let mut bytes = vec![1_u8, 2, 3, 4];
-    let mut handle = XLOPER12 {
-        value: XLOPER12Value {
-            big_data: XLOPER12BigData {
-                handle: XLOPER12BigDataHandle {
-                    data: bytes.as_mut_ptr(),
-                },
-                byte_count: bytes.len() as i32,
-            },
-        },
-        xltype: XLTYPE_BIG_DATA,
-    };
+    let mut handle = AsyncHandleFixture::new([1_u8, 2, 3, 4]);
     let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-    // SAFETY: `handle` is a valid, stack-local XLOPER12 constructed above.
+    // SAFETY: `handle` owns a valid XLOPER12 and its payload for this call.
     unsafe {
         async_udf_boundary_named(
             runtime,
             "test_async_cancel",
             "TEST.ASYNC.CANCEL",
-            &mut handle,
+            handle.as_raw_mut(),
             move |_, _, _| {
                 let release_rx = release_rx;
                 Ok(async move {
@@ -1220,7 +1184,7 @@ fn async_boundary_returns_error_on_cancellation() {
     drop(release_tx);
     assert_eq!(wait_for_async_callback(), -1);
 
-    assert!(runtime.close_async().issues.is_empty());
+    assert!(runtime.async_manager().close().issues.is_empty());
 }
 
 #[test]
@@ -1229,30 +1193,19 @@ fn pending_async_cancellation_is_not_suppressed_by_another_callback_status() {
     let _guard = test_lock_for_runtime(runtime);
     let open_attempt = runtime.begin_open().unwrap();
     let mut open_attempt = runtime.publish(open_attempt, 7_u32, ());
-    runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+    open_attempt.finish_in_place(Vec::new()).unwrap();
     runtime.start_async(1).unwrap();
 
     let _callback_guard = reset_test_callback();
-    let mut bytes = vec![1_u8, 2, 3, 4];
-    let mut handle = XLOPER12 {
-        value: XLOPER12Value {
-            big_data: XLOPER12BigData {
-                handle: XLOPER12BigDataHandle {
-                    data: bytes.as_mut_ptr(),
-                },
-                byte_count: bytes.len() as i32,
-            },
-        },
-        xltype: XLTYPE_BIG_DATA,
-    };
+    let mut handle = AsyncHandleFixture::new([1_u8, 2, 3, 4]);
     let (started_tx, started_rx) = std::sync::mpsc::channel();
-    // SAFETY: `handle` is a valid, stack-local XLOPER12 constructed above.
+    // SAFETY: `handle` owns a valid XLOPER12 and its payload for this call.
     unsafe {
         async_udf_boundary_named(
             runtime,
             "test_async_terminal_gate",
             "TEST.ASYNC.TERMINAL.GATE",
-            &mut handle,
+            handle.as_raw_mut(),
             move |_, _, _| {
                 Ok(async move {
                     started_tx.send(()).unwrap();
@@ -1271,7 +1224,7 @@ fn pending_async_cancellation_is_not_suppressed_by_another_callback_status() {
 
     let callbacks_before_cancel = crate::test_callback::async_return_calls();
     cancel_async_calculation(runtime);
-    assert!(runtime.close_async().issues.is_empty());
+    assert!(runtime.async_manager().close().issues.is_empty());
     assert!(
         crate::test_callback::async_return_calls() > callbacks_before_cancel,
         "async cancellation fallback must retain its independent module admission"
@@ -1284,7 +1237,7 @@ fn cancellation_after_evaluation_does_not_leak_the_return_block() {
     let _guard = test_lock_for_runtime(runtime);
     let open_attempt = runtime.begin_open().unwrap();
     let mut open_attempt = runtime.publish(open_attempt, 7_u32, ());
-    runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+    open_attempt.finish_in_place(Vec::new()).unwrap();
     runtime.start_async(1).unwrap();
 
     let _callback_guard = reset_test_callback();
@@ -1298,25 +1251,14 @@ fn cancellation_after_evaluation_does_not_leak_the_return_block() {
     *EVALUATION_BARRIER.lock() = Some((reached_tx, release_rx));
     *AFTER_ASYNC_EVALUATION_HOOK.lock() = Some(stop_after_async_evaluation);
 
-    let mut bytes = vec![1_u8, 2, 3, 4];
-    let mut handle = XLOPER12 {
-        value: XLOPER12Value {
-            big_data: XLOPER12BigData {
-                handle: XLOPER12BigDataHandle {
-                    data: bytes.as_mut_ptr(),
-                },
-                byte_count: bytes.len() as i32,
-            },
-        },
-        xltype: XLTYPE_BIG_DATA,
-    };
-    // SAFETY: `handle` is a valid, stack-local XLOPER12 constructed above.
+    let mut handle = AsyncHandleFixture::new([1_u8, 2, 3, 4]);
+    // SAFETY: `handle` owns a valid XLOPER12 and its payload for this call.
     unsafe {
         async_udf_boundary_named(
             runtime,
             "test_async_cancel_after_evaluation",
             "TEST.ASYNC.CANCEL.AFTER.EVALUATION",
-            &mut handle,
+            handle.as_raw_mut(),
             |_, _, _| Ok(async { Ok::<_, XllError>("allocated return payload".to_owned()) }),
         );
     }
@@ -1325,7 +1267,7 @@ fn cancellation_after_evaluation_does_not_leak_the_return_block() {
     cancel_async_calculation(runtime);
     release_tx.send(()).unwrap();
     assert_eq!(wait_for_async_callback(), -1);
-    assert!(runtime.close_async().issues.is_empty());
+    assert!(runtime.async_manager().close().issues.is_empty());
 
     assert_eq!(crate::return_abi::live_return_blocks(), before);
     *AFTER_ASYNC_EVALUATION_HOOK.lock() = None;
@@ -1498,7 +1440,7 @@ fn test_generation_state_sharded_removal_and_task_count() {
     for id in 1..=100 {
         let index = task_shard(id);
         let (cancellation, _) = CancellationSource::new(CancellationGuarantee::BestEffort);
-        state.shards[index].tasks.lock().insert(
+        state.shards[index].lock().insert(
             id,
             TaskControl {
                 abort: abort.clone(),
@@ -1709,7 +1651,7 @@ fn removing_task_releases_cancellation_wakers_outside_task_lock() {
     struct ReentrantWake(Arc<GenerationState>, Arc<AtomicBool>);
     impl futures_util::task::ArcWake for ReentrantWake {
         fn wake_by_ref(this: &Arc<Self>) {
-            let unlocked = this.0.shards[0].tasks.try_lock().is_some();
+            let unlocked = this.0.shards[0].try_lock().is_some();
             this.1.store(unlocked, Ordering::Release);
             if unlocked {
                 assert!(!this.0.remove_task(0));
@@ -1731,7 +1673,7 @@ fn removing_task_releases_cancellation_wakers_outside_task_lock() {
             .is_pending()
     );
     let (abort, _) = futures_util::future::AbortHandle::new_pair();
-    generation.shards[0].tasks.lock().insert(
+    generation.shards[0].lock().insert(
         0,
         TaskControl {
             abort,
@@ -2065,29 +2007,18 @@ fn async_udf_boundary_catches_unhandled_panics_at_ffi_boundary() {
         1_u32,
         (PanickingLayer(Arc::clone(&payload_dropped)),),
     );
-    runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+    open_attempt.finish_in_place(Vec::new()).unwrap();
     runtime.start_async(1).unwrap();
 
-    let mut bytes = vec![1_u8, 2, 3, 4];
-    let mut handle = XLOPER12 {
-        value: XLOPER12Value {
-            big_data: XLOPER12BigData {
-                handle: XLOPER12BigDataHandle {
-                    data: bytes.as_mut_ptr(),
-                },
-                byte_count: bytes.len() as i32,
-            },
-        },
-        xltype: XLTYPE_BIG_DATA,
-    };
+    let mut handle = AsyncHandleFixture::new([1_u8, 2, 3, 4]);
 
-    // SAFETY: handle is a valid, stack-local XLOPER12 constructed above.
+    // SAFETY: handle owns a valid XLOPER12 and its payload for this call.
     let result = catch_unwind(AssertUnwindSafe(|| unsafe {
         async_udf_boundary_named(
             runtime,
             "test_async_panic_boundary",
             "TEST.ASYNC.PANIC",
-            &mut handle,
+            handle.as_raw_mut(),
             |_, _, _| Ok(async { Ok::<_, XllError>(42.0) }),
         );
     }));
@@ -2096,7 +2027,7 @@ fn async_udf_boundary_catches_unhandled_panics_at_ffi_boundary() {
         result.is_ok(),
         "async_udf_boundary_named must catch panics at the FFI boundary"
     );
-    assert!(runtime.close_async().issues.is_empty());
+    assert!(runtime.async_manager().close().issues.is_empty());
     assert_eq!(payload_dropped.load(Ordering::Acquire), 0);
 }
 
@@ -2113,24 +2044,13 @@ fn async_constructor_and_future_retain_panicking_payloads() {
     let _guard = test_lock_for_runtime(runtime);
     let open_attempt = runtime.begin_open().unwrap();
     let mut open_attempt = runtime.publish(open_attempt, 7_u32, ());
-    runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+    open_attempt.finish_in_place(Vec::new()).unwrap();
     runtime.start_async(1).unwrap();
     let _callback_guard = reset_test_callback();
     let dropped = Arc::new(AtomicUsize::new(0));
 
     for (index, constructor) in [true, false].into_iter().enumerate() {
-        let mut bytes = [1_u8, 2, 3, 4];
-        let mut handle = XLOPER12 {
-            value: XLOPER12Value {
-                big_data: XLOPER12BigData {
-                    handle: XLOPER12BigDataHandle {
-                        data: bytes.as_mut_ptr(),
-                    },
-                    byte_count: bytes.len() as i32,
-                },
-            },
-            xltype: XLTYPE_BIG_DATA,
-        };
+        let mut handle = AsyncHandleFixture::new([1_u8, 2, 3, 4]);
         let payload = PanickingPayload(Arc::clone(&dropped));
         // SAFETY: handle is valid for this synchronous call and copied before spawning.
         unsafe {
@@ -2138,7 +2058,7 @@ fn async_constructor_and_future_retain_panicking_payloads() {
                 runtime,
                 "payload",
                 "PAYLOAD",
-                &mut handle,
+                handle.as_raw_mut(),
                 move |_, _, _| {
                     if constructor {
                         std::panic::panic_any(payload);
@@ -2151,7 +2071,7 @@ fn async_constructor_and_future_retain_panicking_payloads() {
         assert_eq!(crate::test_callback::last_async_value(), -1);
         assert_eq!(dropped.load(Ordering::Acquire), 0);
     }
-    assert!(runtime.close_async().issues.is_empty());
+    assert!(runtime.async_manager().close().issues.is_empty());
     assert_eq!(crate::test_callback::async_return_calls(), 2);
     assert_eq!(dropped.load(Ordering::Acquire), 0);
 }
@@ -2235,6 +2155,28 @@ fn startup_partial_worker_creation_failure_rolls_back_cleanly() {
             diagnostic_id: crate::diagnostics::id::DiagnosticId::ASYNC_SPAWN
         })
     ));
+}
+
+#[test]
+fn startup_validates_worker_count_against_the_wakeup_mask() {
+    for count in [0, crate::AsyncWorkerCount::MAX + 1] {
+        assert!(matches!(
+            Executor::start_with_failure_at(count, 1, Some(0)),
+            Err(XllError::Domain {
+                code: crate::error::DomainErrorCode::InvalidInput,
+            })
+        ));
+    }
+    // Fail before launching threads: counts beyond the former arbitrary cap
+    // must reach worker creation, while remaining representable in the mask.
+    for count in [33, crate::AsyncWorkerCount::MAX] {
+        assert!(matches!(
+            Executor::start_with_failure_at(count, 1, Some(0)),
+            Err(XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::ASYNC_SPAWN,
+            })
+        ));
+    }
 }
 
 #[test]

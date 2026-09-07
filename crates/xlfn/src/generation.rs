@@ -6,20 +6,11 @@
 use std::num::NonZeroU64;
 use std::ptr::NonNull;
 
-/// Identity of one published or staged runtime service generation.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct RuntimeGeneration(NonZeroU64);
-
-impl RuntimeGeneration {
-    pub(crate) const fn new(raw: u64) -> Option<Self> {
-        match NonZeroU64::new(raw) {
-            Some(raw) => Some(Self(raw)),
-            None => None,
-        }
-    }
-
-    pub(crate) const fn get(self) -> u64 {
-        self.0.get()
+crate::typed_id::nonzero_u64_id! {
+    /// Identity of one published or staged runtime service generation.
+    pub(crate) struct RuntimeGeneration {
+        pub(crate) fn new;
+        pub(crate) fn get;
     }
 }
 
@@ -112,23 +103,16 @@ unsafe impl<A: crate::Addin> Send for ExecutionLease<A> {}
 // SAFETY: same invariant as Send; shared borrows access immutable shared_state.
 unsafe impl<A: crate::Addin> Sync for ExecutionLease<A> {}
 
-/// Identity of an in-flight open transaction. It is distinct from the
-/// published generation even though both participate in lifecycle state.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct OpenAttemptId(NonZeroU64);
+crate::typed_id::nonzero_u64_id! {
+    /// Identity of an in-flight open transaction. It is distinct from the
+    /// published generation even though both participate in lifecycle state.
+    pub(crate) struct OpenAttemptId {
+        pub(crate) fn new;
+        pub(crate) fn get;
+    }
+}
 
 impl OpenAttemptId {
-    pub(crate) const fn new(raw: u64) -> Option<Self> {
-        match NonZeroU64::new(raw) {
-            Some(raw) => Some(Self(raw)),
-            None => None,
-        }
-    }
-
-    pub(crate) const fn get(self) -> u64 {
-        self.0.get()
-    }
-
     /// Promote the identity of a successful open transaction to the
     /// published-generation identity. This is the only conversion between
     /// the two lifecycle domains; callers must not pass either identity
@@ -153,42 +137,29 @@ impl RemovalEpoch {
     }
 }
 
-/// Identity of one owner of the terminal removal protocol.
-///
-/// A removal request may advance the close epoch more than once while callers
-/// wait for an earlier owner to leave. This identity is therefore separate
-/// from [`RemovalEpoch`]: it names the affine owner that is allowed to issue a
-/// terminal certificate.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct RemovalAttemptId(NonZeroU64);
-
-impl RemovalAttemptId {
-    pub(crate) const fn new(raw: u64) -> Option<Self> {
-        match NonZeroU64::new(raw) {
-            Some(raw) => Some(Self(raw)),
-            None => None,
-        }
+crate::typed_id::nonzero_u64_id! {
+    /// Identity of one owner of the terminal removal protocol.
+    ///
+    /// A removal request may advance the close epoch more than once while callers
+    /// wait for an earlier owner to leave. This identity is therefore separate
+    /// from [`RemovalEpoch`]: it names the affine owner that is allowed to issue a
+    /// terminal certificate.
+    pub(crate) struct RemovalAttemptId {
+        pub(crate) fn new;
     }
 }
 
-/// Identity of a binding slot incarnation.  A slot can be reused only with
-/// the next value, so zero is never a valid binding generation.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct BindingGeneration(NonZeroU64);
+crate::typed_id::nonzero_u64_id! {
+    /// Identity of a binding slot incarnation.  A slot can be reused only with
+    /// the next value, so zero is never a valid binding generation.
+    pub(crate) struct BindingGeneration {
+        pub(crate) fn new;
+        pub(crate) fn get;
+    }
+}
 
 impl BindingGeneration {
     pub(crate) const ONE: Self = Self(NonZeroU64::MIN);
-
-    pub(crate) const fn new(raw: u64) -> Option<Self> {
-        match NonZeroU64::new(raw) {
-            Some(raw) => Some(Self(raw)),
-            None => None,
-        }
-    }
-
-    pub(crate) const fn get(self) -> u64 {
-        self.0.get()
-    }
 
     pub(crate) const fn next(self) -> Option<Self> {
         match self.0.get().checked_add(1) {
@@ -198,11 +169,14 @@ impl BindingGeneration {
     }
 }
 
-/// Identity of one mutable topic-table incarnation.  It is separate from
-/// the runtime generation because a topic table may reject an initializer
-/// without creating a new runtime.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct TopicGeneration(NonZeroU64);
+crate::typed_id::nonzero_u64_id! {
+    /// Identity of one mutable topic-table incarnation.  It is separate from
+    /// the runtime generation because a topic table may reject an initializer
+    /// without creating a new runtime.
+    pub(crate) struct TopicGeneration {
+        fn new;
+    }
+}
 
 impl TopicGeneration {
     pub(crate) const ONE: Self = Self(NonZeroU64::MIN);
@@ -213,48 +187,26 @@ impl TopicGeneration {
             None => None,
         }
     }
+}
 
-    const fn new(raw: u64) -> Option<Self> {
-        match NonZeroU64::new(raw) {
-            Some(raw) => Some(Self(raw)),
-            None => None,
-        }
+crate::typed_id::nonzero_u64_id! {
+    /// Identity of one COM/RTD server instance. The zero sentinel is reserved for
+    /// the absence of an active server and never enters subscription maps.
+    pub(crate) struct ServerGeneration {
+        #[cfg(any(
+            all(test, feature = "rtd"),
+            all(feature = "bench-internals", feature = "rtd"),
+            all(target_os = "windows", any(feature = "rtd", feature = "handles"))
+        ))]
+        pub(crate) fn new;
+        #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
+        pub(crate) fn get;
     }
 }
 
-/// Identity of one COM/RTD server instance. The zero sentinel is reserved for
-/// the absence of an active server and never enters subscription maps.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct ServerGeneration(NonZeroU64);
-
-#[cfg(any(
-    all(test, feature = "rtd"),
-    all(feature = "bench-internals", feature = "rtd"),
-    all(target_os = "windows", any(feature = "rtd", feature = "handles"))
-))]
-impl ServerGeneration {
-    pub(crate) const fn new(raw: u64) -> Option<Self> {
-        match NonZeroU64::new(raw) {
-            Some(raw) => Some(Self(raw)),
-            None => None,
-        }
-    }
-
-    #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
-    pub(crate) const fn get(self) -> u64 {
-        self.0.get()
-    }
-}
-
-/// Monotonic identity of one subscription connection attempt.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct ConnectionGeneration(NonZeroU64);
-
-impl ConnectionGeneration {
-    pub(crate) const fn new(raw: u64) -> Option<Self> {
-        match NonZeroU64::new(raw) {
-            Some(raw) => Some(Self(raw)),
-            None => None,
-        }
+crate::typed_id::nonzero_u64_id! {
+    /// Monotonic identity of one subscription connection attempt.
+    pub(crate) struct ConnectionGeneration {
+        pub(crate) fn new;
     }
 }

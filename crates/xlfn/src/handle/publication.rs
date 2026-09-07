@@ -6,7 +6,7 @@
 
 use super::runtime::{FormulaHandleService, PreparedHandleObject};
 use super::{
-    ExcelHandleObject, HandleTopicKey, InitializationPtr, PublishedTopic, PublishedTopicPtr,
+    ExcelHandleObject, FormulaRevisionKey, InitializationPtr, PublishedTopic, PublishedTopicPtr,
 };
 use crate::XllResult;
 use crate::generation::TopicGeneration;
@@ -18,7 +18,7 @@ use crate::generation::TopicGeneration;
 /// waiters.
 pub(super) struct TopicReservation<'runtime> {
     runtime: &'runtime FormulaHandleService,
-    key: HandleTopicKey,
+    key: FormulaRevisionKey,
     initialization: InitializationPtr,
     active: bool,
 }
@@ -26,7 +26,7 @@ pub(super) struct TopicReservation<'runtime> {
 impl<'runtime> TopicReservation<'runtime> {
     pub(super) fn new(
         runtime: &'runtime FormulaHandleService,
-        key: HandleTopicKey,
+        key: FormulaRevisionKey,
         initialization: InitializationPtr,
     ) -> Self {
         Self {
@@ -63,7 +63,7 @@ impl Drop for TopicReservation<'_> {
 /// Owns a binding and its provisional topic until publication is committed.
 struct ProvisionalPublication<'runtime> {
     runtime: &'runtime FormulaHandleService,
-    key: HandleTopicKey,
+    key: FormulaRevisionKey,
     token: String,
     refinement_id: u64,
     active: bool,
@@ -72,7 +72,7 @@ struct ProvisionalPublication<'runtime> {
 impl<'runtime> ProvisionalPublication<'runtime> {
     fn new(
         runtime: &'runtime FormulaHandleService,
-        key: HandleTopicKey,
+        key: FormulaRevisionKey,
         token: String,
         refinement_id: u64,
     ) -> Self {
@@ -124,7 +124,7 @@ impl Drop for ProvisionalPublication<'_> {
 /// same linear transaction.
 pub(crate) struct PublicationReservation<'runtime> {
     runtime: &'runtime FormulaHandleService,
-    key: HandleTopicKey,
+    key: FormulaRevisionKey,
     generation: TopicGeneration,
     reservation: TopicReservation<'runtime>,
 }
@@ -143,7 +143,7 @@ pub(crate) struct InsertedPublication<'runtime> {
 
 pub(super) struct ProvisionalPublicationTxn<'runtime> {
     runtime: &'runtime FormulaHandleService,
-    key: HandleTopicKey,
+    key: FormulaRevisionKey,
     generation: TopicGeneration,
     // Drop order is a synchronization invariant: withdraw the provisional
     // publication before releasing the single-flight reservation and waking
@@ -154,7 +154,7 @@ pub(super) struct ProvisionalPublicationTxn<'runtime> {
 
 pub(super) struct ObservedPublicationTxn<'runtime> {
     runtime: &'runtime FormulaHandleService,
-    key: HandleTopicKey,
+    key: FormulaRevisionKey,
     generation: TopicGeneration,
     publication: PublishedTopicPtr,
     provisional: ProvisionalPublication<'runtime>,
@@ -164,7 +164,7 @@ pub(super) struct ObservedPublicationTxn<'runtime> {
 impl<'runtime> PublicationReservation<'runtime> {
     pub(super) fn new(
         runtime: &'runtime FormulaHandleService,
-        key: HandleTopicKey,
+        key: FormulaRevisionKey,
         generation: TopicGeneration,
         initialization: InitializationPtr,
     ) -> Self {

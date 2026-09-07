@@ -77,9 +77,7 @@ pub(crate) use connection::{FormulaObserverId, Topic};
 pub(crate) use domain::{HandleDomainPermit, HandleDomainWitness, HandleReadDomain};
 #[cfg(any(test, feature = "bench-internals"))]
 pub(crate) use formula::FormulaCaller;
-#[cfg(any(test, feature = "refinement", feature = "bench-internals"))]
 pub(crate) use formula::FormulaRevisionKey;
-pub(crate) use formula::HandleTopicKey;
 #[cfg(feature = "handles")]
 pub(crate) use formula::formula_revision_key;
 #[cfg(any(test, feature = "bench-internals"))]

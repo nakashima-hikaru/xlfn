@@ -19,8 +19,8 @@ enum DeliveryState {
 /// retry after an FFI call has started.
 pub(crate) struct ExcelAsyncResponder {
     pub(crate) udf_id: &'static str,
-    pub(crate) raw: XLOPER12,
-    pub(crate) bytes: Option<Box<[u8]>>,
+    raw: XLOPER12,
+    bytes: Option<Box<[u8]>>,
     pub(crate) fallback_error: Option<XllError>,
     state: DeliveryState,
 }
@@ -55,7 +55,7 @@ impl ExcelAsyncResponder {
                 InputError::Malformed("async handle is too large"),
             ));
         }
-        let mut bytes = if byte_count == 0 {
+        let bytes = if byte_count == 0 {
             None
         } else {
             // SAFETY: a positive byte count selects the data pointer representation.
@@ -73,17 +73,12 @@ impl ExcelAsyncResponder {
                     .into_boxed_slice(),
             )
         };
-        let handle = bytes
-            .as_mut()
-            .map_or(big_data.handle, |bytes| XLOPER12BigDataHandle {
-                data: bytes.as_mut_ptr(),
-            });
         Ok(Self {
             udf_id,
             raw: XLOPER12 {
                 value: XLOPER12Value {
                     big_data: XLOPER12BigData {
-                        handle,
+                        handle: big_data.handle,
                         byte_count: big_data.byte_count,
                     },
                 },
@@ -95,8 +90,13 @@ impl ExcelAsyncResponder {
         })
     }
 
-    fn pointer(&mut self) -> NonNull<XLOPER12> {
-        let _ = &self.bytes;
+    pub(super) fn pointer(&mut self) -> NonNull<XLOPER12> {
+        // Reborrow after any move of the owning Box, immediately before FFI.
+        if let Some(bytes) = self.bytes.as_mut() {
+            self.raw.value.big_data.handle = XLOPER12BigDataHandle {
+                data: bytes.as_mut_ptr(),
+            };
+        }
         NonNull::from_mut(&mut self.raw)
     }
 
@@ -136,7 +136,7 @@ impl Drop for ExcelAsyncResponder {
                 .take()
                 .unwrap_or(XllError::ExcelValue(crate::ExcelError::NotAvailable));
             // SAFETY: raw is live and owned by this handle.
-            let delivery = unsafe { return_error(&mut self.raw, &error) };
+            let delivery = unsafe { return_error(self.pointer().as_ptr(), &error) };
             if let OwnedDeliveryOutcome::Failed(delivery_error) = delivery {
                 crate::diagnostics::report_no_unwind(self.udf_id, &delivery_error);
             }

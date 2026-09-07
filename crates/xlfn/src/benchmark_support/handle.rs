@@ -8,10 +8,10 @@ pub struct BenchHandleObject {
 }
 impl ExcelHandleObject for BenchHandleObject {}
 
-pub(super) fn benchmark_revision_key(udf_id: &'static str, id: u64) -> HandleTopicKey {
+pub(super) fn benchmark_revision_key(udf_id: &'static str, id: u64) -> FormulaRevisionKey {
     let mut inputs = [0_u8; 32];
     inputs[..8].copy_from_slice(&id.to_le_bytes());
-    HandleTopicKey::Formula(FormulaRevisionKey::new(
+    FormulaRevisionKey::new(
         FormulaCaller {
             sheet_id: 1,
             row: 0,
@@ -19,7 +19,7 @@ pub(super) fn benchmark_revision_key(udf_id: &'static str, id: u64) -> HandleTop
         },
         udf_id,
         InputFingerprint::from_bytes(inputs),
-    ))
+    )
 }
 
 pub(super) fn cleanup_handle_runtime(runtime: &FormulaHandleService) {
@@ -30,7 +30,7 @@ pub(super) fn cleanup_handle_runtime(runtime: &FormulaHandleService) {
 /// A batch whose runtime and formula keys are prepared before the timed call.
 pub struct HandleColdBatch {
     runtime: Arc<FormulaHandleService>,
-    keys: Vec<HandleTopicKey>,
+    keys: Vec<FormulaRevisionKey>,
 }
 
 impl HandleColdBatch {
@@ -71,7 +71,7 @@ impl Drop for HandleColdBatch {
 /// A warm-hit benchmark with its seed publication outside the timed section.
 pub struct HandleWarmBenchmark {
     runtime: Arc<FormulaHandleService>,
-    key: HandleTopicKey,
+    key: FormulaRevisionKey,
 }
 
 impl HandleWarmBenchmark {
@@ -118,7 +118,7 @@ impl Drop for HandleWarmBenchmark {
 /// A cold-growth benchmark that inserts `N` unique topic keys into a single runtime.
 pub struct HandleColdGrowthBenchmark {
     runtime: Arc<FormulaHandleService>,
-    keys: Vec<HandleTopicKey>,
+    keys: Vec<FormulaRevisionKey>,
 }
 
 impl HandleColdGrowthBenchmark {
@@ -158,7 +158,7 @@ impl Drop for HandleColdGrowthBenchmark {
 /// A revision-churn benchmark that repeatedly updates the same `N` topics with new objects.
 pub struct HandleRevisionChurnBenchmark {
     runtime: Arc<FormulaHandleService>,
-    keys: Vec<HandleTopicKey>,
+    keys: Vec<FormulaRevisionKey>,
     churn_cycles: usize,
 }
 

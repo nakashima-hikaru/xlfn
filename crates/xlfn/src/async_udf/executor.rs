@@ -7,7 +7,6 @@ use super::worker::{cancelled_calculation_error, run_executor};
 use crate::addin::AsyncWorkerCount;
 use crate::cancellation::CancellationSource;
 use crate::diagnostics::id::DiagnosticId;
-use crate::error::DomainErrorCode;
 #[cfg(feature = "handles")]
 use crate::generation::RuntimeGeneration;
 #[cfg(feature = "handles")]
@@ -145,11 +144,7 @@ impl Executor {
         generation: u64,
         fail_at: Option<usize>,
     ) -> XllResult<Self> {
-        if !(1..=AsyncWorkerCount::MAX).contains(&worker_count) {
-            return Err(XllError::Domain {
-                code: DomainErrorCode::InvalidInput,
-            });
-        }
+        let worker_count = AsyncWorkerCount::try_from(worker_count)?.get();
         let mut workers_local = Vec::with_capacity(worker_count);
         let mut stealers = Vec::with_capacity(worker_count);
         let mut unparkers = Vec::with_capacity(worker_count);
@@ -420,7 +415,7 @@ impl<'a> SpawnReservation<'a> {
 
         let index = task_shard(self.task_id);
         {
-            let mut tasks = generation.shards[index].tasks.lock();
+            let mut tasks = generation.shards[index].lock();
             let previous = tasks.insert(
                 self.task_id,
                 TaskControl {

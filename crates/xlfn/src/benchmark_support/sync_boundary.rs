@@ -58,8 +58,8 @@ impl SyncBoundaryWorkerPool {
             .begin_open_if_epoch(removal_epoch)
             .expect("begin_open");
         let mut open_attempt = runtime.publish(open_attempt, (), ());
-        runtime
-            .finish_open(&mut open_attempt, Vec::new())
+        open_attempt
+            .finish_in_place(Vec::new())
             .expect("finish_open");
         drop(open_attempt);
 

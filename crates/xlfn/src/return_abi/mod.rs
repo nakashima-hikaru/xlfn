@@ -878,7 +878,7 @@ mod tests {
         let runtime = fixture.runtime();
         let open_attempt = runtime.begin_open().unwrap();
         let mut open_attempt = runtime.publish(open_attempt, (), ());
-        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+        open_attempt.finish_in_place(Vec::new()).unwrap();
         drop(open_attempt);
         fixture
     }
@@ -906,7 +906,7 @@ mod tests {
         let _test = test_lock();
         let fixture = open_static_test_runtime();
         let runtime = fixture.runtime();
-        assert!(runtime.returns_are_quiescent());
+        assert!(runtime.open_deps().returns().returns_are_quiescent());
         let pointer = ffi_boundary(runtime, || Ok(42.0));
         assert!(!pointer.is_null());
         // SAFETY: pointer is the live return from ffi_boundary.
@@ -916,13 +916,13 @@ mod tests {
         // SAFETY: pointer remains the live return from ffi_boundary.
         assert_ne!(unsafe { (*pointer).xltype } & XLBIT_DLL_FREE, 0);
         assert!(
-            !runtime.returns_are_quiescent(),
+            !runtime.open_deps().returns().returns_are_quiescent(),
             "Excel-owned return must keep a runtime-local return obligation live"
         );
         // SAFETY: pointer has not yet been freed.
         unsafe { free_return(pointer) };
         assert!(
-            runtime.returns_are_quiescent(),
+            runtime.open_deps().returns().returns_are_quiescent(),
             "free_return must release the runtime-local return obligation"
         );
     }
@@ -1391,7 +1391,7 @@ mod tests {
 
         let (drained_tx, drained_rx) = mpsc::sync_channel(1);
         let closer = std::thread::spawn(move || {
-            runtime.wait_for_returns();
+            runtime.open_deps().returns().wait_for_returns();
             drained_tx.send(()).unwrap();
         });
 
@@ -1489,7 +1489,7 @@ mod tests {
         let runtime = fixture.runtime();
         let open_attempt = runtime.begin_open().unwrap();
         let mut open_attempt = runtime.publish(open_attempt, (), (Recorder(Arc::clone(&events)),));
-        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+        open_attempt.finish_in_place(Vec::new()).unwrap();
         drop(open_attempt);
 
         let pointer = udf_boundary_named(runtime, "test_conversion", "TEST.CONVERSION", |_, _| {
@@ -1644,7 +1644,7 @@ mod tests {
             let barrier_waiter = Arc::clone(&barrier);
             let waiter_handle = std::thread::spawn(move || {
                 barrier_waiter.wait();
-                runtime.wait_for_returns();
+                runtime.open_deps().returns().wait_for_returns();
             });
 
             let producer_handle = std::thread::spawn(move || {
@@ -1658,7 +1658,7 @@ mod tests {
             runtime.return_tracker().close_admission();
             barrier.wait();
             waiter_handle.join().unwrap();
-            assert!(runtime.returns_are_quiescent());
+            assert!(runtime.open_deps().returns().returns_are_quiescent());
         }
     }
 
@@ -1695,7 +1695,7 @@ mod tests {
         let fixture = open_static_test_runtime();
         let runtime = fixture.runtime();
         let pointer = ffi_boundary(runtime, || Ok(42.0));
-        assert!(!runtime.returns_are_quiescent());
+        assert!(!runtime.open_deps().returns().returns_are_quiescent());
         let pointer = pointer as usize;
 
         let worker = std::thread::spawn(move || {
@@ -1704,7 +1704,7 @@ mod tests {
         });
         worker.join().unwrap();
 
-        assert!(runtime.returns_are_quiescent());
+        assert!(runtime.open_deps().returns().returns_are_quiescent());
     }
 
     #[test]
@@ -1793,7 +1793,7 @@ mod tests {
         let fixture = open_static_test_runtime();
         let runtime = fixture.runtime();
 
-        let before = runtime.peek_next_call_id();
+        let before = runtime.open_deps().returns().peek_next_call_id();
 
         for _ in 0..100 {
             let ptr = udf_boundary_named(runtime, "test_fast_path", "TEST.FAST_PATH", |_, _| {
@@ -1804,7 +1804,7 @@ mod tests {
             drop(free_guard);
         }
 
-        let after = runtime.peek_next_call_id();
+        let after = runtime.open_deps().returns().peek_next_call_id();
         assert_eq!(before, after);
     }
 }

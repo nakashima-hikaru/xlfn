@@ -35,7 +35,7 @@ pub fn benchmark_measurement_time() -> Duration {
 }
 
 use crate::handle::{
-    ExcelHandleObject, FormulaCaller, FormulaHandleService, FormulaRevisionKey, HandleTopicKey,
+    ExcelHandleObject, FormulaCaller, FormulaHandleService, FormulaRevisionKey,
     resolve_formula_caller,
 };
 use crate::host_callback::HostCallbackSession;
@@ -59,10 +59,9 @@ mod sync_boundary;
 pub use async_spawn::{AsyncSpawnBenchmark, AsyncSpawnKind, RescheduleFuture, SpawnBatchResult};
 #[cfg(feature = "unstable-cache")]
 pub use cache::{
-    ArcCacheBenchmark, ArcCacheEvictionBenchmark, CacheLookupBenchCase,
-    ConcurrentClearLatencyBenchmark, CurrentCacheBenchmark, CurrentCacheEvictionBenchmark,
-    NoAdmissionCacheBenchmark, NoPinCacheBenchmark, ScopedBatchCacheBenchmark,
-    ScopedDurationCacheBenchmark, ScopedPerLookupCacheBenchmark,
+    CacheLookupBenchCase, ConcurrentClearLatencyBenchmark, CurrentCacheBenchmark,
+    CurrentCacheEvictionBenchmark, ScopedBatchCacheBenchmark, ScopedDurationCacheBenchmark,
+    ScopedPerLookupCacheBenchmark,
 };
 pub use call_resolution::{ConcurrentHandleResolutionBenchmark, MultiHandleCallBenchmark};
 pub use formula::{BenchmarkInputIdentity, FormulaRevisionBenchmark, SemanticIdentityBenchmark};
@@ -93,8 +92,8 @@ pub(super) fn get_benchmark_runtime() -> &'static crate::runtime::Runtime<()> {
             .begin_open_if_epoch(removal_epoch)
             .expect("benchmark runtime open attempt");
         let mut opening = runtime.publish(opening, (), ());
-        runtime
-            .finish_open(&mut opening, Vec::new())
+        opening
+            .finish_in_place(Vec::new())
             .expect("benchmark runtime open");
         drop(opening);
         runtime

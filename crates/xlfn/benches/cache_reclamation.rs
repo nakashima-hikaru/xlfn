@@ -181,7 +181,7 @@ fn run_worker_batch<'cache, const ALLOCATIONS: bool, const LATENCY: bool>(
                 .latencies_ns
                 .push(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX));
             // Observation is outside the individual operation timer. These
-            // counters never flush Moka or advance a grace period.
+            // counters never advance a grace period.
             let stats = cache.reclamation_stats();
             report.sampled_peak_pending_nodes =
                 report.sampled_peak_pending_nodes.max(stats.pending_nodes);
@@ -354,6 +354,7 @@ fn report_probes(pool: &WorkerPool, workload: Workload, workers: usize, payload_
             "latency_probe": {
                 "samples": latency.latencies_ns.len(),
                 "p50_ns": percentile(&latency.latencies_ns, 50),
+                "p95_ns": percentile(&latency.latencies_ns, 95),
                 "p99_ns": percentile(&latency.latencies_ns, 99),
                 "max_ns": latency.latencies_ns.last(),
                 "sampled_peak_pending_nodes": latency.sampled_peak_pending_nodes,
@@ -387,7 +388,7 @@ fn reclamation_benchmarks(c: &mut Criterion) {
         (64..=65_536).contains(&operations),
         "operations per worker must be 64..=65536"
     );
-    let mut group = c.benchmark_group("cache_reclamation");
+    let mut group = c.benchmark_group("cache_reclamation/quick");
     group.measurement_time(benchmark_measurement_time());
     group.sample_size(20);
     group.sampling_mode(SamplingMode::Flat);

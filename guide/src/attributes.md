@@ -2,7 +2,9 @@
 
 This chapter is the compact reference for xlfn's procedural macros. The compiler validates incompatible combinations; prefer the smallest attribute set that accurately describes the Excel contract.
 
-> **Dependency name:** generated code currently refers to the framework crate as `xlfn`. In `Cargo.toml`, depend on the package under its canonical crate name (`xlfn`) rather than renaming it.
+Generated code resolves the framework's dependency name from `Cargo.toml`, including renamed dependencies. The `crate = "path"` option can override that resolution for each macro.
+
+Default names derived from Rust identifiers omit a raw identifier's `r#` prefix: `fn r#type(r#match: f64)` registers as `type` with an argument named `match`. The same rule applies to add-in and enum names. Explicit string options keep their specified spelling.
 
 ## `#[excel_addin(...)]`
 

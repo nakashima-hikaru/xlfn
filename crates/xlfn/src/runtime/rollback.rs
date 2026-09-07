@@ -202,6 +202,7 @@ where
         let (mut shared_state, layers, _config) = opening.into_parts();
         let quiesce = catch_no_unwind(AssertUnwindSafe(|| {
             runtime
+                .shutdown_deps()
                 .with_addin_lifecycle(lifecycle, |lifecycle_state| {
                     runtime.quiesce_addin(&mut shared_state, lifecycle_state)
                 })
