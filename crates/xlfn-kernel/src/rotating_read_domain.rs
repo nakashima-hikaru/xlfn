@@ -399,10 +399,10 @@ mod tests {
         });
 
         let deadline = Instant::now() + Duration::from_secs(1);
-        while domain.current_generation().index() != 1 {
+        while domain.current_generation().index() != 1 || domain.generations[1].is_sealed() {
             assert!(
                 Instant::now() < deadline,
-                "rotation did not publish next generation"
+                "rotation did not publish and reopen next generation"
             );
             std::thread::yield_now();
         }
@@ -429,10 +429,10 @@ mod tests {
         });
 
         let deadline = Instant::now() + Duration::from_secs(1);
-        while domain.current_generation().index() != 1 {
+        while domain.current_generation().index() != 1 || domain.generations[1].is_sealed() {
             assert!(
                 Instant::now() < deadline,
-                "rotation did not publish next generation"
+                "rotation did not publish and reopen next generation"
             );
             std::thread::yield_now();
         }
