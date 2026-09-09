@@ -27,6 +27,13 @@ fn publish_then_reopen(
     reopen();
 }
 
+// Keep the registration guard through publication, then release it before
+// waiting for readers. The Loom model uses this same ordering helper.
+fn publish_then_release_barrier<B>(barrier: B, publish: impl FnOnce()) {
+    publish();
+    drop(barrier);
+}
+
 /// An opaque index identifying one of the two read generations.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct GenerationIndex(u8);
@@ -200,6 +207,23 @@ impl<const N: usize> RotatingReadDomain<N> {
         self.rotate_and_run_locked(operation)
     }
 
+    /// Rotates while synchronizing deferred registration with publication.
+    ///
+    /// `barrier` acquires the old generation's retirement-queue guard while
+    /// the transition lock is held. Holding it through next-generation
+    /// publication makes earlier withdrawals visible to new readers. Writers
+    /// that acquire the queue later must recheck the current generation.
+    /// The guard is dropped before waiting for old readers or invoking the
+    /// reclamation callback. Its acquisition/drop must not invoke user code.
+    pub fn quiesce_with_publication_barrier<B, R>(
+        &self,
+        barrier: impl FnOnce(GenerationIndex) -> B,
+        operation: impl FnOnce(DrainedGeneration) -> R,
+    ) -> Result<R, DomainClosed> {
+        let _transition = self.transition.lock();
+        self.rotate_and_run_with_barrier_locked(barrier, operation)
+    }
+
     /// Best-effort form of [`Self::quiesce`] for maintenance paths that must
     /// not wait for another transition already in progress.
     ///
@@ -228,8 +252,31 @@ impl<const N: usize> RotatingReadDomain<N> {
         self.try_quiesce_if_idle_impl(operation, || {})
     }
 
+    /// Nonblocking retirement-registration form of idle quiescence.
+    ///
+    /// Return `None` from `barrier` if its guard cannot be acquired without
+    /// waiting. No generation change occurs in that case. On success the
+    /// guard follows the same publication ordering as
+    /// [`Self::quiesce_with_publication_barrier`].
+    pub fn try_quiesce_if_idle_with_publication_barrier<B, R>(
+        &self,
+        barrier: impl FnOnce(GenerationIndex) -> Option<B>,
+        operation: impl FnOnce(DrainedGeneration) -> R,
+    ) -> Option<Result<R, DomainClosed>> {
+        self.try_idle_with_barrier_impl(barrier, operation, || {})
+    }
+
     fn try_quiesce_if_idle_impl<R>(
         &self,
+        operation: impl FnOnce(DrainedGeneration) -> R,
+        before_seal: impl FnOnce(),
+    ) -> Option<Result<R, DomainClosed>> {
+        self.try_idle_with_barrier_impl(|_| Some(()), operation, before_seal)
+    }
+
+    fn try_idle_with_barrier_impl<B, R>(
+        &self,
+        barrier: impl FnOnce(GenerationIndex) -> Option<B>,
         operation: impl FnOnce(DrainedGeneration) -> R,
         before_seal: impl FnOnce(),
     ) -> Option<Result<R, DomainClosed>> {
@@ -238,11 +285,12 @@ impl<const N: usize> RotatingReadDomain<N> {
             return Some(Err(DomainClosed));
         }
         let old = self.current_generation();
+        let barrier = barrier(old)?;
         before_seal();
         if !self.generations[old.index()].try_seal_if_idle() {
             return None;
         }
-        self.publish_next_locked(old);
+        publish_then_release_barrier(barrier, || self.publish_next_locked(old));
         Some(Ok(operation(DrainedGeneration { index: old })))
     }
 
@@ -250,18 +298,25 @@ impl<const N: usize> RotatingReadDomain<N> {
         &self,
         operation: impl FnOnce(DrainedGeneration) -> R,
     ) -> Result<R, DomainClosed> {
+        self.rotate_and_run_with_barrier_locked(|_| (), operation)
+    }
+
+    fn rotate_and_run_with_barrier_locked<B, R>(
+        &self,
+        barrier: impl FnOnce(GenerationIndex) -> B,
+        operation: impl FnOnce(DrainedGeneration) -> R,
+    ) -> Result<R, DomainClosed> {
         if self.closed.load(Ordering::Acquire) {
             return Err(DomainClosed);
         }
-
         let old = self.current_generation();
+        let barrier = barrier(old);
         // D3: seal before publishing the replacement, so a reader that
         // loaded `old` before this transition cannot enter it afterwards.
         self.generations[old.index()].seal();
-        self.publish_next_locked(old);
-
-        // D4: the callback is entered only after all readers admitted to the
-        // sealed generation have released their permits.
+        publish_then_release_barrier(barrier, || self.publish_next_locked(old));
+        // D4: no registration guard spans the reader wait. The callback only
+        // runs after every reader admitted to the old generation has left.
         self.generations[old.index()].wait_until_idle();
         Ok(operation(DrainedGeneration { index: old }))
     }
@@ -303,6 +358,21 @@ impl<const N: usize> RotatingReadDomain<N> {
 }
 
 impl RotatingReadDomain<DEFAULT_STRIPE_COUNT> {
+    /// Conservatively detects a caller that might hold a read permit.
+    ///
+    /// Use only before writer-side blocking maintenance. Zero in both
+    /// generations excludes a permit acquired on this thread with its default
+    /// stripe. It cannot detect permits transferred from another thread or
+    /// acquired with an explicit different stripe. Stripe collisions can yield
+    /// false positives, so this must never authorize reclamation.
+    /// No reader-side bookkeeping is added.
+    pub fn current_thread_may_be_reading(&self) -> bool {
+        let stripe = current_thread_stripe();
+        self.generations
+            .iter()
+            .any(|gate| gate.stripe_active(stripe) != 0)
+    }
+
     /// Enters using the calling thread's assigned stripe.
     #[inline]
     pub fn enter_current_thread(
@@ -378,6 +448,188 @@ mod tests {
     use std::cell::Cell;
     use std::sync::{Arc, Barrier, mpsc};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn publication_barrier_is_released_before_old_readers_drain() {
+        let domain = Arc::new(RotatingReadDomain::<2>::new());
+        let queue = Arc::new(Mutex::new(()));
+        let permit = domain.enter(0).unwrap();
+        let rotating = Arc::clone(&domain);
+        let registration = Arc::clone(&queue);
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            rotating
+                .quiesce_with_publication_barrier(
+                    |_| registration.lock(),
+                    |_| {
+                        assert!(registration.try_lock().is_some());
+                        finished_tx.send(()).unwrap();
+                    },
+                )
+                .unwrap();
+        });
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if domain.current_generation().index() == 1 && queue.try_lock().is_some() {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert!(finished_rx.try_recv().is_err());
+        // Registration remains available while the old reader is held.
+        drop(queue.lock());
+        drop(permit);
+        finished_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn idle_publication_barrier_never_waits_for_registration_or_readers() {
+        let domain = RotatingReadDomain::<2>::new();
+        let queue = Mutex::new(());
+        let registration = queue.lock();
+        assert!(
+            domain
+                .try_quiesce_if_idle_with_publication_barrier(
+                    |_| queue.try_lock(),
+                    |_| panic!("busy registration must skip rotation"),
+                )
+                .is_none()
+        );
+        drop(registration);
+        let reader = domain.enter(0).unwrap();
+        assert!(
+            domain
+                .try_quiesce_if_idle_with_publication_barrier(
+                    |_| queue.try_lock(),
+                    |_| panic!("busy reader must skip rotation"),
+                )
+                .is_none()
+        );
+        assert!(queue.try_lock().is_some());
+        assert_eq!(domain.current_generation().index(), 0);
+        drop(reader);
+        domain
+            .try_quiesce_if_idle_with_publication_barrier(
+                |_| queue.try_lock(),
+                |_| assert!(queue.try_lock().is_some()),
+            )
+            .unwrap()
+            .unwrap();
+    }
+
+    // This model isolates the publication/registration handoff. Reader gate
+    // admission and generation reuse are covered by the separate domain model.
+    #[cfg(not(all(target_os = "windows", target_arch = "x86")))]
+    fn model_deferred_registration(synchronize_publication: bool) {
+        use loom::sync::atomic::{AtomicBool as LoomBool, AtomicUsize as LoomUsize, Ordering as O};
+        use loom::sync::{Arc as LoomArc, Mutex as LoomMutex};
+        struct State {
+            published: LoomBool,
+            current: LoomUsize,
+            retired_in_old: LoomMutex<bool>,
+            record: loom::cell::UnsafeCell<usize>,
+        }
+        loom::model(move || {
+            let state = LoomArc::new(State {
+                published: LoomBool::new(true),
+                current: LoomUsize::new(0),
+                retired_in_old: LoomMutex::new(false),
+                record: loom::cell::UnsafeCell::new(42),
+            });
+            let writer_state = LoomArc::clone(&state);
+            let writer = loom::thread::spawn(move || {
+                writer_state.published.store(false, O::Release);
+                let mut queue = writer_state.retired_in_old.lock().unwrap();
+                if writer_state.current.load(O::Acquire) == 0 {
+                    *queue = true;
+                }
+            });
+            let rotating_state = LoomArc::clone(&state);
+            let rotating = loom::thread::spawn(move || {
+                let barrier =
+                    synchronize_publication.then(|| rotating_state.retired_in_old.lock().unwrap());
+                publish_then_release_barrier(barrier, || {
+                    rotating_state.current.store(1, O::Release)
+                });
+                if *rotating_state.retired_in_old.lock().unwrap() {
+                    // SAFETY: the positive model proves a new reader cannot
+                    // observe this withdrawn old-generation record. The
+                    // negative model intentionally violates that protocol.
+                    rotating_state
+                        .record
+                        .with_mut(|value| unsafe { value.write(0) });
+                }
+            });
+            let reader_state = LoomArc::clone(&state);
+            let reader = loom::thread::spawn(move || {
+                if reader_state.current.load(O::Acquire) == 1
+                    && reader_state.published.load(O::Acquire)
+                {
+                    // SAFETY: Loom diagnoses a stale-pointer access without
+                    // the publication barrier; no physical pointer is freed.
+                    reader_state.record.with(|value| unsafe {
+                        std::hint::black_box(value.read());
+                    });
+                }
+            });
+            writer.join().unwrap();
+            rotating.join().unwrap();
+            reader.join().unwrap();
+        });
+    }
+
+    #[cfg(not(all(target_os = "windows", target_arch = "x86")))]
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn loom_publication_barrier_orders_deferred_withdrawal_before_new_readers() {
+        model_deferred_registration(true);
+    }
+
+    #[cfg(not(all(target_os = "windows", target_arch = "x86")))]
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    #[should_panic(expected = "Causality violation")]
+    fn loom_unbarred_publication_can_expose_a_reclaimed_record_to_new_readers() {
+        model_deferred_registration(false);
+    }
+
+    #[test]
+    fn caller_stripe_observation_includes_a_draining_generation() {
+        let domain = Arc::new(RotatingReadDomain::<DEFAULT_STRIPE_COUNT>::new());
+        assert!(!domain.current_thread_may_be_reading());
+        let permit = domain.enter_current_thread().unwrap();
+        assert!(domain.current_thread_may_be_reading());
+        let old = domain.current_generation();
+        let rotating = Arc::clone(&domain);
+        let worker = std::thread::spawn(move || rotating.quiesce(|_| ()).unwrap());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while domain.current_generation() == old {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert!(domain.current_thread_may_be_reading());
+        drop(permit);
+        worker.join().unwrap();
+        assert!(!domain.current_thread_may_be_reading());
+        // A different thread using the same stripe is conservatively included.
+        let stripe = current_thread_stripe();
+        std::thread::scope(|threads| {
+            let (ready_tx, ready_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let domain = &domain;
+            threads.spawn(move || {
+                let _permit = domain.enter(stripe).unwrap();
+                ready_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+            ready_rx.recv().unwrap();
+            assert!(domain.current_thread_may_be_reading());
+            release_tx.send(()).unwrap();
+        });
+        assert!(!domain.current_thread_may_be_reading());
+    }
 
     #[test]
     fn starts_with_only_the_current_generation_open() {

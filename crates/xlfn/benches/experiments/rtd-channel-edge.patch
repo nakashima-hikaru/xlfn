@@ -1,0 +1,160 @@
+--- a/crates/xlfn/src/subscription/channel.rs
++++ b/crates/xlfn/src/subscription/channel.rs
+@@ -12,6 +12,7 @@
+ use std::marker::PhantomData;
+ use std::num::NonZeroUsize;
+ use std::sync::Arc;
++use std::sync::atomic::{AtomicBool, Ordering};
+ use std::thread::{Builder, JoinHandle};
+ use std::time::Duration;
+ 
+@@ -73,7 +74,7 @@
+ impl<T> RtdSender<T> {
+     /// Returns whether this subscription has stopped accepting values.
+     pub fn is_closed(&self) -> bool {
+-        !self.channel.state.lock().accepting
++        !self.channel.accepting.load(Ordering::Acquire)
+     }
+ 
+     /// Waits until admission closes or `timeout` elapses. Returns `true` when
+@@ -81,7 +82,7 @@
+     pub fn wait_closed(&self, timeout: Duration) -> bool {
+         let mut state = self.channel.state.lock();
+         self.channel
+-            .changed
++            .closed
+             .wait_while_for(&mut state, |state| state.accepting, timeout);
+         !state.accepting
+     }
+@@ -99,7 +100,7 @@
+             return Err(XllError::Closing);
+         }
+         let value = value.into_rtd_value()?.into_stored()?;
+-        {
++        let wake_publisher = {
+             let mut state = self.channel.state.lock();
+             if !state.accepting {
+                 return Err(XllError::Closing);
+@@ -107,9 +108,13 @@
+             if state.values.len() >= self.channel.capacity.get() {
+                 return Err(XllError::Overloaded);
+             }
++            let was_empty = state.values.is_empty();
+             state.values.push_back(value);
+-        }
+-        self.channel.changed.notify_all();
++            was_empty
++        };
++        if wake_publisher {
++            self.channel.changed.notify_one();
++        }
+         Ok(())
+     }
+ }
+@@ -124,6 +129,9 @@
+     capacity: NonZeroUsize,
+     state: Mutex<ChannelState>,
+     changed: Condvar,
++    // Cancellation waiters must never consume a publisher wakeup.
++    closed: Condvar,
++    accepting: AtomicBool,
+ }
+ 
+ impl Channel {
+@@ -136,6 +144,8 @@
+                 stopping: false,
+             }),
+             changed: Condvar::new(),
++            closed: Condvar::new(),
++            accepting: AtomicBool::new(true),
+         }
+     }
+ 
+@@ -147,18 +157,25 @@
+     }
+ 
+     fn producer_finished(&self) {
+-        self.state.lock().accepting = false;
++        {
++            let mut state = self.state.lock();
++            state.accepting = false;
++            self.accepting.store(false, Ordering::Release);
++        }
+         self.changed.notify_all();
++        self.closed.notify_all();
+     }
+ 
+     fn close(&self) {
+         let pending = {
+             let mut state = self.state.lock();
+             state.accepting = false;
++            self.accepting.store(false, Ordering::Release);
+             state.stopping = true;
+             std::mem::take(&mut state.values)
+         };
+         self.changed.notify_all();
++        self.closed.notify_all();
+         drop(pending);
+     }
+ 
+@@ -370,7 +387,6 @@
+         RefreshOutcome, RtdValue, SubscriptionRuntime, SubscriptionServerHandle, TopicId,
+     };
+     use std::panic::{AssertUnwindSafe, catch_unwind};
+-    use std::sync::atomic::{AtomicBool, Ordering};
+     use std::sync::mpsc;
+ 
+     const DEADLINE: Duration = Duration::from_secs(5);
+@@ -418,6 +434,52 @@
+         assert!(sender.is_closed());
+         assert!(matches!(sender.try_send(3.0), Err(XllError::Closing)));
+         assert_eq!(channel.receive(), None);
++    }
++
++    #[test]
++    fn data_wakeup_reaches_publisher_with_cancellation_waiters() {
++        let channel = Arc::new(Channel::new(capacity()));
++        let mut cancellation = Vec::new();
++        for _ in 0..4 {
++            let waiting = Arc::clone(&channel);
++            let (ready_tx, ready_rx) = mpsc::channel();
++            cancellation.push(std::thread::spawn(move || {
++                let mut state = waiting.state.lock();
++                ready_tx.send(()).unwrap();
++                waiting
++                    .closed
++                    .wait_while_for(&mut state, |state| state.accepting, DEADLINE);
++                assert!(!state.accepting);
++            }));
++            ready_rx.recv_timeout(DEADLINE).unwrap();
++            // Acquiring this lock proves the cancellation waiter registered
++            // its wait and released the mutex before the publisher starts.
++            drop(channel.state.lock());
++        }
++        let receiving = Arc::clone(&channel);
++        let (ready_tx, ready_rx) = mpsc::channel();
++        let (done_tx, done_rx) = mpsc::channel();
++        let publisher = std::thread::spawn(move || {
++            let mut state = receiving.state.lock();
++            ready_tx.send(()).unwrap();
++            receiving
++                .changed
++                .wait_while_for(&mut state, |state| state.values.is_empty(), DEADLINE);
++            drop(state);
++            done_tx.send(receiving.receive()).unwrap();
++        });
++        ready_rx.recv_timeout(DEADLINE).unwrap();
++        drop(channel.state.lock());
++        channel.sender::<i32>().try_send(42).unwrap();
++        assert_eq!(
++            done_rx.recv_timeout(DEADLINE).unwrap(),
++            Some(StoredRtdValue::Integer(42))
++        );
++        channel.close();
++        publisher.join().unwrap();
++        for waiter in cancellation {
++            waiter.join().unwrap();
++        }
+     }
+ 
+     struct CloseDuringConversion(Arc<Channel>);

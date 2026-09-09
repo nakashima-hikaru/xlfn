@@ -55,6 +55,12 @@ mod output;
 mod rtd;
 mod sync_boundary;
 
+pub use crate::handle::{
+    handle_removal_probe, handle_retirement_debt_probe, token_cache_associativity_probe,
+};
+#[cfg(feature = "rtd")]
+pub use crate::subscription::{channel_protocol_probe, shared_publisher_topology_probe};
+
 #[cfg(feature = "async")]
 pub use async_spawn::{AsyncSpawnBenchmark, AsyncSpawnKind, RescheduleFuture, SpawnBatchResult};
 #[cfg(feature = "unstable-cache")]
@@ -80,8 +86,9 @@ pub use lookup::{
 pub use output::BorrowedStringArrayOutputBenchmark;
 #[cfg(feature = "rtd")]
 pub use rtd::{
-    RTD_REFRESH_SCALING_CASES, RtdPublishNumberBenchmark, RtdPublishStringBenchmark,
-    RtdRefreshScalingBenchmark, RtdRefreshScalingCase, RtdRefreshValueKind,
+    RTD_REFRESH_SCALING_CASES, RtdChannelPipelineBenchmark, RtdPrepareBenchmark,
+    RtdPublishNumberBenchmark, RtdPublishStringBenchmark, RtdRefreshScalingBenchmark,
+    RtdRefreshScalingCase, RtdRefreshValueKind, rtd_pipeline_probe,
 };
 pub use sync_boundary::{SyncBenchKind, SyncBoundaryWorkerPool};
 

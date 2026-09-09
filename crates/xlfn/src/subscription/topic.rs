@@ -146,10 +146,19 @@ pub(crate) struct TopicId(pub(crate) i32);
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct SourceId(pub(crate) SourceHandleId);
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct SubscriptionIdentity {
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct SubscriptionIdentityKey {
     pub(crate) source_id: SourceId,
-    pub(crate) topic: RtdTopic,
+    pub(crate) topic_hash: u64,
+}
+
+impl SubscriptionIdentityKey {
+    pub(crate) fn new(source_id: SourceId, topic: &RtdTopic) -> Self {
+        Self {
+            source_id,
+            topic_hash: topic.identity_hash(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -285,6 +294,16 @@ impl RtdTopic {
     #[must_use]
     pub fn parts(&self) -> &[String] {
         &self.parts
+    }
+
+    pub(crate) const fn identity_hash(&self) -> u64 {
+        self.hash
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_identity_hash(mut self, hash: u64) -> Self {
+        self.hash = hash;
+        self
     }
 
     pub(crate) fn byte_len(&self) -> usize {

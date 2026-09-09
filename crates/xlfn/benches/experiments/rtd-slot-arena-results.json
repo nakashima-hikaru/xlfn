@@ -1,0 +1,533 @@
+{
+  "host": {
+    "cpu": "Apple M1",
+    "os": "macOS 26.6.2",
+    "target": "aarch64-apple-darwin",
+    "rustc": "1.98.0 (88d9e12ae 2026-08-18)"
+  },
+  "measurement": {
+    "batch_size": 256,
+    "measurement_ms": 5000,
+    "warm_up_seconds": 1,
+    "samples": 50,
+    "repetitions": 3,
+    "order": [
+      "map-1",
+      "slots-1",
+      "slots-2",
+      "map-2",
+      "map-3",
+      "slots-3"
+    ]
+  },
+  "source_sha256": {
+    "map": {
+      "crates/xlfn/src/subscription/catalog.rs": "3c6ab3a0744e3239db876e49f79c1f18914e2939a31c554846c75f8bd9c0308e",
+      "crates/xlfn/src/subscription/identity.rs": "9781e7b5e76186711d047d0b13ec0f800156d3fdbad22c53daf8bf2971f83934",
+      "crates/xlfn/src/subscription/runtime.rs": "2df970838f2934683ca341bbd6bf7e35e99e4228b2421f6f243e01e9b667d1d4",
+      "crates/xlfn/src/subscription/tests.rs": "58329c473a97049882ee715473fb805cbb6dbed3f926e78f9c5602cb384c7550"
+    },
+    "slots": {
+      "crates/xlfn/src/subscription/catalog.rs": "d585bc619ea9f7ac8dd4cd3bb9417f9463597e25e9a4c23db20464ce8854f070",
+      "crates/xlfn/src/subscription/identity.rs": "f57abb9dc01b3db3feaf20f4565d8f948fe9d5c23aa9e73015dab57229b39fad",
+      "crates/xlfn/src/subscription/runtime.rs": "6bb0ea766cdf4b6870906f016f99e61995a287d00cb84c7dd168e7b871fdea6b",
+      "crates/xlfn/src/subscription/tests.rs": "9a2c11b998a1d07053b3fb504609c3521b629a8cff3b7e661f7f2ff0e595caa9"
+    }
+  },
+  "binary_sha256": {
+    "map": "9f3c2f8d2f0b8967e167f35ce78b51080cb41117fc2fc1f5eabce2bf2590d853",
+    "slots": "518fd3576bbe495d5ec0739a1d6508cf60ecaaa88098ad6f9fd9d0fa4344c2a1"
+  },
+  "fixture_sha256": "77235f82fec9a571e3d4ee0bc89983d415ac3b19404022cbacf2d05089902878",
+  "support_sha256": "3d994b947eabe91c3a511812df9c0221fec19837d46b943a5ab3c090bfb82cc8",
+  "runs": [
+    {
+      "variant": "map",
+      "repetition": 1,
+      "operation": "new",
+      "parts": 1,
+      "batch_time_us": 56.5731501627686,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 56.01677510868887,
+        "upper": 57.27343402119434
+      }
+    },
+    {
+      "variant": "map",
+      "repetition": 1,
+      "operation": "new",
+      "parts": 10,
+      "batch_time_us": 58.10556642134802,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 57.8826155714747,
+        "upper": 58.33817616628722
+      }
+    },
+    {
+      "variant": "map",
+      "repetition": 1,
+      "operation": "existing",
+      "parts": 1,
+      "batch_time_us": 20.872093744100578,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 19.793804582872625,
+        "upper": 21.704269817259622
+      }
+    },
+    {
+      "variant": "map",
+      "repetition": 1,
+      "operation": "existing",
+      "parts": 10,
+      "batch_time_us": 60.861352224163596,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 59.613176490837176,
+        "upper": 61.82361136499518
+      }
+    },
+    {
+      "variant": "map",
+      "repetition": 1,
+      "operation": "churn",
+      "parts": 1,
+      "batch_time_us": 68.46381614884541,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 68.0513419044778,
+        "upper": 68.99619122548796
+      }
+    },
+    {
+      "variant": "map",
+      "repetition": 1,
+      "operation": "churn",
+      "parts": 10,
+      "batch_time_us": 103.689709062318,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 103.13446006414755,
+        "upper": 104.27163647855235
+      }
+    },
+    {
+      "variant": "slots",
+      "repetition": 1,
+      "operation": "new",
+      "parts": 1,
+      "batch_time_us": 34.06056331089109,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 33.927592370706726,
+        "upper": 34.22825339630106
+      }
+    },
+    {
+      "variant": "slots",
+      "repetition": 1,
+      "operation": "new",
+      "parts": 10,
+      "batch_time_us": 34.73667901617311,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 34.51702861870286,
+        "upper": 35.007860806488836
+      }
+    },
+    {
+      "variant": "slots",
+      "repetition": 1,
+      "operation": "existing",
+      "parts": 1,
+      "batch_time_us": 15.482520533979093,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 15.091357180779461,
+        "upper": 15.850778506623671
+      }
+    },
+    {
+      "variant": "slots",
+      "repetition": 1,
+      "operation": "existing",
+      "parts": 10,
+      "batch_time_us": 54.371811263832264,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 53.68814466690653,
+        "upper": 54.89971895333152
+      }
+    },
+    {
+      "variant": "slots",
+      "repetition": 1,
+      "operation": "churn",
+      "parts": 1,
+      "batch_time_us": 52.74837843172553,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 52.49731942143167,
+        "upper": 53.04753149661281
+      }
+    },
+    {
+      "variant": "slots",
+      "repetition": 1,
+      "operation": "churn",
+      "parts": 10,
+      "batch_time_us": 88.10989279169092,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 87.37438646998207,
+        "upper": 89.0484610577182
+      }
+    },
+    {
+      "variant": "slots",
+      "repetition": 2,
+      "operation": "new",
+      "parts": 1,
+      "batch_time_us": 34.15745619336052,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 34.03925758733528,
+        "upper": 34.27233447036147
+      }
+    },
+    {
+      "variant": "slots",
+      "repetition": 2,
+      "operation": "new",
+      "parts": 10,
+      "batch_time_us": 34.77233694368532,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 34.67151759127009,
+        "upper": 34.87045800285923
+      }
+    },
+    {
+      "variant": "slots",
+      "repetition": 2,
+      "operation": "existing",
+      "parts": 1,
+      "batch_time_us": 15.264306041749686,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 14.906680394896501,
+        "upper": 15.54098215595551
+      }
+    },
+    {
+      "variant": "slots",
+      "repetition": 2,
+      "operation": "existing",
+      "parts": 10,
+      "batch_time_us": 55.8118723750728,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 54.12916615102573,
+        "upper": 58.74483015969578
+      }
+    },
+    {
+      "variant": "slots",
+      "repetition": 2,
+      "operation": "churn",
+      "parts": 1,
+      "batch_time_us": 52.765516871393025,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 52.62234338898768,
+        "upper": 52.89242831544568
+      }
+    },
+    {
+      "variant": "slots",
+      "repetition": 2,
+      "operation": "churn",
+      "parts": 10,
+      "batch_time_us": 87.72340966608427,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 87.40208821091878,
+        "upper": 88.08186690719094
+      }
+    },
+    {
+      "variant": "map",
+      "repetition": 2,
+      "operation": "new",
+      "parts": 1,
+      "batch_time_us": 56.06210320080925,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 55.79976616118204,
+        "upper": 56.33533048606852
+      }
+    },
+    {
+      "variant": "map",
+      "repetition": 2,
+      "operation": "new",
+      "parts": 10,
+      "batch_time_us": 58.669330399922345,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 58.27810737434945,
+        "upper": 59.05077947891712
+      }
+    },
+    {
+      "variant": "map",
+      "repetition": 2,
+      "operation": "existing",
+      "parts": 1,
+      "batch_time_us": 20.5665870688651,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 19.4124205081525,
+        "upper": 21.52584171936318
+      }
+    },
+    {
+      "variant": "map",
+      "repetition": 2,
+      "operation": "existing",
+      "parts": 10,
+      "batch_time_us": 60.86799335792402,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 59.5498190583517,
+        "upper": 61.916090707872385
+      }
+    },
+    {
+      "variant": "map",
+      "repetition": 2,
+      "operation": "churn",
+      "parts": 1,
+      "batch_time_us": 70.49869588817705,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 68.11289920583545,
+        "upper": 75.3306359374943
+      }
+    },
+    {
+      "variant": "map",
+      "repetition": 2,
+      "operation": "churn",
+      "parts": 10,
+      "batch_time_us": 103.36946200543584,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 103.11639843398012,
+        "upper": 103.60145906622341
+      }
+    },
+    {
+      "variant": "map",
+      "repetition": 3,
+      "operation": "new",
+      "parts": 1,
+      "batch_time_us": 55.807123891119765,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 55.647294185451955,
+        "upper": 55.95040255484941
+      }
+    },
+    {
+      "variant": "map",
+      "repetition": 3,
+      "operation": "new",
+      "parts": 10,
+      "batch_time_us": 58.516851145408666,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 58.06673331193367,
+        "upper": 59.118115291844056
+      }
+    },
+    {
+      "variant": "map",
+      "repetition": 3,
+      "operation": "existing",
+      "parts": 1,
+      "batch_time_us": 20.883835472723742,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 19.72913707926252,
+        "upper": 21.83517746633653
+      }
+    },
+    {
+      "variant": "map",
+      "repetition": 3,
+      "operation": "existing",
+      "parts": 10,
+      "batch_time_us": 60.72995725101922,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 59.3110069787109,
+        "upper": 61.87133215964682
+      }
+    },
+    {
+      "variant": "map",
+      "repetition": 3,
+      "operation": "churn",
+      "parts": 1,
+      "batch_time_us": 68.34706656837201,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 68.10438254056565,
+        "upper": 68.66190101923848
+      }
+    },
+    {
+      "variant": "map",
+      "repetition": 3,
+      "operation": "churn",
+      "parts": 10,
+      "batch_time_us": 104.71488775965832,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 103.32918738857535,
+        "upper": 107.20458179554959
+      }
+    },
+    {
+      "variant": "slots",
+      "repetition": 3,
+      "operation": "new",
+      "parts": 1,
+      "batch_time_us": 34.086111906348286,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 34.01640782826699,
+        "upper": 34.15420460637669
+      }
+    },
+    {
+      "variant": "slots",
+      "repetition": 3,
+      "operation": "new",
+      "parts": 10,
+      "batch_time_us": 38.9508033385601,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 34.82505789213072,
+        "upper": 47.43743190241837
+      }
+    },
+    {
+      "variant": "slots",
+      "repetition": 3,
+      "operation": "existing",
+      "parts": 1,
+      "batch_time_us": 15.618949606106122,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 15.195478947638977,
+        "upper": 15.941817282990774
+      }
+    },
+    {
+      "variant": "slots",
+      "repetition": 3,
+      "operation": "existing",
+      "parts": 10,
+      "batch_time_us": 55.56992311939429,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 55.20384152728572,
+        "upper": 55.86202142739621
+      }
+    },
+    {
+      "variant": "slots",
+      "repetition": 3,
+      "operation": "churn",
+      "parts": 1,
+      "batch_time_us": 52.661713679250276,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 52.553163318261475,
+        "upper": 52.78015337091151
+      }
+    },
+    {
+      "variant": "slots",
+      "repetition": 3,
+      "operation": "churn",
+      "parts": 10,
+      "batch_time_us": 87.45914038439139,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 87.0266497211424,
+        "upper": 87.86261433135601
+      }
+    }
+  ],
+  "summary": [
+    {
+      "operation": "new",
+      "parts": 1,
+      "map_median_us": 56.06210320080925,
+      "slots_median_us": 34.086111906348286,
+      "change_percent": -39.199370055284945,
+      "criterion": "\u2264 +5%",
+      "passed": true
+    },
+    {
+      "operation": "existing",
+      "parts": 1,
+      "map_median_us": 20.872093744100578,
+      "slots_median_us": 15.482520533979093,
+      "change_percent": -25.82190975280009,
+      "criterion": "\u2264 18 \u00b5s",
+      "passed": true
+    },
+    {
+      "operation": "churn",
+      "parts": 1,
+      "map_median_us": 68.46381614884541,
+      "slots_median_us": 52.74837843172553,
+      "change_percent": -22.95437006162987,
+      "criterion": "\u2264 +5%",
+      "passed": true
+    },
+    {
+      "operation": "new",
+      "parts": 10,
+      "map_median_us": 58.516851145408666,
+      "slots_median_us": 34.77233694368532,
+      "change_percent": -40.5772247428703,
+      "criterion": "\u2264 +5%",
+      "passed": true
+    },
+    {
+      "operation": "existing",
+      "parts": 10,
+      "map_median_us": 60.861352224163596,
+      "slots_median_us": 55.56992311939429,
+      "change_percent": -8.694235194249378,
+      "criterion": "\u2264 54 \u00b5s",
+      "passed": false
+    },
+    {
+      "operation": "churn",
+      "parts": 10,
+      "map_median_us": 103.689709062318,
+      "slots_median_us": 87.72340966608427,
+      "change_percent": -15.398152372708385,
+      "criterion": "\u2264 +5%",
+      "passed": true
+    }
+  ]
+}

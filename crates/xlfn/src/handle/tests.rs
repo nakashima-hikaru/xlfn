@@ -534,13 +534,13 @@ fn miri_binding_read_lease_delays_object_reclamation_until_reader_exit() {
         );
         std::thread::yield_now();
     }
-    assert!(finished_rx.try_recv().is_err());
+    finished_rx.recv_timeout(Duration::from_secs(30)).unwrap();
     assert_eq!(reader.record().state(), BindingState::Retired);
     assert_eq!(drops.load(Ordering::Relaxed), 0);
 
     drop(reader);
-    finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     removal.join().unwrap();
+    registry.bindings.read_domain().flush_for_test();
     assert_eq!(drops.load(Ordering::Relaxed), 1);
 }
 
@@ -619,15 +619,13 @@ fn slot_reuse_can_publish_while_old_record_waits_for_grace() {
             "new"
         );
     });
-    assert!(finished_rx.try_recv().is_err());
+    finished_rx.recv_timeout(Duration::from_secs(30)).unwrap();
 
     drop(old_reader);
-    finished_rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("old removal must finish after its reader exits");
     removal.join().unwrap();
 
     registry.remove::<Counted>(&new_token).unwrap();
+    registry.bindings.read_domain().flush_for_test();
     assert_eq!(drops.load(Ordering::Relaxed), 2);
 }
 
@@ -653,6 +651,7 @@ fn single_slot_churn_reclaims_binding_records() {
             .expect("published binding must be removable");
     }
 
+    registry.bindings.read_domain().flush_for_test();
     assert_eq!(drops.load(Ordering::Relaxed), iterations);
     let state = registry.bindings.read_state();
     assert_eq!(state.live_bindings, 0);
@@ -1309,6 +1308,12 @@ fn aliased_binding_survives_source_retirement_and_drops_once() {
     );
     runtime.disconnect(lifetime_generation(1), 4);
     assert_eq!(runtime.len(), 0);
+    runtime
+        .store
+        .registry
+        .bindings
+        .read_domain()
+        .flush_for_test();
     assert_eq!(drops.load(Ordering::Relaxed), 1);
 }
 
@@ -1379,6 +1384,12 @@ fn alias_publication_installs_an_independent_object_capability() {
         .store
         .registry
         .remove_and_drop(&alias_token, "remove snapshot alias");
+    runtime
+        .store
+        .registry
+        .bindings
+        .read_domain()
+        .flush_for_test();
     assert_eq!(drops.load(Ordering::SeqCst), 1);
     runtime.seal().map(|_| ()).unwrap();
 }
@@ -1760,6 +1771,12 @@ fn handle_lease_keeps_payload_alive_after_binding_retirement() {
         0
     );
     drop(pinned);
+    runtime
+        .store
+        .registry
+        .bindings
+        .read_domain()
+        .flush_for_test();
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
 
@@ -1829,6 +1846,12 @@ fn scoped_handle_task_drain_releases_pin_before_handle_quiescence() {
 
     manager.cancel_generation(1);
     assert!(manager.close().issues.is_empty());
+    handles
+        .store
+        .registry
+        .bindings
+        .read_domain()
+        .flush_for_test();
     assert_eq!(drops.load(Ordering::Acquire), 1);
 
     let sealed = handles.seal().unwrap();
@@ -1942,6 +1965,12 @@ fn pin_promotion_keeps_a_snapshot_owned_payload_without_a_binding() {
         0
     );
     drop(pinned);
+    runtime
+        .store
+        .registry
+        .bindings
+        .read_domain()
+        .flush_for_test();
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
 
@@ -1994,7 +2023,7 @@ fn disconnect_waits_for_an_in_flight_consumer_and_drops_once() {
         .connect(lifetime_generation(1), 7, &lifetime_key)
         .unwrap();
 
-    let (disconnect_handle, finished_rx) =
+    let (disconnect_handle, _finished_rx) =
         crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
             let consumer: Handle<'_, CountedDataRecord> = runtime.lookup(scope, &token).unwrap();
             assert_eq!(consumer.0.load(Ordering::Relaxed), 0);
@@ -2009,13 +2038,18 @@ fn disconnect_waits_for_an_in_flight_consumer_and_drops_once() {
             });
             started_rx.recv().unwrap();
 
-            assert!(finished_rx.recv_timeout(Duration::from_millis(20)).is_err());
+            finished_rx.recv_timeout(Duration::from_secs(30)).unwrap();
             assert_eq!(drops.load(Ordering::Relaxed), 0);
             (disconnect_handle, finished_rx)
         });
 
-    finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     disconnect_handle.join().unwrap();
+    runtime
+        .store
+        .registry
+        .bindings
+        .read_domain()
+        .flush_for_test();
     assert_eq!(drops.load(Ordering::Relaxed), 1);
     runtime.disconnect(lifetime_generation(1), 7);
     assert_eq!(drops.load(Ordering::Relaxed), 1);
@@ -2036,6 +2070,12 @@ fn terminate_and_close_release_every_remaining_topic_once() {
             .unwrap();
     }
     runtime.terminate_topics(lifetime_generation(1));
+    runtime
+        .store
+        .registry
+        .bindings
+        .read_domain()
+        .flush_for_test();
     assert_eq!(drops.load(Ordering::Relaxed), 2);
     runtime.seal().map(|_| ()).unwrap();
     assert_eq!(drops.load(Ordering::Relaxed), 2);
@@ -2981,6 +3021,12 @@ fn removing_original_binding_keeps_aliased_object_alive() {
         .store
         .registry
         .remove_and_drop(&token2, "test remove 2");
+    runtime
+        .store
+        .registry
+        .bindings
+        .read_domain()
+        .flush_for_test();
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
 
@@ -3018,7 +3064,7 @@ fn call_borrow_keeps_value_alive_across_binding_retirement() {
         .unwrap()
         .into_token();
 
-    let (removal_handle, finished_rx) =
+    let (removal_handle, _finished_rx) =
         crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
             let handle = runtime.lookup::<DropCounter>(scope, &token).unwrap();
             assert_eq!(handle.val, 777);
@@ -3037,15 +3083,20 @@ fn call_borrow_keeps_value_alive_across_binding_retirement() {
             });
             started_rx.recv().unwrap();
 
-            // While scope is active, removal waits for readers to drain.
-            assert!(finished_rx.recv_timeout(Duration::from_millis(20)).is_err());
+            // Withdrawal completes while the scope retains the payload.
+            finished_rx.recv_timeout(Duration::from_secs(30)).unwrap();
             assert_eq!(drops.load(Ordering::SeqCst), 0);
             assert_eq!(handle.val, 777);
             (removal_handle, finished_rx)
         });
 
-    finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     removal_handle.join().unwrap();
+    runtime
+        .store
+        .registry
+        .bindings
+        .read_domain()
+        .flush_for_test();
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
 
@@ -3107,6 +3158,12 @@ fn drop_panic_is_recorded_in_handle_cleanup_state() {
         .registry
         .remove_and_drop(&token, "test panic remove");
 
+    runtime
+        .store
+        .registry
+        .bindings
+        .read_domain()
+        .flush_for_test();
     assert!(matches!(
         runtime.store.registry.cleanup_result(),
         Err(XllError::Panic)
@@ -3197,7 +3254,7 @@ fn alias_read_capability_delays_binding_retirement_until_scope_exit() {
         .unwrap()
         .into_token();
 
-    let (removal, finished_rx) =
+    let (removal, _finished_rx) =
         crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
             let handle = runtime.lookup::<TrackedValue>(scope, &token).unwrap();
             let alias = handle.alias();
@@ -3217,13 +3274,18 @@ fn alias_read_capability_delays_binding_retirement_until_scope_exit() {
 
             // Retirement withdraws the binding immediately but cannot reclaim its
             // object capability until the alias's read permit leaves the scope.
-            assert!(finished_rx.recv_timeout(Duration::from_millis(20)).is_err());
+            finished_rx.recv_timeout(Duration::from_secs(30)).unwrap();
             assert_eq!(drops.load(Ordering::SeqCst), 0);
             assert_eq!(alias.object_id().sequence(), 1);
             (removal, finished_rx)
         });
-    finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     removal.join().unwrap();
+    runtime
+        .store
+        .registry
+        .bindings
+        .read_domain()
+        .flush_for_test();
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
 
@@ -3400,10 +3462,10 @@ fn handle_domain_witness_records_exact_domain() {
     let domains = (domain1, domain2);
     crate::call::with_excel_call_scope_and_state(&domains, |(domain1, domain2), scope| {
         let witness1 = scope.enter_handle_domain(domain1).unwrap();
-        assert_eq!(witness1.domain(), std::ptr::NonNull::from(domain1));
+        assert_eq!(witness1.domain(), std::ptr::NonNull::from(domain1.as_ref()));
 
         let witness2 = scope.enter_handle_domain(domain2).unwrap();
-        assert_eq!(witness2.domain(), std::ptr::NonNull::from(domain2));
+        assert_eq!(witness2.domain(), std::ptr::NonNull::from(domain2.as_ref()));
     });
 }
 
@@ -3413,7 +3475,7 @@ fn miri_domain_permit_witness_lifecycle() {
     // SAFETY: domain outlives permit in this test scope.
     let permit = unsafe { domain.enter_owned() }.unwrap();
     let witness = permit.witness();
-    assert_eq!(witness.domain(), std::ptr::NonNull::from(&domain));
+    assert_eq!(witness.domain(), std::ptr::NonNull::from(domain.as_ref()));
 }
 
 #[test]
@@ -3459,10 +3521,9 @@ fn miri_topic_read_lease_lifecycle() {
 
 #[test]
 fn miri_object_arena_lifecycle() {
-    let arena = super::object::ObjectArena::new();
+    let arena = Arc::new(super::object::ObjectArena::new());
     let id = ObjectId::new(1, 1);
-    // SAFETY: `arena` outlives `binding` and `dup` in this test scope.
-    let binding = unsafe { arena.insert(id, 12345i64) }.unwrap();
+    let binding = arena.insert(id, 12345i64).unwrap();
     assert_eq!(binding.id(), id);
 
     let dup = binding.duplicate().unwrap();
@@ -3515,4 +3576,272 @@ fn miri_topic_close_unpublishes_before_reclamation_can_run() {
     assert!(initializations.is_empty());
     assert_eq!(reclaim_count.get(), 1);
     assert!(!discovered_retired_topic.get());
+}
+
+#[test]
+fn miri_lookup_linearizes_before_withdrawal_during_projection() {
+    let registry = HandleRegistry::from_entropy(1, [7; 40]);
+    let token = insert_production(&registry, Arc::new(DataRecord(42))).unwrap();
+    let (observed_tx, observed_rx) = std::sync::mpsc::sync_channel(0);
+    let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(0);
+    *registry.after_lookup_live.lock() = Some((observed_tx, resume_rx));
+    crate::call::with_excel_call_scope_and_state(&registry, |registry, scope| {
+        std::thread::scope(|threads| {
+            let token = &token;
+            let remover = threads.spawn(move || {
+                observed_rx
+                    .recv_timeout(std::time::Duration::from_secs(30))
+                    .unwrap();
+                registry.remove::<DataRecord>(token).unwrap();
+                resume_tx.send(()).unwrap();
+            });
+            let borrowed = registry.lookup_handle::<DataRecord>(scope, token).unwrap();
+            assert_eq!(borrowed.0, 42);
+            remover.join().unwrap();
+            assert!(matches!(
+                registry.lookup_handle::<DataRecord>(scope, token),
+                Err(XllError::StaleHandle)
+            ));
+        });
+    });
+    registry.bindings.read_domain().flush_for_test();
+}
+
+#[test]
+fn miri_deferred_hard_debt_backpressures_publication_without_waiting_on_own_scope() {
+    let registry = HandleRegistry::from_entropy(1, [7; 40]);
+    let drops = Arc::new(AtomicUsize::new(0));
+    crate::call::with_excel_call_scope_and_state(&registry, |registry, scope| {
+        for _ in 0..super::domain::HARD_DEBT_LIMIT {
+            let token =
+                insert_production(registry, Arc::new(CountedDataRecord(Arc::clone(&drops))))
+                    .unwrap();
+            let borrowed = registry
+                .lookup_handle::<CountedDataRecord>(scope, &token)
+                .unwrap();
+            registry.remove::<CountedDataRecord>(&token).unwrap();
+            assert_eq!(borrowed.0.load(Ordering::Relaxed), 0);
+        }
+        assert_eq!(
+            registry.bindings.read_domain().debt(),
+            super::domain::HARD_DEBT_LIMIT
+        );
+        assert!(matches!(
+            insert_production(registry, Arc::new(DataRecord(42))),
+            Err(XllError::Overloaded)
+        ));
+    });
+    registry.bindings.read_domain().flush_for_test();
+    assert_eq!(
+        drops.load(Ordering::Relaxed),
+        super::domain::HARD_DEBT_LIMIT
+    );
+    assert_eq!(registry.bindings.read_domain().debt(), 0);
+    assert!(insert_production(&registry, Arc::new(DataRecord(42))).is_ok());
+}
+
+#[test]
+fn miri_deferred_single_retirement_eventually_reclaims_without_more_writes() {
+    let registry = HandleRegistry::from_entropy(1, [7; 40]);
+    let drops = Arc::new(AtomicUsize::new(0));
+    let token =
+        insert_production(&registry, Arc::new(CountedDataRecord(Arc::clone(&drops)))).unwrap();
+    crate::call::with_excel_call_scope_and_state(&registry, |registry, scope| {
+        let borrowed = registry
+            .lookup_handle::<CountedDataRecord>(scope, &token)
+            .unwrap();
+        registry.remove::<CountedDataRecord>(&token).unwrap();
+        assert_eq!(borrowed.0.load(Ordering::Relaxed), 0);
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while drops.load(Ordering::Acquire) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a single retirement must be reclaimed without another write or seal"
+        );
+        std::thread::yield_now();
+    }
+    assert_eq!(drops.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn miri_deferred_seal_waits_for_in_flight_destructor() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    struct BlockingDrop {
+        entered: mpsc::Sender<()>,
+        release: parking_lot::Mutex<mpsc::Receiver<()>>,
+    }
+    impl ExcelHandleObject for BlockingDrop {}
+    impl Drop for BlockingDrop {
+        fn drop(&mut self) {
+            self.entered.send(()).unwrap();
+            self.release.get_mut().recv().unwrap();
+        }
+    }
+    let registry = Arc::new(HandleRegistry::from_entropy(1, [7; 40]));
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let token = insert_production(
+        &registry,
+        Arc::new(BlockingDrop {
+            entered: entered_tx,
+            release: parking_lot::Mutex::new(release_rx),
+        }),
+    )
+    .unwrap();
+    registry.remove::<BlockingDrop>(&token).unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+    assert_eq!(registry.bindings.read_domain().debt(), 1);
+    let closing = Arc::clone(&registry);
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let closer = std::thread::spawn(move || {
+        let sealed = closing.seal().unwrap();
+        closing.finish_quiescence(&sealed).unwrap();
+        finished_tx.send(()).unwrap();
+    });
+    assert!(finished_rx.recv_timeout(Duration::from_millis(20)).is_err());
+    release_tx.send(()).unwrap();
+    finished_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+    closer.join().unwrap();
+    assert_eq!(registry.bindings.read_domain().debt(), 0);
+}
+
+#[test]
+fn miri_deferred_worker_can_release_last_registry_owner() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    struct OwnsRegistry {
+        registry: Option<Arc<HandleRegistry>>,
+        entered: mpsc::Sender<()>,
+        release: parking_lot::Mutex<mpsc::Receiver<()>>,
+        finished: mpsc::Sender<()>,
+    }
+    impl ExcelHandleObject for OwnsRegistry {}
+    impl Drop for OwnsRegistry {
+        fn drop(&mut self) {
+            assert!(matches!(
+                self.registry.as_ref().unwrap().seal(),
+                Err(XllError::Closing)
+            ));
+            self.entered.send(()).unwrap();
+            self.release.get_mut().recv().unwrap();
+            drop(self.registry.take());
+            self.finished.send(()).unwrap();
+        }
+    }
+    let registry = Arc::new(HandleRegistry::from_entropy(1, [7; 40]));
+    let arena = Arc::clone(&registry.objects);
+    let domain = Arc::clone(registry.bindings.read_domain_for_test());
+    let weak = Arc::downgrade(&registry);
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let token = insert_production(
+        &registry,
+        Arc::new(OwnsRegistry {
+            registry: Some(Arc::clone(&registry)),
+            entered: entered_tx,
+            release: parking_lot::Mutex::new(release_rx),
+            finished: finished_tx,
+        }),
+    )
+    .unwrap();
+    registry.remove::<OwnsRegistry>(&token).unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+    drop(registry);
+    release_tx.send(()).unwrap();
+    finished_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+    domain.flush_for_test();
+    assert!(weak.upgrade().is_none());
+    arena.finish_quiescence().unwrap();
+}
+
+#[test]
+fn miri_deferred_removal_keeps_borrows_across_slot_reuse_and_batches() {
+    let registry = HandleRegistry::from_entropy(1, [7; 40]);
+    let drops = Arc::new(AtomicUsize::new(0));
+    crate::call::with_excel_call_scope_and_state(&registry, |registry, scope| {
+        let mut borrows = Vec::new();
+        for _ in 0..65 {
+            let pending = registry
+                .new_object(CountedDataRecord(Arc::clone(&drops)))
+                .unwrap();
+            let (token, ..) = registry
+                .publish_pending::<CountedDataRecord>(pending)
+                .unwrap();
+            borrows.push(
+                registry
+                    .lookup_handle::<CountedDataRecord>(scope, &token)
+                    .unwrap(),
+            );
+            assert!(
+                registry
+                    .remove_and_drop_with_observer(&token, "deferred test", |_| {})
+                    .is_some()
+            );
+            assert!(matches!(
+                registry.lookup_handle::<CountedDataRecord>(scope, &token),
+                Err(crate::XllError::StaleHandle)
+            ));
+            assert_eq!(drops.load(Ordering::Relaxed), 0);
+        }
+        registry.bindings.read_domain().maintain();
+        for borrowed in borrows {
+            assert_eq!(borrowed.0.load(Ordering::Relaxed), 0);
+        }
+    });
+    registry.bindings.read_domain().flush_for_test();
+    assert_eq!(drops.load(Ordering::Relaxed), 65);
+    let sealed = registry.seal().unwrap();
+    registry.finish_quiescence(&sealed).unwrap();
+}
+
+#[test]
+fn miri_deferred_seal_racing_removal_cannot_miss_queued_records() {
+    for _ in 0..if cfg!(miri) { 4 } else { 100 } {
+        let registry = Arc::new(HandleRegistry::from_entropy(1, [7; 40]));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let pending = registry
+            .new_object(CountedDataRecord(Arc::clone(&drops)))
+            .unwrap();
+        let (token, ..) = registry
+            .publish_pending::<CountedDataRecord>(pending)
+            .unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let removing = Arc::clone(&registry);
+        let removing_barrier = Arc::clone(&barrier);
+        let worker = std::thread::spawn(move || {
+            removing_barrier.wait();
+            // A seal that wins admission is allowed to reject removal.
+            removing.remove_and_drop_with_observer(&token, "seal race", |_| {});
+        });
+        barrier.wait();
+        let sealed = registry.seal().unwrap();
+        // Seal includes destruction handed to concurrent maintenance,
+        // even before the remover has joined.
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        registry.finish_quiescence(&sealed).unwrap();
+        worker.join().unwrap();
+    }
+}
+
+#[test]
+fn miri_deferred_seal_drains_debt_below_batch_threshold() {
+    let registry = HandleRegistry::from_entropy(1, [7; 40]);
+    let drops = Arc::new(AtomicUsize::new(0));
+    let pending = registry
+        .new_object(CountedDataRecord(Arc::clone(&drops)))
+        .unwrap();
+    let (token, ..) = registry
+        .publish_pending::<CountedDataRecord>(pending)
+        .unwrap();
+    assert!(
+        registry
+            .remove_and_drop_with_observer(&token, "deferred test", |_| {})
+            .is_some()
+    );
+    let sealed = registry.seal().unwrap();
+    registry.finish_quiescence(&sealed).unwrap();
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
 }

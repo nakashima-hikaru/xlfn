@@ -30,6 +30,10 @@ mod runtime_services;
 mod server;
 mod source;
 mod topic;
+#[cfg(all(feature = "rtd", feature = "bench-internals"))]
+mod topology_bench;
+#[cfg(all(feature = "rtd", feature = "bench-internals"))]
+pub use topology_bench::shared_publisher_topology_probe;
 mod value;
 
 pub(crate) type ErasedSink = delivery::ErasedSink;
@@ -40,6 +44,8 @@ pub(crate) type SubscriptionConnection =
 pub(crate) type SubscriptionServerHandle =
     server::SubscriptionServerHandle<crate::excel_rtd::RtdSubscriptionHost>;
 
+#[cfg(all(feature = "rtd", feature = "bench-internals"))]
+pub use channel::channel_protocol_probe;
 #[cfg(feature = "rtd")]
 pub use channel::{RtdChannelSource, RtdChannelSubscription, RtdSender};
 #[cfg(feature = "rtd")]
@@ -131,11 +137,12 @@ pub(crate) use topic::TopicId;
 pub(crate) use topic::{
     DEFAULT_MAX_RTD_ACTIVE, DEFAULT_MAX_RTD_PENDING, DEFAULT_MAX_RTD_QUEUED_UPDATES,
     DEFAULT_MAX_RTD_SOURCE_IDS, DEFAULT_MAX_RTD_TOTAL_TOPIC_BYTES, MAX_RTD_TOPIC_BYTES,
-    MAX_RTD_TOPIC_PARTS, SourceId, SubscriptionId, SubscriptionIdentity,
+    MAX_RTD_TOPIC_PARTS, SourceId, SubscriptionId, SubscriptionIdentityKey,
 };
 #[cfg(any(
     test,
     all(target_os = "windows", any(feature = "rtd", feature = "handles")),
+    feature = "bench-internals",
 ))]
 pub(crate) use value::StoredRtdValue;
 #[cfg(all(test, feature = "rtd"))]

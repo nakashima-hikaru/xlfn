@@ -165,9 +165,21 @@ after the call.
 
 ## Lifetime
 
-Each worksheet formula owns one runtime binding edge. The shared object is
-released after the last binding is removed, or when the registry closes after
-the relevant workbook dependency, RTD topic, or add-in terminates.
+Each worksheet formula owns one runtime binding edge. Successful removal
+means the binding has been withdrawn: subsequent lookups cannot resolve that
+binding. It does not guarantee that the object's destructor has completed.
+A lookup that observed a live binding before withdrawal may still succeed,
+and its call scope keeps the object alive until that call ends.
+
+After the last binding is withdrawn, destruction follows the read grace
+period and release of any async handle pins. Background maintenance reclaims
+small retirement batches even if no further formula changes occur. Final
+registry drain waits for outstanding retirement work; async task drain must
+also release the remaining pins before object quiescence completes.
+
+Maintenance may run an object's destructor on a framework worker, on a
+removing thread, or during shutdown. Do not use removal as a synchronization
+barrier for application side effects in `Drop`.
 
 Destructors must obey the same shutdown rules as any in-process code:
 
@@ -177,6 +189,10 @@ Destructors must obey the same shutdown rules as any in-process code:
 - do not directly destroy a thread-affine application resource from an arbitrary handle destructor.
 
 The runtime supports at most 16,384 live handles per open generation. This is a safety bound, not a capacity target.
+Retired bindings also have a bounded debt policy: new publication may return
+`Overloaded` while retirement is waiting for readers or destructors. Removal
+continues to withdraw existing bindings. Release long-running call scopes
+before retrying publication.
 
 ## Resource-backed handle objects
 

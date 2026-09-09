@@ -1,7 +1,7 @@
 use super::identity::SubscriptionIdentityIndex;
 use super::source::SourceHandleId;
 use super::topic::{
-    RtdLimits, RtdTopic, SourceId, SubscriptionId, SubscriptionIdentity, SubscriptionKey,
+    RtdLimits, RtdTopic, SourceId, SubscriptionId, SubscriptionIdentityKey, SubscriptionKey,
 };
 use crate::generation::{ConnectionGeneration, ServerGeneration};
 use crate::{XllError, XllResult};
@@ -347,11 +347,29 @@ struct PendingInsertPlan {
     id: SubscriptionId,
     key: SubscriptionKey,
     next_subscription_id: u64,
-    identity: SubscriptionIdentity,
+    identity_key: SubscriptionIdentityKey,
     pending_topic_bytes: usize,
 }
 
 impl SubscriptionCatalog {
+    pub(crate) fn find_identity(
+        &self,
+        source_id: SourceId,
+        topic: &RtdTopic,
+    ) -> XllResult<Option<(SubscriptionId, &SubscriptionEntry)>> {
+        let key = SubscriptionIdentityKey::new(source_id, topic);
+        // Hashes only narrow the candidates; entries own the canonical topics.
+        for &id in self.identities.candidates(key) {
+            let entry = self.entries.get(&id).ok_or(XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_INDEX_ORPHAN,
+            })?;
+            if entry.source_id == source_id && entry.topic == *topic {
+                return Ok(Some((id, entry)));
+            }
+        }
+        Ok(None)
+    }
+
     fn plan_pending_insert(
         &self,
         runtime_id: u64,
@@ -375,16 +393,13 @@ impl SubscriptionCatalog {
         })?;
         let id = SubscriptionId(raw_id);
         let key = SubscriptionKey::from_internal(runtime_id, id);
-        let identity = SubscriptionIdentity {
-            source_id: SourceId(source_id),
-            topic: topic.clone(),
-        };
+        let identity_key = SubscriptionIdentityKey::new(SourceId(source_id), topic);
 
         Ok(PendingInsertPlan {
             id,
             key,
             next_subscription_id,
-            identity,
+            identity_key,
             pending_topic_bytes,
         })
     }
@@ -398,7 +413,7 @@ impl SubscriptionCatalog {
             id,
             key,
             next_subscription_id,
-            identity,
+            identity_key,
             pending_topic_bytes,
         } = plan;
 
@@ -407,7 +422,7 @@ impl SubscriptionCatalog {
         let previous = self.entries.insert(
             id,
             SubscriptionEntry {
-                source_id: identity.source_id,
+                source_id: identity_key.source_id,
                 topic,
                 phase: SubscriptionPhase::Pending {
                     reservations: Some(NonZeroUsize::new(1).expect("one is non-zero")),
@@ -432,7 +447,7 @@ impl SubscriptionCatalog {
     ) -> XllResult<(SubscriptionId, SubscriptionKey)> {
         let plan = self.plan_pending_insert(runtime_id, source_id, &topic, limits)?;
         self.identities
-            .insert(plan.identity.clone(), plan.id, limits.max_source_ids.get())?;
+            .insert(plan.identity_key, plan.id, limits.max_source_ids.get())?;
         Ok(self.commit_pending_insert(plan, topic))
     }
 
@@ -484,11 +499,8 @@ impl SubscriptionCatalog {
             self.pending_topic_bytes =
                 checked_sub_or_abort(self.pending_topic_bytes, removed.topic.byte_len());
         }
-        let identity = SubscriptionIdentity {
-            source_id: removed.source_id,
-            topic: removed.topic.clone(),
-        };
-        if self.identities.remove(&identity) != Some(id) {
+        let identity_key = SubscriptionIdentityKey::new(removed.source_id, &removed.topic);
+        if !self.identities.remove(identity_key, id) {
             xlfn_kernel::invariant::fail_stop();
         }
         Some(removed)
@@ -498,17 +510,23 @@ impl SubscriptionCatalog {
     pub(crate) fn assert_identity_invariants(&self) {
         self.identities.assert_invariants();
 
-        assert_eq!(self.identities.id_by_identity.len(), self.entries.len());
-
-        for (identity, id) in &self.identities.id_by_identity {
-            let entry = self
-                .entries
-                .get(id)
-                .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
-
-            assert_eq!(entry.source_id, identity.source_id);
-            assert_eq!(&entry.topic, &identity.topic);
+        let mut seen_ids = rustc_hash::FxHashSet::default();
+        for (key, ids) in &self.identities.ids_by_key {
+            assert!(!ids.is_empty());
+            for (position, id) in ids.iter().enumerate() {
+                assert!(
+                    seen_ids.insert(*id),
+                    "each subscription is indexed exactly once"
+                );
+                let entry = self.entries.get(id).expect("indexed entry exists");
+                assert_eq!(entry.source_id, key.source_id);
+                assert_eq!(entry.topic.identity_hash(), key.topic_hash);
+                for other_id in &ids[..position] {
+                    assert_ne!(entry.topic, self.entries[other_id].topic);
+                }
+            }
         }
+        assert_eq!(seen_ids.len(), self.entries.len());
 
         let expected_pending_bytes = self
             .entries

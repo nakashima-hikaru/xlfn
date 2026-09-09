@@ -12,6 +12,7 @@ use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{Builder, JoinHandle};
 use std::time::Duration;
 
@@ -73,7 +74,7 @@ impl<T> Clone for RtdSender<T> {
 impl<T> RtdSender<T> {
     /// Returns whether this subscription has stopped accepting values.
     pub fn is_closed(&self) -> bool {
-        !self.channel.state.lock().accepting
+        !self.channel.accepting.load(Ordering::Acquire)
     }
 
     /// Waits until admission closes or `timeout` elapses. Returns `true` when
@@ -81,7 +82,7 @@ impl<T> RtdSender<T> {
     pub fn wait_closed(&self, timeout: Duration) -> bool {
         let mut state = self.channel.state.lock();
         self.channel
-            .changed
+            .closed
             .wait_while_for(&mut state, |state| state.accepting, timeout);
         !state.accepting
     }
@@ -99,7 +100,7 @@ impl<T: IntoRtdValue> RtdSender<T> {
             return Err(XllError::Closing);
         }
         let value = value.into_rtd_value()?.into_stored()?;
-        {
+        let wake_publisher = {
             let mut state = self.channel.state.lock();
             if !state.accepting {
                 return Err(XllError::Closing);
@@ -107,9 +108,13 @@ impl<T: IntoRtdValue> RtdSender<T> {
             if state.values.len() >= self.channel.capacity.get() {
                 return Err(XllError::Overloaded);
             }
+            let was_empty = state.values.is_empty();
             state.values.push_back(value);
+            was_empty
+        };
+        if wake_publisher {
+            self.channel.changed.notify_one();
         }
-        self.channel.changed.notify_all();
         Ok(())
     }
 }
@@ -124,6 +129,10 @@ struct Channel {
     capacity: NonZeroUsize,
     state: Mutex<ChannelState>,
     changed: Condvar,
+    // Cancellation waiters must never consume a publisher wakeup.
+    closed: Condvar,
+    accepting: AtomicBool,
+    stopping: AtomicBool,
 }
 
 impl Channel {
@@ -136,6 +145,9 @@ impl Channel {
                 stopping: false,
             }),
             changed: Condvar::new(),
+            closed: Condvar::new(),
+            accepting: AtomicBool::new(true),
+            stopping: AtomicBool::new(false),
         }
     }
 
@@ -147,21 +159,53 @@ impl Channel {
     }
 
     fn producer_finished(&self) {
-        self.state.lock().accepting = false;
+        {
+            let mut state = self.state.lock();
+            state.accepting = false;
+            self.accepting.store(false, Ordering::Release);
+        }
         self.changed.notify_all();
+        self.closed.notify_all();
     }
 
     fn close(&self) {
         let pending = {
             let mut state = self.state.lock();
             state.accepting = false;
+            self.accepting.store(false, Ordering::Release);
             state.stopping = true;
+            self.stopping.store(true, Ordering::Release);
             std::mem::take(&mut state.values)
         };
         self.changed.notify_all();
+        self.closed.notify_all();
         drop(pending);
     }
 
+    fn receive_batch(&self, batch: &mut smallvec::SmallVec<[StoredRtdValue; 32]>) -> bool {
+        debug_assert!(batch.is_empty());
+        let mut state = self.state.lock();
+        loop {
+            if state.stopping {
+                return false;
+            }
+            if !state.values.is_empty() {
+                for _ in 0..32 {
+                    let Some(value) = state.values.pop_front() else {
+                        break;
+                    };
+                    batch.push(value);
+                }
+                return true;
+            }
+            if !state.accepting {
+                return false;
+            }
+            self.changed.wait(&mut state);
+        }
+    }
+
+    #[cfg(test)]
     fn receive(&self) -> Option<StoredRtdValue> {
         let mut state = self.state.lock();
         loop {
@@ -206,10 +250,16 @@ impl RtdChannelSubscription {
                 .name("xlfn-rtd-publisher".into())
                 .spawn(move || {
                     let _close = scopeguard::guard((), |_| publisher_channel.close());
-                    while let Some(value) = publisher_channel.receive() {
-                        // Values have already been converted outside framework
-                        // locks. Only this worker can reach the erased sink.
-                        sink.publish_stored(value)?;
+                    let mut batch = smallvec::SmallVec::new();
+                    while publisher_channel.receive_batch(&mut batch) {
+                        for value in batch.drain(..) {
+                            // Cancellation also discards values dequeued into
+                            // the local batch, apart from an in-flight publish.
+                            if publisher_channel.stopping.load(Ordering::Acquire) {
+                                break;
+                            }
+                            sink.publish_stored(value)?;
+                        }
                     }
                     Ok(())
                 })
@@ -294,6 +344,81 @@ fn spawn_error(error: std::io::Error) -> XllError {
     }
 }
 
+/// Queue-only probe: conversion, enqueue, wakeup, and receive; no RTD sink.
+#[cfg(feature = "bench-internals")]
+pub fn channel_protocol_probe(
+    producers: usize,
+    capacity: usize,
+    operations: usize,
+) -> serde_json::Value {
+    use std::time::Instant;
+    assert!(producers > 0 && operations > 0);
+    let mut rounds = Vec::new();
+    let mut overloaded = 0;
+    for round in 0..7 {
+        let channel = Arc::new(Channel::new(NonZeroUsize::new(capacity).unwrap()));
+        let barrier = Arc::new(std::sync::Barrier::new(producers + 2));
+        let receiver_channel = Arc::clone(&channel);
+        let receiver_barrier = Arc::clone(&barrier);
+        let receiver = std::thread::spawn(move || {
+            receiver_barrier.wait();
+            let mut count = 0;
+            let mut batch = smallvec::SmallVec::new();
+            while receiver_channel.receive_batch(&mut batch) {
+                for value in batch.drain(..) {
+                    if receiver_channel.stopping.load(Ordering::Acquire) {
+                        break;
+                    }
+                    std::hint::black_box(value);
+                    count += 1;
+                }
+            }
+            count
+        });
+        let mut workers = Vec::new();
+        for _ in 0..producers {
+            let sender = channel.sender::<i32>();
+            let barrier = Arc::clone(&barrier);
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                let mut retries = 0;
+                for value in 0..operations {
+                    loop {
+                        match sender.try_send(value as i32) {
+                            Ok(()) => break,
+                            Err(XllError::Overloaded) => {
+                                retries += 1;
+                                std::thread::yield_now();
+                            }
+                            Err(error) => panic!("unexpected send error: {error}"),
+                        }
+                    }
+                }
+                retries
+            }));
+        }
+        let started = Instant::now();
+        barrier.wait();
+        let retries: usize = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .sum();
+        channel.producer_finished();
+        assert_eq!(receiver.join().unwrap(), producers * operations);
+        let elapsed = started.elapsed().as_nanos() as u64;
+        if round > 0 {
+            rounds.push(elapsed);
+            overloaded += retries;
+        }
+    }
+    rounds.sort_unstable();
+    serde_json::json!({
+        "producers": producers, "capacity": capacity, "values_per_round": producers * operations,
+        "measured_rounds": rounds.len(), "median_round_ns": (rounds[2] + rounds[3]) / 2,
+        "min_round_ns": rounds[0], "max_round_ns": rounds[5], "overloaded_retries": overloaded,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,7 +426,6 @@ mod tests {
         RefreshOutcome, RtdValue, SubscriptionRuntime, SubscriptionServerHandle, TopicId,
     };
     use std::panic::{AssertUnwindSafe, catch_unwind};
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
 
     const DEADLINE: Duration = Duration::from_secs(5);
@@ -351,6 +475,52 @@ mod tests {
         assert_eq!(channel.receive(), None);
     }
 
+    #[test]
+    fn data_wakeup_reaches_publisher_with_cancellation_waiters() {
+        let channel = Arc::new(Channel::new(capacity()));
+        let mut cancellation = Vec::new();
+        for _ in 0..4 {
+            let waiting = Arc::clone(&channel);
+            let (ready_tx, ready_rx) = mpsc::channel();
+            cancellation.push(std::thread::spawn(move || {
+                let mut state = waiting.state.lock();
+                ready_tx.send(()).unwrap();
+                waiting
+                    .closed
+                    .wait_while_for(&mut state, |state| state.accepting, DEADLINE);
+                assert!(!state.accepting);
+            }));
+            ready_rx.recv_timeout(DEADLINE).unwrap();
+            // Acquiring this lock proves the cancellation waiter registered
+            // its wait and released the mutex before the publisher starts.
+            drop(channel.state.lock());
+        }
+        let receiving = Arc::clone(&channel);
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let publisher = std::thread::spawn(move || {
+            let mut state = receiving.state.lock();
+            ready_tx.send(()).unwrap();
+            receiving
+                .changed
+                .wait_while_for(&mut state, |state| state.values.is_empty(), DEADLINE);
+            drop(state);
+            done_tx.send(receiving.receive()).unwrap();
+        });
+        ready_rx.recv_timeout(DEADLINE).unwrap();
+        drop(channel.state.lock());
+        channel.sender::<i32>().try_send(42).unwrap();
+        assert_eq!(
+            done_rx.recv_timeout(DEADLINE).unwrap(),
+            Some(StoredRtdValue::Integer(42))
+        );
+        channel.close();
+        publisher.join().unwrap();
+        for waiter in cancellation {
+            waiter.join().unwrap();
+        }
+    }
+
     struct CloseDuringConversion(Arc<Channel>);
 
     impl IntoRtdValue for CloseDuringConversion {
@@ -370,6 +540,82 @@ mod tests {
             sender.try_send(CloseDuringConversion(Arc::clone(&channel))),
             Err(XllError::Closing)
         ));
+        assert!(channel.state.lock().values.is_empty());
+    }
+
+    #[test]
+    fn miri_channel_batches_preserve_fifo_and_finite_drain() {
+        let channel = Arc::new(Channel::new(NonZeroUsize::new(65).unwrap()));
+        for value in 0..65 {
+            channel.sender::<i32>().try_send(value).unwrap();
+        }
+        channel.producer_finished();
+        let mut batch = smallvec::SmallVec::new();
+        let mut received = Vec::new();
+        let mut sizes = Vec::new();
+        while channel.receive_batch(&mut batch) {
+            sizes.push(batch.len());
+            received.extend(batch.drain(..));
+        }
+        assert_eq!(sizes, [32, 32, 1]);
+        assert_eq!(
+            received,
+            (0..65).map(StoredRtdValue::Integer).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn miri_channel_finite_publisher_drains_all_batches_to_publish_core() {
+        let (_runtime, server, sink) = sink();
+        let channel = Arc::new(Channel::new(NonZeroUsize::new(65).unwrap()));
+        for value in 0..65 {
+            channel.sender::<i32>().try_send(value).unwrap();
+        }
+        channel.producer_finished();
+        let mut subscription = RtdChannelSubscription::start_publisher(channel, sink).unwrap();
+        subscription
+            .publisher
+            .take()
+            .unwrap()
+            .join()
+            .unwrap()
+            .unwrap();
+        let batch = server.begin_refresh().unwrap();
+        assert_eq!(batch.updates.len(), 1);
+        assert_eq!(batch.updates[0].value, StoredRtdValue::Integer(64));
+        assert_eq!(batch.updates[0].sequence, 64);
+        batch.complete(RefreshOutcome::Delivered).unwrap();
+        Box::new(subscription).disconnect_and_wait().unwrap();
+    }
+
+    #[test]
+    fn miri_channel_cancel_discards_local_batch_after_in_flight_publish() {
+        let (_runtime, server, sink) = sink();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let notifier = Arc::new(crate::rtd::test_support::TestNotifierState::new());
+        *notifier.entered.lock() = Some(entered_tx);
+        *notifier.release.lock() = Some(release_rx);
+        server
+            .attach_update_notifier(crate::excel_rtd::RtdNotifier::for_test(notifier))
+            .unwrap();
+        let channel = Arc::new(Channel::new(NonZeroUsize::new(64).unwrap()));
+        for value in 0..64 {
+            channel.sender::<i32>().try_send(value).unwrap();
+        }
+        let subscription =
+            RtdChannelSubscription::start_publisher(Arc::clone(&channel), sink).unwrap();
+        entered_rx.recv_timeout(DEADLINE).unwrap();
+        assert_eq!(channel.state.lock().values.len(), 32);
+        subscription.request_cancel();
+        release_tx.send(()).unwrap();
+        drop(release_tx);
+        Box::new(subscription).disconnect_and_wait().unwrap();
+        let batch = server.begin_refresh().unwrap();
+        assert_eq!(batch.updates.len(), 1);
+        assert_eq!(batch.updates[0].value, StoredRtdValue::Integer(0));
+        assert_eq!(batch.updates[0].sequence, 0);
+        batch.complete(RefreshOutcome::Delivered).unwrap();
         assert!(channel.state.lock().values.is_empty());
     }
 

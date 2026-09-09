@@ -84,7 +84,7 @@ impl HandleLookupBenchmark {
                                     })
                             },
                         );
-                        let _ = std::hint::black_box(result);
+                        std::hint::black_box(result).expect("warm handle lookup must succeed");
                     }
                     done_tx
                         .send(())

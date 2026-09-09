@@ -1,6 +1,6 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use xlfn::benchmark_support::{
-    BENCHMARK_MEASUREMENT_TIME, HandleLookupBenchCase, HandleLookupBenchmark,
+    HandleLookupBenchCase, HandleLookupBenchmark, benchmark_measurement_time,
 };
 
 const ITERATIONS_PER_WORKER: usize = 1_000;
@@ -8,7 +8,7 @@ const THREAD_COUNTS: [usize; 4] = [1, 4, 16, 32];
 
 fn handle_lookup_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("handle_lookup");
-    group.measurement_time(BENCHMARK_MEASUREMENT_TIME);
+    group.measurement_time(benchmark_measurement_time());
 
     for case in [
         HandleLookupBenchCase::WarmSameToken,

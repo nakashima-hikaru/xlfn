@@ -1,8 +1,8 @@
 //! Runtime-owned arena for formula-handle payloads.
 //!
 //! The arena is the unique owner of every [`ObjectCell`]. Bindings and pins
-//! carry counted, non-owning capabilities; neither participates in memory
-//! ownership. An object is reclaimed only after both capability counts reach
+//! carry counted capabilities and retain the arena on writer/pin paths. Hot
+//! lookup still uses non-owning projections. An object is reclaimed after both counts reach
 //! zero, and its application destructor always runs outside the arena lock.
 
 use super::token::ObjectId;
@@ -13,6 +13,7 @@ use rustc_hash::FxHashMap;
 use std::any::{Any, TypeId, type_name};
 use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
+use std::sync::Arc;
 use xlfn_kernel::published_owner::PublishedOwner;
 
 /// A type-checked, non-owning projection into an [`ObjectCell`].
@@ -108,15 +109,10 @@ impl ObjectArena {
         }
     }
 
-    /// Inserts a new object into the arena and returns an initial binding.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that `self` (the arena) outlives all returned
-    /// [`ObjectBinding`] instances (and any [`RawObjectLeaseGuard`] acquired from them).
-    /// The owner must drain or drop all binding capabilities before reclaiming the arena.
-    pub(crate) unsafe fn insert<T: Send + Sync + 'static>(
-        &self,
+    /// Inserts a new object. Writer-side capabilities retain the arena so a
+    /// deferred destructor may release the last registry owner safely.
+    pub(crate) fn insert<T: Send + Sync + 'static>(
+        self: &Arc<Self>,
         id: ObjectId,
         value: T,
     ) -> XllResult<ObjectBinding> {
@@ -150,7 +146,7 @@ impl ObjectArena {
         drop(state);
         self.record(crate::shutdown_trace::ShutdownEvent::AddHandleObject);
         Ok(ObjectBinding {
-            arena: NonNull::from(self),
+            arena: Arc::clone(self),
             cell: cell_pointer,
             id,
             armed: true,
@@ -174,7 +170,7 @@ impl ObjectArena {
 
     #[cfg(any(feature = "async", test))]
     fn acquire_pin(
-        &self,
+        self: &Arc<Self>,
         id: ObjectId,
         cell: NonNull<ObjectCell>,
     ) -> XllResult<RawObjectLeaseGuard> {
@@ -196,7 +192,7 @@ impl ObjectArena {
         drop(state);
         self.record(crate::shutdown_trace::ShutdownEvent::AddHandlePin);
         Ok(RawObjectLeaseGuard {
-            arena: NonNull::from(self),
+            arena: Arc::clone(self),
             id,
             armed: true,
         })
@@ -363,9 +359,9 @@ unsafe impl Send for ObjectCell {}
 // SAFETY: ObjectCell contents are immutable and safe to share across threads.
 unsafe impl Sync for ObjectCell {}
 
-/// One formula binding's non-owning, counted capability to an object.
+/// One counted binding. The arena owner is cloned only on writer/pin paths.
 pub(crate) struct ObjectBinding {
-    arena: NonNull<ObjectArena>,
+    arena: Arc<ObjectArena>,
     cell: NonNull<ObjectCell>,
     id: ObjectId,
     armed: bool,
@@ -374,7 +370,7 @@ pub(crate) struct ObjectBinding {
 impl ObjectBinding {
     #[inline]
     pub(crate) fn arena(&self) -> NonNull<ObjectArena> {
-        self.arena
+        NonNull::from(self.arena.as_ref())
     }
 
     pub(crate) fn id(&self) -> ObjectId {
@@ -388,10 +384,9 @@ impl ObjectBinding {
     }
 
     pub(crate) fn duplicate(&self) -> XllResult<Self> {
-        // SAFETY: the boxed arena outlives every binding capability.
-        unsafe { self.arena.as_ref() }.duplicate_binding(self.id, self.cell)?;
+        self.arena.duplicate_binding(self.id, self.cell)?;
         Ok(Self {
-            arena: self.arena,
+            arena: Arc::clone(&self.arena),
             cell: self.cell,
             id: self.id,
             armed: true,
@@ -400,8 +395,7 @@ impl ObjectBinding {
 
     #[cfg(any(feature = "async", test))]
     pub(crate) fn acquire_lease(&self) -> XllResult<RawObjectLeaseGuard> {
-        // SAFETY: same lifetime invariant as `duplicate`.
-        unsafe { self.arena.as_ref() }.acquire_pin(self.id, self.cell)
+        self.arena.acquire_pin(self.id, self.cell)
     }
 }
 
@@ -464,9 +458,9 @@ impl<'registry> PendingObjectBinding<'registry> {
 impl Drop for ObjectBinding {
     fn drop(&mut self) {
         if self.armed {
-            // SAFETY: binding retirement waits for the read-domain grace
-            // period before dropping this capability.
-            unsafe { self.arena.as_ref() }.release_binding(self.id);
+            // Retirement has passed its read-domain grace period. The arena
+            // Arc also survives a destructor that releases the registry owner.
+            self.arena.release_binding(self.id);
         }
     }
 }
@@ -478,11 +472,10 @@ unsafe impl Sync for ObjectBinding {}
 
 /// Internal pin capability held by a generated async handle task.
 ///
-/// This type deliberately has no public lifetime-bearing API. Its raw arena
-/// pointer is safe only while the async task drain precedes handle-service
-/// teardown; the shutdown pipeline owns that ordering invariant.
+/// The Arc retains the arena through the complete final-release notification.
+/// Async task drain still precedes service teardown and quiescence validation.
 pub(crate) struct RawObjectLeaseGuard {
-    arena: NonNull<ObjectArena>,
+    arena: Arc<ObjectArena>,
     id: ObjectId,
     armed: bool,
 }
@@ -490,8 +483,7 @@ pub(crate) struct RawObjectLeaseGuard {
 impl Drop for RawObjectLeaseGuard {
     fn drop(&mut self) {
         if self.armed {
-            // SAFETY: an active pin prevents arena/service reclamation.
-            unsafe { self.arena.as_ref() }.release_pin(self.id);
+            self.arena.release_pin(self.id);
         }
     }
 }
@@ -507,9 +499,8 @@ mod tests {
 
     #[test]
     fn failed_pin_admission_preserves_both_counters() {
-        let arena = ObjectArena::new();
-        // SAFETY: all capabilities are dropped before this local arena.
-        let binding = unsafe { arena.insert(ObjectId::new(1, 1), 42_u32) }.unwrap();
+        let arena = Arc::new(ObjectArena::new());
+        let binding = arena.insert(ObjectId::new(1, 1), 42_u32).unwrap();
         for entry_overflow in [false, true] {
             {
                 let mut state = arena.state.lock();

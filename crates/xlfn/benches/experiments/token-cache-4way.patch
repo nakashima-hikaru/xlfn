@@ -1,0 +1,53 @@
+--- a/crates/xlfn/src/handle/token.rs
++++ b/crates/xlfn/src/handle/token.rs
+@@ -209,6 +209,12 @@
+ 
+ pub(crate) const HANDLE_TOKEN_LENGTH: usize = 82;
+ const VERIFIED_TOKEN_CACHE_SIZE: usize = 16;
++const CACHE_WAYS: usize = 4;
++const CACHE_SETS: usize = VERIFIED_TOKEN_CACHE_SIZE / CACHE_WAYS;
++struct SetAssociativeTokenCache {
++    entries: [Option<VerifiedTokenCacheEntry>; VERIFIED_TOKEN_CACHE_SIZE],
++    victims: [usize; CACHE_SETS],
++}
+ 
+ struct VerifiedTokenCacheEntry {
+     registry_address: usize,
+@@ -219,10 +225,9 @@
+ }
+ 
+ thread_local! {
+-    static VERIFIED_TOKEN_CACHE: RefCell<[
+-        Option<VerifiedTokenCacheEntry>;
+-        VERIFIED_TOKEN_CACHE_SIZE
+-    ]> = const { RefCell::new([const { None }; VERIFIED_TOKEN_CACHE_SIZE]) };
++    static VERIFIED_TOKEN_CACHE: RefCell<SetAssociativeTokenCache> = const { RefCell::new(SetAssociativeTokenCache {
++        entries: [const { None }; VERIFIED_TOKEN_CACHE_SIZE], victims: [0; CACHE_SETS],
++    }) };
+ }
+ 
+ #[inline]
+@@ -248,7 +253,9 @@
+     let index = verified_token_cache_index(bytes)?;
+     VERIFIED_TOKEN_CACHE.with(|cache| {
+         let cache = cache.borrow();
+-        cache[index].as_ref().and_then(|entry| {
++        let first = (index % CACHE_SETS) * CACHE_WAYS;
++        cache.entries[first..first + CACHE_WAYS].iter().find_map(|entry| {
++            let entry = entry.as_ref()?;
+             (entry.registry_address == registry_address
+                 && entry.session == session
+                 && entry.secret == *secret
+@@ -272,7 +279,11 @@
+     let mut token_bytes = [0_u8; HANDLE_TOKEN_LENGTH];
+     token_bytes.copy_from_slice(bytes);
+     VERIFIED_TOKEN_CACHE.with(|cache| {
+-        cache.borrow_mut()[index] = Some(VerifiedTokenCacheEntry {
++        let mut cache = cache.borrow_mut();
++        let set = index % CACHE_SETS;
++        let slot = set * CACHE_WAYS + cache.victims[set];
++        cache.victims[set] = (cache.victims[set] + 1) % CACHE_WAYS;
++        cache.entries[slot] = Some(VerifiedTokenCacheEntry {
+             registry_address,
+             session,
+             secret: *secret,

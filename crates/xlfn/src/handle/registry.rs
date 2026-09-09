@@ -5,7 +5,9 @@
 //! snapshots provide the call-scoped read capability. There is no second
 //! record arena or resurrection path to keep in sync.
 
-use super::binding::{BindingState, BindingTable};
+#[cfg(test)]
+use super::binding::BindingState;
+use super::binding::BindingTable;
 use super::object::{ObjectArena, ObjectBinding, PendingObjectBinding};
 use super::token::{HandleId, HandleToken, ObjectId, TokenCodec};
 use super::{ExcelHandleObject, Handle};
@@ -55,7 +57,14 @@ pub(crate) struct HandleRegistry {
     pub(super) codec: TokenCodec,
     pub(super) phase: AtomicU8,
     pub(super) bindings: BindingTable,
-    pub(super) objects: xlfn_kernel::published_owner::PublishedOwner<ObjectArena>,
+    pub(super) objects: std::sync::Arc<ObjectArena>,
+    #[cfg(test)]
+    pub(super) after_lookup_live: Mutex<
+        Option<(
+            std::sync::mpsc::SyncSender<()>,
+            std::sync::mpsc::Receiver<()>,
+        )>,
+    >,
     next_object_id: AtomicU64,
     #[cfg(any(test, feature = "refinement"))]
     pub(super) trace: Mutex<Option<crate::shutdown_trace::ShutdownTraceHandle>>,
@@ -110,7 +119,9 @@ impl HandleRegistry {
             codec: TokenCodec::new(session, secret),
             phase: AtomicU8::new(HandleRegistryPhase::Open as u8),
             bindings: BindingTable::new(maximum_bindings),
-            objects: xlfn_kernel::published_owner::PublishedOwner::new(ObjectArena::new()),
+            objects: std::sync::Arc::new(ObjectArena::new()),
+            #[cfg(test)]
+            after_lookup_live: Mutex::new(None),
             next_object_id: AtomicU64::new(1),
             #[cfg(any(test, feature = "refinement"))]
             trace: Mutex::new(None),
@@ -172,9 +183,7 @@ impl HandleRegistry {
         value: T,
     ) -> XllResult<PendingObjectBinding<'registry>> {
         let object_id = self.allocate_object_id()?;
-        // SAFETY: `self.objects` is owned by this `HandleRegistry`, which manages
-        // the handle lifecycle and drains all bindings and pins before arena reclamation.
-        let binding = unsafe { self.objects.insert(object_id, value) }?;
+        let binding = self.objects.insert(object_id, value)?;
         PendingObjectBinding::new(self, binding)
     }
 
@@ -298,10 +307,21 @@ impl HandleRegistry {
         }
         let witness = scope.enter_handle_domain(self.bindings.read_domain())?;
         let binding = self.bindings.read_scoped(verified.id, witness)?;
-        let record = binding.record();
-        if record.state() != BindingState::Live {
-            return Err(XllError::StaleHandle);
+        #[cfg(test)]
+        {
+            // Test-only interleaving control; production retains the original
+            // lookup body and has no callback wrapper or hook bookkeeping.
+            let pause = self.after_lookup_live.lock().take();
+            if let Some((observed, resume)) = pause {
+                observed.send(()).unwrap();
+                resume
+                    .recv_timeout(std::time::Duration::from_secs(30))
+                    .unwrap();
+            }
         }
+        // read_scoped's Live observation is the lookup linearization point.
+        // The call permit protects projection and the result across withdrawal.
+        let record = binding.record();
         let Some(value) = record.object().typed_projection::<T>() else {
             let actual_type = record.object().type_name();
             let _ = catch_no_unwind(AssertUnwindSafe(|| {
@@ -313,9 +333,6 @@ impl HandleRegistry {
             }));
             return Err(XllError::InvalidHandle);
         };
-        if record.state() != BindingState::Live {
-            return Err(XllError::StaleHandle);
-        }
         Ok(Handle::new(binding, value))
     }
 
@@ -396,6 +413,9 @@ impl HandleRegistry {
     }
 
     pub(super) fn seal(&self) -> XllResult<HandleRegistrySealed> {
+        if self.bindings.read_domain().is_reclaiming_here() {
+            return Err(XllError::Closing);
+        }
         loop {
             let phase = self.phase();
             match phase {

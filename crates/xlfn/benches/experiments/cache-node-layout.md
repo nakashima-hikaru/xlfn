@@ -1,6 +1,12 @@
 # Cache node payload layout experiment
 
-Decision: retain `Box<V>` in `CacheNode<V>` for now. Directly storing `V`
+Historical result (2026-09-07). The decision below was superseded by the
+2026-09-09 inline-storage implementation and
+[production-cache measurements](protocol-costs-2026-09-09.md). The large-array
+and alignment tradeoffs recorded here still apply; the later reclamation
+benchmark uses a heap-backed payload, not a large inline array.
+
+Decision at the time: retain `Box<V>` in `CacheNode<V>`. Directly storing `V`
 removes one allocation for nonzero-sized values, but the measured tradeoff
 depends on value size and alignment. Large inline arrays consumed more
 allocator space and took longer to construct and reclaim in this experiment.

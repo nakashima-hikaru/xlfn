@@ -124,8 +124,11 @@ impl<V> std::ops::Deref for CacheLease<'_, V> {
 unsafe fn reclaim_cache_node<V>(ptr: *mut ()) {
     // SAFETY: ptr points to an allocated CacheNode<V> whose grace period has ended.
     let node = unsafe { Box::from_raw(ptr as *mut CacheNode<V>) };
-    let value = node.value;
-    if catch_no_unwind(AssertUnwindSafe(|| drop(value))).is_err() {
+    // Drop in place: moving an inline, potentially large V onto the stack
+    // just to catch its destructor would add copies and risk stack overflow.
+    // Box's drop glue frees the node even if V's destructor unwinds. All
+    // framework locks and the grace-period callback have already been left.
+    if catch_no_unwind(AssertUnwindSafe(|| drop(node))).is_err() {
         let error = XllError::Panic;
         crate::diagnostics::report_no_unwind("calculation cache value final drop", &error);
     }
@@ -549,7 +552,7 @@ fn retire_resident<V>(node_ptr: NodePtr<V>) {
 }
 
 struct CacheNode<V> {
-    value: Box<V>,
+    value: V,
     pins: AtomicUsize,
     resident: AtomicBool,
     weight: u32,
@@ -557,9 +560,9 @@ struct CacheNode<V> {
     domain: NonNull<CacheLookupDomain>,
 }
 
-// SAFETY: Box<V> is Send if V: Send.
+// SAFETY: The inline payload is Send if V: Send; the cache owns the domain.
 unsafe impl<V: Send> Send for CacheNode<V> {}
-// SAFETY: Box<V> is Sync if V: Sync.
+// SAFETY: The inline payload is Sync if V: Sync; node metadata is atomic or immutable.
 unsafe impl<V: Sync> Sync for CacheNode<V> {}
 
 #[derive(Debug, PartialEq, Eq)]
@@ -899,7 +902,9 @@ where
             index_bytes_estimate,
             index_metadata_opaque,
             resident_node_bytes_estimate: entries
-                .saturating_mul(std::mem::size_of::<CacheNode<V>>() as u64)
+                .saturating_mul(
+                    (std::mem::size_of::<CacheNode<V>>() - std::mem::size_of::<V>()) as u64,
+                )
                 .saturating_add(weight),
         }
     }
@@ -1113,7 +1118,7 @@ where
                 let value = compute()?;
                 let measured = weight(&value);
                 let node = Box::new(CacheNode {
-                    value: Box::new(value),
+                    value,
                     pins: AtomicUsize::new(1),
                     resident: AtomicBool::new(false),
                     weight: u32::try_from(measured).unwrap_or(u32::MAX).max(1),
@@ -1159,9 +1164,8 @@ where
                     let measured = weight_fn(&value);
                     oversized = measured > self.weight_budget;
                     let w = u32::try_from(measured).unwrap_or(u32::MAX).max(1);
-                    let boxed = Box::new(value);
                     let node = Box::new(CacheNode {
-                        value: boxed,
+                        value,
                         pins: AtomicUsize::new(2), // 1 for Moka residency, 1 for creator lease
                         resident: AtomicBool::new(true),
                         weight: w,
@@ -2465,9 +2469,52 @@ mod tests {
     }
 
     #[test]
+    fn inline_payload_keeps_alignment_address_and_exactly_once_drop() {
+        #[repr(align(64))]
+        struct Payload {
+            bytes: [u8; 8192],
+            drops: Arc<AtomicUsize>,
+        }
+        impl Drop for Payload {
+            fn drop(&mut self) {
+                assert_eq!(self.bytes[8191], 17);
+                self.drops.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        for capacity in [0, 16_384] {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let cache = CalculationCache::new(capacity);
+            let lease = cache
+                .get_or_try_insert_with(
+                    1_u32,
+                    |_| 8192,
+                    || {
+                        Ok(Payload {
+                            bytes: [17; 8192],
+                            drops: Arc::clone(&drops),
+                        })
+                    },
+                )
+                .unwrap();
+            let address = std::ptr::from_ref(&*lease);
+            assert_eq!(address.addr() % 64, 0);
+            if capacity != 0 {
+                let second = cache.get(&1).unwrap();
+                assert_eq!(std::ptr::from_ref(&*second), address);
+            }
+            cache.clear();
+            assert_eq!(std::ptr::from_ref(&*lease), address);
+            assert_eq!(drops.load(Ordering::Relaxed), 0);
+            drop(lease);
+            drop(cache);
+            assert_eq!(drops.load(Ordering::Relaxed), 1);
+        }
+    }
+
+    #[test]
     fn cache_node_pin_overflow_is_prevented() {
         let node = CacheNode {
-            value: Box::new(42u32),
+            value: 42u32,
             pins: AtomicUsize::new(usize::MAX),
             resident: AtomicBool::new(true),
             weight: 1,
@@ -2481,7 +2528,7 @@ mod tests {
     #[test]
     fn final_pin_release_cannot_be_resurrected() {
         let node = CacheNode {
-            value: Box::new(42_u32),
+            value: 42_u32,
             pins: AtomicUsize::new(1),
             resident: AtomicBool::new(false),
             weight: 1,

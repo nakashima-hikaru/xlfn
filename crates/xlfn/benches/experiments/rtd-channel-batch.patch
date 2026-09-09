@@ -1,0 +1,97 @@
+--- a/crates/xlfn/src/subscription/channel.rs
++++ b/crates/xlfn/src/subscription/channel.rs
+@@ -132,6 +132,7 @@
+     // Cancellation waiters must never consume a publisher wakeup.
+     closed: Condvar,
+     accepting: AtomicBool,
++    stopping: AtomicBool,
+ }
+ 
+ impl Channel {
+@@ -146,6 +147,7 @@
+             changed: Condvar::new(),
+             closed: Condvar::new(),
+             accepting: AtomicBool::new(true),
++            stopping: AtomicBool::new(false),
+         }
+     }
+ 
+@@ -172,6 +174,7 @@
+             state.accepting = false;
+             self.accepting.store(false, Ordering::Release);
+             state.stopping = true;
++            self.stopping.store(true, Ordering::Release);
+             std::mem::take(&mut state.values)
+         };
+         self.changed.notify_all();
+@@ -179,6 +182,30 @@
+         drop(pending);
+     }
+ 
++    fn receive_batch(&self, batch: &mut smallvec::SmallVec<[StoredRtdValue; 32]>) -> bool {
++        debug_assert!(batch.is_empty());
++        let mut state = self.state.lock();
++        loop {
++            if state.stopping {
++                return false;
++            }
++            if !state.values.is_empty() {
++                for _ in 0..32 {
++                    let Some(value) = state.values.pop_front() else {
++                        break;
++                    };
++                    batch.push(value);
++                }
++                return true;
++            }
++            if !state.accepting {
++                return false;
++            }
++            self.changed.wait(&mut state);
++        }
++    }
++
++    #[cfg(test)]
+     fn receive(&self) -> Option<StoredRtdValue> {
+         let mut state = self.state.lock();
+         loop {
+@@ -223,10 +250,16 @@
+                 .name("xlfn-rtd-publisher".into())
+                 .spawn(move || {
+                     let _close = scopeguard::guard((), |_| publisher_channel.close());
+-                    while let Some(value) = publisher_channel.receive() {
+-                        // Values have already been converted outside framework
+-                        // locks. Only this worker can reach the erased sink.
+-                        sink.publish_stored(value)?;
++                    let mut batch = smallvec::SmallVec::new();
++                    while publisher_channel.receive_batch(&mut batch) {
++                        for value in batch.drain(..) {
++                            // Cancellation also discards values dequeued into
++                            // the local batch, apart from an in-flight publish.
++                            if publisher_channel.stopping.load(Ordering::Acquire) {
++                                break;
++                            }
++                            sink.publish_stored(value)?;
++                        }
+                     }
+                     Ok(())
+                 })
+@@ -330,9 +363,15 @@
+         let receiver = std::thread::spawn(move || {
+             receiver_barrier.wait();
+             let mut count = 0;
+-            while let Some(value) = receiver_channel.receive() {
+-                std::hint::black_box(value);
+-                count += 1;
++            let mut batch = smallvec::SmallVec::new();
++            while receiver_channel.receive_batch(&mut batch) {
++                for value in batch.drain(..) {
++                    if receiver_channel.stopping.load(Ordering::Acquire) {
++                        break;
++                    }
++                    std::hint::black_box(value);
++                    count += 1;
++                }
+             }
+             count
+         });

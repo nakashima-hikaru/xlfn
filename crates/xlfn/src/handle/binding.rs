@@ -1,7 +1,8 @@
 //! Formula-binding ownership and non-owning read-side publication.
 //!
-//! Every live binding slot uniquely owns its record. During removal the record
-//! is moved to a local owner until the read domain's grace period completes.
+//! Every live binding slot uniquely owns its record. Removal transfers it to
+//! a generation-bound queue while still holding the table writer lock; the
+//! record remains owned there until read-domain maintenance or final seal.
 //! Atomic publication exposes only a pointer; the call-scoped read domain
 //! protects that pointer and the record's object capability while a call reads
 //! it.
@@ -19,6 +20,7 @@ use crate::generation::BindingGeneration;
 use crate::{XllError, XllResult};
 use parking_lot::{RwLock, RwLockWriteGuard};
 use std::ptr::NonNull;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 use xlfn_kernel::published_owner::PublishedOwner;
 
@@ -75,20 +77,6 @@ impl BindingRecord {
 
     fn duplicate_object_binding(&self) -> XllResult<ObjectBinding> {
         self.object.duplicate()
-    }
-
-    #[allow(
-        clippy::boxed_local,
-        reason = "consume the retired Box after grace-period ownership is established"
-    )]
-    fn into_object_binding(self: Box<Self>) -> ObjectBinding {
-        let Self {
-            id: _,
-            cell: _,
-            object,
-            state: _,
-        } = *self;
-        object
     }
 }
 
@@ -212,7 +200,7 @@ pub(crate) struct RegistryState {
 pub(crate) struct BindingTable {
     state: RwLock<RegistryState>,
     published: PublishedBindings,
-    read_domain: PublishedOwner<HandleReadDomain>,
+    read_domain: Arc<HandleReadDomain>,
     maximum_bindings: u32,
 }
 
@@ -225,9 +213,14 @@ impl BindingTable {
                 live_bindings: 0,
             }),
             published: PublishedBindings::new(maximum_bindings),
-            read_domain: PublishedOwner::new(HandleReadDomain::new()),
+            read_domain: HandleReadDomain::new(),
             maximum_bindings,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn read_domain_for_test(&self) -> &Arc<HandleReadDomain> {
+        &self.read_domain
     }
 
     pub(crate) fn read_domain(&self) -> &HandleReadDomain {
@@ -274,7 +267,15 @@ impl BindingTable {
     }
 
     pub(crate) fn reserve(&self) -> XllResult<BindingReservation<'_>> {
+        self.read_domain.ensure_worker()?;
         let mut state = self.state.write();
+        // A remover may itself hold a call permit and must not wait for it.
+        // Stop new publication at hard debt even in that case. With the live
+        // binding cap this bounds total records by maximum_bindings + 256,
+        // including batches whose arbitrary destructors are still running.
+        if self.read_domain.debt() >= super::domain::HARD_DEBT_LIMIT {
+            return Err(XllError::Overloaded);
+        }
         if state.live_bindings >= self.maximum_bindings {
             return Err(XllError::Domain {
                 code: DomainErrorCode::Overflow,
@@ -475,9 +476,11 @@ impl BindingRemoval<'_> {
             state.free.push(self.id.slot as usize);
         }
         self.active = false;
+        // Enqueue before releasing the table lock: seal's retire_all must
+        // not pass this removal and drain the domain before it is registered.
+        self.table.read_domain.enqueue_reclaim(retired);
         drop(state);
-        self.table.read_domain.quiesce();
-        drop(retired.into_box().into_object_binding());
+        self.table.read_domain.maintain_after_removal();
         reusable
     }
 }
@@ -485,5 +488,13 @@ impl BindingRemoval<'_> {
 impl Drop for BindingRemoval<'_> {
     fn drop(&mut self) {
         debug_assert_eq!(self.state.is_some(), self.active);
+    }
+}
+
+impl Drop for BindingTable {
+    fn drop(&mut self) {
+        // The domain worker cannot outlive table ownership unnoticed. Its
+        // queued records retain their object arena even for reentrant drop.
+        self.read_domain.seal();
     }
 }

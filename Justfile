@@ -158,6 +158,7 @@ bench-full:
     just bench-one formula_caller
     just bench-one argument_ingress
     just bench-one array_string_output
+    just bench-one rtd_prepare "bench-internals rtd"
     just bench-one rtd_publish "bench-internals rtd"
     just bench-one rtd_refresh "bench-internals rtd"
     just bench-one handle_call_resolution

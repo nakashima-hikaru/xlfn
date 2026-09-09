@@ -236,3 +236,100 @@ This run did not compare an earlier implementation, and Criterion test mode
 does not produce throughput estimates or confidence intervals. The 32-worker
 p99 includes substantial contention/scheduling effects; it is a measurement
 starting point, not evidence that tail latency has improved.
+
+## `rtd_prepare`
+
+This benchmark times batches of 256 subscriptions on one source, with either
+one or ten topic parts:
+
+- `new`: prepare and commit distinct pending subscriptions;
+- `existing`: prepare and commit topics already present as committed pending entries;
+- `churn`: prepare the entire batch, then roll back every reservation.
+
+Criterion batched setup constructs the runtime and input topics outside the
+timed section. Existing-entry seeding and final runtime teardown are also
+excluded. Timing includes reservation handling, index maintenance, pending-byte
+accounting, and destruction of consumed topics; churn also includes its temporary
+reservation vector. It does not include Excel/COM connection or publication.
+
+Run all six cases with the normal ten-second measurement policy:
+
+```text
+just bench-one rtd_prepare "bench-internals rtd"
+```
+
+`just bench-full` includes this target. For a shorter local A/B comparison, use
+the same benchmark fixture on both revisions and save separate Criterion baselines:
+
+```text
+XLFN_BENCH_MEASUREMENT_MS=3000 cargo bench -p xlfn --bench rtd_prepare \
+  --features "bench-internals rtd" --locked -- \
+  --warm-up-time 1 --sample-size 30 --save-baseline non-owning
+```
+
+### 2026-09-09 identity index comparison
+
+A local macOS arm64 release comparison used the command above: 1 s warm-up,
+3 s measurement, and 30 samples per case. The owning baseline was revision
+`a65833b` with the same benchmark fixture copied into an isolated checkout.
+The final non-owning implementation returns the matching entry alongside its ID
+to avoid another entry lookup in `prepare`. These two measurements ran
+sequentially after the workspace tests had finished.
+
+Values are Criterion slope point estimates for one 256-subscription batch;
+negative change means less time. This is one short local A/B run, not a Windows
+or Excel performance qualification.
+
+| Operation | Topic parts | Owning index | Non-owning index | Time change |
+| --- | ---: | ---: | ---: | ---: |
+| new | 1 | 84.38 µs | 57.48 µs | -31.9% |
+| existing | 1 | 16.89 µs | 22.50 µs | +33.2% |
+| churn | 1 | 113.89 µs | 70.26 µs | -38.3% |
+| new | 10 | 206.91 µs | 58.86 µs | -71.6% |
+| existing | 10 | 54.16 µs | 57.45 µs | +6.1% |
+| churn | 10 | 378.57 µs | 103.67 µs | -72.6% |
+
+New admission and churn improved in this run. Existing-topic reuse remained
+slower, particularly for single-part topics, even after eliminating the
+redundant entry lookup. The ownership change removes the retained topic copy
+and insertion/removal deep clones, but does not establish a latency improvement
+for every path. Confirm the reuse tradeoff with repeated full measurements on
+the deployment host before setting performance thresholds. Allocation counts
+and retained bytes were not measured by this timing fixture.
+
+The follow-up [stable slot arena experiment](experiments/rtd-slot-arena.md)
+keeps a candidate patch and compares the same six cases against this non-owning
+map implementation.
+
+The [borrowed lookup experiment](experiments/rtd-borrowed-lookup.md) builds on
+that arena and measures caller-owned parts with validation/hash computation
+inside the timed section. It includes a separate zero-allocation gate and
+keeps the public subscription API unchanged.
+
+## Protocol cost experiments (2026-09-09)
+
+The [initial protocol report](experiments/protocol-costs-2026-09-09.md) records
+inline cache storage and the historical prototype patches. The
+[production follow-up](experiments/protocol-production-2026-09-09.md) records
+single-state handle lookup, deferred retirement with bounded debt and a
+registration/publication barrier, RTD edge+batch adoption, and validation.
+Combined cache state is rejected and archived. Historical deferred patches
+must not be applied to the production tree.
+
+`protocol_costs` includes removal/final-drain and retirement-debt probes,
+queue microbenchmarks, and optional real Rust RTD pipeline measurements:
+
+```text
+cargo bench -p xlfn --all-features --bench protocol_costs
+cargo bench -p xlfn --all-features --bench protocol_costs -- --pipeline
+cargo bench -p xlfn --all-features --bench rtd_publish -- channel_pipeline
+cargo bench -p xlfn --all-features --bench rtd_refresh -- channel_pipeline
+XLFN_TOPOLOGY_SUBSCRIPTIONS=512 XLFN_TOPOLOGY_PUBLISHERS=1 cargo bench -p xlfn --all-features --bench protocol_costs -- --topology
+cargo bench -p xlfn --all-features --bench protocol_costs -- --token-cache
+```
+
+The pipeline includes RtdSender, publisher, ErasedSink, PublishCore, and refresh
+planning/completion with sequence checks. Excel/COM is not timed. Shared
+publisher topology and token-cache associativity remain benchmark-only
+experiments; normal builds retain per-subscription publishers and direct
+mapping. See the follow-up report for configuration, raw results, and limits.

@@ -37,6 +37,79 @@ unsafe impl<T: crate::subscription::IntoRtdValue + Clone + Send + Sync + 'static
     }
 }
 
+/// A batch of prebuilt topics; construction and runtime teardown stay outside timing.
+pub struct RtdPrepareBenchmark {
+    runtime: crate::subscription::SubscriptionRuntime,
+    source: crate::subscription::RtdSourceHandle<BenchmarkRtdSource<f64>>,
+    topics: Vec<crate::subscription::RtdTopic>,
+}
+
+impl RtdPrepareBenchmark {
+    pub fn new(count: usize, parts: usize, existing: bool) -> Self {
+        let generation =
+            crate::generation::RuntimeGeneration::new(1).expect("benchmark generation is non-zero");
+        let registration = crate::subscription::SourceRegistration::new(generation);
+        let source = registration
+            .register(BenchmarkRtdSource::<f64> {
+                sink: Arc::new(parking_lot::Mutex::new(None)),
+            })
+            .expect("benchmark source registration");
+        let runtime = crate::subscription::SubscriptionRuntime::with_sources_for_internal(
+            registration.finish(),
+        );
+        let topics: Vec<_> = (0..count)
+            .map(|index| {
+                crate::subscription::RtdTopic::new(
+                    (0..parts).map(|part| format!("market-{index:06}-field-{part:02}")),
+                )
+                .expect("valid benchmark topic")
+            })
+            .collect();
+        if existing {
+            for topic in &topics {
+                runtime
+                    .prepare(&source, topic.clone())
+                    .expect("seed existing topic")
+                    .commit();
+            }
+        }
+        Self {
+            runtime,
+            source,
+            topics,
+        }
+    }
+
+    /// Prepare and commit each prebuilt topic, either new or already present.
+    pub fn run_prepare(&mut self) {
+        for topic in self.topics.drain(..) {
+            let prepared = self
+                .runtime
+                .prepare(&self.source, topic)
+                .expect("prepare topic");
+            std::hint::black_box(prepared.id());
+            prepared.commit();
+        }
+    }
+
+    /// Grow the catalog with the entire batch, then remove every reservation.
+    pub fn run_churn(&mut self) {
+        let prepared: Vec<_> = self
+            .topics
+            .drain(..)
+            .map(|topic| {
+                self.runtime
+                    .prepare(&self.source, topic)
+                    .expect("prepare topic")
+            })
+            .collect();
+        for reservation in prepared {
+            std::hint::black_box(reservation.id());
+            reservation.rollback();
+        }
+    }
+}
+
 pub struct RtdPublishNumberBenchmark {
     _runtime: Box<crate::subscription::SubscriptionRuntime>,
     _server: crate::subscription::SubscriptionServerHandle,
@@ -505,4 +578,177 @@ fn topic_ids_for_case(case: RtdRefreshScalingCase) -> Vec<crate::subscription::T
         topic_ids.push(crate::subscription::TopicId(raw));
     }
     topic_ids
+}
+
+/// Persistent real channel adapter, sender workers, PublishCore, and refresh consumer.
+/// All worker creation and subscription setup are outside measured cycles.
+pub struct RtdChannelPipelineBenchmark {
+    _runtime: Box<crate::subscription::SubscriptionRuntime>,
+    server: crate::subscription::SubscriptionServerHandle,
+    sender: crate::subscription::RtdSender<f64>,
+    jobs: Vec<std::sync::mpsc::SyncSender<(u64, usize)>>,
+    done: std::sync::mpsc::Receiver<usize>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+    revision: u64,
+    last_sequence: Option<u64>,
+}
+
+impl RtdChannelPipelineBenchmark {
+    pub fn new(capacity: usize, producers: usize) -> Self {
+        assert!(producers > 0);
+        let registration = crate::subscription::SourceRegistration::new(
+            crate::generation::RuntimeGeneration::new(1).unwrap(),
+        );
+        let (sender_tx, sender_rx) = std::sync::mpsc::sync_channel(1);
+        let source = registration
+            .register(crate::subscription::RtdChannelSource::new(
+                std::num::NonZeroUsize::new(capacity).unwrap(),
+                move |_, sender: crate::subscription::RtdSender<f64>| {
+                    sender_tx.send(sender.clone()).unwrap();
+                    while !sender.wait_closed(Duration::from_secs(1)) {}
+                    Ok(())
+                },
+            ))
+            .unwrap();
+        let runtime = Box::new(
+            crate::subscription::SubscriptionRuntime::with_sources_for_internal(
+                registration.finish(),
+            ),
+        );
+        // SAFETY: the boxed runtime stays at a stable address for this fixture.
+        let server = unsafe {
+            runtime
+                .register_server(crate::subscription::ServerGeneration::new(1).unwrap())
+                .unwrap()
+        };
+        let prepared = runtime
+            .prepare(
+                &source,
+                crate::subscription::RtdTopic::single("pipeline").unwrap(),
+            )
+            .unwrap();
+        runtime
+            .connect_transaction(&server, crate::subscription::TopicId(1), prepared.id())
+            .unwrap()
+            .commit()
+            .unwrap();
+        prepared.commit();
+        let sender = sender_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let mut jobs = Vec::new();
+        let mut workers = Vec::new();
+        for producer in 0..producers {
+            let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<(u64, usize)>(1);
+            jobs.push(job_tx);
+            let sender = sender.clone();
+            let done_tx = done_tx.clone();
+            workers.push(std::thread::spawn(move || {
+                while let Ok((revision, count)) = job_rx.recv() {
+                    let mut retries = 0;
+                    for index in 0..count {
+                        let value = (revision * 100_000_000
+                            + producer as u64 * 1_000_000
+                            + index as u64) as f64;
+                        retries += pipeline_send(&sender, value);
+                    }
+                    done_tx.send(retries).unwrap();
+                }
+            }));
+        }
+        Self {
+            _runtime: runtime,
+            server,
+            sender,
+            jobs,
+            done,
+            workers,
+            revision: 0,
+            last_sequence: None,
+        }
+    }
+
+    /// Enqueue all updates, then deliver a FIFO marker through actual refresh
+    /// planning and completion. Returns bounded-queue admission retries.
+    pub fn run_cycle(&mut self, updates_per_producer: usize) -> usize {
+        self.revision += 1;
+        for job in &self.jobs {
+            job.send((self.revision, updates_per_producer)).unwrap();
+        }
+        let mut retries = 0;
+        for _ in &self.jobs {
+            retries += self.done.recv_timeout(Duration::from_secs(30)).unwrap();
+        }
+        let marker = -(self.revision as f64);
+        retries += pipeline_send(&self.sender, marker);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let batch = self.server.begin_refresh().unwrap();
+            let final_sequence = batch.updates.iter().find_map(|update| {
+                matches!(update.value, crate::subscription::StoredRtdValue::Number(value) if value == marker)
+                    .then_some(update.sequence)
+            });
+            batch
+                .complete(crate::subscription::RefreshOutcome::Delivered)
+                .unwrap();
+            if let Some(sequence) = final_sequence {
+                if let Some(previous) = self.last_sequence {
+                    assert_eq!(
+                        sequence - previous,
+                        (self.jobs.len() * updates_per_producer + 1) as u64,
+                        "every accepted distinct value must reach PublishCore before the marker"
+                    );
+                }
+                self.last_sequence = Some(sequence);
+                return retries;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "pipeline did not deliver its final marker"
+            );
+            std::thread::yield_now();
+        }
+    }
+}
+
+fn pipeline_send(sender: &crate::subscription::RtdSender<f64>, value: f64) -> usize {
+    let mut retries = 0;
+    loop {
+        match sender.try_send(value) {
+            Ok(()) => return retries,
+            Err(crate::XllError::Overloaded) => {
+                retries += 1;
+                std::thread::yield_now();
+            }
+            Err(error) => panic!("pipeline send failed: {error}"),
+        }
+    }
+}
+
+impl Drop for RtdChannelPipelineBenchmark {
+    fn drop(&mut self) {
+        self.jobs.clear();
+        for worker in self.workers.drain(..) {
+            worker.join().unwrap();
+        }
+    }
+}
+
+pub fn rtd_pipeline_probe(
+    producers: usize,
+    capacity: usize,
+    operations: usize,
+) -> serde_json::Value {
+    let mut fixture = RtdChannelPipelineBenchmark::new(capacity, producers);
+    let mut elapsed = Vec::new();
+    let mut retries = 0;
+    fixture.run_cycle(operations);
+    for _ in 0..9 {
+        let started = Instant::now();
+        retries += fixture.run_cycle(operations);
+        elapsed.push(started.elapsed().as_nanos() as u64);
+    }
+    elapsed.sort_unstable();
+    serde_json::json!({ "producers": producers, "capacity": capacity,
+        "updates_per_producer": operations, "rounds_ns": elapsed,
+        "median_ns": elapsed[elapsed.len()/2], "overloaded_retries": retries })
 }

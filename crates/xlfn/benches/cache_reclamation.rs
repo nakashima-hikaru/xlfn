@@ -380,6 +380,29 @@ fn report_probes(pool: &WorkerPool, workload: Workload, workers: usize, payload_
 }
 
 fn reclamation_benchmarks(c: &mut Criterion) {
+    // Isolate entry storage from Moka policy allocation and payload backing
+    // buffers. Warm TLS first and keep final-drop maintenance outside the probe.
+    let zero_capacity = CalculationCache::<u64, u64>::new(0);
+    drop(
+        zero_capacity
+            .get_or_try_insert_with(0, |_| 8, || Ok(42))
+            .unwrap(),
+    );
+    let allocation_probe = AllocationProbe::start();
+    let value = zero_capacity
+        .get_or_try_insert_with(1, |_| 8, || Ok(42))
+        .unwrap();
+    black_box(&*value);
+    let allocations = allocation_probe.finish();
+    println!(
+        "cache_entry_allocation_probe {}",
+        serde_json::json!({
+            "value": "u64", "capacity": 0,
+            "calls": allocations.calls, "requested_bytes": allocations.requested_bytes,
+        })
+    );
+    drop(value);
+
     let operations = std::env::var("XLFN_CACHE_RECLAIM_OPERATIONS")
         .ok()
         .map(|value| {

@@ -1901,33 +1901,27 @@ fn failed_pending_admission_rolls_back_new_source_identity() {
 fn source_refcount_tracks_live_subscription_identities() {
     let mut index = SubscriptionIdentityIndex::default();
     let (_arena, source, _, _) = publishing_source::<f64>(None);
-    let first_identity = SubscriptionIdentity {
-        source_id: SourceId(source.id),
-        topic: RtdTopic::single("first").unwrap(),
-    };
-    let second_identity = SubscriptionIdentity {
-        source_id: SourceId(source.id),
-        topic: RtdTopic::single("second").unwrap(),
-    };
+    let first_identity =
+        SubscriptionIdentityKey::new(SourceId(source.id), &RtdTopic::single("first").unwrap());
+    let second_identity =
+        SubscriptionIdentityKey::new(SourceId(source.id), &RtdTopic::single("second").unwrap());
     let first_id = SubscriptionId(1);
     let second_id = SubscriptionId(2);
 
-    index.insert(first_identity.clone(), first_id, 16).unwrap();
-    index
-        .insert(second_identity.clone(), second_id, 16)
-        .unwrap();
+    index.insert(first_identity, first_id, 16).unwrap();
+    index.insert(second_identity, second_id, 16).unwrap();
     assert_eq!(
         index.source_ref_count(source.id).map(|refs| refs.get()),
         Some(2)
     );
     assert_eq!(index.distinct_source_count(), 1);
 
-    index.remove(&first_identity);
+    assert!(index.remove(first_identity, first_id));
     assert_eq!(
         index.source_ref_count(source.id).map(|refs| refs.get()),
         Some(1)
     );
-    index.remove(&second_identity);
+    assert!(index.remove(second_identity, second_id));
     assert_eq!(index.distinct_source_count(), 0);
     index.assert_invariants();
 }
@@ -2008,26 +2002,133 @@ fn source_limit_rejects_a_second_live_source() {
 }
 
 #[test]
-fn duplicate_identity_does_not_change_source_refcount() {
+fn duplicate_index_id_does_not_change_source_refcount() {
     let mut index = SubscriptionIdentityIndex::default();
     let (_arena, source, _, _) = publishing_source::<f64>(None);
-    let identity = SubscriptionIdentity {
-        source_id: SourceId(source.id),
-        topic: RtdTopic::single("duplicate").unwrap(),
-    };
+    let identity =
+        SubscriptionIdentityKey::new(SourceId(source.id), &RtdTopic::single("duplicate").unwrap());
     let first_id = SubscriptionId(1);
-    let second_id = SubscriptionId(2);
 
-    index.insert(identity.clone(), first_id, 1).unwrap();
+    index.insert(identity, first_id, 1).unwrap();
     assert!(matches!(
-        index.insert(identity, second_id, 1),
+        index.insert(identity, first_id, 1),
         Err(XllError::Internal {
             diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_INDEX_DUPLICATE
         })
     ));
     assert_eq!(index.source_ref_count(source.id).map(|n| n.get()), Some(1));
-    assert_eq!(index.id_by_identity.len(), 1);
+    assert_eq!(index.ids_by_key.len(), 1);
     index.assert_invariants();
+}
+
+#[test]
+fn colliding_topics_remain_distinct_and_survive_either_removal_order() {
+    for remove_first in [true, false] {
+        let (arena, source, _, _) = publishing_source::<f64>(None);
+        let runtime = SubscriptionRuntime::with_sources_for_internal(arena);
+        let topic = |name| RtdTopic::single(name).unwrap().with_test_identity_hash(42);
+        let first = runtime.prepare(&source, topic("USDJPY")).unwrap();
+        let second = runtime.prepare(&source, topic("EURUSD")).unwrap();
+        assert_ne!(first.id(), second.id());
+
+        for (name, id) in [("USDJPY", first.id()), ("EURUSD", second.id())] {
+            let repeated = runtime.prepare(&source, topic(name)).unwrap();
+            assert_eq!(repeated.id(), id);
+            repeated.rollback();
+        }
+        {
+            let catalog = runtime.catalog.lock();
+            assert_eq!(catalog.identities.ids_by_key.len(), 1);
+            assert_eq!(
+                catalog
+                    .identities
+                    .source_ref_count(source.id)
+                    .unwrap()
+                    .get(),
+                2
+            );
+            catalog.assert_identity_invariants();
+        }
+
+        let (removed, survivor, removed_name, surviving_name) = if remove_first {
+            (first, second, "USDJPY", "EURUSD")
+        } else {
+            (second, first, "EURUSD", "USDJPY")
+        };
+        removed.rollback();
+        {
+            let catalog = runtime.catalog.lock();
+            assert!(
+                catalog
+                    .find_identity(SourceId(source.id), &topic(removed_name))
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                catalog
+                    .identities
+                    .source_ref_count(source.id)
+                    .unwrap()
+                    .get(),
+                1
+            );
+            catalog.assert_identity_invariants();
+        }
+        let repeated = runtime.prepare(&source, topic(surviving_name)).unwrap();
+        assert_eq!(repeated.id(), survivor.id());
+        repeated.rollback();
+        survivor.rollback();
+
+        let catalog = runtime.catalog.lock();
+        assert!(catalog.identities.ids_by_key.is_empty());
+        assert!(catalog.entries.is_empty());
+        assert_eq!(catalog.identities.distinct_source_count(), 0);
+        catalog.assert_identity_invariants();
+    }
+}
+
+#[test]
+fn missing_collision_candidate_does_not_change_source_refcount() {
+    let mut index = SubscriptionIdentityIndex::default();
+    let (_arena, source, _, _) = publishing_source::<f64>(None);
+    let key =
+        SubscriptionIdentityKey::new(SourceId(source.id), &RtdTopic::single("topic").unwrap());
+    index.insert(key, SubscriptionId(1), 1).unwrap();
+    index.insert(key, SubscriptionId(2), 1).unwrap();
+    assert!(!index.remove(key, SubscriptionId(3)));
+    assert_eq!(
+        index.candidates(key),
+        &[SubscriptionId(1), SubscriptionId(2)]
+    );
+    assert_eq!(index.source_ref_count(source.id).unwrap().get(), 2);
+    index.assert_invariants();
+    index.clear();
+    assert!(index.candidates(key).is_empty());
+    assert!(!index.remove(key, SubscriptionId(1)));
+    index.assert_invariants();
+}
+
+#[test]
+fn identity_lookup_reports_orphaned_candidate() {
+    let (arena, source, _, _) = publishing_source::<f64>(None);
+    let runtime = SubscriptionRuntime::with_sources_for_internal(arena);
+    let topic = RtdTopic::single("orphan").unwrap();
+    let mut catalog = runtime.catalog.lock();
+    catalog
+        .identities
+        .insert(
+            SubscriptionIdentityKey::new(SourceId(source.id), &topic),
+            SubscriptionId(1),
+            1,
+        )
+        .unwrap();
+    assert!(matches!(
+        catalog.find_identity(SourceId(source.id), &topic),
+        Err(XllError::Internal {
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_INDEX_ORPHAN
+        })
+    ));
+    catalog.identities.clear();
 }
 
 #[test]
@@ -2122,7 +2223,7 @@ fn identity_index_is_removed_after_final_unbind() {
 
     let catalog = runtime.catalog.lock();
     assert!(catalog.entries.is_empty());
-    assert!(catalog.identities.id_by_identity.is_empty());
+    assert!(catalog.identities.ids_by_key.is_empty());
     catalog.assert_identity_invariants();
 }
 
@@ -2144,13 +2245,15 @@ fn catalog_entries_are_canonical_for_subscription_identity() {
 
     let catalog = runtime.catalog.lock();
     catalog.assert_identity_invariants();
-    assert_eq!(catalog.identities.id_by_identity.len(), 2);
+    assert_eq!(catalog.identities.ids_by_key.len(), 2);
     assert_eq!(catalog.entries.len(), 2);
 
-    for (identity, id) in &catalog.identities.id_by_identity {
-        let entry = catalog.entries.get(id).unwrap();
-        assert_eq!(entry.source_id, identity.source_id);
-        assert_eq!(&entry.topic, &identity.topic);
+    for (key, ids) in &catalog.identities.ids_by_key {
+        for id in ids {
+            let entry = catalog.entries.get(id).unwrap();
+            assert_eq!(entry.source_id, key.source_id);
+            assert_eq!(entry.topic.identity_hash(), key.topic_hash);
+        }
     }
     drop(catalog);
 
@@ -2159,7 +2262,7 @@ fn catalog_entries_are_canonical_for_subscription_identity() {
 
     let catalog = runtime.catalog.lock();
     assert!(catalog.entries.is_empty());
-    assert!(catalog.identities.id_by_identity.is_empty());
+    assert!(catalog.identities.ids_by_key.is_empty());
     catalog.assert_identity_invariants();
 }
 

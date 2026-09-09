@@ -1,7 +1,8 @@
 use super::source::SourceHandleId;
-use super::topic::{SubscriptionId, SubscriptionIdentity};
+use super::topic::{SubscriptionId, SubscriptionIdentityKey};
 use crate::{XllError, XllResult};
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -24,28 +25,28 @@ pub(crate) fn allocate_runtime_id() -> XllResult<u64> {
 
 #[derive(Default)]
 pub(crate) struct SubscriptionIdentityIndex {
-    pub(crate) id_by_identity: FxHashMap<SubscriptionIdentity, SubscriptionId>,
+    pub(crate) ids_by_key: FxHashMap<SubscriptionIdentityKey, SmallVec<[SubscriptionId; 1]>>,
     source_refs: FxHashMap<SourceHandleId, NonZeroUsize>,
 }
 
 impl SubscriptionIdentityIndex {
-    pub(crate) fn get_id(&self, identity: &SubscriptionIdentity) -> Option<SubscriptionId> {
-        self.id_by_identity.get(identity).copied()
+    pub(crate) fn candidates(&self, key: SubscriptionIdentityKey) -> &[SubscriptionId] {
+        self.ids_by_key.get(&key).map_or(&[], SmallVec::as_slice)
     }
 
     fn plan_insert(
         &self,
-        identity: &SubscriptionIdentity,
-        _id: SubscriptionId,
+        key: SubscriptionIdentityKey,
+        id: SubscriptionId,
         max_source_ids: usize,
     ) -> XllResult<SourceRefUpdate> {
-        if self.id_by_identity.contains_key(identity) {
+        if self.candidates(key).contains(&id) {
             return Err(XllError::Internal {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_INDEX_DUPLICATE,
             });
         }
 
-        let source_id = identity.source_id.0;
+        let source_id = key.source_id.0;
         let source_ref_update = match self.source_refs.get(&source_id) {
             Some(current) => {
                 let next = current.get().checked_add(1).ok_or(XllError::Internal {
@@ -67,14 +68,12 @@ impl SubscriptionIdentityIndex {
 
     fn commit_insert(
         &mut self,
-        identity: SubscriptionIdentity,
+        key: SubscriptionIdentityKey,
         id: SubscriptionId,
         source_ref_update: SourceRefUpdate,
     ) {
-        let source_id = identity.source_id.0;
-        if self.id_by_identity.insert(identity, id).is_some() {
-            xlfn_kernel::invariant::fail_stop();
-        }
+        let source_id = key.source_id.0;
+        self.ids_by_key.entry(key).or_default().push(id);
 
         match source_ref_update {
             SourceRefUpdate::Insert => {
@@ -98,23 +97,32 @@ impl SubscriptionIdentityIndex {
 
     pub(crate) fn insert(
         &mut self,
-        identity: SubscriptionIdentity,
+        key: SubscriptionIdentityKey,
         id: SubscriptionId,
         max_source_ids: usize,
     ) -> XllResult<()> {
-        let source_ref_update = self.plan_insert(&identity, id, max_source_ids)?;
-        self.commit_insert(identity, id, source_ref_update);
+        let source_ref_update = self.plan_insert(key, id, max_source_ids)?;
+        self.commit_insert(key, id, source_ref_update);
         Ok(())
     }
 
-    pub(crate) fn remove(&mut self, identity: &SubscriptionIdentity) -> Option<SubscriptionId> {
-        let id = self.id_by_identity.remove(identity)?;
-        release_ref(&mut self.source_refs, identity.source_id.0);
-        Some(id)
+    pub(crate) fn remove(&mut self, key: SubscriptionIdentityKey, id: SubscriptionId) -> bool {
+        let Some(ids) = self.ids_by_key.get_mut(&key) else {
+            return false;
+        };
+        let Some(position) = ids.iter().position(|&candidate| candidate == id) else {
+            return false;
+        };
+        ids.swap_remove(position);
+        if ids.is_empty() {
+            self.ids_by_key.remove(&key);
+        }
+        release_ref(&mut self.source_refs, key.source_id.0);
+        true
     }
 
     pub(crate) fn clear(&mut self) {
-        self.id_by_identity.clear();
+        self.ids_by_key.clear();
         self.source_refs.clear();
     }
 
@@ -131,10 +139,11 @@ impl SubscriptionIdentityIndex {
     #[cfg(test)]
     pub(crate) fn assert_invariants(&self) {
         let mut expected_source_refs = FxHashMap::default();
-        for identity in self.id_by_identity.keys() {
+        for (key, ids) in &self.ids_by_key {
+            assert!(!ids.is_empty());
             *expected_source_refs
-                .entry(identity.source_id.0)
-                .or_insert(0usize) += 1;
+                .entry(key.source_id.0)
+                .or_insert(0usize) += ids.len();
         }
         assert_eq!(expected_source_refs.len(), self.source_refs.len());
         for (source_id, refs) in expected_source_refs {

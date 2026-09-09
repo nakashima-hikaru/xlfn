@@ -417,6 +417,12 @@ impl<const N: usize> StripedDrainGate<N> {
         })
     }
 
+    /// Writer-side observation only. A nonzero count may belong to any
+    /// thread assigned this stripe; it is not proof of thread ownership.
+    pub(crate) fn stripe_active(&self, stripe: usize) -> usize {
+        self.counter(stripe).active()
+    }
+
     #[inline]
     pub fn is_sealed(&self) -> bool {
         self.counters.iter().all(|counter| counter.is_sealed())

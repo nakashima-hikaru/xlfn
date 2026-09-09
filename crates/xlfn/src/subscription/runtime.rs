@@ -15,9 +15,7 @@ use super::server::{
     disconnect_one_no_unwind,
 };
 use super::source::{RtdSource, RtdSourceHandle, SourceArena};
-use super::topic::{
-    RtdLimits, RtdTopic, SourceId, SubscriptionId, SubscriptionIdentity, SubscriptionKey, TopicId,
-};
+use super::topic::{RtdLimits, RtdTopic, SourceId, SubscriptionId, SubscriptionKey, TopicId};
 use super::value::StoredRtdValue;
 use crate::generation::{ConnectionGeneration, RuntimeGeneration, ServerGeneration};
 use crate::{XllError, XllResult};
@@ -229,20 +227,8 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         }
         let mut catalog = self.catalog.lock();
 
-        let identity = SubscriptionIdentity {
-            source_id: SourceId(source.id),
-            topic,
-        };
-
-        if let Some(existing_id) = catalog.identities.get_id(&identity) {
+        if let Some((existing_id, entry)) = catalog.find_identity(SourceId(source.id), &topic)? {
             let existing_key = SubscriptionKey::from_internal(self.runtime_id, existing_id);
-            let entry = catalog
-                .entries
-                .get(&existing_id)
-                .ok_or(XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_INDEX_ORPHAN,
-                })?;
-
             if entry.is_connected() {
                 return Ok(PreparedSubscription {
                     id: existing_id,
@@ -273,8 +259,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             });
         }
 
-        let (id, key) =
-            catalog.insert_pending(self.runtime_id, source.id, identity.topic, self.limits)?;
+        let (id, key) = catalog.insert_pending(self.runtime_id, source.id, topic, self.limits)?;
 
         Ok(PreparedSubscription {
             id,

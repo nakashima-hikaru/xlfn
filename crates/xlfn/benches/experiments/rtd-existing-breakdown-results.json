@@ -1,0 +1,688 @@
+{
+  "host": {
+    "cpu": "Apple M1",
+    "os": "macOS 26.6.2",
+    "target": "aarch64-apple-darwin",
+    "rustc": "1.98.0 (88d9e12ae 2026-08-18)"
+  },
+  "measurement": {
+    "batch_size": 256,
+    "measurement_ms": 3000,
+    "warm_up_seconds": 0.5,
+    "samples": 30,
+    "repetitions": 3,
+    "case_order": [
+      "production",
+      "owned_compare",
+      "borrowed_compare",
+      "owned_hash_only",
+      "borrowed_hash_only",
+      "drop_only",
+      "commit_only"
+    ],
+    "parts_order": [
+      1,
+      10
+    ],
+    "estimator": "median of three Criterion slope point estimates"
+  },
+  "arena_unchanged": true,
+  "source_sha256": {
+    "crates/xlfn/src/subscription/catalog.rs": "d585bc619ea9f7ac8dd4cd3bb9417f9463597e25e9a4c23db20464ce8854f070",
+    "crates/xlfn/src/subscription/runtime.rs": "9e4a64ad6e69a1c4d8285235c90d06553dbc17d34c789b3ccb641ee95ca81b8e",
+    "crates/xlfn/src/benchmark_support/rtd.rs": "8ee8fbdff96f720e96baf18d53d6f0015716d601a40173042a8d588b23f72286",
+    "crates/xlfn/benches/experiments/rtd_existing_breakdown.rs": "46ad1fbdb1198968f5b45745647b5fcf69952b9f67550d1c46a08da4c692fee9",
+    "crates/xlfn/benches/experiments/rtd_existing_allocations.rs": "517e1ed1631b5b333fbd333c7b415cc274de978c7354865e5b4a1887fadba8a8"
+  },
+  "binary_sha256": {
+    "rtd_existing_breakdown": "0813ca6560dcb3ae1753fd7a6a32f47229f2f6615b8793276011e25ffe873922",
+    "rtd_existing_allocations": "382029f356a44fb4c5a51b4d125e85ebec6a2b825a22aaff903c6f0b68aad42d"
+  },
+  "runs": [
+    {
+      "case": "production",
+      "parts": 1,
+      "repetition": 1,
+      "batch_time_us": 16.523850084440728,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 15.573387892957447,
+        "upper": 17.99994402937116
+      }
+    },
+    {
+      "case": "production",
+      "parts": 1,
+      "repetition": 2,
+      "batch_time_us": 13.478652029136315,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 13.18909506188413,
+        "upper": 13.70370803998146
+      }
+    },
+    {
+      "case": "production",
+      "parts": 1,
+      "repetition": 3,
+      "batch_time_us": 13.719064438106301,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 13.371928399935163,
+        "upper": 13.986275730322783
+      }
+    },
+    {
+      "case": "production",
+      "parts": 10,
+      "repetition": 1,
+      "batch_time_us": 52.88152645866384,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 52.07281150996143,
+        "upper": 53.44982821450393
+      }
+    },
+    {
+      "case": "production",
+      "parts": 10,
+      "repetition": 2,
+      "batch_time_us": 52.233759591485985,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 50.685677144358614,
+        "upper": 55.162308808625305
+      }
+    },
+    {
+      "case": "production",
+      "parts": 10,
+      "repetition": 3,
+      "batch_time_us": 52.48487891415477,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 50.79846107978178,
+        "upper": 55.696234542092824
+      }
+    },
+    {
+      "case": "owned_compare",
+      "parts": 1,
+      "repetition": 1,
+      "batch_time_us": 15.636715885092373,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 15.069069361428468,
+        "upper": 16.117516710090573
+      }
+    },
+    {
+      "case": "owned_compare",
+      "parts": 1,
+      "repetition": 2,
+      "batch_time_us": 13.789837913928132,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 13.46084661583435,
+        "upper": 14.078780057288144
+      }
+    },
+    {
+      "case": "owned_compare",
+      "parts": 1,
+      "repetition": 3,
+      "batch_time_us": 14.007227528896276,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 13.641375092239896,
+        "upper": 14.333898207022713
+      }
+    },
+    {
+      "case": "owned_compare",
+      "parts": 10,
+      "repetition": 1,
+      "batch_time_us": 57.526198610964215,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 56.09334852559543,
+        "upper": 58.90365800459491
+      }
+    },
+    {
+      "case": "owned_compare",
+      "parts": 10,
+      "repetition": 2,
+      "batch_time_us": 53.464707796328476,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 50.91449663109113,
+        "upper": 58.20815492294554
+      }
+    },
+    {
+      "case": "owned_compare",
+      "parts": 10,
+      "repetition": 3,
+      "batch_time_us": 52.13029048475234,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 51.192167821196946,
+        "upper": 53.08610273607254
+      }
+    },
+    {
+      "case": "borrowed_compare",
+      "parts": 1,
+      "repetition": 1,
+      "batch_time_us": 11.051102438849501,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 10.599427109165399,
+        "upper": 11.443475745105845
+      }
+    },
+    {
+      "case": "borrowed_compare",
+      "parts": 1,
+      "repetition": 2,
+      "batch_time_us": 9.723480962453728,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 8.843074183365296,
+        "upper": 10.86950392994009
+      }
+    },
+    {
+      "case": "borrowed_compare",
+      "parts": 1,
+      "repetition": 3,
+      "batch_time_us": 10.00972020265775,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 9.039180280531607,
+        "upper": 11.128159356010162
+      }
+    },
+    {
+      "case": "borrowed_compare",
+      "parts": 10,
+      "repetition": 1,
+      "batch_time_us": 20.071635254715318,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 19.260045611534427,
+        "upper": 21.125260791815073
+      }
+    },
+    {
+      "case": "borrowed_compare",
+      "parts": 10,
+      "repetition": 2,
+      "batch_time_us": 14.998036382866209,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 14.475279366867772,
+        "upper": 15.417037443128002
+      }
+    },
+    {
+      "case": "borrowed_compare",
+      "parts": 10,
+      "repetition": 3,
+      "batch_time_us": 14.895847678476995,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 14.461633503096927,
+        "upper": 15.232049696988607
+      }
+    },
+    {
+      "case": "owned_hash_only",
+      "parts": 1,
+      "repetition": 1,
+      "batch_time_us": 15.84183023660463,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 14.999637062720037,
+        "upper": 16.92452247682868
+      }
+    },
+    {
+      "case": "owned_hash_only",
+      "parts": 1,
+      "repetition": 2,
+      "batch_time_us": 12.726033229772607,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 12.222344487141948,
+        "upper": 13.387512573367232
+      }
+    },
+    {
+      "case": "owned_hash_only",
+      "parts": 1,
+      "repetition": 3,
+      "batch_time_us": 14.103746544487043,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 13.331313758206283,
+        "upper": 14.669875074809593
+      }
+    },
+    {
+      "case": "owned_hash_only",
+      "parts": 10,
+      "repetition": 1,
+      "batch_time_us": 53.2855537886228,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 47.75303375420854,
+        "upper": 61.328645778827706
+      }
+    },
+    {
+      "case": "owned_hash_only",
+      "parts": 10,
+      "repetition": 2,
+      "batch_time_us": 42.788886673717606,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 42.49913483259121,
+        "upper": 43.015591694931864
+      }
+    },
+    {
+      "case": "owned_hash_only",
+      "parts": 10,
+      "repetition": 3,
+      "batch_time_us": 46.970267611493036,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 46.044282989762316,
+        "upper": 48.07445173347046
+      }
+    },
+    {
+      "case": "borrowed_hash_only",
+      "parts": 1,
+      "repetition": 1,
+      "batch_time_us": 9.55668548242873,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 9.126190980342955,
+        "upper": 9.90910105976434
+      }
+    },
+    {
+      "case": "borrowed_hash_only",
+      "parts": 1,
+      "repetition": 2,
+      "batch_time_us": 7.794478962168333,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 7.502187217449724,
+        "upper": 8.142881932326414
+      }
+    },
+    {
+      "case": "borrowed_hash_only",
+      "parts": 1,
+      "repetition": 3,
+      "batch_time_us": 9.032450915900167,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 8.402195634264922,
+        "upper": 9.673507368719374
+      }
+    },
+    {
+      "case": "borrowed_hash_only",
+      "parts": 10,
+      "repetition": 1,
+      "batch_time_us": 8.605136843695702,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 7.9625480810285625,
+        "upper": 9.433492258217148
+      }
+    },
+    {
+      "case": "borrowed_hash_only",
+      "parts": 10,
+      "repetition": 2,
+      "batch_time_us": 7.421857198572184,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 7.220846357280091,
+        "upper": 7.569771680390941
+      }
+    },
+    {
+      "case": "borrowed_hash_only",
+      "parts": 10,
+      "repetition": 3,
+      "batch_time_us": 8.308545468006347,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 7.982876508284826,
+        "upper": 8.566828229313492
+      }
+    },
+    {
+      "case": "drop_only",
+      "parts": 1,
+      "repetition": 1,
+      "batch_time_us": 6.369225961987122,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 6.3584724206817045,
+        "upper": 6.3786668193571865
+      }
+    },
+    {
+      "case": "drop_only",
+      "parts": 1,
+      "repetition": 2,
+      "batch_time_us": 6.462866484261835,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 6.3800942772477205,
+        "upper": 6.5904840753734995
+      }
+    },
+    {
+      "case": "drop_only",
+      "parts": 1,
+      "repetition": 3,
+      "batch_time_us": 6.591101223111171,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 6.541118793594701,
+        "upper": 6.65339738609503
+      }
+    },
+    {
+      "case": "drop_only",
+      "parts": 10,
+      "repetition": 1,
+      "batch_time_us": 36.64312187334744,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 36.563313625682206,
+        "upper": 36.71700371167443
+      }
+    },
+    {
+      "case": "drop_only",
+      "parts": 10,
+      "repetition": 2,
+      "batch_time_us": 39.30847352591222,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 36.6167015812433,
+        "upper": 44.88842464575428
+      }
+    },
+    {
+      "case": "drop_only",
+      "parts": 10,
+      "repetition": 3,
+      "batch_time_us": 39.265953569539924,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 37.45122063099459,
+        "upper": 43.066783814028945
+      }
+    },
+    {
+      "case": "commit_only",
+      "parts": 1,
+      "repetition": 1,
+      "batch_time_us": 3.553647940633371,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 3.3830306601568947,
+        "upper": 3.75637283563145
+      }
+    },
+    {
+      "case": "commit_only",
+      "parts": 1,
+      "repetition": 2,
+      "batch_time_us": 2.509910501097704,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 2.4948172954095473,
+        "upper": 2.521293184174202
+      }
+    },
+    {
+      "case": "commit_only",
+      "parts": 1,
+      "repetition": 3,
+      "batch_time_us": 2.6506117951429853,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 2.6238064609326446,
+        "upper": 2.6733498860357225
+      }
+    },
+    {
+      "case": "commit_only",
+      "parts": 10,
+      "repetition": 1,
+      "batch_time_us": 3.8804896206913133,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 3.679930038323506,
+        "upper": 4.185617130667186
+      }
+    },
+    {
+      "case": "commit_only",
+      "parts": 10,
+      "repetition": 2,
+      "batch_time_us": 2.646218548387097,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 2.4846985571202227,
+        "upper": 2.9657731231430855
+      }
+    },
+    {
+      "case": "commit_only",
+      "parts": 10,
+      "repetition": 3,
+      "batch_time_us": 2.6785394830777367,
+      "confidence_interval_us": {
+        "level": 0.95,
+        "lower": 2.646997181632101,
+        "upper": 2.7087633728903673
+      }
+    }
+  ],
+  "summary": [
+    {
+      "case": "production",
+      "one_part_us": 13.719064438106301,
+      "ten_parts_us": 52.48487891415477,
+      "additional_nine_parts_us": 38.76581447604847
+    },
+    {
+      "case": "owned_compare",
+      "one_part_us": 14.007227528896276,
+      "ten_parts_us": 53.464707796328476,
+      "additional_nine_parts_us": 39.4574802674322
+    },
+    {
+      "case": "borrowed_compare",
+      "one_part_us": 10.00972020265775,
+      "ten_parts_us": 14.998036382866209,
+      "additional_nine_parts_us": 4.988316180208459
+    },
+    {
+      "case": "owned_hash_only",
+      "one_part_us": 14.103746544487043,
+      "ten_parts_us": 46.970267611493036,
+      "additional_nine_parts_us": 32.86652106700599
+    },
+    {
+      "case": "borrowed_hash_only",
+      "one_part_us": 9.032450915900167,
+      "ten_parts_us": 8.308545468006347,
+      "additional_nine_parts_us": -0.72390544789382
+    },
+    {
+      "case": "drop_only",
+      "one_part_us": 6.462866484261835,
+      "ten_parts_us": 39.265953569539924,
+      "additional_nine_parts_us": 32.80308708527809
+    },
+    {
+      "case": "commit_only",
+      "one_part_us": 2.6506117951429853,
+      "ten_parts_us": 2.6785394830777367,
+      "additional_nine_parts_us": 0.027927687934751422
+    }
+  ],
+  "effects": {
+    "destruction_with_comparison_us": 34.469164087223746,
+    "destruction_without_comparison_us": 33.59042651489981,
+    "destruction_average_us": 34.02979530106178,
+    "comparison_with_destruction_us": 6.590959200426212,
+    "comparison_without_destruction_us": 5.712221628102279,
+    "comparison_average_us": 6.151590414264246,
+    "interaction_us": 0.878737572323935,
+    "hash_only_core_residual_us": -0.72390544789382,
+    "production_minus_owned_control_us": -0.6916657913837341
+  },
+  "allocation_probe": [
+    {
+      "allocations": 0,
+      "case": "production",
+      "deallocations": 512,
+      "freed_requested_bytes": 13312,
+      "parts": 1,
+      "reallocations": 0,
+      "subscriptions": 256
+    },
+    {
+      "allocations": 0,
+      "case": "production",
+      "deallocations": 2816,
+      "freed_requested_bytes": 133120,
+      "parts": 10,
+      "reallocations": 0,
+      "subscriptions": 256
+    },
+    {
+      "allocations": 0,
+      "case": "owned_compare",
+      "deallocations": 512,
+      "freed_requested_bytes": 13312,
+      "parts": 1,
+      "reallocations": 0,
+      "subscriptions": 256
+    },
+    {
+      "allocations": 0,
+      "case": "owned_compare",
+      "deallocations": 2816,
+      "freed_requested_bytes": 133120,
+      "parts": 10,
+      "reallocations": 0,
+      "subscriptions": 256
+    },
+    {
+      "allocations": 0,
+      "case": "borrowed_compare",
+      "deallocations": 0,
+      "freed_requested_bytes": 0,
+      "parts": 1,
+      "reallocations": 0,
+      "subscriptions": 256
+    },
+    {
+      "allocations": 0,
+      "case": "borrowed_compare",
+      "deallocations": 0,
+      "freed_requested_bytes": 0,
+      "parts": 10,
+      "reallocations": 0,
+      "subscriptions": 256
+    },
+    {
+      "allocations": 0,
+      "case": "owned_hash_only",
+      "deallocations": 512,
+      "freed_requested_bytes": 13312,
+      "parts": 1,
+      "reallocations": 0,
+      "subscriptions": 256
+    },
+    {
+      "allocations": 0,
+      "case": "owned_hash_only",
+      "deallocations": 2816,
+      "freed_requested_bytes": 133120,
+      "parts": 10,
+      "reallocations": 0,
+      "subscriptions": 256
+    },
+    {
+      "allocations": 0,
+      "case": "borrowed_hash_only",
+      "deallocations": 0,
+      "freed_requested_bytes": 0,
+      "parts": 1,
+      "reallocations": 0,
+      "subscriptions": 256
+    },
+    {
+      "allocations": 0,
+      "case": "borrowed_hash_only",
+      "deallocations": 0,
+      "freed_requested_bytes": 0,
+      "parts": 10,
+      "reallocations": 0,
+      "subscriptions": 256
+    },
+    {
+      "allocations": 0,
+      "case": "drop_only",
+      "deallocations": 512,
+      "freed_requested_bytes": 13312,
+      "parts": 1,
+      "reallocations": 0,
+      "subscriptions": 256
+    },
+    {
+      "allocations": 0,
+      "case": "drop_only",
+      "deallocations": 2816,
+      "freed_requested_bytes": 133120,
+      "parts": 10,
+      "reallocations": 0,
+      "subscriptions": 256
+    },
+    {
+      "allocations": 0,
+      "case": "commit_only",
+      "deallocations": 0,
+      "freed_requested_bytes": 0,
+      "parts": 1,
+      "reallocations": 0,
+      "subscriptions": 256
+    },
+    {
+      "allocations": 0,
+      "case": "commit_only",
+      "deallocations": 0,
+      "freed_requested_bytes": 0,
+      "parts": 10,
+      "reallocations": 0,
+      "subscriptions": 256
+    }
+  ]
+}

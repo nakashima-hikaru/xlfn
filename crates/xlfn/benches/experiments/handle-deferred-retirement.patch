@@ -1,0 +1,232 @@
+--- a/crates/xlfn/src/handle/domain.rs
++++ b/crates/xlfn/src/handle/domain.rs
+@@ -6,8 +6,8 @@
+ //! cache-line contention on individual binding records during concurrent
+ //! lookups of the same handle.
+ //!
+-//! When bindings are removed or retired, reclamation seals the active
+-//! generation, reopens the other generation, and then drains the sealed one.
++//! Removed bindings enter generation-bound queues. Threshold maintenance
++//! attempts an idle rotation, and final seal drains both generations.
+ //! Only the current generation is open, so a reader that observed the old
+ //! generation before rotation cannot be admitted after the grace period starts.
+ 
+@@ -22,11 +22,17 @@
+     RotatingReadDomain, RotatingReadOwnedPermit, RotatingReadPermit,
+ };
+ 
++use super::binding::BindingRecord;
++use parking_lot::Mutex;
+ use std::marker::PhantomData;
+ use std::ptr::NonNull;
++use std::sync::atomic::{AtomicUsize, Ordering};
++use xlfn_kernel::published_owner::PublishedOwner;
+ 
+ pub(crate) struct HandleReadDomain {
+     domain: RotatingReadDomain<DEFAULT_STRIPE_COUNT>,
++    pending: [Mutex<Vec<PublishedOwner<BindingRecord>>>; 2],
++    removals: AtomicUsize,
+ }
+ 
+ pub(crate) struct HandleDomainPermit {
+@@ -82,6 +88,8 @@
+     pub(crate) fn new() -> Self {
+         Self {
+             domain: RotatingReadDomain::new(),
++            pending: [Mutex::new(Vec::new()), Mutex::new(Vec::new())],
++            removals: AtomicUsize::new(0),
+         }
+     }
+ 
+@@ -114,15 +122,57 @@
+         }
+     }
+ 
++    /// Benchmark-only policy prototype: withdrawal precedes this enqueue.
++    /// Queue locking and generation revalidation prevent enqueue-after-drain.
++    /// The caller must retain the binding-table writer lock through enqueue
++    /// so retire_all cannot pass withdrawal before retirement is registered.
++    pub(crate) fn enqueue_reclaim(&self, record: PublishedOwner<BindingRecord>) {
++        loop {
++            let generation = self.domain.current_generation();
++            let mut queue = self.pending[generation.index()].lock();
++            if self.domain.current_generation() != generation {
++                drop(queue);
++                continue;
++            }
++            queue.push(record);
++            break;
++        }
++    }
++
++    pub(crate) fn maintain_after_removal(&self) {
++        if self.removals.fetch_add(1, Ordering::Relaxed) % 32 == 31 {
++            self.maintain();
++        }
++    }
++
++    pub(crate) fn maintain(&self) {
++        let drained = self
++            .domain
++            .try_quiesce_if_idle(|generation| {
++                std::mem::take(&mut *self.pending[generation.index()].lock())
++            })
++            .and_then(Result::ok)
++            .unwrap_or_default();
++        // Arbitrary destructors run after both the queue and transition locks.
++        drop(drained);
++    }
++
+     /// Rotates the read generation and waits for all readers admitted to the
+     /// sealed generation to complete.
+     pub(crate) fn quiesce(&self) {
+-        let _ = self.domain.quiesce(|_| {});
++        let drained = self
++            .domain
++            .quiesce(|generation| std::mem::take(&mut *self.pending[generation.index()].lock()))
++            .unwrap_or_default();
++        drop(drained);
+     }
+ 
+     /// Seals both generations of the domain, preventing new readers and
+     /// draining existing ones.
+     pub(crate) fn seal(&self) {
+         self.domain.seal_and_wait();
++        let mut drained = std::mem::take(&mut *self.pending[0].lock());
++        drained.append(&mut *self.pending[1].lock());
++        drop(drained);
+     }
+ }
+--- a/crates/xlfn/src/handle/binding.rs
++++ b/crates/xlfn/src/handle/binding.rs
+@@ -1,7 +1,8 @@
+ //! Formula-binding ownership and non-owning read-side publication.
+ //!
+-//! Every live binding slot uniquely owns its record. During removal the record
+-//! is moved to a local owner until the read domain's grace period completes.
++//! Every live binding slot uniquely owns its record. Removal transfers it to
++//! a generation-bound queue while still holding the table writer lock; the
++//! record remains owned there until read-domain maintenance or final seal.
+ //! Atomic publication exposes only a pointer; the call-scoped read domain
+ //! protects that pointer and the record's object capability while a call reads
+ //! it.
+@@ -75,20 +76,6 @@
+ 
+     fn duplicate_object_binding(&self) -> XllResult<ObjectBinding> {
+         self.object.duplicate()
+-    }
+-
+-    #[allow(
+-        clippy::boxed_local,
+-        reason = "consume the retired Box after grace-period ownership is established"
+-    )]
+-    fn into_object_binding(self: Box<Self>) -> ObjectBinding {
+-        let Self {
+-            id: _,
+-            cell: _,
+-            object,
+-            state: _,
+-        } = *self;
+-        object
+     }
+ }
+ 
+@@ -475,9 +462,11 @@
+             state.free.push(self.id.slot as usize);
+         }
+         self.active = false;
++        // Enqueue before releasing the table lock: seal's retire_all must
++        // not pass this removal and drain the domain before it is registered.
++        self.table.read_domain.enqueue_reclaim(retired);
+         drop(state);
+-        self.table.read_domain.quiesce();
+-        drop(retired.into_box().into_object_binding());
++        self.table.read_domain.maintain_after_removal();
+         reusable
+     }
+ }
+--- a/crates/xlfn/src/handle/protocol_bench.rs
++++ b/crates/xlfn/src/handle/protocol_bench.rs
+@@ -75,3 +75,82 @@
+         "retained_after_remove": retained_after_remove, "destroyed_after_final_drain": drops.load(Ordering::Relaxed),
+     })
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn miri_deferred_removal_keeps_borrows_across_slot_reuse_and_batches() {
++        let registry = HandleRegistry::from_entropy(1, [7; 40]);
++        let drops = Arc::new(AtomicUsize::new(0));
++        crate::call::with_excel_call_scope_and_state(&registry, |registry, scope| {
++            let mut borrows = Vec::new();
++            for _ in 0..65 {
++                let pending = registry.new_object(Payload(Arc::clone(&drops))).unwrap();
++                let (token, ..) = registry.publish_pending::<Payload>(pending).unwrap();
++                borrows.push(registry.lookup_handle::<Payload>(scope, &token).unwrap());
++                assert!(
++                    registry
++                        .remove_and_drop_with_observer(&token, "deferred test", |_| {})
++                        .is_some()
++                );
++                assert!(matches!(
++                    registry.lookup_handle::<Payload>(scope, &token),
++                    Err(crate::XllError::StaleHandle)
++                ));
++                assert_eq!(drops.load(Ordering::Relaxed), 0);
++            }
++            registry.bindings.read_domain().maintain();
++            for borrowed in borrows {
++                assert_eq!(borrowed.0.load(Ordering::Relaxed), 0);
++            }
++        });
++        registry.bindings.read_domain().maintain();
++        assert_eq!(drops.load(Ordering::Relaxed), 65);
++        let sealed = registry.seal().unwrap();
++        registry.finish_quiescence(&sealed).unwrap();
++    }
++
++    #[test]
++    fn miri_deferred_seal_racing_removal_cannot_miss_queued_records() {
++        for _ in 0..if cfg!(miri) { 4 } else { 100 } {
++            let registry = Arc::new(HandleRegistry::from_entropy(1, [7; 40]));
++            let drops = Arc::new(AtomicUsize::new(0));
++            let pending = registry.new_object(Payload(Arc::clone(&drops))).unwrap();
++            let (token, ..) = registry.publish_pending::<Payload>(pending).unwrap();
++            let barrier = Arc::new(std::sync::Barrier::new(2));
++            let removing = Arc::clone(&registry);
++            let removing_barrier = Arc::clone(&barrier);
++            let worker = std::thread::spawn(move || {
++                removing_barrier.wait();
++                // A seal that wins admission is allowed to reject removal.
++                removing.remove_and_drop_with_observer(&token, "seal race", |_| {});
++            });
++            barrier.wait();
++            let sealed = registry.seal().unwrap();
++            // With one retirement (below the maintenance threshold), every
++            // destructor belongs to seal, even before the remover has joined.
++            assert_eq!(drops.load(Ordering::Relaxed), 1);
++            registry.finish_quiescence(&sealed).unwrap();
++            worker.join().unwrap();
++        }
++    }
++
++    #[test]
++    fn miri_deferred_seal_drains_debt_below_batch_threshold() {
++        let registry = HandleRegistry::from_entropy(1, [7; 40]);
++        let drops = Arc::new(AtomicUsize::new(0));
++        let pending = registry.new_object(Payload(Arc::clone(&drops))).unwrap();
++        let (token, ..) = registry.publish_pending::<Payload>(pending).unwrap();
++        assert!(
++            registry
++                .remove_and_drop_with_observer(&token, "deferred test", |_| {})
++                .is_some()
++        );
++        assert_eq!(drops.load(Ordering::Relaxed), 0);
++        let sealed = registry.seal().unwrap();
++        registry.finish_quiescence(&sealed).unwrap();
++        assert_eq!(drops.load(Ordering::Relaxed), 1);
++    }
++}
