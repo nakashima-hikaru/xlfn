@@ -79,6 +79,8 @@
     Windows.Win32.GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
     Windows.Win32.DISPID_UNKNOWN
     Windows.Win32.SafeArrayCreate
+    Windows.Win32.SafeArrayAccessData
+    Windows.Win32.SafeArrayUnaccessData
     Windows.Win32.SafeArrayDestroy
     Windows.Win32.SafeArrayGetDim
     Windows.Win32.SafeArrayGetElement

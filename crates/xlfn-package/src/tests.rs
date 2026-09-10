@@ -1353,11 +1353,188 @@ fn snapshot_file_keeps_the_bytes_from_its_open_handle() {
 }
 
 #[test]
+fn streaming_snapshot_comparison_preserves_bytes_digest_and_budget() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("payload.bin");
+    for bytes in [Vec::new(), vec![0x53; 150_000]] {
+        fs::write(&source, &bytes).unwrap();
+        let mut file = std::fs::File::open(&source).unwrap();
+        let compared = compare_stable_snapshot(
+            "test",
+            &source,
+            &mut file,
+            &bytes,
+            Some(&sha256_digest(&bytes)),
+            Some(bytes.len() as u64),
+            &NoopSnapshotObserver,
+        )
+        .unwrap();
+        assert!(compared);
+        assert!(
+            !compare_stable_snapshot(
+                "test",
+                &source,
+                &mut file,
+                &bytes,
+                Some(&[0; 32]),
+                None,
+                &NoopSnapshotObserver,
+            )
+            .unwrap()
+        );
+        let different = compare_stable_snapshot(
+            "test",
+            &source,
+            &mut file,
+            b"different",
+            None,
+            None,
+            &NoopSnapshotObserver,
+        )
+        .unwrap();
+        assert!(!different);
+        if !bytes.is_empty() {
+            assert!(
+                compare_stable_snapshot(
+                    "test",
+                    &source,
+                    &mut file,
+                    &bytes,
+                    None,
+                    Some(bytes.len() as u64 - 1),
+                    &NoopSnapshotObserver,
+                )
+                .is_err()
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn streaming_comparison_rejects_growth_truncation_and_in_place_mutation() {
+    struct MutateAfterFirstChunk(fn(&Path));
+    impl SnapshotObserver for MutateAfterFirstChunk {
+        fn after_first_chunk(&self, path: &Path) {
+            (self.0)(path);
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("payload.bin");
+    let bytes = vec![0x53; 150_000];
+    let mutations: [fn(&Path); 3] = [
+        |path| {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(path)
+                .unwrap()
+                .write_all(b"growth")
+                .unwrap();
+        },
+        |path| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_len(70_000)
+                .unwrap();
+        },
+        |path| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .write_all(b"changed")
+                .unwrap();
+        },
+    ];
+    for mutation in mutations {
+        fs::write(&source, &bytes).unwrap();
+        let mut file = std::fs::File::open(&source).unwrap();
+        let result = compare_stable_snapshot(
+            "test",
+            &source,
+            &mut file,
+            &bytes,
+            None,
+            Some(bytes.len() as u64),
+            &MutateAfterFirstChunk(mutation),
+        );
+        assert!(matches!(
+            result,
+            Err(PackageError::UnstableBundleSource { .. })
+        ));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn second_read_rejects_bytes_changed_after_the_original_snapshot() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("payload.bin");
+    fs::write(&source, b"original").unwrap();
+    let mut file = std::fs::File::open(&source).unwrap();
+    let snapshot = read_stable_snapshot("test", &source, &mut file, &NoopSnapshotObserver).unwrap();
+    fs::write(&source, b"modified").unwrap();
+    assert!(matches!(
+        verify_snapshot_against_second_read("test", &source, &mut file, &snapshot),
+        Err(PackageError::UnstableBundleSource { .. })
+    ));
+}
+
+#[test]
+fn directory_preparation_shares_matching_bytes_and_falls_back_for_wrong_hints() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("payload.bin");
+    fs::write(&source, b"snapshot").unwrap();
+    for bytes in [
+        b"snapshot".as_slice(),
+        b"bad hint".as_slice(),
+        b"short".as_slice(),
+        b"a longer mismatching hint".as_slice(),
+    ] {
+        let candidate = SharedBytes::from(bytes.to_vec());
+        let shared = BTreeMap::from([(PathBuf::from("payload.bin"), candidate.clone())]);
+        let prepared = PreparedDirectoryCommit::prepare_with_shared_artifacts(
+            directory.path(),
+            &["payload.bin"],
+            &shared,
+        )
+        .unwrap();
+        let [PreparedDirectoryEntry::File { bytes: actual, .. }] = prepared.entries.as_slice()
+        else {
+            panic!("one prepared file expected");
+        };
+        assert_eq!(actual.as_ref(), b"snapshot");
+        assert_eq!(actual.as_ptr() == candidate.as_ptr(), bytes == b"snapshot");
+        prepared.verify_source_contents().unwrap();
+    }
+}
+
+#[test]
+fn streaming_source_verification_requires_identity_even_for_identical_bytes() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("payload.bin");
+    fs::write(&source, b"snapshot").unwrap();
+    let prepared = PreparedDirectoryCommit::prepare(directory.path(), &["payload.bin"]).unwrap();
+    let replacement = directory.path().join("replacement.bin");
+    fs::write(&replacement, b"snapshot").unwrap();
+    fs::rename(&replacement, &source).unwrap();
+    assert!(matches!(
+        prepared.verify_source_contents(),
+        Err(PackageError::StagedArtifactChanged { .. })
+    ));
+    prepared
+        .verify_committed_contents(directory.path())
+        .unwrap();
+}
+
+#[test]
 fn verified_artifacts_keep_bytes_and_identity_for_commit_checks() {
     let directory = tempfile::tempdir().unwrap();
     let staged = directory.path().join("Engine.dll");
     fs::write(&staged, b"stable bytes").unwrap();
-    let bytes: Arc<[u8]> = Arc::from(&b"stable bytes"[..]);
+    let bytes: SharedBytes = SharedBytes::from(b"stable bytes".to_vec());
     let artifact = verified_artifact(
         PathBuf::from("Engine.dll"),
         bytes,
@@ -1403,7 +1580,7 @@ fn prepared_package_rejects_unknown_entries_and_manifest_mutation() {
     fs::write(&staged, b"stable bytes").unwrap();
     let artifact = verified_artifact(
         PathBuf::from("Engine.dll"),
-        Arc::from(&b"stable bytes"[..]),
+        SharedBytes::from(b"stable bytes".to_vec()),
         fs::metadata(&staged).unwrap().permissions(),
     );
     let (package, manifest) = package_with_test_manifest(artifact);
@@ -1431,7 +1608,7 @@ fn prepared_package_opens_entries_without_following_symlinks() {
     fs::write(&staged, b"stable bytes").unwrap();
     let artifact = verified_artifact(
         PathBuf::from("Engine.dll"),
-        Arc::from(&b"stable bytes"[..]),
+        SharedBytes::from(b"stable bytes".to_vec()),
         fs::metadata(&staged).unwrap().permissions(),
     );
     let (package, manifest) = package_with_test_manifest(artifact);
@@ -1455,7 +1632,7 @@ fn prepared_package_rejects_replaced_staging_directory() {
     fs::write(&staged, b"stable bytes").unwrap();
     let artifact = verified_artifact(
         PathBuf::from("Engine.dll"),
-        Arc::from(&b"stable bytes"[..]),
+        SharedBytes::from(b"stable bytes".to_vec()),
         fs::metadata(&staged).unwrap().permissions(),
     );
     let (package, manifest) = package_with_test_manifest(artifact);

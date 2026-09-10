@@ -1,7 +1,11 @@
 //! Allocation counts only. This allocator is never linked into the timing binary.
+#![allow(
+    unsafe_code,
+    reason = "allocation probe forwards unchanged calls to System"
+)]
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use xlfn::benchmark_support::RtdBorrowedBenchmark;
+use xlfn::benchmark_support::RtdPrepareBenchmark;
 
 struct CountedSystem;
 static TRACK: AtomicBool = AtomicBool::new(false);
@@ -50,13 +54,13 @@ unsafe impl GlobalAlloc for CountedSystem {
 #[global_allocator]
 static ALLOCATOR: CountedSystem = CountedSystem;
 
-fn probe<const N: usize, const BORROWED: bool>() {
-    let fixture = RtdBorrowedBenchmark::<N>::new(256, true);
+fn probe(parts: usize) {
+    let fixture = RtdPrepareBenchmark::new(256, parts, true);
     for count in [&ALLOCS, &DEALLOCS, &REALLOCS, &FREED_BYTES] {
         count.store(0, Ordering::Relaxed);
     }
     TRACK.store(true, Ordering::SeqCst);
-    fixture.run::<BORROWED>(false);
+    fixture.run_subscribe_input(false);
     TRACK.store(false, Ordering::SeqCst);
     let counts = [
         ALLOCS.load(Ordering::Relaxed),
@@ -66,18 +70,14 @@ fn probe<const N: usize, const BORROWED: bool>() {
     println!(
         "{}",
         serde_json::json!({
-            "case": if BORROWED { "borrowed" } else { "owned" }, "parts": N,
+            "case": "borrowed", "parts": parts,
             "subscriptions": 256, "allocations": counts[0], "reallocations": counts[1],
             "deallocations": counts[2], "freed_requested_bytes": FREED_BYTES.load(Ordering::Relaxed),
         })
     );
-    if BORROWED {
-        assert_eq!(counts, [0, 0, 0], "existing borrowed allocation gate");
-    }
+    assert_eq!(counts, [0, 0, 0], "existing borrowed allocation gate");
 }
 fn main() {
-    probe::<1, false>();
-    probe::<10, false>();
-    probe::<1, true>();
-    probe::<10, true>();
+    probe(1);
+    probe(10);
 }

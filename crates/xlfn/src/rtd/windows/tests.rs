@@ -1463,6 +1463,9 @@ fn refresh_data_preserves_every_rtd_scalar_variant_by_column_and_row() {
             )),
         ),
         RtdUpdate::for_test(206, RtdValue::Empty),
+        RtdUpdate::for_test(207, RtdValue::String(String::new())),
+        RtdUpdate::for_test(208, RtdValue::String("A\0B😀漢".to_owned())),
+        RtdUpdate::for_test(209, RtdValue::String("😀漢".repeat(512))),
     ];
     let mut topic_count = -1;
     let mut array = ptr::null_mut();
@@ -1483,7 +1486,7 @@ fn refresh_data_preserves_every_rtd_scalar_variant_by_column_and_row() {
         let mut value_index = [1, column];
 
         // SAFETY: the logical RTD table has `updates.len()` columns and two
-        // rows. Automation receives those indices in [column, row] order,
+        // rows. Automation receives those indices in [row, column] order,
         // and both VARIANT outputs are writable.
         unsafe {
             assert_eq!(
@@ -1556,6 +1559,55 @@ fn refresh_data_preserves_every_rtd_scalar_variant_by_column_and_row() {
 }
 
 #[test]
+fn direct_bstr_encoding_preserves_exact_utf16_and_terminator() {
+    let _apartment = TestComApartment::enter();
+    for text in [
+        String::new(),
+        "ASCII\0text".to_owned(),
+        "A\0B😀漢".to_owned(),
+        "漢😀".repeat(1024),
+    ] {
+        let mut variant = VARIANT::default();
+        // SAFETY: the output is initialized writable storage, owned by this test.
+        assert_eq!(unsafe { write_bstr_variant(&mut variant, &text) }, S_OK);
+        // SAFETY: successful conversion initialized a VT_BSTR. Inspect its
+        // counted payload and allocator-provided terminator before clearing it.
+        unsafe {
+            assert_eq!(variant.Anonymous.Anonymous.vt, VT_BSTR);
+            let bstr = variant.Anonymous.Anonymous.Anonymous.bstrVal;
+            let length = SysStringLen(bstr) as usize;
+            assert_eq!(
+                std::slice::from_raw_parts(bstr, length),
+                text.encode_utf16().collect::<Vec<_>>()
+            );
+            assert_eq!(*bstr.add(length), 0);
+            assert_eq!(VariantClear(&mut variant), S_OK);
+        }
+    }
+}
+
+#[test]
+fn direct_refresh_conversion_failure_keeps_outputs_empty_after_partial_fill() {
+    let _apartment = TestComApartment::enter();
+    let valid = RtdUpdate::for_test(1, RtdValue::String("allocated first".to_owned()));
+    let mut invalid = RtdUpdate::for_test(2, RtdValue::Empty);
+    invalid.value = StoredRtdValue::String(
+        "a".repeat(crate::utf16::EXCEL_STRING_LIMIT + 1)
+            .into_boxed_str(),
+    );
+    let mut topic_count = -1;
+    let mut array = ptr::dangling_mut();
+    assert_eq!(
+        // SAFETY: both output pointers are writable. The conversion must clean
+        // up the first initialized BSTR when the second fails validation.
+        unsafe { write_refresh_data(&mut topic_count, &mut array, &[valid, invalid]) },
+        E_INVALIDARG
+    );
+    assert_eq!(topic_count, 0);
+    assert!(array.is_null());
+}
+
+#[test]
 fn topic_key_limits_reject_extreme_bounds_and_oversized_strings() {
     assert_eq!(
         checked_topic_part_count(0, 252).unwrap(),
@@ -1582,7 +1634,7 @@ fn topic_key_from_safearray_handles_single_and_rejects_multi_or_invalid_dimensio
     let array = unsafe { SafeArrayCreate(VT_VARIANT, 1, &bound) };
     assert!(!array.is_null());
 
-    let bstr_val = crate::utf16::encode_bounded("topic_one", "test", 100).unwrap();
+    let bstr_val = "topic_one".encode_utf16().collect::<Vec<_>>();
 
     // SAFETY: `bstr_val` is readable for `bstr_val.len()` UTF-16 code units.
     let bstr = unsafe { SysAllocStringLen(bstr_val.as_ptr(), bstr_val.len() as u32) };
@@ -1624,7 +1676,7 @@ fn topic_key_from_safearray_handles_single_and_rejects_multi_or_invalid_dimensio
     assert!(!array_multi.is_null());
 
     for (i, p) in ["part1", "part2"].iter().enumerate() {
-        let u16_val = crate::utf16::encode_bounded(p, "test", 100).unwrap();
+        let u16_val = p.encode_utf16().collect::<Vec<_>>();
 
         // SAFETY: `u16_val` is readable for `u16_val.len()` UTF-16 units.
         let bstr = unsafe { SysAllocStringLen(u16_val.as_ptr(), u16_val.len() as u32) };
@@ -2386,7 +2438,7 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
     let prepared = subscriptions
         .prepare(
             &source_handle,
-            RtdTopic::single("dispatch-refresh").unwrap(),
+            RtdTopic::single("dispatch-refresh").unwrap().borrowed(),
         )
         .unwrap();
     let conn = subscriptions
@@ -2653,7 +2705,7 @@ fn repeated_ensure_server_calls_do_not_rearm_subscription_notifications() {
         .unwrap();
 
     let prepared = subscriptions
-        .prepare(&source, RtdTopic::single("ensure-test").unwrap())
+        .prepare(&source, RtdTopic::single("ensure-test").unwrap().borrowed())
         .unwrap();
     let id = prepared.id();
     prepared.commit();

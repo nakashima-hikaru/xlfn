@@ -1,7 +1,8 @@
 use super::identity::SubscriptionIdentityIndex;
 use super::source::SourceHandleId;
 use super::topic::{
-    RtdLimits, RtdTopic, SourceId, SubscriptionId, SubscriptionIdentityKey, SubscriptionKey,
+    BorrowedTopicParts, RtdLimits, RtdTopic, SourceId, SubscriptionId, SubscriptionIdentityKey,
+    SubscriptionKey,
 };
 use crate::generation::{ConnectionGeneration, ServerGeneration};
 use crate::{XllError, XllResult};
@@ -339,6 +340,7 @@ impl SubscriptionEntry {
 pub(crate) struct SubscriptionCatalog {
     pub(crate) entries: FxHashMap<SubscriptionId, SubscriptionEntry>,
     pub(crate) pending_topic_bytes: usize,
+    pub(crate) pending_count: usize,
     pub(crate) identities: SubscriptionIdentityIndex,
     pub(crate) next_subscription_id: u64,
 }
@@ -352,18 +354,18 @@ struct PendingInsertPlan {
 }
 
 impl SubscriptionCatalog {
-    pub(crate) fn find_identity(
+    pub(crate) fn find_identity<Part: AsRef<str>>(
         &self,
         source_id: SourceId,
-        topic: &RtdTopic,
+        topic: &BorrowedTopicParts<'_, Part>,
     ) -> XllResult<Option<(SubscriptionId, &SubscriptionEntry)>> {
-        let key = SubscriptionIdentityKey::new(source_id, topic);
+        let key = topic.identity_key(source_id);
         // Hashes only narrow the candidates; entries own the canonical topics.
         for &id in self.identities.candidates(key) {
             let entry = self.entries.get(&id).ok_or(XllError::Internal {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_INDEX_ORPHAN,
             })?;
-            if entry.source_id == source_id && entry.topic == *topic {
+            if entry.source_id == source_id && topic.matches(&entry.topic) {
                 return Ok(Some((id, entry)));
             }
         }
@@ -435,6 +437,7 @@ impl SubscriptionCatalog {
             xlfn_kernel::invariant::fail_stop();
         }
         self.pending_topic_bytes = pending_topic_bytes;
+        self.pending_count += 1;
         (id, key)
     }
 
@@ -452,10 +455,7 @@ impl SubscriptionCatalog {
     }
 
     pub(crate) fn pending_len(&self) -> usize {
-        self.entries
-            .values()
-            .filter(|entry| entry.tracks_pending_bytes())
-            .count()
+        self.pending_count
     }
 
     pub(crate) fn with_entry<R>(
@@ -478,12 +478,14 @@ impl SubscriptionCatalog {
 
         match (was_pending, is_pending) {
             (false, true) => {
+                self.pending_count += 1;
                 self.pending_topic_bytes = self
                     .pending_topic_bytes
                     .checked_add(topic_bytes)
                     .expect("pending topic byte accounting overflow");
             }
             (true, false) => {
+                self.pending_count = checked_sub_or_abort(self.pending_count, 1);
                 self.pending_topic_bytes =
                     checked_sub_or_abort(self.pending_topic_bytes, topic_bytes);
             }
@@ -496,6 +498,7 @@ impl SubscriptionCatalog {
     pub(crate) fn remove_entry(&mut self, id: SubscriptionId) -> Option<SubscriptionEntry> {
         let removed = self.entries.remove(&id)?;
         if removed.tracks_pending_bytes() {
+            self.pending_count = checked_sub_or_abort(self.pending_count, 1);
             self.pending_topic_bytes =
                 checked_sub_or_abort(self.pending_topic_bytes, removed.topic.byte_len());
         }
@@ -535,6 +538,13 @@ impl SubscriptionCatalog {
             .map(|entry| entry.topic.byte_len())
             .sum::<usize>();
         assert_eq!(self.pending_topic_bytes, expected_pending_bytes);
+        assert_eq!(
+            self.pending_count,
+            self.entries
+                .values()
+                .filter(|entry| entry.tracks_pending_bytes())
+                .count()
+        );
 
         for entry in self.entries.values() {
             match &entry.phase {

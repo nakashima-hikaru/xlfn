@@ -35,7 +35,7 @@ pub(crate) struct BundleFile {
     // Resolution owns the immutable bytes. Sharing this allocation with
     // staging and verification avoids copies; paths never supply fallback
     // contents after resolution.
-    pub(crate) snapshot: Arc<[u8]>,
+    pub(crate) snapshot: SharedBytes,
     pub(crate) permissions: std::fs::Permissions,
 }
 
@@ -230,7 +230,7 @@ pub fn verify_bundle_files(bundle: &ResolvedBundle, target: &str) -> PackageResu
 
 /// Opens a packaging source with the same stable-snapshot guarantees used for
 /// bundled DLLs and returns the bytes read from that fixed file identity.
-pub fn snapshot_file(target: &str, path: &Path) -> PackageResult<Arc<[u8]>> {
+pub fn snapshot_file(target: &str, path: &Path) -> PackageResult<SharedBytes> {
     let mut file = open_bundle_source_for_snapshot(path)
         .map_err(|error| map_snapshot_open_error(target, path, error))?;
     if !file.metadata()?.is_file() {
@@ -306,7 +306,7 @@ pub fn stage_bundle(
             source: output,
             name: file.name.clone(),
             configured_path: file.configured_path.clone(),
-            snapshot: Arc::clone(snapshot),
+            snapshot: snapshot.clone(),
             permissions: file.permissions.clone(),
         });
     }
@@ -339,7 +339,7 @@ pub fn stage_bundle(
         }
         let artifact = verified_artifact(
             PathBuf::from(&file.name),
-            Arc::clone(&file.snapshot),
+            file.snapshot.clone(),
             file.permissions.clone(),
         );
         let identity = file_snapshot_state(&handle)?.identity;

@@ -1,5 +1,4 @@
-//! Actual token authentication/cache path; alternative cache layouts live in
-//! archived patches, with exactly 16 total entries in every variant.
+//! Actual token authentication/cache path, including bounded-cache overflow.
 use super::token::{HandleId, HandleToken, TokenCodec};
 use crate::generation::BindingGeneration;
 use std::time::Instant;
@@ -21,9 +20,12 @@ pub fn token_cache_associativity_probe() -> serde_json::Value {
         ("natural_8", 8, false),
         ("natural_16", 16, false),
         ("natural_32", 32, false),
+        ("natural_64", 64, false),
+        ("natural_128", 128, false),
         ("same_bucket_2", 2, true),
         ("same_bucket_4", 4, true),
         ("same_bucket_8", 8, true),
+        ("same_bucket_16", 16, true),
     ] {
         let tokens: Vec<_> = corpus
             .iter()
@@ -54,5 +56,20 @@ pub fn token_cache_associativity_probe() -> serde_json::Value {
             "tag_nibbles": tokens.iter().map(|(token,_)| token.chars().last().unwrap()).collect::<String>(),
             "rounds_ns": elapsed, "median_ns": elapsed[elapsed.len()/2] }));
     }
+    let mut elapsed = Vec::new();
+    for round in 0..7 {
+        let started = Instant::now();
+        for index in 0..100_000 {
+            let token = codec.format(std::hint::black_box(corpus[index % corpus.len()].1));
+            std::hint::black_box(token);
+        }
+        if round > 0 {
+            elapsed.push(started.elapsed().as_nanos() as u64);
+        }
+    }
+    elapsed.sort_unstable();
+    cases.push(serde_json::json!({ "case": "format", "operations": 100_000,
+        "verification_cache_storage_bytes_per_thread": super::token::VERIFIED_TOKEN_CACHE_STORAGE_BYTES,
+        "rounds_ns": elapsed, "median_ns": elapsed[elapsed.len()/2] }));
     serde_json::Value::Array(cases)
 }

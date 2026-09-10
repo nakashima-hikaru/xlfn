@@ -12,10 +12,10 @@ use crate::subscription::{RtdUpdate, StoredRtdValue};
 use crate::win32::{
     DISP_E_BADPARAMCOUNT, DISP_E_MEMBERNOTFOUND, DISP_E_PARAMNOTFOUND, DISP_E_TYPEMISMATCH,
     DISP_E_UNKNOWNINTERFACE, DISP_E_UNKNOWNNAME, DISPID_UNKNOWN, DISPPARAMS, E_FAIL, E_INVALIDARG,
-    E_OUTOFMEMORY, E_POINTER, EXCEPINFO, GUID, S_OK, SAFEARRAY, SAFEARRAYBOUND, SafeArrayCreate,
-    SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement, SafeArrayGetLBound, SafeArrayGetUBound,
-    SafeArrayGetVartype, SafeArrayPutElement, SysAllocStringLen, SysFreeString, SysStringLen,
-    VARIANT, VARIANT_BOOL, VariantClear,
+    E_OUTOFMEMORY, E_POINTER, EXCEPINFO, GUID, S_OK, SAFEARRAY, SAFEARRAYBOUND,
+    SafeArrayAccessData, SafeArrayCreate, SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement,
+    SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayGetVartype, SafeArrayUnaccessData,
+    SysAllocStringLen, SysFreeString, SysStringLen, VARIANT, VARIANT_BOOL, VariantClear,
 };
 use crate::{XllError, XllResult};
 use std::ptr::{self, NonNull};
@@ -630,32 +630,49 @@ unsafe fn wide_name_eq_ascii(name: *const u16, expected: &[u8]) -> bool {
     unsafe { *name.add(expected.len()) == 0 }
 }
 pub(super) unsafe fn write_bstr_variant(result: *mut VARIANT, value: &str) -> i32 {
-    let wide =
-        match crate::utf16::encode_bounded(value, "RTD value", crate::utf16::EXCEL_STRING_LIMIT) {
-            Ok(wide) => wide,
+    let length =
+        match crate::utf16::checked_utf16_len(value, "RTD value", crate::utf16::EXCEL_STRING_LIMIT)
+        {
+            Ok(length) => length,
             Err(_) => return E_INVALIDARG,
         };
 
-    let length = match u32::try_from(wide.len()) {
-        Ok(length) => length,
-        Err(_) => return E_INVALIDARG,
-    };
-
-    // SAFETY: `wide` is readable for exactly `length` UTF-16 code units and
-    // remains live for the duration of SysAllocStringLen.
-    let bstr = unsafe { SysAllocStringLen(wide.as_ptr(), length) };
-
-    if bstr.is_null() {
+    // SAFETY: a null source requests an uninitialized BSTR with exactly this
+    // many code units plus its terminator. The validated Excel limit fits u32.
+    let bstr = unsafe { SysAllocStringLen(ptr::null(), length as u32) };
+    // The generated BSTR alias is const-qualified, but this allocation is new
+    // writable storage exclusively owned by this function.
+    let Some(bstr) = NonNull::new(bstr.cast_mut()) else {
         return E_FAIL;
+    };
+    let owner = scopeguard::guard(bstr, |bstr| {
+        // SAFETY: this guard owns the allocation until the completed VARIANT
+        // receives it; unwind before transfer frees it exactly once.
+        unsafe { SysFreeString(bstr.as_ptr()) };
+    });
+    if value.len() == length {
+        // Equal UTF-8 and UTF-16 lengths prove ASCII for a valid Rust str.
+        for (index, &byte) in value.as_bytes().iter().enumerate() {
+            // SAFETY: the byte count equals the allocated code-unit count.
+            // Write directly without borrowing uninitialized BSTR contents.
+            unsafe { bstr.as_ptr().add(index).write(u16::from(byte)) };
+        }
+    } else {
+        for (index, unit) in value.encode_utf16().enumerate() {
+            // SAFETY: checked_utf16_len counted this same immutable string, so
+            // every write is in bounds. The allocator's terminator is retained.
+            unsafe { bstr.as_ptr().add(index).write(unit) };
+        }
     }
 
     let mut variant = VARIANT::default();
     variant.Anonymous.Anonymous.vt = VT_BSTR;
-    variant.Anonymous.Anonymous.Anonymous.bstrVal = bstr;
+    variant.Anonymous.Anonymous.Anonymous.bstrVal = bstr.as_ptr();
 
     // SAFETY: the caller guarantees that `result` points to writable VARIANT
     // output storage. Ownership of `bstr` transfers into the written VARIANT.
     unsafe { *result = variant };
+    let _ = scopeguard::ScopeGuard::into_inner(owner);
 
     S_OK
 }
@@ -716,10 +733,16 @@ pub(super) unsafe fn write_refresh_data(
         return S_OK;
     }
 
-    let count = match u32::try_from(updates.len()) {
+    let count = match i32::try_from(updates.len()) {
         Ok(count) => count,
         Err(_) => return E_INVALIDARG,
     };
+    let Some(cells) = updates.len().checked_mul(2) else {
+        return E_INVALIDARG;
+    };
+    if std::alloc::Layout::array::<VARIANT>(cells).is_err() {
+        return E_INVALIDARG;
+    }
 
     let mut bounds = [
         SAFEARRAYBOUND {
@@ -727,7 +750,7 @@ pub(super) unsafe fn write_refresh_data(
             lLbound: 0,
         },
         SAFEARRAYBOUND {
-            cElements: count,
+            cElements: count as u32,
             lLbound: 0,
         },
     ];
@@ -740,84 +763,55 @@ pub(super) unsafe fn write_refresh_data(
         return E_OUTOFMEMORY;
     }
 
-    for (column, update) in updates.iter().enumerate() {
-        let Ok(column) = i32::try_from(column) else {
-            // SAFETY: `array` was allocated above, has not been transferred to
-            // Excel, and is destroyed exactly once on this error path.
-            unsafe { SafeArrayDestroy(array) };
-            return E_INVALIDARG;
-        };
-
+    let owner = scopeguard::guard(array, |array| {
+        // SAFETY: the guard exclusively owns the untransferred array; any data
+        // access guard is dropped first. Destroy clears all initialized VARIANTs.
+        if unsafe { SafeArrayDestroy(array) } < 0 {
+            xlfn_kernel::invariant::fail_stop();
+        }
+    });
+    let mut data = ptr::null_mut();
+    // SAFETY: the fresh array is exclusively owned and data is a writable out pointer.
+    let status = unsafe { SafeArrayAccessData(array, &mut data) };
+    if status < 0 {
+        return status;
+    }
+    let access = scopeguard::guard(array, |array| {
+        // SAFETY: this guard owns the sole successful data access above. It is
+        // always released before transferring or destroying the array.
+        if unsafe { SafeArrayUnaccessData(array) } < 0 {
+            xlfn_kernel::invariant::fail_stop();
+        }
+    });
+    if data.is_null() {
+        return E_FAIL;
+    }
+    // SAFETY: SafeArrayCreate initialized `cells` contiguous VARIANT elements.
+    // AccessData keeps their allocation locked, and the checked layout fits
+    // Rust's slice size limit. The array has no aliases outside these guards.
+    let cells = unsafe { std::slice::from_raw_parts_mut(data.cast::<VARIANT>(), cells) };
+    // Automation arrays are column-major: [row, column] maps to row + 2*column.
+    // Write directly into each empty array-owned VARIANT so BSTR ownership is
+    // transferred once without SafeArrayPutElement's extra deep copy.
+    for (column, update) in cells.as_chunks_mut::<2>().0.iter_mut().zip(updates) {
         let mut topic = VARIANT::default();
         topic.Anonymous.Anonymous.vt = VT_I4;
         topic.Anonymous.Anonymous.Anonymous.lVal = update.topic_id;
-
-        let mut value_variant = VARIANT::default();
-
-        // SAFETY: `value_variant` is initialized writable VARIANT storage owned
-        // by this stack frame and `update.value` remains readable.
-        let value_status = unsafe { write_value_variant(&mut value_variant, &update.value) };
-
-        if value_status != S_OK {
-            // SAFETY: `value_variant` is initialized and locally owned.
-            // `array` has not been transferred to Excel and is destroyed once.
-            unsafe {
-                VariantClear(&mut value_variant);
-                SafeArrayDestroy(array);
-            }
-
-            return value_status;
-        }
-
-        // The SAFEARRAY consists of two rows and one column per RTD update.
-        // The first row stores topic IDs and the second row stores values.
-        let mut topic_index = [0, column];
-        let mut value_index = [1, column];
-
-        // SAFETY: `topic_index` is within the declared two-dimensional bounds,
-        // and `topic` points to a readable initialized VARIANT.
-        let topic_status = unsafe {
-            SafeArrayPutElement(
-                array,
-                topic_index.as_mut_ptr(),
-                (&mut topic as *mut VARIANT).cast(),
-            )
-        };
-
-        // SAFETY: `value_index` is within the declared two-dimensional bounds,
-        // and `value_variant` points to a readable initialized VARIANT.
-        let value_status = unsafe {
-            SafeArrayPutElement(
-                array,
-                value_index.as_mut_ptr(),
-                (&mut value_variant as *mut VARIANT).cast(),
-            )
-        };
-
-        // SAFETY: SafeArrayPutElement copies VARIANT payloads. The local
-        // VARIANTs remain owned here and must be cleared exactly once.
-        unsafe {
-            VariantClear(&mut topic);
-            VariantClear(&mut value_variant);
-        }
-
-        if topic_status < 0 {
-            // SAFETY: array has not been transferred to Excel.
-            unsafe { SafeArrayDestroy(array) };
-            return topic_status;
-        }
-
-        if value_status < 0 {
-            // SAFETY: array has not been transferred to Excel.
-            unsafe { SafeArrayDestroy(array) };
-            return value_status;
+        column[0] = topic;
+        // SAFETY: the second element is fresh initialized writable VARIANT
+        // storage. On success the array owns any BSTR written into it.
+        let status = unsafe { write_value_variant(&mut column[1], &update.value) };
+        if status != S_OK {
+            return status;
         }
     }
+    drop(access);
+    let array = scopeguard::ScopeGuard::into_inner(owner);
 
     // SAFETY: both output pointers were validated as writable. Ownership of the
     // fully initialized SAFEARRAY transfers to Excel through `result`.
     unsafe {
-        *topic_count = updates.len() as i32;
+        *topic_count = count;
         *result = array;
     }
 

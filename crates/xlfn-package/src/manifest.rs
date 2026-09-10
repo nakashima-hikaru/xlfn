@@ -238,7 +238,7 @@ pub(crate) fn digest_hex(digest: &[u8]) -> String {
 
 pub(crate) fn verified_artifact(
     relative_path: PathBuf,
-    bytes: Arc<[u8]>,
+    bytes: SharedBytes,
     permissions: std::fs::Permissions,
 ) -> VerifiedArtifact {
     VerifiedArtifact {

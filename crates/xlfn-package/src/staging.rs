@@ -800,7 +800,7 @@ pub(crate) fn read_stable_snapshot(
     path: &Path,
     file: &mut std::fs::File,
     observer: &impl SnapshotObserver,
-) -> PackageResult<Arc<[u8]>> {
+) -> PackageResult<SharedBytes> {
     read_stable_snapshot_with_limit(target, path, file, observer, None)
 }
 
@@ -810,7 +810,7 @@ pub(crate) fn read_stable_snapshot_with_limit(
     file: &mut std::fs::File,
     observer: &impl SnapshotObserver,
     maximum_len: Option<u64>,
-) -> PackageResult<Arc<[u8]>> {
+) -> PackageResult<SharedBytes> {
     let before = file_snapshot_state(file)?;
     if maximum_len.is_some_and(|maximum| before.len > maximum) {
         return Err(PackageError::Message(format!(
@@ -870,7 +870,72 @@ pub(crate) fn read_stable_snapshot_with_limit(
         return Err(unstable_bundle_source(target, path));
     }
 
-    Ok(Arc::from(snapshot))
+    Ok(SharedBytes::from(snapshot))
+}
+
+/// Reads a stable file without retaining another full-sized snapshot when
+/// immutable expected bytes already exist. A mismatch is distinct from an
+/// unstable read: optional sharing hints can fall back to an owned snapshot.
+pub(crate) fn compare_stable_snapshot(
+    target: &str,
+    path: &Path,
+    file: &mut std::fs::File,
+    expected: &[u8],
+    expected_digest: Option<&[u8; 32]>,
+    maximum_len: Option<u64>,
+    observer: &impl SnapshotObserver,
+) -> PackageResult<bool> {
+    let before = file_snapshot_state(file)?;
+    if maximum_len.is_some_and(|maximum| before.len > maximum) {
+        return Err(PackageError::Message(format!(
+            "{target}: file exceeds the snapshot byte budget: {}",
+            path.display()
+        )));
+    }
+    file.seek(SeekFrom::Start(0))?;
+
+    let mut hasher = expected_digest.map(|_| Sha256::new());
+    let mut limited = file.take(before.len.saturating_add(1));
+    #[allow(
+        clippy::large_stack_arrays,
+        reason = "64KB chunk buffer on CLI staging thread stack avoids heap allocation"
+    )]
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut matches = before.len == expected.len() as u64;
+    let mut offset = 0_u64;
+
+    loop {
+        let count = limited.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        if offset == 0 {
+            observer.after_first_chunk(path);
+        }
+        let end = offset
+            .checked_add(count as u64)
+            .filter(|end| *end <= before.len)
+            .ok_or_else(|| unstable_bundle_source(target, path))?;
+        if matches {
+            // Matching lengths prove these offsets fit the expected slice.
+            matches = expected[offset as usize..end as usize] == buffer[..count];
+        }
+        offset = end;
+        if let Some(hasher) = &mut hasher {
+            hasher.update(&buffer[..count]);
+        }
+    }
+
+    let after = file_snapshot_state(file)?;
+    if offset != before.len || before != after {
+        return Err(unstable_bundle_source(target, path));
+    }
+
+    if let Some((hasher, expected_digest)) = hasher.zip(expected_digest) {
+        let digest: [u8; 32] = hasher.finalize().into();
+        matches &= digest == *expected_digest;
+    }
+    Ok(matches)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -880,31 +945,16 @@ pub(crate) fn verify_snapshot_against_second_read(
     file: &mut std::fs::File,
     expected: &[u8],
 ) -> PackageResult {
-    let before = file_snapshot_state(file)?;
-    file.seek(SeekFrom::Start(0))?;
-
-    let expected_digest = Sha256::digest(expected);
-    let mut hasher = Sha256::new();
-    let mut limited = file.take(before.len.saturating_add(1));
-    #[allow(
-        clippy::large_stack_arrays,
-        reason = "64KB chunk buffer on CLI staging thread stack avoids heap allocation"
-    )]
-    let mut buffer = [0_u8; 64 * 1024];
-
-    loop {
-        let count = limited.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buffer[..count]);
-    }
-
-    let observed_digest = hasher.finalize();
-    let after = file_snapshot_state(file)?;
-    if before != after || expected_digest != observed_digest {
+    if !compare_stable_snapshot(
+        target,
+        path,
+        file,
+        expected,
+        None,
+        None,
+        &NoopSnapshotObserver,
+    )? {
         return Err(unstable_bundle_source(target, path));
     }
-
     Ok(())
 }

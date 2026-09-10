@@ -324,7 +324,10 @@ fn measure_source<S: RtdSource>(
     };
     for index in 0..subscriptions {
         let prepared = runtime
-            .prepare(&source, RtdTopic::single(index.to_string()).unwrap())
+            .prepare(
+                &source,
+                RtdTopic::single(index.to_string()).unwrap().borrowed(),
+            )
             .unwrap();
         runtime
             .connect_transaction(&server, TopicId(index as i32 + 1), prepared.id())

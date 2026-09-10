@@ -68,7 +68,7 @@ impl RtdPrepareBenchmark {
         if existing {
             for topic in &topics {
                 runtime
-                    .prepare(&source, topic.clone())
+                    .prepare(&source, topic.borrowed())
                     .expect("seed existing topic")
                     .commit();
             }
@@ -85,7 +85,7 @@ impl RtdPrepareBenchmark {
         for topic in self.topics.drain(..) {
             let prepared = self
                 .runtime
-                .prepare(&self.source, topic)
+                .prepare(&self.source, topic.borrowed())
                 .expect("prepare topic");
             std::hint::black_box(prepared.id());
             prepared.commit();
@@ -99,13 +99,41 @@ impl RtdPrepareBenchmark {
             .drain(..)
             .map(|topic| {
                 self.runtime
-                    .prepare(&self.source, topic)
+                    .prepare(&self.source, topic.borrowed())
                     .expect("prepare topic")
             })
             .collect();
         for reservation in prepared {
             std::hint::black_box(reservation.id());
             reservation.rollback();
+        }
+    }
+
+    /// Include input validation, hashing, and canonical topic materialization.
+    pub fn run_subscribe_input(&self, churn: bool) {
+        let prepare = |topic: &crate::subscription::RtdTopic| {
+            let parts: smallvec::SmallVec<[&str; 16]> =
+                topic.parts().iter().map(String::as_str).collect();
+            self.runtime
+                .prepare(
+                    &self.source,
+                    crate::subscription::BorrowedTopicParts::new(&parts)
+                        .expect("valid input parts"),
+                )
+                .expect("prepare input")
+        };
+        if churn {
+            let prepared: Vec<_> = self.topics.iter().map(prepare).collect();
+            for reservation in prepared {
+                std::hint::black_box(reservation.id());
+                reservation.rollback();
+            }
+        } else {
+            for topic in &self.topics {
+                let prepared = prepare(topic);
+                std::hint::black_box(prepared.id());
+                prepared.commit();
+            }
         }
     }
 }
@@ -150,7 +178,7 @@ impl RtdPublishNumberBenchmark {
         let topic = crate::subscription::RtdTopic::new(["BENCH", "NUMBER"])
             .expect("benchmark RTD topic must be valid");
         let prepared = runtime
-            .prepare(&source, topic)
+            .prepare(&source, topic.borrowed())
             .expect("prepare must succeed");
         let id = prepared.id();
         let conn = runtime
@@ -240,7 +268,7 @@ impl RtdPublishStringBenchmark {
         let topic = crate::subscription::RtdTopic::new(["BENCH", "STRING"])
             .expect("benchmark RTD topic must be valid");
         let prepared = runtime
-            .prepare(&source, topic)
+            .prepare(&source, topic.borrowed())
             .expect("prepare must succeed");
         let id = prepared.id();
         let conn = runtime
@@ -545,7 +573,7 @@ where
             let topic = crate::subscription::RtdTopic::single(format!("refresh-{index}"))
                 .expect("benchmark RTD topic must be valid");
             let prepared = runtime
-                .prepare(&source, topic)
+                .prepare(&source, topic.borrowed())
                 .expect("prepare must succeed");
             let id = prepared.id();
             let connection = runtime
@@ -627,7 +655,9 @@ impl RtdChannelPipelineBenchmark {
         let prepared = runtime
             .prepare(
                 &source,
-                crate::subscription::RtdTopic::single("pipeline").unwrap(),
+                crate::subscription::RtdTopic::single("pipeline")
+                    .unwrap()
+                    .borrowed(),
             )
             .unwrap();
         runtime

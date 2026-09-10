@@ -145,7 +145,7 @@ fn connected_sink<T: IntoRtdValue + Clone + Send + Sync + 'static>(
     let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime.register_test_server(1);
     let prepared = runtime
-        .prepare(&source, RtdTopic::single(topic).unwrap())
+        .prepare(&source, RtdTopic::single(topic).unwrap().borrowed())
         .unwrap();
     let id = prepared.id();
     prepared.commit();
@@ -185,10 +185,10 @@ fn server_publish_isolation() {
     let server_b = runtime.register_test_server(2);
 
     let prep_a = runtime
-        .prepare(&source_a, RtdTopic::single("a").unwrap())
+        .prepare(&source_a, RtdTopic::single("a").unwrap().borrowed())
         .unwrap();
     let prep_b = runtime
-        .prepare(&source_b, RtdTopic::single("b").unwrap())
+        .prepare(&source_b, RtdTopic::single("b").unwrap().borrowed())
         .unwrap();
 
     let id_a = prep_a.id();
@@ -250,10 +250,10 @@ fn notification_callback_isolation() {
         .unwrap();
 
     let prep_a = runtime
-        .prepare(&source_a, RtdTopic::single("a").unwrap())
+        .prepare(&source_a, RtdTopic::single("a").unwrap().borrowed())
         .unwrap();
     let prep_b = runtime
-        .prepare(&source_b, RtdTopic::single("b").unwrap())
+        .prepare(&source_b, RtdTopic::single("b").unwrap().borrowed())
         .unwrap();
     let id_a = prep_a.id();
     let id_b = prep_b.id();
@@ -296,7 +296,7 @@ fn server_locality_refresh_lock_independence() {
     let server_b = runtime.register_test_server(2);
 
     let prep_b = runtime
-        .prepare(&source_b, RtdTopic::single("b-0").unwrap())
+        .prepare(&source_b, RtdTopic::single("b-0").unwrap().borrowed())
         .unwrap();
     let id_b = prep_b.id();
     prep_b.commit();
@@ -352,7 +352,7 @@ fn runtime_close_blocks_all_servers_immediately() {
     let server_b = runtime.register_test_server(2);
 
     let prep_b = runtime
-        .prepare(&source_b, RtdTopic::single("b-0").unwrap())
+        .prepare(&source_b, RtdTopic::single("b-0").unwrap().borrowed())
         .unwrap();
     let id_b = prep_b.id();
     prep_b.commit();
@@ -373,7 +373,7 @@ fn runtime_close_blocks_all_servers_immediately() {
         .unwrap();
 
     let prep_a = runtime
-        .prepare(&source_a, RtdTopic::single("a-0").unwrap())
+        .prepare(&source_a, RtdTopic::single("a-0").unwrap().borrowed())
         .unwrap();
     let id_a = prep_a.id();
     prep_a.commit();
@@ -416,7 +416,10 @@ fn server_termination_clears_pending_and_allows_reconnect() {
     let server_a = runtime.register_test_server(1);
 
     let prep = runtime
-        .prepare(&source, RtdTopic::single("shared-topic").unwrap())
+        .prepare(
+            &source,
+            RtdTopic::single("shared-topic").unwrap().borrowed(),
+        )
         .unwrap();
     let id = prep.id();
     prep.commit();
@@ -433,7 +436,10 @@ fn server_termination_clears_pending_and_allows_reconnect() {
     assert!(disconnected.load(Ordering::SeqCst));
     let server_b = runtime.register_test_server(2);
     let prep_b = runtime
-        .prepare(&source, RtdTopic::single("shared-topic").unwrap())
+        .prepare(
+            &source,
+            RtdTopic::single("shared-topic").unwrap().borrowed(),
+        )
         .unwrap();
     let id_b = prep_b.id();
     prep_b.commit();
@@ -471,7 +477,7 @@ fn uncommitted_update_does_not_trigger_notification() {
         .unwrap();
 
     let prep_a = runtime
-        .prepare(&source_a, RtdTopic::single("a-0").unwrap())
+        .prepare(&source_a, RtdTopic::single("a-0").unwrap().borrowed())
         .unwrap();
     let id_a = prep_a.id();
     prep_a.commit();
@@ -481,7 +487,7 @@ fn uncommitted_update_does_not_trigger_notification() {
     conn_a.commit().unwrap();
 
     let prep_b = runtime
-        .prepare(&source_b, RtdTopic::single("b-0").unwrap())
+        .prepare(&source_b, RtdTopic::single("b-0").unwrap().borrowed())
         .unwrap();
     let id_b = prep_b.id();
     prep_b.commit();
@@ -511,7 +517,10 @@ fn publish_between_install_and_commit_prepares_notification() {
         .unwrap();
 
     let prepared = runtime
-        .prepare(&source, RtdTopic::single("known-update").unwrap())
+        .prepare(
+            &source,
+            RtdTopic::single("known-update").unwrap().borrowed(),
+        )
         .unwrap();
     let id = prepared.id();
     prepared.commit();
@@ -535,7 +544,7 @@ fn deliverable_pending_accounting_tracks_connection_lifecycle() {
     let server = runtime.register_test_server(1);
 
     let prepared = runtime
-        .prepare(&source, RtdTopic::single("accounting").unwrap())
+        .prepare(&source, RtdTopic::single("accounting").unwrap().borrowed())
         .unwrap();
     let id = prepared.id();
     prepared.commit();
@@ -692,7 +701,10 @@ fn reconnect_does_not_inherit_previous_generation_latest() {
     let server_a = runtime.register_test_server(1);
 
     let prepared_a = runtime
-        .prepare(&source, RtdTopic::single("generation-latest").unwrap())
+        .prepare(
+            &source,
+            RtdTopic::single("generation-latest").unwrap().borrowed(),
+        )
         .unwrap();
     let id_a = prepared_a.id();
     prepared_a.commit();
@@ -706,7 +718,10 @@ fn reconnect_does_not_inherit_previous_generation_latest() {
 
     let server_b = runtime.register_test_server(2);
     let prepared_b = runtime
-        .prepare(&source, RtdTopic::single("generation-latest").unwrap())
+        .prepare(
+            &source,
+            RtdTopic::single("generation-latest").unwrap().borrowed(),
+        )
         .unwrap();
     let id_b = prepared_b.id();
     prepared_b.commit();
@@ -732,7 +747,7 @@ fn old_buffer_update_is_not_redelivered_after_newer_update() {
     let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime.register_test_server(1);
     let prepared = runtime
-        .prepare(&source, RtdTopic::single("superseded").unwrap())
+        .prepare(&source, RtdTopic::single("superseded").unwrap().borrowed())
         .unwrap();
     let id = prepared.id();
     prepared.commit();
@@ -766,7 +781,10 @@ fn two_buffer_string_refresh_picks_newer_sequence_and_cleans_both() {
     let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime.register_test_server(1);
     let prepared = runtime
-        .prepare(&source, RtdTopic::single("string-superseded").unwrap())
+        .prepare(
+            &source,
+            RtdTopic::single("string-superseded").unwrap().borrowed(),
+        )
         .unwrap();
     let id = prepared.id();
     prepared.commit();
@@ -803,7 +821,10 @@ fn newer_update_survives_completion_of_older_refresh() {
     let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime.register_test_server(1);
     let prepared = runtime
-        .prepare(&source, RtdTopic::single("newer-survives").unwrap())
+        .prepare(
+            &source,
+            RtdTopic::single("newer-survives").unwrap().borrowed(),
+        )
         .unwrap();
     let id = prepared.id();
     prepared.commit();
@@ -833,7 +854,10 @@ fn failed_refresh_keeps_pending_update() {
     let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime.register_test_server(1);
     let prepared = runtime
-        .prepare(&source, RtdTopic::single("failed-refresh").unwrap())
+        .prepare(
+            &source,
+            RtdTopic::single("failed-refresh").unwrap().borrowed(),
+        )
         .unwrap();
     let id = prepared.id();
     prepared.commit();
@@ -863,7 +887,10 @@ fn concurrent_publish_after_refresh_snapshot_is_delivered_later() {
     let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime.register_test_server(1);
     let prepared = runtime
-        .prepare(&source, RtdTopic::single("concurrent-publish").unwrap())
+        .prepare(
+            &source,
+            RtdTopic::single("concurrent-publish").unwrap().borrowed(),
+        )
         .unwrap();
     let id = prepared.id();
     prepared.commit();
@@ -894,7 +921,7 @@ fn refresh_collection_skips_shards_without_deliverable_updates() {
     let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime.register_test_server(1);
     let prepared = runtime
-        .prepare(&source, RtdTopic::single("ready-shard").unwrap())
+        .prepare(&source, RtdTopic::single("ready-shard").unwrap().borrowed())
         .unwrap();
     let id = prepared.id();
     prepared.commit();
@@ -929,7 +956,10 @@ fn refresh_planning_does_not_traverse_topic_shards() {
     let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime.register_test_server(1);
     let prepared = runtime
-        .prepare(&source, RtdTopic::single("planning-only").unwrap())
+        .prepare(
+            &source,
+            RtdTopic::single("planning-only").unwrap().borrowed(),
+        )
         .unwrap();
     let id = prepared.id();
     prepared.commit();
@@ -961,7 +991,7 @@ fn refresh_preserves_latest_update_for_each_topic() {
         (&source_two, TopicId(2), "reduction-two"),
     ] {
         let prepared = runtime
-            .prepare(source, RtdTopic::single(name).unwrap())
+            .prepare(source, RtdTopic::single(name).unwrap().borrowed())
             .unwrap();
         let id = prepared.id();
         prepared.commit();
@@ -1000,7 +1030,7 @@ fn server_standalone_termination() {
     let server_b = runtime.register_test_server(2);
 
     let prep_b = runtime
-        .prepare(&source_b, RtdTopic::single("b").unwrap())
+        .prepare(&source_b, RtdTopic::single("b").unwrap().borrowed())
         .unwrap();
     let id_b = prep_b.id();
     prep_b.commit();
@@ -1036,7 +1066,7 @@ fn stale_sink_returns_closing() {
     let server_b = runtime.register_test_server(2);
 
     let prep_a = runtime
-        .prepare(&source_a, RtdTopic::single("a").unwrap())
+        .prepare(&source_a, RtdTopic::single("a").unwrap().borrowed())
         .unwrap();
     let id_a = prep_a.id();
     prep_a.commit();
@@ -1052,7 +1082,7 @@ fn stale_sink_returns_closing() {
     assert!(matches!(sink_a.publish(1.0), Err(XllError::Closing)));
 
     let prep_b = runtime
-        .prepare(&source_b, RtdTopic::single("b").unwrap())
+        .prepare(&source_b, RtdTopic::single("b").unwrap().borrowed())
         .unwrap();
     let id_b = prep_b.id();
     prep_b.commit();
@@ -1092,7 +1122,10 @@ fn global_quota_enforcement() {
     let mut sinks_a = Vec::new();
     for (i, (source, sink, _)) in sources_a.into_iter().enumerate() {
         let prep = runtime
-            .prepare(&source, RtdTopic::single(format!("a-{}", i)).unwrap())
+            .prepare(
+                &source,
+                RtdTopic::single(format!("a-{}", i)).unwrap().borrowed(),
+            )
             .unwrap();
         let id = prep.id();
         prep.commit();
@@ -1106,7 +1139,10 @@ fn global_quota_enforcement() {
     let mut sinks_b = Vec::new();
     for (i, (source, sink, _)) in sources_b.into_iter().enumerate() {
         let prep = runtime
-            .prepare(&source, RtdTopic::single(format!("b-{}", i)).unwrap())
+            .prepare(
+                &source,
+                RtdTopic::single(format!("b-{}", i)).unwrap().borrowed(),
+            )
             .unwrap();
         let id = prep.id();
         prep.commit();
@@ -1140,7 +1176,7 @@ fn key_binding_concurrency_rejection() {
     let server_b = runtime.register_test_server(2);
 
     let prep = runtime
-        .prepare(&source, RtdTopic::single("shared").unwrap())
+        .prepare(&source, RtdTopic::single("shared").unwrap().borrowed())
         .unwrap();
     let id = prep.id();
     prep.commit();
@@ -1179,7 +1215,7 @@ fn runtime_close_waits_for_inflight() {
         .unwrap();
 
     let prep_a = runtime
-        .prepare(&source_a, RtdTopic::single("a").unwrap())
+        .prepare(&source_a, RtdTopic::single("a").unwrap().borrowed())
         .unwrap();
     let id_a = prep_a.id();
     prep_a.commit();
@@ -1309,7 +1345,7 @@ fn inflight_prepare_waits_for_close() {
 
     let runtime_clone = Arc::clone(&runtime);
     let handle_prep = std::thread::spawn(move || {
-        let prep = runtime_clone.prepare(&source, RtdTopic::single("topic").unwrap())?;
+        let prep = runtime_clone.prepare(&source, RtdTopic::single("topic").unwrap().borrowed())?;
         drop(prep);
         Ok::<(), XllError>(())
     });
@@ -1388,7 +1424,7 @@ fn reentrant_drop_safety() {
     let server = runtime.register_test_server(1);
 
     let prep = runtime
-        .prepare(&source, RtdTopic::single("reentrant").unwrap())
+        .prepare(&source, RtdTopic::single("reentrant").unwrap().borrowed())
         .unwrap();
     let id = prep.id();
     prep.commit();
@@ -1408,7 +1444,7 @@ fn server_lifecycle_rejects_mutations_when_closing() {
     let server = runtime.register_test_server(1);
 
     let prep = runtime
-        .prepare(&source, RtdTopic::single("test").unwrap())
+        .prepare(&source, RtdTopic::single("test").unwrap().borrowed())
         .unwrap();
     let id = prep.id();
 
@@ -1449,7 +1485,7 @@ fn server_terminate_returns_cleanup_error_to_caller_and_waiter() {
     let server = runtime.register_test_server(1);
 
     let prep = runtime
-        .prepare(&source, RtdTopic::single("test_err").unwrap())
+        .prepare(&source, RtdTopic::single("test_err").unwrap().borrowed())
         .unwrap();
     let id = prep.id();
     prep.commit();
@@ -1542,7 +1578,7 @@ fn disconnect_propagates_subscription_cleanup_error() {
     let server = runtime.register_test_server(1);
 
     let prep = runtime
-        .prepare(&source, RtdTopic::single("disc_err").unwrap())
+        .prepare(&source, RtdTopic::single("disc_err").unwrap().borrowed())
         .unwrap();
     let id = prep.id();
     prep.commit();
@@ -1576,7 +1612,7 @@ fn rollback_records_subscription_cleanup_error() {
     let server = runtime.register_test_server(1);
 
     let prep = runtime
-        .prepare(&source, RtdTopic::single("roll_err").unwrap())
+        .prepare(&source, RtdTopic::single("roll_err").unwrap().borrowed())
         .unwrap();
     let id = prep.id();
     prep.commit();
@@ -1633,7 +1669,10 @@ fn request_cancel_panic_propagates_to_termination() {
     let phases = Arc::new(AtomicUsize::new(0));
 
     let prep = runtime
-        .prepare(&source, RtdTopic::single("cancel_panic").unwrap())
+        .prepare(
+            &source,
+            RtdTopic::single("cancel_panic").unwrap().borrowed(),
+        )
         .unwrap();
     let id = prep.id();
     prep.commit();
@@ -1722,7 +1761,10 @@ fn install_failure_during_closing_propagates_cleanup_error() {
     let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime.register_test_server(1);
     let prep = runtime
-        .prepare(&source, RtdTopic::single("delayed_fail").unwrap())
+        .prepare(
+            &source,
+            RtdTopic::single("delayed_fail").unwrap().borrowed(),
+        )
         .unwrap();
     let id = prep.id();
     prep.commit();
@@ -1763,8 +1805,8 @@ fn same_handle_and_same_topic_reuse_pending_identity() {
     let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let topic = RtdTopic::single("shared").unwrap();
 
-    let first = runtime.prepare(&source, topic.clone()).unwrap();
-    let second = runtime.prepare(&source, topic).unwrap();
+    let first = runtime.prepare(&source, topic.borrowed()).unwrap();
+    let second = runtime.prepare(&source, topic.borrowed()).unwrap();
 
     assert_eq!(first.key(), second.key());
     assert!(first.has_reservation());
@@ -1786,8 +1828,8 @@ fn distinct_handles_do_not_share_source_identity() {
     ));
     let topic = RtdTopic::single("shared").unwrap();
 
-    let first = runtime.prepare(&source_a, topic.clone()).unwrap();
-    let second = runtime.prepare(&source_b, topic).unwrap();
+    let first = runtime.prepare(&source_a, topic.borrowed()).unwrap();
+    let second = runtime.prepare(&source_b, topic.borrowed()).unwrap();
 
     assert_ne!(first.key(), second.key());
 
@@ -1803,7 +1845,7 @@ fn same_handle_reuses_active_subscription_identity() {
 
     let topic = RtdTopic::single("shared-active").unwrap();
 
-    let first = runtime.prepare(&source, topic.clone()).unwrap();
+    let first = runtime.prepare(&source, topic.borrowed()).unwrap();
     let id = first.id();
     let key = *first.key();
     first.commit();
@@ -1813,7 +1855,7 @@ fn same_handle_reuses_active_subscription_identity() {
         .unwrap();
     connection.commit().unwrap();
 
-    let second = runtime.prepare(&source, topic).unwrap();
+    let second = runtime.prepare(&source, topic.borrowed()).unwrap();
 
     assert_eq!(second.id(), id);
     assert_eq!(second.key(), &key);
@@ -1848,13 +1890,16 @@ fn released_source_identity_returns_to_the_live_quota() {
     ));
 
     runtime
-        .prepare(&first_source, RtdTopic::single("first").unwrap())
+        .prepare(&first_source, RtdTopic::single("first").unwrap().borrowed())
         .unwrap()
         .rollback();
     let _ = first_source;
 
     runtime
-        .prepare(&second_source, RtdTopic::single("second").unwrap())
+        .prepare(
+            &second_source,
+            RtdTopic::single("second").unwrap().borrowed(),
+        )
         .expect("a released source identity returns to the live quota")
         .rollback();
 }
@@ -1865,12 +1910,12 @@ fn live_source_reuses_identity_after_pending_subscription_is_removed() {
     let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let topic = RtdTopic::single("stable").unwrap();
 
-    let first = runtime.prepare(&source, topic.clone()).unwrap();
+    let first = runtime.prepare(&source, topic.borrowed()).unwrap();
 
     let first_key = *first.key();
     first.rollback();
 
-    let second = runtime.prepare(&source, topic).unwrap();
+    let second = runtime.prepare(&source, topic.borrowed()).unwrap();
 
     assert_ne!(second.key(), &first_key);
 }
@@ -1890,7 +1935,7 @@ fn failed_pending_admission_rolls_back_new_source_identity() {
     ));
 
     assert!(matches!(
-        runtime.prepare(&source, RtdTopic::single("blocked").unwrap()),
+        runtime.prepare(&source, RtdTopic::single("blocked").unwrap().borrowed()),
         Err(XllError::Overloaded)
     ));
 
@@ -1940,10 +1985,13 @@ fn source_limit_counts_distinct_live_sources_not_topics() {
     ));
 
     let first = runtime
-        .prepare(&source, RtdTopic::single("first-topic").unwrap())
+        .prepare(&source, RtdTopic::single("first-topic").unwrap().borrowed())
         .unwrap();
     let second = runtime
-        .prepare(&source, RtdTopic::single("second-topic").unwrap())
+        .prepare(
+            &source,
+            RtdTopic::single("second-topic").unwrap().borrowed(),
+        )
         .unwrap();
 
     let catalog = runtime.catalog.lock();
@@ -1978,10 +2026,16 @@ fn source_limit_rejects_a_second_live_source() {
     ));
 
     let first = runtime
-        .prepare(&source_a, RtdTopic::single("first-source").unwrap())
+        .prepare(
+            &source_a,
+            RtdTopic::single("first-source").unwrap().borrowed(),
+        )
         .unwrap();
     assert!(matches!(
-        runtime.prepare(&source_b, RtdTopic::single("second-source").unwrap()),
+        runtime.prepare(
+            &source_b,
+            RtdTopic::single("second-source").unwrap().borrowed()
+        ),
         Err(XllError::Overloaded)
     ));
 
@@ -2027,12 +2081,16 @@ fn colliding_topics_remain_distinct_and_survive_either_removal_order() {
         let (arena, source, _, _) = publishing_source::<f64>(None);
         let runtime = SubscriptionRuntime::with_sources_for_internal(arena);
         let topic = |name| RtdTopic::single(name).unwrap().with_test_identity_hash(42);
-        let first = runtime.prepare(&source, topic("USDJPY")).unwrap();
-        let second = runtime.prepare(&source, topic("EURUSD")).unwrap();
+        let first = runtime
+            .prepare(&source, topic("USDJPY").borrowed())
+            .unwrap();
+        let second = runtime
+            .prepare(&source, topic("EURUSD").borrowed())
+            .unwrap();
         assert_ne!(first.id(), second.id());
 
         for (name, id) in [("USDJPY", first.id()), ("EURUSD", second.id())] {
-            let repeated = runtime.prepare(&source, topic(name)).unwrap();
+            let repeated = runtime.prepare(&source, topic(name).borrowed()).unwrap();
             assert_eq!(repeated.id(), id);
             repeated.rollback();
         }
@@ -2060,7 +2118,7 @@ fn colliding_topics_remain_distinct_and_survive_either_removal_order() {
             let catalog = runtime.catalog.lock();
             assert!(
                 catalog
-                    .find_identity(SourceId(source.id), &topic(removed_name))
+                    .find_identity(SourceId(source.id), &topic(removed_name).borrowed())
                     .unwrap()
                     .is_none()
             );
@@ -2074,7 +2132,9 @@ fn colliding_topics_remain_distinct_and_survive_either_removal_order() {
             );
             catalog.assert_identity_invariants();
         }
-        let repeated = runtime.prepare(&source, topic(surviving_name)).unwrap();
+        let repeated = runtime
+            .prepare(&source, topic(surviving_name).borrowed())
+            .unwrap();
         assert_eq!(repeated.id(), survivor.id());
         repeated.rollback();
         survivor.rollback();
@@ -2123,7 +2183,7 @@ fn identity_lookup_reports_orphaned_candidate() {
         )
         .unwrap();
     assert!(matches!(
-        catalog.find_identity(SourceId(source.id), &topic),
+        catalog.find_identity(SourceId(source.id), &topic.borrowed()),
         Err(XllError::Internal {
             diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_INDEX_ORPHAN
         })
@@ -2139,9 +2199,9 @@ fn topic_part_boundaries_are_part_of_subscription_identity() {
     let topic_a = RtdTopic::new(["a\0b", "c"]).unwrap();
     let topic_b = RtdTopic::new(["a", "b\0c"]).unwrap();
 
-    let prepared_a = runtime.prepare(&source, topic_a).unwrap();
+    let prepared_a = runtime.prepare(&source, topic_a.borrowed()).unwrap();
 
-    let prepared_b = runtime.prepare(&source, topic_b).unwrap();
+    let prepared_b = runtime.prepare(&source, topic_b.borrowed()).unwrap();
 
     assert_ne!(prepared_a.key(), prepared_b.key());
     runtime.catalog.lock().assert_identity_invariants();
@@ -2153,15 +2213,170 @@ fn structurally_equal_topics_share_transport_key() {
     let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
 
     let prepared_a = runtime
-        .prepare(&source, RtdTopic::new(["market", "USD\0JPY"]).unwrap())
+        .prepare(
+            &source,
+            RtdTopic::new(["market", "USD\0JPY"]).unwrap().borrowed(),
+        )
         .unwrap();
 
     let prepared_b = runtime
-        .prepare(&source, RtdTopic::new(["market", "USD\0JPY"]).unwrap())
+        .prepare(
+            &source,
+            RtdTopic::new(["market", "USD\0JPY"]).unwrap().borrowed(),
+        )
         .unwrap();
 
     assert_eq!(prepared_a.key(), prepared_b.key());
     runtime.catalog.lock().assert_identity_invariants();
+}
+
+#[test]
+fn borrowed_preparation_owns_only_canonical_storage_and_outlives_input() {
+    let (arena, source, _, _) = publishing_source::<f64>(None);
+    let runtime = SubscriptionRuntime::with_sources_for_internal(arena);
+    let first = {
+        let input = String::from("USD\0JPY");
+        let parts = ["market", input.as_str()];
+        let prepared = runtime
+            .prepare(&source, BorrowedTopicParts::new(&parts).unwrap())
+            .unwrap();
+        assert_ne!(
+            runtime.catalog.lock().entries[&prepared.id()].topic.parts()[1].as_ptr(),
+            input.as_ptr()
+        );
+        prepared
+    };
+    let id = first.id();
+    let canonical = runtime.catalog.lock().entries[&id].topic.parts().as_ptr();
+    let repeated = runtime
+        .prepare(
+            &source,
+            BorrowedTopicParts::new(&["market", "USD\0JPY"]).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(repeated.id(), id);
+    assert_eq!(
+        runtime.catalog.lock().entries[&id].topic.parts().as_ptr(),
+        canonical
+    );
+    repeated.rollback();
+    first.rollback();
+    let catalog = runtime.catalog.lock();
+    assert!(catalog.entries.is_empty());
+    catalog.assert_identity_invariants();
+}
+
+#[test]
+fn borrowed_collision_reuse_and_removal_preserve_source_isolation() {
+    let fixture = SourceFixture::new();
+    let (source, _, _) = fixture.add::<f64>(None);
+    let (other, _, _) = fixture.add::<f64>(None);
+    let runtime = SubscriptionRuntime::with_sources_for_internal(fixture.finish());
+    let usd_parts = ["market", "USD"];
+    let eur_parts = ["market", "EUR"];
+    let topic = |parts| {
+        BorrowedTopicParts::new(parts)
+            .unwrap()
+            .with_test_identity_hash(7)
+    };
+    let usd = runtime.prepare(&source, topic(&usd_parts)).unwrap();
+    let eur = runtime.prepare(&source, topic(&eur_parts)).unwrap();
+    assert_ne!(usd.id(), eur.id());
+    usd.rollback();
+    let repeated = runtime.prepare(&source, topic(&eur_parts)).unwrap();
+    assert_eq!(repeated.id(), eur.id());
+    let foreign = runtime.prepare(&other, topic(&eur_parts)).unwrap();
+    assert_ne!(foreign.id(), eur.id());
+    runtime.catalog.lock().assert_identity_invariants();
+    repeated.rollback();
+    foreign.rollback();
+    eur.rollback();
+    runtime.catalog.lock().assert_identity_invariants();
+}
+
+#[test]
+fn pending_count_follows_borrowed_connection_and_termination_transitions() {
+    let (arena, source, _, _) = publishing_source(Some(1.0_f64));
+    let runtime = SubscriptionRuntime::with_sources_for_internal(arena);
+    let server = runtime.register_test_server(1);
+    let first = runtime
+        .prepare(&source, BorrowedTopicParts::new(&["active"]).unwrap())
+        .unwrap();
+    let id = first.id();
+    assert_eq!(runtime.catalog.lock().pending_len(), 1);
+    let connection = runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap();
+    let connecting = runtime
+        .prepare(&source, BorrowedTopicParts::new(&["active"]).unwrap())
+        .unwrap();
+    assert_eq!(connecting.id(), id);
+    assert!(!connecting.has_reservation());
+    connecting.rollback();
+    connection.commit().unwrap();
+    assert_eq!(
+        runtime.catalog.lock().pending_len(),
+        1,
+        "original reservation is live"
+    );
+    first.commit();
+    assert_eq!(runtime.catalog.lock().pending_len(), 0);
+    let active = runtime
+        .prepare(&source, BorrowedTopicParts::new(&["active"]).unwrap())
+        .unwrap();
+    assert_eq!(active.id(), id);
+    assert!(!active.has_reservation());
+    active.rollback();
+    runtime.catalog.lock().assert_identity_invariants();
+    runtime
+        .terminate_server(ServerGeneration::new(1).unwrap())
+        .unwrap();
+    let catalog = runtime.catalog.lock();
+    assert_eq!(catalog.pending_len(), 0);
+    assert!(catalog.entries.is_empty());
+    catalog.assert_identity_invariants();
+}
+
+#[test]
+fn borrowed_admission_rejection_preserves_counts_and_runtime_checks() {
+    let (arena, source, _, _) = publishing_source::<f64>(None);
+    let runtime = SubscriptionRuntime::with_host(
+        RuntimeGeneration::new(1).unwrap(),
+        RtdLimits::standard().with_max_pending(RtdCapacity::from_usize(1)),
+        Default::default(),
+        arena,
+    );
+    let first = runtime
+        .prepare(&source, BorrowedTopicParts::new(&["a"]).unwrap())
+        .unwrap();
+    let next = runtime.catalog.lock().next_subscription_id;
+    assert!(matches!(
+        runtime.prepare(&source, BorrowedTopicParts::new(&["b"]).unwrap()),
+        Err(XllError::Overloaded)
+    ));
+    assert_eq!(runtime.catalog.lock().next_subscription_id, next);
+    runtime.catalog.lock().assert_identity_invariants();
+    first.rollback();
+    runtime
+        .prepare(&source, BorrowedTopicParts::new(&["b"]).unwrap())
+        .unwrap()
+        .rollback();
+    runtime.close().unwrap();
+    assert!(matches!(
+        runtime.prepare(&source, BorrowedTopicParts::new(&["a"]).unwrap()),
+        Err(XllError::Closing)
+    ));
+    runtime.catalog.lock().assert_identity_invariants();
+    let stale_runtime = SubscriptionRuntime::with_host(
+        RuntimeGeneration::new(2).unwrap(),
+        RtdLimits::standard(),
+        Default::default(),
+        SourceArena::empty(RuntimeGeneration::new(2).unwrap()),
+    );
+    assert!(matches!(
+        stale_runtime.prepare(&source, BorrowedTopicParts::new(&["a"]).unwrap()),
+        Err(XllError::StaleHandle)
+    ));
 }
 
 #[test]
@@ -2176,7 +2391,7 @@ fn large_logical_topic_uses_bounded_transport_key() {
     let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
 
     let topic = RtdTopic::single("x".repeat(16 * 1024)).unwrap();
-    let prepared = runtime.prepare(&source, topic).unwrap();
+    let prepared = runtime.prepare(&source, topic.borrowed()).unwrap();
 
     let transport = prepared.key().to_transport();
     assert_eq!(transport.encode_utf16().count(), 43);
@@ -2195,8 +2410,8 @@ fn distinct_identities_receive_distinct_transport_keys() {
 
     let topic = RtdTopic::single("same").unwrap();
 
-    let a = runtime.prepare(&source_a, topic.clone()).unwrap();
-    let b = runtime.prepare(&source_b, topic).unwrap();
+    let a = runtime.prepare(&source_a, topic.borrowed()).unwrap();
+    let b = runtime.prepare(&source_b, topic.borrowed()).unwrap();
 
     assert_ne!(a.key(), b.key());
     runtime.catalog.lock().assert_identity_invariants();
@@ -2209,7 +2424,7 @@ fn identity_index_is_removed_after_final_unbind() {
     let server = runtime.register_test_server(1);
 
     let prepared = runtime
-        .prepare(&source, RtdTopic::single("unbind_test").unwrap())
+        .prepare(&source, RtdTopic::single("unbind_test").unwrap().borrowed())
         .unwrap();
     let id = prepared.id();
     prepared.commit();
@@ -2237,10 +2452,10 @@ fn catalog_entries_are_canonical_for_subscription_identity() {
     ));
 
     let prep_a = runtime
-        .prepare(&source_a, RtdTopic::single("topic-a").unwrap())
+        .prepare(&source_a, RtdTopic::single("topic-a").unwrap().borrowed())
         .unwrap();
     let prep_b = runtime
-        .prepare(&source_b, RtdTopic::single("topic-b").unwrap())
+        .prepare(&source_b, RtdTopic::single("topic-b").unwrap().borrowed())
         .unwrap();
 
     let catalog = runtime.catalog.lock();
@@ -2334,7 +2549,7 @@ fn server_notification_retry_sequence_eventually_succeeds() {
         .unwrap();
 
     let prep = runtime
-        .prepare(&source, RtdTopic::single("retry_test").unwrap())
+        .prepare(&source, RtdTopic::single("retry_test").unwrap().borrowed())
         .unwrap();
     let id = prep.id();
     prep.commit();
@@ -2381,7 +2596,10 @@ fn server_notification_retry_suppressed_after_max_attempts() {
         .unwrap();
 
     let prep = runtime
-        .prepare(&source, RtdTopic::single("suppress_test").unwrap())
+        .prepare(
+            &source,
+            RtdTopic::single("suppress_test").unwrap().borrowed(),
+        )
         .unwrap();
     let id = prep.id();
     prep.commit();
@@ -2412,7 +2630,7 @@ fn server_notification_panic_records_cleanup_failure() {
         .unwrap();
 
     let prep = runtime
-        .prepare(&source, RtdTopic::single("panic_test").unwrap())
+        .prepare(&source, RtdTopic::single("panic_test").unwrap().borrowed())
         .unwrap();
     let id = prep.id();
     prep.commit();
@@ -2463,7 +2681,7 @@ fn runtime_close_and_publish_race() {
     let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime.register_test_server(1);
     let prep = runtime
-        .prepare(&source, RtdTopic::single("race_test").unwrap())
+        .prepare(&source, RtdTopic::single("race_test").unwrap().borrowed())
         .unwrap();
     let id = prep.id();
     prep.commit();
@@ -2518,7 +2736,7 @@ fn quota_permit_releases_on_drain() {
     let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime.register_test_server(1);
     let prep = runtime
-        .prepare(&source, RtdTopic::single("quota_test").unwrap())
+        .prepare(&source, RtdTopic::single("quota_test").unwrap().borrowed())
         .unwrap();
     let id = prep.id();
     prep.commit();
@@ -2580,7 +2798,7 @@ fn publish_core_drops_cleanly_without_cycle_when_subscription_holds_sink() {
     let server = runtime.register_test_server(1);
 
     let prep = runtime
-        .prepare(&source, RtdTopic::single("cycle_test").unwrap())
+        .prepare(&source, RtdTopic::single("cycle_test").unwrap().borrowed())
         .unwrap();
     let id = prep.id();
     prep.commit();
@@ -2608,12 +2826,12 @@ fn prepare_warm_path_reuses_registered_source_identity() {
     assert_eq!(runtime.catalog.lock().identities.distinct_source_count(), 0);
 
     // 1. Initial prepare registers the handle identity and creates the pending subscription.
-    let first = runtime.prepare(&source, topic.clone()).unwrap();
+    let first = runtime.prepare(&source, topic.borrowed()).unwrap();
     assert!(first.has_reservation());
     assert_eq!(runtime.catalog.lock().identities.distinct_source_count(), 1);
 
     // 2. ExistingPending prepare reuses the same handle identity and pending entry.
-    let second_pending = runtime.prepare(&source, topic.clone()).unwrap();
+    let second_pending = runtime.prepare(&source, topic.borrowed()).unwrap();
     assert!(second_pending.has_reservation());
     assert_eq!(runtime.catalog.lock().identities.distinct_source_count(), 1);
     second_pending.rollback();
@@ -2628,7 +2846,7 @@ fn prepare_warm_path_reuses_registered_source_identity() {
     conn.commit().unwrap();
 
     // 3. ExistingActive prepare is a warm lookup without a new source identity.
-    let warm_prepared = runtime.prepare(&source, topic).unwrap();
+    let warm_prepared = runtime.prepare(&source, topic.borrowed()).unwrap();
     assert!(!warm_prepared.has_reservation());
     assert_eq!(runtime.catalog.lock().identities.distinct_source_count(), 1);
     warm_prepared.rollback();
@@ -2642,7 +2860,7 @@ fn existing_active_does_not_downgrade_runtime_or_mutate_catalog() {
 
     let topic = RtdTopic::single("existing-active-noop").unwrap();
 
-    let first = runtime.prepare(&source, topic.clone()).unwrap();
+    let first = runtime.prepare(&source, topic.borrowed()).unwrap();
     let id = first.id();
     let key = *first.key();
     first.commit();
@@ -2653,7 +2871,7 @@ fn existing_active_does_not_downgrade_runtime_or_mutate_catalog() {
     conn.commit().unwrap();
 
     // Prepare on existing active: warm lookup
-    let warm = runtime.prepare(&source, topic).unwrap();
+    let warm = runtime.prepare(&source, topic.borrowed()).unwrap();
     assert_eq!(warm.id(), id);
     assert_eq!(warm.key(), &key);
     assert!(!warm.has_reservation());
@@ -2677,7 +2895,10 @@ fn resolve_transport_key_validates_runtime_identity() {
     let runtime_b = Arc::new(SubscriptionRuntime::new());
 
     let prep = runtime_a
-        .prepare(&source, RtdTopic::single("resolve-test").unwrap())
+        .prepare(
+            &source,
+            RtdTopic::single("resolve-test").unwrap().borrowed(),
+        )
         .unwrap();
 
     let id = prep.id();
@@ -2721,7 +2942,10 @@ fn preparation_rejects_missing_source_without_catalog_reservation() {
     source.id.sequence = u64::MAX;
 
     assert!(matches!(
-        runtime.prepare(&source, RtdTopic::single("missing-source").unwrap()),
+        runtime.prepare(
+            &source,
+            RtdTopic::single("missing-source").unwrap().borrowed()
+        ),
         Err(XllError::StaleHandle)
     ));
     let catalog = runtime.catalog.lock();
@@ -2736,7 +2960,10 @@ fn rejected_connection_source_leaves_preparation_pending() {
     let runtime = SubscriptionRuntime::with_sources_for_internal(arena);
     let server = runtime.register_test_server(1);
     let prepared = runtime
-        .prepare(&source, RtdTopic::single("source-resolution").unwrap())
+        .prepare(
+            &source,
+            RtdTopic::single("source-resolution").unwrap().borrowed(),
+        )
         .unwrap();
     let id = prepared.id();
     // Inject a damaged identity after preparation to verify that the
@@ -3189,7 +3416,10 @@ fn miri_runtime_drop_disconnects_subscriptions_before_reclaiming_sources() {
     let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime.register_test_server(1);
     let prepared = runtime
-        .prepare(&source, RtdTopic::single("runtime-drop").unwrap())
+        .prepare(
+            &source,
+            RtdTopic::single("runtime-drop").unwrap().borrowed(),
+        )
         .unwrap();
     let id = prepared.id();
     prepared.commit();
@@ -3265,7 +3495,10 @@ fn refresh_drop_contains_hostile_notifier_panic_during_unwind() {
         );
         let server = runtime.register_test_server(1);
         let prepared = runtime
-            .prepare(&source, RtdTopic::single("drop-refresh-panic").unwrap())
+            .prepare(
+                &source,
+                RtdTopic::single("drop-refresh-panic").unwrap().borrowed(),
+            )
             .unwrap();
         let id = prepared.id();
         prepared.commit();
@@ -3302,7 +3535,10 @@ fn closing_disconnect_leaves_subscription_for_termination_to_join() {
     let runtime = SubscriptionRuntime::with_sources_for_internal(arena);
     let server = runtime.register_test_server(1);
     let prepared = runtime
-        .prepare(&source, RtdTopic::single("disconnect-closing").unwrap())
+        .prepare(
+            &source,
+            RtdTopic::single("disconnect-closing").unwrap().borrowed(),
+        )
         .unwrap();
     let id = prepared.id();
     prepared.commit();
@@ -3335,7 +3571,7 @@ fn stale_connection_rollback_preserves_reused_topic_subscription() {
     let runtime = SubscriptionRuntime::with_sources_for_internal(fixture.finish());
     let server = runtime.register_test_server(1);
     let prepared = runtime
-        .prepare(&old_source, RtdTopic::single("old").unwrap())
+        .prepare(&old_source, RtdTopic::single("old").unwrap().borrowed())
         .unwrap();
     let id = prepared.id();
     prepared.commit();
@@ -3344,7 +3580,7 @@ fn stale_connection_rollback_preserves_reused_topic_subscription() {
     assert!(old_disconnected.load(Ordering::Acquire));
 
     let prepared = runtime
-        .prepare(&new_source, RtdTopic::single("new").unwrap())
+        .prepare(&new_source, RtdTopic::single("new").unwrap().borrowed())
         .unwrap();
     let id = prepared.id();
     prepared.commit();
@@ -3385,7 +3621,7 @@ fn uncommitted_subscription_trace_balances_each_cleanup_path() {
         };
         let server = runtime.register_test_server(1);
         let prepared = runtime
-            .prepare(&source, RtdTopic::single(cleanup).unwrap())
+            .prepare(&source, RtdTopic::single(cleanup).unwrap().borrowed())
             .unwrap();
         let id = prepared.id();
         prepared.commit();
@@ -3673,7 +3909,7 @@ fn runtime_close_reclaims_all_inflight_slots() {
     for i in 1..=5 {
         let topic_name = format!("orphan-topic-{i}");
         let prepared = runtime
-            .prepare(&source, RtdTopic::single(&topic_name).unwrap())
+            .prepare(&source, RtdTopic::single(&topic_name).unwrap().borrowed())
             .unwrap();
         let id = prepared.id();
         prepared.commit();

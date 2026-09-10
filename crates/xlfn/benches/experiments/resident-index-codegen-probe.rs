@@ -28,7 +28,7 @@ mod codegen_probe {
     #[unsafe(no_mangle)]
     pub fn resident_codegen_insert_wrapped(
         index: &Wrapped,
-        key: VersionedKey<u64>,
+        key: &VersionedKey<u64>,
         init: fn() -> XllResult<Entry<u64>>,
     ) -> Result<Entry<u64>, Arc<XllError>> {
         index.insert(key, init)
@@ -36,10 +36,10 @@ mod codegen_probe {
     #[unsafe(no_mangle)]
     pub fn resident_codegen_insert_direct(
         index: &Raw,
-        key: VersionedKey<u64>,
+        key: &VersionedKey<u64>,
         init: fn() -> XllResult<Entry<u64>>,
     ) -> Result<Entry<u64>, Arc<XllError>> {
-        index.try_get_with(key, init)
+        index.try_get_with_by_ref(key, init)
     }
     #[unsafe(no_mangle)]
     pub fn resident_codegen_invalidate_wrapped(index: &Wrapped, key: &VersionedKey<u64>) {

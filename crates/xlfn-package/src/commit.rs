@@ -20,7 +20,7 @@ pub(crate) enum PreparedDirectoryEntry {
     File {
         name: String,
         identity: FileIdentity,
-        bytes: Arc<[u8]>,
+        bytes: SharedBytes,
     },
     Directory {
         name: String,
@@ -179,11 +179,11 @@ impl PreparedPackageCommit {
 
     /// Returns the verified snapshots so a containing directory transaction
     /// can retain the same allocations instead of rereading every artifact.
-    pub fn shared_artifacts(&self) -> impl Iterator<Item = (PathBuf, Arc<[u8]>)> + '_ {
+    pub fn shared_artifacts(&self) -> impl Iterator<Item = (PathBuf, SharedBytes)> + '_ {
         self.entries.iter().map(|entry| {
             (
                 entry.artifact.relative_path.clone(),
-                Arc::clone(&entry.artifact.bytes),
+                entry.artifact.bytes.clone(),
             )
         })
     }
@@ -199,7 +199,7 @@ impl PreparedDirectoryCommit {
     pub fn prepare_with_shared_artifacts(
         staging: &Path,
         expected_names: &[&str],
-        shared: &BTreeMap<PathBuf, Arc<[u8]>>,
+        shared: &BTreeMap<PathBuf, SharedBytes>,
     ) -> PackageResult<Self> {
         let expected_names = expected_name_set(expected_names)?;
         let mut budget = PreparedBudget::default();
@@ -265,7 +265,7 @@ pub(crate) enum ExpectedIdentity {
     SameOrBytes(FileIdentity),
 }
 
-pub(crate) fn snapshot_staged_artifact(target: &str, path: &Path) -> PackageResult<Arc<[u8]>> {
+pub(crate) fn snapshot_staged_artifact(target: &str, path: &Path) -> PackageResult<SharedBytes> {
     let mut file = open_staged_file_no_follow(path).map_err(|_| staged_changed(target, path))?;
     let metadata = file.metadata().map_err(|_| staged_changed(target, path))?;
     if !metadata.is_file() || is_reparse_point(&metadata) {
@@ -302,6 +302,25 @@ pub(crate) fn verify_staged_artifact(
     expected: &VerifiedArtifact,
     identity: ExpectedIdentity,
 ) -> PackageResult<FileIdentity> {
+    if expected.bytes.len() as u64 != expected.size {
+        return Err(staged_changed(target, path));
+    }
+    verify_staged_bytes(
+        target,
+        path,
+        &expected.bytes,
+        Some(&expected.sha256),
+        identity,
+    )
+}
+
+pub(crate) fn verify_staged_bytes(
+    target: &str,
+    path: &Path,
+    expected: &[u8],
+    expected_digest: Option<&[u8; 32]>,
+    identity: ExpectedIdentity,
+) -> PackageResult<FileIdentity> {
     let mut file = open_staged_file_no_follow(path).map_err(|_| staged_changed(target, path))?;
     let metadata = file.metadata().map_err(|_| staged_changed(target, path))?;
     if !metadata.is_file() || is_reparse_point(&metadata) {
@@ -313,24 +332,23 @@ pub(crate) fn verify_staged_artifact(
     {
         return Err(staged_changed(target, path));
     }
-    let snapshot = read_stable_snapshot_with_limit(
+    let comparison = compare_stable_snapshot(
         target,
         path,
         &mut file,
+        expected,
+        expected_digest,
+        Some(expected.len() as u64),
         &NoopSnapshotObserver,
-        Some(expected.size),
     )?;
-    #[cfg(unix)]
-    verify_snapshot_against_second_read(target, path, &mut file, &snapshot)?;
-    let matches = snapshot.len() as u64 == expected.size
-        && sha256_digest(&snapshot) == expected.sha256
-        && snapshot.as_ref() == expected.bytes.as_ref();
-    if !matches {
+    if !comparison {
         return Err(staged_changed(target, path));
     }
+    #[cfg(unix)]
+    verify_snapshot_against_second_read(target, path, &mut file, expected)?;
     if let ExpectedIdentity::SameOrBytes(expected_identity) = identity
         && state.identity != expected_identity
-        && snapshot.as_ref() != expected.bytes.as_ref()
+        && !comparison
     {
         return Err(staged_changed(target, path));
     }
@@ -447,7 +465,7 @@ pub(crate) fn prepare_directory_entry(
     name: &str,
     path: &Path,
     relative: &Path,
-    shared: &BTreeMap<PathBuf, Arc<[u8]>>,
+    shared: &BTreeMap<PathBuf, SharedBytes>,
     budget: &mut PreparedBudget,
 ) -> PackageResult<PreparedDirectoryEntry> {
     budget.account_entry(path)?;
@@ -465,7 +483,26 @@ pub(crate) fn prepare_directory_entry(
         let file_state = file_snapshot_state(&handle)?;
         budget.reserve_bytes(path, file_state.len)?;
         let identity = file_state.identity;
-        let snapshot = read_stable_snapshot_with_limit(
+        if let Some(candidate) = shared.get(relative)
+            && compare_stable_snapshot(
+                "directory commit",
+                path,
+                &mut handle,
+                candidate,
+                None,
+                Some(file_state.len),
+                &NoopSnapshotObserver,
+            )?
+        {
+            #[cfg(unix)]
+            verify_snapshot_against_second_read("directory commit", path, &mut handle, candidate)?;
+            return Ok(PreparedDirectoryEntry::File {
+                name: name.to_owned(),
+                identity,
+                bytes: candidate.clone(),
+            });
+        }
+        let bytes = read_stable_snapshot_with_limit(
             "directory commit",
             path,
             &mut handle,
@@ -473,11 +510,7 @@ pub(crate) fn prepare_directory_entry(
             Some(file_state.len),
         )?;
         #[cfg(unix)]
-        verify_snapshot_against_second_read("directory commit", path, &mut handle, &snapshot)?;
-        let bytes = shared
-            .get(relative)
-            .filter(|candidate| candidate.as_ref() == snapshot.as_ref())
-            .map_or(snapshot, Arc::clone);
+        verify_snapshot_against_second_read("directory commit", path, &mut handle, &bytes)?;
         Ok(PreparedDirectoryEntry::File {
             name: name.to_owned(),
             identity,
@@ -497,7 +530,7 @@ pub(crate) fn prepare_directory_entry(
 pub(crate) fn prepare_directory_contents(
     path: &Path,
     relative_prefix: &Path,
-    shared: &BTreeMap<PathBuf, Arc<[u8]>>,
+    shared: &BTreeMap<PathBuf, SharedBytes>,
     budget: &mut PreparedBudget,
 ) -> PackageResult<PreparedDirectoryContents> {
     let (identity, actual_names) = inspect_directory_identity(path, budget.remaining_entries())?;
@@ -576,30 +609,30 @@ pub(crate) fn verify_prepared_directory_contents(
                 }
                 let state = file_snapshot_state(&handle)
                     .map_err(|_| staged_changed("directory commit", &path))?;
-                let bytes = read_stable_snapshot_with_limit(
+                let comparison = compare_stable_snapshot(
                     "directory commit",
                     &path,
                     &mut handle,
-                    &NoopSnapshotObserver,
+                    expected_bytes,
+                    None,
                     Some(expected_bytes.len() as u64),
+                    &NoopSnapshotObserver,
                 )?;
+                if !comparison {
+                    return Err(staged_changed("directory commit", &path));
+                }
                 #[cfg(unix)]
                 verify_snapshot_against_second_read(
                     "directory commit",
                     &path,
                     &mut handle,
-                    &bytes,
+                    expected_bytes,
                 )?;
                 if source {
                     if state.identity != *expected_identity {
                         return Err(staged_changed("directory commit", &path));
                     }
-                } else if state.identity != *expected_identity
-                    && bytes.as_ref() != expected_bytes.as_ref()
-                {
-                    return Err(staged_changed("directory commit", &path));
-                }
-                if bytes.as_ref() != expected_bytes.as_ref() {
+                } else if state.identity != *expected_identity && !comparison {
                     return Err(staged_changed("directory commit", &path));
                 }
             }

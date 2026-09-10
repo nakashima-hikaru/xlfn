@@ -15,6 +15,11 @@ impl BorrowedStringArrayOutputBenchmark {
         }
     }
 
+    pub fn with_payload(cells: usize, payload: String) -> Self {
+        assert!(cells > 0, "benchmark array must be non-empty");
+        Self { cells, payload }
+    }
+
     #[inline]
     pub fn run_borrowed(&self) {
         let mut builder =

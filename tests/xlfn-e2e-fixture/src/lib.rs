@@ -2,8 +2,8 @@
 
 use std::collections::HashMap;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicI32, Ordering};
 use xlfn::prelude::*;
 use xlfn::rtd::{RtdSink, RtdSource, RtdSubscription, RtdTopic, RtdValue};
 
@@ -95,11 +95,7 @@ impl FixtureCore {
     }
 
     fn active_topics(&self) -> XllResult<i32> {
-        let count = self
-            .sinks
-            .lock()
-            .map_err(|_| XllError::Panic)?
-            .len();
+        let count = self.sinks.lock().map_err(|_| XllError::Panic)?.len();
         i32::try_from(count).map_err(|_| XllError::Domain {
             code: xlfn::error::DomainErrorCode::Overflow,
         })
@@ -200,10 +196,9 @@ pub fn rtd_fixture(
             xlfn::error::InputError::OutOfRange,
         ));
     }
-    context.rtd().subscribe(
-        &context.state().rtd,
-        RtdTopic::single(format!("topic-{topic_id}"))?,
-    )
+    context
+        .rtd()
+        .subscribe(&context.state().rtd, &[&format!("topic-{topic_id}")])
 }
 
 #[excel_function(name = "FRAMEWORK.RTD.PUBLISH", volatile)]

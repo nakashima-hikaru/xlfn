@@ -1,12 +1,12 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use xlfn::benchmark_support::{
-    BENCHMARK_MEASUREMENT_TIME, BenchHandleObject, RawArgumentIngressBenchmark,
+    BenchHandleObject, RawArgumentIngressBenchmark, benchmark_measurement_time,
 };
 use xlfn::value::{ExcelCellValue, ExcelValue, Matrix};
 
 fn argument_ingress_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("argument_ingress");
-    group.measurement_time(BENCHMARK_MEASUREMENT_TIME);
+    group.measurement_time(benchmark_measurement_time());
 
     // 1. Scalar f64
     let mut f64_bench = RawArgumentIngressBenchmark::number(42.0);
@@ -46,6 +46,13 @@ fn argument_ingress_benchmarks(c: &mut Criterion) {
     });
     group.bench_function("string_1k/with_identity", |b| {
         b.iter(|| str_long.run_with_identity::<String>());
+    });
+    group.bench_function("string_1k/borrowed", |b| {
+        b.iter(|| str_long.run_borrowed_str());
+    });
+    let mut unicode_long = RawArgumentIngressBenchmark::string(&"日本語💡".repeat(80));
+    group.bench_function("string_unicode_1k/borrowed", |b| {
+        b.iter(|| unicode_long.run_borrowed_str());
     });
 
     // 5. String matrices

@@ -1,7 +1,7 @@
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use xlfn::benchmark_support::{
-    BENCHMARK_MEASUREMENT_TIME, HandleColdBatch, HandleColdGrowthBenchmark,
-    HandleDistinctKeyBenchmark, HandleRevisionChurnBenchmark, HandleWarmBenchmark,
+    HandleColdBatch, HandleColdGrowthBenchmark, HandleDistinctKeyBenchmark,
+    HandleRevisionChurnBenchmark, HandleWarmBenchmark, benchmark_measurement_time,
 };
 
 const DISTINCT_WORKERS: [usize; 4] = [1, 4, 16, 32];
@@ -13,7 +13,7 @@ const REVISION_CHURN_SIZE: usize = 10_000;
 fn handle_prepare_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("handle_prepare");
     group.sample_size(50);
-    group.measurement_time(BENCHMARK_MEASUREMENT_TIME);
+    group.measurement_time(benchmark_measurement_time());
 
     group.throughput(Throughput::Elements(BATCH_SIZE as u64));
     group.bench_function("cold_miss_batch_100", |b| {

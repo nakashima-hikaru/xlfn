@@ -10,7 +10,18 @@ pub(crate) fn checked_utf16_len(
     argument: &'static str,
     limit: usize,
 ) -> XllResult<usize> {
-    let length = text.encode_utf16().count();
+    let length = if text.is_ascii() {
+        text.len()
+    } else {
+        // Valid UTF-8 contributes one UTF-16 unit per leading byte, plus
+        // one more for each four-byte scalar (a surrogate pair). Counting
+        // independent bytes can vectorize and avoids decoding characters
+        // merely to determine the allocation size.
+        text.as_bytes()
+            .iter()
+            .map(|&byte| usize::from(byte & 0xc0 != 0x80) + usize::from(byte >= 0xf0))
+            .sum()
+    };
     if length > limit {
         return Err(XllError::input(
             argument,
@@ -30,9 +41,8 @@ pub(crate) fn checked_utf16_len(
 /// (ASCII = 1 byte/unit, BMP = 2..3 bytes/unit, astral = 4 bytes/2 units),
 /// `text.len() <= limit` guarantees that the UTF-16 code unit count cannot exceed `limit`.
 ///
-/// When `text.len() > limit`, this falls back to early-terminating UTF-16 iteration,
-/// taking at most `limit + 1` units to detect violations without scanning unbounded text.
-/// If an error occurs, the exact full length is computed for diagnostic error reporting.
+/// Longer UTF-8 strings are counted once, including the exact length used
+/// in an error, without materializing encoded units.
 pub(crate) fn validate_utf16_limit(
     text: &str,
     argument: &'static str,
@@ -43,18 +53,7 @@ pub(crate) fn validate_utf16_limit(
         return Ok(());
     }
 
-    // Fallback: text.len() > limit (e.g. multi-byte UTF-8 like Japanese or emoji),
-    // but the actual UTF-16 code unit count may still be within limit.
-    // Early-terminate at limit + 1 units to avoid scanning huge invalid strings.
-    if text.encode_utf16().take(limit + 1).count() <= limit {
-        Ok(())
-    } else {
-        let actual = text.encode_utf16().count();
-        Err(XllError::input(
-            argument,
-            InputError::TooLarge { limit, actual },
-        ))
-    }
+    checked_utf16_len(text, argument, limit).map(|_| ())
 }
 
 /// Compares UTF-16 code units using the same ASCII-only folding as
@@ -75,35 +74,6 @@ const fn fold_ascii(unit: u16) -> u16 {
         0x41..=0x5a => unit + (0x61 - 0x41),
         _ => unit,
     }
-}
-
-#[cfg(any(
-    test,
-    all(target_os = "windows", any(feature = "rtd", feature = "handles")),
-))]
-pub(crate) fn encode_bounded(
-    text: &str,
-    argument: &'static str,
-    limit: usize,
-) -> XllResult<SmallVec<[u16; INLINE_UTF16_CAPACITY]>> {
-    let mut units = SmallVec::new();
-    let mut length = 0_usize;
-    for unit in text.encode_utf16() {
-        length += 1;
-        if length <= limit {
-            units.push(unit);
-        }
-    }
-    if length > limit {
-        return Err(XllError::input(
-            argument,
-            InputError::TooLarge {
-                limit,
-                actual: length,
-            },
-        ));
-    }
-    Ok(units)
 }
 
 pub(crate) fn encode_counted(
@@ -137,6 +107,16 @@ pub(crate) fn encode_counted(
 mod tests {
     use super::*;
 
+    proptest::proptest! {
+        #[test]
+        fn counted_length_matches_standard_unicode_encoding(text in ".{0,256}") {
+            proptest::prop_assert_eq!(
+                checked_utf16_len(&text, "test", usize::MAX).unwrap(),
+                text.encode_utf16().count(),
+            );
+        }
+    }
+
     #[test]
     fn counted_encoding_uses_one_final_buffer() {
         assert_eq!(
@@ -157,20 +137,6 @@ mod tests {
         .unwrap();
         assert_eq!(encoded.len(), 25);
         assert!(!encoded.spilled());
-    }
-
-    #[test]
-    fn bounded_encoding_reports_the_full_utf16_length() {
-        assert!(matches!(
-            encode_bounded("a😀", "test", 1),
-            Err(XllError::Input {
-                reason: InputError::TooLarge {
-                    limit: 1,
-                    actual: 3
-                },
-                ..
-            })
-        ));
     }
 
     #[test]

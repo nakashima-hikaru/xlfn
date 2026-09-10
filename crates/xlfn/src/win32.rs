@@ -29,6 +29,7 @@ windows_link::link!("advapi32.dll" "system" fn RegQueryValueExW(hkey : HKEY, lpv
 windows_link::link!("advapi32.dll" "system" fn RegSetValueExW(hkey : HKEY, lpvaluename : PCWSTR, reserved : u32, dwtype : u32, lpdata : *const u8, cbdata : u32) -> LSTATUS);
 windows_link::link!("kernel32.dll" "system" fn ReleaseMutex(hmutex : HANDLE) -> BOOL);
 windows_link::link!("kernel32.dll" "system" fn ResetEvent(hevent : HANDLE) -> BOOL);
+windows_link::link!("oleaut32.dll" "system" fn SafeArrayAccessData(psa : *const SAFEARRAY, ppvdata : *mut *mut core::ffi::c_void) -> HRESULT);
 windows_link::link!("oleaut32.dll" "system" fn SafeArrayCreate(vt : VARTYPE, cdims : u32, rgsabound : *const SAFEARRAYBOUND) -> *mut SAFEARRAY);
 windows_link::link!("oleaut32.dll" "system" fn SafeArrayDestroy(psa : *const SAFEARRAY) -> HRESULT);
 windows_link::link!("oleaut32.dll" "system" fn SafeArrayGetDim(psa : *const SAFEARRAY) -> u32);
@@ -37,6 +38,7 @@ windows_link::link!("oleaut32.dll" "system" fn SafeArrayGetLBound(psa : *const S
 windows_link::link!("oleaut32.dll" "system" fn SafeArrayGetUBound(psa : *const SAFEARRAY, ndim : u32, plubound : *mut i32) -> HRESULT);
 windows_link::link!("oleaut32.dll" "system" fn SafeArrayGetVartype(psa : *const SAFEARRAY, pvt : *mut VARTYPE) -> HRESULT);
 windows_link::link!("oleaut32.dll" "system" fn SafeArrayPutElement(psa : *const SAFEARRAY, rgindices : *const i32, pv : *const core::ffi::c_void) -> HRESULT);
+windows_link::link!("oleaut32.dll" "system" fn SafeArrayUnaccessData(psa : *const SAFEARRAY) -> HRESULT);
 windows_link::link!("kernel32.dll" "system" fn SetEvent(hevent : HANDLE) -> BOOL);
 windows_link::link!("oleaut32.dll" "system" fn SysAllocStringLen(strin : *const OLECHAR, ui : u32) -> BSTR);
 windows_link::link!("oleaut32.dll" "system" fn SysFreeString(bstrstring : BSTR));

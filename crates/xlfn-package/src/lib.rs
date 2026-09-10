@@ -24,7 +24,6 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
 
 #[cfg(target_os = "windows")]
 #[allow(
@@ -45,6 +44,7 @@ mod fs_identity;
 mod manifest;
 mod names;
 mod pe;
+mod shared_bytes;
 mod staging;
 
 pub(crate) use bundle::*;
@@ -83,6 +83,7 @@ pub use pe::{
     ExportSymbol, ForwardedExport, PeInfo, inspect_pe, parse_pe_bytes, sha256,
     verify_pe_dependency_closure, verify_xll,
 };
+pub use shared_bytes::SharedBytes;
 pub use staging::PrivateStagingDirectory;
 
 #[cfg(test)]

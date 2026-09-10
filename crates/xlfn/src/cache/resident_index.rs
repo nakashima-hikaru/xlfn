@@ -92,11 +92,11 @@ where
     /// owns its creator pin; followers must re-lookup under their read domain.
     pub(super) fn insert(
         &self,
-        key: VersionedKey<K>,
+        key: &VersionedKey<K>,
         initialize: impl FnOnce() -> XllResult<Entry<V>>,
     ) -> Result<Entry<V>, Arc<XllError>> {
         match &self.0 {
-            Backend::Moka(index) => index.cache.try_get_with(key, initialize),
+            Backend::Moka(index) => index.cache.try_get_with_by_ref(key, initialize),
             #[cfg(feature = "bench-internals")]
             Backend::Sharded(index) => index.insert(key, initialize),
         }

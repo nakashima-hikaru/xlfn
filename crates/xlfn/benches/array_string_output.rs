@@ -1,18 +1,31 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use xlfn::benchmark_support::{BENCHMARK_MEASUREMENT_TIME, BorrowedStringArrayOutputBenchmark};
+use xlfn::benchmark_support::{BorrowedStringArrayOutputBenchmark, benchmark_measurement_time};
 
 const CELLS: usize = 16_384;
 const PAYLOAD_LEN: usize = 32;
 
 fn array_string_output_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("array_string_output");
-    group.measurement_time(BENCHMARK_MEASUREMENT_TIME);
+    group.measurement_time(benchmark_measurement_time());
     group.throughput(Throughput::Elements(CELLS as u64));
 
     let benchmark = BorrowedStringArrayOutputBenchmark::new(CELLS, PAYLOAD_LEN);
     group.bench_function(BenchmarkId::new("borrowed_str", CELLS), |b| {
         b.iter(|| benchmark.run_borrowed());
     });
+
+    for (label, payload) in [
+        ("ascii_1k", "x".repeat(1_024)),
+        ("unicode_short", "日本語💡".to_owned()),
+        ("unicode_1k", "日本語💡".repeat(80)),
+        ("mixed", "ABC日本語123💡".repeat(3)),
+        ("empty", String::new()),
+    ] {
+        let benchmark = BorrowedStringArrayOutputBenchmark::with_payload(CELLS, payload);
+        group.bench_function(BenchmarkId::new(label, CELLS), |b| {
+            b.iter(|| benchmark.run_borrowed());
+        });
+    }
 
     group.finish();
 }

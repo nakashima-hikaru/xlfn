@@ -15,7 +15,9 @@ use super::server::{
     disconnect_one_no_unwind,
 };
 use super::source::{RtdSource, RtdSourceHandle, SourceArena};
-use super::topic::{RtdLimits, RtdTopic, SourceId, SubscriptionId, SubscriptionKey, TopicId};
+use super::topic::{
+    BorrowedTopicParts, RtdLimits, SourceId, SubscriptionId, SubscriptionKey, TopicId,
+};
 use super::value::StoredRtdValue;
 use crate::generation::{ConnectionGeneration, RuntimeGeneration, ServerGeneration};
 use crate::{XllError, XllResult};
@@ -95,6 +97,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             catalog: Mutex::new(SubscriptionCatalog {
                 entries: FxHashMap::default(),
                 pending_topic_bytes: 0,
+                pending_count: 0,
                 identities: super::identity::SubscriptionIdentityIndex::default(),
                 next_subscription_id: 1,
             }),
@@ -205,10 +208,10 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         Some(unsafe { pointer.as_ref() })
     }
 
-    pub(crate) fn prepare<S>(
+    pub(crate) fn prepare<S, Part: AsRef<str>>(
         &self,
         source: &RtdSourceHandle<S>,
-        topic: RtdTopic,
+        topic: BorrowedTopicParts<'_, Part>,
     ) -> XllResult<PreparedSubscription<'_, H>>
     where
         S: RtdSource,
@@ -237,29 +240,21 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
                 });
             }
 
-            if catalog.entries.contains_key(&existing_id) {
-                let Some(result) =
-                    catalog.with_entry(existing_id, SubscriptionEntry::add_reservation)
-                else {
-                    return Err(XllError::Internal {
-                        diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_INDEX_ORPHAN,
-                    });
-                };
-                result?;
+            catalog
+                .with_entry(existing_id, SubscriptionEntry::add_reservation)
+                .ok_or(XllError::Internal {
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_INDEX_ORPHAN,
+                })??;
 
-                return Ok(PreparedSubscription {
-                    id: existing_id,
-                    key: existing_key,
-                    reservation: Some(PreparationReservation { runtime: self }),
-                });
-            }
-
-            return Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_INDEX_ORPHAN,
+            return Ok(PreparedSubscription {
+                id: existing_id,
+                key: existing_key,
+                reservation: Some(PreparationReservation { runtime: self }),
             });
         }
 
-        let (id, key) = catalog.insert_pending(self.runtime_id, source.id, topic, self.limits)?;
+        let (id, key) =
+            catalog.insert_pending(self.runtime_id, source.id, topic.into_owned(), self.limits)?;
 
         Ok(PreparedSubscription {
             id,
@@ -637,6 +632,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             let mut catalog = self.catalog.lock();
             catalog.identities.clear();
             catalog.pending_topic_bytes = 0;
+            catalog.pending_count = 0;
             catalog.entries.clear();
         }
 

@@ -1,7 +1,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use xlfn::prelude::*;
-use xlfn::rtd::{RtdTopic, RtdValue};
+use xlfn::rtd::RtdValue;
 
 mod metric_source;
 
@@ -47,6 +47,7 @@ pub fn last_metric(
     #[excel_context(main_thread)] context: MainThreadContext<'_, RtdSourceExample>,
     symbol: String,
 ) -> XllResult<RtdValue> {
-    let topic = RtdTopic::new(["last", symbol.as_str()])?;
-    context.rtd().subscribe(&context.state().metrics, topic)
+    context
+        .rtd()
+        .subscribe(&context.state().metrics, &["last", symbol.as_str()])
 }

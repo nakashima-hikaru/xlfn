@@ -989,7 +989,7 @@ mod tests {
         let topic = crate::subscription::RtdTopic::single("shared-observation").unwrap();
         let server = runtime
             .with_subscriptions(|subscriptions| {
-                let prepared = subscriptions.prepare(&source, topic.clone()).unwrap();
+                let prepared = subscriptions.prepare(&source, topic.borrowed()).unwrap();
                 // SAFETY: `runtime` owns `subscriptions` and outlives `server` for the test duration.
                 let server = unsafe {
                     subscriptions
@@ -1010,7 +1010,7 @@ mod tests {
                 );
                 conn.commit().unwrap();
 
-                let repeated = subscriptions.prepare(&source, topic.clone()).unwrap();
+                let repeated = subscriptions.prepare(&source, topic.borrowed()).unwrap();
                 assert_eq!(repeated.id(), id);
                 assert_eq!(repeated.key(), &key_obj);
                 assert!(!repeated.has_reservation());
@@ -1031,7 +1031,10 @@ mod tests {
                         ),
                     );
                     assert!(matches!(
-                        context.rtd().subscribe(&source, topic),
+                        context.rtd().subscribe(
+                            &source,
+                            &topic.parts().iter().map(String::as_str).collect::<Vec<_>>(),
+                        ),
                         Err(crate::XllError::ExcelApi {
                             function: crate::ExcelApiFunction::Rtd,
                             failure: crate::ExcelApiFailure::Status(

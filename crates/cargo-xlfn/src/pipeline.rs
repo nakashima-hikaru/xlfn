@@ -1,5 +1,4 @@
 use super::*;
-use std::sync::Arc;
 
 /// The profile a command uses when the user does not select one explicitly.
 /// Check and package intentionally keep different defaults.
@@ -193,7 +192,7 @@ fn build_target(
 fn verify_target_snapshot(
     target: WindowsTarget,
     metadata: &ProjectMetadata,
-    source_snapshot: Arc<[u8]>,
+    source_snapshot: xlfn_package::SharedBytes,
     resolved_bundle: &ResolvedTargetBundle,
     staging: &xlfn_package::PrivateStagingDirectory,
 ) -> Result<(xlfn_package::VerifiedPackage, CrtObservation)> {

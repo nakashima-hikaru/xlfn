@@ -101,7 +101,7 @@ where
 
     pub(super) fn insert(
         &self,
-        key: VersionedKey<K>,
+        key: &VersionedKey<K>,
         initialize: impl FnOnce() -> XllResult<Entry<V>>,
     ) -> Result<Entry<V>, Arc<XllError>> {
         let mut initialize = Some(initialize);
@@ -116,7 +116,7 @@ where
                 }) {
                     return Ok(entry);
                 }
-                if let Some(flight) = flights.get(&key) {
+                if let Some(flight) = flights.get(key) {
                     (Arc::clone(flight), false)
                 } else {
                     let flight = Arc::new(Flight {
@@ -142,7 +142,7 @@ where
             // On an unwinding initializer, followers retry with their own
             // initializer, as with Moka. Never leave a permanently pending flight.
             let _finish = scopeguard::guard((), |_| {
-                let removed = self.flights.lock().remove_entry(&key);
+                let removed = self.flights.lock().remove_entry(key);
                 {
                     let mut state = flight.state.lock();
                     if matches!(*state, Completion::Pending) {

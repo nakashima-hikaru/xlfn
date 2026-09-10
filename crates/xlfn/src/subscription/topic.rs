@@ -267,19 +267,8 @@ impl RtdTopic {
                 crate::error::InputError::Malformed("RTD topics require non-empty parts"),
             ));
         }
-        let (byte_len, hash) = measure_topic_parts(&normalized)?;
-        for part in &normalized {
-            let length = part.encode_utf16().count();
-            if length > crate::utf16::EXCEL_STRING_LIMIT {
-                return Err(XllError::input(
-                    "RTD topic",
-                    crate::error::InputError::TooLarge {
-                        limit: crate::utf16::EXCEL_STRING_LIMIT,
-                        actual: length,
-                    },
-                ));
-            }
-        }
+        let TopicMetadata { byte_len, hash } =
+            validate_topic_parts(normalized.iter().map(String::as_str))?;
         Ok(Self {
             parts: normalized.into_boxed_slice(),
             byte_len,
@@ -294,6 +283,17 @@ impl RtdTopic {
     #[must_use]
     pub fn parts(&self) -> &[String] {
         &self.parts
+    }
+
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub(crate) fn borrowed(&self) -> BorrowedTopicParts<'_, String> {
+        BorrowedTopicParts {
+            parts: &self.parts,
+            metadata: TopicMetadata {
+                byte_len: self.byte_len,
+                hash: self.hash,
+            },
+        }
     }
 
     pub(crate) const fn identity_hash(&self) -> u64 {
@@ -325,27 +325,44 @@ impl Hash for RtdTopic {
     }
 }
 
-fn measure_topic_parts(parts: &[String]) -> XllResult<(usize, u64)> {
-    if parts.is_empty() || parts.iter().any(String::is_empty) {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TopicMetadata {
+    byte_len: usize,
+    hash: u64,
+}
+
+fn validate_topic_parts<'a>(
+    parts: impl Clone + ExactSizeIterator<Item = &'a str>,
+) -> XllResult<TopicMetadata> {
+    if parts.len() == 0 {
         return Err(XllError::input(
             "RTD topic",
             crate::error::InputError::Malformed("RTD topics require non-empty parts"),
         ));
     }
-    if parts.len() > MAX_RTD_TOPIC_PARTS {
-        return Err(XllError::input(
-            "RTD topic",
-            crate::error::InputError::TooLarge {
-                limit: MAX_RTD_TOPIC_PARTS,
-                actual: parts.len(),
-            },
-        ));
+    // Keep the owning constructor's error precedence: an empty part among
+    // the first 253 wins, but the 254th is rejected before inspecting it.
+    for (index, part) in parts.clone().enumerate() {
+        if index >= MAX_RTD_TOPIC_PARTS {
+            return Err(XllError::input(
+                "RTD topic",
+                crate::error::InputError::TooLarge {
+                    limit: MAX_RTD_TOPIC_PARTS,
+                    actual: index.saturating_add(1),
+                },
+            ));
+        }
+        if part.is_empty() {
+            return Err(XllError::input(
+                "RTD topic",
+                crate::error::InputError::Malformed("RTD topics require non-empty parts"),
+            ));
+        }
     }
-
     let mut total_bytes = 0_usize;
     let mut hasher = FxHasher::default();
     parts.len().hash(&mut hasher);
-    for part in parts {
+    for part in parts.clone() {
         total_bytes = total_bytes.checked_add(part.len()).ok_or_else(|| {
             XllError::input(
                 "RTD topic",
@@ -366,5 +383,174 @@ fn measure_topic_parts(parts: &[String]) -> XllResult<(usize, u64)> {
             },
         ));
     }
-    Ok((total_bytes, hasher.finish()))
+    for part in parts {
+        // Every Unicode scalar needs at most as many UTF-16 units as UTF-8
+        // bytes. Short parts are therefore valid without decoding their text.
+        if part.len() <= crate::utf16::EXCEL_STRING_LIMIT {
+            continue;
+        }
+        let length = part.encode_utf16().count();
+        if length > crate::utf16::EXCEL_STRING_LIMIT {
+            return Err(XllError::input(
+                "RTD topic",
+                crate::error::InputError::TooLarge {
+                    limit: crate::utf16::EXCEL_STRING_LIMIT,
+                    actual: length,
+                },
+            ));
+        }
+    }
+    Ok(TopicMetadata {
+        byte_len: total_bytes,
+        hash: hasher.finish(),
+    })
+}
+
+/// A validated lookup input; it retains no owned topic storage.
+pub(crate) struct BorrowedTopicParts<'a, Part: AsRef<str> = &'a str> {
+    parts: &'a [Part],
+    metadata: TopicMetadata,
+}
+
+impl<'a, Part: AsRef<str>> BorrowedTopicParts<'a, Part> {
+    pub(crate) fn new(parts: &'a [Part]) -> XllResult<Self> {
+        let metadata = validate_topic_parts(parts.iter().map(AsRef::as_ref))?;
+        Ok(Self { parts, metadata })
+    }
+
+    pub(super) fn identity_key(&self, source_id: SourceId) -> SubscriptionIdentityKey {
+        SubscriptionIdentityKey {
+            source_id,
+            topic_hash: self.metadata.hash,
+        }
+    }
+
+    pub(super) fn matches(&self, canonical: &RtdTopic) -> bool {
+        self.metadata.hash == canonical.hash
+            && self.parts.len() == canonical.parts.len()
+            && canonical
+                .parts
+                .iter()
+                .map(String::as_str)
+                .eq(self.parts.iter().map(AsRef::as_ref))
+    }
+
+    pub(super) fn into_owned(self) -> RtdTopic {
+        RtdTopic {
+            parts: self
+                .parts
+                .iter()
+                .map(|part| part.as_ref().to_owned())
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            byte_len: self.metadata.byte_len,
+            hash: self.metadata.hash,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_test_identity_hash(mut self, hash: u64) -> Self {
+        self.metadata.hash = hash;
+        self
+    }
+}
+
+#[cfg(test)]
+mod borrowed_tests {
+    use super::*;
+
+    fn check<const N: usize>(parts: [&str; N]) {
+        let owned = RtdTopic::new(parts);
+        let borrowed = BorrowedTopicParts::new(&parts);
+        match (owned, borrowed) {
+            (Ok(owned), Ok(borrowed)) => {
+                assert!(borrowed.matches(&owned));
+                assert_eq!(borrowed.metadata.byte_len, owned.byte_len());
+                // Independently retain the pre-experiment canonical hash recipe.
+                let mut hasher = FxHasher::default();
+                N.hash(&mut hasher);
+                for part in parts {
+                    part.hash(&mut hasher);
+                }
+                assert_eq!(borrowed.metadata.hash, hasher.finish());
+                assert_eq!(borrowed.into_owned(), owned);
+            }
+            (Err(owned), Err(borrowed)) => {
+                assert_eq!(format!("{owned:?}"), format!("{borrowed:?}"))
+            }
+            _ => panic!("owning and borrowed validation disagree"),
+        }
+    }
+
+    #[test]
+    fn borrowed_validation_matches_owned_boundaries_and_precedence() {
+        check([]);
+        check([""]);
+        check(["x"; 253]);
+        check(["x"; 254]);
+        let mut many = ["x"; 254];
+        many[0] = "";
+        check(many);
+        many[0] = "x";
+        many[253] = "";
+        check(many);
+        for length in [32767, 32768] {
+            check([&"a".repeat(length)]);
+        }
+        check([&format!("{}a", "😀".repeat(16383))]);
+        check([&"😀".repeat(16384)]);
+        check(["market", "USD\0JPY"]);
+        let large = "a".repeat(32767);
+        let last = "a".repeat(32);
+        let mut exact = [large.as_str(); 33];
+        exact[32] = &last;
+        check(exact);
+        let over = "a".repeat(33);
+        exact[32] = &over;
+        check(exact);
+        // Total byte rejection precedes UTF-16 rejection for both routes.
+        check([&"a".repeat(MAX_RTD_TOPIC_BYTES + 1)]);
+    }
+
+    #[test]
+    fn borrowed_utf16_byte_bound_agrees_with_full_unicode_count() {
+        for scalar in ["a", "é", "漢", "😀"] {
+            for count in [8191, 8192, 10922, 10923, 16383, 16384, 32767, 32768] {
+                let text = scalar.repeat(count);
+                let expected = text.encode_utf16().count() <= crate::utf16::EXCEL_STRING_LIMIT;
+                assert_eq!(BorrowedTopicParts::new(&[text.as_str()]).is_ok(), expected);
+                assert_eq!(RtdTopic::new([text.as_str()]).is_ok(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn borrowed_collision_equality_preserves_parts_and_materialized_metadata() {
+        let canonical = RtdTopic::new(["ab", "c\0d"])
+            .unwrap()
+            .with_test_identity_hash(42);
+        let same = BorrowedTopicParts::new(&["ab", "c\0d"])
+            .unwrap()
+            .with_test_identity_hash(42);
+        assert!(same.matches(&canonical));
+        assert_eq!(
+            same.into_owned().identity_hash(),
+            42,
+            "materialize must not rehash"
+        );
+        for parts in [["a", "bc\0d"], ["ab", "c\0e"]] {
+            assert!(
+                !BorrowedTopicParts::new(&parts)
+                    .unwrap()
+                    .with_test_identity_hash(42)
+                    .matches(&canonical)
+            );
+        }
+        assert!(
+            !BorrowedTopicParts::new(&["abc\0d"])
+                .unwrap()
+                .with_test_identity_hash(42)
+                .matches(&canonical)
+        );
+    }
 }

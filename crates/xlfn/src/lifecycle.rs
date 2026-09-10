@@ -770,7 +770,8 @@ mod tests {
                         .prepare(
                             &source,
                             crate::subscription::RtdTopic::single("lean-checker-subscription")
-                                .unwrap(),
+                                .unwrap()
+                                .borrowed(),
                         )
                         .unwrap();
                     let id = prepared.id();
@@ -1572,7 +1573,9 @@ mod tests {
                     let prepared = subscriptions
                         .prepare(
                             &source,
-                            crate::subscription::RtdTopic::single("ordered").unwrap(),
+                            crate::subscription::RtdTopic::single("ordered")
+                                .unwrap()
+                                .borrowed(),
                         )
                         .unwrap();
                     let id = prepared.id();

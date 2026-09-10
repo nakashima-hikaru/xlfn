@@ -1,15 +1,15 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use xlfn::benchmark_support::{
-    BENCHMARK_MEASUREMENT_TIME, ConcurrentHandleResolutionBenchmark, MultiHandleCallBenchmark,
+    ConcurrentHandleResolutionBenchmark, MultiHandleCallBenchmark, benchmark_measurement_time,
 };
 
-const HANDLE_COUNTS: [usize; 4] = [1, 2, 4, 8];
+const HANDLE_COUNTS: [usize; 7] = [1, 2, 4, 8, 16, 32, 64];
 const CONCURRENT_THREAD_COUNTS: [usize; 6] = [1, 2, 4, 8, 16, 32];
 const ITERATIONS_PER_THREAD: usize = 1000;
 
 fn handle_call_resolution_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("handle_call_resolution");
-    group.measurement_time(BENCHMARK_MEASUREMENT_TIME);
+    group.measurement_time(benchmark_measurement_time());
 
     for &count in &HANDLE_COUNTS {
         let mut benchmark = MultiHandleCallBenchmark::new(count);
@@ -22,7 +22,7 @@ fn handle_call_resolution_benchmarks(c: &mut Criterion) {
     group.finish();
 
     let mut group_concurrent = c.benchmark_group("handle_runtime_resolution/concurrent");
-    group_concurrent.measurement_time(BENCHMARK_MEASUREMENT_TIME);
+    group_concurrent.measurement_time(benchmark_measurement_time());
 
     for &threads in &CONCURRENT_THREAD_COUNTS {
         let attempts = threads * ITERATIONS_PER_THREAD;

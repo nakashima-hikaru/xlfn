@@ -401,7 +401,31 @@ fn reclamation_benchmarks(c: &mut Criterion) {
             "calls": allocations.calls, "requested_bytes": allocations.requested_bytes,
         })
     );
+    let release_probe = AllocationProbe::start();
     drop(value);
+    let release_allocations = release_probe.finish();
+    println!(
+        "cache_final_lease_drop_probe {}",
+        serde_json::json!({
+            "value": "u64", "capacity": 0,
+            "calls": release_allocations.calls,
+            "requested_bytes": release_allocations.requested_bytes,
+            "pending_nodes": zero_capacity.reclamation_stats().pending_nodes,
+        })
+    );
+
+    let mut nonresident = c.benchmark_group("cache_nonresident");
+    nonresident.measurement_time(benchmark_measurement_time());
+    nonresident.bench_function("roundtrip", |b| {
+        b.iter(|| {
+            let lease = zero_capacity
+                .get_or_try_insert_with(1, |_| 8, || Ok(42))
+                .unwrap();
+            black_box(*lease);
+            drop(lease);
+        });
+    });
+    nonresident.finish();
 
     let operations = std::env::var("XLFN_CACHE_RECLAIM_OPERATIONS")
         .ok()

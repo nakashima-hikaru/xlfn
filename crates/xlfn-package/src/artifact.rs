@@ -3,7 +3,7 @@ use super::*;
 #[derive(Clone, Debug)]
 pub struct VerifiedArtifact {
     pub(crate) relative_path: PathBuf,
-    pub(crate) bytes: Arc<[u8]>,
+    pub(crate) bytes: SharedBytes,
     pub(crate) size: u64,
     pub(crate) sha256: [u8; 32],
     pub(crate) permissions: std::fs::Permissions,
@@ -56,7 +56,11 @@ impl VerifiedPackage {
         if !self.expected_names.insert(name_key) {
             return Err("package already contains build-manifest.json".into());
         }
-        let artifact = verified_artifact(relative_path, Arc::from(bytes), manifest_permissions()?);
+        let artifact = verified_artifact(
+            relative_path,
+            SharedBytes::from(bytes),
+            manifest_permissions()?,
+        );
         self.artifacts.push(artifact);
         validate_manifest_bytes(&self.artifacts)
             .map(|()| self)
@@ -213,13 +217,13 @@ pub fn verify_staged_package(
     let xll_snapshot = snapshot_staged_artifact(target, xll)?;
     verify_xll_bytes(&xll_snapshot, target, required_exports, xll)?;
     for file in &bundle.files {
-        let current = snapshot_staged_artifact(target, &file.source)?;
-        if current.as_ref() != file.snapshot.as_ref() {
-            return Err(PackageError::StagedArtifactChanged {
-                target: target.to_owned(),
-                path: file.source.clone(),
-            });
-        }
+        verify_staged_bytes(
+            target,
+            &file.source,
+            &file.snapshot,
+            None,
+            ExpectedIdentity::Any,
+        )?;
     }
     verify_dependency_closure(xll, target, &bundle, &xll_snapshot)?;
 

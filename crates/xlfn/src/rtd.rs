@@ -64,15 +64,18 @@ impl<'call> RtdCallContext<'call> {
     ///
     /// A failed Excel observation consumes the prepared transaction through
     /// rollback, so no caller can accidentally publish a pending subscription.
+    /// Topic parts are borrowed for this call. Reusing an existing subscription
+    /// does not allocate topic storage; a new subscription owns its canonical copy.
     pub fn subscribe<Source>(
         &self,
         source: &crate::subscription::RtdSourceHandle<Source>,
-        topic: crate::subscription::RtdTopic,
+        parts: &[&str],
     ) -> XllResult<crate::subscription::RtdValue>
     where
         Source: crate::subscription::RtdSource,
     {
         let subscriptions = self.generation.read()?;
+        let topic = crate::subscription::BorrowedTopicParts::new(parts)?;
         let prepared = subscriptions.prepare(source, topic)?;
         match observe_subscription(&subscriptions, prepared.key(), self.host) {
             Ok(value) => {

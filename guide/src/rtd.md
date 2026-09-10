@@ -6,7 +6,7 @@ Real-Time Data (RTD) is the appropriate model for a formula that should update r
 
 ```text
 worksheet formula
-    -> MainThreadContext::rtd().subscribe(&source_handle, topic)
+    -> MainThreadContext::rtd().subscribe(&source_handle, &parts)
     -> RtdChannelSource starts a producer and publisher
     -> producer calls sender.try_send(value)
     -> framework publisher forwards queued values through RtdSink
@@ -21,18 +21,21 @@ notify Excel.
 ## Define a topic
 
 ```rust
-let topic = RtdTopic::new([
+let parts = [
     "events",
     symbol.as_str(),
     field.as_str(),
-])?;
+];
+context.rtd().subscribe(&source_handle, &parts)?;
 ```
 
 For one part:
 
 ```rust
-let topic = RtdTopic::single("service-health")?;
+context.rtd().subscribe(&source_handle, &["service-health"])?;
 ```
+
+The subscription call borrows its parts and copies them only when creating a new subscription. Source callbacks receive the canonical owned `RtdTopic`.
 
 A topic must contain at least one non-empty part. Each part must fit Excel's 32,767 UTF-16-unit counted-string representation. Topic parts are identity, not display labels; use stable, canonical values.
 

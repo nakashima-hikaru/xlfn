@@ -126,6 +126,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 #[cfg(test)]
 use std::sync::{Arc, Weak};
+#[cfg(feature = "rtd")]
+pub(crate) use topic::BorrowedTopicParts;
 pub(crate) use topic::SubscriptionKey;
 #[cfg(any(
     test,

@@ -67,12 +67,16 @@ impl GenerationState {
     }
 
     pub(crate) fn drain_tasks(&self) -> Vec<TaskControl> {
-        let mut result = Vec::new();
+        // Admission is drained before cancellation reaches this method.
+        // Completions can still remove controls, so this is an upper bound.
+        // Drain directly into one buffer rather than allocating and copying
+        // an intermediate Vec for each shard. Callers drop/wake the returned
+        // controls only after releasing the executor control lock.
+        let mut result = Vec::with_capacity(self.task_count.load(Ordering::Acquire));
         for shard in self.shards.iter() {
             let mut tasks = shard.tasks.lock();
             let count = tasks.len();
-            let drained = tasks.drain().map(|(_, task)| task).collect::<Vec<_>>();
-            result.extend(drained);
+            result.extend(tasks.drain().map(|(_, task)| task));
             if count != 0 {
                 let _ = xlfn_kernel::invariant::checked_atomic_sub(&self.task_count, count);
             }

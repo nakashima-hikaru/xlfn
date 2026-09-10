@@ -6,6 +6,7 @@ mod backend_tests;
 mod resident_index;
 use parking_lot::{Mutex, RwLock};
 use resident_index::ResidentIndex;
+use smallvec::SmallVec;
 use std::any::{Any, TypeId};
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -134,7 +135,7 @@ unsafe fn reclaim_cache_node<V>(ptr: *mut ()) {
     }
 }
 
-fn reclaim_cache_entries<V>(entries: Vec<ReclaimEntry>) {
+fn reclaim_cache_entries<V>(entries: ReclaimEntries) {
     for entry in entries {
         // SAFETY: [TR-RECLAIM-1] entry.0 points to an allocated CacheNode<V> whose grace period has ended.
         unsafe {
@@ -602,6 +603,22 @@ struct ReclaimEntry(*mut (), u32);
 // SAFETY: ReclaimEntry holds a raw pointer to a retired CacheNode to be freed on a quiesced domain.
 unsafe impl Send for ReclaimEntry {}
 
+// Final leases and small eviction batches need no queue allocation. Four is
+// Vec's previous initial capacity, so larger batches also skip that allocation
+// without adding an extra growth step or a fixed reclamation limit.
+type ReclaimEntries = SmallVec<[ReclaimEntry; 4]>;
+
+fn merge_reclaims(batches: impl IntoIterator<Item = ReclaimEntries>) -> ReclaimEntries {
+    batches
+        .into_iter()
+        .filter(|batch| !batch.is_empty())
+        .reduce(|mut entries, next| {
+            entries.extend(next);
+            entries
+        })
+        .unwrap_or_default()
+}
+
 type CacheDomainPermit<'domain> = RotatingReadPermit<'domain, DEFAULT_STRIPE_COUNT>;
 
 struct CacheLookupDomain {
@@ -609,7 +626,7 @@ struct CacheLookupDomain {
     // only after the grace period covering every reader that could
     // have observed its pointer has ended.
     domain: RotatingReadDomain<DEFAULT_STRIPE_COUNT>,
-    pending_reclaims: [Mutex<Vec<ReclaimEntry>>; 2],
+    pending_reclaims: [Mutex<ReclaimEntries>; 2],
     pending_nodes: AtomicUsize,
     pending_weight: AtomicU64,
     peak_pending_nodes: AtomicUsize,
@@ -623,7 +640,10 @@ impl CacheLookupDomain {
     fn new() -> Self {
         Self {
             domain: RotatingReadDomain::new(),
-            pending_reclaims: [Mutex::new(Vec::new()), Mutex::new(Vec::new())],
+            pending_reclaims: [
+                Mutex::new(ReclaimEntries::new()),
+                Mutex::new(ReclaimEntries::new()),
+            ],
             pending_nodes: AtomicUsize::new(0),
             pending_weight: AtomicU64::new(0),
             peak_pending_nodes: AtomicUsize::new(0),
@@ -662,7 +682,10 @@ impl CacheLookupDomain {
     ) {
         // The queue lock is the enqueue linearization point. Revalidate the
         // generation while holding it so a rotation cannot drain the queue
-        // just before this retired node is appended.
+        // just before this retired node is appended. Rotation also takes this
+        // lock before publishing its replacement generation: withdrawals
+        // already registered here must happen before new-generation lookups.
+        // Moka protects its own entries, not the copied non-owning NodePtr.
         loop {
             let generation = self.domain.current_generation();
             after_generation_load(generation);
@@ -685,45 +708,49 @@ impl CacheLookupDomain {
         }
     }
 
-    fn quiesce_and_drain(&self) -> Vec<ReclaimEntry> {
+    fn quiesce_and_drain(&self) -> ReclaimEntries {
         // A caller may release a lease or clear/read cache metrics from a
         // compute/weight callback. Defer value destruction until that outer
         // singleflight has returned, just as ordinary maintenance does.
         if ACTIVE_CACHE_INITIALIZATION_DEPTH.get() != 0 {
-            return Vec::new();
+            return ReclaimEntries::new();
         }
         let start = Instant::now();
-        let entries = self
+        let batches = self
             .domain
-            .quiesce(|generation| self.drain_generation(generation))
+            .quiesce_with_publication_barrier(
+                |generation| self.pending_reclaims[generation.index()].lock(),
+                |generation| self.drain_generation(generation),
+            )
             .unwrap_or_default()
             .into_iter()
-            .flatten()
-            .flatten()
-            .collect::<Vec<_>>();
+            .flatten();
+        // Preserve an existing batch allocation when only one generation has
+        // debt, instead of allocating and copying a new flattened Vec.
+        let entries = merge_reclaims(batches);
         self.record_batch(&entries, start);
         entries
     }
 
-    fn try_quiesce_and_drain(&self) -> Vec<ReclaimEntry> {
+    fn try_quiesce_and_drain(&self) -> ReclaimEntries {
         if ACTIVE_CACHE_INITIALIZATION_DEPTH.get() != 0
             || self.pending_nodes.load(Ordering::Relaxed) == 0
         {
-            return Vec::new();
+            return ReclaimEntries::new();
         }
         let start = Instant::now();
-        let Some(result) = self
-            .domain
-            .try_quiesce_if_idle(|generation| self.drain_generation(generation))
-        else {
-            return Vec::new();
+        let Some(result) = self.domain.try_quiesce_if_idle_with_publication_barrier(
+            |generation| self.pending_reclaims[generation.index()].try_lock(),
+            |generation| self.drain_generation(generation),
+        ) else {
+            return ReclaimEntries::new();
         };
         let entries = result.unwrap_or_default();
         self.record_batch(&entries, start);
         entries
     }
 
-    fn drain_generation(&self, generation: DrainedGeneration) -> Vec<ReclaimEntry> {
+    fn drain_generation(&self, generation: DrainedGeneration) -> ReclaimEntries {
         let mut queue = self.pending_reclaims[generation.index()].lock();
         let entries = std::mem::take(&mut *queue);
         self.pending_nodes
@@ -760,16 +787,11 @@ impl CacheLookupDomain {
         self.domain.seal_and_wait();
     }
 
-    fn drain_all(&self) -> Vec<ReclaimEntry> {
-        let mut all = Vec::new();
-        for gen_idx in 0..2 {
-            let items = {
-                let mut queue = self.pending_reclaims[gen_idx].lock();
-                std::mem::take(&mut *queue)
-            };
-            all.extend(items);
-        }
-        all
+    fn drain_all(&self) -> ReclaimEntries {
+        merge_reclaims((0..2).map(|gen_idx| {
+            let mut queue = self.pending_reclaims[gen_idx].lock();
+            std::mem::take(&mut *queue)
+        }))
     }
 }
 
@@ -1096,7 +1118,7 @@ where
         key: K,
         weight: W,
         compute: F,
-        mut epoch: u64,
+        epoch: u64,
     ) -> XllResult<CacheLease<'a, V>>
     where
         F: FnOnce() -> XllResult<V>,
@@ -1143,25 +1165,23 @@ where
         }
         let mut compute_opt = Some(compute);
         let mut weight_opt = Some(weight);
+        let mut vkey = VersionedKey { epoch, key };
 
         loop {
-            if let Some(lease) = self.get_at_epoch(&key, epoch) {
+            let epoch = vkey.epoch;
+            if let Some(lease) = self.get_at_epoch(&vkey.key, epoch) {
                 self.maintain(false);
                 return Ok(lease);
             }
 
             let _active = ActiveCacheGuard::enter()?;
-            let vkey = VersionedKey {
-                epoch,
-                key: key.clone(),
-            };
             let domain_ptr = NonNull::from(&*self.domain);
             let mut created = false;
             let mut oversized = false;
 
             let initialized = self
                 .index
-                .insert(vkey.clone(), || {
+                .insert(&vkey, || {
                     let compute_fn = compute_opt.take().expect("compute called once");
                     let weight_fn = weight_opt.take().expect("weight called once");
                     let value = compute_fn()?;
@@ -1208,12 +1228,12 @@ where
             }
 
             // Another thread initialized the entry; acquire a pin safely through the admission domain.
-            if let Some(lease) = self.get_at_epoch(&key, epoch) {
+            if let Some(lease) = self.get_at_epoch(&vkey.key, epoch) {
                 return Ok(lease);
             }
 
             // The entry was evicted or invalidated before we could acquire a pin; retry with fresh epoch.
-            epoch = self.generation.snapshot();
+            vkey.epoch = self.generation.snapshot();
         }
     }
 }
@@ -1351,6 +1371,24 @@ mod tests {
     }
 
     #[test]
+    fn cache_miss_clones_only_the_resident_key() {
+        let clones = Arc::new(AtomicUsize::new(0));
+        let cache = CalculationCache::<CloneCountedKey, u32>::new(8);
+        let key = CloneCountedKey {
+            value: 1,
+            clones: Arc::clone(&clones),
+        };
+        let lease = cache.get_or_try_insert_with(key, |_| 1, || Ok(7)).unwrap();
+        assert_eq!(*lease, 7);
+        // The cache takes ownership of the caller's key for retry/invalidation;
+        // only Moka's resident key needs a copy, including heap-backed keys.
+        assert_eq!(clones.load(Ordering::SeqCst), 1);
+        cache.clear();
+        assert_eq!(*lease, 7);
+        assert_eq!(clones.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn enqueue_reclaim_racing_rotation_is_not_lost() {
         let domain = Arc::new(CacheLookupDomain::new());
         let (loaded_tx, loaded_rx) = mpsc::sync_channel(0);
@@ -1386,6 +1424,32 @@ mod tests {
         assert!(domain.pending_reclaims[0].lock().is_empty());
         assert_eq!(domain.pending_reclaims[1].lock().len(), 1);
         let _ = domain.drain_all();
+    }
+
+    #[test]
+    fn cache_idle_reclamation_does_not_publish_before_registration_unlocks() {
+        let domain = Arc::new(CacheLookupDomain::new());
+        domain.enqueue_reclaim(std::ptr::null_mut(), 7);
+        let generation = domain.domain.current_generation();
+        let registration = domain.pending_reclaims[generation.index()].lock();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker_domain = Arc::clone(&domain);
+        let worker = std::thread::spawn(move || {
+            let retired = worker_domain.try_quiesce_and_drain();
+            done_tx
+                .send((retired.len(), worker_domain.domain.current_generation()))
+                .unwrap();
+        });
+        // An unbarred idle rotation publishes a new generation then blocks on
+        // this queue. Release it before assertions so a regression cannot hang.
+        let result = done_rx.recv_timeout(Duration::from_secs(1));
+        let observed_generation = domain.domain.current_generation();
+        drop(registration);
+        worker.join().unwrap();
+        assert_eq!(result, Ok((0, generation)));
+        assert_eq!(observed_generation, generation);
+        assert_eq!(domain.quiesce_and_drain().len(), 1);
+        assert_eq!(domain.stats().pending_nodes, 0);
     }
 
     #[cfg(feature = "bench-internals")]

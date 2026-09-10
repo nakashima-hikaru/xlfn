@@ -460,7 +460,10 @@ mod tests {
         let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
         let server = runtime.register_test_server(1);
         let prepared = runtime
-            .prepare(&source, RtdTopic::single("channel-test").unwrap())
+            .prepare(
+                &source,
+                RtdTopic::single("channel-test").unwrap().borrowed(),
+            )
             .unwrap();
         let id = prepared.id();
         prepared.commit();
@@ -779,7 +782,7 @@ mod tests {
         let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
         let server = runtime.register_test_server(1);
         let prepared = runtime
-            .prepare(&source, RtdTopic::single("disconnect").unwrap())
+            .prepare(&source, RtdTopic::single("disconnect").unwrap().borrowed())
             .unwrap();
         let id = prepared.id();
         prepared.commit();

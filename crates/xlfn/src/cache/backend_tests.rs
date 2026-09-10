@@ -209,7 +209,8 @@ fn reentrant_miss_is_rejected_but_hits_and_clear_remain_safe() {
 #[test]
 fn scoped_reference_survives_eviction_and_debt_drains_after_scope() {
     for backend in backends() {
-        let count = if cfg!(miri) { 4 } else { 64 };
+        // Also exercise a spilled reclamation batch under Miri (inline holds 4).
+        let count = if cfg!(miri) { 6 } else { 64 };
         let drops = counters(count);
         let cache = CalculationCache::new_with_backend(count, backend);
         for id in 0..count {
