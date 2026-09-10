@@ -402,10 +402,13 @@ pub fn shared_publisher_topology_probe(
     let registration =
         SourceRegistration::new(crate::generation::RuntimeGeneration::new(1).unwrap());
     let mut result = if shared_publishers == 0 {
-        let source = RtdChannelSource::new(NonZeroUsize::new(64).unwrap(), move |topic, sender| {
+        let source = RtdChannelSource::new(NonZeroUsize::new(64).unwrap(), move |topic| {
             let index: usize = topic.parts()[0].parse().unwrap();
             let receiver = receivers.lock()[index].take().unwrap();
-            run_producer(receiver, done_tx.clone(), |value| sender.try_send(value))
+            let done_tx = done_tx.clone();
+            Ok(move |sender: super::RtdSender<i32>| {
+                run_producer(receiver, done_tx, |value| sender.try_send(value))
+            })
         });
         measure_source(source, registration, jobs, done_rx, subscriptions, updates)
     } else {

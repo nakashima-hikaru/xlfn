@@ -312,10 +312,7 @@ pub(crate) fn inspect_checked_bundle_file(
     file: &BundleFile,
     architecture: Architecture,
 ) -> PackageResult<PeInfo> {
-    let info = match file.snapshot.as_deref() {
-        Some(snapshot) => parse_pe_bytes(snapshot)?,
-        None => inspect_pe(&file.source)?,
-    };
+    let info = parse_pe_bytes(&file.snapshot)?;
     verify_machine(&info, architecture, &file.source)?;
     verify_image_characteristics(&info, &file.source)?;
     Ok(info)

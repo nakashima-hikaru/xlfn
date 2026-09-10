@@ -116,7 +116,7 @@ pub fn handle_retirement_debt_probe() -> serde_json::Value {
     let drain_ns = started.elapsed().as_nanos();
     assert_eq!(registry.bindings.read_domain().debt(), 0);
     assert_eq!(drops.load(Ordering::Relaxed), debt + 1);
-    serde_json::json!({ "soft_threshold": super::domain::SOFT_DEBT_LIMIT,
+    serde_json::json!({ "maintenance": "polled_grace_period",
         "hard_threshold": super::domain::HARD_DEBT_LIMIT, "maximum_live_bindings": 8,
         "queued_while_own_scope_live": queued, "debt_while_own_scope_live": debt,
         "peak_debt": peak, "final_debt": 0, "payloads_dropped": debt + 1,

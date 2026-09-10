@@ -57,7 +57,7 @@ pub(crate) struct HandleRegistry {
     pub(super) codec: TokenCodec,
     pub(super) phase: AtomicU8,
     pub(super) bindings: BindingTable,
-    pub(super) objects: std::sync::Arc<ObjectArena>,
+    pub(super) objects: xlfn_kernel::published_owner::PublishedOwner<ObjectArena>,
     #[cfg(test)]
     pub(super) after_lookup_live: Mutex<
         Option<(
@@ -119,7 +119,7 @@ impl HandleRegistry {
             codec: TokenCodec::new(session, secret),
             phase: AtomicU8::new(HandleRegistryPhase::Open as u8),
             bindings: BindingTable::new(maximum_bindings),
-            objects: std::sync::Arc::new(ObjectArena::new()),
+            objects: xlfn_kernel::published_owner::PublishedOwner::new(ObjectArena::new()),
             #[cfg(test)]
             after_lookup_live: Mutex::new(None),
             next_object_id: AtomicU64::new(1),
@@ -178,12 +178,20 @@ impl HandleRegistry {
             })
     }
 
+    #[allow(
+        unsafe_code,
+        reason = "Registry exclusively owns and drains the published arena"
+    )]
     pub(crate) fn new_object<'registry, T: Send + Sync + 'static>(
         &'registry self,
         value: T,
     ) -> XllResult<PendingObjectBinding<'registry>> {
         let object_id = self.allocate_object_id()?;
-        let binding = self.objects.insert(object_id, value)?;
+        // SAFETY: the registry retains this fixed allocation, pending bindings
+        // borrow it, published bindings belong to its table, and generated
+        // async pins drain before service retirement. Registry Drop validates
+        // all counts and final releases before recovering the allocation.
+        let binding = unsafe { ObjectArena::insert(&self.objects, object_id, value) }?;
         PendingObjectBinding::new(self, binding)
     }
 
@@ -451,5 +459,20 @@ impl HandleRegistry {
 
     pub(super) fn finish_quiescence(&self, _sealed: &HandleRegistrySealed) -> XllResult<()> {
         self.objects.finish_quiescence()
+    }
+}
+
+impl Drop for HandleRegistry {
+    fn drop(&mut self) {
+        // Reclamation always borrows this registry. Reentering its destruction
+        // from a raw capability would violate that capability's owner contract;
+        // stop before recovering any published allocation in that case.
+        if self.bindings.read_domain().is_reclaiming_here() {
+            xlfn_kernel::invariant::fail_stop();
+        }
+        self.objects.seal();
+        self.retire_values_for_seal();
+        self.bindings.read_domain().seal();
+        self.objects.assert_reclaimable();
     }
 }

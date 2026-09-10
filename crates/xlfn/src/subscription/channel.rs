@@ -16,12 +16,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{Builder, JoinHandle};
 use std::time::Duration;
 
-type Producer<T> = dyn Fn(RtdTopic, RtdSender<T>) -> XllResult<()> + Send + Sync;
+type Producer<T> = dyn FnOnce(RtdSender<T>) -> XllResult<()> + Send;
+type ProducerFactory<T> = dyn Fn(RtdTopic) -> XllResult<Box<Producer<T>>> + Send + Sync;
 
 /// A safe RTD source with a bounded queue and framework-owned workers.
 ///
-/// Each subscription runs the producer on its own thread. The producer sees
-/// only an [`RtdSender`]; a separate publisher owns the non-owning [`RtdSink`].
+/// The source uniquely owns a factory. For each topic the factory transfers a
+/// new producer job to its subscription's worker. That job owns its captures
+/// and sees only an [`RtdSender`]; a separate publisher owns the non-owning
+/// [`RtdSink`]. Source destruction never controls a running job's lifetime.
 /// Disconnect closes the queue and joins both workers, including when the
 /// producer fails or panics. Sender clones may outlive the subscription: they
 /// retain only a closed queue and cannot access the RTD runtime.
@@ -32,31 +35,44 @@ type Producer<T> = dyn Fn(RtdTopic, RtdSender<T>) -> XllResult<()> + Send + Sync
 /// threads or callbacks before returning from the producer.
 pub struct RtdChannelSource<T> {
     capacity: NonZeroUsize,
-    producer: Arc<Producer<T>>,
+    factory: Box<ProducerFactory<T>>,
 }
 
 impl<T: IntoRtdValue + Send + 'static> RtdChannelSource<T> {
     /// Creates a source with a per-subscription queue capacity.
     ///
-    /// `producer` runs asynchronously after subscription starts. Its error or
-    /// panic closes sender admission and is reported during disconnect. A
-    /// successful return drains accepted values, then closes the publisher.
-    pub fn new(
+    /// `factory` runs synchronously during subscription setup and returns an
+    /// owned job, or fails before any worker starts. Each job runs once on its
+    /// own worker and may own resources that are neither `Clone` nor `Sync`.
+    /// Its error or panic closes sender admission and is reported during
+    /// disconnect. A successful return drains accepted values, then closes
+    /// the publisher. Job resources are dropped before its worker is joined.
+    pub fn new<P>(
         capacity: NonZeroUsize,
-        producer: impl Fn(RtdTopic, RtdSender<T>) -> XllResult<()> + Send + Sync + 'static,
-    ) -> Self {
+        factory: impl Fn(RtdTopic) -> XllResult<P> + Send + Sync + 'static,
+    ) -> Self
+    where
+        P: FnOnce(RtdSender<T>) -> XllResult<()> + Send + 'static,
+    {
         Self {
             capacity,
-            producer: Arc::new(producer),
+            factory: Box::new(move |topic| {
+                factory(topic).map(|job| Box::new(job) as Box<Producer<T>>)
+            }),
         }
     }
 }
 
-/// A cloneable, owning sender that never contains a raw RTD capability.
+/// A cloneable queue sender that never contains a raw RTD capability.
 ///
 /// Values are converted and validated on the calling thread, before the queue
 /// is locked. Successful enqueueing does not guarantee delivery: disconnect
 /// discards pending values, and an RTD publication error closes the channel.
+///
+/// The subscription exclusively owns shutdown and worker joins. Reference
+/// counting only shares queue storage among senders and those workers; it
+/// cannot extend admission or retain queued payloads after disconnect. A
+/// sender that survives disconnect retains an empty, closed queue allocation.
 pub struct RtdSender<T> {
     channel: Arc<Channel>,
     _value: PhantomData<fn(T)>,
@@ -320,16 +336,15 @@ unsafe impl<T: IntoRtdValue + Send + 'static> RtdSource for RtdChannelSource<T> 
     type Subscription = RtdChannelSubscription;
 
     fn subscribe(&self, topic: &RtdTopic, sink: RtdSink<T>) -> XllResult<Self::Subscription> {
+        let producer = (self.factory)(topic.clone())?;
         let channel = Arc::new(Channel::new(self.capacity));
         let mut subscription = RtdChannelSubscription::start_publisher(Arc::clone(&channel), sink)?;
-        let producer = Arc::clone(&self.producer);
-        let topic = topic.clone();
         subscription.producer = Some(
             Builder::new()
                 .name("xlfn-rtd-producer".into())
                 .spawn(move || {
                     let _finish = scopeguard::guard((), |_| channel.producer_finished());
-                    producer(topic, channel.sender())
+                    producer(channel.sender())
                 })
                 .map_err(spawn_error)?,
         );
@@ -622,9 +637,11 @@ mod tests {
     #[test]
     fn completed_producer_drains_values_then_stops_publisher() {
         let (_runtime, server, sink) = sink();
-        let source = RtdChannelSource::new(capacity(), |_, sender| {
-            sender.try_send(17)?;
-            sender.try_send(42)
+        let source = RtdChannelSource::new(capacity(), |_| {
+            Ok(|sender: RtdSender<i32>| {
+                sender.try_send(17)?;
+                sender.try_send(42)
+            })
         });
         let mut subscription = source
             .subscribe(&RtdTopic::single("finite").unwrap(), sink)
@@ -644,20 +661,115 @@ mod tests {
     }
 
     #[test]
+    fn miri_factory_and_job_have_independent_unique_lifetimes() {
+        struct Owner {
+            label: &'static str,
+            dropped: mpsc::Sender<&'static str>,
+        }
+
+        impl Owner {
+            fn new_job(&self) -> Self {
+                Self {
+                    label: "job",
+                    dropped: self.dropped.clone(),
+                }
+            }
+        }
+
+        impl Drop for Owner {
+            fn drop(&mut self) {
+                let _ = self.dropped.send(self.label);
+            }
+        }
+
+        let (_runtime, _server, sink) = sink();
+        let (dropped_tx, dropped_rx) = mpsc::channel();
+        let factory_owner = Owner {
+            label: "factory",
+            dropped: dropped_tx,
+        };
+        let (sender_tx, sender_rx) = mpsc::channel();
+        let source = RtdChannelSource::new(capacity(), move |_| {
+            // Cell is Send but not Sync. This uncloneable resource belongs
+            // only to its FnOnce job, never to a shared producer callback.
+            let job_owner = std::cell::Cell::new(Some(factory_owner.new_job()));
+            let sender_tx = sender_tx.clone();
+            Ok(move |sender: RtdSender<i32>| {
+                sender_tx.send(sender.clone()).unwrap();
+                // Ownership is independent of the timed-wait adapter, whose
+                // platform clock syscall is unavailable in Miri isolation.
+                while !sender.is_closed() {
+                    std::thread::yield_now();
+                }
+                drop(job_owner.take());
+                Ok(())
+            })
+        });
+        let subscription = source
+            .subscribe(&RtdTopic::single("owned-job").unwrap(), sink)
+            .unwrap();
+        let sender = sender_rx.recv_timeout(DEADLINE).unwrap();
+
+        drop(source);
+
+        assert_eq!(dropped_rx.recv_timeout(DEADLINE).unwrap(), "factory");
+        assert!(dropped_rx.try_recv().is_err());
+        assert!(!sender.is_closed());
+        sender.try_send(42).unwrap();
+
+        Box::new(subscription).disconnect_and_wait().unwrap();
+
+        assert_eq!(dropped_rx.try_recv().unwrap(), "job");
+        assert!(sender.is_closed());
+        assert!(sender.channel.state.lock().values.is_empty());
+    }
+
+    #[test]
+    fn factory_error_or_panic_fails_subscription_setup_synchronously() {
+        for panic in [false, true] {
+            let (_runtime, _server, sink) = sink();
+            let source = RtdChannelSource::new(
+                capacity(),
+                move |topic| -> XllResult<fn(RtdSender<i32>) -> XllResult<()>> {
+                    assert_eq!(topic.parts(), ["invalid"]);
+                    if panic {
+                        panic!("injected factory panic");
+                    }
+                    Err(XllError::Overloaded)
+                },
+            );
+            let result = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
+                source.subscribe(&RtdTopic::single("invalid").unwrap(), sink)
+            }));
+            if panic {
+                assert!(result.is_err());
+            } else {
+                assert!(matches!(result, Ok(Err(XllError::Overloaded))));
+            }
+        }
+    }
+
+    #[test]
     fn disconnect_joins_producer_and_closes_escaped_senders() {
         let (sender_tx, sender_rx) = mpsc::channel();
         let (closed_tx, closed_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
-        let release_rx = Mutex::new(release_rx);
+        let release_rx = Mutex::new(Some(release_rx));
         let finished = Arc::new(AtomicBool::new(false));
         let producer_finished = Arc::clone(&finished);
-        let source = RtdChannelSource::new(capacity(), move |_, sender| {
-            sender_tx.send(sender.clone()).unwrap();
-            assert!(sender.wait_closed(DEADLINE));
-            closed_tx.send(()).unwrap();
-            release_rx.lock().recv_timeout(DEADLINE).unwrap();
-            producer_finished.store(true, Ordering::Release);
-            Ok(())
+        let source = RtdChannelSource::new(capacity(), move |_| {
+            let sender_tx = sender_tx.clone();
+            let closed_tx = closed_tx.clone();
+            let release_rx = release_rx.lock().take().unwrap();
+            let producer_finished = Arc::clone(&producer_finished);
+            Ok(move |sender: RtdSender<i32>| {
+                sender_tx.send(sender.clone()).unwrap();
+                assert!(sender.wait_closed(DEADLINE));
+                closed_tx.send(()).unwrap();
+                release_rx.recv_timeout(DEADLINE).unwrap();
+                producer_finished.store(true, Ordering::Release);
+                Ok(())
+            })
         });
         let (arena, source) = crate::subscription::SourceArena::with_source(
             crate::generation::RuntimeGeneration::new(1).unwrap(),
@@ -708,11 +820,14 @@ mod tests {
             .attach_update_notifier(crate::excel_rtd::RtdNotifier::for_test(notifier))
             .unwrap();
         let (sender_tx, sender_rx) = mpsc::channel();
-        let source = RtdChannelSource::new(capacity(), move |_, sender| {
-            sender_tx.send(sender.clone()).unwrap();
-            sender.try_send(1)?;
-            assert!(sender.wait_closed(DEADLINE));
-            Ok(())
+        let source = RtdChannelSource::new(capacity(), move |_| {
+            let sender_tx = sender_tx.clone();
+            Ok(move |sender: RtdSender<i32>| {
+                sender_tx.send(sender.clone()).unwrap();
+                sender.try_send(1)?;
+                assert!(sender.wait_closed(DEADLINE));
+                Ok(())
+            })
         });
         let subscription = source
             .subscribe(&RtdTopic::single("blocked-publisher").unwrap(), sink)
@@ -737,9 +852,12 @@ mod tests {
     fn panic_in_producer_closes_sender_and_is_reported_after_join() {
         let (_runtime, _server, sink) = sink();
         let (sender_tx, sender_rx) = mpsc::channel();
-        let source = RtdChannelSource::new(capacity(), move |_, sender| {
-            sender_tx.send(sender).unwrap();
-            panic!("injected producer panic");
+        let source = RtdChannelSource::new(capacity(), move |_| {
+            let sender_tx = sender_tx.clone();
+            Ok(move |sender| {
+                sender_tx.send(sender).unwrap();
+                panic!("injected producer panic");
+            })
         });
         let subscription = source
             .subscribe(&RtdTopic::single("panic").unwrap(), sink)
@@ -757,9 +875,12 @@ mod tests {
     fn producer_error_closes_sender_and_is_reported_after_join() {
         let (_runtime, _server, sink) = sink();
         let (sender_tx, sender_rx) = mpsc::channel();
-        let source = RtdChannelSource::new(capacity(), move |_, sender| {
-            sender_tx.send(sender).unwrap();
-            Err(XllError::Overloaded)
+        let source = RtdChannelSource::new(capacity(), move |_| {
+            let sender_tx = sender_tx.clone();
+            Ok(move |sender| {
+                sender_tx.send(sender).unwrap();
+                Err(XllError::Overloaded)
+            })
         });
         let subscription = source
             .subscribe(&RtdTopic::single("error").unwrap(), sink)
@@ -778,10 +899,13 @@ mod tests {
             let (_runtime, _server, sink) = sink();
             let payload_drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let producer_drops = Arc::clone(&payload_drops);
-            let source = RtdChannelSource::new(capacity(), move |_, _| {
-                std::panic::panic_any(crate::panic_boundary::tests::PanickingPayload(Arc::clone(
-                    &producer_drops,
-                )));
+            let source = RtdChannelSource::new(capacity(), move |_| {
+                let producer_drops = Arc::clone(&producer_drops);
+                Ok(move |_| {
+                    std::panic::panic_any(crate::panic_boundary::tests::PanickingPayload(
+                        producer_drops,
+                    ));
+                })
             });
             let subscription = source
                 .subscribe(&RtdTopic::single("custom-payload").unwrap(), sink)
@@ -804,11 +928,15 @@ mod tests {
         let (sender_tx, sender_rx) = mpsc::channel();
         let finished = Arc::new(AtomicBool::new(false));
         let producer_finished = Arc::clone(&finished);
-        let source = RtdChannelSource::new(capacity(), move |_, sender| {
-            sender_tx.send(sender.clone()).unwrap();
-            assert!(sender.wait_closed(DEADLINE));
-            producer_finished.store(true, Ordering::Release);
-            Ok(())
+        let source = RtdChannelSource::new(capacity(), move |_| {
+            let sender_tx = sender_tx.clone();
+            let producer_finished = Arc::clone(&producer_finished);
+            Ok(move |sender: RtdSender<i32>| {
+                sender_tx.send(sender.clone()).unwrap();
+                assert!(sender.wait_closed(DEADLINE));
+                producer_finished.store(true, Ordering::Release);
+                Ok(())
+            })
         });
         let subscription = source
             .subscribe(&RtdTopic::single("unwind").unwrap(), sink)

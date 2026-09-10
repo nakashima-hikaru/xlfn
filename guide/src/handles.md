@@ -103,10 +103,11 @@ committed. The lease may be used before and after `.await`, but its generation
 brand prevents it from being returned, stored in `'static` state, or moved into
 an independently spawned thread.
 
-`Handle::pin()` is not part of the public API. Synchronous code that needs to
-retain an object should keep using the token, formula binding, or
-`HandleAlias<'_, T>` publication path. This keeps call-scoped lookup separate
-from the async task lifetime and avoids adding a second lifetime to `Handle`.
+`Handle::pin()` is not part of the public API. A saved token can look up an
+object only while its formula binding remains live; the token does not extend
+the object's lifetime. Synchronous code retains an object through an active
+formula binding, including a new binding published with `HandleAlias<'_, T>`.
+This keeps call-scoped lookup separate from the async task lifetime.
 `HandleLease` is not an Excel return value.
 
 ## Re-evaluation semantics
@@ -157,9 +158,9 @@ fn alias(dataset: Handle<'_, Dataset>) -> HandleAlias<'_, Dataset> {
 `HandleAlias<'call, T>` is the only handle return capability. It is an
 identity-only, call-scoped capability whose binding snapshot keeps the shared
 object alive until publication or disposal. Consume it while the originating
-call scope is active. Publishing clones the shared object ownership only for
-the new binding and installs a fresh formula binding; it does not clone the
-business value. Once the call scope ends, an unconsumed alias is not a way to
+call scope is active. Publishing adds a counted binding to the same
+arena-owned object and installs a fresh formula binding; it does not clone
+the business value. Once the call scope ends, an unconsumed alias is not a way to
 keep the object alive. A plain `Handle` cannot be returned, cloned, or retained
 after the call.
 
@@ -172,14 +173,17 @@ A lookup that observed a live binding before withdrawal may still succeed,
 and its call scope keeps the object alive until that call ends.
 
 After the last binding is withdrawn, destruction follows the read grace
-period and release of any async handle pins. Background maintenance reclaims
-small retirement batches even if no further formula changes occur. Final
-registry drain waits for outstanding retirement work; async task drain must
-also release the remaining pins before object quiescence completes.
+period and release of any async handle pins. Removing threads and departing
+readers advance reclamation while borrowing the registry. A generation is
+sealed before its existing readers drain, so newer calls cannot extend its
+grace period. Final registry drain waits for outstanding retirement work;
+async task drain must also release the remaining pins before object
+quiescence completes.
 
-Maintenance may run an object's destructor on a framework worker, on a
-removing thread, or during shutdown. Do not use removal as a synchronization
-barrier for application side effects in `Drop`.
+An object's destructor may run on the removing thread, when a call scope
+ends, when an async task releases its last pin, or during shutdown. There is
+no dedicated handle reclamation worker. Do not use removal as a
+synchronization barrier for application side effects in `Drop`.
 
 Destructors must obey the same shutdown rules as any in-process code:
 
@@ -252,8 +256,11 @@ The token is a bearer capability inside the Excel process. It is not an authoriz
 A good handle object is:
 
 - immutable or internally synchronized;
-- cheap to share through `Arc`;
+- suitable for call-scoped borrowing and counted bindings to an arena-owned value;
 - explicit about any application-level thread affinity;
 - free of workbook-owned pointers;
 - bounded in memory;
 - safe to drop during orderly add-in close.
+
+Use `Arc` inside a value only when it reduces immutable payload copying;
+the registry's bindings and pins determine the handle object's lifetime.

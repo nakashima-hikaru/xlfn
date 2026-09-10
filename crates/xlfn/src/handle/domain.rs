@@ -6,11 +6,12 @@
 //! cache-line contention on individual binding records during concurrent
 //! lookups of the same handle.
 //!
-//! Removed bindings enter generation-bound queues. A lazily started worker
-//! reclaims even a single retirement; writers attempt idle maintenance at 32
-//! outstanding records and blocking maintenance at 256 when they cannot hold
-//! their own read permit. Admission backpressure bounds debt in the latter
-//! case. Final seal joins maintenance and waits for destructor completion.
+//! Removed bindings enter generation-bound queues. Writers and departing
+//! readers reclaim idle generations while borrowing the registry owner. The
+//! last reader therefore reclaims even a single retirement without a worker
+//! owning or extending the domain's lifetime. Writers apply blocking
+//! backpressure at 256 records when they cannot hold their own read permit.
+//! Final seal waits for reader and destructor completion.
 //! Only the current generation is open, so a reader that observed the old
 //! generation before rotation cannot be admitted after the grace period starts.
 
@@ -30,10 +31,7 @@ use parking_lot::{Condvar, Mutex};
 use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::thread::{Builder, JoinHandle};
-use std::time::Duration;
 use xlfn_kernel::published_owner::PublishedOwner;
 
 pub(crate) struct HandleReadDomain {
@@ -42,15 +40,15 @@ pub(crate) struct HandleReadDomain {
     queued: AtomicUsize,
     debt: AtomicUsize,
     peak_debt: AtomicUsize,
-    worker_started: AtomicBool,
-    worker: Mutex<Option<JoinHandle<()>>>,
-    stopping: Mutex<bool>,
+    maintenance_running: AtomicBool,
+    maintenance_requested: AtomicBool,
+    completion: Mutex<()>,
     changed: Condvar,
 }
 
 pub(crate) struct HandleDomainPermit {
     pub(crate) domain: NonNull<HandleReadDomain>,
-    _permit: RotatingReadOwnedPermit<DEFAULT_STRIPE_COUNT>,
+    permit: Option<RotatingReadOwnedPermit<DEFAULT_STRIPE_COUNT>>,
 }
 
 impl HandleDomainPermit {
@@ -94,68 +92,39 @@ impl<'scope> HandleDomainWitness<'scope> {
     }
 }
 
-pub(crate) type HandleBindingDomainPermit<'domain> =
-    RotatingReadPermit<'domain, DEFAULT_STRIPE_COUNT>;
+impl Drop for HandleDomainPermit {
+    fn drop(&mut self) {
+        drop(self.permit.take());
+        // SAFETY: enter_owned requires the domain owner to outlive the whole
+        // capability, including this final maintenance notification.
+        unsafe { self.domain.as_ref() }.maintain();
+    }
+}
+
+pub(crate) struct HandleBindingDomainPermit<'domain> {
+    domain: &'domain HandleReadDomain,
+    permit: Option<RotatingReadPermit<'domain, DEFAULT_STRIPE_COUNT>>,
+}
+
+impl Drop for HandleBindingDomainPermit<'_> {
+    fn drop(&mut self) {
+        drop(self.permit.take());
+        self.domain.maintain();
+    }
+}
 
 impl HandleReadDomain {
-    pub(crate) fn new() -> Arc<Self> {
-        Arc::new(Self {
+    pub(crate) fn new() -> Self {
+        Self {
             domain: RotatingReadDomain::new(),
             pending: [Mutex::new(Vec::new()), Mutex::new(Vec::new())],
             queued: AtomicUsize::new(0),
             debt: AtomicUsize::new(0),
             peak_debt: AtomicUsize::new(0),
-            worker_started: AtomicBool::new(false),
-            worker: Mutex::new(None),
-            stopping: Mutex::new(false),
+            maintenance_running: AtomicBool::new(false),
+            maintenance_requested: AtomicBool::new(false),
+            completion: Mutex::new(()),
             changed: Condvar::new(),
-        })
-    }
-
-    /// Start once, on the first publication, before any pointer is published.
-    pub(crate) fn ensure_worker(self: &Arc<Self>) -> XllResult<()> {
-        if self.worker_started.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        let mut worker = self.worker.lock();
-        if *self.stopping.lock() {
-            return Err(XllError::Closing);
-        }
-        if worker.is_none() {
-            let domain = Arc::clone(self);
-            *worker = Some(
-                Builder::new()
-                    .name("xlfn-handle-reclaim".into())
-                    .spawn(move || domain.run_worker())
-                    .map_err(|error| XllError::Native {
-                        code: error.raw_os_error().unwrap_or(0),
-                        message: format!("failed to start handle maintenance: {error}"),
-                    })?,
-            );
-            self.worker_started.store(true, Ordering::Release);
-        }
-        Ok(())
-    }
-
-    fn run_worker(&self) {
-        loop {
-            let mut stopping = self.stopping.lock();
-            while !*stopping && self.queued.load(Ordering::Acquire) == 0 {
-                self.changed.wait(&mut stopping);
-            }
-            if *stopping {
-                return;
-            }
-            // Coalesce small retirements, but never require another removal.
-            self.changed
-                .wait_for(&mut stopping, Duration::from_millis(1));
-            if *stopping {
-                return;
-            }
-            drop(stopping);
-            // Rotation publishes the next generation before waiting for old
-            // readers. Continuous later readers cannot starve this batch.
-            self.quiesce();
         }
     }
 
@@ -164,6 +133,10 @@ impl HandleReadDomain {
     pub(crate) fn enter(&self) -> XllResult<HandleBindingDomainPermit<'_>> {
         self.domain
             .enter_current_thread()
+            .map(|permit| HandleBindingDomainPermit {
+                domain: self,
+                permit: Some(permit),
+            })
             .map_err(|_| XllError::Closing)
     }
 
@@ -182,7 +155,7 @@ impl HandleReadDomain {
                 .enter_owned_current_thread()
                 .map(|permit| HandleDomainPermit {
                     domain: NonNull::from(self),
-                    _permit: permit,
+                    permit: Some(permit),
                 })
                 .map_err(|_| XllError::Closing)
         }
@@ -228,12 +201,6 @@ impl HandleReadDomain {
     }
 
     pub(crate) fn maintain_after_removal(&self) {
-        // Register wakeup under the same mutex used to park the worker.
-        let stopping = self.stopping.lock();
-        if !*stopping {
-            self.changed.notify_one();
-        }
-        drop(stopping);
         if self.is_reclaiming_here() {
             return;
         }
@@ -243,7 +210,7 @@ impl HandleReadDomain {
         // own permit without changing lookup/permit-entry bookkeeping.
         if debt >= HARD_DEBT_LIMIT && !self.domain.current_thread_may_be_reading() {
             self.quiesce();
-        } else if debt >= SOFT_DEBT_LIMIT {
+        } else {
             self.maintain();
         }
     }
@@ -264,10 +231,10 @@ impl HandleReadDomain {
         let _guard = scopeguard::guard(address, |address| {
             RECLAIMING.with(|stack| assert_eq!(stack.borrow_mut().pop(), Some(address)));
         });
-        // No table, queue, transition, or worker lock spans user destructors.
+        // No table, queue, transition, or completion lock spans user destructors.
         drop(records);
         self.debt.fetch_sub(count, Ordering::AcqRel);
-        let _stopping = self.stopping.lock();
+        let _completion = self.completion.lock();
         self.changed.notify_all();
     }
 
@@ -275,15 +242,36 @@ impl HandleReadDomain {
         if self.is_reclaiming_here() {
             return;
         }
-        let records = self
-            .domain
-            .try_quiesce_if_idle_with_publication_barrier(
+        // Coalesce requests without losing the last reader's notification
+        // when it races a poll holding the transition or notification lock.
+        // A failed requester transfers its retry obligation to the active
+        // driver; no thread or shared owner retains this responsibility.
+        self.maintenance_requested.store(true, Ordering::Release);
+        if self.maintenance_running.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        loop {
+            self.maintenance_requested.store(false, Ordering::Release);
+            self.poll_maintenance();
+            self.maintenance_running.store(false, Ordering::Release);
+            if !self.maintenance_requested.swap(false, Ordering::AcqRel)
+                || self.maintenance_running.swap(true, Ordering::AcqRel)
+            {
+                return;
+            }
+        }
+    }
+
+    fn poll_maintenance(&self) {
+        while self.queued.load(Ordering::Acquire) != 0 {
+            let Some(Ok(records)) = self.domain.poll_quiesce_with_publication_barrier(
                 |generation| self.pending[generation.index()].try_lock(),
                 |generation| self.take_generation(generation.index()),
-            )
-            .and_then(Result::ok)
-            .unwrap_or_default();
-        self.reclaim(records);
+            ) else {
+                break;
+            };
+            self.reclaim(records);
+        }
     }
 
     pub(crate) fn quiesce(&self) {
@@ -293,49 +281,40 @@ impl HandleReadDomain {
                 |generation| self.pending[generation.index()].lock(),
                 |generation| self.take_generation(generation.index()),
             )
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .collect();
         self.reclaim(records);
+        self.maintain();
     }
 
     #[cfg(test)]
     pub(crate) fn flush_for_test(&self) {
         self.quiesce();
-        let mut stopping = self.stopping.lock();
+        let mut completion = self.completion.lock();
         while self.debt() != 0 {
-            self.changed.wait(&mut stopping);
+            self.changed.wait(&mut completion);
         }
     }
 
-    /// Final drain closes reader admission, joins maintenance, and waits for
-    /// destruction already handed to another writer. A destructor releasing
-    /// the last registry owner may run this from the worker itself: owning
-    /// arena capabilities retain all data until that worker finishes.
+    /// Final drain closes reader admission and waits for destruction already
+    /// handed to another borrowing writer or departing reader.
     pub(crate) fn seal(&self) {
-        {
-            let _worker = self.worker.lock();
-            *self.stopping.lock() = true;
-            self.changed.notify_all();
-        }
         self.domain.seal_and_wait();
         let mut records = self.take_generation(0);
         records.extend(self.take_generation(1));
         self.reclaim(records);
-        let worker = self.worker.lock().take();
-        if let Some(worker) = worker
-            && worker.thread().id() != std::thread::current().id()
-        {
-            let _ = crate::panic_boundary::contain_panic(worker.join());
-        }
         if !self.is_reclaiming_here() {
-            let mut stopping = self.stopping.lock();
+            let mut completion = self.completion.lock();
             while self.debt() != 0 {
-                self.changed.wait(&mut stopping);
+                self.changed.wait(&mut completion);
             }
         }
     }
 }
 
-pub(crate) const SOFT_DEBT_LIMIT: usize = 32;
 pub(crate) const HARD_DEBT_LIMIT: usize = 256;
 thread_local! {
     static RECLAIMING: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
@@ -345,6 +324,33 @@ thread_local! {
 mod tests {
     use super::*;
     use crate::handle::{ExcelHandleObject, registry::HandleRegistry};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[test]
+    fn miri_last_old_reader_reclaims_while_a_later_reader_remains() {
+        // Object payloads are static; keep the observation outside the arena.
+        struct Counted(Arc<AtomicUsize>);
+        impl ExcelHandleObject for Counted {}
+        impl Drop for Counted {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::Release);
+            }
+        }
+        let registry = HandleRegistry::from_entropy(1, [7; 40]);
+        let drops = Arc::new(AtomicUsize::new(0));
+        let pending = registry.new_object(Counted(Arc::clone(&drops))).unwrap();
+        let token = registry.publish_pending::<Counted>(pending).unwrap().0;
+        let domain = registry.bindings.read_domain();
+        let old = domain.enter().unwrap();
+        registry.remove::<Counted>(&token).unwrap();
+        assert_eq!(drops.load(Ordering::Acquire), 0);
+        let later = domain.enter().unwrap();
+        drop(old);
+        assert_eq!(drops.load(Ordering::Acquire), 1);
+        assert_eq!(domain.debt(), 0);
+        drop(later);
+    }
 
     #[test]
     fn hard_debt_remover_without_a_read_permit_waits_for_grace() {

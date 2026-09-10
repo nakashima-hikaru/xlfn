@@ -56,7 +56,7 @@ impl HandleObjectId {
 /// The binding read lease anchors the immutable publication snapshot. That
 /// snapshot points to a slot-owned binding record, which holds an
 /// `ObjectBinding` capability into the `ObjectArena`-owned `ObjectCell`.
-/// A warm lookup therefore does not clone the object `Arc`.
+/// A warm lookup therefore only projects the registry-owned object.
 pub struct Handle<'call, T: ExcelHandleObject> {
     pub(crate) binding: BindingReadLease<'call>,
     pub(crate) value: TypedObjectProjection<T>,

@@ -84,7 +84,7 @@ pub struct DomainClosed;
 pub struct RotatingReadDomain<const N: usize> {
     generations: [StripedDrainGate<N>; 2],
     current: AtomicUsize,
-    transition: Mutex<()>,
+    transition: Mutex<Option<GenerationIndex>>,
     closed: AtomicBool,
 }
 
@@ -95,7 +95,7 @@ impl<const N: usize> RotatingReadDomain<N> {
         Self {
             generations: [StripedDrainGate::new_open(), StripedDrainGate::new_sealed()],
             current: AtomicUsize::new(0),
-            transition: Mutex::new(()),
+            transition: Mutex::new(None),
             closed: AtomicBool::new(false),
         }
     }
@@ -198,13 +198,20 @@ impl<const N: usize> RotatingReadDomain<N> {
     ///
     /// The transition lock remains held while `operation` runs. Subsystems
     /// must use this callback to drain retired work before another rotation is
-    /// allowed.
+    /// allowed. If a polled transition is pending, its callback runs first,
+    /// then the generation current at this call is rotated and drained. The
+    /// fixed result slots retain both batches without allocating or dropping
+    /// either callback result while the transition lock is held.
     pub fn quiesce<R>(
         &self,
-        operation: impl FnOnce(DrainedGeneration) -> R,
-    ) -> Result<R, DomainClosed> {
-        let _transition = self.transition.lock();
-        self.rotate_and_run_locked(operation)
+        operation: impl FnMut(DrainedGeneration) -> R,
+    ) -> Result<[Option<R>; 2], DomainClosed> {
+        let mut results = [None, None];
+        {
+            let mut transition = self.transition.lock();
+            self.rotate_and_run_locked(&mut transition, &mut results, operation)?;
+        }
+        Ok(results)
     }
 
     /// Rotates while synchronizing deferred registration with publication.
@@ -218,10 +225,19 @@ impl<const N: usize> RotatingReadDomain<N> {
     pub fn quiesce_with_publication_barrier<B, R>(
         &self,
         barrier: impl FnOnce(GenerationIndex) -> B,
-        operation: impl FnOnce(DrainedGeneration) -> R,
-    ) -> Result<R, DomainClosed> {
-        let _transition = self.transition.lock();
-        self.rotate_and_run_with_barrier_locked(barrier, operation)
+        operation: impl FnMut(DrainedGeneration) -> R,
+    ) -> Result<[Option<R>; 2], DomainClosed> {
+        let mut results = [None, None];
+        {
+            let mut transition = self.transition.lock();
+            self.rotate_and_run_with_barrier_locked(
+                &mut transition,
+                &mut results,
+                barrier,
+                operation,
+            )?;
+        }
+        Ok(results)
     }
 
     /// Best-effort form of [`Self::quiesce`] for maintenance paths that must
@@ -232,10 +248,14 @@ impl<const N: usize> RotatingReadDomain<N> {
     /// means the lock was acquired and closure was observed.
     pub fn try_quiesce<R>(
         &self,
-        operation: impl FnOnce(DrainedGeneration) -> R,
-    ) -> Option<Result<R, DomainClosed>> {
-        let _transition = self.transition.try_lock()?;
-        Some(self.rotate_and_run_locked(operation))
+        operation: impl FnMut(DrainedGeneration) -> R,
+    ) -> Option<Result<[Option<R>; 2], DomainClosed>> {
+        let mut results = [None, None];
+        let result = {
+            let mut transition = self.transition.try_lock()?;
+            self.rotate_and_run_locked(&mut transition, &mut results, operation)
+        };
+        Some(result.map(|()| results))
     }
 
     /// Attempts quiescence without waiting for the transition lock or readers.
@@ -245,6 +265,8 @@ impl<const N: usize> RotatingReadDomain<N> {
     /// generation left open. On success, `operation` runs under the transition
     /// lock after the old generation is sealed and idle. The callback itself
     /// may block; callers needing bounded latency must keep it non-blocking.
+    /// If a polled transition is pending, only that transition is completed;
+    /// its replacement is never reopened before its callback has run.
     pub fn try_quiesce_if_idle<R>(
         &self,
         operation: impl FnOnce(DrainedGeneration) -> R,
@@ -266,6 +288,41 @@ impl<const N: usize> RotatingReadDomain<N> {
         self.try_idle_with_barrier_impl(barrier, operation, || {})
     }
 
+    /// Starts or completes a grace period without waiting for readers.
+    ///
+    /// Unlike idle-only maintenance, this seals the old generation and
+    /// publishes its replacement even while old readers remain. Later readers
+    /// cannot prolong that grace period. `None` means admission progressed
+    /// but the old readers are still active, or a lock/barrier was busy.
+    /// A subsequent poll, idle attempt or blocking quiescence must run the
+    /// old generation's callback before its gate may be reused.
+    pub fn poll_quiesce_with_publication_barrier<B, R>(
+        &self,
+        barrier: impl FnOnce(GenerationIndex) -> Option<B>,
+        operation: impl FnOnce(DrainedGeneration) -> R,
+    ) -> Option<Result<R, DomainClosed>> {
+        let mut transition = self.transition.try_lock()?;
+        if self.closed.load(Ordering::Acquire) {
+            return Some(Err(DomainClosed));
+        }
+        let old = if let Some(old) = *transition {
+            old
+        } else {
+            let old = self.current_generation();
+            let barrier = barrier(old)?;
+            self.generations[old.index()].seal();
+            *transition = Some(old);
+            publish_then_release_barrier(barrier, || self.publish_next_locked(old));
+            old
+        };
+        if !self.generations[old.index()].try_wait_until_idle() {
+            return None;
+        }
+        let result = operation(DrainedGeneration { index: old });
+        *transition = None;
+        Some(Ok(result))
+    }
+
     fn try_quiesce_if_idle_impl<R>(
         &self,
         operation: impl FnOnce(DrainedGeneration) -> R,
@@ -280,9 +337,17 @@ impl<const N: usize> RotatingReadDomain<N> {
         operation: impl FnOnce(DrainedGeneration) -> R,
         before_seal: impl FnOnce(),
     ) -> Option<Result<R, DomainClosed>> {
-        let _transition = self.transition.try_lock()?;
+        let mut transition = self.transition.try_lock()?;
         if self.closed.load(Ordering::Acquire) {
             return Some(Err(DomainClosed));
+        }
+        if let Some(old) = *transition {
+            if !self.generations[old.index()].try_wait_until_idle() {
+                return None;
+            }
+            let result = operation(DrainedGeneration { index: old });
+            *transition = None;
+            return Some(Ok(result));
         }
         let old = self.current_generation();
         let barrier = barrier(old)?;
@@ -290,35 +355,50 @@ impl<const N: usize> RotatingReadDomain<N> {
         if !self.generations[old.index()].try_seal_if_idle() {
             return None;
         }
+        *transition = Some(old);
         publish_then_release_barrier(barrier, || self.publish_next_locked(old));
-        Some(Ok(operation(DrainedGeneration { index: old })))
+        let result = operation(DrainedGeneration { index: old });
+        *transition = None;
+        Some(Ok(result))
     }
 
     fn rotate_and_run_locked<R>(
         &self,
-        operation: impl FnOnce(DrainedGeneration) -> R,
-    ) -> Result<R, DomainClosed> {
-        self.rotate_and_run_with_barrier_locked(|_| (), operation)
+        pending: &mut Option<GenerationIndex>,
+        results: &mut [Option<R>; 2],
+        operation: impl FnMut(DrainedGeneration) -> R,
+    ) -> Result<(), DomainClosed> {
+        self.rotate_and_run_with_barrier_locked(pending, results, |_| (), operation)
     }
 
     fn rotate_and_run_with_barrier_locked<B, R>(
         &self,
+        pending: &mut Option<GenerationIndex>,
+        results: &mut [Option<R>; 2],
         barrier: impl FnOnce(GenerationIndex) -> B,
-        operation: impl FnOnce(DrainedGeneration) -> R,
-    ) -> Result<R, DomainClosed> {
+        mut operation: impl FnMut(DrainedGeneration) -> R,
+    ) -> Result<(), DomainClosed> {
         if self.closed.load(Ordering::Acquire) {
             return Err(DomainClosed);
+        }
+        if let Some(old) = *pending {
+            self.generations[old.index()].wait_until_idle();
+            results[0] = Some(operation(DrainedGeneration { index: old }));
+            *pending = None;
         }
         let old = self.current_generation();
         let barrier = barrier(old);
         // D3: seal before publishing the replacement, so a reader that
         // loaded `old` before this transition cannot enter it afterwards.
         self.generations[old.index()].seal();
+        *pending = Some(old);
         publish_then_release_barrier(barrier, || self.publish_next_locked(old));
         // D4: no registration guard spans the reader wait. The callback only
         // runs after every reader admitted to the old generation has left.
         self.generations[old.index()].wait_until_idle();
-        Ok(operation(DrainedGeneration { index: old }))
+        results[1] = Some(operation(DrainedGeneration { index: old }));
+        *pending = None;
+        Ok(())
     }
 
     /// Publishes the replacement after the caller has sealed `old` while
@@ -448,6 +528,165 @@ mod tests {
     use std::cell::Cell;
     use std::sync::{Arc, Barrier, mpsc};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn miri_polled_grace_completes_despite_overlapping_later_readers() {
+        let domain = RotatingReadDomain::<2>::new();
+        let old = domain.enter(0).unwrap();
+        assert!(
+            domain
+                .poll_quiesce_with_publication_barrier(|_| Some(()), |_| ())
+                .is_none()
+        );
+        assert_eq!(domain.current_generation().index(), 1);
+        let later = domain.enter(1).unwrap();
+        drop(old);
+        assert_eq!(
+            domain.poll_quiesce_with_publication_barrier(|_| Some(()), |old| old.index()),
+            Some(Ok(0))
+        );
+        assert!(
+            domain
+                .poll_quiesce_with_publication_barrier(|_| Some(()), |_| ())
+                .is_none()
+        );
+        assert_eq!(domain.current_generation().index(), 0);
+        let newest = domain.enter(0).unwrap();
+        drop(later);
+        assert_eq!(
+            domain.poll_quiesce_with_publication_barrier(|_| Some(()), |old| old.index()),
+            Some(Ok(1))
+        );
+        drop(newest);
+    }
+
+    #[test]
+    fn miri_blocking_quiescence_preserves_pending_and_current_batches() {
+        let domain = RotatingReadDomain::<2>::new();
+        let old = domain.enter(0).unwrap();
+        assert!(
+            domain
+                .poll_quiesce_with_publication_barrier(|_| Some(()), |_| ())
+                .is_none()
+        );
+        drop(old);
+        assert_eq!(
+            domain.quiesce(|old| old.index()).unwrap(),
+            [Some(0), Some(1)]
+        );
+        assert_eq!(domain.current_generation().index(), 0);
+        assert!(domain.transition.lock().is_none());
+    }
+
+    #[test]
+    fn miri_idle_attempt_finishes_pending_before_reusing_a_generation() {
+        let domain = RotatingReadDomain::<2>::new();
+        let old = domain.enter(0).unwrap();
+        assert!(
+            domain
+                .poll_quiesce_with_publication_barrier(|_| Some(()), |_| ())
+                .is_none()
+        );
+        let later = domain.enter(1).unwrap();
+        assert!(domain.try_quiesce_if_idle(|_| ()).is_none());
+        drop(old);
+        assert_eq!(domain.try_quiesce_if_idle(|old| old.index()), Some(Ok(0)));
+        assert_eq!(domain.current_generation().index(), 1);
+        assert!(domain.try_quiesce_if_idle(|_| ()).is_none());
+        drop(later);
+        assert_eq!(domain.try_quiesce_if_idle(|old| old.index()), Some(Ok(1)));
+    }
+
+    #[test]
+    fn miri_callback_panic_keeps_generation_pending_across_apis() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        for idle in [false, true] {
+            let domain = RotatingReadDomain::<2>::new();
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                if idle {
+                    domain.try_quiesce_if_idle::<()>(|_| panic!("injected callback failure"));
+                } else {
+                    domain
+                        .quiesce::<()>(|_| panic!("injected callback failure"))
+                        .unwrap();
+                }
+            }));
+            assert!(result.is_err());
+            assert_eq!(domain.current_generation().index(), 1);
+            assert_eq!(
+                domain.poll_quiesce_with_publication_barrier(|_| Some(()), |old| old.index()),
+                Some(Ok(0))
+            );
+            assert_eq!(domain.current_generation().index(), 1);
+        }
+    }
+
+    #[test]
+    fn miri_first_batch_drops_unlocked_if_second_quiescence_stage_panics() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        struct Batch<'a> {
+            domain: &'a RotatingReadDomain<2>,
+            dropped: &'a Cell<bool>,
+        }
+        impl Drop for Batch<'_> {
+            fn drop(&mut self) {
+                assert!(self.domain.transition.try_lock().is_some());
+                self.dropped.set(true);
+            }
+        }
+        for barrier_panics in [false, true] {
+            let domain = RotatingReadDomain::<2>::new();
+            let old = domain.enter(0).unwrap();
+            assert!(
+                domain
+                    .poll_quiesce_with_publication_barrier(|_| Some(()), |_| ())
+                    .is_none()
+            );
+            drop(old);
+            let dropped = Cell::new(false);
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                let _ = domain.quiesce_with_publication_barrier(
+                    |_| {
+                        assert!(!barrier_panics, "injected second barrier failure");
+                    },
+                    |old| {
+                        assert_eq!(old.index(), 0, "injected second callback failure");
+                        Batch {
+                            domain: &domain,
+                            dropped: &dropped,
+                        }
+                    },
+                );
+            }));
+            assert!(result.is_err());
+            assert!(dropped.get());
+        }
+    }
+
+    #[test]
+    fn miri_seal_drains_both_sides_of_a_pending_rotation() {
+        let domain = RotatingReadDomain::<2>::new();
+        let old = domain.enter(0).unwrap();
+        assert!(
+            domain
+                .poll_quiesce_with_publication_barrier(|_| Some(()), |_| ())
+                .is_none()
+        );
+        let current = domain.enter(1).unwrap();
+        std::thread::scope(|scope| {
+            let sealing = scope.spawn(|| domain.seal_and_wait());
+            while !domain.closed.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            drop(old);
+            drop(current);
+            sealing.join().unwrap();
+        });
+        assert_eq!(
+            domain.poll_quiesce_with_publication_barrier(|_| Some(()), |_| ()),
+            Some(Err(DomainClosed))
+        );
+    }
 
     #[test]
     fn publication_barrier_is_released_before_old_readers_drain() {

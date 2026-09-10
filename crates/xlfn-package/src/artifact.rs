@@ -208,25 +208,18 @@ pub fn verify_staged_package(
     xll: &Path,
     target: &str,
     required_exports: &[String],
-    mut bundle: StagedBundle,
+    bundle: StagedBundle,
 ) -> PackageResult<VerifiedPackage> {
     let xll_snapshot = snapshot_staged_artifact(target, xll)?;
     verify_xll_bytes(&xll_snapshot, target, required_exports, xll)?;
-    for file in &mut bundle.files {
-        let expected = file.snapshot.as_deref().ok_or_else(|| {
-            PackageError::Message(format!(
-                "staged bundle file has no immutable snapshot: {}",
-                file.source.display()
-            ))
-        })?;
+    for file in &bundle.files {
         let current = snapshot_staged_artifact(target, &file.source)?;
-        if current.as_ref() != expected {
+        if current.as_ref() != file.snapshot.as_ref() {
             return Err(PackageError::StagedArtifactChanged {
                 target: target.to_owned(),
                 path: file.source.clone(),
             });
         }
-        file.snapshot = Some(current);
     }
     verify_dependency_closure(xll, target, &bundle, &xll_snapshot)?;
 
@@ -255,13 +248,11 @@ pub fn verify_staged_package(
             return Err(format!("duplicate staged artifact basename: {}", file.name).into());
         }
         expected_names.insert(name_key);
-        let snapshot = file.snapshot.ok_or_else(|| {
-            PackageError::Message(format!(
-                "staged bundle file has no immutable snapshot: {}",
-                file.source.display()
-            ))
-        })?;
-        artifacts.push(verified_artifact(relative_path, snapshot, file.permissions));
+        artifacts.push(verified_artifact(
+            relative_path,
+            file.snapshot,
+            file.permissions,
+        ));
     }
     Ok(VerifiedPackage {
         artifacts,

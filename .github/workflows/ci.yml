@@ -411,7 +411,7 @@ jobs:
                   cargo test
                   --package xlfn
                   --lib
-                  --features "async refinement"
+                  --features "async handles rtd refinement"
                   rust_shutdown_resource_traces_are_accepted_by_lean_checker
                   --locked
                   --

@@ -16,6 +16,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 type Removed<V> = dyn Fn(Entry<V>) + Send + Sync;
 type ResidentMap<K, V> = HashMap<VersionedKey<K>, Entry<V>, RandomState>;
+// Arc only shares the synchronization cell and immutable outcome between
+// callers already borrowing this index. The initializer alone completes and
+// removes a flight; neither the flight nor its reference count owns nodes or
+// grants permission to dereference an Entry.
 type Flights<K, V> = HashMap<VersionedKey<K>, Arc<Flight<V>>, RandomState>;
 
 enum Completion<V> {
@@ -42,7 +46,7 @@ pub(super) struct ShardedResidentIndex<K, V> {
     capacity: u64,
     policy: Mutex<Policy>,
     flights: Mutex<Flights<K, V>>,
-    removed: Arc<Removed<V>>,
+    removed: Box<Removed<V>>,
     entries: AtomicU64,
     weight: AtomicU64,
 }
@@ -72,7 +76,7 @@ where
                 next_victim: 0,
             }),
             flights: Mutex::new(HashMap::with_hasher(hash)),
-            removed: Arc::new(removed),
+            removed: Box::new(removed),
             entries: AtomicU64::new(0),
             weight: AtomicU64::new(0),
         }

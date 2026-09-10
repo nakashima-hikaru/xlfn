@@ -20,7 +20,6 @@ use crate::generation::BindingGeneration;
 use crate::{XllError, XllResult};
 use parking_lot::{RwLock, RwLockWriteGuard};
 use std::ptr::NonNull;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 use xlfn_kernel::published_owner::PublishedOwner;
 
@@ -200,7 +199,7 @@ pub(crate) struct RegistryState {
 pub(crate) struct BindingTable {
     state: RwLock<RegistryState>,
     published: PublishedBindings,
-    read_domain: Arc<HandleReadDomain>,
+    read_domain: PublishedOwner<HandleReadDomain>,
     maximum_bindings: u32,
 }
 
@@ -213,14 +212,9 @@ impl BindingTable {
                 live_bindings: 0,
             }),
             published: PublishedBindings::new(maximum_bindings),
-            read_domain: HandleReadDomain::new(),
+            read_domain: PublishedOwner::new(HandleReadDomain::new()),
             maximum_bindings,
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn read_domain_for_test(&self) -> &Arc<HandleReadDomain> {
-        &self.read_domain
     }
 
     pub(crate) fn read_domain(&self) -> &HandleReadDomain {
@@ -267,7 +261,6 @@ impl BindingTable {
     }
 
     pub(crate) fn reserve(&self) -> XllResult<BindingReservation<'_>> {
-        self.read_domain.ensure_worker()?;
         let mut state = self.state.write();
         // A remover may itself hold a call permit and must not wait for it.
         // Stop new publication at hard debt even in that case. With the live
@@ -493,8 +486,8 @@ impl Drop for BindingRemoval<'_> {
 
 impl Drop for BindingTable {
     fn drop(&mut self) {
-        // The domain worker cannot outlive table ownership unnoticed. Its
-        // queued records retain their object arena even for reentrant drop.
+        // All reclamation runs under a borrowing call/writer capability, and
+        // its final access must finish before the unique domain is destroyed.
         self.read_domain.seal();
     }
 }

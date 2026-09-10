@@ -350,5 +350,37 @@
     "count": 1,
     "category": "test",
     "reason": "Observes standard-library bounds assertion payloads from invalid matrix indices."
+  },
+  {
+    "path": "crates/xlfn-kernel/src/rotating_read_domain.rs",
+    "context": "# [ cfg ( test ) ] mod tests / # [ test ] fn miri_callback_panic_keeps_generation_pending_across_apis",
+    "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",
+    "count": 1,
+    "category": "test",
+    "reason": "Test-only import; the direct panic observation in this function is separately inventoried."
+  },
+  {
+    "path": "crates/xlfn-kernel/src/rotating_read_domain.rs",
+    "context": "# [ cfg ( test ) ] mod tests / # [ test ] fn miri_callback_panic_keeps_generation_pending_across_apis",
+    "code": "let result = catch_unwind(AssertUnwindSafe(|| {",
+    "count": 1,
+    "category": "test",
+    "reason": "Observes a fixed string callback panic and verifies pending-generation recovery across maintenance APIs."
+  },
+  {
+    "path": "crates/xlfn-kernel/src/rotating_read_domain.rs",
+    "context": "# [ cfg ( test ) ] mod tests / # [ test ] fn miri_first_batch_drops_unlocked_if_second_quiescence_stage_panics",
+    "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",
+    "count": 1,
+    "category": "test",
+    "reason": "Test-only import; the direct panic observation in this function is separately inventoried."
+  },
+  {
+    "path": "crates/xlfn-kernel/src/rotating_read_domain.rs",
+    "context": "# [ cfg ( test ) ] mod tests / # [ test ] fn miri_first_batch_drops_unlocked_if_second_quiescence_stage_panics",
+    "code": "let result = catch_unwind(AssertUnwindSafe(|| {",
+    "count": 1,
+    "category": "test",
+    "reason": "Observes fixed string barrier/callback panics and verifies retained result destruction occurs after releasing the transition lock."
   }
 ]

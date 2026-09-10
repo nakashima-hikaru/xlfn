@@ -1,7 +1,5 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use std::sync::Arc;
-
 use xlfn::prelude::*;
 use xlfn::rtd::{RtdTopic, RtdValue};
 
@@ -36,9 +34,7 @@ impl Addin for RtdSourceExample {
     ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
         Ok(Opened::new(
             State {
-                metrics: context
-                    .rtd()
-                    .register_source(metric_source(Arc::new(Client)))?,
+                metrics: context.rtd().register_source(metric_source())?,
             },
             (),
             (),

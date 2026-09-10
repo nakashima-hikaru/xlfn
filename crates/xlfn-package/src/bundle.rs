@@ -32,7 +32,10 @@ pub(crate) struct BundleFile {
     pub(crate) source: PathBuf,
     pub(crate) name: String,
     pub(crate) configured_path: String,
-    pub(crate) snapshot: Option<Arc<[u8]>>,
+    // Resolution owns the immutable bytes. Sharing this allocation with
+    // staging and verification avoids copies; paths never supply fallback
+    // contents after resolution.
+    pub(crate) snapshot: Arc<[u8]>,
     pub(crate) permissions: std::fs::Permissions,
 }
 
@@ -43,10 +46,7 @@ impl std::fmt::Debug for BundleFile {
             .field("source", &self.source)
             .field("name", &self.name)
             .field("configured_path", &self.configured_path)
-            .field(
-                "snapshot_len",
-                &self.snapshot.as_deref().map(|snapshot| snapshot.len()),
-            )
+            .field("snapshot_len", &self.snapshot.len())
             .field("permissions", &self.permissions)
             .finish()
     }
@@ -210,7 +210,7 @@ pub(crate) fn resolve_bundle_files_with_policy_impl(
             source,
             name,
             configured_path: configured_path.clone(),
-            snapshot: Some(snapshot),
+            snapshot,
             permissions: opened_metadata.permissions(),
         });
     }
@@ -277,12 +277,7 @@ pub fn stage_bundle(
             .into());
         }
 
-        let snapshot = file.snapshot.clone().ok_or_else(|| {
-            PackageError::Message(format!(
-                "resolved bundle file has no immutable snapshot: {}",
-                file.source.display()
-            ))
-        })?;
+        let snapshot = &file.snapshot;
         temp_file.as_file_mut().write_all(snapshot.as_ref())?;
         temp_file.as_file_mut().flush()?;
         temp_file
@@ -311,7 +306,7 @@ pub fn stage_bundle(
             source: output,
             name: file.name.clone(),
             configured_path: file.configured_path.clone(),
-            snapshot: Some(Arc::clone(&snapshot)),
+            snapshot: Arc::clone(snapshot),
             permissions: file.permissions.clone(),
         });
     }
@@ -342,15 +337,9 @@ pub fn stage_bundle(
             )
             .into());
         }
-        let snapshot = file.snapshot.as_ref().ok_or_else(|| {
-            PackageError::Message(format!(
-                "staged bundle entry has no immutable snapshot: {}",
-                path.display()
-            ))
-        })?;
         let artifact = verified_artifact(
             PathBuf::from(&file.name),
-            Arc::clone(snapshot),
+            Arc::clone(&file.snapshot),
             file.permissions.clone(),
         );
         let identity = file_snapshot_state(&handle)?.identity;

@@ -1,5 +1,5 @@
 use crate::generation::RemovalAttemptId;
-use crate::module_runtime::{ModuleAuthority, ModuleClosing};
+use crate::module_runtime::{ModuleAuthority, ModuleCleanupAuthority, ModuleClosing};
 use crate::runtime::capabilities::ShutdownDeps;
 
 /// Runtime-side owner of a lifecycle removal claim.
@@ -12,8 +12,16 @@ pub(crate) struct RemovalOwner<'runtime, A: crate::Addin> {
     lifecycle: &'runtime crate::lifecycle::LifecycleCoordinator<A>,
     observer: &'runtime crate::runtime::observer::RuntimeObserver,
     attempt: RemovalAttemptId,
-    module_closing: Option<ModuleClosing>,
-    returned_module: Option<Box<ModuleAuthority>>,
+    authority: RemovalAuthority,
+}
+
+/// The claim holds either the initial close capability, no capability while
+/// the teardown pipeline owns it, or the capability returned for a takeover.
+/// Initial and returned authority cannot coexist.
+enum RemovalAuthority {
+    Closing(ModuleClosing),
+    InPipeline,
+    Returned(Box<ModuleCleanupAuthority>),
 }
 
 impl<A: crate::Addin> Drop for RemovalOwner<'_, A> {
@@ -24,14 +32,10 @@ impl<A: crate::Addin> Drop for RemovalOwner<'_, A> {
         // authority.
         let lifecycle = crate::lifecycle::LifecycleControl::new(self.lifecycle);
         let mut control = lifecycle.access();
-        let closing = self.module_closing.take().map(ModuleAuthority::Closing);
-        let returned = match (
-            closing,
-            self.returned_module.take().map(|authority| *authority),
-        ) {
-            (Some(_), Some(_)) => xlfn_kernel::invariant::fail_stop(),
-            (Some(authority), None) | (None, Some(authority)) => Some(authority),
-            (None, None) => None,
+        let returned = match std::mem::replace(&mut self.authority, RemovalAuthority::InPipeline) {
+            RemovalAuthority::Closing(closing) => Some(ModuleAuthority::Closing(closing)),
+            RemovalAuthority::Returned(authority) => Some(authority.into_authority()),
+            RemovalAuthority::InPipeline => None,
         };
         lifecycle.release_removal_claim(&mut control, self.attempt, returned);
         self.observer.release_cleanup_owner();
@@ -48,8 +52,7 @@ impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
             lifecycle: deps.lifecycle(),
             observer: deps.observer(),
             attempt: claim.attempt(),
-            module_closing: Some(claim.into_module_closing()),
-            returned_module: None,
+            authority: RemovalAuthority::Closing(claim.into_module_closing()),
         }
     }
 
@@ -58,22 +61,25 @@ impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
     }
 
     pub(crate) fn has_module_closing(&self) -> bool {
-        self.module_closing.is_some()
+        matches!(self.authority, RemovalAuthority::Closing(_))
     }
 
     pub(crate) fn take_module_closing(&mut self) -> ModuleClosing {
-        self.module_closing
-            .take()
-            .expect("removal owner carries module close capability")
-    }
-
-    pub(crate) fn return_module_authority(
-        &mut self,
-        authority: crate::module_runtime::ModuleCleanupAuthority,
-    ) {
-        if self.module_closing.is_some() || self.returned_module.is_some() {
+        if !self.has_module_closing() {
             xlfn_kernel::invariant::fail_stop();
         }
-        self.returned_module = Some(Box::new(authority.into_authority()));
+        let RemovalAuthority::Closing(closing) =
+            std::mem::replace(&mut self.authority, RemovalAuthority::InPipeline)
+        else {
+            unreachable!("removal owner carries module close capability");
+        };
+        closing
+    }
+
+    pub(crate) fn return_module_authority(&mut self, authority: ModuleCleanupAuthority) {
+        if !matches!(self.authority, RemovalAuthority::InPipeline) {
+            xlfn_kernel::invariant::fail_stop();
+        }
+        self.authority = RemovalAuthority::Returned(Box::new(authority));
     }
 }

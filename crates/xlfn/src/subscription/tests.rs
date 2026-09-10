@@ -2715,6 +2715,58 @@ fn server_handle_cannot_cross_subscription_runtime_boundary() {
 }
 
 #[test]
+fn preparation_rejects_missing_source_without_catalog_reservation() {
+    let (arena, mut source, _, _) = publishing_source::<i32>(None);
+    let runtime = SubscriptionRuntime::with_sources_for_internal(arena);
+    source.id.sequence = u64::MAX;
+
+    assert!(matches!(
+        runtime.prepare(&source, RtdTopic::single("missing-source").unwrap()),
+        Err(XllError::StaleHandle)
+    ));
+    let catalog = runtime.catalog.lock();
+    assert!(catalog.entries.is_empty());
+    assert_eq!(catalog.pending_topic_bytes, 0);
+    catalog.assert_identity_invariants();
+}
+
+#[test]
+fn rejected_connection_source_leaves_preparation_pending() {
+    let (arena, source, _, _) = publishing_source::<i32>(None);
+    let runtime = SubscriptionRuntime::with_sources_for_internal(arena);
+    let server = runtime.register_test_server(1);
+    let prepared = runtime
+        .prepare(&source, RtdTopic::single("source-resolution").unwrap())
+        .unwrap();
+    let id = prepared.id();
+    // Inject a damaged identity after preparation to verify that the
+    // connection boundary rejects it before acquiring a catalog obligation.
+    runtime
+        .catalog
+        .lock()
+        .entries
+        .get_mut(&id)
+        .unwrap()
+        .source_id
+        .0
+        .sequence = u64::MAX;
+
+    assert!(matches!(
+        runtime.connect_transaction(&server, TopicId(1), id),
+        Err(XllError::StaleHandle)
+    ));
+    {
+        let mut catalog = runtime.catalog.lock();
+        let entry = catalog.entries.get_mut(&id).unwrap();
+        assert!(!entry.is_connected());
+        entry.source_id = SourceId(source.id);
+        catalog.assert_identity_invariants();
+    }
+    prepared.rollback();
+    assert!(runtime.catalog.lock().entries.is_empty());
+}
+
+#[test]
 fn double_slot_pending_metadata_and_values_invariants() {
     // Invariants 2, 3, 4:
     // - For any pending update in pending[b], active.values[b] exists with matching (generation, sequence)

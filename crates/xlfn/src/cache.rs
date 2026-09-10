@@ -696,7 +696,11 @@ impl CacheLookupDomain {
         let entries = self
             .domain
             .quiesce(|generation| self.drain_generation(generation))
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .collect::<Vec<_>>();
         self.record_batch(&entries, start);
         entries
     }

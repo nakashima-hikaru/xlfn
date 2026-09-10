@@ -222,7 +222,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         if let Some(hook) = self.test_enter_hook.lock().as_ref().cloned() {
             hook();
         }
-        if source.id.generation != self.generation {
+        if source.id.generation != self.generation || self.sources.resolve(source.id).is_none() {
             return Err(XllError::StaleHandle);
         }
         let mut catalog = self.catalog.lock();
@@ -348,21 +348,23 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_SUBSCRIPTION_OVERFLOW,
         })?;
 
-        let (source_id, topic) = {
+        let (source, topic) = {
             let mut catalog = self.catalog.lock();
             let Some(result) = catalog.with_entry(id, |entry| -> XllResult<_> {
+                // Resolve the immutable arena entry before acquiring any
+                // catalog connection obligation. A rejected source must leave
+                // the pending subscription available for rollback or retry.
+                let source = self
+                    .sources
+                    .resolve(entry.source_id.0)
+                    .ok_or(XllError::StaleHandle)?;
                 entry.begin_connection(server.generation, conn_gen)?;
-                Ok((entry.source_id.0, entry.topic.clone()))
+                Ok((source, entry.topic.clone()))
             }) else {
                 return Err(XllError::Closing);
             };
             result?
         };
-        let source = self
-            .sources
-            .resolve(source_id)
-            .ok_or(XllError::StaleHandle)?;
-
         if let Err(error) = server.publish.reserve_connection(topic_id, id, conn_gen) {
             self.rollback_catalog_connection_reservation(id, conn_gen);
             return Err(error);
@@ -426,8 +428,6 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             id,
             value: latest_value,
             observed_sequence,
-            created: true,
-            finished: false,
         })
     }
 
@@ -712,15 +712,16 @@ impl<H: SubscriptionHost> Drop for PreparedSubscription<'_, H> {
 }
 
 pub(crate) struct SubscriptionConnection<H: SubscriptionHost> {
-    pub(crate) runtime: NonNull<SubscriptionRuntime<H>>,
-    pub(crate) operation: Option<OwnedServerOperation<H>>,
-    pub(crate) topic_id: TopicId,
-    pub(crate) generation: ConnectionGeneration,
-    pub(crate) id: SubscriptionId,
-    pub(crate) value: StoredRtdValue,
-    pub(crate) observed_sequence: Option<u64>,
-    pub(crate) created: bool,
-    pub(crate) finished: bool,
+    runtime: NonNull<SubscriptionRuntime<H>>,
+    // This permit is the transaction's sole completion state. Taking it
+    // discharges the rollback obligation exactly once; no independent flags
+    // can claim completion while a live operation remains retained.
+    operation: Option<OwnedServerOperation<H>>,
+    topic_id: TopicId,
+    generation: ConnectionGeneration,
+    id: SubscriptionId,
+    value: StoredRtdValue,
+    observed_sequence: Option<u64>,
 }
 
 // SAFETY: the connection carries an OwnedServerOperation with runtime/server
@@ -735,57 +736,38 @@ impl<H: SubscriptionHost> SubscriptionConnection<H> {
         unsafe { self.runtime.as_ref() }
     }
 
-    #[inline]
-    pub(crate) fn server(&self) -> &SubscriptionServer<H> {
-        self.operation
-            .as_ref()
-            .expect("active connection operation")
-            .server()
-    }
-
     pub(crate) fn value(&self) -> &StoredRtdValue {
         &self.value
     }
 
     pub(crate) fn commit(mut self) -> XllResult<()> {
-        if self.finished {
+        let Some(operation) = &self.operation else {
             return Ok(());
-        }
-        let result = if self.created {
-            self.runtime().commit_connection(
-                self.server(),
-                self.topic_id,
-                self.generation,
-                self.id,
-                self.observed_sequence,
-            )
-        } else {
-            Ok(())
         };
+        let result = self.runtime().commit_connection(
+            operation.server(),
+            self.topic_id,
+            self.generation,
+            self.id,
+            self.observed_sequence,
+        );
 
         if result.is_ok() {
-            self.finished = true;
             self.operation.take();
         }
         result
     }
 
     pub(crate) fn rollback(&mut self) {
-        if self.finished {
+        let Some(operation) = self.operation.take() else {
             return;
-        }
-        self.finished = true;
-        if self.created
-            && let Some(operation) = &self.operation
-        {
-            let _ = self.runtime().rollback_connection(
-                operation.server(),
-                self.topic_id,
-                self.generation,
-                self.id,
-            );
-        }
-        self.operation.take();
+        };
+        let _ = self.runtime().rollback_connection(
+            operation.server(),
+            self.topic_id,
+            self.generation,
+            self.id,
+        );
     }
 }
 

@@ -79,12 +79,10 @@ pub(crate) struct RuntimeExecutors {
 #[must_use = "an armed service reservation must be committed or rolled back"]
 pub(crate) struct ArmedServices {
     services: Option<GenerationServices>,
-    committed: bool,
 }
 
 impl ArmedServices {
     pub(crate) fn commit(mut self) -> Box<GenerationServices> {
-        self.committed = true;
         Box::new(
             self.services
                 .take()
@@ -95,9 +93,7 @@ impl ArmedServices {
 
 impl Drop for ArmedServices {
     fn drop(&mut self) {
-        if !self.committed
-            && let Some(services) = self.services.as_ref()
-        {
+        if let Some(services) = self.services.as_ref() {
             services.disarm_or_abort();
         }
     }
@@ -141,7 +137,6 @@ impl GenerationServices {
         }
         Ok(ArmedServices {
             services: Some(services),
-            committed: false,
         })
     }
 

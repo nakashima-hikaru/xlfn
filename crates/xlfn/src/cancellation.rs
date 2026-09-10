@@ -27,7 +27,6 @@ pub enum CancellationGuarantee {
 
 struct CancellationSlot {
     generation: AtomicU64,
-    source_live: AtomicBool,
     cancelled: AtomicBool,
     delivery_state: AtomicU8,
     // Slot reuse and every generation-dependent mutation share this lock. A
@@ -39,6 +38,22 @@ struct SlotWaiters {
     generation: u64,
     next_id: u64,
     entries: FxHashMap<u64, std::task::Waker>,
+}
+
+impl CancellationSlot {
+    /// Both explicit cancellation and loss of the unique source terminate the
+    /// same scope. The caller holds this slot's waiter lock through transition
+    /// and detachment; arbitrary wakers run only after releasing all locks.
+    fn cancel_locked(&self, waiters: &mut SlotWaiters) -> FxHashMap<u64, std::task::Waker> {
+        let _ = self.delivery_state.compare_exchange(
+            STATE_RUNNING,
+            STATE_CANCELED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        self.cancelled.store(true, Ordering::Release);
+        std::mem::take(&mut waiters.entries)
+    }
 }
 
 struct CancellationRegistryState {
@@ -73,7 +88,6 @@ impl CancellationRegistry {
             waiters.generation = generation;
             waiters.next_id = 1;
             slot.generation.store(generation, Ordering::Release);
-            slot.source_live.store(true, Ordering::Release);
             slot.cancelled.store(false, Ordering::Release);
             slot.delivery_state.store(STATE_RUNNING, Ordering::Release);
             (NonNull::from(&**slot), generation, index)
@@ -82,7 +96,6 @@ impl CancellationRegistry {
                 u32::try_from(state.slots.len()).expect("cancellation slot index exhausted");
             let slot = PublishedOwner::new(CancellationSlot {
                 generation: AtomicU64::new(1),
-                source_live: AtomicBool::new(true),
                 cancelled: AtomicBool::new(false),
                 delivery_state: AtomicU8::new(STATE_RUNNING),
                 waiters: Mutex::new(SlotWaiters {
@@ -105,8 +118,7 @@ impl CancellationRegistry {
             if waiters.generation != expected_gen {
                 return;
             }
-            slot.source_live.store(false, Ordering::Release);
-            let detached = std::mem::take(&mut waiters.entries);
+            let detached = slot.cancel_locked(&mut waiters);
             drop(waiters);
             // A wrapped generation could make a process-live old token valid
             // again. Exhausted slots remain allocated, but are never reused.
@@ -123,6 +135,11 @@ impl CancellationRegistry {
 
 static CANCELLATION_REGISTRY: CancellationRegistry = CancellationRegistry::new();
 
+/// Non-owning observation of one cancellation scope.
+///
+/// Its unique source owns the scope's lifetime. Explicit cancellation or
+/// dropping that source makes this token permanently cancelled. Copies retain
+/// only a process-stable slot identity; they never extend the scope's lifetime.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CancellationToken {
     slot: NonNull<CancellationSlot>,
@@ -171,16 +188,7 @@ impl CancellationSource {
             if waiters.generation != self.generation {
                 return;
             }
-            let _ = slot.delivery_state.compare_exchange(
-                STATE_RUNNING,
-                STATE_CANCELED,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            );
-            if slot.cancelled.swap(true, Ordering::AcqRel) {
-                return;
-            }
-            std::mem::take(&mut waiters.entries)
+            slot.cancel_locked(&mut waiters)
         };
         for (_, waker) in detached {
             let _ = catch_no_unwind(AssertUnwindSafe(|| waker.wake()));
@@ -195,6 +203,7 @@ impl Drop for CancellationSource {
 }
 
 impl CancellationToken {
+    /// Returns whether cancellation was requested or the owning scope ended.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
         // SAFETY: slot memory is stable for the lifetime of the process.
@@ -219,7 +228,7 @@ impl CancellationToken {
         // SAFETY: slot memory is stable for the lifetime of the process.
         let slot = unsafe { self.slot.as_ref() };
         let waiters = slot.waiters.lock();
-        if waiters.generation != self.generation || !slot.source_live.load(Ordering::Acquire) {
+        if waiters.generation != self.generation {
             return false;
         }
         slot.delivery_state
@@ -252,6 +261,7 @@ impl CancellationToken {
         self.guarantee
     }
 
+    /// Completes when [`Self::is_cancelled`] becomes true.
     pub fn cancelled(&self) -> Cancelled<'_> {
         Cancelled {
             token: *self,
@@ -285,7 +295,7 @@ impl Cancelled<'_> {
     ) -> Poll<()> {
         // SAFETY: slot memory is stable for the lifetime of the process.
         let slot = unsafe { self.token.slot.as_ref() };
-        if self.token.is_cancelled() || !slot.source_live.load(Ordering::Acquire) {
+        if self.token.is_cancelled() {
             self.unregister();
             return Poll::Ready(());
         }
@@ -301,7 +311,7 @@ impl Cancelled<'_> {
         }
         let detached;
         let result;
-        if self.token.is_cancelled() || !slot.source_live.load(Ordering::Acquire) {
+        if self.token.is_cancelled() {
             detached = self
                 .waiter_id
                 .take()
@@ -656,15 +666,24 @@ mod tests {
     }
 
     #[test]
-    fn terminal_token_after_source_drop_is_ready_on_poll() {
+    fn miri_source_drop_cancels_token_and_waiter_before_slot_reuse() {
         let registry = CancellationRegistry::new();
         let (source, token) = local_source(&registry);
         assert!(!token.is_cancelled());
-        drop(source);
-        assert!(!token.is_cancelled());
-
         let mut future = std::pin::pin!(token.cancelled());
-        let waker = noop_waker();
+        let wake_count = StdArc::new(WakeCount(AtomicUsize::new(0)));
+        let waker = waker(StdArc::clone(&wake_count));
+        assert_eq!(
+            future.as_mut().poll(&mut Context::from_waker(&waker)),
+            Poll::Pending
+        );
+
+        drop(source);
+
+        assert!(token.is_cancelled());
+        assert_eq!(wake_count.0.load(Ordering::Acquire), 1);
+        #[cfg(feature = "async")]
+        assert!(!token.try_start_delivery());
         assert_eq!(
             future.as_mut().poll(&mut Context::from_waker(&waker)),
             Poll::Ready(())
@@ -678,7 +697,7 @@ mod tests {
         let gen1 = token1.generation;
         let slot_ptr1 = token1.slot;
         drop(source1);
-        assert!(!token1.is_cancelled());
+        assert!(token1.is_cancelled());
 
         let (source2, token2) = local_source(&registry);
         assert_eq!(token2.slot, slot_ptr1);

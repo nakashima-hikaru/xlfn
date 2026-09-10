@@ -2,8 +2,10 @@
 //!
 //! Read-side maps publish non-owning pointers to topics. Retired topic owners
 //! are reclaimed only after the rotating read domain completes their grace
-//! period. Single-flight initializers use separate Arc ownership so their
-//! owners and waiters can complete after the table removes an initializer.
+//! period. Single-flight completion cells share a small synchronization
+//! allocation; the initializer reservation owns completion, and service close
+//! explicitly waits for it. Reference counts do not govern service, topic or
+//! object lifetime.
 
 #![allow(
     unsafe_code,
@@ -180,6 +182,9 @@ fn shard_count_for(maximum_bindings: usize) -> usize {
 }
 
 #[derive(Clone)]
+/// Shared rendezvous storage only. `PublicationReservation` is the logical
+/// initializer owner; it removes the marker and signals completion explicitly.
+/// Arc avoids keeping completed cells in a second table until waiters finish.
 pub(crate) struct InitializationPtr(Arc<Initialization>);
 
 impl InitializationPtr {

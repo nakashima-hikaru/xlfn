@@ -64,7 +64,7 @@ publishing zero, and a drain waiter synchronizes with that release's final
 access. Async generation snapshots acquire a lifetime pin before dereferencing
 the current generation; completion retains the pin even after cancellation
 removes the task's control entry. Executor destruction cancels, drains, and
-joins workers before reclaiming their shared allocation.
+joins workers before reclaiming the uniquely owned executor allocation.
 
 ## Handle tokens
 

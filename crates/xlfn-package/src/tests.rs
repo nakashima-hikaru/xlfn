@@ -1530,6 +1530,30 @@ fn stage_bundle_uses_the_resolved_file_snapshot() {
 }
 
 #[test]
+fn resolved_bundle_verification_does_not_reopen_source_paths() {
+    let source = tempfile::tempdir().unwrap();
+    let source_path = source.path().join("Engine.dll");
+    fs::write(
+        &source_path,
+        minimal_pe(
+            IMAGE_FILE_MACHINE_AMD64,
+            IMAGE_FILE_EXECUTABLE_IMAGE | IMAGE_FILE_DLL,
+        ),
+    )
+    .unwrap();
+    let bundle = resolve_bundle_files(
+        source.path(),
+        "x86_64-pc-windows-msvc",
+        &["Engine.dll".to_owned()],
+    )
+    .unwrap();
+    fs::remove_file(source_path).unwrap();
+
+    verify_bundle_files(&bundle, "x86_64-pc-windows-msvc").unwrap();
+    assert!(verify_bundle_files(&bundle, "i686-pc-windows-msvc").is_err());
+}
+
+#[test]
 fn bundle_rejects_windows_system_dll_name_collisions() {
     let source = tempfile::tempdir().unwrap();
     fs::write(source.path().join("version.dll"), b"not the system DLL").unwrap();

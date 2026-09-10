@@ -603,10 +603,13 @@ impl RtdChannelPipelineBenchmark {
         let source = registration
             .register(crate::subscription::RtdChannelSource::new(
                 std::num::NonZeroUsize::new(capacity).unwrap(),
-                move |_, sender: crate::subscription::RtdSender<f64>| {
-                    sender_tx.send(sender.clone()).unwrap();
-                    while !sender.wait_closed(Duration::from_secs(1)) {}
-                    Ok(())
+                move |_| {
+                    let sender_tx = sender_tx.clone();
+                    Ok(move |sender: crate::subscription::RtdSender<f64>| {
+                        sender_tx.send(sender.clone()).unwrap();
+                        while !sender.wait_closed(Duration::from_secs(1)) {}
+                        Ok(())
+                    })
                 },
             ))
             .unwrap();

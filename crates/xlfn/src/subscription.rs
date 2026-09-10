@@ -142,7 +142,7 @@ pub(crate) use topic::{
 #[cfg(any(
     test,
     all(target_os = "windows", any(feature = "rtd", feature = "handles")),
-    feature = "bench-internals",
+    all(feature = "bench-internals", feature = "rtd"),
 ))]
 pub(crate) use value::StoredRtdValue;
 #[cfg(all(test, feature = "rtd"))]

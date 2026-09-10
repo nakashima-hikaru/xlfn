@@ -378,6 +378,19 @@ impl<const N: usize> StripedDrainGate<N> {
 
     /// Waits until every stripe is observed idle. Seal all stripes first when
     /// an owner needs a stable grace period rather than an open-gate snapshot.
+    pub(crate) fn try_wait_until_idle(&self) -> bool {
+        let Some(_guard) = self.idle.lock.try_lock() else {
+            return false;
+        };
+        // Synchronize with the final release's notification tail, not only
+        // its zero count. A successful check is stable after admission seals.
+        self.counters
+            .iter()
+            .all(|counter| counter.mark_waiting() == 0)
+    }
+
+    /// Waits until every stripe is observed idle. Seal all stripes first when
+    /// an owner needs a stable grace period rather than an open-gate snapshot.
     pub fn wait_until_idle(&self) {
         wait_for_idle(&self.idle, || {
             self.counters.iter().fold(0_usize, |active, counter| {

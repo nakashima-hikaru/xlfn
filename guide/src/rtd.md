@@ -40,10 +40,12 @@ The runtime also applies bounded admission limits. The standard limits are 253 t
 
 ## Implement a source
 
-Use `RtdChannelSource` for ordinary producers. Its callback runs on a
-framework-owned thread and receives only a typed, bounded `RtdSender`. A
-separate publisher thread owns the internal sink. The capacity passed to
-`RtdChannelSource::new` limits queued values per subscription.
+Use `RtdChannelSource` for ordinary producers. The source owns a factory that
+runs synchronously during subscription setup and returns an owned producer
+job for the topic. Each job runs once on a framework-owned thread and receives
+only a typed, bounded `RtdSender`. Its captures may include resources that are
+neither `Clone` nor `Sync`. A separate publisher thread owns the internal sink.
+The capacity passed to `RtdChannelSource::new` limits queued values per subscription.
 
 ```rust
 {{#include ../../examples/rtd-source/src/metric_source.rs}}
@@ -52,15 +54,19 @@ separate publisher thread owns the internal sink. The capacity passed to
 In this illustrative loop, `try_next_metric` is a non-blocking poll and
 `wait_closed` makes the polling delay interruptible. Use bounded or
 cancellation-aware I/O so the callback returns promptly after admission
-closes. Callback errors and panics close the channel and are reported during
-disconnect; topic validation inside the callback also runs asynchronously.
+closes. The factory validates the topic before any worker starts. Producer
+errors and panics close the channel and are reported during disconnect.
 
 ## Shutdown and advanced sources
 
 The channel adapter closes admission, discards pending values, and joins both
 workers during disconnect. Sender clones can remain alive afterward: their
 `try_send` calls return `XllError::Closing`, even after the RTD runtime has
-been reclaimed. They own only channel state and never receive a raw sink.
+been reclaimed. Reference counting shares only the empty, closed queue storage;
+the subscription owns admission, payload disposal, and worker joins. Source
+configuration and each producer job have separate unique owners, so dropping
+the source neither drops a running job's resources nor waits for a final shared
+callback reference. Jobs release their captures before their workers are joined.
 Successful producer completion drains accepted values before the publisher
 stops. The producer must stop any additional threads or callbacks before it
 returns. A producer that ignores cancellation delays disconnect and unload.
@@ -82,7 +88,7 @@ Do not implement a timeout that abandons an in-process callback and then permits
 
 ## Use the source from a function
 
-Keep the source in add-in state and subscribe from a main-thread function:
+Keep the source handle in add-in state and subscribe from a main-thread function:
 
 ```rust
 {{#include ../../examples/rtd-source/src/lib.rs}}

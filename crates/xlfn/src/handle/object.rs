@@ -1,8 +1,9 @@
 //! Runtime-owned arena for formula-handle payloads.
 //!
 //! The arena is the unique owner of every [`ObjectCell`]. Bindings and pins
-//! carry counted capabilities and retain the arena on writer/pin paths. Hot
-//! lookup still uses non-owning projections. An object is reclaimed after both counts reach
+//! carry counted, non-owning capabilities. The registry owns the arena and
+//! drains every capability before reclaiming it. Hot lookup uses projections.
+//! An object is reclaimed after both counts reach
 //! zero, and its application destructor always runs outside the arena lock.
 
 use super::token::ObjectId;
@@ -13,7 +14,6 @@ use rustc_hash::FxHashMap;
 use std::any::{Any, TypeId, type_name};
 use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
-use std::sync::Arc;
 use xlfn_kernel::published_owner::PublishedOwner;
 
 /// A type-checked, non-owning projection into an [`ObjectCell`].
@@ -84,6 +84,7 @@ struct ObjectEntry {
 struct ObjectArenaState {
     objects: FxHashMap<ObjectId, ObjectEntry>,
     active_pins: usize,
+    active_releases: usize,
     sealed: bool,
 }
 
@@ -101,6 +102,7 @@ impl ObjectArena {
             state: Mutex::new(ObjectArenaState {
                 objects: FxHashMap::default(),
                 active_pins: 0,
+                active_releases: 0,
                 sealed: false,
             }),
             cleanup: HandleCleanupState::new(),
@@ -109,10 +111,19 @@ impl ObjectArena {
         }
     }
 
-    /// Inserts a new object. Writer-side capabilities retain the arena so a
-    /// deferred destructor may release the last registry owner safely.
-    pub(crate) fn insert<T: Send + Sync + 'static>(
-        self: &Arc<Self>,
+    /// Inserts an object under the registry's unique arena owner. Pending
+    /// bindings borrow that registry; published records belong to its table.
+    /// Taking the published owner fixes the allocation's address before any
+    /// binding pointer is created; moving a stack arena cannot invalidate it.
+    ///
+    /// # Safety
+    ///
+    /// The caller must retain the arena at this address through every binding,
+    /// pin and final release derived from the result. It must validate that
+    /// these capabilities have drained before recovering or dropping the
+    /// published allocation. The registry is the sole production caller.
+    pub(crate) unsafe fn insert<T: Send + Sync + 'static>(
+        arena: &PublishedOwner<Self>,
         id: ObjectId,
         value: T,
     ) -> XllResult<ObjectBinding> {
@@ -127,7 +138,7 @@ impl ObjectArena {
         cell.pointer = NonNull::from_ref(cell.owner.as_ref().unwrap().as_ref()).cast::<()>();
         let cell = PublishedOwner::from_box(cell);
 
-        let mut state = self.state.lock();
+        let mut state = arena.state.lock();
         if state.sealed {
             return Err(XllError::Closing);
         }
@@ -144,9 +155,9 @@ impl ObjectArena {
         );
         let cell_pointer = NonNull::from(state.objects.get(&id).unwrap().cell.as_ref());
         drop(state);
-        self.record(crate::shutdown_trace::ShutdownEvent::AddHandleObject);
+        arena.record(crate::shutdown_trace::ShutdownEvent::AddHandleObject);
         Ok(ObjectBinding {
-            arena: Arc::clone(self),
+            arena: NonNull::from(arena.as_ref()),
             cell: cell_pointer,
             id,
             armed: true,
@@ -170,7 +181,7 @@ impl ObjectArena {
 
     #[cfg(any(feature = "async", test))]
     fn acquire_pin(
-        self: &Arc<Self>,
+        &self,
         id: ObjectId,
         cell: NonNull<ObjectCell>,
     ) -> XllResult<RawObjectLeaseGuard> {
@@ -192,13 +203,14 @@ impl ObjectArena {
         drop(state);
         self.record(crate::shutdown_trace::ShutdownEvent::AddHandlePin);
         Ok(RawObjectLeaseGuard {
-            arena: Arc::clone(self),
+            arena: NonNull::from(self),
             id,
             armed: true,
         })
     }
 
     fn release_binding(&self, id: ObjectId) {
+        let _release = self.begin_release();
         let retired = {
             let mut state = self.state.lock();
             let entry = state
@@ -227,6 +239,7 @@ impl ObjectArena {
     }
 
     fn release_pin(&self, id: ObjectId) {
+        let _release = self.begin_release();
         let retired = {
             let mut state = self.state.lock();
             let reclaim = {
@@ -274,6 +287,26 @@ impl ObjectArena {
         self.record(crate::shutdown_trace::ShutdownEvent::RemoveHandleObject);
     }
 
+    /// Keep final-release completion distinct from the payload counts: user
+    /// destruction can reenter the registry after the last payload is removed.
+    /// The arena must still exist for diagnostics and the final notification.
+    fn begin_release(&self) -> impl Drop + '_ {
+        {
+            let mut state = self.state.lock();
+            state.active_releases = state
+                .active_releases
+                .checked_add(1)
+                .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+        }
+        scopeguard::guard(self, |arena| {
+            let mut state = arena.state.lock();
+            state.active_releases = state
+                .active_releases
+                .checked_sub(1)
+                .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+        })
+    }
+
     pub(crate) fn seal(&self) {
         self.state.lock().sealed = true;
     }
@@ -293,13 +326,23 @@ impl ObjectArena {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_PINS,
             });
         }
-        if !state.objects.is_empty() {
+        if !state.objects.is_empty() || state.active_releases != 0 {
             return Err(XllError::Internal {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_OBJECTS,
             });
         }
         drop(state);
         self.cleanup.result()
+    }
+
+    /// Validate while allocation access is still shared, before its unique
+    /// owner recovers a Box or starts destruction. Checking only inside Drop
+    /// would happen after Box reconstruction has already claimed exclusivity.
+    pub(crate) fn assert_reclaimable(&self) {
+        let state = self.state.lock();
+        if !state.objects.is_empty() || state.active_pins != 0 || state.active_releases != 0 {
+            xlfn_kernel::invariant::fail_stop();
+        }
     }
 
     #[cfg(any(test, feature = "refinement"))]
@@ -320,7 +363,7 @@ impl ObjectArena {
 impl Drop for ObjectArena {
     fn drop(&mut self) {
         let state = self.state.lock();
-        if !state.objects.is_empty() || state.active_pins != 0 {
+        if !state.objects.is_empty() || state.active_pins != 0 || state.active_releases != 0 {
             xlfn_kernel::invariant::fail_stop();
         }
     }
@@ -359,9 +402,9 @@ unsafe impl Send for ObjectCell {}
 // SAFETY: ObjectCell contents are immutable and safe to share across threads.
 unsafe impl Sync for ObjectCell {}
 
-/// One counted binding. The arena owner is cloned only on writer/pin paths.
+/// One counted binding; its registry owns the arena for the entire capability.
 pub(crate) struct ObjectBinding {
-    arena: Arc<ObjectArena>,
+    arena: NonNull<ObjectArena>,
     cell: NonNull<ObjectCell>,
     id: ObjectId,
     armed: bool,
@@ -370,7 +413,7 @@ pub(crate) struct ObjectBinding {
 impl ObjectBinding {
     #[inline]
     pub(crate) fn arena(&self) -> NonNull<ObjectArena> {
-        NonNull::from(self.arena.as_ref())
+        self.arena
     }
 
     pub(crate) fn id(&self) -> ObjectId {
@@ -384,9 +427,11 @@ impl ObjectBinding {
     }
 
     pub(crate) fn duplicate(&self) -> XllResult<Self> {
-        self.arena.duplicate_binding(self.id, self.cell)?;
+        // SAFETY: the binding count prevents the arena owner from completing
+        // reclamation; every production binding is nested inside its registry.
+        unsafe { self.arena.as_ref() }.duplicate_binding(self.id, self.cell)?;
         Ok(Self {
-            arena: Arc::clone(&self.arena),
+            arena: self.arena,
             cell: self.cell,
             id: self.id,
             armed: true,
@@ -395,7 +440,8 @@ impl ObjectBinding {
 
     #[cfg(any(feature = "async", test))]
     pub(crate) fn acquire_lease(&self) -> XllResult<RawObjectLeaseGuard> {
-        self.arena.acquire_pin(self.id, self.cell)
+        // SAFETY: this binding holds an arena count throughout pin admission.
+        unsafe { self.arena.as_ref() }.acquire_pin(self.id, self.cell)
     }
 }
 
@@ -458,9 +504,10 @@ impl<'registry> PendingObjectBinding<'registry> {
 impl Drop for ObjectBinding {
     fn drop(&mut self) {
         if self.armed {
-            // Retirement has passed its read-domain grace period. The arena
-            // Arc also survives a destructor that releases the registry owner.
-            self.arena.release_binding(self.id);
+            // SAFETY: retirement passed its grace period while borrowing the
+            // registry owner. The arena checks final-release completion before
+            // allowing its allocation to be reclaimed.
+            unsafe { self.arena.as_ref() }.release_binding(self.id);
         }
     }
 }
@@ -472,10 +519,10 @@ unsafe impl Sync for ObjectBinding {}
 
 /// Internal pin capability held by a generated async handle task.
 ///
-/// The Arc retains the arena through the complete final-release notification.
-/// Async task drain still precedes service teardown and quiescence validation.
+/// Generated tasks retain their execution lease through this pin's final
+/// release; task drain precedes service teardown and arena quiescence checks.
 pub(crate) struct RawObjectLeaseGuard {
-    arena: Arc<ObjectArena>,
+    arena: NonNull<ObjectArena>,
     id: ObjectId,
     armed: bool,
 }
@@ -483,7 +530,9 @@ pub(crate) struct RawObjectLeaseGuard {
 impl Drop for RawObjectLeaseGuard {
     fn drop(&mut self) {
         if self.armed {
-            self.arena.release_pin(self.id);
+            // SAFETY: async execution and the arena's checked pin count prevent
+            // the unique owner from reclaiming the arena before this release.
+            unsafe { self.arena.as_ref() }.release_pin(self.id);
         }
     }
 }
@@ -499,8 +548,9 @@ mod tests {
 
     #[test]
     fn failed_pin_admission_preserves_both_counters() {
-        let arena = Arc::new(ObjectArena::new());
-        let binding = arena.insert(ObjectId::new(1, 1), 42_u32).unwrap();
+        let arena = PublishedOwner::new(ObjectArena::new());
+        // SAFETY: arena remains published until the binding and all test pins drop.
+        let binding = unsafe { ObjectArena::insert(&arena, ObjectId::new(1, 1), 42_u32) }.unwrap();
         for entry_overflow in [false, true] {
             {
                 let mut state = arena.state.lock();

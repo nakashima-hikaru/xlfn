@@ -189,16 +189,16 @@ See the [User guide](https://nakashima-hikaru.github.io/xlfn/) for project setup
 
 ## Choosing an approach
 
-| | **xlfn** | **Excel-DNA** | **Excel XLL SDK** |
-|---|---|---|---|
-| Language | Rust | .NET | C / C++ |
-| Excel ABI | Managed by xlfn | Managed by Excel-DNA | Direct |
-| Typed worksheet API | Rust | .NET | Application-defined |
-| Handles | Built in | Built in | Application-defined |
-| Async / RTD | Built in | Built in | Application-defined |
-| XLL packaging | `cargo xlfn` | Excel-DNA tooling | Application-defined |
-| Office UI integration | Out of scope | Extensive | Manual / COM |
-| Best suited for | Native Rust calculation add-ins | .NET / Office integration | Low-level Excel integration |
+|                       | **xlfn**                        | **Excel-DNA**             | **Excel XLL SDK**           |
+| --------------------- | ------------------------------- | ------------------------- | --------------------------- |
+| Language              | Rust                            | .NET                      | C / C++                     |
+| Excel ABI             | Managed by xlfn                 | Managed by Excel-DNA      | Direct                      |
+| Typed worksheet API   | Rust                            | .NET                      | Application-defined         |
+| Handles               | Built in                        | Built in                  | Application-defined         |
+| Async / RTD           | Built in                        | Built in                  | Application-defined         |
+| XLL packaging         | `cargo xlfn`                    | Excel-DNA tooling         | Application-defined         |
+| Office UI integration | Out of scope                    | Extensive                 | Manual / COM                |
+| Best suited for       | Native Rust calculation add-ins | .NET / Office integration | Low-level Excel integration |
 
 Use **xlfn** when the calculation engine and worksheet API should remain native Rust.
 

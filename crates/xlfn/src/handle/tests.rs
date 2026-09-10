@@ -3462,10 +3462,10 @@ fn handle_domain_witness_records_exact_domain() {
     let domains = (domain1, domain2);
     crate::call::with_excel_call_scope_and_state(&domains, |(domain1, domain2), scope| {
         let witness1 = scope.enter_handle_domain(domain1).unwrap();
-        assert_eq!(witness1.domain(), std::ptr::NonNull::from(domain1.as_ref()));
+        assert_eq!(witness1.domain(), std::ptr::NonNull::from(domain1));
 
         let witness2 = scope.enter_handle_domain(domain2).unwrap();
-        assert_eq!(witness2.domain(), std::ptr::NonNull::from(domain2.as_ref()));
+        assert_eq!(witness2.domain(), std::ptr::NonNull::from(domain2));
     });
 }
 
@@ -3475,7 +3475,7 @@ fn miri_domain_permit_witness_lifecycle() {
     // SAFETY: domain outlives permit in this test scope.
     let permit = unsafe { domain.enter_owned() }.unwrap();
     let witness = permit.witness();
-    assert_eq!(witness.domain(), std::ptr::NonNull::from(domain.as_ref()));
+    assert_eq!(witness.domain(), std::ptr::NonNull::from(&domain));
 }
 
 #[test]
@@ -3521,9 +3521,11 @@ fn miri_topic_read_lease_lifecycle() {
 
 #[test]
 fn miri_object_arena_lifecycle() {
-    let arena = Arc::new(super::object::ObjectArena::new());
+    let arena =
+        xlfn_kernel::published_owner::PublishedOwner::new(super::object::ObjectArena::new());
     let id = ObjectId::new(1, 1);
-    let binding = arena.insert(id, 12345i64).unwrap();
+    // SAFETY: this test retains the stable arena owner through binding release.
+    let binding = unsafe { super::object::ObjectArena::insert(&arena, id, 12345i64) }.unwrap();
     assert_eq!(binding.id(), id);
 
     let dup = binding.duplicate().unwrap();
@@ -3690,7 +3692,8 @@ fn miri_deferred_seal_waits_for_in_flight_destructor() {
         }),
     )
     .unwrap();
-    registry.remove::<BlockingDrop>(&token).unwrap();
+    let removing = Arc::clone(&registry);
+    let remover = std::thread::spawn(move || removing.remove::<BlockingDrop>(&token).unwrap());
     entered_rx.recv_timeout(Duration::from_secs(30)).unwrap();
     assert_eq!(registry.bindings.read_domain().debt(), 1);
     let closing = Arc::clone(&registry);
@@ -3703,12 +3706,13 @@ fn miri_deferred_seal_waits_for_in_flight_destructor() {
     assert!(finished_rx.recv_timeout(Duration::from_millis(20)).is_err());
     release_tx.send(()).unwrap();
     finished_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+    remover.join().unwrap();
     closer.join().unwrap();
     assert_eq!(registry.bindings.read_domain().debt(), 0);
 }
 
 #[test]
-fn miri_deferred_worker_can_release_last_registry_owner() {
+fn miri_borrowing_remover_retains_registry_through_reentrant_drop() {
     use std::sync::mpsc;
     use std::time::Duration;
     struct OwnsRegistry {
@@ -3731,8 +3735,6 @@ fn miri_deferred_worker_can_release_last_registry_owner() {
         }
     }
     let registry = Arc::new(HandleRegistry::from_entropy(1, [7; 40]));
-    let arena = Arc::clone(&registry.objects);
-    let domain = Arc::clone(registry.bindings.read_domain_for_test());
     let weak = Arc::downgrade(&registry);
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
@@ -3747,14 +3749,17 @@ fn miri_deferred_worker_can_release_last_registry_owner() {
         }),
     )
     .unwrap();
-    registry.remove::<OwnsRegistry>(&token).unwrap();
+    let removing = Arc::clone(&registry);
+    let remover = std::thread::spawn(move || {
+        removing.remove::<OwnsRegistry>(&token).unwrap();
+        removing.objects.finish_quiescence().unwrap();
+    });
     entered_rx.recv_timeout(Duration::from_secs(30)).unwrap();
     drop(registry);
     release_tx.send(()).unwrap();
     finished_rx.recv_timeout(Duration::from_secs(30)).unwrap();
-    domain.flush_for_test();
+    remover.join().unwrap();
     assert!(weak.upgrade().is_none());
-    arena.finish_quiescence().unwrap();
 }
 
 #[test]

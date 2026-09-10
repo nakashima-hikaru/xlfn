@@ -277,7 +277,7 @@ ownership algebra:
 architecture under the redesign:
 
 - **Ownership model**: each live `BindingTable` slot owns one `PublishedOwner<BindingRecord>`. `PublishedBindings` exposes an
-  `AtomicPtr<BindingRecord>`, and readers hold an `OwnedOperationGuard` (admission permit).
+  `AtomicPtr<BindingRecord>`, and call scopes hold a rotating-domain admission permit.
   `ObjectArena` is the sole owner of each `ObjectCell`. A published `BindingRecord` holds a non-owning
   `ObjectBinding` capability, while a generation-scoped `HandleLease<'_, T>`
   holds a counted pin owned by an async task.
@@ -293,6 +293,21 @@ architecture under the redesign:
   - `pinnedObjectNotReclaimed`: An object held by a `HandleLease` pin cannot be destroyed.
   - `reclaimRequiresNoCapabilities`: `ObjectCell` destruction requires all capabilities to be drained.
   - Refinement to `TemporalOwnership`: Publication events simulate `TemporalOwnership.Step`.
+
+The concrete registry uniquely owns both the published object arena and its
+binding read domain. Reclamation runs while a writer or departing reader
+borrows that owner; no background worker or arena reference count extends its
+lifetime. A nonblocking poll seals the old generation and publishes the next
+before waiting, so overlapping later calls cannot prolong the old grace
+period. Departing readers complete pending grace periods, and blocking
+quiescence completes both an existing pending generation and the generation
+current at entry. Callbacks detach batches under the transition lock; payload
+destructors run after it is released, including when a later callback unwinds.
+The registry validates binding, pin, and final-release completion before its
+published arena allocation is recovered. These concrete scheduling and
+destructor-tail guarantees refine the same abstract retirement steps above;
+they are exercised by Rust concurrency and Miri tests, not proved by the Lean
+publication model.
 
 
 ### RTD server generations
