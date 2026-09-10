@@ -62,10 +62,10 @@ Lean's temporal-reclamation model verifies abstract admission, observation,
 pinning, and reclamation conditions. It does not model the concrete two-gate
 publication order; the new deterministic and Loom tests cover that boundary.
 
-The existing [full-cache Miri limitation](../crates/xlfn/benches/experiments/cache-miri.md)
-in Moka/Crossbeam remains separate from the framework regressions. Passing
-selected Miri tests is not a claim that the complete dependency stack is
-Miri-clean. No finite review establishes the absence of all future improvements.
+The upstream full-cache Miri limitation in Moka/Crossbeam remains separate
+from the framework regressions. Passing selected Miri tests is not a claim
+that the complete dependency stack is Miri-clean. No finite review establishes
+the absence of all future improvements.
 
 The cache unwind guard drains the affected cache's retired nodes when its
 readers are idle and no initializer is active. Otherwise, subsequent operations

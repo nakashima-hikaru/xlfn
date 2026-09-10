@@ -141,16 +141,13 @@ matrix and any known unqualified combinations with the release notes.
 
 `just miri-cache-sharded` runs the full-cache common regressions with 8, 16,
 32, and 64 shards under Stacked Borrows and Tree Borrows, with leak checking
-and alias validation enabled. Production still defaults to Moka. Its separate
-Miri dependency blocker is recorded in
-`crates/xlfn/benches/experiments/cache-miri.md`; requalify that path only after
-Moka/crossbeam-epoch/Miri/nightly updates.
+and alias validation enabled. Production still defaults to Moka. Full cache
+Miri execution reaches an upstream Crossbeam intrusive-pointer retag issue;
+requalify that path only after Moka/crossbeam-epoch/Miri/nightly updates.
 
 `just bench-cache-backends` runs three serial repetitions of the existing
 lookup/reclamation benchmarks and the supplemental throughput/latency/debt
 matrix. Results and console logs go under `target/cache-backend-qualification`.
 Set `XLFN_CACHE_BACKEND=moka|sharded8|sharded16|sharded32|sharded64` when running
 an individual cache Criterion benchmark. This selector is available only
-with `bench-internals` and never changes the production default. The fixed
-adoption gates and recorded decision are in
-`crates/xlfn/benches/experiments/resident-index-qualification.md`.
+with `bench-internals` and never changes the production default.

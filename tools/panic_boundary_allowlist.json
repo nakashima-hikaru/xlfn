@@ -48,38 +48,6 @@
     "reason": "Property test asserts arbitrary generated parser input never unwinds."
   },
   {
-    "path": "crates/xlfn/benches/experiments/cache_node_layout.rs",
-    "context": "fn drop_boxed",
-    "code": "catch_unwind(AssertUnwindSafe(|| drop(value))).is_err()",
-    "count": 1,
-    "category": "experiment",
-    "reason": "Standalone cache-node layout experiment only; the fixture Drop and warmup panic with fixed standard string payloads. Never linked into the framework."
-  },
-  {
-    "path": "crates/xlfn/benches/experiments/cache_node_layout.rs",
-    "context": "fn drop_direct",
-    "code": "catch_unwind(AssertUnwindSafe(|| drop(node))).is_err()",
-    "count": 1,
-    "category": "experiment",
-    "reason": "Standalone cache-node layout experiment only; the fixture Drop and warmup panic with fixed standard string payloads. Never linked into the framework."
-  },
-  {
-    "path": "crates/xlfn/benches/experiments/cache_node_layout.rs",
-    "context": "fn main",
-    "code": "assert!(catch_unwind(|| panic!( )).is_err());",
-    "count": 1,
-    "category": "experiment",
-    "reason": "Standalone cache-node layout experiment only; the fixture Drop and warmup panic with fixed standard string payloads. Never linked into the framework."
-  },
-  {
-    "path": "crates/xlfn/benches/experiments/cache_node_layout.rs",
-    "context": "module root",
-    "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",
-    "count": 1,
-    "category": "experiment",
-    "reason": "Standalone cache-node layout experiment only; the fixture Drop and warmup panic with fixed standard string payloads. Never linked into the framework."
-  },
-  {
     "path": "crates/xlfn/src/async_udf.rs",
     "context": "# [ cfg ( test ) ]",
     "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",

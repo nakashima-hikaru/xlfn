@@ -153,8 +153,7 @@ four cases do not establish Windows/Excel performance or tail-latency bounds.
   blocked by the missing Windows SDK header `malloc.h` in the `alloca` build.
 - Full cache Miri execution reaches an upstream Crossbeam intrusive-pointer
   retag failure, independently reproduced with Moka alone. The same dependency
-  path can be reached through async peer stealing. See the
-  [cache Miri investigation](../crates/xlfn/benches/experiments/cache-miri.md).
+  path can be reached through async peer stealing.
   The async lifetime Miri regressions use one worker to isolate framework
   ownership; native integration tests still exercise multiple workers.
 - Miri emits third-party integer-to-pointer provenance warnings from

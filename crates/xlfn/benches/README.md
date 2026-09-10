@@ -297,24 +297,7 @@ for every path. Confirm the reuse tradeoff with repeated full measurements on
 the deployment host before setting performance thresholds. Allocation counts
 and retained bytes were not measured by this timing fixture.
 
-The follow-up [stable slot arena experiment](experiments/rtd-slot-arena.md)
-keeps a candidate patch and compares the same six cases against this non-owning
-map implementation.
-
-The [borrowed lookup experiment](experiments/rtd-borrowed-lookup.md) builds on
-that arena and measures caller-owned parts with validation/hash computation
-inside the timed section. It includes a separate zero-allocation gate and
-keeps the public subscription API unchanged.
-
-## Protocol cost experiments (2026-09-09)
-
-The [initial protocol report](experiments/protocol-costs-2026-09-09.md) records
-inline cache storage and the historical prototype patches. The
-[production follow-up](experiments/protocol-production-2026-09-09.md) records
-single-state handle lookup, deferred retirement with bounded debt and a
-registration/publication barrier, RTD edge+batch adoption, and validation.
-Combined cache state is rejected and archived. Historical deferred patches
-must not be applied to the production tree.
+## Protocol costs
 
 `protocol_costs` includes removal/final-drain and retirement-debt probes,
 queue microbenchmarks, and optional real Rust RTD pipeline measurements:
@@ -331,5 +314,5 @@ cargo bench -p xlfn --all-features --bench protocol_costs -- --token-cache
 The pipeline includes RtdSender, publisher, ErasedSink, PublishCore, and refresh
 planning/completion with sequence checks. Excel/COM is not timed. Shared
 publisher topology and token-cache associativity remain benchmark-only
-experiments; normal builds retain per-subscription publishers and direct
-mapping. See the follow-up report for configuration, raw results, and limits.
+controls; normal builds retain per-subscription publishers and direct
+mapping.
