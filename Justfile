@@ -172,11 +172,11 @@ bench-one-filter name filter features="bench-internals":
 bench-check:
     cargo clippy --package xlfn --benches --all-features --locked
 
-# Full-cache sharded baseline; leak and alias validation remain enabled.
-miri-cache-sharded:
+# Full-cache production policy and comparators; leak and alias checks remain enabled.
+miri-cache-backends:
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="" cargo +nightly miri test -p xlfn --features "unstable-cache bench-internals" --lib cache::backend_tests --locked
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-tree-borrows" cargo +nightly miri test -p xlfn --features "unstable-cache bench-internals" --lib cache::backend_tests --locked
 
-# Ten-minute local qualification, with serial candidates and three repetitions.
+# Serial backend diagnostics with three repetitions; includes all comparison policies.
 bench-cache-backends output="target/cache-backend-qualification":
     python3 -B tools/qualify_cache_backends.py --output "{{output}}"

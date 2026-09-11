@@ -136,7 +136,7 @@ unsafe impl RtdSource for RtdFixtureSource {
         let key = topic
             .parts()
             .first()
-            .cloned()
+            .map(|part| part.as_str().to_owned())
             .ok_or(XllError::InvalidHandle)?;
         self.core()
             .sinks

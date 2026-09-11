@@ -16,11 +16,11 @@ use super::FormulaLifetimeGeneration;
 use super::{FormulaObserverId, HandleTopicKey, Topic};
 use crate::generation::TopicGeneration;
 use crate::{XllError, XllResult};
+use papaya::Guard;
 use parking_lot::{Condvar, Mutex, RwLock};
 #[cfg(test)]
 use parking_lot::{RwLockReadGuard, RwLockWriteGuard};
-use rustc_hash::{FxHashMap, FxHasher};
-use std::hash::{Hash, Hasher};
+use rustc_hash::{FxBuildHasher, FxHashMap};
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::ptr::NonNull;
@@ -34,9 +34,6 @@ use xlfn_kernel::published_owner::PublishedOwner;
 use xlfn_kernel::rotating_read_domain::{
     DrainedGeneration, RotatingReadDomain, RotatingReadPermit,
 };
-
-const MIN_PUBLISHED_TOPIC_SHARDS: usize = 64;
-const TARGET_TOPICS_PER_SHARD: usize = 64;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -130,55 +127,40 @@ impl<'a> Deref for PublishedTopicRef<'a> {
 }
 
 pub(crate) struct PublishedTopics {
-    shards: Box<[RwLock<FxHashMap<HandleTopicKey, PublishedTopicPtr>>]>,
-    shard_mask: usize,
+    entries: papaya::HashMap<HandleTopicKey, PublishedTopicPtr, FxBuildHasher>,
 }
 
 impl PublishedTopics {
-    pub(crate) fn new(maximum_bindings: usize) -> Self {
-        let shard_count = shard_count_for(maximum_bindings);
+    pub(crate) fn new() -> Self {
         Self {
-            shards: (0..shard_count)
-                .map(|_| RwLock::new(FxHashMap::default()))
-                .collect(),
-            shard_mask: shard_count - 1,
+            entries: papaya::HashMap::with_hasher(FxBuildHasher),
         }
     }
 
-    fn shard_index(&self, key: &HandleTopicKey) -> usize {
-        let mut hasher = FxHasher::default();
-        key.hash(&mut hasher);
-        (hasher.finish() as usize) & self.shard_mask
-    }
-
     pub(crate) fn load(&self, key: &HandleTopicKey) -> Option<PublishedTopicPtr> {
-        self.shards[self.shard_index(key)].read().get(key).copied()
+        // Papaya protects only map slots while copying the pointer. The
+        // enclosing TopicReadLease protects the separately owned topic.
+        // Never retain a map guard across callbacks or Excel calls.
+        self.entries.pin().get(key).copied()
     }
 
     fn insert(&self, key: HandleTopicKey, topic: PublishedTopicPtr) {
-        if self.shards[self.shard_index(&key)]
-            .write()
-            .insert(key, topic)
-            .is_some()
-        {
+        if self.entries.pin().try_insert(key, topic).is_err() {
             xlfn_kernel::invariant::fail_stop();
         }
     }
 
     fn remove(&self, key: HandleTopicKey) {
-        self.shards[self.shard_index(&key)].write().remove(&key);
+        self.entries.pin().remove(&key);
     }
 
     fn clear(&self) {
-        for shard in &self.shards {
-            shard.write().clear();
-        }
+        // The topic-table write lock excludes publishers/removers, so clear
+        // sees a stable set despite Papaya's weak concurrent iteration model.
+        let guard = self.entries.guard();
+        self.entries.clear(&guard);
+        guard.flush();
     }
-}
-
-fn shard_count_for(maximum_bindings: usize) -> usize {
-    let required = maximum_bindings.max(1).div_ceil(TARGET_TOPICS_PER_SHARD);
-    required.next_power_of_two().max(MIN_PUBLISHED_TOPIC_SHARDS)
 }
 
 #[derive(Clone)]
@@ -239,10 +221,10 @@ pub(crate) struct TopicTable {
 }
 
 impl TopicTable {
-    pub(crate) fn new(maximum_bindings: usize) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             state: RwLock::new(TopicTableState::default()),
-            published: PublishedTopics::new(maximum_bindings),
+            published: PublishedTopics::new(),
             read_domain: RotatingReadDomain::new(),
             pending_reclaims: [Mutex::new(Vec::new()), Mutex::new(Vec::new())],
         }
@@ -261,6 +243,9 @@ impl TopicTable {
     }
 
     fn enqueue_reclaim(&self, topic: PublishedOwner<PublishedTopic>) {
+        // Map withdrawal precedes registration here. Rotation takes this
+        // queue lock before publishing its next generation, establishing the
+        // ordering needed by readers of copied, non-owning topic pointers.
         loop {
             let generation = self.read_domain.current_generation();
             let mut queue = self.pending_reclaims[generation.index()].lock();
@@ -283,13 +268,24 @@ impl TopicTable {
     }
 
     pub(crate) fn try_quiesce_and_drain(&self) -> Vec<PublishedOwner<PublishedTopic>> {
-        if self.pending_reclaims[0].lock().is_empty() && self.pending_reclaims[1].lock().is_empty()
-        {
+        let empty = {
+            let Some(first) = self.pending_reclaims[0].try_lock() else {
+                return Vec::new();
+            };
+            let Some(second) = self.pending_reclaims[1].try_lock() else {
+                return Vec::new();
+            };
+            first.is_empty() && second.is_empty()
+        };
+        if empty {
             return Vec::new();
         }
         let Some(result) = self
             .read_domain
-            .try_quiesce_if_idle(|generation| self.drain_generation(generation))
+            .try_quiesce_if_idle_with_publication_barrier(
+                |generation| self.pending_reclaims[generation.index()].try_lock(),
+                |generation| self.drain_generation(generation),
+            )
         else {
             return Vec::new();
         };
@@ -850,16 +846,35 @@ pub(crate) enum PrepareDecision {
 
 #[cfg(test)]
 mod tests {
-    use super::{PublishedTopics, shard_count_for};
+    use super::{PublishedTopic, TopicTable};
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+    use xlfn_kernel::published_owner::PublishedOwner;
 
     #[test]
-    fn publication_shards_follow_the_configured_binding_capacity() {
-        assert_eq!(shard_count_for(1), 64);
-        assert_eq!(shard_count_for(4_096), 64);
-        assert_eq!(shard_count_for(16_384), 256);
-        assert_eq!(shard_count_for(100_000), 2_048);
-        assert_eq!(shard_count_for(1_048_576), 16_384);
-
-        assert_eq!(PublishedTopics::new(16_384).shards.len(), 256);
+    fn idle_topic_reclamation_skips_busy_registration_without_publishing() {
+        let table = Arc::new(TopicTable::new());
+        table.enqueue_reclaim(PublishedOwner::new(PublishedTopic::new(
+            "token".to_owned(),
+            "lifetime".to_owned(),
+        )));
+        let generation = table.read_domain.current_generation();
+        let registration = table.pending_reclaims[generation.index()].lock();
+        let (sent, received) = mpsc::sync_channel(1);
+        let worker_table = Arc::clone(&table);
+        let worker = std::thread::spawn(move || {
+            let drained = worker_table.try_quiesce_and_drain();
+            sent.send((drained.len(), worker_table.read_domain.current_generation()))
+                .unwrap();
+        });
+        let outcome = received.recv_timeout(Duration::from_secs(5));
+        // Release before asserting so a regression cannot strand the worker.
+        drop(registration);
+        worker.join().unwrap();
+        let (count, observed_generation) =
+            outcome.expect("idle reclamation must not wait for registration");
+        assert_eq!(count, 0);
+        assert_eq!(observed_generation, generation);
+        assert_eq!(table.try_quiesce_and_drain().len(), 1);
     }
 }

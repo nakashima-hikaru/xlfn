@@ -155,7 +155,7 @@ impl Drop for HandleColdGrowthBenchmark {
     }
 }
 
-/// A revision-churn benchmark that repeatedly updates the same `N` topics with new objects.
+/// Repeated observation of `N` topics, with an explicit republish mode.
 pub struct HandleRevisionChurnBenchmark {
     runtime: Arc<FormulaHandleService>,
     keys: Vec<HandleTopicKey>,
@@ -185,6 +185,12 @@ impl HandleRevisionChurnBenchmark {
             keys,
             churn_cycles,
         }
+    }
+
+    /// Withdraw all topics, then publish fresh objects for the same keys.
+    pub fn run_republish(&self) {
+        self.runtime.terminate_all_topics();
+        self.run();
     }
 
     pub fn run(&self) {

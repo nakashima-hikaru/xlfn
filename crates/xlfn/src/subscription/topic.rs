@@ -1,6 +1,7 @@
 use super::source::SourceHandleId;
 use crate::{XllError, XllResult};
 use rustc_hash::FxHasher;
+use smol_str::SmolStr;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 
@@ -234,13 +235,13 @@ fn parse_fixed_hex(value: &str) -> Option<u64> {
 
 #[derive(Clone, Debug)]
 pub struct RtdTopic {
-    parts: Box<[String]>,
+    parts: Box<[SmolStr]>,
     byte_len: usize,
     hash: u64,
 }
 
 impl RtdTopic {
-    pub fn new(parts: impl IntoIterator<Item = impl Into<String>>) -> XllResult<Self> {
+    pub fn new(parts: impl IntoIterator<Item = impl Into<SmolStr>>) -> XllResult<Self> {
         let mut normalized = Vec::new();
         for part in parts {
             if normalized.len() >= MAX_RTD_TOPIC_PARTS {
@@ -268,7 +269,7 @@ impl RtdTopic {
             ));
         }
         let TopicMetadata { byte_len, hash } =
-            validate_topic_parts(normalized.iter().map(String::as_str))?;
+            validate_topic_parts(normalized.iter().map(SmolStr::as_str))?;
         Ok(Self {
             parts: normalized.into_boxed_slice(),
             byte_len,
@@ -276,17 +277,19 @@ impl RtdTopic {
         })
     }
 
-    pub fn single(part: impl Into<String>) -> XllResult<Self> {
-        Self::new([part.into()])
+    pub fn single(part: impl Into<SmolStr>) -> XllResult<Self> {
+        Self::new([part])
     }
 
     #[must_use]
-    pub fn parts(&self) -> &[String] {
+    /// Canonical immutable parts. Short parts are stored inline, and cloning
+    /// long parts shares their text allocation.
+    pub fn parts(&self) -> &[SmolStr] {
         &self.parts
     }
 
     #[cfg(any(test, feature = "bench-internals"))]
-    pub(crate) fn borrowed(&self) -> BorrowedTopicParts<'_, String> {
+    pub(crate) fn borrowed(&self) -> BorrowedTopicParts<'_, SmolStr> {
         BorrowedTopicParts {
             parts: &self.parts,
             metadata: TopicMetadata {
@@ -431,7 +434,7 @@ impl<'a, Part: AsRef<str>> BorrowedTopicParts<'a, Part> {
             && canonical
                 .parts
                 .iter()
-                .map(String::as_str)
+                .map(SmolStr::as_str)
                 .eq(self.parts.iter().map(AsRef::as_ref))
     }
 
@@ -440,7 +443,7 @@ impl<'a, Part: AsRef<str>> BorrowedTopicParts<'a, Part> {
             parts: self
                 .parts
                 .iter()
-                .map(|part| part.as_ref().to_owned())
+                .map(|part| SmolStr::new(part.as_ref()))
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             byte_len: self.metadata.byte_len,

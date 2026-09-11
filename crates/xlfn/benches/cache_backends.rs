@@ -216,13 +216,27 @@ fn percentiles(values: &mut [u64]) -> serde_json::Value {
 fn main() {
     let smoke = std::env::var_os("XLFN_BACKEND_SMOKE").is_some();
     let duration = Duration::from_millis(if smoke { 10 } else { 1000 });
-    let backends = [
+    let mut backends = vec![
         CacheBackend::Moka,
         CacheBackend::Sharded { shards: 8 },
         CacheBackend::Sharded { shards: 16 },
         CacheBackend::Sharded { shards: 32 },
         CacheBackend::Sharded { shards: 64 },
+        CacheBackend::QuickCache { shards: 1 },
+        CacheBackend::QuickCache { shards: 8 },
+        CacheBackend::QuickCache { shards: 32 },
     ];
+    if let Ok(selected) = std::env::var("XLFN_CACHE_BACKENDS") {
+        backends.retain(|backend| {
+            let name = match backend {
+                CacheBackend::Moka => "moka".to_owned(),
+                CacheBackend::Sharded { shards } => format!("sharded{shards}"),
+                CacheBackend::QuickCache { shards } => format!("quick{shards}"),
+            };
+            selected.split(',').any(|selected| selected == name)
+        });
+        assert!(!backends.is_empty(), "no selected cache backend");
+    }
     let cases = [
         (Workload::Hot, 1),
         (Workload::Hot, 8),

@@ -4,9 +4,12 @@ use crate::unstable::cache::{CacheBackend, CalculationCache};
 pub fn benchmark_cache_backend() -> CacheBackend {
     match std::env::var("XLFN_CACHE_BACKEND")
         .as_deref()
-        .unwrap_or("moka")
+        .unwrap_or("quick1")
     {
         "moka" => CacheBackend::Moka,
+        "quick1" => CacheBackend::QuickCache { shards: 1 },
+        "quick8" => CacheBackend::QuickCache { shards: 8 },
+        "quick32" => CacheBackend::QuickCache { shards: 32 },
         "sharded8" => CacheBackend::Sharded { shards: 8 },
         "sharded16" => CacheBackend::Sharded { shards: 16 },
         "sharded32" => CacheBackend::Sharded { shards: 32 },
@@ -882,7 +885,9 @@ impl ArcCacheEvictionBenchmark {
 /// Runs a controlled full-cache retirement/drain probe with a scoped reference.
 /// The clear hook observes debt without advancing the read domain itself.
 pub fn cache_backend_debt_probe(backend: CacheBackend) -> serde_json::Value {
-    let cache = CalculationCache::new_with_backend(64 * 8, backend);
+    // Isolate retirement from admission: even all 64 keys hashing into one
+    // of 64 shards must fit. Capacity pressure has separate workloads.
+    let cache = CalculationCache::new_with_backend(64 * 8 * 64, backend);
     for key in 0_u64..64 {
         drop(
             cache
@@ -892,6 +897,7 @@ pub fn cache_backend_debt_probe(backend: CacheBackend) -> serde_json::Value {
     }
     cache.maintenance();
     let resident = cache.resident_stats();
+    assert_eq!(resident.entries, 64);
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
     let started = Instant::now();

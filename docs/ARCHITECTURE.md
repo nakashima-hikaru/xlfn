@@ -46,3 +46,22 @@ Standard shutdown is a logical termination. Physical unload requires the explici
 contract of `PhysicallyUnloadableAddin` alongside a termination certificate.
 `PublishedOwner` provides a stable address with unique ownership, and pointer validity
 lifetimes are strictly bounded by gates, leases, and joins.
+
+## Resident and publication indexes
+
+Calculation-cache residency uses Quick Cache with a single global weight budget.
+The index owns one residency pin per stored entry; lookup snapshots are non-owning.
+Eviction, rejection, explicit invalidation and clear release that pin and enqueue
+retirement without running user destructors inside index locks. Existing read
+permits and leases govern node reclamation. Moka and alternate sharded indexes
+are available only through the internal benchmark feature.
+
+Handle-topic publication uses Papaya for short map lookups. Its guard protects
+map slots while copying a pointer; the runtime's rotating read permit protects
+the separately owned topic. Transactional topic changes remain under the topic
+table write lock. Withdrawal and retirement registration precede publication of
+the next read generation through the retirement-queue publication barrier.
+
+Canonical RTD topic parts use immutable `SmolStr` values; borrowed lookup stays
+allocation-free on a hit. See [crate evaluation](PERFORMANCE.md) for measurements,
+accepted regressions and platform qualification limits.

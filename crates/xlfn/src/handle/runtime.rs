@@ -136,7 +136,7 @@ impl FormulaHandleService {
         let registry_session = store.session();
         Ok(Self {
             store,
-            topics: TopicTable::new(maximum_bindings),
+            topics: TopicTable::new(),
             prepares: HandlePrepareState::new(),
             refinement: HandleRefinementHooks::new(registry_session),
         })

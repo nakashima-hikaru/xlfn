@@ -12,7 +12,7 @@ use xlfn::unstable::cache::{
 
 ## One typed cache
 
-`CalculationCache<K, V>` uses Moka's TinyLFU admission/eviction policy and a caller-defined weight:
+`CalculationCache<K, V>` uses Quick Cache with one global resident weight budget and a caller-defined weight:
 
 ```rust
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -34,17 +34,16 @@ The returned value is `CacheLease<'_, V>`, which implements `Deref<Target = V>`.
 
 The weight budget is an abstract integer. It can represent approximate bytes, external-resource units, or another monotone cost, but every call site for a cache must use one consistent definition. Zero is normalized to a minimum positive cache weight. A value heavier than the entire budget is returned but not retained.
 
-Metrics such as `len()` and `used_weight()` run pending Moka maintenance first, but should still be treated as operational estimates rather than transactional accounting.
+Metrics such as `len()` and `used_weight()` observe current residency. Concurrent changes mean these remain operational estimates rather than a transactional snapshot.
 
 Eviction and memory reclamation are separate. A live lease intentionally keeps
 its value alive after eviction or `clear()`. Once the final pin is released,
 the value enters a retirement queue until readers that could have observed its
-pointer have finished. The eviction listener only queues work; it never waits
-for readers or runs a value destructor inside Moka maintenance.
+pointer have finished. The resident entry destructor only queues work; it never waits
+for readers or runs a value destructor inside the index lock.
 
 Ordinary reads attempt reclamation when work is queued, without waiting for
-readers. Initialization attempts flush Moka's pending work every 32 attempts.
-They also apply backpressure when queued retirement reaches 256 nodes or the
+readers. Initialization attempts also apply backpressure when queued retirement reaches 256 nodes or the
 endpoint's weight budget: the operation waits for existing readers before
 returning. This bounds accumulating debt during ongoing mutation, subject to
 concurrent operations; it is not a strict bound on process memory. A final lease

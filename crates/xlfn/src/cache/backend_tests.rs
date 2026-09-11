@@ -1,5 +1,5 @@
 //! The same cache-level contracts run against every resident implementation.
-//! Miri runs only sharded candidates, never Moka's dependency-blocked path.
+//! Miri excludes Moka's dependency-blocked path.
 
 use super::*;
 use std::sync::{Arc, Barrier, mpsc};
@@ -10,6 +10,7 @@ fn backends() -> Vec<CacheBackend> {
         backends.push(CacheBackend::Moka);
     }
     backends.extend([8, 16, 32, 64].map(|shards| CacheBackend::Sharded { shards }));
+    backends.extend([1, 8, 32].map(|shards| CacheBackend::QuickCache { shards }));
     backends
 }
 
@@ -212,7 +213,10 @@ fn scoped_reference_survives_eviction_and_debt_drains_after_scope() {
         // Also exercise a spilled reclamation batch under Miri (inline holds 4).
         let count = if cfg!(miri) { 6 } else { 64 };
         let drops = counters(count);
-        let cache = CalculationCache::new_with_backend(count, backend);
+        // Fit all fixture entries even in one shard of the most-sharded
+        // backend. This test controls retirement through explicit clearing;
+        // policy-driven capacity eviction is exercised separately above.
+        let cache = CalculationCache::new_with_backend(count * 64, backend);
         for id in 0..count {
             drop(
                 cache

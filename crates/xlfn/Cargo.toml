@@ -21,11 +21,11 @@ rtd = []
 # Formula handles use the private Excel RTD transport internally, but do not
 # expose the generic RTD subscription capability.
 handles = []
-unstable-cache = ["dep:moka"]
+unstable-cache = ["dep:quick_cache"]
 unstable-output = []
 refinement = []
 # Experimental backends/dependencies belong only to this internal benchmark surface.
-bench-internals = ["handles", "xlfn-sys/abi-probe", "dep:hashbrown"]
+bench-internals = ["handles", "xlfn-sys/abi-probe", "dep:hashbrown", "dep:moka"]
 
 [[bench]]
 name = "async_spawn"
@@ -68,6 +68,11 @@ harness = false
 required-features = ["bench-internals", "unstable-cache"]
 
 [[bench]]
+name = "cache_workloads"
+harness = false
+required-features = ["bench-internals", "unstable-cache"]
+
+[[bench]]
 name = "cache_reclamation"
 harness = false
 required-features = ["bench-internals", "unstable-cache"]
@@ -89,6 +94,16 @@ required-features = ["bench-internals"]
 
 [[bench]]
 name = "rtd_prepare"
+harness = false
+required-features = ["bench-internals", "rtd"]
+
+[[bench]]
+name = "rtd_topic_storage"
+harness = false
+required-features = ["bench-internals", "rtd"]
+
+[[bench]]
+name = "rtd_topic_allocations"
 harness = false
 required-features = ["bench-internals", "rtd"]
 
@@ -132,11 +147,14 @@ getrandom.workspace = true
 hashbrown = { workspace = true, optional = true }
 moka = { workspace = true, optional = true }
 parking_lot.workspace = true
+papaya.workspace = true
+quick_cache = { workspace = true, optional = true }
 scopeguard.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rustc-hash.workspace = true
 smallvec.workspace = true
+smol_str.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 xlfn-common.workspace = true
@@ -160,3 +178,8 @@ shuttle.workspace = true
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "handle_memory"
+harness = false
+required-features = ["bench-internals"]

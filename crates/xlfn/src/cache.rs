@@ -164,7 +164,7 @@ pub struct CacheReclamationStats {
     pub grace_period_nanos: u64,
 }
 
-// Mutations periodically flush Moka's deferred eviction work. Retirement also
+// Mutations periodically drive index maintenance. Retirement also
 // requests maintenance on ordinary reads, with a cheap zero-debt fast path.
 const MAINTENANCE_INTERVAL: usize = 32;
 const RECLAIM_BACKPRESSURE_NODES: usize = 256;
@@ -685,7 +685,7 @@ impl CacheLookupDomain {
         // just before this retired node is appended. Rotation also takes this
         // lock before publishing its replacement generation: withdrawals
         // already registered here must happen before new-generation lookups.
-        // Moka protects its own entries, not the copied non-owning NodePtr.
+        // The index protects its own entries, not the copied non-owning NodePtr.
         loop {
             let generation = self.domain.current_generation();
             after_generation_load(generation);
@@ -795,12 +795,13 @@ impl CacheLookupDomain {
     }
 }
 
-/// Test/benchmark-only resident policy selection. Production uses Moka.
+/// Test/benchmark-only resident policy selection. Production uses Quick Cache.
 #[cfg(feature = "bench-internals")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CacheBackend {
     Moka,
     Sharded { shards: usize },
+    QuickCache { shards: usize },
 }
 
 /// Side-effect-free residency and approximate storage observations.
@@ -833,20 +834,20 @@ where
     K: Clone + Eq + Hash + Send + Sync + 'static,
     V: Send + Sync + 'static,
 {
-    /// Creates a concurrent, weighted cache backed by Moka's TinyLFU policy.
+    /// Creates a concurrent, weighted cache backed by Quick Cache.
     ///
     /// Weight is supplied with each initialization. Values heavier than the
     /// configured budget are returned to the caller but are not retained.
-    /// Size and entry metrics are approximate until Moka runs maintenance.
+    /// One global weight budget allows a single value to use the entire cache.
     /// Cache misses cannot start another cache initialization from inside an
     /// initializer. Existing cached values may still be read normally.
     #[must_use]
     pub fn new(weight_budget: usize) -> Self {
-        Self::new_with_eviction_hook(weight_budget, || {})
+        Self::with_index(weight_budget, |capacity| ResidentIndex::quick(capacity, 1))
     }
 
-    // The production no-op is eliminated during monomorphization; tests can
-    // make Moka's time-limited eviction pass stop before draining the cache.
+    // Qualify the benchmark comparator's time-limited eviction behavior.
+    #[cfg(all(test, feature = "bench-internals"))]
     fn new_with_eviction_hook(
         weight_budget: usize,
         after_eviction: impl Fn() + Send + Sync + 'static,
@@ -868,6 +869,7 @@ where
             CacheBackend::Sharded { shards } => {
                 ResidentIndex::sharded(capacity, shards, |entry| retire_resident(entry.0))
             }
+            CacheBackend::QuickCache { shards } => ResidentIndex::quick(capacity, shards),
         })
     }
 
@@ -888,16 +890,9 @@ where
                 // SAFETY: [TR-RECLAIM-1] ptr points to a valid CalculationCache<K, V> during Drop.
                 let cache = unsafe { &*(ptr as *const Self) };
                 cache.domain.seal();
-                // Drop has exclusive access, so no new generation can be
-                // published. Moka may time-limit a maintenance pass: keep
-                // driving invalidation until every resident pin is released.
+                // Drop has exclusive access. Clear synchronously releases
+                // all residency pins before the final node drain.
                 cache.index.clear();
-                loop {
-                    cache.index.maintenance();
-                    if cache.index.resident_count() == 0 {
-                        break;
-                    }
-                }
                 let retired = cache.domain.drain_all();
                 reclaim_cache_entries::<V>(retired);
             }),
@@ -955,7 +950,7 @@ where
 
     fn maintain(&self, mutation: bool) {
         // A read inside an initializer must not run another value's Drop
-        // while Moka is still executing that initializer's singleflight.
+        // while the index is still coordinating that initializer.
         if ACTIVE_CACHE_INITIALIZATION_DEPTH.get() != 0 {
             return;
         }
@@ -1136,9 +1131,8 @@ where
             }));
         });
         if self.weight_budget == 0 {
-            // Moka disables its map at zero capacity and never invokes the
-            // eviction listener. Do not create a residency pin that nobody
-            // could release. The caller's lease uniquely owns this node.
+            // A zero budget bypasses residency entirely. The caller's
+            // lease uniquely owns this node.
             let active = ActiveCacheGuard::enter()?;
             let initialized = (|| {
                 let value = compute()?;
@@ -1190,7 +1184,7 @@ where
                     let w = u32::try_from(measured).unwrap_or(u32::MAX).max(1);
                     let node = Box::new(CacheNode {
                         value,
-                        pins: AtomicUsize::new(2), // 1 for Moka residency, 1 for creator lease
+                        pins: AtomicUsize::new(2), // 1 for index residency, 1 for creator lease
                         resident: AtomicBool::new(true),
                         weight: w,
                         generation: epoch,
@@ -1209,11 +1203,11 @@ where
             let (node_ptr, _weight) = initialized?;
 
             if created {
-                // SAFETY: [TR-ACQUIRE-PIN] node was allocated with pins = 2 (1 for Moka, 1 for this lease).
+                // SAFETY: [TR-ACQUIRE-PIN] node was allocated with pins = 2 (1 for residency, 1 for this lease).
                 // Live pin guarantees node cannot be reclaimed by concurrent eviction or clear.
                 if oversized {
                     // Compare the original estimate, before clamping it to
-                    // Moka's u32 weigher. A larger value must not become a
+                    // the index entry's u32 weight. A larger value must not become a
                     // resident merely because its weight was saturated.
                     self.index.invalidate(&vkey);
                 } else {
@@ -1381,7 +1375,7 @@ mod tests {
         let lease = cache.get_or_try_insert_with(key, |_| 1, || Ok(7)).unwrap();
         assert_eq!(*lease, 7);
         // The cache takes ownership of the caller's key for retry/invalidation;
-        // only Moka's resident key needs a copy, including heap-backed keys.
+        // only the resident key needs a copy, including heap-backed keys.
         assert_eq!(clones.load(Ordering::SeqCst), 1);
         cache.clear();
         assert_eq!(*lease, 7);
@@ -1656,7 +1650,7 @@ mod tests {
     }
 
     #[test]
-    fn tiny_lfu_eviction_is_bounded_by_approximate_bytes() {
+    fn eviction_is_bounded_by_approximate_bytes() {
         let cache = CalculationCache::new(8);
         cache
             .get_or_try_insert_with(1, |_| 8, || Ok(10_u32))
@@ -1710,7 +1704,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_allows_an_inflight_moka_initializer_to_complete() {
+    fn clear_allows_an_inflight_initializer_to_complete() {
         let cache = CalculationCache::<u32, u32>::new(8);
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
@@ -2033,7 +2027,7 @@ mod tests {
             let initializer = loom_thread::spawn(move || {
                 let snapshot = initializer_generation.snapshot();
 
-                // Models Moka publishing the initialized entry before
+                // Models the index publishing the initialized entry before
                 // CalculationCache performs its post-initialization epoch check.
                 *initializer_stored.lock().unwrap() = Some(snapshot);
                 initializer_generation.discard_if_stale(snapshot, || {
@@ -2624,7 +2618,7 @@ mod tests {
                     .get_or_try_insert_with(key, |_| 1, || Ok(DropProbe(Arc::clone(&drops))))
                     .unwrap(),
             );
-            // These are observations only: neither accessor can flush Moka or
+            // These are observations only: neither accessor can maintain the index or
             // trigger a grace period and hide unbounded reclamation debt.
             let stats = cache.reclamation_stats();
             assert!(stats.pending_nodes < RECLAIM_BACKPRESSURE_NODES);
@@ -2908,6 +2902,7 @@ mod tests {
         drop(initialized);
     }
 
+    #[cfg(feature = "bench-internals")]
     #[test]
     fn cache_drop_finishes_time_limited_eviction_passes() {
         struct DropProbe(Arc<AtomicUsize>);
@@ -2954,7 +2949,7 @@ mod tests {
 
     #[cfg(target_pointer_width = "64")]
     #[test]
-    fn oversized_weight_is_checked_before_moka_saturation() {
+    fn oversized_weight_is_checked_before_weight_saturation() {
         let cache = CalculationCache::<u32, u32>::new(u32::MAX as usize);
         let value = cache
             .get_or_try_insert_with(1, |_| u32::MAX as usize + 1, || Ok(7))

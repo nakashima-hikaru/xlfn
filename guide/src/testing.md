@@ -139,15 +139,16 @@ matrix and any known unqualified combinations with the release notes.
 
 ### Experimental cache resident backends
 
-`just miri-cache-sharded` runs the full-cache common regressions with 8, 16,
-32, and 64 shards under Stacked Borrows and Tree Borrows, with leak checking
-and alias validation enabled. Production still defaults to Moka. Full cache
-Miri execution reaches an upstream Crossbeam intrusive-pointer retag issue;
-requalify that path only after Moka/crossbeam-epoch/Miri/nightly updates.
+`just miri-cache-backends` runs the full-cache common regressions for the
+production Quick Cache policy (1 shard), additional Quick Cache configurations
+(8/32 shards), and the benchmark sharded maps (8/16/32/64 shards), under Stacked
+Borrows and Tree Borrows with leak and alias checks enabled. The Moka benchmark
+comparator is excluded because its Crossbeam intrusive-pointer path is blocked
+under Miri. Production uses Quick Cache without a runtime backend selector.
 
 `just bench-cache-backends` runs three serial repetitions of the existing
 lookup/reclamation benchmarks and the supplemental throughput/latency/debt
 matrix. Results and console logs go under `target/cache-backend-qualification`.
-Set `XLFN_CACHE_BACKEND=moka|sharded8|sharded16|sharded32|sharded64` when running
+Set `XLFN_CACHE_BACKEND=quick1|quick8|quick32|moka|sharded8|sharded16|sharded32|sharded64` when running
 an individual cache Criterion benchmark. This selector is available only
 with `bench-internals` and never changes the production default.

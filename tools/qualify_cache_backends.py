@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import subprocess
 
-BACKENDS = ["moka", "sharded8", "sharded16", "sharded32", "sharded64"]
+BACKENDS = ["moka", "sharded8", "sharded16", "sharded32", "sharded64", "quick1", "quick8", "quick32"]
 LOOKUP = r"^cache_lookup/(cache_hit/u64/current/warm|cache_hit_hot_key/current/threads_(1|8|32)/u64|cache_hit_disjoint/current/threads_(8|32)/u64|eviction_with_live_lease/current|concurrent_clear_latency/scope_100)$"
 
 

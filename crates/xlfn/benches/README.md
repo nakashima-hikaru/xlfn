@@ -2,10 +2,11 @@
 
 ## `cache_lookup`
 
-This benchmark compares the production `CalculationCache<u64, u64>` with a
-benchmark-only control that keeps the same versioned Moka cache, capacity, key
-shape, warm hit rate, and persistent worker topology, but stores `(Arc<u64>,
-weight)` instead of the production node pointer and lease protocol.
+This benchmark compares `CalculationCache<u64, u64>` (Quick Cache by default)
+with a benchmark-only Moka control storing `(Arc<u64>, weight)`. Capacity, key
+shape, warm hit rate, and persistent worker topology match. Set
+`XLFN_CACHE_BACKEND=moka` to keep the resident policy identical when isolating
+node/lease ownership costs; the default comparison also includes policy costs.
 
 The lookup cases are:
 
@@ -19,8 +20,8 @@ The steady-state hit rows also include two benchmark-only diagnostic controls:
 - `no_admission_control`: the same Moka lookup and node pin, without lookup admission;
 - `no_pin_control`: the same Moka lookup and lookup admission, with raw node access and no pin accounting.
 
-Together with `current` and `arc_control`, these controls separate admission and
-pin costs without adding either mechanism to the production cache API. The
+With `XLFN_CACHE_BACKEND=moka`, `current` and these controls separate admission
+and pin costs without adding either mechanism to the production cache API. The
 diagnostic controls assume that the warmed cache is not evicted or mutated
 while the worker pool is running.
 
@@ -165,7 +166,7 @@ before Criterion's measurements. The probes use separate batches:
   including allocation, insertion, lease displacement/drop, and any synchronous
   reclamation they trigger. Allocation counting is disabled for this batch.
   `reclamation_stats()` is sampled after each operation's timer stops; it only
-  reads counters and cannot advance Moka maintenance or a grace period.
+  reads counters and cannot advance index maintenance or a grace period.
 - `cache_lifetime_stats_after_probes`: report the cache's intrinsic peak
   pending counts/weights, final pending values, reclaimed nodes, largest batch,
   and cumulative grace-period time. These include the one warm-up batch and
@@ -316,3 +317,12 @@ planning/completion with sequence checks. Excel/COM is not timed. Shared
 publisher topology and token-cache associativity remain benchmark-only
 controls; normal builds retain per-subscription publishers and direct
 mapping.
+
+## Crate replacement evaluation
+
+[The evaluation record](../../../docs/PERFORMANCE.md) contains paired results
+for immutable RTD topic storage, cache admission/recomputation, and handle-topic
+publication. `rtd_topic_allocations` and `handle_memory` instrument allocation
+separately from timing. `handle_prepare/revision_churn` is the historical warm
+re-observation case; `handle_prepare/republish` explicitly withdraws and recreates
+topics and must be used to assess publication churn.

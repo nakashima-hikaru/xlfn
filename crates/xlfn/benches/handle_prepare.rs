@@ -58,11 +58,14 @@ fn handle_prepare_benchmarks(c: &mut Criterion) {
         });
     }
 
-    // Revision churn at scale
+    // Repeated warm observation; retained historical benchmark ID.
     group.throughput(Throughput::Elements(REVISION_CHURN_SIZE as u64));
     let churn_bench = HandleRevisionChurnBenchmark::new(REVISION_CHURN_SIZE, REVISION_CHURN_SIZE);
     group.bench_function("revision_churn/10_000", |b| {
         b.iter(|| churn_bench.run());
+    });
+    group.bench_function("republish/10_000", |b| {
+        b.iter(|| churn_bench.run_republish());
     });
     drop(churn_bench);
 
