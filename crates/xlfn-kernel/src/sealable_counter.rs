@@ -91,17 +91,22 @@ impl SealableCounter {
 
     #[inline]
     pub fn try_acquire(&self) -> Result<(), Sealed> {
+        // Acquire a reopen's publication even if a delayed reader selected
+        // this gate in an older generation. The count itself publishes no data.
         self.state
-            .try_update(Ordering::AcqRel, Ordering::Acquire, acquire_update)
+            .try_update(Ordering::Acquire, Ordering::Relaxed, acquire_update)
             .map(|_| ())
             .map_err(|_| Sealed)
     }
 
     #[inline]
     pub fn release(&self) -> ReleaseOutcome {
+        // Publish protected accesses to an acquiring idle observer. Every
+        // state update is an RMW, so intermediate admissions/releases preserve
+        // the release sequence without acquiring earlier holders' accesses.
         let previous = self
             .state
-            .try_update(Ordering::AcqRel, Ordering::Acquire, release_update)
+            .try_update(Ordering::Release, Ordering::Relaxed, release_update)
             .unwrap_or_else(|_| fail_stop());
         release_outcome(previous)
     }
@@ -112,8 +117,8 @@ impl SealableCounter {
     pub(crate) fn try_release_without_notification(&self) -> Option<ReleaseOutcome> {
         self.state
             .try_update(
-                Ordering::AcqRel,
-                Ordering::Acquire,
+                Ordering::Release,
+                Ordering::Relaxed,
                 release_without_notification_update,
             )
             .ok()
@@ -129,7 +134,9 @@ impl SealableCounter {
 
     #[inline]
     pub fn seal(&self) {
-        self.state.fetch_or(SEALED_BIT, Ordering::AcqRel);
+        // Publish closure to is_sealed/admission observers. Sealing is not a
+        // drain: mark_waiting/active/try_seal_if_idle acquire completed releases.
+        self.state.fetch_or(SEALED_BIT, Ordering::Release);
     }
 
     /// Seals an open, idle counter in one atomic operation. A failed attempt
@@ -211,9 +218,38 @@ pub(crate) mod loom_support {
             }
         }
 
+        pub(crate) fn new_sealed() -> Self {
+            Self {
+                state: AtomicUsize::new(SEALED_BIT),
+            }
+        }
+
+        pub(crate) fn active(&self) -> usize {
+            self.state.load(Ordering::Acquire) & ACTIVE_COUNT_MASK
+        }
+
+        pub(crate) fn is_sealed(&self) -> bool {
+            self.state.load(Ordering::Acquire) & SEALED_BIT != 0
+        }
+
+        pub(crate) fn try_seal_if_idle(&self) -> bool {
+            let state = self.state.load(Ordering::Acquire);
+            if state & (SEALED_BIT | ACTIVE_COUNT_MASK) != 0 {
+                return false;
+            }
+            self.state
+                .compare_exchange(
+                    state,
+                    state | SEALED_BIT,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+        }
+
         pub(crate) fn try_acquire(&self) -> Result<(), Sealed> {
             self.state
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, acquire_update)
+                .fetch_update(Ordering::Acquire, Ordering::Relaxed, acquire_update)
                 .map(|_| ())
                 .map_err(|_| Sealed)
         }
@@ -221,8 +257,8 @@ pub(crate) mod loom_support {
         pub(crate) fn try_release_without_notification(&self) -> Option<ReleaseOutcome> {
             self.state
                 .fetch_update(
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
+                    Ordering::Release,
+                    Ordering::Relaxed,
                     release_without_notification_update,
                 )
                 .ok()
@@ -232,7 +268,7 @@ pub(crate) mod loom_support {
         pub(crate) fn release(&self) -> ReleaseOutcome {
             let previous = self
                 .state
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, release_update)
+                .fetch_update(Ordering::Release, Ordering::Relaxed, release_update)
                 .expect("model releases an admitted count");
             release_outcome(previous)
         }
@@ -242,7 +278,7 @@ pub(crate) mod loom_support {
         }
 
         pub(crate) fn seal(&self) {
-            self.state.fetch_or(SEALED_BIT, Ordering::AcqRel);
+            self.state.fetch_or(SEALED_BIT, Ordering::Release);
         }
 
         pub(crate) fn reopen(&self) -> Result<(), ReopenError> {
@@ -257,6 +293,69 @@ pub(crate) mod loom_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(all(target_os = "windows", target_arch = "x86")))]
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn loom_idle_observer_acquires_all_holders_through_the_release_sequence() {
+        use loom::sync::Arc;
+        use loom::sync::atomic::AtomicUsize;
+        use loom::thread;
+
+        let mut model = loom::model::Builder::new();
+        model.preemption_bound = Some(2);
+        model.check(|| {
+            let counter = Arc::new(loom_support::Counter::new());
+            let values = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
+            counter.try_acquire().unwrap();
+            counter.try_acquire().unwrap();
+            counter.seal();
+            let mut holders = Vec::new();
+            for index in 0..2 {
+                let counter = Arc::clone(&counter);
+                let values = Arc::clone(&values);
+                holders.push(thread::spawn(move || {
+                    values[index].store(index + 1, Ordering::Relaxed);
+                    counter.release();
+                }));
+            }
+            while counter.active() != 0 {
+                thread::yield_now();
+            }
+            // Check before join: the counter must supply the synchronization.
+            assert_eq!(values[0].load(Ordering::Relaxed), 1);
+            assert_eq!(values[1].load(Ordering::Relaxed), 2);
+            for holder in holders {
+                holder.join().unwrap();
+            }
+        });
+    }
+
+    #[cfg(not(all(target_os = "windows", target_arch = "x86")))]
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn loom_admission_acquires_reopened_generation_data() {
+        use loom::sync::Arc;
+        use loom::sync::atomic::AtomicUsize;
+        use loom::thread;
+
+        loom::model(|| {
+            let counter = Arc::new(loom_support::Counter::new_sealed());
+            let value = Arc::new(AtomicUsize::new(0));
+            let reader_counter = Arc::clone(&counter);
+            let reader_value = Arc::clone(&value);
+            let reader = thread::spawn(move || {
+                while reader_counter.try_acquire().is_err() {
+                    thread::yield_now();
+                }
+                assert_eq!(reader_value.load(Ordering::Relaxed), 7);
+                reader_counter.release();
+            });
+            value.store(7, Ordering::Relaxed);
+            counter.reopen().unwrap();
+            reader.join().unwrap();
+        });
+    }
 
     #[test]
     fn seal_rejects_new_acquisitions_until_reopened() {

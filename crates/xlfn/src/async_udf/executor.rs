@@ -205,7 +205,9 @@ impl Executor {
                     diagnostic_id: DiagnosticId::ASYNC_SPAWN,
                 });
             }
-            shared.live_workers.fetch_add(1, Ordering::Release);
+            // Reserve before spawning; thread creation and executor publication
+            // provide initialization ordering, not this worker count.
+            shared.live_workers.fetch_add(1, Ordering::Relaxed);
             let worker_shared = ExecutorPtr::from_ref(shared.as_ref());
             let worker = thread::Builder::new()
                 .name(format!("xlfn-async-{index}"))
@@ -215,7 +217,8 @@ impl Executor {
             let worker = match worker {
                 Ok(worker) => worker,
                 Err(_) => {
-                    let _ = xlfn_kernel::invariant::checked_atomic_dec(&shared.live_workers);
+                    let _ =
+                        xlfn_kernel::invariant::checked_atomic_dec_release(&shared.live_workers);
                     return Err(XllError::Internal {
                         diagnostic_id: DiagnosticId::ASYNC_SPAWN,
                     });
@@ -429,7 +432,7 @@ impl<'a> SpawnReservation<'a> {
                 },
             );
             debug_assert!(previous.is_none(), "task ID must be unique per generation");
-            generation.task_count.fetch_add(1, Ordering::AcqRel);
+            generation.task_count.fetch_add(1, Ordering::Relaxed);
         }
 
         let completion = self

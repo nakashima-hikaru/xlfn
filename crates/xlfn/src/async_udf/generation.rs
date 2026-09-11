@@ -26,6 +26,7 @@ pub(crate) struct TaskShard {
 pub(crate) struct GenerationState {
     pub(crate) id: u64,
     pub(crate) admission: xlfn_kernel::operation_gate::OperationGate,
+    // Allocation hint only; shard mutexes publish and own the actual task map.
     pub(crate) task_count: AtomicUsize,
     /// Reservations and completion guards, including canceled tasks whose
     /// controls have already been drained. This is the reclamation authority.
@@ -56,7 +57,7 @@ impl GenerationState {
             let mut tasks = self.shards[index].tasks.lock();
             let removed = tasks.remove(&id);
             if removed.is_some() {
-                let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.task_count);
+                let _ = xlfn_kernel::invariant::checked_atomic_dec_relaxed(&self.task_count);
             }
             removed
         };
@@ -72,13 +73,13 @@ impl GenerationState {
         // Drain directly into one buffer rather than allocating and copying
         // an intermediate Vec for each shard. Callers drop/wake the returned
         // controls only after releasing the executor control lock.
-        let mut result = Vec::with_capacity(self.task_count.load(Ordering::Acquire));
+        let mut result = Vec::with_capacity(self.task_count.load(Ordering::Relaxed));
         for shard in self.shards.iter() {
             let mut tasks = shard.tasks.lock();
             let count = tasks.len();
             result.extend(tasks.drain().map(|(_, task)| task));
             if count != 0 {
-                let _ = xlfn_kernel::invariant::checked_atomic_sub(&self.task_count, count);
+                let _ = xlfn_kernel::invariant::checked_atomic_sub_relaxed(&self.task_count, count);
             }
         }
         result
@@ -94,9 +95,11 @@ impl GenerationPin {
     /// The caller must hold the executor's generation-publication lock and
     /// keep the executor alive until this pin is released.
     pub(crate) unsafe fn acquire(state: &GenerationState) -> Self {
+        // The publication lock already acquires initialization and excludes
+        // reclamation while this lifetime reservation is added.
         state
             .pins
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pins| {
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |pins| {
                 pins.checked_add(1)
             })
             .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
@@ -116,8 +119,9 @@ impl GenerationPin {
 impl Drop for GenerationPin {
     fn drop(&mut self) {
         // No generation access may follow the release: a concurrent advance
-        // can immediately reclaim the Box when this was its final pin.
-        let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.get().pins);
+        // can immediately reclaim the Box when this was its final pin. Its
+        // Acquire zero observation must see every pin holder's prior accesses.
+        let _ = xlfn_kernel::invariant::checked_atomic_dec_release(&self.get().pins);
     }
 }
 
@@ -139,16 +143,33 @@ mod tests {
     fn miri_generation_final_pin_release_can_race_owner_reclamation() {
         for id in 0..16 {
             let owner = PublishedOwner::new(GenerationState::new(id));
-            // SAFETY: the owner is private until this sole pin is acquired;
-            // reclamation below waits for that pin's terminal publication.
-            let pin = unsafe { GenerationPin::acquire(&owner) };
+            // SAFETY: the owner is private until both pins are acquired;
+            // reclamation below waits for their terminal publication.
+            let first = unsafe { GenerationPin::acquire(&owner) };
+            // SAFETY: the owner is still private and both pins are drained below.
+            let second = unsafe { GenerationPin::acquire(&owner) };
+            let values = [AtomicUsize::new(0), AtomicUsize::new(0)];
             std::thread::scope(|scope| {
-                let releaser = scope.spawn(move || drop(pin));
+                let first_value = &values[0];
+                let first = scope.spawn(move || {
+                    first_value.store(1, Ordering::Relaxed);
+                    drop(first);
+                });
+                let second_value = &values[1];
+                let second = scope.spawn(move || {
+                    second_value.store(2, Ordering::Relaxed);
+                    drop(second);
+                });
                 while owner.pins.load(Ordering::Acquire) != 0 {
                     std::thread::yield_now();
                 }
+                // The zero observation, not joining either thread, must
+                // acquire both holders' writes through the release sequence.
+                assert_eq!(values[0].load(Ordering::Relaxed), 1);
+                assert_eq!(values[1].load(Ordering::Relaxed), 2);
                 drop(owner);
-                releaser.join().unwrap();
+                first.join().unwrap();
+                second.join().unwrap();
             });
         }
     }

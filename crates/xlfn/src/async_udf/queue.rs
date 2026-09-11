@@ -8,17 +8,22 @@ use xlfn_kernel::drain_gate::DrainGate;
 // Keep the memory-order handshake shared with the Loom model. Every work
 // publication and idle announcement must participate in the same RMW order.
 trait IdleWorkerMask {
-    fn publish_and_observe(&self, bits: u64) -> u64;
+    fn publish_work(&self) -> u64;
+    fn announce_idle(&self, bits: u64);
     fn try_claim(&self, current: u64, next: u64) -> Result<u64, u64>;
 }
 
 impl IdleWorkerMask for AtomicU64 {
-    fn publish_and_observe(&self, bits: u64) -> u64 {
-        self.fetch_or(bits, Ordering::AcqRel)
+    fn publish_work(&self) -> u64 {
+        self.fetch_or(0, Ordering::Release)
+    }
+
+    fn announce_idle(&self, bits: u64) {
+        self.fetch_or(bits, Ordering::Acquire);
     }
 
     fn try_claim(&self, current: u64, next: u64) -> Result<u64, u64> {
-        self.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire)
+        self.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed)
     }
 }
 
@@ -26,9 +31,10 @@ fn claim_idle_worker(mask: &impl IdleWorkerMask) -> Option<usize> {
     // A load can miss a worker's concurrent idle announcement while its
     // queue recheck misses our push (store buffering). An unconditional
     // RMW joins the announcement's modification order: either we observe
-    // its bit and unpark it, or its later AcqRel announcement observes our
-    // release and must see the queued work before parking.
-    let mut idle = mask.publish_and_observe(0);
+    // its bit and unpark it, or its later Acquire announcement observes our
+    // Release and must see the queued work before parking. Claim/clear RMWs
+    // only change bits and preserve that release sequence even when Relaxed.
+    let mut idle = mask.publish_work();
     while idle != 0 {
         let worker_index = idle.trailing_zeros() as usize;
         match mask.try_claim(idle, idle & !(1u64 << worker_index)) {
@@ -94,7 +100,7 @@ impl RunnableQueue {
     }
 
     pub(crate) fn announce_idle(&self, worker_bit: u64) {
-        self.idle_workers.publish_and_observe(worker_bit);
+        self.idle_workers.announce_idle(worker_bit);
     }
 
     pub(crate) fn wake_all(&self) {
@@ -183,12 +189,16 @@ mod tests {
     use loom::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     impl IdleWorkerMask for AtomicU64 {
-        fn publish_and_observe(&self, bits: u64) -> u64 {
-            self.fetch_or(bits, Ordering::AcqRel)
+        fn publish_work(&self) -> u64 {
+            self.fetch_or(0, Ordering::Release)
+        }
+
+        fn announce_idle(&self, bits: u64) {
+            self.fetch_or(bits, Ordering::Acquire);
         }
 
         fn try_claim(&self, current: u64, next: u64) -> Result<u64, u64> {
-            self.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire)
+            self.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed)
         }
     }
 
@@ -201,19 +211,47 @@ mod tests {
             let worker_idle = Arc::clone(&idle);
             let worker_queue = Arc::clone(&queued);
             let worker = loom::thread::spawn(move || {
-                if worker_queue.load(Ordering::Acquire) {
+                if worker_queue.load(Ordering::Relaxed) {
                     return true;
                 }
-                worker_idle.publish_and_observe(1);
-                worker_queue.load(Ordering::Acquire)
+                worker_idle.announce_idle(1);
+                worker_queue.load(Ordering::Relaxed)
             });
-            queued.store(true, Ordering::Release);
+            // Model queue contents without their own synchronization so the
+            // test specifically requires the idle-mask publication handshake.
+            queued.store(true, Ordering::Relaxed);
             let notified = claim_idle_worker(&*idle).is_some();
             let found_work = worker.join().unwrap();
             assert!(
                 found_work || notified,
                 "a worker must see queued work or receive a park token"
             );
+        });
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn loom_idle_mask_clear_preserves_the_work_release_sequence() {
+        let mut model = loom::model::Builder::new();
+        model.preemption_bound = Some(2);
+        model.check(|| {
+            let idle = Arc::new(AtomicU64::new(2));
+            let queued = Arc::new(AtomicBool::new(false));
+            let worker_idle = Arc::clone(&idle);
+            let worker_queue = Arc::clone(&queued);
+            let worker = loom::thread::spawn(move || {
+                worker_idle.announce_idle(1);
+                worker_queue.load(Ordering::Relaxed)
+            });
+            let clearing_idle = Arc::clone(&idle);
+            let clearing_worker = loom::thread::spawn(move || {
+                clearing_idle.fetch_and(!2, Ordering::Relaxed);
+            });
+            queued.store(true, Ordering::Relaxed);
+            let notified = claim_idle_worker(&*idle);
+            let found_work = worker.join().unwrap();
+            assert!(found_work || notified == Some(0));
+            clearing_worker.join().unwrap();
         });
     }
 }

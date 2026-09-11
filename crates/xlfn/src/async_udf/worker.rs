@@ -46,14 +46,16 @@ impl Drop for WorkerExitGuard {
             );
         }
 
-        let _ = xlfn_kernel::invariant::checked_atomic_dec(&shared.live_workers);
+        // An Acquire zero observation must see recovered queues and failures.
+        let _ = xlfn_kernel::invariant::checked_atomic_dec_release(&shared.live_workers);
         let _guard = shared.wait_lock.lock();
         shared.idle.notify_all();
     }
 }
 
 pub(crate) fn release_active(shared: &ExecutorShared) {
-    if xlfn_kernel::invariant::checked_atomic_dec(&shared.active) == 1 {
+    // Publish task cleanup to wait_for_idle's Acquire zero observation.
+    if xlfn_kernel::invariant::checked_atomic_dec_release(&shared.active) == 1 {
         let _guard = shared.wait_lock.lock();
         shared.idle.notify_all();
     }
@@ -128,7 +130,7 @@ pub(crate) fn run_executor(
             shared_ref
                 .queue
                 .idle_workers
-                .fetch_and(!my_bit, Ordering::AcqRel);
+                .fetch_and(!my_bit, Ordering::Relaxed);
             runnable.run();
             continue;
         }
@@ -137,7 +139,7 @@ pub(crate) fn run_executor(
             shared_ref
                 .queue
                 .idle_workers
-                .fetch_and(!my_bit, Ordering::AcqRel);
+                .fetch_and(!my_bit, Ordering::Relaxed);
             break;
         }
 
@@ -145,6 +147,6 @@ pub(crate) fn run_executor(
         shared_ref
             .queue
             .idle_workers
-            .fetch_and(!my_bit, Ordering::AcqRel);
+            .fetch_and(!my_bit, Ordering::Relaxed);
     }
 }

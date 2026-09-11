@@ -23,10 +23,18 @@ pub fn checked_sub_or_abort(value: usize, amount: usize) -> usize {
 /// subtraction.
 #[inline]
 pub fn checked_atomic_sub(counter: &AtomicUsize, amount: usize) -> usize {
+    checked_atomic_sub_ordered(counter, amount, Ordering::AcqRel, Ordering::Acquire)
+}
+
+#[inline]
+fn checked_atomic_sub_ordered(
+    counter: &AtomicUsize,
+    amount: usize,
+    success: Ordering,
+    failure: Ordering,
+) -> usize {
     counter
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-            value.checked_sub(amount)
-        })
+        .fetch_update(success, failure, |value| value.checked_sub(amount))
         .unwrap_or_else(|_| fail_stop())
 }
 
@@ -34,6 +42,26 @@ pub fn checked_atomic_sub(counter: &AtomicUsize, amount: usize) -> usize {
 #[inline]
 pub fn checked_atomic_dec(counter: &AtomicUsize) -> usize {
     checked_atomic_sub(counter, 1)
+}
+
+/// Subtracts accounting units without publishing or acquiring other memory.
+/// The owner must provide lifetime synchronization independently of this count.
+#[inline]
+pub fn checked_atomic_sub_relaxed(counter: &AtomicUsize, amount: usize) -> usize {
+    checked_atomic_sub_ordered(counter, amount, Ordering::Relaxed, Ordering::Relaxed)
+}
+
+/// Releases one accounting unit without synchronizing other memory accesses.
+#[inline]
+pub fn checked_atomic_dec_relaxed(counter: &AtomicUsize) -> usize {
+    checked_atomic_sub_relaxed(counter, 1)
+}
+
+/// Releases one unit, publishing prior accesses to an acquiring drain observer.
+/// This does not acquire earlier releasers' accesses for the calling thread.
+#[inline]
+pub fn checked_atomic_dec_release(counter: &AtomicUsize) -> usize {
+    checked_atomic_sub_ordered(counter, 1, Ordering::Release, Ordering::Relaxed)
 }
 
 /// Atomically subtracts a `u64` internal accounting counter.

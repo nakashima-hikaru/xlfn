@@ -26,6 +26,7 @@ fn current_ingress_stripe() -> usize {
 
 #[derive(Debug)]
 struct UdfStripe {
+    // Instrumentation only; StripedDrainGate owns admission and drain ordering.
     active: AtomicUsize,
 }
 
@@ -38,7 +39,7 @@ impl UdfStripe {
 
     fn enter(&self) {
         self.active
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |active| {
                 active.checked_add(1)
             })
             .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
@@ -46,14 +47,14 @@ impl UdfStripe {
 
     fn leave(&self) {
         self.active
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |active| {
                 active.checked_sub(1)
             })
             .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
     }
 
     fn active(&self) -> usize {
-        self.active.load(Ordering::Acquire)
+        self.active.load(Ordering::Relaxed)
     }
 }
 

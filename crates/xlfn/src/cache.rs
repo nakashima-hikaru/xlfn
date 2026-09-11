@@ -572,8 +572,10 @@ struct PinOverflow;
 impl<V> CacheNode<V> {
     #[inline]
     fn try_acquire_pin(&self) -> Result<bool, PinOverflow> {
+        // Lookup admission retains the allocation, and the resident index
+        // publishes its initialized value. Pins only extend that lifetime.
         self.pins
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pins| {
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |pins| {
                 // Zero is terminal: resurrecting a node after its final pin
                 // is released would let two threads race to retire it, while
                 // one of them might still be accessing the allocation.
@@ -591,11 +593,18 @@ impl<V> CacheNode<V> {
 
     #[inline]
     fn release_pin(&self) -> bool {
-        let prev = self.pins.fetch_sub(1, Ordering::AcqRel);
+        let prev = self.pins.fetch_sub(1, Ordering::Release);
         if prev == 0 {
             xlfn_kernel::invariant::fail_stop();
         }
-        prev == 1
+        if prev != 1 {
+            return false;
+        }
+        // Only the final releaser retires the node. Acquire every earlier
+        // holder's accesses through the pin counter's RMW release sequence
+        // before publishing the node to the reclamation queue.
+        std::sync::atomic::fence(Ordering::Acquire);
+        true
     }
 }
 
@@ -2127,8 +2136,17 @@ mod tests {
                     if !ptr.is_null() {
                         // SAFETY: ptr was non-null and allocated at start of model run.
                         let n = unsafe { &*ptr };
-                        // TR-ACQUIRE-PIN: Increment pins with AcqRel while admission held
-                        n.pins.fetch_add(1, Ordering::AcqRel);
+                        // TR-ACQUIRE-PIN: admission protects the allocation;
+                        // a zero pin count is terminal, just as in CacheNode.
+                        if n.pins
+                            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |pins| {
+                                (pins != 0).then_some(pins + 1)
+                            })
+                            .is_err()
+                        {
+                            reader_dom.leave();
+                            return;
+                        }
                         if n.resident.load(Ordering::Acquire) {
                             // TR-LOOKUP-LEAVE: Leave admission
                             reader_dom.leave();
@@ -2139,14 +2157,16 @@ mod tests {
                                 "UAF: node reclaimed while lease held"
                             );
 
-                            // Simulate lease drop with AcqRel:
-                            if n.pins.fetch_sub(1, Ordering::AcqRel) == 1 {
+                            // Only the final releaser acquires prior holders.
+                            if n.pins.fetch_sub(1, Ordering::Release) == 1 {
+                                loom::sync::atomic::fence(Ordering::Acquire);
                                 n.reclaimed.store(true, Ordering::Release);
                             }
                             return;
                         } else {
                             // Evicted concurrently
-                            if n.pins.fetch_sub(1, Ordering::AcqRel) == 1 {
+                            if n.pins.fetch_sub(1, Ordering::Release) == 1 {
+                                loom::sync::atomic::fence(Ordering::Acquire);
                                 n.reclaimed.store(true, Ordering::Release);
                             }
                         }
@@ -2164,8 +2184,10 @@ mod tests {
                     // SAFETY: ptr was non-null and allocated at start of model run.
                     let n = unsafe { &*ptr };
                     n.resident.store(false, Ordering::Release);
-                    // Decrement resident pin with AcqRel
-                    if n.pins.fetch_sub(1, Ordering::AcqRel) == 1 {
+                    // Publish residency release, then acquire earlier holders
+                    // before this final releaser hands the node to reclamation.
+                    if n.pins.fetch_sub(1, Ordering::Release) == 1 {
+                        loom::sync::atomic::fence(Ordering::Acquire);
                         // TR-RECLAIM-1: Quiesce domain before reclaim
                         evictor_dom.quiesce();
                         n.reclaimed.store(true, Ordering::Release);
@@ -2268,7 +2290,8 @@ mod tests {
                     // SAFETY: ptr was non-null and points to model node.
                     let n = unsafe { &*ptr };
                     n.resident.store(false, Ordering::Release);
-                    if n.pins.fetch_sub(1, Ordering::AcqRel) == 1 {
+                    if n.pins.fetch_sub(1, Ordering::Release) == 1 {
+                        loom::sync::atomic::fence(Ordering::Acquire);
                         // Admissions was 0 when reader hadn't entered yet!
                         evictor_dom.quiesce();
                         n.reclaimed.store(true, Ordering::Release);
@@ -2600,6 +2623,61 @@ mod tests {
         assert!(node.release_pin());
         assert_eq!(node.try_acquire_pin(), Ok(false));
         assert_eq!(node.pins.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn miri_final_cache_pin_acquires_all_holders_before_retirement() {
+        let node = CacheNode {
+            value: [AtomicUsize::new(0), AtomicUsize::new(0)],
+            pins: AtomicUsize::new(2),
+            resident: AtomicBool::new(false),
+            weight: 1,
+            generation: 0,
+            domain: NonNull::dangling(),
+        };
+        std::thread::scope(|scope| {
+            for index in 0..2 {
+                let node = &node;
+                scope.spawn(move || {
+                    node.value[index].store(index + 1, Ordering::Relaxed);
+                    if node.release_pin() {
+                        // Check before either join or queue locking can hide
+                        // a missing Acquire fence on the final pin release.
+                        assert_eq!(node.value[0].load(Ordering::Relaxed), 1);
+                        assert_eq!(node.value[1].load(Ordering::Relaxed), 2);
+                    }
+                });
+            }
+        });
+    }
+
+    #[cfg(not(all(target_os = "windows", target_arch = "x86")))]
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn loom_final_pin_fence_acquires_all_holders_before_retirement() {
+        use loom::sync::Arc;
+        use loom::sync::atomic::{AtomicUsize, Ordering, fence};
+
+        loom::model(|| {
+            let pins = Arc::new(AtomicUsize::new(2));
+            let values = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
+            let mut holders = Vec::new();
+            for index in 0..2 {
+                let pins = Arc::clone(&pins);
+                let values = Arc::clone(&values);
+                holders.push(loom::thread::spawn(move || {
+                    values[index].store(index + 1, Ordering::Relaxed);
+                    if pins.fetch_sub(1, Ordering::Release) == 1 {
+                        fence(Ordering::Acquire);
+                        assert_eq!(values[0].load(Ordering::Relaxed), 1);
+                        assert_eq!(values[1].load(Ordering::Relaxed), 2);
+                    }
+                }));
+            }
+            for holder in holders {
+                holder.join().unwrap();
+            }
+        });
     }
 
     #[test]

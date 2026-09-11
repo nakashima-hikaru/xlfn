@@ -8,12 +8,14 @@
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::invariant::checked_atomic_dec;
+use crate::invariant::checked_atomic_dec_relaxed;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct QuotaExceeded;
 
 pub struct Quota {
+    // Capacity accounting only. The owner-lifetime contract, not observing
+    // this count reach zero, synchronizes destruction of permit-bearing objects.
     used: AtomicUsize,
     limit: usize,
 }
@@ -34,7 +36,7 @@ impl Quota {
     /// destroy every permit-bearing object before reclaiming the quota.
     pub unsafe fn try_acquire(&self) -> Result<QuotaPermit, QuotaExceeded> {
         self.used
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
                 (used < self.limit).then(|| used + 1)
             })
             .map_err(|_| QuotaExceeded)?;
@@ -46,7 +48,7 @@ impl Quota {
 
     #[inline]
     pub fn used(&self) -> usize {
-        self.used.load(Ordering::Acquire)
+        self.used.load(Ordering::Relaxed)
     }
 }
 
@@ -58,7 +60,7 @@ impl Drop for QuotaPermit {
     fn drop(&mut self) {
         // SAFETY: guaranteed by `Quota::try_acquire`'s owner-lifetime
         // contract. Dropping the permit ends the capability before reclaim.
-        let _ = checked_atomic_dec(&unsafe { self.quota.as_ref() }.used);
+        let _ = checked_atomic_dec_relaxed(&unsafe { self.quota.as_ref() }.used);
     }
 }
 

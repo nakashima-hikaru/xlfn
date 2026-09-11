@@ -1255,71 +1255,7 @@ mod tests {
         use loom::sync::atomic::{AtomicBool, AtomicUsize, Ordering as LoomOrdering};
         use loom::thread as loom_thread;
 
-        const SEALED: usize = 1;
-
-        struct LoomGate {
-            state: AtomicUsize,
-        }
-
-        impl LoomGate {
-            fn new_open() -> Self {
-                Self {
-                    state: AtomicUsize::new(0),
-                }
-            }
-
-            fn new_sealed() -> Self {
-                Self {
-                    state: AtomicUsize::new(SEALED),
-                }
-            }
-
-            fn try_acquire(&self) -> bool {
-                let mut state = self.state.load(LoomOrdering::Acquire);
-                loop {
-                    if state & SEALED != 0 {
-                        return false;
-                    }
-                    match self.state.compare_exchange_weak(
-                        state,
-                        state + 2,
-                        LoomOrdering::AcqRel,
-                        LoomOrdering::Acquire,
-                    ) {
-                        Ok(_) => return true,
-                        Err(observed) => state = observed,
-                    }
-                }
-            }
-
-            fn release(&self) {
-                self.state.fetch_sub(2, LoomOrdering::AcqRel);
-            }
-
-            fn seal(&self) {
-                self.state.fetch_or(SEALED, LoomOrdering::AcqRel);
-            }
-
-            fn try_seal_if_idle(&self) -> bool {
-                self.state
-                    .compare_exchange(0, SEALED, LoomOrdering::AcqRel, LoomOrdering::Acquire)
-                    .is_ok()
-            }
-
-            fn reopen(&self) {
-                self.state
-                    .compare_exchange(SEALED, 0, LoomOrdering::AcqRel, LoomOrdering::Acquire)
-                    .unwrap();
-            }
-
-            fn active(&self) -> usize {
-                self.state.load(LoomOrdering::Acquire) >> 1
-            }
-
-            fn is_sealed(&self) -> bool {
-                self.state.load(LoomOrdering::Acquire) & SEALED != 0
-            }
-        }
+        use crate::sealable_counter::loom_support::Counter as LoomGate;
 
         struct LoomReadDomain {
             generations: [LoomGate; 2],
@@ -1330,7 +1266,7 @@ mod tests {
         impl LoomReadDomain {
             fn new() -> Self {
                 Self {
-                    generations: [LoomGate::new_open(), LoomGate::new_sealed()],
+                    generations: [LoomGate::new(), LoomGate::new_sealed()],
                     current: AtomicUsize::new(0),
                     reclaimed: [AtomicBool::new(false), AtomicBool::new(false)],
                 }
@@ -1340,7 +1276,7 @@ mod tests {
                 loop {
                     let generation = self.current.load(LoomOrdering::Acquire) & 1;
                     loom_thread::yield_now();
-                    if self.generations[generation].try_acquire() {
+                    if self.generations[generation].try_acquire().is_ok() {
                         return Some(generation);
                     }
                     loom_thread::yield_now();
@@ -1357,7 +1293,7 @@ mod tests {
                 }
                 publish_then_reopen(
                     || self.current.store(next, LoomOrdering::Release),
-                    || self.generations[next].reopen(),
+                    || self.generations[next].reopen().unwrap(),
                     || {},
                 );
                 if wait_for_readers {

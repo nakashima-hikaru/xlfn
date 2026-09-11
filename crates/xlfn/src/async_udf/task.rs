@@ -18,9 +18,11 @@ pub(crate) struct ActiveReservation<'a> {
 
 impl<'a> ActiveReservation<'a> {
     pub(crate) fn try_acquire(shared: &'a ExecutorShared) -> Option<Self> {
+        // Generation admission protects lifecycle entry. This RMW only
+        // reserves capacity; completion releases publish work to the drainer.
         shared
             .active
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |active| {
                 (active < MAX_PENDING).then_some(active + 1)
             })
             .ok()?;

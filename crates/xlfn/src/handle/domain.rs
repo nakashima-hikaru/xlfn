@@ -37,7 +37,10 @@ use xlfn_kernel::published_owner::PublishedOwner;
 pub(crate) struct HandleReadDomain {
     domain: RotatingReadDomain<DEFAULT_STRIPE_COUNT>,
     pending: [Mutex<Vec<PublishedOwner<BindingRecord>>>; 2],
+    // Maintenance hint; pending queue locks and the driver handoff publish work.
     queued: AtomicUsize,
+    // Also a destruction-completion counter: release decrements synchronize
+    // with seal/flush Acquire loads, even before a reclaimer locks completion.
     debt: AtomicUsize,
     peak_debt: AtomicUsize,
     maintenance_running: AtomicBool,
@@ -175,9 +178,9 @@ impl HandleReadDomain {
                 continue;
             }
             queue.push(record);
-            let debt = self.debt.fetch_add(1, Ordering::AcqRel) + 1;
+            let debt = self.debt.fetch_add(1, Ordering::Relaxed) + 1;
             self.peak_debt.fetch_max(debt, Ordering::Relaxed);
-            self.queued.fetch_add(1, Ordering::Release);
+            self.queued.fetch_add(1, Ordering::Relaxed);
             break;
         }
     }
@@ -185,7 +188,7 @@ impl HandleReadDomain {
     #[cfg(feature = "bench-internals")]
     pub(crate) fn debt_snapshot(&self) -> (usize, usize, usize) {
         (
-            self.queued.load(Ordering::Acquire),
+            self.queued.load(Ordering::Relaxed),
             self.debt(),
             self.peak_debt.load(Ordering::Relaxed),
         )
@@ -217,7 +220,7 @@ impl HandleReadDomain {
 
     fn take_generation(&self, index: usize) -> Vec<PublishedOwner<BindingRecord>> {
         let records = std::mem::take(&mut *self.pending[index].lock());
-        self.queued.fetch_sub(records.len(), Ordering::AcqRel);
+        self.queued.fetch_sub(records.len(), Ordering::Relaxed);
         records
     }
 
@@ -233,7 +236,7 @@ impl HandleReadDomain {
         });
         // No table, queue, transition, or completion lock spans user destructors.
         drop(records);
-        self.debt.fetch_sub(count, Ordering::AcqRel);
+        self.debt.fetch_sub(count, Ordering::Release);
         let _completion = self.completion.lock();
         self.changed.notify_all();
     }
@@ -263,7 +266,7 @@ impl HandleReadDomain {
     }
 
     fn poll_maintenance(&self) {
-        while self.queued.load(Ordering::Acquire) != 0 {
+        while self.queued.load(Ordering::Relaxed) != 0 {
             let Some(Ok(records)) = self.domain.poll_quiesce_with_publication_barrier(
                 |generation| self.pending[generation.index()].try_lock(),
                 |generation| self.take_generation(generation.index()),

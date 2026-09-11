@@ -1505,7 +1505,7 @@ fn test_generation_state_sharded_removal_and_task_count() {
                 cancellation,
             },
         );
-        state.task_count.fetch_add(1, Ordering::AcqRel);
+        state.task_count.fetch_add(1, Ordering::Relaxed);
     }
 
     assert_eq!(state.task_count.load(Ordering::Acquire), 100);
@@ -2326,7 +2326,7 @@ fn test_lost_wakeup_interleaving_push_before_idle_mark() {
     let discovered = queue
         .steal_injector_batch_and_pop(&local)
         .expect("task must be discovered");
-    queue.idle_workers.fetch_and(!(1 << 0), Ordering::AcqRel);
+    queue.idle_workers.fetch_and(!(1 << 0), Ordering::Relaxed);
     discovered.run();
     assert!(ran.load(Ordering::Acquire));
 }

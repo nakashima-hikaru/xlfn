@@ -429,8 +429,15 @@ fn panicking_initializers_do_not_wait_for_active_readers() {
                 // an outer lookup invoking it from a key callback. Unwind
                 // cleanup must not wait for that reader's permit. Release it
                 // before joining even on timeout so a regression cannot hang.
-                let completed =
-                    completed_rx.recv_timeout(std::time::Duration::from_secs(1)) == Ok(true);
+                // Miri advances virtual time per basic block. Use its deadlock
+                // detector instead of a timing budget: waiting for this held
+                // permit would block both threads. Native runs retain timeout
+                // recovery so an actual regression cannot hang the test runner.
+                let completed = if cfg!(miri) {
+                    completed_rx.recv() == Ok(true)
+                } else {
+                    completed_rx.recv_timeout(std::time::Duration::from_secs(1)) == Ok(true)
+                };
                 assert_eq!(drops[0].load(Ordering::SeqCst), 0);
                 drop(permit);
                 assert!(crate::panic_boundary::contain_panic(worker.join()).is_ok());
