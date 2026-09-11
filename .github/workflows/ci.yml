@@ -148,7 +148,7 @@ jobs:
                   fallback: none
 
             - name: Install Miri
-              run: rustup toolchain install nightly --component miri
+              run: just miri-setup
 
             - name: Run Miri regression tests
               run: just miri

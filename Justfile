@@ -1,6 +1,10 @@
 # Developer and CI command surface. Keep CI workflows and the testing guide
 # aligned with these recipes.
 
+# parking_lot_core 0.9.12 passes a reference to Linux's variadic futex syscall;
+# newer Miri rejects its argument type. Revisit this pin after an upstream fix.
+miri-toolchain := "nightly-2026-08-22"
+
 default:
     @just --list
 
@@ -46,11 +50,14 @@ test-libtest:
 test-all: test-libtest
 
 # Miri temporal pointer reclamation and domain safety regression tests.
+miri-setup:
+    rustup toolchain install {{miri-toolchain}} --profile minimal --component miri
+
 miri:
-    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +nightly miri test -p xlfn-kernel --lib -- miri_
-    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +nightly miri test -p xlfn --no-default-features --features handles --lib -- miri_
-    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +nightly miri test -p xlfn --no-default-features --features async --lib -- miri_
-    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +nightly miri test -p xlfn --no-default-features --features rtd --lib -- miri_
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn-kernel --lib --locked -- miri_
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features handles --lib --locked -- miri_
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features async --lib --locked -- miri_
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features rtd --lib --locked -- miri_
 
 test-core:
     cargo test \
@@ -174,8 +181,8 @@ bench-check:
 
 # Full-cache production policy and comparators; leak and alias checks remain enabled.
 miri-cache-backends:
-    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="" cargo +nightly miri test -p xlfn --features "unstable-cache bench-internals" --lib cache::backend_tests --locked
-    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-tree-borrows" cargo +nightly miri test -p xlfn --features "unstable-cache bench-internals" --lib cache::backend_tests --locked
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="" cargo +{{miri-toolchain}} miri test -p xlfn --features "unstable-cache bench-internals" --lib cache::backend_tests --locked
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-tree-borrows" cargo +{{miri-toolchain}} miri test -p xlfn --features "unstable-cache bench-internals" --lib cache::backend_tests --locked
 
 # Serial backend diagnostics with three repetitions; includes all comparison policies.
 bench-cache-backends output="target/cache-backend-qualification":

@@ -20,6 +20,14 @@ benchmark compilation, cargo-deny, and the public API compatibility audit.
 Use `just test-libtest` when validating same-process libtest behavior, which is
 the execution model retained by the Windows artifact job.
 
+Run `just miri-setup` once before `just miri` or `just miri-cache-backends`.
+The `Justfile` pins Miri to `nightly-2026-08-22` for both local checks and CI.
+Newer Miri rejects the reference passed to the variadic
+Linux futex syscall by `parking_lot_core 0.9.12`; this pin is a temporary
+compatibility workaround, not a fix for that dependency. Revisit it when
+the dependency is fixed, and validate both Miri recipes before advancing it.
+The recipes use the committed lockfile to keep dependency resolution stable.
+
 ## API compatibility
 
 `just semver` runs `cargo-semver-checks` for the publishable workspace crates
