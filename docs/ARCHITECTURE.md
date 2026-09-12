@@ -14,17 +14,17 @@ boundary.
 
 ## Ownership Structure
 
-| Owner | Owned Resources | Consumers and Lifetime |
-| ------------------------ | ---------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| Module | Export ingress, DLL residency, host connections | Governed by admission permits and termination proofs |
-| `Runtime<A>` | Lifecycle, host registration ledger, return tracking, executors, quarantined resources | Borrowed as required capabilities by call boundaries |
-| Lifecycle generation bundle | `ExecutionGeneration` and `GenerationServices` | Retains published regions until `CallGuard` / `ExecutionLease` drain |
-| `ThreadAffineSlot` | `A::LifecycleState` | Mutable access restricted to initialization and shutdown threads |
-| `ExecutionGeneration` | `A::SharedState` and UDF layers | Shared-borrowed by UDFs within the lifetime of their guards |
-| Generation services | Handle registry, RTD source / subscription | Referenced via generation-tagged IDs and service read permits |
-| Handle registry | Binding table, read domain, object arena | Reclaimed independently after call-scoped borrows and async pins drain |
-| RTD channel adapter | Source owns factory; subscription workers own individual `FnOnce` jobs | Subscription closes the queue and joins producer / publisher workers |
-| Return protocol | Excel return values allocated by the DLL | Reclaimed by `xlAutoFree12`; physical unload is prohibited while uncollected |
+| Owner                       | Owned Resources                                                                        | Consumers and Lifetime                                                       |
+| --------------------------- | -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Module                      | Export ingress, DLL residency, host connections                                        | Governed by admission permits and termination proofs                         |
+| `Runtime<A>`                | Lifecycle, host registration ledger, return tracking, executors, quarantined resources | Borrowed as required capabilities by call boundaries                         |
+| Lifecycle generation bundle | `ExecutionGeneration` and `GenerationServices`                                         | Retains published regions until `CallGuard` / `ExecutionLease` drain         |
+| `ThreadAffineSlot`          | `A::LifecycleState`                                                                    | Mutable access restricted to initialization and shutdown threads             |
+| `ExecutionGeneration`       | `A::SharedState` and UDF layers                                                        | Shared-borrowed by UDFs within the lifetime of their guards                  |
+| Generation services         | Handle registry, RTD source / subscription                                             | Referenced via generation-tagged IDs and service read permits                |
+| Handle registry             | Binding table, read domain, object arena                                               | Reclaimed independently after call-scoped borrows and async pins drain       |
+| RTD channel adapter         | Source owns factory; subscription workers own individual `FnOnce` jobs                 | Subscription closes the queue and joins producer / publisher workers         |
+| Return protocol             | Excel return values allocated by the DLL                                               | Reclaimed by `xlAutoFree12`; physical unload is prohibited while uncollected |
 
 Excel inputs are borrowed only for the duration of a call. Asynchronous operations
 receive owned inputs and an execution lease (`ExecutionLease`). Handle identifiers
@@ -98,6 +98,3 @@ diagnostics apply the text budget during formatting before JSON serialization.
 Diagnostic queue capacity is reserved before cloning the event; failed admission
 does not build a payload. Construction unwind returns its reservation, successful
 send transfers it to the worker, and dequeue returns it before sink delivery.
-
-See the [performance audit](PERFORMANCE.md) for measurements, design tradeoffs and
-platform qualification limits.
