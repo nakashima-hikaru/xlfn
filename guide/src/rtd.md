@@ -37,6 +37,12 @@ context.rtd().subscribe(&source_handle, &["service-health"])?;
 
 The subscription call borrows its parts and copies them only when creating a new subscription. Source callbacks receive the canonical owned `RtdTopic`.
 
+Use `topic.len()` to inspect the part count, `topic.part(index)` for an optional
+`&str`, and `topic.parts()` for an allocation-free `RtdTopicParts` iterator over
+`&str` values. The iterator implements `ExactSizeIterator`. `RtdTopic::new` and
+`RtdTopic::single` accept string inputs through `AsRef<str>`; their storage
+representation is private.
+
 A topic must contain at least one non-empty part. Each part must fit Excel's 32,767 UTF-16-unit counted-string representation. Topic parts are identity, not display labels; use stable, canonical values.
 
 The runtime also applies bounded admission limits. The standard limits are 253 topic parts, 1 MiB of UTF-8 text per topic, 64 MiB of pending-topic text in aggregate, 4,096 pending preparations, 4,096 active streams, 4,096 queued updates, and 4,096 distinct live source identities. A custom `RuntimeConfig::with_rtd_limits` can choose lower limits during `Addin::open`; use `RtdCapacity::bounded` or `RtdCapacity::disabled` for each resource class so a disabled limit is explicit rather than an untyped zero. Exceeding a limit returns `XllError::Overloaded` (or a topic input error for an invalid topic).

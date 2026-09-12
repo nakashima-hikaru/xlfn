@@ -159,6 +159,7 @@ pub(crate) fn wait_for_return_quiescence(
 /// Classification for a best-effort failure observed after unload safety was
 /// established.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum CleanupIssueKind {
     HostMetadata,
     HostMemoryLeak,

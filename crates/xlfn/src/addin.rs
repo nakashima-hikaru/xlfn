@@ -1031,14 +1031,9 @@ mod tests {
                         ),
                     );
                     assert!(matches!(
-                        context.rtd().subscribe(
-                            &source,
-                            &topic
-                                .parts()
-                                .iter()
-                                .map(|part| part.as_str())
-                                .collect::<Vec<_>>(),
-                        ),
+                        context
+                            .rtd()
+                            .subscribe(&source, &topic.parts().collect::<Vec<_>>(),),
                         Err(crate::XllError::ExcelApi {
                             function: crate::ExcelApiFunction::Rtd,
                             failure: crate::ExcelApiFailure::Status(

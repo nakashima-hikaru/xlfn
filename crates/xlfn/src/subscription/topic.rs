@@ -241,7 +241,7 @@ pub struct RtdTopic {
 }
 
 impl RtdTopic {
-    pub fn new(parts: impl IntoIterator<Item = impl Into<SmolStr>>) -> XllResult<Self> {
+    pub fn new(parts: impl IntoIterator<Item = impl AsRef<str>>) -> XllResult<Self> {
         let mut normalized = Vec::new();
         for part in parts {
             if normalized.len() >= MAX_RTD_TOPIC_PARTS {
@@ -253,7 +253,7 @@ impl RtdTopic {
                     },
                 ));
             }
-            let part = part.into();
+            let part = SmolStr::new(part.as_ref());
             if part.is_empty() {
                 return Err(XllError::input(
                     "RTD topic",
@@ -277,15 +277,34 @@ impl RtdTopic {
         })
     }
 
-    pub fn single(part: impl Into<SmolStr>) -> XllResult<Self> {
+    pub fn single(part: impl AsRef<str>) -> XllResult<Self> {
         Self::new([part])
     }
 
+    /// Returns the number of topic parts.
     #[must_use]
-    /// Canonical immutable parts. Short parts are stored inline, and cloning
-    /// long parts shares their text allocation.
-    pub fn parts(&self) -> &[SmolStr] {
-        &self.parts
+    pub fn len(&self) -> usize {
+        self.parts.len()
+    }
+
+    /// Returns whether the topic has no parts. Valid topics are always non-empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.parts.is_empty()
+    }
+
+    /// Returns one topic part, or `None` if the index is out of bounds.
+    #[must_use]
+    pub fn part(&self, index: usize) -> Option<&str> {
+        self.parts.get(index).map(SmolStr::as_str)
+    }
+
+    /// Borrows the canonical parts in order without allocating.
+    #[must_use]
+    pub fn parts(&self) -> RtdTopicParts<'_> {
+        RtdTopicParts {
+            inner: self.parts.iter(),
+        }
     }
 
     #[cfg(any(test, feature = "bench-internals"))]
@@ -313,6 +332,28 @@ impl RtdTopic {
         self.byte_len
     }
 }
+
+/// Borrowed topic parts in their canonical order.
+#[derive(Clone, Debug)]
+pub struct RtdTopicParts<'a> {
+    inner: std::slice::Iter<'a, SmolStr>,
+}
+
+impl<'a> Iterator for RtdTopicParts<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(SmolStr::as_str)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl ExactSizeIterator for RtdTopicParts<'_> {}
+
+impl std::iter::FusedIterator for RtdTopicParts<'_> {}
 
 impl PartialEq for RtdTopic {
     fn eq(&self, other: &Self) -> bool {

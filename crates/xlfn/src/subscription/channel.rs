@@ -734,7 +734,7 @@ mod tests {
             let source = RtdChannelSource::new(
                 capacity(),
                 move |topic| -> XllResult<fn(RtdSender<i32>) -> XllResult<()>> {
-                    assert_eq!(topic.parts(), ["invalid"]);
+                    assert!(topic.parts().eq(["invalid"]));
                     if panic {
                         panic!("injected factory panic");
                     }

@@ -37,11 +37,12 @@ pub(crate) use file::install_file_diagnostic_sink;
 #[cfg(test)]
 pub(crate) use file::{FileDiagnosticSink, RotatingLog, install_file_diagnostic_sink_at};
 
+pub(crate) use event::DiagnosticShutdownError;
 #[cfg(test)]
 pub(crate) use event::DiagnosticsDrained;
 pub use event::{
-    AddinId, DiagnosticEvent, DiagnosticInitError, DiagnosticShutdownError, DiagnosticSink,
-    DiagnosticStats, InvalidAddinId, diagnostic_stats,
+    AddinId, DiagnosticEvent, DiagnosticInitError, DiagnosticSink, DiagnosticStats, InvalidAddinId,
+    diagnostic_stats,
 };
 use worker::{AsyncDiagnosticSink, DiagnosticObserver, OwnedDiagnosticEvent};
 

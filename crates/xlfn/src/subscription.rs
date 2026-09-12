@@ -51,9 +51,9 @@ pub use channel::{RtdChannelSource, RtdChannelSubscription, RtdSender};
 #[cfg(feature = "rtd")]
 pub use source::{RtdSink, RtdSource, RtdSourceHandle, RtdSubscription};
 #[cfg(feature = "rtd")]
-pub use topic::RtdTopic;
-#[cfg(feature = "rtd")]
 pub use topic::{RtdCapacity, RtdLimits};
+#[cfg(feature = "rtd")]
+pub use topic::{RtdTopic, RtdTopicParts};
 #[cfg(feature = "rtd")]
 pub use value::IntoRtdValue;
 #[cfg(feature = "rtd")]

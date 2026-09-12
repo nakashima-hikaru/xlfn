@@ -112,8 +112,7 @@ impl RtdPrepareBenchmark {
     /// Include input validation, hashing, and canonical topic materialization.
     pub fn run_subscribe_input(&self, churn: bool) {
         let prepare = |topic: &crate::subscription::RtdTopic| {
-            let parts: smallvec::SmallVec<[&str; 16]> =
-                topic.parts().iter().map(|part| part.as_str()).collect();
+            let parts: smallvec::SmallVec<[&str; 16]> = topic.parts().collect();
             self.runtime
                 .prepare(
                     &self.source,

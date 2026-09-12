@@ -66,7 +66,7 @@ pub enum DiagnosticInitError {
     reason = "Shutdown error is retained for internal lifecycle diagnostics"
 )]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum DiagnosticShutdownError {
+pub(crate) enum DiagnosticShutdownError {
     #[error("diagnostic logger worker panicked")]
     WorkerPanicked,
     #[error("diagnostic logger cannot join itself")]

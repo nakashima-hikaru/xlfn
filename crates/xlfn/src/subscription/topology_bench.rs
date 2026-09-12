@@ -244,7 +244,7 @@ unsafe impl RtdSource for SharedSource {
     type Value = i32;
     type Subscription = SharedSubscription;
     fn subscribe(&self, topic: &RtdTopic, sink: RtdSink<i32>) -> XllResult<Self::Subscription> {
-        let index: usize = topic.parts()[0].parse().unwrap();
+        let index: usize = topic.part(0).unwrap().parse().unwrap();
         let topic = Arc::new(SharedTopic {
             state: Mutex::new(TopicState {
                 values: VecDeque::new(),
@@ -406,7 +406,7 @@ pub fn shared_publisher_topology_probe(
         SourceRegistration::new(crate::generation::RuntimeGeneration::new(1).unwrap());
     let mut result = if shared_publishers == 0 {
         let source = RtdChannelSource::new(NonZeroUsize::new(64).unwrap(), move |topic| {
-            let index: usize = topic.parts()[0].parse().unwrap();
+            let index: usize = topic.part(0).unwrap().parse().unwrap();
             let receiver = receivers.lock()[index].take().unwrap();
             let done_tx = done_tx.clone();
             Ok(move |sender: super::RtdSender<i32>| {

@@ -16,7 +16,7 @@ pub struct SheetId(IDSHEET);
 
 impl SheetId {
     #[must_use]
-    pub const fn get(self) -> IDSHEET {
+    pub const fn get(self) -> usize {
         self.0
     }
 }
@@ -112,9 +112,11 @@ impl ExcelReference<'_> {
 
     #[must_use]
     pub fn areas(&self) -> ReferenceAreas<'_> {
-        match &self.kind {
-            ReferenceKind::SameSheet(area) => ReferenceAreas::One(Some(*area)),
-            ReferenceKind::Sheet { areas, .. } => ReferenceAreas::Many(areas.iter()),
+        ReferenceAreas {
+            inner: match &self.kind {
+                ReferenceKind::SameSheet(area) => ReferenceAreasInner::One(Some(*area)),
+                ReferenceKind::Sheet { areas, .. } => ReferenceAreasInner::Many(areas.iter()),
+            },
         }
     }
 
@@ -123,7 +125,12 @@ impl ExcelReference<'_> {
     }
 }
 
-pub enum ReferenceAreas<'call> {
+/// Iterates over the validated areas of an Excel reference.
+pub struct ReferenceAreas<'call> {
+    inner: ReferenceAreasInner<'call>,
+}
+
+enum ReferenceAreasInner<'call> {
     One(Option<ReferenceArea>),
     Many(slice::Iter<'call, XLREF12>),
 }
@@ -132,9 +139,9 @@ impl Iterator for ReferenceAreas<'_> {
     type Item = ReferenceArea;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::One(area) => area.take(),
-            Self::Many(areas) => areas
+        match &mut self.inner {
+            ReferenceAreasInner::One(area) => area.take(),
+            ReferenceAreasInner::Many(areas) => areas
                 .next()
                 .and_then(|area| ReferenceArea::parse(*area, "reference").ok()),
         }

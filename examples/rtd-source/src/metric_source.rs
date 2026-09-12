@@ -8,7 +8,8 @@ pub(crate) type MetricSource = RtdChannelSource<RtdValue>;
 
 pub(crate) fn metric_source() -> MetricSource {
     RtdChannelSource::new(NonZeroUsize::new(64).unwrap(), |topic| {
-        let [kind, symbol] = topic.parts() else {
+        let mut parts = topic.parts();
+        let (Some(kind), Some(symbol), None) = (parts.next(), parts.next(), parts.next()) else {
             return Err(XllError::input(
                 "RTD topic",
                 InputError::Malformed("expected [kind, symbol]"),
@@ -20,7 +21,7 @@ pub(crate) fn metric_source() -> MetricSource {
                 InputError::Malformed("unsupported metric topic"),
             ));
         }
-        let symbol = symbol.clone();
+        let symbol = symbol.to_owned();
         // Each job owns its client; real integrations can open a connection here.
         let client = Client;
         Ok(move |sender: RtdSender<RtdValue>| {

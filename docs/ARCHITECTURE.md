@@ -62,6 +62,8 @@ the separately owned topic. Transactional topic changes remain under the topic
 table write lock. Withdrawal and retirement registration precede publication of
 the next read generation through the retirement-queue publication barrier.
 
-Canonical RTD topic parts use immutable `SmolStr` values; borrowed lookup stays
+Canonical RTD topic parts use immutable `SmolStr` values internally. The public
+`RtdTopic` API accepts `AsRef<str>` inputs and exposes borrowed `&str` parts
+through `part` and the exact-size `RtdTopicParts` iterator. Borrowed lookup stays
 allocation-free on a hit. See [crate evaluation](PERFORMANCE.md) for measurements,
 accepted regressions and platform qualification limits.

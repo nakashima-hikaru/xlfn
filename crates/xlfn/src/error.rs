@@ -66,6 +66,7 @@ impl ExcelError {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum InputError {
     NullPointer,
     WrongType {
@@ -91,6 +92,7 @@ pub struct Shape {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum DomainErrorCode {
     InvalidInput,
     Overflow,
@@ -133,6 +135,7 @@ impl ExcelCallbackStatus {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[non_exhaustive]
 pub enum ExcelApiFunction {
     Caller,
     SheetName,
@@ -170,6 +173,7 @@ impl fmt::Display for ExcelApiFunction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[non_exhaustive]
 pub enum ExcelApiFailure {
     Status(ExcelCallbackStatus),
     Suppressed(ExcelCallbackStatus),

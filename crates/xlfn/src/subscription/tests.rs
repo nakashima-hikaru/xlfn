@@ -2241,13 +2241,21 @@ fn borrowed_preparation_owns_only_canonical_storage_and_outlives_input() {
             .prepare(&source, BorrowedTopicParts::new(&parts).unwrap())
             .unwrap();
         assert_ne!(
-            runtime.catalog.lock().entries[&prepared.id()].topic.parts()[1].as_ptr(),
+            runtime.catalog.lock().entries[&prepared.id()]
+                .topic
+                .part(1)
+                .unwrap()
+                .as_ptr(),
             input.as_ptr()
         );
         prepared
     };
     let id = first.id();
-    let canonical = runtime.catalog.lock().entries[&id].topic.parts().as_ptr();
+    let canonical = runtime.catalog.lock().entries[&id]
+        .topic
+        .part(0)
+        .unwrap()
+        .as_ptr();
     let repeated = runtime
         .prepare(
             &source,
@@ -2256,7 +2264,11 @@ fn borrowed_preparation_owns_only_canonical_storage_and_outlives_input() {
         .unwrap();
     assert_eq!(repeated.id(), id);
     assert_eq!(
-        runtime.catalog.lock().entries[&id].topic.parts().as_ptr(),
+        runtime.catalog.lock().entries[&id]
+            .topic
+            .part(0)
+            .unwrap()
+            .as_ptr(),
         canonical
     );
     repeated.rollback();
