@@ -51,7 +51,7 @@ test-all: test-libtest
 
 # Miri temporal pointer reclamation and domain safety regression tests.
 miri-setup:
-    rustup toolchain install {{miri-toolchain}} --profile minimal --component miri
+    rustup toolchain install {{miri-toolchain}} --profile minimal --component miri,rust-src
 
 miri:
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn-kernel --lib --locked -- miri_
