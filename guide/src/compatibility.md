@@ -6,13 +6,13 @@ This chapter distinguishes implemented targets from environments that have been 
 
 For the source version documented by this guide:
 
-| Item | Value |
-|---|---|
-| supported `xlfn` facade version | `0.2.0` |
-| Rust edition | 2024 |
-| minimum/pinned Rust toolchain | `1.98.0` |
-| license | MIT OR Apache-2.0 |
-| Excel C API generation | Excel 12 / `XLOPER12` |
+| Item                            | Value                 |
+| ------------------------------- | --------------------- |
+| supported `xlfn` facade version | `0.2.0`               |
+| Rust edition                    | 2024                  |
+| minimum/pinned Rust toolchain   | `1.98.1`              |
+| license                         | MIT OR Apache-2.0     |
+| Excel C API generation          | Excel 12 / `XLOPER12` |
 
 The supported application contract is the `xlfn` facade. The implementation
 crates `xlfn-common`, `xlfn-kernel`, and `xlfn-macros` intentionally use an
@@ -26,10 +26,10 @@ The repository pins the toolchain and both Windows MSVC targets in `rust-toolcha
 
 The supported XLL target implementations are:
 
-| Excel process | Rust target | Package directory |
-|---|---|---|
-| 32-bit Excel | `i686-pc-windows-msvc` | `win-x86` |
-| 64-bit Excel | `x86_64-pc-windows-msvc` | `win-x64` |
+| Excel process | Rust target              | Package directory |
+| ------------- | ------------------------ | ----------------- |
+| 32-bit Excel  | `i686-pc-windows-msvc`   | `win-x86`         |
+| 64-bit Excel  | `x86_64-pc-windows-msvc` | `win-x64`         |
 
 Select by **Excel process bitness**, not Windows bitness. A 64-bit Windows installation may run 32-bit Excel and therefore require the x86 package.
 
@@ -58,11 +58,11 @@ Do not convert an intended target into a support claim without evidence.
 
 The `xlfn` crate has no default features.
 
-| Feature | Adds | Use when |
-|---|---|---|
-| `async` | native async UDF executor, async context, calculation cancellation exports | a formula produces one eventual result without blocking Excel |
-| `unstable-cache` | lower-level calculation-cache API | the add-in explicitly accepts experimental cache API evolution |
-| `unstable-output` | lower-level array-output API | the add-in explicitly accepts experimental output API evolution |
+| Feature           | Adds                                                                       | Use when                                                        |
+| ----------------- | -------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `async`           | native async UDF executor, async context, calculation cancellation exports | a formula produces one eventual result without blocking Excel   |
+| `unstable-cache`  | lower-level calculation-cache API                                          | the add-in explicitly accepts experimental cache API evolution  |
+| `unstable-output` | lower-level array-output API                                               | the add-in explicitly accepts experimental output API evolution |
 
 Examples:
 
@@ -152,11 +152,11 @@ xlfn does not perform runtime adapter loading or ABI negotiation. Any applicatio
 
 Publish a matrix for each release candidate:
 
-| Environment | Artifact check | Load/open | sync UDF | MTR | handles | async | RTD | external adapter | unload/reload |
-|---|---|---|---|---|---|---|---|---|---|
-| Windows 10, Excel 32-bit, exact build/channel |  |  |  |  |  |  |  |  |  |
-| Windows 10, Excel 64-bit, exact build/channel |  |  |  |  |  |  |  |  |  |
-| Windows 11, Excel 32-bit, exact build/channel |  |  |  |  |  |  |  |  |  |
-| Windows 11, Excel 64-bit, exact build/channel |  |  |  |  |  |  |  |  |  |
+| Environment                                   | Artifact check | Load/open | sync UDF | MTR | handles | async | RTD | external adapter | unload/reload |
+| --------------------------------------------- | -------------- | --------- | -------- | --- | ------- | ----- | --- | ---------------- | ------------- |
+| Windows 10, Excel 32-bit, exact build/channel |                |           |          |     |         |       |     |                  |               |
+| Windows 10, Excel 64-bit, exact build/channel |                |           |          |     |         |       |     |                  |               |
+| Windows 11, Excel 32-bit, exact build/channel |                |           |          |     |         |       |     |                  |               |
+| Windows 11, Excel 64-bit, exact build/channel |                |           |          |     |         |       |     |                  |               |
 
 Record failures and skipped capabilities explicitly; a blank cell must not be interpreted as a pass.

@@ -5,7 +5,7 @@
 Release XLLs target the Microsoft Visual C++ ABI and are expected to be built and linked on Windows with:
 
 - Windows 10 or Windows 11;
-- Rust 1.98.0 or a compatible toolchain for this source snapshot;
+- Rust 1.98.1 or a compatible toolchain for this source snapshot;
 - the `i686-pc-windows-msvc` and/or `x86_64-pc-windows-msvc` Rust targets;
 - Visual Studio Build Tools with **Desktop development with C++**;
 - Cargo and `cargo-xlfn`.
@@ -14,7 +14,7 @@ The repository pins the toolchain and both targets in `rust-toolchain.toml`:
 
 ```toml
 [toolchain]
-channel = "1.98.0"
+channel = "1.98.1"
 profile = "minimal"
 components = ["clippy", "rustfmt"]
 targets = ["i686-pc-windows-msvc", "x86_64-pc-windows-msvc"]
@@ -28,10 +28,10 @@ Host-side tests that do not link an XLL may run on other operating systems. Pack
 
 Match the XLL to the **Excel process**, not to the operating system:
 
-| Excel process | Rust target | Package directory |
-|---|---|---|
-| 32-bit Excel | `i686-pc-windows-msvc` | `package/win-x86/` |
-| 64-bit Excel | `x86_64-pc-windows-msvc` | `package/win-x64/` |
+| Excel process | Rust target              | Package directory  |
+| ------------- | ------------------------ | ------------------ |
+| 32-bit Excel  | `i686-pc-windows-msvc`   | `package/win-x86/` |
+| 64-bit Excel  | `x86_64-pc-windows-msvc` | `package/win-x64/` |
 
 A 64-bit edition of Windows can run 32-bit Excel. In that case, use the x86 XLL.
 
@@ -57,11 +57,11 @@ Enable only what the add-in uses:
 xlfn = { version = "0.2", features = ["async"] }
 ```
 
-| Feature | Adds |
-|---|---|
-| `async` | native asynchronous UDF runtime, `AsyncContext`, cancellation tokens, and calculation-event exports |
-| `unstable-cache` | lower-level calculation-cache API with an explicitly unstable contract |
-| `unstable-output` | lower-level array-output API with an explicitly unstable contract |
+| Feature           | Adds                                                                                                |
+| ----------------- | --------------------------------------------------------------------------------------------------- |
+| `async`           | native asynchronous UDF runtime, `AsyncContext`, cancellation tokens, and calculation-event exports |
+| `unstable-cache`  | lower-level calculation-cache API with an explicitly unstable contract                              |
+| `unstable-output` | lower-level array-output API with an explicitly unstable contract                                   |
 
 ## Project shape
 

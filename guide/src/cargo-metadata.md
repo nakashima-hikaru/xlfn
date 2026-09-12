@@ -49,12 +49,12 @@ external-imports = ["OrganizationRuntime.dll"]
 strict-paths = true
 ```
 
-| Key | Type | Meaning |
-|---|---|---|
-| `x86` | array of strings | files packaged for `i686-pc-windows-msvc` |
-| `x64` | array of strings | files packaged for `x86_64-pc-windows-msvc` |
-| `external-imports` | array of strings | approved non-system DLL basenames supplied outside the package |
-| `strict-paths` | Boolean | reject symbolic links/reparse points present in configured source paths; defaults to `true` |
+| Key                | Type             | Meaning                                                                                     |
+| ------------------ | ---------------- | ------------------------------------------------------------------------------------------- |
+| `x86`              | array of strings | files packaged for `i686-pc-windows-msvc`                                                   |
+| `x64`              | array of strings | files packaged for `x86_64-pc-windows-msvc`                                                 |
+| `external-imports` | array of strings | approved non-system DLL basenames supplied outside the package                              |
+| `strict-paths`     | Boolean          | reject symbolic links/reparse points present in configured source paths; defaults to `true` |
 
 Unknown fields are rejected.
 
@@ -94,7 +94,7 @@ Windows system imports are accepted by the versioned built-in `windows-system-v1
 name = "data-xlfn"
 version = "1.4.0"
 edition = "2024"
-rust-version = "1.98.0"
+rust-version = "1.98.1"
 
 [lib]
 crate-type = ["cdylib"]
@@ -130,21 +130,21 @@ The selected package must contain exactly one `cdylib` target.
 
 Every package directory contains schema version 6 audit metadata. Its top-level fields are:
 
-| Field | Meaning |
-|---|---|
-| `schema` | manifest schema number |
-| `package` | Cargo package name |
-| `package_version` | Cargo package version |
-| `artifact` | configured artifact basename |
-| `target` | Rust target triple |
-| `profile` | Cargo profile |
-| `feature_selection` | requested and resolved package feature set |
-| `cargo_constraints` | lock/network constraints and lockfile hash |
-| `crt` | requested/source/effective CRT policy, enforcement, observed dynamic CRT imports, and consistency |
-| `bundle_sources` | configured relative paths and their staged relative basenames |
-| `bundle_policy` | effective strict-paths setting, versioned system-DLL policy, and approved external imports |
-| `integrity` | explicit trust-boundary statement |
-| `files` | relative path, byte size, and SHA-256 for every distributed file |
+| Field               | Meaning                                                                                           |
+| ------------------- | ------------------------------------------------------------------------------------------------- |
+| `schema`            | manifest schema number                                                                            |
+| `package`           | Cargo package name                                                                                |
+| `package_version`   | Cargo package version                                                                             |
+| `artifact`          | configured artifact basename                                                                      |
+| `target`            | Rust target triple                                                                                |
+| `profile`           | Cargo profile                                                                                     |
+| `feature_selection` | requested and resolved package feature set                                                        |
+| `cargo_constraints` | lock/network constraints and lockfile hash                                                        |
+| `crt`               | requested/source/effective CRT policy, enforcement, observed dynamic CRT imports, and consistency |
+| `bundle_sources`    | configured relative paths and their staged relative basenames                                     |
+| `bundle_policy`     | effective strict-paths setting, versioned system-DLL policy, and approved external imports        |
+| `integrity`         | explicit trust-boundary statement                                                                 |
+| `files`             | relative path, byte size, and SHA-256 for every distributed file                                  |
 
 The integrity block deliberately states that hashes are **audit metadata only** and are not verified before executable sidecar code runs. Windows may load and initialize a DLL before application-level protocol or ABI checks can run. Use access-controlled installation directories and code signing for runtime trust; do not treat the JSON file as a secure loader.
 
