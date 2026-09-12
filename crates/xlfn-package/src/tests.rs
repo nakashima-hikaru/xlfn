@@ -319,6 +319,15 @@ fn unsafe_bundle_paths_are_rejected() {
     assert!(validate_relative("file", "/Vendor.dll").is_err());
 }
 
+#[test]
+fn bundle_paths_reject_dot_segments_before_path_normalization() {
+    for path in ["./Vendor.dll", "native/./Vendor.dll", "native/."] {
+        assert!(validate_relative("file", path).is_err(), "{path}");
+    }
+    assert!(validate_relative("file", "native/Vendor.dll").is_ok());
+    assert!(validate_relative("file", "native/.support.dll").is_ok());
+}
+
 #[cfg(unix)]
 #[test]
 fn directory_validation_checks_existing_ancestors() {

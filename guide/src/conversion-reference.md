@@ -101,7 +101,7 @@ See [Optional arguments and enums](optional-arguments.md).
 
 ## Arrays and allocation limits
 
-`XlArrayRef` is the allocation-free mixed-value input path. It exposes shape, indexed access, and lazy cell iteration through `XlValueRef`; `XlStrRef` borrows a string's UTF-16 units until decoding is actually requested. Use `XlArrayRef` when lazy raw-cell access is enough. Use `&str`, `ExcelCellRef`, or `MatrixRef<T>` when a synchronous function needs typed call-local values; `MatrixRef` materializes its `Copy` elements in call scratch. Use `String`, `ExcelCellValue`, `Matrix<T>`, or `Vec<T>` when the input must be owned, especially for async work.
+`XlArrayRef` is the allocation-free mixed-value input path. It validates every cell's type tag when the array is admitted, then exposes shape, indexed access, and lazy payload conversion through `XlValueRef`; `XlStrRef` borrows a string's UTF-16 units until decoding is actually requested. Admission is linear in the cell count even if only a subset is read. Use `XlArrayRef` when lazy cell conversion is enough. Use `&str`, `ExcelCellRef`, or `MatrixRef<T>` when a synchronous function needs typed call-local values; `MatrixRef` materializes its `Copy` elements in call scratch. Use `String`, `ExcelCellValue`, `Matrix<T>`, or `Vec<T>` when the input must be owned, especially for async work.
 
 Borrowed strings and grids use one `CallScope` scratch root. String decoding allocates UTF-8 bytes there, and borrowed matrix elements are stored there only when `T: Copy`; no destructor-bearing collection is placed in call scratch. The scope is dropped after the generated synchronous call returns.
 

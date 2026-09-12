@@ -44,10 +44,10 @@ impl ResolvedBuildProfile {
                 default.cargo_default().map(str::to_owned),
             ),
         };
-        let output_directory = if name == "dev" {
-            "debug".to_owned()
-        } else {
-            name.clone()
+        let output_directory = match name.as_str() {
+            "dev" | "test" => "debug".to_owned(),
+            "release" | "bench" => "release".to_owned(),
+            _ => name.clone(),
         };
         Self {
             name,
@@ -284,5 +284,21 @@ mod tests {
         assert_eq!(profile.name, "ci");
         assert_eq!(profile.cargo_profile(), Some("ci"));
         assert_eq!(profile.output_directory(), "ci");
+    }
+
+    #[test]
+    fn test_and_bench_profiles_use_cargos_shared_output_directories() {
+        for (name, directory) in [("test", "debug"), ("bench", "release")] {
+            let build = BuildSelectionArgs {
+                profile: Some(name.to_owned()),
+                ..BuildSelectionArgs::default()
+            };
+            for default in [DefaultBuildProfile::Dev, DefaultBuildProfile::Release] {
+                let profile = ResolvedBuildProfile::resolve(&build, default);
+                assert_eq!(profile.name, name);
+                assert_eq!(profile.cargo_profile(), Some(name));
+                assert_eq!(profile.output_directory(), directory);
+            }
+        }
     }
 }

@@ -11,6 +11,10 @@ default:
 fmt:
     cargo fmt --all -- --check
 
+# Build the public API reference; missing or ambiguous links block release.
+doc:
+    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
+
 # Audit every direct catch reference, including test and macro token streams.
 panic-boundaries:
     python3 -B -m unittest discover -s tools -p test_check_panic_boundaries.py
@@ -114,12 +118,22 @@ semver:
         --exclude xlfn-kernel \
         --baseline-rev 0.1.0
 
-publish-check:
-    cargo publish --workspace --dry-run --locked
+# Assemble and build registry-ready archives without invoking publication.
+# Cargo verifies the archives with local path dependencies removed.
+package-check: release-metadata
+    cargo package --workspace --exclude xlfn-windows-bindings-gen --all-features --locked
+
+# Keep distributable files and internal dependency pins aligned with the source.
+release-metadata:
+    python3 -B -m unittest discover -s tools -p test_check_release_metadata.py
+    python3 -B tools/check_release_metadata.py
+
+# Retain the existing check name without calling `cargo publish`.
+publish-check: package-check
 
 quick: fmt panic-boundaries clippy test
 
-check: fmt panic-boundaries clippy features test bench-check deny semver
+check: fmt panic-boundaries clippy features test bench-check deny semver doc package-check
 
 # --- Benchmark recipes ---
 

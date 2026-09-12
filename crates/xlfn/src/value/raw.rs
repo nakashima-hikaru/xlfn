@@ -149,7 +149,7 @@ impl<'call> XlValueRef<'call> {
     /// `raw` must be non-null, aligned, and point to a live XLOPER12 for
     /// `'call`. Any nested pointers selected by `xltype` must satisfy the
     /// corresponding Excel SDK contract.
-    pub unsafe fn from_raw(raw: *mut XLOPER12) -> XllResult<Self> {
+    pub(crate) unsafe fn from_raw(raw: *mut XLOPER12) -> XllResult<Self> {
         // SAFETY: The caller guarantees a live, aligned XLOPER12 for 'call.
         let raw = unsafe { raw.as_ref() }
             .ok_or_else(|| XllError::input("<raw>", InputError::NullPointer))?;
@@ -186,7 +186,7 @@ impl<'call> XlValueRef<'call> {
 
     #[must_use]
     #[inline]
-    pub const fn raw(&self) -> &'call XLOPER12 {
+    pub(crate) const fn raw(&self) -> &'call XLOPER12 {
         self.raw
     }
 
@@ -384,6 +384,15 @@ impl<'call> XlArrayRef<'call> {
             // dimensions, byte size, and lifetime of this contiguous range.
             unsafe { slice::from_raw_parts(array.values.cast_const(), len) }
         };
+        // Indexed access and iteration expose infallible XlValueRef values,
+        // whose semantic type must already be valid. Check only the cell
+        // headers here; payload conversion and string decoding remain lazy.
+        for cell in cells {
+            XlValueRef::from_array_cell(cell).map_err(|error| match error {
+                XllError::Input { reason, .. } => XllError::Input { argument, reason },
+                other => other,
+            })?;
+        }
         Ok(Self {
             cells,
             rows,
@@ -608,5 +617,75 @@ mod tests {
         let nil_ref = XlValueRef::from_array_cell(&nil_oper).unwrap();
         assert_eq!(nil_ref.value_type(), XlValueType::Nil);
         assert!(nil_ref.is_blank());
+    }
+
+    #[test]
+    fn borrowed_array_rejects_invalid_cell_headers_before_exposing_views() {
+        for (xltype, expected) in [
+            (XLTYPE_NUM | 0x2000, "unknown xltype flag"),
+            (0x0003, "unknown base xltype"),
+        ] {
+            let mut cells = [
+                XLOPER12::number(1.0),
+                XLOPER12 {
+                    value: XLOPER12Value { number: 2.0 },
+                    xltype,
+                },
+            ];
+            let raw = XLOPER12 {
+                value: XLOPER12Value {
+                    array: XLOPER12Array {
+                        values: cells.as_mut_ptr(),
+                        rows: 1,
+                        columns: 2,
+                    },
+                },
+                xltype: xlfn_sys::XLTYPE_MULTI,
+            };
+            let value = XlValueRef::from_array_cell(&raw).unwrap();
+            let result = XlArrayRef::from_excel(value, "values");
+            assert!(matches!(
+                result,
+                Err(XllError::Input {
+                    argument: "values",
+                    reason: InputError::Malformed(reason),
+                }) if reason == expected
+            ));
+        }
+    }
+
+    #[test]
+    fn borrowed_array_preserves_lazy_payload_conversion() {
+        let mut invalid_utf16 = [1_u16, 0xd800];
+        let mut cells = [XLOPER12 {
+            value: XLOPER12Value {
+                string: invalid_utf16.as_mut_ptr(),
+            },
+            xltype: xlfn_sys::XLTYPE_STR,
+        }];
+        let raw = XLOPER12 {
+            value: XLOPER12Value {
+                array: XLOPER12Array {
+                    values: cells.as_mut_ptr(),
+                    rows: 1,
+                    columns: 1,
+                },
+            },
+            xltype: xlfn_sys::XLTYPE_MULTI,
+        };
+        let value = XlValueRef::from_array_cell(&raw).unwrap();
+        let array = XlArrayRef::from_excel(value, "values").unwrap();
+        assert_eq!(array.get(0, 0).unwrap().value_type(), XlValueType::String);
+        assert_eq!(
+            array.cells().next().unwrap().value_type(),
+            XlValueType::String
+        );
+        assert!(matches!(
+            array.get(0, 0).unwrap().as_str().unwrap().to_string(),
+            Err(XllError::Input {
+                reason: InputError::InvalidUtf16,
+                ..
+            })
+        ));
     }
 }

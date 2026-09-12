@@ -23,6 +23,10 @@ Write worksheet functions as typed Rust functions. xlfn handles the Excel 12 / `
 > [!NOTE]
 > xlfn is pre-1.0. Public APIs may change between minor releases.
 
+The [1.0 readiness record](docs/RELEASE_READINESS.md) lists verified checks and
+outstanding qualification gates. The [compatibility policy](guide/src/compatibility.md)
+defines the API scope intended for 1.0; the current crate version is unchanged.
+
 ## Example
 
 ```rust

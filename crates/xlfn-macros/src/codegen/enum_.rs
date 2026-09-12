@@ -6,6 +6,7 @@ use syn::{Data, DeriveInput, Expr, Fields};
 
 use crate::options::parse_expr_path;
 use crate::support::resolve_crate_path;
+use crate::validation::validate_registration_string;
 
 pub(crate) fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let mut ascii_case_insensitive = false;
@@ -73,6 +74,7 @@ pub(crate) fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::
                 "Excel enum value cannot be empty",
             ));
         }
+        validate_registration_string("Excel enum value", &excel_name, &variant.ident)?;
         let uniqueness_key = if ascii_case_insensitive {
             excel_name.to_ascii_lowercase()
         } else {
@@ -176,4 +178,31 @@ pub(crate) fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enum_names_must_fit_the_excel_utf16_string_limit() {
+        for (name, valid) in [
+            ("x".repeat(xlfn_common::EXCEL_STRING_LIMIT), true),
+            ("x".repeat(xlfn_common::EXCEL_STRING_LIMIT + 1), false),
+            ("😀".repeat(xlfn_common::EXCEL_STRING_LIMIT / 2 + 1), false),
+        ] {
+            let input = syn::parse_quote! {
+                enum Value {
+                    #[excel_value(name = #name)]
+                    Item,
+                }
+            };
+            let result = expand_excel_enum(input);
+            assert_eq!(result.is_ok(), valid);
+            if let Err(error) = result {
+                assert!(error.to_string().contains("Excel enum value"));
+                assert!(error.to_string().contains("UTF-16 limit"));
+            }
+        }
+    }
 }

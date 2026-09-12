@@ -81,7 +81,11 @@ for path in markdown_files:
     if path.resolve() not in listed:
         errors.append(f"Markdown file is not listed in SUMMARY.md: {path.relative_to(SRC)}")
 
-for path in [GUIDE / "README.md", GUIDE.parent / "README.md", *markdown_files]:
+maintainer_docs = [
+    *sorted(GUIDE.parent.glob("*.md")),
+    *sorted((GUIDE.parent / "docs").rglob("*.md")),
+]
+for path in [GUIDE / "README.md", *maintainer_docs, *markdown_files]:
     text = path.read_text(encoding="utf-8")
     lines = text.splitlines()
     fence_count = sum(line.startswith("```") for line in lines)

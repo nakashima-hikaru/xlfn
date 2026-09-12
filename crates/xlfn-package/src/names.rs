@@ -6,6 +6,9 @@ pub(crate) fn validate_relative(field: &str, value: &str) -> PackageResult {
         || value.contains('\\')
         || value.contains(':')
         || path.is_absolute()
+        // Path::components normalizes away embedded and trailing `.` segments.
+        // Reject them before normalization to enforce the configured path rules.
+        || value.split('/').any(|component| component == ".")
         || path
             .components()
             .any(|c| !matches!(c, Component::Normal(_)))

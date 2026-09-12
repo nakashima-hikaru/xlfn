@@ -72,6 +72,12 @@ jobs:
             - name: Check public API compatibility
               run: just semver
 
+            - name: Build the public API reference without warnings
+              run: just doc
+
+            - name: Verify release metadata and crate archives without publishing
+              run: just package-check
+
             - name: Build the user guide
               run: mdbook build guide
 
@@ -203,6 +209,16 @@ jobs:
                   name: windows-handle-refinement-traces-${{ matrix.target }}
                   path: windows-handle-refinement-traces-${{ matrix.target }}
                   if-no-files-found: error
+
+            - name: Verify publishable crate archives for the Windows target
+              shell: pwsh
+              run: >-
+                  cargo package
+                  --workspace
+                  --exclude xlfn-windows-bindings-gen
+                  --all-features
+                  --target ${{ matrix.target }}
+                  --locked
 
             - name: Build and validate the basic example XLL across CRT policies
               shell: pwsh

@@ -1,5 +1,8 @@
 # Formula-owned handles
 
+Enable the `handles` feature in the application's `xlfn` dependency. Add `async`
+as well when a generated asynchronous UDF consumes a handle.
+
 Handles let a worksheet formula own an ownership edge to a typed Rust object without exposing a pointer or serialized object graph. A producer returns the object itself; a consumer accepts a call-scoped `Handle<'_, T>`. xlfn owns the formula binding, the published object identity, and the Rust value lifetime; multiple formula bindings may refer to the same object through an explicit alias. Any resource managed inside `T` remains part of `T`'s application-level contract.
 
 ## Define a handle object

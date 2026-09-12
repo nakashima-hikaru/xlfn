@@ -1,0 +1,21 @@
+error[E0624]: method `raw` is private
+ --> tests/ui/fail/value_raw_abi_is_not_public.rs:4:19
+  |
+4 |     let _ = value.raw();
+  |                   ^^^ private method
+  |
+ ::: src/value/raw.rs
+  |
+  |     pub(crate) const fn raw(&self) -> &'call XLOPER12 {
+  |     ------------------------------------------------- private method defined here
+
+error[E0624]: associated function `from_raw` is private
+ --> tests/ui/fail/value_raw_abi_is_not_public.rs:8:25
+  |
+8 |     let _ = XlValueRef::from_raw;
+  |                         ^^^^^^^^ private associated function
+  |
+ ::: src/value/raw.rs
+  |
+  |     pub(crate) unsafe fn from_raw(raw: *mut XLOPER12) -> XllResult<Self> {
+  |     -------------------------------------------------------------------- private associated function defined here

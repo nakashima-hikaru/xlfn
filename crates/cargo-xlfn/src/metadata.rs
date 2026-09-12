@@ -72,7 +72,15 @@ pub(crate) fn project_metadata(
             libraries.len()
         );
     }
-    let metadata = package.metadata.get("xlfn");
+    let metadata = package
+        .metadata
+        .get("xlfn")
+        .map(|value| {
+            value
+                .as_object()
+                .context("[package.metadata.xlfn] must be a table")
+        })
+        .transpose()?;
     let metadata_crt = metadata
         .and_then(|value| value.get("crt"))
         .map(CrtPolicy::parse_metadata)
@@ -80,7 +88,12 @@ pub(crate) fn project_metadata(
     let crt = ResolvedCrtPolicy::resolve(build.crt, metadata_crt);
     let artifact_name = metadata
         .and_then(|value| value.get("artifact-name"))
-        .and_then(serde_json::Value::as_str)
+        .map(|value| {
+            value
+                .as_str()
+                .context("[package.metadata.xlfn].artifact-name must be a string")
+        })
+        .transpose()?
         .unwrap_or(package.name.as_str())
         .to_owned();
     validate_windows_basename(&artifact_name)

@@ -16,7 +16,8 @@ just check
 
 `just quick` runs formatting, the panic-boundary audit, workspace Clippy, and the default nextest
 profile. `just check` additionally runs the cargo-hack feature powerset,
-benchmark compilation, cargo-deny, and the public API compatibility audit.
+benchmark compilation, cargo-deny, the public API compatibility audit,
+strict API documentation, and publishable crate archive verification.
 Use `just test-libtest` when validating same-process libtest behavior, which is
 the execution model retained by the Windows artifact job.
 
@@ -30,9 +31,11 @@ The recipes use the committed lockfile to keep dependency resolution stable.
 
 ## API compatibility
 
-`just semver` runs `cargo-semver-checks` for the publishable workspace crates
+`just semver` runs `cargo-semver-checks` for the supported workspace libraries
 against the published `0.1.0` tag. The CI checkout fetches the full history so
 that this baseline is available in pull requests as well as on `main`.
+The new `xlfn-kernel` crate has no baseline and is explicitly excluded;
+procedural macros and the CLI binary do not receive Rust API comparisons.
 
 The tool derives compatibility requirements from each crate's actual version.
 The `0.1.0` to `0.2.0` transition permits breaking changes, including the typed
@@ -44,6 +47,16 @@ checked within that compatibility line. Intentional breaking changes require
 the appropriate version change and documentation. CLI behavior and
 procedural-macro diagnostics are separate compatibility contracts and are not
 covered by this audit.
+
+`just doc` denies rustdoc warnings. `just package-check` builds the seven
+publishable crate archives with local path dependencies removed, excluding the
+development-only Windows bindings generator. It requires a clean checkout.
+Its prerequisite, `just release-metadata`, checks README/license files and
+internal dependency version pins and runs the checker's regression tests.
+For an explicitly reviewed working tree, use the same `cargo package` command
+with `--allow-dirty`, then repeat the clean check on the final commit.
+`just publish-check` is an alias for this archive check; none of these commands
+uploads crates or invokes `cargo publish`.
 
 Standalone consumers should also be checked when their interfaces change:
 
@@ -94,13 +107,11 @@ Run `just panic-boundaries` after changing panic handling. The independent CI
 job checks all Rust source, including imports, test functions, and generated
 macro token streams, against an occurrence-specific allowlist. New consuming
 calls use the helper; intentional resume-only exceptions require a specific
-reason and inventory update. See the [boundary and join audit](tools/panic-boundary-audit.md).
-
-The [2026-09-07 soundness audit](tools/soundness-audit-2026-09-07.md) maps
-publication and reclamation obligations to their regression checks and records
-the limits of local Miri, model-checking, and Windows validation.
-The [follow-up quality review](tools/quality-review-2026-09-07.md) records the
-subsequent concurrency, cleanup, conversion, and packaging regressions.
+reason and inventory update. The checked inventory is
+[panic_boundary_allowlist.json](tools/panic_boundary_allowlist.json).
+The [architecture](docs/ARCHITECTURE.md) describes ownership and shutdown;
+the [formal model documentation](formal/README.md) records the verification
+boundaries and their Rust concurrency and Miri counterparts.
 
 ## Windows artifacts and ABI
 
@@ -165,6 +176,10 @@ When changing generated Windows bindings, run the generator and verify that
 the tracked generated files have no diff.
 
 ## Release evidence
+
+Use the [release procedure](docs/RELEASING.md) and keep the
+[1.0 readiness record](docs/RELEASE_READINESS.md) current. Preparation and
+archive validation do not authorize uploading crates or changing versions.
 
 Keep these claims separate:
 

@@ -43,7 +43,7 @@ Exact support for a particular Microsoft 365 channel, perpetual Excel build, loc
 
 ## Qualification status
 
-The repository contains automated Windows artifact checks and a real-Excel release-gate procedure. At the source snapshot used for this guide, the existing implementation-status record does **not** claim completed real-Excel validation for all Windows 10/11 and 32/64-bit combinations.
+The repository contains automated Windows artifact checks and a real-Excel release-gate procedure. The [release readiness record](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/RELEASE_READINESS.md) tracks the evidence and remaining gates for the 1.0 candidate. It does **not** claim completed real-Excel validation for all Windows 10/11 and 32/64-bit combinations.
 
 Accordingly:
 
@@ -61,8 +61,16 @@ The `xlfn` crate has no default features.
 | Feature           | Adds                                                                       | Use when                                                        |
 | ----------------- | -------------------------------------------------------------------------- | --------------------------------------------------------------- |
 | `async`           | native async UDF executor, async context, calculation cancellation exports | a formula produces one eventual result without blocking Excel   |
+| `handles`         | formula-owned typed objects, aliases, and scoped handle inputs              | a worksheet formula owns a Rust object                           |
+| `rtd`             | typed streaming sources, subscriptions, and RTD configuration               | a formula receives repeated updates from a push source           |
 | `unstable-cache`  | lower-level calculation-cache API                                          | the add-in explicitly accepts experimental cache API evolution  |
 | `unstable-output` | lower-level array-output API                                               | the add-in explicitly accepts experimental output API evolution |
+
+`handles` and `rtd` share a private Excel RTD transport, but neither enables the
+other's public API. Async handle inputs need both `async` and `handles`.
+`refinement` and `bench-internals` are repository verification facilities,
+outside the supported application API. To use all supported capabilities,
+declare `features = ["async", "handles", "rtd"]` on the `xlfn` dependency.
 
 Examples:
 
@@ -93,7 +101,7 @@ xlfn-sys = "0.2"
 use xlfn_sys::XLOPER12;
 ```
 
-Generated code may use hidden items under `xlfn::macro_support`, but that module is
+Generated code may use hidden items under `xlfn::__private`, but that module is
 an implementation detail and is not a supported application API.
 
 ## Build-profile requirements
@@ -121,6 +129,40 @@ Use `my_xlfn::prelude::*` with this declaration. When accessing the framework th
 ## Source and binary compatibility
 
 The `0.x` line is pre-1.0. Treat public Rust APIs, macro diagnostics, package metadata, and generated artifacts as subject to intentional breaking change between minor releases. Pin versions for production builds and review release notes before upgrading.
+
+### Contract intended for 1.0
+
+The version in this checkout is still `0.2.0`. The following defines the scope
+to freeze when 1.0 is released; it does not announce that release:
+
+- The documented `xlfn` facade, its prelude, macro inputs and generated behavior,
+  and the `async`, `handles`, and `rtd` feature APIs form the stable application
+  contract. Removing or incompatibly changing them requires a major release.
+- Custom conversion, lifecycle, execution-layer, and RTD extension traits are
+  included. Adding a required trait method or changing a public type's fields,
+  exhaustive variants, lifetimes, or thread-safety bounds must be reviewed for
+  downstream source compatibility.
+- `unstable-cache`, `unstable-output`, hidden macro support, benchmark helpers,
+  and refinement trace formats are excluded. Code opting into these facilities
+  must pin the exact framework version. Experimental features are not implied
+  by the supported feature set.
+- Macro error wording, rustc diagnostic formatting, backtraces, log prose,
+  timing, allocation strategy, and private handle-token text are not stable
+  formats. Documented errors and capability/lifetime restrictions remain part
+  of the contract. Handles are session-scoped and must not be persisted.
+- Rust has no stable binary ABI here. Rebuild the complete XLL and its generated
+  wrappers together when updating the framework; do not mix compiled Rust
+  objects from different versions. Workbook-visible names and semantics remain
+  the add-in author's responsibility.
+- Rust `1.98.1` is the initial minimum toolchain. A minimum-version increase
+  must be documented and made in a minor or major release, not a patch release.
+  Qualified Windows/Excel environments are recorded separately below.
+
+`xlfn-sys`, the programmatic `xlfn-package` API, and the `cargo-xlfn` CLI have
+their own release contracts. The facade's 1.0 commitment does not implicitly
+stabilize every implementation crate. See the maintainer's
+[release procedure](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/RELEASING.md) for version alignment, artifact
+formats, and the baseline update required before the first stable release.
 
 Workbook compatibility is a separate concern. The following are workbook-visible public API:
 

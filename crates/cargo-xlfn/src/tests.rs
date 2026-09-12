@@ -1016,33 +1016,79 @@ fn workspace_manifest_path_resolves_without_explicit_package() {
 }
 
 #[test]
-fn project_metadata_reports_bundle_metadata_path() {
-    let directory = tempfile::tempdir().unwrap();
-    fs::create_dir(directory.path().join("src")).unwrap();
+fn project_metadata_rejects_malformed_xlfn_settings() {
+    for (metadata, expected) in [
+        (
+            "[package.metadata]\nxlfn = 42",
+            "[package.metadata.xlfn] must be a table",
+        ),
+        (
+            "[package.metadata]\nxlfn = []",
+            "[package.metadata.xlfn] must be a table",
+        ),
+        (
+            "[package.metadata.xlfn]\nartifact-name = 42",
+            "[package.metadata.xlfn].artifact-name must be a string",
+        ),
+        (
+            "[package.metadata.xlfn]\nartifact-name = false",
+            "[package.metadata.xlfn].artifact-name must be a string",
+        ),
+    ] {
+        let error = project_metadata_fixture(metadata)
+            .err()
+            .expect("malformed settings must not silently use defaults");
+        assert!(error.to_string().contains(expected), "{error:#}");
+    }
+}
+
+#[test]
+fn project_metadata_preserves_explicit_and_default_artifact_names() {
+    assert_eq!(
+        project_metadata_fixture("").unwrap().artifact_name,
+        "metadata-diagnostic-fixture"
+    );
+    assert_eq!(
+        project_metadata_fixture("[package.metadata.xlfn]\nartifact-name = \"DataTools\"")
+            .unwrap()
+            .artifact_name,
+        "DataTools"
+    );
+}
+
+fn project_metadata_fixture(metadata: &str) -> Result<ProjectMetadata> {
+    let directory = tempfile::tempdir()?;
+    fs::create_dir(directory.path().join("src"))?;
     fs::write(
         directory.path().join("Cargo.toml"),
-        r#"[package]
-name = "bundle-diagnostic-fixture"
+        format!(
+            r#"[package]
+name = "metadata-diagnostic-fixture"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
 crate-type = ["cdylib"]
 
-[package.metadata.xlfn.bundle]
-x86 = ["foo.dll", 123]
+{metadata}
 "#,
-    )
-    .unwrap();
-    fs::write(directory.path().join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
+        ),
+    )?;
+    fs::write(directory.path().join("src/lib.rs"), "pub fn fixture() {}\n")?;
 
     let args = ProjectArgs {
         package: None,
         manifest_path: Some(directory.path().join("Cargo.toml")),
     };
-    let error = project_metadata(&args, &BuildSelectionArgs::default())
-        .err()
-        .expect("invalid bundle metadata should fail project metadata resolution");
+    project_metadata(&args, &BuildSelectionArgs::default())
+}
+
+#[test]
+fn project_metadata_reports_bundle_metadata_path() {
+    let error =
+        project_metadata_fixture("[package.metadata.xlfn.bundle]\nx86 = [\"foo.dll\", 123]")
+            .err()
+            .expect("invalid bundle metadata should fail project metadata resolution");
     let message = error.to_string();
 
     assert!(

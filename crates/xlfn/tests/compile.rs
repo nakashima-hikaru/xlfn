@@ -15,6 +15,7 @@ fn trait_driven_function_signatures_compile() {
     tests.compile_fail("tests/ui/fail/removed_export_macro.rs");
     tests.compile_fail("tests/ui/fail/return_trait_missing.rs");
     tests.compile_fail("tests/ui/fail/sys_module_is_not_public.rs");
+    tests.compile_fail("tests/ui/fail/value_raw_abi_is_not_public.rs");
     tests.compile_fail("tests/ui/fail/udf_layers_is_sealed.rs");
 
     #[cfg(feature = "handles")]

@@ -1,5 +1,8 @@
 # Streaming RTD
 
+Enable the `rtd` feature in the application's `xlfn` dependency. The `handles`
+feature alone does not expose the generic streaming API.
+
 Real-Time Data (RTD) is the appropriate model for a formula that should update repeatedly from a push source. xlfn hides the COM server transport and exposes typed sources, topics, sinks, and subscriptions.
 
 ## Data flow
