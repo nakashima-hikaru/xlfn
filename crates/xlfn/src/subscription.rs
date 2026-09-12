@@ -128,6 +128,8 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 #[cfg(feature = "rtd")]
 pub(crate) use topic::BorrowedTopicParts;
+#[cfg(any(test, all(feature = "bench-internals", feature = "rtd")))]
+pub(crate) use topic::SubscriptionId;
 pub(crate) use topic::SubscriptionKey;
 #[cfg(any(
     test,
@@ -139,7 +141,7 @@ pub(crate) use topic::TopicId;
 pub(crate) use topic::{
     DEFAULT_MAX_RTD_ACTIVE, DEFAULT_MAX_RTD_PENDING, DEFAULT_MAX_RTD_QUEUED_UPDATES,
     DEFAULT_MAX_RTD_SOURCE_IDS, DEFAULT_MAX_RTD_TOTAL_TOPIC_BYTES, MAX_RTD_TOPIC_BYTES,
-    MAX_RTD_TOPIC_PARTS, SourceId, SubscriptionId, SubscriptionIdentityKey,
+    MAX_RTD_TOPIC_PARTS, SourceId, SubscriptionIdentityKey,
 };
 #[cfg(any(
     test,

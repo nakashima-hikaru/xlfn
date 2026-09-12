@@ -35,12 +35,6 @@ const MAX_RETURN_BYTES: usize = core::cfg_select! {
     _ => 256 * 1024 * 1024,
 };
 
-enum ReturnOwnership {
-    Excel(Option<ReturnObligation<'static>>),
-    #[cfg(feature = "async")]
-    Local,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReturnBlockBacking {
     ThreadLocal,
@@ -54,7 +48,7 @@ struct ReturnBlock {
     oper: XLOPER12,
     storage: Option<ReturnStorage>,
     array: Option<PublishedOwner<[XLOPER12]>>,
-    ownership: ReturnOwnership,
+    obligation: Option<ReturnObligation<'static>>,
     magic: u64,
     backing: ReturnBlockBacking,
 }
@@ -203,7 +197,7 @@ impl PreparedReturn {
             oper: self.oper,
             storage: self.storage,
             array: self.array,
-            ownership: ReturnOwnership::Excel(Some(obligation)),
+            obligation: Some(obligation),
             magic: RETURN_MAGIC,
             backing: ReturnBlockBacking::Heap,
         };
@@ -223,23 +217,6 @@ impl PreparedReturn {
                 ReturnBlock::into_non_null(Box::new(block)).as_ptr()
             }
         })
-    }
-
-    #[cfg(feature = "async")]
-    fn publish_local(self) -> NonNull<XLOPER12> {
-        let block = Box::new(ReturnBlock {
-            oper: self.oper,
-            storage: self.storage,
-            array: self.array,
-            ownership: ReturnOwnership::Local,
-            magic: RETURN_MAGIC,
-            backing: ReturnBlockBacking::Heap,
-        });
-
-        #[cfg(test)]
-        LIVE_BLOCKS.fetch_add(1, Ordering::Relaxed);
-
-        ReturnBlock::into_non_null(block)
     }
 }
 
@@ -360,11 +337,6 @@ fn allocate_excel_owned(
     Ok(prepared.publish_excel(producer))
 }
 
-#[cfg(feature = "async")]
-pub(crate) fn allocate_local_async_return(value: ReturnPayload) -> XllResult<NonNull<XLOPER12>> {
-    PreparedReturn::encode(value).map(PreparedReturn::publish_local)
-}
-
 fn allocate_excel_error(
     error: &XllError,
     producer: &mut ReturnProducerGuard<'static>,
@@ -388,44 +360,30 @@ pub(crate) fn closing_error_pointer() -> *mut XLOPER12 {
     ptr as *mut XLOPER12
 }
 
+/// Owns a value only for the synchronous `xlAsyncReturn` callback.
+///
+/// Excel does not retain this root or ask `xlAutoFree12` to release it. Keep
+/// the root inline and borrow its ABI representation only at delivery; owned
+/// array and string buffers remain stable when this owner moves.
 #[cfg(feature = "async")]
-pub(crate) fn allocate_local_async_error(error: &XllError) -> NonNull<XLOPER12> {
-    // Encoding a scalar Excel error cannot fail except for process-wide OOM,
-    // which Rust defines as aborting.
-    allocate_local_async_return(ReturnPayload::Scalar(ExcelCellOutput::Error(
-        error.excel_error(),
-    )))
-    .expect("scalar Excel error return allocation is infallible")
+pub(crate) struct AsyncReturnValue {
+    prepared: PreparedReturn,
 }
 
 #[cfg(feature = "async")]
-pub(crate) struct AsyncReturnPointer {
-    pointer: NonNull<XLOPER12>,
-}
-
-#[cfg(feature = "async")]
-impl AsyncReturnPointer {
+impl AsyncReturnValue {
     pub(crate) fn from_value(value: ReturnPayload) -> XllResult<Self> {
-        allocate_local_async_return(value).map(|pointer| Self { pointer })
+        PreparedReturn::encode(value).map(|prepared| Self { prepared })
     }
 
     pub(crate) fn error(error: &XllError) -> Self {
         Self {
-            pointer: allocate_local_async_error(error),
+            prepared: PreparedReturn::error(error),
         }
     }
 
-    pub(crate) fn as_non_null(&self) -> NonNull<XLOPER12> {
-        self.pointer
-    }
-}
-
-#[cfg(feature = "async")]
-impl Drop for AsyncReturnPointer {
-    fn drop(&mut self) {
-        // SAFETY: this RAII owner is created only from a fresh ReturnBlock raw
-        // pointer and never transfers ownership.
-        unsafe { free_return(self.pointer.as_ptr()) };
+    pub(crate) fn as_raw(&mut self) -> &mut XLOPER12 {
+        &mut self.prepared.oper
     }
 }
 
@@ -737,22 +695,16 @@ unsafe fn enter_return_free_operation(pointer: *mut XLOPER12) -> Option<ReturnFr
     }
     let block = pointer.cast::<ReturnBlock>();
     // SAFETY: caller contract guarantees pointer points to a valid live ReturnBlock.
-    let ownership = unsafe { &mut (*block).ownership };
-    match ownership {
-        ReturnOwnership::Excel(slot) => {
-            slot.as_ref()
-                .expect("Excel return obligation is taken exactly once")
-                .observe_begin_free();
+    let slot = unsafe { &mut (*block).obligation };
+    slot.as_ref()
+        .expect("Excel return obligation is taken exactly once")
+        .observe_begin_free();
 
-            Some(ReturnFreeGuard {
-                obligation: slot
-                    .take()
-                    .expect("Excel return obligation is taken exactly once"),
-            })
-        }
-        #[cfg(feature = "async")]
-        ReturnOwnership::Local => None,
-    }
+    Some(ReturnFreeGuard {
+        obligation: slot
+            .take()
+            .expect("Excel return obligation is taken exactly once"),
+    })
 }
 
 unsafe fn free_return_block(pointer: *mut XLOPER12, operation: Option<&ReturnFreeGuard>) {
@@ -765,17 +717,9 @@ unsafe fn free_return_block(pointer: *mut XLOPER12, operation: Option<&ReturnFre
     let block = unsafe { &mut *block_pointer };
     debug_assert_eq!(block.magic, RETURN_MAGIC);
 
-    match &block.ownership {
-        ReturnOwnership::Excel(slot) => {
-            debug_assert!(slot.is_none());
-            let _operation = operation.expect("Excel return destruction owns a free guard");
-            _operation.obligation.observe_release_block();
-        }
-        #[cfg(feature = "async")]
-        ReturnOwnership::Local => {
-            debug_assert!(operation.is_none());
-        }
-    }
+    debug_assert!(block.obligation.is_none());
+    let operation = operation.expect("Excel return destruction owns a free guard");
+    operation.obligation.observe_release_block();
 
     destroy_return_block(block_pointer, block.backing);
 }
@@ -1564,26 +1508,67 @@ mod tests {
 
     #[cfg(feature = "async")]
     #[test]
-    fn async_return_allocation_does_not_set_xlbit_dll_free() {
+    fn async_return_value_does_not_set_xlbit_dll_free_or_create_a_return_block() {
         let _test = test_lock();
         let fixture = open_static_test_runtime();
         let runtime = fixture.runtime();
         let excel_ptr = ffi_boundary(runtime, || Ok(42.0));
-        let async_ptr =
-            allocate_local_async_return(ReturnPayload::Scalar(ExcelCellOutput::Number(42.0)))
+        let blocks = live_return_blocks();
+        let mut async_value =
+            AsyncReturnValue::from_value(ReturnPayload::Scalar(ExcelCellOutput::Number(42.0)))
                 .unwrap();
 
         // SAFETY: excel_ptr is a valid ReturnBlock pointer.
         let excel_oper = unsafe { &*excel_ptr };
-        // SAFETY: async_ptr is a valid ReturnBlock pointer.
-        let async_oper = unsafe { &*async_ptr.as_ptr() };
+        let async_oper = async_value.as_raw();
         assert_ne!(excel_oper.xltype & xlfn_sys::XLBIT_DLL_FREE, 0);
         assert_eq!(async_oper.xltype & xlfn_sys::XLBIT_DLL_FREE, 0);
+        assert_eq!(live_return_blocks(), blocks);
+        drop(async_value);
+        assert_eq!(live_return_blocks(), blocks);
 
         // SAFETY: excel_ptr is freed once.
         unsafe { free_return(excel_ptr) };
-        // SAFETY: async_ptr is freed once.
-        unsafe { free_return(async_ptr.as_ptr()) };
+    }
+
+    #[cfg(feature = "async")]
+    #[test]
+    fn miri_async_return_buffers_remain_live_after_moving_the_inline_root() {
+        let mut builder = XlArrayBuilder::new(1, 2).unwrap();
+        builder.push("日本語 💡").unwrap();
+        builder.push(42.0).unwrap();
+        let array =
+            AsyncReturnValue::from_value(ReturnPayload::Array(builder.finish().unwrap())).unwrap();
+        let string = AsyncReturnValue::from_value(ReturnPayload::Scalar(ExcelCellOutput::String(
+            "価格 💡".to_owned(),
+        )))
+        .unwrap();
+        // Both the root and the arena owners move after their payload pointers
+        // are encoded. Only borrow a root after it reaches its delivery site.
+        let mut values = vec![array, string];
+        let mut string = values.pop().unwrap();
+        // SAFETY: the inline root and its owned UTF-16 storage remain live.
+        let borrowed = unsafe { crate::value::XlValueRef::from_raw(string.as_raw()) }.unwrap();
+        assert_eq!(borrowed.as_str().unwrap().to_string().unwrap(), "価格 💡");
+
+        let mut array = values.pop().unwrap();
+        // SAFETY: the inline root and its owned cell/string buffers remain live.
+        let borrowed = unsafe { crate::value::XlValueRef::from_raw(array.as_raw()) }.unwrap();
+        let array_ref =
+            <crate::value::XlArrayRef as crate::value::FromExcel>::from_excel(borrowed, "array")
+                .unwrap();
+        assert_eq!(array_ref.shape(), (1, 2));
+        assert_eq!(
+            array_ref
+                .get(0, 0)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string()
+                .unwrap(),
+            "日本語 💡"
+        );
+        assert_eq!(array_ref.get(0, 1).unwrap().as_f64().unwrap(), 42.0);
     }
 
     #[test]

@@ -897,13 +897,13 @@ fn async_handle_payload_is_deep_copied() {
         unsafe { std::slice::from_raw_parts(copied, 4) },
         &[1, 2, 3, 4]
     );
-    let result = AsyncReturnPointer::error(&XllError::Closing);
+    let result = AsyncReturnValue::error(&XllError::Closing);
     // SAFETY: the test callback owns the async-return boundary and both
     // pointers remain live for the duration of the call.
     unsafe { owned.deliver(result) }.unwrap();
     assert_eq!(crate::test_callback::async_return_calls(), 1);
 
-    let second = AsyncReturnPointer::error(&XllError::Closing);
+    let second = AsyncReturnValue::error(&XllError::Closing);
     let second_result = {
         // SAFETY: the responder rejects a second delivery before touching Excel.
         unsafe { owned.deliver(second) }
@@ -1492,7 +1492,7 @@ fn rejection_priority_old_generation_over_max_pending() {
 }
 
 #[test]
-fn test_generation_state_sharded_removal_and_task_count() {
+fn test_generation_state_sharded_removal_and_drain() {
     let state = GenerationState::new(1);
     let (abort, _) = AbortHandle::new_pair();
     for id in 1..=100 {
@@ -1505,21 +1505,69 @@ fn test_generation_state_sharded_removal_and_task_count() {
                 cancellation,
             },
         );
-        state.task_count.fetch_add(1, Ordering::Relaxed);
     }
-
-    assert_eq!(state.task_count.load(Ordering::Acquire), 100);
 
     // Remove 40 tasks via remove_task
     for id in 1..=40 {
         assert!(state.remove_task(id));
     }
-    assert_eq!(state.task_count.load(Ordering::Acquire), 60);
-
     // Drain remaining 60 tasks
     let drained = state.drain_tasks();
     assert_eq!(drained.len(), 60);
-    assert_eq!(state.task_count.load(Ordering::Acquire), 0);
+    assert!(
+        state
+            .shards
+            .iter()
+            .all(|shard| shard.tasks.lock().is_empty())
+    );
+}
+
+#[test]
+fn generation_drain_racing_completions_claims_every_task_once() {
+    for _ in 0..8 {
+        let state = GenerationState::new(TEST_GENERATION);
+        let (abort, _) = AbortHandle::new_pair();
+        for id in 0..128 {
+            state.shards[task_shard(id)].tasks.lock().insert(
+                id,
+                TaskControl {
+                    abort: abort.clone(),
+                    cancellation: test_cancellation_source(),
+                },
+            );
+        }
+        // No new controls can be inserted after admission drains. Existing
+        // completions may remove them before or during the capacity scan.
+        let barrier = std::sync::Barrier::new(5);
+        std::thread::scope(|scope| {
+            let removers = (0..4)
+                .map(|worker| {
+                    let state = &state;
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        (worker..128)
+                            .step_by(4)
+                            .filter(|&id| state.remove_task(id))
+                            .count()
+                    })
+                })
+                .collect::<Vec<_>>();
+            barrier.wait();
+            let drained = state.drain_tasks();
+            let completed: usize = removers
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .sum();
+            assert_eq!(completed + drained.len(), 128);
+            assert!(
+                state
+                    .shards
+                    .iter()
+                    .all(|shard| shard.tasks.lock().is_empty())
+            );
+        });
+    }
 }
 
 #[test]
@@ -1626,7 +1674,7 @@ fn miri_canceled_running_task_keeps_its_generation_until_completion() {
             .generations
             .get(&TEST_GENERATION)
             .expect("canceling controls must not free a running task's generation");
-        assert_eq!(old.task_count.load(Ordering::Acquire), 0);
+        assert!(old.shards.iter().all(|shard| shard.tasks.lock().is_empty()));
         assert_eq!(old.pins.load(Ordering::Acquire), 1);
     }
     release_tx.send(()).unwrap();
@@ -1738,10 +1786,14 @@ fn removing_task_releases_cancellation_wakers_outside_task_lock() {
             cancellation: source,
         },
     );
-    generation.task_count.store(1, Ordering::Release);
     assert!(generation.remove_task(0));
     assert!(observed.load(Ordering::Acquire));
-    assert_eq!(generation.task_count.load(Ordering::Acquire), 0);
+    assert!(
+        generation
+            .shards
+            .iter()
+            .all(|shard| shard.tasks.lock().is_empty())
+    );
 }
 
 #[test]

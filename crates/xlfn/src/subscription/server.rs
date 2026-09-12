@@ -226,12 +226,8 @@ impl<H: SubscriptionHost> SubscriptionServer<H> {
                 let mut termination = self.publish.begin_termination();
                 term_state.phase = ServerTerminationPhase::Terminating;
                 let notifier = termination.take_notifier();
-                let initial_subscriptions = self
-                    .subscriptions
-                    .lock()
-                    .drain()
-                    .map(|(_, subscription)| subscription)
-                    .collect();
+                let subscriptions = std::mem::take(&mut *self.subscriptions.lock());
+                let initial_subscriptions = subscriptions.into_values().collect();
                 TerminationAdmission::Owner(ServerTermination {
                     runtime,
                     server: self,
@@ -442,17 +438,9 @@ impl<H: SubscriptionHost> ServerTermination<'_, H> {
             }
         }
 
-        let subscriptions = self
-            .initial_subscriptions
-            .drain(..)
-            .chain(
-                self.server
-                    .subscriptions
-                    .lock()
-                    .drain()
-                    .map(|(_, subscription)| subscription),
-            )
-            .collect::<Vec<_>>();
+        let mut subscriptions = std::mem::take(&mut self.initial_subscriptions);
+        let late_subscriptions = std::mem::take(&mut *self.server.subscriptions.lock());
+        subscriptions.extend(late_subscriptions.into_values());
         for _ in 0..subscriptions.len() {
             self.runtime
                 .record_shutdown_event(crate::shutdown_trace::ShutdownEvent::RemoveSubscription);

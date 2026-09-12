@@ -11,24 +11,33 @@ fn write_hex(mut value: u64, encoded: &mut [u8]) {
     }
 }
 
-pub(crate) fn decode_tag(encoded: &str) -> Option<[u8; 16]> {
+fn decode_tag(encoded: &[u8]) -> Option<[u8; 16]> {
     if encoded.len() != 32 {
         return None;
     }
     let mut tag = [0_u8; 16];
-    let (chunks, _) = encoded.as_bytes().as_chunks::<2>();
+    let (chunks, _) = encoded.as_chunks::<2>();
     for (index, pair) in chunks.iter().enumerate() {
         tag[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
     }
     Some(tag)
 }
 
-pub(crate) const fn hex_nibble(value: u8) -> Option<u8> {
+const fn hex_nibble(value: u8) -> Option<u8> {
     match value {
         b'0'..=b'9' => Some(value - b'0'),
         b'a'..=b'f' => Some(value - b'a' + 10),
         _ => None,
     }
+}
+
+fn decode_hex(encoded: &[u8]) -> Option<u64> {
+    // All callers select a fixed wire field no wider than 16 hex digits.
+    // Its width proves overflow impossible, without per-digit checked math.
+    debug_assert!(encoded.len() <= 16);
+    encoded.iter().try_fold(0, |value, &byte| {
+        Some((value << 4) | u64::from(hex_nibble(byte)?))
+    })
 }
 
 /// The authenticated identity of one formula-owned handle binding.
@@ -157,30 +166,24 @@ impl TokenCodec {
     }
 
     fn parse_uncached(&self, token: HandleToken<'_>) -> XllResult<ParsedHandleToken> {
-        let mut fields = token.as_str().splitn(7, ':');
-        let prefix = fields.next().ok_or(XllError::InvalidHandle)?;
-        let version = fields.next().ok_or(XllError::InvalidHandle)?;
-        let session = fields.next().ok_or(XllError::InvalidHandle)?;
-        let slot = fields.next().ok_or(XllError::InvalidHandle)?;
-        let generation = fields.next().ok_or(XllError::InvalidHandle)?;
-        let tag = fields.next().ok_or(XllError::InvalidHandle)?;
-        if fields.next().is_some()
-            || prefix != "xllh"
-            || version != "3"
-            || session.len() != 16
-            || slot.len() != 8
-            || generation.len() != 16
-            || tag.len() != 32
+        let bytes = token.as_str().as_bytes();
+        if bytes.len() != HANDLE_TOKEN_LENGTH
+            || !bytes.starts_with(b"xllh:3:")
+            || bytes[23] != b':'
+            || bytes[32] != b':'
+            || bytes[49] != b':'
         {
             return Err(XllError::InvalidHandle);
         }
-        let session = u64::from_str_radix(session, 16).map_err(|_| XllError::InvalidHandle)?;
-        let slot = u32::from_str_radix(slot, 16).map_err(|_| XllError::InvalidHandle)?;
-        let generation = u64::from_str_radix(generation, 16)
-            .ok()
+        // The formatter and parser share one canonical, lowercase ASCII
+        // grammar. Byte slices also reject non-ASCII input without risking
+        // UTF-8 boundary panics on fixed-position string slicing.
+        let session = decode_hex(&bytes[7..23]).ok_or(XllError::InvalidHandle)?;
+        let slot = decode_hex(&bytes[24..32]).ok_or(XllError::InvalidHandle)? as u32;
+        let generation = decode_hex(&bytes[33..49])
             .and_then(BindingGeneration::new)
             .ok_or(XllError::InvalidHandle)?;
-        let tag = decode_tag(tag).ok_or(XllError::InvalidHandle)?;
+        let tag = decode_tag(&bytes[50..]).ok_or(XllError::InvalidHandle)?;
         Ok(ParsedHandleToken {
             session,
             id: HandleId { slot, generation },
@@ -199,12 +202,12 @@ impl TokenCodec {
     }
 
     pub(crate) fn authentication_tag(&self, id: HandleId) -> [u8; 16] {
-        let mut mac = blake3::Hasher::new_keyed(&self.secret);
-        mac.update(b"xlfn-handle-token-v1\0");
-        mac.update(&self.session.to_le_bytes());
-        mac.update(&id.slot.to_le_bytes());
-        mac.update(&id.generation.get().to_le_bytes());
-        mac.finalize().as_bytes()[..16]
+        let mut message = [0; 41];
+        message[..21].copy_from_slice(b"xlfn-handle-token-v1\0");
+        message[21..29].copy_from_slice(&self.session.to_le_bytes());
+        message[29..33].copy_from_slice(&id.slot.to_le_bytes());
+        message[33..41].copy_from_slice(&id.generation.get().to_le_bytes());
+        blake3::keyed_hash(&self.secret, &message).as_bytes()[..16]
             .try_into()
             .expect("the BLAKE3 output contains a 128-bit tag")
     }
@@ -238,7 +241,11 @@ struct VerifiedTokenCacheEntry {
     session: u64,
     secret: [u8; 32],
     token: [u8; HANDLE_TOKEN_LENGTH],
-    id: HandleId,
+    // Keep the verified pair in flat storage: embedding an aligned HandleId
+    // would retain its padding beside the 82-byte wire token. Construction and
+    // lookup still accept/return the one typed identity as a unit.
+    slot: u32,
+    generation: BindingGeneration,
 }
 
 thread_local! {
@@ -275,7 +282,10 @@ pub(crate) fn verified_token_cache_lookup(
                 && entry.session == session
                 && entry.token.as_slice() == bytes
                 && entry.secret == *secret)
-                .then_some(entry.id)
+                .then_some(HandleId {
+                    slot: entry.slot,
+                    generation: entry.generation,
+                })
         })
     })
 }
@@ -302,7 +312,8 @@ pub(crate) fn verified_token_cache_store(
             session,
             secret: *secret,
             token: token_bytes,
-            id,
+            slot: id.slot,
+            generation: id.generation,
         });
     });
 }
@@ -325,8 +336,16 @@ mod tests {
                         slot,
                         generation: BindingGeneration::new(generation).unwrap(),
                     };
-                    let tag = codec
-                        .authentication_tag(id)
+                    // Independent streaming construction checks the wire MAC
+                    // bytes while production uses one fixed-layout message.
+                    let mut reference = blake3::Hasher::new_keyed(&codec.secret);
+                    reference.update(b"xlfn-handle-token-v1\0");
+                    reference.update(&session.to_le_bytes());
+                    reference.update(&slot.to_le_bytes());
+                    reference.update(&generation.to_le_bytes());
+                    let expected_tag = reference.finalize();
+                    assert_eq!(codec.authentication_tag(id), expected_tag.as_bytes()[..16]);
+                    let tag = expected_tag.as_bytes()[..16]
                         .iter()
                         .map(|byte| format!("{byte:02x}"))
                         .collect::<String>();
@@ -344,6 +363,83 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn fixed_wire_parser_rejects_noncanonical_and_non_ascii_tokens_without_panicking() {
+        let codec = TokenCodec::new(0xab, [19; 32]);
+        let id = HandleId {
+            slot: 0xab,
+            generation: BindingGeneration::new(0xab).unwrap(),
+        };
+        let token = codec.format(id);
+        for length in 0..HANDLE_TOKEN_LENGTH {
+            assert!(
+                codec
+                    .parse_uncached(HandleToken::new(&token[..length]))
+                    .is_err()
+            );
+        }
+        for field in [7..23, 24..32, 33..49] {
+            let mut uppercase = token.clone();
+            uppercase.replace_range(field.clone(), &token[field.clone()].to_ascii_uppercase());
+            assert!(codec.parse_uncached(HandleToken::new(&uppercase)).is_err());
+            let mut signed = token.clone();
+            signed.replace_range(field.start..field.start + 1, "+");
+            assert!(codec.parse_uncached(HandleToken::new(&signed)).is_err());
+        }
+        for position in 0..HANDLE_TOKEN_LENGTH - 1 {
+            let mut non_ascii = token.clone();
+            // Keep the total byte length unchanged and place a UTF-8 code
+            // point across every possible field / separator boundary.
+            non_ascii.replace_range(position..position + 2, "é");
+            assert!(codec.parse_uncached(HandleToken::new(&non_ascii)).is_err());
+        }
+        let mut zero_generation = token.clone();
+        zero_generation.replace_range(33..49, "0000000000000000");
+        assert!(
+            codec
+                .parse_uncached(HandleToken::new(&zero_generation))
+                .is_err()
+        );
+        assert!(
+            codec
+                .parse_uncached(HandleToken::new(&(token + ":")))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn cache_keeps_distinct_registry_identities_resident_across_switches() {
+        clear_cache();
+        let codecs = [TokenCodec::new(7, [19; 32]), TokenCodec::new(8, [20; 32])];
+        let id = HandleId {
+            slot: 7,
+            generation: BindingGeneration::ONE,
+        };
+        let tokens = codecs.each_ref().map(|codec| codec.format(id));
+        for _ in 0..8 {
+            for (codec, token) in codecs.iter().zip(&tokens) {
+                assert_eq!(
+                    codec
+                        .parse(std::ptr::from_ref(codec).addr(), HandleToken::new(token))
+                        .unwrap()
+                        .id,
+                    id
+                );
+            }
+        }
+        for (codec, token) in codecs.iter().zip(&tokens) {
+            assert_eq!(
+                verified_token_cache_lookup(
+                    std::ptr::from_ref(codec).addr(),
+                    codec.session,
+                    &codec.secret,
+                    token
+                ),
+                Some(id)
+            );
         }
     }
 

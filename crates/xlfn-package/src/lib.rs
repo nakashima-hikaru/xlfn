@@ -80,7 +80,7 @@ pub use manifest::{
 };
 pub use names::{validate_directory_path, validate_path_components, validate_windows_basename};
 pub use pe::{
-    ExportSymbol, ForwardedExport, PeInfo, inspect_pe, parse_pe_bytes, sha256,
+    ExportSymbol, ForwardedExport, PeInfo, PeSnapshot, inspect_pe, parse_pe_bytes, sha256,
     verify_pe_dependency_closure, verify_xll,
 };
 pub use shared_bytes::SharedBytes;

@@ -183,7 +183,7 @@ impl PreparedPackageCommit {
         self.entries.iter().map(|entry| {
             (
                 entry.artifact.relative_path.clone(),
-                entry.artifact.bytes.clone(),
+                entry.artifact.shared_bytes().clone(),
             )
         })
     }
@@ -265,18 +265,6 @@ pub(crate) enum ExpectedIdentity {
     SameOrBytes(FileIdentity),
 }
 
-pub(crate) fn snapshot_staged_artifact(target: &str, path: &Path) -> PackageResult<SharedBytes> {
-    let mut file = open_staged_file_no_follow(path).map_err(|_| staged_changed(target, path))?;
-    let metadata = file.metadata().map_err(|_| staged_changed(target, path))?;
-    if !metadata.is_file() || is_reparse_point(&metadata) {
-        return Err(staged_changed(target, path));
-    }
-    let snapshot = read_stable_snapshot(target, path, &mut file, &NoopSnapshotObserver)?;
-    #[cfg(unix)]
-    verify_snapshot_against_second_read(target, path, &mut file, &snapshot)?;
-    Ok(snapshot)
-}
-
 pub(crate) fn staged_artifact_permissions(
     target: &str,
     path: &Path,
@@ -302,23 +290,13 @@ pub(crate) fn verify_staged_artifact(
     expected: &VerifiedArtifact,
     identity: ExpectedIdentity,
 ) -> PackageResult<FileIdentity> {
-    if expected.bytes.len() as u64 != expected.size {
-        return Err(staged_changed(target, path));
-    }
-    verify_staged_bytes(
-        target,
-        path,
-        &expected.bytes,
-        Some(&expected.sha256),
-        identity,
-    )
+    verify_staged_bytes(target, path, expected.bytes(), identity)
 }
 
 pub(crate) fn verify_staged_bytes(
     target: &str,
     path: &Path,
     expected: &[u8],
-    expected_digest: Option<&[u8; 32]>,
     identity: ExpectedIdentity,
 ) -> PackageResult<FileIdentity> {
     let mut file = open_staged_file_no_follow(path).map_err(|_| staged_changed(target, path))?;
@@ -337,7 +315,6 @@ pub(crate) fn verify_staged_bytes(
         path,
         &mut file,
         expected,
-        expected_digest,
         Some(expected.len() as u64),
         &NoopSnapshotObserver,
     )?;
@@ -489,7 +466,6 @@ pub(crate) fn prepare_directory_entry(
                 path,
                 &mut handle,
                 candidate,
-                None,
                 Some(file_state.len),
                 &NoopSnapshotObserver,
             )?
@@ -614,7 +590,6 @@ pub(crate) fn verify_prepared_directory_contents(
                     &path,
                     &mut handle,
                     expected_bytes,
-                    None,
                     Some(expected_bytes.len() as u64),
                     &NoopSnapshotObserver,
                 )?;

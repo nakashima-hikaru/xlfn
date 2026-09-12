@@ -136,6 +136,7 @@ required-features = ["bench-internals"]
 xlfn-macros.workspace = true
 xlfn-sys.workspace = true
 inventory.workspace = true
+indexmap.workspace = true
 async-task = { workspace = true, optional = true }
 blake3.workspace = true
 bumpalo.workspace = true

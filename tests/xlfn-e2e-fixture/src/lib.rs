@@ -135,8 +135,8 @@ unsafe impl RtdSource for RtdFixtureSource {
     ) -> XllResult<Self::Subscription> {
         let key = topic
             .parts()
-            .first()
-            .map(|part| part.as_str().to_owned())
+            .next()
+            .map(str::to_owned)
             .ok_or(XllError::InvalidHandle)?;
         self.core()
             .sinks

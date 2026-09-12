@@ -1,5 +1,30 @@
 use super::*;
 
+/// Immutable PE bytes and the information parsed from those exact bytes.
+///
+/// Consumers may inspect the information before transferring the snapshot to
+/// package verification. Neither component can be replaced independently.
+pub struct PeSnapshot {
+    bytes: SharedBytes,
+    info: PeInfo,
+}
+
+impl PeSnapshot {
+    pub fn parse(bytes: SharedBytes) -> PackageResult<Self> {
+        let info = parse_pe_bytes(&bytes)?;
+        Ok(Self { bytes, info })
+    }
+
+    #[must_use]
+    pub const fn info(&self) -> &PeInfo {
+        &self.info
+    }
+
+    pub(crate) fn into_parts(self) -> (SharedBytes, PeInfo) {
+        (self.bytes, self.info)
+    }
+}
+
 pub fn verify_xll(path: &Path, target: &str, required_exports: &[String]) -> PackageResult {
     verify_xll_bytes(&fs::read(path)?, target, required_exports, path)
 }
@@ -139,7 +164,7 @@ pub(crate) fn verify_dependency_closure(
     xll: &Path,
     target: &str,
     bundle: &StagedBundle,
-    xll_snapshot: &[u8],
+    xll_info: PeInfo,
 ) -> PackageResult {
     let architecture = Architecture::parse(target)?;
     let root_name = xll
@@ -148,13 +173,7 @@ pub(crate) fn verify_dependency_closure(
         .ok_or_else(|| format!("XLL has no UTF-8 basename: {}", xll.display()))?;
     let mut images = BTreeMap::new();
     let root_key = windows_name_key("XLL basename", root_name)?;
-    images.insert(
-        root_key.clone(),
-        (
-            root_name.to_owned(),
-            inspect_checked_pe_bytes(xll_snapshot, architecture, xll)?,
-        ),
-    );
+    images.insert(root_key.clone(), (root_name.to_owned(), xll_info));
     for file in bundle
         .files
         .iter()
@@ -286,15 +305,6 @@ pub(crate) fn validate_imports(
 
 pub(crate) fn inspect_checked_pe(path: &Path, architecture: Architecture) -> PackageResult<PeInfo> {
     let info = inspect_pe(path)?;
-    inspect_checked_info(info, architecture, path)
-}
-
-pub(crate) fn inspect_checked_pe_bytes(
-    bytes: &[u8],
-    architecture: Architecture,
-    path: &Path,
-) -> PackageResult<PeInfo> {
-    let info = parse_pe_bytes(bytes)?;
     inspect_checked_info(info, architecture, path)
 }
 

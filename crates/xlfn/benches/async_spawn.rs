@@ -1,5 +1,5 @@
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use xlfn::benchmark_support::{AsyncSpawnBenchmark, AsyncSpawnKind, BENCHMARK_MEASUREMENT_TIME};
+use xlfn::benchmark_support::{AsyncSpawnBenchmark, AsyncSpawnKind, benchmark_measurement_time};
 
 const WORKER_COUNTS: [usize; 4] = [1, 4, 8, 16];
 const PRODUCER_COUNTS: [usize; 4] = [1, 4, 16, 32];
@@ -8,8 +8,15 @@ const MATRIX_ITERATIONS_PER_THREAD: usize = 64;
 const RESCHEDULE_YIELDS: usize = 4;
 
 fn concurrent_spawns(c: &mut Criterion) {
+    let mut returns = c.benchmark_group("async_return");
+    returns.measurement_time(benchmark_measurement_time());
+    returns.bench_function("scalar", |b| {
+        b.iter(AsyncSpawnBenchmark::encode_scalar_return)
+    });
+    returns.finish();
+
     let mut group = c.benchmark_group("async_spawn/per_iteration");
-    group.measurement_time(BENCHMARK_MEASUREMENT_TIME);
+    group.measurement_time(benchmark_measurement_time());
 
     for threads in [1_usize, 4, 16, 32] {
         let attempts = threads * ITERATIONS_PER_THREAD;
@@ -35,7 +42,7 @@ fn concurrent_spawns(c: &mut Criterion) {
     group.finish();
 
     let mut group_scaling = c.benchmark_group("async_spawn/matrix_spawn");
-    group_scaling.measurement_time(BENCHMARK_MEASUREMENT_TIME);
+    group_scaling.measurement_time(benchmark_measurement_time());
 
     for &workers in &WORKER_COUNTS {
         for &producers in &PRODUCER_COUNTS {
@@ -63,7 +70,7 @@ fn concurrent_spawns(c: &mut Criterion) {
     group_scaling.finish();
 
     let mut group_reschedule = c.benchmark_group("async_spawn/matrix_reschedule");
-    group_reschedule.measurement_time(BENCHMARK_MEASUREMENT_TIME);
+    group_reschedule.measurement_time(benchmark_measurement_time());
 
     for &workers in &WORKER_COUNTS {
         for &producers in &PRODUCER_COUNTS {
@@ -97,7 +104,7 @@ fn concurrent_spawns(c: &mut Criterion) {
     group_reschedule.finish();
 
     let mut group_drain = c.benchmark_group("async_spawn/spawn_and_drain");
-    group_drain.measurement_time(BENCHMARK_MEASUREMENT_TIME);
+    group_drain.measurement_time(benchmark_measurement_time());
 
     for &workers in &WORKER_COUNTS {
         for &producers in &PRODUCER_COUNTS {

@@ -1815,6 +1815,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "hashbrown",
+ "indexmap",
  "inventory",
  "loom",
  "moka",

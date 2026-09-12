@@ -30,5 +30,28 @@ fn array_string_output_benchmarks(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, array_string_output_benchmarks);
+fn counted_utf16_benchmarks(c: &mut Criterion) {
+    let mut group = c.benchmark_group("callback_counted_utf16");
+    group.measurement_time(benchmark_measurement_time());
+    for (label, payload) in [
+        ("ascii_short", "x".repeat(32)),
+        ("ascii_1k", "x".repeat(1_024)),
+        ("unicode_short", "日本語💡".to_owned()),
+        ("unicode_1k", "日本語💡".repeat(80)),
+        ("unicode_limit", "あ".repeat(32_767)),
+    ] {
+        group.throughput(Throughput::Bytes(payload.len() as u64));
+        let benchmark = BorrowedStringArrayOutputBenchmark::with_payload(1, payload);
+        group.bench_function(label, |b| {
+            b.iter(|| benchmark.run_counted_utf16());
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    array_string_output_benchmarks,
+    counted_utf16_benchmarks
+);
 criterion_main!(benches);

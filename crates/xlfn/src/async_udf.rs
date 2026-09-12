@@ -43,7 +43,7 @@ use crate::execution::{
     CallId, CallMetadata, CallOutcome, UdfCompletionOutcome, UdfDeliveryOutcome, UdfErrorKind,
 };
 #[cfg(test)]
-use crate::return_abi::AsyncReturnPointer;
+use crate::return_abi::AsyncReturnValue;
 #[cfg(test)]
 use crate::runtime::Runtime;
 #[cfg(test)]

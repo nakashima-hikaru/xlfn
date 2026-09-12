@@ -31,4 +31,16 @@ impl BorrowedStringArrayOutputBenchmark {
         }
         std::hint::black_box(builder.finish().expect("benchmark array must finish"));
     }
+
+    #[inline]
+    pub fn run_counted_utf16(&self) {
+        std::hint::black_box(
+            crate::utf16::encode_counted(
+                &self.payload,
+                "benchmark",
+                crate::utf16::EXCEL_STRING_LIMIT,
+            )
+            .expect("benchmark callback string must encode"),
+        );
+    }
 }

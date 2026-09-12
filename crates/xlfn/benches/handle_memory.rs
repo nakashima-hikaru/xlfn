@@ -5,6 +5,7 @@ use xlfn::benchmark_support::{HandleColdGrowthBenchmark, HandleRevisionChurnBenc
 
 struct CountingAllocator;
 static LIVE: AtomicUsize = AtomicUsize::new(0);
+static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 
 // SAFETY: requests and layouts are forwarded unchanged to System.
 unsafe impl GlobalAlloc for CountingAllocator {
@@ -13,6 +14,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
         let pointer = unsafe { System.alloc(layout) };
         if !pointer.is_null() {
             LIVE.fetch_add(layout.size(), Ordering::Relaxed);
+            ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
         }
         pointer
     }
@@ -42,6 +44,24 @@ fn main() {
     // Warm process/TLS state before taking deltas; print only after snapshots.
     drop(HandleColdGrowthBenchmark::new(1));
     println!("{{\"probe\":\"requested_live_bytes_not_rss\"}}");
+    for maximum_bindings in [16_384, 1_048_576] {
+        let before = live();
+        let bench = HandleColdGrowthBenchmark::with_binding_limit(1, maximum_bindings);
+        let empty = live();
+        bench.run();
+        let populated = live();
+        let started = std::time::Instant::now();
+        drop(bench);
+        let close_ns = started.elapsed().as_nanos();
+        let closed = live();
+        println!(
+            "{}",
+            serde_json::json!({"case": "sparse", "count": 1,
+            "maximum_bindings": maximum_bindings,
+            "empty_bytes": empty.saturating_sub(before), "populated_bytes": populated.saturating_sub(before),
+            "close_ns": close_ns, "after_drop_bytes": closed as i128 - before as i128})
+        );
+    }
     for count in [1_000, 10_000] {
         let before = live();
         let bench = HandleColdGrowthBenchmark::new(count);
@@ -60,7 +80,9 @@ fn main() {
     let before = live();
     let bench = HandleRevisionChurnBenchmark::new(10_000, 10_000);
     let populated = live();
+    let before_allocations = ALLOCATIONS.load(Ordering::Relaxed);
     bench.run_republish();
+    let first_allocations = ALLOCATIONS.load(Ordering::Relaxed) - before_allocations;
     let first = live();
     for _ in 0..49 {
         bench.run_republish();
@@ -71,6 +93,7 @@ fn main() {
     println!(
         "{}",
         serde_json::json!({"case": "churn", "cycles": 500_000,
+        "allocations_first_10_000": first_allocations,
         "populated_bytes": populated.saturating_sub(before), "after_first_bytes": first.saturating_sub(before),
         "after_repeated_bytes": repeated.saturating_sub(before), "after_drop_bytes": closed as i128 - before as i128})
     );

@@ -37,6 +37,17 @@ fn rtd_refresh_benchmarks(c: &mut Criterion) {
         b.iter(|| num_sparse.run_end_to_end_cycle());
     });
 
+    let sparse_after_dense =
+        RtdRefreshScalingBenchmark::after_dense_refresh(case_sparse, RtdRefreshValueKind::Number);
+    group.bench_function(
+        BenchmarkId::new("number/collection", "sparse_tail_after_dense"),
+        |b| b.iter_custom(|iterations| sparse_after_dense.measure_refresh_collection(iterations)),
+    );
+    group.bench_function(
+        BenchmarkId::new("number/end_to_end", "sparse_tail_after_dense"),
+        |b| b.iter(|| sparse_after_dense.run_end_to_end_cycle()),
+    );
+
     group.throughput(Throughput::Elements(case_dense.updated_topics as u64));
     group.bench_function(BenchmarkId::new("number/end_to_end", "dense"), |b| {
         b.iter(|| num_dense.run_end_to_end_cycle());

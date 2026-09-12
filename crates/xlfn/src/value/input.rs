@@ -147,6 +147,26 @@ impl InputMode for FormulaInputMode {
 )]
 pub trait FromExcel<'call>: Sized {
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self>;
+
+    /// Converts an owned input while recording its semantic identity.
+    ///
+    /// The default composes conversion and identity encoding. Collection
+    /// implementations can override it to record identity during conversion,
+    /// avoiding a second traversal. An override must produce the same value,
+    /// errors, and encoded identity as `from_excel` followed by
+    /// [`ExcelInputIdentity::encode_input_identity`].
+    fn from_excel_with_identity(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        identity: &mut InputIdentityEncoder,
+    ) -> XllResult<Self>
+    where
+        Self: ExcelInputIdentity,
+    {
+        let converted = Self::from_excel(value, argument)?;
+        converted.encode_input_identity(identity);
+        Ok(converted)
+    }
 }
 
 /// Encodes the semantic value observed by a formula-revision UDF.
@@ -204,9 +224,7 @@ where
         _context: &CallContext<'call>,
         identity: &mut InputIdentityEncoder,
     ) -> XllResult<Self> {
-        let result = T::from_excel(value, argument)?;
-        result.encode_input_identity(identity);
-        Ok(result)
+        T::from_excel_with_identity(value, argument, identity)
     }
 
     fn encode_decoded(&self, identity: &mut InputIdentityEncoder) {

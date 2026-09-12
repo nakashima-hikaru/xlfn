@@ -242,6 +242,30 @@ impl RawArgumentIngressBenchmark {
         })
     }
 
+    pub fn run_borrowed_array_with_identity(&mut self) -> [u8; 32] {
+        let ingress = benchmark_ingress();
+        let call = self
+            .runtime
+            .enter(&ingress)
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
+            let mut arguments =
+                crate::value::ArgumentContext::<crate::value::FormulaInputMode>::new(
+                    call, scope, 1,
+                );
+            // SAFETY: the fixture owns the root, cells, and UTF-16 payloads.
+            let value = unsafe {
+                crate::value::argument_from_raw_with_arguments::<
+                    crate::value::FormulaInputMode,
+                    crate::value::XlArrayRef<'_>,
+                >(&mut arguments, 0, "arg", &mut self.raw)
+            }
+            .expect("raw array identity must encode");
+            std::hint::black_box(value);
+            arguments.finish().unwrap().unwrap()
+        })
+    }
+
     pub fn run_borrowed_matrix_str(&mut self) {
         let ingress = benchmark_ingress();
         let call = self

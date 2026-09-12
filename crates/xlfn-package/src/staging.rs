@@ -881,7 +881,6 @@ pub(crate) fn compare_stable_snapshot(
     path: &Path,
     file: &mut std::fs::File,
     expected: &[u8],
-    expected_digest: Option<&[u8; 32]>,
     maximum_len: Option<u64>,
     observer: &impl SnapshotObserver,
 ) -> PackageResult<bool> {
@@ -894,7 +893,6 @@ pub(crate) fn compare_stable_snapshot(
     }
     file.seek(SeekFrom::Start(0))?;
 
-    let mut hasher = expected_digest.map(|_| Sha256::new());
     let mut limited = file.take(before.len.saturating_add(1));
     #[allow(
         clippy::large_stack_arrays,
@@ -921,9 +919,6 @@ pub(crate) fn compare_stable_snapshot(
             matches = expected[offset as usize..end as usize] == buffer[..count];
         }
         offset = end;
-        if let Some(hasher) = &mut hasher {
-            hasher.update(&buffer[..count]);
-        }
     }
 
     let after = file_snapshot_state(file)?;
@@ -931,10 +926,6 @@ pub(crate) fn compare_stable_snapshot(
         return Err(unstable_bundle_source(target, path));
     }
 
-    if let Some((hasher, expected_digest)) = hasher.zip(expected_digest) {
-        let digest: [u8; 32] = hasher.finalize().into();
-        matches &= digest == *expected_digest;
-    }
     Ok(matches)
 }
 
@@ -945,15 +936,7 @@ pub(crate) fn verify_snapshot_against_second_read(
     file: &mut std::fs::File,
     expected: &[u8],
 ) -> PackageResult {
-    if !compare_stable_snapshot(
-        target,
-        path,
-        file,
-        expected,
-        None,
-        None,
-        &NoopSnapshotObserver,
-    )? {
+    if !compare_stable_snapshot(target, path, file, expected, None, &NoopSnapshotObserver)? {
         return Err(unstable_bundle_source(target, path));
     }
     Ok(())

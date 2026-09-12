@@ -350,5 +350,21 @@
     "count": 1,
     "category": "test",
     "reason": "Observes fixed string barrier/callback panics and verifies retained result destruction occurs after releasing the transition lock."
+  },
+  {
+    "path": "crates/xlfn/src/diagnostics.rs",
+    "context": "# [ cfg ( test ) ] mod tests / # [ test ] fn diagnostic_event_construction_panic_returns_queue_reservation",
+    "code": "catch_unwind(AssertUnwindSafe(|| {",
+    "count": 1,
+    "category": "test",
+    "reason": "Negative observer catches an injected event-builder panic and verifies that RAII returns the final diagnostic queue reservation."
+  },
+  {
+    "path": "crates/xlfn/src/subscription/data_plane.rs",
+    "context": "# [ cfg ( all ( test , feature = ) ) ] mod tests / # [ test ] fn partial_collection_unwind_restores_in_flight_values",
+    "code": "std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {",
+    "count": 1,
+    "category": "test",
+    "reason": "Negative observer catches an injected panic between shard collections and verifies that dropping the partial refresh restores in-flight values for retry."
   }
 ]

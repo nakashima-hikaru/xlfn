@@ -2,6 +2,141 @@ use super::*;
 
 use proptest::prelude::*;
 
+/// Measures repeated verification against an already-owned, immutable artifact.
+/// Run explicitly in release mode with `--ignored --nocapture`.
+#[test]
+#[ignore = "manual performance measurement; run serially in release mode"]
+fn benchmark_verified_artifact_contents() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("engine.dll");
+    for size in [1024 * 1024, 64 * 1024 * 1024] {
+        let bytes = vec![0x53; size];
+        fs::write(&path, &bytes).unwrap();
+        let artifact = VerifiedArtifact::new(
+            PathBuf::from("engine.dll"),
+            bytes.into(),
+            fs::metadata(&path).unwrap().permissions(),
+        );
+        let mut elapsed = Vec::new();
+        for round in 0..12 {
+            let started = std::time::Instant::now();
+            std::hint::black_box(
+                verify_staged_artifact("benchmark", &path, &artifact, ExpectedIdentity::Any)
+                    .unwrap(),
+            );
+            if round != 0 {
+                elapsed.push(started.elapsed().as_nanos());
+            }
+        }
+        elapsed.sort_unstable();
+        println!(
+            "{}",
+            serde_json::json!({
+                "bytes": size,
+                "median_ns": elapsed[elapsed.len() / 2],
+                "samples_ns": elapsed,
+            })
+        );
+    }
+}
+
+fn synthetic_xll() -> Vec<u8> {
+    let base = synthetic_export_pe(1, &[SyntheticExportTarget::Direct], &[]);
+    let mut bytes = vec![0; 0xc00];
+    bytes[..0x200].copy_from_slice(&base[..0x200]);
+    bytes[0x400..0x800].copy_from_slice(&base[0x200..0x600]);
+    let optional = 0x98;
+    let sections = optional + 0xf0;
+    bytes[0x86..0x88].copy_from_slice(&4_u16.to_le_bytes());
+    bytes[optional + 56..optional + 60].copy_from_slice(&0x5000_u32.to_le_bytes());
+    bytes[optional + 60..optional + 64].copy_from_slice(&0x400_u32.to_le_bytes());
+    for (index, raw) in [0x400_u32, 0x600, 0x800, 0xa00].into_iter().enumerate() {
+        let section = sections + index * 40;
+        bytes[section + 20..section + 24].copy_from_slice(&raw.to_le_bytes());
+        let flags: u32 = if index == 1 { 0x60000020 } else { 0x40000040 };
+        bytes[section + 36..section + 40].copy_from_slice(&flags.to_le_bytes());
+        if index >= 2 {
+            let name: &[u8; 8] = if index == 2 {
+                b".xllexp\0"
+            } else {
+                b".xlfncrt"
+            };
+            bytes[section..section + 8].copy_from_slice(name);
+            bytes[section + 8..section + 12].copy_from_slice(&0x200_u32.to_le_bytes());
+            bytes[section + 12..section + 16]
+                .copy_from_slice(&((index as u32 + 1) * 0x1000).to_le_bytes());
+            bytes[section + 16..section + 20].copy_from_slice(&0x200_u32.to_le_bytes());
+        }
+    }
+    let mut names = REQUIRED_XLL_EXPORTS.to_vec();
+    names.sort_unstable();
+    bytes[0x418..0x41c].copy_from_slice(&(names.len() as u32).to_le_bytes());
+    bytes[0x424..0x428].copy_from_slice(&0x1060_u32.to_le_bytes());
+    let mut string = 0x490;
+    let mut manifest = 0x800;
+    for (index, name) in names.into_iter().enumerate() {
+        let pointer = 0x440 + index * 4;
+        bytes[pointer..pointer + 4]
+            .copy_from_slice(&(0x1000_u32 + (string - 0x400) as u32).to_le_bytes());
+        bytes[string..string + name.len()].copy_from_slice(name.as_bytes());
+        string += name.len() + 1;
+        bytes[manifest..manifest + name.len()].copy_from_slice(name.as_bytes());
+        manifest += name.len() + 1;
+    }
+    bytes[0xa00..0xa08].copy_from_slice(CRT_MARKER_MAGIC);
+    bytes[0xa08] = CRT_MARKER_SCHEMA;
+    bytes
+}
+
+#[test]
+fn parsed_snapshot_is_transferred_without_replacing_its_bytes() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("addin.xll");
+    let bytes = SharedBytes::from(synthetic_xll());
+    fs::write(&path, bytes.as_ref()).unwrap();
+    let snapshot = PeSnapshot::parse(bytes.clone()).unwrap();
+    assert_eq!(
+        snapshot.info().crt_policy,
+        Some(EffectiveCrtPolicy::Dynamic)
+    );
+    let package = verify_staged_package(
+        &path,
+        "x86_64-pc-windows-msvc",
+        snapshot,
+        &[],
+        StagedBundle {
+            files: Vec::new(),
+            external_imports: BTreeSet::new(),
+        },
+    )
+    .unwrap();
+    assert_eq!(package.artifacts().len(), 1);
+    assert_eq!(package.artifacts()[0].bytes().as_ptr(), bytes.as_ptr());
+    assert_eq!(package.artifacts()[0].bytes(), bytes.as_ref());
+}
+
+#[test]
+fn staged_package_rejects_content_changed_after_policy_inspection() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("addin.xll");
+    let bytes = synthetic_xll();
+    let mut changed = bytes.clone();
+    changed[0x600] ^= 1;
+    fs::write(&path, &changed).unwrap();
+    let error = verify_staged_package(
+        &path,
+        "x86_64-pc-windows-msvc",
+        PeSnapshot::parse(bytes.into()).unwrap(),
+        &[],
+        StagedBundle {
+            files: Vec::new(),
+            external_imports: BTreeSet::new(),
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(error, PackageError::StagedArtifactChanged { .. }));
+}
+
 fn xll_info() -> PeInfo {
     let framework = REQUIRED_XLL_EXPORTS
         .iter()
@@ -1353,7 +1488,7 @@ fn snapshot_file_keeps_the_bytes_from_its_open_handle() {
 }
 
 #[test]
-fn streaming_snapshot_comparison_preserves_bytes_digest_and_budget() {
+fn streaming_snapshot_comparison_preserves_bytes_and_budget() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("payload.bin");
     for bytes in [Vec::new(), vec![0x53; 150_000]] {
@@ -1364,43 +1499,44 @@ fn streaming_snapshot_comparison_preserves_bytes_digest_and_budget() {
             &source,
             &mut file,
             &bytes,
-            Some(&sha256_digest(&bytes)),
             Some(bytes.len() as u64),
             &NoopSnapshotObserver,
         )
         .unwrap();
         assert!(compared);
-        assert!(
-            !compare_stable_snapshot(
-                "test",
-                &source,
-                &mut file,
-                &bytes,
-                Some(&[0; 32]),
-                None,
-                &NoopSnapshotObserver,
-            )
-            .unwrap()
-        );
         let different = compare_stable_snapshot(
             "test",
             &source,
             &mut file,
             b"different",
             None,
-            None,
             &NoopSnapshotObserver,
         )
         .unwrap();
         assert!(!different);
         if !bytes.is_empty() {
+            for offset in [0, bytes.len() / 2, bytes.len() - 1] {
+                let mut different = bytes.clone();
+                different[offset] ^= 1;
+                assert!(
+                    !compare_stable_snapshot(
+                        "test",
+                        &source,
+                        &mut file,
+                        &different,
+                        Some(bytes.len() as u64),
+                        &NoopSnapshotObserver,
+                    )
+                    .unwrap(),
+                    "same-length corruption at byte {offset} must be rejected",
+                );
+            }
             assert!(
                 compare_stable_snapshot(
                     "test",
                     &source,
                     &mut file,
                     &bytes,
-                    None,
                     Some(bytes.len() as u64 - 1),
                     &NoopSnapshotObserver,
                 )
@@ -1456,7 +1592,6 @@ fn streaming_comparison_rejects_growth_truncation_and_in_place_mutation() {
             &source,
             &mut file,
             &bytes,
-            None,
             Some(bytes.len() as u64),
             &MutateAfterFirstChunk(mutation),
         );
@@ -1535,7 +1670,7 @@ fn verified_artifacts_keep_bytes_and_identity_for_commit_checks() {
     let staged = directory.path().join("Engine.dll");
     fs::write(&staged, b"stable bytes").unwrap();
     let bytes: SharedBytes = SharedBytes::from(b"stable bytes".to_vec());
-    let artifact = verified_artifact(
+    let artifact = VerifiedArtifact::new(
         PathBuf::from("Engine.dll"),
         bytes,
         fs::metadata(&staged).unwrap().permissions(),
@@ -1578,7 +1713,7 @@ fn prepared_package_rejects_unknown_entries_and_manifest_mutation() {
     let directory = tempfile::tempdir().unwrap();
     let staged = directory.path().join("Engine.dll");
     fs::write(&staged, b"stable bytes").unwrap();
-    let artifact = verified_artifact(
+    let artifact = VerifiedArtifact::new(
         PathBuf::from("Engine.dll"),
         SharedBytes::from(b"stable bytes".to_vec()),
         fs::metadata(&staged).unwrap().permissions(),
@@ -1606,7 +1741,7 @@ fn prepared_package_opens_entries_without_following_symlinks() {
     let staged = directory.path().join("Engine.dll");
     let replacement = directory.path().join("replacement.dll");
     fs::write(&staged, b"stable bytes").unwrap();
-    let artifact = verified_artifact(
+    let artifact = VerifiedArtifact::new(
         PathBuf::from("Engine.dll"),
         SharedBytes::from(b"stable bytes".to_vec()),
         fs::metadata(&staged).unwrap().permissions(),
@@ -1630,7 +1765,7 @@ fn prepared_package_rejects_replaced_staging_directory() {
     fs::create_dir(&staging).unwrap();
     let staged = staging.join("Engine.dll");
     fs::write(&staged, b"stable bytes").unwrap();
-    let artifact = verified_artifact(
+    let artifact = VerifiedArtifact::new(
         PathBuf::from("Engine.dll"),
         SharedBytes::from(b"stable bytes".to_vec()),
         fs::metadata(&staged).unwrap().permissions(),

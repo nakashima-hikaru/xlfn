@@ -20,6 +20,7 @@ use crate::generation::BindingGeneration;
 use crate::{XllError, XllResult};
 use parking_lot::{RwLock, RwLockWriteGuard};
 use std::ptr::NonNull;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 use xlfn_kernel::published_owner::PublishedOwner;
 
@@ -126,32 +127,49 @@ impl<'domain> BindingReadLease<'domain> {
     }
 }
 
+const BINDINGS_PER_PAGE: usize = 256;
+type BindingPage = [AtomicPtr<BindingRecord>; BINDINGS_PER_PAGE];
+
 pub(crate) struct PublishedBindings {
-    entries: Box<[AtomicPtr<BindingRecord>]>,
+    // Pages are initialized once and stay at fixed addresses until registry
+    // destruction. Lookup needs no table lock and page lifetime requires no
+    // second reclamation protocol alongside the binding read domain.
+    pages: Box<[OnceLock<Box<BindingPage>>]>,
 }
 
 impl PublishedBindings {
     pub(crate) fn new(maximum_bindings: u32) -> Self {
         Self {
-            entries: (0..maximum_bindings.max(1))
-                .map(|_| AtomicPtr::new(std::ptr::null_mut()))
+            pages: (0..(maximum_bindings as usize).div_ceil(BINDINGS_PER_PAGE))
+                .map(|_| OnceLock::new())
                 .collect(),
         }
     }
 
     pub(crate) fn load(&self, slot: u32) -> BindingSnapshot {
         let record = self
-            .entries
-            .get(slot as usize)
+            .entry(slot)
             .and_then(|entry| NonNull::new(entry.load(Ordering::Acquire)))
             .map(BindingPtr);
         BindingSnapshot { record }
     }
 
+    #[inline]
+    fn entry(&self, slot: u32) -> Option<&AtomicPtr<BindingRecord>> {
+        let slot = slot as usize;
+        let page = self.pages.get(slot / BINDINGS_PER_PAGE)?.get()?;
+        Some(&page[slot % BINDINGS_PER_PAGE])
+    }
+
     fn insert(&self, id: HandleId, record: BindingPtr) {
-        let Some(entry) = self.entries.get(id.slot as usize) else {
+        let slot = id.slot as usize;
+        let Some(page) = self.pages.get(slot / BINDINGS_PER_PAGE) else {
             xlfn_kernel::invariant::fail_stop();
         };
+        let page = page.get_or_init(|| {
+            Box::new([const { AtomicPtr::new(std::ptr::null_mut()) }; BINDINGS_PER_PAGE])
+        });
+        let entry = &page[slot % BINDINGS_PER_PAGE];
         if !entry.load(Ordering::Acquire).is_null() {
             xlfn_kernel::invariant::fail_stop();
         }
@@ -159,7 +177,7 @@ impl PublishedBindings {
     }
 
     fn remove(&self, id: HandleId, expected: BindingPtr) {
-        let Some(entry) = self.entries.get(id.slot as usize) else {
+        let Some(entry) = self.entry(id.slot) else {
             xlfn_kernel::invariant::fail_stop();
         };
         if entry
@@ -175,12 +193,6 @@ impl PublishedBindings {
             // must clear the exact pointer it observed. Any mismatch means
             // the publication invariant has already been violated.
             xlfn_kernel::invariant::fail_stop();
-        }
-    }
-
-    fn clear(&self) {
-        for entry in &self.entries {
-            entry.store(std::ptr::null_mut(), Ordering::Release);
         }
     }
 }
@@ -283,6 +295,13 @@ impl BindingTable {
             }
             None => {
                 let index = state.slots.len();
+                // Exhausted generations permanently consume their slot. Do
+                // not treat padding in the last publication page as capacity.
+                if index >= self.maximum_bindings as usize {
+                    return Err(XllError::Domain {
+                        code: DomainErrorCode::Overflow,
+                    });
+                }
                 let slot = u32::try_from(index).map_err(|_| XllError::Domain {
                     code: DomainErrorCode::Overflow,
                 })?;
@@ -346,11 +365,14 @@ impl BindingTable {
         let live_bindings = state.live_bindings;
         let mut retired = Vec::with_capacity(live_bindings as usize);
         state.free.clear();
-        self.published.clear();
         for index in 0..state.slots.len() {
             let reusable = {
                 let slot = &mut state.slots[index];
                 if let Some(record) = slot.record.take() {
+                    // Touch only live publications, independent of the
+                    // configured upper bound or empty publication pages.
+                    self.published
+                        .remove(record.id, BindingPtr::from_ref(&record));
                     record
                         .state
                         .store(BindingState::Retired as u8, Ordering::Release);
@@ -489,5 +511,76 @@ impl Drop for BindingTable {
         // All reclamation runs under a borrowing call/writer capability, and
         // its final access must finish before the unique domain is destroyed.
         self.read_domain.seal();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::handle::registry::HandleRegistry;
+
+    #[test]
+    fn zero_limit_and_exhausted_slots_do_not_publish_into_page_padding() {
+        let empty = HandleRegistry::from_entropy(0, [7; 40]);
+        assert!(empty.bindings.published.pages.is_empty());
+        assert!(empty.insert_pending(&mut Some(1_usize)).is_err());
+        assert!(empty.bindings.published.load(0).record.is_none());
+
+        let registry = HandleRegistry::from_entropy(1, [7; 40]);
+        let token = registry.insert_pending(&mut Some(1_usize)).unwrap();
+        registry.remove::<usize>(&token).unwrap();
+        registry.bindings.write_state().slots[0].next_generation =
+            BindingGeneration::new(u64::MAX).unwrap();
+        let token = registry.insert_pending(&mut Some(2_usize)).unwrap();
+        registry.remove::<usize>(&token).unwrap();
+        assert!(matches!(
+            registry.insert_pending(&mut Some(3_usize)),
+            Err(XllError::Domain {
+                code: DomainErrorCode::Overflow
+            })
+        ));
+        assert!(registry.bindings.published.load(1).record.is_none());
+    }
+
+    #[test]
+    fn sparse_publication_allocates_only_used_pages_and_reuses_them() {
+        let registry = HandleRegistry::from_entropy(1_048_576, [7; 40]);
+        let published = &registry.bindings.published;
+        let allocated_pages = || {
+            published
+                .pages
+                .iter()
+                .filter(|page| page.get().is_some())
+                .count()
+        };
+        assert_eq!(allocated_pages(), 0);
+        assert!(published.load(1_048_575).record.is_none());
+        assert!(published.load(u32::MAX).record.is_none());
+
+        let mut tokens = Vec::new();
+        for value in 0..=BINDINGS_PER_PAGE {
+            tokens.push(registry.insert_pending(&mut Some(value)).unwrap());
+        }
+        assert_eq!(allocated_pages(), 2);
+        for (value, token) in tokens.iter().enumerate() {
+            assert_eq!(registry.lookup::<usize>(token).unwrap(), value);
+        }
+        let page = published.pages[1].get().unwrap().as_ref().as_ptr();
+        registry.remove::<usize>(tokens.last().unwrap()).unwrap();
+        assert!(registry.lookup::<usize>(tokens.last().unwrap()).is_err());
+        let replacement = registry.insert_pending(&mut Some(99_usize)).unwrap();
+        assert_eq!(registry.lookup::<usize>(&replacement).unwrap(), 99);
+        assert_eq!(published.pages[1].get().unwrap().as_ref().as_ptr(), page);
+        assert_eq!(allocated_pages(), 2);
+
+        registry.retire_values_for_seal();
+        for slot in 0..=BINDINGS_PER_PAGE {
+            assert!(published.load(slot as u32).record.is_none());
+        }
+        assert_eq!(
+            allocated_pages(),
+            2,
+            "pages remain stable until registry drop"
+        );
     }
 }

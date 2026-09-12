@@ -194,7 +194,7 @@ impl DiagnosticRouter {
                 self.observer
                     .record(crate::shutdown_trace::ShutdownEvent::RecordCleanupIssue);
                 if let Some(sink) = self.sink.read_if_ready() {
-                    sink.report(OwnedDiagnosticEvent {
+                    sink.report(|| OwnedDiagnosticEvent {
                         udf_id: "diagnostic sink replacement",
                         argument: None,
                         error: XllError::Panic,
@@ -502,7 +502,7 @@ pub(crate) fn report_no_unwind(udf_id: &'static str, error: &XllError) -> Diagno
         );
         let read = router().sink.read_if_ready();
         if let Some(sink) = read.as_deref() {
-            sink.report(OwnedDiagnosticEvent {
+            sink.report(|| OwnedDiagnosticEvent {
                 udf_id,
                 argument,
                 error: error.clone(),
@@ -749,7 +749,7 @@ mod tests {
             .unwrap(),
         );
         for id in 1..=3 {
-            sink.report(OwnedDiagnosticEvent {
+            sink.report(|| OwnedDiagnosticEvent {
                 udf_id: "panic payload delivery",
                 argument: None,
                 error: XllError::Panic,
@@ -805,7 +805,7 @@ mod tests {
         owners.reserve(16);
         let sink = Box::new(owners.pop().unwrap());
         for id in 1..=8 {
-            sink.report(OwnedDiagnosticEvent {
+            sink.report(|| OwnedDiagnosticEvent {
                 udf_id: "observer ownership",
                 argument: None,
                 error: XllError::Panic,
@@ -838,7 +838,7 @@ mod tests {
             .read_if_ready()
             .as_ref()
             .unwrap()
-            .report(OwnedDiagnosticEvent {
+            .report(|| OwnedDiagnosticEvent {
                 udf_id: "reload",
                 argument: None,
                 error: XllError::Panic,
@@ -856,7 +856,7 @@ mod tests {
             .read_if_ready()
             .as_ref()
             .unwrap()
-            .report(OwnedDiagnosticEvent {
+            .report(|| OwnedDiagnosticEvent {
                 udf_id: "reload",
                 argument: None,
                 error: XllError::Panic,
@@ -909,7 +909,7 @@ mod tests {
             .read_if_ready()
             .as_ref()
             .unwrap()
-            .report(OwnedDiagnosticEvent {
+            .report(|| OwnedDiagnosticEvent {
                 udf_id: "retiring",
                 argument: None,
                 error: XllError::Panic,
@@ -1075,7 +1075,7 @@ mod tests {
             .read_if_ready()
             .as_ref()
             .unwrap()
-            .report(OwnedDiagnosticEvent {
+            .report(|| OwnedDiagnosticEvent {
                 udf_id: "terminal-close-race",
                 argument: None,
                 error: XllError::Panic,
@@ -1253,7 +1253,7 @@ mod tests {
         );
         let before = dropped_diagnostic_events();
 
-        sink.report(OwnedDiagnosticEvent {
+        sink.report(|| OwnedDiagnosticEvent {
             udf_id: "bounded",
             argument: None,
             error: XllError::Panic,
@@ -1262,7 +1262,7 @@ mod tests {
         });
         started_rx.recv().unwrap();
         for diagnostic_id in 2..=(DIAGNOSTIC_QUEUE_CAPACITY as u64 + 2) {
-            sink.report(OwnedDiagnosticEvent {
+            sink.report(|| OwnedDiagnosticEvent {
                 udf_id: "bounded",
                 argument: None,
                 error: XllError::Panic,
@@ -1271,7 +1271,98 @@ mod tests {
             });
         }
         assert!(dropped_diagnostic_events() > before);
+        sink.report(|| panic!("a full queue must not build the dropped event"));
 
+        release_tx.send(()).unwrap();
+        sink.shutdown().unwrap();
+    }
+
+    #[test]
+    fn diagnostic_event_construction_panic_returns_queue_reservation() {
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let sink = Box::new(
+            AsyncDiagnosticSink::new(BlockingSink {
+                first: AtomicBool::new(true),
+                started: started_tx,
+                release: Mutex::new(release_rx),
+            })
+            .unwrap(),
+        );
+        let report = || {
+            sink.report(|| OwnedDiagnosticEvent {
+                udf_id: "reservation rollback",
+                argument: None,
+                error: XllError::Panic,
+                diagnostic_id: DiagnosticId::from_u64(1),
+                timestamp: SystemTime::now(),
+            });
+        };
+        report();
+        started_rx.recv().unwrap();
+        for _ in 0..DIAGNOSTIC_QUEUE_CAPACITY - 1 {
+            report();
+        }
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                sink.report(|| panic!("injected event construction panic"));
+            }))
+            .is_err()
+        );
+        report();
+        assert_eq!(sink.pending(), DIAGNOSTIC_QUEUE_CAPACITY as u64 + 1);
+        sink.report(|| panic!("the restored capacity must now be fully reserved"));
+        release_tx.send(()).unwrap();
+        sink.shutdown().unwrap();
+    }
+
+    #[test]
+    #[ignore = "manual release-mode diagnostic overload performance measurement"]
+    fn benchmark_full_diagnostic_queue() {
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let sink = Box::new(
+            AsyncDiagnosticSink::new(BlockingSink {
+                first: AtomicBool::new(true),
+                started: started_tx,
+                release: Mutex::new(release_rx),
+            })
+            .unwrap(),
+        );
+        let event = |error| OwnedDiagnosticEvent {
+            udf_id: "overload benchmark",
+            argument: None,
+            error,
+            diagnostic_id: DiagnosticId::from_u64(1),
+            timestamp: SystemTime::now(),
+        };
+        sink.report(|| event(XllError::Panic));
+        started_rx.recv().unwrap();
+        for _ in 0..DIAGNOSTIC_QUEUE_CAPACITY {
+            sink.report(|| event(XllError::Panic));
+        }
+        for bytes in [0, 65_536, 1_048_576] {
+            let error = XllError::Native {
+                code: 1,
+                message: "x".repeat(bytes),
+            };
+            let mut samples = Vec::new();
+            for sample in 0..12 {
+                let start = std::time::Instant::now();
+                for _ in 0..256 {
+                    sink.report(|| event(std::hint::black_box(&error).clone()));
+                }
+                let elapsed = start.elapsed().as_nanos();
+                if sample != 0 {
+                    samples.push(elapsed / 256);
+                }
+            }
+            samples.sort_unstable();
+            eprintln!(
+                "diagnostic_full_queue bytes={bytes} median_ns={}",
+                samples[5]
+            );
+        }
         release_tx.send(()).unwrap();
         sink.shutdown().unwrap();
     }

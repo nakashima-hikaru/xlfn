@@ -208,12 +208,14 @@ fn verify_target_snapshot(
     }
     fs::write(&xll, source_snapshot.as_ref())?;
 
-    let observation = CrtObservation::inspect(&xlfn_package::inspect_pe(&xll)?, metadata.crt)?;
+    let snapshot = xlfn_package::PeSnapshot::parse(source_snapshot)?;
+    let observation = CrtObservation::inspect(snapshot.info(), metadata.crt)?;
     observation.warn_if_mixed();
     // Dynamic MSVC runtimes are redistributable external dependencies, not
     // Windows inbox DLLs. Admit only names observed in this exact XLL image.
     staged_bundle.try_add_external_imports(&observation.observed_dynamic_crt_imports)?;
-    let verified = xlfn_package::verify_staged_package(&xll, target.triple(), &[], staged_bundle)?;
+    let verified =
+        xlfn_package::verify_staged_package(&xll, target.triple(), snapshot, &[], staged_bundle)?;
     Ok((verified, observation))
 }
 

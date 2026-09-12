@@ -56,6 +56,39 @@ pub fn token_cache_associativity_probe() -> serde_json::Value {
             "tag_nibbles": tokens.iter().map(|(token,_)| token.chars().last().unwrap()).collect::<String>(),
             "rounds_ns": elapsed, "median_ns": elapsed[elapsed.len()/2] }));
     }
+    for count in [2, 4, 8] {
+        let codecs: Vec<_> = (0..count)
+            .map(|index| TokenCodec::new(index as u64 + 100, [index as u8; 32]))
+            .collect();
+        let id = HandleId {
+            slot: 7,
+            generation: BindingGeneration::ONE,
+        };
+        let tokens: Vec<_> = codecs.iter().map(|codec| codec.format(id)).collect();
+        let mut elapsed = Vec::new();
+        for round in 0..7 {
+            let started = Instant::now();
+            for index in 0..100_000 {
+                let which = index % count;
+                let codec = &codecs[which];
+                let verified = codec
+                    .parse(
+                        std::ptr::from_ref(codec).addr(),
+                        HandleToken::new(std::hint::black_box(&tokens[which])),
+                    )
+                    .unwrap();
+                assert_eq!(verified.id, id);
+                std::hint::black_box(verified);
+            }
+            if round > 0 {
+                elapsed.push(started.elapsed().as_nanos() as u64);
+            }
+        }
+        elapsed.sort_unstable();
+        cases.push(serde_json::json!({"case": format!("registries_{count}"),
+            "registries": count, "operations": 100_000,
+            "rounds_ns": elapsed, "median_ns": elapsed[elapsed.len()/2]}));
+    }
     let mut elapsed = Vec::new();
     for round in 0..7 {
         let started = Instant::now();

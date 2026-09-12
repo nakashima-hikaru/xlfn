@@ -28,23 +28,27 @@ use xlfn_kernel::rotating_read_domain::{
 
 use super::binding::BindingRecord;
 use parking_lot::{Condvar, Mutex};
+use smallvec::SmallVec;
 use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use xlfn_kernel::published_owner::PublishedOwner;
+
+// Single-cell deletion and ordinary revision replacement should not allocate
+// a heap queue. Larger retirement batches retain their allocation when drained.
+type RetiredBindings = SmallVec<[PublishedOwner<BindingRecord>; 4]>;
 
 pub(crate) struct HandleReadDomain {
     domain: RotatingReadDomain<DEFAULT_STRIPE_COUNT>,
-    pending: [Mutex<Vec<PublishedOwner<BindingRecord>>>; 2],
+    pending: [Mutex<RetiredBindings>; 2],
     // Maintenance hint; pending queue locks and the driver handoff publish work.
     queued: AtomicUsize,
     // Also a destruction-completion counter: release decrements synchronize
     // with seal/flush Acquire loads, even before a reclaimer locks completion.
     debt: AtomicUsize,
     peak_debt: AtomicUsize,
-    maintenance_running: AtomicBool,
-    maintenance_requested: AtomicBool,
+    maintenance_requests: AtomicUsize,
     completion: Mutex<()>,
     changed: Condvar,
 }
@@ -100,7 +104,7 @@ impl Drop for HandleDomainPermit {
         drop(self.permit.take());
         // SAFETY: enter_owned requires the domain owner to outlive the whole
         // capability, including this final maintenance notification.
-        unsafe { self.domain.as_ref() }.maintain();
+        unsafe { self.domain.as_ref() }.maintain_after_reader();
     }
 }
 
@@ -112,7 +116,7 @@ pub(crate) struct HandleBindingDomainPermit<'domain> {
 impl Drop for HandleBindingDomainPermit<'_> {
     fn drop(&mut self) {
         drop(self.permit.take());
-        self.domain.maintain();
+        self.domain.maintain_after_reader();
     }
 }
 
@@ -120,12 +124,11 @@ impl HandleReadDomain {
     pub(crate) fn new() -> Self {
         Self {
             domain: RotatingReadDomain::new(),
-            pending: [Mutex::new(Vec::new()), Mutex::new(Vec::new())],
+            pending: [Mutex::new(SmallVec::new()), Mutex::new(SmallVec::new())],
             queued: AtomicUsize::new(0),
             debt: AtomicUsize::new(0),
             peak_debt: AtomicUsize::new(0),
-            maintenance_running: AtomicBool::new(false),
-            maintenance_requested: AtomicBool::new(false),
+            maintenance_requests: AtomicUsize::new(0),
             completion: Mutex::new(()),
             changed: Condvar::new(),
         }
@@ -218,13 +221,13 @@ impl HandleReadDomain {
         }
     }
 
-    fn take_generation(&self, index: usize) -> Vec<PublishedOwner<BindingRecord>> {
+    fn take_generation(&self, index: usize) -> RetiredBindings {
         let records = std::mem::take(&mut *self.pending[index].lock());
         self.queued.fetch_sub(records.len(), Ordering::Relaxed);
         records
     }
 
-    fn reclaim(&self, records: Vec<PublishedOwner<BindingRecord>>) {
+    fn reclaim(&self, records: RetiredBindings) {
         if records.is_empty() {
             return;
         }
@@ -241,27 +244,51 @@ impl HandleReadDomain {
         self.changed.notify_all();
     }
 
+    fn maintain_after_reader(&self) {
+        // The permit's Release RMW precedes this fence. If a writer already
+        // sealed that stripe, acquire its Release sequence: enqueue precedes
+        // seal, so the zero-queue test cannot miss that writer's debt. If this
+        // reader left before seal, the writer's idle check sees its departure
+        // and handles the drain. A queue load without this fence can lose the
+        // final reader notification on weakly ordered hosts.
+        std::sync::atomic::fence(Ordering::Acquire);
+        if self.queued.load(Ordering::Relaxed) != 0 {
+            self.maintain();
+        }
+    }
+
     pub(crate) fn maintain(&self) {
         if self.is_reclaiming_here() {
             return;
         }
-        // Coalesce requests without losing the last reader's notification
-        // when it races a poll holding the transition or notification lock.
-        // A failed requester transfers its retry obligation to the active
-        // driver; no thread or shared owner retains this responsibility.
-        self.maintenance_requested.store(true, Ordering::Release);
-        if self.maintenance_running.swap(true, Ordering::AcqRel) {
+        // Writers and blocking quiescence always register. In particular,
+        // acquiring a previous failed poll's notification after releasing the
+        // transition lock makes its queued work visible to this next pass.
+        // Every requester registers once. Only the 0 -> 1 caller drives;
+        // requests arriving during a poll remain in the count and force the
+        // driver to acquire them before another poll. Subtracting the consumed
+        // batch to zero transfers driving responsibility to the next caller.
+        // One modification order replaces a two-flag handoff, so a departing
+        // reader's notification cannot be cleared without being consumed.
+        let previous = self
+            .maintenance_requests
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |requests| {
+                requests.checked_add(1)
+            })
+            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+        if previous != 0 {
             return;
         }
+        let mut consumed = 1;
         loop {
-            self.maintenance_requested.store(false, Ordering::Release);
             self.poll_maintenance();
-            self.maintenance_running.store(false, Ordering::Release);
-            if !self.maintenance_requested.swap(false, Ordering::AcqRel)
-                || self.maintenance_running.swap(true, Ordering::AcqRel)
-            {
+            let requested = self
+                .maintenance_requests
+                .fetch_sub(consumed, Ordering::AcqRel);
+            if requested == consumed {
                 return;
             }
+            consumed = requested - consumed;
         }
     }
 
@@ -287,8 +314,12 @@ impl HandleReadDomain {
             .unwrap_or_default()
             .into_iter()
             .flatten()
-            .flatten()
-            .collect();
+            .filter(|batch| !batch.is_empty())
+            .reduce(|mut records, next| {
+                records.extend(next);
+                records
+            })
+            .unwrap_or_default();
         self.reclaim(records);
         self.maintain();
     }
@@ -329,6 +360,134 @@ mod tests {
     use crate::handle::{ExcelHandleObject, registry::HandleRegistry};
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[cfg(not(all(target_os = "windows", target_arch = "x86")))]
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn loom_empty_queue_fast_path_preserves_last_reader_notification() {
+        use loom::sync::Arc;
+        use loom::sync::atomic::{AtomicUsize, Ordering, fence};
+
+        struct Maintenance {
+            // Bits 1/2 are seal/wait flags. Keep the same RMW orderings
+            // as SealableCounter::release / seal / mark_waiting.
+            gates: [AtomicUsize; 2],
+            queued: AtomicUsize,
+            requests: AtomicUsize,
+        }
+
+        impl Maintenance {
+            fn maintain(&self) {
+                if self.requests.fetch_add(1, Ordering::AcqRel) != 0 {
+                    return;
+                }
+                let mut consumed = 1;
+                loop {
+                    if self.queued.load(Ordering::Relaxed) != 0 {
+                        for gate in &self.gates {
+                            gate.fetch_or(2, Ordering::Release);
+                        }
+                        if self
+                            .gates
+                            .iter()
+                            .all(|gate| gate.fetch_or(4, Ordering::AcqRel) & 1 == 0)
+                        {
+                            self.queued.store(0, Ordering::Relaxed);
+                        }
+                    }
+                    let requested = self.requests.fetch_sub(consumed, Ordering::AcqRel);
+                    if requested == consumed {
+                        return;
+                    }
+                    consumed = requested - consumed;
+                }
+            }
+        }
+
+        for reader_count in [1, 2] {
+            let mut model = loom::model::Builder::new();
+            if reader_count == 2 {
+                // Three actors have a much larger schedule space. Exercise
+                // two reader stripes with bounded preemption in normal CI.
+                model.preemption_bound = Some(2);
+                model.max_permutations = Some(20_000);
+            }
+            model.check(move || {
+                let state = Arc::new(Maintenance {
+                    gates: std::array::from_fn(|index| {
+                        AtomicUsize::new(usize::from(index < reader_count))
+                    }),
+                    queued: AtomicUsize::new(0),
+                    requests: AtomicUsize::new(0),
+                });
+                let readers: Vec<_> = (0..reader_count)
+                    .map(|index| {
+                        let reader = Arc::clone(&state);
+                        loom::thread::spawn(move || {
+                            reader.gates[index].fetch_sub(1, Ordering::Release);
+                            fence(Ordering::Acquire);
+                            if reader.queued.load(Ordering::Relaxed) != 0 {
+                                reader.maintain();
+                            }
+                        })
+                    })
+                    .collect();
+                let writer = Arc::clone(&state);
+                let writer = loom::thread::spawn(move || {
+                    writer.queued.store(1, Ordering::Relaxed);
+                    writer.maintain();
+                });
+                for reader in readers {
+                    reader.join().unwrap();
+                }
+                writer.join().unwrap();
+                assert_eq!(state.queued.load(Ordering::Relaxed), 0);
+                assert_eq!(state.requests.load(Ordering::Relaxed), 0);
+            });
+        }
+    }
+
+    #[test]
+    fn miri_blocking_quiescence_drives_retirement_queued_in_the_new_generation() {
+        struct Counted(Arc<AtomicUsize>);
+        impl Drop for Counted {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::Release);
+            }
+        }
+        let registry = Arc::new(HandleRegistry::from_entropy(1, [7; 40]));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let token = registry
+            .insert_pending(&mut Some(Counted(Arc::clone(&drops))))
+            .unwrap();
+        let domain = registry.bindings.read_domain();
+        // Hold an initially empty generation across a blocking quiescence.
+        // Use the kernel permit so its drop supplies no handle-level retry:
+        // the blocking writer must itself service the new generation's debt.
+        let permit = domain.domain.enter(0).unwrap();
+        let initial = domain.domain.current_generation();
+        let worker_registry = Arc::clone(&registry);
+        let worker = std::thread::spawn(move || worker_registry.bindings.read_domain().quiesce());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while domain.domain.current_generation() == initial && std::time::Instant::now() < deadline
+        {
+            std::thread::yield_now();
+        }
+        let rotated = domain.domain.current_generation() != initial;
+        if rotated {
+            registry.remove::<Counted>(&token).unwrap();
+            assert_eq!(domain.debt(), 1);
+            assert_eq!(drops.load(Ordering::Acquire), 0);
+        }
+        drop(permit);
+        worker.join().unwrap();
+        assert!(
+            rotated,
+            "the blocking writer must publish its next generation"
+        );
+        assert_eq!(domain.debt(), 0);
+        assert_eq!(drops.load(Ordering::Acquire), 1);
+    }
 
     #[test]
     fn miri_last_old_reader_reclaims_while_a_later_reader_remains() {

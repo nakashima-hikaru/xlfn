@@ -21,6 +21,7 @@ use parking_lot::{Condvar, Mutex, RwLock};
 #[cfg(test)]
 use parking_lot::{RwLockReadGuard, RwLockWriteGuard};
 use rustc_hash::{FxBuildHasher, FxHashMap};
+use smallvec::SmallVec;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::ptr::NonNull;
@@ -213,11 +214,14 @@ impl Default for TopicTableState {
     }
 }
 
+// Match binding retirement: the common single-topic disconnect stays inline.
+type RetiredTopics = SmallVec<[PublishedOwner<PublishedTopic>; 4]>;
+
 pub(crate) struct TopicTable {
     state: RwLock<TopicTableState>,
     published: PublishedTopics,
     read_domain: RotatingReadDomain<DEFAULT_STRIPE_COUNT>,
-    pending_reclaims: [Mutex<Vec<PublishedOwner<PublishedTopic>>>; 2],
+    pending_reclaims: [Mutex<RetiredTopics>; 2],
 }
 
 impl TopicTable {
@@ -226,7 +230,7 @@ impl TopicTable {
             state: RwLock::new(TopicTableState::default()),
             published: PublishedTopics::new(),
             read_domain: RotatingReadDomain::new(),
-            pending_reclaims: [Mutex::new(Vec::new()), Mutex::new(Vec::new())],
+            pending_reclaims: [Mutex::new(SmallVec::new()), Mutex::new(SmallVec::new())],
         }
     }
 
@@ -259,26 +263,23 @@ impl TopicTable {
         }
     }
 
-    fn drain_generation(
-        &self,
-        generation: DrainedGeneration,
-    ) -> Vec<PublishedOwner<PublishedTopic>> {
+    fn drain_generation(&self, generation: DrainedGeneration) -> RetiredTopics {
         let mut queue = self.pending_reclaims[generation.index()].lock();
         std::mem::take(&mut *queue)
     }
 
-    pub(crate) fn try_quiesce_and_drain(&self) -> Vec<PublishedOwner<PublishedTopic>> {
+    pub(crate) fn try_quiesce_and_drain(&self) -> RetiredTopics {
         let empty = {
             let Some(first) = self.pending_reclaims[0].try_lock() else {
-                return Vec::new();
+                return SmallVec::new();
             };
             let Some(second) = self.pending_reclaims[1].try_lock() else {
-                return Vec::new();
+                return SmallVec::new();
             };
             first.is_empty() && second.is_empty()
         };
         if empty {
-            return Vec::new();
+            return SmallVec::new();
         }
         let Some(result) = self
             .read_domain
@@ -287,12 +288,12 @@ impl TopicTable {
                 |generation| self.drain_generation(generation),
             )
         else {
-            return Vec::new();
+            return SmallVec::new();
         };
         result.unwrap_or_default()
     }
 
-    pub(crate) fn seal_and_drain(&self) -> Vec<PublishedOwner<PublishedTopic>> {
+    pub(crate) fn seal_and_drain(&self) -> RetiredTopics {
         self.read_domain.seal_and_wait();
         let mut queue0 = self.pending_reclaims[0].lock();
         let mut queue1 = self.pending_reclaims[1].lock();
@@ -724,19 +725,36 @@ impl TopicTable {
 
     pub(crate) fn remove_all(&self) -> Vec<TopicRemoval> {
         let mut state = self.state.write();
-        let keys = state.by_key.keys().copied().collect::<Vec<_>>();
-        let mut removals = Vec::with_capacity(keys.len());
-        let mut retired_topics = Vec::with_capacity(keys.len());
-        for key in keys {
-            if let Some((removal, retired)) = self.remove_topic_locked(&mut state, key) {
-                removals.push(removal);
-                retired_topics.push(retired);
-            }
+        let mut removals = Vec::with_capacity(state.by_key.len());
+        // Withdraw every pointer before registering any retired owner. This
+        // is the same ordering as close; the queue never destroys payloads.
+        self.published.clear();
+        let TopicTableState {
+            by_key,
+            by_lifetime_key,
+            by_observer_id,
+            initializing,
+            ..
+        } = &mut *state;
+        for (key, topic) in by_key.drain() {
+            let was_provisional = topic.publication.state() == PublishedTopicState::Provisional;
+            topic
+                .publication
+                .state
+                .store(PublishedTopicState::Stale as u8, Ordering::Release);
+            removals.push(TopicRemoval {
+                token: topic.publication.token.clone(),
+                key,
+                was_provisional,
+                initialization_id: initializing
+                    .get(&key)
+                    .map(|initialization| initialization.refinement_id),
+            });
+            self.enqueue_reclaim(topic.publication);
         }
+        by_lifetime_key.clear();
+        by_observer_id.clear();
         drop(state);
-        for retired in retired_topics {
-            self.enqueue_reclaim(retired);
-        }
         if !super::runtime::is_current_thread_reading_topic() {
             let drained = self.try_quiesce_and_drain();
             drop(drained);

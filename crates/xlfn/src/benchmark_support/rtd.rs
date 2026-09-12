@@ -3,6 +3,15 @@ use std::{cell::Cell, time::Instant};
 
 use crate::subscription::TOPIC_SHARDS;
 
+/// Format the internal fixed-width topic key on the RTD observation path.
+pub fn rtd_transport_key(runtime_id: u64, subscription_id: u64) {
+    let key = crate::subscription::SubscriptionKey::from_internal(
+        runtime_id,
+        crate::subscription::SubscriptionId(subscription_id),
+    );
+    std::hint::black_box(key.to_transport().as_str());
+}
+
 struct BenchmarkSubscription;
 
 // SAFETY: the benchmark subscription owns no background activity or retained
@@ -387,6 +396,24 @@ pub struct RtdRefreshScalingBenchmark {
 }
 
 impl RtdRefreshScalingBenchmark {
+    /// Models an initial full subscription snapshot followed by sparse ticks.
+    /// Both epoch buffers retain their peak storage before measurement starts.
+    pub fn after_dense_refresh(
+        case: RtdRefreshScalingCase,
+        value_kind: RtdRefreshValueKind,
+    ) -> Self {
+        let mut benchmark = Self::new(case, value_kind);
+        benchmark.updated_indices = (0..case.active_topics).collect();
+        benchmark.run_end_to_end_cycle();
+        benchmark.run_end_to_end_cycle();
+        // Update late topic IDs, not the initial snapshot's first key. A
+        // hash-table iterator may stop early for a low occupied bucket and
+        // accidentally hide historical-capacity scans in that special case.
+        benchmark.updated_indices =
+            (case.active_topics - case.updated_topics..case.active_topics).collect();
+        benchmark
+    }
+
     pub fn new(case: RtdRefreshScalingCase, value_kind: RtdRefreshValueKind) -> Self {
         assert!(case.active_topics > 0);
         assert!(case.updated_topics > 0);
@@ -446,8 +473,11 @@ impl RtdRefreshScalingBenchmark {
                 .plan_refresh()
                 .expect("refresh planning must succeed");
             let started = Instant::now();
-            let updates = planned.publish.collect_refresh(&planned.plan);
+            planned
+                .publish
+                .collect_refresh(&planned.plan, &mut planned.updates);
             measured += started.elapsed();
+            let updates = std::mem::take(&mut planned.updates);
             planned
                 .publish
                 .restore_refresh_updates(&planned.plan, updates);
@@ -485,6 +515,13 @@ impl RtdRefreshScalingBenchmark {
         batch
             .complete(crate::subscription::RefreshOutcome::Delivered)
             .expect("refresh completion must succeed");
+    }
+
+    /// Retains the runtime and its terminal server handle for footprint probes.
+    pub fn terminate_server(&self) {
+        self.server
+            .terminate()
+            .expect("server termination must succeed");
     }
 
     fn publish_updates(&self) {

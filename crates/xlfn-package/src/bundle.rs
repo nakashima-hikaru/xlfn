@@ -337,7 +337,7 @@ pub fn stage_bundle(
             )
             .into());
         }
-        let artifact = verified_artifact(
+        let artifact = VerifiedArtifact::new(
             PathBuf::from(&file.name),
             file.snapshot.clone(),
             file.permissions.clone(),

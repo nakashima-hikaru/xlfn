@@ -432,7 +432,6 @@ impl<'a> SpawnReservation<'a> {
                 },
             );
             debug_assert!(previous.is_none(), "task ID must be unique per generation");
-            generation.task_count.fetch_add(1, Ordering::Relaxed);
         }
 
         let completion = self

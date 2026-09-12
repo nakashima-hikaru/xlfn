@@ -3,7 +3,7 @@ use crate::call_return::{ExcelReturn, ReturnContext};
 use crate::cancellation::CancellationToken;
 use crate::error::ExcelCallbackStatus;
 use crate::panic_boundary::catch_no_unwind;
-use crate::return_abi::AsyncReturnPointer;
+use crate::return_abi::AsyncReturnValue;
 use crate::{XllError, XllResult};
 use futures_util::Future;
 use std::panic::AssertUnwindSafe;
@@ -84,25 +84,25 @@ where
             let result = catch_no_unwind(AssertUnwindSafe(|| {
                 let mut return_context = ReturnContext::new();
                 let value = T::invoke(&mut return_context, || Ok(value))?;
-                AsyncReturnPointer::from_value(value)
+                AsyncReturnValue::from_value(value)
             }))
             .unwrap_or(Err(XllError::Panic));
             match result {
                 Ok(pointer) => (pointer, OwnedCompletionOutcome::Success),
                 Err(error) => (
-                    AsyncReturnPointer::error(&error),
+                    AsyncReturnValue::error(&error),
                     OwnedCompletionOutcome::Error(error),
                 ),
             }
         }
         Ok(Err(error)) => (
-            AsyncReturnPointer::error(&error),
+            AsyncReturnValue::error(&error),
             OwnedCompletionOutcome::Error(error),
         ),
         Err(_) => {
             let error = XllError::Panic;
             (
-                AsyncReturnPointer::error(&error),
+                AsyncReturnValue::error(&error),
                 OwnedCompletionOutcome::Error(error),
             )
         }
@@ -129,10 +129,10 @@ pub(crate) unsafe fn return_error(handle: *mut XLOPER12, error: &XllError) -> Ow
     let Some(handle) = NonNull::new(handle) else {
         return OwnedDeliveryOutcome::Unobserved;
     };
-    let pointer = AsyncReturnPointer::error(error);
+    let mut value = AsyncReturnValue::error(error);
     // SAFETY: the raw handle is valid under the caller's FFI contract and the
     // return pointer remains owned until async_return returns.
-    match unsafe { async_return(handle, pointer.as_non_null()) } {
+    match unsafe { async_return(handle, NonNull::from_mut(value.as_raw())) } {
         Ok(()) => OwnedDeliveryOutcome::Delivered,
         Err(error) => OwnedDeliveryOutcome::Failed(error),
     }

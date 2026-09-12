@@ -47,6 +47,7 @@ futures-util = { version = "0.3.34", default-features = false, features = ["std"
 getrandom = "0.4.3"
 hashbrown = { version = "0.17.1", default-features = false, features = ["raw-entry"] }
 inventory = "0.3.24"
+indexmap = "2.14.2"
 libc = "0.2.189"
 loom = "0.7.2"
 moka = { version = "0.12", default-features = false, features = ["sync"] }

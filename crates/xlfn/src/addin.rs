@@ -215,11 +215,11 @@ pub struct HandleConfig {
 #[cfg(feature = "handles")]
 impl HandleConfig {
     pub const DEFAULT_MAX_BINDINGS: u32 = 16_384;
-    /// Upper bound for the dense immutable publication table.
+    /// Upper bound for simultaneously live formula bindings.
     ///
-    /// The table is allocated when a handle generation is initialized, so an
-    /// unchecked `u32` would turn configuration input into an unbounded eager
-    /// allocation. The bound keeps the dense lookup policy explicit.
+    /// The publication table allocates fixed pages as slots are used. This
+    /// limit bounds the page directory and the maximum retained registry size
+    /// without eagerly allocating one pointer for every possible binding.
     pub const MAX_SUPPORTED_BINDINGS: u32 = 1_048_576;
 
     #[must_use]

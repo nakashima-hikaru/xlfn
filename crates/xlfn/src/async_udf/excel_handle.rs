@@ -1,7 +1,7 @@
 use super::completion::{OwnedDeliveryOutcome, return_error};
 use super::manager::MAX_ASYNC_HANDLE_BYTES;
 use crate::error::InputError;
-use crate::return_abi::AsyncReturnPointer;
+use crate::return_abi::AsyncReturnValue;
 use crate::{XllError, XllResult};
 use std::ptr::NonNull;
 use xlfn_sys::{XLOPER12, XLOPER12BigData, XLOPER12BigDataHandle, XLOPER12Value, XLTYPE_BIG_DATA};
@@ -104,7 +104,7 @@ impl ExcelAsyncResponder {
         self.fallback_error = Some(error);
     }
 
-    pub(crate) unsafe fn deliver(&mut self, value: AsyncReturnPointer) -> XllResult<()> {
+    pub(crate) unsafe fn deliver(&mut self, mut value: AsyncReturnValue) -> XllResult<()> {
         if self.state != DeliveryState::Pending {
             return Err(XllError::Internal {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::ASYNC_DELIVERY,
@@ -114,8 +114,10 @@ impl ExcelAsyncResponder {
         // from Excel must not cause Drop to issue a second callback.
         self.state = DeliveryState::Attempted;
         // SAFETY: the responder owns a valid copied handle and `value` remains
-        // owned by the caller for the duration of this call.
-        unsafe { super::completion::async_return(self.pointer(), value.as_non_null()) }
+        // owned here for the duration of this call.
+        unsafe {
+            super::completion::async_return(self.pointer(), NonNull::from_mut(value.as_raw()))
+        }
     }
 
     /// Delivers an Excel error through the same single-attempt path as a
@@ -123,7 +125,7 @@ impl ExcelAsyncResponder {
     pub(crate) unsafe fn deliver_error(&mut self, error: &XllError) -> XllResult<()> {
         // SAFETY: the returned pointer is owned by this call until `deliver`
         // completes, which forwards the pointer to Excel synchronously.
-        unsafe { self.deliver(AsyncReturnPointer::error(error)) }
+        unsafe { self.deliver(AsyncReturnValue::error(error)) }
     }
 }
 

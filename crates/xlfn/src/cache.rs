@@ -164,15 +164,25 @@ pub struct CacheReclamationStats {
     pub grace_period_nanos: u64,
 }
 
-// Mutations periodically drive index maintenance. Retirement also
-// requests maintenance on ordinary reads, with a cheap zero-debt fast path.
-const MAINTENANCE_INTERVAL: usize = 32;
+// Retirement requests maintenance on ordinary reads, with a cheap zero-debt
+// fast path. Resident-policy maintenance belongs to the index backend.
 const RECLAIM_BACKPRESSURE_NODES: usize = 256;
 
 impl<V> Drop for CacheLease<'_, V> {
     fn drop(&mut self) {
         // SAFETY: [TR-LEASE-1] self.node remains valid because a pin capability is held by this lease.
         let node = unsafe { self.node.as_ref() };
+        if !node.published && ACTIVE_CACHE_INITIALIZATION_DEPTH.get() == 0 {
+            // A never-published node has exactly this lease as its owner; no
+            // index reader can have observed its pointer. Initializer-local
+            // drops still enter deferred reclamation below so user destructors
+            // never run inside the cache initialization guard.
+            debug_assert_eq!(node.pins.load(Ordering::Relaxed), 1);
+            // SAFETY: the sole owning lease is being consumed and this node
+            // has never been reachable through a non-owning index snapshot.
+            unsafe { reclaim_cache_node::<V>(self.node.as_ptr().cast()) };
+            return;
+        }
         if node.release_pin() {
             // SAFETY: [TR-RECLAIM-1] The last pin was dropped on a retired (non-resident) node.
             let domain = unsafe { node.domain.as_ref() };
@@ -556,6 +566,8 @@ struct CacheNode<V> {
     value: V,
     pins: AtomicUsize,
     resident: AtomicBool,
+    // Immutable: only zero-budget nodes bypass every index publication.
+    published: bool,
     weight: u32,
     generation: u64,
     domain: NonNull<CacheLookupDomain>,
@@ -833,7 +845,6 @@ pub struct CalculationCache<K, V> {
     generation: CacheGeneration,
     domain: xlfn_kernel::published_owner::PublishedOwner<CacheLookupDomain>,
     clear_lock: Mutex<()>,
-    mutations: AtomicUsize,
     index: ResidentIndex<K, V>,
     clear_fn: Option<fn(*const ())>,
 }
@@ -893,7 +904,6 @@ where
             generation: CacheGeneration::new(),
             domain: xlfn_kernel::published_owner::PublishedOwner::new(CacheLookupDomain::new()),
             clear_lock: Mutex::new(()),
-            mutations: AtomicUsize::new(0),
             index: make_index(capacity),
             clear_fn: Some(|ptr| {
                 // SAFETY: [TR-RECLAIM-1] ptr points to a valid CalculationCache<K, V> during Drop.
@@ -963,11 +973,8 @@ where
         if ACTIVE_CACHE_INITIALIZATION_DEPTH.get() != 0 {
             return;
         }
-        if mutation
-            && self.mutations.fetch_add(1, Ordering::Relaxed) % MAINTENANCE_INTERVAL
-                == MAINTENANCE_INTERVAL - 1
-        {
-            self.index.maintenance();
+        if mutation {
+            self.index.maintenance_after_mutation();
         }
         let nodes = self.domain.pending_nodes.load(Ordering::Relaxed);
         if nodes == 0 {
@@ -1150,6 +1157,7 @@ where
                     value,
                     pins: AtomicUsize::new(1),
                     resident: AtomicBool::new(false),
+                    published: false,
                     weight: u32::try_from(measured).unwrap_or(u32::MAX).max(1),
                     generation: epoch,
                     domain: NonNull::from(&*self.domain),
@@ -1195,6 +1203,7 @@ where
                         value,
                         pins: AtomicUsize::new(2), // 1 for index residency, 1 for creator lease
                         resident: AtomicBool::new(true),
+                        published: true,
                         weight: w,
                         generation: epoch,
                         domain: domain_ptr,
@@ -2602,6 +2611,7 @@ mod tests {
             value: 42u32,
             pins: AtomicUsize::new(usize::MAX),
             resident: AtomicBool::new(true),
+            published: true,
             weight: 1,
             generation: 1,
             domain: NonNull::dangling(),
@@ -2616,6 +2626,7 @@ mod tests {
             value: 42_u32,
             pins: AtomicUsize::new(1),
             resident: AtomicBool::new(false),
+            published: false,
             weight: 1,
             generation: 0,
             domain: NonNull::dangling(),
@@ -2631,6 +2642,7 @@ mod tests {
             value: [AtomicUsize::new(0), AtomicUsize::new(0)],
             pins: AtomicUsize::new(2),
             resident: AtomicBool::new(false),
+            published: false,
             weight: 1,
             generation: 0,
             domain: NonNull::dangling(),
@@ -2734,7 +2746,30 @@ mod tests {
     }
 
     #[test]
-    fn zero_budget_values_are_reclaimed_when_their_leases_end() {
+    #[ignore = "manual release-mode zero-budget cache performance measurement"]
+    fn benchmark_zero_budget_cache() {
+        for budget in [0, 8] {
+            let cache = CalculationCache::new(budget);
+            let mut samples = Vec::new();
+            for round in 0..12 {
+                let start = std::time::Instant::now();
+                for key in 0..10_000_u64 {
+                    let value = cache
+                        .get_or_try_insert_with(std::hint::black_box(key), |_| 1, || Ok(key))
+                        .unwrap();
+                    std::hint::black_box(*value);
+                }
+                if round != 0 {
+                    samples.push(start.elapsed().as_nanos() / 10_000);
+                }
+            }
+            samples.sort_unstable();
+            eprintln!("cache_budget={budget} median_ns={}", samples[5]);
+        }
+    }
+
+    #[test]
+    fn miri_zero_budget_values_are_reclaimed_when_their_leases_end() {
         struct DropProbe(Arc<AtomicUsize>);
         impl Drop for DropProbe {
             fn drop(&mut self) {
@@ -2753,6 +2788,7 @@ mod tests {
             assert_eq!(drops.load(Ordering::Relaxed), key as usize + 1);
         }
         assert_eq!(cache.reclamation_stats().pending_nodes, 0);
+        assert_eq!(cache.reclamation_stats().reclaimed_nodes, 0);
     }
 
     #[test]

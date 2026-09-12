@@ -140,7 +140,7 @@ impl BuildManifest {
                 }
                 Ok(ManifestFile {
                     relative_path: relative_path.to_owned(),
-                    size: artifact.size,
+                    size: artifact.size(),
                     sha256: artifact.sha256_hex(),
                 })
             })
@@ -173,7 +173,7 @@ pub(crate) fn validate_manifest_bytes(artifacts: &[VerifiedArtifact]) -> Package
         .iter()
         .find(|artifact| artifact.relative_path == Path::new("build-manifest.json"))
         .ok_or_else(|| PackageError::InvalidBuildManifest("manifest artifact is missing".into()))?;
-    let manifest: BuildManifest = serde_json::from_slice(&manifest.bytes).map_err(|error| {
+    let manifest: BuildManifest = serde_json::from_slice(manifest.bytes()).map_err(|error| {
         PackageError::InvalidBuildManifest(format!("manifest schema is invalid: {error}"))
     })?;
     if manifest.schema != BUILD_MANIFEST_SCHEMA {
@@ -217,7 +217,7 @@ pub(crate) fn validate_manifest_bytes(artifacts: &[VerifiedArtifact]) -> Package
                 "manifest does not describe {name:?}"
             )));
         };
-        if *described_name != name || *size != artifact.size || *sha256 != artifact.sha256_hex() {
+        if *described_name != name || *size != artifact.size() || *sha256 != artifact.sha256_hex() {
             return Err(PackageError::InvalidBuildManifest(format!(
                 "manifest metadata does not match {name:?}"
             )));
@@ -234,20 +234,6 @@ pub(crate) fn digest_hex(digest: &[u8]) -> String {
         output.push(HEX[(byte & 0x0f) as usize] as char);
     }
     output
-}
-
-pub(crate) fn verified_artifact(
-    relative_path: PathBuf,
-    bytes: SharedBytes,
-    permissions: std::fs::Permissions,
-) -> VerifiedArtifact {
-    VerifiedArtifact {
-        relative_path,
-        size: bytes.len() as u64,
-        sha256: sha256_digest(&bytes),
-        permissions,
-        bytes,
-    }
 }
 
 pub(crate) fn artifact_relative_path(path: &Path, label: &str) -> PackageResult<PathBuf> {

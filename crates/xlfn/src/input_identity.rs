@@ -3,7 +3,7 @@ use crate::{XllError, XllResult};
 
 const INLINE_ARGUMENT_BYTES: usize = 128;
 const HASH_BUFFER_BYTES: usize = 4_096;
-const INPUT_FINGERPRINT_DOMAIN: &[u8] = b"xlfn-input-v2\0";
+const INPUT_FINGERPRINT_DOMAIN: &[u8] = b"xlfn-input-v3\0";
 
 /// Runtime-local semantic identity of one UDF argument list.
 ///
@@ -87,6 +87,21 @@ impl InputIdentityEncoder {
     /// Adds a UTF-8 string by its bytes, not by its source Excel encoding.
     pub fn string(&mut self, value: &str) {
         self.bytes(value.as_bytes());
+    }
+
+    /// Encodes raw Excel text without interpreting surrogate pairs. Borrowed
+    /// raw views can observe invalid UTF-16 units, so preserve every unit and
+    /// its length. UTF-8 semantic strings use the separate `string` encoding.
+    pub(crate) fn utf16(&mut self, units: &[u16]) {
+        self.u64(units.len() as u64);
+        let mut bytes = [0_u8; 256];
+        for chunk in units.chunks(bytes.len() / 2) {
+            let (pairs, _) = bytes.as_chunks_mut::<2>();
+            for (&unit, pair) in chunk.iter().zip(pairs.iter_mut()) {
+                pair.copy_from_slice(&unit.to_le_bytes());
+            }
+            self.write(&bytes[..chunk.len() * 2]);
+        }
     }
 
     /// Adds a boolean value.
@@ -461,6 +476,29 @@ mod tests {
                 .unwrap();
         }
         builder.finish().unwrap()
+    }
+
+    #[test]
+    fn raw_utf16_batches_match_length_delimited_little_endian_units() {
+        for length in [0, 1, 59, 60, 61, 63, 64, 127, 128, 129, 4_096] {
+            let units = (0..length)
+                .map(|index| (index * 997) as u16)
+                .collect::<Vec<_>>();
+            let mut batched = InputIdentityEncoder::new("text");
+            batched.utf16(&units);
+            let mut reference = InputIdentityEncoder::new("text");
+            reference.u64(length as u64);
+            let bytes = units
+                .iter()
+                .flat_map(|unit| unit.to_le_bytes())
+                .collect::<Vec<_>>();
+            reference.write(&bytes);
+            let mut actual = blake3::Hasher::new();
+            batched.finish_into(&mut actual).unwrap();
+            let mut expected = blake3::Hasher::new();
+            reference.finish_into(&mut expected).unwrap();
+            assert_eq!(actual.finalize(), expected.finalize(), "length={length}");
+        }
     }
 
     #[test]

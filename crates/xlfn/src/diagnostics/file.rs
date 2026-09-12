@@ -8,6 +8,8 @@ use crate::diagnostics::event::{
 };
 use parking_lot::Mutex;
 use serde::Serialize;
+use std::borrow::Cow;
+use std::fmt;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -16,17 +18,17 @@ use std::time::SystemTime;
 use std::{fs, io};
 
 #[derive(Serialize)]
-struct FileDiagnosticRecord {
+struct FileDiagnosticRecord<'a> {
     timestamp_ms: u128,
     diagnostic_id: u64,
-    udf: String,
-    argument: Option<String>,
+    udf: Cow<'a, str>,
+    argument: Option<Cow<'a, str>>,
     error: String,
 }
 
-pub(crate) fn bounded_diagnostic_text(value: &str) -> String {
+fn bounded_diagnostic_text(value: &str) -> Cow<'_, str> {
     if value.len() <= DIAGNOSTIC_TEXT_MAX_BYTES {
-        return value.to_owned();
+        return Cow::Borrowed(value);
     }
 
     let suffix = DIAGNOSTIC_TRUNCATION_SUFFIX;
@@ -39,7 +41,52 @@ pub(crate) fn bounded_diagnostic_text(value: &str) -> String {
     let mut bounded = String::with_capacity(prefix_end + suffix.len());
     bounded.push_str(&value[..prefix_end]);
     bounded.push_str(suffix);
-    bounded
+    Cow::Owned(bounded)
+}
+
+/// Applies the log budget during formatting so a large vendor message never
+/// creates an equally large temporary string before being truncated.
+#[derive(Default)]
+struct BoundedDiagnosticText {
+    text: String,
+    truncated: bool,
+}
+
+impl fmt::Write for BoundedDiagnosticText {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        if self.truncated {
+            return Err(fmt::Error);
+        }
+        let remaining = DIAGNOSTIC_TEXT_MAX_BYTES - self.text.len();
+        if value.len() <= remaining {
+            self.text.push_str(value);
+            return Ok(());
+        }
+        let end = value.floor_char_boundary(remaining.min(value.len()));
+        self.text.push_str(&value[..end]);
+        self.truncated = true;
+        // Display implementations propagate this to stop formatting fields
+        // whose output can no longer appear in the record.
+        Err(fmt::Error)
+    }
+}
+
+impl BoundedDiagnosticText {
+    fn finish(mut self) -> String {
+        if self.truncated {
+            let limit = DIAGNOSTIC_TEXT_MAX_BYTES - DIAGNOSTIC_TRUNCATION_SUFFIX.len();
+            self.text
+                .truncate(self.text.floor_char_boundary(limit.min(self.text.len())));
+            self.text.push_str(DIAGNOSTIC_TRUNCATION_SUFFIX);
+        }
+        self.text
+    }
+}
+
+fn bounded_diagnostic_error(error: &crate::XllError) -> String {
+    let mut output = BoundedDiagnosticText::default();
+    let _ = fmt::write(&mut output, format_args!("{error}"));
+    output.finish()
 }
 
 pub(crate) struct FileDiagnosticSink {
@@ -57,7 +104,7 @@ impl DiagnosticSink for FileDiagnosticSink {
             diagnostic_id: event.diagnostic_id().as_u64(),
             udf: bounded_diagnostic_text(event.udf_id()),
             argument: event.argument().map(bounded_diagnostic_text),
-            error: bounded_diagnostic_text(&event.error().to_string()),
+            error: bounded_diagnostic_error(event.error()),
         };
         let line = match serde_json::to_string(&record) {
             Ok(line) => line,
@@ -193,9 +240,9 @@ fn rotate_log_files(path: &Path, generations: usize) -> io::Result<()> {
 #[cfg(target_os = "windows")]
 pub(crate) fn append_startup_log(path: &Path, message: &str) -> io::Result<()> {
     #[derive(Serialize)]
-    struct StartupLogRecord {
+    struct StartupLogRecord<'a> {
         timestamp_ms: u128,
-        message: String,
+        message: Cow<'a, str>,
     }
 
     let record = StartupLogRecord {
@@ -230,4 +277,48 @@ pub(crate) fn install_file_diagnostic_sink_at(
     };
     super::set_diagnostic_sink(sink)?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod bounded_text_tests {
+    use super::*;
+
+    #[test]
+    fn formatting_matches_existing_truncation_at_unicode_boundaries() {
+        for unit in ["x", "é", "日", "🦀"] {
+            for extra in 0..8 {
+                let message = unit.repeat(DIAGNOSTIC_TEXT_MAX_BYTES / unit.len() + extra);
+                let error = crate::XllError::Native { code: 17, message };
+                assert_eq!(
+                    bounded_diagnostic_error(&error),
+                    bounded_diagnostic_text(&error.to_string()),
+                );
+            }
+        }
+        let exact = "x".repeat(DIAGNOSTIC_TEXT_MAX_BYTES);
+        let mut output = BoundedDiagnosticText::default();
+        fmt::write(&mut output, format_args!("{exact}")).unwrap();
+        assert_eq!(output.finish(), exact);
+        assert!(matches!(
+            bounded_diagnostic_text("udf"),
+            Cow::Borrowed("udf")
+        ));
+    }
+
+    #[test]
+    fn formatting_stops_when_the_record_budget_is_exhausted() {
+        struct MustNotFormat;
+        impl fmt::Display for MustNotFormat {
+            fn fmt(&self, _: &mut fmt::Formatter<'_>) -> fmt::Result {
+                panic!("formatting after the log budget must be skipped");
+            }
+        }
+        let huge = "x".repeat(1024 * 1024);
+        let mut output = BoundedDiagnosticText::default();
+        assert!(fmt::write(&mut output, format_args!("{huge}{MustNotFormat}")).is_err());
+        assert!(output.text.capacity() <= DIAGNOSTIC_TEXT_MAX_BYTES * 2);
+        let result = output.finish();
+        assert_eq!(result.len(), DIAGNOSTIC_TEXT_MAX_BYTES);
+        assert!(result.ends_with(DIAGNOSTIC_TRUNCATION_SUFFIX));
+    }
 }

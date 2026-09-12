@@ -359,8 +359,7 @@ impl<'call> XlStrRef<'call> {
     }
 
     pub fn to_string(self) -> XllResult<String> {
-        String::from_utf16(self.utf16)
-            .map_err(|_| XllError::input(self.argument, InputError::InvalidUtf16))
+        crate::utf16::decode_owned(self.utf16, self.argument)
     }
 }
 
@@ -480,10 +479,7 @@ pub(crate) fn encode_raw_value(
             encoder.tag(RawValueKind::String as u8);
             match value.utf16(encoder.argument()) {
                 Ok(text) => {
-                    encoder.u64(text.len() as u64);
-                    for unit in text {
-                        encoder.u32(u32::from(*unit));
-                    }
+                    encoder.utf16(text);
                 }
                 Err(error) => encoder.fail(error),
             }

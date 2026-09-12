@@ -1,14 +1,21 @@
 //! Allocation-only companion; the timing benchmark uses the uninstrumented allocator.
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use xlfn::{benchmark_support::RtdPrepareBenchmark, rtd::RtdTopic};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
+use xlfn::{
+    benchmark_support::{
+        RtdPrepareBenchmark, RtdRefreshScalingBenchmark, RtdRefreshScalingCase,
+        RtdRefreshValueKind, rtd_transport_key,
+    },
+    rtd::RtdTopic,
+};
 
 struct CountingAllocator;
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
 static REALLOCS: AtomicUsize = AtomicUsize::new(0);
 static BYTES: AtomicUsize = AtomicUsize::new(0);
+static LIVE_BYTES: AtomicIsize = AtomicIsize::new(0);
 
 // SAFETY: allocation/deallocation and layouts are forwarded unchanged to System.
 unsafe impl GlobalAlloc for CountingAllocator {
@@ -18,12 +25,17 @@ unsafe impl GlobalAlloc for CountingAllocator {
             BYTES.fetch_add(layout.size(), Ordering::Relaxed);
         }
         // SAFETY: the allocator contract supplies a valid layout.
-        unsafe { System.alloc(layout) }
+        let pointer = unsafe { System.alloc(layout) };
+        if !pointer.is_null() {
+            LIVE_BYTES.fetch_add(layout.size() as isize, Ordering::Relaxed);
+        }
+        pointer
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
         // SAFETY: pointer and layout came from the same delegated allocator.
         unsafe { System.dealloc(pointer, layout) }
+        LIVE_BYTES.fetch_sub(layout.size() as isize, Ordering::Relaxed);
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
@@ -32,7 +44,11 @@ unsafe impl GlobalAlloc for CountingAllocator {
             BYTES.fetch_add(size, Ordering::Relaxed);
         }
         // SAFETY: the caller supplies a live allocation and a valid new size.
-        unsafe { System.realloc(pointer, layout, size) }
+        let replacement = unsafe { System.realloc(pointer, layout, size) };
+        if !replacement.is_null() {
+            LIVE_BYTES.fetch_add(size as isize - layout.size() as isize, Ordering::Relaxed);
+        }
+        replacement
     }
 }
 
@@ -58,6 +74,9 @@ fn measure(case: &str, operation: impl FnOnce()) {
 }
 
 fn main() {
+    measure("transport_key", || {
+        rtd_transport_key(black_box(1), black_box(42))
+    });
     for (name, part) in [
         ("ascii8", "x".repeat(8)),
         ("ascii23", "x".repeat(23)),
@@ -92,5 +111,33 @@ fn main() {
                 },
             );
         }
+    }
+    for topics in [1, 4096] {
+        let before = LIVE_BYTES.load(Ordering::Relaxed);
+        let benchmark = RtdRefreshScalingBenchmark::new(
+            RtdRefreshScalingCase {
+                name: "termination",
+                active_topics: topics,
+                updated_topics: topics,
+                ready_shards: 32,
+            },
+            RtdRefreshValueKind::Number,
+        );
+        benchmark.run_end_to_end_cycle();
+        benchmark.run_end_to_end_cycle();
+        let active = LIVE_BYTES.load(Ordering::Relaxed) - before;
+        measure(&format!("termination/{topics}"), || {
+            benchmark.terminate_server()
+        });
+        let terminated = LIVE_BYTES.load(Ordering::Relaxed) - before;
+        println!(
+            "{}",
+            serde_json::json!({
+                "case": format!("server_footprint/{topics}"),
+                "active_bytes": active,
+                "terminated_bytes": terminated,
+            })
+        );
+        drop(benchmark);
     }
 }

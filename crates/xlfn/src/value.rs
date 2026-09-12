@@ -238,8 +238,7 @@ impl ExcelInputIdentity for i64 {
 
 impl<'call> FromExcel<'call> for String {
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
-        String::from_utf16(value.utf16(argument)?)
-            .map_err(|_| XllError::input(argument, InputError::InvalidUtf16))
+        crate::utf16::decode_owned(value.utf16(argument)?, argument)
     }
 }
 
@@ -818,35 +817,30 @@ impl<'call, M: InputMode> ExcelParameter<'call, M> for ExcelCellRef<'call> {
         context: &CallContext<'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
-        match value.value_type() {
+        let decoded = match value.value_type() {
             XlValueType::Number | XlValueType::Integer => {
                 let number = <f64 as FromExcel>::from_excel(value, argument)?;
-                M::f64(identity, number);
-                Ok(Self::Number(number))
+                Self::Number(number)
             }
             XlValueType::Boolean => {
                 let boolean = <bool as FromExcel>::from_excel(value, argument)?;
-                M::bool(identity, boolean);
-                Ok(Self::Boolean(boolean))
+                Self::Boolean(boolean)
             }
             XlValueType::String => {
                 let text = context
                     .scratch()
                     .decode_utf16(value.utf16(argument)?, argument)?;
-                M::string(identity, text);
-                Ok(Self::String(text))
+                Self::String(text)
             }
             XlValueType::Error => {
                 let error = <ExcelErrorValue as FromExcel>::from_excel(value, argument)?.0;
-                M::i64(identity, i64::from(error.code()));
-                Ok(Self::Error(error))
+                Self::Error(error)
             }
-            XlValueType::Nil => {
-                M::tag(identity, 5);
-                Ok(Self::Blank)
-            }
-            _ => Err(value.wrong_type(argument, "worksheet cell")),
-        }
+            XlValueType::Nil => Self::Blank,
+            _ => return Err(value.wrong_type(argument, "worksheet cell")),
+        };
+        <Self as ExcelParameter<'call, M>>::encode_decoded(&decoded, identity);
+        Ok(decoded)
     }
 
     fn encode_decoded(&self, identity: &mut M::Identity) {
@@ -905,23 +899,22 @@ where
 {
     let grid = GridView::from_value(value, argument)?;
     let (rows, columns) = grid.shape();
-    convert_owned_grid_elements(&grid, argument).and_then(|data| Matrix::new(rows, columns, data))
+    convert_owned_grid_elements(&grid, argument, |element| T::from_excel(element, argument))
+        .and_then(|data| Matrix::new(rows, columns, data))
 }
 
 fn convert_owned_grid_elements<'call, T>(
     grid: &GridView<'call>,
     argument: &'static str,
-) -> XllResult<Vec<T>>
-where
-    T: FromExcel<'call>,
-{
+    mut convert: impl FnMut(XlValueRef<'call>) -> XllResult<T>,
+) -> XllResult<Vec<T>> {
     let cells = grid.cells();
     let mut budget = ArrayInputBudget::new::<T>(cells.len(), argument)?;
     let mut data = Vec::with_capacity(cells.len());
     for element in cells.iter().map(XlValueRef::from_array_cell) {
         let element = element?;
         budget.include(element)?;
-        data.push(T::from_excel(element, argument)?);
+        data.push(convert(element)?);
     }
     Ok(data)
 }
@@ -935,6 +928,27 @@ impl<'call> FromExcel<'call> for ExcelValue {
             }
             _ => ExcelCellValue::from_excel(value, argument).map(Self::Scalar),
         }
+    }
+
+    fn from_excel_with_identity(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        identity: &mut InputIdentityEncoder,
+    ) -> XllResult<Self> {
+        if value.value_type() != XlValueType::Multi {
+            let converted = Self::from_excel(value, argument)?;
+            converted.encode_input_identity(identity);
+            return Ok(converted);
+        }
+        let grid = GridView::from_value(value, argument)?;
+        let (rows, columns) = grid.shape();
+        identity.tag(3);
+        identity.u64(rows as u64);
+        identity.u64(columns as u64);
+        let cells = convert_owned_grid_elements(&grid, argument, |cell| {
+            ExcelCellValue::from_excel_with_identity(cell, argument, identity)
+        })?;
+        Matrix::new(rows, columns, cells).map(Self::Array)
     }
 }
 
@@ -1231,6 +1245,153 @@ mod tests {
             })
             .unwrap();
         builder.finish().unwrap()
+    }
+
+    #[test]
+    fn borrowed_cell_identity_preserves_variants_and_matches_decoded_values() {
+        use crate::input_identity::InputFingerprintBuilder;
+
+        fn identity(raw: &mut XLOPER12) -> crate::input_identity::InputFingerprint {
+            with_excel_call_scope(|scope| {
+                let mut during_decode = InputFingerprintBuilder::new(1);
+                // SAFETY: the caller keeps the root and its payload live for this scope.
+                let borrowed = unsafe { XlValueRef::from_raw(raw) }.unwrap();
+                let decoded = during_decode
+                    .with_argument(0, "arg", |encoder| {
+                        <ExcelCellRef<'_> as ExcelParameter<FormulaInputMode>>::decode(
+                            borrowed,
+                            "arg",
+                            &CallContext::plain(scope),
+                            encoder,
+                        )
+                    })
+                    .unwrap();
+                let mut after_decode = InputFingerprintBuilder::new(1);
+                after_decode
+                    .with_argument(0, "arg", |encoder| {
+                        decoded.encode_input_identity(encoder);
+                        Ok(())
+                    })
+                    .unwrap();
+                let fingerprint = during_decode.finish().unwrap();
+                assert_eq!(fingerprint, after_decode.finish().unwrap());
+                fingerprint
+            })
+        }
+
+        let mut text = vec![0];
+        text.extend("日本語💡".encode_utf16());
+        text[0] = (text.len() - 1) as u16;
+        let mut cases = [
+            XLOPER12::number(0.0),
+            XLOPER12::error(ExcelError::Null.code()),
+            XLOPER12::boolean(false),
+            XLOPER12 {
+                value: XLOPER12Value {
+                    string: text.as_mut_ptr(),
+                },
+                xltype: xlfn_sys::XLTYPE_STR,
+            },
+            XLOPER12::nil(),
+        ];
+        let fingerprints = cases.iter_mut().map(identity).collect::<Vec<_>>();
+        for (index, fingerprint) in fingerprints.iter().enumerate() {
+            for other in &fingerprints[index + 1..] {
+                assert_ne!(fingerprint, other);
+            }
+        }
+    }
+
+    #[test]
+    fn fused_excel_value_conversion_matches_independent_conversion_and_identity() {
+        let mut text = vec![0];
+        text.extend("日本語💡".encode_utf16());
+        text[0] = (text.len() - 1) as u16;
+        let mut cells = [
+            XLOPER12::number(-0.0),
+            XLOPER12::integer(42),
+            XLOPER12::boolean(true),
+            XLOPER12 {
+                value: XLOPER12Value {
+                    string: text.as_mut_ptr(),
+                },
+                xltype: XLTYPE_STR,
+            },
+            XLOPER12::error(ExcelError::Null.code()),
+            XLOPER12::nil(),
+        ];
+        let mut inputs = [
+            XLOPER12::missing(),
+            XLOPER12::number(42.0),
+            XLOPER12 {
+                value: XLOPER12Value {
+                    array: XLOPER12Array {
+                        rows: 2,
+                        columns: 3,
+                        values: cells.as_mut_ptr(),
+                    },
+                },
+                xltype: XLTYPE_MULTI,
+            },
+        ];
+        for raw in &mut inputs {
+            let expected_value = convert::<ExcelValue>(raw).unwrap();
+            let mut reference = crate::input_identity::InputFingerprintBuilder::new(1);
+            reference
+                .with_argument(0, "arg", |encoder| {
+                    expected_value.encode_input_identity(encoder);
+                    Ok(())
+                })
+                .unwrap();
+            let (actual_value, actual_identity) = convert_with_identity::<ExcelValue>(raw).unwrap();
+            assert_eq!(actual_value, expected_value);
+            assert_eq!(actual_identity, reference.finish().unwrap());
+        }
+    }
+
+    #[test]
+    fn raw_string_identity_preserves_cell_boundaries_and_surrogate_units() {
+        fn identity(strings: &[&[u16]]) -> crate::input_identity::InputFingerprint {
+            let mut payloads = strings
+                .iter()
+                .map(|units| {
+                    std::iter::once(units.len() as u16)
+                        .chain(units.iter().copied())
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let mut cells = payloads
+                .iter_mut()
+                .map(|text| XLOPER12 {
+                    value: XLOPER12Value {
+                        string: text.as_mut_ptr(),
+                    },
+                    xltype: XLTYPE_STR,
+                })
+                .collect::<Vec<_>>();
+            let mut raw = XLOPER12 {
+                value: XLOPER12Value {
+                    array: XLOPER12Array {
+                        rows: 1,
+                        columns: cells.len() as i32,
+                        values: cells.as_mut_ptr(),
+                    },
+                },
+                xltype: XLTYPE_MULTI,
+            };
+            with_excel_call_scope(|scope| {
+                // SAFETY: root, cells, and counted strings remain live in this scope.
+                let view: XlArrayRef<'_> =
+                    unsafe { argument_from_raw(scope, "arg", &mut raw) }.unwrap();
+                raw_array_identity(view)
+            })
+        }
+        assert_ne!(
+            identity(&[&[0x61, 0x62], &[0x63]]),
+            identity(&[&[0x61], &[0x62, 0x63]])
+        );
+        assert_ne!(identity(&[&[0xd800]]), identity(&[&[0xfffd]]));
+        assert_ne!(identity(&[&[]]), identity(&[&[0]]));
     }
 
     #[test]

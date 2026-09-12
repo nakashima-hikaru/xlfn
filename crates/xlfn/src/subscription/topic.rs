@@ -171,6 +171,15 @@ pub(crate) struct SubscriptionKey {
     subscription_id: u64,
 }
 
+/// Fixed-width ASCII transport representation, kept inline during observation.
+pub(crate) struct SubscriptionTransportKey([u8; 43]);
+
+impl SubscriptionTransportKey {
+    pub(crate) fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.0).expect("subscription transport contains only ASCII")
+    }
+}
+
 impl SubscriptionKey {
     pub(crate) const fn from_internal(runtime_id: u64, id: SubscriptionId) -> Self {
         Self {
@@ -195,11 +204,15 @@ impl SubscriptionKey {
         }
     }
 
-    pub(crate) fn to_transport(self) -> String {
-        format!(
-            "stream:v1:{:016x}:{:016x}",
-            self.runtime_id, self.subscription_id
-        )
+    pub(crate) fn to_transport(self) -> SubscriptionTransportKey {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut encoded = *b"stream:v1:0000000000000000:0000000000000000";
+        for offset in 0..16 {
+            let shift = 4 * (15 - offset);
+            encoded[10 + offset] = HEX[((self.runtime_id >> shift) & 0xf) as usize];
+            encoded[27 + offset] = HEX[((self.subscription_id >> shift) & 0xf) as usize];
+        }
+        SubscriptionTransportKey(encoded)
     }
 
     pub(crate) fn parse_transport(value: &str) -> XllResult<Self> {
@@ -242,7 +255,11 @@ pub struct RtdTopic {
 
 impl RtdTopic {
     pub fn new(parts: impl IntoIterator<Item = impl AsRef<str>>) -> XllResult<Self> {
-        let mut normalized = Vec::new();
+        let parts = parts.into_iter();
+        // Arrays, slices and mapped collections expose their length. Avoid
+        // growth followed by boxed-slice shrinking on these common inputs,
+        // while bounding reservations from arbitrary iterator size hints.
+        let mut normalized = Vec::with_capacity(parts.size_hint().0.min(MAX_RTD_TOPIC_PARTS));
         for part in parts {
             if normalized.len() >= MAX_RTD_TOPIC_PARTS {
                 return Err(XllError::input(

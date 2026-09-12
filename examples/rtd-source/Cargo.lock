@@ -494,6 +494,7 @@ dependencies = [
  "constant_time_eq 0.6.0",
  "crossbeam-utils",
  "getrandom",
+ "indexmap",
  "inventory",
  "papaya",
  "parking_lot",

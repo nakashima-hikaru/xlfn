@@ -12,6 +12,8 @@ use moka::sync::Cache;
 use quick_cache::Equivalent;
 use std::hash::Hash;
 use std::sync::Arc;
+#[cfg(feature = "bench-internals")]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 mod quick;
 #[cfg(feature = "bench-internals")]
@@ -43,6 +45,7 @@ enum Backend<K, V> {
 #[cfg(feature = "bench-internals")]
 struct MokaResidentIndex<K, V> {
     cache: Cache<VersionedKey<K>, Entry<V>>,
+    mutations: AtomicUsize,
 }
 
 impl<K, V> ResidentIndex<K, V>
@@ -59,6 +62,7 @@ where
                 .support_invalidation_closures()
                 .eviction_listener(move |_, entry, _| removed(entry))
                 .build(),
+            mutations: AtomicUsize::new(0),
         }))
     }
 
@@ -150,6 +154,21 @@ where
             #[cfg(feature = "bench-internals")]
             Backend::Sharded(_) => {}
             Backend::Quick(_) => {}
+        }
+    }
+
+    #[inline]
+    pub(super) fn maintenance_after_mutation(&self) {
+        // Only the benchmark Moka control needs periodic background policy
+        // maintenance. Synchronous policies must not pay for its shared RMW.
+        #[cfg(feature = "bench-internals")]
+        if let Backend::Moka(index) = &self.0 {
+            const MAINTENANCE_INTERVAL: usize = 32;
+            if index.mutations.fetch_add(1, Ordering::Relaxed) % MAINTENANCE_INTERVAL
+                == MAINTENANCE_INTERVAL - 1
+            {
+                index.cache.run_pending_tasks();
+            }
         }
     }
 

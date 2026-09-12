@@ -1,4 +1,5 @@
 use super::task::TaskControl;
+use crossbeam_utils::CachePadded;
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 use std::ptr::NonNull;
@@ -26,26 +27,25 @@ pub(crate) struct TaskShard {
 pub(crate) struct GenerationState {
     pub(crate) id: u64,
     pub(crate) admission: xlfn_kernel::operation_gate::OperationGate,
-    // Allocation hint only; shard mutexes publish and own the actual task map.
-    pub(crate) task_count: AtomicUsize,
     /// Reservations and completion guards, including canceled tasks whose
     /// controls have already been drained. This is the reclamation authority.
     pub(crate) pins: AtomicUsize,
-    pub(crate) shards: Box<[TaskShard]>,
+    pub(crate) shards: Box<[CachePadded<TaskShard>]>,
 }
 
 impl GenerationState {
     pub(crate) fn new(id: u64) -> Self {
         let shards = (0..TASK_SHARDS)
-            .map(|_| TaskShard {
-                tasks: Mutex::new(FxHashMap::default()),
+            .map(|_| {
+                CachePadded::new(TaskShard {
+                    tasks: Mutex::new(FxHashMap::default()),
+                })
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();
         Self {
             id,
             admission: xlfn_kernel::operation_gate::OperationGate::new(),
-            task_count: AtomicUsize::new(0),
             pins: AtomicUsize::new(0),
             shards,
         }
@@ -53,14 +53,7 @@ impl GenerationState {
 
     pub(crate) fn remove_task(&self, id: u64) -> bool {
         let index = task_shard(id);
-        let removed = {
-            let mut tasks = self.shards[index].tasks.lock();
-            let removed = tasks.remove(&id);
-            if removed.is_some() {
-                let _ = xlfn_kernel::invariant::checked_atomic_dec_relaxed(&self.task_count);
-            }
-            removed
-        };
+        let removed = self.shards[index].tasks.lock().remove(&id);
         let existed = removed.is_some();
         // CancellationSource destruction can drop or wake user wakers.
         drop(removed);
@@ -68,19 +61,21 @@ impl GenerationState {
     }
 
     pub(crate) fn drain_tasks(&self) -> Vec<TaskControl> {
-        // Admission is drained before cancellation reaches this method.
-        // Completions can still remove controls, so this is an upper bound.
-        // Drain directly into one buffer rather than allocating and copying
-        // an intermediate Vec for each shard. Callers drop/wake the returned
-        // controls only after releasing the executor control lock.
-        let mut result = Vec::with_capacity(self.task_count.load(Ordering::Relaxed));
+        // Admission is drained before cancellation reaches this method, so
+        // controls can only disappear while the lengths are sampled. This
+        // cold scan provides an upper bound without forcing every spawn and
+        // completion to update a shared allocation-hint counter.
+        let capacity = self
+            .shards
+            .iter()
+            .map(|shard| shard.tasks.lock().len())
+            .sum();
+        // Callers drop/wake the controls after releasing the executor control
+        // lock. No TaskControl destructor runs while a shard lock is held.
+        let mut result = Vec::with_capacity(capacity);
         for shard in self.shards.iter() {
             let mut tasks = shard.tasks.lock();
-            let count = tasks.len();
             result.extend(tasks.drain().map(|(_, task)| task));
-            if count != 0 {
-                let _ = xlfn_kernel::invariant::checked_atomic_sub_relaxed(&self.task_count, count);
-            }
         }
         result
     }

@@ -28,26 +28,11 @@ impl CallScratch {
         units: &[u16],
         argument: &'static str,
     ) -> XllResult<&'call str> {
-        // Reduction (rather than a short-circuit loop) lets the compiler
-        // vectorize ASCII detection, including long text columns.
-        let bits = units.iter().copied().fold(0, |bits, unit| bits | unit);
-        if bits < 0x80 {
-            let bytes = self
-                .arena
-                .alloc_slice_fill_iter(units.iter().map(|&unit| unit as u8));
-            return Ok(std::str::from_utf8(bytes).expect("ASCII units are valid UTF-8"));
-        }
-        // Every UTF-16 unit emits at most three UTF-8 bytes (a surrogate
-        // pair emits four). The array input budget already charges this
-        // bound, so reserving it avoids growth and copying for Unicode text.
-        let capacity = units.len() * 3;
-        let mut decoded = bumpalo::collections::String::with_capacity_in(capacity, &self.arena.0);
-        for character in char::decode_utf16(units.iter().copied()) {
-            decoded.push(character.map_err(|_| {
-                crate::XllError::input(argument, crate::error::InputError::InvalidUtf16)
-            })?);
-        }
-        Ok(decoded.into_bump_str())
+        let decoder = crate::utf16::Utf16Decoder::new(units);
+        let output = self
+            .arena
+            .alloc_slice_fill_with(decoder.utf8_len(), |_| std::mem::MaybeUninit::uninit());
+        decoder.decode_into(output, argument)
     }
 
     pub(crate) fn collect_copy<T: Copy>(

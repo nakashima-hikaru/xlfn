@@ -123,9 +123,15 @@ pub struct HandleColdGrowthBenchmark {
 
 impl HandleColdGrowthBenchmark {
     pub fn new(count: usize) -> Self {
+        Self::with_binding_limit(count, count.max(1))
+    }
+
+    /// Separates the configured binding limit from actual workbook occupancy.
+    pub fn with_binding_limit(count: usize, maximum_bindings: usize) -> Self {
+        assert!(count <= maximum_bindings);
         Self {
             runtime: Arc::new(
-                FormulaHandleService::try_new(count.max(1))
+                FormulaHandleService::try_new(maximum_bindings)
                     .expect("benchmark host provides an OS CSPRNG"),
             ),
             keys: (0..count)

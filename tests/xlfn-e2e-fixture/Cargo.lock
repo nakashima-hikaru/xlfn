@@ -545,6 +545,7 @@ dependencies = [
  "crossbeam-utils",
  "futures-util",
  "getrandom",
+ "indexmap",
  "inventory",
  "papaya",
  "parking_lot",

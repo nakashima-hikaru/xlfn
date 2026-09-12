@@ -145,7 +145,7 @@ pub(crate) fn observe_subscription(
     };
 
     let key_transport = key.to_transport();
-    let mut topic = match CountedString::new(&key_transport) {
+    let mut topic = match CountedString::new(key_transport.as_str()) {
         Ok(value) => value,
         Err(error) => {
             discard_unpublished_server(active.pointer, ensured.newly_created);

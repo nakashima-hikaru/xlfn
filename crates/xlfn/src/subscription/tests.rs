@@ -977,6 +977,78 @@ fn refresh_planning_does_not_traverse_topic_shards() {
 }
 
 #[test]
+fn sparse_refresh_after_dense_drain_reuses_storage_and_preserves_retries() {
+    let fixture = SourceFixture::new();
+    let sources = (0..64)
+        .map(|_| fixture.add::<i32>(None))
+        .collect::<Vec<_>>();
+    let runtime = SubscriptionRuntime::with_sources_for_internal(fixture.finish());
+    let server = runtime.register_test_server(1);
+    for (index, (source, _, _)) in sources.iter().enumerate() {
+        let topic = RtdTopic::single(format!("dense-{index}")).unwrap();
+        let prepared = runtime.prepare(source, topic.borrowed()).unwrap();
+        let id = prepared.id();
+        prepared.commit();
+        runtime
+            .connect_transaction(&server, TopicId((index as i32 + 1) * 32), id)
+            .unwrap()
+            .commit()
+            .unwrap();
+    }
+
+    let mut allocation = None;
+    for value in [-2, -1] {
+        for (_, slot, _) in &sources {
+            slot.lock().as_ref().unwrap().publish(value).unwrap();
+        }
+        let batch = server.begin_refresh().unwrap();
+        assert_eq!(batch.updates.len(), 64);
+        if let Some(previous) = allocation {
+            assert_eq!(batch.updates.as_ptr(), previous);
+        }
+        allocation = Some(batch.updates.as_ptr());
+        batch.complete(RefreshOutcome::Delivered).unwrap();
+    }
+
+    drop(server.test_server().publish.plan_refresh().unwrap());
+    for index in [3, 20, 62] {
+        sources[index]
+            .1
+            .lock()
+            .as_ref()
+            .unwrap()
+            .publish(index as i32)
+            .unwrap();
+    }
+    runtime.disconnect(&server, TopicId(21 * 32)).unwrap();
+    let failed = server.begin_refresh().unwrap();
+    assert_eq!(failed.updates.len(), 2);
+    assert_eq!(Some(failed.updates.as_ptr()), allocation);
+    drop(failed);
+    assert_eq!(server.pending_update_count(), 2);
+
+    sources[3].1.lock().as_ref().unwrap().publish(103).unwrap();
+    let retry = server.begin_refresh().unwrap();
+    assert_eq!(Some(retry.updates.as_ptr()), allocation);
+    let mut values = retry
+        .updates
+        .iter()
+        .map(|update| (update.topic_id, update.value.clone()))
+        .collect::<Vec<_>>();
+    values.sort_by_key(|&(topic, _)| topic);
+    assert_eq!(
+        values,
+        vec![
+            (4 * 32, StoredRtdValue::Integer(103)),
+            (63 * 32, StoredRtdValue::Integer(62)),
+        ],
+    );
+    retry.complete(RefreshOutcome::Delivered).unwrap();
+    assert_eq!(server.pending_update_count(), 0);
+    assert_eq!(server.test_server().publish.queued_update_count(), 0);
+}
+
+#[test]
 fn refresh_preserves_latest_update_for_each_topic() {
     let fixture = SourceFixture::new();
     let (source_one, sink_one, _) = fixture.add::<f64>(None);
@@ -2406,8 +2478,8 @@ fn large_logical_topic_uses_bounded_transport_key() {
     let prepared = runtime.prepare(&source, topic.borrowed()).unwrap();
 
     let transport = prepared.key().to_transport();
-    assert_eq!(transport.encode_utf16().count(), 43);
-    assert!(transport.starts_with("stream:v1:"));
+    assert_eq!(transport.as_str().encode_utf16().count(), 43);
+    assert!(transport.as_str().starts_with("stream:v1:"));
     runtime.catalog.lock().assert_identity_invariants();
 }
 
@@ -2511,8 +2583,33 @@ fn subscription_key_round_trips_through_transport() {
     let key = SubscriptionKey::from_allocated_id(1, 42);
     let transport = key.to_transport();
 
-    assert_eq!(transport, "stream:v1:0000000000000001:000000000000002a");
-    assert_eq!(SubscriptionKey::parse_transport(&transport).unwrap(), key);
+    assert_eq!(
+        transport.as_str(),
+        "stream:v1:0000000000000001:000000000000002a"
+    );
+    assert_eq!(
+        SubscriptionKey::parse_transport(transport.as_str()).unwrap(),
+        key
+    );
+}
+
+#[test]
+fn transport_key_preserves_all_hex_digits_and_identifier_boundaries() {
+    let identifiers = [0, 1, 15, 16, 255, 256, 0x0123_4567_89ab_cdef, u64::MAX];
+    for runtime_id in identifiers {
+        for subscription_id in identifiers {
+            let key = SubscriptionKey::from_allocated_id(runtime_id, subscription_id);
+            let transport = key.to_transport();
+            assert_eq!(
+                transport.as_str(),
+                format!("stream:v1:{runtime_id:016x}:{subscription_id:016x}")
+            );
+            assert_eq!(
+                SubscriptionKey::parse_transport(transport.as_str()).unwrap(),
+                key
+            );
+        }
+    }
 }
 
 #[test]
@@ -2927,7 +3024,7 @@ fn resolve_transport_key_validates_runtime_identity() {
 
     // 3. Round-trip transport string
     let transport = key.to_transport();
-    let parsed_key = SubscriptionKey::parse_transport(&transport).unwrap();
+    let parsed_key = SubscriptionKey::parse_transport(transport.as_str()).unwrap();
     assert_eq!(runtime_a.resolve_transport_key(parsed_key).unwrap(), id);
 }
 

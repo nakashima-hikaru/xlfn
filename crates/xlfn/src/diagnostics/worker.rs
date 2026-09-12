@@ -13,8 +13,8 @@ use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 #[cfg(any(test, feature = "refinement"))]
 use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
-use std::sync::mpsc::{self, SyncSender, TrySendError};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, SyncSender};
 use std::thread::JoinHandle;
 use xlfn_kernel::published_owner::PublishedOwner;
 
@@ -55,6 +55,9 @@ unsafe impl Send for DiagnosticObserverPtr {}
 unsafe impl Sync for DiagnosticObserverPtr {}
 
 pub(crate) struct DiagnosticObserver {
+    // Reservations include builders and queued events, but not delivery.
+    // The channel publishes payloads; this counter only enforces capacity.
+    reserved: AtomicUsize,
     #[cfg(any(test, feature = "refinement"))]
     pending: AtomicU64,
     sink: crate::shutdown_trace::ObservationSink,
@@ -63,6 +66,7 @@ pub(crate) struct DiagnosticObserver {
 impl DiagnosticObserver {
     pub(crate) fn new() -> Box<Self> {
         Box::new(Self {
+            reserved: AtomicUsize::new(0),
             #[cfg(any(test, feature = "refinement"))]
             pending: AtomicU64::new(0),
             sink: crate::shutdown_trace::ObservationSink::new(),
@@ -79,6 +83,24 @@ impl DiagnosticObserver {
 
     pub(crate) fn record(&self, event: crate::shutdown_trace::ShutdownEvent) {
         self.sink.record(event);
+    }
+
+    fn reserve(&self) -> Option<DiagnosticReservation<'_>> {
+        self.reserved
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |reserved| {
+                (reserved < super::DIAGNOSTIC_QUEUE_CAPACITY).then_some(reserved + 1)
+            })
+            .ok()
+            .map(|_| DiagnosticReservation {
+                observer: self,
+                committed: false,
+            })
+    }
+
+    fn release_reservation(&self) {
+        if self.reserved.fetch_sub(1, Ordering::Relaxed) == 0 {
+            xlfn_kernel::invariant::fail_stop();
+        }
     }
 
     fn increment_pending(&self) {
@@ -106,6 +128,25 @@ impl DiagnosticObserver {
     }
 }
 
+struct DiagnosticReservation<'a> {
+    observer: &'a DiagnosticObserver,
+    committed: bool,
+}
+
+impl DiagnosticReservation<'_> {
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for DiagnosticReservation<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.observer.release_reservation();
+        }
+    }
+}
+
 impl AsyncDiagnosticSink {
     pub(crate) fn new<S: DiagnosticSink>(sink: S) -> Result<Self, DiagnosticInitError> {
         Self::new_named(sink, "xlfn-diagnostics")
@@ -130,6 +171,9 @@ impl AsyncDiagnosticSink {
             .spawn(move || {
                 let worker_observer = observer_ptr;
                 while let Ok(event) = receiver.recv() {
+                    // SAFETY: the observer lives until the worker is joined.
+                    let observer_ref = unsafe { worker_observer.0.as_ref() };
+                    observer_ref.release_reservation();
                     event.deliver(&sink);
                     crate::ingress::with_diagnostic_linearization(|| {
                         // SAFETY: the observer lives until the worker thread joins in shutdown or drop
@@ -162,17 +206,26 @@ impl AsyncDiagnosticSink {
         std::thread::current().id() == self.worker_thread_id
     }
 
-    pub(crate) fn report(&self, event: OwnedDiagnosticEvent) {
+    pub(crate) fn report(&self, build: impl FnOnce() -> OwnedDiagnosticEvent) {
+        let Some(sender) = self.sender.as_ref() else {
+            DROPPED_EVENTS.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        let Some(reservation) = self.observer.reserve() else {
+            DROPPED_EVENTS.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        // Expensive error cloning and timestamps happen only after admission,
+        // outside the channel and trace locks. Panic returns the reservation.
+        let event = build();
         let result = crate::ingress::with_diagnostic_linearization(|| {
             self.observer.increment_pending();
-            let result = match self.sender.as_ref() {
-                Some(sender) => sender.try_send(event),
-                None => Err(TrySendError::Disconnected(event)),
-            };
+            let result = sender.try_send(event);
             if result.is_err() {
                 self.observer.decrement_pending();
             }
             if result.is_ok() {
+                reservation.commit();
                 self.observer
                     .record(crate::shutdown_trace::ShutdownEvent::EnqueueDiagnostic);
             }

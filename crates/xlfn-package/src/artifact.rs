@@ -3,13 +3,30 @@ use super::*;
 #[derive(Clone, Debug)]
 pub struct VerifiedArtifact {
     pub(crate) relative_path: PathBuf,
-    pub(crate) bytes: SharedBytes,
-    pub(crate) size: u64,
-    pub(crate) sha256: [u8; 32],
+    bytes: SharedBytes,
+    size: u64,
+    sha256: [u8; 32],
     pub(crate) permissions: std::fs::Permissions,
 }
 
 impl VerifiedArtifact {
+    /// Binds the size and digest to immutable bytes once. Later verification
+    /// compares every byte against this snapshot; hashing that same content
+    /// again cannot strengthen an exact equality check.
+    pub(crate) fn new(
+        relative_path: PathBuf,
+        bytes: SharedBytes,
+        permissions: std::fs::Permissions,
+    ) -> Self {
+        Self {
+            relative_path,
+            size: bytes.len() as u64,
+            sha256: sha256_digest(&bytes),
+            permissions,
+            bytes,
+        }
+    }
+
     #[must_use]
     pub fn relative_path(&self) -> &Path {
         &self.relative_path
@@ -17,6 +34,10 @@ impl VerifiedArtifact {
 
     #[must_use]
     pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub(crate) fn shared_bytes(&self) -> &SharedBytes {
         &self.bytes
     }
 
@@ -56,7 +77,7 @@ impl VerifiedPackage {
         if !self.expected_names.insert(name_key) {
             return Err("package already contains build-manifest.json".into());
         }
-        let artifact = verified_artifact(
+        let artifact = VerifiedArtifact::new(
             relative_path,
             SharedBytes::from(bytes),
             manifest_permissions()?,
@@ -208,24 +229,23 @@ impl VerifiedPackage {
         Ok(())
     }
 }
+/// Verifies the staged XLL against the bytes already parsed for policy
+/// inspection, then transfers that same allocation into the verified package.
 pub fn verify_staged_package(
     xll: &Path,
     target: &str,
+    snapshot: PeSnapshot,
     required_exports: &[String],
     bundle: StagedBundle,
 ) -> PackageResult<VerifiedPackage> {
-    let xll_snapshot = snapshot_staged_artifact(target, xll)?;
-    verify_xll_bytes(&xll_snapshot, target, required_exports, xll)?;
+    let (xll_snapshot, xll_info) = snapshot.into_parts();
+    verify_staged_bytes(target, xll, &xll_snapshot, ExpectedIdentity::Any)?;
+    let xll_info = inspect_checked_info(xll_info, Architecture::parse(target)?, xll)?;
+    verify_xll_exports(&xll_info, xll, required_exports)?;
     for file in &bundle.files {
-        verify_staged_bytes(
-            target,
-            &file.source,
-            &file.snapshot,
-            None,
-            ExpectedIdentity::Any,
-        )?;
+        verify_staged_bytes(target, &file.source, &file.snapshot, ExpectedIdentity::Any)?;
     }
-    verify_dependency_closure(xll, target, &bundle, &xll_snapshot)?;
+    verify_dependency_closure(xll, target, &bundle, xll_info)?;
 
     let mut relative_paths = BTreeSet::new();
     let mut expected_names = BTreeSet::new();
@@ -240,7 +260,7 @@ pub fn verify_staged_package(
     }
     expected_names.insert(xll_name_key);
     let xll_permissions = staged_artifact_permissions(target, xll)?;
-    artifacts.push(verified_artifact(
+    artifacts.push(VerifiedArtifact::new(
         xll_relative_path,
         xll_snapshot,
         xll_permissions,
@@ -252,7 +272,7 @@ pub fn verify_staged_package(
             return Err(format!("duplicate staged artifact basename: {}", file.name).into());
         }
         expected_names.insert(name_key);
-        artifacts.push(verified_artifact(
+        artifacts.push(VerifiedArtifact::new(
             relative_path,
             file.snapshot,
             file.permissions,

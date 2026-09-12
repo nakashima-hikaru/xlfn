@@ -229,7 +229,10 @@ pub(crate) const SERVER_LIFECYCLE_TERMINATED: u8 = 2;
 pub(crate) struct TopicShard {
     pub(crate) active_by_topic: FxHashMap<TopicId, ActiveSubscription>,
     pub(crate) topic_by_id: FxHashMap<SubscriptionId, TopicId>,
-    pub(crate) pending: [FxHashMap<TopicId, QueuedUpdate>; 2],
+    // Dense entries keep refresh traversal proportional to current updates,
+    // even after a full snapshot leaves large retained hash-table capacities.
+    // Cross-topic order is unspecified, so completion uses swap removal.
+    pub(crate) pending: [indexmap::IndexMap<TopicId, QueuedUpdate, rustc_hash::FxBuildHasher>; 2],
     /// Exact number of pending entries belonging to committed connections.
     pub(crate) deliverable_count: usize,
 }
@@ -255,6 +258,8 @@ pub(crate) struct RefreshState<N> {
     pub(crate) next_notification_ticket: u64,
     pub(crate) notifier: Option<N>,
     pub(crate) phase: DeliveryPhase,
+    /// Empty storage returned by the previous completed refresh transaction.
+    pub(crate) recycled_updates: Vec<RtdUpdate>,
 }
 
 impl<N> Default for RefreshState<N> {
@@ -264,6 +269,7 @@ impl<N> Default for RefreshState<N> {
             next_notification_ticket: 0,
             notifier: None,
             phase: DeliveryPhase::default(),
+            recycled_updates: Vec::new(),
         }
     }
 }

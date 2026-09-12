@@ -358,19 +358,26 @@ impl<H: SubscriptionHost> PublishCore<H> {
     }
 
     pub(crate) fn finish_termination(&self) -> PublishTerminationResult<H::Notifier> {
-        let notifier = self.refresh.lock().detach_notifier();
+        let (notifier, recycled_updates) = {
+            let mut refresh = self.refresh.lock();
+            (
+                refresh.detach_notifier(),
+                std::mem::take(&mut refresh.recycled_updates),
+            )
+        };
+        drop(recycled_updates);
         let mut connections = Vec::new();
         for shard_mutex in self.shards.iter() {
-            let mut shard = shard_mutex.lock();
-            shard.pending[0].clear();
-            shard.pending[1].clear();
-            connections.extend(shard.active_by_topic.drain().map(|(_, active)| {
+            // The permanent server tombstone still answers stale handles,
+            // but no operation can reuse these tables after its gate drains.
+            // Release their peak allocations instead of retaining clear maps.
+            let shard = std::mem::take(&mut *shard_mutex.lock());
+            connections.extend(shard.active_by_topic.into_values().map(|active| {
                 RetiredConnection {
                     id: active.id,
                     generation: active.generation,
                 }
             }));
-            shard.topic_by_id.clear();
         }
         self.pending_updates.store(0, Ordering::Release);
         self.deliverable_pending.store(0, Ordering::Release);
@@ -469,17 +476,28 @@ impl<H: SubscriptionHost> PublishCore<H> {
         topic_id: TopicId,
         predicate: impl FnOnce(&QueuedUpdate) -> bool,
     ) -> bool {
+        let pending = &mut shard.pending[buffer];
+        let Some((&last_topic, last_update)) = pending.last() else {
+            return false;
+        };
+        if last_topic == topic_id {
+            if !predicate(last_update) {
+                return false;
+            }
+            pending.pop();
+        } else {
+            let indexmap::map::Entry::Occupied(entry) = pending.entry(topic_id) else {
+                return false;
+            };
+            if !predicate(entry.get()) {
+                return false;
+            }
+            entry.swap_remove();
+        }
         let deliverable = shard
             .active_by_topic
             .get(&topic_id)
             .is_some_and(|active| active.committed);
-        let pending = &mut shard.pending[buffer];
-        if !pending.get(&topic_id).is_some_and(predicate) {
-            return false;
-        }
-        if pending.remove(&topic_id).is_none() {
-            xlfn_kernel::invariant::fail_stop();
-        }
         self.record_pending_removal(shard, shard_index, deliverable);
         true
     }
@@ -826,13 +844,13 @@ impl<H: SubscriptionHost> PublishCore<H> {
                 let pending = &mut pending_buffers[buffer];
                 let pending_entry = pending.entry(topic_id);
                 let inserted = match pending_entry {
-                    std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    indexmap::map::Entry::Occupied(mut entry) => {
                         let existing = entry.get_mut();
                         existing.connection_generation = conn_gen;
                         existing.sequence = sequence;
                         false
                     }
-                    std::collections::hash_map::Entry::Vacant(entry) => {
+                    indexmap::map::Entry::Vacant(entry) => {
                         // SAFETY: the runtime-owned queue quota outlives this
                         // publish core and every queued-update permit.
                         let permit = unsafe { Quota::try_acquire(self.queued_update_quota()) }
@@ -948,7 +966,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
     pub(crate) fn complete_refresh_inner(
         &self,
         refresh_id: u64,
-        delivered_updates: Vec<RtdUpdate>,
+        mut delivered_updates: Vec<RtdUpdate>,
         outcome: RefreshOutcome,
     ) -> XllResult<Option<NotificationAttempt<H::Notifier>>> {
         {
@@ -969,7 +987,10 @@ impl<H: SubscriptionHost> PublishCore<H> {
             refresh.ensure_notification_ticket()?;
         }
 
-        let mut updates_iter = delivered_updates.into_iter();
+        // Collection groups each shard in dense pending-entry order. Retire
+        // backwards so the common full-buffer drain removes tail entries
+        // without moving survivors or repairing their indices.
+        let mut updates_iter = delivered_updates.drain(..).rev();
         let mut current_opt = updates_iter.next();
         while let Some(first_update) = current_opt {
             let shard_idx = shard_index(TopicId(first_update.topic_id));
@@ -1042,6 +1063,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
             }
         }
 
+        drop(updates_iter);
         let mut refresh = self.refresh.lock();
         let DeliveryPhase::Refreshing {
             refresh_id: active_id,
@@ -1059,6 +1081,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
         refresh.phase = DeliveryPhase::BetweenRefreshes {
             signal: SignalState::Dormant,
         };
+        refresh.recycled_updates = delivered_updates;
 
         let has_updates = self.has_deliverable_updates();
         let prepared = refresh.prepare_notification(has_updates)?;
@@ -1066,7 +1089,18 @@ impl<H: SubscriptionHost> PublishCore<H> {
         Ok(attempt)
     }
 
-    pub(crate) fn abort_refresh_no_unwind(&self, refresh_id: u64) {
+    pub(crate) fn abort_refresh_no_unwind(&self, refresh_id: u64, updates: Vec<RtdUpdate>) {
+        if !updates.is_empty() {
+            // An unwind during collection can leave an owned partial batch.
+            // Restore its InFlight slots before making another refresh
+            // admissible, exactly as when a collected batch is dropped.
+            if let Ok(Some(attempt)) =
+                self.complete_refresh_inner(refresh_id, updates, RefreshOutcome::Failed)
+            {
+                self.drive_notification(attempt);
+            }
+            return;
+        }
         let attempt = {
             let mut refresh = self.refresh.lock();
             if let DeliveryPhase::Refreshing {
@@ -1077,6 +1111,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
                     refresh.phase = DeliveryPhase::BetweenRefreshes {
                         signal: SignalState::Dormant,
                     };
+                    refresh.recycled_updates = updates;
                     let has_updates = self.has_deliverable_updates();
                     let prepared = refresh.prepare_notification(has_updates).ok().flatten();
                     prepared.map(|p| refresh.commit_notification(p))
@@ -1143,7 +1178,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
 
     pub(crate) fn plan_refresh(&self) -> XllResult<PlannedRtdRefresh<'_, H>> {
         let operation = self.enter_operation()?;
-        let plan = {
+        let (plan, updates) = {
             self.ensure_open()?;
             let mut refresh = self.refresh.lock();
             if matches!(refresh.phase, DeliveryPhase::Refreshing { .. }) {
@@ -1166,17 +1201,21 @@ impl<H: SubscriptionHost> PublishCore<H> {
                 })?;
             let epoch = previous_epoch + 1;
             refresh.phase = DeliveryPhase::Refreshing { refresh_id };
-            RefreshPlan {
-                refresh_id,
-                epoch,
-                candidate_shards: self.ready_shards.load(Ordering::Acquire),
-                estimated_updates: self.deliverable_pending.load(Ordering::Acquire),
-            }
+            (
+                RefreshPlan {
+                    refresh_id,
+                    epoch,
+                    candidate_shards: self.ready_shards.load(Ordering::Acquire),
+                    estimated_updates: self.deliverable_pending.load(Ordering::Acquire),
+                },
+                std::mem::take(&mut refresh.recycled_updates),
+            )
         };
         Ok(PlannedRtdRefresh {
             publish: self,
             operation: Some(operation),
             plan,
+            updates,
             finished: false,
         })
     }
@@ -1276,16 +1315,16 @@ impl<H: SubscriptionHost> PublishCore<H> {
         }
     }
 
-    pub(crate) fn collect_refresh(&self, plan: &RefreshPlan) -> Vec<RtdUpdate> {
+    pub(crate) fn collect_refresh(&self, plan: &RefreshPlan, updates: &mut Vec<RtdUpdate>) {
         debug_assert_eq!(self.publish_epoch.load(Ordering::Acquire), plan.epoch);
-        let mut updates = Vec::with_capacity(plan.estimated_updates);
+        debug_assert!(updates.is_empty());
+        updates.reserve(plan.estimated_updates);
         let mut shards = plan.candidate_shards;
         while shards != 0 {
             let index = shards.trailing_zeros() as usize;
             shards &= shards - 1;
-            self.collect_shard_into(index, &mut updates);
+            self.collect_shard_into(index, updates);
         }
-        updates
     }
 
     pub(crate) fn begin_refresh(&self) -> XllResult<RtdRefreshBatch<'_, H>> {
@@ -1327,22 +1366,19 @@ pub(crate) struct PlannedRtdRefresh<'a, H: SubscriptionHost> {
     pub(crate) publish: &'a PublishCore<H>,
     pub(crate) operation: Option<ScopedPublishOperation<'a, H>>,
     pub(crate) plan: RefreshPlan,
+    pub(crate) updates: Vec<RtdUpdate>,
     pub(crate) finished: bool,
 }
 
 impl<'a, H: SubscriptionHost> PlannedRtdRefresh<'a, H> {
-    pub(crate) fn collect(self) -> RtdRefreshBatch<'a, H> {
-        let updates = self.publish.collect_refresh(&self.plan);
-        self.finish_collection(updates)
-    }
-
-    pub(crate) fn finish_collection(mut self, updates: Vec<RtdUpdate>) -> RtdRefreshBatch<'a, H> {
+    pub(crate) fn collect(mut self) -> RtdRefreshBatch<'a, H> {
+        self.publish.collect_refresh(&self.plan, &mut self.updates);
         self.finished = true;
         RtdRefreshBatch {
             publish: self.publish,
             operation: self.operation.take(),
             plan: self.plan,
-            updates,
+            updates: std::mem::take(&mut self.updates),
             finished: false,
         }
     }
@@ -1354,7 +1390,8 @@ impl<H: SubscriptionHost> Drop for PlannedRtdRefresh<'_, H> {
             return;
         }
         let _ = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
-            self.publish.abort_refresh_no_unwind(self.plan.refresh_id);
+            self.publish
+                .abort_refresh_no_unwind(self.plan.refresh_id, std::mem::take(&mut self.updates));
         }));
     }
 }
@@ -1386,7 +1423,7 @@ impl<H: SubscriptionHost> RtdRefreshBatch<'_, H> {
 // AUDIT [Lock Safety & Self-Deadlock Prevention]:
 // `RtdRefreshBatch::drop` acquires shard mutexes during rollback (`complete_refresh_inner`).
 // Self-deadlock is structurally impossible because:
-// 1. `RtdRefreshBatch` is only constructed via `PlannedRtdRefresh::collect()` / `finish_collection()`,
+// 1. `RtdRefreshBatch` is only constructed via `PlannedRtdRefresh::collect()`,
 //    which executes strictly after all `collect_shard` mutex guards have been dropped. No shard
 //    lock is held when `RtdRefreshBatch` is handed to the caller.
 // 2. Caller code (e.g. `IRtdServer::RefreshData`) and safe consumer APIs never acquire or hold
@@ -1419,6 +1456,113 @@ mod tests {
     use super::{OperationDropTrace, with_operation_drop_trace};
     use crate::subscription::runtime::SubscriptionRuntime;
     use std::sync::Arc;
+
+    #[test]
+    fn terminated_servers_release_payload_storage_before_runtime_drop() {
+        use crate::subscription::tests::SourceFixture;
+        use crate::subscription::{RefreshOutcome, RtdTopic, TopicId};
+        let fixture = SourceFixture::new();
+        let sources = (0..64)
+            .map(|_| fixture.add::<i32>(None))
+            .collect::<Vec<_>>();
+        let runtime =
+            SubscriptionRuntime::<crate::excel_rtd::RtdSubscriptionHost>::with_sources_for_internal(
+                fixture.finish(),
+            );
+        for generation in [1, 2] {
+            let server = runtime.register_test_server(generation);
+            for (index, (source, sink, _)) in sources.iter().enumerate() {
+                let topic = RtdTopic::single(format!("footprint-{index}")).unwrap();
+                let prepared = runtime.prepare(source, topic.borrowed()).unwrap();
+                let id = prepared.id();
+                prepared.commit();
+                runtime
+                    .connect_transaction(&server, TopicId(index as i32 + 1), id)
+                    .unwrap()
+                    .commit()
+                    .unwrap();
+                sink.lock().as_ref().unwrap().publish(index as i32).unwrap();
+            }
+            let batch = server.begin_refresh().unwrap();
+            assert_eq!(batch.updates.len(), sources.len());
+            batch.complete(RefreshOutcome::Delivered).unwrap();
+            let publish = &server.test_server().publish;
+            assert!(publish.refresh.lock().recycled_updates.capacity() >= sources.len());
+            server.terminate().unwrap();
+            assert!(matches!(
+                server.begin_refresh(),
+                Err(crate::XllError::Closing)
+            ));
+            assert_eq!(publish.refresh.lock().recycled_updates.capacity(), 0);
+            assert_eq!(server.test_server().subscriptions.lock().capacity(), 0);
+            for shard in &publish.shards {
+                let shard = shard.lock();
+                assert_eq!(shard.active_by_topic.capacity(), 0);
+                assert_eq!(shard.topic_by_id.capacity(), 0);
+                for pending in &shard.pending {
+                    assert_eq!(pending.capacity(), 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn partial_collection_unwind_restores_in_flight_values() {
+        use crate::subscription::tests::SourceFixture;
+        use crate::subscription::{RefreshOutcome, RtdTopic, StoredRtdValue, TopicId};
+        let fixture = SourceFixture::new();
+        let sources = [fixture.add::<i32>(None), fixture.add::<i32>(None)];
+        let runtime =
+            SubscriptionRuntime::<crate::excel_rtd::RtdSubscriptionHost>::with_sources_for_internal(
+                fixture.finish(),
+            );
+        let server = runtime.register_test_server(1);
+        for (index, (source, sink, _)) in sources.iter().enumerate() {
+            let prepared = runtime
+                .prepare(
+                    source,
+                    RtdTopic::single(format!("partial-{index}"))
+                        .unwrap()
+                        .borrowed(),
+                )
+                .unwrap();
+            let id = prepared.id();
+            prepared.commit();
+            runtime
+                .connect_transaction(&server, TopicId(index as i32 + 1), id)
+                .unwrap()
+                .commit()
+                .unwrap();
+            sink.lock().as_ref().unwrap().publish(index as i32).unwrap();
+        }
+        let publish = &server.test_server().publish;
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut planned = publish.plan_refresh().unwrap();
+                publish.collect_shard_into(1, &mut planned.updates);
+                assert_eq!(planned.updates.len(), 1);
+                panic!("injected unwind between shard collections");
+            }))
+            .is_err()
+        );
+        let retry = server.begin_refresh().unwrap();
+        let mut values = retry
+            .updates
+            .iter()
+            .map(|update| (update.topic_id, update.value.clone()))
+            .collect::<Vec<_>>();
+        values.sort_by_key(|&(topic, _)| topic);
+        assert_eq!(
+            values,
+            [
+                (1, StoredRtdValue::Integer(0)),
+                (2, StoredRtdValue::Integer(1)),
+            ]
+        );
+        retry.complete(RefreshOutcome::Delivered).unwrap();
+        assert_eq!(server.pending_update_count(), 0);
+        assert_eq!(publish.queued_update_count(), 0);
+    }
 
     fn assert_drop_order(run: impl FnOnce()) {
         let trace: OperationDropTrace = Arc::new(parking_lot::Mutex::new(Vec::new()));

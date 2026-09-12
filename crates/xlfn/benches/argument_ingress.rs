@@ -51,8 +51,20 @@ fn argument_ingress_benchmarks(c: &mut Criterion) {
         b.iter(|| str_long.run_borrowed_str());
     });
     let mut unicode_long = RawArgumentIngressBenchmark::string(&"日本語💡".repeat(80));
+    group.bench_function("string_unicode_1k/owned", |b| {
+        b.iter(|| unicode_long.run_plain::<String>());
+    });
     group.bench_function("string_unicode_1k/borrowed", |b| {
         b.iter(|| unicode_long.run_borrowed_str());
+    });
+    let mut unicode_limit = RawArgumentIngressBenchmark::string(&"あ".repeat(32_767));
+    group.bench_function("string_unicode_limit/owned", |b| {
+        b.iter(|| unicode_limit.run_plain::<String>());
+    });
+    let mut unicode_sparse =
+        RawArgumentIngressBenchmark::string(&format!("{}é", "a".repeat(1_000)));
+    group.bench_function("string_unicode_sparse/borrowed", |b| {
+        b.iter(|| unicode_sparse.run_borrowed_str());
     });
 
     // 5. String matrices
@@ -65,6 +77,9 @@ fn argument_ingress_benchmarks(c: &mut Criterion) {
         let mut borrowed = RawArgumentIngressBenchmark::string_matrix(&values);
         group.bench_function(format!("matrix_string_{label}/borrowed"), |b| {
             b.iter(|| borrowed.run_borrowed_matrix_str());
+        });
+        group.bench_function(format!("matrix_string_{label}/raw_identity"), |b| {
+            b.iter(|| borrowed.run_borrowed_array_with_identity());
         });
     }
 

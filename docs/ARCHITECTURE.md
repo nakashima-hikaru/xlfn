@@ -55,6 +55,9 @@ Eviction, rejection, explicit invalidation and clear release that pin and enqueu
 retirement without running user destructors inside index locks. Existing read
 permits and leases govern node reclamation. Moka and alternate sharded indexes
 are available only through the internal benchmark feature.
+Zero-budget nodes are never published and belong to their single lease. They
+can be destroyed directly, except during cache initialization, when destruction
+is deferred until the initialization guard has exited.
 
 Handle-topic publication uses Papaya for short map lookups. Its guard protects
 map slots while copying a pointer; the runtime's rotating read permit protects
@@ -65,5 +68,36 @@ the next read generation through the retirement-queue publication barrier.
 Canonical RTD topic parts use immutable `SmolStr` values internally. The public
 `RtdTopic` API accepts `AsRef<str>` inputs and exposes borrowed `&str` parts
 through `part` and the exact-size `RtdTopicParts` iterator. Borrowed lookup stays
-allocation-free on a hit. See [crate evaluation](PERFORMANCE.md) for measurements,
-accepted regressions and platform qualification limits.
+allocation-free on a hit. Pending updates use dense `IndexMap` entries so refresh
+traversal follows current updates rather than retained hash capacity. The serial
+refresh transaction recycles its empty output buffer after completion or rollback.
+Server termination releases table and refresh-buffer allocations while retaining
+the small server identity needed to reject stale handles. Observation encodes its
+fixed-width transport key into an inline ASCII buffer.
+
+Handle binding publication allocates stable pages of 256 slots as they are used.
+The page directory depends on the configured cap; slot allocation and withdrawal
+depend on actual usage. Departing readers with no queued retirement avoid shared
+maintenance writes. An acquire fence preserves the seal/release handoff, and a
+counted notification protocol gives one borrowing caller responsibility for draining
+all maintenance requests. Small binding/topic retirement batches remain inline.
+
+`xlAsyncReturn` borrows an inline root only for its synchronous callback. Its string
+and array storage remains owned by the callback value; it never enters the
+Excel-owned `ReturnBlock` / `xlAutoFree12` protocol. Async task shards own their
+control maps and are padded independently; only cancellation computes the capacity
+needed to drain them.
+
+`PeSnapshot` owns immutable bytes together with their parsed PE information. CRT
+inspection borrows that information, then package verification consumes the same
+snapshot and compares it against the staged XLL without allocating another image.
+Package artifacts bind immutable shared bytes, size and digest at construction.
+Subsequent commit checks compare every file byte against that snapshot, preserving
+identity and stable-read checks without recalculating the same digest. File
+diagnostics apply the text budget during formatting before JSON serialization.
+Diagnostic queue capacity is reserved before cloning the event; failed admission
+does not build a payload. Construction unwind returns its reservation, successful
+send transfers it to the worker, and dequeue returns it before sink delivery.
+
+See the [performance audit](PERFORMANCE.md) for measurements, design tradeoffs and
+platform qualification limits.

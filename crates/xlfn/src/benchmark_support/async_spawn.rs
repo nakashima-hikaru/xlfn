@@ -59,6 +59,16 @@ pub struct SpawnBatchResult {
 
 #[cfg(feature = "async")]
 impl AsyncSpawnBenchmark {
+    pub fn encode_scalar_return() {
+        let value = crate::return_abi::AsyncReturnValue::from_value(
+            crate::call_return::ReturnPayload::Scalar(crate::value::ExcelCellOutput::Number(
+                std::hint::black_box(42.0),
+            )),
+        )
+        .expect("finite scalar output must encode");
+        std::hint::black_box(&value);
+    }
+
     pub fn new(worker_count: usize, producer_count: usize) -> Self {
         Self::new_with_kind(worker_count, producer_count, AsyncSpawnKind::Noop)
     }
