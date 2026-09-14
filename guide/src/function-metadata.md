@@ -21,17 +21,17 @@ fn calculate_area(
 
 ## Function fields
 
-| Field or flag | Meaning |
-|---|---|
-| `name = "..."` | Excel-visible function name; defaults to the Rust function name |
-| `id = "..."` | stable generated export ID; defaults to the Rust function name |
-| `category = "..."` | Function Wizard category; empty means the add-in default category |
-| `description = "..."` | function description; defaults to joined Rust doc comments |
-| `help_topic = "..."` | optional help URL or topic |
-| `thread_safe` | registers the function for multi-threaded recalculation |
-| `macro_sheet` | registers macro-sheet capability |
-| `volatile` | asks Excel to recalculate the function as volatile |
-| `hidden` | hides the function from normal Function Wizard discovery |
+| Field or flag         | Meaning                                                           |
+| --------------------- | ----------------------------------------------------------------- |
+| `name = "..."`        | Excel-visible function name; defaults to the Rust function name   |
+| `id = "..."`          | stable generated export ID; defaults to the Rust function name    |
+| `category = "..."`    | Function Wizard category; empty means the add-in default category |
+| `description = "..."` | function description; defaults to joined Rust doc comments        |
+| `help_topic = "..."`  | optional help URL or topic                                        |
+| `thread_safe`         | registers the function for multi-threaded recalculation           |
+| `macro_sheet`         | registers macro-sheet capability                                  |
+| `volatile`            | asks Excel to recalculate the function as volatile                |
+| `hidden`              | hides the function from normal Function Wizard discovery          |
 
 The `id` must be a Rust identifier fragment: ASCII letters, digits, and underscores, not beginning with a digit. It becomes part of an exported symbol and should remain stable once released.
 
@@ -63,7 +63,7 @@ At crate root:
     id = "math-analytics",
     category = "Math"
 )]
-pub struct RatesAnalytics;
+pub struct MathAnalytics;
 ```
 
 - `name` and `category` contain 1 to 255 UTF-16 code units;
