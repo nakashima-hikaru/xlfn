@@ -11,3 +11,9 @@ target/
 formal/.lake/
 
 guide/book/
+
+# Verification trace artifacts
+/*-trace*.json
+/rust-composition-*.json
+/windows-*-trace*.json
+/windows-handle-refinement-traces*/
