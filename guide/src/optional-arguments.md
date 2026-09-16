@@ -47,18 +47,18 @@ This is the correct representation when omission means "use configuration" but a
 `#[excel_arg]` can apply a policy before ordinary conversion:
 
 ```rust
-#[excel_function(name = "RATE.COMPOUND", thread_safe)]
-fn compound(
-    principal: f64,
+#[excel_function(name = "MATH.GROWTH", thread_safe)]
+fn growth(
+    base: f64,
     #[excel_arg(
-        name = "Rate",
+        name = "Factor",
         default = 0.0,
         missing = "default",
         blank = "error"
     )]
-    rate: f64,
+    factor: f64,
 ) -> f64 {
-    principal * (1.0 + rate)
+    base * (1.0 + factor)
 }
 ```
 

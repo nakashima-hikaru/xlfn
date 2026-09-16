@@ -35,7 +35,7 @@ impl IntoXllError for DataProcessingError {
 }
 
 #[excel_function(name = "DATA.EVALUATE", thread_safe)]
-fn intrinsic(factor: f64, beta: f64) -> Result<f64, DataProcessingError> {
+fn evaluate(base: f64, limit: f64) -> Result<f64, DataProcessingError> {
     if limit < 0.0 {
         return Err(DataProcessingError::InvalidValue);
     }

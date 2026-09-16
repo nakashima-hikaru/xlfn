@@ -63,11 +63,11 @@ The default output root is `package/`. A typical result is:
 ```text
 package/
 ├── win-x86/
-│   ├── DeskTools.xll
+│   ├── AppTools.xll
 │   ├── build-manifest.json
 │   └── NativeEngine.dll
 └── win-x64/
-    ├── DeskTools.xll
+    ├── AppTools.xll
     ├── build-manifest.json
     └── NativeEngine.dll
 ```

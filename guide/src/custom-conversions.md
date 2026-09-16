@@ -13,18 +13,18 @@ use xlfn::{
 };
 
 #[derive(Clone, Copy)]
-struct PositiveRate(f64);
+struct PositiveFactor(f64);
 
-impl<'call> FromExcel<'call> for PositiveRate {
+impl<'call> FromExcel<'call> for PositiveFactor {
     fn from_excel(
         value: XlValueRef<'call>,
         argument: &'static str,
     ) -> XllResult<Self> {
-        let rate = <f64 as FromExcel>::from_excel(value, argument)?;
-        if rate < 0.0 {
+        let factor = <f64 as FromExcel>::from_excel(value, argument)?;
+        if factor < 0.0 {
             return Err(XllError::input(argument, InputError::OutOfRange));
         }
-        Ok(Self(rate))
+        Ok(Self(factor))
     }
 }
 ```
@@ -50,7 +50,7 @@ require only `FromExcel`:
 ```rust
 use xlfn::value::{ExcelInputIdentity, InputIdentityEncoder};
 
-impl ExcelInputIdentity for PositiveRate {
+impl ExcelInputIdentity for PositiveFactor {
     fn encode_input_identity(&self, encoder: &mut InputIdentityEncoder) {
         encoder.f64(self.0);
     }
@@ -87,9 +87,9 @@ The same implementation is used for scalar returns and matrix cells. Execution-m
 A simpler alternative is to convert inside the function and return a built-in value:
 
 ```rust
-#[excel_function(name = "RATE.PERCENT", thread_safe)]
-fn percent(rate: PositiveRate) -> f64 {
-    rate.0 * 100.0
+#[excel_function(name = "FACTOR.PERCENT", thread_safe)]
+fn percent(factor: PositiveFactor) -> f64 {
+    factor.0 * 100.0
 }
 ```
 
@@ -102,16 +102,16 @@ use xlfn::error::{InputError, IntoXllError, XllError};
 
 #[derive(Debug)]
 enum DataError {
-    MissingPillar,
+    MissingEntry,
     InvalidInput,
 }
 
 impl IntoXllError for DataError {
     fn into_xll_error(self) -> XllError {
         match self {
-            Self::MissingPillar => XllError::input(
+            Self::MissingEntry => XllError::input(
                 "dataset",
-                InputError::Malformed("missing pillar"),
+                InputError::Malformed("missing entry"),
             ),
             Self::InvalidInput => XllError::Domain {
                 code: xlfn::error::DomainErrorCode::InvalidInput,

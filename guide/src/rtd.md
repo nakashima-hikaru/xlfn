@@ -26,8 +26,8 @@ notify Excel.
 ```rust
 let parts = [
     "events",
-    symbol.as_str(),
-    field.as_str(),
+    topic.as_str(),
+    metric.as_str(),
 ];
 context.rtd().subscribe(&source_handle, &parts)?;
 ```

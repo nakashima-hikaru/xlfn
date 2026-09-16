@@ -24,7 +24,7 @@ impl Dataset {
             return Err(XllError::input("time", InputError::OutOfRange));
         }
 
-        let right = self.times.partition_point(|pillar| *pillar < time);
+        let right = self.times.partition_point(|point| *point < time);
         if right == 0 {
             return Ok(self.values[0]);
         }
@@ -46,7 +46,7 @@ The derived trait requires the value to be `Any + Send + Sync + 'static`. The ob
 ## Produce and consume
 
 ```rust
-#[excel_function(name = "CURVE.CREATE")]
+#[excel_function(name = "DATASET.CREATE")]
 fn create_dataset(times: Row<f64>, values: Row<f64>) -> XllResult<Dataset> {
     let times = times.into_vec();
     let values = values.into_vec();
@@ -135,16 +135,16 @@ Because the producer runs at most once per formula revision, reading hidden muta
 
 ```rust
 // NG: hidden mutable state is read but never triggers re-evaluation.
-fn market() -> Market {
+fn dataset() -> Dataset {
     database.load_latest()
 }
 
 // OK: changing snapshot_id changes the input fingerprint and revision, creating a new object.
-fn market(snapshot_id: String) -> Market { .. }
+fn dataset(snapshot_id: String) -> Dataset { .. }
 
 // OK: changing the underlying upstream object changes the downstream input fingerprint;
 // aliases of the same object retain the same semantic identity.
-fn model(market: Handle<'_, MarketSnapshot>) -> Model { .. }
+fn model(dataset: Handle<'_, DatasetSnapshot>) -> Model { .. }
 ```
 
 ## Handle alias functions
@@ -152,7 +152,7 @@ fn model(market: Handle<'_, MarketSnapshot>) -> Model { .. }
 A function may explicitly republish an existing handle through `HandleAlias`:
 
 ```rust
-#[excel_function(name = "CURVE.ALIAS")]
+#[excel_function(name = "DATASET.ALIAS")]
 fn alias(dataset: Handle<'_, Dataset>) -> HandleAlias<'_, Dataset> {
     dataset.alias()
 }

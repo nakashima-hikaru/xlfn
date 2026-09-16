@@ -17,8 +17,8 @@ use xlfn::unstable::cache::{
 ```rust
 #[derive(Clone, Eq, Hash, PartialEq)]
 struct DatasetKey {
-    currency: String,
-    as_of: i32,
+    namespace: String,
+    version: i32,
 }
 
 let cache = CalculationCache::<DatasetKey, Dataset>::new(64 * 1024 * 1024);
@@ -108,13 +108,13 @@ Do not use raw `f64` as an ordinary hash key. `CanonicalF64` rejects NaN and inf
 ```rust
 #[derive(Clone, Eq, Hash, PartialEq)]
 struct QueryKey {
-    alpha: CanonicalF64,
-    beta: CanonicalF64,
+    x: CanonicalF64,
+    y: CanonicalF64,
 }
 
 let key = QueryKey {
-    alpha: CanonicalF64::new(x)?,
-    beta: CanonicalF64::new(y)?,
+    x: CanonicalF64::new(x)?,
+    y: CanonicalF64::new(y)?,
 };
 ```
 

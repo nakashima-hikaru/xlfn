@@ -17,10 +17,10 @@ The project uses Excel 2010 or later as the operational baseline for this capabi
 #[excel_function(name = "SERVICE.FETCH")]
 async fn fetch(
     #[excel_context(asynchronous)] context: AsyncContext<'_, ServiceAddin>,
-    symbol: String,
+    key: String,
 ) -> XllResult<f64> {
     context.check_cancelled()?;
-    let value = context.state().client.fetch(&symbol).await?;
+    let value = context.state().client.fetch(&key).await?;
     context.check_cancelled()?;
     Ok(value)
 }

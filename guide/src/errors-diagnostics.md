@@ -36,7 +36,7 @@ This mapping is intentionally coarse. The diagnostic stream carries the specific
 A basic production setup installs the built-in bounded file sink during `Addin::open`:
 
 ```rust
-impl Addin for DeskTools {
+impl Addin for AppTools {
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;
@@ -91,7 +91,7 @@ impl DiagnosticSink for Telemetry {
 Install the custom sink during `Addin::open`:
 
 ```rust
-impl Addin for DeskTools {
+impl Addin for AppTools {
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;

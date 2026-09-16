@@ -51,7 +51,7 @@ impl UdfLayerGuard for MetricsGuard {
 Register layers from the add-in using static tuple composition:
 
 ```rust
-impl Addin for DeskTools {
+impl Addin for AppTools {
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;

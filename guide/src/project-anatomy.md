@@ -25,13 +25,13 @@ pub struct State {
 }
 
 pub struct Configuration {
-    pub desk: String,
+    pub environment: String,
 }
 
-#[excel_addin(name = "Desk Tools", id = "desk-tools", category = "Desk")]
-pub struct DeskTools;
+#[excel_addin(name = "App Tools", id = "app-tools", category = "App")]
+pub struct AppTools;
 
-impl Addin for DeskTools {
+impl Addin for AppTools {
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;
@@ -47,7 +47,7 @@ impl Addin for DeskTools {
 
 fn load_configuration(_: &std::path::Path) -> XllResult<Configuration> {
     Ok(Configuration {
-        desk: "Rates".to_owned(),
+        environment: "Production".to_owned(),
     })
 }
 ```

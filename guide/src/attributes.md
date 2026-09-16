@@ -12,11 +12,11 @@ Place exactly one `#[excel_addin]` on a non-generic struct declared at the crate
 
 ```rust
 #[excel_addin(
-    name = "Desk Tools",
-    id = "desk-tools",
-    category = "DeskTools"
+    name = "App Tools",
+    id = "app-tools",
+    category = "AppTools"
 )]
-pub struct DeskTools;
+pub struct AppTools;
 ```
 
 | Option | Meaning | Default |
@@ -41,11 +41,11 @@ stop every such source before the stronger quiescence hook returns.
 Apply the attribute to an ordinary or `async` free function:
 
 ```rust
-/// Returns the present value of a cash flow.
+/// Computes the area of a rectangle.
 #[excel_function(
     name = "MATH.SCALE",
     id = "math_scale_v1",
-    category = "Valuation",
+    category = "Math",
     help_topic = "https://docs.example.invalid/math/scale",
     thread_safe
 )]
@@ -87,7 +87,7 @@ A function may have at most one injected context. It must be the first parameter
 
 ```rust
 fn lookup(
-    #[excel_context(thread_safe)] context: ThreadSafeContext<'_, DeskTools>,
+    #[excel_context(thread_safe)] context: ThreadSafeContext<'_, AppTools>,
     key: String,
 ) -> XllResult<f64> {
     context.state().lookup(&key)
@@ -96,10 +96,10 @@ fn lookup(
 
 | Role | Rust context | Capability |
 |---|---|---|
-| `main_thread` | `MainThreadContext<'_, DeskTools>` | main-thread Excel callbacks, handles, RTD |
-| `thread_safe` | `ThreadSafeContext<'_, DeskTools>` | shared state during MTR; no unsafe Excel callbacks |
-| `macro_sheet` | `MacroSheetContext<'_, DeskTools>` | Excel references and macro-sheet registration |
-| `asynchronous` | `AsyncContext<'_, DeskTools>` | cancellation and shared state for an async UDF |
+| `main_thread` | `MainThreadContext<'_, AppTools>` | main-thread Excel callbacks, handles, RTD |
+| `thread_safe` | `ThreadSafeContext<'_, AppTools>` | shared state during MTR; no unsafe Excel callbacks |
+| `macro_sheet` | `MacroSheetContext<'_, AppTools>` | Excel references and macro-sheet registration |
+| `asynchronous` | `AsyncContext<'_, AppTools>` | cancellation and shared state for an async UDF |
 
 An `async fn` may omit a context. When it has one, the role must be `asynchronous`. A synchronous function cannot use the asynchronous role.
 

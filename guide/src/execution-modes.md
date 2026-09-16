@@ -5,11 +5,11 @@ xlfn separates Excel-visible arguments from injected capabilities. A context, wh
 ## Main-thread context
 
 ```rust
-#[excel_function(name = "APP.DESK")]
-fn desk(
-    #[excel_context(main_thread)] context: MainThreadContext<'_, DeskTools>,
+#[excel_function(name = "APP.ENVIRONMENT")]
+fn environment(
+    #[excel_context(main_thread)] context: MainThreadContext<'_, AppTools>,
 ) -> String {
-    context.state().desk.clone()
+    context.state().environment.clone()
 }
 ```
 
@@ -22,7 +22,7 @@ Do not combine a main-thread context with `thread_safe`.
 ```rust
 #[excel_function(name = "APP.VERSION", thread_safe)]
 fn version(
-    #[excel_context(thread_safe)] context: ThreadSafeContext<'_, DeskTools>,
+    #[excel_context(thread_safe)] context: ThreadSafeContext<'_, AppTools>,
 ) -> String {
     context.state().version.clone()
 }
@@ -41,7 +41,7 @@ Do not move call-scoped Excel values, raw references, or callback capabilities t
 ```rust
 #[excel_function(name = "APP.RANGE.NAME")]
 fn range_name(
-    #[excel_context(macro_sheet)] context: MacroSheetContext<'_, DeskTools>,
+    #[excel_context(macro_sheet)] context: MacroSheetContext<'_, AppTools>,
     #[excel_arg(reference)] reference: ExcelReference<'_>,
 ) -> XllResult<String> {
     context.sheet_name(&reference)
@@ -61,7 +61,7 @@ The `macro_sheet` function flag selects the same registration capability without
 ```rust
 #[excel_function(name = "APP.SLOW")]
 async fn slow(
-    #[excel_context(asynchronous)] context: AsyncContext<'_, DeskTools>,
+    #[excel_context(asynchronous)] context: AsyncContext<'_, AppTools>,
     input: String,
 ) -> XllResult<String> {
     context.check_cancelled()?;
@@ -69,7 +69,7 @@ async fn slow(
 }
 ```
 
-The framework-owned future retains the current open-generation lease and per-call cancellation token. `AsyncContext<'_, DeskTools>` borrows those capabilities for the invocation, so it is available only with the `async` feature and only to `async fn`; it cannot escape into a detached task. An async function may omit the context if it does not need state or cancellation.
+The framework-owned future retains the current open-generation lease and per-call cancellation token. `AsyncContext<'_, AppTools>` borrows those capabilities for the invocation, so it is available only with the `async` feature and only to `async fn`; it cannot escape into a detached task. An async function may omit the context if it does not need state or cancellation.
 
 ## Compatibility table
 
