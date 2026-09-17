@@ -31,6 +31,11 @@ fn trait_driven_function_signatures_compile() {
         tests.compile_fail("tests/ui/fail/unscoped_call_scope.rs");
     }
 
+    #[cfg(feature = "cache")]
+    {
+        tests.pass("tests/ui/pass/cache_endpoint.rs");
+    }
+
     #[cfg(feature = "async")]
     {
         tests.pass("tests/ui/pass_async/owned_matrix.rs");

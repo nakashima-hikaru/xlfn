@@ -195,8 +195,8 @@ bench-check:
 
 # Full-cache production policy and comparators; leak and alias checks remain enabled.
 miri-cache-backends:
-    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="" cargo +{{miri-toolchain}} miri test -p xlfn --features "unstable-cache bench-internals" --lib cache::backend_tests --locked
-    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-tree-borrows" cargo +{{miri-toolchain}} miri test -p xlfn --features "unstable-cache bench-internals" --lib cache::backend_tests --locked
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="" cargo +{{miri-toolchain}} miri test -p xlfn --features "cache bench-internals" --lib cache::backend_tests --locked
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-tree-borrows" cargo +{{miri-toolchain}} miri test -p xlfn --features "cache bench-internals" --lib cache::backend_tests --locked
 
 # Serial backend diagnostics with three repetitions; includes all comparison policies.
 bench-cache-backends output="target/cache-backend-qualification":

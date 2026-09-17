@@ -28,7 +28,7 @@ while the worker pool is running.
 Run the full benchmark with the normal ten-second measurement policy:
 
 ```text
-cargo bench -p xlfn --bench cache_lookup --features bench-internals,unstable-cache
+cargo bench -p xlfn --bench cache_lookup --features bench-internals,cache
 ```
 
 For a short local smoke run, set `XLFN_BENCH_MEASUREMENT_MS` and reduce the
@@ -36,7 +36,7 @@ warm-up time:
 
 ```text
 XLFN_BENCH_MEASUREMENT_MS=50 cargo bench -p xlfn --bench cache_lookup \
-  --features bench-internals,unstable-cache -- --noplot --warm-up-time 0.05
+  --features bench-internals,cache -- --noplot --warm-up-time 0.05
 ```
 
 The allocation probe runs outside Criterion's timed section and reports
@@ -184,7 +184,7 @@ Run the normal ten-second-per-case measurements with 256 operations per worker
 and 20 flat samples:
 
 ```text
-cargo bench -p xlfn --bench cache_reclamation --features bench-internals,unstable-cache
+cargo bench -p xlfn --bench cache_reclamation --features bench-internals,cache
 ```
 
 For a short execution/metrics smoke check of all twelve cases, use 64
@@ -192,7 +192,7 @@ operations per worker and Criterion's test mode:
 
 ```text
 XLFN_CACHE_RECLAIM_OPERATIONS=64 cargo bench -p xlfn --bench cache_reclamation \
-  --features bench-internals,unstable-cache -- --test
+  --features bench-internals,cache -- --test
 ```
 
 `XLFN_CACHE_RECLAIM_OPERATIONS` accepts 64 through 65,536 operations per worker.

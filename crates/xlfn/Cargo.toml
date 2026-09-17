@@ -21,7 +21,7 @@ rtd = []
 # Formula handles use the private Excel RTD transport internally, but do not
 # expose the generic RTD subscription capability.
 handles = []
-unstable-cache = ["dep:quick_cache"]
+cache = ["dep:quick_cache"]
 refinement = []
 # Experimental backends/dependencies belong only to this internal benchmark surface.
 bench-internals = ["handles", "xlfn-sys/abi-probe", "dep:hashbrown", "dep:moka"]
@@ -59,22 +59,22 @@ required-features = ["bench-internals"]
 [[bench]]
 name = "cache_lookup"
 harness = false
-required-features = ["bench-internals", "unstable-cache"]
+required-features = ["bench-internals", "cache"]
 
 [[bench]]
 name = "cache_backends"
 harness = false
-required-features = ["bench-internals", "unstable-cache"]
+required-features = ["bench-internals", "cache"]
 
 [[bench]]
 name = "cache_workloads"
 harness = false
-required-features = ["bench-internals", "unstable-cache"]
+required-features = ["bench-internals", "cache"]
 
 [[bench]]
 name = "cache_reclamation"
 harness = false
-required-features = ["bench-internals", "unstable-cache"]
+required-features = ["bench-internals", "cache"]
 
 [[bench]]
 name = "input_identity"

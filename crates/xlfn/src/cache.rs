@@ -146,6 +146,7 @@ fn reclaim_cache_entries<V>(entries: ReclaimEntries) {
 
 /// Approximate, side-effect-free reclamation counters. Weights use the
 /// caller's estimates, not allocator or process memory measurements.
+#[cfg(any(test, feature = "bench-internals"))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CacheReclamationStats {
     /// Evicted nodes without lease pins, awaiting their grace period.
@@ -297,42 +298,37 @@ impl<Marker, K, V> CacheEndpoint<Marker, K, V> {
 
 impl<Marker: 'static, K: 'static, V: 'static> CacheEndpoint<Marker, K, V> {
     #[must_use]
-    pub fn key(&self) -> (TypeId, &'static str) {
+    pub(crate) fn key(&self) -> (TypeId, &'static str) {
         (TypeId::of::<(Marker, K, V)>(), self.id)
     }
 }
 
-impl<Marker, K, V> BoundCacheEndpoint<'_, Marker, K, V>
+impl<'registry, Marker, K, V> BoundCacheEndpoint<'registry, Marker, K, V>
 where
+    Marker: 'static,
     K: Clone + Eq + Hash + Send + Sync + 'static,
     V: Send + Sync + 'static,
 {
-    pub fn get_or_try_insert<'a, F, W>(
-        &'a self,
+    pub fn get_or_try_insert<F, W>(
+        &self,
         key: K,
         weight: W,
         compute: F,
-    ) -> XllResult<CacheLease<'a, V>>
+    ) -> XllResult<CacheLease<'registry, V>>
     where
         F: FnOnce() -> XllResult<V>,
         W: FnOnce(&V) -> usize,
     {
-        // SAFETY: self.cache is valid for 'registry, and 'a is within 'registry.
-        unsafe { self.cache.as_ref() }
-            .cache
-            .get_or_try_insert_with(key, weight, compute)
+        // SAFETY: self.cache is valid for 'registry.
+        let stored: &'registry StoredCache<Marker, K, V> = unsafe { self.cache.as_ref() };
+        stored.cache.get_or_try_insert_with(key, weight, compute)
     }
 
     #[must_use]
-    pub fn get<'a>(&'a self, key: &K) -> Option<CacheLease<'a, V>> {
-        // SAFETY: self.cache is valid for 'registry, and 'a is within 'registry.
-        unsafe { self.cache.as_ref() }.cache.get(key)
-    }
-
-    #[must_use]
-    pub fn reclamation_stats(&self) -> CacheReclamationStats {
-        // SAFETY: this bound capability cannot outlive its registry allocation.
-        unsafe { self.cache.as_ref() }.cache.reclamation_stats()
+    pub fn get(&self, key: &K) -> Option<CacheLease<'registry, V>> {
+        // SAFETY: self.cache is valid for 'registry.
+        let stored: &'registry StoredCache<Marker, K, V> = unsafe { self.cache.as_ref() };
+        stored.cache.get(key)
     }
 
     /// Opens a benchmark-only scoped read region for repeated cache hits.
@@ -490,8 +486,9 @@ impl CacheRegistry {
         }
     }
 
+    #[cfg(test)]
     #[must_use]
-    pub fn endpoint_count(&self) -> usize {
+    pub(crate) fn endpoint_count(&self) -> usize {
         self.caches.read().len()
     }
 }
@@ -792,6 +789,7 @@ impl CacheLookupDomain {
         }
     }
 
+    #[cfg(any(test, feature = "bench-internals"))]
     fn stats(&self) -> CacheReclamationStats {
         CacheReclamationStats {
             pending_nodes: self.pending_nodes.load(Ordering::Relaxed),
@@ -840,6 +838,11 @@ pub struct CacheResidentStats {
     pub resident_node_bytes_estimate: u64,
 }
 
+/// A concurrent weighted cache with a bounded resident budget.
+///
+/// `CalculationCache` provides memoization for expensive computations across
+/// UDF invocations. Eviction is based on abstract caller-reported weights rather
+/// than physical allocations.
 pub struct CalculationCache<K, V> {
     weight_budget: usize,
     generation: CacheGeneration,
@@ -854,7 +857,7 @@ where
     K: Clone + Eq + Hash + Send + Sync + 'static,
     V: Send + Sync + 'static,
 {
-    /// Creates a concurrent, weighted cache backed by Quick Cache.
+    /// Creates a concurrent weighted cache with a bounded resident budget.
     ///
     /// Weight is supplied with each initialization. Values heavier than the
     /// configured budget are returned to the caller but are not retained.
@@ -918,6 +921,7 @@ where
         }
     }
 
+    #[cfg(any(test, feature = "bench-internals"))]
     #[must_use]
     pub const fn weight_budget(&self) -> usize {
         self.weight_budget
@@ -925,6 +929,7 @@ where
 
     /// Observes reclamation without running maintenance. Pending counters
     /// exclude resident nodes and values kept alive by outstanding leases.
+    #[cfg(any(test, feature = "bench-internals"))]
     #[must_use]
     pub fn reclamation_stats(&self) -> CacheReclamationStats {
         self.domain.stats()

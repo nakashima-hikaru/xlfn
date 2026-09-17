@@ -4,7 +4,7 @@ use std::hint::black_box;
 use std::sync::{Arc, Barrier, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use xlfn::unstable::cache::{CacheBackend, CacheLease, CalculationCache};
+use xlfn::cache::{CacheBackend, CacheLease, CalculationCache};
 
 const OPS: usize = 256;
 const BUDGET: usize = 64 * 8;

@@ -1,4 +1,4 @@
-use crate::unstable::cache::{CacheBackend, CalculationCache};
+use crate::cache::{CacheBackend, CalculationCache};
 
 /// Selects only the resident backend in cache benchmark executables.
 pub fn benchmark_cache_backend() -> CacheBackend {

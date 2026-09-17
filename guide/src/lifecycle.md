@@ -30,9 +30,9 @@ select RTD limits and, with the `async` feature, the async worker count.
 
 The stable default uses `type Layers = ();`. Custom UDF layers are part of the
 stable execution contract and are documented separately in [UDF execution
-layers](udf-layers.md). Other lower-level APIs remain behind the explicit
-`unstable-cache` feature; internal lifecycle refinement is enabled only by
-`refinement` and is not required by add-in authors.
+layers](udf-layers.md). Calculation caches are enabled by the `cache`
+feature; internal lifecycle refinement is enabled only by `refinement` and
+is not required by add-in authors.
 
 ## Open
 

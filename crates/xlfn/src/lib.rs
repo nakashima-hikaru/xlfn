@@ -41,9 +41,9 @@ mod async_udf;
 #[doc(hidden)]
 pub mod benchmark_support;
 mod boundary;
-#[cfg(feature = "unstable-cache")]
+#[cfg(feature = "cache")]
 #[allow(unsafe_code, reason = "Cache value arena and lease pointers")]
-mod cache;
+pub mod cache;
 #[allow(
     unsafe_code,
     reason = "Call-scoped read permits and domain witness capabilities"
@@ -525,22 +525,6 @@ macro_rules! __xlfn_private_excel_rtd_exports {
 #[macro_export]
 macro_rules! __xlfn_private_excel_rtd_exports {
     ($runtime:expr) => {};
-}
-
-/// Experimental lower-level APIs.
-#[cfg(feature = "unstable-cache")]
-pub mod unstable {
-    /// Calculation-scoped caches.
-    pub mod cache {
-        #[cfg(feature = "bench-internals")]
-        pub use crate::cache::CacheReadScope;
-        pub use crate::cache::{
-            BoundCacheEndpoint, CacheEndpoint, CacheLease, CacheReclamationStats, CacheRegistry,
-            CalculationCache, CanonicalF64,
-        };
-        #[cfg(feature = "bench-internals")]
-        pub use crate::cache::{CacheBackend, CacheResidentStats};
-    }
 }
 
 /// Efficient construction of Excel array return values.

@@ -42,7 +42,7 @@ use crate::host_callback::HostCallbackSession;
 use crate::input_identity::InputFingerprint;
 
 mod async_spawn;
-#[cfg(feature = "unstable-cache")]
+#[cfg(feature = "cache")]
 mod cache;
 mod call_resolution;
 mod formula;
@@ -63,7 +63,7 @@ pub use crate::subscription::{channel_protocol_probe, shared_publisher_topology_
 
 #[cfg(feature = "async")]
 pub use async_spawn::{AsyncSpawnBenchmark, AsyncSpawnKind, RescheduleFuture, SpawnBatchResult};
-#[cfg(feature = "unstable-cache")]
+#[cfg(feature = "cache")]
 pub use cache::{
     ArcCacheBenchmark, ArcCacheEvictionBenchmark, CacheLookupBenchCase,
     ConcurrentClearLatencyBenchmark, CurrentCacheBenchmark, CurrentCacheEvictionBenchmark,

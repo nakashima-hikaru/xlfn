@@ -20,7 +20,7 @@ def main():
     parser.add_argument("--supplemental-only", action="store_true")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
-    features = "unstable-cache bench-internals"
+    features = "cache bench-internals"
     base = ["cargo", "bench", "-p", "xlfn", "--features", features, "--locked"]
     if not args.supplemental_only:
         with (args.output / "criterion.jsonl").open("w") as out:

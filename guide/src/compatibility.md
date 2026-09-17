@@ -63,7 +63,7 @@ The `xlfn` crate has no default features.
 | `async`           | native async UDF executor, async context, calculation cancellation exports | a formula produces one eventual result without blocking Excel   |
 | `handles`         | formula-owned typed objects, aliases, and scoped handle inputs              | a worksheet formula owns a Rust object                           |
 | `rtd`             | typed streaming sources, subscriptions, and RTD configuration               | a formula receives repeated updates from a push source           |
-| `unstable-cache`  | lower-level calculation-cache API                                          | the add-in explicitly accepts experimental cache API evolution  |
+| `cache`           | concurrent calculation cache and endpoints                                 | an add-in shares or bounds internal computation across cells    |
 
 `handles` and `rtd` share a private Excel RTD transport, but neither enables the
 other's public API. Async handle inputs need both `async` and `handles`.
@@ -134,14 +134,14 @@ The `0.x` line is pre-1.0. Treat public Rust APIs, macro diagnostics, package me
 The version in this checkout is still `0.2.0`. The following defines the scope
 to freeze when 1.0 is released; it does not announce that release:
 
-- The documented `xlfn` facade, including `xlfn::output`, its prelude, macro inputs and generated behavior,
-  and the `async`, `handles`, and `rtd` feature APIs form the stable application
+- The documented `xlfn` facade, including `xlfn::output`, `xlfn::cache`, its prelude, macro inputs and generated behavior,
+  and the `async`, `cache`, `handles`, and `rtd` feature APIs form the stable application
   contract. Removing or incompatibly changing them requires a major release.
 - Custom conversion, lifecycle, execution-layer, and RTD extension traits are
   included. Adding a required trait method or changing a public type's fields,
   exhaustive variants, lifetimes, or thread-safety bounds must be reviewed for
   downstream source compatibility.
-- `unstable-cache`, hidden macro support, benchmark helpers,
+- Hidden macro support, benchmark helpers,
   and refinement trace formats are excluded. Code opting into these facilities
   must pin the exact framework version. Experimental features are not implied
   by the supported feature set.
@@ -156,6 +156,18 @@ to freeze when 1.0 is released; it does not announce that release:
 - Rust `1.98.1` is the initial minimum toolchain. A minimum-version increase
   must be documented and made in a minor or major release, not a patch release.
   Qualified Windows/Excel environments are recorded separately below.
+
+### Calculation cache non-guarantees
+
+The following internal operational characteristics are intentionally excluded from the stable contract and may change without notice:
+
+- Eviction algorithm and eviction order
+- Exact residency decisions and strict process-memory bounds
+- Underlying cache backend implementation
+- Maintenance cadence and thread assignment for destructors
+- Reclamation mechanism, grace periods, and timing
+- Number of internal shards or stripes
+- Internal synchronization and single-flight coordination primitives
 
 `xlfn-sys`, the programmatic `xlfn-package` API, and the `cargo-xlfn` CLI have
 their own release contracts. The facade's 1.0 commitment does not implicitly

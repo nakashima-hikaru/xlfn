@@ -11,7 +11,7 @@ use std::sync::{Arc, Barrier};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 use xlfn::benchmark_support::benchmark_measurement_time;
-use xlfn::unstable::cache::{CacheLease, CalculationCache};
+use xlfn::cache::{CacheLease, CalculationCache};
 
 #[derive(Clone, Copy, Default)]
 struct AllocationCounts {

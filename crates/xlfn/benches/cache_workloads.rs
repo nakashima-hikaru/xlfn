@@ -4,7 +4,7 @@ use std::cell::Cell;
 use std::hint::black_box;
 use std::time::Instant;
 use xlfn::benchmark_support::benchmark_cache_backend;
-use xlfn::unstable::cache::CalculationCache;
+use xlfn::cache::CalculationCache;
 
 const KIB: usize = 1024;
 

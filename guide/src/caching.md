@@ -1,18 +1,18 @@
 # Calculation caches
 
-The experimental cache module provides concurrent, bounded memoization for application data. It is independent of formula-owned handles: a handle controls worksheet ownership, while a cache controls reuse of an internal computation. Enable the explicit `unstable-cache` crate feature to use it.
+The cache module provides concurrent, bounded memoization for application data. It is independent of formula-owned handles: a handle controls worksheet ownership, while a cache controls reuse of an internal computation. Enable the `cache` crate feature to use it.
 
 Import from:
 
 ```rust
-use xlfn::unstable::cache::{
+use xlfn::cache::{
     BoundCacheEndpoint, CacheEndpoint, CacheLease, CacheRegistry, CalculationCache, CanonicalF64,
 };
 ```
 
 ## One typed cache
 
-`CalculationCache<K, V>` uses Quick Cache with one global resident weight budget and a caller-defined weight:
+`CalculationCache<K, V>` is a concurrent weighted cache with a bounded resident budget and caller-defined entry weights:
 
 ```rust
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -36,28 +36,18 @@ The weight budget is an abstract integer. It can represent approximate bytes, ex
 
 Metrics such as `len()` and `used_weight()` observe current residency. Concurrent changes mean these remain operational estimates rather than a transactional snapshot.
 
-Eviction and memory reclamation are separate. A live lease intentionally keeps
-its value alive after eviction or `clear()`. Once the final pin is released,
-the value enters a retirement queue until readers that could have observed its
-pointer have finished. The resident entry destructor only queues work; it never waits
-for readers or runs a value destructor inside the index lock.
+Eviction and memory reclamation are separate. A live lease intentionally keeps its value alive after eviction or `clear()`. The implementation may apply synchronous maintenance or backpressure to prevent unbounded retirement debt during continuous mutation. Idle caches can retain retired entries until a subsequent cache operation or destruction.
 
-Ordinary reads attempt reclamation when work is queued, without waiting for
-readers. Initialization attempts also apply backpressure when queued retirement reaches 256 nodes or the
-endpoint's weight budget: the operation waits for existing readers before
-returning. This bounds accumulating debt during ongoing mutation, subject to
-concurrent operations; it is not a strict bound on process memory. A final lease
-drop and explicit clear also wait for reclamation. There is no background
-reclamation thread; idle caches can retain their last small batch until another
-operation or destruction.
+## Guaranteed observable semantics
 
-`reclamation_stats()` on a cache or bound endpoint returns approximate counters
-without performing maintenance: pending nodes and weight, their peak values,
-the number of nodes handed to reclamation, the largest batch, and cumulative
-grace-period time. Pending counts exclude resident entries and values retained
-by live leases. Use these counters with `used_weight()` to distinguish eviction
-capacity from retirement debt; caller-defined weights do not measure allocator
-overhead or the process's actual memory usage.
+The stable cache contract guarantees:
+
+- **Same-key single flight**: Concurrent initializations for the same key coalesce so that the compute closure runs once, returning valid leases to all concurrent callers.
+- **Failed computations**: If an initializer returns an error, nothing is published into the cache, allowing future calls to re-attempt computation.
+- **Clear generation semantics**: Calling `clear()` advances the cache epoch and invalidates existing entries. An in-flight computation that began before `clear()` still returns its value to its immediate caller, but does not repopulate the new generation with a stale result.
+- **Lease stability**: A `CacheLease` remains valid and readable for its full lifetime, even if the underlying entry is evicted or `clear()` is invoked.
+- **Weight normalization**: A weight of 0 is normalized to the minimum positive cache weight. Overweight values exceeding the budget are returned to the caller but are not retained in resident storage.
+- **Reentrancy**: Reentrant cache initialization from within a compute or weight callback on the same thread is unsupported.
 
 ## Typed endpoint registry
 
