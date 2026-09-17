@@ -6,32 +6,14 @@
 //! This backend never dereferences a node or changes a residency/pin counter.
 
 use super::{Entry, VersionedKey, VersionedKeyRef};
-use crate::{XllError, XllResult};
 use hashbrown::{HashMap, hash_map::RawEntryMut};
-use parking_lot::{Condvar, Mutex, RwLock};
+use parking_lot::{Mutex, RwLock};
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 type Removed<V> = dyn Fn(Entry<V>) + Send + Sync;
 type ResidentMap<K, V> = HashMap<VersionedKey<K>, Entry<V>, RandomState>;
-// Arc only shares the synchronization cell and immutable outcome between
-// callers already borrowing this index. The initializer alone completes and
-// removes a flight; neither the flight nor its reference count owns nodes or
-// grants permission to dereference an Entry.
-type Flights<K, V> = HashMap<VersionedKey<K>, Arc<Flight<V>>, RandomState>;
-
-enum Completion<V> {
-    Pending,
-    Finished(Result<Entry<V>, Arc<XllError>>),
-    Retry,
-}
-
-struct Flight<V> {
-    state: Mutex<Completion<V>>,
-    changed: Condvar,
-}
 
 struct Policy {
     weight: u64,
@@ -45,7 +27,6 @@ pub(super) struct ShardedResidentIndex<K, V> {
     shift: u32,
     capacity: u64,
     policy: Mutex<Policy>,
-    flights: Mutex<Flights<K, V>>,
     removed: Box<Removed<V>>,
     entries: AtomicU64,
     weight: AtomicU64,
@@ -75,7 +56,6 @@ where
                 entries: 0,
                 next_victim: 0,
             }),
-            flights: Mutex::new(HashMap::with_hasher(hash)),
             removed: Box::new(removed),
             entries: AtomicU64::new(0),
             weight: AtomicU64::new(0),
@@ -99,70 +79,7 @@ where
             .map(|(_, entry)| *entry)
     }
 
-    pub(super) fn insert(
-        &self,
-        key: &VersionedKey<K>,
-        initialize: impl FnOnce() -> XllResult<Entry<V>>,
-    ) -> Result<Entry<V>, Arc<XllError>> {
-        let mut initialize = Some(initialize);
-        loop {
-            let (flight, owner) = {
-                let mut flights = self.flights.lock();
-                // Serialize the second lookup with flight creation/removal.
-                // Otherwise a just-completed owner could be initialized twice.
-                if let Some(entry) = self.get(&VersionedKeyRef {
-                    epoch: key.epoch,
-                    key: &key.key,
-                }) {
-                    return Ok(entry);
-                }
-                if let Some(flight) = flights.get(key) {
-                    (Arc::clone(flight), false)
-                } else {
-                    let flight = Arc::new(Flight {
-                        state: Mutex::new(Completion::Pending),
-                        changed: Condvar::new(),
-                    });
-                    flights.insert(key.clone(), Arc::clone(&flight));
-                    (flight, true)
-                }
-            };
-            if !owner {
-                let mut state = flight.state.lock();
-                loop {
-                    match &*state {
-                        Completion::Pending => flight.changed.wait(&mut state),
-                        Completion::Finished(result) => return result.clone(),
-                        Completion::Retry => break,
-                    }
-                }
-                continue;
-            }
-
-            // On an unwinding initializer, followers retry with their own
-            // initializer, as with Moka. Never leave a permanently pending flight.
-            let _finish = scopeguard::guard((), |_| {
-                let removed = self.flights.lock().remove_entry(key);
-                {
-                    let mut state = flight.state.lock();
-                    if matches!(*state, Completion::Pending) {
-                        *state = Completion::Retry;
-                    }
-                    flight.changed.notify_all();
-                }
-                // Keys and the last flight/error owner are dropped unlocked.
-                drop(removed);
-            });
-            let result = initialize.take().expect("initializer consumed once")().map_err(Arc::new);
-            if let Ok(entry) = result {
-                self.publish(key.clone(), entry);
-            }
-            *flight.state.lock() = Completion::Finished(result.clone());
-            return result;
-        }
-    }
-
-    fn publish(&self, key: VersionedKey<K>, entry: Entry<V>) {
+    pub(super) fn publish(&self, key: VersionedKey<K>, entry: Entry<V>) {
         let hash = self.hash.hash_one(&key);
         let shard_index = self.shard(hash);
         let mut removed = Vec::new();
@@ -280,7 +197,5 @@ where
                 .iter()
                 .map(|shard| shard.read().capacity() * 8 / 7 * bucket)
                 .sum::<usize>()
-            + self.flights.lock().capacity() * 8 / 7
-                * (std::mem::size_of::<(VersionedKey<K>, Arc<Flight<V>>)>() + 1)
     }
 }

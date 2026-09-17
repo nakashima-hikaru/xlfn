@@ -4,18 +4,20 @@ use crate::{XllError, XllResult};
 #[cfg(all(test, feature = "bench-internals"))]
 mod backend_tests;
 mod resident_index;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{Condvar, Mutex, RwLock};
 use resident_index::ResidentIndex;
 use smallvec::SmallVec;
 use std::any::{Any, TypeId};
+use std::borrow::Borrow;
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 #[cfg(feature = "bench-internals")]
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 use xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT;
@@ -173,23 +175,26 @@ impl<V> Drop for CacheLease<'_, V> {
     fn drop(&mut self) {
         // SAFETY: [TR-LEASE-1] self.node remains valid because a pin capability is held by this lease.
         let node = unsafe { self.node.as_ref() };
-        if !node.published && ACTIVE_CACHE_INITIALIZATION_DEPTH.get() == 0 {
-            // A never-published node has exactly this lease as its owner; no
-            // index reader can have observed its pointer. Initializer-local
-            // drops still enter deferred reclamation below so user destructors
-            // never run inside the cache initialization guard.
-            debug_assert_eq!(node.pins.load(Ordering::Relaxed), 1);
-            // SAFETY: the sole owning lease is being consumed and this node
-            // has never been reachable through a non-owning index snapshot.
-            unsafe { reclaim_cache_node::<V>(self.node.as_ptr().cast()) };
-            return;
-        }
         if node.release_pin() {
-            // SAFETY: [TR-RECLAIM-1] The last pin was dropped on a retired (non-resident) node.
-            let domain = unsafe { node.domain.as_ref() };
-            domain.enqueue_reclaim(self.node.as_ptr() as *mut (), node.weight);
-            let retired = domain.quiesce_and_drain();
-            reclaim_cache_entries::<V>(retired);
+            if node.published {
+                // SAFETY: [TR-RECLAIM-1] The last pin was dropped on a retired (non-resident) node.
+                let domain = unsafe { node.domain.as_ref() };
+                domain.enqueue_reclaim(self.node.as_ptr() as *mut (), node.weight);
+                let retired = domain.quiesce_and_drain();
+                reclaim_cache_entries::<V>(retired);
+            } else if ACTIVE_CACHE_INITIALIZATION_DEPTH.get() == 0 {
+                // SAFETY: A never-published node was never reachable through an index snapshot.
+                // Its final pin release can immediately destroy the node.
+                unsafe { reclaim_cache_node::<V>(self.node.as_ptr().cast()) };
+            } else {
+                // Initializer-local drops still enter deferred reclamation so user destructors
+                // never run inside the cache initialization guard.
+                // SAFETY: node.domain is a valid pointer to CacheLookupDomain.
+                let domain = unsafe { node.domain.as_ref() };
+                domain.enqueue_reclaim(self.node.as_ptr() as *mut (), node.weight);
+                let retired = domain.quiesce_and_drain();
+                reclaim_cache_entries::<V>(retired);
+            }
         }
     }
 }
@@ -617,6 +622,112 @@ impl<V> CacheNode<V> {
     }
 }
 
+enum FlightState<V> {
+    Pending,
+    Finished(Result<(NodePtr<V>, u32), Arc<XllError>>),
+    Retry,
+}
+
+struct Flight<K, V> {
+    key: VersionedKey<K>,
+    state: Mutex<FlightState<V>>,
+    changed: Condvar,
+}
+
+impl<K, V> Flight<K, V> {
+    fn new(key: VersionedKey<K>) -> Self {
+        Self {
+            key,
+            state: Mutex::new(FlightState::Pending),
+            changed: Condvar::new(),
+        }
+    }
+}
+
+impl<K, V> Drop for Flight<K, V> {
+    fn drop(&mut self) {
+        if let FlightState::Finished(Ok((node_ptr, _))) = &*self.state.get_mut() {
+            // SAFETY: node_ptr points to a valid CacheNode allocated during this flight.
+            let node = unsafe { node_ptr.0.as_ref() };
+            if node.release_pin() {
+                if node.published {
+                    // SAFETY: [TR-RECLAIM-1] The last pin was dropped on a retired (non-resident) node.
+                    let domain = unsafe { node.domain.as_ref() };
+                    domain.enqueue_reclaim(node_ptr.0.as_ptr() as *mut (), node.weight);
+                    let retired = domain.quiesce_and_drain();
+                    reclaim_cache_entries::<V>(retired);
+                } else if ACTIVE_CACHE_INITIALIZATION_DEPTH.get() == 0 {
+                    // SAFETY: A never-published node was never reachable through an index snapshot.
+                    // Its final pin release can immediately destroy the node.
+                    unsafe { reclaim_cache_node::<V>(node_ptr.0.as_ptr().cast()) };
+                } else {
+                    // SAFETY: node.domain is a valid pointer to CacheLookupDomain.
+                    let domain = unsafe { node.domain.as_ref() };
+                    domain.enqueue_reclaim(node_ptr.0.as_ptr() as *mut (), node.weight);
+                    let retired = domain.quiesce_and_drain();
+                    reclaim_cache_entries::<V>(retired);
+                }
+            }
+        }
+    }
+}
+
+struct FlightHandle<K, V>(Arc<Flight<K, V>>);
+
+impl<K, V> Clone for FlightHandle<K, V> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl<K: Hash, V> Hash for FlightHandle<K, V> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.key.hash(state);
+    }
+}
+
+impl<K: Eq, V> PartialEq for FlightHandle<K, V> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.key == other.0.key
+    }
+}
+
+impl<K: Eq, V> Eq for FlightHandle<K, V> {}
+
+impl<K, V> Borrow<VersionedKey<K>> for FlightHandle<K, V> {
+    fn borrow(&self) -> &VersionedKey<K> {
+        &self.0.key
+    }
+}
+
+type FlightSet<K, V> = HashSet<FlightHandle<K, V>>;
+
+struct LeaderGuard<'a, K: Clone + Eq + Hash, V> {
+    cache: &'a CalculationCache<K, V>,
+    flight: &'a Arc<Flight<K, V>>,
+    completed: bool,
+}
+
+impl<K: Clone + Eq + Hash, V> Drop for LeaderGuard<'_, K, V> {
+    fn drop(&mut self) {
+        if !self.completed {
+            let removed = self.cache.flights.lock().take(&self.flight.key);
+            debug_assert!(
+                removed
+                    .as_ref()
+                    .is_some_and(|handle| Arc::ptr_eq(&handle.0, self.flight))
+            );
+            {
+                let mut state = self.flight.state.lock();
+                if matches!(*state, FlightState::Pending) {
+                    *state = FlightState::Retry;
+                }
+            }
+            self.flight.changed.notify_all();
+        }
+    }
+}
+
 struct ReclaimEntry(*mut (), u32);
 // SAFETY: ReclaimEntry holds a raw pointer to a retired CacheNode to be freed on a quiesced domain.
 unsafe impl Send for ReclaimEntry {}
@@ -849,6 +960,7 @@ pub struct CalculationCache<K, V> {
     domain: xlfn_kernel::published_owner::PublishedOwner<CacheLookupDomain>,
     clear_lock: Mutex<()>,
     index: ResidentIndex<K, V>,
+    flights: Mutex<FlightSet<K, V>>,
     clear_fn: Option<fn(*const ())>,
 }
 
@@ -908,6 +1020,7 @@ where
             domain: xlfn_kernel::published_owner::PublishedOwner::new(CacheLookupDomain::new()),
             clear_lock: Mutex::new(()),
             index: make_index(capacity),
+            flights: Mutex::new(HashSet::new()),
             clear_fn: Some(|ptr| {
                 // SAFETY: [TR-RECLAIM-1] ptr points to a valid CalculationCache<K, V> during Drop.
                 let cache = unsafe { &*(ptr as *const Self) };
@@ -1151,106 +1264,172 @@ where
                 reclaim_cache_entries::<V>(cache.domain.try_quiesce_and_drain());
             }));
         });
-        if self.weight_budget == 0 {
-            // A zero budget bypasses residency entirely. The caller's
-            // lease uniquely owns this node.
-            let active = ActiveCacheGuard::enter()?;
-            let initialized = (|| {
-                let value = compute()?;
-                let measured = weight(&value);
-                let node = Box::new(CacheNode {
-                    value,
-                    pins: AtomicUsize::new(1),
-                    resident: AtomicBool::new(false),
-                    published: false,
-                    weight: u32::try_from(measured).unwrap_or(u32::MAX).max(1),
-                    generation: epoch,
-                    domain: NonNull::from(&*self.domain),
-                });
-                Ok(CacheLease {
-                    node: NonNull::from(Box::leak(node)),
-                    _marker: PhantomData,
-                })
-            })();
-            drop(active);
-            // As with the resident path, callbacks may have dropped another
-            // lease whose reclamation was deferred by the initialization
-            // guard. Service that debt even if this initializer failed.
-            self.maintain(true);
-            return initialized;
-        }
+
         let mut compute_opt = Some(compute);
         let mut weight_opt = Some(weight);
-        let mut vkey = VersionedKey { epoch, key };
+        let mut vkey_opt = Some(VersionedKey { epoch, key });
 
-        loop {
-            let epoch = vkey.epoch;
-            if let Some(lease) = self.get_at_epoch(&vkey.key, epoch) {
+        'outer: loop {
+            let current_lookup_epoch = vkey_opt.as_ref().unwrap().epoch;
+            if let Some(lease) =
+                self.get_at_epoch(&vkey_opt.as_ref().unwrap().key, current_lookup_epoch)
+            {
                 self.maintain(false);
                 return Ok(lease);
             }
 
-            let _active = ActiveCacheGuard::enter()?;
-            let domain_ptr = NonNull::from(&*self.domain);
-            let mut created = false;
-            let mut oversized = false;
-
-            let initialized = self
-                .index
-                .insert(&vkey, || {
-                    let compute_fn = compute_opt.take().expect("compute called once");
-                    let weight_fn = weight_opt.take().expect("weight called once");
-                    let value = compute_fn()?;
-                    let measured = weight_fn(&value);
-                    oversized = measured > self.weight_budget;
-                    let w = u32::try_from(measured).unwrap_or(u32::MAX).max(1);
-                    let node = Box::new(CacheNode {
-                        value,
-                        pins: AtomicUsize::new(2), // 1 for index residency, 1 for creator lease
-                        resident: AtomicBool::new(true),
-                        published: true,
-                        weight: w,
-                        generation: epoch,
-                        domain: domain_ptr,
-                    });
-                    created = true;
-                    let ptr = NodePtr(NonNull::from(Box::leak(node)));
-                    Ok::<_, XllError>((ptr, w))
-                })
-                .map_err(|error| (*error).clone());
-
-            drop(_active);
-
-            self.maintain(true);
-
-            let (node_ptr, _weight) = initialized?;
-
-            if created {
-                // SAFETY: [TR-ACQUIRE-PIN] node was allocated with pins = 2 (1 for residency, 1 for this lease).
-                // Live pin guarantees node cannot be reclaimed by concurrent eviction or clear.
-                if oversized {
-                    // Compare the original estimate, before clamping it to
-                    // the index entry's u32 weight. A larger value must not become a
-                    // resident merely because its weight was saturated.
-                    self.index.invalidate(&vkey);
-                } else {
-                    self.generation.discard_if_stale(epoch, || {
-                        self.index.invalidate(&vkey);
-                    });
-                }
-                return Ok(CacheLease {
-                    node: node_ptr.0,
-                    _marker: PhantomData,
+            if ACTIVE_CACHE_INITIALIZATION_DEPTH.get() != 0 {
+                return Err(XllError::Internal {
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::CACHE_REENTRANT,
                 });
             }
 
-            // Another thread initialized the entry; acquire a pin safely through the admission domain.
-            if let Some(lease) = self.get_at_epoch(&vkey.key, epoch) {
-                return Ok(lease);
+            let (flight, is_leader) = {
+                let mut flights = self.flights.lock();
+                let vkey_ref = vkey_opt.as_ref().unwrap();
+                if let Some(lease) = self.get_at_epoch(&vkey_ref.key, current_lookup_epoch) {
+                    self.maintain(false);
+                    return Ok(lease);
+                }
+                if let Some(handle) = flights.get(vkey_ref) {
+                    (Arc::clone(&handle.0), false)
+                } else {
+                    let vkey = vkey_opt.take().unwrap();
+                    let flight = Arc::new(Flight::new(vkey));
+                    let inserted = flights.insert(FlightHandle(Arc::clone(&flight)));
+                    debug_assert!(inserted);
+                    (flight, true)
+                }
+            };
+
+            if !is_leader {
+                let mut state = flight.state.lock();
+                let (node_ptr, _w) = loop {
+                    match &*state {
+                        FlightState::Pending => flight.changed.wait(&mut state),
+                        FlightState::Finished(Ok(entry)) => break *entry,
+                        FlightState::Finished(Err(err)) => {
+                            self.maintain(false);
+                            return Err((**err).clone());
+                        }
+                        FlightState::Retry => {
+                            drop(state);
+                            vkey_opt.as_mut().unwrap().epoch = self.generation.snapshot();
+                            continue 'outer;
+                        }
+                    }
+                };
+                drop(state);
+
+                // SAFETY: node_ptr points to an allocated CacheNode kept alive by the flight's anchor pin.
+                let node = unsafe { node_ptr.0.as_ref() };
+                match node.try_acquire_pin() {
+                    Ok(true) => {
+                        self.maintain(false);
+                        return Ok(CacheLease {
+                            node: node_ptr.0,
+                            _marker: PhantomData,
+                        });
+                    }
+                    Ok(false) => {
+                        vkey_opt.as_mut().unwrap().epoch = self.generation.snapshot();
+                        continue 'outer;
+                    }
+                    Err(PinOverflow) => xlfn_kernel::invariant::fail_stop(),
+                }
             }
 
-            // The entry was evicted or invalidated before we could acquire a pin; retry with fresh epoch.
-            vkey.epoch = self.generation.snapshot();
+            // Leader path
+            let _active = ActiveCacheGuard::enter()?;
+            let mut guard = LeaderGuard {
+                cache: self,
+                flight: &flight,
+                completed: false,
+            };
+
+            let compute_fn = compute_opt.take().expect("compute called once");
+            let weight_fn = weight_opt.take().expect("weight called once");
+
+            let res = (|| -> XllResult<(V, usize)> {
+                let value = compute_fn()?;
+                let measured = weight_fn(&value);
+                Ok((value, measured))
+            })();
+
+            match res {
+                Ok((value, measured)) => {
+                    let current_epoch = self.generation.snapshot();
+                    let publish = self.weight_budget != 0
+                        && measured <= self.weight_budget
+                        && current_epoch == flight.key.epoch;
+
+                    let initial_pins = if publish { 3 } else { 2 };
+                    let w = u32::try_from(measured).unwrap_or(u32::MAX).max(1);
+                    let node = Box::new(CacheNode {
+                        value,
+                        pins: AtomicUsize::new(initial_pins),
+                        resident: AtomicBool::new(publish),
+                        published: publish,
+                        weight: w,
+                        generation: flight.key.epoch,
+                        domain: NonNull::from(&*self.domain),
+                    });
+                    let node_ptr = NodePtr(NonNull::from(Box::leak(node)));
+
+                    // 3. Publish resident first, if eligible.
+                    if publish {
+                        self.index.insert_resident(&flight.key, (node_ptr, w));
+                        self.generation.discard_if_stale(flight.key.epoch, || {
+                            self.index.invalidate(&flight.key);
+                        });
+                    }
+
+                    // 4. Publish result to followers.
+                    guard.completed = true;
+                    {
+                        let mut state = flight.state.lock();
+                        *state = FlightState::Finished(Ok((node_ptr, w)));
+                    }
+                    flight.changed.notify_all();
+
+                    // 5. Only then remove single-flight registration.
+                    let removed = self.flights.lock().take(&flight.key);
+                    debug_assert!(
+                        removed
+                            .as_ref()
+                            .is_some_and(|handle| Arc::ptr_eq(&handle.0, &flight))
+                    );
+
+                    drop(_active);
+                    self.maintain(true);
+
+                    return Ok(CacheLease {
+                        node: node_ptr.0,
+                        _marker: PhantomData,
+                    });
+                }
+                Err(err) => {
+                    guard.completed = true;
+                    let arc_err = Arc::new(err.clone());
+                    {
+                        let mut state = flight.state.lock();
+                        *state = FlightState::Finished(Err(arc_err));
+                    }
+                    flight.changed.notify_all();
+
+                    let removed = self.flights.lock().take(&flight.key);
+                    debug_assert!(
+                        removed
+                            .as_ref()
+                            .is_some_and(|handle| Arc::ptr_eq(&handle.0, &flight))
+                    );
+
+                    drop(_active);
+                    self.maintain(true);
+
+                    return Err(err);
+                }
+            }
         }
     }
 }
@@ -1403,6 +1582,107 @@ mod tests {
         cache.clear();
         assert_eq!(*lease, 7);
         assert_eq!(clones.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn resident_hit_with_get_or_try_insert_does_not_clone_key() {
+        let clones = Arc::new(AtomicUsize::new(0));
+        let cache = CalculationCache::<CloneCountedKey, u32>::new(8);
+        let key1 = CloneCountedKey {
+            value: 1,
+            clones: Arc::clone(&clones),
+        };
+        drop(cache.get_or_try_insert_with(key1, |_| 1, || Ok(7)).unwrap());
+        assert_eq!(clones.load(Ordering::SeqCst), 1);
+
+        let key2 = CloneCountedKey {
+            value: 1,
+            clones: Arc::clone(&clones),
+        };
+        let lease = cache
+            .get_or_try_insert_with(key2, |_| 1, || unreachable!())
+            .unwrap();
+        assert_eq!(*lease, 7);
+        assert_eq!(clones.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn follower_does_not_clone_key() {
+        let clones = Arc::new(AtomicUsize::new(0));
+        let cache = CalculationCache::<CloneCountedKey, u32>::new(8);
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let cache_ref = &cache;
+        let clones_ref = &clones;
+
+        std::thread::scope(|s| {
+            s.spawn(move || {
+                let key = CloneCountedKey {
+                    value: 1,
+                    clones: Arc::clone(clones_ref),
+                };
+                let lease = cache_ref
+                    .get_or_try_insert_with(
+                        key,
+                        |_| 1,
+                        || {
+                            started_tx.send(()).unwrap();
+                            release_rx.recv().unwrap();
+                            Ok(7)
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(*lease, 7);
+            });
+
+            started_rx.recv().unwrap();
+
+            let follower = s.spawn(move || {
+                let key = CloneCountedKey {
+                    value: 1,
+                    clones: Arc::clone(clones_ref),
+                };
+                let lease = cache_ref
+                    .get_or_try_insert_with(key, |_| 1, || unreachable!())
+                    .unwrap();
+                assert_eq!(*lease, 7);
+            });
+
+            std::thread::sleep(Duration::from_millis(20));
+            release_tx.send(()).unwrap();
+            follower.join().unwrap();
+        });
+
+        // Exactly 1 clone was performed across both leader and follower: by resident index insertion.
+        assert_eq!(clones.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn zero_budget_miss_does_not_clone_key() {
+        let clones = Arc::new(AtomicUsize::new(0));
+        let cache = CalculationCache::<CloneCountedKey, u32>::new(0);
+        let key = CloneCountedKey {
+            value: 1,
+            clones: Arc::clone(&clones),
+        };
+        let lease = cache.get_or_try_insert_with(key, |_| 1, || Ok(7)).unwrap();
+        assert_eq!(*lease, 7);
+        assert_eq!(clones.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn overweight_miss_does_not_clone_key() {
+        let clones = Arc::new(AtomicUsize::new(0));
+        let cache = CalculationCache::<CloneCountedKey, u32>::new(10);
+        let key = CloneCountedKey {
+            value: 1,
+            clones: Arc::clone(&clones),
+        };
+        let lease = cache
+            .get_or_try_insert_with(key, |_| 100, || Ok(7))
+            .unwrap();
+        assert_eq!(*lease, 7);
+        assert_eq!(clones.load(Ordering::SeqCst), 0);
     }
 
     #[test]

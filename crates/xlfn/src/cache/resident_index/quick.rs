@@ -3,14 +3,12 @@
 
 use super::{Entry, VersionedKey, VersionedKeyRef};
 use crate::cache::{NodePtr, retire_resident};
-use crate::{XllError, XllResult};
 use quick_cache::{
     OptionsBuilder, Weighter,
-    sync::{Cache, DefaultLifecycle, GuardResult},
+    sync::{Cache, DefaultLifecycle},
 };
 use std::collections::hash_map::RandomState;
 use std::hash::Hash;
-use std::sync::Arc;
 
 // Flat fields preserve the existing pointer + weight entry size on 64-bit hosts.
 struct ResidentEntry<V> {
@@ -108,25 +106,8 @@ where
         self.cache.get(key).map(|entry| entry.snapshot())
     }
 
-    pub(super) fn insert(
-        &self,
-        key: &VersionedKey<K>,
-        initialize: impl FnOnce() -> XllResult<Entry<V>>,
-    ) -> Result<Entry<V>, Arc<XllError>> {
-        match self.cache.get_value_or_guard(key, None) {
-            GuardResult::Value(entry) => Ok(entry.snapshot()),
-            GuardResult::Guard(guard) => {
-                let entry = initialize().map_err(Arc::new)?;
-                // Move the sole residency owner into the table. The generic
-                // get_or_insert_with API clones before storing and therefore
-                // must not be used with non-owning lookup snapshots.
-                // If invalidation removed the placeholder, dropping the
-                // rejected owner releases residency; the creator pin remains.
-                drop(guard.insert(ResidentEntry::new(entry)));
-                Ok(entry)
-            }
-            GuardResult::Timeout => unreachable!("no timeout was requested"),
-        }
+    pub(super) fn insert_resident(&self, key: &VersionedKey<K>, entry: Entry<V>) {
+        self.cache.insert(key.clone(), ResidentEntry::new(entry));
     }
 
     pub(super) fn invalidate(&self, key: &VersionedKey<K>) {

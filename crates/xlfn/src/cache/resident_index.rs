@@ -6,12 +6,10 @@
 //! dereferencing them. Notifications never reclaim nodes themselves.
 
 use super::{NodePtr, VersionedKey, VersionedKeyRef};
-use crate::{XllError, XllResult};
 #[cfg(feature = "bench-internals")]
 use moka::sync::Cache;
 use quick_cache::Equivalent;
 use std::hash::Hash;
-use std::sync::Arc;
 #[cfg(feature = "bench-internals")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -106,19 +104,20 @@ where
         }
     }
 
-    /// Atomically initializes an absent versioned key. Only the initializer
-    /// owns its creator pin; followers must re-lookup under their read domain.
-    pub(super) fn insert(
-        &self,
-        key: &VersionedKey<K>,
-        initialize: impl FnOnce() -> XllResult<Entry<V>>,
-    ) -> Result<Entry<V>, Arc<XllError>> {
+    /// Stores an initialized entry in the resident index.
+    pub(super) fn insert_resident(&self, key: &VersionedKey<K>, entry: Entry<V>) {
         match &self.0 {
             #[cfg(feature = "bench-internals")]
-            Backend::Moka(index) => index.cache.try_get_with_by_ref(key, initialize),
+            Backend::Moka(index) => {
+                index.cache.insert(key.clone(), entry);
+            }
             #[cfg(feature = "bench-internals")]
-            Backend::Sharded(index) => index.insert(key, initialize),
-            Backend::Quick(index) => index.insert(key, initialize),
+            Backend::Sharded(index) => {
+                index.publish(key.clone(), entry);
+            }
+            Backend::Quick(index) => {
+                index.insert_resident(key, entry);
+            }
         }
     }
 
