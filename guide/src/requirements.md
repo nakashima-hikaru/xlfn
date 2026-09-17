@@ -63,7 +63,6 @@ xlfn = { version = "0.2", features = ["async"] }
 | `handles`         | formula-owned typed objects, aliases, and scoped handle inputs                                     |
 | `rtd`             | streaming sources, subscriptions, and RTD configuration                                             |
 | `unstable-cache`  | lower-level calculation-cache API with an explicitly unstable contract                              |
-| `unstable-output` | lower-level array-output API with an explicitly unstable contract                                   |
 
 `handles` and `rtd` are independent public capabilities. Use both `async` and
 `handles` for asynchronous handle consumers. The `refinement` and

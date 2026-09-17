@@ -64,7 +64,6 @@ The `xlfn` crate has no default features.
 | `handles`         | formula-owned typed objects, aliases, and scoped handle inputs              | a worksheet formula owns a Rust object                           |
 | `rtd`             | typed streaming sources, subscriptions, and RTD configuration               | a formula receives repeated updates from a push source           |
 | `unstable-cache`  | lower-level calculation-cache API                                          | the add-in explicitly accepts experimental cache API evolution  |
-| `unstable-output` | lower-level array-output API                                               | the add-in explicitly accepts experimental output API evolution |
 
 `handles` and `rtd` share a private Excel RTD transport, but neither enables the
 other's public API. Async handle inputs need both `async` and `handles`.
@@ -135,14 +134,14 @@ The `0.x` line is pre-1.0. Treat public Rust APIs, macro diagnostics, package me
 The version in this checkout is still `0.2.0`. The following defines the scope
 to freeze when 1.0 is released; it does not announce that release:
 
-- The documented `xlfn` facade, its prelude, macro inputs and generated behavior,
+- The documented `xlfn` facade, including `xlfn::output`, its prelude, macro inputs and generated behavior,
   and the `async`, `handles`, and `rtd` feature APIs form the stable application
   contract. Removing or incompatibly changing them requires a major release.
 - Custom conversion, lifecycle, execution-layer, and RTD extension traits are
   included. Adding a required trait method or changing a public type's fields,
   exhaustive variants, lifetimes, or thread-safety bounds must be reviewed for
   downstream source compatibility.
-- `unstable-cache`, `unstable-output`, hidden macro support, benchmark helpers,
+- `unstable-cache`, hidden macro support, benchmark helpers,
   and refinement trace formats are excluded. Code opting into these facilities
   must pin the exact framework version. Experimental features are not implied
   by the supported feature set.

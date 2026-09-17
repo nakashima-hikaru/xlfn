@@ -22,7 +22,6 @@ rtd = []
 # expose the generic RTD subscription capability.
 handles = []
 unstable-cache = ["dep:quick_cache"]
-unstable-output = []
 refinement = []
 # Experimental backends/dependencies belong only to this internal benchmark surface.
 bench-internals = ["handles", "xlfn-sys/abi-probe", "dep:hashbrown", "dep:moka"]

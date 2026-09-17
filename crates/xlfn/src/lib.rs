@@ -98,10 +98,6 @@ mod registration;
     dead_code,
     reason = "Return protocol types are consumed only at FFI boundaries"
 )]
-#[allow(
-    unreachable_pub,
-    reason = "ABI array builders are exposed only through the unstable façade"
-)]
 mod return_abi;
 #[cfg(feature = "rtd")]
 pub mod rtd;
@@ -532,10 +528,9 @@ macro_rules! __xlfn_private_excel_rtd_exports {
 }
 
 /// Experimental lower-level APIs.
-#[cfg(any(feature = "unstable-cache", feature = "unstable-output"))]
+#[cfg(feature = "unstable-cache")]
 pub mod unstable {
     /// Calculation-scoped caches.
-    #[cfg(feature = "unstable-cache")]
     pub mod cache {
         #[cfg(feature = "bench-internals")]
         pub use crate::cache::CacheReadScope;
@@ -546,12 +541,11 @@ pub mod unstable {
         #[cfg(feature = "bench-internals")]
         pub use crate::cache::{CacheBackend, CacheResidentStats};
     }
+}
 
-    /// Explicit low-level array output construction.
-    #[cfg(feature = "unstable-output")]
-    pub mod output {
-        pub use crate::return_abi::{XlArrayBuilder, XlArrayOutput};
-    }
+/// Efficient construction of Excel array return values.
+pub mod output {
+    pub use crate::return_abi::{XlArrayBuilder, XlArrayOutput};
 }
 
 #[cfg(feature = "handles")]

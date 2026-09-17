@@ -5,6 +5,7 @@ fn trait_driven_function_signatures_compile() {
     tests.pass("tests/ui/pass/case_distinct_udfs.rs");
     tests.pass("tests/ui/pass/cfg_gating.rs");
     tests.pass("tests/ui/pass/excel_enum.rs");
+    tests.pass("tests/ui/pass/output_array.rs");
     tests.pass("tests/ui/pass/physical_unload.rs");
     tests.pass("tests/ui/pass/raw_identifiers.rs");
     tests.pass("tests/ui/pass/udf_layers_tuple.rs");
@@ -29,9 +30,6 @@ fn trait_driven_function_signatures_compile() {
         tests.compile_fail("tests/ui/fail/handle_cannot_outlive_registry.rs");
         tests.compile_fail("tests/ui/fail/unscoped_call_scope.rs");
     }
-
-    #[cfg(feature = "unstable-output")]
-    tests.pass("tests/ui/pass_unstable/*.rs");
 
     #[cfg(feature = "async")]
     {

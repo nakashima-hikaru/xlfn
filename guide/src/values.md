@@ -55,19 +55,6 @@ fn text_count(values: MatrixRef<'_, &str>) -> f64 {
 }
 ```
 
-For large numeric outputs, explicitly enable the `unstable-output` crate feature and import `xlfn::unstable::output::{XlArrayBuilder, XlArrayOutput}`. Write directly into an `XlArrayBuilder`; the finished cell allocation is adopted by `ReturnBlock` without copying:
-
-```rust
-fn doubled(values: XlArrayRef<'_>) -> XllResult<XlArrayOutput> {
-    let (rows, columns) = values.shape();
-    let mut output = XlArrayBuilder::new(rows, columns)?;
-    for cell in values.cells() {
-        output.push_f64(cell.as_f64()? * 2.0)?;
-    }
-    output.finish()
-}
-```
-
 Use the owned `Matrix<T>` path when values must outlive the exported call or cross into async work.
 
 `Matrix<T>` stores a rectangular grid in row-major order:
@@ -156,6 +143,27 @@ fn mean(values: BoundedVarArgs<f64, 128>) -> XllResult<f64> {
 ```
 
 `MAX` must be greater than zero.
+
+## Efficient large array output
+
+For ordinary owned arrays, prefer `Matrix<T>`, `Row<T>`, and `Column<T>`.
+When the result is large or is naturally produced incrementally, use
+`XlArrayBuilder` to construct the return value without first materializing
+an intermediate `Matrix<T>`.
+
+```rust
+use xlfn::output::{XlArrayBuilder, XlArrayOutput};
+
+#[excel_function(name = "ARRAY.DOUBLED", thread_safe)]
+fn doubled(values: XlArrayRef<'_>) -> XllResult<XlArrayOutput> {
+    let (rows, columns) = values.shape();
+    let mut output = XlArrayBuilder::new(rows, columns)?;
+    for cell in values.cells() {
+        output.push_f64(cell.as_f64()? * 2.0)?;
+    }
+    output.finish()
+}
+```
 
 ## Array safety limits
 

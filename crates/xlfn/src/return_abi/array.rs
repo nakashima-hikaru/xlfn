@@ -4,12 +4,9 @@ use crate::value::{ExcelCellOutput, IntoExcel, MAX_ARRAY_BYTES, validate_matrix_
 use crate::{XllError, XllResult};
 use xlfn_sys::{XLOPER12, XLOPER12Value, XLTYPE_STR};
 
-/// An Excel array whose cells are already encoded in their final ABI form.
+/// A completed Excel array return value.
 ///
-/// Prefer constructing this through [`XlArrayBuilder`]. The return-value layer
-/// adopts the cell allocation instead of materializing an intermediate semantic
-/// value vector or encoding the array into a second cell buffer.
-#[doc(hidden)]
+/// Values of this type are normally created by [`XlArrayBuilder::finish`].
 pub struct XlArrayOutput {
     pub(crate) rows: usize,
     pub(crate) columns: usize,
@@ -29,11 +26,11 @@ impl std::fmt::Debug for XlArrayOutput {
     }
 }
 
-/// Builds an Excel array directly in its final `XLOPER12` cell buffer.
+/// Builds an Excel array return value incrementally.
 ///
-/// This is the low-allocation output path for calculated arrays. The builder
-/// owns exactly one cell buffer; returning the finished value transfers that
-/// buffer to the DLL-owned return block without copying its cells.
+/// This provides a low-allocation path for constructing large array results.
+/// It encodes cells directly into its return representation instead of first
+/// materializing a [`Matrix<T>`](crate::value::Matrix).
 pub struct XlArrayBuilder {
     rows: usize,
     columns: usize,
@@ -96,7 +93,6 @@ impl XlArrayBuilder {
         Ok(())
     }
 
-    #[allow(dead_code, reason = "Used by the unstable output API")]
     pub fn push_f64(&mut self, value: f64) -> XllResult<()> {
         if !value.is_finite() {
             return Err(XllError::input("<array output>", InputError::NonFinite));
