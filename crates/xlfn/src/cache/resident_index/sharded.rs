@@ -85,7 +85,7 @@ where
         let mut removed = Vec::new();
         {
             let mut policy = self.policy.lock();
-            if u64::from(entry.1) > self.capacity {
+            if entry.1 > self.capacity {
                 removed.push((key, entry));
             } else {
                 {
@@ -93,14 +93,14 @@ where
                     match shard.raw_entry_mut().from_hash(hash, |owned| owned == &key) {
                         RawEntryMut::Occupied(old) => {
                             let (old_key, old_entry) = old.remove_entry();
-                            policy.weight -= u64::from(old_entry.1);
+                            policy.weight -= old_entry.1;
                             policy.entries -= 1;
                             removed.push((old_key, old_entry));
                         }
                         RawEntryMut::Vacant(_) => {}
                     }
                 }
-                while policy.weight + u64::from(entry.1) > self.capacity {
+                while policy.weight + entry.1 > self.capacity {
                     // At least one resident exists when the bounded weight
                     // requires eviction. Rotate the starting shard so policy
                     // does not always charge the first shard for global debt.
@@ -108,13 +108,13 @@ where
                     policy.next_victim = (index + 1) % self.shards.len();
                     let victim = self.shards[index].write().extract_if(|_, _| true).next();
                     if let Some(victim) = victim {
-                        policy.weight -= u64::from(victim.1.1);
+                        policy.weight -= victim.1.1;
                         policy.entries -= 1;
                         removed.push(victim);
                     }
                 }
                 self.shards[shard_index].write().insert(key, entry);
-                policy.weight += u64::from(entry.1);
+                policy.weight += entry.1;
                 policy.entries += 1;
             }
             self.record(&policy);

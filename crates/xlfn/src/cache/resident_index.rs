@@ -20,7 +20,7 @@ use quick::QuickResidentIndex;
 #[cfg(feature = "bench-internals")]
 use sharded::ShardedResidentIndex;
 
-type Entry<V> = (NodePtr<V>, u32);
+type Entry<V> = (NodePtr<V>, u64);
 
 impl<K: Eq> Equivalent<VersionedKey<K>> for VersionedKeyRef<'_, K> {
     fn equivalent(&self, owned: &VersionedKey<K>) -> bool {
@@ -56,7 +56,7 @@ where
         Self(Backend::Moka(MokaResidentIndex {
             cache: Cache::builder()
                 .max_capacity(capacity)
-                .weigher(|_, entry: &Entry<V>| entry.1)
+                .weigher(|_, entry: &Entry<V>| u32::try_from(entry.1).unwrap_or(u32::MAX))
                 .support_invalidation_closures()
                 .eviction_listener(move |_, entry, _| removed(entry))
                 .build(),

@@ -13,7 +13,7 @@ use std::hash::Hash;
 // Flat fields preserve the existing pointer + weight entry size on 64-bit hosts.
 struct ResidentEntry<V> {
     node: NodePtr<V>,
-    weight: u32,
+    weight: u64,
     owns_residency: bool,
 }
 
@@ -56,7 +56,7 @@ struct EntryWeight;
 
 impl<K, V> Weighter<K, ResidentEntry<V>> for EntryWeight {
     fn weight(&self, _: &K, value: &ResidentEntry<V>) -> u64 {
-        u64::from(value.weight)
+        value.weight
     }
 }
 

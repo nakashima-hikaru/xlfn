@@ -171,31 +171,36 @@ pub struct CacheReclamationStats {
 // fast path. Resident-policy maintenance belongs to the index backend.
 const RECLAIM_BACKPRESSURE_NODES: usize = 256;
 
+unsafe fn release_node_pin<V>(node_ptr: NonNull<CacheNode<V>>) {
+    // SAFETY: node_ptr points to an allocated CacheNode whose pin is being released.
+    let node = unsafe { node_ptr.as_ref() };
+    if node.release_pin() {
+        if node.published {
+            // SAFETY: [TR-RECLAIM-1] The last pin was dropped on a retired (non-resident) node.
+            let domain = unsafe { node.domain.as_ref() };
+            domain.enqueue_reclaim(node_ptr.as_ptr() as *mut (), node.weight);
+            let retired = domain.quiesce_and_drain();
+            reclaim_cache_entries::<V>(retired);
+        } else if ACTIVE_CACHE_INITIALIZATION_DEPTH.get() == 0 {
+            // SAFETY: A never-published node was never reachable through an index snapshot.
+            // Its final pin release can immediately destroy the node.
+            unsafe { reclaim_cache_node::<V>(node_ptr.as_ptr().cast()) };
+        } else {
+            // Initializer-local drops still enter deferred reclamation so user destructors
+            // never run inside the cache initialization guard.
+            // SAFETY: node.domain is a valid pointer to CacheLookupDomain.
+            let domain = unsafe { node.domain.as_ref() };
+            domain.enqueue_reclaim(node_ptr.as_ptr() as *mut (), node.weight);
+            let retired = domain.quiesce_and_drain();
+            reclaim_cache_entries::<V>(retired);
+        }
+    }
+}
+
 impl<V> Drop for CacheLease<'_, V> {
     fn drop(&mut self) {
         // SAFETY: [TR-LEASE-1] self.node remains valid because a pin capability is held by this lease.
-        let node = unsafe { self.node.as_ref() };
-        if node.release_pin() {
-            if node.published {
-                // SAFETY: [TR-RECLAIM-1] The last pin was dropped on a retired (non-resident) node.
-                let domain = unsafe { node.domain.as_ref() };
-                domain.enqueue_reclaim(self.node.as_ptr() as *mut (), node.weight);
-                let retired = domain.quiesce_and_drain();
-                reclaim_cache_entries::<V>(retired);
-            } else if ACTIVE_CACHE_INITIALIZATION_DEPTH.get() == 0 {
-                // SAFETY: A never-published node was never reachable through an index snapshot.
-                // Its final pin release can immediately destroy the node.
-                unsafe { reclaim_cache_node::<V>(self.node.as_ptr().cast()) };
-            } else {
-                // Initializer-local drops still enter deferred reclamation so user destructors
-                // never run inside the cache initialization guard.
-                // SAFETY: node.domain is a valid pointer to CacheLookupDomain.
-                let domain = unsafe { node.domain.as_ref() };
-                domain.enqueue_reclaim(self.node.as_ptr() as *mut (), node.weight);
-                let retired = domain.quiesce_and_drain();
-                reclaim_cache_entries::<V>(retired);
-            }
-        }
+        unsafe { release_node_pin(self.node) };
     }
 }
 
@@ -570,7 +575,7 @@ struct CacheNode<V> {
     resident: AtomicBool,
     // Immutable: only zero-budget nodes bypass every index publication.
     published: bool,
-    weight: u32,
+    weight: u64,
     generation: u64,
     domain: NonNull<CacheLookupDomain>,
 }
@@ -624,7 +629,7 @@ impl<V> CacheNode<V> {
 
 enum FlightState<V> {
     Pending,
-    Finished(Result<(NodePtr<V>, u32), Arc<XllError>>),
+    Finished(Result<(NodePtr<V>, u64), Arc<XllError>>),
     Retry,
 }
 
@@ -648,26 +653,7 @@ impl<K, V> Drop for Flight<K, V> {
     fn drop(&mut self) {
         if let FlightState::Finished(Ok((node_ptr, _))) = &*self.state.get_mut() {
             // SAFETY: node_ptr points to a valid CacheNode allocated during this flight.
-            let node = unsafe { node_ptr.0.as_ref() };
-            if node.release_pin() {
-                if node.published {
-                    // SAFETY: [TR-RECLAIM-1] The last pin was dropped on a retired (non-resident) node.
-                    let domain = unsafe { node.domain.as_ref() };
-                    domain.enqueue_reclaim(node_ptr.0.as_ptr() as *mut (), node.weight);
-                    let retired = domain.quiesce_and_drain();
-                    reclaim_cache_entries::<V>(retired);
-                } else if ACTIVE_CACHE_INITIALIZATION_DEPTH.get() == 0 {
-                    // SAFETY: A never-published node was never reachable through an index snapshot.
-                    // Its final pin release can immediately destroy the node.
-                    unsafe { reclaim_cache_node::<V>(node_ptr.0.as_ptr().cast()) };
-                } else {
-                    // SAFETY: node.domain is a valid pointer to CacheLookupDomain.
-                    let domain = unsafe { node.domain.as_ref() };
-                    domain.enqueue_reclaim(node_ptr.0.as_ptr() as *mut (), node.weight);
-                    let retired = domain.quiesce_and_drain();
-                    reclaim_cache_entries::<V>(retired);
-                }
-            }
+            unsafe { release_node_pin(node_ptr.0) };
         }
     }
 }
@@ -728,7 +714,66 @@ impl<K: Clone + Eq + Hash, V> Drop for LeaderGuard<'_, K, V> {
     }
 }
 
-struct ReclaimEntry(*mut (), u32);
+struct CreatorPinGuard<'a, V> {
+    node: Option<NonNull<CacheNode<V>>>,
+    _marker: PhantomData<&'a V>,
+}
+
+impl<'a, V> CreatorPinGuard<'a, V> {
+    #[inline]
+    fn new(node: NonNull<CacheNode<V>>) -> Self {
+        Self {
+            node: Some(node),
+            _marker: PhantomData,
+        }
+    }
+
+    #[inline]
+    fn into_lease(mut self) -> CacheLease<'a, V> {
+        let node = self.node.take().expect("creator pin node present");
+        CacheLease {
+            node,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<V> Drop for CreatorPinGuard<'_, V> {
+    fn drop(&mut self) {
+        if let Some(node) = self.node.take() {
+            // SAFETY: node points to an allocated CacheNode whose creator pin is held by this guard.
+            unsafe {
+                release_node_pin(node);
+            }
+        }
+    }
+}
+
+struct ResidentPinGuard<V> {
+    node: Option<NodePtr<V>>,
+}
+
+impl<V> ResidentPinGuard<V> {
+    #[inline]
+    fn new(node: NodePtr<V>) -> Self {
+        Self { node: Some(node) }
+    }
+
+    #[inline]
+    fn commit(mut self) {
+        self.node = None;
+    }
+}
+
+impl<V> Drop for ResidentPinGuard<V> {
+    fn drop(&mut self) {
+        if let Some(node) = self.node.take() {
+            retire_resident(node);
+        }
+    }
+}
+
+struct ReclaimEntry(*mut (), u64);
 // SAFETY: ReclaimEntry holds a raw pointer to a retired CacheNode to be freed on a quiesced domain.
 unsafe impl Send for ReclaimEntry {}
 
@@ -790,7 +835,7 @@ impl CacheLookupDomain {
             .map_err(|_| XllError::Closing)
     }
 
-    fn enqueue_reclaim(&self, ptr: *mut (), weight: u32) {
+    fn enqueue_reclaim(&self, ptr: *mut (), weight: u64) {
         self.enqueue_reclaim_impl(ptr, weight, |_| {});
     }
 
@@ -806,7 +851,7 @@ impl CacheLookupDomain {
     fn enqueue_reclaim_impl(
         &self,
         ptr: *mut (),
-        weight: u32,
+        weight: u64,
         after_generation_load: impl Fn(GenerationIndex),
     ) {
         // The queue lock is the enqueue linearization point. Revalidate the
@@ -828,8 +873,8 @@ impl CacheLookupDomain {
             let nodes = self.pending_nodes.fetch_add(1, Ordering::Relaxed) + 1;
             let weight = self
                 .pending_weight
-                .fetch_add(u64::from(weight), Ordering::Relaxed)
-                + u64::from(weight);
+                .fetch_add(weight, Ordering::Relaxed)
+                + weight;
             self.peak_pending_nodes.fetch_max(nodes, Ordering::Relaxed);
             self.peak_pending_weight
                 .fetch_max(weight, Ordering::Relaxed);
@@ -884,7 +929,7 @@ impl CacheLookupDomain {
         let entries = std::mem::take(&mut *queue);
         self.pending_nodes
             .fetch_sub(entries.len(), Ordering::Relaxed);
-        let weight = entries.iter().map(|entry| u64::from(entry.1)).sum();
+        let weight = entries.iter().map(|entry| entry.1).sum();
         self.pending_weight.fetch_sub(weight, Ordering::Relaxed);
         entries
     }
@@ -957,11 +1002,12 @@ pub struct CacheResidentStats {
 pub struct CalculationCache<K, V> {
     weight_budget: usize,
     generation: CacheGeneration,
+    flights: Mutex<FlightSet<K, V>>,
     domain: xlfn_kernel::published_owner::PublishedOwner<CacheLookupDomain>,
     clear_lock: Mutex<()>,
     index: ResidentIndex<K, V>,
-    flights: Mutex<FlightSet<K, V>>,
     clear_fn: Option<fn(*const ())>,
+    follower_hook: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl<K, V> CalculationCache<K, V>
@@ -995,6 +1041,16 @@ where
         })
     }
 
+    #[doc(hidden)]
+    pub fn new_with_follower_hook(
+        weight_budget: usize,
+        hook: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        let mut cache = Self::new(weight_budget);
+        cache.follower_hook = Some(Arc::new(hook));
+        cache
+    }
+
     /// Builds a candidate using the identical cache/lifetime implementation.
     #[cfg(feature = "bench-internals")]
     #[must_use]
@@ -1012,18 +1068,18 @@ where
         weight_budget: usize,
         make_index: impl FnOnce(u64) -> ResidentIndex<K, V>,
     ) -> Self {
-        let weight_budget = weight_budget.min(u32::MAX as usize);
         let capacity = u64::try_from(weight_budget).unwrap_or(u64::MAX);
         Self {
             weight_budget,
             generation: CacheGeneration::new(),
+            flights: Mutex::new(HashSet::new()),
             domain: xlfn_kernel::published_owner::PublishedOwner::new(CacheLookupDomain::new()),
             clear_lock: Mutex::new(()),
             index: make_index(capacity),
-            flights: Mutex::new(HashSet::new()),
             clear_fn: Some(|ptr| {
                 // SAFETY: [TR-RECLAIM-1] ptr points to a valid CalculationCache<K, V> during Drop.
                 let cache = unsafe { &*(ptr as *const Self) };
+                cache.flights.lock().clear();
                 cache.domain.seal();
                 // Drop has exclusive access. Clear synchronously releases
                 // all residency pins before the final node drain.
@@ -1031,6 +1087,7 @@ where
                 let retired = cache.domain.drain_all();
                 reclaim_cache_entries::<V>(retired);
             }),
+            follower_hook: None,
         }
     }
 
@@ -1133,6 +1190,12 @@ where
         self.len() == 0
     }
 
+    /// Invalidates all currently resident entries and advances the cache generation.
+    ///
+    /// Values held by existing [`CacheLease`] instances remain valid and will be safely
+    /// retired and reclaimed when their leases drop. In-flight computations started before
+    /// this clear will still complete and return valid leases to their concurrent callers,
+    /// but their results will not be published into the new cache generation.
     pub fn clear(&self) {
         let retired = {
             let _guard = self.clear_lock.lock();
@@ -1228,6 +1291,20 @@ where
         })
     }
 
+    /// Returns a lease to the cached value for `key`, or computes and stores it.
+    ///
+    /// Concurrent requests for the same key coalesce into a single execution of `compute`.
+    /// All concurrent callers receive valid leases, even if the value is overweight or the
+    /// cache has zero budget (`weight_budget == 0`).
+    ///
+    /// If `compute` or key operations unwind/panic, allocated creator and flight pins are
+    /// released safely via RAII guards without leaking resources, and waiting callers retry
+    /// without leaving permanently blocked flights.
+    ///
+    /// Requests are anchored to the cache generation snapshot taken at entry. If `clear()`
+    /// advances the generation while computation is in progress, the result will be returned
+    /// to the caller and its single-flight peers, but will not be retained in the post-clear
+    /// generation.
     pub fn get_or_try_insert_with<'a, F, W>(
         &'a self,
         key: K,
@@ -1314,12 +1391,16 @@ where
                         }
                         FlightState::Retry => {
                             drop(state);
-                            vkey_opt.as_mut().unwrap().epoch = self.generation.snapshot();
+                            // Do NOT update request epoch! Stale requests must not be promoted to newer generations.
                             continue 'outer;
                         }
                     }
                 };
                 drop(state);
+
+                if let Some(hook) = &self.follower_hook {
+                    hook();
+                }
 
                 // SAFETY: node_ptr points to an allocated CacheNode kept alive by the flight's anchor pin.
                 let node = unsafe { node_ptr.0.as_ref() };
@@ -1332,7 +1413,7 @@ where
                         });
                     }
                     Ok(false) => {
-                        vkey_opt.as_mut().unwrap().epoch = self.generation.snapshot();
+                        // Node pins became 0; retry without mutating the request epoch.
                         continue 'outer;
                     }
                     Err(PinOverflow) => xlfn_kernel::invariant::fail_stop(),
@@ -1363,11 +1444,12 @@ where
                         && measured <= self.weight_budget
                         && current_epoch == flight.key.epoch;
 
-                    let initial_pins = if publish { 3 } else { 2 };
-                    let w = u32::try_from(measured).unwrap_or(u32::MAX).max(1);
+                    let w = u64::try_from(measured).unwrap_or(u64::MAX).max(1);
+                    // 1. Allocate node with 1 pin (for creator).
+                    // The CreatorPinGuard immediately assumes RAII ownership of this pin.
                     let node = Box::new(CacheNode {
                         value,
-                        pins: AtomicUsize::new(initial_pins),
+                        pins: AtomicUsize::new(1),
                         resident: AtomicBool::new(publish),
                         published: publish,
                         weight: w,
@@ -1375,16 +1457,27 @@ where
                         domain: NonNull::from(&*self.domain),
                     });
                     let node_ptr = NodePtr(NonNull::from(Box::leak(node)));
+                    let creator_guard = CreatorPinGuard::new(node_ptr.0);
 
-                    // 3. Publish resident first, if eligible.
+                    // SAFETY: node_ptr points to the newly allocated CacheNode kept alive by creator_guard.
+                    let node_ref = unsafe { node_ptr.0.as_ref() };
+
+                    // 2. Publish resident first, if eligible.
+                    // Increment pins for resident index, protected by ResidentPinGuard until committed.
                     if publish {
+                        node_ref.pins.fetch_add(1, Ordering::Release);
+                        let resident_guard = ResidentPinGuard::new(node_ptr);
                         self.index.insert_resident(&flight.key, (node_ptr, w));
+                        resident_guard.commit();
+
                         self.generation.discard_if_stale(flight.key.epoch, || {
                             self.index.invalidate(&flight.key);
                         });
                     }
 
-                    // 4. Publish result to followers.
+                    // 3. Publish result to followers.
+                    // Increment pins for Flight, transferring 1 pin to FlightState::Finished.
+                    node_ref.pins.fetch_add(1, Ordering::Release);
                     guard.completed = true;
                     {
                         let mut state = flight.state.lock();
@@ -1392,7 +1485,7 @@ where
                     }
                     flight.changed.notify_all();
 
-                    // 5. Only then remove single-flight registration.
+                    // 4. Only then remove single-flight registration.
                     let removed = self.flights.lock().take(&flight.key);
                     debug_assert!(
                         removed
@@ -1403,10 +1496,8 @@ where
                     drop(_active);
                     self.maintain(true);
 
-                    return Ok(CacheLease {
-                        node: node_ptr.0,
-                        _marker: PhantomData,
-                    });
+                    // 5. Creator pin transfers seamlessly to returned CacheLease.
+                    return Ok(creator_guard.into_lease());
                 }
                 Err(err) => {
                     guard.completed = true;
@@ -3338,8 +3429,8 @@ mod tests {
     fn pending_weight_preserves_totals_above_the_32_bit_limit() {
         let domain = CacheLookupDomain::new();
         // Sentinel pointers never reach a reclaimer in this queue-only test.
-        domain.enqueue_reclaim(std::ptr::null_mut(), u32::MAX);
-        domain.enqueue_reclaim(std::ptr::null_mut(), u32::MAX);
+        domain.enqueue_reclaim(std::ptr::null_mut(), u64::from(u32::MAX));
+        domain.enqueue_reclaim(std::ptr::null_mut(), u64::from(u32::MAX));
         assert_eq!(domain.stats().pending_weight, 2 * u64::from(u32::MAX));
         let entries = domain.quiesce_and_drain();
         assert_eq!(entries.len(), 2);
