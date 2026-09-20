@@ -1,5 +1,7 @@
 //! A fail-stop active counter that can be sealed and reopened after draining.
 
+pub mod transitions;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::invariant::fail_stop;
@@ -12,12 +14,7 @@ pub struct Sealed;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReopenError;
 
-/// The result of releasing one active permit.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ReleaseOutcome {
-    StillActive,
-    BecameIdle,
-}
+pub use transitions::ReleaseOutcome;
 
 /// A bounded active counter with sealed and drain-notification bits.
 ///
@@ -32,25 +29,41 @@ pub const SEALED_BIT: usize = 1_usize << (usize::BITS - 1);
 const WAITING_BIT: usize = SEALED_BIT >> 1;
 const ACTIVE_COUNT_MASK: usize = WAITING_BIT - 1;
 
+#[cfg(target_pointer_width = "32")]
+const _: () = {
+    assert!(SEALED_BIT == transitions::SEALED_BIT_32 as usize);
+    assert!(WAITING_BIT == transitions::WAITING_BIT_32 as usize);
+    assert!(ACTIVE_COUNT_MASK == transitions::ACTIVE_COUNT_MASK_32 as usize);
+};
+
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    assert!(SEALED_BIT == transitions::SEALED_BIT_64 as usize);
+    assert!(WAITING_BIT == transitions::WAITING_BIT_64 as usize);
+    assert!(ACTIVE_COUNT_MASK == transitions::ACTIVE_COUNT_MASK_64 as usize);
+};
+
 /// [SC-1] Active count is strictly bounded: active <= ACTIVE_COUNT_MASK.
 /// [SC-2] Successful acquire: active' = active + 1, flags preserved.
 /// [SC-3] Sealed rejects acquire: sealed => None.
 #[inline]
 fn acquire_update(state: usize) -> Option<usize> {
-    if state & SEALED_BIT != 0 {
-        return None;
+    match transitions::acquire_step(state) {
+        transitions::TransitionOutcome::Success(next) => Some(next),
+        transitions::TransitionOutcome::Rejected => None,
+        transitions::TransitionOutcome::FailStop => fail_stop(),
     }
-    if state & ACTIVE_COUNT_MASK == ACTIVE_COUNT_MASK {
-        fail_stop();
-    }
-    Some(state + 1)
 }
 
 /// [SC-4] Release requires active > 0.
 /// [SC-5] Successful release: active' = active - 1, flags preserved.
 #[inline]
 fn release_update(state: usize) -> Option<usize> {
-    (state & ACTIVE_COUNT_MASK != 0).then(|| state - 1)
+    match transitions::release_step(state) {
+        transitions::TransitionOutcome::Success(next) => Some(next),
+        transitions::TransitionOutcome::Rejected => None,
+        transitions::TransitionOutcome::FailStop => fail_stop(),
+    }
 }
 
 /// [SC-9] Retain final capability: waiting && active == 1 => returns None.
@@ -59,33 +72,28 @@ fn release_update(state: usize) -> Option<usize> {
 /// [SC-9b] Successful release decrements active by 1 and preserves flags.
 #[inline]
 fn release_without_notification_update(state: usize) -> Option<usize> {
-    let active = state & ACTIVE_COUNT_MASK;
-    if active == 0 {
-        fail_stop();
+    match transitions::release_without_notification_step(state) {
+        transitions::TransitionOutcome::Success(next) => Some(next),
+        transitions::TransitionOutcome::Rejected => None,
+        transitions::TransitionOutcome::FailStop => fail_stop(),
     }
-    // Keep the last count live until the drain gate owns its notification
-    // mutex. This also keeps the gate alive while that mutex is acquired.
-    if active == 1 && state & WAITING_BIT != 0 {
-        return None;
-    }
-    Some(state - 1)
 }
 
 /// [SC-6] BecameIdle equivalence: outcome is BecameIdle <=> previous active == 1.
 #[inline]
 fn release_outcome(previous: usize) -> ReleaseOutcome {
-    if previous & ACTIVE_COUNT_MASK == 1 {
-        ReleaseOutcome::BecameIdle
-    } else {
-        ReleaseOutcome::StillActive
-    }
+    transitions::release_outcome_step(previous)
 }
 
 /// [SC-7] Reopen precondition: requires sealed && active == 0.
 /// [SC-8] Reopen postcondition: establishes !sealed && !waiting && active == 0.
 #[inline]
 fn reopen_update(state: usize) -> Option<usize> {
-    (state & SEALED_BIT != 0 && state & ACTIVE_COUNT_MASK == 0).then_some(0)
+    match transitions::reopen_step(state) {
+        transitions::TransitionOutcome::Success(next) => Some(next),
+        transitions::TransitionOutcome::Rejected => None,
+        transitions::TransitionOutcome::FailStop => fail_stop(),
+    }
 }
 
 impl SealableCounter {

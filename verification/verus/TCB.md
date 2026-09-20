@@ -7,11 +7,11 @@ xlfn employs a multi-tiered verification architecture to ensure safe, high-throu
 | Layer | Target Scope | Verification Engine | Primary Guarantees |
 | :--- | :--- | :--- | :--- |
 | **Protocol** | Whole-system & lifecycle | **Lean 4** | Generational transition safety, shutdown quiescence, quiescence certificates |
-| **Implementation** | Concurrent ownership & state machines | **Verus** | Bit representations, atomic transitions, resource invariants, linear raw pointer ownership |
+| **Protocol & Representation Model** | Concurrent ownership, dual 32/64-bit representations & state machines | **Verus** | Bit representations (32-bit i686 & 64-bit), atomic transitions, resource invariants, linear raw pointer ownership |
 | **Memory Order** | Memory-ordering regressions | **Loom** | Exhaustive thread interleavings of Acquire, Release, AcqRel, and Relaxed orderings |
 | **Runtime UB** | Aliasing & undefined behavior | **Miri** | Stacked Borrows / Tree Borrows, absence of aliasing violations or memory leaks |
 
-Formal verification with Verus mathematically proves the logical consistency and invariant preservation of the Rust implementation. It does not verify the physical execution hardware or the host operating system. Consequently, the assumptions and prerequisites at the verification boundary (the Trusted Computing Base, or TCB) are explicitly defined and strictly audited.
+Formal verification with Verus mathematically proves the logical consistency and invariant preservation of the protocol models and executable transitions. In `SealableCounter`, end-to-end refinement is established by verifying the production transition kernel directly (Single Source of Truth, SSOT). Across all primitives, assumptions and prerequisites at the verification boundary (the Trusted Computing Base, or TCB) are explicitly defined and strictly audited.
 
 ---
 
@@ -19,7 +19,13 @@ Formal verification with Verus mathematically proves the logical consistency and
 
 The following components and properties are treated as **Trusted Assumptions (TCB)** outside the scope of Verus automated proofs.
 
-### 2.1. External Libraries & Runtime
+### 2.1. Target Architecture & Word Widths
+1. **Target Word Sizes**:
+   - 32-bit architectures (`i686-pc-windows-msvc`, Excel 32-bit process): `usize = u32`, 32-bit pointer width.
+   - 64-bit architectures (`x86_64`, `aarch64`, Excel 64-bit process): `usize = u64`, 64-bit pointer width.
+   - Verus formally certifies theorems for both $W = 32$ and $W = 64$, ensuring machine-level bit carry and mask isolation are sound regardless of target word width.
+
+### 2.2. External Libraries & Runtime
 1. **`parking_lot::Mutex` Semantics**:
    - Mutual exclusion: `lock()` grants critical section access to at most one thread at a time.
    - Lock release: `unlock()` / `drop()` correctly yields access to pending or subsequent waiters.
@@ -41,16 +47,17 @@ The following components and properties are treated as **Trusted Assumptions (TC
 
 The following properties and theorems are statically proved within Verus with zero verification failures and zero unverified assumptions:
 
-### 3.1. SealableCounter
-- **`[SC-1]` Bounded Active**: The `active` reader count never exceeds `ACTIVE_COUNT_MASK`.
-- **`[SC-2]` Acquire Correctness**: Successful acquisition strictly increments `active` by $+1$, preserving `sealed` and `waiting` flags.
-- **`[SC-3]` Sealed Rejection**: If `sealed` is set, `acquire` unconditionally returns `None`.
-- **`[SC-4]` Release Precondition**: Release cannot succeed if `active == 0` (absence of counter underflow).
-- **`[SC-5]` Release Correctness**: Successful release strictly decrements `active` by $-1$, preserving all status flags.
-- **`[SC-6]` BecameIdle Equivalence**: `BecameIdle` is returned if and only if previous `active == 1`.
-- **`[SC-7]` Reopen Precondition**: Reopening succeeds only when `sealed && active == 0`.
-- **`[SC-8]` Reopen Postcondition**: Upon successful reopen, `!sealed && !waiting && active == 0` holds.
-- **`[SC-9]` Retain Final Capability**: When `waiting && active == 1`, `release_without_notification` returns `None`, forbidding the last permit from disappearing before the waiter notification mutex is acquired.
+### 3.1. SealableCounter (SSOT Verified for both 32-bit and 64-bit)
+- **`[SC-1]` Bounded Active**: The `active` reader count never exceeds `ACTIVE_COUNT_MASK` (proved for `u32` and `u64`).
+- **`[SC-2]` Acquire Correctness**: Successful acquisition strictly increments `active` by $+1$, preserving `sealed` and `waiting` flags (proved for `u32` and `u64`).
+- **`[SC-3]` Sealed Rejection**: If `sealed` is set, `acquire` returns `Rejected` (mapping to `None` / `Err(Sealed)`) (proved for `u32` and `u64`).
+- **`[SC-4]` Release Precondition**: Release cannot succeed if `active == 0` (underflow produces `FailStop`, halting the process) (proved for `u32` and `u64`).
+- **`[SC-5]` Release Correctness**: Successful release strictly decrements `active` by $-1$, preserving all status flags (proved for `u32` and `u64`).
+- **`[SC-6]` BecameIdle Equivalence**: `BecameIdle` is returned if and only if previous `active == 1` (proved for `u32` and `u64`).
+- **`[SC-7]` Reopen Precondition**: Reopening succeeds only when `sealed && active == 0` (proved for `u32` and `u64`).
+- **`[SC-8]` Reopen Postcondition**: Upon successful reopen, `!sealed && !waiting && active == 0` holds (proved for `u32` and `u64`).
+- **`[SC-9]` Retain Final Capability**: When `waiting && active == 1`, `release_without_notification` returns `Rejected`, forbidding the last permit from disappearing before the waiter notification mutex is acquired (proved for `u32` and `u64`).
+- **`[SC-9b]` Release Without Notification Decrements Active**: When successful, active count is decremented by 1 while preserving status flags (proved for `u32` and `u64`).
 
 ### 3.2. DrainGate (Phase 3)
 - **`[DG-1]` Permit Liveness**: The existence of an active permit strictly implies `active > 0`.
