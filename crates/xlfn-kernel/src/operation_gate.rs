@@ -38,16 +38,28 @@ impl OperationGate {
         self.drain.active()
     }
 
+    /// Begins closing the gate to prevent new admissions.
+    ///
+    /// Formal theorem [OG-1]: After this linearization point (`drain.seal()`),
+    /// all future `acquire` and `enter` attempts will return `Err(GateClosed)`.
     #[inline]
     pub fn begin_close(&self) {
         self.drain.seal();
     }
 
+    /// Acquires admission into an active operation.
+    ///
+    /// Formal theorem [OG-1], [OG-5]: Atomically increments active count if open.
+    /// Linearization point: `self.drain.try_acquire()`.
     #[inline]
     pub fn acquire(&self) -> Result<(), GateClosed> {
         self.drain.try_acquire().map_err(|_| GateClosed)
     }
 
+    /// Enters an operation producing an RAII-scoped [`OperationGuard`].
+    ///
+    /// Formal theorem [OG-1], [OG-3]: Guarantees a live permit backed by active count.
+    /// Linearization point: `self.drain.try_enter()`.
     #[inline]
     pub fn enter(&self) -> Result<OperationGuard<'_>, GateClosed> {
         let permit = self.drain.try_enter().map_err(|_| GateClosed)?;
@@ -62,6 +74,8 @@ impl OperationGate {
     /// guard, including its final release notification. Sealing and draining
     /// this same gate synchronizes with that final access; the owner may then
     /// be reclaimed if no other capability can access it.
+    ///
+    /// Formal theorem [OG-4]: Owned guard establishes a reclamation barrier until release.
     pub unsafe fn enter_owned(&self) -> Result<OwnedOperationGuard, GateClosed> {
         self.acquire()?;
         Ok(OwnedOperationGuard {
@@ -69,6 +83,9 @@ impl OperationGate {
         })
     }
 
+    /// Seals the gate and prepares to wait for all active operations to quiesce.
+    ///
+    /// Formal theorem [OG-1], [OG-2]: Marks gate closed and initiates drain barrier.
     pub fn close_and_wait_begin(&self) -> TerminationWaitGuard<'_> {
         self.begin_close();
         TerminationWaitGuard { gate: self }
@@ -78,6 +95,9 @@ impl OperationGate {
     ///
     /// This is used when an acquired operation cannot store an [`OperationGuard`]
     /// bound to the gate lifetime and manages the drain permit release manually.
+    ///
+    /// Formal theorem [OG-5]: Atomically decrements active count by 1.
+    /// Linearization point: `self.drain.release()`.
     #[inline]
     pub fn release(&self) {
         self.drain.release();
@@ -92,8 +112,13 @@ pub struct OwnedOperationGuard {
     gate: NonNull<OperationGate>,
 }
 
-impl Drop for OwnedOperationGuard {
-    fn drop(&mut self) {
+impl OwnedOperationGuard {
+    /// Releases the operation permit from the gate without going through implicit drop.
+    ///
+    /// Formal theorem [OG-4], [OG-5]: projects the inner drain gate and releases
+    /// the owned count, satisfying the reclamation barrier.
+    #[inline]
+    pub(crate) unsafe fn release_inner(&mut self) {
         // SAFETY: guaranteed by `OperationGate::enter_owned`; this guard is
         // itself the outstanding operation that delays owner reclamation.
         // Project the drain field without passing &OperationGate across its
@@ -103,6 +128,15 @@ impl Drop for OwnedOperationGuard {
         let drain = unsafe { NonNull::new_unchecked(drain) };
         // SAFETY: this guard owns the live count for the projected gate.
         unsafe { DrainGate::release_owned(drain) };
+    }
+}
+
+impl Drop for OwnedOperationGuard {
+    #[inline]
+    fn drop(&mut self) {
+        // Rule 4: Drop is a thin wrapper over release_inner.
+        // SAFETY: this guard owns the live count for the projected gate.
+        unsafe { self.release_inner() };
     }
 }
 
@@ -117,6 +151,9 @@ pub struct TerminationWaitGuard<'a> {
 }
 
 impl TerminationWaitGuard<'_> {
+    /// Waits until all operations admitted before or during close have finished.
+    ///
+    /// Formal theorem [OG-2]: Upon return, `active == 0` and quiescence is certified.
     pub fn wait(self) {
         self.gate.drain.wait_until_idle();
     }

@@ -36,6 +36,8 @@ impl<T: ?Sized> PublishedOwner<T> {
     /// Dereferencing it requires the usual aliasing and lifetime guarantees;
     /// in particular, callers cannot mutate through it while shared borrows
     /// of the same data remain live.
+    ///
+    /// [PO-3] Exposes the pointer value without moving or consuming owner capability.
     pub fn as_ptr(&self) -> *mut T {
         self.pointer.as_ptr()
     }
@@ -43,10 +45,25 @@ impl<T: ?Sized> PublishedOwner<T> {
     /// Recovers ordinary exclusive ownership. Before calling, the publication
     /// protocol must drain every raw capability that could access this value.
     /// Rust borrows obtained through Deref already enforce that restriction.
+    ///
+    /// Guaranteed by Verus:
+    /// [PO-4] Consumes the unique owner capability and restores exclusive Box ownership.
+    /// [PO-6] Reclamation requires zero active readers.
     pub fn into_box(self) -> Box<T> {
         let owner = std::mem::ManuallyDrop::new(self);
-        // SAFETY: this unique owner consumes the original Box allocation once.
+        // SAFETY: [PO-1] this unique owner consumes the original Box allocation once.
         unsafe { Box::from_raw(owner.pointer.as_ptr()) }
+    }
+
+    /// Explicitly deallocates the owned payload.
+    ///
+    /// [PO-5] Consumes the allocation exactly once.
+    /// [PO-6] Precludes concurrent reader access.
+    #[inline]
+    pub(crate) unsafe fn release_inner(&mut self) {
+        // SAFETY: [PO-1] this is the sole owner. As with Box, any raw capability's
+        // creator must guarantee it does not survive allocation destruction.
+        unsafe { drop(Box::from_raw(self.pointer.as_ptr())) };
     }
 }
 
@@ -67,10 +84,13 @@ impl<T: ?Sized> Deref for PublishedOwner<T> {
 }
 
 impl<T: ?Sized> Drop for PublishedOwner<T> {
+    /// Thin wrapper around `release_inner`.
+    ///
+    /// Guaranteed by Verus: [PO-5] Single drop deallocation exactly once.
     fn drop(&mut self) {
-        // SAFETY: this is the sole owner. As with Box, any raw capability's
-        // creator must guarantee it does not survive allocation destruction.
-        drop(unsafe { Box::from_raw(self.pointer.as_ptr()) });
+        // SAFETY: self is an exclusive &mut reference at drop time, and drop
+        // is called exactly once to deallocate the owned pointer via release_inner.
+        unsafe { self.release_inner() };
     }
 }
 

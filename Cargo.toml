@@ -9,6 +9,14 @@ members = [
     "tools/windows-bindings",
     "crates/xlfn",
 ]
+exclude = [
+    "verification/verus/sealable_counter",
+    "verification/verus/drain_gate",
+    "verification/verus/published_owner",
+    "verification/verus/operation_gate",
+    "verification/verus/rotating_read_domain",
+    "verification/verus/service_slot",
+]
 resolver = "3"
 
 [workspace.package]
@@ -78,6 +86,7 @@ windows-bindgen = "=0.100.0"
 windows-link = "=0.100.0"
 
 [workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)'] }
 unsafe_op_in_unsafe_fn = "deny"
 unused_must_use = "deny"
 linker_messages = "deny"

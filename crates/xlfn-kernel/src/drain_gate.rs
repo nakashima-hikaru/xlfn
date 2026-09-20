@@ -149,6 +149,8 @@ impl DrainGate {
         }
     }
 
+    /// [DG-1] Holding an active permit guarantees active > 0.
+    /// [DG-2] Returns Err(Sealed) if the gate has been sealed.
     #[inline]
     pub fn try_enter(&self) -> Result<DrainPermit<'_>, Sealed> {
         self.counter.try_acquire()?;
@@ -160,6 +162,9 @@ impl DrainGate {
     /// This is the temporal-lifetime counterpart of an owning reference: the
     /// gate owner must seal and drain every permit before reclaiming the
     /// pointed-to object.
+    ///
+    /// [DG-1] Live permit ensures gate active count > 0.
+    /// [DG-2] Rejects admission once sealed.
     #[inline]
     pub fn try_enter_owned(&'static self) -> Result<OwnedDrainPermit, Sealed> {
         self.counter.try_acquire()?;
@@ -174,6 +179,10 @@ impl DrainGate {
         self.counter.try_acquire()
     }
 
+    /// Releases one active permit capability.
+    ///
+    /// [DG-1] Decrements outstanding active count.
+    /// [DG-5] Fast-path succeeds only when no waiter is pending on final count.
     #[inline]
     pub fn release(&self) -> ReleaseOutcome {
         let counter = &self.counter;
@@ -191,6 +200,10 @@ impl DrainGate {
     /// # Safety
     /// The pointer must identify a live gate with one count owned by this
     /// caller. Its owner may reclaim only after sealing and waiting for idle.
+    ///
+    /// Guaranteed by Verus:
+    /// [DG-5] / [SC-9] The fast-path rejects when `waiting && active == 1`, guaranteeing
+    /// that the final count is held until the slow path acquires `idle.lock`.
     pub(crate) unsafe fn release_owned(gate: NonNull<Self>) -> ReleaseOutcome {
         let gate = gate.as_ptr();
         // SAFETY: the caller's active count retains every field until this
@@ -208,6 +221,7 @@ impl DrainGate {
         release_and_notify(&idle, || counter.release())
     }
 
+    /// [DG-2] Once sealed, all subsequent admission attempts fail.
     #[inline]
     pub fn seal(&self) {
         self.counter.seal();
@@ -219,6 +233,8 @@ impl DrainGate {
         wait_for_idle(&self.idle, || self.counter.mark_waiting());
     }
 
+    /// [DG-3] Quiescence on Drain: establishes sealed && active == 0 && outstanding == 0.
+    /// [DG-4] Reclamation Precondition: safe to reclaim protected resources after return.
     pub fn seal_and_wait(&self) {
         self.seal();
         self.wait_until_idle();

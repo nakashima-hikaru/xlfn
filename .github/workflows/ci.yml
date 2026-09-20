@@ -296,6 +296,33 @@ jobs:
                   --target ${{ matrix.target }}
                   --locked
 
+    verus:
+        name: Verus formal verification
+        runs-on: ubuntu-latest
+        steps:
+            - name: Check out repository
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+            - name: Set up Python
+              uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+              with:
+                  python-version: "3.13"
+
+            - name: Install Just
+              uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
+              with:
+                  tool: just
+                  fallback: none
+
+            - name: Install Verus
+              run: ./tools/install_verus.sh /usr/local/bin
+
+            - name: Audit Verus TCB compliance (assumes and unapproved external_body)
+              run: just verus-audit
+
+            - name: Run Verus formal verification
+              run: just verus
+
     lean:
         name: Lean formal models
         runs-on: ubuntu-latest

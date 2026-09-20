@@ -513,12 +513,24 @@ unsafe impl<const N: usize> Send for RotatingReadOwnedPermit<N> {}
 // SAFETY: the permit only exposes the thread-safe release operation.
 unsafe impl<const N: usize> Sync for RotatingReadOwnedPermit<N> {}
 
-impl<const N: usize> Drop for RotatingReadOwnedPermit<N> {
+impl<const N: usize> RotatingReadOwnedPermit<N> {
+    /// Releases the owned permit back to the generational drain gate.
+    ///
+    /// Formal theorem [RRD-D4]: releases the permit, synchronizing with old readers drain.
     #[inline]
-    fn drop(&mut self) {
+    pub(crate) unsafe fn release_inner(&mut self) {
         // SAFETY: the caller retains the domain through this final release;
         // its drain wait synchronizes with the last notification-field access.
         unsafe { StripedDrainGate::release_owned(self.gate, self.stripe) };
+    }
+}
+
+impl<const N: usize> Drop for RotatingReadOwnedPermit<N> {
+    #[inline]
+    fn drop(&mut self) {
+        // Rule 4: Drop is a thin wrapper over release_inner.
+        // SAFETY: the caller retains the domain through this final release.
+        unsafe { self.release_inner() };
     }
 }
 

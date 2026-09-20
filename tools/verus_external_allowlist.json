@@ -1,0 +1,6 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Verus External Body Allowlist",
+  "description": "Inventory of approved external_body items for Verus formal verification",
+  "external_bodies": []
+}

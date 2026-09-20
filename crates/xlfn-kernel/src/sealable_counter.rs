@@ -32,6 +32,9 @@ pub const SEALED_BIT: usize = 1_usize << (usize::BITS - 1);
 const WAITING_BIT: usize = SEALED_BIT >> 1;
 const ACTIVE_COUNT_MASK: usize = WAITING_BIT - 1;
 
+/// [SC-1] Active count is strictly bounded: active <= ACTIVE_COUNT_MASK.
+/// [SC-2] Successful acquire: active' = active + 1, flags preserved.
+/// [SC-3] Sealed rejects acquire: sealed => None.
 #[inline]
 fn acquire_update(state: usize) -> Option<usize> {
     if state & SEALED_BIT != 0 {
@@ -43,11 +46,17 @@ fn acquire_update(state: usize) -> Option<usize> {
     Some(state + 1)
 }
 
+/// [SC-4] Release requires active > 0.
+/// [SC-5] Successful release: active' = active - 1, flags preserved.
 #[inline]
 fn release_update(state: usize) -> Option<usize> {
     (state & ACTIVE_COUNT_MASK != 0).then(|| state - 1)
 }
 
+/// [SC-9] Retain final capability: waiting && active == 1 => returns None.
+/// Keeps the last count live until the drain gate owns its notification
+/// mutex, preventing premature gate destruction.
+/// [SC-9b] Successful release decrements active by 1 and preserves flags.
 #[inline]
 fn release_without_notification_update(state: usize) -> Option<usize> {
     let active = state & ACTIVE_COUNT_MASK;
@@ -62,6 +71,7 @@ fn release_without_notification_update(state: usize) -> Option<usize> {
     Some(state - 1)
 }
 
+/// [SC-6] BecameIdle equivalence: outcome is BecameIdle <=> previous active == 1.
 #[inline]
 fn release_outcome(previous: usize) -> ReleaseOutcome {
     if previous & ACTIVE_COUNT_MASK == 1 {
@@ -71,6 +81,8 @@ fn release_outcome(previous: usize) -> ReleaseOutcome {
     }
 }
 
+/// [SC-7] Reopen precondition: requires sealed && active == 0.
+/// [SC-8] Reopen postcondition: establishes !sealed && !waiting && active == 0.
 #[inline]
 fn reopen_update(state: usize) -> Option<usize> {
     (state & SEALED_BIT != 0 && state & ACTIVE_COUNT_MASK == 0).then_some(0)
@@ -89,6 +101,8 @@ impl SealableCounter {
         }
     }
 
+    /// Linearization Point: RMW update with `acquire_update`.
+    /// Guaranteed by Verus: [SC-2] increments active by 1; [SC-3] rejects if sealed.
     #[inline]
     pub fn try_acquire(&self) -> Result<(), Sealed> {
         // Acquire a reopen's publication even if a delayed reader selected
@@ -99,6 +113,8 @@ impl SealableCounter {
             .map_err(|_| Sealed)
     }
 
+    /// Linearization Point: RMW update with `release_update`.
+    /// Guaranteed by Verus: [SC-4] requires active > 0; [SC-5] decrements active by 1; [SC-6] BecameIdle iff active == 1.
     #[inline]
     pub fn release(&self) -> ReleaseOutcome {
         // Publish protected accesses to an acquiring idle observer. Every
@@ -113,6 +129,9 @@ impl SealableCounter {
 
     /// Attempts a release that will need no further access to the drain gate.
     /// `None` retains the last count until the gate acquires its wait mutex.
+    ///
+    /// Linearization Point: RMW update with `release_without_notification_update`.
+    /// Guaranteed by Verus: [SC-9] safely refuses decrement when waiting && active == 1.
     #[inline]
     pub(crate) fn try_release_without_notification(&self) -> Option<ReleaseOutcome> {
         self.state
@@ -128,10 +147,14 @@ impl SealableCounter {
     /// Registers drain notification in the same atomic state as admission and
     /// release, and returns the active count observed by that RMW. The bit is
     /// sticky until a serialized reopen; no independent waiter counter exists.
+    ///
+    /// Linearization Point: atomic fetch_or setting WAITING_BIT.
     pub(crate) fn mark_waiting(&self) -> usize {
         self.state.fetch_or(WAITING_BIT, Ordering::AcqRel) & ACTIVE_COUNT_MASK
     }
 
+    /// Linearization Point: atomic fetch_or setting SEALED_BIT.
+    /// Guaranteed by Verus: [SC-3] ensures all subsequent try_acquire calls observe sealed.
     #[inline]
     pub fn seal(&self) {
         // Publish closure to is_sealed/admission observers. Sealing is not a
@@ -171,6 +194,9 @@ impl SealableCounter {
 
     /// Reopens a sealed, idle counter and clears its notification obligation.
     /// Drain gates serialize this reset with waiter registration.
+    ///
+    /// Linearization Point: RMW update with `reopen_update`.
+    /// Guaranteed by Verus: [SC-7] requires sealed && active == 0; [SC-8] resets to !sealed && !waiting && active == 0.
     pub fn reopen(&self) -> Result<(), ReopenError> {
         self.state
             .try_update(Ordering::AcqRel, Ordering::Acquire, reopen_update)

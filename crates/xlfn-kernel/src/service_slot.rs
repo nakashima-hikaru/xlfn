@@ -96,11 +96,11 @@ impl<'slot, C, R, E: Clone> InitializingTxn<'slot, C, R, E> {
         runtime: Box<R>,
         on_initialized: impl FnOnce(&R),
     ) -> GenerationServiceRead<'slot, R> {
-        // Convert before publishing: moving a Box would retag its allocation
-        // while readers may still hold pointers into it.
+        // Formal theorem [SS-1]: Convert Box to PublishedOwner before publishing.
+        // Moving a Box would retag its allocation while readers may still hold pointers into it.
         let runtime = PublishedOwner::from_box(runtime);
         // Keep the callback outside the state lock. If it panics, Drop owns
-        // the transition to InitFaulted and the local owner is reclaimed.
+        // the transition to InitFaulted and the local owner is reclaimed ([SS-5]).
         on_initialized(runtime.as_ref());
         let pointer = NonNull::from(runtime.as_ref());
 
@@ -109,6 +109,7 @@ impl<'slot, C, R, E: Clone> InitializingTxn<'slot, C, R, E> {
             GenerationServiceState::Initializing => {}
             _ => unreachable!("initialization transaction lost its state owner"),
         }
+        // Formal theorem [SS-1], [SS-2]: Transition to Ready publishes sole owner.
         *state = GenerationServiceState::Ready { runtime };
         self.slot
             .published
@@ -186,6 +187,8 @@ impl<C, R, E: Clone> SealingTxn<'_, C, R, E> {
                     .runtime
                     .take()
                     .expect("a successful seal transfers its runtime root");
+                // Formal theorem [SS-1], [SS-4]: Quiescence was certified by wait_until_idle
+                // prior to this transaction, so extracting Box<R> via into_box is race-free.
                 Ok(ServiceSeal::Present {
                     runtime: runtime.into_box(),
                     sealed,
@@ -417,6 +420,8 @@ impl<C, R, E: Clone> GenerationServiceSlot<C, R, E> {
 
             match std::mem::replace(&mut *state, GenerationServiceState::Sealing) {
                 GenerationServiceState::Ready { runtime } => {
+                    // Formal theorem [SS-3]: Withdraw publication and seal readers gate
+                    // before waiting for drain, preventing any late reader admission.
                     self.readers.seal();
                     self.published
                         .store(std::ptr::null_mut(), Ordering::Release);
@@ -439,6 +444,7 @@ impl<C, R, E: Clone> GenerationServiceSlot<C, R, E> {
             }
         };
 
+        // Formal theorem [SS-4]: Wait until all active readers drain completely.
         self.readers.wait_until_idle();
         SealingTxn {
             slot: self,

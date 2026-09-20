@@ -63,6 +63,20 @@ miri:
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features async --lib --locked -- miri_
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features rtd --lib --locked -- miri_
 
+# Verus formal verification of concurrent kernel primitives.
+verus:
+    verus --crate-type=lib verification/verus/sealable_counter/src/lib.rs
+    verus --crate-type=lib verification/verus/drain_gate/src/lib.rs
+    verus --crate-type=lib verification/verus/published_owner/src/lib.rs
+    verus --crate-type=lib verification/verus/operation_gate/src/lib.rs
+    verus --crate-type=lib verification/verus/rotating_read_domain/src/lib.rs
+    verus --crate-type=lib verification/verus/service_slot/src/lib.rs
+
+# Audit Verus verification TCB compliance (enforces 0 assumes and approved external_bodies).
+verus-audit:
+    python3 -B -m unittest discover -s tools -p test_check_verus_tcb.py
+    python3 -B tools/check_verus_tcb.py
+
 test-core:
     cargo test \
         --package xlfn \
