@@ -366,5 +366,30 @@
     "count": 1,
     "category": "test",
     "reason": "Negative observer catches an injected panic between shard collections and verifies that dropping the partial refresh restores in-flight values for retry."
+  },
+  {
+    "path": "crates/xlfn/tests/cache_contract/generations.rs",
+    "context": "# [ test ] fn follower_retrying_after_leader_panic_across_clear_does_not_pollute_new_epoch",
+    "code": "let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {",
+    "count": 1,
+    "category": "test",
+    "reason": "Observes injected leader computation panic to verify retrying follower after clear does not pollute new epoch."
+  },
+  {
+    "path": "crates/xlfn/tests/cache_review_regressions.rs",
+    "context": "# [ test ] fn post_compute_hash_panic_must_not_leak_the_creator_pin",
+    "code": "let outcome = catch_unwind(AssertUnwindSafe(|| {",
+    "count": 1,
+    "category": "test",
+    "reason": "Observes injected post-compute hash panic to verify creator pin guard cleanup does not leak."
+  },
+  {
+    "path": "crates/xlfn/tests/cache_review_regressions.rs",
+    "context": "module root",
+    "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",
+    "count": 1,
+    "category": "test",
+    "reason": "Test-only import; the direct panic observation in this module is separately inventoried."
   }
 ]
+

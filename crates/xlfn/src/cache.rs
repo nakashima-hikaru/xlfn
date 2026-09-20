@@ -871,10 +871,7 @@ impl CacheLookupDomain {
             }
             queue.push(ReclaimEntry(ptr, weight));
             let nodes = self.pending_nodes.fetch_add(1, Ordering::Relaxed) + 1;
-            let weight = self
-                .pending_weight
-                .fetch_add(weight, Ordering::Relaxed)
-                + weight;
+            let weight = self.pending_weight.fetch_add(weight, Ordering::Relaxed) + weight;
             self.peak_pending_nodes.fetch_max(nodes, Ordering::Relaxed);
             self.peak_pending_weight
                 .fetch_max(weight, Ordering::Relaxed);

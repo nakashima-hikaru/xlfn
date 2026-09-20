@@ -144,7 +144,7 @@ where
             let removed = self.shards[self.shard(hash)].write().remove_entry(key);
             if let Some((_, entry)) = &removed {
                 policy.entries -= 1;
-                policy.weight -= u64::from(entry.1);
+                policy.weight -= entry.1;
             }
             self.record(&policy);
             removed
@@ -168,7 +168,7 @@ where
                 let mut shard = shard.write();
                 for item in shard.extract_if(|key, _| select(key)) {
                     policy.entries -= 1;
-                    policy.weight -= u64::from(item.1.1);
+                    policy.weight -= item.1.1;
                     removed.push(item);
                 }
             }
