@@ -16,6 +16,8 @@ exclude = [
     "verification/verus/operation_gate",
     "verification/verus/rotating_read_domain",
     "verification/verus/service_slot",
+    "verification/verus/cache_lease",
+    "verification/verus/handle_domain",
 ]
 resolver = "3"
 

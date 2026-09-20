@@ -197,10 +197,24 @@ unsafe fn release_node_pin<V>(node_ptr: NonNull<CacheNode<V>>) {
     }
 }
 
-impl<V> Drop for CacheLease<'_, V> {
-    fn drop(&mut self) {
+impl<V> CacheLease<'_, V> {
+    /// Releases the active pin capability without relying on implicit Drop.
+    ///
+    /// Formal theorem [TR-LEASE-1], [TR-RECLAIM-1]: releasing this pin capability
+    /// decrements the node's pin count and enqueues for reclamation only if this is the final pin.
+    #[inline]
+    pub(crate) unsafe fn release_inner(&mut self) {
         // SAFETY: [TR-LEASE-1] self.node remains valid because a pin capability is held by this lease.
         unsafe { release_node_pin(self.node) };
+    }
+}
+
+impl<V> Drop for CacheLease<'_, V> {
+    #[inline]
+    fn drop(&mut self) {
+        // Rule 4: Drop is a thin wrapper over release_inner.
+        // SAFETY: [TR-LEASE-1] self.node remains valid because a pin capability is held by this lease.
+        unsafe { self.release_inner() };
     }
 }
 

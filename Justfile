@@ -71,6 +71,8 @@ verus:
     verus --crate-type=lib verification/verus/operation_gate/src/lib.rs
     verus --crate-type=lib verification/verus/rotating_read_domain/src/lib.rs
     verus --crate-type=lib verification/verus/service_slot/src/lib.rs
+    verus --crate-type=lib verification/verus/cache_lease/src/lib.rs
+    verus --crate-type=lib verification/verus/handle_domain/src/lib.rs
 
 # Audit Verus verification TCB compliance (enforces 0 assumes and approved external_bodies).
 verus-audit:

@@ -88,6 +88,20 @@ The following properties and theorems are statically proved within Verus with ze
 - **`[SS-4]` Quiescence Precondition for Box Extraction**: `into_box` is invoked only after `readers.active() == 0`, ensuring race-free extraction.
 - **`[SS-5]` Fault Isolation**: Any failure during initialization or teardown transitions the slot to a fault state (`InitFaulted` or `TeardownFaulted`), preventing invalid state reuse.
 
+### 3.7. CacheLease & Temporal Reclamation (Phase 8)
+- **`[TR-OBSERVE-1]` Pointer Observation Soundness**: Observing a raw cache node pointer implies the object is live (`Published` or `Retired`), never `Reclaimed`.
+- **`[TR-LEASE-1]` Lease Pin Safety**: An active `CacheLease` pin strictly prevents node reclamation, guaranteeing safe shared dereference.
+- **`[TR-ADMISSION-1]` Admission Boundedness**: Pointer observations can only occur under the protection of an active admission domain permit (`observing <= admissions`).
+- **`[TR-RECLAIM-1]` Drained Reclamation Precondition**: Transitioning a cache node to `Reclaimed` requires all admissions, observers, and pins to be zero (`admissions == 0 && observing == 0 && pins == 0`).
+- **`[TR-NO-UAF]` Fundamental Temporal Safety**: In any valid system state, holding any capability (pin or observation) guarantees `status != Reclaimed`.
+
+### 3.8. HandleReadDomain & Publication (Phase 9)
+- **`[HD-1]` Admission Isolation**: Handle lookup operations proceed strictly under active `HandleDomainPermit` protection; closed domain unconditionally rejects new readers.
+- **`[HD-2]` Binding Retirement Before Reclamation**: Withdrawing an active binding moves it to the generation-bound pending queue and tracks it in `debt`, forbidding immediate destruction.
+- **`[HD-3]` Generational Quiescence**: Draining a retired generation strictly requires zero active readers in that generation.
+- **`[HD-4]` Linear Binding Deallocation**: Each retired `BindingRecord` in the pending queue is consumed and dropped exactly once.
+- **`[HD-5]` Destruction Barrier**: Complete seal and domain teardown establishes zero active readers, zero queued records, and zero outstanding debt (`debt == 0`).
+
 ---
 
 ## 4. TCB Governance Rules

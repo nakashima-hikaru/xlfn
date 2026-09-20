@@ -152,6 +152,8 @@ impl HandleReadDomain {
     ///
     /// The caller must ensure that `self` outlives the returned [`HandleDomainPermit`].
     /// All permits must be dropped before the domain is destroyed or moved.
+    ///
+    /// Formal theorem [HD-1]: Reader admission under domain isolation guarantees safe access.
     #[inline]
     pub(crate) unsafe fn enter_owned(&self) -> XllResult<HandleDomainPermit> {
         // SAFETY: guaranteed by caller's owner-lifetime contract;
@@ -173,6 +175,8 @@ impl HandleReadDomain {
     /// queue after publication makes the recheck below select the next queue.
     /// A double generation load without that queue/publication barrier would
     /// not exclude new readers observing a stale withdrawn pointer.
+    ///
+    /// Formal theorem [HD-2]: Retired bindings enter generation-bound queue; immediate drop is forbidden.
     pub(crate) fn enqueue_reclaim(&self, record: PublishedOwner<BindingRecord>) {
         loop {
             let generation = self.domain.current_generation();
@@ -227,6 +231,9 @@ impl HandleReadDomain {
         records
     }
 
+    /// Reclaims a batch of retired binding records after their grace period.
+    ///
+    /// Formal theorem [HD-4]: Linear binding deallocation: each retired binding is dropped exactly once.
     fn reclaim(&self, records: RetiredBindings) {
         if records.is_empty() {
             return;
@@ -304,6 +311,9 @@ impl HandleReadDomain {
         }
     }
 
+    /// Rotates the domain and drains retired bindings.
+    ///
+    /// Formal theorem [HD-3]: Generational quiescence ensures all readers of the retired generation have drained.
     pub(crate) fn quiesce(&self) {
         let records = self
             .domain
@@ -335,6 +345,8 @@ impl HandleReadDomain {
 
     /// Final drain closes reader admission and waits for destruction already
     /// handed to another borrowing writer or departing reader.
+    ///
+    /// Formal theorem [HD-5]: Destruction barrier: waits for domain drain and flushes remaining debt before arena teardown.
     pub(crate) fn seal(&self) {
         self.domain.seal_and_wait();
         let mut records = self.take_generation(0);
