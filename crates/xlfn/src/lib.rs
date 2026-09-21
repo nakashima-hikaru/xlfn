@@ -93,7 +93,6 @@ mod panic_boundary;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 pub mod reference;
 mod registration;
-#[cfg(any(feature = "cache", feature = "handles"))]
 mod retirement_queue;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 #[allow(

@@ -79,10 +79,13 @@ def main():
         print("PASS: native borrow checker rejects barrier release before generation publication", flush=True)
 
         barrier_path.write_text(barrier_source)
+        if "--offline" in command:
+            command.remove("--offline")
         command[command.index("--features") + 1] = "handles,cache"
         baseline = check()
         if baseline.returncode:
             raise SystemExit("FAIL: native Cache baseline does not compile\n" + baseline.stdout + baseline.stderr)
+        command.append("--offline")
         cache_path = tree / "crates/xlfn/src/cache.rs"
         cache_source = cache_path.read_text()
         anchor = "impl<V> std::ops::Deref for CacheLease<'_, V> {"
