@@ -102,7 +102,7 @@ impl<'domain> DrainedBindings<'domain> {
     }
 
     fn extend(&mut self, mut other: Self) {
-        protocol::append_owned_batch!(
+        crate::retirement_queue::append_owned_batch!(
             std::ptr::from_ref(self.domain), std::ptr::from_ref(other.domain);
             xlfn_kernel::invariant::fail_stop(),
             self.records.append(&mut other.records)

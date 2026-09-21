@@ -338,3 +338,15 @@ mod rotation;
 mod retirement;
 
 mod observation_coverage;
+mod atomic_admission;
+mod atomic_pins;
+
+pub mod queued_atomic;
+
+pub mod retained_observations;
+
+pub mod resident_index;
+
+#[path = "../../../../crates/xlfn/src/cache/node_layout.rs"]
+pub mod node_layout;
+pub mod inline_value;

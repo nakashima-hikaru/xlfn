@@ -3,7 +3,9 @@ use crate::panic_boundary::catch_no_unwind;
 use crate::{XllError, XllResult};
 #[cfg(all(test, feature = "bench-internals"))]
 mod backend_tests;
+mod node_layout;
 mod pin_transitions;
+use node_layout::verus;
 mod resident_index;
 use parking_lot::{Condvar, Mutex, RwLock};
 use resident_index::{ResidentEntry, ResidentIndex};
@@ -121,12 +123,17 @@ impl<V> std::ops::Deref for CacheLease<'_, V> {
     fn deref(&self) -> &Self::Target {
         // SAFETY: [TR-LEASE-1] self.node is pinned for the lifetime of this CacheLease;
         // its live pin prevents retirement and reclamation.
-        unsafe { &self.node.as_ref().value }
+        node_layout::value!(unsafe { self.node.as_ref() })
     }
 }
 
-unsafe fn reclaim_cache_node<V>(ptr: *mut CacheNode<V>) {
-    // SAFETY: ptr points to an allocated CacheNode<V> whose grace period has ended.
+/// Consumes the final-pin retirement entry after all observations have ended.
+/// The caller must establish a matching grace period, or that the node was never
+/// published. Ownership of the entry alone does not establish quiescence.
+unsafe fn reclaim_cache_node<V>(entry: ReclaimEntry<V>) {
+    let ReclaimEntry { pointer: ptr, .. } = entry;
+    // SAFETY: the caller establishes quiescence; consuming entry transfers the
+    // unique retirement ownership into Box without copying the inline payload.
     let node = unsafe { Box::from_raw(ptr) };
     // Drop in place: moving an inline, potentially large V onto the stack
     // just to catch its destructor would add copies and risk stack overflow.
@@ -138,11 +145,11 @@ unsafe fn reclaim_cache_node<V>(ptr: *mut CacheNode<V>) {
     }
 }
 
-fn reclaim_cache_entries<V>(entries: ReclaimEntries<V>) {
-    for entry in entries {
-        // SAFETY: [TR-RECLAIM-1] entry.0 points to an allocated CacheNode<V> whose grace period has ended.
+fn reclaim_cache_entries<V>(entries: ReclaimEntries<'_, V>) {
+    for entry in entries.entries {
+        // SAFETY: [TR-RECLAIM-1] entry.pointer points to an allocated CacheNode<V> whose grace period has ended.
         unsafe {
-            reclaim_cache_node::<V>(entry.0);
+            reclaim_cache_node::<V>(entry);
         }
     }
 }
@@ -186,7 +193,7 @@ unsafe fn release_node_pin<V>(node_ptr: NonNull<CacheNode<V>>) {
         } else if ACTIVE_CACHE_INITIALIZATION_DEPTH.get() == 0 {
             // SAFETY: A never-published node was never reachable through an index snapshot.
             // Its final pin release can immediately destroy the node.
-            unsafe { reclaim_cache_node::<V>(entry.0) };
+            unsafe { reclaim_cache_node::<V>(entry) };
         } else {
             // Initializer-local drops still enter deferred reclamation so user destructors
             // never run inside the cache initialization guard.
@@ -283,7 +290,7 @@ where
             return None;
         }
 
-        Some(&node.value)
+        Some(node_layout::value!(node))
     }
 }
 
@@ -586,15 +593,12 @@ fn retire_resident<V>(node_ptr: NodePtr<V>) {
     }
 }
 
-struct CacheNode<V> {
-    value: V,
-    pins: AtomicUsize,
-    resident: AtomicBool,
-    // Immutable: only zero-budget nodes bypass every index publication.
-    published: bool,
-    weight: u64,
-    generation: u64,
-    domain: NonNull<CacheLookupDomain<V>>,
+node_layout::declare_node! {
+    struct CacheNode<V> {
+        pins: AtomicUsize,
+        resident: AtomicBool,
+        domain: NonNull<CacheLookupDomain<V>>,
+    }
 }
 
 // SAFETY: The inline payload is Send if V: Send; the cache owns the domain.
@@ -625,39 +629,27 @@ impl<V> CacheNode<V> {
     fn acquire_pin_with_ordering(&self, success: Ordering) -> Result<bool, PinOverflow> {
         // Lookup admission retains the allocation, and the resident index
         // publishes its initialized value. Pins only extend that lifetime.
-        self.pins
-            .fetch_update(success, Ordering::Relaxed, |pins| {
-                // Zero is terminal: resurrecting a node after its final pin
-                // is released would let two threads race to retire it, while
-                // one of them might still be accessing the allocation.
-                match pin_transitions::acquire(pins as _) {
-                    pin_transitions::Acquire::Acquired(next) => Some(next as usize),
-                    pin_transitions::Acquire::Zero | pin_transitions::Acquire::Overflow => None,
-                }
-            })
-            .map(|_| true)
-            .or_else(|pins| {
-                if pins == 0 {
-                    Ok(false)
-                } else {
-                    Err(PinOverflow)
-                }
-            })
+        use pin_transitions::{Acquire, pin_retry_expr};
+        pin_transitions::acquire_retry!(raw, next;
+            load = self.pins.load(Ordering::Relaxed),
+            classify = pin_transitions::acquire(raw as _),
+            attempt = self.pins.compare_exchange_weak(raw, next as usize, success, Ordering::Relaxed),
+            success = Ok(true), zero = Ok(false), overflow = Err(PinOverflow);
+        )
     }
 
     #[inline]
     fn release_pin(&self) -> bool {
-        let prev = self.pins.fetch_sub(1, Ordering::Release);
-        match pin_transitions::release(prev as _) {
-            pin_transitions::Release::FailStop => xlfn_kernel::invariant::fail_stop(),
-            pin_transitions::Release::StillPinned => return false,
-            pin_transitions::Release::LastPin => {}
-        }
-        // Only the final releaser retires the node. Acquire every earlier
-        // holder's accesses through the pin counter's RMW release sequence
-        // before publishing the node to the reclamation queue.
-        std::sync::atomic::fence(Ordering::Acquire);
-        true
+        use pin_transitions::{Release, pin_retry_expr};
+        // Acquire every earlier holder's accesses through the release sequence
+        // before publishing the final pin's node to the reclamation queue.
+        pin_transitions::release_pin!(previous;
+            decrement = self.pins.fetch_sub(1, Ordering::Release),
+            classify = pin_transitions::release(previous as _),
+            fence = std::sync::atomic::fence(Ordering::Acquire),
+            last = true, pinned = false,
+            fail_stop = xlfn_kernel::invariant::fail_stop(),
+        )
     }
 }
 
@@ -783,7 +775,11 @@ impl<V> Drop for CreatorPinGuard<'_, V> {
     }
 }
 
-struct ReclaimEntry<V>(*mut CacheNode<V>, u64);
+struct ReclaimEntry<V> {
+    pointer: *mut CacheNode<V>,
+    weight: u64,
+    domain: NonNull<CacheLookupDomain<V>>,
+}
 impl<V> ReclaimEntry<V> {
     /// Consumes one live pin; only the final release yields retirement ownership.
     /// The caller must own that pin and keep the allocation/domain valid.
@@ -791,7 +787,11 @@ impl<V> ReclaimEntry<V> {
         // SAFETY: guaranteed by the caller's live-pin ownership contract.
         let node = unsafe { pointer.as_ref() };
         if node.release_pin() {
-            Some(Self(pointer.as_ptr(), node.weight))
+            Some(Self {
+                pointer: pointer.as_ptr(),
+                weight: node.weight,
+                domain: node_layout::domain!(node),
+            })
         } else {
             None
         }
@@ -799,8 +799,12 @@ impl<V> ReclaimEntry<V> {
 
     /// Queue-only tests never pass sentinel entries to a node reclaimer.
     #[cfg(test)]
-    fn sentinel(weight: u64) -> Self {
-        Self(std::ptr::null_mut(), weight)
+    fn sentinel(domain: &CacheLookupDomain<V>, weight: u64) -> Self {
+        Self {
+            pointer: std::ptr::null_mut(),
+            weight,
+            domain: NonNull::from(domain),
+        }
     }
 }
 
@@ -814,47 +818,50 @@ unsafe impl<V: Send> Send for ReclaimEntry<V> {}
 type PendingEntries<V> = SmallVec<[ReclaimEntry<V>; 4]>;
 
 /// A batch detached only after a same-domain grace-period certificate.
-/// Keeping this distinct from PendingEntries prevents accidental direct reclaim
-/// of a still-pending queue through the safe batch-reclamation entry point.
-#[repr(transparent)]
-struct ReclaimEntries<V>(PendingEntries<V>);
+/// The owner borrow keeps the allocation's domain alive through reclamation.
+struct ReclaimEntries<'domain, V> {
+    domain: &'domain CacheLookupDomain<V>,
+    entries: PendingEntries<V>,
+}
 
-impl<V> ReclaimEntries<V> {
-    fn new() -> Self {
-        Self(PendingEntries::new())
+impl<'domain, V> ReclaimEntries<'domain, V> {
+    fn new(domain: &'domain CacheLookupDomain<V>) -> Self {
+        Self {
+            domain,
+            entries: PendingEntries::new(),
+        }
     }
-    fn extend(&mut self, other: Self) {
-        self.0.extend(other.0);
+    fn extend(&mut self, mut other: Self) {
+        crate::retirement_queue::append_owned_batch!(
+            std::ptr::from_ref(self.domain), std::ptr::from_ref(other.domain);
+            xlfn_kernel::invariant::fail_stop(),
+            self.entries.append(&mut other.entries)
+        );
     }
 }
-impl<V> Default for ReclaimEntries<V> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-impl<V> std::ops::Deref for ReclaimEntries<V> {
+impl<V> std::ops::Deref for ReclaimEntries<'_, V> {
     type Target = [ReclaimEntry<V>];
     fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-impl<V> IntoIterator for ReclaimEntries<V> {
-    type Item = ReclaimEntry<V>;
-    type IntoIter = <PendingEntries<V> as IntoIterator>::IntoIter;
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
+        &self.entries
     }
 }
 
-fn merge_reclaims<V>(batches: impl IntoIterator<Item = ReclaimEntries<V>>) -> ReclaimEntries<V> {
-    batches
+fn merge_reclaims<'domain, V>(
+    domain: &'domain CacheLookupDomain<V>,
+    batches: impl IntoIterator<Item = ReclaimEntries<'domain, V>>,
+) -> ReclaimEntries<'domain, V> {
+    let entries = batches
         .into_iter()
         .filter(|batch| !batch.is_empty())
         .reduce(|mut entries, next| {
             entries.extend(next);
             entries
         })
-        .unwrap_or_default()
+        .unwrap_or_else(|| ReclaimEntries::new(domain));
+    crate::retirement_queue::append_owned_batch!(
+        std::ptr::from_ref(entries.domain), std::ptr::from_ref(domain);
+        xlfn_kernel::invariant::fail_stop(), entries
+    )
 }
 
 type CacheDomainPermit<'domain> = RotatingReadPermit<'domain, DEFAULT_STRIPE_COUNT>;
@@ -917,35 +924,40 @@ impl<V> CacheLookupDomain<V> {
         entry: ReclaimEntry<V>,
         after_generation_load: impl Fn(GenerationIndex),
     ) {
-        // The queue lock is the enqueue linearization point. Revalidate the
-        // generation while holding it so a rotation cannot drain the queue
-        // just before this retired node is appended. Rotation also takes this
-        // lock before publishing its replacement generation: withdrawals
-        // already registered here must happen before new-generation lookups.
-        // The index protects its own entries, not the copied non-owning NodePtr.
-        self.domain.register_retired(
-            |generation| {
-                after_generation_load(generation);
-                self.pending_reclaims[generation.index()].lock()
-            },
-            |_, mut queue| {
-                let weight = entry.1;
-                crate::retirement_queue::append_retired!(&mut *queue, entry);
-                let nodes = self.pending_nodes.fetch_add(1, Ordering::Relaxed) + 1;
-                let weight = self.pending_weight.fetch_add(weight, Ordering::Relaxed) + weight;
-                self.peak_pending_nodes.fetch_max(nodes, Ordering::Relaxed);
-                self.peak_pending_weight
-                    .fetch_max(weight, Ordering::Relaxed);
-            },
+        crate::retirement_queue::append_owned_batch!(
+            std::ptr::from_ref(self), entry.domain.as_ptr();
+            xlfn_kernel::invariant::fail_stop(), {
+                // The queue lock is the enqueue linearization point. Revalidate the
+                // generation while holding it so a rotation cannot drain the queue
+                // just before this retired node is appended. Rotation also takes this
+                // lock before publishing its replacement generation: withdrawals
+                // already registered here must happen before new-generation lookups.
+                // The index protects its own entries, not the copied non-owning NodePtr.
+                self.domain.register_retired(
+                    |generation| {
+                        after_generation_load(generation);
+                        self.pending_reclaims[generation.index()].lock()
+                    },
+                    |_, mut queue| {
+                        let weight = entry.weight;
+                        crate::retirement_queue::append_retired!(&mut *queue, entry);
+                        let nodes = self.pending_nodes.fetch_add(1, Ordering::Relaxed) + 1;
+                        let weight = self.pending_weight.fetch_add(weight, Ordering::Relaxed) + weight;
+                        self.peak_pending_nodes.fetch_max(nodes, Ordering::Relaxed);
+                        self.peak_pending_weight
+                            .fetch_max(weight, Ordering::Relaxed);
+                    },
+                );
+            }
         );
     }
 
-    fn quiesce_and_drain(&self) -> ReclaimEntries<V> {
+    fn quiesce_and_drain(&self) -> ReclaimEntries<'_, V> {
         // A caller may release a lease or clear/read cache metrics from a
         // compute/weight callback. Defer value destruction until that outer
         // singleflight has returned, just as ordinary maintenance does.
         if ACTIVE_CACHE_INITIALIZATION_DEPTH.get() != 0 {
-            return ReclaimEntries::new();
+            return ReclaimEntries::new(self);
         }
         let start = Instant::now();
         let batches = self
@@ -959,30 +971,30 @@ impl<V> CacheLookupDomain<V> {
             .flatten();
         // Preserve an existing batch allocation when only one generation has
         // debt, instead of allocating and copying a new flattened Vec.
-        let entries = merge_reclaims(batches);
+        let entries = merge_reclaims(self, batches);
         self.record_batch(&entries, start);
         entries
     }
 
-    fn try_quiesce_and_drain(&self) -> ReclaimEntries<V> {
+    fn try_quiesce_and_drain(&self) -> ReclaimEntries<'_, V> {
         if ACTIVE_CACHE_INITIALIZATION_DEPTH.get() != 0
             || self.pending_nodes.load(Ordering::Relaxed) == 0
         {
-            return ReclaimEntries::new();
+            return ReclaimEntries::new(self);
         }
         let start = Instant::now();
         let Some(result) = self.domain.try_quiesce_if_idle_with_publication_barrier(
             |generation| self.pending_reclaims[generation.index()].try_lock(),
             |generation| self.drain_generation(generation),
         ) else {
-            return ReclaimEntries::new();
+            return ReclaimEntries::new(self);
         };
-        let entries = result.unwrap_or_default();
+        let entries = result.unwrap_or_else(|_| ReclaimEntries::new(self));
         self.record_batch(&entries, start);
         entries
     }
 
-    fn drain_generation(&self, generation: DrainedGeneration<'_>) -> ReclaimEntries<V> {
+    fn drain_generation(&self, generation: DrainedGeneration<'_>) -> ReclaimEntries<'_, V> {
         generation
             .take_queue(
                 &self.domain,
@@ -991,9 +1003,12 @@ impl<V> CacheLookupDomain<V> {
                     let entries = crate::retirement_queue::take_retired!(&mut *queue);
                     self.pending_nodes
                         .fetch_sub(entries.len(), Ordering::Relaxed);
-                    let weight = entries.iter().map(|entry| entry.1).sum();
+                    let weight = entries.iter().map(|entry| entry.weight).sum();
                     self.pending_weight.fetch_sub(weight, Ordering::Relaxed);
-                    ReclaimEntries(entries)
+                    ReclaimEntries {
+                        domain: self,
+                        entries,
+                    }
                 },
             )
             .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop())
@@ -1027,20 +1042,26 @@ impl<V> CacheLookupDomain<V> {
         self.domain.seal_and_wait()
     }
 
-    fn drain_all(&self, closed: ClosedDomain<'_>) -> ReclaimEntries<V> {
+    fn drain_all(&self, closed: ClosedDomain<'_>) -> ReclaimEntries<'_, V> {
         let batches = closed
             .take_queues(
                 &self.domain,
                 |index| self.pending_reclaims[index].lock(),
                 |mut first, mut second| {
                     [
-                        ReclaimEntries(crate::retirement_queue::take_retired!(&mut *first)),
-                        ReclaimEntries(crate::retirement_queue::take_retired!(&mut *second)),
+                        ReclaimEntries {
+                            domain: self,
+                            entries: crate::retirement_queue::take_retired!(&mut *first),
+                        },
+                        ReclaimEntries {
+                            domain: self,
+                            entries: crate::retirement_queue::take_retired!(&mut *second),
+                        },
                     ]
                 },
             )
             .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
-        merge_reclaims(batches)
+        merge_reclaims(self, batches)
     }
 }
 
@@ -1328,36 +1349,29 @@ where
         let (node_ptr, _) = self.index.get(&lookup)?;
         // SAFETY: [TR-OBSERVE-POINTER] node_ptr is observed only while holding a valid lookup admission domain permit.
         let node = unsafe { node_ptr.0.as_ref() };
-        if node.generation != epoch || !node.resident.load(Ordering::Acquire) {
-            drop(permit);
-            return None;
-        }
-        // TR-ACQUIRE-PIN: Increment pin capability while still within admission domain.
-        match node.try_acquire_pin() {
-            Ok(true) => {}
-            Ok(false) => return None,
-            Err(PinOverflow) => xlfn_kernel::invariant::fail_stop(),
-        }
-        if !node.resident.load(Ordering::Acquire) {
-            // SAFETY: the successful acquisition above owns this rollback pin.
-            let retired = unsafe { ReclaimEntry::release_pin(node_ptr.0) };
-            let domain_ptr = node.domain;
-            drop(permit);
-            if let Some(entry) = retired {
-                // SAFETY: [TR-RECLAIM-1] The node was retired (non-resident) and this was the last pin.
-                let domain = unsafe { domain_ptr.as_ref() };
-                domain.enqueue_reclaim(entry);
-                let retired = domain.quiesce_and_drain();
-                reclaim_cache_entries::<V>(retired);
-            }
-            return None;
-        }
-        // TR-LOOKUP-LEAVE: Release lookup admission permit now that node is pinned.
-        drop(permit);
-        Some(CacheLease {
-            node: node_ptr.0,
-            _marker: PhantomData,
-        })
+        pin_transitions::lookup_after_observation!(
+            eligible = node_layout::eligible!(node_layout::generation!(node), epoch, node_layout::resident!(node)),
+            acquire = node.try_acquire_pin(),
+            resident = node_layout::resident!(node),
+            // SAFETY: the successful acquisition owns this rollback pin.
+            rollback retired = unsafe { ReclaimEntry::release_pin(node_ptr.0) },
+            context domain_ptr = node.domain,
+            leave = drop(permit),
+            reclaim = {
+                if let Some(entry) = retired {
+                    // SAFETY: the domain outlives the lookup; the last pin owns retirement.
+                    let domain = unsafe { domain_ptr.as_ref() };
+                    domain.enqueue_reclaim(entry);
+                    let retired = domain.quiesce_and_drain();
+                    reclaim_cache_entries::<V>(retired);
+                }
+            },
+            success = Some(CacheLease {
+                node: node_ptr.0,
+                _marker: PhantomData,
+            }),
+            overflow = xlfn_kernel::invariant::fail_stop(),
+        )
     }
 
     /// Returns a lease to the cached value for `key`, or computes and stores it.
@@ -1845,6 +1859,70 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(miri))]
+    fn foreign_cache_reclaim_batch_is_fail_stop() {
+        const CASE: &str = "XLFN_TEST_FOREIGN_CACHE_RECLAIM_BATCH";
+        if let Ok(case) = std::env::var(CASE) {
+            let owner = CacheLookupDomain::<()>::new();
+            let foreign = CacheLookupDomain::<()>::new();
+            if case == "register" {
+                owner.enqueue_reclaim_with_hook(ReclaimEntry::sentinel(&foreign, 1), |_| {
+                    std::process::exit(86); // A distinct failure if registration is reached.
+                });
+                return;
+            }
+            foreign.enqueue_reclaim(ReclaimEntry::sentinel(&foreign, 1));
+            let foreign_batch = foreign.quiesce_and_drain();
+            match case.as_str() {
+                "first" => {
+                    let _ = merge_reclaims(&owner, [foreign_batch]);
+                }
+                "append" => {
+                    owner.enqueue_reclaim(ReclaimEntry::sentinel(&owner, 2));
+                    let own_batch = owner.quiesce_and_drain();
+                    let _ = merge_reclaims(&owner, [own_batch, foreign_batch]);
+                }
+                _ => panic!("unknown foreign-batch test case"),
+            }
+            return;
+        }
+        for case in ["first", "append", "register"] {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "cache::tests::foreign_cache_reclaim_batch_is_fail_stop",
+                ])
+                .env(CASE, case)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(!status.success(), "foreign batch must fail-stop: {case}");
+            assert_ne!(status.code(), Some(86), "registration ran before rejection");
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                assert_eq!(status.signal(), Some(6), "expected SIGABRT: {case}");
+            }
+        }
+    }
+
+    #[test]
+    fn drained_cache_batches_keep_owner_and_all_entries_when_merged() {
+        let domain = CacheLookupDomain::<()>::new();
+        domain.enqueue_reclaim(ReclaimEntry::sentinel(&domain, 11));
+        let first = domain.quiesce_and_drain();
+        domain.enqueue_reclaim(ReclaimEntry::sentinel(&domain, 17));
+        let second = domain.quiesce_and_drain();
+        let batch = merge_reclaims(&domain, [first, second]);
+        assert!(std::ptr::eq(batch.domain, &domain));
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch.iter().map(|entry| entry.weight).sum::<u64>(), 28);
+        assert_eq!(domain.pending_nodes.load(Ordering::Relaxed), 0);
+        // Sentinel entries exercise queue ownership only, never destruction.
+    }
+
+    #[test]
     fn enqueue_reclaim_racing_rotation_is_not_lost() {
         let domain = Arc::new(CacheLookupDomain::<()>::new());
         let (loaded_tx, loaded_rx) = mpsc::sync_channel(0);
@@ -1854,12 +1932,15 @@ mod tests {
         let enqueuer_domain = Arc::clone(&domain);
         let enqueuer = std::thread::spawn(move || {
             let first_load = std::cell::Cell::new(true);
-            enqueuer_domain.enqueue_reclaim_with_hook(ReclaimEntry::sentinel(0), |generation| {
-                if first_load.replace(false) {
-                    loaded_tx.send(generation).unwrap();
-                    resume_rx.recv().unwrap();
-                }
-            });
+            enqueuer_domain.enqueue_reclaim_with_hook(
+                ReclaimEntry::sentinel(&enqueuer_domain, 0),
+                |generation| {
+                    if first_load.replace(false) {
+                        loaded_tx.send(generation).unwrap();
+                        resume_rx.recv().unwrap();
+                    }
+                },
+            );
         });
 
         assert_eq!(loaded_rx.recv().unwrap().index(), 0);
@@ -1885,7 +1966,7 @@ mod tests {
     #[test]
     fn cache_idle_reclamation_does_not_publish_before_registration_unlocks() {
         let domain = Arc::new(CacheLookupDomain::<()>::new());
-        domain.enqueue_reclaim(ReclaimEntry::sentinel(7));
+        domain.enqueue_reclaim(ReclaimEntry::sentinel(&domain, 7));
         let generation = domain.domain.current_generation();
         let registration = domain.pending_reclaims[generation.index()].lock();
         let (done_tx, done_rx) = mpsc::channel();
@@ -2589,40 +2670,50 @@ mod tests {
                     if !ptr.is_null() {
                         // SAFETY: ptr was non-null and allocated at start of model run.
                         let n = unsafe { &*ptr };
-                        // TR-ACQUIRE-PIN: admission protects the allocation;
-                        // a zero pin count is terminal, just as in CacheNode.
-                        if n.pins
-                            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |pins| {
-                                (pins != 0).then_some(pins + 1)
-                            })
-                            .is_err()
-                        {
-                            reader_dom.leave();
-                            return;
-                        }
-                        if n.resident.load(Ordering::Acquire) {
-                            // TR-LOOKUP-LEAVE: Leave admission
-                            reader_dom.leave();
-
-                            // TR-LEASE-1: Node MUST NOT be reclaimed while pin is held
+                        let release_pin = || {
+                            use pin_transitions::{Release, pin_retry_expr};
+                            pin_transitions::release_pin!(previous;
+                                decrement = n.pins.fetch_sub(1, Ordering::Release),
+                                classify = pin_transitions::release(previous as _),
+                                fence = loom::sync::atomic::fence(Ordering::Acquire),
+                                last = true, pinned = false,
+                                fail_stop = panic!("pin underflow"),
+                            )
+                        };
+                        let lease = pin_transitions::lookup_after_observation!(
+                            eligible = node_layout::resident!(n),
+                            acquire = (|| {
+                                use pin_transitions::{Acquire, pin_retry_expr};
+                                pin_transitions::acquire_retry!(raw, next;
+                                    load = n.pins.load(Ordering::Relaxed),
+                                    classify = pin_transitions::acquire(raw as _),
+                                    attempt = n.pins.compare_exchange_weak(raw, next as usize, Ordering::Relaxed, Ordering::Relaxed),
+                                    success = Ok(true), zero = Ok(false), overflow = Err(PinOverflow);
+                                )
+                            })(),
+                            resident = node_layout::resident!(n),
+                            rollback retired = release_pin(),
+                            context _domain = (),
+                            leave = reader_dom.leave(),
+                            reclaim = {
+                                if retired {
+                                    reader_dom.quiesce();
+                                    n.reclaimed.store(true, Ordering::Release);
+                                }
+                            },
+                            success = Some(()),
+                            overflow = panic!("pin overflow"),
+                        );
+                        if lease.is_some() {
                             assert!(
                                 !n.reclaimed.load(Ordering::Acquire),
                                 "UAF: node reclaimed while lease held"
                             );
-
-                            // Only the final releaser acquires prior holders.
-                            if n.pins.fetch_sub(1, Ordering::Release) == 1 {
-                                loom::sync::atomic::fence(Ordering::Acquire);
-                                n.reclaimed.store(true, Ordering::Release);
-                            }
-                            return;
-                        } else {
-                            // Evicted concurrently
-                            if n.pins.fetch_sub(1, Ordering::Release) == 1 {
-                                loom::sync::atomic::fence(Ordering::Acquire);
+                            if release_pin() {
                                 n.reclaimed.store(true, Ordering::Release);
                             }
                         }
+                        return;
                     }
                     reader_dom.leave();
                 }
@@ -2639,12 +2730,18 @@ mod tests {
                     n.resident.store(false, Ordering::Release);
                     // Publish residency release, then acquire earlier holders
                     // before this final releaser hands the node to reclamation.
-                    if n.pins.fetch_sub(1, Ordering::Release) == 1 {
-                        loom::sync::atomic::fence(Ordering::Acquire);
-                        // TR-RECLAIM-1: Quiesce domain before reclaim
-                        evictor_dom.quiesce();
-                        n.reclaimed.store(true, Ordering::Release);
-                    }
+                    use pin_transitions::{Release, pin_retry_expr};
+                    pin_transitions::release_pin!(previous;
+                        decrement = n.pins.fetch_sub(1, Ordering::Release),
+                        classify = pin_transitions::release(previous as _),
+                        fence = loom::sync::atomic::fence(Ordering::Acquire),
+                        last = {
+                            // TR-RECLAIM-1: Quiesce domain before reclaim
+                            evictor_dom.quiesce();
+                            n.reclaimed.store(true, Ordering::Release);
+                        },
+                        pinned = (), fail_stop = panic!("pin underflow"),
+                    );
                 }
             });
 
@@ -3012,15 +3109,22 @@ mod tests {
         struct Payload {
             bytes: [u8; 8192],
             drops: Arc<AtomicUsize>,
+            expected_address: Arc<AtomicUsize>,
         }
         impl Drop for Payload {
             fn drop(&mut self) {
                 assert_eq!(self.bytes[8191], 17);
+                assert_eq!(
+                    std::ptr::from_ref(self).addr(),
+                    self.expected_address.load(Ordering::Relaxed),
+                    "reclamation must destroy the inline value at its leased address",
+                );
                 self.drops.fetch_add(1, Ordering::Relaxed);
             }
         }
         for capacity in [0, 16_384] {
             let drops = Arc::new(AtomicUsize::new(0));
+            let expected_address = Arc::new(AtomicUsize::new(0));
             let cache = CalculationCache::new(capacity);
             let lease = cache
                 .get_or_try_insert_with(
@@ -3030,11 +3134,13 @@ mod tests {
                         Ok(Payload {
                             bytes: [17; 8192],
                             drops: Arc::clone(&drops),
+                            expected_address: Arc::clone(&expected_address),
                         })
                     },
                 )
                 .unwrap();
             let address = std::ptr::from_ref(&*lease);
+            expected_address.store(address.addr(), Ordering::Relaxed);
             assert_eq!(address.addr() % 64, 0);
             if capacity != 0 {
                 let second = cache.get(&1).unwrap();
@@ -3144,7 +3250,7 @@ mod tests {
         static_assertions::assert_impl_all!(ReclaimEntry<u8>: Send);
         assert_eq!(
             std::mem::size_of::<ReclaimEntry<u8>>(),
-            std::mem::size_of::<(*mut (), u64)>()
+            std::mem::size_of::<(*mut (), u64, NonNull<CacheLookupDomain<u8>>)>()
         );
     }
 
@@ -3211,7 +3317,7 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     fn loom_final_pin_fence_acquires_all_holders_before_retirement() {
         use loom::sync::Arc;
-        use loom::sync::atomic::{AtomicUsize, Ordering, fence};
+        use loom::sync::atomic::{AtomicUsize, Ordering};
 
         loom::model(|| {
             let pins = Arc::new(AtomicUsize::new(2));
@@ -3222,11 +3328,17 @@ mod tests {
                 let values = Arc::clone(&values);
                 holders.push(loom::thread::spawn(move || {
                     values[index].store(index + 1, Ordering::Relaxed);
-                    if pins.fetch_sub(1, Ordering::Release) == 1 {
-                        fence(Ordering::Acquire);
-                        assert_eq!(values[0].load(Ordering::Relaxed), 1);
-                        assert_eq!(values[1].load(Ordering::Relaxed), 2);
-                    }
+                    use pin_transitions::{Release, pin_retry_expr};
+                    pin_transitions::release_pin!(previous;
+                        decrement = pins.fetch_sub(1, Ordering::Release),
+                        classify = pin_transitions::release(previous as _),
+                        fence = loom::sync::atomic::fence(Ordering::Acquire),
+                        last = {
+                            assert_eq!(values[0].load(Ordering::Relaxed), 1);
+                            assert_eq!(values[1].load(Ordering::Relaxed), 2);
+                        },
+                        pinned = (), fail_stop = panic!("pin underflow"),
+                    );
                 }));
             }
             for holder in holders {
@@ -3596,8 +3708,8 @@ mod tests {
     fn pending_weight_preserves_totals_above_the_32_bit_limit() {
         let domain = CacheLookupDomain::<()>::new();
         // Sentinel pointers never reach a reclaimer in this queue-only test.
-        domain.enqueue_reclaim(ReclaimEntry::sentinel(u64::from(u32::MAX)));
-        domain.enqueue_reclaim(ReclaimEntry::sentinel(u64::from(u32::MAX)));
+        domain.enqueue_reclaim(ReclaimEntry::sentinel(&domain, u64::from(u32::MAX)));
+        domain.enqueue_reclaim(ReclaimEntry::sentinel(&domain, u64::from(u32::MAX)));
         assert_eq!(domain.stats().pending_weight, 2 * u64::from(u32::MAX));
         let entries = domain.quiesce_and_drain();
         assert_eq!(entries.len(), 2);

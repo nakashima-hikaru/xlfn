@@ -22,6 +22,38 @@ class TestCheckVerusTcb(unittest.TestCase):
             assumes, externals = audit_verus_files([Path(tmpdir)], set())
             self.assertEqual(len(assumes), 1)
 
+    def test_rejects_alternative_and_multiline_assumptions(self):
+        examples = [
+            "proof fn f() { assume\n/* boundary */ (false); }",
+            "pub assume_specification[std::ptr::read](p: *const u8) -> u8;",
+            "pub axiom\nfn fabricated() ensures false;",
+        ]
+        for source in examples:
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "test.rs"
+                path.write_text("// preface\n" + source)
+                assumes, _ = audit_verus_files([Path(tmpdir)], set())
+                self.assertEqual(len(assumes), 1)
+                self.assertIn("test.rs:2:", assumes[0])
+
+    def test_external_specs_require_approval(self):
+        for attribute in ("external_type_specification", "external_fn_specification"):
+            with self.subTest(attribute=attribute), tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "test.rs"
+                path.write_text(f"#[verifier::{attribute}]\nstruct Bridge;")
+                _, externals = audit_verus_files([Path(tmpdir)], set())
+                self.assertEqual(len(externals), 1)
+                _, approved = audit_verus_files([Path(tmpdir)], {"test.rs"})
+                self.assertEqual(approved, [])
+
+    def test_assumption_words_in_literals_are_not_code(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "test.rs"
+            path.write_text('const TEXT: &str = r###"assume_specification axiom fn external_type_specification"###;\n'
+                            '/* axiom fn fake(); /* assume(false) */ */\n'
+                            'fn assume_specification_helper() {}')
+            self.assertEqual(audit_verus_files([Path(tmpdir)], set()), ([], []))
+
     def test_ignores_assume_in_comments(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "test.rs"

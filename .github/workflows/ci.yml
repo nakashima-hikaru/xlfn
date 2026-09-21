@@ -323,6 +323,9 @@ jobs:
             - name: Run Verus formal verification
               run: just verus
 
+            - name: Check shared Cache release ordering with Loom mutations
+              run: just cache-release-ordering
+
     lean:
         name: Lean formal models
         runs-on: ubuntu-latest

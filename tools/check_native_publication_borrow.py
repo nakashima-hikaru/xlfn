@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reject lifetime and exclusivity violations of the native publication guard (not an SMT test)."""
+"""Reject native publication-guard and Cache ownership violations (not an SMT test)."""
 from pathlib import Path
 import os
 import shutil
@@ -77,6 +77,70 @@ def main():
         if result.returncode == 0 or "error[E0382]: borrow of moved value: `barrier`" not in output:
             raise SystemExit("FAIL: expected native early barrier release error\n" + output)
         print("PASS: native borrow checker rejects barrier release before generation publication", flush=True)
+
+        barrier_path.write_text(barrier_source)
+        command[command.index("--features") + 1] = "handles,cache"
+        baseline = check()
+        if baseline.returncode:
+            raise SystemExit("FAIL: native Cache baseline does not compile\n" + baseline.stdout + baseline.stderr)
+        cache_path = tree / "crates/xlfn/src/cache.rs"
+        cache_source = cache_path.read_text()
+        anchor = "impl<V> std::ops::Deref for CacheLease<'_, V> {"
+        probe = """
+fn borrowed_cache_lease_probe<V>(lease: CacheLease<'_, V>) {
+    let value = &*lease;
+    drop(lease);
+    std::hint::black_box(value);
+}
+"""
+        if cache_source.count(anchor) != 1:
+            raise SystemExit("FAIL: native Cache lease lifetime anchor changed")
+        cache_path.write_text(cache_source.replace(anchor, probe + anchor))
+        rejected = check()
+        output = rejected.stdout + rejected.stderr
+        required = ("error[E0505]: cannot move out of `lease` because it is borrowed",
+                    "borrow later used here", "cache.rs")
+        if rejected.returncode == 0 or not all(marker in output for marker in required):
+            raise SystemExit("FAIL: expected native live-Cache-lease-reference error\n" + output)
+        print("PASS: native borrow checker rejects dropping a Cache lease while its value reference is live", flush=True)
+
+
+        cache_path.write_text(cache_source)
+        anchor = "unsafe fn reclaim_cache_node<V>(entry: ReclaimEntry<V>) {"
+        probe = """
+unsafe fn duplicate_cache_reclamation_probe<V>(entry: ReclaimEntry<V>) {
+    unsafe { reclaim_cache_node(entry); }
+    unsafe { reclaim_cache_node(entry); }
+}
+"""
+        if cache_source.count(anchor) != 1:
+            raise SystemExit("FAIL: native Cache reclamation ownership anchor changed")
+        cache_path.write_text(cache_source.replace(anchor, probe + anchor))
+        rejected = check()
+        output = rejected.stdout + rejected.stderr
+        required = ("error[E0382]: use of moved value: `entry`", "cache.rs")
+        if rejected.returncode == 0 or not all(marker in output for marker in required):
+            raise SystemExit("FAIL: expected native duplicate-reclamation ownership error\n" + output)
+        print("PASS: native borrow checker rejects reclaiming the same retirement entry twice", flush=True)
+
+        cache_path.write_text(cache_source)
+        anchor = "unsafe fn reclaim_cache_node<V>(entry: ReclaimEntry<V>) {"
+        probe = """
+fn release_cache_domain_before_batch_probe() {
+    let domain = CacheLookupDomain::<u8>::new();
+    let batch = domain.quiesce_and_drain();
+    drop(domain);
+    reclaim_cache_entries(batch);
+}
+"""
+        cache_path.write_text(cache_source.replace(anchor, probe + anchor))
+        rejected = check()
+        output = rejected.stdout + rejected.stderr
+        required = ("error[E0505]: cannot move out of `domain` because it is borrowed",
+                    "borrow later used here", "cache.rs")
+        if rejected.returncode == 0 or not all(marker in output for marker in required):
+            raise SystemExit("FAIL: expected native Cache domain-before-batch error\n" + output)
+        print("PASS: native borrow checker retains the Cache domain through batch reclamation", flush=True)
 
 
 if __name__ == "__main__":

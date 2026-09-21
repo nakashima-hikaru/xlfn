@@ -33,15 +33,15 @@ if __name__ == "__main__":
             "        $notify;\n        $unlock;", "        $unlock;\n        $notify;",
         ),
     })
-    check_mutations(PROOF, PROTOCOL, DEPENDENCIES, {
+    check_mutations(PROOF, Path("crates/xlfn/src/retirement_queue.rs"), DEPENDENCIES, {
         "batch merge accepts a foreign domain": (
             "if left != right {", "if false {",
         ),
         "batch merge forgets payload transfer": (
-            "        $append;", "        ();",
+            "        $append", "        ()",
         ),
         "batch merge moves payload before checking owner": (
-            "        let left: *const _ = $left;\n        let right: *const _ = $right;\n        if left != right {\n            $reject;\n        }\n        $append;",
+            "        let left: *const _ = $left;\n        let right: *const _ = $right;\n        if left != right {\n            $reject;\n        }\n        $append",
             "        $append;\n        let left: *const _ = $left;\n        let right: *const _ = $right;\n        if left != right {\n            $reject;\n        }",
         ),
     })
@@ -669,5 +669,12 @@ if __name__ == "__main__":
         ),
         "pending lease recovery omits the final allocation": (
             "while records.len() != 0", "while records.len() > 1",
+        ),
+    })
+
+    check_mutations(PROOF, PROOF / "src/queued_retirement.rs", DEPENDENCIES, {
+        "pending completion accepts readiness from another current queue": (
+            "current.inv(), current.owner() == domain.rotation, lock.pred().preparation.id() == current.gate(handoff.index()),",
+            "current.inv(), current.owner() == domain.rotation,",
         ),
     })

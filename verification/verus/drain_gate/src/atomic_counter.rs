@@ -71,6 +71,10 @@ impl DrainLease {
         requires self.inv(), share.inv(), share.gate_id() == self.gate_id(),
         ensures false,
     { share.positive(&self.gate, self.active()); }
+    pub proof fn excludes_permit(tracked &self, tracked permit: &admission::permits)
+        requires self.inv(), permit.instance_id() == self.gate_id(),
+        ensures false,
+    { self.gate.positive(self.active(), permit); }
     pub proof fn active(tracked &self) -> (tracked active: &admission::active)
         requires self.inv(), ensures active.instance_id() == self.gate_id(), active.value() == 0,
     {
@@ -106,6 +110,10 @@ impl DrainSet {
         requires self.inv(), share.inv(), self.domain().contains(share.gate_id()),
         ensures false,
     { self.leases.tracked_borrow(share.gate_id()).excludes_share(share); }
+    pub proof fn excludes_permit(tracked &self, tracked permit: &admission::permits)
+        requires self.inv(), self.domain().contains(permit.instance_id()),
+        ensures false,
+    { self.leases.tracked_borrow(permit.instance_id()).excludes_permit(permit); }
 }
 }
 macro_rules! width {

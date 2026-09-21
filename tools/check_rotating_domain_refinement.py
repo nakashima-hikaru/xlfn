@@ -421,3 +421,11 @@ if __name__ == "__main__":
             ),
         },
     )
+
+    check_mutations(
+        Path("verification/verus/rotating_read_domain"), Path("verification/verus/rotating_read_domain/src/striped_rotation.rs"),
+        (Path("crates/xlfn/src/retirement_queue.rs"), Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
+         Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"), Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
+         *tuple(Path("verification/verus/drain_gate/src").glob("*.rs"))),
+        {"completed pending callback never clears its state": ("            state.pending = None;", "")},
+    )

@@ -730,18 +730,19 @@ macro_rules! width {
         },
     {
         if !collection.poll_all(counters) { return Err((handoff, collection, Tracked(prepared))); }
-        let mut completed = None;
+        let mut completed: Option<(RecoveredBatch<'domain, T>,
+            Tracked<super::super::rotation::queue_preparation::phase::ready>, Ghost<Seq<Retirement<'slot, 'domain, T>>>)> = None;
         let mut finished = None;
         super::super::rotation::finish_rotation!(callback_result;
             vstd::prelude::verus_exec_expr!({
                 completed = Some({
-            let Tracked(drains) = collection.drains(counters);
-            let held = lock.acquire_write();
-            let tracked mut ticket = Some(prepared);
-            let (withdrawal, ready) = super::super::rotation::locked_detachment::take_prepared(domain.rotation, held, lock, Tracked(&mut ticket));
-            let ghost source = withdrawal.source();
-            let batch = super::super::batches::bind_withdrawal(domain, withdrawal);
-            (recover_drain_batch(batch.into_batch(), Tracked(drains)), ready, Ghost(source))
+                    let Tracked(drains) = collection.drains(counters);
+                    let held = lock.acquire_write();
+                    let tracked mut ticket = Some(prepared);
+                    let (withdrawal, ready) = super::super::rotation::locked_detachment::take_prepared(domain.rotation, held, lock, Tracked(&mut ticket));
+                    let ghost source = withdrawal.source();
+                    let batch = super::super::batches::bind_withdrawal(domain, withdrawal);
+                    (recover_drain_batch(batch.into_batch(), Tracked(drains)), ready, Ghost(source))
                 });
             }),
             vstd::prelude::verus_exec_expr!({

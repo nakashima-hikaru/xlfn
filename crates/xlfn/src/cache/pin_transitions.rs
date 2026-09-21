@@ -1,4 +1,4 @@
-//! Cache pin arithmetic shared by production and Verus.
+//! Cache pin arithmetic and lookup sequencing shared by production and Verus.
 //! Zero pins is terminal; overflow is an error, while release underflow aborts.
 
 #[cfg(verus_only)]
@@ -116,3 +116,91 @@ width!(word64, u64);
 pub(crate) use word32::{acquire, release};
 #[cfg(all(not(verus_only), target_pointer_width = "64"))]
 pub(crate) use word64::{acquire, release};
+
+/// Control flow after an index observation, shared with the ownership proof.
+/// Rollback captures its domain before leaving admission; reclamation follows leave.
+macro_rules! lookup_after_observation {
+    (eligible = $eligible:expr, acquire = $acquire:expr, resident = $resident:expr,
+     rollback $retired:ident = $rollback:expr, context $context:ident = $capture:expr,
+     leave = $leave:expr, reclaim = $reclaim:expr, success = $success:expr,
+     overflow = $overflow:expr $(,)?) => {{
+        if !$eligible {
+            $leave;
+            None
+        } else {
+            match $acquire {
+                Ok(true) => {
+                    if !$resident {
+                        let $retired = $rollback;
+                        let $context = $capture;
+                        $leave;
+                        $reclaim;
+                        None
+                    } else {
+                        $leave;
+                        $success
+                    }
+                }
+                Ok(false) => {
+                    $leave;
+                    None
+                }
+                Err(_) => $overflow,
+            }
+        }
+    }};
+}
+pub(crate) use lookup_after_observation;
+
+#[cfg(verus_only)]
+pub(crate) use vstd::prelude::verus_exec_expr as pin_retry_expr;
+#[cfg(not(verus_only))]
+macro_rules! pin_retry_expr { ($($body:tt)*) => { $($body)* }; }
+#[cfg(not(verus_only))]
+pub(crate) use pin_retry_expr;
+
+/// fetch_update's retry protocol: load once, then reuse the failed CAS value.
+/// The backend supplies a weak CAS with its native ordering and proof resources.
+macro_rules! acquire_retry {
+    ($raw:ident, $next:ident; load = $load:expr, classify = $classify:expr,
+     attempt = $attempt:expr, success = $success:expr,
+     zero = $zero:expr, overflow = $overflow:expr; $($annotations:tt)*) => {
+        pin_retry_expr!({
+            let mut $raw = $load;
+            loop $($annotations)* {
+                match $classify {
+                    Acquire::Zero => return $zero,
+                    Acquire::Overflow => return $overflow,
+                    Acquire::Acquired($next) => {
+                        match $attempt {
+                            Ok(_) => return $success,
+                            Err(current) => { $raw = current; }
+                        }
+                    }
+                }
+            }
+        })
+    };
+}
+pub(crate) use acquire_retry;
+
+/// Final-pin ordering shared by native release, Loom, and the token proof.
+/// The fence's weak-memory effect is validated by Loom, not by the SeqCst proof.
+macro_rules! release_pin {
+    ($previous:ident; decrement = $decrement:expr, classify = $classify:expr,
+     fence = $fence:expr, last = $last:expr, pinned = $pinned:expr,
+     fail_stop = $fail_stop:expr $(,)?) => {
+        pin_retry_expr!({
+            let $previous = $decrement;
+            match $classify {
+                Release::FailStop => $fail_stop,
+                Release::StillPinned => $pinned,
+                Release::LastPin => {
+                    $fence;
+                    $last
+                }
+            }
+        })
+    };
+}
+pub(crate) use release_pin;

@@ -20,6 +20,16 @@ silently assumed as the desired conclusion.
 | Cross-layer composition and claim audit | Lean invariants, Verus, unsafe call sites | Requirement-to-proof/caller mapping; explicit remaining TCB, no theorem claims for models alone | Open |
 | Regression sensitivity and validation | `Justfile`, verification tools, kernel/cache/handle tests | Unsafe shared mutations rejected; Verus/audit, Loom, both Miri modes, Rust checks | Shared-control and resource negative gates implemented; incremental native/Loom/Miri validation recorded below; final whole-stack audit remains open |
 
+Policy: do not add project-owned trusted adapters; unsupported primitive
+connections remain explicitly incomplete.
+
+The current native field/lock mismatches and next representation change are
+listed in [NATIVE_ADAPTER_PLAN.md](NATIVE_ADAPTER_PLAN.md). In particular, the
+Cache proof currently allocates a separate pin atomic and retains an executable
+ledger RwLock for observation registration/completion and retirement. Pin CAS and
+metadata reads now borrow the reader-owned Ticket without that lock; the remaining
+representation and synchronization differences are not native refinement. Primitive contracts alone would not remove that difference.
+
 Windows execution and remote CI evidence are distinct from local Rust/Verus
 checks. This worklist is not a release-readiness or publication authorization.
 
@@ -2040,3 +2050,667 @@ foreign restored controllers, bypassed drain, mismatched prepared coverage and
 missing final allocation, after clean baselines. Rotation/Handle have 71/150 unique
 anchors. TCB audit and diff checks pass. No fresh full negative suite or native,
 Miri, Windows or remote CI run is claimed.
+
+
+## Shared callback return clears pending with complete drain and queue readiness
+
+- PendingHandoff::finish requires complete actual stripe collection and ready
+  authority tied to the pending queue in Current. It restores all leases and
+  clears pending while preserving both generation controller mappings.
+- recover_pending_striped now instantiates production finish_rotation. The exact
+  recovered batch, ready authority and withdrawal snapshot are established before
+  the finish effect. Busy return is unchanged; ordinary restore/cancel still keep
+  pending Some. Successful callback return now produces pending None.
+- The first reordered-callback probe stopped at an unrelated type-inference error;
+  that result was discarded. Explicit callback-result typing lets the probe reach
+  the intended borrow check: consuming collection in finish before recovery causes
+  E0382 when the callback later tries to borrow it.
+- Pending clearing is retirement callback completion, not Box/Drop completion.
+  Constructor premises, native state/lock/weak-memory/address correspondence,
+  Cache integration and destruction remain incomplete.
+
+Validation: RotatingReadDomain 497, Handle 799 and Cache 615 verify with zero
+errors. Two new SMT mutations reject omitted pending clear and wrong Current queue
+readiness. All six lifetime checks pass, including reordered callback/clear, each
+suite after its untouched baseline. Eight failure-classifier unit tests pass;
+rotation/Handle anchors are unique (72/151). TCB audit and diff checks pass. No
+fresh full negative suite or native/Miri/Windows/remote CI run is claimed.
+
+
+## Cache borrows actual atomic admission and derives recovery from drain leases
+
+- Added Cache atomic_admission for both widths: actual CAS acquisition supplies an
+  owned matching permit wrapper, observation borrows that permit into the existing
+  ledger, and release returns it through the matching actual counter. Rejected and
+  fail-stop admission return no capability.
+- DrainLease and DrainSet now exclude a matching borrowed admission permit. Cache
+  observations use that authority to derive zero counts and narrow frozen coverage.
+  recover_after_drain recovers the exact retired allocation from that zero result,
+  matching zero-pin/allocation resources and the final-pin retirement ticket.
+- Native Cache pin atomics/index/ledger representation, full preparation/queue/
+  reclamation driver migration, weak memory and destruction remain incomplete.
+  These are connected actual resource adapters, not a native Cache completion claim.
+
+Validation: DrainGate 280, RotatingReadDomain 499, Handle 801 and Cache 629 verify
+with zero errors. Six new Cache mutations reject foreign drain/admission identity,
+missing excluded/observed gate coverage and unrelated node domains. All seven
+lifetime gates pass, including E0505 when release precedes the last observation's
+end. Baselines are verified first; all 34 Cache ownership anchors are unique.
+TCB audit and diff checks pass. No fresh full negative suite or native/Miri/Windows/
+remote CI run is claimed for this proof-only increment.
+
+
+## Cache atomic pin updates and recovery share one count invariant
+
+- Added 32/64-bit atomic_pins with count/retiring tokens inside its actual atomic
+  invariant. Successful observed and anchored CAS issue the matching linear pin;
+  failed CAS retries retain resources. A ghost sample ties the returned acquisition
+  classification to the production-shared kernel, including Zero versus Overflow.
+- fetch_sub consumes the owned pin, derives non-underflow from conservation, and
+  creates a final retirement ticket only at the last pin. release_covered turns it
+  into the exact RetiredNode and freezes its observation ledger.
+- Scoped Cache observations can now acquire a lease through that atomic adapter.
+  Recovery uses the same atomic count/retiring tokens and final ticket together
+  with actual drain-derived zero observations to withdraw the exact heap permission.
+- Native fetch_update correspondence, pin memory order/fence/release sequence,
+  node/index/ledger representation, full queue-driver integration and Box/Drop
+  remain incomplete. No full native Cache refinement claim is made.
+
+Validation: Cache 651 verified, zero errors. Eight negative checks reject pin
+issuance on failed observed/anchored CAS, lost count conservation, omitted nonfinal
+release, foreign pin release, missing final freeze, missing drain coverage and
+Overflow/Zero confusion. The baseline verifies before mutations; all 42 Cache
+ownership anchors are unique. TCB audit and diff checks pass. No fresh full
+negative suite, native/Miri/Windows or remote CI run is claimed.
+
+
+## Cache allocation resources initialize the same pin atomic
+
+The 32/64-bit `atomic_pins::initialize` entry point consumes one initialized heap
+permission and initializes the conserving node and actual pin atomic together.
+It returns the matching creator pin, allocation token and empty observation ledger;
+node identity, exact memory and drain domain are established as postconditions.
+Native allocation/layout, weak memory, queue integration and destruction remain open.
+
+Validation: Cache 653 verified, zero errors. Both new constructor mutations
+(wrong drain domain and initial count two) fail verification after a clean baseline.
+The ownership suite now configures 44 mutations; only these two were rerun for this
+increment. TCB audit and diff checks pass. No native or remote CI run is claimed.
+
+
+## Cache atomic retirement entries use the same protected allocation ledger
+
+Added `queued_atomic` for both widths. Its constructor moves initialization's
+allocation and observation resources into a node-bound actual RwLock. Final pin
+release obtains that lock and produces a payload borrowing the same node. Atomic
+registration uses the existing matching Current/queue locks. Recovery obtains the
+node lock, derives allocation presence from the final-pin ticket, and invokes the
+same pin atomic's recovery. Locked detachment recovers every exact queued allocation
+in reverse pop order with borrowed full-domain DrainSet authority.
+
+This increment does not complete normal pending-generation reclamation: scoped
+observations through this lock and narrowed coverage/preparation remain to connect.
+The native node layout, weak memory and destruction are also still open. Full-domain
+recovery is not a replacement completion criterion for the two-generation path.
+
+Validation: Cache 670 verified, zero errors. Four new mutations reject foreign
+allocation/node identity, missing drain coverage, and loss of a recovered batch
+allocation after an untouched baseline. All 48 ownership anchors are unique.
+TCB audit and diff checks pass. The full mutation suite and native/Miri/Windows/CI
+were not rerun for this proof-only increment.
+
+
+## Cache narrows locked observation coverage and reserves the prepared queue
+
+- A tokenized snapshot tracks the actual observation coverage/frozen state inside
+  each resource-lock invariant. Final release issues a same-instance bound receipt;
+  narrowing preserves all previous receipts. Prepared recovery derives sufficient
+  drain coverage from the persistent receipt after reacquiring the resource lock.
+- Queue preparation holds the real write handle, polls actual stripe collection,
+  and preserves the entire queue on busy return. Complete drains justify narrowing
+  each entry; leases are restored only after the borrow ends.
+- The reservation adapter rechecks Current, prepares and reserves with the same
+  borrowed handle. Both stale paths return the still-owned queue and either partial
+  collection or restored controllers. Prepared detachment consumes the phase token
+  for the matching drain domain and recovers the exact batch in reverse pop order.
+- The complete publication/pending driver, scoped observation operations through
+  the lock, native representation, weak memory and Box/Drop remain incomplete.
+
+Validation: Cache 691 verified, zero errors. Ten queued-atomic mutations (four
+existing and six new) pass after a clean baseline; three additional recheck/reserve/
+collection mutations also pass after a fresh final-state baseline. All 57 ownership
+anchors are unique. TCB audit and diff checks pass. No full mutation-suite, native,
+Miri, Windows or remote CI run is claimed.
+
+
+## Cache striped publication and pending callback composition
+
+The Cache queue adapter now joins `prepare_reserve_collected` to the actual striped
+rotation driver. Retry preserves its partial collection and transition handoff;
+stale reservation restores sealed controllers; successful publication returns the
+matching old-generation prepared token after shared seal/publish/reopen.
+
+`recover_pending_striped` collects the actual pending stripes, acquires its queue,
+recovers every exact allocation, and uses the production-shared callback-before-clear
+macro. Pending is cleared only after recovery returns the matching ready token;
+live-generation controllers remain unchanged. This proves resource recovery, not
+Box/Drop. Scoped observation operations through the resource-lock node and native
+representation/weak-memory/destruction correspondence remain incomplete.
+
+Validation: Cache 697 verified, zero errors. Four new SMT mutations fail after a
+clean baseline (incomplete drain, wrong prepared coverage, wrong Current queue phase,
+and pending left uncleared). All eight lifetime checks pass, including the new Cache
+E0382 check for pending clear before callback. All 61 ownership mutation anchors are
+unique. TCB audit and diff checks pass. No full SMT mutation-suite, native, Miri,
+Windows or remote CI run is claimed for this proof-only increment.
+
+
+## Cache node observations retain owned admission shares
+
+Replaced the queued node's borrowed observation ledger with a conserving ledger of
+owned admission Shares and storage-backed node observation fragments. Receipt tokens
+bind ledger, scope and exact memory. Ending an observation consumes its receipt and
+returns the Share to the same Scope; the existing counter scope release requires
+zero outstanding shares. Persistent pin retirement history excludes new observations
+after final release. Node and Entry no longer carry the borrowed scope lifetime.
+
+Node observation, completion and actual observed CAS acquisition use the same
+resource lock. Initialization, final release, narrowing and prepared queue recovery
+now use this owned ledger. `lookup_pin` composes actual counter admission, observation,
+atomic lease acquisition, observation completion and admission release. Ended receipts
+cannot be reused for pin acquisition.
+
+Native `ResidentEntry::clone` returns a non-owning snapshot, while `lookup_pin` takes
+a borrowed resident fragment. The helper is therefore a stronger-premise composition,
+not the native `get_at_epoch` refinement. Split observe/acquire APIs allow retirement
+between observation and acquisition; native index snapshot transfer, generation and
+resident rechecks, rollback, typed scoped reads, weak memory and Box/Drop remain open.
+
+Validation: Cache 730 verified, zero errors. The full 68-case ownership mutation
+suite passed, including seven retained-ledger mutations; the two subsequently added
+lookup mutations passed separately after their fresh baseline. All 70 anchors are
+unique. All nine lifetime gates pass, including E0382 for using an ended observation
+receipt. TCB audit and diff checks pass. No native/Miri/Windows/remote CI run is
+claimed for this proof-only increment.
+
+
+## Production, Loom and Verus share Cache lookup branches
+
+Extracted `lookup_after_observation!` into the production-shared pin transition
+source. Native `get_at_epoch` now uses it for eligibility, acquisition, resident
+recheck, rollback pin release, domain capture, admission exit and reclaim handoff.
+The Verus `complete_lookup` consumes an existing observation receipt and its scope,
+uses actual pin acquisition/release and counter release, and proves the returned
+lease or final retirement entry matches the observed allocation. It does not retain
+a resident fragment across lookup. The Loom temporal-reclamation reader now uses
+the same expression and arithmetic, including rollback quiescence after scope exit.
+
+Index snapshot-to-observation transfer, the native metadata loads/address mapping,
+and execution of native rollback enqueue/drain/destruction remain separate: the
+proof accepts arbitrary metadata samples and returns the retirement handoff. Its
+overflow branch is nonreturning, not a proof of native process abort. This closes
+shared branch-expression correspondence, not the full native lookup theorem.
+
+Validation: Cache 734 verified, zero errors. All six shared pin/lookup SMT mutations
+pass after the clean baseline. All ten lifetime gates pass, including E0382 when
+the shared macro leaves admission before pin acquisition. Native Cache tests pass
+59/59 with one manual benchmark ignored, including the updated Loom model. Clippy
+for cache+handles/all targets with warnings denied, formatting, TCB audit, panic
+boundary audit and diff checks pass. i686-pc-windows-msvc cargo check passes (not
+Windows execution). Pinned nightly Miri Tree Borrows passes cache_hit_does_not_clone_key
+and hit_path_and_clear_race_safety. The race run emits parking_lot_core 0.9.12's
+integer-to-pointer/provenance warning, limiting pointer-bug detection. No full Miri
+suite, Stacked Borrows rerun, Windows runtime or remote CI result is claimed.
+
+
+## Guarded resident entry transfers an independent observation snapshot
+
+Added a 32/64-bit resident-cell adapter backed by a vstd RwLock. Its stored value
+owns a resident pin; lookup issues the node observation while borrowing that pin
+under the read guard, releases the guard, and returns an independent Snapshot.
+Removal transfers the resident capability under a write handle. Snapshot completion
+uses the existing production-shared lookup expression, and lookup_complete composes
+actual counter admission, guarded transfer and completion without borrowing a
+resident pin across the acquisition attempt.
+
+Local quick_cache 0.7.0 source confirms get clones within its shard read-guard
+expression. This motivates the transfer point but does not mechanically identify
+the vstd cell with the native library entry: hashing/eviction, Clone/Drop ghost
+instrumentation, native identity, metadata loads, weak memory and destruction remain
+unproved. This is a per-entry guard refinement adapter, not a native index completion
+claim. The proof-only change adds no production lock or snapshot overhead.
+
+Validation: Cache 748 verified, zero errors. Six new mutations reject invalid stored
+residency, wrong pin role, foreign admission, lost snapshot identity, foreign scope
+and foreign lookup counter after a clean baseline. All eleven lifetime gates pass,
+including E0505 for releasing the index read guard before observation transfer.
+All 76 ownership anchors are unique; TCB audit and diff checks pass. No full mutation
+suite or new native/Miri/Windows/remote CI run is claimed for this increment.
+
+
+## Guarded lookup returns a typed owned lease
+
+Added Node::borrow_pin and an owned Lease binding the exact node, pointer, initialized
+heap permission and Lease-role pin. Its typed read borrows the pin storage guard;
+release consumes that same pin through Node::release. Snapshot::into_lease and the
+admitted resident-cell lookup now return the owned Lease, preserving exact memory
+and owner identity, instead of exposing only the pin token.
+
+The Verus borrow gate rejects release while a later typed reference use remains.
+The native compile-fail suite now separately checks CacheLease::Deref: dropping the
+lease before a later reference use fails E0505. Native field/address/provenance
+mapping and actual destruction are not established by this API lifetime check;
+the proof's generic allocation T is not yet the native inline CacheNode<V> layout.
+
+Validation: Cache 758 verified, zero errors. Three new SMT mutations reject wrong
+node identity, pointer mismatch and uninitialized memory. The scope-identity mutation
+anchor was made specific after the new wrapper introduced a second matching clause;
+it was rerun successfully after a clean baseline. All 12 Verus lifetime gates and
+all four native compile-fail probes pass. All 79 ownership anchors are unique;
+TCB audit and diff checks pass. No full mutation-suite, new runtime/Miri/Windows
+or remote CI run is claimed for this increment.
+
+
+## Inline allocation fields and value projection share native source
+
+CacheNode's original flat field declaration now comes from cache/node_layout.rs,
+with unchanged native field order, field types and visibility. The same declaration
+instantiates Allocation<V> in Verus. Native CacheLease::Deref, scope reads and the
+verified ValueLease share the `.value` reference expression. ValueLease borrows the
+whole initialized Allocation through the existing exact-pin Lease; release preserves
+the identity of the whole allocation in any resulting retirement entry.
+
+The proof does not yet tie its separate atomic backend to the native pins field or
+its opaque domain pointer to CacheLookupDomain. Sharing the declaration is not an
+ABI theorem or proof of native allocation, raw pointer provenance, index metadata,
+weak memory, or Box/Drop. Those remain required for completion of the original goal.
+
+Validation: Cache Verus reports 764 verified, 0 errors. Removing ValueLease's pin
+invariant fails SMT verification after a passing baseline. All 13 Verus lifetime
+checks and four native compile-fail checks pass; the added lifetime case rejects
+allocation release while the projected inline value remains borrowed. All six
+shared pin/lookup mutations pass and all 80 ownership mutation anchors are unique;
+the full 80-case SMT mutation suite was not rerun. Native cache tests pass 59 with
+one manual benchmark ignored, including inline alignment/address/exactly-once-drop
+and production-sharing Loom cases. Cache/handles all-target Clippy with -D warnings,
+i686 Windows cross-check, formatting, TCB audit and whitespace checks pass. This is
+not Windows execution or remote CI evidence.
+The inline alignment/address/exactly-once-drop test also passes pinned Miri
+nightly-2026-08-22 in both Stacked and Tree Borrows modes. The first invocation
+stopped at existing deprecated-fetch_update build warnings; reruns used the
+repository Miri task's CARGO_BUILD_WARNINGS=allow and RUSTFLAGS=-A deprecated
+settings. No full Miri suite was run for this increment.
+
+
+## Native final reclamation consumes retirement ownership
+
+The native single-node reclaimer formerly accepted the raw pointer copied out of
+ReclaimEntry. It now consumes the entry itself; both callers move their retirement
+ownership to Box recovery. The Box is dropped in place under existing panic
+containment, preserving large-value behavior and avoiding a new payload move.
+The explicit unsafe precondition still requires matching quiescence or a
+never-published node. This change aligns the native ownership-transfer shape with
+Entry::recover; it does not itself prove their allocation identity correspondence,
+weak memory, destructor behavior or the complete native path.
+
+Validation: all five native borrow/ownership probes pass after clean baselines,
+including a new double-reclamation E0382 case. Cache native/Loom tests pass 59 with
+one manual benchmark ignored. No new native Miri, Windows execution, remote CI,
+or full SMT mutation-suite run is claimed for this signature change.
+All 14 Verus lifetime/ownership gates also pass after clean proof baselines,
+including the new second-Entry::recover rejection. Cache/handles all-target Clippy
+with -D warnings, the 50-reference panic-boundary audit, formatting and whitespace
+checks pass.
+
+
+## Native Cache drained batches retain their domain borrow
+
+ReclaimEntries now borrows its CacheLookupDomain through reclamation. Nonempty
+construction remains inside matching DrainedGeneration/ClosedDomain queue extraction;
+empty deferred/failure results carry the same owner. Merging preserves an existing
+batch allocation and rejects nonempty batches from a different domain before
+combining their entries. The generic IntoIterator escape was removed; the private
+reclaimer consumes the records while accepting the owner-borrowing batch.
+
+The native compile-fail gate rejects dropping the domain before reclaiming the
+batch (E0505 after a clean baseline). All six native ownership/lifetime probes pass.
+Existing Cache/Loom tests pass 59 with one benchmark ignored; an added regression
+checks two successive drains merged under one owner preserve every entry and weight.
+This adds one owner reference to the cold drained-batch wrapper, not each node or
+lease. It is not a theorem identifying native domain addresses with ghost domain
+IDs, does not establish queue payload provenance, and does not prove Box/Drop.
+
+
+## Locked Cache recovery preserves queue/payload owner agreement
+
+The prepared and full-drain lower recovery APIs now require payload owner equality
+and guarantee valid_records for the original queue alongside exact allocation
+recovery. The new_queue constructor and pending striped driver already establish
+the stronger condition; no new assumed identity or external body was introduced.
+Cache Verus passes 764 obligations. Removing either lower API's owner condition
+fails SMT verification after a clean baseline. All 82 Cache ownership mutation
+anchors are unique, and the TCB audit passes. The full 82-case mutation suite now passes: each group verifies its untouched
+baseline, and each mutation must fail SMT obligations rather than compilation.
+Native production code is unchanged in this proof increment.
+
+
+### Native foreign-owner batch rejection is exercised
+
+A subprocess regression exercises both rejection points: a foreign first nonempty
+batch, and a foreign nonempty batch appended to an existing owner batch. Both
+abort; on this macOS run the test requires SIGABRT, so an unrelated assertion
+failure does not satisfy the expectation. The subprocess test is excluded from
+Miri. It passes with the owner-retaining merge implementation. This checks the
+native fail-stop behavior, not a formal native/proof owner identity theorem.
+
+The foreign-batch regression also passes all-target Cache/handles Clippy with
+-D warnings. The owner-borrowing native code cross-checks on i686 Windows. The
+inline alignment/address/exactly-once-drop test passes pinned Miri in both Stacked
+and Tree Borrows modes using the repository's deprecated-warning configuration.
+These are targeted checks, not full Miri or Windows execution. Full Cache ownership
+SMT sensitivity validation is now 82/82; native representation and full-stack
+completion obligations remain open.
+
+
+## One shared owner check for Cache and Handle batch transfer
+
+Moved the already-verified append_owned_batch expression to retirement_queue.rs;
+removed its former Handle-local definition and updated the mutation gate's source.
+Cache extend now uses the same owner check and append operation as Handle; the
+single-batch return uses the same check with a returning operation. The macro's
+operation is a tail expression, preserving append's unit result while allowing
+that batch return without no-effect statements or a redundant return.
+
+Handle Verus passes 801 obligations and Cache Verus 764; Cache native/Loom tests
+pass 61 with one benchmark ignored, and the five Handle domain tests pass. The
+final tail-expression adjustment passes all-target Cache/handles Clippy. Existing
+native foreign-owner abort cases and shared mutation cases are rechecked below.
+No full native representation, fresh full Miri, Windows execution or remote CI
+completion is claimed.
+The final shared expression passes all three batch mutation cases after a clean
+Handle proof baseline: omitted owner check, omitted payload transfer, and transfer
+before owner check. The native foreign-owner abort regression and four tests
+selected by the batches filter pass (three ownership cases and one unrelated
+input-identity batch test). Cache-only compilation, TCB audit, formatting and
+whitespace checks pass. All 151 Handle mutation anchors remain unique; a full
+151-case SMT rerun is not claimed.
+
+
+## Cache retirement retains and checks its allocation domain before registration
+
+ReclaimEntry captures node.domain at final pin release, with named pointer/weight/
+domain fields. All registration paths pass through the shared owner check before
+selecting a generation or invoking a queue callback. The fail-stop subprocess test
+now includes a foreign-entry registration case; reaching generation selection exits
+with a distinct code that cannot satisfy the rejection test. macOS requires SIGABRT.
+This is native enforcement of the verified registration precondition, not a theorem
+identifying native addresses with proof instance IDs. Queue metadata gains one
+pointer field; node and lease layouts are unchanged.
+
+Validation: Cache native/Loom tests pass 61 with one benchmark ignored, including
+foreign first-batch, appended-batch and registration rejection. The inline payload
+alignment/address/exactly-once-drop test passes pinned Miri Tree Borrows. No new
+Stacked Borrows run, Windows execution, remote CI or full Verus rerun is claimed
+for this native-only increment; the shared macro body and proof source are unchanged.
+
+
+## Inline allocation owner enters the pin ledger through its actual field
+
+Added a permission-backed initializer that reads the domain from initialized
+Allocation<V> and passes it to Node::new. The same node_layout::domain expression
+now supplies the native retirement entry's domain field. The initializer preserves
+the exact creator permission; ValueLease requires allocation/ledger owner agreement
+and its release preserves that owner in the returned retirement entry. This is a
+local representation connection, not completion of native Box/atomic/NonNull/index
+construction and identity obligations.
+
+Cache Verus passes 766 obligations. Three targeted mutations pass after a clean
+baseline: substituting the allocation address for domain, removing owner agreement,
+and dropping the allocation pin invariant. The TCB audit passes. The ownership gate
+now contains 84 cases; the preceding full 82-case run is not reported as a full run
+of this revised suite.
+All 14 Verus borrow/ownership gates pass with the stronger inline lease invariant.
+All 84 mutation anchors are unique. Native Cache/handles compilation and all-target
+Clippy with -D warnings pass. No new runtime, Miri, Windows or remote CI run is
+claimed for this shared field-projection increment.
+
+
+## NonNull boundary probe and assumption-audit repair
+
+The installed verifier rejects this direct native-type probe:
+
+```rust
+use vstd::prelude::*;
+verus! {
+fn pointer(value: std::ptr::NonNull<u8>) -> *mut u8 { value.as_ptr() }
+}
+```
+
+Both the type and as_ptr lack supported vstd specifications. No project assumption
+or external body was added to make the probe pass, and the raw-domain allocation
+adapter is not promoted to native NonNull refinement. This is a concrete remaining
+library-adapter obligation, not an overall stop: allocation/control/resource wiring
+work remains independently possible.
+
+Inspection found that the existing audit missed assume_specification, axiom fn,
+external type/function specifications, and assume calls split across lines. The
+audit now matches sanitized whole-source tokens, rejects the assumption forms,
+and requires explicit approval for external specifications. Eight audit unit tests
+pass, covering multiline/comment-separated assumptions, external spec approvals,
+and ignored literal/comment text. The strengthened repository audit passes with
+zero local assumptions/axioms and no unapproved externals. Native and formal
+implementation code is unchanged in this audit increment; no new native/Miri/
+Windows/full-Verus result is claimed.
+
+
+## Protected allocation owner relation survives snapshot completion
+
+The actual vstd index lock now carries a ghost predicate on its resident allocation
+permission. A checked constructor establishes the predicate; lookup preserves it
+through the independent snapshot receipt and actual admission/lookup completion.
+The inline allocation adapter instantiates this predicate with stored-domain/owner
+equality, then wraps successful pins as ValueLease and preserves that owner through
+rollback retirement. Owner agreement is no longer a fresh caller premise between
+index lookup and typed lease construction.
+
+Cache Verus passes 772 obligations. The strengthened TCB audit passes; all 87 Cache
+ownership mutation anchors are unique. Targeted index/inline mutation verification
+is recorded below. Native production source is unchanged in this increment; no
+new native/Miri/Windows/full-suite result is claimed. Native index/NonNull/atomic
+representation and Box/Drop obligations remain open.
+All 12 targeted index/inline mutation cases pass after their clean proof baselines.
+The new cases remove the protected allocation predicate, replace the inline index
+predicate with true, or admit an unrelated allocation owner at typed lookup; each
+fails SMT verification. The full 87-case suite was not rerun for this increment.
+
+
+## Typed lookup reads generation under its actual observation capability
+
+Added permission-backed immutable generation access through a Snapshot's retained
+receipt. The typed lookup now acquires admission, obtains a guarded snapshot, reads
+the allocation generation, and derives eligibility using the same field projection
+and epoch/residency expression as native get_at_epoch. It no longer accepts an
+unconstrained eligible boolean. Success guarantees the requested epoch; a mismatched
+snapshot cannot yield a lease or rollback retirement. Resident atomic samples and
+native backend representation remain outside this connection.
+
+Validation: Cache Verus passes 776 obligations. Three shared-source mutations fail
+SMT verification after a clean baseline: reading weight instead of generation,
+omitting epoch comparison, and omitting residency. Native Cache/Loom tests pass 61
+with one manual benchmark ignored; Cache/handles all-target Clippy with -D warnings
+passes. All 90 ownership mutation anchors are unique. No new full 90-case run,
+Miri, Windows execution or remote CI result is claimed.
+
+
+## Resident observations become actual Acquire loads in the typed path
+
+Replaced typed lookup's sampled resident inputs with direct loads of its observed
+Allocation.resident. The first load is short-circuited by epoch comparison; the
+second executes inside the production-shared lookup expression after successful
+pin acquisition. Both use the live retained observation permission. Native lookup,
+Loom reader and proof share the same resident field/load/Acquire expression.
+Ghost sample evidence retains the initial-resident requirement rather than losing
+it when the input booleans disappear. Generic sampled helpers remain alongside the
+typed path and are not claimed to be native atomic refinements.
+
+Cache Verus passes 786 obligations. Shared generation/eligibility mutation cases
+all pass, including omission of the initial resident evaluation. Native Cache/Loom
+tests pass 61 with one manual benchmark ignored; Cache/handles all-target Clippy
+passes. Native store histories, pin-field correspondence and full weak-memory/
+NonNull/index/Box/Drop connections remain open. No full ownership mutation-suite,
+Miri, Windows execution or remote CI run is claimed for this increment.
+All 15 borrow/ownership probes pass after clean baselines, including the new
+E0505 rejection for releasing the allocation permission before resident.load.
+The Loom temporal-reclamation test passes again after using the shared resident
+load expression. Strengthened TCB audit, formatting and whitespace checks pass.
+
+
+## Atomic contract probe distinguishes accepted calls from state refinement
+
+Added tools/probe_verus_atomic_contracts.py to make the native contract boundary
+reproducible against the installed verifier. Direct std AtomicBool load verifies,
+but initial-value assertions for fresh AtomicBool and AtomicUsize fail SMT
+verification. The permission-backed PAtomicBool control verifies the corresponding
+assertion. The diagnostic labels these outcomes proved/unproved; it is deliberately
+not a correctness gate that requires future verifier versions to remain incomplete.
+Unexpected compiler/tool failures stop the diagnostic.
+
+Inspection of the matching vstd revision confirms the primitive owns its native
+atomic and uses SeqCst operations; the ghost constructor builds a new primitive.
+There is no demonstrated adoption of the actual CacheNode field. This rules out
+claiming that accepting resident.load or constructing another Pins atomic closes
+field identity/history refinement. The required next implementation boundary is
+one owner for the real field and its permission, with explicit native ordering.
+No new assumptions, external bodies, native source changes, or full-refinement
+claims accompany this diagnostic increment.
+
+
+## Cache pin retry control is shared across native, Loom and Verus
+
+Replaced the native fetch_update wrapper and independent proof loops with the same
+`acquire_retry!` expansion. The backend selects the atomic implementation and
+ordering; the shared control handles terminal zero, overflow, weak CAS success and
+retry from its failure value. The Loom temporal-reclamation model uses this same
+expansion. Ghost updates still occur only in a successful atomic operation.
+
+Validation for this increment: Cache Verus 786 verified / 0 errors; shared Cache
+pin/lookup mutation suite rejects all eight mutations, including granting a pin on
+failed CAS and fabricating a zero failure observation. Native Cache tests pass
+61 with one manual benchmark ignored, including Loom. Cache/handles all-target
+Clippy, formatting and strengthened TCB audit pass. All 241 Cache/Handle ownership
+mutation anchors remain unique; this anchor check is not a full mutation-suite run.
+The native ordering remains unchanged; no native performance measurement, Windows
+execution, remote CI or complete memory-model refinement is claimed.
+
+The i686 Windows target passes cargo check for Cache/handles. The x86_64 MSVC
+cross-check stops in the blake3 dependency build because this macOS environment
+has no ml64.exe; it does not reach a complete Rust check and is not counted as a
+pass. The local aarch64 native checks above and both Verus widths do pass.
+The ten atomic pin ownership mutations also reject after a clean Verus baseline,
+including both failed-CAS token grants, count conservation, owner identity, drain
+coverage, retirement freezing, and the overflow/zero distinction.
+
+
+## Shared final Cache pin release and weak-memory mutation gate
+
+Production and Loom previously duplicated the final decrement/fence sequence.
+They now instantiate the same `release_pin!` tail as the Verus pin-token adapter.
+Both temporal-reclamation roles and the focused final-holder test use it.
+The proof's SeqCst backend supplies no fence; native and Loom supply the Acquire
+fence after their Release decrement. This boundary is explicit in TCB.md.
+
+Validation: Cache Verus 786 verified / 0 errors; all ten shared pin/lookup SMT
+mutations reject, including nonfinal retirement and losing final retirement.
+The new `just cache-release-ordering` passes its untouched one-test baseline and
+rejects both missing and late fences through actual Loom stale-value assertions.
+Native Cache tests with cache,handles,bench-internals pass 68 with one manual
+benchmark ignored. This includes the corrected retired-entry size expectation
+for the already-added domain pointer. Clippy with those features and all targets,
+TCB audit, formatting and whitespace checks pass. All 241 Cache/Handle ownership
+mutation anchors remain unique; the full ownership mutation suites were not rerun.
+The new Loom gate is wired into CI, but remote CI and Windows execution are not
+claimed. Atomic field identity, native weak-memory refinement, allocation/Drop
+adapters and the full main-path completion audit remain outstanding.
+
+
+## Native Box support probe and in-place destructor validation
+
+Probed the actual allocation/recovery APIs before attempting a new adapter.
+The installed Verus proves Box::new contents and permission-guarded ptr_ref;
+Box::into_raw/from_raw and Box::leak-to-pointer remain unsupported. The diagnostic
+is recorded in tools/probe_verus_heap_contracts.py and adds no assumption or
+external body. This prevents treating a returned HeapPermission as an already
+verified native Box conversion. A proper primitive contract/implementation
+connection is still required; arbitrary destructor behavior is not proven here.
+
+Strengthened the native large/aligned inline-payload test to record its leased
+address and assert that same address inside Drop, for both zero-budget and resident
+cache paths. The exact test passes natively and under the pinned Miri toolchain
+with Stacked Borrows and Tree Borrows, with leak/alias checks enabled. This is
+runtime evidence for the actual Box path, not a theorem for generic Box/Drop.
+A temporary-workspace mutation replacing native drop(node) with drop(*node)
+passes compilation but fails the destructor-address assertion after a clean
+one-test baseline; the production source is not changed by this experiment.
+TCB audit, formatting and whitespace checks pass. No full-suite or remote CI run
+is claimed for this increment.
+
+
+## Reader-owned observation removes the proof lock from metadata and pin CAS
+
+Moved the linear Cache observation into Ticket. The retained ledger keeps each
+admission share and receipt bookkeeping; count conservation and drain coverage
+still prove zero observations. Ticket's type invariant binds its observation to
+the exact receipt memory, and Node/Snapshot explicitly retain its node identity.
+Acquiring a pin and reading generation/resident now borrow Ticket directly,
+without acquiring the proof-only ledger RwLock. Ending the observation consumes
+Ticket and removes its share together.
+
+Cache Verus passes 786 obligations. All nine retained-observation SMT mutations
+reject, including the new missing-observation-consumption and wrong-node cases.
+All 15 borrow/ownership probes pass; the resident-load probe now attempts to end
+the Ticket while its allocation borrow remains live and requires E0505. The full
+Cache ownership mutation suite subsequently passed all 92 mutations, each after
+a clean group baseline and with a verifier failure required for rejection. TCB audit
+passes, with no new assumptions or trusted adapters. Native production code is
+unchanged in this increment. Registration/release/recovery locking and native
+atomic/Box correspondence remain incomplete under the selected no-new-TCB policy.
+
+
+## Full Cache ownership regression after reader-owned Ticket change
+
+The complete check_cache_ownership_refinement.py run finished successfully for
+the reader-owned Ticket tree: all 92 mutations were rejected by SMT verification.
+This includes the queued recovery, frozen coverage, index, inline value and owner
+boundaries as well as the nine direct retained-observation mutations. No source
+changes were made while this suite was running. The earlier 786-obligation Cache
+verification, 15 borrow probes and zero-assumption TCB audit belong to this same
+implementation. This is not native atomic/Box refinement or remote CI evidence.
+
+The next supported reduction is to execute the pin decrement before acquiring
+the proof ledger lock, returning immediately for a nonfinal release. Final-pin
+retirement authority must then justify freezing coverage under the lock. The
+native implementation already releases nonfinal pins without a node ledger lock;
+adding a trusted synchronization adapter is not authorized by the selected policy.
+
+
+## Nonfinal pin release no longer takes the proof ledger lock
+
+Moved Node::release's atomic pin decrement before ledger acquisition. Nonfinal
+release returns without the lock. Only the final retirement token permits a
+RetiredNode, followed by observation/coverage freezing under the ledger lock.
+Removed the unused release_owned_covered helper rather than retaining a second
+lock-spanning release path. The resource machine still excludes resident pins
+once final retirement is issued, including the interval before ledger freezing.
+
+Validation on this increment: Cache Verus 784 verified / 0 errors (two obligations
+removed with the obsolete width-instantiated helper); all 26 queued-atomic,
+lease and recovered-owner mutations pass their negative verification gates,
+including the two new missing-freeze/nonfinal-retirement mutations. All 15
+borrow/ownership probes and the TCB audit pass. All 245 Cache/Handle mutation
+anchors are unique; this anchor check is not a rerun of every mutation. The prior
+full 92-mutation Cache run applies to the preceding reader-owned-Ticket tree;
+the now-expanded full 94-mutation suite has not been rerun. Native code is unchanged.
+
+Final-release completion, observation registration/completion and heap recovery
+still have proof-only ledger synchronization. Native field identity, weak-memory
+and Box support gaps remain incomplete; no trusted adapters have been added.

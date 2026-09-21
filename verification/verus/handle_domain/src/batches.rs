@@ -61,7 +61,7 @@ pub fn append<P>(left: &mut Batch<'_, P>, right: &mut Batch<'_, P>) -> (accepted
             && final(right).records() == Seq::<P>::empty(),
         !accepted ==> final(left).records() == old(left).records() && final(right).records() == old(right).records(),
 {
-    super::completion_protocol::append_owned_batch!(left.owner.identity, right.owner.identity;
+    super::rotation::queue_transitions::append_owned_batch!(left.owner.identity, right.owner.identity;
         return false, left.records.append(&mut right.records));
     true
 }

@@ -83,6 +83,10 @@ verus:
     verus --crate-type=lib verification/verus/handle_domain/src/lib.rs
     python3 -B tools/check_handle_completion_refinement.py
 
+# Weak-memory mutation gate for the shared final-pin release tail.
+cache-release-ordering:
+    python3 -B tools/check_cache_release_ordering.py
+
 # Audit Verus verification TCB compliance (enforces 0 assumes and approved external_bodies).
 verus-audit:
     python3 -B -m unittest discover -s tools -p test_check_verus_tcb.py

@@ -29,7 +29,7 @@ pub proof fn initialize_node<T>(tracked memory: HeapPermission<T>, domain: Set<v
         node.retiring.instance_id() == node.instance.id(), !node.retiring.value(),
 {
     let tracked (Tracked(instance), Tracked(allocation), Tracked(count), Tracked(mut pins),
-        Tracked(observations), Tracked(observing), Tracked(retiring), Tracked(retirement))
+        Tracked(observations), Tracked(observing), Tracked(retiring), Tracked(retirement), Tracked(retired_history))
         = cache_pins::Instance::allocate(memory, domain, Some(memory));
     let tracked creator = pins.remove((memory, PinKind::Creator));
     InitializedNode { instance, allocation, count, creator, observing, retiring }
@@ -81,6 +81,11 @@ impl<'scope, T> ScopedObservation<'scope, T> {
         ensures final(observing).instance_id() == node.id(),
             final(observing).value() + 1 == old(observing).value(),
     { node.leave_observation(self.observation.element(), self.observation, observing); }
+
+    pub proof fn excludes_drain(tracked &self, tracked drains: &super::rotation::drain::atomic_counter::DrainSet)
+        requires drains.inv(), drains.domain().contains(self.gate_id()),
+        ensures false,
+    { drains.excludes_permit(self.permit); }
 
     pub proof fn excludes_idle(tracked &self,
         tracked gate: &admission::Instance, tracked active: &admission::active)
@@ -163,6 +168,19 @@ macro_rules! exclude_observation_after_histories {
     use super::*;
     use super::super::rotation::drain::stripe_ownership::$module as stripes;
     verus! {
+    #[verifier::exec_allows_no_decreases_clause]
+    pub(crate) fn acquire_atomic_pin<T>(pins: &super::super::atomic_pins::$module::Pins<T>,
+        Tracked(observation): Tracked<&ScopedObservation<'_, T>>)
+        -> (result: (super::super::pin_transitions::Acquire<$word>, Tracked<Option<cache_pins::pins<HeapPermission<T>>>>, Ghost<$word>))
+        requires pins.inv(), observation.node_id() == pins.id(),
+        ensures result.0 == super::super::pin_transitions::$module::acquire_spec(result.2@), match result.0 {
+            super::super::pin_transitions::Acquire::Acquired(_) => result.1@.is_some()
+                && result.1@.unwrap().instance_id() == observation.node_id()
+                && result.1@.unwrap().element() == (observation.memory(), super::super::pin_ownership::PinKind::Lease),
+            _ => result.1@.is_none(),
+        },
+    { pins.acquire_observed(Tracked(&observation.observation)) }
+
     pub proof fn exclude_observation_after_histories<T>(histories: Seq<Seq<$word>>,
         tracked observation: &ScopedObservation<'_, T>,
         tracked ledgers: &stripes::StripeLedgers, index: int)

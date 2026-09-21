@@ -2,8 +2,8 @@
 """Audit Verus formal verification codebase for TCB boundary violations.
 
 Enforces:
-1. Zero `assume(...)` directives in verification code.
-2. Only approved `external_body` declarations listed in `verus_external_allowlist.json`.
+1. Zero project-local assume calls, assume_specification declarations, or axiom functions.
+2. Only approved external bodies/type/function specifications in the allowlist.
 """
 
 from __future__ import annotations
@@ -19,8 +19,10 @@ ALLOWLIST_PATH = ROOT / "tools/verus_external_allowlist.json"
 
 RAW_STRING = re.compile(r'(?:br|cr|r)(#*)"')
 CHARACTER = re.compile(r"(?:b)?'(?:[^'\\\n]|\\(?:u\{[0-9a-fA-F_]+\}|x[0-9a-fA-F]{2}|.))'")
-ASSUME_PATTERN = re.compile(r"\bassume\s*\(")
-EXTERNAL_BODY_PATTERN = re.compile(r"\bexternal_body\b")
+ASSUME_PATTERN = re.compile(r"\b(?:assume\s*\(|assume_specification\b|axiom\s+fn\b)")
+EXTERNAL_BODY_PATTERN = re.compile(
+    r"\b(?:external_body|external_type_specification|external_fn_specification)\b"
+)
 
 
 def strip_rust_comments_and_strings(source: str) -> str:
@@ -105,13 +107,16 @@ def audit_verus_files(search_paths: list[Path], allowlist: set[str]) -> tuple[li
                 display_path = file_path
 
             lines = sanitized.splitlines()
-            for line_no, line in enumerate(lines, start=1):
-                if ASSUME_PATTERN.search(line):
-                    assumes.append(f"{display_path}:{line_no}: {line.strip()}")
-                if EXTERNAL_BODY_PATTERN.search(line):
-                    loc_id = f"{display_path}:{line_no}"
-                    if loc_id not in allowlist and file_path.name not in allowlist:
-                        unapproved_externals.append(f"{loc_id}: {line.strip()}")
+            # Match the whole sanitized source: Verus permits whitespace and
+            # comments, including newlines, between assumption tokens.
+            for match in ASSUME_PATTERN.finditer(sanitized):
+                line_no = sanitized.count("\n", 0, match.start()) + 1
+                assumes.append(f"{display_path}:{line_no}: {lines[line_no - 1].strip()}")
+            for match in EXTERNAL_BODY_PATTERN.finditer(sanitized):
+                line_no = sanitized.count("\n", 0, match.start()) + 1
+                loc_id = f"{display_path}:{line_no}"
+                if loc_id not in allowlist and file_path.name not in allowlist:
+                    unapproved_externals.append(f"{loc_id}: {lines[line_no - 1].strip()}")
 
     return assumes, unapproved_externals
 
@@ -137,20 +142,20 @@ def main() -> int:
 
     failed = False
     if assumes:
-        print("ERROR: Verus verification contains 'assume' directives (must be 0):", file=sys.stderr)
+        print("ERROR: Verus verification contains local assumptions or axioms (must be 0):", file=sys.stderr)
         for entry in assumes:
             print(f"  {entry}", file=sys.stderr)
         failed = True
     else:
-        print("PASS: 0 'assume' directives found.")
+        print("PASS: 0 project-local assumptions or axioms found.")
 
     if unapproved_externals:
-        print("ERROR: Unapproved 'external_body' found in Verus code:", file=sys.stderr)
+        print("ERROR: Unapproved external body/type/function specification found in Verus code:", file=sys.stderr)
         for entry in unapproved_externals:
             print(f"  {entry}", file=sys.stderr)
         failed = True
     else:
-        print("PASS: All external_body declarations are approved or 0 found.")
+        print("PASS: All external body/type/function specifications are approved or 0 found.")
 
     return 1 if failed else 0
 

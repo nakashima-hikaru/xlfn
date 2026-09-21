@@ -24,6 +24,7 @@ pub proof fn initialize_covered_node<'scope, T>(tracked memory: HeapPermission<T
         covered.creator.instance_id() == covered.instance.id(), covered.creator.element() == (memory, PinKind::Creator),
         covered.observations.inv(), covered.observations.node_id() == covered.instance.id(),
         covered.observations.domain() == domain, covered.observations.len() == 0,
+        !covered.observations.frozen(), covered.observations.coverage() == domain,
         covered.retiring.instance_id() == covered.instance.id(), !covered.retiring.value(),
 {
     let tracked node = super::scope_ownership::initialize_node(memory, domain);
@@ -50,6 +51,9 @@ impl<'scope, T> ObservationLedger<'scope, T> {
             && self.entries[key].inv()
             && self.coverage.contains(self.entries[key].gate_id()))
     }
+    pub proof fn coverage_within_domain(tracked &self)
+        requires self.inv(), ensures self.coverage().subset_of(self.domain()),
+    {}
     pub closed spec fn node_id(&self) -> vstd::tokens::InstanceId { self.observing.instance_id() }
     pub closed spec fn domain(&self) -> Set<vstd::tokens::InstanceId> { self.domain }
     pub closed spec fn coverage(&self) -> Set<vstd::tokens::InstanceId> { self.coverage }
@@ -162,6 +166,41 @@ pub fn borrow_covered<'a, 'scope, T>(pointer: *const T,
     let tracked observation = observations.observation(key);
     super::scope_ownership::borrow_scoped(pointer, Tracked(node), Tracked(observation))
 }
+pub proof fn narrow_after_drain<T>(tracked observations: &mut ObservationLedger<'_, T>,
+    keep: Set<vstd::tokens::InstanceId>, tracked drains: &super::rotation::drain::atomic_counter::DrainSet)
+    requires old(observations).inv(), old(observations).frozen(), drains.inv(),
+        drains.covers(old(observations).coverage().difference(keep)),
+    ensures final(observations).inv(), final(observations).frozen(),
+        final(observations).coverage() == old(observations).coverage().intersect(keep),
+        final(observations).domain() == old(observations).domain(),
+        final(observations).node_id() == old(observations).node_id(), final(observations).len() == old(observations).len(),
+{
+    if exists|key: nat| observations.entries.dom().contains(key)
+        && !keep.contains((#[trigger] observations.entries[key]).gate_id()) {
+        let key = choose|key: nat| observations.entries.dom().contains(key)
+            && !keep.contains((#[trigger] observations.entries[key]).gate_id());
+        let tracked observation = observations.entries.tracked_borrow(key);
+        observation.excludes_drain(drains);
+    }
+    observations.coverage = observations.coverage.intersect(keep);
+}
+pub proof fn zero_after_drain<T>(tracked observations: &ObservationLedger<'_, T>,
+    tracked drains: &super::rotation::drain::atomic_counter::DrainSet)
+    requires observations.inv(), drains.inv(), drains.covers(observations.coverage()),
+    ensures observations.len() == 0,
+{
+    if observations.entries.len() > 0 {
+        assert(exists|key: nat| observations.entries.dom().contains(key)) by {
+            if !(exists|key: nat| observations.entries.dom().contains(key)) {
+                assert(observations.entries =~= Map::<nat, ScopedObservation<'_, T>>::empty());
+            }
+        }
+        let key = choose|key: nat| observations.entries.dom().contains(key);
+        let tracked observation = observations.entries.tracked_borrow(key);
+        observation.excludes_drain(drains);
+    }
+}
+
 }
 macro_rules! drained_coverage {
     ($module:ident, $word:ty, $exclude:ident) => {

@@ -697,13 +697,13 @@ introduced to hide those differences.
 ## 4. TCB Governance Rules
 
 1. **Zero-Assume Policy**:
-   - In both production code and Verus proofs, `assume(...)` directives are strictly prohibited (enforced to be 0 by CI).
+   - In both production code and Verus proofs, project-local `assume(...)`, `assume_specification`, and `axiom fn` declarations are prohibited, including tokens split across lines (enforced to be 0 by CI).
    - Any temporary assumption requires an explicit justification, an issue reference, an expiration deadline, and approval in the TCB allowlist.
 2. **`external_body` Allowlist Management**:
-   - Any functions annotated with `#[verifier::external_body]` must be explicitly registered in `tools/verus_external_allowlist.json`.
+   - External bodies and external type/function specifications must be explicitly registered in `tools/verus_external_allowlist.json`.
 3. **Continuous Integration Gates**:
    - `just verus`: Automated execution of all Verus proof crates, requiring 0 verification errors.
-   - `just verus-audit`: Automated inspection ensuring 0 `assume` directives and 0 unapproved `external_body` items.
+   - `just verus-audit`: Automated inspection ensuring 0 project-local assumptions/axioms and 0 unapproved external bodies or specifications.
 
 
 ### Arbitrary-stripe transition-owned publication
@@ -752,10 +752,524 @@ the handoff and prepared ticket. With all pending stripes drained, it borrows th
 exact DrainSet, acquires the prepared queue, uses the shared take/reset/release
 operation, and recovers every allocation through that same AtomicPtr registry.
 The returned heap-permission vector is matched element-for-element (in pop order)
-to the protected withdrawal snapshot. Only after recovery does it restore leases
-and transition State; the live-generation map is unchanged and pending remains.
+to the protected withdrawal snapshot. Recovery now instantiates production's
+finish_rotation: callback output is established first, then PendingHandoff::finish
+requires complete collection plus the ready authority for that pending queue in
+the same Current instance. It restores all leases, reconstructs State and clears
+pending, preserving the live-generation map and returned recovered allocations.
+Ordinary restore/cancel still retain pending; they do not stand for callback
+completion. Moving the clear effect before the callback is rejected as use of the
+collection after it has been consumed by finish.
 
 This is not yet the complete native migration: the constructor still receives
-matching maps as premises, pending clearing needs the callback-completion handoff,
-and native constructor/lock/weak-memory correspondence, Cache and destruction
-remain open. Recovered heap permissions are not destructor-return receipts.
+matching maps as premises, and native constructor/lock/weak-memory correspondence,
+Cache and destruction remain open. Recovered heap permissions are not
+destructor-return receipts; pending completion here is retirement callback return.
+
+
+### Cache observations use actual admission and drain resources
+
+Cache atomic_admission retains the permit returned by the actual 32/64-bit counter
+CAS and the matching Counter reference. Its observation adapter lends that permit
+to the existing conserving ObservationLedger. Release consumes the wrapper and
+returns that same permit through the counter's release CAS; a live observation
+borrow prevents moving/releasing the wrapper. Rejected admission and fail-stop
+produce no wrapper.
+
+DrainLease/DrainSet now exclude borrowed admission permits as well as retained
+shares. Cache's ScopedObservation uses this exclusion directly. Frozen-ledger
+narrowing removes only gates covered by actual drains, and the conserving ledger
+derives zero observations once its remaining coverage is drained. recover_after_drain
+combines that result with the matching final-pin ticket, zero-pin token and
+allocation storage to recover the exact initialized HeapPermission. These methods
+accept no fabricated drain histories.
+
+The actual Counter-to-observation borrow and actual drain-to-recovery premises are
+connected. This does not yet instantiate the native Cache index or pin AtomicUsize
+registry, migrate its complete queue/preparation/reclamation driver, or prove its
+weak memory and Box/Drop behavior. Those mappings remain required; the new
+capabilities alone do not establish full native Cache refinement.
+
+
+### Cache pin atomics conserve the allocation's actual linear resources
+
+Cache atomic_pins binds a vstd AtomicU32/AtomicU64 value to the same cache_pins
+instance's count and retiring tokens. Observation-to-lease and existing-pin-to-anchor
+acquisitions use the shared acquire kernel in a CAS retry loop; only successful
+CAS updates count and issues a fragment. Results include a ghost sampled count
+whose shared-kernel classification distinguishes Zero and Overflow. Failed CAS
+retains resources and retries. ScopedObservation supplies its actual storage-backed
+observation to the acquire adapter.
+
+Release consumes a matching pin at fetch_sub. The pin-positive property excludes
+underflow for valid ownership; final release creates the exact retirement ticket.
+release_covered converts that ticket to RetiredNode and freezes the same node's
+observation coverage. Recovery opens this same atomic invariant, derives its zero
+count and retiring flag from the final ticket, uses actual drain-derived zero
+observations, and withdraws the exact allocation permission from storage. Count
+and retiring are no longer independent caller-supplied zero premises in this path.
+
+These are SeqCst vstd atomic operations. The native fetch_update lowering,
+Relaxed/Release updates, final Acquire fence and release sequence, native node/index
+representation, complete queue-driver instantiation and Box/Drop remain separate
+obligations. The adapter does not claim that the native CacheNode binary was
+accepted directly by Verus.
+
+The pin adapter constructor now consumes an initialized `HeapPermission<T>` and
+creates its node instance, atomic count/retiring invariant, creator capability,
+allocation token and observation ledger together. Matching identity and drain
+domain are constructor postconditions, not caller-supplied matching-token premises
+for this entry point. This does not verify the native allocator or node layout.
+
+### Cache retirement payloads retain their actual resource lock
+
+`queued_atomic` constructs a node-bound `vstd::rwlock::RwLock` over the allocation
+and observation ledger returned by atomic pin initialization. Final release opens
+this lock and freezes the same ledger before creating a queue payload. The payload
+borrows its node; recovery opens that exact lock and derives allocation presence
+from the linear retirement ticket, rather than assuming an external allocation
+matches. Atomic registration uses the existing Current/queue-lock implementation.
+Locked batch detachment and per-node recovery preserve every exact memory in
+reverse pop order under borrowed full-domain DrainSet authority.
+
+This is a verified adapter with trusted vstd lock semantics, not direct verification
+of the native Cache node layout. Scoped observation operations, monotonic narrowed
+coverage through the lock, pending-generation preparation, native ordering and
+Box/Drop still need integration. The full-domain recovery entry point does not
+replace the required normal two-generation reclamation path.
+
+### Cache coverage bounds survive resource-lock reacquisition
+
+The queued atomic adapter now stores a tokenized monotonic coverage snapshot in its
+resource lock invariant, equal to the observation ledger's coverage and frozen flag.
+Final release freezes that snapshot and gives the entry a matching bound receipt.
+Preparing an entry narrows the actual observation ledger using DrainSet exclusions,
+updates the snapshot, and issues a persistent receipt. Its guarantee survives later
+lock acquisitions and additional narrowing; prepared recovery derives sufficient
+drain coverage from this receipt rather than a caller-provided observation count.
+
+Queue preparation borrows the actual queue write handle, polls real stripe collection,
+leaves the queue untouched on incomplete drain, and restores collected leases only
+after narrowing ends. The reservation adapter rechecks Current, prepares and reserves
+while borrowing the same handle. Prepared detachment consumes the matching phase
+receipt and recovers the exact batch using its specified drain domain. The complete
+publication/pending callback driver and observation operations through the resource
+lock remain to connect; native representation, weak memory and destruction remain
+outside this increment.
+
+### Cache publication and pending completion use the striped resource driver
+
+Cache now invokes the actual striped rotation driver from its prepared queue
+reservation. Retry retains the borrowed transition handoff and partial collection;
+stale reservation restores controllers and queue ownership. Successful publication
+uses the shared seal/pending/publish/reopen sequence and returns the old queue's
+prepared receipt with precisely its stripe IDs.
+
+Pending completion borrows that collection's actual DrainSet, acquires the matching
+queue, recovers every exact allocation through its node lock, and invokes the shared
+`finish_rotation` callback-before-clear sequence. The returned state is sealed for
+the pending generation, preserves live-generation controllers and clears pending
+only after recovery returns matching empty-queue readiness. Recovery means heap
+permission recovery, not native destruction. Scoped observation integration into
+this node, native representation and weak-memory/Box/Drop correspondence remain open.
+
+The Cache-specific lifetime gate mutates the shared macro to clear before callback;
+it must fail with E0382 for use of the consumed collection in `queued_atomic.rs`.
+This is checked separately from SMT mutations and after the untouched Cache baseline.
+
+### Cache observations retain owned admission shares in the node ledger
+
+The queued node now uses `retained_observations::Ledger` instead of extending a
+borrowed admission over the lifetime of the node. Each ledger entry owns a Share
+from the existing storage-backed admission Scope and the node's linear observation
+fragment. A linear receipt fixes the ledger, scope and exact memory; receipt-map
+conservation prevents foreign or already-ended observations from being used.
+Ending an observation consumes that receipt and returns its Share to the same Scope.
+The existing actual counter `acquire_scope`/`release_scope` contracts require all
+shares returned before releasing admission.
+
+A persistent retirement history in the pin state machine excludes any live pin;
+the retained ledger uses it to reject new observations after final release. Node
+observe/end and observed pin acquisition hold the same actual resource lock; pin
+acquisition executes the existing CAS adapter. Final release, coverage narrowing,
+prepared queue rotation and recovery now operate on this retained ledger. The
+borrowed ledger remains in the older proof adapters, but is no longer the queued
+node's resource representation. Node/Entry no longer carry its scope lifetime.
+
+These are resource adapters. Mapping native index lookup to the resident fragment,
+returning native scoped references through this representation, native weak memory
+and Box/Drop remain unproved. No extra native lock or representation change was
+introduced by this proof-only migration.
+
+The `lookup_pin` adapter now directly composes counter `acquire_scope`, node
+observation, atomic lease acquisition, observation end and `release_scope`. A
+successful returned pin carries the same resident memory and survives scope release.
+Rejected/fail-stop admission returns no pin result. The caller still supplies the
+resident fragment and proves counter membership in the node domain; this is not yet
+a proof of the native index lookup, resident recheck or rollback path.
+
+Native `ResidentEntry::clone` produces a non-owning snapshot. Consequently the new
+`lookup_pin` helper's borrowed resident fragment is a stronger premise than native
+`get_at_epoch` retains across lookup; it must not be presented as that whole method's
+refinement. The split observe/acquire APIs permit the resident fragment to end
+between index observation and pin acquisition, but native snapshot transfer,
+generation/resident rechecks and rollback still require explicit correspondence.
+
+### Cache native lookup control flow shares one macro with Verus and Loom
+
+`get_at_epoch` now instantiates `lookup_after_observation!` from the same file as
+pin arithmetic. The common expression performs eligibility rejection, pin outcome
+classification, resident recheck, rollback pin release, domain capture, admission
+exit and retirement handoff, or returns a lease after admission exit. Zero-pin
+rejection explicitly exits admission; overflow does not return normally.
+
+`complete_lookup` instantiates that expression with a pre-existing owned observation
+receipt, actual pin atomic acquisition/release and actual counter scope release.
+It does not borrow a resident pin across acquisition. Success yields the exact lease
+fragment only for eligible/resident samples; rollback yields at most the exact
+final-pin retirement entry, never a lease. Its overflow backend is a nonreturning
+loop; native abort behavior remains the fail-stop TCB contract.
+
+The Loom temporal-reclamation reader also uses the same macro and pin arithmetic.
+Its rollback waits for admission quiescence after leaving its own scope. Verus takes
+metadata samples as inputs and returns the retirement handoff instead of executing
+the native enqueue/drain/destructor callback. Those effects, raw index snapshot
+transfer, address mapping, weak memory and native destruction are still not an
+end-to-end theorem. The shared expression removes branch-order drift for this slice.
+
+### Resident index guard transfers residency protection into an observation
+
+`resident_index` now models a protected entry using an actual vstd read/write lock.
+The stored Resident owns the matching resident pin; lookup borrows that pin only
+under the read handle, issues a retained observation and returns a Snapshot with
+its own receipt. The snapshot references the node independently of the cell guard.
+Removal transfers the resident pin under a write handle; retiring it does not
+consume earlier snapshot observations. Snapshot completion calls the shared lookup
+expression, and `lookup_complete` surrounds the transfer with actual counter
+admission/release, without a caller-supplied resident pin spanning acquisition.
+
+The locally resolved quick_cache 0.7.0 `sync::Cache::get` was inspected: its
+`shard.read().get(hash, key).cloned()` expression clones while the read guard is
+alive. Native ResidentEntry clones are non-owning. That identifies a candidate
+observation-transfer point, but the per-entry adapter is not a verification of
+Quick Cache hashing, eviction policy, native Clone/Drop instrumentation or the
+mapping between library locks and this vstd lock. Those remain explicit library/
+representation obligations, as do metadata loads, weak memory and destruction.
+
+### Typed lease references borrow the exact pin until their last use
+
+The queued node exposes a typed read through its existing storage-backed pin guard.
+The new owned Lease binds node ID, Lease role, initialized HeapPermission and pointer;
+read borrows that pin, and release consumes it through the same node atomic. Resident
+snapshot completion and admitted cell lookup now return this Lease instead of an
+unwrapped pin token. Reads return the exact stored T; no permission is cloned.
+
+The Verus lifetime gate rejects releasing the Lease before a later use of its value
+reference. A separate native cargo check probe rejects dropping CacheLease before
+using its Deref result; both fail with E0505 after their clean baselines. This native
+check verifies the public borrow lifetime, not the unsafe dereference implementation.
+Mapping generic proof T to native CacheNode<V>, its inline value-field projection,
+raw address/provenance, weak memory and Box/Drop remains to be proved.
+
+
+### Inline value projection uses the shared allocation field declaration
+
+`cache/node_layout.rs` supplies the CacheNode field declaration to native Rust and
+`inline_value::Allocation<V>` in Verus. The declaration preserves native field
+order, types and visibility; there is no added metadata wrapper or runtime field.
+Both native lease/scope reads and the permission-backed ValueLease read use the
+same `.value` projection expression. ValueLease first borrows the entire initialized
+Allocation through its exact allocation pin. Its returned reference borrows the
+lease, and release transfers that same whole-allocation permission if it retires.
+
+This is a shared field/projection refinement, not a native layout/ABI theorem.
+The proof instantiation uses std atomic field types but does not connect their
+addresses to the separate verified atomic backend; its domain is an opaque raw
+pointer instead of native NonNull<CacheLookupDomain<V>>. Allocation construction,
+index/metadata correspondence, native pointer provenance, weak memory, and Box/Drop
+remain obligations. In particular this wrapper does not manufacture a native
+allocation or establish that the native pin atomic governs this permission.
+
+
+### Native reclamation consumes the retirement entry
+
+`reclaim_cache_node` now takes ReclaimEntry<V> by value instead of accepting its
+copyable raw pointer. Both the certified-batch loop and never-published fast path
+move the entry into this boundary. Only there is the pointer extracted for
+Box::from_raw. The inline value is still destroyed in place; the existing panic
+containment and Box deallocation path are preserved.
+
+A native compile-fail probe rejects passing the same entry twice with E0382. The
+corresponding verifier probe rejects a second Entry::recover call on the same
+retirement resource. These are linear consumption checks, not a proof that a raw
+pointer cannot be forged by unsafe code. Quiescence remains an unsafe precondition
+of the native single-entry boundary; its final-pin origin, exact allocation/proof
+resource mapping and Box/Drop contract are not discharged by this API change.
+
+
+### Native Cache batch ownership retains domain lifetime
+
+ReclaimEntries<'domain, V> borrows CacheLookupDomain, including empty results.
+Drained/closed certificate callbacks attach the owner; nonempty merges check owner
+address equality. Native compilation rejects destroying that owner before consuming
+the batch. This connects native lifetime custody to the explicit ownership shape
+used by the resource adapters, but does not establish equality of native addresses
+and proof instance IDs, queue payload provenance, or Box/Drop semantics.
+
+
+### Cache locked recovery requires payload owner agreement
+
+Both recover_prepared_locked and recover_locked now require every admitted queue
+payload to have the same owner as the queue being recovered. Their postconditions
+establish valid_records for the original queue contents as well as exact recovered
+memory correspondence. Previously the lower APIs required valid entries and drain
+coverage but did not retain the owner constraint imposed by the higher striped
+caller. The actual queue constructor and striped path already supply that condition;
+this removes the weaker generic recovery contract. It is an ownership contract
+strengthening, not a proof of native address-to-instance representation.
+
+
+### Cache and Handle share the checked batch-transfer expression
+
+The existing append_owned_batch macro moved from handle/domain/protocol.rs to
+retirement_queue.rs. Both native batch implementations and the generic Verus
+Handle Batch::append adapter now instantiate it; Cache also uses it to validate
+the first returned batch against the requested owner. There is no compatibility
+copy of the former macro. Address comparison precedes the supplied operation.
+
+The generic proof establishes rejection without payload changes for different
+owner addresses, and exact sequence concatenation with an emptied source on
+acceptance. The macro now returns the operation's result, allowing Cache's final
+owner validation to return the batch directly. Native SmallVec versus proof Vec,
+owner address/provenance mapping, and destructor effects remain backend
+obligations; this is shared control-flow verification, not full native ownership
+representation refinement.
+
+
+### Native Cache registration checks the retired node's captured domain
+
+ReclaimEntry now stores named pointer, weight and domain fields. The only production
+constructor is final-pin release, which captures the domain directly from the live
+node alongside its allocation pointer and weight. Before generation selection or
+queue locking, enqueue_reclaim_impl compares that captured domain with self using
+the shared checked-owner expression. A mismatch fails stop before registration;
+there is no separate unchecked enqueue helper. Sentinel tests explicitly name
+their synthetic owner instead of supplying ownerless entries.
+
+This enforces the native counterpart of the owner-equality precondition already
+required by the Cache registration proof. It does not prove that native pointers
+are the same ghost identities, establish all allocation constructor/provenance
+obligations, or discharge weak-memory/Box/Drop refinement. The retirement entry
+stores one additional pointer; it is cold queue metadata, not a node or lease field.
+
+
+### Inline allocation owner is obtained by a permission-backed field read
+
+inline_value::initialize now borrows the initialized HeapPermission with ptr_ref,
+reads its domain through node_layout::domain!, then initializes the pin ledger
+using that value. The native final-pin retirement constructor uses the same field
+projection. The proof initializer returns the exact creator permission and a node
+whose owner equals the stored allocation domain; it takes no independent owner
+argument. ValueLease now requires that agreement, and its release guarantees any
+retirement entry retains the allocation's stored owner.
+
+This connects the inline allocation field to the verified owner at this entry
+point. Generic Node construction still exists for other resource adapters; the
+native Box constructor, real atomic-field-to-backend mapping, opaque raw domain
+versus NonNull<CacheLookupDomain<V>>, and generation/index wiring are not thereby
+proved. The initializer consumes an already-initialized permission rather than
+proving Box allocation itself. Full native refinement remains open.
+
+
+### NonNull representation remains an explicit unsupported-library boundary
+
+A direct compile probe against the installed Verus rejects both
+std::ptr::NonNull<u8> and NonNull::as_ptr as unsupported. The diagnostic suggests
+external_type_specification and assume_specification; neither was added. The inline
+allocation adapter therefore still uses an opaque raw domain pointer. A passing
+raw-pointer field proof is not a proof of the native NonNull representation.
+
+The TCB audit now rejects project-local assume_specification and axiom fn in
+addition to assume calls, including tokens separated by newlines/comments. External
+type/function specifications require the same explicit allowlist treatment as
+external bodies. This closes ways that unsupported-library adapters could otherwise
+silently introduce trusted facts while still reporting a zero-assume audit. The
+existing library TCB remains explicit; the project external allowlist is still empty.
+
+
+### Protected index transports allocation representation facts into lookup
+
+resident_index's lock predicate now includes a ghost memory predicate. new_checked
+establishes it on the stored resident permission; guarded lookup transfers it to
+the Snapshot, and lookup_complete preserves it for the exact observed permission.
+The ordinary generic constructor uses the always-true predicate.
+
+inline_value::new_index instantiates the protected predicate with equality between
+the allocation's stored domain and the index owner. Its lookup adapter runs actual
+counter admission, guarded observation transfer and the shared lookup transition;
+it constructs ValueLease from the resulting pin and preserves the stored owner in
+any rollback retirement entry. No extra per-lookup assertion of allocation/owner
+agreement is supplied after the index access. That fact now comes from the lock
+invariant established at checked index construction.
+
+This connects the typed allocation representation to the existing executable index
+adapter. It does not verify the native Quick Cache implementation or native
+NonNull/atomic-address mapping, metadata sampling, allocation/Box/Drop, or weak
+memory. Checked index construction still requires a valid resident pin and the
+allocation owner relation; issuance from native allocation remains a separate
+boundary, while inline initialize supplies the relation in the permission model.
+
+
+### Typed lookup derives eligibility from observed allocation generation
+
+The typed inline lookup no longer accepts an arbitrary eligible flag. Snapshot
+reads generation through its retained observation receipt: the queued node borrows
+the matching storage-backed observation under its resource lock, obtains ptr_ref
+permission, copies the immutable generation, and releases the lock. The returned
+scalar is proved equal to that exact allocation's generation.
+
+Native get_at_epoch and typed proof lookup now instantiate the same generation
+field projection and epoch/residency comparison expression in node_layout.rs.
+Successful ValueLease therefore has the requested epoch; a mismatched observed
+epoch cannot produce either a lease or a rollback retirement entry. The existing
+shared completion expression still controls pin acquisition and observation exit.
+
+Resident-before and resident-after remain sampled boolean inputs in the proof.
+This increment does not connect native AtomicBool loads or memory order, and the
+resource lock is the proof adapter rather than a newly introduced native lock.
+Native Quick Cache, NonNull, atomic-address, Box/Drop and full driver correspondence
+remain explicit obligations.
+
+
+### Typed lookup performs actual resident loads at the shared control points
+
+A compile probe confirms the installed verifier accepts std AtomicBool::load with
+Ordering::Acquire (unlike the recorded NonNull boundary). The typed lookup no
+longer receives resident-before/after booleans. Its Snapshot reads the embedded
+Allocation.resident under the retained observation's actual PointsTo permission.
+The first read occurs only after matching the requested epoch; the recheck is
+inside lookup_after_observation, after successful pin acquisition and before
+observation discharge. Native get_at_epoch and the Loom reader use the same
+node_layout::resident load expression, including Acquire ordering.
+
+The typed adapter records the first sampled result in ghost output. A successful
+lease requires a true first sample; a false sample yields no lease or retirement.
+complete_inline_lookup records the recheck sample and distinguishes successful
+lease from rollback retirement. The earlier generic boolean-sample helper remains
+for generic protocol adapters; the typed entry now calls the actual-load path.
+
+This establishes permission-backed access and shared control placement, not a
+complete atomic-history theorem. It does not bind concurrent residency stores to
+the index model, identify the native pin field with the separate vstd pin atomic,
+or prove weak-memory publication/release sequences, native NonNull/index/Box/Drop.
+The standard atomic primitive semantics remain library TCB.
+
+
+### Direct std atomic calls do not provide the value-history contract
+
+The installed Verus accepts a direct AtomicBool Acquire load, but fails the true
+single-threaded assertions that a newly created AtomicBool(false) loads false and
+an AtomicUsize(1) loads 1. The same initial-value assertion succeeds for
+vstd::atomic::PAtomicBool with its linear permission. These are specification
+coverage probes, not native atomic failures. Reproduce with
+`python3 -B tools/probe_verus_atomic_contracts.py`; it reports proved/unproved
+separately and rejects compiler/tool errors instead of counting them as evidence.
+
+Thus the resident-load adapter establishes field access and placement but cannot
+claim initialized residency or coherent store history from std calls alone.
+The matching [vstd primitive source](https://raw.githubusercontent.com/verus-lang/verus/671956e/source/vstd/atomic.rs)
+owns a private native atomic and pairs it with a permission; its operations use
+SeqCst. The [ghost wrapper source](https://raw.githubusercontent.com/verus-lang/verus/671956e/source/vstd/atomic_ghost.rs)
+constructs this primitive and associates the permission with an invariant. These
+constructors create an atomic rather than importing an existing native field.
+A separate newly-created proof atomic is not evidence for the existing field.
+Connecting that field to its permission and preserving native ordering remains
+required; no cast, ownership axiom or TCB exception was added to bridge it.
+
+
+### Shared Cache pin CAS retry control
+
+Native CacheNode, the Loom temporal-reclamation reader, and both Verus pin
+acquisition methods now instantiate `pin_transitions::acquire_retry!`.
+It loads once, classifies zero/overflow, attempts a weak CAS, returns a pin only
+on success, and reuses the observed value on failure. The native implementation
+retains Relaxed load/failure and the caller's Relaxed or Release success ordering.
+The Verus backend retains vstd's SeqCst primitive; its invariant reconnects each
+successful CAS with the same instance's linear pin token. An anchored acquisition
+also proves the failed-CAS observation remains positive, including spurious failure.
+
+This shares executable retry control, not the atomic field or its weak-memory
+contract. There is no termination/fairness claim for a contended or spuriously
+failing CAS loop. Allocation identity, native atomic permission adoption, and
+Box/Drop refinement remain open. No assumption or external specification was added.
+
+
+### Shared final Cache pin release tail and fence boundary
+
+`pin_transitions::release_pin!` now shares decrement-before-classification and
+last-pin-only fence-before-retirement control between CacheNode, both roles of
+the Loom temporal-reclamation model, the focused Loom final-holder test, and
+both Verus atomic pin widths. The latter consumes exactly the same instance's
+pin token and returns a retirement token iff the observed decrement is final.
+
+Native/Loom supply a Release fetch_sub and an Acquire fence. Verus uses vstd's
+SeqCst fetch_sub and an empty fence expression: the installed verifier rejects
+the direct std fence call as unsupported. No assume_specification was added.
+Consequently this proves the token/branch correspondence, not weak-memory fence
+semantics. `just cache-release-ordering` supplies separate executable evidence:
+the unchanged focused Loom test passes, while removing the shared fence or
+placing it after retirement fails a stale-value assertion. Parser/compiler
+errors and an absent/filtered test do not count as a successful mutation gate.
+The gate copies sources to a temporary workspace and is wired into CI after
+Verus. CI execution itself has not been performed locally.
+
+
+### Native Box recovery support boundary
+
+`tools/probe_verus_heap_contracts.py` distinguishes proved, unproved and unsupported
+outcomes using the installed verifier. With 0.2026.09.13.671956e, Box::new's value
+and a PointsTo-guarded pointer borrow verify. Box::into_raw, Box::from_raw and the
+Box::leak-to-pointer expression used by Cache are unsupported. Compiler rejection
+is reported as unsupported, never as successful verification; unexpected compiler
+errors fail the diagnostic. This is an informational probe, not a gate requiring
+future Verus versions to retain those limitations.
+
+Thus recovering HeapPermission from the retirement ledger still does not establish
+the native Box handoff. Adding a local trusted specification for that handoff would
+move it into the TCB rather than prove it; no such specification has been added.
+Likewise, replacing in-place Box destruction with ptr_read would change production
+behavior for large inline values and is not an acceptable proof-only substitute.
+The native inline-payload test now verifies that Drop executes at the exact address
+previously exposed by the lease, in addition to alignment and exactly-once drop.
+
+
+### Reader-owned retained Cache observations
+
+Retained Ticket now owns its Cache observation token as well as its receipt. A
+type invariant relates their exact HeapPermission. Node identity is an explicit
+precondition threaded through Node and Snapshot; completion consumes the matching
+node observation and receipt together. The ledger retains admission shares and
+count/coverage bookkeeping, not the reader's Cache observation fragment.
+
+Pin CAS and immutable-generation/resident loads borrow directly from Ticket and
+no longer execute a ledger lock operation. Registration, completion, final-pin
+freezing and recovery still use the proof ledger lock, so native synchronization
+refinement is not complete. The separate vstd pin atomic also remains separate
+from the native allocation's atomic field. No trusted adapter or assumption was
+introduced by this resource redistribution.
+
+
+### Pin release before proof ledger locking
+
+Node::release now performs the pin atomic decrement before acquiring the ledger
+lock. A nonfinal decrement returns immediately. Only a final retirement token
+allows construction of the RetiredNode and subsequent observation/coverage
+freezing under that lock. The earlier release_owned_covered helper was removed;
+its lock-spanning release is no longer the queued node's executable behavior.
+
+The interval between final decrement and ledger freezing cannot issue a new
+observation from a live resident pin: the pin resource machine excludes a live
+pin once final retirement is issued. Existing reader-owned Tickets continue to
+retain observations until their own completion. This uses existing resource
+contracts, not a new trusted specification. Final completion, observation
+registration/completion and recovery still have proof-only synchronization.

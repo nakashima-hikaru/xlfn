@@ -35,6 +35,12 @@ tokenized_state_machine!(cache_pins<Perm> {
         pub retiring: bool,
         #[sharding(option)]
         pub retirement: Option<Perm>,
+        #[sharding(persistent_map)] pub retired_history: Map<(), ()>,
+    }
+
+    #[invariant]
+    pub fn retirement_history_is_terminal(&self) -> bool {
+        self.retired_history.dom().contains(()) ==> self.retiring
     }
 
     #[invariant]
@@ -80,13 +86,33 @@ tokenized_state_machine!(cache_pins<Perm> {
             init observing = 0;
             init retiring = false;
             init retirement = None;
+            init retired_history = Map::empty();
         }
     }
+
+    transition! { remember_retirement(x: Perm) {
+        have retirement >= Some(x);
+        add retired_history (union)= [() => ()];
+    } }
+    property! { live_excludes_retirement(x: Perm, kind: PinKind) {
+        have pins >= {(x, kind)};
+        have retired_history >= [() => ()];
+        assert(false);
+    } }
+    #[inductive(remember_retirement)] fn remember_retirement_inductive(pre: Self, post: Self, x: Perm) {}
 
     property! {
         pin_positive(x: Perm, kind: PinKind) {
             have pins >= {(x, kind)};
             assert(pre.count > 0);
+        }
+    }
+
+    property! {
+        retirement_zero(x: Perm) {
+            have retirement >= Some(x);
+            assert(pre.count == 0);
+            assert(pre.retiring);
         }
     }
 
@@ -162,6 +188,13 @@ tokenized_state_machine!(cache_pins<Perm> {
             update count = 0;
             update retiring = true;
             add retirement += Some(x);
+        }
+    }
+
+    property! {
+        retirement_allocation(x: Perm) {
+            have retirement >= Some(x);
+            assert(pre.allocation == Some(x));
         }
     }
 

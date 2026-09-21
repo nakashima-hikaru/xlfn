@@ -19,6 +19,14 @@ impl<T> RetiredNode<T> {
         self.ticket@.value().ptr() == self.pointer && self.ticket@.value().is_init()
     }
 
+    pub fn ticket(&self) -> (ticket: Tracked<&cache_pins::retirement<HeapPermission<T>>>)
+        ensures ticket@.instance_id() == self.node_id(), ticket@.value() == self.memory(),
+    { Tracked(self.ticket.borrow()) }
+
+    pub fn into_ticket(self) -> (ticket: Tracked<cache_pins::retirement<HeapPermission<T>>>)
+        ensures ticket@.instance_id() == self.node_id(), ticket@.value() == self.memory(),
+    { self.ticket }
+
     /// The final-pin ticket is moved into the payload, not represented by a
     /// copied node ID. Its memory/allocator ownership remains in node storage.
     pub fn from_ticket(pointer: *mut T,
@@ -72,6 +80,28 @@ pub fn recover_retired<T>(entry: RetiredNode<T>,
     let tracked memory = recover_memory(node, allocation, count, observing, retiring, entry.ticket.get());
     Tracked(memory)
 }
+/// Derive zero observations from actual sealed-zero drain leases, while the
+/// final-pin retirement ticket and allocation token identify the exact memory.
+pub fn recover_after_drain<T>(entry: RetiredNode<T>,
+    Tracked(node): Tracked<&cache_pins::Instance<HeapPermission<T>>>,
+    Tracked(allocation): Tracked<&mut cache_pins::allocation<HeapPermission<T>>>,
+    Tracked(count): Tracked<&cache_pins::count<HeapPermission<T>>>,
+    Tracked(observations): Tracked<&super::observation_coverage::ObservationLedger<'_, T>>,
+    Tracked(retiring): Tracked<&cache_pins::retiring<HeapPermission<T>>>,
+    Tracked(drains): Tracked<&super::rotation::drain::atomic_counter::DrainSet>) -> (memory: Tracked<HeapPermission<T>>)
+    requires entry.node_id() == node.id(), old(allocation).instance_id() == node.id(),
+        old(allocation).value() == Some(entry.memory()), count.instance_id() == node.id(),
+        retiring.instance_id() == node.id(), count.value() == 0, retiring.value(),
+        observations.inv(), observations.node_id() == node.id(), observations.domain() == node.domain(),
+        drains.inv(), drains.covers(observations.coverage()),
+    ensures memory@ == entry.memory(), memory@.ptr() == entry.pointer(),
+        final(allocation).instance_id() == node.id(), final(allocation).value().is_none(),
+{
+    proof { super::observation_coverage::zero_after_drain(observations, drains); }
+    let tracked observing = observations.count();
+    recover_retired(entry, Tracked(node), Tracked(allocation), Tracked(count), Tracked(observing), Tracked(retiring))
+}
+
 }
 
 
