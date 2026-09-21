@@ -1,25 +1,28 @@
 //! Verus formal verification of DrainGate concurrent protocol and permit ownership.
 //!
-//! Verifies the safety invariants and linear capability model of `crates/xlfn-kernel/src/drain_gate.rs`.
-//! All proofs ensure zero verification failures, zero assumes, and zero runtime overhead.
+//! Shared control-flow refinement plus an abstract permit-conservation model.
+//! A SeqCst atomic-counter backend owns real linear permits. Native ordering,
+//! waiter backend composition and cross-layer raw pointer lifetimes remain separate.
 
 use vstd::prelude::*;
 
+#[path = "../../../../crates/xlfn-kernel/src/drain_gate/protocol.rs"]
+mod protocol;
+#[path = "../../../../crates/xlfn-kernel/src/sealable_counter/transitions.rs"]
+pub(crate) mod transitions;
+
+pub(crate) mod refinement;
+pub mod permits;
+pub mod stripe_ownership;
+
 verus! {
-
-// ============================================================================
-// Bit Constants & Representation (matching DrainGate / SealableCounter)
-// ============================================================================
-
-pub const SEALED_BIT: u64 = 0x8000_0000_0000_0000;
-pub const WAITING_BIT: u64 = 0x4000_0000_0000_0000;
-pub const ACTIVE_COUNT_MASK: u64 = 0x3FFF_FFFF_FFFF_FFFF;
 
 // ============================================================================
 // Abstract Drain Gate State
 // ============================================================================
 
 pub struct DrainGateState {
+    pub capacity: nat,
     pub sealed: bool,
     pub waiting: bool,
     pub active: nat,
@@ -28,22 +31,25 @@ pub struct DrainGateState {
 
 /// System Invariant for DrainGate:
 /// 1. Every outstanding permit corresponds to an allocated active count.
-/// 2. Active count never exceeds ACTIVE_COUNT_MASK.
+/// 2. Active count never exceeds the decoded machine capacity.
 pub open spec fn drain_gate_inv(s: DrainGateState) -> bool {
     &&& s.outstanding_permits <= s.active
-    &&& s.active <= ACTIVE_COUNT_MASK as nat
+    &&& s.active <= s.capacity
 }
 
 // ============================================================================
 // Abstract Transitions
 // ============================================================================
 
-/// State transition on admission acquire (try_enter / try_enter_owned).
+/// Successful-admission relation (try_enter / try_enter_owned).
+/// None means no successful transition, not a runtime rejection classification;
+/// the imported kernel retains distinct Rejected and FailStop outcomes.
 pub open spec fn step_acquire(s: DrainGateState) -> Option<DrainGateState> {
-    if s.sealed || s.active >= ACTIVE_COUNT_MASK as nat {
+    if s.sealed || s.active >= s.capacity {
         None
     } else {
         Some(DrainGateState {
+            capacity: s.capacity,
             sealed: s.sealed,
             waiting: s.waiting,
             active: (s.active + 1) as nat,
@@ -58,6 +64,7 @@ pub open spec fn step_release(s: DrainGateState) -> Option<DrainGateState> {
         None
     } else {
         Some(DrainGateState {
+            capacity: s.capacity,
             sealed: s.sealed,
             waiting: s.waiting,
             active: (s.active - 1) as nat,
@@ -69,6 +76,7 @@ pub open spec fn step_release(s: DrainGateState) -> Option<DrainGateState> {
 /// State transition on gate sealing.
 pub open spec fn step_seal(s: DrainGateState) -> DrainGateState {
     DrainGateState {
+        capacity: s.capacity,
         sealed: true,
         waiting: s.waiting,
         active: s.active,
@@ -79,6 +87,7 @@ pub open spec fn step_seal(s: DrainGateState) -> DrainGateState {
 /// State transition on waiter registration (mark_waiting).
 pub open spec fn step_mark_waiting(s: DrainGateState) -> DrainGateState {
     DrainGateState {
+        capacity: s.capacity,
         sealed: s.sealed,
         waiting: true,
         active: s.active,
@@ -86,22 +95,16 @@ pub open spec fn step_mark_waiting(s: DrainGateState) -> DrainGateState {
     }
 }
 
-/// State transition on wait_until_idle completion.
-pub open spec fn step_wait_until_idle(s: DrainGateState) -> DrainGateState
-    recommends s.waiting,
-{
-    DrainGateState {
-        sealed: s.sealed,
-        waiting: s.waiting,
-        active: 0,
-        outstanding_permits: 0,
-    }
+/// Completion is an observation, never a transition that drains live permits.
+pub open spec fn step_wait_until_idle(s: DrainGateState) -> Option<DrainGateState> {
+    if s.waiting && s.active == 0 { Some(s) } else { None }
 }
 
 /// State transition on generation reopen.
 pub open spec fn step_reopen(s: DrainGateState) -> Option<DrainGateState> {
     if s.sealed && s.active == 0 && s.outstanding_permits == 0 {
         Some(DrainGateState {
+            capacity: s.capacity,
             sealed: false,
             waiting: false,
             active: 0,
@@ -146,16 +149,12 @@ pub proof fn dg2_sealed_precludes_new_permits(s: DrainGateState)
 pub proof fn dg3_seal_and_wait_establishes_quiescence(s: DrainGateState)
     requires
         drain_gate_inv(s),
+        s.sealed,
+        step_wait_until_idle(s).is_some(),
     ensures
-        ({
-            let s_sealed = step_seal(s);
-            let s_waiting = step_mark_waiting(s_sealed);
-            let s_idle = step_wait_until_idle(s_waiting);
-            &&& s_idle.sealed
-            &&& s_idle.active == 0
-            &&& s_idle.outstanding_permits == 0
-            &&& drain_gate_inv(s_idle)
-        }),
+        s.active == 0,
+        s.outstanding_permits == 0,
+        step_wait_until_idle(s) == Some(s),
 {
 }
 
@@ -173,27 +172,8 @@ pub proof fn dg4_reclamation_requires_zero_permits(s: DrainGateState)
     // s.outstanding_permits <= s.active == 0
 }
 
-/// **[DG-5] Final Release Mutual Exclusion (Cooperating with SC-9)**:
-/// When a waiter is registered (`waiting == true`) and `active == 1`, a fast-path release
-/// without notification is strictly impossible.
-/// The release must take the slow path through the notification mutex, ensuring that
-/// the gate's owner cannot observe `active == 0` and reclaim the gate while the final release
-/// is accessing the gate.
-pub proof fn dg5_final_release_cannot_vanish_before_lock(s: DrainGateState, raw_state: u64)
-    requires
-        drain_gate_inv(s),
-        s.waiting,
-        s.active == 1,
-        (raw_state & WAITING_BIT) != 0,
-        (raw_state & ACTIVE_COUNT_MASK) == 1,
-    ensures
-        // release_without_notification_update rejects:
-        ({
-            let active = raw_state & ACTIVE_COUNT_MASK;
-            active == 1 && (raw_state & WAITING_BIT) != 0
-        }),
-{
-}
+// DG-5 is proved against the actual shared 32/64-bit transition functions in
+// refinement.rs, and release_tail_refines checks the lock/notify/unlock order.
 
 /// **[DG-INV] Invariant Preservation**:
 /// Every valid state transition preserves the DrainGate invariant `drain_gate_inv`.
@@ -225,3 +205,9 @@ pub proof fn dg_invariant_preservation_reopen(s: DrainGateState, s_next: DrainGa
 }
 
 } // verus!
+
+pub(crate) mod permit_shares;
+
+pub mod atomic_counter;
+
+pub mod atomic_stripes;

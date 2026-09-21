@@ -12,7 +12,9 @@
     reason = "binding reads use audited non-owning pointers protected by the read domain"
 )]
 
-use super::domain::{HandleBindingDomainPermit, HandleReadDomain};
+#[cfg(test)]
+use super::domain::HandleBindingDomainPermit;
+use super::domain::HandleReadDomain;
 use super::object::{ObjectBinding, ObjectCell};
 use super::token::HandleId;
 use crate::error::DomainErrorCode;
@@ -103,7 +105,17 @@ pub(crate) struct BindingSnapshot {
 /// being retired while it is projected into a typed handle.
 pub(crate) struct BindingReadLease<'domain> {
     record: BindingPtr,
-    _permit: Option<HandleBindingDomainPermit<'domain>>,
+    _protection: BindingReadProtection<'domain>,
+}
+
+enum BindingReadProtection<'domain> {
+    Scoped {
+        _witness: super::HandleDomainWitness<'domain>,
+    },
+    #[cfg(test)]
+    Standalone {
+        _permit: HandleBindingDomainPermit<'domain>,
+    },
 }
 
 impl<'domain> BindingReadLease<'domain> {
@@ -126,6 +138,8 @@ impl<'domain> BindingReadLease<'domain> {
         self.record().object.acquire_lease()
     }
 }
+
+mod protocol;
 
 const BINDINGS_PER_PAGE: usize = 256;
 type BindingPage = [AtomicPtr<BindingRecord>; BINDINGS_PER_PAGE];
@@ -160,24 +174,35 @@ impl PublishedBindings {
         let page = self.pages.get(slot / BINDINGS_PER_PAGE)?.get()?;
         Some(&page[slot % BINDINGS_PER_PAGE])
     }
+}
 
-    fn insert(&self, id: HandleId, record: BindingPtr) {
+/// The publication mutator borrows the actual matching write guard for every
+/// empty check/store or removal CAS. Its exclusive borrow prevents both guard
+/// release and a second writer capability until the mutation finishes.
+struct PublicationWriter<'guard, 'table> {
+    published: &'table PublishedBindings,
+    _guard: &'guard mut RwLockWriteGuard<'table, RegistryState>,
+}
+
+impl PublicationWriter<'_, '_> {
+    fn insert(&mut self, id: HandleId, record: BindingPtr) {
         let slot = id.slot as usize;
-        let Some(page) = self.pages.get(slot / BINDINGS_PER_PAGE) else {
+        let Some(page) = self.published.pages.get(slot / BINDINGS_PER_PAGE) else {
             xlfn_kernel::invariant::fail_stop();
         };
         let page = page.get_or_init(|| {
             Box::new([const { AtomicPtr::new(std::ptr::null_mut()) }; BINDINGS_PER_PAGE])
         });
         let entry = &page[slot % BINDINGS_PER_PAGE];
-        if !entry.load(Ordering::Acquire).is_null() {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        entry.store(record.0.as_ptr(), Ordering::Release);
+        protocol::publish_binding!(
+            entry.load(Ordering::Acquire).is_null(),
+            xlfn_kernel::invariant::fail_stop(),
+            entry.store(record.0.as_ptr(), Ordering::Release)
+        );
     }
 
-    fn remove(&self, id: HandleId, expected: BindingPtr) {
-        let Some(entry) = self.entry(id.slot) else {
+    fn remove(&mut self, id: HandleId, expected: BindingPtr) {
+        let Some(entry) = self.published.entry(id.slot) else {
             xlfn_kernel::invariant::fail_stop();
         };
         if entry
@@ -229,6 +254,19 @@ impl BindingTable {
         }
     }
 
+    fn publication_writer<'guard, 'table>(
+        &'table self,
+        guard: &'guard mut RwLockWriteGuard<'table, RegistryState>,
+    ) -> Option<PublicationWriter<'guard, 'table>> {
+        if !std::ptr::eq(RwLockWriteGuard::rwlock(guard), &self.state) {
+            return None;
+        }
+        Some(PublicationWriter {
+            published: &self.published,
+            _guard: guard,
+        })
+    }
+
     pub(crate) fn read_domain(&self) -> &HandleReadDomain {
         &self.read_domain
     }
@@ -239,21 +277,21 @@ impl BindingTable {
         id: HandleId,
         witness: super::HandleDomainWitness<'domain>,
     ) -> XllResult<BindingReadLease<'domain>> {
-        if witness.domain() != NonNull::from(self.read_domain()) {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        let snapshot = self.published.load(id.slot);
-        let record = snapshot.record.ok_or(XllError::StaleHandle)?;
-        // SAFETY: witness proves the calling scope holds an active permit for self.read_domain,
-        // and snapshot was loaded directly from self.published which is governed by self.read_domain.
-        let record_ref = unsafe { record.0.as_ref() };
-        if record_ref.id != id || record_ref.state() != BindingState::Live {
-            return Err(XllError::StaleHandle);
-        }
-        Ok(BindingReadLease {
-            record,
-            _permit: None,
-        })
+        protocol::read_binding!(record, record_ref;
+            witness.domain() == NonNull::from(self.read_domain()),
+            xlfn_kernel::invariant::fail_stop(),
+            self.published.load(id.slot).record,
+            return Err(XllError::StaleHandle),
+            // SAFETY: authorization precedes loading and dereferencing a pointer
+            // published by this domain. The retained witness prevents reclamation.
+            unsafe { record.0.as_ref() },
+            record_ref.id == id && record_ref.state() == BindingState::Live,
+            return Err(XllError::StaleHandle),
+            Ok(BindingReadLease {
+                record,
+                _protection: BindingReadProtection::Scoped { _witness: witness },
+            })
+        )
     }
 
     #[cfg(test)]
@@ -268,7 +306,7 @@ impl BindingTable {
         }
         Ok(BindingReadLease {
             record,
-            _permit: Some(permit),
+            _protection: BindingReadProtection::Standalone { _permit: permit },
         })
     }
 
@@ -366,26 +404,19 @@ impl BindingTable {
         let mut retired = Vec::with_capacity(live_bindings as usize);
         state.free.clear();
         for index in 0..state.slots.len() {
-            let reusable = {
-                let slot = &mut state.slots[index];
-                if let Some(record) = slot.record.take() {
-                    // Touch only live publications, independent of the
-                    // configured upper bound or empty publication pages.
-                    self.published
-                        .remove(record.id, BindingPtr::from_ref(&record));
-                    record
-                        .state
-                        .store(BindingState::Retired as u8, Ordering::Release);
-                    retired.push(record);
-                }
-                if let Some(next) = slot.next_generation.next() {
-                    slot.next_generation = next;
-                    true
-                } else {
-                    false
-                }
-            };
-            if reusable {
+            if let Some(record) = state.slots[index].record.take() {
+                // Touch only live publications, independent of page capacity.
+                self.publication_writer(&mut state)
+                    .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop())
+                    .remove(record.id, BindingPtr::from_ref(&record));
+                record
+                    .state
+                    .store(BindingState::Retired as u8, Ordering::Release);
+                retired.push(record);
+            }
+            let slot = &mut state.slots[index];
+            if let Some(next) = slot.next_generation.next() {
+                slot.next_generation = next;
                 state.free.push(index);
             }
         }
@@ -416,7 +447,10 @@ impl BindingReservation<'_> {
         let slot = &mut state.slots[self.index];
         slot.record = Some(record);
         let pointer = BindingPtr::from_ref(slot.record.as_ref().unwrap().as_ref());
-        self.table.published.insert(self.id, pointer);
+        self.table
+            .publication_writer(&mut state)
+            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop())
+            .insert(self.id, pointer);
         state.live_bindings = state
             .live_bindings
             .checked_add(1)
@@ -476,7 +510,11 @@ impl BindingRemoval<'_> {
         retired
             .state
             .store(BindingState::Retired as u8, Ordering::Release);
-        self.table.published.remove(self.id, self.record);
+        self.table
+            .publication_writer(&mut state)
+            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop())
+            .remove(self.id, self.record);
+        let slot = &mut state.slots[self.id.slot as usize];
         let reusable = if let Some(next) = slot.next_generation.next() {
             slot.next_generation = next;
             true
@@ -518,6 +556,24 @@ impl Drop for BindingTable {
 mod tests {
     use super::*;
     use crate::handle::registry::HandleRegistry;
+
+    #[test]
+    fn miri_publication_writer_requires_matching_table_guard() {
+        let first = BindingTable::new(1);
+        let second = BindingTable::new(1);
+        let mut first_guard = first.state.write();
+        {
+            let writer = first.publication_writer(&mut first_guard).unwrap();
+            assert!(std::ptr::eq(writer.published, &first.published));
+            assert!(second.publication_writer(&mut first_guard).is_none());
+            assert!(first.state.try_write().is_none());
+        }
+        drop(first_guard);
+        assert!(first.state.try_write().is_some());
+        let mut second_guard = second.state.write();
+        assert!(first.publication_writer(&mut second_guard).is_none());
+        assert!(second.publication_writer(&mut second_guard).is_some());
+    }
 
     #[test]
     fn zero_limit_and_exhausted_slots_do_not_publish_into_page_padding() {

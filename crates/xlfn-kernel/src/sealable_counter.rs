@@ -3,6 +3,7 @@
 pub mod transitions;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use transitions::idle_seal_logic;
 
 use crate::invariant::fail_stop;
 
@@ -158,7 +159,7 @@ impl SealableCounter {
     ///
     /// Linearization Point: atomic fetch_or setting WAITING_BIT.
     pub(crate) fn mark_waiting(&self) -> usize {
-        self.state.fetch_or(WAITING_BIT, Ordering::AcqRel) & ACTIVE_COUNT_MASK
+        transitions::mark_waiting!(self.state, WAITING_BIT, ACTIVE_COUNT_MASK)
     }
 
     /// Linearization Point: atomic fetch_or setting SEALED_BIT.
@@ -174,18 +175,7 @@ impl SealableCounter {
     /// leaves the counter unchanged, including when a reader won admission.
     #[inline]
     pub(crate) fn try_seal_if_idle(&self) -> bool {
-        let state = self.state.load(Ordering::Acquire);
-        if state & (SEALED_BIT | ACTIVE_COUNT_MASK) != 0 {
-            return false;
-        }
-        self.state
-            .compare_exchange(
-                state,
-                state | SEALED_BIT,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
+        transitions::try_idle_seal!(self.state, SEALED_BIT, ACTIVE_COUNT_MASK)
     }
 
     /// Rolls back an idle seal without discarding an existing notification
@@ -193,8 +183,7 @@ impl SealableCounter {
     pub(crate) fn undo_idle_seal(&self) -> Result<(), ReopenError> {
         self.state
             .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
-                (state & SEALED_BIT != 0 && state & ACTIVE_COUNT_MASK == 0)
-                    .then_some(state & !SEALED_BIT)
+                transitions::undo_idle_seal_logic!(state, SEALED_BIT, ACTIVE_COUNT_MASK)
             })
             .map(|_| ())
             .map_err(|_| ReopenError)
@@ -267,18 +256,7 @@ pub(crate) mod loom_support {
         }
 
         pub(crate) fn try_seal_if_idle(&self) -> bool {
-            let state = self.state.load(Ordering::Acquire);
-            if state & (SEALED_BIT | ACTIVE_COUNT_MASK) != 0 {
-                return false;
-            }
-            self.state
-                .compare_exchange(
-                    state,
-                    state | SEALED_BIT,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok()
+            transitions::try_idle_seal!(self.state, SEALED_BIT, ACTIVE_COUNT_MASK)
         }
 
         pub(crate) fn try_acquire(&self) -> Result<(), Sealed> {
@@ -308,7 +286,7 @@ pub(crate) mod loom_support {
         }
 
         pub(crate) fn mark_waiting(&self) -> usize {
-            self.state.fetch_or(WAITING_BIT, Ordering::AcqRel) & ACTIVE_COUNT_MASK
+            transitions::mark_waiting!(self.state, WAITING_BIT, ACTIVE_COUNT_MASK)
         }
 
         pub(crate) fn seal(&self) {

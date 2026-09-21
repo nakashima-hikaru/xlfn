@@ -130,6 +130,7 @@ def main() -> int:
     search_dirs = [
         ROOT / "verification/verus",
         ROOT / "crates/xlfn-kernel",
+        ROOT / "crates/xlfn/src",
     ]
 
     assumes, unapproved_externals = audit_verus_files(search_dirs, allowlist_items)

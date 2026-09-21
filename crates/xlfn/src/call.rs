@@ -48,11 +48,40 @@ impl CallScratch {
     }
 }
 
-/// A generative lifetime token for one generated Excel call boundary.
-enum HandlePermits {
-    Empty,
-    Single(crate::handle::HandleDomainPermit),
-    Multiple(Vec<crate::handle::HandleDomainPermit>),
+mod permits;
+type HandlePermits = permits::Retained<crate::handle::HandleDomainPermit>;
+
+#[derive(Clone, Copy)]
+enum HandleWitnessSource<'scope> {
+    Scope {
+        _scope: &'scope CallScope<'scope>,
+        domain: std::ptr::NonNull<crate::handle::HandleReadDomain>,
+    },
+    #[cfg(test)]
+    Permit(&'scope crate::handle::HandleDomainPermit),
+}
+
+/// A real borrow of the append-only call scope or the owning permit.
+/// Scope construction stays private to the code that retains its permits.
+#[derive(Clone, Copy)]
+pub(crate) struct HandleDomainWitness<'scope> {
+    source: HandleWitnessSource<'scope>,
+}
+impl<'scope> HandleDomainWitness<'scope> {
+    #[cfg(test)]
+    pub(crate) fn from_permit(permit: &'scope crate::handle::HandleDomainPermit) -> Self {
+        Self {
+            source: HandleWitnessSource::Permit(permit),
+        }
+    }
+    #[inline]
+    pub(crate) fn domain(&self) -> std::ptr::NonNull<crate::handle::HandleReadDomain> {
+        match self.source {
+            HandleWitnessSource::Scope { domain, .. } => domain,
+            #[cfg(test)]
+            HandleWitnessSource::Permit(permit) => permit.domain(),
+        }
+    }
 }
 
 /// A generative lifetime token for one generated Excel call boundary.
@@ -99,20 +128,22 @@ impl<'call> CallScope<'call> {
         match &*permits {
             HandlePermits::Empty => {}
             HandlePermits::Single(permit) => {
-                if permit.domain == domain_ptr {
-                    // SAFETY: an active permit for `domain` is retained in `self.handle_permits`
-                    // for the invariant brand lifetime of this `CallScope`.
-                    return Ok(unsafe {
-                        crate::handle::HandleDomainWitness::new_unchecked(domain_ptr)
+                if permit.domain() == domain_ptr {
+                    return Ok(HandleDomainWitness {
+                        source: HandleWitnessSource::Scope {
+                            _scope: self,
+                            domain: domain_ptr,
+                        },
                     });
                 }
             }
             HandlePermits::Multiple(list) => {
-                if list.iter().any(|p| p.domain == domain_ptr) {
-                    // SAFETY: an active permit for `domain` is retained in `self.handle_permits`
-                    // for the invariant brand lifetime of this `CallScope`.
-                    return Ok(unsafe {
-                        crate::handle::HandleDomainWitness::new_unchecked(domain_ptr)
+                if list.iter().any(|p| p.domain() == domain_ptr) {
+                    return Ok(HandleDomainWitness {
+                        source: HandleWitnessSource::Scope {
+                            _scope: self,
+                            domain: domain_ptr,
+                        },
                     });
                 }
             }
@@ -122,21 +153,13 @@ impl<'call> CallScope<'call> {
         // invariant brand excludes owners local to that operation. The domain
         // therefore remains alive until the constructor drops every permit.
         let permit = unsafe { domain.enter_owned()? };
-        match std::mem::replace(&mut *permits, HandlePermits::Empty) {
-            HandlePermits::Empty => {
-                *permits = HandlePermits::Single(permit);
-            }
-            HandlePermits::Single(existing) => {
-                *permits = HandlePermits::Multiple(vec![existing, permit]);
-            }
-            HandlePermits::Multiple(mut list) => {
-                list.push(permit);
-                *permits = HandlePermits::Multiple(list);
-            }
-        }
-        // SAFETY: `permit` was stored in `self.handle_permits` and remains active for
-        // the entire invariant brand lifetime of this `CallScope`.
-        Ok(unsafe { crate::handle::HandleDomainWitness::new_unchecked(domain_ptr) })
+        permits.insert(permit);
+        Ok(HandleDomainWitness {
+            source: HandleWitnessSource::Scope {
+                _scope: self,
+                domain: domain_ptr,
+            },
+        })
     }
 }
 

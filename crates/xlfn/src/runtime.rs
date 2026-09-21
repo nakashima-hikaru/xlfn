@@ -785,7 +785,10 @@ impl<A: crate::Addin> Default for Runtime<A> {
 #[cfg(test)]
 impl<A: crate::Addin> Runtime<A> {
     pub(crate) fn cleanup_test_runtime(&self) {
-        if !matches!(self.phase(), LifecyclePhase::Closed) {
+        // A locally quarantined/unopened fixture does not own the global
+        // module epoch and must not close another test's active ingress.
+        let owns_module = self.lifecycle.test_module_lease.lock().is_some();
+        if owns_module && !matches!(self.phase(), LifecyclePhase::Closed) {
             let ingress = crate::module_runtime::ingress();
             if matches!(
                 ingress.phase(),
@@ -1170,6 +1173,22 @@ pub(crate) mod tests {
         closed_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         closer.join().unwrap();
         assert_eq!(runtime.phase(), LifecyclePhase::Closed);
+    }
+
+    #[test]
+    fn unopened_quarantined_fixture_does_not_close_another_runtime() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let active = Runtime::<()>::new();
+        let opening = active.begin_open().unwrap();
+        let mut opening = active.publish(opening, (), ());
+        active.finish_open(&mut opening, Vec::new()).unwrap();
+        let unopened = Runtime::<()>::new();
+        unopened.lifecycle_orchestrator().quarantine();
+        drop(unopened);
+        assert_eq!(
+            crate::module_runtime::ingress().phase(),
+            crate::ingress::PHASE_OPEN
+        );
     }
 
     #[test]

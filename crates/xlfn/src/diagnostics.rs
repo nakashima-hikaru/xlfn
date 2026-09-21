@@ -950,14 +950,24 @@ mod tests {
 
     #[test]
     fn failed_file_sink_construction_preserves_the_current_sink() {
+        // Other tests may report through the global sink without replacing it.
+        // Count this test's event while still detecting duplicate delivery.
+        struct PreservedSink(Arc<AtomicUsize>);
+        impl DiagnosticSink for PreservedSink {
+            fn report(&self, event: &DiagnosticEvent<'_>) {
+                if event.udf_id == "failed_file_sink_construction_preserved" {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
         let _router_guard = prepare_global_router();
         let delivered = Arc::new(AtomicUsize::new(0));
-        set_diagnostic_sink(CountingSink(Arc::clone(&delivered))).unwrap();
+        set_diagnostic_sink(PreservedSink(Arc::clone(&delivered))).unwrap();
         let directory = tempfile::tempdir().unwrap();
 
         let result = install_file_diagnostic_sink_at(directory.path().to_path_buf());
         assert!(matches!(result, Err(DiagnosticInitError::Io(_))));
-        report_no_unwind("preserved", &XllError::Panic);
+        report_no_unwind("failed_file_sink_construction_preserved", &XllError::Panic);
         clear_diagnostic_sink().unwrap();
         assert_eq!(delivered.load(Ordering::Relaxed), 1);
     }

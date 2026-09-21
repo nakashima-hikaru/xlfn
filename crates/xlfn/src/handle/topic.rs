@@ -250,22 +250,20 @@ impl TopicTable {
         // Map withdrawal precedes registration here. Rotation takes this
         // queue lock before publishing its next generation, establishing the
         // ordering needed by readers of copied, non-owning topic pointers.
-        loop {
-            let generation = self.read_domain.current_generation();
-            let mut queue = self.pending_reclaims[generation.index()].lock();
-            if self.read_domain.current_generation() != generation {
-                drop(queue);
-                std::hint::spin_loop();
-                continue;
-            }
-            queue.push(topic);
-            return;
-        }
+        self.read_domain.register_retired(
+            |generation| self.pending_reclaims[generation.index()].lock(),
+            |_, mut queue| queue.push(topic),
+        );
     }
 
-    fn drain_generation(&self, generation: DrainedGeneration) -> RetiredTopics {
-        let mut queue = self.pending_reclaims[generation.index()].lock();
-        std::mem::take(&mut *queue)
+    fn drain_generation(&self, generation: DrainedGeneration<'_>) -> RetiredTopics {
+        generation
+            .take_queue(
+                &self.read_domain,
+                |index| self.pending_reclaims[index].lock(),
+                |mut queue| std::mem::take(&mut *queue),
+            )
+            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop())
     }
 
     pub(crate) fn try_quiesce_and_drain(&self) -> RetiredTopics {
@@ -294,12 +292,18 @@ impl TopicTable {
     }
 
     pub(crate) fn seal_and_drain(&self) -> RetiredTopics {
-        self.read_domain.seal_and_wait();
-        let mut queue0 = self.pending_reclaims[0].lock();
-        let mut queue1 = self.pending_reclaims[1].lock();
-        let mut all = std::mem::take(&mut *queue0);
-        all.append(&mut *queue1);
-        all
+        let closed = self.read_domain.seal_and_wait();
+        closed
+            .take_queues(
+                &self.read_domain,
+                |index| self.pending_reclaims[index].lock(),
+                |mut first, mut second| {
+                    let mut all = std::mem::take(&mut *first);
+                    all.append(&mut *second);
+                    all
+                },
+            )
+            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop())
     }
 
     #[cfg(test)]

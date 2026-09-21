@@ -6,6 +6,19 @@
 
 use vstd::prelude::*;
 
+#[path = "../../../../crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"]
+mod protocol;
+pub(crate) use protocol::finish_rotation;
+#[path = "../../drain_gate/src/lib.rs"]
+pub(crate) mod drain;
+use drain::transitions;
+pub(crate) use drain::permits as gate_permits;
+pub(crate) mod refinement;
+pub(crate) mod registration;
+pub(crate) mod identity;
+pub(crate) mod lock_ownership;
+pub(crate) mod detachment;
+
 verus! {
 
 // ============================================================================
@@ -32,6 +45,7 @@ pub struct RotatingDomainState {
     pub current: nat,
     pub transition_pending: Option<nat>,
     pub closed: bool,
+    pub close_complete: bool,
 }
 
 pub open spec fn get_gen(s: RotatingDomainState, idx: nat) -> GenState {
@@ -54,14 +68,17 @@ pub open spec fn set_gen(s: RotatingDomainState, idx: nat, g: GenState) -> Rotat
 /// - current is always 0 or 1.
 /// - Each generation maintains its local drain invariant.
 /// - [RRD-D1]: at most one generation admits readers (!gen0.sealed && !gen1.sealed is FALSE).
-/// - [RRD-D5]: if closed, both generations are sealed and no generation can reopen.
+/// - Closure starts before the gates drain; completed closure certifies both idle.
 pub open spec fn rotating_domain_inv(s: RotatingDomainState) -> bool {
     &&& (s.current == 0 || s.current == 1)
     &&& gen_inv(s.gen0)
     &&& gen_inv(s.gen1)
     &&& (!s.gen0.sealed ==> s.gen1.sealed)
     &&& (!s.gen1.sealed ==> s.gen0.sealed)
-    &&& (s.closed ==> (s.gen0.sealed && s.gen1.sealed))
+    &&& (!s.gen0.sealed ==> s.current == 0)
+    &&& (!s.gen1.sealed ==> s.current == 1)
+    &&& (s.close_complete ==> (s.closed && s.gen0.sealed && s.gen1.sealed
+        && s.gen0.active == 0 && s.gen1.active == 0))
     &&& match s.transition_pending {
         Some(idx) => (idx == 0 || idx == 1) && get_gen(s, idx).sealed,
         None => true,
@@ -80,6 +97,7 @@ pub open spec fn initial_state() -> RotatingDomainState {
         current: 0,
         transition_pending: None,
         closed: false,
+        close_complete: false,
     }
 }
 
@@ -138,29 +156,39 @@ pub open spec fn step_transition_seal_current(s: RotatingDomainState) -> Option<
     }
 }
 
-/// Transition Step 2: Publish next generation and reopen it.
-/// (publish_next_locked: store next to current, then reopen next)
+/// Publish with both generations sealed; reopening is a distinct operation.
+pub open spec fn step_transition_publish(s: RotatingDomainState) -> Option<RotatingDomainState> {
+    match s.transition_pending {
+        Some(old) => {
+            let next = if old == 0 { 1 as nat } else { 0 as nat };
+            let g = get_gen(s, next);
+            if !s.closed && s.current == old && get_gen(s, old).sealed
+                && g.sealed && g.active == 0 && g.permits == 0 {
+                Some(RotatingDomainState { current: next, ..s })
+            } else { None }
+        },
+        None => None,
+    }
+}
+
+pub open spec fn step_transition_reopen(s: RotatingDomainState) -> Option<RotatingDomainState> {
+    match s.transition_pending {
+        Some(old) => {
+            let next = if old == 0 { 1 as nat } else { 0 as nat };
+            let g = get_gen(s, next);
+            if !s.closed && s.current == next && get_gen(s, old).sealed
+                && g.sealed && g.active == 0 && g.permits == 0 {
+                Some(set_gen(s, next, GenState { sealed: false, active: 0, permits: 0 }))
+            } else { None }
+        },
+        None => None,
+    }
+}
+
 pub open spec fn step_transition_publish_and_reopen(s: RotatingDomainState) -> Option<RotatingDomainState> {
-    if s.closed {
-        None
-    } else {
-        match s.transition_pending {
-            None => None,
-            Some(old) => {
-                let next = if old == 0 { 1 as nat } else { 0 as nat };
-                let next_g = get_gen(s, next);
-                // Can only reopen if next is idle and sealed
-                if next_g.sealed && next_g.active == 0 && next_g.permits == 0 {
-                    let reopened_g = GenState { sealed: false, active: 0, permits: 0 };
-                    Some(RotatingDomainState {
-                        current: next,
-                        ..set_gen(s, next, reopened_g)
-                    })
-                } else {
-                    None
-                }
-            }
-        }
+    match step_transition_publish(s) {
+        Some(published) => step_transition_reopen(published),
+        None => None,
     }
 }
 
@@ -170,7 +198,7 @@ pub open spec fn step_transition_quiesce_and_finish(s: RotatingDomainState) -> O
         None => None,
         Some(old) => {
             let old_g = get_gen(s, old);
-            if old_g.sealed && old_g.active == 0 && old_g.permits == 0 {
+            if s.current != old && old_g.sealed && old_g.active == 0 && old_g.permits == 0 {
                 Some(RotatingDomainState {
                     transition_pending: None,
                     ..s
@@ -182,14 +210,34 @@ pub open spec fn step_transition_quiesce_and_finish(s: RotatingDomainState) -> O
     }
 }
 
-/// Domain close (seal_and_wait).
-pub open spec fn step_seal_and_wait(s: RotatingDomainState) -> RotatingDomainState {
-    RotatingDomainState {
-        gen0: GenState { sealed: true, active: 0, permits: 0 },
-        gen1: GenState { sealed: true, active: 0, permits: 0 },
-        current: s.current,
-        transition_pending: None,
-        closed: true,
+/// The production closed flag is published before sealing/draining the gates.
+/// Neither operation manufactures a zero reader count.
+pub open spec fn step_begin_close(s: RotatingDomainState) -> RotatingDomainState {
+    RotatingDomainState { closed: true, ..s }
+}
+
+pub open spec fn step_close_seal(s: RotatingDomainState, idx: nat) -> Option<RotatingDomainState> {
+    if s.closed && idx < 2 {
+        Some(set_gen(s, idx, GenState { sealed: true, ..get_gen(s, idx) }))
+    } else { None }
+}
+
+pub open spec fn step_complete_close(s: RotatingDomainState) -> Option<RotatingDomainState> {
+    if s.closed && s.gen0.sealed && s.gen1.sealed
+        && s.gen0.active == 0 && s.gen1.active == 0 {
+        Some(RotatingDomainState { close_complete: true, ..s })
+    } else { None }
+}
+
+/// A delayed reader acts on its previously selected gate. There is no second
+/// current-generation check in production: exclusion comes from gate sealing.
+pub open spec fn step_reader_acquire_selected(s: RotatingDomainState, idx: nat) -> Option<RotatingDomainState> {
+    if idx >= 2 || get_gen(s, idx).sealed { None }
+    else {
+        let g = get_gen(s, idx);
+        Some(set_gen(s, idx, GenState {
+            active: g.active + 1, permits: g.permits + 1, ..g
+        }))
     }
 }
 
@@ -264,15 +312,13 @@ pub proof fn rrd_d4_quiescence_before_callback(s: RotatingDomainState)
 }
 
 /// **[RRD-D5] Closed Domain Never Reopens**:
-/// Once closed (`closed == true`), both generations remain sealed, and no transition or reopen
-/// can succeed.
+/// Once closure starts, new rotation/reopen operations are rejected.
+/// Readers that already passed the closed check are accounted for until drain.
 pub proof fn rrd_d5_closed_domain_never_reopens(s: RotatingDomainState)
     requires
         rotating_domain_inv(s),
         s.closed,
     ensures
-        s.gen0.sealed,
-        s.gen1.sealed,
         step_reader_enter(s, 0) == None::<RotatingDomainState>,
         step_reader_enter(s, 1) == None::<RotatingDomainState>,
         step_transition_seal_current(s) == None::<RotatingDomainState>,
@@ -335,12 +381,45 @@ pub proof fn rrd_step_transition_finish_preserves_inv(s: RotatingDomainState, s_
 {
 }
 
-pub proof fn rrd_step_seal_and_wait_preserves_inv(s: RotatingDomainState)
-    requires
-        rotating_domain_inv(s),
-    ensures
-        rotating_domain_inv(step_seal_and_wait(s)),
-{
-}
+pub proof fn rrd_close_steps_preserve_inv(s: RotatingDomainState, idx: nat)
+    requires rotating_domain_inv(s),
+    ensures rotating_domain_inv(step_begin_close(s)),
+        step_close_seal(s, idx).is_some() ==> rotating_domain_inv(step_close_seal(s, idx).unwrap()),
+        step_complete_close(s).is_some() ==> rotating_domain_inv(step_complete_close(s).unwrap()),
+{}
+
+pub proof fn rrd_publish_intermediate_preserves_inv(s: RotatingDomainState)
+    requires rotating_domain_inv(s),
+    ensures step_transition_publish(s).is_some() ==> rotating_domain_inv(step_transition_publish(s).unwrap()),
+        step_transition_reopen(s).is_some() ==> rotating_domain_inv(step_transition_reopen(s).unwrap()),
+{}
+
+pub proof fn rrd_stale_selection_is_excluded_by_sealing(s: RotatingDomainState, idx: nat)
+    requires rotating_domain_inv(s), idx != s.current,
+    ensures step_reader_acquire_selected(s, idx).is_none(),
+{}
+
+pub proof fn rrd_selected_acquire_preserves_inv(s: RotatingDomainState, idx: nat)
+    requires rotating_domain_inv(s),
+    ensures step_reader_acquire_selected(s, idx).is_some() ==>
+        rotating_domain_inv(step_reader_acquire_selected(s, idx).unwrap()),
+{}
 
 } // verus!
+
+pub mod barrier_ownership;
+
+pub mod locked_detachment;
+
+pub mod queue_preparation;
+
+#[path = "../../../../crates/xlfn/src/retirement_queue.rs"]
+pub(crate) mod queue_transitions;
+
+pub mod current_authority;
+pub mod current_atomic;
+
+pub mod atomic_registration;
+
+pub mod atomic_rotation;
+pub mod striped_rotation;

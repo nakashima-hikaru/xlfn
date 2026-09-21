@@ -1,55 +1,13 @@
 //! Quick Cache resident policy. Only stored values own a residency obligation.
 //! Cloned lookup/placeholder results are non-owning snapshots, as with Moka.
 
-use super::{Entry, VersionedKey, VersionedKeyRef};
-use crate::cache::{NodePtr, retire_resident};
+use super::{Entry, ResidentEntry, VersionedKey, VersionedKeyRef};
 use quick_cache::{
     OptionsBuilder, Weighter,
     sync::{Cache, DefaultLifecycle},
 };
 use std::collections::hash_map::RandomState;
 use std::hash::Hash;
-
-// Flat fields preserve the existing pointer + weight entry size on 64-bit hosts.
-struct ResidentEntry<V> {
-    node: NodePtr<V>,
-    weight: u64,
-    owns_residency: bool,
-}
-
-impl<V> ResidentEntry<V> {
-    fn new((node, weight): Entry<V>) -> Self {
-        Self {
-            node,
-            weight,
-            owns_residency: true,
-        }
-    }
-
-    fn snapshot(&self) -> Entry<V> {
-        (self.node, self.weight)
-    }
-}
-
-impl<V> Clone for ResidentEntry<V> {
-    fn clone(&self) -> Self {
-        Self {
-            node: self.node,
-            weight: self.weight,
-            owns_residency: false,
-        }
-    }
-}
-
-impl<V> Drop for ResidentEntry<V> {
-    fn drop(&mut self) {
-        if self.owns_residency {
-            // Release only index ownership, never the payload. The cache's
-            // grace-period machinery destroys values after index locks drop.
-            retire_resident(self.node);
-        }
-    }
-}
 
 #[derive(Clone)]
 struct EntryWeight;
@@ -106,8 +64,8 @@ where
         self.cache.get(key).map(|entry| entry.snapshot())
     }
 
-    pub(super) fn insert_resident(&self, key: &VersionedKey<K>, entry: Entry<V>) {
-        self.cache.insert(key.clone(), ResidentEntry::new(entry));
+    pub(super) fn insert_resident(&self, key: &VersionedKey<K>, entry: ResidentEntry<V>) {
+        self.cache.insert(key.clone(), entry);
     }
 
     pub(super) fn invalidate(&self, key: &VersionedKey<K>) {

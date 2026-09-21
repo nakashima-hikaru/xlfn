@@ -65,14 +65,23 @@ miri:
 
 # Verus formal verification of concurrent kernel primitives.
 verus:
+    python3 -B -m unittest discover -s tools -p test_check_refinement_failures.py
     verus --crate-type=lib verification/verus/sealable_counter/src/lib.rs
     verus --crate-type=lib verification/verus/drain_gate/src/lib.rs
+    python3 -B tools/check_drain_gate_refinement.py
     verus --crate-type=lib verification/verus/published_owner/src/lib.rs
+    python3 -B tools/check_published_owner_permission.py
     verus --crate-type=lib verification/verus/operation_gate/src/lib.rs
     verus --crate-type=lib verification/verus/rotating_read_domain/src/lib.rs
+    python3 -B tools/check_rotating_domain_refinement.py
+    python3 -B tools/check_transition_borrows.py
+    python3 -B tools/check_native_publication_borrow.py
     verus --crate-type=lib verification/verus/service_slot/src/lib.rs
     verus --crate-type=lib verification/verus/cache_lease/src/lib.rs
+    python3 -B tools/check_cache_pin_refinement.py
+    python3 -B tools/check_cache_ownership_refinement.py
     verus --crate-type=lib verification/verus/handle_domain/src/lib.rs
+    python3 -B tools/check_handle_completion_refinement.py
 
 # Audit Verus verification TCB compliance (enforces 0 assumes and approved external_bodies).
 verus-audit:

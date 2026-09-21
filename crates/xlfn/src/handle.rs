@@ -77,12 +77,13 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
+pub(crate) use crate::call::HandleDomainWitness;
 #[cfg(test)]
 pub(crate) use binding::BindingState;
 #[cfg(any(target_os = "windows", test))]
 pub(crate) use connection::HandleConnection;
 pub(crate) use connection::{FormulaObserverId, Topic};
-pub(crate) use domain::{HandleDomainPermit, HandleDomainWitness, HandleReadDomain};
+pub(crate) use domain::{HandleDomainPermit, HandleReadDomain};
 #[cfg(any(test, feature = "bench-internals"))]
 pub(crate) use formula::FormulaCaller;
 #[cfg(any(test, feature = "refinement", feature = "bench-internals"))]

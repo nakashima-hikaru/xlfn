@@ -9,6 +9,9 @@ use parking_lot::{Condvar, Mutex};
 
 use crate::sealable_counter::{ReleaseOutcome, ReopenError, SealableCounter, Sealed};
 
+mod protocol;
+use protocol::protocol_expr;
+
 /// Synchronization surface shared by the production protocol and its Loom
 /// model. Implementations are private and cannot run application callbacks.
 trait IdleWait {
@@ -87,23 +90,17 @@ fn release_and_notify<W: IdleWait>(
     // The last count remains live until this lock is acquired. Publishing
     // zero before locking would let a waiter reclaim the gate while release
     // was still trying to access its mutex/condvar.
-    let _guard = idle.lock();
-    let outcome = release();
-    if outcome == ReleaseOutcome::BecameIdle {
-        idle.notify_all();
-    }
-    outcome
+    protocol::release_tail!(guard, outcome;
+        idle.lock(), release(), idle.notify_all(), drop(guard))
 }
 
 fn wait_for_idle<W: IdleWait>(idle: &W, mut register_and_observe: impl FnMut() -> usize) {
-    let mut guard = idle.lock();
     // Register through each counter's RMW under this mutex. Either the last
     // release won that RMW and we observe zero, or it must retain its count
     // until we atomically unlock and park. Re-register after waking because
     // a serialized reopen may have started a new generation in the meantime.
-    while register_and_observe() != 0 {
-        guard = idle.wait(guard);
-    }
+    protocol::wait_loop!(guard, active;
+        idle.lock(), register_and_observe(), idle.wait(guard), drop(guard);)
 }
 
 /// Default stripe count for scalable concurrency without false sharing or cache-line bouncing.
@@ -368,28 +365,19 @@ impl<const N: usize> StripedDrainGate<N> {
     }
 
     pub fn seal(&self) {
-        for counter in &self.counters {
-            counter.seal();
-        }
+        protocol::seal_all_stripes!(index; self.counters.len(), self.counters[index].seal(););
     }
 
     /// Seals every stripe only if each is idle, without waiting for readers.
     /// The caller must serialize this operation with other seal/reopen calls.
     /// On failure, stripes sealed by this attempt are reopened before return.
     pub(crate) fn try_seal_if_idle(&self) -> bool {
-        for (index, counter) in self.counters.iter().enumerate() {
-            if !counter.try_seal_if_idle() {
-                // Successfully sealed stripes cannot admit readers. They are
-                // still idle, so rollback never needs to wait for a drain.
-                for sealed in &self.counters[..index] {
-                    sealed
-                        .undo_idle_seal()
-                        .unwrap_or_else(|_| crate::invariant::fail_stop());
-                }
-                return false;
-            }
-        }
-        true
+        protocol::seal_stripes!(index, rollback;
+            N, self.counters[index].try_seal_if_idle(),
+            self.counters[rollback].undo_idle_seal()
+                .unwrap_or_else(|_| crate::invariant::fail_stop());
+            []; []
+        )
     }
 
     /// Waits until every stripe is observed idle. Seal all stripes first when
@@ -400,21 +388,19 @@ impl<const N: usize> StripedDrainGate<N> {
         };
         // Synchronize with the final release's notification tail, not only
         // its zero count. A successful check is stable after admission seals.
-        self.counters
-            .iter()
-            .all(|counter| counter.mark_waiting() == 0)
+        self.observe_stripes_idle()
     }
 
     /// Waits until every stripe is observed idle. Seal all stripes first when
     /// an owner needs a stable grace period rather than an open-gate snapshot.
     pub fn wait_until_idle(&self) {
-        wait_for_idle(&self.idle, || {
-            self.counters.iter().fold(0_usize, |active, counter| {
-                active
-                    .checked_add(counter.mark_waiting())
-                    .unwrap_or_else(|| crate::invariant::fail_stop())
-            })
-        });
+        wait_for_idle(&self.idle, || usize::from(!self.observe_stripes_idle()));
+    }
+
+    fn observe_stripes_idle(&self) -> bool {
+        protocol::observe_stripes!(index, idle;
+            N, self.counters[index].mark_waiting();
+        )
     }
 
     pub fn seal_and_wait(&self) {
@@ -431,10 +417,14 @@ impl<const N: usize> StripedDrainGate<N> {
         {
             return Err(ReopenError);
         }
-        for counter in &self.counters {
-            counter.reopen()?;
+        let opened = protocol::reopen_stripes!(index;
+            self.counters.len(), self.counters[index].reopen().is_ok();
+        );
+        if opened == self.counters.len() {
+            Ok(())
+        } else {
+            Err(ReopenError)
         }
-        Ok(())
     }
 
     #[inline]
@@ -622,7 +612,7 @@ mod tests {
 
 #[cfg(all(test, not(all(target_os = "windows", target_arch = "x86"))))]
 mod loom_tests {
-    use super::{IdleWait, ReleaseOutcome, release_and_notify, wait_for_idle};
+    use super::{IdleWait, ReleaseOutcome, protocol_expr, release_and_notify, wait_for_idle};
     use crate::sealable_counter::loom_support::Counter;
     use loom::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use loom::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -685,21 +675,23 @@ mod loom_tests {
 
         fn wait(&self) {
             wait_for_idle(&self.idle, || {
-                self.counters.iter().map(Counter::mark_waiting).sum()
+                let idle = super::protocol::observe_stripes!(index, idle;
+                    N, self.counters[index].mark_waiting();
+                );
+                usize::from(!idle)
             });
         }
 
         fn seal(&self) {
-            for counter in &self.counters {
-                counter.seal();
-            }
+            super::protocol::seal_all_stripes!(index; N, self.counters[index].seal(););
         }
 
         fn reopen(&self) {
             let _guard = self.idle.lock();
-            for counter in &self.counters {
-                counter.reopen().unwrap();
-            }
+            let opened = super::protocol::reopen_stripes!(index;
+                N, self.counters[index].reopen().is_ok();
+            );
+            assert_eq!(opened, N);
         }
     }
 

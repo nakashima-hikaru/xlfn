@@ -7,6 +7,10 @@
 
 use vstd::prelude::*;
 
+#[path = "../../../../crates/xlfn/src/cache/pin_transitions.rs"]
+pub mod pin_transitions;
+pub mod pin_ownership;
+
 verus! {
 
 // ============================================================================
@@ -29,16 +33,16 @@ pub struct CacheTemporalState {
 
 /// Fundamental System Invariant for Temporal Reclamation:
 /// - [TR-OBSERVE-1]: Pointer observation implies object is published or retired (not reclaimed or unpublished).
-/// - [TR-LEASE-1]: Active pin (CacheLease) implies object is published or retired (not reclaimed or unpublished).
-/// - [TR-ADMISSION-1]: Pointer observation can only occur while an admission is held (observing <= admissions).
+/// - [TR-LEASE-1]: Any creator/resident/flight/lease pin implies the allocation is not reclaimed.
+/// - [TR-ADMISSION-1]: Pointer observations need admission coverage; one admission may cover multiple observations.
 /// - [TR-RECLAIM-1]: Reclaimed status strictly requires zero admissions, zero observers, and zero pins.
-/// - [TR-PUBLISH-1]: Unpublished status requires zero observers and zero pins.
+/// - [TR-PUBLISH-1]: Unpublished status requires zero index observers; creator/flight/lease pins are allowed.
 pub open spec fn cache_temporal_inv(s: CacheTemporalState) -> bool {
     &&& (s.observing > 0 ==> (s.status is Published || s.status is Retired))
-    &&& (s.pins > 0 ==> (s.status is Published || s.status is Retired))
-    &&& (s.observing <= s.admissions)
+    &&& (s.pins > 0 ==> !(s.status is Reclaimed))
+    &&& (s.observing > 0 ==> s.admissions > 0)
     &&& (s.status is Reclaimed ==> (s.admissions == 0 && s.observing == 0 && s.pins == 0))
-    &&& (s.status is Unpublished ==> (s.observing == 0 && s.pins == 0))
+    &&& (s.status is Unpublished ==> s.observing == 0)
 }
 
 // ============================================================================
@@ -50,13 +54,13 @@ pub open spec fn initial_state() -> CacheTemporalState {
         status: ObjectStatus::Unpublished,
         admissions: 0,
         observing: 0,
-        pins: 0,
+        pins: 1,
     }
 }
 
 /// Node allocation and index publication.
 pub open spec fn step_publish(s: CacheTemporalState) -> Option<CacheTemporalState> {
-    if s.status is Unpublished {
+    if s.status is Unpublished && s.pins > 0 {
         Some(CacheTemporalState {
             status: ObjectStatus::Published,
             ..s
@@ -80,7 +84,7 @@ pub open spec fn step_enter_lookup(s: CacheTemporalState) -> Option<CacheTempora
 
 /// Reader observes raw pointer while holding lookup admission.
 pub open spec fn step_observe_pointer(s: CacheTemporalState) -> Option<CacheTemporalState> {
-    if (s.status is Published || s.status is Retired) && s.observing < s.admissions {
+    if (s.status is Published || s.status is Retired) && s.admissions > 0 {
         Some(CacheTemporalState {
             observing: (s.observing + 1) as nat,
             ..s
@@ -92,7 +96,7 @@ pub open spec fn step_observe_pointer(s: CacheTemporalState) -> Option<CacheTemp
 
 /// Reader converts observation into an active CacheLease pin (try_acquire_pin).
 pub open spec fn step_acquire_pin(s: CacheTemporalState) -> Option<CacheTemporalState> {
-    if s.observing > 0 {
+    if s.observing > 0 && s.pins > 0 {
         Some(CacheTemporalState {
             observing: (s.observing - 1) as nat,
             pins: (s.pins + 1) as nat,
@@ -105,7 +109,7 @@ pub open spec fn step_acquire_pin(s: CacheTemporalState) -> Option<CacheTemporal
 
 /// Reader departs lookup domain.
 pub open spec fn step_leave_lookup(s: CacheTemporalState) -> Option<CacheTemporalState> {
-    if s.observing < s.admissions {
+    if s.admissions > 0 && (s.observing == 0 || s.admissions > 1) {
         Some(CacheTemporalState {
             admissions: (s.admissions - 1) as nat,
             ..s
@@ -141,7 +145,7 @@ pub open spec fn step_retire(s: CacheTemporalState) -> Option<CacheTemporalState
 
 /// Memory reclamation (CacheNode drop and Box free).
 pub open spec fn step_reclaim(s: CacheTemporalState) -> Option<CacheTemporalState> {
-    if s.status is Retired && s.admissions == 0 && s.observing == 0 && s.pins == 0 {
+    if (s.status is Retired || s.status is Unpublished) && s.admissions == 0 && s.observing == 0 && s.pins == 0 {
         Some(CacheTemporalState {
             status: ObjectStatus::Reclaimed,
             ..s
@@ -169,25 +173,23 @@ pub proof fn tr_observing_implies_live(s: CacheTemporalState)
 }
 
 /// **[TR-LEASE-1] Lease Pin Safety**:
-/// Any active `CacheLease` pin strictly implies the object is live (Published or Retired),
-/// never Reclaimed.
+/// Any active pin keeps the allocation live, including never-published nodes.
 pub proof fn tr_pin_implies_live(s: CacheTemporalState)
     requires
         cache_temporal_inv(s),
         s.pins > 0,
     ensures
-        s.status is Published || s.status is Retired,
         !(s.status is Reclaimed),
 {
 }
 
 /// **[TR-ADMISSION-1] Admission Boundedness**:
-/// Pointer observations cannot exceed the active admission count.
-pub proof fn tr_admission_bounds_observing(s: CacheTemporalState)
+/// Multiple observations may share one admission; positive observations need coverage.
+pub proof fn tr_observation_requires_admission(s: CacheTemporalState)
     requires
         cache_temporal_inv(s),
     ensures
-        s.observing <= s.admissions,
+        s.observing > 0 ==> s.admissions > 0,
 {
 }
 
@@ -324,3 +326,15 @@ pub proof fn tr_step_reclaim_preserves_inv(s: CacheTemporalState, s_next: CacheT
 }
 
 } // verus!
+
+#[path = "../../published_owner/src/heap_permission.rs"]
+mod heap_permission;
+
+mod scope_ownership;
+
+#[path = "../../rotating_read_domain/src/lib.rs"]
+mod rotation;
+
+mod retirement;
+
+mod observation_coverage;

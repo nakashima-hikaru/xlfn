@@ -390,6 +390,13 @@
     "count": 1,
     "category": "test",
     "reason": "Test-only import; the direct panic observation in this module is separately inventoried."
+  },
+  {
+    "path": "crates/xlfn/src/cache.rs",
+    "context": "# [ cfg ( test ) ] mod tests / # [ test ] fn miri_resident_insertion_panic_preserves_creator_pin",
+    "code": "let result = std::panic::catch_unwind(AssertUnwindSafe(|| {",
+    "count": 1,
+    "category": "test",
+    "reason": "Observes fixed string key Clone/Hash panics during resident insertion and verifies that only the resident pin is released, retaining the creator pin."
   }
 ]
-

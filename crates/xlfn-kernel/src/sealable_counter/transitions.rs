@@ -440,3 +440,50 @@ pub fn reopen_step(state: usize) -> TransitionOutcome<usize> {
         }
     }
 }
+
+// The RMW operation and ordering are shared, not just the observation mask.
+// `Ordering` resolves to the native/Loom enum or the executable Verus backend.
+#[cfg_attr(verus_only, allow(unused_macros))]
+macro_rules! mark_waiting {
+    ($state:expr, $waiting:expr, $mask:expr) => {
+        $state.fetch_or($waiting, Ordering::AcqRel) & $mask
+    };
+}
+
+pub(crate) use mark_waiting;
+
+#[cfg_attr(verus_only, allow(unused_macros))]
+macro_rules! idle_seal_logic {
+    ($state:ident, $sealed:expr, $mask:expr) => {
+        if $state & ($sealed | $mask) == 0 {
+            Some($state | $sealed)
+        } else {
+            None
+        }
+    };
+}
+#[cfg_attr(verus_only, allow(unused_macros))]
+macro_rules! undo_idle_seal_logic {
+    ($state:ident, $sealed:expr, $mask:expr) => {
+        if $state & $sealed != 0 && $state & $mask == 0 {
+            Some($state & !$sealed)
+        } else {
+            None
+        }
+    };
+}
+#[cfg_attr(verus_only, allow(unused_macros))]
+macro_rules! try_idle_seal {
+    ($atomic:expr, $sealed:expr, $mask:expr) => {{
+        let state = $atomic.load(Ordering::Acquire);
+        match idle_seal_logic!(state, $sealed, $mask) {
+            Some(next) => $atomic
+                .compare_exchange(state, next, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok(),
+            None => false,
+        }
+    }};
+}
+pub(crate) use idle_seal_logic;
+pub(crate) use try_idle_seal;
+pub(crate) use undo_idle_seal_logic;

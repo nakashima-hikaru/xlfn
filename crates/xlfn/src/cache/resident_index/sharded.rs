@@ -3,17 +3,16 @@
 //! Reads take one fixed shard's shared lock. Writers serialize capacity
 //! decisions, then take shard write locks one at a time. Initialization has
 //! separate per-key flights and runs without either policy or shard locks.
-//! This backend never dereferences a node or changes a residency/pin counter.
+//! Stored values own resident pins; their drops retire without destroying values.
 
-use super::{Entry, VersionedKey, VersionedKeyRef};
+use super::{Entry, ResidentEntry, VersionedKey, VersionedKeyRef};
 use hashbrown::{HashMap, hash_map::RawEntryMut};
 use parking_lot::{Mutex, RwLock};
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-type Removed<V> = dyn Fn(Entry<V>) + Send + Sync;
-type ResidentMap<K, V> = HashMap<VersionedKey<K>, Entry<V>, RandomState>;
+type ResidentMap<K, V> = HashMap<VersionedKey<K>, ResidentEntry<V>, RandomState>;
 
 struct Policy {
     weight: u64,
@@ -27,7 +26,6 @@ pub(super) struct ShardedResidentIndex<K, V> {
     shift: u32,
     capacity: u64,
     policy: Mutex<Policy>,
-    removed: Box<Removed<V>>,
     entries: AtomicU64,
     weight: AtomicU64,
 }
@@ -37,11 +35,7 @@ where
     K: Clone + Eq + Hash + Send + Sync + 'static,
     V: Send + Sync + 'static,
 {
-    pub(super) fn new(
-        capacity: u64,
-        shard_count: usize,
-        removed: impl Fn(Entry<V>) + Send + Sync + 'static,
-    ) -> Self {
+    pub(super) fn new(capacity: u64, shard_count: usize) -> Self {
         assert!(matches!(shard_count, 8 | 16 | 32 | 64));
         let hash = RandomState::new();
         Self {
@@ -56,7 +50,6 @@ where
                 entries: 0,
                 next_victim: 0,
             }),
-            removed: Box::new(removed),
             entries: AtomicU64::new(0),
             weight: AtomicU64::new(0),
         }
@@ -76,16 +69,16 @@ where
             .from_hash(hash, |owned| {
                 owned.epoch == key.epoch && &owned.key == key.key
             })
-            .map(|(_, entry)| *entry)
+            .map(|(_, entry)| entry.snapshot())
     }
 
-    pub(super) fn publish(&self, key: VersionedKey<K>, entry: Entry<V>) {
+    pub(super) fn publish(&self, key: VersionedKey<K>, entry: ResidentEntry<V>) {
         let hash = self.hash.hash_one(&key);
         let shard_index = self.shard(hash);
         let mut removed = Vec::new();
         {
             let mut policy = self.policy.lock();
-            if entry.1 > self.capacity {
+            if entry.weight > self.capacity {
                 removed.push((key, entry));
             } else {
                 {
@@ -93,14 +86,14 @@ where
                     match shard.raw_entry_mut().from_hash(hash, |owned| owned == &key) {
                         RawEntryMut::Occupied(old) => {
                             let (old_key, old_entry) = old.remove_entry();
-                            policy.weight -= old_entry.1;
+                            policy.weight -= old_entry.weight;
                             policy.entries -= 1;
                             removed.push((old_key, old_entry));
                         }
                         RawEntryMut::Vacant(_) => {}
                     }
                 }
-                while policy.weight + entry.1 > self.capacity {
+                while policy.weight + entry.weight > self.capacity {
                     // At least one resident exists when the bounded weight
                     // requires eviction. Rotate the starting shard so policy
                     // does not always charge the first shard for global debt.
@@ -108,13 +101,14 @@ where
                     policy.next_victim = (index + 1) % self.shards.len();
                     let victim = self.shards[index].write().extract_if(|_, _| true).next();
                     if let Some(victim) = victim {
-                        policy.weight -= victim.1.1;
+                        policy.weight -= victim.1.weight;
                         policy.entries -= 1;
                         removed.push(victim);
                     }
                 }
+                let weight = entry.weight;
                 self.shards[shard_index].write().insert(key, entry);
-                policy.weight += entry.1;
+                policy.weight += weight;
                 policy.entries += 1;
             }
             self.record(&policy);
@@ -127,12 +121,12 @@ where
         self.weight.store(policy.weight, Ordering::Relaxed);
     }
 
-    fn notify(&self, removed: Vec<(VersionedKey<K>, Entry<V>)>) {
+    fn notify(&self, mut removed: Vec<(VersionedKey<K>, ResidentEntry<V>)>) {
         // Transfer every residency obligation before destroying removed keys.
         // In particular, a key destructor cannot skip later notifications.
         // The xlfn callback only retires; it must not unwind or reclaim values.
-        for (_, entry) in &removed {
-            (self.removed)(*entry);
+        for (_, entry) in &mut removed {
+            entry.retire();
         }
         drop(removed);
     }
@@ -144,7 +138,7 @@ where
             let removed = self.shards[self.shard(hash)].write().remove_entry(key);
             if let Some((_, entry)) = &removed {
                 policy.entries -= 1;
-                policy.weight -= entry.1;
+                policy.weight -= entry.weight;
             }
             self.record(&policy);
             removed
@@ -168,7 +162,7 @@ where
                 let mut shard = shard.write();
                 for item in shard.extract_if(|key, _| select(key)) {
                     policy.entries -= 1;
-                    policy.weight -= item.1.1;
+                    policy.weight -= item.1.weight;
                     removed.push(item);
                 }
             }
@@ -189,7 +183,7 @@ where
     pub(super) fn estimated_index_bytes(&self) -> usize {
         // Hashbrown's capacity excludes control bytes and spare buckets. The
         // 8/7 factor estimates its load factor; allocator rounding is excluded.
-        let bucket = std::mem::size_of::<(VersionedKey<K>, Entry<V>)>() + 1;
+        let bucket = std::mem::size_of::<(VersionedKey<K>, ResidentEntry<V>)>() + 1;
         std::mem::size_of::<Self>()
             + self.shards.len() * std::mem::size_of::<RwLock<ResidentMap<K, V>>>()
             + self

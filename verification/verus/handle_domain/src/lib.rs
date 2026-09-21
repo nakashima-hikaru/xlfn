@@ -22,6 +22,7 @@ pub struct HandleDomainState {
     pub active_bindings: nat,
     pub pending_0: nat,
     pub pending_1: nat,
+    pub reclaiming_bindings: nat,
     pub reclaimed_bindings: nat,
     pub debt: nat,
     pub closed: bool,
@@ -38,13 +39,13 @@ pub open spec fn get_pending(s: HandleDomainState, gen: nat) -> nat {
 /// System Invariant for HandleReadDomain:
 /// - current_gen is 0 or 1.
 /// - At most one generation admits readers (!sealed_0 && !sealed_1 is false).
-/// - Debt matches pending queue lengths: debt == pending_0 + pending_1.
-/// - Closed domain implies both sealed and no active readers.
+/// - Debt includes detached records until their destructors complete.
+/// - Closing seals both generations; it does not fabricate reader completion.
 pub open spec fn handle_domain_inv(s: HandleDomainState) -> bool {
     &&& (s.current_gen == 0 || s.current_gen == 1)
     &&& (!s.sealed_0 ==> s.sealed_1)
     &&& (!s.sealed_1 ==> s.sealed_0)
-    &&& (s.debt == s.pending_0 + s.pending_1)
+    &&& (s.debt == s.pending_0 + s.pending_1 + s.reclaiming_bindings)
     &&& (s.closed ==> (s.sealed_0 && s.sealed_1))
 }
 
@@ -62,6 +63,7 @@ pub open spec fn initial_state() -> HandleDomainState {
         active_bindings: 0,
         pending_0: 0,
         pending_1: 0,
+        reclaiming_bindings: 0,
         reclaimed_bindings: 0,
         debt: 0,
         closed: false,
@@ -185,51 +187,47 @@ pub open spec fn step_rotate_domain(s: HandleDomainState) -> Option<HandleDomain
     }
 }
 
-/// Drained generation reclamation (quiesce Step 2: take queue and drop records).
-pub open spec fn step_reclaim_generation(s: HandleDomainState, old_gen: nat) -> Option<HandleDomainState> {
-    if old_gen == 0 {
-        if s.readers_0 == 0 {
-            Some(HandleDomainState {
-                reclaimed_bindings: (s.reclaimed_bindings + s.pending_0) as nat,
-                debt: (s.debt - s.pending_0) as nat,
-                pending_0: 0,
-                ..s
-            })
-        } else {
-            None
-        }
-    } else if old_gen == 1 {
-        if s.readers_1 == 0 {
-            Some(HandleDomainState {
-                reclaimed_bindings: (s.reclaimed_bindings + s.pending_1) as nat,
-                debt: (s.debt - s.pending_1) as nat,
-                pending_1: 0,
-                ..s
-            })
-        } else {
-            None
-        }
-    } else {
-        None
-    }
-}
-
-/// Final seal and drain (seal).
-pub open spec fn step_seal_and_drain(s: HandleDomainState) -> Option<HandleDomainState> {
-    if s.readers_0 == 0 && s.readers_1 == 0 {
+/// Detaching a drained generation transfers records to destruction in flight.
+/// It does not discharge debt or establish destructor completion.
+pub open spec fn step_detach_generation(s: HandleDomainState, old_gen: nat) -> Option<HandleDomainState> {
+    if old_gen == 0 && s.sealed_0 && s.readers_0 == 0 {
         Some(HandleDomainState {
-            sealed_0: true,
-            sealed_1: true,
-            reclaimed_bindings: (s.reclaimed_bindings + s.pending_0 + s.pending_1) as nat,
+            reclaiming_bindings: s.reclaiming_bindings + s.pending_0,
             pending_0: 0,
-            pending_1: 0,
-            debt: 0,
-            closed: true,
             ..s
         })
-    } else {
-        None
-    }
+    } else if old_gen == 1 && s.sealed_1 && s.readers_1 == 0 {
+        Some(HandleDomainState {
+            reclaiming_bindings: s.reclaiming_bindings + s.pending_1,
+            pending_1: 0,
+            ..s
+        })
+    } else { None }
+}
+
+/// Abstract destructor completion. The shared executable completion protocol
+/// below separately checks that the destruction effect precedes debt discharge.
+pub open spec fn step_complete_destruction(s: HandleDomainState, count: nat) -> Option<HandleDomainState> {
+    if count <= s.reclaiming_bindings {
+        Some(HandleDomainState {
+            reclaiming_bindings: (s.reclaiming_bindings - count) as nat,
+            reclaimed_bindings: s.reclaimed_bindings + count,
+            debt: (s.debt - count) as nat,
+            ..s
+        })
+    } else { None }
+}
+
+pub open spec fn step_close(s: HandleDomainState) -> HandleDomainState {
+    HandleDomainState { sealed_0: true, sealed_1: true, closed: true, ..s }
+}
+
+/// Successful seal observes completion; no counter is assigned zero here.
+pub open spec fn step_finish_close(s: HandleDomainState) -> Option<HandleDomainState> {
+    if s.closed && s.readers_0 == 0 && s.readers_1 == 0
+        && s.pending_0 == 0 && s.pending_1 == 0 && s.reclaiming_bindings == 0 {
+        Some(s)
+    } else { None }
 }
 
 // ============================================================================
@@ -270,7 +268,7 @@ pub proof fn hd3_reclamation_requires_zero_readers(s: HandleDomainState, old_gen
         handle_domain_inv(s),
         get_readers(s, old_gen) > 0,
     ensures
-        step_reclaim_generation(s, old_gen) == None::<HandleDomainState>,
+        step_detach_generation(s, old_gen) == None::<HandleDomainState>,
 {
     if old_gen == 0 {
         assert(s.readers_0 > 0);
@@ -279,45 +277,33 @@ pub proof fn hd3_reclamation_requires_zero_readers(s: HandleDomainState, old_gen
     }
 }
 
-/// **[HD-4] Linear Binding Deallocation**:
-/// A generation's pending records are consumed and reclaimed in full, decreasing debt by exactly the queue length.
-pub proof fn hd4_linear_deallocation(s: HandleDomainState, old_gen: nat)
-    requires
-        handle_domain_inv(s),
-        old_gen == 0 || old_gen == 1,
-        get_readers(s, old_gen) == 0,
-    ensures
-        ({
-            let s_next = step_reclaim_generation(s, old_gen).unwrap();
-            let count = get_pending(s, old_gen);
-            &&& s_next.debt == s.debt - count
-            &&& s_next.reclaimed_bindings == s.reclaimed_bindings + count
-            &&& get_pending(s_next, old_gen) == 0
-        }),
-{
-}
+/// **[HD-4]** Queue detachment conserves debt, including destruction in flight.
+pub proof fn hd4_detachment_preserves_destruction_debt(s: HandleDomainState, old_gen: nat)
+    requires handle_domain_inv(s), step_detach_generation(s, old_gen).is_some(),
+    ensures ({ let next = step_detach_generation(s, old_gen).unwrap();
+        next.debt == s.debt && next.reclaimed_bindings == s.reclaimed_bindings
+        && next.reclaiming_bindings == s.reclaiming_bindings + get_pending(s, old_gen)
+        && get_pending(next, old_gen) == 0 }),
+{}
 
-/// **[HD-5] Destruction Barrier**:
-/// When seal and drain completes, all generations are sealed, all readers are zero,
-/// and debt is strictly zero (`debt == 0`).
+pub proof fn hd4_only_completed_destruction_discharges_debt(s: HandleDomainState, count: nat)
+    requires handle_domain_inv(s), step_complete_destruction(s, count).is_some(),
+    ensures ({ let next = step_complete_destruction(s, count).unwrap();
+        next.debt + count == s.debt && next.reclaimed_bindings == s.reclaimed_bindings + count
+        && next.reclaiming_bindings + count == s.reclaiming_bindings }),
+{}
+
+/// **[HD-5]** A detached batch still blocks final destruction completion.
+pub proof fn hd5_in_flight_destruction_blocks_close(s: HandleDomainState)
+    requires s.reclaiming_bindings > 0,
+    ensures step_finish_close(s).is_none(),
+{}
+
 pub proof fn hd5_destruction_barrier_establishes_zero_debt(s: HandleDomainState)
-    requires
-        handle_domain_inv(s),
-        s.readers_0 == 0 && s.readers_1 == 0,
-    ensures
-        ({
-            let s_closed = step_seal_and_drain(s).unwrap();
-            &&& s_closed.closed
-            &&& s_closed.sealed_0
-            &&& s_closed.sealed_1
-            &&& s_closed.readers_0 == 0
-            &&& s_closed.readers_1 == 0
-            &&& s_closed.debt == 0
-            &&& s_closed.pending_0 == 0
-            &&& s_closed.pending_1 == 0
-        }),
-{
-}
+    requires handle_domain_inv(s), step_finish_close(s).is_some(),
+    ensures s.closed, s.sealed_0, s.sealed_1, s.readers_0 == 0, s.readers_1 == 0,
+        s.debt == 0, s.pending_0 == 0, s.pending_1 == 0, s.reclaiming_bindings == 0,
+{}
 
 // ============================================================================
 // Invariant Preservation
@@ -373,22 +359,75 @@ pub proof fn hd_step_rotate_domain_preserves_inv(s: HandleDomainState, s_next: H
 {
 }
 
-pub proof fn hd_step_reclaim_generation_preserves_inv(s: HandleDomainState, old_gen: nat, s_next: HandleDomainState)
+pub proof fn hd_step_detach_generation_preserves_inv(s: HandleDomainState, old_gen: nat, s_next: HandleDomainState)
     requires
         handle_domain_inv(s),
-        step_reclaim_generation(s, old_gen) == Some(s_next),
+        step_detach_generation(s, old_gen) == Some(s_next),
     ensures
         handle_domain_inv(s_next),
 {
 }
 
-pub proof fn hd_step_seal_and_drain_preserves_inv(s: HandleDomainState, s_next: HandleDomainState)
-    requires
-        handle_domain_inv(s),
-        step_seal_and_drain(s) == Some(s_next),
-    ensures
-        handle_domain_inv(s_next),
-{
-}
+pub proof fn hd_step_complete_destruction_preserves_inv(s: HandleDomainState, count: nat, s_next: HandleDomainState)
+    requires handle_domain_inv(s), step_complete_destruction(s, count) == Some(s_next),
+    ensures handle_domain_inv(s_next),
+{}
+
+pub proof fn hd_step_close_preserves_inv(s: HandleDomainState)
+    requires handle_domain_inv(s),
+    ensures handle_domain_inv(step_close(s)),
+{}
+
+pub proof fn hd_step_finish_close_preserves_inv(s: HandleDomainState, s_next: HandleDomainState)
+    requires handle_domain_inv(s), step_finish_close(s) == Some(s_next),
+    ensures handle_domain_inv(s_next),
+{}
 
 } // verus!
+
+#[path = "../../../../crates/xlfn/src/handle/domain/protocol.rs"]
+mod completion_protocol;
+mod completion;
+
+#[path = "../../../../crates/xlfn/src/handle/domain/counters.rs"]
+mod counters;
+
+mod counter_refinement;
+
+mod batches;
+
+#[path = "../../rotating_read_domain/src/lib.rs"]
+mod rotation;
+#[path = "../../published_owner/src/heap_permission.rs"]
+mod heap_permission;
+#[path = "../../published_owner/src/permission.rs"]
+mod ownership;
+
+mod binding_ownership;
+
+#[path = "../../../../crates/xlfn/src/call/permits.rs"]
+mod retained_permits;
+
+mod retention;
+
+#[path = "../../../../crates/xlfn/src/handle/binding/protocol.rs"]
+mod read_protocol;
+mod reading;
+
+mod observations;
+
+mod coverage;
+
+mod atomic_publication;
+
+mod publication_counts;
+
+mod writer_authority;
+
+mod writer_lock;
+
+mod retained_counts;
+
+mod queued_retirement;
+
+pub mod admitted_read;

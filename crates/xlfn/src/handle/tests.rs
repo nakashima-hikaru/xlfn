@@ -3470,6 +3470,55 @@ fn handle_domain_witness_records_exact_domain() {
 }
 
 #[test]
+fn miri_scope_retains_handles_across_permit_storage_growth() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let registries: Vec<_> = (0..8)
+        .map(|_| HandleRegistry::from_entropy(1, [7; 40]))
+        .collect();
+    let tokens: Vec<_> = registries
+        .iter()
+        .map(|registry| {
+            insert_production(registry, Arc::new(CountedDataRecord(Arc::clone(&drops)))).unwrap()
+        })
+        .collect();
+
+    crate::call::with_excel_call_scope_and_state(&registries, |registries, scope| {
+        let first = registries[0]
+            .lookup_handle::<CountedDataRecord>(scope, &tokens[0])
+            .unwrap();
+        let witness = scope
+            .enter_handle_domain(registries[0].bindings.read_domain())
+            .unwrap();
+        // Single -> Multiple and subsequent Vec growth must preserve every
+        // earlier admission, including after the binding has been retired.
+        registries[0]
+            .remove::<CountedDataRecord>(&tokens[0])
+            .unwrap();
+        for (registry, token) in registries.iter().zip(&tokens).skip(1) {
+            let handle = registry
+                .lookup_handle::<CountedDataRecord>(scope, token)
+                .unwrap();
+            registry.remove::<CountedDataRecord>(token).unwrap();
+            assert!(Arc::ptr_eq(&handle.0, &drops));
+            assert!(Arc::ptr_eq(&first.0, &drops));
+            assert_eq!(
+                witness.domain(),
+                std::ptr::NonNull::from(registries[0].bindings.read_domain())
+            );
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+        }
+        for registry in registries {
+            assert_eq!(registry.bindings.read_domain().debt(), 1);
+        }
+    });
+    for registry in &registries {
+        registry.bindings.read_domain().flush_for_test();
+        assert_eq!(registry.bindings.read_domain().debt(), 0);
+    }
+    assert_eq!(drops.load(Ordering::SeqCst), registries.len());
+}
+
+#[test]
 fn miri_domain_permit_witness_lifecycle() {
     let domain = HandleReadDomain::new();
     // SAFETY: domain outlives permit in this test scope.

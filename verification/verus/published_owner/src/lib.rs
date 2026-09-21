@@ -1,9 +1,13 @@
 //! Verus formal verification of PublishedOwner linear raw pointer ownership.
 //!
 //! Models and verifies the single-owner linear allocation semantics of `crates/xlfn-kernel/src/published_owner.rs`.
-//! All proofs ensure zero verification failures, zero assumes, and zero runtime overhead.
+//! Snapshot results below are not linear ownership proofs. The permission module
+//! uses non-duplicable initialized memory; production Box/caller composition remains open.
 
 use vstd::prelude::*;
+
+mod heap_permission;
+mod permission;
 
 verus! {
 
@@ -91,7 +95,7 @@ pub open spec fn step_into_box(snap: AllocationSnapshot, token: PublishedOwnerTo
     }
 }
 
-/// Models Drop / release_inner: consumes the PublishedOwnerToken and transitions to Deallocated.
+/// Models Drop: consumes the PublishedOwnerToken and transitions to Deallocated.
 pub open spec fn step_drop(snap: AllocationSnapshot, token: PublishedOwnerToken) -> Option<AllocationSnapshot> {
     if snap.phase is Published && snap.alloc_id == token.alloc_id && snap.active_readers == 0 {
         Some(AllocationSnapshot {
@@ -106,12 +110,13 @@ pub open spec fn step_drop(snap: AllocationSnapshot, token: PublishedOwnerToken)
 }
 
 // ============================================================================
-// Formal Safety Theorems (PO-1 through PO-6)
+// Abstract snapshot properties (PO-1 through PO-6)
 // ============================================================================
 
 /// **[PO-1] Single Allocation Owner**:
-/// In the published phase, there is exactly one valid PublishedOwnerToken matching the allocation.
-pub proof fn po1_single_allocation_owner(snap: AllocationSnapshot, token1: PublishedOwnerToken, token2: PublishedOwnerToken)
+/// Matching snapshots agree on numeric identity. This is not a linear uniqueness
+/// theorem; actual non-duplicable memory ownership is modeled in permission.rs.
+pub proof fn po1_matching_snapshots_agree(snap: AllocationSnapshot, token1: PublishedOwnerToken, token2: PublishedOwnerToken)
     requires
         allocation_inv(snap, Some(token1)),
         allocation_inv(snap, Some(token2)),
