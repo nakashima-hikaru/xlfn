@@ -145,6 +145,7 @@ crossbeam-utils.workspace = true
 futures-util = { workspace = true, optional = true }
 getrandom.workspace = true
 papaya.workspace = true
+parking_lot.workspace = true
 quick_cache = { workspace = true, optional = true }
 scopeguard.workspace = true
 serde.workspace = true
