@@ -19,8 +19,10 @@ use super::object::{ObjectBinding, ObjectCell};
 use super::token::HandleId;
 use crate::error::DomainErrorCode;
 use crate::generation::BindingGeneration;
+#[cfg(test)]
+use crate::sync::RwLockReadGuard;
+use crate::sync::{RwLock, RwLockWriteGuard};
 use crate::{XllError, XllResult};
-use parking_lot::{RwLock, RwLockWriteGuard};
 use std::ptr::NonNull;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
@@ -366,17 +368,17 @@ impl BindingTable {
     }
 
     #[cfg(test)]
-    pub(crate) fn read_state(&self) -> parking_lot::RwLockReadGuard<'_, RegistryState> {
+    pub(crate) fn read_state(&self) -> RwLockReadGuard<'_, RegistryState> {
         self.state.read()
     }
 
     #[cfg(test)]
-    pub(crate) fn try_read_state(&self) -> Option<parking_lot::RwLockReadGuard<'_, RegistryState>> {
+    pub(crate) fn try_read_state(&self) -> Option<RwLockReadGuard<'_, RegistryState>> {
         self.state.try_read()
     }
 
     #[cfg(test)]
-    pub(crate) fn write_state(&self) -> parking_lot::RwLockWriteGuard<'_, RegistryState> {
+    pub(crate) fn write_state(&self) -> RwLockWriteGuard<'_, RegistryState> {
         self.state.write()
     }
 

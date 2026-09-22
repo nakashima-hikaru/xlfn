@@ -24,7 +24,7 @@ handles = []
 cache = ["dep:quick_cache"]
 refinement = []
 # Experimental backends/dependencies belong only to this internal benchmark surface.
-bench-internals = ["handles", "xlfn-sys/abi-probe", "dep:hashbrown", "dep:moka"]
+bench-internals = ["handles", "xlfn-sys/abi-probe"]
 
 [[bench]]
 name = "async_spawn"
@@ -144,9 +144,6 @@ crossbeam-deque = { workspace = true, optional = true }
 crossbeam-utils.workspace = true
 futures-util = { workspace = true, optional = true }
 getrandom.workspace = true
-hashbrown = { workspace = true, optional = true }
-moka = { workspace = true, optional = true }
-parking_lot.workspace = true
 papaya.workspace = true
 quick_cache = { workspace = true, optional = true }
 scopeguard.workspace = true
@@ -157,6 +154,7 @@ smallvec.workspace = true
 smol_str.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+triomphe.workspace = true
 xlfn-common.workspace = true
 xlfn-kernel.workspace = true
 

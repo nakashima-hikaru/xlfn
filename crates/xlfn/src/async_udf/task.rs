@@ -92,14 +92,14 @@ unsafe impl Send for CompletionGuard {}
 
 pub(crate) struct CompletionObservation {
     #[cfg(any(test, feature = "refinement"))]
-    completion: parking_lot::Mutex<crate::shutdown_trace::Completion>,
+    completion: crate::sync::Mutex<crate::shutdown_trace::Completion>,
 }
 
 impl CompletionObservation {
     fn new() -> Self {
         Self {
             #[cfg(any(test, feature = "refinement"))]
-            completion: parking_lot::Mutex::new(crate::shutdown_trace::Completion::Failed),
+            completion: crate::sync::Mutex::new(crate::shutdown_trace::Completion::Failed),
         }
     }
 

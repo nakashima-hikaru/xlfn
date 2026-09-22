@@ -5,7 +5,7 @@
     reason = "the publication pointer is protected by the lifecycle-owned drain gate"
 )]
 
-use parking_lot::{Condvar, Mutex, MutexGuard};
+use crate::sync::{Condvar, Mutex, MutexGuard};
 use std::mem;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};

@@ -14,7 +14,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::{self, ThreadId};
 
-use parking_lot::Mutex;
+use crate::sync::Mutex;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ThreadAffineError {

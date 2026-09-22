@@ -416,7 +416,7 @@ pub(crate) fn trace(metadata: &UdfTraceMetadata, outcome: &CallOutcome<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use parking_lot::Mutex;
+    use crate::sync::Mutex;
     use std::sync::Arc;
 
     #[derive(Clone)]

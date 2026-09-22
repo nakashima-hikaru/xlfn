@@ -13,9 +13,9 @@ use super::token::{HandleId, HandleToken, ObjectId, TokenCodec};
 use super::{ExcelHandleObject, Handle};
 use crate::error::DomainErrorCode;
 use crate::panic_boundary::catch_no_unwind;
-use crate::{XllError, XllResult};
 #[cfg(any(test, feature = "refinement"))]
-use parking_lot::Mutex;
+use crate::sync::Mutex;
+use crate::{XllError, XllResult};
 use std::any::{TypeId, type_name};
 use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
@@ -130,7 +130,7 @@ impl HandleRegistry {
 
     #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
-        self.objects.set_trace_sink(std::sync::Arc::clone(&trace));
+        self.objects.set_trace_sink(triomphe::Arc::clone(&trace));
         *self.trace.lock() = Some(trace);
     }
 

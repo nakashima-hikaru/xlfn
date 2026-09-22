@@ -13,10 +13,10 @@ use crate::generation::RuntimeGeneration;
 #[cfg(feature = "handles")]
 use crate::handle::GenerationLeaseBrand;
 use crate::shutdown::CleanupIssueKind;
+use crate::sync::{Condvar, Mutex};
 use crate::{XllError, XllResult};
 use crossbeam_utils::sync::Parker;
 use futures_util::future::{AbortHandle, Abortable};
-use parking_lot::{Condvar, Mutex};
 #[cfg(feature = "handles")]
 use std::marker::PhantomData;
 #[cfg(feature = "handles")]

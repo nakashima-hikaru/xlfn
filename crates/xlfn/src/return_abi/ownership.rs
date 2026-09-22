@@ -1,8 +1,3 @@
-#![allow(
-    unused_imports,
-    reason = "module boundary reexports are consumed through their parent"
-)]
-
 //! Excel-owned return-obligation ownership and quiescence accounting.
 
 use crate::{XllError, XllResult};

@@ -7,8 +7,8 @@ use super::ErasedSink;
 use super::topic::RtdTopic;
 use super::value::{IntoRtdValue, StoredRtdValue};
 use crate::generation::RuntimeGeneration;
+use crate::sync::Mutex;
 use crate::{XllError, XllResult};
-use parking_lot::Mutex;
 use std::marker::PhantomData;
 
 /// A subscription whose cancellation and disconnection protocol is explicit.

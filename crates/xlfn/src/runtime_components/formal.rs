@@ -1,7 +1,9 @@
 //! Verification-only runtime composition state.
 
 #[cfg(any(test, feature = "refinement"))]
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
+#[cfg(any(test, feature = "refinement"))]
+use triomphe::Arc;
 
 #[cfg(any(test, feature = "refinement"))]
 /// Verification-only state is isolated from operational runtime components.

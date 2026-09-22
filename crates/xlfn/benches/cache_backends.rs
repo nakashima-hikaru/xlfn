@@ -217,7 +217,6 @@ fn main() {
     let smoke = std::env::var_os("XLFN_BACKEND_SMOKE").is_some();
     let duration = Duration::from_millis(if smoke { 10 } else { 1000 });
     let mut backends = vec![
-        CacheBackend::Moka,
         CacheBackend::Sharded { shards: 8 },
         CacheBackend::Sharded { shards: 16 },
         CacheBackend::Sharded { shards: 32 },
@@ -229,7 +228,6 @@ fn main() {
     if let Ok(selected) = std::env::var("XLFN_CACHE_BACKENDS") {
         backends.retain(|backend| {
             let name = match backend {
-                CacheBackend::Moka => "moka".to_owned(),
                 CacheBackend::Sharded { shards } => format!("sharded{shards}"),
                 CacheBackend::QuickCache { shards } => format!("quick{shards}"),
             };

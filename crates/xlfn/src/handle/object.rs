@@ -8,8 +8,8 @@
 
 use super::token::ObjectId;
 use crate::panic_boundary::catch_no_unwind;
+use crate::sync::Mutex;
 use crate::{XllError, XllResult};
-use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 use std::any::{Any, TypeId, type_name};
 use std::panic::AssertUnwindSafe;

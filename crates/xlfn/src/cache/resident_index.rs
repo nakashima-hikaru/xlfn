@@ -6,15 +6,9 @@
 //! dereferencing them. Notifications never reclaim nodes themselves.
 
 use super::{NodePtr, VersionedKey, VersionedKeyRef, retire_resident};
-#[cfg(feature = "bench-internals")]
-use moka::sync::Cache;
 use quick_cache::Equivalent;
 use std::hash::Hash;
-#[cfg(feature = "bench-internals")]
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-#[cfg(feature = "bench-internals")]
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 mod quick;
 #[cfg(feature = "bench-internals")]
@@ -45,15 +39,6 @@ impl<V> ResidentEntry<V> {
 
     fn snapshot(&self) -> Entry<V> {
         (self.node, self.weight)
-    }
-
-    // Moka clones values before storing them. Its values therefore share one
-    // owner through Arc, and eviction notification discharges that owner once.
-    #[cfg(feature = "bench-internals")]
-    fn retire_shared(&self) {
-        if self.owns_residency.swap(false, Ordering::Relaxed) {
-            retire_resident(self.node);
-        }
     }
 
     fn retire(&mut self) {
@@ -93,16 +78,8 @@ pub(super) struct ResidentIndex<K, V>(Backend<K, V>);
 
 enum Backend<K, V> {
     #[cfg(feature = "bench-internals")]
-    Moka(MokaResidentIndex<K, V>),
-    #[cfg(feature = "bench-internals")]
     Sharded(Box<ShardedResidentIndex<K, V>>),
     Quick(QuickResidentIndex<K, V>),
-}
-
-#[cfg(feature = "bench-internals")]
-struct MokaResidentIndex<K, V> {
-    cache: Cache<VersionedKey<K>, Arc<ResidentEntry<V>>>,
-    mutations: AtomicUsize,
 }
 
 impl<K, V> ResidentIndex<K, V>
@@ -110,24 +87,6 @@ where
     K: Clone + Eq + Hash + Send + Sync + 'static,
     V: Send + Sync + 'static,
 {
-    #[cfg(feature = "bench-internals")]
-    pub(super) fn moka(capacity: u64, after_eviction: impl Fn() + Send + Sync + 'static) -> Self {
-        Self(Backend::Moka(MokaResidentIndex {
-            cache: Cache::builder()
-                .max_capacity(capacity)
-                .weigher(|_, entry: &Arc<ResidentEntry<V>>| {
-                    u32::try_from(entry.weight).unwrap_or(u32::MAX)
-                })
-                .support_invalidation_closures()
-                .eviction_listener(move |_, entry, _| {
-                    entry.retire_shared();
-                    after_eviction();
-                })
-                .build(),
-            mutations: AtomicUsize::new(0),
-        }))
-    }
-
     #[cfg(feature = "bench-internals")]
     pub(super) fn sharded(capacity: u64, shards: usize) -> Self {
         Self(Backend::Sharded(Box::new(ShardedResidentIndex::new(
@@ -142,14 +101,6 @@ where
     #[cfg(feature = "bench-internals")]
     pub(super) fn memory_estimate(&self) -> (usize, bool) {
         match &self.0 {
-            Backend::Moka(_) => (
-                std::mem::size_of::<MokaResidentIndex<K, V>>()
-                    + self.resident_count() as usize
-                        * (std::mem::size_of::<(VersionedKey<K>, Arc<ResidentEntry<V>>)>()
-                            + std::mem::size_of::<ResidentEntry<V>>()
-                            + 2 * std::mem::size_of::<usize>()),
-                true,
-            ),
             Backend::Sharded(index) => (index.estimated_index_bytes(), false),
             Backend::Quick(index) => (index.estimated_index_bytes(), false),
         }
@@ -159,8 +110,6 @@ where
     pub(super) fn get(&self, key: &VersionedKeyRef<'_, K>) -> Option<Entry<V>> {
         match &self.0 {
             #[cfg(feature = "bench-internals")]
-            Backend::Moka(index) => index.cache.get(key).map(|entry| entry.snapshot()),
-            #[cfg(feature = "bench-internals")]
             Backend::Sharded(index) => index.get(key),
             Backend::Quick(index) => index.get(key),
         }
@@ -169,10 +118,6 @@ where
     /// Stores an initialized entry in the resident index.
     pub(super) fn insert_resident(&self, key: &VersionedKey<K>, entry: ResidentEntry<V>) {
         match &self.0 {
-            #[cfg(feature = "bench-internals")]
-            Backend::Moka(index) => {
-                index.cache.insert(key.clone(), Arc::new(entry));
-            }
             #[cfg(feature = "bench-internals")]
             Backend::Sharded(index) => {
                 index.publish(key.clone(), entry);
@@ -186,8 +131,6 @@ where
     pub(super) fn invalidate(&self, key: &VersionedKey<K>) {
         match &self.0 {
             #[cfg(feature = "bench-internals")]
-            Backend::Moka(index) => index.cache.invalidate(key),
-            #[cfg(feature = "bench-internals")]
             Backend::Sharded(index) => index.invalidate(key),
             Backend::Quick(index) => index.invalidate(key),
         }
@@ -196,57 +139,18 @@ where
     pub(super) fn invalidate_before(&self, epoch: u64) {
         match &self.0 {
             #[cfg(feature = "bench-internals")]
-            Backend::Moka(index) => {
-                index
-                    .cache
-                    .invalidate_entries_if(move |key, _| key.epoch < epoch)
-                    .expect("invalidation closures are enabled");
-            }
-            #[cfg(feature = "bench-internals")]
             Backend::Sharded(index) => index.invalidate_before(epoch),
             Backend::Quick(index) => index.invalidate_before(epoch),
         }
     }
 
-    pub(super) fn maintenance(&self) {
-        match &self.0 {
-            #[cfg(feature = "bench-internals")]
-            Backend::Moka(index) => index.cache.run_pending_tasks(),
-            #[cfg(feature = "bench-internals")]
-            Backend::Sharded(_) => {}
-            Backend::Quick(_) => {}
-        }
-    }
+    pub(super) fn maintenance(&self) {}
 
     #[inline]
-    pub(super) fn maintenance_after_mutation(&self) {
-        // Only the benchmark Moka control needs periodic background policy
-        // maintenance. Synchronous policies must not pay for its shared RMW.
-        #[cfg(feature = "bench-internals")]
-        if let Backend::Moka(index) = &self.0 {
-            const MAINTENANCE_INTERVAL: usize = 32;
-            if index.mutations.fetch_add(1, Ordering::Relaxed) % MAINTENANCE_INTERVAL
-                == MAINTENANCE_INTERVAL - 1
-            {
-                index.cache.run_pending_tasks();
-            }
-        }
-    }
+    pub(super) fn maintenance_after_mutation(&self) {}
 
     pub(super) fn clear(&self) {
         match &self.0 {
-            #[cfg(feature = "bench-internals")]
-            Backend::Moka(index) => {
-                index.cache.invalidate_all();
-                // Moka may time-limit eviction; exclusive cache Drop must
-                // release every residency obligation before draining nodes.
-                loop {
-                    index.cache.run_pending_tasks();
-                    if index.cache.entry_count() == 0 {
-                        break;
-                    }
-                }
-            }
             #[cfg(feature = "bench-internals")]
             Backend::Sharded(index) => index.clear(),
             Backend::Quick(index) => index.clear(),
@@ -256,8 +160,6 @@ where
     pub(super) fn resident_count(&self) -> u64 {
         match &self.0 {
             #[cfg(feature = "bench-internals")]
-            Backend::Moka(index) => index.cache.entry_count(),
-            #[cfg(feature = "bench-internals")]
             Backend::Sharded(index) => index.resident_count(),
             Backend::Quick(index) => index.resident_count(),
         }
@@ -265,8 +167,6 @@ where
 
     pub(super) fn resident_weight(&self) -> u64 {
         match &self.0 {
-            #[cfg(feature = "bench-internals")]
-            Backend::Moka(index) => index.cache.weighted_size(),
             #[cfg(feature = "bench-internals")]
             Backend::Sharded(index) => index.resident_weight(),
             Backend::Quick(index) => index.resident_weight(),

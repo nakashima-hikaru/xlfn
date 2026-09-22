@@ -1,7 +1,7 @@
 //! Shared control flow for the production, Loom, and Verus drain protocols.
 //!
 //! Backend expressions supply synchronization effects. Verus checks their order
-//! against an executable model; parking_lot/atomic semantics remain in the TCB.
+//! against an executable model; sync/atomic semantics remain in the TCB.
 //! The optional loop annotations contain proof metadata only.
 
 #[cfg(verus_only)]

@@ -6,13 +6,12 @@
 //! Stored values own resident pins; their drops retire without destroying values.
 
 use super::{Entry, ResidentEntry, VersionedKey, VersionedKeyRef};
-use hashbrown::{HashMap, hash_map::RawEntryMut};
-use parking_lot::{Mutex, RwLock};
-use std::collections::hash_map::RandomState;
+use crate::sync::{Mutex, RwLock};
+use rustc_hash::{FxBuildHasher, FxHashMap};
 use std::hash::{BuildHasher, Hash};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-type ResidentMap<K, V> = HashMap<VersionedKey<K>, ResidentEntry<V>, RandomState>;
+type ResidentMap<K, V> = FxHashMap<VersionedKey<K>, ResidentEntry<V>>;
 
 struct Policy {
     weight: u64,
@@ -22,7 +21,7 @@ struct Policy {
 
 pub(super) struct ShardedResidentIndex<K, V> {
     shards: Box<[RwLock<ResidentMap<K, V>>]>,
-    hash: RandomState,
+    hash: FxBuildHasher,
     shift: u32,
     capacity: u64,
     policy: Mutex<Policy>,
@@ -37,13 +36,13 @@ where
 {
     pub(super) fn new(capacity: u64, shard_count: usize) -> Self {
         assert!(matches!(shard_count, 8 | 16 | 32 | 64));
-        let hash = RandomState::new();
+        let hash = FxBuildHasher;
         Self {
             shards: (0..shard_count)
-                .map(|_| RwLock::new(HashMap::with_hasher(hash.clone())))
+                .map(|_| RwLock::new(FxHashMap::default()))
                 .collect(),
             shift: 64 - shard_count.trailing_zeros(),
-            hash: hash.clone(),
+            hash,
             capacity,
             policy: Mutex::new(Policy {
                 weight: 0,
@@ -62,14 +61,15 @@ where
 
     #[inline]
     pub(super) fn get(&self, key: &VersionedKeyRef<'_, K>) -> Option<Entry<V>> {
-        let hash = self.hash.hash_one(key);
+        let lookup = VersionedKey {
+            epoch: key.epoch,
+            key: key.key.clone(),
+        };
+        let hash = self.hash.hash_one(&lookup);
         self.shards[self.shard(hash)]
             .read()
-            .raw_entry()
-            .from_hash(hash, |owned| {
-                owned.epoch == key.epoch && &owned.key == key.key
-            })
-            .map(|(_, entry)| entry.snapshot())
+            .get(&lookup)
+            .map(|entry| entry.snapshot())
     }
 
     pub(super) fn publish(&self, key: VersionedKey<K>, entry: ResidentEntry<V>) {
@@ -83,14 +83,10 @@ where
             } else {
                 {
                     let mut shard = self.shards[shard_index].write();
-                    match shard.raw_entry_mut().from_hash(hash, |owned| owned == &key) {
-                        RawEntryMut::Occupied(old) => {
-                            let (old_key, old_entry) = old.remove_entry();
-                            policy.weight -= old_entry.weight;
-                            policy.entries -= 1;
-                            removed.push((old_key, old_entry));
-                        }
-                        RawEntryMut::Vacant(_) => {}
+                    if let Some(old_entry) = shard.remove(&key) {
+                        policy.weight -= old_entry.weight;
+                        policy.entries -= 1;
+                        removed.push((key.clone(), old_entry));
                     }
                 }
                 while policy.weight + entry.weight > self.capacity {
@@ -99,11 +95,13 @@ where
                     // does not always charge the first shard for global debt.
                     let index = policy.next_victim;
                     policy.next_victim = (index + 1) % self.shards.len();
-                    let victim = self.shards[index].write().extract_if(|_, _| true).next();
-                    if let Some(victim) = victim {
-                        policy.weight -= victim.1.weight;
+                    let victim_key = self.shards[index].read().keys().next().cloned();
+                    if let Some(victim_key) = victim_key
+                        && let Some(victim_entry) = self.shards[index].write().remove(&victim_key)
+                    {
+                        policy.weight -= victim_entry.weight;
                         policy.entries -= 1;
-                        removed.push(victim);
+                        removed.push((victim_key, victim_entry));
                     }
                 }
                 let weight = entry.weight;
@@ -159,11 +157,21 @@ where
         {
             let mut policy = self.policy.lock();
             for shard in &self.shards {
-                let mut shard = shard.write();
-                for item in shard.extract_if(|key, _| select(key)) {
-                    policy.entries -= 1;
-                    policy.weight -= item.1.weight;
-                    removed.push(item);
+                let matching: Vec<_> = shard
+                    .read()
+                    .keys()
+                    .filter(|key| select(key))
+                    .cloned()
+                    .collect();
+                if !matching.is_empty() {
+                    let mut shard = shard.write();
+                    for key in matching {
+                        if let Some(entry) = shard.remove(&key) {
+                            policy.entries -= 1;
+                            policy.weight -= entry.weight;
+                            removed.push((key, entry));
+                        }
+                    }
                 }
             }
             self.record(&policy);

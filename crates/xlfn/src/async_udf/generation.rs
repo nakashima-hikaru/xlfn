@@ -1,6 +1,6 @@
 use super::task::TaskControl;
+use crate::sync::Mutex;
 use crossbeam_utils::CachePadded;
-use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 use std::ptr::NonNull;
 use std::sync::atomic::AtomicUsize;

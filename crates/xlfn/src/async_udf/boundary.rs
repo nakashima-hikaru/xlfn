@@ -10,10 +10,10 @@ use crate::cancellation::{CancellationGuarantee, CancellationSource, Cancellatio
 use crate::execution::{CallId, CallMetadata, InstrumentationPlan};
 use crate::panic_boundary::catch_no_unwind;
 use crate::runtime::Runtime;
+#[cfg(test)]
+use crate::sync::Mutex;
 use crate::{XllError, XllResult};
 use futures_util::Future;
-#[cfg(test)]
-use parking_lot::Mutex;
 use std::panic::AssertUnwindSafe;
 use xlfn_sys::XLOPER12;
 

@@ -53,7 +53,7 @@ Calculation-cache residency uses Quick Cache with a single global weight budget.
 The index owns one residency pin per stored entry; lookup snapshots are non-owning.
 Eviction, rejection, explicit invalidation and clear release that pin and enqueue
 retirement without running user destructors inside index locks. Existing read
-permits and leases govern node reclamation. Moka and alternate sharded indexes
+permits and leases govern node reclamation. Alternate sharded indexes
 are available only through the internal benchmark feature.
 Zero-budget nodes are never published and belong to their single lease. They
 can be destroyed directly, except during cache initialization, when destruction

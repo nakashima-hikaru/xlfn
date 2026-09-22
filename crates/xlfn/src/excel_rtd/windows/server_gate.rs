@@ -1,6 +1,6 @@
 use super::event::{ManualResetEvent, Win32EventError};
-use parking_lot::{Condvar, Mutex, MutexGuard};
-use std::collections::HashMap;
+use crate::sync::{Condvar, Mutex, MutexGuard};
+use rustc_hash::FxHashMap;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::thread::ThreadId;
@@ -22,8 +22,8 @@ pub(super) struct ServerOperationState {
     termination_coordinator: Option<ThreadId>,
     pub(super) in_flight: usize,
     notifications_in_flight: usize,
-    in_flight_by_thread: HashMap<ThreadId, usize>,
-    notifications_in_flight_by_thread: HashMap<ThreadId, usize>,
+    in_flight_by_thread: FxHashMap<ThreadId, usize>,
+    notifications_in_flight_by_thread: FxHashMap<ThreadId, usize>,
 }
 
 pub(super) struct ServerOperationBarrier {

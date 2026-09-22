@@ -1,5 +1,5 @@
 //! Quick Cache resident policy. Only stored values own a residency obligation.
-//! Cloned lookup/placeholder results are non-owning snapshots, as with Moka.
+//! Cloned lookup/placeholder results are non-owning snapshots.
 
 use super::{Entry, ResidentEntry, VersionedKey, VersionedKeyRef};
 use quick_cache::{
@@ -50,7 +50,7 @@ where
             .build()
             .expect("valid resident cache options");
         Self {
-            // Use the same hasher family as the benchmark Moka control.
+            // Use the standard RandomState hasher.
             cache: Cache::with_options(
                 options,
                 EntryWeight,

@@ -1,5 +1,5 @@
+use crate::sync::{Condvar, Mutex};
 use crossbeam_utils::CachePadded;
-use parking_lot::{Condvar, Mutex};
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;

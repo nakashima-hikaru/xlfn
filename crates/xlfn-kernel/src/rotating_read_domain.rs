@@ -11,7 +11,7 @@
 )]
 
 use crate::drain_gate::{DEFAULT_STRIPE_COUNT, StripedDrainGate, current_thread_stripe};
-use parking_lot::{Mutex, MutexGuard};
+use crate::sync::{Mutex, MutexGuard};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 

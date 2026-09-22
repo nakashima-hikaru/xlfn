@@ -6,7 +6,7 @@ use super::{
 use crate::diagnostics::event::{
     DiagnosticEvent, DiagnosticInitError, DiagnosticSink, FAILED_WRITES,
 };
-use parking_lot::Mutex;
+use crate::sync::Mutex;
 use serde::Serialize;
 use std::borrow::Cow;
 use std::fmt;

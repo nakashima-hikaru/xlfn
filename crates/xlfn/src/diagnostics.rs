@@ -6,8 +6,8 @@ use id::DiagnosticId;
 
 use crate::error::IntoXllError;
 use crate::panic_boundary::catch_no_unwind;
+use crate::sync::Mutex;
 use crate::{XllError, XllResult};
-use parking_lot::Mutex;
 #[cfg(test)]
 use std::fs;
 #[cfg(test)]
@@ -15,7 +15,7 @@ use std::io;
 use std::panic::AssertUnwindSafe;
 #[cfg(test)]
 use std::panic::catch_unwind;
-#[cfg(any(test, feature = "refinement"))]
+#[cfg(test)]
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -26,8 +26,6 @@ use xlfn_kernel::service_slot::ReplaceableServiceSlot;
 pub mod event;
 /// Private file-sink and startup-log integration.
 pub(crate) mod file;
-/// Private lifecycle router and worker operations.
-pub(crate) mod router;
 /// Private bounded worker and ownership handoff.
 pub(crate) mod worker;
 
@@ -128,7 +126,7 @@ impl DiagnosticRouter {
 
     #[cfg(any(test, feature = "refinement"))]
     fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
-        self.observer.set_trace_sink(Arc::clone(&trace));
+        self.observer.set_trace_sink(triomphe::Arc::clone(&trace));
         if let Some(sink) = self.sink.read_if_ready() {
             sink.set_trace_sink(trace);
         }
@@ -589,7 +587,7 @@ mod tests {
 
     struct GlobalRouterTestGuard {
         _module_lease: crate::ingress::TestModuleLease,
-        _diagnostic_lock: parking_lot::MutexGuard<'static, ()>,
+        _diagnostic_lock: crate::sync::MutexGuard<'static, ()>,
     }
 
     impl Drop for GlobalRouterTestGuard {

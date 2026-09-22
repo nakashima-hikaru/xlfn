@@ -1,5 +1,5 @@
 use std::ops::Deref;
-use std::sync::Arc;
+use triomphe::Arc;
 
 /// Immutable bytes shared between snapshot, verification and commit stages.
 ///

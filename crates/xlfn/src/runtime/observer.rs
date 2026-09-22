@@ -11,7 +11,7 @@ use crate::runtime_components::ReturnProtocol;
 #[cfg(not(any(test, feature = "refinement")))]
 use std::marker::PhantomData;
 #[cfg(any(test, feature = "refinement"))]
-use std::sync::Arc;
+use triomphe::Arc;
 
 pub(crate) struct RuntimeObserver {
     #[cfg(any(test, feature = "refinement"))]

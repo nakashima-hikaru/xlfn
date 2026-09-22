@@ -48,8 +48,8 @@
     "reason": "Property test asserts arbitrary generated parser input never unwinds."
   },
   {
-    "path": "crates/xlfn/src/async_udf.rs",
-    "context": "# [ cfg ( test ) ]",
+    "path": "crates/xlfn/src/async_udf/tests.rs",
+    "context": "module root",
     "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",
     "count": 1,
     "category": "test",
@@ -134,14 +134,7 @@
     "count": 1,
     "category": "test",
     "reason": "Negative observer asserts layer teardown contains the fixture panic while exiting all layers."
-  },
-  {
-    "path": "crates/xlfn/src/handle.rs",
-    "context": "# [ cfg ( test ) ]",
-    "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",
-    "count": 1,
-    "category": "test",
-    "reason": "Test-only import; each direct test call is separately inventoried by function, source context, and occurrence count."
+
   },
   {
     "path": "crates/xlfn/src/handle/tests.rs",
@@ -176,7 +169,7 @@
     "reason": "Import for the audited resume-only boundary. destroy_thread_local_return_block poisons partially destroyed TLS storage and resumes the original payload; free_return_boundary consumes it."
   },
   {
-    "path": "crates/xlfn/src/rtd/windows.rs",
+    "path": "crates/xlfn/src/excel_rtd/windows.rs",
     "context": "# [ cfg ( test ) ]",
     "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",
     "count": 1,
@@ -184,7 +177,7 @@
     "reason": "Test-only import; each direct test call is separately inventoried by function, source context, and occurrence count."
   },
   {
-    "path": "crates/xlfn/src/rtd/windows/server.rs",
+    "path": "crates/xlfn/src/excel_rtd/windows/server.rs",
     "context": "fn deferred_termination_worker",
     "code": "let outcome = catch_unwind(AssertUnwindSafe(|| {",
     "count": 1,
@@ -192,7 +185,7 @@
     "reason": "deferred_termination_worker finishes phase/refcount cleanup and resumes the original payload; TerminationWorker::join consumes it before publishing Joined."
   },
   {
-    "path": "crates/xlfn/src/rtd/windows/server.rs",
+    "path": "crates/xlfn/src/excel_rtd/windows/server.rs",
     "context": "module root",
     "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",
     "count": 1,
@@ -200,7 +193,7 @@
     "reason": "Import for the audited resume-only boundary. deferred_termination_worker finishes phase/refcount cleanup and resumes the original payload; TerminationWorker::join consumes it before publishing Joined."
   },
   {
-    "path": "crates/xlfn/src/rtd/windows/tests.rs",
+    "path": "crates/xlfn/src/excel_rtd/windows/tests.rs",
     "context": "# [ test ] fn panicking_git_revocation_retry_requeues_claim",
     "code": "let result = catch_unwind(AssertUnwindSafe(|| {",
     "count": 1,
@@ -208,8 +201,8 @@
     "reason": "Observes a fixed string test-hook panic and checks the revocation claim is requeued."
   },
   {
-    "path": "crates/xlfn/src/subscription.rs",
-    "context": "# [ cfg ( test ) ]",
+    "path": "crates/xlfn/src/subscription/tests.rs",
+    "context": "module root",
     "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",
     "count": 1,
     "category": "test",

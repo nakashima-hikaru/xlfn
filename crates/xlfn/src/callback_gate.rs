@@ -1,5 +1,5 @@
 use crate::return_abi::ExcelCallbackStatus;
-use parking_lot::Mutex;
+use crate::sync::Mutex;
 use xlfn_sys::XLRET_FAILED;
 
 /// The module-wide callback lifecycle is independent from the state of any

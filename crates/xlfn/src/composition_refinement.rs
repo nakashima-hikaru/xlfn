@@ -1,5 +1,5 @@
 use crate::shutdown_trace::{CertificateEvent, ShutdownResources};
-use parking_lot::Mutex;
+use crate::sync::Mutex;
 use serde::Serialize;
 
 const MAX_TRACE_EVENTS: usize = 16_384;

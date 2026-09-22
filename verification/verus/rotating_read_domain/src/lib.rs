@@ -413,6 +413,7 @@ pub mod locked_detachment;
 
 pub mod queue_preparation;
 
+#[allow(unused_macros)]
 #[path = "../../../../crates/xlfn/src/retirement_queue.rs"]
 pub(crate) mod queue_transitions;
 

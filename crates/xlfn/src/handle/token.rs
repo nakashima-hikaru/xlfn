@@ -525,7 +525,7 @@ mod tests {
     fn verified_token_cache_index_distinguishes_all_16_nibbles() {
         let mut token = vec![b'a'; HANDLE_TOKEN_LENGTH];
         let hex_chars = b"0123456789abcdef";
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = rustc_hash::FxHashSet::default();
         for &ch in hex_chars {
             token[HANDLE_TOKEN_LENGTH - 1] = ch;
             let index = verified_token_cache_index(&token).expect("valid hex nibble index");

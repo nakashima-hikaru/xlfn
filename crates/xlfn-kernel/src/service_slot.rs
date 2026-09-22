@@ -7,13 +7,13 @@
 
 use crate::drain_gate::{DEFAULT_STRIPE_COUNT, StripedDrainGate, StripedDrainPermit};
 use crate::published_owner::PublishedOwner;
-use parking_lot::{Condvar, Mutex};
+use crate::sync::{Condvar, Mutex};
 use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 use std::ops::Deref;
 use std::ptr::NonNull;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
+use triomphe::Arc;
 
 /// Number of reader stripes for the generation service slot.
 pub const SERVICE_READER_STRIPES: usize = DEFAULT_STRIPE_COUNT;

@@ -7,22 +7,22 @@ mod node_layout;
 mod pin_transitions;
 use node_layout::verus;
 mod resident_index;
-use parking_lot::{Condvar, Mutex, RwLock};
+use crate::sync::{Condvar, Mutex, RwLock};
 use resident_index::{ResidentEntry, ResidentIndex};
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use std::any::{Any, TypeId};
 use std::borrow::Borrow;
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 #[cfg(feature = "bench-internals")]
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
+use triomphe::Arc;
 use xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT;
 use xlfn_kernel::rotating_read_domain::{
     ClosedDomain, DrainedGeneration, GenerationIndex, RotatingReadDomain, RotatingReadPermit,
@@ -428,7 +428,7 @@ struct CacheEntry {
     ops: CacheOps,
 }
 
-type CacheMap = HashMap<(TypeId, &'static str), CacheEntry>;
+type CacheMap = FxHashMap<(TypeId, &'static str), CacheEntry>;
 
 pub struct CacheRegistry {
     weight_budget_per_endpoint: usize,
@@ -440,7 +440,7 @@ impl CacheRegistry {
     pub fn new(weight_budget_per_endpoint: usize) -> Self {
         Self {
             weight_budget_per_endpoint,
-            caches: RwLock::new(HashMap::new()),
+            caches: RwLock::new(FxHashMap::default()),
         }
     }
 
@@ -712,7 +712,7 @@ impl<K, V> Borrow<VersionedKey<K>> for FlightHandle<K, V> {
     }
 }
 
-type FlightSet<K, V> = HashSet<FlightHandle<K, V>>;
+type FlightSet<K, V> = FxHashSet<FlightHandle<K, V>>;
 
 struct LeaderGuard<'a, K: Clone + Eq + Hash, V> {
     cache: &'a CalculationCache<K, V>,
@@ -1069,7 +1069,6 @@ impl<V> CacheLookupDomain<V> {
 #[cfg(feature = "bench-internals")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CacheBackend {
-    Moka,
     Sharded { shards: usize },
     QuickCache { shards: usize },
 }
@@ -1081,8 +1080,7 @@ pub struct CacheResidentStats {
     pub entries: u64,
     pub weight: u64,
     pub index_bytes_estimate: usize,
-    /// Moka does not expose policy/table allocation sizes; its estimate is a
-    /// lower bound that excludes opaque metadata. Key heap storage is excluded.
+    /// Whether the resident index estimate excludes opaque metadata.
     pub index_metadata_opaque: bool,
     /// Resident node headers plus caller-reported payload weights. Excludes
     /// live non-resident leases and queued retirement debt.
@@ -1102,7 +1100,7 @@ pub struct CalculationCache<K, V> {
     clear_lock: Mutex<()>,
     index: ResidentIndex<K, V>,
     clear_fn: Option<fn(*const ())>,
-    follower_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+    follower_hook: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl<K, V> CalculationCache<K, V>
@@ -1122,24 +1120,13 @@ where
         Self::with_index(weight_budget, |capacity| ResidentIndex::quick(capacity, 1))
     }
 
-    // Qualify the benchmark comparator's time-limited eviction behavior.
-    #[cfg(all(test, feature = "bench-internals"))]
-    fn new_with_eviction_hook(
-        weight_budget: usize,
-        after_eviction: impl Fn() + Send + Sync + 'static,
-    ) -> Self {
-        Self::with_index(weight_budget, |capacity| {
-            ResidentIndex::moka(capacity, after_eviction)
-        })
-    }
-
     #[doc(hidden)]
     pub fn new_with_follower_hook(
         weight_budget: usize,
         hook: impl Fn() + Send + Sync + 'static,
     ) -> Self {
         let mut cache = Self::new(weight_budget);
-        cache.follower_hook = Some(Arc::new(hook));
+        cache.follower_hook = Some(Box::new(hook));
         cache
     }
 
@@ -1148,7 +1135,6 @@ where
     #[must_use]
     pub fn new_with_backend(weight_budget: usize, backend: CacheBackend) -> Self {
         Self::with_index(weight_budget, |capacity| match backend {
-            CacheBackend::Moka => ResidentIndex::moka(capacity, || {}),
             CacheBackend::Sharded { shards } => ResidentIndex::sharded(capacity, shards),
             CacheBackend::QuickCache { shards } => ResidentIndex::quick(capacity, shards),
         })
@@ -1162,7 +1148,7 @@ where
         Self {
             weight_budget,
             generation: CacheGeneration::new(),
-            flights: Mutex::new(HashSet::new()),
+            flights: Mutex::new(FxHashSet::default()),
             domain: xlfn_kernel::published_owner::PublishedOwner::new(CacheLookupDomain::new()),
             clear_lock: Mutex::new(()),
             index: make_index(capacity),
@@ -3202,7 +3188,6 @@ mod tests {
             #[cfg(feature = "bench-internals")]
             let indexes = [
                 ResidentIndex::<PanicKey, DropProbe>::quick(16, 1),
-                ResidentIndex::moka(16, || {}),
                 ResidentIndex::sharded(16, 8),
             ];
             for index in indexes {
@@ -3669,39 +3654,6 @@ mod tests {
         assert_eq!(drops.load(Ordering::Relaxed), 1);
         assert_eq!(cache.reclamation_stats().pending_nodes, 0);
         drop(initialized);
-    }
-
-    #[cfg(feature = "bench-internals")]
-    #[test]
-    fn cache_drop_finishes_time_limited_eviction_passes() {
-        struct DropProbe(Arc<AtomicUsize>);
-        impl Drop for DropProbe {
-            fn drop(&mut self) {
-                self.0.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        let drops = Arc::new(AtomicUsize::new(0));
-        let pause = Arc::new(AtomicBool::new(false));
-        let pause_once = Arc::clone(&pause);
-        let cache = CalculationCache::new_with_eviction_hook(2048, move || {
-            if pause_once.swap(false, Ordering::Relaxed) {
-                // Moka time-limits a maintenance pass at 100 ms when a
-                // listener is installed. Force it to stop after one batch.
-                std::thread::sleep(Duration::from_millis(150));
-            }
-        });
-        for key in 0..1024 {
-            drop(
-                cache
-                    .get_or_try_insert_with(key, |_| 1, || Ok(DropProbe(Arc::clone(&drops))))
-                    .unwrap(),
-            );
-        }
-        assert_eq!(drops.load(Ordering::Relaxed), 0);
-        pause.store(true, Ordering::Relaxed);
-        drop(cache);
-        assert!(!pause.load(Ordering::Relaxed));
-        assert_eq!(drops.load(Ordering::Relaxed), 1024);
     }
 
     #[test]

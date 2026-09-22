@@ -15,21 +15,21 @@
 use super::FormulaLifetimeGeneration;
 use super::{FormulaObserverId, HandleTopicKey, Topic};
 use crate::generation::TopicGeneration;
+use crate::sync::{Condvar, Mutex, RwLock};
+#[cfg(test)]
+use crate::sync::{RwLockReadGuard, RwLockWriteGuard};
 use crate::{XllError, XllResult};
 use papaya::Guard;
-use parking_lot::{Condvar, Mutex, RwLock};
-#[cfg(test)]
-use parking_lot::{RwLockReadGuard, RwLockWriteGuard};
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use smallvec::SmallVec;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::ptr::NonNull;
-use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::thread::ThreadId;
+use triomphe::Arc;
 use xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT;
 use xlfn_kernel::published_owner::PublishedOwner;
 use xlfn_kernel::rotating_read_domain::{

@@ -1,5 +1,5 @@
+use crate::sync::Mutex;
 use crate::{XllError, XllResult};
-use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender};

@@ -13,15 +13,15 @@ use super::runtime_services::RuntimeServices;
 use super::topic::{SubscriptionId, TopicId};
 use super::value::StoredRtdValue;
 use crate::generation::ConnectionGeneration;
+use crate::sync::Mutex;
 use crate::{XllError, XllResult};
-use parking_lot::Mutex;
 #[cfg(test)]
 use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::NonNull;
-#[cfg(test)]
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+#[cfg(test)]
+use triomphe::Arc;
 use xlfn_kernel::operation_gate::{
     OperationGate, OperationGuard, OwnedOperationGuard, TerminationWaitGuard,
 };
@@ -1345,7 +1345,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
     pub(crate) fn lock_shard_for_test(
         &self,
         index: usize,
-    ) -> parking_lot::MutexGuard<'_, TopicShard> {
+    ) -> crate::sync::MutexGuard<'_, TopicShard> {
         self.shards[index].lock()
     }
 
@@ -1455,7 +1455,7 @@ impl<H: SubscriptionHost> Drop for RtdRefreshBatch<'_, H> {
 mod tests {
     use super::{OperationDropTrace, with_operation_drop_trace};
     use crate::subscription::runtime::SubscriptionRuntime;
-    use std::sync::Arc;
+    use triomphe::Arc;
 
     #[test]
     fn terminated_servers_release_payload_storage_before_runtime_drop() {
@@ -1565,7 +1565,7 @@ mod tests {
     }
 
     fn assert_drop_order(run: impl FnOnce()) {
-        let trace: OperationDropTrace = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let trace: OperationDropTrace = Arc::new(crate::sync::Mutex::new(Vec::new()));
         with_operation_drop_trace(Arc::clone(&trace), run);
         assert_eq!(
             *trace.lock(),

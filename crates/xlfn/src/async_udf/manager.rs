@@ -7,12 +7,12 @@ use crate::cancellation::CancellationSource;
 use crate::diagnostics::id::DiagnosticId;
 #[cfg(feature = "handles")]
 use crate::generation::RuntimeGeneration;
+use crate::sync::{Condvar, Mutex};
 use crate::{XllError, XllResult};
 use futures_util::Future;
-use parking_lot::{Condvar, Mutex};
 use std::ops::Deref;
 use std::ptr::NonNull;
-#[cfg(any(test, feature = "refinement"))]
+#[cfg(test)]
 use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 #[cfg(test)]
@@ -152,7 +152,7 @@ impl AsyncManager {
 
     #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
-        self.observer.set_trace_sink(Arc::clone(&trace));
+        self.observer.set_trace_sink(triomphe::Arc::clone(&trace));
         let mut state = self.state.lock();
         match &mut *state {
             ExecutorState::Running(executor) | ExecutorState::Closing(Some(executor)) => {

@@ -1,4 +1,12 @@
+use super::binding::BindingState;
+use super::formula::{FormulaCaller, resolve_formula_caller};
+use super::registry::HandleRegistryPhase;
 use super::*;
+use crate::call_return::ReturnContext;
+use crate::sync::Mutex;
+use crate::{XllError, XllResult};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn lifetime_generation(raw: u64) -> crate::handle::FormulaLifetimeGeneration {
     crate::handle::FormulaLifetimeGeneration::new(raw).expect("test server generation is non-zero")
@@ -3721,7 +3729,7 @@ fn miri_deferred_seal_waits_for_in_flight_destructor() {
     use std::time::Duration;
     struct BlockingDrop {
         entered: mpsc::Sender<()>,
-        release: parking_lot::Mutex<mpsc::Receiver<()>>,
+        release: crate::sync::Mutex<mpsc::Receiver<()>>,
     }
     impl ExcelHandleObject for BlockingDrop {}
     impl Drop for BlockingDrop {
@@ -3737,7 +3745,7 @@ fn miri_deferred_seal_waits_for_in_flight_destructor() {
         &registry,
         Arc::new(BlockingDrop {
             entered: entered_tx,
-            release: parking_lot::Mutex::new(release_rx),
+            release: crate::sync::Mutex::new(release_rx),
         }),
     )
     .unwrap();
@@ -3767,7 +3775,7 @@ fn miri_borrowing_remover_retains_registry_through_reentrant_drop() {
     struct OwnsRegistry {
         registry: Option<Arc<HandleRegistry>>,
         entered: mpsc::Sender<()>,
-        release: parking_lot::Mutex<mpsc::Receiver<()>>,
+        release: crate::sync::Mutex<mpsc::Receiver<()>>,
         finished: mpsc::Sender<()>,
     }
     impl ExcelHandleObject for OwnsRegistry {}
@@ -3793,7 +3801,7 @@ fn miri_borrowing_remover_retains_registry_through_reentrant_drop() {
         Arc::new(OwnsRegistry {
             registry: Some(Arc::clone(&registry)),
             entered: entered_tx,
-            release: parking_lot::Mutex::new(release_rx),
+            release: crate::sync::Mutex::new(release_rx),
             finished: finished_tx,
         }),
     )

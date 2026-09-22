@@ -17,7 +17,6 @@ use std::sync::atomic::Ordering;
 use xlfn_sys::{XLBIT_DLL_FREE, XLOPER12, XLOPER12Array, XLOPER12Value, XLTYPE_MULTI, XLTYPE_STR};
 
 pub(crate) mod array;
-pub(crate) mod boundary;
 pub(crate) mod conversion;
 pub(crate) mod ownership;
 pub(crate) mod storage;

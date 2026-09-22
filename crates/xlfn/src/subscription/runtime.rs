@@ -20,8 +20,8 @@ use super::topic::{
 };
 use super::value::StoredRtdValue;
 use crate::generation::{ConnectionGeneration, RuntimeGeneration, ServerGeneration};
+use crate::sync::Mutex;
 use crate::{XllError, XllResult};
-use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::NonNull;

@@ -6,9 +6,13 @@
 use super::*;
 use crate::excel_rtd::{RtdNotifier, RtdSubscriptionHost};
 use crate::rtd::test_support::{TestNotifierState, TestNotifyOutcome};
+use crate::sync::Mutex;
+use crate::{XllError, XllResult};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
 
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 pub(crate) struct TestSubscription {
     canceled: Arc<AtomicBool>,
@@ -3713,9 +3717,9 @@ fn uncommitted_subscription_trace_balances_each_cleanup_path() {
     for cleanup in ["rollback", "disconnect", "server-close", "runtime-close"] {
         let (arena, source, _, disconnected) = publishing_source::<i32>(None);
         let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
-        let trace = Arc::new(ShutdownTraceRecorder::new());
+        let trace = triomphe::Arc::new(ShutdownTraceRecorder::new());
         trace.begin(1, ShutdownResources::opened(0, 0)).unwrap();
-        runtime.set_trace_sink(Arc::clone(&trace));
+        runtime.set_trace_sink(triomphe::Arc::clone(&trace));
         let subscription_events = || {
             trace
                 .activities()

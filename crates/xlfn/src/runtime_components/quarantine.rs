@@ -1,6 +1,6 @@
 //! Quarantine ownership for resources whose unload safety is not proven.
 
-use parking_lot::Mutex;
+use crate::sync::Mutex;
 use std::mem::ManuallyDrop;
 
 use crate::generation::ExecutionGeneration;

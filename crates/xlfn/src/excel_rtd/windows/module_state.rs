@@ -1,4 +1,4 @@
-use parking_lot::{Condvar, Mutex};
+use crate::sync::{Condvar, Mutex};
 use std::num::NonZeroU32;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

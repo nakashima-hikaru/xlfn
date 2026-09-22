@@ -12,4 +12,5 @@ pub mod quota;
 pub mod rotating_read_domain;
 pub mod sealable_counter;
 pub mod service_slot;
+pub mod sync;
 pub mod thread_affine;

@@ -7,8 +7,8 @@ use super::{
     IntoRtdValue, RefreshOutcome, RtdChannelSource, RtdSink, RtdSource, RtdSubscription, RtdTopic,
     SourceRegistration, StoredRtdValue, SubscriptionRuntime, TopicId,
 };
+use crate::sync::{Condvar, Mutex};
 use crate::{XllError, XllResult};
-use parking_lot::{Condvar, Mutex};
 use std::{
     collections::VecDeque,
     num::NonZeroUsize,

@@ -1,6 +1,6 @@
 //! Physical module residency ownership.
 
-use parking_lot::Mutex;
+use crate::sync::Mutex;
 
 use crate::module_residency::ModuleResidencyLease;
 

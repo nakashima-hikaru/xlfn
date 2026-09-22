@@ -6,15 +6,15 @@
 use super::source::{RtdSink, RtdSource, RtdSubscription};
 use super::topic::RtdTopic;
 use super::value::{IntoRtdValue, StoredRtdValue};
+use crate::sync::{Condvar, Mutex};
 use crate::{XllError, XllResult};
-use parking_lot::{Condvar, Mutex};
 use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{Builder, JoinHandle};
 use std::time::Duration;
+use triomphe::Arc;
 
 type Producer<T> = dyn FnOnce(RtdSender<T>) -> XllResult<()> + Send;
 type ProducerFactory<T> = dyn Fn(RtdTopic) -> XllResult<Box<Producer<T>>> + Send + Sync;
@@ -167,9 +167,9 @@ impl Channel {
         }
     }
 
-    fn sender<T>(self: &Arc<Self>) -> RtdSender<T> {
+    fn sender<T>(this: &Arc<Self>) -> RtdSender<T> {
         RtdSender {
-            channel: Arc::clone(self),
+            channel: Arc::clone(this),
             _value: PhantomData,
         }
     }
@@ -344,7 +344,7 @@ unsafe impl<T: IntoRtdValue + Send + 'static> RtdSource for RtdChannelSource<T> 
                 .name("xlfn-rtd-producer".into())
                 .spawn(move || {
                     let _finish = scopeguard::guard((), |_| channel.producer_finished());
-                    producer(channel.sender())
+                    producer(Channel::sender(&channel))
                 })
                 .map_err(spawn_error)?,
         );
@@ -392,7 +392,7 @@ pub fn channel_protocol_probe(
         });
         let mut workers = Vec::new();
         for _ in 0..producers {
-            let sender = channel.sender::<i32>();
+            let sender = Channel::sender::<i32>(&channel);
             let barrier = Arc::clone(&barrier);
             workers.push(std::thread::spawn(move || {
                 barrier.wait();
@@ -441,7 +441,7 @@ mod tests {
         RefreshOutcome, RtdValue, SubscriptionRuntime, SubscriptionServerHandle, TopicId,
     };
     use std::panic::{AssertUnwindSafe, catch_unwind};
-    use std::sync::mpsc;
+    use std::sync::{Arc as StdArc, mpsc};
 
     const DEADLINE: Duration = Duration::from_secs(5);
 
@@ -479,7 +479,7 @@ mod tests {
     #[test]
     fn bounded_channel_validates_before_admission() {
         let channel = Arc::new(Channel::new(capacity()));
-        let sender = channel.sender::<f64>();
+        let sender = Channel::sender::<f64>(&channel);
         assert!(sender.try_send(f64::NAN).is_err());
         assert!(channel.state.lock().values.is_empty());
         sender.try_send(1.0).unwrap();
@@ -527,7 +527,7 @@ mod tests {
         });
         ready_rx.recv_timeout(DEADLINE).unwrap();
         drop(channel.state.lock());
-        channel.sender::<i32>().try_send(42).unwrap();
+        Channel::sender::<i32>(&channel).try_send(42).unwrap();
         assert_eq!(
             done_rx.recv_timeout(DEADLINE).unwrap(),
             Some(StoredRtdValue::Integer(42))
@@ -553,7 +553,7 @@ mod tests {
     #[test]
     fn conversion_can_reenter_and_close_the_channel() {
         let channel = Arc::new(Channel::new(capacity()));
-        let sender = channel.sender::<CloseDuringConversion>();
+        let sender = Channel::sender::<CloseDuringConversion>(&channel);
         assert!(matches!(
             sender.try_send(CloseDuringConversion(Arc::clone(&channel))),
             Err(XllError::Closing)
@@ -565,7 +565,7 @@ mod tests {
     fn miri_channel_batches_preserve_fifo_and_finite_drain() {
         let channel = Arc::new(Channel::new(NonZeroUsize::new(65).unwrap()));
         for value in 0..65 {
-            channel.sender::<i32>().try_send(value).unwrap();
+            Channel::sender::<i32>(&channel).try_send(value).unwrap();
         }
         channel.producer_finished();
         let mut batch = smallvec::SmallVec::new();
@@ -587,7 +587,7 @@ mod tests {
         let (_runtime, server, sink) = sink();
         let channel = Arc::new(Channel::new(NonZeroUsize::new(65).unwrap()));
         for value in 0..65 {
-            channel.sender::<i32>().try_send(value).unwrap();
+            Channel::sender::<i32>(&channel).try_send(value).unwrap();
         }
         channel.producer_finished();
         let mut subscription = RtdChannelSubscription::start_publisher(channel, sink).unwrap();
@@ -611,7 +611,7 @@ mod tests {
         let (_runtime, server, sink) = sink();
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
-        let notifier = Arc::new(crate::rtd::test_support::TestNotifierState::new());
+        let notifier = StdArc::new(crate::rtd::test_support::TestNotifierState::new());
         *notifier.entered.lock() = Some(entered_tx);
         *notifier.release.lock() = Some(release_rx);
         server
@@ -619,7 +619,7 @@ mod tests {
             .unwrap();
         let channel = Arc::new(Channel::new(NonZeroUsize::new(64).unwrap()));
         for value in 0..64 {
-            channel.sender::<i32>().try_send(value).unwrap();
+            Channel::sender::<i32>(&channel).try_send(value).unwrap();
         }
         let subscription =
             RtdChannelSubscription::start_publisher(Arc::clone(&channel), sink).unwrap();
@@ -816,7 +816,7 @@ mod tests {
         let (_runtime, server, sink) = sink();
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
-        let notifier = Arc::new(crate::rtd::test_support::TestNotifierState::new());
+        let notifier = StdArc::new(crate::rtd::test_support::TestNotifierState::new());
         *notifier.entered.lock() = Some(entered_tx);
         *notifier.release.lock() = Some(release_rx);
         server
@@ -900,10 +900,10 @@ mod tests {
     fn custom_producer_panic_payload_cannot_unwind_disconnect_or_drop() {
         for explicit_disconnect in [false, true] {
             let (_runtime, _server, sink) = sink();
-            let payload_drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let producer_drops = Arc::clone(&payload_drops);
+            let payload_drops = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
+            let producer_drops = StdArc::clone(&payload_drops);
             let source = RtdChannelSource::new(capacity(), move |_| {
-                let producer_drops = Arc::clone(&producer_drops);
+                let producer_drops = StdArc::clone(&producer_drops);
                 Ok(move |_| {
                     std::panic::panic_any(crate::panic_boundary::tests::PanickingPayload(
                         producer_drops,
@@ -961,7 +961,7 @@ mod tests {
         for unwind in [false, true] {
             let (runtime, _server, sink) = sink();
             let channel = Arc::new(Channel::new(capacity()));
-            let sender = channel.sender::<i32>();
+            let sender = Channel::sender::<i32>(&channel);
             let result = catch_unwind(AssertUnwindSafe(move || {
                 let _subscription = RtdChannelSubscription::start_publisher(channel, sink)?;
                 // This is the intermediate setup state when spawning the
@@ -979,7 +979,7 @@ mod tests {
             assert!(sender.is_closed());
             // The publisher's owning channel reference has been released
             // before setup returns, leaving only the retained sender.
-            assert_eq!(Arc::strong_count(&sender.channel), 1);
+            assert_eq!(Arc::count(&sender.channel), 1);
             drop(runtime);
             assert!(matches!(sender.try_send(1), Err(XllError::Closing)));
         }

@@ -26,13 +26,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
     test,
     all(target_os = "windows", any(feature = "rtd", feature = "handles"))
 ))]
-#[path = "rtd/counted_string.rs"]
 mod counted_string;
 
-#[path = "rtd/host.rs"]
 mod host;
 #[cfg(feature = "rtd")]
-#[path = "rtd/service.rs"]
 mod service;
 
 pub(crate) use host::RtdSubscriptionHost;
@@ -46,7 +43,6 @@ pub(crate) use service::SubscriptionServiceSlot;
     unsafe_code,
     reason = "Windows Excel RTD transport is an intentional raw FFI boundary"
 )]
-#[path = "rtd/windows.rs"]
 mod windows;
 
 #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]

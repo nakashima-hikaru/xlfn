@@ -110,6 +110,8 @@ mod subscription;
 mod utf16;
 pub mod value;
 
+pub(crate) use xlfn_kernel::sync;
+
 pub use addin::{
     Addin, BuildInfo, DiagnosticsSetup, MacroSheetContext, MainThreadContext, OpenContext, Opened,
     PhysicallyUnloadableAddin, RuntimeConfig, ThreadSafeContext,

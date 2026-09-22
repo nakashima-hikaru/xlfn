@@ -3,11 +3,11 @@
 use super::schema::MAX_REGISTER_ARGUMENT_HELP_ENTRIES;
 use super::{ExcelNameKey, RegistrationDescriptor, RegistrationSignature};
 use crate::{XllError, XllResult};
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 
 pub(crate) fn validate_descriptors(descriptors: &[RegistrationDescriptor]) -> XllResult<()> {
-    let mut exports = HashSet::with_capacity(descriptors.len());
-    let mut excel_names = HashSet::with_capacity(descriptors.len());
+    let mut exports = FxHashSet::default();
+    let mut excel_names = FxHashSet::default();
     for descriptor in descriptors {
         let max_arguments =
             xlfn_common::max_excel_function_arguments(descriptor.signature.execution);

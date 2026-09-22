@@ -5,9 +5,9 @@
 
 use super::refinement_wire::TokenWire;
 use super::{FormulaLifetimeGeneration, FormulaObserverId, FormulaRevisionKey, HandleTopicKey};
-use parking_lot::{Mutex, MutexGuard};
+use crate::sync::{Mutex, MutexGuard};
+use rustc_hash::FxHashMap;
 use serde::Serialize;
-use std::collections::HashMap;
 
 pub(crate) const SCHEMA_VERSION: u32 = 4;
 const MAX_TRACE_EVENTS: usize = 16_384;
@@ -179,7 +179,7 @@ struct Machine {
     next_initializer_id: u64,
     next_reader_id: u64,
     returned_success: bool,
-    initializers: HashMap<FormulaRevisionKeyWire, u64>,
+    initializers: FxHashMap<FormulaRevisionKeyWire, u64>,
     #[cfg(test)]
     before_seal_hook: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
 }
@@ -193,7 +193,7 @@ impl Machine {
             next_initializer_id: 1,
             next_reader_id: 1,
             returned_success: false,
-            initializers: HashMap::new(),
+            initializers: FxHashMap::default(),
             #[cfg(test)]
             before_seal_hook: None,
         }

@@ -1,8 +1,8 @@
 use crate::host_callback::HostCallbackSession;
 use crate::return_abi::{CallbackCleanupDebt, ExcelCallbackStatus};
+use crate::sync::Mutex;
 use crate::value::{XlValueRef, XlValueType};
 use crate::{XllError, XllResult};
-use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::ptr::NonNull;

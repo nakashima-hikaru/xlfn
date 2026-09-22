@@ -13,11 +13,11 @@
     reason = "the passive wire schema covers events emitted by all supported feature profiles"
 )]
 
-use parking_lot::Mutex;
+use crate::sync::Mutex;
 use serde::Serialize;
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use triomphe::Arc;
 
 static NEXT_ACTIVITY_ID: AtomicU64 = AtomicU64::new(1);
 

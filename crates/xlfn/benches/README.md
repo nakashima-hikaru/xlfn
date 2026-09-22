@@ -3,10 +3,8 @@
 ## `cache_lookup`
 
 This benchmark compares `CalculationCache<u64, u64>` (Quick Cache by default)
-with a benchmark-only Moka control storing `(Arc<u64>, weight)`. Capacity, key
-shape, warm hit rate, and persistent worker topology match. Set
-`XLFN_CACHE_BACKEND=moka` to keep the resident policy identical when isolating
-node/lease ownership costs; the default comparison also includes policy costs.
+with a benchmark-only Arc control storing `(Arc<u64>, weight)`. Capacity, key
+shape, warm hit rate, and persistent worker topology match.
 
 The lookup cases are:
 
@@ -17,11 +15,10 @@ The lookup cases are:
 
 The steady-state hit rows also include two benchmark-only diagnostic controls:
 
-- `no_admission_control`: the same Moka lookup and node pin, without lookup admission;
-- `no_pin_control`: the same Moka lookup and lookup admission, with raw node access and no pin accounting.
+- `no_admission_control`: lookup and node pin, without lookup admission;
+- `no_pin_control`: lookup and lookup admission, with raw node access and no pin accounting.
 
-With `XLFN_CACHE_BACKEND=moka`, `current` and these controls separate admission
-and pin costs without adding either mechanism to the production cache API. The
+These controls separate admission and pin costs without adding either mechanism to the production cache API. The
 diagnostic controls assume that the warmed cache is not evicted or mutated
 while the worker pool is running.
 

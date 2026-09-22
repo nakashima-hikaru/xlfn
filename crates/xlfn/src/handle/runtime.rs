@@ -10,8 +10,8 @@ use super::{
 use super::{FormulaLifetimeGeneration, FormulaObserverId, HandleConnection};
 use crate::generation::RuntimeGeneration;
 use crate::generation::TopicGeneration;
+use crate::sync::{Condvar, Mutex};
 use crate::{XllError, XllResult};
-use parking_lot::{Condvar, Mutex};
 #[cfg(feature = "handles")]
 use std::cell::OnceCell;
 use std::cell::RefCell;
@@ -810,7 +810,7 @@ impl FormulaHandleServiceSlot {
 
     #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
-        let _ = self.trace.set(std::sync::Arc::clone(&trace));
+        let _ = self.trace.set(triomphe::Arc::clone(&trace));
         self.service.with_published(|runtime| {
             if let Some(runtime) = runtime {
                 runtime.set_trace_sink(trace);
@@ -840,7 +840,7 @@ impl FormulaHandleServiceSlot {
                 |_runtime| {
                     #[cfg(any(test, feature = "refinement"))]
                     if let Some(trace) = self.trace.get() {
-                        _runtime.set_trace_sink(std::sync::Arc::clone(trace));
+                        _runtime.set_trace_sink(triomphe::Arc::clone(trace));
                     }
                 },
             )

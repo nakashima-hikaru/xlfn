@@ -33,7 +33,7 @@ use xlfn_kernel::rotating_read_domain::{
 use xlfn_kernel::rotating_read_domain::RotatingReadPermit;
 
 use super::binding::BindingRecord;
-use parking_lot::{Condvar, Mutex};
+use crate::sync::{Condvar, Mutex};
 use smallvec::SmallVec;
 use std::cell::RefCell;
 use std::ptr::NonNull;

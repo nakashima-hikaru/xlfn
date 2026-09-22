@@ -25,7 +25,7 @@ unsafe impl crate::subscription::RtdSubscription for BenchmarkSubscription {
 }
 
 struct BenchmarkRtdSource<T> {
-    sink: Arc<parking_lot::Mutex<Option<crate::subscription::RtdSink<T>>>>,
+    sink: Arc<crate::sync::Mutex<Option<crate::subscription::RtdSink<T>>>>,
 }
 
 // SAFETY: the benchmark source stores its only retained sink in the shared
@@ -60,7 +60,7 @@ impl RtdPrepareBenchmark {
         let registration = crate::subscription::SourceRegistration::new(generation);
         let source = registration
             .register(BenchmarkRtdSource::<f64> {
-                sink: Arc::new(parking_lot::Mutex::new(None)),
+                sink: Arc::new(crate::sync::Mutex::new(None)),
             })
             .expect("benchmark source registration");
         let runtime = crate::subscription::SubscriptionRuntime::with_sources_for_internal(
@@ -163,7 +163,7 @@ impl RtdPublishNumberBenchmark {
         let generation =
             crate::generation::RuntimeGeneration::new(1).expect("benchmark generation is non-zero");
         let registration = crate::subscription::SourceRegistration::new(generation);
-        let sink_slot = Arc::new(parking_lot::Mutex::new(None));
+        let sink_slot = Arc::new(crate::sync::Mutex::new(None));
         let source = registration
             .register(BenchmarkRtdSource {
                 sink: Arc::clone(&sink_slot),
@@ -253,7 +253,7 @@ impl RtdPublishStringBenchmark {
         let generation =
             crate::generation::RuntimeGeneration::new(1).expect("benchmark generation is non-zero");
         let registration = crate::subscription::SourceRegistration::new(generation);
-        let sink_slot = Arc::new(parking_lot::Mutex::new(None));
+        let sink_slot = Arc::new(crate::sync::Mutex::new(None));
         let source = registration
             .register(BenchmarkRtdSource {
                 sink: Arc::clone(&sink_slot),
@@ -580,7 +580,7 @@ where
     let registered = topic_ids
         .iter()
         .map(|_| {
-            let sink_slot = Arc::new(parking_lot::Mutex::new(None));
+            let sink_slot = Arc::new(crate::sync::Mutex::new(None));
             let source = registration
                 .register(BenchmarkRtdSource {
                     sink: Arc::clone(&sink_slot),

@@ -181,7 +181,7 @@ fn run_worker_batch<'cache, const ALLOCATIONS: bool, const LATENCY: bool>(
                 .latencies_ns
                 .push(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX));
             // Observation is outside the individual operation timer. These
-            // counters never flush Moka or advance a grace period.
+            // counters never flush the cache or advance a grace period.
             let stats = cache.reclamation_stats();
             report.sampled_peak_pending_nodes =
                 report.sampled_peak_pending_nodes.max(stats.pending_nodes);
@@ -380,7 +380,7 @@ fn report_probes(pool: &WorkerPool, workload: Workload, workers: usize, payload_
 }
 
 fn reclamation_benchmarks(c: &mut Criterion) {
-    // Isolate entry storage from Moka policy allocation and payload backing
+    // Isolate entry storage from policy allocation and payload backing
     // buffers. Warm TLS first and keep final-drop maintenance outside the probe.
     let zero_capacity = CalculationCache::<u64, u64>::new(0);
     drop(

@@ -1,14 +1,10 @@
 //! The same cache-level contracts run against every resident implementation.
-//! Miri excludes Moka's dependency-blocked path.
 
 use super::*;
 use std::sync::{Arc, Barrier, mpsc};
 
 fn backends() -> Vec<CacheBackend> {
     let mut backends = Vec::new();
-    if !cfg!(miri) {
-        backends.push(CacheBackend::Moka);
-    }
     backends.extend([8, 16, 32, 64].map(|shards| CacheBackend::Sharded { shards }));
     backends.extend([1, 8, 32].map(|shards| CacheBackend::QuickCache { shards }));
     backends

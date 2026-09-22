@@ -1,4 +1,5 @@
 use super::*;
+use crate::{XllError, XllResult};
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;

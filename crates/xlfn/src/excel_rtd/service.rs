@@ -107,7 +107,7 @@ impl SubscriptionServiceSlot {
         reason = "trace wiring is used only when the runtime observer is enabled"
     )]
     pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
-        self.observer.set_trace_sink(std::sync::Arc::clone(&trace));
+        self.observer.set_trace_sink(triomphe::Arc::clone(&trace));
         self.service.with_published(|runtime| {
             if let Some(runtime) = runtime {
                 runtime.set_trace_sink(trace);

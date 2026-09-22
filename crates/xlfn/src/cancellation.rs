@@ -1,5 +1,5 @@
 use crate::panic_boundary::catch_no_unwind;
-use parking_lot::Mutex;
+use crate::sync::Mutex;
 use rustc_hash::FxHashMap;
 use std::future::Future;
 use std::marker::PhantomData;
@@ -68,7 +68,7 @@ pub(crate) struct CancellationRegistry {
 impl CancellationRegistry {
     pub(crate) const fn new() -> Self {
         Self {
-            state: parking_lot::const_mutex(CancellationRegistryState {
+            state: Mutex::new(CancellationRegistryState {
                 slots: Vec::new(),
                 free: Vec::new(),
             }),

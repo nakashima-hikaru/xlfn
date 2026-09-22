@@ -6,7 +6,6 @@ pub fn benchmark_cache_backend() -> CacheBackend {
         .as_deref()
         .unwrap_or("quick1")
     {
-        "moka" => CacheBackend::Moka,
         "quick1" => CacheBackend::QuickCache { shards: 1 },
         "quick8" => CacheBackend::QuickCache { shards: 8 },
         "quick32" => CacheBackend::QuickCache { shards: 32 },
@@ -18,7 +17,11 @@ pub fn benchmark_cache_backend() -> CacheBackend {
     }
 }
 
-use moka::{Equivalent, sync::Cache};
+use quick_cache::{
+    Equivalent, OptionsBuilder, Weighter,
+    sync::{Cache, DefaultLifecycle},
+};
+use std::collections::hash_map::RandomState;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::ops::Deref;
@@ -464,9 +467,18 @@ unsafe impl Send for DiagnosticNodePtr {}
 // synchronized by its atomics and remains owned by the store for the benchmark lifetime.
 unsafe impl Sync for DiagnosticNodePtr {}
 
+#[derive(Clone)]
+struct DiagnosticWeight;
+
+impl Weighter<DiagnosticVersionedKey<u64>, (DiagnosticNodePtr, u32)> for DiagnosticWeight {
+    fn weight(&self, _: &DiagnosticVersionedKey<u64>, entry: &(DiagnosticNodePtr, u32)) -> u64 {
+        entry.1 as u64
+    }
+}
+
 struct DiagnosticCacheStore {
-    // Keep the Moka cache before `nodes` so cache bookkeeping is dropped first.
-    cache: Cache<DiagnosticVersionedKey<u64>, (DiagnosticNodePtr, u32)>,
+    cache:
+        Cache<DiagnosticVersionedKey<u64>, (DiagnosticNodePtr, u32), DiagnosticWeight, RandomState>,
     epoch: AtomicU64,
     domain: DiagnosticLookupDomain,
     nodes: Vec<Pin<Box<DiagnosticNode>>>,
@@ -475,12 +487,19 @@ struct DiagnosticCacheStore {
 impl DiagnosticCacheStore {
     fn new(weight_budget: usize) -> Self {
         let capacity = u64::try_from(weight_budget).unwrap_or(u64::MAX);
+        let options = OptionsBuilder::new()
+            .weight_capacity(capacity)
+            .estimated_items_capacity(weight_budget.clamp(1, 1024))
+            .hot_allocation(1.0)
+            .build()
+            .expect("valid diagnostic cache options");
         Self {
-            cache: Cache::builder()
-                .max_capacity(capacity)
-                .weigher(|_, entry: &(DiagnosticNodePtr, u32)| entry.1)
-                .support_invalidation_closures()
-                .build(),
+            cache: Cache::with_options(
+                options,
+                DiagnosticWeight,
+                RandomState::new(),
+                DefaultLifecycle::default(),
+            ),
             epoch: AtomicU64::new(0),
             domain: DiagnosticLookupDomain::new(),
             nodes: Vec::new(),
@@ -523,7 +542,7 @@ impl DiagnosticCacheStore {
         Some(node_ptr)
     }
 
-    /// Diagnostic B: Moka lookup plus the node pin, without lookup admission.
+    /// Diagnostic B: lookup plus the node pin, without lookup admission.
     fn get_with_pin<'a>(&'a self, key: &u64) -> Option<DiagnosticPinLease<'a>> {
         let epoch = self.epoch.load(Ordering::Acquire);
         let node_ptr = self.lookup_node(key, epoch)?;
@@ -598,7 +617,7 @@ impl Deref for DiagnosticRawLease<'_> {
     }
 }
 
-/// Benchmark-only control for Moka lookup plus node pin, without admission.
+/// Benchmark-only control for lookup plus node pin, without admission.
 pub struct NoAdmissionCacheBenchmark {
     workers: WorkerPool,
     total_iterations: usize,
@@ -708,20 +727,36 @@ impl Deref for ArcCacheLease {
     }
 }
 
+#[derive(Clone)]
+struct ArcWeight;
+
+impl Weighter<ArcVersionedKey<u64>, (Arc<u64>, u32)> for ArcWeight {
+    fn weight(&self, _: &ArcVersionedKey<u64>, entry: &(Arc<u64>, u32)) -> u64 {
+        entry.1 as u64
+    }
+}
+
 struct ArcCacheStore {
-    cache: Cache<ArcVersionedKey<u64>, (Arc<u64>, u32)>,
+    cache: Cache<ArcVersionedKey<u64>, (Arc<u64>, u32), ArcWeight, RandomState>,
     epoch: AtomicU64,
 }
 
 impl ArcCacheStore {
     fn new(weight_budget: usize) -> Self {
         let capacity = u64::try_from(weight_budget).unwrap_or(u64::MAX);
+        let options = OptionsBuilder::new()
+            .weight_capacity(capacity)
+            .estimated_items_capacity(weight_budget.clamp(1, 1024))
+            .hot_allocation(1.0)
+            .build()
+            .expect("valid arc cache options");
         Self {
-            cache: Cache::builder()
-                .max_capacity(capacity)
-                .weigher(|_, entry: &(Arc<u64>, u32)| entry.1)
-                .support_invalidation_closures()
-                .build(),
+            cache: Cache::with_options(
+                options,
+                ArcWeight,
+                RandomState::new(),
+                DefaultLifecycle::default(),
+            ),
             epoch: AtomicU64::new(0),
         }
     }
@@ -743,22 +778,22 @@ impl ArcCacheStore {
     fn get_or_insert(&self, key: u64, value: u64) -> ArcCacheLease {
         let epoch = self.epoch.load(Ordering::Acquire);
         let vkey = ArcVersionedKey { epoch, key };
-        let (value, _) = self
-            .cache
-            .get_with(vkey, || (Arc::new(value), ENTRY_WEIGHT));
-        ArcCacheLease(value)
+        if let Some((value, _)) = self.cache.get(&vkey) {
+            ArcCacheLease(value)
+        } else {
+            let entry = (Arc::new(value), ENTRY_WEIGHT);
+            self.cache.insert(vkey, entry.clone());
+            ArcCacheLease(entry.0)
+        }
     }
 
     fn clear(&self) {
         let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
-        self.cache
-            .invalidate_entries_if(move |key, _| key.epoch < epoch)
-            .expect("invalidation closures are enabled");
-        self.cache.run_pending_tasks();
+        self.cache.retain(|key, _| key.epoch >= epoch);
     }
 }
 
-/// Ownership control using the same versioned Moka lookup and cache capacity.
+/// Ownership control using the same versioned lookup and cache capacity.
 pub struct ArcCacheBenchmark {
     workers: WorkerPool,
     total_iterations: usize,
@@ -833,8 +868,8 @@ impl CurrentCacheEvictionBenchmark {
                 .cache
                 .get_or_try_insert_with(0, |_| ENTRY_WEIGHT as usize, || Ok(0))
                 .expect("current cache eviction seed A failed");
-            // Clear retires A deterministically; relying only on TinyLFU admission would make
-            // this ownership comparison depend on which candidate Moka admits at capacity one.
+            // Clear retires A deterministically; relying only on admission would make
+            // this ownership comparison depend on which candidate is admitted at capacity one.
             self.cache.clear();
             let lease_b = self
                 .cache

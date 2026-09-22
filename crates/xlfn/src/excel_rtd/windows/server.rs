@@ -20,6 +20,7 @@ use crate::error::InputError;
 use crate::handle::{FormulaLifetimeBackend, FormulaLifetimeConnection, FormulaLifetimeGeneration};
 use crate::subscription::ServerGeneration;
 use crate::subscription::SubscriptionRuntime;
+use crate::sync::Mutex;
 use crate::win32::E_UNEXPECTED;
 use crate::win32::{
     CoCreateGuid, DISP_E_BADINDEX, DISPPARAMS, E_FAIL, E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL,
@@ -27,7 +28,6 @@ use crate::win32::{
     VARIANT_TRUE, VariantClear,
 };
 use crate::{XllError, XllResult};
-use parking_lot::Mutex;
 use std::ffi::c_void;
 use std::num::NonZeroU32;
 use std::panic::{AssertUnwindSafe, catch_unwind};

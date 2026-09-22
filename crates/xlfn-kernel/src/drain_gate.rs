@@ -4,8 +4,8 @@ use std::cell::Cell;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::sync::{Condvar, Mutex, MutexGuard};
 use crossbeam_utils::CachePadded;
-use parking_lot::{Condvar, Mutex};
 
 use crate::sealable_counter::{ReleaseOutcome, ReopenError, SealableCounter, Sealed};
 
@@ -39,7 +39,7 @@ impl IdleNotification {
 }
 
 impl IdleWait for IdleNotification {
-    type Guard<'a> = parking_lot::MutexGuard<'a, ()>;
+    type Guard<'a> = MutexGuard<'a, ()>;
 
     fn lock(&self) -> Self::Guard<'_> {
         self.lock.lock()
@@ -65,7 +65,7 @@ struct IdleNotificationRef<'a> {
 
 impl IdleWait for IdleNotificationRef<'_> {
     type Guard<'a>
-        = parking_lot::MutexGuard<'a, ()>
+        = MutexGuard<'a, ()>
     where
         Self: 'a;
 

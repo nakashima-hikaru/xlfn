@@ -1,6 +1,6 @@
 //! Host registration and metadata-debt recovery ledger.
 
-use parking_lot::Mutex;
+use crate::sync::Mutex;
 use std::collections::BTreeMap;
 
 use crate::registration::{

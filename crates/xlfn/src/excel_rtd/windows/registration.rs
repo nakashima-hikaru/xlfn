@@ -1,4 +1,5 @@
 use super::ActiveServer;
+use crate::sync::{Mutex, MutexGuard};
 use crate::win32::{
     CloseHandle, CreateMutexW, ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, GUID,
     GetLastError, HANDLE, HKEY, HKEY_CURRENT_USER, INFINITE, KEY_READ, KEY_WRITE,
@@ -7,7 +8,6 @@ use crate::win32::{
     WAIT_OBJECT_0, WaitForSingleObject,
 };
 use crate::{XllError, XllResult};
-use parking_lot::{Mutex, MutexGuard};
 use std::ptr;
 
 // Schema 2 registrations are protected by one cross-process mutex for the

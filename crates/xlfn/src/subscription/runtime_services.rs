@@ -6,8 +6,8 @@
 //! runtime Drop exclusively borrows the control plane and joins producers.
 
 use crate::shutdown_trace::{ObservationSink, ShutdownEvent, ShutdownTraceHandle};
+use crate::sync::Mutex;
 use crate::{XllError, XllResult};
-use parking_lot::Mutex;
 use xlfn_kernel::operation_gate::OperationGate;
 use xlfn_kernel::quota::Quota;
 

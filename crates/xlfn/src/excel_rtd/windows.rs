@@ -14,10 +14,10 @@ use crate::subscription::RtdValue;
 #[cfg(test)]
 use crate::subscription::SubscriptionRuntime;
 #[cfg(test)]
+use crate::sync::Mutex;
+#[cfg(test)]
 use crate::win32::{CO_E_SERVER_STOPPING, E_UNEXPECTED};
 use crate::win32::{GUID, S_OK};
-#[cfg(test)]
-use parking_lot::Mutex;
 #[cfg(test)]
 use std::ffi::c_void;
 #[cfg(test)]
@@ -33,27 +33,16 @@ use std::sync::atomic::Ordering;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32};
 
-#[path = "windows/automation.rs"]
 mod automation;
-#[path = "windows/class_factory.rs"]
 mod class_factory;
-#[path = "windows/com_abi.rs"]
 mod com_abi;
-#[path = "windows/event.rs"]
 mod event;
-#[path = "windows/excel_rtd.rs"]
 mod excel_rtd;
-#[path = "windows/global_interface_table.rs"]
 mod global_interface_table;
-#[path = "windows/module_state.rs"]
 mod module_state;
-#[path = "windows/registration.rs"]
 mod registration;
-#[path = "windows/server.rs"]
 mod server;
-#[path = "windows/server_gate.rs"]
 mod server_gate;
-#[path = "windows/update_event.rs"]
 mod update_event;
 #[cfg(test)]
 use crate::win32::{
@@ -146,5 +135,4 @@ pub(super) fn wait_for_module_quiescence() -> Result<(), crate::excel_rtd::RtdQu
 }
 
 #[cfg(test)]
-#[path = "windows/tests.rs"]
 mod tests;
