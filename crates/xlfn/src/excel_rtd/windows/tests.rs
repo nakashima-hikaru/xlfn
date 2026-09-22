@@ -609,11 +609,11 @@ fn com_module_lifetime_emits_rtd_resource_trace_events() {
         .expect("RTD test state")
         .begin_open();
 
-    let trace = Arc::new(crate::shutdown_trace::ShutdownTraceRecorder::new());
+    let trace = triomphe::Arc::new(crate::shutdown_trace::ShutdownTraceRecorder::new());
     trace
         .begin(1, crate::shutdown_trace::ShutdownResources::opened(0, 0))
         .unwrap();
-    module_lifetime().set_trace_sink(Arc::clone(&trace));
+    module_lifetime().set_trace_sink(triomphe::Arc::clone(&trace));
 
     let (call, accepted) = module_lifetime().enter_call();
     assert!(accepted);

@@ -4,12 +4,13 @@ use super::module_lifetime;
 use super::server_gate::ServerOperationBarrier;
 use crate::sync::Mutex;
 use crate::win32::{COINIT_MULTITHREADED, RPC_E_CHANGED_MODE, S_FALSE, S_OK};
+use crate::{XllError, XllResult};
 use std::ffi::c_void;
 use std::marker::PhantomData;
 use std::ptr::{self, NonNull};
 use std::rc::Rc;
 #[cfg(test)]
-use triomphe::Arc;
+use std::sync::Arc;
 use xlfn_kernel::published_owner::PublishedOwner;
 
 #[derive(Default)]
