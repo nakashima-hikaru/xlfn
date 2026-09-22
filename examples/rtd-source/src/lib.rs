@@ -1,7 +1,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use xlfn::prelude::*;
-use xlfn::rtd::RtdValue;
+use xlfn::rtd::{RtdSourceHandle, RtdValue};
 
 mod metric_source;
 
@@ -32,13 +32,9 @@ impl Addin for RtdSourceExample {
     fn open(
         context: &OpenContext,
     ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
-        Ok(Opened::new(
-            State {
-                metrics: context.rtd().register_source(metric_source())?,
-            },
-            (),
-            (),
-        ))
+        Ok(Opened::new(State {
+            metrics: context.rtd().register_source(metric_source())?,
+        }))
     }
 }
 

@@ -17,7 +17,7 @@ impl Addin for ExampleAddin {
     fn open(
         _context: &OpenContext,
     ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
-        Ok(Opened::new(ExampleState, (), ()))
+        Ok(Opened::new(ExampleState))
     }
 }
 

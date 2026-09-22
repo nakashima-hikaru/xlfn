@@ -1,6 +1,10 @@
 use std::{num::NonZeroUsize, time::Duration};
 
-use xlfn::{error::InputError, prelude::*, rtd::RtdValue};
+use xlfn::{
+    error::InputError,
+    prelude::*,
+    rtd::{RtdChannelSource, RtdSender, RtdValue},
+};
 
 use super::Client;
 

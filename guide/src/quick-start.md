@@ -83,7 +83,7 @@ impl Addin for HelloXll {
                 code: -1,
                 message: error.to_string(),
             })?;
-        Ok(Opened::new(State, (), ()))
+        Ok(Opened::new(State))
     }
 }
 ```

@@ -58,7 +58,7 @@ impl Addin for AppTools {
     type Layers = (MetricsLayer,);
 
     fn open(_: &OpenContext) -> XllResult<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>> {
-        Ok(Opened::new(State::new(), (), (MetricsLayer,)))
+        Ok(Opened::new(State::new()).with_layers((MetricsLayer,)))
     }
 }
 ```
@@ -73,7 +73,8 @@ impl Addin for SimpleAddin {
     type Layers = ();
 
     fn open(_: &OpenContext) -> XllResult<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>> {
-        Ok(Opened::new(State::new(), (), ()))
+        Ok(Opened::new(State::new()))
+    }
 }
 ```
 

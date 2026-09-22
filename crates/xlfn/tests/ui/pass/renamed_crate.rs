@@ -24,7 +24,7 @@ impl Addin for RenamedAddin {
     type Layers = ();
 
     fn open(_context: &OpenContext) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
-        Ok(Opened::new((), (), ()))
+        Ok(Opened::new(()))
     }
 }
 

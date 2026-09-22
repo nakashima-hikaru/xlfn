@@ -41,7 +41,7 @@ impl Addin for AppTools {
         let configuration = load_configuration(context.module_directory())?;
         Ok(Opened::new(State {
             configuration: Arc::new(configuration),
-        }, (), ()))
+        }))
     }
 }
 

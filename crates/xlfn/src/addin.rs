@@ -274,6 +274,27 @@ impl RuntimeConfig {
 
     #[cfg(feature = "rtd")]
     #[must_use]
+    pub const fn with_rtd(mut self, rtd: RtdConfig) -> Self {
+        self.rtd = rtd;
+        self
+    }
+
+    #[cfg(feature = "handles")]
+    #[must_use]
+    pub const fn with_handles(mut self, handles: HandleConfig) -> Self {
+        self.handles = handles;
+        self
+    }
+
+    #[cfg(feature = "async")]
+    #[must_use]
+    pub const fn with_async(mut self, async_runtime: AsyncConfig) -> Self {
+        self.async_runtime = async_runtime;
+        self
+    }
+
+    #[cfg(feature = "rtd")]
+    #[must_use]
     pub const fn with_rtd_limits(mut self, limits: RtdLimits) -> Self {
         self.rtd = self.rtd.with_limits(limits);
         self
@@ -421,17 +442,34 @@ impl Default for AsyncRuntimeConfig {
     }
 }
 
+#[cfg(feature = "async")]
+pub type AsyncConfig = AsyncRuntimeConfig;
+
 /// The result of a successful [`Addin::open`] transaction.
-pub struct Opened<S, L, U> {
+pub struct Opened<S, L = (), U = ()> {
     shared_state: S,
     lifecycle_state: L,
     layers: U,
     runtime: RuntimeConfig,
 }
 
-impl<S, L, U> Opened<S, L, U> {
+impl<S> Opened<S, (), ()> {
+    /// Creates a new open transaction with default lifecycle state `()` and no layers `()`.
     #[must_use]
-    pub const fn new(shared_state: S, lifecycle_state: L, layers: U) -> Self {
+    pub const fn new(shared_state: S) -> Self {
+        Self {
+            shared_state,
+            lifecycle_state: (),
+            layers: (),
+            runtime: RuntimeConfig::new(),
+        }
+    }
+}
+
+impl<S, L, U> Opened<S, L, U> {
+    /// Constructs an `Opened` value from all components explicitly.
+    #[must_use]
+    pub const fn from_parts(shared_state: S, lifecycle_state: L, layers: U) -> Self {
         Self {
             shared_state,
             lifecycle_state,
@@ -440,6 +478,29 @@ impl<S, L, U> Opened<S, L, U> {
         }
     }
 
+    /// Attaches dedicated thread-affine lifecycle state.
+    #[must_use]
+    pub fn with_lifecycle<NewL>(self, lifecycle_state: NewL) -> Opened<S, NewL, U> {
+        Opened {
+            shared_state: self.shared_state,
+            lifecycle_state,
+            layers: self.layers,
+            runtime: self.runtime,
+        }
+    }
+
+    /// Attaches UDF invocation layers.
+    #[must_use]
+    pub fn with_layers<NewU>(self, layers: NewU) -> Opened<S, L, NewU> {
+        Opened {
+            shared_state: self.shared_state,
+            lifecycle_state: self.lifecycle_state,
+            layers,
+            runtime: self.runtime,
+        }
+    }
+
+    /// Attaches runtime configuration.
     #[must_use]
     pub const fn with_runtime_config(mut self, runtime: RuntimeConfig) -> Self {
         self.runtime = runtime;
@@ -557,7 +618,7 @@ impl Addin for () {
     fn open(
         _context: &OpenContext,
     ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
-        Ok(Opened::new((), (), ()))
+        Ok(Opened::new(()))
     }
 }
 
@@ -816,7 +877,7 @@ mod tests {
             _: &crate::OpenContext,
         ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error>
         {
-            Ok(Opened::new((), Rc::new(()), ()))
+            Ok(Opened::new(()).with_lifecycle(Rc::new(())))
         }
     }
 
@@ -1071,7 +1132,7 @@ mod tests {
             _context: &crate::OpenContext,
         ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error>
         {
-            Ok(Opened::new(23, (), ()))
+            Ok(Opened::new(23))
         }
     }
 

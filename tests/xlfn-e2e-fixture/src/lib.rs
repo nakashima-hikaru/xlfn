@@ -5,7 +5,7 @@ use std::ptr::NonNull;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI32, Ordering};
 use xlfn::prelude::*;
-use xlfn::rtd::{RtdSink, RtdSource, RtdSubscription, RtdTopic, RtdValue};
+use xlfn::rtd::{RtdSink, RtdSource, RtdSourceHandle, RtdSubscription, RtdTopic, RtdValue};
 
 pub struct State {
     rtd: RtdSourceHandle<RtdFixtureSource>,
@@ -36,7 +36,7 @@ impl Addin for FixtureAddin {
         let rtd = context
             .rtd()
             .register_source(RtdFixtureSource { core: core_ptr })?;
-        Ok(Opened::new(State { rtd, core }, (), ()))
+        Ok(Opened::new(State { rtd, core }))
     }
 }
 

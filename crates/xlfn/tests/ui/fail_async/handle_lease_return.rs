@@ -12,7 +12,7 @@ impl Addin for ReturnedHandleLeaseAddin {
     type Layers = ();
 
     fn open(_: &OpenContext) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
-        Ok(Opened::new(State, (), ()))
+        Ok(Opened::new(State))
     }
 }
 

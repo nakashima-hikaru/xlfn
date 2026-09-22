@@ -6,7 +6,7 @@ Import from:
 
 ```rust
 use xlfn::cache::{
-    BoundCacheEndpoint, CacheEndpoint, CacheLease, CacheRegistry, CalculationCache, CanonicalF64,
+    CacheEndpoint, CacheLease, CacheRegistry, CalculationCache, CanonicalF64,
 };
 ```
 
@@ -54,26 +54,22 @@ The stable cache contract guarantees:
 `CacheRegistry` creates caches lazily for static endpoints:
 
 ```rust
-enum LookupEndpoint {}
+static LOOKUP_DATASETS: CacheEndpoint<DatasetKey, Dataset> =
+    CacheEndpoint::new("lookup-datasets-v1");
 
-static LOOKUP_DATASETS: CacheEndpoint<
-    LookupEndpoint,
-    DatasetKey,
-    Dataset,
-> = CacheEndpoint::new("lookup-datasets-v1");
-
-struct State<'registry> {
-    datasets: BoundCacheEndpoint<'registry, LookupEndpoint, DatasetKey, Dataset>,
+struct State {
+    caches: CacheRegistry,
 }
 
-fn build_state<'registry>(caches: &'registry CacheRegistry) -> XllResult<State<'registry>> {
-    Ok(State {
-        datasets: caches.bind(&LOOKUP_DATASETS)?,
-    })
+fn build_state() -> State {
+    State {
+        caches: CacheRegistry::new(),
+    }
 }
 
-fn cached_dataset<'a>(state: &'a State<'_>, key: DatasetKey) -> XllResult<CacheLease<'a, Dataset>> {
-    state.datasets.get_or_try_insert(
+fn cached_dataset<'a>(state: &'a State, key: DatasetKey) -> XllResult<CacheLease<'a, Dataset>> {
+    state.caches.get_or_try_insert(
+        &LOOKUP_DATASETS,
         key.clone(),
         |dataset| dataset.estimated_bytes(),
         || build_dataset(&key),
@@ -81,7 +77,22 @@ fn cached_dataset<'a>(state: &'a State<'_>, key: DatasetKey) -> XllResult<CacheL
 }
 ```
 
-An endpoint identity includes its marker type, key type, value type, and static ID. The marker gives semantically different caches separate identities even when key and value types are the same.
+You can also perform operations directly through the endpoint descriptor:
+
+```rust
+fn cached_dataset<'a>(state: &'a State, key: DatasetKey) -> XllResult<CacheLease<'a, Dataset>> {
+    LOOKUP_DATASETS.get_or_try_insert(
+        &state.caches,
+        key.clone(),
+        |dataset| dataset.estimated_bytes(),
+        || build_dataset(&key),
+    )
+}
+```
+
+`CacheEndpoint<K, V, Marker = ()>` is a `'static` descriptor that holds no references to `CacheRegistry`, completely avoiding self-referential lifetimes in `SharedState`.
+
+An endpoint identity includes its marker type, key type, value type, and static ID. By default, `Marker = ()`. When multiple endpoints share key and value types, an optional marker type (e.g. `CacheEndpoint<DatasetKey, Dataset, LookupMarker>`) provides semantic disambiguation.
 
 Use versioned IDs when a cached value's meaning changes:
 

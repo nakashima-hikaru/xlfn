@@ -51,7 +51,7 @@ impl Addin for AppTools {
                 message: error.to_string(),
             })?;
         tracing::info!(path = %path.display(), "diagnostic log installed");
-        Ok(Opened::new(State::new(), (), ()))
+        Ok(Opened::new(State::new()))
     }
 }
 ```
@@ -105,7 +105,7 @@ impl Addin for AppTools {
                 code: -1,
                 message: error.to_string(),
             })?;
-        Ok(Opened::new(State::new(), (), ()))
+        Ok(Opened::new(State::new()))
     }
 }
 ```

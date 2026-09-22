@@ -117,7 +117,7 @@ pub use addin::{
     PhysicallyUnloadableAddin, RuntimeConfig, ThreadSafeContext,
 };
 #[cfg(feature = "async")]
-pub use addin::{AsyncContext, AsyncRuntimeConfig, AsyncWorkerCount};
+pub use addin::{AsyncConfig, AsyncContext, AsyncRuntimeConfig, AsyncWorkerCount};
 #[cfg(feature = "handles")]
 pub use addin::{HandleBindingLimit, HandleConfig};
 #[cfg(feature = "rtd")]
@@ -545,22 +545,12 @@ pub mod prelude {
     pub use crate::ExcelHandleObject;
     #[cfg(feature = "async")]
     pub use crate::addin::AsyncContext;
-    #[cfg(feature = "rtd")]
-    pub use crate::addin::RtdOpenContext;
-    pub use crate::addin::{Addin, OpenContext, Opened, PhysicallyUnloadableAddin, RuntimeConfig};
-    #[cfg(feature = "handles")]
-    pub use crate::addin::{HandleBindingLimit, HandleConfig};
-    pub use crate::addin::{MacroSheetContext, MainThreadContext, ThreadSafeContext};
+    pub use crate::addin::{
+        Addin, MacroSheetContext, MainThreadContext, OpenContext, Opened, ThreadSafeContext,
+    };
     pub use crate::error::{ExcelError, XllError, XllResult};
     #[cfg(feature = "handles")]
-    pub use crate::handle::{Handle, HandleAlias, HandleLease, HandleObjectId};
-    #[cfg(feature = "rtd")]
-    pub use crate::rtd::RtdCallContext;
-    pub use crate::shutdown::{CleanupIssueKind, CleanupReporter};
-    #[cfg(feature = "rtd")]
-    pub use crate::subscription::{
-        RtdCapacity, RtdChannelSource, RtdLimits, RtdSender, RtdSourceHandle, RtdTopic,
-    };
+    pub use crate::handle::{Handle, HandleAlias, HandleLease};
     pub use crate::value::{
         Column, ExcelCellRef, ExcelErrorValue, ExcelSerialDate, Matrix, MatrixRef,
         OptionalExcelValue, Row,

@@ -81,9 +81,11 @@ impl Addin for ServiceAddin {
     type Layers = ();
 
     fn open(_: &OpenContext) -> XllResult<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>> {
-        Ok(Opened::new(State::new(), (), ()).with_runtime_config(
-            RuntimeConfig::new().with_async_worker_count(
-                AsyncWorkerCount::new(4).expect("4 is within the supported range"),
+        Ok(Opened::new(State::new()).with_runtime_config(
+            RuntimeConfig::new().with_async(
+                AsyncConfig::new().with_worker_count(
+                    AsyncWorkerCount::new(4).expect("4 is within the supported range"),
+                ),
             ),
         ))
     }

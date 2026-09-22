@@ -903,7 +903,7 @@ pub(crate) mod tests {
             crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
             Self::Error,
         > {
-            Ok(crate::addin::Opened::new(0, (), ()))
+            Ok(crate::addin::Opened::new(0))
         }
     }
 

@@ -22,11 +22,14 @@ pub trait Addin: Send + Sync + 'static {
 ```
 
 `Opened` returns shared state, lifecycle-local state, execution layers, and the
-runtime policy as one open transaction. `SharedState` is borrowed by UDF calls
-and must be `Send + Sync`; `LifecycleState` is retained by xlfn in thread-local
-storage and bound to the Excel lifecycle thread for the open generation, so it
-may own thread-affine resources. `RuntimeConfig` can
-select RTD limits and, with the `async` feature, the async worker count.
+runtime policy as one open transaction. `Opened::new(shared_state)` constructs a transaction
+with default `LifecycleState = ()` and `Layers = ()`. Use the fluent builder methods to configure
+additional parts:
+- `.with_lifecycle(lifecycle_state)`
+- `.with_layers(layers)`
+- `.with_runtime_config(runtime_config)`
+
+`SharedState` is borrowed by UDF calls and must be `Send + Sync`; `LifecycleState` is retained by xlfn in thread-local storage and bound to the Excel lifecycle thread for the open generation, so it may own thread-affine resources. `RuntimeConfig` can configure RTD limits, handle registries, and async runtime settings via `.with_rtd(...)`, `.with_handles(...)`, and `.with_async(...)`.
 
 The stable default uses `type Layers = ();`. Custom UDF layers are part of the
 stable execution contract and are documented separately in [UDF execution
@@ -83,9 +86,11 @@ impl Addin for ServiceAddin {
     type Layers = ();
 
     fn open(_: &OpenContext) -> XllResult<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>> {
-        Ok(Opened::new(State::new(), (), ()).with_runtime_config(
-            RuntimeConfig::new().with_async_worker_count(
-                AsyncWorkerCount::new(4).expect("4 is within the supported range"),
+        Ok(Opened::new(State::new()).with_runtime_config(
+            RuntimeConfig::new().with_async(
+                AsyncConfig::new().with_worker_count(
+                    AsyncWorkerCount::new(4).expect("4 is within the supported range"),
+                ),
             ),
         ))
     }

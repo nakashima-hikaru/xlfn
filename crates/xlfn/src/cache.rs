@@ -98,11 +98,27 @@ impl Drop for ActiveCacheGuard {
     }
 }
 
-pub struct CacheEndpoint<Marker, K, V> {
+pub struct CacheEndpoint<K, V, Marker = ()> {
     id: &'static str,
-    _marker: PhantomData<fn() -> Marker>,
     _key: PhantomData<fn() -> K>,
     _value: PhantomData<fn() -> V>,
+    _marker: PhantomData<fn() -> Marker>,
+}
+
+impl<K, V, Marker> Clone for CacheEndpoint<K, V, Marker> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<K, V, Marker> Copy for CacheEndpoint<K, V, Marker> {}
+
+impl<K, V, Marker> std::fmt::Debug for CacheEndpoint<K, V, Marker> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CacheEndpoint")
+            .field("id", &self.id)
+            .finish()
+    }
 }
 
 pub struct CacheLease<'a, V> {
@@ -294,32 +310,14 @@ where
     }
 }
 
-pub struct BoundCacheEndpoint<'registry, Marker, K, V> {
-    cache: NonNull<StoredCache<Marker, K, V>>,
-    _marker: PhantomData<&'registry CacheRegistry>,
-}
-
-impl<Marker, K, V> Clone for BoundCacheEndpoint<'_, Marker, K, V> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<Marker, K, V> Copy for BoundCacheEndpoint<'_, Marker, K, V> {}
-
-// SAFETY: StoredCache is thread-safe and bound to 'registry lifetime.
-unsafe impl<Marker, K: Send + Sync, V: Send + Sync> Send for BoundCacheEndpoint<'_, Marker, K, V> {}
-// SAFETY: StoredCache is thread-safe and bound to 'registry lifetime.
-unsafe impl<Marker, K: Send + Sync, V: Send + Sync> Sync for BoundCacheEndpoint<'_, Marker, K, V> {}
-
-impl<Marker, K, V> CacheEndpoint<Marker, K, V> {
+impl<K, V, Marker> CacheEndpoint<K, V, Marker> {
     #[must_use]
     pub const fn new(id: &'static str) -> Self {
         Self {
             id,
-            _marker: PhantomData,
             _key: PhantomData,
             _value: PhantomData,
+            _marker: PhantomData,
         }
     }
 
@@ -329,46 +327,48 @@ impl<Marker, K, V> CacheEndpoint<Marker, K, V> {
     }
 }
 
-impl<Marker: 'static, K: 'static, V: 'static> CacheEndpoint<Marker, K, V> {
+impl<K: 'static, V: 'static, Marker: 'static> CacheEndpoint<K, V, Marker> {
     #[must_use]
     pub(crate) fn key(&self) -> (TypeId, &'static str) {
         (TypeId::of::<(Marker, K, V)>(), self.id)
     }
 }
 
-impl<'registry, Marker, K, V> BoundCacheEndpoint<'registry, Marker, K, V>
+impl<K, V, Marker> CacheEndpoint<K, V, Marker>
 where
     Marker: 'static,
     K: Clone + Eq + Hash + Send + Sync + 'static,
     V: Send + Sync + 'static,
 {
-    pub fn get_or_try_insert<F, W>(
+    pub fn get_or_try_insert<'a, F, W>(
         &self,
+        registry: &'a CacheRegistry,
         key: K,
         weight: W,
         compute: F,
-    ) -> XllResult<CacheLease<'registry, V>>
+    ) -> XllResult<CacheLease<'a, V>>
     where
         F: FnOnce() -> XllResult<V>,
         W: FnOnce(&V) -> usize,
     {
-        // SAFETY: self.cache is valid for 'registry.
-        let stored: &'registry StoredCache<Marker, K, V> = unsafe { self.cache.as_ref() };
-        stored.cache.get_or_try_insert_with(key, weight, compute)
+        registry.get_or_try_insert(self, key, weight, compute)
     }
 
-    #[must_use]
-    pub fn get(&self, key: &K) -> Option<CacheLease<'registry, V>> {
-        // SAFETY: self.cache is valid for 'registry.
-        let stored: &'registry StoredCache<Marker, K, V> = unsafe { self.cache.as_ref() };
-        stored.cache.get(key)
+    pub fn get<'a>(
+        &self,
+        registry: &'a CacheRegistry,
+        key: &K,
+    ) -> XllResult<Option<CacheLease<'a, V>>> {
+        registry.get(self, key)
     }
 
     /// Opens a benchmark-only scoped read region for repeated cache hits.
     #[cfg(feature = "bench-internals")]
-    pub fn read_scope<'a>(&'a self) -> XllResult<CacheReadScope<'a, K, V>> {
-        // SAFETY: self.cache is valid for 'registry, and 'a is within 'registry.
-        unsafe { self.cache.as_ref() }.cache.read_scope()
+    pub fn read_scope<'a>(
+        &self,
+        registry: &'a CacheRegistry,
+    ) -> XllResult<CacheReadScope<'a, K, V>> {
+        registry.read_scope(self)
     }
 }
 
@@ -444,41 +444,88 @@ impl CacheRegistry {
         }
     }
 
-    pub fn bind<'registry, Marker, K, V>(
-        &'registry self,
-        endpoint: &CacheEndpoint<Marker, K, V>,
-    ) -> XllResult<BoundCacheEndpoint<'registry, Marker, K, V>>
+    fn resolve_cache<K, V, Marker>(
+        &self,
+        endpoint: &CacheEndpoint<K, V, Marker>,
+    ) -> XllResult<NonNull<StoredCache<Marker, K, V>>>
     where
         Marker: 'static,
         K: Clone + Eq + Hash + Send + Sync + 'static,
         V: Send + Sync + 'static,
     {
         let cache_key = endpoint.key();
-        let cache = {
-            let caches = self.caches.read();
-            if let Some(entry) = caches.get(&cache_key) {
-                Self::downcast_cache::<Marker, K, V>(entry)?
-            } else {
-                drop(caches);
-                let mut caches = self.caches.write();
-                let entry = caches.entry(cache_key).or_insert_with(|| {
-                    let cache = Box::new(StoredCache::<Marker, K, V> {
-                        cache: CalculationCache::new(self.weight_budget_per_endpoint),
-                        _marker: PhantomData,
-                    });
-                    let erased: Box<ErasedCache> = cache;
-                    CacheEntry {
-                        cache: xlfn_kernel::published_owner::PublishedOwner::from_box(erased),
-                        ops: CacheOps::of::<Marker, K, V>(),
-                    }
+        let caches = self.caches.read();
+        if let Some(entry) = caches.get(&cache_key) {
+            Self::downcast_cache::<Marker, K, V>(entry)
+        } else {
+            drop(caches);
+            let mut caches = self.caches.write();
+            let entry = caches.entry(cache_key).or_insert_with(|| {
+                let cache = Box::new(StoredCache::<Marker, K, V> {
+                    cache: CalculationCache::new(self.weight_budget_per_endpoint),
+                    _marker: PhantomData,
                 });
-                Self::downcast_cache::<Marker, K, V>(entry)?
-            }
-        };
-        Ok(BoundCacheEndpoint {
-            cache,
-            _marker: PhantomData,
-        })
+                let erased: Box<ErasedCache> = cache;
+                CacheEntry {
+                    cache: xlfn_kernel::published_owner::PublishedOwner::from_box(erased),
+                    ops: CacheOps::of::<Marker, K, V>(),
+                }
+            });
+            Self::downcast_cache::<Marker, K, V>(entry)
+        }
+    }
+
+    pub fn get_or_try_insert<'a, K, V, Marker, F, W>(
+        &'a self,
+        endpoint: &CacheEndpoint<K, V, Marker>,
+        key: K,
+        weight: W,
+        compute: F,
+    ) -> XllResult<CacheLease<'a, V>>
+    where
+        Marker: 'static,
+        K: Clone + Eq + Hash + Send + Sync + 'static,
+        V: Send + Sync + 'static,
+        F: FnOnce() -> XllResult<V>,
+        W: FnOnce(&V) -> usize,
+    {
+        let cache = self.resolve_cache(endpoint)?;
+        // SAFETY: self.caches retains the boxed cache for 'a (&'a self).
+        let stored: &'a StoredCache<Marker, K, V> = unsafe { cache.as_ref() };
+        stored.cache.get_or_try_insert_with(key, weight, compute)
+    }
+
+    pub fn get<'a, K, V, Marker>(
+        &'a self,
+        endpoint: &CacheEndpoint<K, V, Marker>,
+        key: &K,
+    ) -> XllResult<Option<CacheLease<'a, V>>>
+    where
+        Marker: 'static,
+        K: Clone + Eq + Hash + Send + Sync + 'static,
+        V: Send + Sync + 'static,
+    {
+        let cache = self.resolve_cache(endpoint)?;
+        // SAFETY: self.caches retains the boxed cache for 'a (&'a self).
+        let stored: &'a StoredCache<Marker, K, V> = unsafe { cache.as_ref() };
+        Ok(stored.cache.get(key))
+    }
+
+    /// Opens a benchmark-only scoped read region for repeated cache hits.
+    #[cfg(feature = "bench-internals")]
+    pub fn read_scope<'a, K, V, Marker>(
+        &'a self,
+        endpoint: &CacheEndpoint<K, V, Marker>,
+    ) -> XllResult<CacheReadScope<'a, K, V>>
+    where
+        Marker: 'static,
+        K: Clone + Eq + Hash + Send + Sync + 'static,
+        V: Send + Sync + 'static,
+    {
+        let cache = self.resolve_cache(endpoint)?;
+        // SAFETY: self.caches retains the boxed cache for 'a (&'a self).
+        let stored: &'a StoredCache<Marker, K, V> = unsafe { cache.as_ref() };
+        stored.cache.read_scope()
     }
 
     fn downcast_cache<Marker, K, V>(
@@ -1665,25 +1712,21 @@ mod tests {
     #[test]
     fn endpoint_identity_includes_key_and_value_types() {
         enum Marker {}
-        static NUMBERS: CacheEndpoint<Marker, u32, u32> = CacheEndpoint::new("shared-id");
-        static TEXT: CacheEndpoint<Marker, String, String> = CacheEndpoint::new("shared-id");
+        static NUMBERS: CacheEndpoint<u32, u32, Marker> = CacheEndpoint::new("shared-id");
+        static TEXT: CacheEndpoint<String, String, Marker> = CacheEndpoint::new("shared-id");
         let registry = CacheRegistry::new(64);
 
         assert_eq!(
             *registry
-                .bind(&NUMBERS)
-                .unwrap()
-                .get_or_try_insert(1, |_| 4, || Ok(7))
+                .get_or_try_insert(&NUMBERS, 1, |_| 4, || Ok(7))
                 .unwrap(),
             7
         );
         assert_eq!(
             registry
-                .bind(&TEXT)
-                .unwrap()
-                .get_or_try_insert(String::from("key"), String::len, || Ok(String::from(
-                    "value"
-                )))
+                .get_or_try_insert(&TEXT, String::from("key"), String::len, || Ok(
+                    String::from("value")
+                ),)
                 .unwrap()
                 .as_str(),
             "value"
@@ -1983,15 +2026,18 @@ mod tests {
 
     #[cfg(feature = "bench-internals")]
     #[test]
-    fn bound_endpoint_exposes_scoped_reads() {
+    fn endpoint_exposes_scoped_reads() {
         enum Marker {}
-        static ENDPOINT: CacheEndpoint<Marker, u32, u32> = CacheEndpoint::new("SCOPED_READ");
+        static ENDPOINT: CacheEndpoint<u32, u32, Marker> = CacheEndpoint::new("SCOPED_READ");
 
         let registry = CacheRegistry::new(8);
-        let endpoint = registry.bind(&ENDPOINT).unwrap();
-        drop(endpoint.get_or_try_insert(1, |_| 1, || Ok(7)).unwrap());
+        drop(
+            registry
+                .get_or_try_insert(&ENDPOINT, 1, |_| 1, || Ok(7))
+                .unwrap(),
+        );
 
-        let scope = endpoint.read_scope().unwrap();
+        let scope = registry.read_scope(&ENDPOINT).unwrap();
         assert_eq!(*scope.get(&1).unwrap(), 7);
     }
 
@@ -2382,51 +2428,51 @@ mod tests {
     fn registry_keeps_typed_endpoints_independent() {
         enum First {}
         enum Second {}
-        static FIRST: CacheEndpoint<First, u32, u32> =
-            CacheEndpoint::<First, u32, u32>::new("FIRST");
-        static SECOND: CacheEndpoint<Second, u32, String> =
-            CacheEndpoint::<Second, u32, String>::new("SECOND");
+        static FIRST: CacheEndpoint<u32, u32, First> =
+            CacheEndpoint::<u32, u32, First>::new("FIRST");
+        static SECOND: CacheEndpoint<u32, String, Second> =
+            CacheEndpoint::<u32, String, Second>::new("SECOND");
 
         let registry = CacheRegistry::new(8);
-        let first = registry.bind(&FIRST).unwrap();
-        let second = registry.bind(&SECOND).unwrap();
 
-        assert_eq!(*first.get_or_try_insert(1, |_| 4, || Ok(7)).unwrap(), 7);
         assert_eq!(
-            second
-                .get_or_try_insert(1, String::len, || Ok("seven".to_owned()))
+            *registry
+                .get_or_try_insert(&FIRST, 1, |_| 4, || Ok(7))
+                .unwrap(),
+            7
+        );
+        assert_eq!(
+            registry
+                .get_or_try_insert(&SECOND, 1, String::len, || Ok("seven".to_owned()))
                 .unwrap()
                 .as_str(),
             "seven"
         );
 
-        let rebound_first = registry.bind(&FIRST).unwrap();
-        let rebound_second = registry.bind(&SECOND).unwrap();
-        assert_eq!(*rebound_first.get(&1).unwrap(), 7);
-        assert_eq!(rebound_second.get(&1).unwrap().as_str(), "seven");
+        assert_eq!(*registry.get(&FIRST, &1).unwrap().unwrap(), 7);
+        assert_eq!(
+            registry.get(&SECOND, &1).unwrap().unwrap().as_str(),
+            "seven"
+        );
     }
 
     #[test]
     fn registry_differentiates_endpoints_by_marker_type() {
         enum Number {}
         enum Text {}
-        let number = CacheEndpoint::<Number, u32, u32>::new("DUPLICATE");
-        let text = CacheEndpoint::<Text, u32, String>::new("DUPLICATE");
+        let number = CacheEndpoint::<u32, u32, Number>::new("DUPLICATE");
+        let text = CacheEndpoint::<u32, String, Text>::new("DUPLICATE");
         let registry = CacheRegistry::new(1024);
 
         assert_eq!(
             *registry
-                .bind(&number)
-                .unwrap()
-                .get_or_try_insert(1, |_| 4, || Ok(7))
+                .get_or_try_insert(&number, 1, |_| 4, || Ok(7))
                 .unwrap(),
             7
         );
         assert_eq!(
             registry
-                .bind(&text)
-                .unwrap()
-                .get_or_try_insert(1, String::len, || Ok("seven".to_owned()))
+                .get_or_try_insert(&text, 1, String::len, || Ok("seven".to_owned()))
                 .unwrap()
                 .as_str(),
             "seven"
@@ -2437,17 +2483,18 @@ mod tests {
     #[test]
     fn registry_clear_invalidates_bound_endpoint_values() {
         enum FirstUse {}
-        static ENDPOINT: CacheEndpoint<FirstUse, u32, u32> =
-            CacheEndpoint::<FirstUse, u32, u32>::new("FIRST_USE");
+        static ENDPOINT: CacheEndpoint<u32, u32, FirstUse> =
+            CacheEndpoint::<u32, u32, FirstUse>::new("FIRST_USE");
 
         let registry = CacheRegistry::new(8);
-        let endpoint = registry.bind(&ENDPOINT).unwrap();
+        let reg = &registry;
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
         std::thread::scope(|s| {
             let worker = s.spawn(move || {
-                let lease = endpoint
+                let lease = reg
                     .get_or_try_insert(
+                        &ENDPOINT,
                         1,
                         |_| 4,
                         || {
@@ -2469,9 +2516,7 @@ mod tests {
 
         assert_eq!(
             *registry
-                .bind(&ENDPOINT)
-                .unwrap()
-                .get_or_try_insert(1, |_| 4, || Ok(9))
+                .get_or_try_insert(&ENDPOINT, 1, |_| 4, || Ok(9))
                 .unwrap(),
             9
         );
@@ -2846,55 +2891,60 @@ mod tests {
     }
 
     #[test]
-    fn same_endpoint_bound_twice_shares_single_allocation() {
+    fn same_endpoint_resolved_twice_shares_single_allocation() {
         enum Marker {}
-        static ENDPOINT: CacheEndpoint<Marker, u32, u32> = CacheEndpoint::new("SAME_ENDPOINT");
+        static ENDPOINT: CacheEndpoint<u32, u32, Marker> = CacheEndpoint::new("SAME_ENDPOINT");
         let registry = CacheRegistry::new(64);
-        let a = registry.bind(&ENDPOINT).unwrap();
-        let b = registry.bind(&ENDPOINT).unwrap();
-        assert_eq!(a.cache, b.cache);
+        let a = registry.resolve_cache(&ENDPOINT).unwrap();
+        let b = registry.resolve_cache(&ENDPOINT).unwrap();
+        assert_eq!(a, b);
     }
 
     #[test]
     fn different_marker_types_create_distinct_storage_allocations() {
         enum MarkerA {}
         enum MarkerB {}
-        static ENDPOINT_A: CacheEndpoint<MarkerA, u32, u32> = CacheEndpoint::new("SHARED_ID");
-        static ENDPOINT_B: CacheEndpoint<MarkerB, u32, u32> = CacheEndpoint::new("SHARED_ID");
+        static ENDPOINT_A: CacheEndpoint<u32, u32, MarkerA> = CacheEndpoint::new("SHARED_ID");
+        static ENDPOINT_B: CacheEndpoint<u32, u32, MarkerB> = CacheEndpoint::new("SHARED_ID");
         let registry = CacheRegistry::new(64);
-        let a = registry.bind(&ENDPOINT_A).unwrap();
-        let b = registry.bind(&ENDPOINT_B).unwrap();
+        ENDPOINT_A
+            .get_or_try_insert(&registry, 1, |_| 1, || Ok(10))
+            .unwrap();
+        ENDPOINT_B
+            .get_or_try_insert(&registry, 1, |_| 1, || Ok(20))
+            .unwrap();
         assert_eq!(registry.endpoint_count(), 2);
-        a.get_or_try_insert(1, |_| 1, || Ok(10)).unwrap();
-        b.get_or_try_insert(1, |_| 1, || Ok(20)).unwrap();
-        assert_eq!(*a.get(&1).unwrap(), 10);
-        assert_eq!(*b.get(&1).unwrap(), 20);
+        assert_eq!(*ENDPOINT_A.get(&registry, &1).unwrap().unwrap(), 10);
+        assert_eq!(*ENDPOINT_B.get(&registry, &1).unwrap().unwrap(), 20);
     }
 
     #[test]
-    fn bound_endpoint_remains_usable_across_registry_clear() {
+    fn endpoint_remains_usable_across_registry_clear() {
         enum Marker {}
-        static ENDPOINT: CacheEndpoint<Marker, u32, u32> = CacheEndpoint::new("SURVIVE_CLEAR");
+        static ENDPOINT: CacheEndpoint<u32, u32, Marker> = CacheEndpoint::new("SURVIVE_CLEAR");
         let registry = CacheRegistry::new(64);
-        let endpoint = registry.bind(&ENDPOINT).unwrap();
 
         assert_eq!(
-            *endpoint.get_or_try_insert(1, |_| 1, || Ok(100)).unwrap(),
+            *ENDPOINT
+                .get_or_try_insert(&registry, 1, |_| 1, || Ok(100))
+                .unwrap(),
             100
         );
-        assert_eq!(*endpoint.get(&1).unwrap(), 100);
+        assert_eq!(*ENDPOINT.get(&registry, &1).unwrap().unwrap(), 100);
 
         registry.clear();
 
         // Old generation value is missed
-        assert!(endpoint.get(&1).is_none());
+        assert!(ENDPOINT.get(&registry, &1).unwrap().is_none());
 
         // New value can be inserted in the new generation
         assert_eq!(
-            *endpoint.get_or_try_insert(1, |_| 1, || Ok(200)).unwrap(),
+            *ENDPOINT
+                .get_or_try_insert(&registry, 1, |_| 1, || Ok(200))
+                .unwrap(),
             200
         );
-        assert_eq!(*endpoint.get(&1).unwrap(), 200);
+        assert_eq!(*ENDPOINT.get(&registry, &1).unwrap().unwrap(), 200);
     }
 
     #[test]
@@ -3761,8 +3811,8 @@ mod tests {
     fn registry_clear_allows_destructor_to_bind_new_endpoints() {
         enum Marker {}
         enum NewMarker {}
-        static EXISTING: CacheEndpoint<Marker, u32, ReentrantBind> = CacheEndpoint::new("existing");
-        static NEW: CacheEndpoint<NewMarker, u32, u32> = CacheEndpoint::new("new");
+        static EXISTING: CacheEndpoint<u32, ReentrantBind, Marker> = CacheEndpoint::new("existing");
+        static NEW: CacheEndpoint<u32, u32, NewMarker> = CacheEndpoint::new("new");
         struct ReentrantBind {
             registry: std::sync::Weak<CacheRegistry>,
             completed: Arc<AtomicBool>,
@@ -3772,17 +3822,20 @@ mod tests {
                 let registry = self.registry.upgrade().unwrap();
                 // Detect the lock regression without hanging the test suite.
                 assert!(registry.caches.try_write().is_some());
-                let endpoint = registry.bind(&NEW).unwrap();
-                drop(endpoint.get_or_try_insert(2, |_| 1, || Ok(9)).unwrap());
+                drop(
+                    registry
+                        .get_or_try_insert(&NEW, 2, |_| 1, || Ok(9))
+                        .unwrap(),
+                );
                 self.completed.store(true, Ordering::Release);
             }
         }
         let registry = Arc::new(CacheRegistry::new(16));
         let completed = Arc::new(AtomicBool::new(false));
-        let endpoint = registry.bind(&EXISTING).unwrap();
         drop(
-            endpoint
+            registry
                 .get_or_try_insert(
+                    &EXISTING,
                     1,
                     |_| 1,
                     || {
@@ -3797,6 +3850,6 @@ mod tests {
         registry.clear();
         assert!(completed.load(Ordering::Acquire));
         assert_eq!(registry.endpoint_count(), 2);
-        assert_eq!(*registry.bind(&NEW).unwrap().get(&2).unwrap(), 9);
+        assert_eq!(*registry.get(&NEW, &2).unwrap().unwrap(), 9);
     }
 }

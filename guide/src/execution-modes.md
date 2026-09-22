@@ -20,7 +20,7 @@ Do not combine a main-thread context with `thread_safe`.
 ## Thread-safe context
 
 ```rust
-#[excel_function(name = "APP.VERSION", thread_safe)]
+#[excel_function(name = "APP.VERSION")]
 fn version(
     #[excel_context(thread_safe)] context: ThreadSafeContext<'_, AppTools>,
 ) -> String {
@@ -28,7 +28,7 @@ fn version(
 }
 ```
 
-`ThreadSafeContext` is `Copy`, `Send`, and `Sync` when the referenced state permits it. Its presence marks the function as thread-safe even if the function attribute omits the flag. Use an explicit attribute as well when it improves readability, but do not treat duplicate declaration as additional safety.
+The context parameter acts as the single source of truth for the function's execution mode. When `ThreadSafeContext` is present, it explicitly declares the function as thread-safe; do **not** declare `thread_safe` in `#[excel_function]`, as redundant mode declarations are rejected at compile time. The `#[excel_function(thread_safe)]` attribute flag is reserved for functions that do not take a context argument (i.e. pure computation UDFs that do not require state access).
 
 ### What `thread_safe` guarantees
 
@@ -54,7 +54,7 @@ A macro-sheet context permits Excel callback operations that are not allowed in 
 - `coerce_matrix<T>` for an owned matrix;
 - `sheet_name`.
 
-The `macro_sheet` function flag selects the same registration capability without injecting state access. It is incompatible with `thread_safe` and asynchronous functions.
+The `macro_sheet` attribute flag on `#[excel_function(macro_sheet)]` selects macro-sheet registration for pure functions without injecting state access. When `MacroSheetContext` is present in the parameters, it defines the execution mode, and adding `macro_sheet` to `#[excel_function]` is a compile error. Macro-sheet mode is incompatible with `thread_safe` and asynchronous functions.
 
 ## Asynchronous context
 
@@ -75,9 +75,9 @@ The framework-owned future retains the current open-generation lease and per-cal
 
 | Mode | How selected | Excel MTR | Can use raw references | Can return a new handle object |
 |---|---|---:|---:|---:|
-| Main thread | default or `main_thread` context | no | no | yes |
-| Thread-safe | `thread_safe` or `thread_safe` context | yes | no | no |
-| Macro-sheet | `macro_sheet` or `macro_sheet` context | no | yes | no |
+| Main thread | default (no context) or `main_thread` context | no | no | yes |
+| Thread-safe | `thread_safe` flag (no context) or `thread_safe` context | yes | no | no |
+| Macro-sheet | `macro_sheet` flag (no context) or `macro_sheet` context | no | yes | no |
 | Asynchronous | `async fn` | native async ABI | no | no |
 
 A function marked `volatile` must still return a type valid for its mode. Handle objects and `HandleAlias<'_, T>` support volatile main-thread return semantics. Borrowed `Handle<'_, T>` values are synchronous call-scoped inputs and cannot be used in async functions. An async function that needs a formula-owned object must use the generation-scoped `HandleLease<'_, T>` input, which pins the registry payload before the task is committed.

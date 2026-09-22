@@ -8,60 +8,61 @@ struct MarkerB;
 #[test]
 fn different_endpoint_markers_remain_distinct() {
     let registry = CacheRegistry::new(1024);
-    let ep_a = CacheEndpoint::<MarkerA, String, String>::new("endpoint");
-    let ep_b = CacheEndpoint::<MarkerB, String, String>::new("endpoint");
+    let ep_a = CacheEndpoint::<String, String, MarkerA>::new("endpoint");
+    let ep_b = CacheEndpoint::<String, String, MarkerB>::new("endpoint");
 
-    let bound_a = registry.bind(&ep_a).unwrap();
-    let bound_b = registry.bind(&ep_b).unwrap();
-
-    bound_a
-        .get_or_try_insert("k1".to_string(), |_| 1, || Ok("val_a".to_string()))
+    registry
+        .get_or_try_insert(&ep_a, "k1".to_string(), |_| 1, || Ok("val_a".to_string()))
         .unwrap();
 
-    assert_eq!(&*bound_a.get(&"k1".to_string()).unwrap(), "val_a");
-    assert!(bound_b.get(&"k1".to_string()).is_none());
+    assert_eq!(
+        &*registry.get(&ep_a, &"k1".to_string()).unwrap().unwrap(),
+        "val_a"
+    );
+    assert!(registry.get(&ep_b, &"k1".to_string()).unwrap().is_none());
 }
 
 #[test]
 fn versioned_endpoint_ids_are_distinct() {
     let registry = CacheRegistry::new(1024);
-    let ep1 = CacheEndpoint::<MarkerA, String, String>::new("v1");
-    let ep2 = CacheEndpoint::<MarkerA, String, String>::new("v2");
+    let ep1 = CacheEndpoint::<String, String, MarkerA>::new("v1");
+    let ep2 = CacheEndpoint::<String, String, MarkerA>::new("v2");
 
-    let bound1 = registry.bind(&ep1).unwrap();
-    let bound2 = registry.bind(&ep2).unwrap();
+    ep1.get_or_try_insert(
+        &registry,
+        "k1".to_string(),
+        |_| 1,
+        || Ok("val1".to_string()),
+    )
+    .unwrap();
 
-    bound1
-        .get_or_try_insert("k1".to_string(), |_| 1, || Ok("val1".to_string()))
-        .unwrap();
-
-    assert_eq!(&*bound1.get(&"k1".to_string()).unwrap(), "val1");
-    assert!(bound2.get(&"k1".to_string()).is_none());
+    assert_eq!(
+        &*ep1.get(&registry, &"k1".to_string()).unwrap().unwrap(),
+        "val1"
+    );
+    assert!(ep2.get(&registry, &"k1".to_string()).unwrap().is_none());
 }
 
 #[test]
 fn registry_clear_clears_all_endpoints() {
     let registry = CacheRegistry::new(1024);
-    let ep_a = CacheEndpoint::<MarkerA, String, String>::new("ep_a");
-    let ep_b = CacheEndpoint::<MarkerB, String, String>::new("ep_b");
+    let ep_a = CacheEndpoint::<String, String, MarkerA>::new("ep_a");
+    let ep_b = CacheEndpoint::<String, String, MarkerB>::new("ep_b");
 
-    let bound_a = registry.bind(&ep_a).unwrap();
-    let bound_b = registry.bind(&ep_b).unwrap();
-
-    bound_a
-        .get_or_try_insert("k1".to_string(), |_| 1, || Ok("val_a".to_string()))
+    registry
+        .get_or_try_insert(&ep_a, "k1".to_string(), |_| 1, || Ok("val_a".to_string()))
         .unwrap();
-    bound_b
-        .get_or_try_insert("k2".to_string(), |_| 1, || Ok("val_b".to_string()))
+    registry
+        .get_or_try_insert(&ep_b, "k2".to_string(), |_| 1, || Ok("val_b".to_string()))
         .unwrap();
 
-    assert!(bound_a.get(&"k1".to_string()).is_some());
-    assert!(bound_b.get(&"k2".to_string()).is_some());
+    assert!(registry.get(&ep_a, &"k1".to_string()).unwrap().is_some());
+    assert!(registry.get(&ep_b, &"k2".to_string()).unwrap().is_some());
 
     registry.clear();
 
-    assert!(bound_a.get(&"k1".to_string()).is_none());
-    assert!(bound_b.get(&"k2".to_string()).is_none());
+    assert!(registry.get(&ep_a, &"k1".to_string()).unwrap().is_none());
+    assert!(registry.get(&ep_b, &"k2".to_string()).unwrap().is_none());
 }
 
 #[test]

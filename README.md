@@ -50,7 +50,7 @@ impl Addin for ExampleAddin {
     type Layers = ();
 
     fn open(_context: &OpenContext) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
-        Ok(Opened::new(State, (), ()))
+        Ok(Opened::new(State))
     }
 }
 
@@ -58,7 +58,7 @@ impl Addin for ExampleAddin {
 // the `excel_addin` attribute above and provide this implementation only when
 // every application-owned executable source is stopped before quiescence
 // returns. Otherwise xlfn retains module residency after terminal removal.
-// unsafe impl PhysicallyUnloadableAddin for ExampleAddin {}
+// unsafe impl xlfn::PhysicallyUnloadableAddin for ExampleAddin {}
 
 /// Adds two finite numbers.
 #[excel_function(name = "EXAMPLE.ADD", thread_safe)]

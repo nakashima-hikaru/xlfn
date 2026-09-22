@@ -13,7 +13,7 @@ impl Addin for BorrowedAsyncAliasAddin {
     type Layers = ();
 
     fn open(_: &OpenContext) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
-        Ok(Opened::new((), (), ()))
+        Ok(Opened::new(()))
     }
 }
 
