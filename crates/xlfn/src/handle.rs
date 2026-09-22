@@ -48,15 +48,17 @@ pub(crate) use crate::call::HandleDomainWitness;
 pub(crate) use connection::HandleConnection;
 pub(crate) use connection::{FormulaObserverId, Topic};
 pub(crate) use domain::{HandleDomainPermit, HandleReadDomain};
+#[cfg(any(feature = "bench-internals", all(test, feature = "handles")))]
+pub(crate) use formula::FormulaCaller;
 #[cfg(any(test, feature = "refinement", feature = "bench-internals"))]
 pub(crate) use formula::FormulaRevisionKey;
 pub(crate) use formula::HandleTopicKey;
 #[cfg(feature = "handles")]
 pub(crate) use formula::formula_revision_key;
+#[cfg(feature = "bench-internals")]
+pub(crate) use formula::resolve_formula_caller;
 #[cfg(all(test, feature = "handles"))]
 pub(crate) use formula::test_topic_key;
-#[cfg(any(feature = "bench-internals", all(test, feature = "handles")))]
-pub(crate) use formula::{FormulaCaller, resolve_formula_caller};
 #[cfg(any(feature = "handles", all(target_os = "windows", feature = "rtd"),))]
 pub(crate) use lifetime::FormulaLifetimeBackend;
 #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles"),))]
