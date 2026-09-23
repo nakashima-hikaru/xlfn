@@ -710,6 +710,136 @@ macro_rules! width {
         let (recovered, ready, source) = completed.unwrap();
         Ok((finished.unwrap(), recovered, ready, source))
     }
+    /// Consume a published idle rotation's exact old-queue records while its
+    /// transition handle and zero-count stripe leases remain owned.
+    pub fn recover_idle_published<'a, 'b, 'node, T>(
+        published: owned_rotation::IdlePublished<'a, 'b, Entry<'node, T>>,
+        counters: &Vec<Counter>, owner: *const u8)
+        -> (result: (owned_rotation::IdleDetached<'a, 'b, Entry<'node, T>>,
+            Vec<Tracked<HeapPermission<T>>>, Ghost<Seq<Entry<'node, T>>>))
+        requires published.inv(), counters@ == published.target(), published.owner() == owner,
+            forall|entry: Entry<'node, T>| (#[trigger] (published.payload_inv())(entry))
+                ==> entry.inv() && entry.owner() == owner,
+            forall|entry: Entry<'node, T>, bound: Set<vstd::tokens::InstanceId>|
+                (#[trigger] (published.prepared_inv())(entry, bound)) == entry.prepared_for(bound),
+        ensures result.0.inv(), result.0.owner() == owner,
+            result.0.bound() == published.bound(), result.0.target() == counters@,
+            valid_records(result.2@, owner), prepared_records(result.2@, published.bound()),
+            result.1.len() == result.2@.len(),
+            forall|i: int| 0 <= i < result.2@.len() ==>
+                (#[trigger] result.1@[i])@ == result.2@[result.2@.len() - 1 - i].memory(),
+    {
+        let ghost bound = published.bound();
+        let (detached, withdrawal) = published.detach();
+        let ghost source = withdrawal.source();
+        assert(valid_records(source, owner));
+        assert(prepared_records(source, bound));
+        let (memories, source) = recover_idle_detached(&detached, withdrawal, counters, owner);
+        (detached, memories, source)
+    }
+    fn recover_idle_detached<'a, 'b, 'node, T>(
+        detached: &owned_rotation::IdleDetached<'a, 'b, Entry<'node, T>>,
+        withdrawal: super::super::rotation::locked_detachment::Withdrawal<Entry<'node, T>>,
+        counters: &Vec<Counter>, owner: *const u8)
+        -> (result: (Vec<Tracked<HeapPermission<T>>>, Ghost<Seq<Entry<'node, T>>>))
+        requires detached.inv(), detached.target() == counters@,
+            withdrawal.inv(), withdrawal.owner() == owner, withdrawal.index() == detached.index(),
+            valid_records(withdrawal.source(), owner),
+            prepared_records(withdrawal.source(), detached.bound()),
+        ensures result.1@ == withdrawal.source(),
+            valid_records(result.1@, owner), prepared_records(result.1@, detached.bound()),
+            result.0.len() == result.1@.len(),
+            forall|i: int| 0 <= i < result.1@.len() ==>
+                (#[trigger] result.0@[i])@ == result.1@[result.1@.len() - 1 - i].memory(),
+    {
+        let ghost source = withdrawal.source();
+        let ghost bound = detached.bound();
+        let Tracked(drains) = detached.drains(counters);
+        let mut records = withdrawal.into_records();
+        let mut memories: Vec<Tracked<HeapPermission<T>>> = Vec::new();
+        while records.len() > 0
+            invariant detached.inv(), detached.bound() == bound, drains.inv(), drains.domain() == bound,
+                records@ == source.take(records.len() as int),
+                records.len() + memories.len() == source.len(),
+                valid_records(records@, owner), prepared_records(records@, bound),
+                forall|i: int| 0 <= i < memories.len() ==>
+                    (#[trigger] memories@[i])@ == source[source.len() - 1 - i].memory(),
+            decreases records.len(),
+        {
+            let entry = records.pop().unwrap();
+            let memory = entry.recover_prepared(Tracked(drains));
+            memories.push(memory);
+        }
+        (memories, Ghost(source))
+    }
+    /// Recover the old queue inside the idle callback, then return its sealed
+    /// controls only after every exact heap permission has been recovered.
+    pub fn recover_idle_and_restore<'a, 'b, 'node, T>(
+        published: owned_rotation::IdlePublished<'a, 'b, Entry<'node, T>>,
+        counters: &Vec<Counter>, owner: *const u8)
+        -> (result: (owned_rotation::State, Vec<Tracked<HeapPermission<T>>>,
+            Tracked<super::super::rotation::queue_preparation::phase::ready>,
+            Ghost<Seq<Entry<'node, T>>>))
+        requires published.inv(), counters@ == published.target(), published.owner() == owner,
+            forall|entry: Entry<'node, T>| (#[trigger] (published.payload_inv())(entry))
+                ==> entry.inv() && entry.owner() == owner,
+            forall|entry: Entry<'node, T>, bound: Set<vstd::tokens::InstanceId>|
+                (#[trigger] (published.prepared_inv())(entry, bound)) == entry.prepared_for(bound),
+        ensures published.lock().inv(result.0), result.0.pending().is_none(),
+            result.0.sealed(published.target(), published.index()),
+            result.0.sealed(published.other(), !published.index()),
+            result.2@.instance_id() == published.prepared_id(),
+            valid_records(result.3@, owner), prepared_records(result.3@, published.bound()),
+            result.1.len() == result.3@.len(),
+            forall|i: int| 0 <= i < result.3@.len() ==>
+                (#[trigger] result.1@[i])@ == result.3@[result.3@.len() - 1 - i].memory(),
+    {
+        let ghost bound = published.bound();
+        let ghost callback_post: spec_fn(Seq<Entry<'node, T>>, Vec<Tracked<HeapPermission<T>>>) -> bool =
+            |source: Seq<Entry<'node, T>>, memories: Vec<Tracked<HeapPermission<T>>>|
+                valid_records(source, owner) && prepared_records(source, bound)
+                && memories.len() == source.len()
+                && (forall|i: int| 0 <= i < source.len() ==>
+                    (#[trigger] memories@[i])@ == source[source.len() - 1 - i].memory());
+        let callback = |detached: &owned_rotation::IdleDetached<'a, 'b, Entry<'node, T>>,
+                        withdrawal: super::super::rotation::locked_detachment::Withdrawal<Entry<'node, T>>|
+            -> (value: Vec<Tracked<HeapPermission<T>>>)
+            requires detached.inv(), detached.target() == counters@, detached.bound() == bound,
+                withdrawal.inv(), withdrawal.owner() == owner, withdrawal.index() == detached.index(),
+                valid_records(withdrawal.source(), owner),
+                prepared_records(withdrawal.source(), detached.bound()),
+            ensures callback_post(withdrawal.source(), value),
+        {
+            let ghost source = withdrawal.source();
+            let (memories, Ghost(recovered_source)) = recover_idle_detached(detached, withdrawal, counters, owner);
+            assert(recovered_source == source);
+            assert(callback_post(source, memories));
+            memories
+        };
+        assert forall|detached: &owned_rotation::IdleDetached<'a, 'b, Entry<'node, T>>,
+                      withdrawal: super::super::rotation::locked_detachment::Withdrawal<Entry<'node, T>>|
+            published.callback_input(detached, withdrawal) implies
+                call_requires(callback, (detached, withdrawal)) by {
+            if published.callback_input(detached, withdrawal) {
+                assert forall|i: int| 0 <= i < withdrawal.source().len() implies
+                    (#[trigger] withdrawal.source()[i]).inv()
+                    && withdrawal.source()[i].owner() == owner by {
+                    assert((published.payload_inv())(withdrawal.source()[i]));
+                };
+                assert forall|i: int| 0 <= i < withdrawal.source().len() implies
+                    (#[trigger] withdrawal.source()[i]).prepared_for(detached.bound()) by {
+                    assert((published.prepared_inv())(withdrawal.source()[i], bound));
+                };
+            }
+        };
+        assert forall|detached: &owned_rotation::IdleDetached<'a, 'b, Entry<'node, T>>,
+                      withdrawal: super::super::rotation::locked_detachment::Withdrawal<Entry<'node, T>>,
+                      value: Vec<Tracked<HeapPermission<T>>>|
+            (#[trigger] call_ensures(callback, (detached, withdrawal), value)) implies
+                callback_post(withdrawal.source(), value) by {};
+        let (state, ready, memories, source) = published.run_callback(counters, callback, Ghost(callback_post));
+        (state, memories, ready, source)
+    }
     pub fn recover_prepared_locked<'node, T>(owner: *const u8,
         held: (super::super::rotation::barrier_ownership::QueueState<Entry<'node, T>>,
             super::super::rotation::barrier_ownership::QueueHandle<'_, Entry<'node, T>>),

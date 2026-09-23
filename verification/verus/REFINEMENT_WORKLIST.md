@@ -9,26 +9,26 @@ silently assumed as the desired conclusion.
 | Requirement | Authoritative production surface | Evidence required | Status |
 | --- | --- | --- | --- |
 | Counter admission/release, widths, fail-stop | `sealable_counter/transitions.rs` | Shared 32/64-bit executable transition proofs | Implemented |
-| Final release and wait observation | `drain_gate.rs`, `drain_gate/protocol.rs` | Shared lock/release/notify/unlock and reobservation proofs, backend obligations | Shared control flow implemented; backend composition remains |
-| Striped drain/idle seal/rollback | `drain_gate.rs` | All-stripe conservation and zero observations, rollback preserves waiting | Shared full-stripe scan, linear instance ledgers and sealed-zero interference histories composed; idle-seal/rollback verified; native address/history/lock representation remains open |
+| Final release and wait observation | `drain_gate.rs`, `drain_gate/protocol.rs` | Shared lock/release/notify/unlock and reobservation proofs, backend obligations | Shared control flow and vstd counter/stripe resources composed; native atomic and wait/notify correspondence deferred |
+| Striped drain/idle seal/rollback | `drain_gate.rs` | All-stripe conservation and zero observations, rollback preserves waiting | Shared full-stripe scan, sealed-zero interference and resource-backed idle-seal/rollback verified; vstd all-stripe collection composes with the rotation lock; native address/history/lock representation deferred |
 | Reader selection/retry and generation identity | `rotating_read_domain.rs` | Admission at the gate RMW, including stale selection and reuse | Production borrowed/owned and Loom reader loops share the verified selection/acquire/retry/permit control flow; 32/64-bit acquire rejects noncurrent selection under the generation invariant; live history, stripe and allocation identity composition open |
-| Rotation and pending generation | `rotating_read_domain.rs` | Shared blocking/polled/idle paths; seal before publish before reopen; pending retained on callback failure | Shared begin/publish/reopen/finish and polled observation order verified in 32/64-bit models; full driver/idle-seal composition open |
-| Publication barrier and terminal close | `rotating_read_domain.rs` | Registration held through publication, released before wait; close prevents reopen; no fabricated drain | Shared barrier/publication order and close-before-seal verified; actual SeqCst current and queue-handle registration derive readiness by token custody, with reserve/publish resource transfer; native driver and both-generation drain composition open |
+| Rotation and pending generation | `rotating_read_domain.rs` | Shared blocking/polled/idle paths; seal before publish before reopen; pending retained on callback failure | Shared 32/64-bit control flow and vstd arbitrary-stripe pending/idle drivers verify collection, publication, callback and restoration order; native driver field/history identity deferred |
+| Publication barrier and terminal close | `rotating_read_domain.rs` | Registration held through publication, released before wait; close prevents reopen; no fabricated drain | Shared barrier/close order, vstd current and queue-handle readiness, reserve/publish resource transfer and certified detachment verified; production domain and queues co-owned; native primitive and terminal drain-history correspondence deferred |
 | Cache observation/pin/retirement/reclaim | `cache.rs`, `cache/pin_transitions.rs` | Shared ownership transitions connected to the generation proof; pin/read/reclaim exclusion | Shared pin kernel; heap-backed pin/observation/retirement resources; scoped rotation/stripe exclusion and shared typed queue registration/detachment composed; frozen observation coverage narrows before shared publication and pending drain derives zero observations; native queue/stripe cutoff and representation remain open |
-| Handle observation/retirement/debt/reclaim | `handle/domain.rs`, `handle/binding.rs`, `handle/object.rs` | Same-domain admission, queue-generation revalidation, linear retirement, pin/binding lifetime | Production registration, certificate-authorized detachment and completion tail share control flow; modeled debt includes destruction in flight and linear return receipts; shared checked debt/queued arithmetic and conditional count bridges added; native owner-borrowing drained batches added with shared merge identity checks; initialized linear binding owners now traverse shared registration/certified batches/completion in Verus; native reader witnesses borrow their retaining scope and shared append-only storage conserves linear admissions; enriched AtomicPtr retirement records now traverse registration, selected-queue coverage preparation, certified detachment and exact batch heap recovery; a library queue lock now preserves payload invariants and composes acquisition, preparation, publication and release; native lock/array/address/history and Box/Drop adapters plus concurrent atomic debt composition remain open |
+| Handle observation/retirement/debt/reclaim | `handle/domain.rs`, `handle/binding.rs`, `handle/object.rs` | Same-domain admission, queue-generation revalidation, linear retirement, pin/binding lifetime | Production registration, certificate-authorized detachment and completion tail share control flow; modeled debt includes destruction in flight and linear return receipts; shared checked debt/queued arithmetic and conditional count bridges added; native owner-borrowing drained batches added with shared merge identity checks; initialized linear binding owners now traverse shared registration/certified batches/completion in Verus; native reader witnesses borrow their retaining scope and shared append-only storage conserves linear admissions; enriched AtomicPtr retirement records now traverse registration, selected-queue coverage preparation, certified detachment and exact batch heap recovery; a library queue lock now preserves payload invariants and composes acquisition, preparation, publication and release; native lock/array/address/history, Box/Drop and concurrent atomic debt-field composition remain future native work |
 | Allocation ownership/raw pointer recovery | `published_owner.rs` and callers | Single allocation ownership, borrow/access capability, recovery after all relevant readers/pins | Tracked initialized memory plus allocator rights retained through owner/cache retirement proofs; native Box/DST/Drop and reader-lifetime adapters remain open |
-| Cross-layer composition and claim audit | Lean invariants, Verus, unsafe call sites | Requirement-to-proof/caller mapping; explicit remaining TCB, no theorem claims for models alone | Open |
-| Regression sensitivity and validation | `Justfile`, verification tools, kernel/cache/handle tests | Unsafe shared mutations rejected; Verus/audit, Loom, both Miri modes, Rust checks | Shared-control and resource negative gates implemented; incremental native/Loom/Miri validation recorded below; final whole-stack audit remains open |
+| Cross-layer composition and claim audit | Lean invariants, Verus, unsafe call sites | Requirement-to-proof/caller mapping; explicit remaining TCB, no theorem claims for models alone | Traceability audited below; native and cross-prover theorem composition open |
+| Regression sensitivity and validation | `Justfile`, verification tools, kernel/cache/handle tests | Unsafe shared mutations rejected; Verus/audit, Loom, both Miri modes, Rust checks | Shared-control and resource negative gates implemented; local whole-stack audit recorded below; remote Windows/CI execution is separate |
 
 Policy: do not add project-owned trusted adapters; unsupported primitive
 connections remain explicitly incomplete.
 
-The current native field/lock mismatches and next representation change are
+The current native field/identity gaps and remaining representation work are
 listed in [NATIVE_ADAPTER_PLAN.md](NATIVE_ADAPTER_PLAN.md). In particular, the
-Cache proof currently allocates a separate pin atomic and retains an executable
-ledger RwLock for observation registration/completion and retirement. Pin CAS and
-metadata reads now borrow the reader-owned Ticket without that lock; the remaining
-representation and synchronization differences are not native refinement. Primitive contracts alone would not remove that difference.
+Cache proof currently allocates a separate pin atomic. Its observation ledger
+now uses an erased ghost invariant; no extra executable per-node lock remains.
+Connecting the separate pin field and ghost updates to native events is still
+required for native refinement. Primitive contracts alone would not remove that difference.
 
 Windows execution and remote CI evidence are distinct from local Rust/Verus
 checks. This worklist is not a release-readiness or publication authorization.
@@ -2693,11 +2693,12 @@ native implementation already releases nonfinal pins without a node ledger lock;
 adding a trusted synchronization adapter is not authorized by the selected policy.
 
 
-## Nonfinal pin release no longer takes the proof ledger lock
+## Earlier nonfinal pin release stopped taking the proof ledger lock
 
 Moved Node::release's atomic pin decrement before ledger acquisition. Nonfinal
 release returns without the lock. Only the final retirement token permits a
-RetiredNode, followed by observation/coverage freezing under the ledger lock.
+RetiredNode, followed by observation/coverage freezing; the former proof lock
+was subsequently replaced by the ghost invariant described below.
 Removed the unused release_owned_covered helper rather than retaining a second
 lock-spanning release path. The resource machine still excludes resident pins
 once final retirement is issued, including the interval before ledger freezing.
@@ -2714,3 +2715,409 @@ the now-expanded full 94-mutation suite has not been rerun. Native code is uncha
 Final-release completion, observation registration/completion and heap recovery
 still have proof-only ledger synchronization. Native field identity, weak-memory
 and Box support gaps remain incomplete; no trusted adapters have been added.
+
+
+## Cache ledger replaced with a ghost atomic invariant
+
+The queued Cache node no longer creates an executable vstd RwLock for its
+allocation/observation/coverage ledger. It stores those linear resources in an
+`AtomicInvariant` tracked field. Observation issue/end, final-pin freezing,
+preparation and recovery open the ghost invariant. The pin atomic invariant and
+ledger invariant have different namespaces; recovery's verified atomic/no-unwind
+body may open the pin invariant while holding the ledger invariant.
+
+At this ghost-ledger increment, the Cache Verus crate verified 784
+obligations and its erased crate compiled. All 95 Cache ownership/domain/composition mutations were rejected
+by the full gate; all 15 borrow/ownership probes passed. The production Cache
+unit-test run passed 67 tests with one manual benchmark ignored, and Clippy
+passed with warnings denied. The shared final-pin Loom baseline passed and
+both missing/early Acquire-fence mutations were detected. TCB audit reports
+zero project-local assumptions and zero added trusted specifications.
+The independent vstd pin counter, weak-memory mapping, native index/queue
+identities and Box/Drop connection remain incomplete under the selected policy.
+
+
+## Idle-only rotation start shares the checked seal boundary
+
+`try_idle_with_barrier_impl` now instantiates `try_begin_idle_rotation!` from the
+production protocol file. A failed all-stripe idle seal returns before pending
+registration or generation publication; success performs those steps in order.
+The both-width Verus instantiation uses DrainGate's already verified shared
+load/CAS idle-seal backend with an arbitrary stale sample. Its scalar rotation
+state remains unchanged on failure, and on success its sealed word equals the
+backend's post-CAS word before pending and publication proceed. The proof
+model does not identify that scalar with the native stripe array, synchronize
+its CAS history with the native atomic fields, or prove the parking_lot
+transition/queue barrier mapping. These remain incomplete under the no-new-TCB
+policy.
+
+At this idle-only rotation increment, RotatingReadDomain Verus verified 505 obligations and the
+erased crate compiled; Cache and Handle Verus verified 790 and 807 obligations
+after importing the changed module. All 76 rotation mutations, including four
+new idle-start/stale-CAS failures, were rejected. Kernel tests passed 67/67;
+the three idle-related Miri cases passed under Stacked and Tree Borrows. Kernel
+Clippy with warnings denied, workspace formatting and the zero-assumption TCB
+audit passed. This is local validation, not Windows or remote CI evidence.
+
+
+## DrainGate idle seal carries exact zero-permit leases through rollback
+
+The 32/64-bit `atomic_counter::Counter::try_seal_if_idle` method checks the
+shared idle-seal predicate and performs a CAS on its own vstd atomic. A
+successful CAS transfers the matching zero active-count token and lifecycle
+controller into one DrainLease in that atomic invariant. A failed or stale CAS
+returns the original open controller. `undo_idle_seal` consumes only that
+counter's lease, retries the shared rollback expression against concurrent
+waiting-bit registration, preserves the waiting bit, restores the active token
+and returns an open controller. The owned lease rules out a foreign counter or
+outstanding matching permit.
+
+`atomic_stripes::IdleCollection` instantiates production's shared
+`seal_stripes!` loop with those resource-backed operations. It retains every
+successful prefix lease; on failure, it consumes each lease during rollback
+and returns the complete map of open controllers. On success, its borrowed
+DrainSet covers exactly the vector's gate identities. The collection's
+progress bookkeeping is ghost state and erases from executable code. This
+closes the all-stripe resource rollback model without adding a trusted
+specification or a runtime proof-only lock.
+
+The vstd counters remain separate from native `SealableCounter.state` fields.
+The collection was not yet bound to RotatingReadDomain's transition ownership
+or vstd queue phase at this increment; the next section records that additional
+proof. Its SeqCst contracts do not prove the native AcqRel/Acquire history,
+and native Mutex/Condvar and Box/raw pointer connections remain open. The
+all-stripe proof therefore does not by itself certify the production callback.
+
+Validation: DrainGate Verus 314 verified / 0 errors and erased compilation;
+all 65 DrainGate mutations rejected, including wrong-counter sealing/rollback
+and lost zero-count authority. Importing crates verified RotatingReadDomain
+539, Cache 824 and Handle 841 obligations, all without errors. The production
+source is unchanged in this increment; native kernel tests and targeted Miri
+evidence from the preceding idle-only rotation increment still apply.
+
+## Idle stripe leases through transition ownership and queue detachment
+
+`striped_rotation::collect_idle` now takes the actual vstd transition
+WriteHandle together with the old generation's open controller map. Its
+`IdleHandoff` holds the handle while `IdleCollection` attempts the shared
+all-stripe idle seal. A failed attempt rolls back every successful stripe and
+returns a valid open transition-lock state. A successful attempt retains every
+matching zero-count DrainLease; the old controller map cannot be returned to
+the lock during that interval. The handoff also keeps the other generation's
+sealed controllers and verifies exact stripe and gate identity for both word
+widths.
+
+On that success branch, `IdleHandoff::publish` calls the vstd current atomic's
+reserved publication and releases the queue WriteHandle through production's
+shared `publish_release!` ordering expression while the leases are still
+owned. `IdlePublished` retains the matching prepared old-queue ticket,
+transition handle and full
+DrainSet. Its `detach` acquires the matching vstd queue WriteHandle, consumes
+the prepared ticket through the verified queue reset/detachment function, and
+returns the withdrawn records alongside `IdleDetached`. `IdleDetached` still
+owns every old-stripe lease and the new ready ticket. Every withdrawn record
+retains the queue's prepared predicate for exactly the old stripe DrainSet.
+The conversion from idle leases to the existing sealed-drain collection is
+verified, but no function
+currently consumes `IdleDetached` to certify actual callback execution and
+return a completed transition state. This remains incomplete.
+
+This connects the resource proof through vstd transition ownership,
+publication and queue detachment without a new trusted adapter. The native
+`parking_lot` mutex/queue, `AtomicUsize` field identity, AcqRel/Acquire history,
+Condvar notification and Box/raw-pointer identity remain unconnected. Tests
+and Miri check behaviors at those boundaries, but do not establish the
+missing machine-checked refinement.
+
+Local validation for this increment: DrainGate 318 and RotatingReadDomain 559
+Verus obligations verified with zero errors, and both erased crates compiled.
+CacheLease 844 and HandleDomain 861 imported obligations verified with zero
+errors. Both DrainGate and RotatingReadDomain negative-mutation suites passed,
+including the idle-handoff, exact-bound and prepared-payload mutations. Kernel
+unit tests passed 67/67 and doctests 2/2; the zero-assumption audit, formatting
+and whitespace checks passed. Native Miri evidence remains from the preceding
+production-source increment; this increment changes only verification code,
+mutation checks and documentation.
+
+## Idle queue withdrawal reaches Cache and Handle heap permissions
+
+`IdlePublished::detach` now exposes the protected queue's payload predicate,
+prepared predicate, owner, generation and exact old-stripe bound to its
+`IdleDetached` continuation. The continuation retains all zero-count stripe
+leases and the transition WriteHandle while the withdrawn records are processed.
+
+CacheLease's `recover_idle_published` consumes that exact withdrawal, uses the
+retained DrainSet for every `Entry::recover_prepared`, and returns heap
+permissions in reverse queue order with a source-sequence identity proof.
+HandleDomain's parallel entry binds the same withdrawal to its DomainOwner,
+then invokes `recover_drain_batch` under the retained DrainSet. Both paths
+prove the source records were prepared for exactly the published old-stripe
+bound; a foreign bound or omitted final Cache record fails verification.
+These are executable vstd resource compositions for both machine widths.
+
+The original recovery entry still returns `IdleDetached`; the later
+`recover_idle_and_restore` entry below closes that vstd callback handoff.
+Native callback return and actual destructor completion remain separate.
+The recovered `HeapPermission` is not itself a
+proof of native `Box::from_raw` or `Drop`, and the vstd atomics and locks remain
+distinct from native fields. This extends the formal admission-to-recovery
+path without claiming native end-to-end refinement or adding trusted adapters.
+
+Local validation for this increment: CacheLease 848 and HandleDomain 863
+obligations verified with zero errors, and both erased crates compiled.
+Their full ownership/completion mutation suites passed, including the new
+idle-bound, prepared-predicate and final-record cases. RotatingReadDomain's
+559 obligations verified, and its full mutation suite was rerun after adding
+the withdrawal predicate and stripe-identity contracts. The zero-assumption
+TCB audit, formatting and whitespace checks passed. No native production
+source changed in this increment, so native Box/Drop or memory-order evidence
+is not inferred from these checks.
+
+## Idle callback returns Cache and Handle permissions before sealed-state restoration
+
+`IdlePublished::run_callback` now consumes the published handoff, detaches its
+exact prepared queue and calls a higher-ranked `FnOnce` while the transition
+handle and zero-count stripe leases remain held. Only after that call returns
+does it restore the controller map and return the matching ready token. The
+ordering instantiates production's shared `finish_rotation!` expression.
+The restoration step is private to the verified driver; the callback's
+precondition and result predicate are checked through Verus `call_requires`
+and `call_ensures`, rather than assumed.
+
+Cache and Handle each supply a verified recovery callback. Their
+`recover_idle_and_restore` entries return a sealed idle State only with the
+matching old-queue `HeapPermission` sequence, in reverse queue order, and the
+same queue-ready instance. Cache recovers each entry with the retained DrainSet;
+Handle binds the withdrawal to its domain and recovers the whole batch under
+that DrainSet. The generic callback driver returns the actual withdrawal's
+ghost source, and each callback contract relates its recovered permissions to
+that source rather than an arbitrary valid sequence. Removing either source
+equality is a negative mutation. Both versions verify for 32-bit and 64-bit
+words.
+
+This closes the vstd idle callback-to-recovery composition. It does not identify
+the vstd transition lock, counters, current atomic, queue or heap permissions
+with their native fields. It also does not prove native callback invocation,
+`Box::from_raw`, destructors, unwind behavior, or weak-memory histories. No
+new project-owned trusted adapter or assumption was introduced.
+
+Validation for this increment: `just verus` passed all eight crates and their
+negative-mutation and borrow-check gates. RotatingReadDomain verified 563
+obligations, CacheLease 856, and HandleDomain 871, all with zero errors; all
+three erased crates compiled. Reordering the shared callback/restore expression
+was rejected by Rust E0382 on the linear `IdleDetached` resource. New Cache and
+Handle mutations removing exact withdrawal-source equality both failed
+verification. `just verus-audit` found zero project-local assumptions or axioms.
+
+## Native synchronization contract boundary (2026-09-23)
+
+The installed Verus 0.2026.09.13.671956e rejects direct use of
+`std::sync::Mutex` and `Condvar` at their types, before it can verify a guard
+or wait/notify contract. `tools/probe_verus_sync_contracts.py` records this as
+`unsupported`; it would report a future accepted but unproved assertion as
+`unproved`. This is a diagnostic, not a mutation test or proof of production
+`parking_lot` behavior. The existing atomic and heap probes still find direct
+native `AtomicUsize` initial-value assertions unproved and Box raw conversions
+unsupported. All three probes were rerun locally.
+
+The deliberately raw-backed `PublishedOwner` cannot be replaced with a moving
+`Box` field as a proof shortcut: its published pointers must survive owner
+moves, and the current native/Miri test covers that requirement. No native
+representation or verifier TCB was changed. Native field, lock/guard, Condvar,
+raw allocation and weak-memory refinement remain open under the selected
+no-new-trusted-adapter policy.
+
+## Native certificate chooses the retirement queue (2026-09-23)
+
+`DrainedGeneration::take_queue` and `ClosedDomain::take_queues` now receive a
+two-element `Mutex` array and lock the certified index themselves. The former
+caller-provided lock closure could ignore that index while still satisfying the
+function's types. Cache, Handle bindings and Handle topics use the new API; the
+existing shared authorization/lock/take expression remains in both production
+and Verus. A native test covers generation zero, generation one, ordered terminal
+take and rejection of a foreign-domain certificate. This makes selection within
+the supplied array a native function-body property rather than a caller promise.
+
+The certificate still cannot prove that the supplied array is the issuing
+domain's retirement storage; that address/object mapping and the native lock
+semantics remain open. The change adds no new trusted adapter or proof claim for
+`parking_lot`.
+
+Validation: kernel library tests pass 67/67; xlfn cache+handles library tests
+pass 416 with 8 manual/feature-dependent tests ignored when run serially, and
+also pass on a subsequent ordinary parallel rerun. The first parallel run had
+one failure in `lifecycle::tests::failed_controlled_reload_quarantines_the_runtime`;
+that test passed alone and in both reruns, so the first failure is retained as
+an observed intermittent result, not erased. The focused certificate test
+passes under the pinned Miri toolchain with Stacked and Tree Borrows. xlfn
+all-feature check, affected all-target Clippy with warnings denied, formatting,
+whitespace and the zero-assumption TCB audit pass. `just verus` passes all eight
+crates and its complete mutation/borrow gates; RRD, Cache and Handle report
+563, 856 and 871 verified obligations respectively, with zero errors. These
+checks do not discharge the native array-owner or library primitive boundary.
+
+## One native owner for admission and retirement queues (2026-09-23)
+
+The kernel's `RotatingRetirementDomain<N, Q>` now stores the admission domain
+and both generation queues in private fields. Its registration retries, blocking
+and polled publication barriers, idle attempts, certified generation take, and
+terminal two-queue take all select those fields internally. Cache, Handle
+bindings and Handle topics hold this one owner in place of their former
+independent domain and queue-array fields. The former public low-level
+certificate take and caller-supplied lock/barrier APIs are now kernel-private.
+The existing `take_authorized_queue!` and terminal authorization expressions
+remain the source of the certificate check and lock/take sequence. The native
+certificate test follows payloads from registration through both rotations and
+terminal take, and confirms foreign-owner rejection.
+
+This removes caller-supplied queue-array identity from those production
+operations. The public inspection methods hold the queue locks but lend only
+`&Q`; the current Cache and Handle queues cannot be directly mutated through
+inspection. Registration and certified withdrawal are the only public paths
+that lend mutable guards. This is a Rust structural and callsite property, not
+a Verus proof that its vstd queue/lock instances denote the native
+`parking_lot` fields. Native primitive semantics are also outside this proof;
+this increment does not close the end-to-end refinement row.
+
+Local checks so far: kernel 67 tests; xlfn cache+handles 416 tests with 8
+ignored, both serial and ordinary parallel; affected all-target Clippy with
+warnings denied; all-feature check; warning-free workspace documentation;
+formatting, whitespace and zero-assumption TCB audit. The focused native
+certificate test passes under Miri Stacked and Tree Borrows; Handle's 26
+selected Miri tests and the Cache zero-budget reclamation test also pass in
+both modes. `parking_lot_core` emits its existing integer-to-pointer provenance
+warning, so these runs are not strict-provenance certification. Full `just verus`
+completed with exit code zero before the final inspection-only API edit:
+all eight crates and the negative-mutation/borrow gates passed; RRD, Cache and
+Handle verified 563, 856 and 871 obligations, respectively. The API edit
+does not change the proof sources or transition expressions. On the edited
+tree, kernel tests pass 67/67; xlfn cache+handles tests pass 416 with 8 ignored;
+all-feature and i686 Windows-target checks and affected all-target Clippy with
+warnings denied pass. The final audit and focused Miri rerun are recorded below.
+
+## Deferred native types and exact completion boundary
+
+The currently installed Verus cannot verify the production native
+`AtomicUsize`, `Mutex`/`Condvar` and `Box` raw-conversion objects at the needed
+contracts. These connections are **future work**, not completed refinements.
+The diagnostic probes in `NATIVE_ADAPTER_PLAN.md` record which operations are
+unsupported or accepted without sufficient postconditions. No project-owned
+trusted adapter is added to fill the gap.
+
+| Ownership step | Production connection | Verified part | Remaining boundary |
+| --- | --- | --- | --- |
+| Admission and permit release | `drain_gate.rs` and `rotating_read_domain.rs` use shared counter transitions and reader retry expressions | Dual-width counter and stripe resource proofs | Native atomic location/history and `parking_lot` guard identity |
+| Seal, drain and generation publish | `RotatingRetirementDomain` owns the admission domain and both queues; publication barriers select its own fields | Shared rotation order, pending/idle collection and all-stripe modeled drain authority | Native cross-location ordering and callback-to-native-field correspondence |
+| Retirement registration and certified detachment | Cache, Handle bindings and Handle topics call the owner's registration and certificate take methods | Shared select/recheck/append and exact queue withdrawal expressions, with resource-backed Cache/Handle batches | Native `Mutex`/`SmallVec` representation and destructor behavior |
+| Cache reclaim | `cache.rs` consumes detached entries after quiescence | Shared pin kernel and modeled observation/heap permission recovery | Actual `CacheNode.pins`, native allocation and `Box::from_raw` identity |
+| Handle reclaim | `handle/domain.rs` retains detached batches through destruction and debt completion | Modeled reader shares, bounded drain, exact batch recovery and shared completion tail | Native AtomicPtr/guard/debt history, raw allocation and `Drop` behavior |
+
+Lean and Verus share invariant identifiers and corresponding protocol claims,
+but there is no mechanically checked theorem importing Lean results into
+Verus. The table records corresponding steps, not a transitive end-to-end
+theorem. That cross-prover boundary is distinct from unsupported native types.
+The pinned Verus tool's `--export`/`--import` interface exchanges Verus crate
+metadata with another Verus crate; the Lean package has only its own checked
+declarations and executable trace checkers. Neither interface imports a proof
+from the other system. Adding a project-owned translator and trusting its
+output would enlarge the verification boundary, so the current trace checks
+must not be presented as a cross-prover theorem.
+
+The supported portion now connects shared transition/control expressions and
+resource proofs to production callsites, and constrains the native retirement
+owner so admission, barrier, detachment and terminal take select the same
+owned queues. The remaining cross-layer row cannot be marked complete until
+the exact native fields, histories, allocation identity, destructor and
+weak-memory obligations are mechanically connected. Loom, Miri and ordinary
+Rust tests provide separate evidence; none turns an unsupported native type
+into a Verus theorem.
+
+Final local audit for the inspection-only API edit: `just verus-audit` passes
+with zero project-local assumptions or axioms and no unapproved trusted bodies;
+`git diff --check`, formatting and warning-denied workspace documentation
+pass. The native certificate test and Cache/Topic lock-contention tests pass
+under both Stacked Borrows and Tree Borrows. The first Cache/Topic Miri build
+encountered the existing deprecated-API warnings denied by Cargo configuration;
+the focused rerun used the same warning settings as the root `miri` recipe and
+passed. These checks do not claim a whole-workspace Miri or Windows runtime
+result.
+
+## Local whole-stack audit before the Cache weight fix (2026-09-23)
+
+After the inspection-only API edit, and before the subsequent Cache weight
+fix below, `just verus` completed with exit code zero
+across all eight crates, every negative-mutation gate and both native/Verus
+borrow gates. DrainGate verified 318 obligations, RotatingReadDomain 563,
+CacheLease 856 and HandleDomain 871, all with zero errors. `just verus-audit`
+again found zero project-local assumptions or axioms and no unapproved trusted
+bodies. The native Atomic/Mutex/Condvar/Box probes still report the unsupported
+or insufficient contracts described above; passing Verus does not close them.
+
+`just test-libtest` passed for the complete workspace with all features;
+`just clippy`, `just panic-boundaries`, and the Cache final-pin ordering
+mutation gate passed. `just miri` completed with exit code zero in both its
+default Stacked Borrows mode and `-Zmiri-tree-borrows` mode across the kernel,
+Handle, async and RTD selections. The existing `parking_lot_core` exposed-
+provenance warning means these runs are not strict-provenance certification.
+The affected-crate warning-denied Clippy, all-feature and i686 Windows-target
+checks, warning-denied documentation, formatting and whitespace checks also
+passed on that source tree. There is no Windows runtime or remote CI result for
+the uncommitted changes.
+
+Lean `lake build` and all four executable trace-checker builds passed. Local
+fixtures passed (seven composition, one shutdown, one rejected Handle negative,
+and the RTD serialization golden vectors). Rust-generated shutdown and five
+composition traces were accepted by their Lean checkers. A source scan found
+no Lean `sorry` or `admit`. These are independent consistency checks, not a
+mechanically checked Lean-to-Verus refinement theorem.
+
+## Cache retirement-weight overflow boundary (2026-09-23)
+
+An executable Cache regression with two `u64::MAX` retirement weights failed
+at the existing `pending_weight.fetch_add(weight) + weight` while holding the
+generation queue lock. The same extreme weights could also overflow the batch
+sum during certified detachment. This was a production panic/leak risk caused
+by accounting, not a Verus-proved native atomic property.
+
+`pending_nodes`, which controls the zero-work fast path, now uses checked
+atomic add/subtract with fail-stop on an impossible count mismatch. The weight
+metric instead saturates. Once saturated, it remains a conservative
+backpressure signal until both owned queues are observed empty under their
+locks, when the metric can reset without racing registration. A second test
+holds a reader across publication, enqueues weights in both generations, and
+checks that draining just the old queue does not clear that signal.
+
+The failing regression was observed before the fix. On the updated source,
+the Cache-feature library suite passes 314 tests with 7 ignored, and the
+all-feature `xlfn` library suite passes 658 tests with 9 ignored. Affected
+all-target Clippy with warnings denied, the i686 Windows-target check,
+warning-denied workspace documentation, formatting, whitespace, the panic
+boundary gate and the Cache final-pin ordering mutation gate pass. Both new
+boundary tests pass with Stacked Borrows and Tree Borrows. Full `just verus`
+was rerun on this source tree and exited zero: all eight crates verified,
+including 318 DrainGate, 563 RotatingReadDomain, 856 CacheLease and 871
+HandleDomain obligations, and all negative-mutation and borrow gates passed.
+`just verus-audit` again found zero project-local assumptions or axioms and
+no unapproved trusted bodies. No native atomic refinement or Windows runtime
+result is inferred from these checks.
+
+## Handle maintenance request handoff (2026-09-23)
+
+`HandleReadDomain::maintain` previously incremented `maintenance_requests`
+with an inline checked closure but subtracted the consumed batch with
+`fetch_sub`, which could wrap before the subsequent branch if its accounting
+invariant were broken. Both RMWs now instantiate the existing shared
+`counters::add` / `counters::subtract` transition kernels through
+`fetch_update`, with fail-stop on overflow or underflow. The Loom handoff model
+uses the same kernels and RMW orderings. This keeps arithmetic aligned with
+the dual-width Verus proof; the native atomic linearization and scheduler
+liveness are separate obligations, with bounded Loom schedules providing
+regression evidence rather than an unbounded theorem.
+
+The focused Loom last-reader notification test, 658 all-feature `xlfn`
+library tests, affected all-target Clippy with warnings denied, the i686
+Windows-target check, formatting and whitespace checks pass. The Handle
+Verus crate verifies 871 obligations with zero errors. The 26 selected Handle
+Miri tests pass under both Stacked Borrows and Tree Borrows. The existing
+`parking_lot_core` exposed-provenance warning remains, and no Windows runtime
+or remote CI result is claimed.

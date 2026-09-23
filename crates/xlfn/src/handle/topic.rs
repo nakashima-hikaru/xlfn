@@ -33,7 +33,7 @@ use triomphe::Arc;
 use xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT;
 use xlfn_kernel::published_owner::PublishedOwner;
 use xlfn_kernel::rotating_read_domain::{
-    DrainedGeneration, RotatingReadDomain, RotatingReadPermit,
+    DrainedGeneration, RotatingReadPermit, RotatingRetirementDomain,
 };
 
 #[repr(u8)]
@@ -220,8 +220,7 @@ type RetiredTopics = SmallVec<[PublishedOwner<PublishedTopic>; 4]>;
 pub(crate) struct TopicTable {
     state: RwLock<TopicTableState>,
     published: PublishedTopics,
-    read_domain: RotatingReadDomain<DEFAULT_STRIPE_COUNT>,
-    pending_reclaims: [Mutex<RetiredTopics>; 2],
+    read_domain: RotatingRetirementDomain<DEFAULT_STRIPE_COUNT, RetiredTopics>,
 }
 
 impl TopicTable {
@@ -229,8 +228,7 @@ impl TopicTable {
         Self {
             state: RwLock::new(TopicTableState::default()),
             published: PublishedTopics::new(),
-            read_domain: RotatingReadDomain::new(),
-            pending_reclaims: [Mutex::new(SmallVec::new()), Mutex::new(SmallVec::new())],
+            read_domain: RotatingRetirementDomain::new(),
         }
     }
 
@@ -250,41 +248,29 @@ impl TopicTable {
         // Map withdrawal precedes registration here. Rotation takes this
         // queue lock before publishing its next generation, establishing the
         // ordering needed by readers of copied, non-owning topic pointers.
-        self.read_domain.register_retired(
-            |generation| self.pending_reclaims[generation.index()].lock(),
-            |_, mut queue| queue.push(topic),
-        );
+        self.read_domain
+            .register_retired(|_, mut queue| queue.push(topic));
     }
 
     fn drain_generation(&self, generation: DrainedGeneration<'_>) -> RetiredTopics {
-        generation
-            .take_queue(
-                &self.read_domain,
-                |index| self.pending_reclaims[index].lock(),
-                |mut queue| std::mem::take(&mut *queue),
-            )
+        self.read_domain
+            .take_queue(&generation, |mut queue| std::mem::take(&mut *queue))
             .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop())
     }
 
     pub(crate) fn try_quiesce_and_drain(&self) -> RetiredTopics {
-        let empty = {
-            let Some(first) = self.pending_reclaims[0].try_lock() else {
-                return SmallVec::new();
-            };
-            let Some(second) = self.pending_reclaims[1].try_lock() else {
-                return SmallVec::new();
-            };
-            first.is_empty() && second.is_empty()
+        let Some(empty) = self
+            .read_domain
+            .try_inspect_both(|first, second| first.is_empty() && second.is_empty())
+        else {
+            return SmallVec::new();
         };
         if empty {
             return SmallVec::new();
         }
         let Some(result) = self
             .read_domain
-            .try_quiesce_if_idle_with_publication_barrier(
-                |generation| self.pending_reclaims[generation.index()].try_lock(),
-                |generation| self.drain_generation(generation),
-            )
+            .try_quiesce_if_idle(|generation| self.drain_generation(generation))
         else {
             return SmallVec::new();
         };
@@ -293,16 +279,12 @@ impl TopicTable {
 
     pub(crate) fn seal_and_drain(&self) -> RetiredTopics {
         let closed = self.read_domain.seal_and_wait();
-        closed
-            .take_queues(
-                &self.read_domain,
-                |index| self.pending_reclaims[index].lock(),
-                |mut first, mut second| {
-                    let mut all = std::mem::take(&mut *first);
-                    all.append(&mut *second);
-                    all
-                },
-            )
+        self.read_domain
+            .take_queues(&closed, |mut first, mut second| {
+                let mut all = std::mem::take(&mut *first);
+                all.append(&mut *second);
+                all
+            })
             .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop())
     }
 
@@ -881,17 +863,17 @@ mod tests {
             "lifetime".to_owned(),
         )));
         let generation = table.read_domain.current_generation();
-        let registration = table.pending_reclaims[generation.index()].lock();
-        let (sent, received) = mpsc::sync_channel(1);
-        let worker_table = Arc::clone(&table);
-        let worker = std::thread::spawn(move || {
-            let drained = worker_table.try_quiesce_and_drain();
-            sent.send((drained.len(), worker_table.read_domain.current_generation()))
-                .unwrap();
+        let (worker, outcome) = table.read_domain.inspect_queue(generation.index(), |_| {
+            let (sent, received) = mpsc::sync_channel(1);
+            let worker_table = Arc::clone(&table);
+            let worker = std::thread::spawn(move || {
+                let drained = worker_table.try_quiesce_and_drain();
+                sent.send((drained.len(), worker_table.read_domain.current_generation()))
+                    .unwrap();
+            });
+            (worker, received.recv_timeout(Duration::from_secs(5)))
         });
-        let outcome = received.recv_timeout(Duration::from_secs(5));
-        // Release before asserting so a regression cannot strand the worker.
-        drop(registration);
+        // The inspection lock is released before joining the worker.
         worker.join().unwrap();
         let (count, observed_generation) =
             outcome.expect("idle reclamation must not wait for registration");

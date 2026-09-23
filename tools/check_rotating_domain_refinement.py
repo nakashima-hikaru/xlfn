@@ -40,7 +40,15 @@ MUTATIONS = {
         "                $unlock;", "                ();",
     ),
     "publication before seal": ("        $seal;", "        ();"),
-    "publication without pending registration": ("        $pending;", "        ();"),
+    "publication without pending registration": ("        $seal;\n        $pending;", "        $seal;\n        ();"),
+    "idle publication ignores failed seal": (
+        "if !$try_seal {\n            return None;",
+        "if false {\n            return None;",
+    ),
+    "idle publication skips pending registration": (
+        "        $pending;\n        $publish;\n    }};\n}\n\nmacro_rules! finish_rotation",
+        "        ();\n        $publish;\n    }};\n}\n\nmacro_rules! finish_rotation",
+    ),
     "reopen before publication": (
         "$publish;\n        $between;\n        $reopen;",
         "$reopen;\n        $between;\n        $publish;",
@@ -61,6 +69,7 @@ if __name__ == "__main__":
         (Path("crates/xlfn/src/retirement_queue.rs"), Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
          *tuple(Path("verification/verus/drain_gate/src").glob("*.rs")), Path("crates/xlfn-kernel/src/drain_gate/protocol.rs")),
         MUTATIONS,
+        ownership_rejections=frozenset({"clear pending before callback"}),
     )
 
     check_mutations(
@@ -194,8 +203,16 @@ if __name__ == "__main__":
          *tuple(Path("verification/verus/drain_gate/src").glob("*.rs"))),
         {
             "transition model releases barrier before publication": (
-                "publish_reopen!(model.publish(), model.publication_window(), model.reopen()),\n            model.release_barrier()",
-                "model.release_barrier(),\n            publish_reopen!(model.publish(), model.publication_window(), model.reopen())",
+                "begin_rotation!(model.seal_current(), model.mark_pending(),\n        publish_release!(\n            publish_reopen!(model.publish(), model.publication_window(), model.reopen()),\n            model.release_barrier()))",
+                "begin_rotation!(model.seal_current(), model.mark_pending(),\n        publish_release!(\n            model.release_barrier(),\n            publish_reopen!(model.publish(), model.publication_window(), model.reopen())))",
+            ),
+            "idle rotation ignores stale CAS sample": (
+                "let success = super::super::drain::refinement::$module::shared_idle_seal(&mut atomic);",
+                "let success = true;",
+            ),
+            "idle rotation omits the successful seal state": (
+                "            self.seal_current();",
+                "            ();",
             ),
         },
     )
@@ -370,8 +387,8 @@ if __name__ == "__main__":
          *tuple(Path("verification/verus/drain_gate/src").glob("*.rs"))),
         {
             "collection handoff accepts a foreign transition handle": (
-                "requires transition.inv(state), handle.rwlock() == *transition, state.pending().is_none(),",
-                "requires transition.inv(state), state.pending().is_none(),",
+                "requires transition.inv(state), handle.rwlock() == *transition, state.pending().is_none(),\n            next@ == transition.pred().counters(!index)",
+                "requires transition.inv(state), state.pending().is_none(),\n            next@ == transition.pred().counters(!index)",
             ),
             "collection handoff restores an unrelated controller map": (
                 "requires self.inv(), stripes::controls_match(self.next(), controls),", "requires self.inv(),",
@@ -398,6 +415,59 @@ if __name__ == "__main__":
             "collection cancellation restores another generation": (
                 "requires self.inv(), counters@ == self.next(), collection.inv(counters@),",
                 "requires self.inv(), collection.inv(counters@),",
+            ),
+        },
+    )
+
+    check_mutations(
+        Path("verification/verus/rotating_read_domain"), Path("verification/verus/rotating_read_domain/src/striped_rotation.rs"),
+        (Path("crates/xlfn/src/retirement_queue.rs"), Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
+         Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"), Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
+         *tuple(Path("verification/verus/drain_gate/src").glob("*.rs"))),
+        {
+            "idle handoff accepts a foreign transition handle": (
+                "requires transition.inv(state), handle.rwlock() == *transition, state.pending().is_none(),\n            counters@ == transition.pred().counters(index)",
+                "requires transition.inv(state), state.pending().is_none(),\n            counters@ == transition.pred().counters(index)",
+            ),
+            "idle handoff moves the wrong generation controls": (
+                "let (other_controls, target_controls) = if index { (zero, one) } else { (one, zero) };",
+                "let (other_controls, target_controls) = if index { (one, zero) } else { (zero, one) };",
+            ),
+            "idle handoff accepts a different stripe vector": (
+                "counters@ == transition.pred().counters(index), state.opened(counters@, index),",
+                "state.opened(counters@, index),",
+            ),
+            "idle cancellation skips exact lease rollback": (
+                "collection.undo_all(counters);\n            self.restore_open(collection.into_controls(counters))",
+                "self.restore_open(collection.into_controls(counters))",
+            ),
+            "idle handoff restores a sealed controller as open": (
+                "requires self.inv(), stripes::open_controls_match(self.target(), controls),",
+                "requires self.inv(), stripes::controls_owned(self.target(), controls),",
+            ),
+            "idle publication loses the exact stripe bound": (
+                "reserved.bound() == stripes::gate_ids(counters@),",
+                "true,",
+            ),
+            "published idle handoff records another queue generation": (
+                "&& self.queue.pred().index == self.handoff.index()\n                && self.queue.pred().preparation.id() == self.current.gate(self.handoff.index())\n                && self.prepared@",
+                "&& self.queue.pred().index != self.handoff.index()\n                && self.queue.pred().preparation.id() == self.current.gate(self.handoff.index())\n                && self.prepared@",
+            ),
+            "idle queue detachment uses a foreign owner": (
+                "let owner = held.0.domain;\n            let tracked mut ticket = Some(prepared);",
+                "let owner = core::ptr::null();\n            let tracked mut ticket = Some(prepared);",
+            ),
+            "idle detachment certifies records for the wrong stripe set": (
+                "(self.prepared_inv())(#[trigger] result.1.source()[i], self.bound()),",
+                "(self.prepared_inv())(#[trigger] result.1.source()[i], Set::empty()),",
+            ),
+            "idle detachment changes its payload predicate": (
+                "result.0.prepared_inv() == self.prepared_inv(), result.0.payload_inv() == self.payload_inv(),",
+                "result.0.prepared_inv() == self.prepared_inv(), result.0.payload_inv() != self.payload_inv(),",
+            ),
+            "idle detachment returns another stripe vector": (
+                "result.0.index() == self.index(), result.0.target() == self.target(),",
+                "result.0.index() == self.index(), result.0.target() != self.target(),",
             ),
         },
     )

@@ -24,6 +24,18 @@ macro_rules! begin_rotation {
     }};
 }
 
+// Idle-only rotation must not register pending or publish after a failed seal.
+// The seal backend is responsible for rolling back partial stripe progress.
+macro_rules! try_begin_idle_rotation {
+    ($try_seal:expr, $pending:expr, $publish:expr) => {{
+        if !$try_seal {
+            return None;
+        }
+        $pending;
+        $publish;
+    }};
+}
+
 macro_rules! finish_rotation {
     ($result:ident; $operation:expr, $clear:expr) => {{
         // The callback may unwind. Clearing pending first would allow reuse
@@ -56,6 +68,7 @@ pub(crate) use close_domain;
 pub(crate) use finish_rotation;
 pub(crate) use publish_release;
 pub(crate) use publish_reopen;
+pub(crate) use try_begin_idle_rotation;
 pub(crate) use try_finish_rotation;
 
 #[cfg(verus_only)]

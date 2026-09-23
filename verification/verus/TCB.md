@@ -70,6 +70,13 @@ The following properties and theorems are statically proved within Verus with ze
 - The release model starts from an arbitrary successful-RMW observation and executes the imported SealableCounter transition kernel; it does not reconstruct the concurrent atomic history. Both widths have bridges from acquire/release/reopen to the permit model and from registration to a count-preserving observation.
 - Wait interference is overapproximated by arbitrary raw-state samples, including reopen and spurious wakes. Exhausted samples repeat the current state. `exec_allows_no_decreases_clause` deliberately restricts the result to partial correctness: no termination or fairness theorem is claimed.
 - The `mark_waiting` RMW call, AcqRel ordering, waiting-bit operand and pre-RMW active-mask observation are now shared by production, Loom and executable Verus backends. The backend implements the primitive fetch_or contract; the actual concurrent atomic history remains TCB. Backend/closure wiring beyond this operation, RAII guard destruction, raw pointer projections, reference lifetimes, and concurrent sealed stability across stripes remain open. The full-stripe registration/zero scan itself is shared and verified for both widths, including the zero-permit implication; idle-seal uses shared load/CAS control flow verified against arbitrary stale load samples, and the shared rollback expression preserves waiting. Multi-stripe seal/rollback control flow is now shared and verified against these primitive backends. Concurrent interference during the driver remains open; exact rollback restoration in the sequential model is not a snapshot claim about the live atomic array. A separate both-width induction proves sealed observations stable under arbitrary finite histories of shared reader transitions, waiting registration and repeated seal. Applying it to actual stripe observations still requires owner/generation evidence excluding reopen and undo throughout the interval. Existing production-reusing Loom tests and Miri tests exercise these boundaries.
+- The resource-backed 32/64-bit vstd counter now checks the shared
+  idle-seal predicate and performs a CAS on its permit-owning atomic.
+  Success freezes the matching zero-count token and lifecycle controller
+  in a DrainLease. The verified all-stripe driver retains exact leases and
+  consumes them on rollback, preserving concurrent waiting registration.
+  Its bookkeeping erases, but the proof atomics remain separate from native
+  `SealableCounter.state` fields and their memory-order histories.
 - A zero observation under an open gate is a snapshot. Stable reclamation needs admission sealed and concurrent reopen excluded by the owner. No theorem here proves the complete rotating-domain/cache/handle reclamation path or a Lean-to-Verus translation.
 
 - **`[DG-1]` Permit Liveness**: The existence of an active permit strictly implies `active > 0`.
@@ -123,6 +130,24 @@ remaining boundary, not completed proofs of the native methods.
 - **`[RRD-D3]` Current Sealed Before Replacement Published**: The current generation is sealed before the replacement generation is published, preventing late readers from entering retired generations.
 - **`[RRD-D4]` Quiescence Before Reclamation Callback**: The transition callback runs only after the old generation has drained completely (`active == 0`).
 - **`[RRD-D5]` Closed Domain Never Reopens**: A closed domain permanently seals all generations and never reopens.
+
+The native idle-only start and its Verus model now instantiate the same
+`try_begin_idle_rotation!` expression. The model calls DrainGate’s verified
+shared load/CAS seal backend with an arbitrary stale sample: rejection
+leaves pending and publication untouched; success binds the scalar
+rotation word to the backend’s post-CAS sealed word before publication.
+An additional 32/64-bit resource path moves the exact old-generation stripe
+controllers into zero-count leases while retaining the matching vstd transition
+WriteHandle. Failure rolls back every lease and returns an open lock state.
+Success can publish through the vstd current atomic while retaining those leases,
+then detach/reset the matching prepared queue under its vstd WriteHandle. The
+result still owns all zero-count leases and the reset queue's ready ticket;
+Cache and Handle now consume its exact withdrawn records under that DrainSet
+and return their matching heap permissions. The proof does not yet discharge
+the native callback, destroy those allocations, or return that success state
+to the lock. None of this identifies the vstd counters, locks or queue
+with the native all-stripe array, mutex and queue barrier, nor proves their
+weak-memory history.
 
 Native rotating/terminal certificate methods share `authorize_domain!` with
 Verus. Its thin-pointer address comparison authorizes exactly the supplied
@@ -821,41 +846,41 @@ allocation token and observation ledger together. Matching identity and drain
 domain are constructor postconditions, not caller-supplied matching-token premises
 for this entry point. This does not verify the native allocator or node layout.
 
-### Cache retirement payloads retain their actual resource lock
+### Earlier Cache resource-lock adapter (superseded by ghost invariant)
 
-`queued_atomic` constructs a node-bound `vstd::rwlock::RwLock` over the allocation
-and observation ledger returned by atomic pin initialization. Final release opens
-this lock and freezes the same ledger before creating a queue payload. The payload
-borrows its node; recovery opens that exact lock and derives allocation presence
+The earlier `queued_atomic` adapter constructed a node-bound `vstd::rwlock::RwLock` over the allocation
+and observation ledger returned by atomic pin initialization. Final release opened
+that lock and froze the same ledger before creating a queue payload. The payload
+borrowed its node; recovery opened that lock and derived allocation presence
 from the linear retirement ticket, rather than assuming an external allocation
-matches. Atomic registration uses the existing Current/queue-lock implementation.
-Locked batch detachment and per-node recovery preserve every exact memory in
+matched. Atomic registration used the existing Current/queue-lock implementation.
+Locked batch detachment and per-node recovery preserved every exact memory in
 reverse pop order under borrowed full-domain DrainSet authority.
 
-This is a verified adapter with trusted vstd lock semantics, not direct verification
+That was a verified adapter with trusted vstd lock semantics, not direct verification
 of the native Cache node layout. Scoped observation operations, monotonic narrowed
-coverage through the lock, pending-generation preparation, native ordering and
-Box/Drop still need integration. The full-domain recovery entry point does not
+coverage through the lock and pending-generation preparation were steps of that
+adapter. Native ordering and Box/Drop still need integration. The full-domain recovery entry point does not
 replace the required normal two-generation reclamation path.
 
-### Cache coverage bounds survive resource-lock reacquisition
+### Cache coverage bounds survive later ghost-state access
 
 The queued atomic adapter now stores a tokenized monotonic coverage snapshot in its
-resource lock invariant, equal to the observation ledger's coverage and frozen flag.
+resource invariant, equal to the observation ledger's coverage and frozen flag.
 Final release freezes that snapshot and gives the entry a matching bound receipt.
 Preparing an entry narrows the actual observation ledger using DrainSet exclusions,
 updates the snapshot, and issues a persistent receipt. Its guarantee survives later
-lock acquisitions and additional narrowing; prepared recovery derives sufficient
+ghost invariant openings and additional narrowing; prepared recovery derives sufficient
 drain coverage from this receipt rather than a caller-provided observation count.
 
 Queue preparation borrows the actual queue write handle, polls real stripe collection,
 leaves the queue untouched on incomplete drain, and restores collected leases only
 after narrowing ends. The reservation adapter rechecks Current, prepares and reserves
 while borrowing the same handle. Prepared detachment consumes the matching phase
-receipt and recovers the exact batch using its specified drain domain. The complete
-publication/pending callback driver and observation operations through the resource
-lock remain to connect; native representation, weak memory and destruction remain
-outside this increment.
+receipt and recovers the exact batch using its specified drain domain. At this earlier increment, the complete publication/pending callback driver and
+observation operations were still disconnected. Later sections record those resource
+proofs and the switch to an erased ghost invariant. Native representation, weak
+memory and destruction remain open.
 
 ### Cache publication and pending completion use the striped resource driver
 
@@ -866,7 +891,7 @@ uses the shared seal/pending/publish/reopen sequence and returns the old queue's
 prepared receipt with precisely its stripe IDs.
 
 Pending completion borrows that collection's actual DrainSet, acquires the matching
-queue, recovers every exact allocation through its node lock, and invokes the shared
+queue, recovers every exact allocation through its node ledger, and invokes the shared
 `finish_rotation` callback-before-clear sequence. The returned state is sealed for
 the pending generation, preserves live-generation controllers and clears pending
 only after recovery returns matching empty-queue readiness. Recovery means heap
@@ -890,8 +915,8 @@ shares returned before releasing admission.
 
 A persistent retirement history in the pin state machine excludes any live pin;
 the retained ledger uses it to reject new observations after final release. Node
-observe/end and observed pin acquisition hold the same actual resource lock; pin
-acquisition executes the existing CAS adapter. Final release, coverage narrowing,
+observe/end and observed pin acquisition used the earlier resource lock; pin
+acquisition executes the existing CAS adapter without that node lock now. Final release, coverage narrowing,
 prepared queue rotation and recovery now operate on this retained ledger. The
 borrowed ledger remains in the older proof adapters, but is no longer the queued
 node's resource representation. Node/Entry no longer carry its scope lifetime.
@@ -1124,8 +1149,8 @@ boundary, while inline initialize supplies the relation in the permission model.
 
 The typed inline lookup no longer accepts an arbitrary eligible flag. Snapshot
 reads generation through its retained observation receipt: the queued node borrows
-the matching storage-backed observation under its resource lock, obtains ptr_ref
-permission, copies the immutable generation, and releases the lock. The returned
+the matching storage-backed observation from the reader-owned Ticket, obtains
+ptr_ref permission, and copies the immutable generation. The returned
 scalar is proved equal to that exact allocation's generation.
 
 Native get_at_epoch and typed proof lookup now instantiate the same generation
@@ -1136,7 +1161,8 @@ shared completion expression still controls pin acquisition and observation exit
 
 Resident-before and resident-after remain sampled boolean inputs in the proof.
 This increment does not connect native AtomicBool loads or memory order, and the
-resource lock is the proof adapter rather than a newly introduced native lock.
+ledger bookkeeping now uses an erased ghost invariant; native field identity
+and ordering remain unresolved.
 Native Quick Cache, NonNull, atomic-address, Box/Drop and full driver correspondence
 remain explicit obligations.
 
@@ -1252,24 +1278,102 @@ node observation and receipt together. The ledger retains admission shares and
 count/coverage bookkeeping, not the reader's Cache observation fragment.
 
 Pin CAS and immutable-generation/resident loads borrow directly from Ticket and
-no longer execute a ledger lock operation. Registration, completion, final-pin
-freezing and recovery still use the proof ledger lock, so native synchronization
-refinement is not complete. The separate vstd pin atomic also remains separate
+do not execute a ledger lock operation. Registration, completion, final-pin
+freezing and recovery now open the erased ghost invariant; their placement at
+matching native events remains unproved, so native synchronization refinement
+is not complete. The separate vstd pin atomic also remains separate
 from the native allocation's atomic field. No trusted adapter or assumption was
 introduced by this resource redistribution.
 
 
-### Pin release before proof ledger locking
+### Pin release before ghost ledger completion
 
-Node::release now performs the pin atomic decrement before acquiring the ledger
-lock. A nonfinal decrement returns immediately. Only a final retirement token
-allows construction of the RetiredNode and subsequent observation/coverage
-freezing under that lock. The earlier release_owned_covered helper was removed;
-its lock-spanning release is no longer the queued node's executable behavior.
+Node::release performs the pin atomic decrement before opening the ghost ledger
+invariant. A nonfinal decrement returns immediately. Only a final retirement
+token allows construction of the RetiredNode and subsequent observation/coverage
+freezing inside that invariant. The earlier release_owned_covered helper was removed;
+its former lock-spanning release is no longer the queued node's executable behavior.
 
-The interval between final decrement and ledger freezing cannot issue a new
+The interval between final decrement and ghost-ledger freezing cannot issue a new
 observation from a live resident pin: the pin resource machine excludes a live
 pin once final retirement is issued. Existing reader-owned Tickets continue to
 retain observations until their own completion. This uses existing resource
 contracts, not a new trusted specification. Final completion, observation
-registration/completion and recovery still have proof-only synchronization.
+registration/completion and recovery now use the erased ghost invariant.
+
+
+### Cache ledger uses an erased ghost invariant
+
+The queued Cache node stores its allocation, retained admission shares and
+coverage snapshot in vstd `AtomicInvariant` tracked state. Observation issue/end,
+final-pin freezing, narrowing and recovery open that invariant; none takes a
+per-node executable RwLock. The pin counter's separate invariant has a distinct
+namespace, proved by the node constructor and exercised during recovery. The
+recovery function is checked as atomic and no-unwind so it can be called while
+the ledger invariant is open; those annotations do not trust its body. Verus
+compiled the erased crate after proving 784 obligations.
+
+This removes the extra node lock from the proof's executable representation.
+The vstd pin counter is still freshly created rather than adopted from the
+actual `CacheNode.pins` field, and its SeqCst contracts do not establish the
+native Relaxed/Release/Acquire history. Index, queue and Box ownership identity
+remain separate obligations. No project-owned trusted adapter, assumption or
+external specification was added. The underlying invariant interface is part of
+[vstd at the pinned Verus revision](https://github.com/verus-lang/verus/blob/671956e/source/vstd/invariant.rs).
+
+### Idle callback and recovery composition
+
+The 32/64-bit vstd idle rotation now retains the transition write handle and
+zero-count stripe leases across queue detachment, Cache or Handle recovery, and
+the callback's return. `IdlePublished::run_callback` invokes the callback before
+restoring sealed controller state through the production-shared
+`finish_rotation!` expression. Its generic precondition and result contract
+are proved with Verus closure contracts; Cache and Handle callbacks each prove
+exact source-sequence heap-permission recovery and matching queue-ready identity.
+
+This adds no project-owned trusted specification. The vstd objects remain
+separate from native `AtomicUsize`, transition mutex, queue, `Box::from_raw` and
+destructors. Their field identity and native callback callsite, unwind and
+weak-memory refinement remain open.
+
+### Native std synchronization support probe
+
+`tools/probe_verus_sync_contracts.py` checks the installed verifier against a
+direct `std::sync::Mutex` protected-value assertion and `Condvar::new`. With
+0.2026.09.13.671956e, both are rejected as unsupported types/functions, before
+a guard or wait postcondition can be proved. This probe is diagnostic only;
+production `DrainGate` uses `parking_lot`, which needs its own native identity,
+guard and wait/notify correspondence. Neither an unsupported compiler result
+nor a modeled vstd lock establishes that correspondence. No project-owned
+external type/function specification or trusted adapter was added.
+
+### Native certificate queue-array selection
+
+The kernel-private `DrainedGeneration::take_queue` and
+`ClosedDomain::take_queues` select the authorized element(s) of a two-queue
+`Mutex` array inside their own bodies. This eliminates the former arbitrary
+`lock_queue` callback, which could ignore the certified index. The
+authorization and lock order still instantiate the shared protocol expression
+used by Verus. Only `RotatingRetirementDomain` supplies the array from outside
+the kernel-private implementation. Native tests check both indices and the
+terminal order; they do not prove native atomic/lock semantics.
+
+### One native owner for rotation and retirement queues
+
+`RotatingRetirementDomain<N, Q>` stores the production `RotatingReadDomain<N>`
+and both `Mutex<Q>` retirement queues in private fields. Its registration,
+blocking/polled/idle publication barriers, and certified withdrawal select
+these same fields. Cache, Handle bindings and Handle topics now use that owner;
+the low-level certificate take and caller-supplied barrier APIs are no longer
+exported from the kernel crate. The certificate rejects a foreign owner before
+locking a queue. Native tests follow payloads through both generations and
+terminal detachment; Miri checks the same path under both borrow modes.
+The public inspection methods expose only immutable queue references while
+holding the lock; callers cannot obtain a mutable queue guard outside the
+owner's registration and certified withdrawal operations. Current Cache and
+Handle queue types have no interior mutability.
+
+This is Rust structural/callsite coupling, not a Verus proof that the vstd queue
+and transition lock are those native fields. It does not add a project-owned
+trusted primitive specification, nor discharge the `parking_lot`, native
+atomic, raw allocation, destructor or weak-memory obligations.

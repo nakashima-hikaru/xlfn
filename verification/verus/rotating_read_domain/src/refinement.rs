@@ -154,6 +154,8 @@ impl Rotation {
             final(self).one & $mask == old(self).one & $mask,
             final(self).sealed(false), final(self).sealed(true),
             final(self).idle(!final(self).current),
+            final(self).gate(old(self).current) == old(self).gate(old(self).current) | $sealed,
+            final(self).gate(!old(self).current) == old(self).gate(!old(self).current),
             final(self).current == old(self).current,
             final(self).locked, final(self).barrier, !final(self).closed,
             final(self).pending.is_none(),
@@ -166,6 +168,37 @@ impl Rotation {
         assert((raw_one | $sealed) & $mask == raw_one & $mask) by(bit_vector);
         if self.current { self.one = self.one | $sealed; }
         else { self.zero = self.zero | $sealed; }
+    }
+
+    /// The idle-only production path uses the shared load/CAS seal expression
+    /// in every stripe. A stale sample can reject a seal without changing the
+    /// rotation state; native stripe identity remains a separate obligation.
+    fn try_seal_current_if_idle(&mut self, sample: $word) -> (success: bool)
+        requires old(self).inv(), old(self).locked, old(self).barrier,
+            !old(self).closed, old(self).pending.is_none(),
+        ensures final(self).inv(), final(self).domain == old(self).domain,
+            success == (sample == old(self).gate(old(self).current)
+                && old(self).gate(old(self).current) & ($sealed | $mask) == 0),
+            success ==> final(self).sealed(false) && final(self).sealed(true)
+                && final(self).idle(old(self).current)
+                && final(self).gate(old(self).current)
+                    == old(self).gate(old(self).current) | $sealed
+                && final(self).current == old(self).current
+                && final(self).pending.is_none()
+                && final(self).locked && final(self).barrier && !final(self).closed,
+            !success ==> *final(self) == *old(self),
+    {
+        let raw = if self.current { self.one } else { self.zero };
+        let mut atomic = super::super::drain::refinement::$module::IdleSealAtomic { raw, sample };
+        let success = super::super::drain::refinement::$module::shared_idle_seal(&mut atomic);
+        if success {
+            assert(raw & ($sealed | $mask) == 0);
+            assert((raw & ($sealed | $mask) == 0) ==> (raw & $mask == 0)) by(bit_vector);
+            assert(raw & $mask == 0);
+            self.seal_current();
+            assert(atomic.raw == self.gate(self.current));
+        }
+        success
     }
 
     fn mark_pending(&mut self)
@@ -471,6 +504,29 @@ pub fn shared_begin_and_publication(model: &mut Rotation)
         publish_release!(
             publish_reopen!(model.publish(), model.publication_window(), model.reopen()),
             model.release_barrier()));
+}
+
+/// A failed idle seal leaves pending and publication untouched. On success,
+/// the shared production expression seals before registering/publishing.
+pub fn shared_try_idle_begin_and_publication(model: &mut Rotation, sample: $word)
+    -> (result: Option<Result<(), ()>>)
+    requires old(model).inv(), old(model).locked, old(model).barrier,
+        !old(model).closed, old(model).pending.is_none(),
+    ensures final(model).inv(),
+        match result {
+            Some(_) => final(model).current == !old(model).current
+                && final(model).pending == Some(old(model).current)
+                && final(model).idle(old(model).current)
+                && final(model).sealed(old(model).current)
+                && final(model).locked && !final(model).barrier,
+            None => *final(model) == *old(model),
+        },
+{
+    try_begin_idle_rotation!(model.try_seal_current_if_idle(sample), model.mark_pending(),
+        publish_release!(
+            publish_reopen!(model.publish(), model.publication_window(), model.reopen()),
+            model.release_barrier()));
+    Some(Ok(()))
 }
 
 pub fn shared_finish(model: &mut Rotation)

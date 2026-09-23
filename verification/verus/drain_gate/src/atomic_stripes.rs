@@ -44,6 +44,11 @@ macro_rules! width {
         && (forall|i: int| 0 <= i < counters.len() ==> #[trigger] controls.dom().contains(i as nat)
             && controls[i as nat].instance_id() == counters[i].authority_id() && controls[i as nat].value())
     }
+    pub open spec fn open_controls_match(counters: Seq<Counter>, controls: Map<nat, lifecycle::control>) -> bool {
+        controls.dom() == indices(counters)
+        && (forall|i: int| 0 <= i < counters.len() ==> #[trigger] controls.dom().contains(i as nat)
+            && controls[i as nat].instance_id() == counters[i].authority_id() && !controls[i as nat].value())
+    }
     pub open spec fn control_row(counters: Seq<Counter>, controls: Map<nat, lifecycle::control>, i: int) -> bool {
         controls.dom().contains(i as nat) && controls[i as nat].instance_id() == counters[i].authority_id()
     }
@@ -141,6 +146,7 @@ macro_rules! width {
                 && self.controls@[i as nat].value())
         }
         pub closed spec fn inv(&self, counters: Seq<Counter>) -> bool {
+            // Polled collection resources remain within this exact vector.
             self.completed.len() == counters.len() && distinct(counters) && self.drains@.inv()
             && self.controls@.dom().subset_of(indices(counters))
             && self.drains@.domain().subset_of(gate_ids(counters))
@@ -182,6 +188,7 @@ macro_rules! width {
                     0
                 },
                 Err(control) => {
+                    // A busy polled stripe retains its own controller.
                     proof { self.controls.borrow_mut().tracked_insert(index as nat, control.get()); }
                     assert forall|j: int| 0 <= j < counters.len() implies #[trigger] self.row(counters@, j) by {
                         assert(old(self).row(counters@, j));
@@ -223,6 +230,7 @@ macro_rules! width {
             ensures final(self).inv(counters@), forall|i: int| 0 <= i < counters.len() ==> !final(self).ready(i),
         {
             let mut index = 0;
+            // Restore every polled stripe, including the final position.
             while index < counters.len()
                 invariant self.inv(counters@), index <= counters.len(), forall|i: int| 0 <= i < index ==> !self.ready(i),
                 decreases counters.len() - index,
@@ -279,6 +287,208 @@ macro_rules! width {
                 };
             };
             Tracked(self.drains.borrow())
+        }
+    }
+
+    /// Idle-only collection keeps each successful seal's zero-count authority
+    /// until either the whole vector succeeds or the exact prefix is undone.
+    pub struct IdleCollection {
+        completed: Ghost<Seq<bool>>,
+        controls: Tracked<Map<nat, lifecycle::control>>,
+        drains: Tracked<DrainSet>,
+    }
+    impl IdleCollection {
+        pub closed spec fn ready(&self, index: int) -> bool { self.completed@[index] }
+        pub closed spec fn row(&self, counters: Seq<Counter>, i: int) -> bool {
+            counters[i].inv()
+            && (self.completed@[i] == self.drains@.domain().contains(counters[i].id()))
+            && (self.controls@.dom().contains(i as nat) == !self.completed@[i])
+            && (self.completed@[i] ==> counters[i].accepts_lease(self.drains@.at(counters[i].id())))
+            && (!self.completed@[i] ==> self.controls@[i as nat].instance_id() == counters[i].authority_id()
+                && !self.controls@[i as nat].value())
+        }
+        pub closed spec fn inv(&self, counters: Seq<Counter>) -> bool {
+            self.completed@.len() == counters.len() && distinct(counters) && self.drains@.inv()
+            && self.controls@.dom().subset_of(indices(counters))
+            && self.drains@.domain().subset_of(gate_ids(counters))
+            && (forall|i: int| 0 <= i < counters.len() ==> #[trigger] self.row(counters, i))
+        }
+        pub fn new(counters: &Vec<Counter>, Tracked(controls): Tracked<Map<nat, lifecycle::control>>) -> (collection: Self)
+            requires distinct(counters@), controls.dom() == indices(counters@),
+                forall|i: int| #![auto] 0 <= i < counters.len() ==> counters@[i].inv()
+                    && controls.dom().contains(i as nat)
+                    && controls[i as nat].instance_id() == counters@[i].authority_id()
+                    && !controls[i as nat].value(),
+            ensures collection.inv(counters@),
+                forall|i: int| 0 <= i < counters.len() ==> !collection.ready(i),
+        {
+            let ghost completed = Seq::new(counters.len() as nat, |i: int| false);
+            let collection = IdleCollection {
+                completed: Ghost(completed), controls: Tracked(controls), drains: Tracked(DrainSet::empty()),
+            };
+            assert forall|i: int| 0 <= i < counters.len() implies #[trigger] collection.row(counters@, i) by {};
+            collection
+        }
+        fn seal_one(&mut self, counters: &Vec<Counter>, index: usize) -> (sealed: bool)
+            requires old(self).inv(counters@), index < counters.len(),
+                !old(self).ready(index as int),
+            ensures final(self).inv(counters@),
+                sealed == final(self).ready(index as int),
+                forall|j: int| 0 <= j < counters.len() && j != index ==>
+                    final(self).ready(j) == old(self).ready(j),
+        {
+            proof { index_bounds(counters@); contains_gate(counters@, index as int); }
+            assert(self.row(counters@, index as int));
+            let tracked control = self.controls.borrow_mut().tracked_remove(index as nat);
+            match counters[index].try_seal_if_idle(Tracked(control)) {
+                Ok(lease) => {
+                    proof { self.drains.borrow_mut().insert(lease.get()); }
+                    proof { self.completed = Ghost(self.completed@.update(index as int, true)); }
+                    assert forall|j: int| 0 <= j < counters.len() implies #[trigger] self.row(counters@, j) by {
+                        assert(old(self).row(counters@, j));
+                        if j != index { assert(counters@[j].id() != counters@[index as int].id()); }
+                    };
+                    true
+                },
+                Err(control) => {
+                    proof { self.controls.borrow_mut().tracked_insert(index as nat, control.get()); }
+                    assert forall|j: int| 0 <= j < counters.len() implies #[trigger] self.row(counters@, j) by {
+                        assert(old(self).row(counters@, j));
+                    };
+                    false
+                },
+            }
+        }
+        fn undo_one(&mut self, counters: &Vec<Counter>, index: usize)
+            requires old(self).inv(counters@), index < counters.len(),
+                old(self).ready(index as int),
+            ensures final(self).inv(counters@), !final(self).ready(index as int),
+                forall|j: int| 0 <= j < counters.len() && j != index ==>
+                    final(self).ready(j) == old(self).ready(j),
+        {
+            proof { index_bounds(counters@); contains_gate(counters@, index as int); }
+            assert(self.row(counters@, index as int));
+            let tracked lease = self.drains.borrow_mut().remove(counters@[index as int].id());
+            let control = counters[index].undo_idle_seal(Tracked(lease));
+            proof { self.controls.borrow_mut().tracked_insert(index as nat, control.get()); }
+            proof { self.completed = Ghost(self.completed@.update(index as int, false)); }
+            assert forall|j: int| 0 <= j < counters.len() implies #[trigger] self.row(counters@, j) by {
+                assert(old(self).row(counters@, j));
+                if j != index { assert(counters@[j].id() != counters@[index as int].id()); }
+            };
+        }
+        pub fn try_seal_all(&mut self, counters: &Vec<Counter>) -> (success: bool)
+            requires old(self).inv(counters@),
+                forall|i: int| 0 <= i < counters.len() ==> !old(self).ready(i),
+            ensures final(self).inv(counters@),
+                success ==> (forall|i: int| 0 <= i < counters.len() ==> final(self).ready(i)),
+                !success ==> (forall|i: int| 0 <= i < counters.len() ==> !final(self).ready(i)),
+        {
+            super::super::protocol::seal_stripes!(index, rollback;
+                counters.len(), self.seal_one(counters, index), self.undo_one(counters, rollback);
+                [invariant self.inv(counters@), index <= counters.len(),
+                    forall|i: int| 0 <= i < index ==> self.ready(i),
+                    forall|i: int| index <= i < counters.len() ==> !self.ready(i),
+                 decreases counters.len() - index,];
+                [invariant self.inv(counters@), rollback <= index, index < counters.len(),
+                    forall|i: int| 0 <= i < rollback ==> !self.ready(i),
+                    forall|i: int| rollback <= i < index ==> self.ready(i),
+                    forall|i: int| index <= i < counters.len() ==> !self.ready(i),
+                 decreases index - rollback,]
+            )
+        }
+        pub fn undo_all(&mut self, counters: &Vec<Counter>)
+            requires old(self).inv(counters@),
+                forall|i: int| 0 <= i < counters.len() ==> old(self).ready(i),
+            ensures final(self).inv(counters@),
+                forall|i: int| 0 <= i < counters.len() ==> !final(self).ready(i),
+        {
+            let mut index = 0;
+            while index < counters.len()
+                invariant self.inv(counters@), index <= counters.len(),
+                    forall|i: int| 0 <= i < index ==> !self.ready(i),
+                    forall|i: int| index <= i < counters.len() ==> self.ready(i),
+                decreases counters.len() - index,
+            {
+                self.undo_one(counters, index);
+                index += 1;
+            }
+        }
+        pub fn into_controls(self, counters: &Vec<Counter>) -> (result: Tracked<Map<nat, lifecycle::control>>)
+            requires self.inv(counters@),
+                forall|i: int| 0 <= i < counters.len() ==> !self.ready(i),
+            ensures open_controls_match(counters@, result@),
+        {
+            assert forall|i: int| 0 <= i < counters.len() implies #[trigger] self.controls@.dom().contains(i as nat)
+                && self.controls@[i as nat].instance_id() == counters@[i].authority_id()
+                && !self.controls@[i as nat].value() by {
+                assert(self.row(counters@, i));
+                assert(!self.ready(i));
+            };
+            proof {
+                assert(self.drains@.domain() =~= Set::empty()) by {
+                    assert forall|gate: vstd::tokens::InstanceId| !self.drains@.domain().contains(gate) by {
+                        if self.drains@.domain().contains(gate) {
+                            let ids = counters@.map(|i: int, counter: Counter| counter.id());
+                            let i = choose|i: int| 0 <= i < ids.len() && ids[i] == gate;
+                            assert(self.row(counters@, i));
+                            assert(!self.ready(i));
+                        }
+                    };
+                };
+                index_bounds(counters@);
+                assert(self.controls@.dom() =~= indices(counters@)) by {
+                    assert forall|i: nat| indices(counters@).contains(i) implies self.controls@.dom().contains(i) by {
+                        assert(self.row(counters@, i as int));
+                    };
+                };
+            }
+            self.controls
+        }
+        pub fn drains<'a>(&'a self, counters: &Vec<Counter>) -> (drains: Tracked<&'a DrainSet>)
+            requires self.inv(counters@),
+                forall|i: int| 0 <= i < counters.len() ==> self.ready(i),
+            ensures drains@.inv(), drains@.domain() == gate_ids(counters@),
+                forall|i: int| #![auto] 0 <= i < counters.len() ==>
+                    drains@.domain().contains(counters@[i].id()),
+        {
+            assert forall|i: int| #![auto] 0 <= i < counters.len() implies self.drains@.domain().contains(counters@[i].id()) by {
+                assert(self.row(counters@, i));
+                assert(self.ready(i));
+            };
+            assert(self.drains@.domain() =~= gate_ids(counters@)) by {
+                assert forall|gate: vstd::tokens::InstanceId| gate_ids(counters@).contains(gate)
+                    implies self.drains@.domain().contains(gate) by {
+                    let ids = counters@.map(|i: int, counter: Counter| counter.id());
+                    let i = choose|i: int| 0 <= i < ids.len() && ids[i] == gate;
+                    assert(self.row(counters@, i));
+                    assert(self.ready(i));
+                };
+            };
+            Tracked(self.drains.borrow())
+        }
+        /// Convert a fully leased idle seal into the existing sealed-drain
+        /// restoration representation. Callback completion is not certified here.
+        pub fn into_polled_collection(self, counters: &Vec<Counter>) -> (result: Collection)
+            requires self.inv(counters@),
+                forall|i: int| 0 <= i < counters.len() ==> self.ready(i),
+            ensures result.inv(counters@),
+                forall|i: int| 0 <= i < counters.len() ==> result.ready(i),
+        {
+            let ghost original = self;
+            let mut completed: Vec<bool> = Vec::new();
+            while completed.len() < counters.len()
+                invariant completed.len() <= counters.len(),
+                    forall|i: int| 0 <= i < completed.len() ==> completed@[i],
+                decreases counters.len() - completed.len(),
+            { completed.push(true); }
+            let IdleCollection { completed: _, controls, drains } = self;
+            let result = Collection { completed, controls, drains };
+            assert forall|i: int| 0 <= i < counters.len() implies #[trigger] result.row(counters@, i) by {
+                assert(original.row(counters@, i));
+                assert(original.ready(i));
+            };
+            result
         }
     }
     }

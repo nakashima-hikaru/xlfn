@@ -1,5 +1,5 @@
 import unittest
-from check_drain_gate_refinement import is_verification_failure
+from check_drain_gate_refinement import is_idle_callback_ownership_rejection, is_verification_failure
 
 
 class VerificationFailureTests(unittest.TestCase):
@@ -30,6 +30,12 @@ class VerificationFailureTests(unittest.TestCase):
             "verification results:: 417 verified, 1 errors\nerror: assertion failed"))
         self.assertFalse(is_verification_failure(1,
             "verification results:: 417 verified, 0 errors\nerror: assertion failed"))
+
+    def test_idle_callback_ownership_failure_is_narrow(self):
+        diagnostic = "error[E0382]: borrow of moved value: `detached`"
+        self.assertTrue(is_idle_callback_ownership_rejection(1, diagnostic))
+        self.assertFalse(is_idle_callback_ownership_rejection(0, diagnostic))
+        self.assertFalse(is_idle_callback_ownership_rejection(1, "error[E0308]: mismatched types"))
 
 
 class BaselineGateTests(unittest.TestCase):
