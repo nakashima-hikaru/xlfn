@@ -2,7 +2,8 @@
 """Require the DrainGate proof to reject unsafe shared-control-flow mutations.
 
 Each mutation is checked in a temporary source tree; production is never edited.
-Compiler/parser failures do not count as successful negative verification.
+Compiler/parser failures do not count as successful negative verification,
+except for explicitly named ownership-order mutations rejected by Rust E0382.
 """
 
 from pathlib import Path
@@ -71,8 +72,14 @@ def is_verification_failure(returncode: int, output: str) -> bool:
     return returncode != 0 and proof_failure and verified_failure is not None
 
 
+def is_idle_callback_ownership_rejection(returncode: int, output: str) -> bool:
+    """The reordered callback must move its linear handoff before borrowing it."""
+    return returncode != 0 and "error[E0382]: borrow of moved value: `detached`" in output
+
+
 def check_mutations(proof: Path, protocol: Path, dependencies: tuple[Path, ...],
-                    mutations: dict[str, tuple[str, str]]) -> None:
+                    mutations: dict[str, tuple[str, str]],
+                    ownership_rejections: frozenset[str] = frozenset()) -> None:
     source = (ROOT / protocol).read_text()
     with tempfile.TemporaryDirectory(prefix="xlfn-refinement-") as directory:
         tree = Path(directory)
@@ -94,6 +101,11 @@ def check_mutations(proof: Path, protocol: Path, dependencies: tuple[Path, ...],
                 cwd=tree, capture_output=True, text=True, timeout=120,
             )
             output = result.stdout + result.stderr
+            if name in ownership_rejections:
+                if not is_idle_callback_ownership_rejection(result.returncode, output):
+                    raise SystemExit(f"FAIL: {name} was not rejected by ownership checking:\n{output}")
+                print(f"PASS: ownership rejected {name}", flush=True)
+                continue
             if not is_verification_failure(result.returncode, output):
                 raise SystemExit(f"FAIL: {name} did not fail verification:\n{output}")
             print(f"PASS: rejected {name}", flush=True)
@@ -177,7 +189,8 @@ def main() -> None:
             "requires self.inv(), control.instance_id() == self.authority_id(),",
         ),
         "atomic restore accepts another counter drain lease": (
-            "requires self.inv(), self.accepts_lease(lease),", "requires self.inv(),",
+            "pub fn restore(&self, Tracked(lease): Tracked<DrainLease>) -> (control: Tracked<lifecycle::control>)\n            requires self.inv(), self.accepts_lease(lease),",
+            "pub fn restore(&self, Tracked(lease): Tracked<DrainLease>) -> (control: Tracked<lifecycle::control>)\n            requires self.inv(),",
         ),
         "frozen atomic forgets zero and sealed state": (
             "state.frozen.value().is_some() ==> raw & $mask == 0 && raw & $sealed != 0",
@@ -191,7 +204,27 @@ def main() -> None:
             "self.acquire_observing(Tracked(Some(control)))", "self.acquire_observing(Tracked(None))",
         ),
         "atomic seal disagrees with its controller": (
-            "self.lifecycle.borrow().set(true, &mut state.sealed, control);", "self.lifecycle.borrow().set(false, &mut state.sealed, control);",
+            "\n                self.lifecycle.borrow().set(true, &mut state.sealed, control);", "\n                self.lifecycle.borrow().set(false, &mut state.sealed, control);",
+        ),
+        "failed idle-seal CAS changes lifecycle authority": (
+            "if result is Ok {\n                            assert(next == raw | $sealed);",
+            "if true {\n                            assert(next == raw | $sealed);",
+        ),
+        "successful idle-seal CAS omits lifecycle update": (
+            "                            self.lifecycle.borrow().set(true, &mut state.sealed, &mut mode);",
+            "                            ();",
+        ),
+        "idle-seal rollback accepts another counter lease": (
+            "pub fn undo_idle_seal(&self, Tracked(lease): Tracked<DrainLease>) -> (control: Tracked<lifecycle::control>)\n            requires self.inv(), self.accepts_lease(lease),",
+            "pub fn undo_idle_seal(&self, Tracked(lease): Tracked<DrainLease>) -> (control: Tracked<lifecycle::control>)\n            requires self.inv(),",
+        ),
+        "idle-seal rollback leaves lifecycle sealed": (
+            "self.lifecycle.borrow().set(false, &mut state.sealed, &mut mode);",
+            "self.lifecycle.borrow().set(true, &mut state.sealed, &mut mode);",
+        ),
+        "idle-seal rollback loses zero-count token": (
+            "                                state.active = Some(payload.active);",
+            "                                state.active = None;",
         ),
         "atomic reopen uses admission instead of sealed-zero transition": (
             "match $reopen(raw) {", "match $acquire(raw) {",
@@ -222,23 +255,24 @@ def main() -> None:
 
     check_mutations(PROOF, PROOF / "src/atomic_stripes.rs", (PROTOCOL, TRANSITIONS), {
         "stripe collection marks a busy counter drained": (
-            "self.controls.borrow_mut().tracked_insert(index as nat, control.get()); }\n                    assert forall",
-            "self.controls.borrow_mut().tracked_insert(index as nat, control.get()); }\n                    self.completed.set(index, true);\n                    assert forall",
+            "// A busy polled stripe retains its own controller.\n                    proof { self.controls.borrow_mut().tracked_insert(index as nat, control.get()); }\n                    assert forall",
+            "// A busy polled stripe retains its own controller.\n                    proof { self.controls.borrow_mut().tracked_insert(index as nat, control.get()); }\n                    self.completed.set(index, true);\n                    assert forall",
         ),
         "stripe collection loses busy controller ownership": (
-            "proof { self.controls.borrow_mut().tracked_insert(index as nat, control.get()); }\n                    assert forall",
-            "assert forall",
+            "// A busy polled stripe retains its own controller.\n                    proof { self.controls.borrow_mut().tracked_insert(index as nat, control.get()); }\n                    assert forall",
+            "// A busy polled stripe retains its own controller.\n                    assert forall",
         ),
         "stripe restoration skips the final counter": (
-            "while index < counters.len()", "while index < counters.len() && index + 1 < counters.len()",
+            "// Restore every polled stripe, including the final position.\n            while index < counters.len()",
+            "// Restore every polled stripe, including the final position.\n            while index < counters.len() && index + 1 < counters.len()",
         ),
         "stripe drain view escapes before every counter is ready": (
             "requires self.inv(counters@), forall|i: int| 0 <= i < counters.len() ==> self.ready(i),",
             "requires self.inv(counters@),",
         ),
         "stripe collection accepts duplicate gate identities": (
-            "self.completed.len() == counters.len() && distinct(counters) && self.drains@.inv()",
-            "self.completed.len() == counters.len() && self.drains@.inv()",
+            "// Polled collection resources remain within this exact vector.\n            self.completed.len() == counters.len() && distinct(counters) && self.drains@.inv()",
+            "// Polled collection resources remain within this exact vector.\n            self.completed.len() == counters.len() && self.drains@.inv()",
         ),
     })
 
@@ -266,13 +300,16 @@ def main() -> None:
 
     check_mutations(PROOF, PROOF / "src/atomic_stripes.rs", (PROTOCOL, TRANSITIONS), {
         "stripe collection accepts controllers outside its vector": (
-            "requires distinct(counters@), controls.dom() == indices(counters@),", "requires distinct(counters@),",
+            "requires distinct(counters@), controls.dom() == indices(counters@),\n                forall|i: int| #![auto] 0 <= i < counters.len() ==> counters@[i].inv()\n                    && controls.dom().contains(i as nat) && controls[i as nat].instance_id() == counters@[i].authority_id() && controls[i as nat].value(),",
+            "requires distinct(counters@),\n                forall|i: int| #![auto] 0 <= i < counters.len() ==> counters@[i].inv()\n                    && controls.dom().contains(i as nat) && controls[i as nat].instance_id() == counters@[i].authority_id() && controls[i as nat].value(),",
         ),
         "stripe collection invariant allows unrelated controllers": (
-            "&& self.controls@.dom().subset_of(indices(counters))", "",
+            "// Polled collection resources remain within this exact vector.\n            self.completed.len() == counters.len() && distinct(counters) && self.drains@.inv()\n            && self.controls@.dom().subset_of(indices(counters))",
+            "// Polled collection resources remain within this exact vector.\n            self.completed.len() == counters.len() && distinct(counters) && self.drains@.inv()",
         ),
         "stripe collection invariant allows unrelated drain leases": (
-            "&& self.drains@.domain().subset_of(gate_ids(counters))", "",
+            "// Polled collection resources remain within this exact vector.\n            self.completed.len() == counters.len() && distinct(counters) && self.drains@.inv()\n            && self.controls@.dom().subset_of(indices(counters))\n            && self.drains@.domain().subset_of(gate_ids(counters))",
+            "// Polled collection resources remain within this exact vector.\n            self.completed.len() == counters.len() && distinct(counters) && self.drains@.inv()\n            && self.controls@.dom().subset_of(indices(counters))",
         ),
     })
 
@@ -289,6 +326,29 @@ def main() -> None:
     check_mutations(PROOF, PROOF / "src/atomic_stripes.rs", (PROTOCOL, TRANSITIONS), {
         "stripe seal accepts a foreign controller map": (
             "requires controls_owned(counters@, *old(controls)),", "requires true,",
+        ),
+    })
+
+    check_mutations(PROOF, PROOF / "src/atomic_stripes.rs", (PROTOCOL, TRANSITIONS), {
+        "idle stripe seals another counter's controller": (
+            "match counters[index].try_seal_if_idle(Tracked(control))",
+            "match counters[0].try_seal_if_idle(Tracked(control))",
+        ),
+        "idle stripe undoes another counter's lease": (
+            "let control = counters[index].undo_idle_seal(Tracked(lease));",
+            "let control = counters[0].undo_idle_seal(Tracked(lease));",
+        ),
+        "idle rollback leaves its stripe marked complete": (
+            "let control = counters[index].undo_idle_seal(Tracked(lease));\n            proof { self.controls.borrow_mut().tracked_insert(index as nat, control.get()); }\n            proof { self.completed = Ghost(self.completed@.update(index as int, false)); }",
+            "let control = counters[index].undo_idle_seal(Tracked(lease));\n            proof { self.controls.borrow_mut().tracked_insert(index as nat, control.get()); }\n            proof { self.completed = Ghost(self.completed@.update(index as int, true)); }",
+        ),
+        "idle lease conversion forgets a completed stripe": (
+            "{ completed.push(true); }\n            let IdleCollection",
+            "{ completed.push(false); }\n            let IdleCollection",
+        ),
+        "idle lease conversion drops its drain authority": (
+            "let result = Collection { completed, controls, drains };",
+            "let result = Collection { completed, controls, drains: Tracked(DrainSet::empty()) };",
         ),
     })
 

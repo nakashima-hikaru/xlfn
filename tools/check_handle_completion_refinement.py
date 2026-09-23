@@ -678,3 +678,18 @@ if __name__ == "__main__":
             "current.inv(), current.owner() == domain.rotation,",
         ),
     })
+
+    check_mutations(PROOF, PROOF / "src/queued_retirement.rs", DEPENDENCIES, {
+        "idle handle recovery uses another stripe bound": (
+            "let ghost bound = published.bound();\n        let (detached, withdrawal) = published.detach();",
+            "let ghost bound = Set::empty();\n        let (detached, withdrawal) = published.detach();",
+        ),
+        "idle handle recovery drops prepared coverage": (
+            "(#[trigger] (published.prepared_inv())(entry, bound)) == entry.prepared_for(bound),\n        ensures result.0.inv()",
+            "(#[trigger] (published.prepared_inv())(entry, bound)) == (published.prepared_inv())(entry, bound),\n        ensures result.0.inv()",
+        ),
+        "idle handle callback loses exact withdrawn source": (
+            "ensures result.1@ == withdrawal.source(), result.0.owner() == domain,",
+            "ensures result.0.owner() == domain,",
+        ),
+    })

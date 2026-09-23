@@ -475,3 +475,22 @@ if __name__ == "__main__":
                 '$generation == $epoch && $resident', '$generation == $epoch',
             ),
         })
+
+    check_mutations(Path("verification/verus/cache_lease"), Path("verification/verus/cache_lease/src/queued_atomic.rs"),
+        (Path("crates/xlfn/src/retirement_queue.rs"), Path("crates/xlfn/src/cache/pin_transitions.rs"), Path("crates/xlfn/src/cache/node_layout.rs"),
+         Path("verification/verus/published_owner/src/heap_permission.rs"), *tuple(Path("verification/verus/drain_gate/src").glob("*.rs")),
+         Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"), Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
+         *tuple(Path("verification/verus/rotating_read_domain/src").glob("*.rs")), Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs")), {
+            'Cache idle recovery uses another stripe bound': (
+                'let ghost bound = published.bound();\n        let (detached, withdrawal) = published.detach();',
+                'let ghost bound = Set::empty();\n        let (detached, withdrawal) = published.detach();',
+            ),
+            'Cache idle recovery skips the last withdrawn node': (
+                'while records.len() > 0\n            invariant detached.inv()',
+                'while records.len() > 1\n            invariant detached.inv()',
+            ),
+            'Cache idle callback loses exact withdrawn source': (
+                'ensures result.1@ == withdrawal.source(),\n            valid_records(result.1@, owner)',
+                'ensures valid_records(result.1@, owner)',
+            ),
+        })

@@ -87,11 +87,15 @@ def main() -> None:
         source = path.read_text()
         start = "            let tracked mut returned = None;"
         finish = "            Tracked(returned.tracked_unwrap())"
-        if source.count(start) != 1 or source.count(finish) != 1:
+        restore_start = source.index("        pub fn restore(&self, Tracked(lease): Tracked<DrainLease>)")
+        restore_end = source.index("        pub fn seal(&self", restore_start)
+        restore = source[restore_start:restore_end]
+        if restore.count(start) != 1 or restore.count(finish) != 1:
             raise SystemExit("FAIL: drain lease lifetime mutation anchor changed")
+        mutated_restore = restore.replace(start, "            let tracked active = lease.active();\n" + start)
+        mutated_restore = mutated_restore.replace(finish, "            proof { Self::use_zero(active); }\n" + finish)
         path.write_text(source.replace("    impl Counter {", "    impl Counter {\n        proof fn use_zero(tracked active: &admission::active) requires active.value() == 0 {}")
-                        .replace(start, "            let tracked active = lease.active();\n" + start)
-                        .replace(finish, "            proof { Self::use_zero(active); }\n" + finish))
+                        .replace(restore, mutated_restore))
         rejected = subprocess.run(command, cwd=tree, capture_output=True, text=True, timeout=120)
         output = rejected.stdout + rejected.stderr
         required = (

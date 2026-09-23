@@ -11,6 +11,7 @@ macro_rules! width {
     use super::*;
     use super::super::drain::atomic_counter::$module::Counter;
     use super::super::drain::atomic_stripes::$module as stripes;
+    use super::super::locked_detachment::Withdrawal;
     verus! {
     pub struct State {
         zero: Tracked<Map<nat, lifecycle::control>>, one: Tracked<Map<nat, lifecycle::control>>,
@@ -112,6 +113,287 @@ macro_rules! width {
         let (old_controls, next_controls) = if index { (one, zero) } else { (zero, one) };
         let collection = stripes::Collection::new(next, next_controls);
         (CollectionHandoff { transition, handle, index, old_controls, original: Ghost(original) }, collection)
+    }
+    /// Hold the matching transition handle while the open generation's
+    /// controllers move into zero-count leases. The state cannot be returned
+    /// to the lock until failure has rolled back or success has completed its
+    /// protected callback and restored the controllers.
+    pub struct IdleHandoff<'a> {
+        transition: &'a TransitionLock, handle: &'a TransitionHandle<'a>, index: bool,
+        other_controls: Tracked<Map<nat, lifecycle::control>>, original: Ghost<State>,
+    }
+    impl<'a> IdleHandoff<'a> {
+        pub closed spec fn inv(&self) -> bool {
+            self.handle.rwlock() == *self.transition && self.transition.inv(self.original@)
+                && self.original@.pending().is_none()
+                && self.original@.opened(self.target(), self.index)
+                && self.original@.sealed(self.other(), !self.index)
+                && self.other_controls@ == self.original@.controls(!self.index)
+        }
+        pub closed spec fn index(&self) -> bool { self.index }
+        pub closed spec fn target(&self) -> Seq<Counter> { self.transition.pred().counters(self.index) }
+        pub closed spec fn other(&self) -> Seq<Counter> { self.transition.pred().counters(!self.index) }
+        pub closed spec fn lock(&self) -> TransitionLock { *self.transition }
+        pub closed spec fn original(&self) -> State { self.original@ }
+        pub fn restore_open(self, Tracked(controls): Tracked<Map<nat, lifecycle::control>>) -> (state: State)
+            requires self.inv(), stripes::open_controls_match(self.target(), controls),
+            ensures self.lock().inv(state), state.pending().is_none(),
+                state.opened(self.target(), self.index()), state.sealed(self.other(), !self.index()),
+                state.controls(!self.index()) == self.original().controls(!self.index()),
+        {
+            let IdleHandoff { transition: _, handle: _, index, other_controls, original: _ } = self;
+            if index { State { zero: other_controls, one: Tracked(controls), pending: None } }
+            else { State { zero: Tracked(controls), one: other_controls, pending: None } }
+        }
+        pub fn attempt(self, mut collection: stripes::IdleCollection, counters: &Vec<Counter>)
+            -> (result: Result<(Self, stripes::IdleCollection), State>)
+            requires self.inv(), counters@ == self.target(), collection.inv(counters@),
+                forall|i: int| 0 <= i < counters.len() ==> !collection.ready(i),
+            ensures match result {
+                Ok((handoff, sealed)) => handoff.inv() && sealed.inv(counters@)
+                    && (forall|i: int| 0 <= i < counters.len() ==> sealed.ready(i)),
+                Err(state) => self.lock().inv(state) && state.pending().is_none()
+                    && state.opened(self.target(), self.index())
+                    && state.sealed(self.other(), !self.index()),
+            },
+        {
+            if collection.try_seal_all(counters) {
+                Ok((self, collection))
+            } else {
+                let controls = collection.into_controls(counters);
+                Err(self.restore_open(controls))
+            }
+        }
+        pub fn cancel(self, mut collection: stripes::IdleCollection, counters: &Vec<Counter>) -> (state: State)
+            requires self.inv(), counters@ == self.target(), collection.inv(counters@),
+                forall|i: int| 0 <= i < counters.len() ==> collection.ready(i),
+            ensures self.lock().inv(state), state.pending().is_none(),
+                state.opened(self.target(), self.index()), state.sealed(self.other(), !self.index()),
+        {
+            collection.undo_all(counters);
+            self.restore_open(collection.into_controls(counters))
+        }
+        pub fn publish<'b, P>(self, collection: stripes::IdleCollection, counters: &Vec<Counter>,
+            current: &'b Current, reserved: ReservedQueue<P>, queue: &'b QueueLock<P>,
+            queue_handle: QueueHandle<'_, P>, Tracked(ready): Tracked<phase::ready>) -> (published: IdlePublished<'a, 'b, P>)
+            requires self.inv(), counters@ == self.target(), collection.inv(counters@),
+                forall|i: int| 0 <= i < counters.len() ==> collection.ready(i),
+                current.inv(), current.owner() == self.lock().pred().domain,
+                reserved.inv(current, queue), reserved.index() == self.index(),
+                reserved.bound() == stripes::gate_ids(counters@),
+                queue.pred().domain == current.owner(), queue.pred().index == self.index(),
+                queue.pred().preparation.id() == current.gate(self.index()),
+                queue_handle.rwlock() == *queue,
+                ready.instance_id() == current.gate(!self.index()),
+            ensures published.inv(), published.index() == self.index(),
+                published.bound() == stripes::gate_ids(counters@),
+        {
+            let mut published = None;
+            let mut prepared = None;
+            super::super::protocol::publish_release!(
+                vstd::prelude::verus_exec_expr!({
+                    published = Some(current.publish_reserved(reserved, queue, &queue_handle, Tracked(ready)));
+                }),
+                vstd::prelude::verus_exec_expr!({
+                    let (contents, ticket) = published.unwrap();
+                    queue_handle.release_write(contents);
+                    prepared = Some(ticket);
+                })
+            );
+            IdlePublished { handoff: self, collection, current, queue, prepared: prepared.unwrap() }
+        }
+    }
+    /// Publication has consumed the prepared old queue phase while all old
+    /// stripe leases remain owned. A matching queue detachment can now run.
+    #[verifier::reject_recursive_types(P)]
+    pub struct IdlePublished<'a, 'b, P> {
+        handoff: IdleHandoff<'a>, collection: stripes::IdleCollection,
+        current: &'b Current, queue: &'b QueueLock<P>, prepared: Tracked<phase::prepared>,
+    }
+    impl<'a, 'b, P> IdlePublished<'a, 'b, P> {
+        pub closed spec fn inv(&self) -> bool {
+            self.handoff.inv() && self.collection.inv(self.handoff.target())
+                && (forall|i: int| 0 <= i < self.handoff.target().len() ==> self.collection.ready(i))
+                && self.current.inv() && self.current.owner() == self.handoff.lock().pred().domain
+                && self.queue.pred().domain == self.current.owner()
+                && self.queue.pred().index == self.handoff.index()
+                && self.queue.pred().preparation.id() == self.current.gate(self.handoff.index())
+                && self.prepared@.instance_id() == self.queue.pred().preparation.id()
+                && self.prepared@.value() == stripes::gate_ids(self.handoff.target())
+        }
+        pub closed spec fn index(&self) -> bool { self.handoff.index() }
+        pub closed spec fn target(&self) -> Seq<Counter> { self.handoff.target() }
+        pub closed spec fn owner(&self) -> *const u8 { self.current.owner() }
+        pub closed spec fn lock(&self) -> TransitionLock { self.handoff.lock() }
+        pub closed spec fn other(&self) -> Seq<Counter> { self.handoff.other() }
+        pub closed spec fn bound(&self) -> Set<vstd::tokens::InstanceId> { self.prepared@.value() }
+        pub closed spec fn prepared_id(&self) -> vstd::tokens::InstanceId {
+            self.queue.pred().preparation.id()
+        }
+        pub closed spec fn prepared_inv(&self) -> spec_fn(P, Set<vstd::tokens::InstanceId>) -> bool {
+            self.queue.pred().prepared_inv
+        }
+        pub closed spec fn payload_inv(&self) -> spec_fn(P) -> bool { self.queue.pred().payload_inv }
+        pub open spec fn callback_input(&self, detached: &IdleDetached<'a, 'b, P>, withdrawal: Withdrawal<P>) -> bool {
+            detached.inv() && detached.index() == self.index() && detached.target() == self.target()
+                && detached.lock() == self.lock() && detached.other() == self.other()
+                && detached.prepared_id() == self.prepared_id()
+                && detached.owner() == self.owner() && detached.bound() == self.bound()
+                && detached.payload_inv() == self.payload_inv()
+                && detached.prepared_inv() == self.prepared_inv()
+                && withdrawal.inv() && withdrawal.owner() == self.owner() && withdrawal.index() == self.index()
+                && (forall|i: int| 0 <= i < withdrawal.source().len() ==>
+                    (self.payload_inv())(#[trigger] withdrawal.source()[i])
+                    && (self.prepared_inv())(withdrawal.source()[i], self.bound()))
+        }
+        pub fn drains<'c>(&'c self, counters: &Vec<Counter>) -> (leases: Tracked<&'c super::super::drain::atomic_counter::DrainSet>)
+            requires self.inv(), counters@ == self.target(),
+            ensures leases@.inv(), leases@.domain() == self.bound(),
+        { self.collection.drains(counters) }
+        #[verifier::exec_allows_no_decreases_clause]
+        pub fn detach(self) -> (result: (IdleDetached<'a, 'b, P>, super::super::locked_detachment::Withdrawal<P>))
+            requires self.inv(),
+            ensures result.0.inv(), result.0.index() == self.index(), result.0.target() == self.target(),
+                result.0.lock() == self.lock(), result.0.other() == self.other(),
+                result.0.prepared_id() == self.prepared_id(),
+                result.1.inv(), result.1.owner() == self.owner(), result.1.index() == self.index(),
+                result.0.bound() == self.bound(), result.0.owner() == self.owner(),
+                result.0.prepared_inv() == self.prepared_inv(), result.0.payload_inv() == self.payload_inv(),
+                forall|i: int| 0 <= i < result.1.source().len() ==>
+                    (self.payload_inv())(#[trigger] result.1.source()[i]),
+                forall|i: int| 0 <= i < result.1.source().len() ==>
+                    (self.prepared_inv())(#[trigger] result.1.source()[i], self.bound()),
+        {
+            let IdlePublished { handoff, collection, current, queue, prepared: Tracked(prepared) } = self;
+            let held = queue.acquire_write();
+            let owner = held.0.domain;
+            let tracked mut ticket = Some(prepared);
+            let (withdrawal, ready) = super::super::locked_detachment::take_prepared(
+                owner, held, queue, Tracked(&mut ticket));
+            (IdleDetached { handoff, collection, current, queue, ready }, withdrawal)
+        }
+        #[verifier::exec_allows_no_decreases_clause]
+        pub fn run_callback<R, F: for<'c> FnOnce(&'c IdleDetached<'a, 'b, P>, Withdrawal<P>) -> R>(
+            self, counters: &Vec<Counter>, callback: F, Ghost(callback_post): Ghost<spec_fn(Seq<P>, R) -> bool>)
+            -> (result: (State, Tracked<phase::ready>, R, Ghost<Seq<P>>))
+            requires self.inv(), counters@ == self.target(),
+                forall|detached: &IdleDetached<'a, 'b, P>, withdrawal: Withdrawal<P>|
+                    self.callback_input(detached, withdrawal) ==>
+                        call_requires(callback, (detached, withdrawal)),
+                forall|detached: &IdleDetached<'a, 'b, P>, withdrawal: Withdrawal<P>, value: R|
+                    (#[trigger] call_ensures(callback, (detached, withdrawal), value)) ==>
+                        callback_post(withdrawal.source(), value),
+            ensures self.lock().inv(result.0), result.0.pending().is_none(),
+                result.0.sealed(self.target(), self.index()),
+                result.0.sealed(self.other(), !self.index()),
+                result.1@.instance_id() == self.prepared_id(),
+                callback_post(result.3@, result.2),
+                forall|i: int| 0 <= i < result.3@.len() ==>
+                    (self.payload_inv())(#[trigger] result.3@[i])
+                    && (self.prepared_inv())(result.3@[i], self.bound()),
+        {
+            let ghost original = self;
+            let (detached, withdrawal) = self.detach();
+            assert(original.callback_input(&detached, withdrawal));
+            let ghost source = withdrawal.source();
+            let mut restored = None;
+            let value = super::super::protocol::finish_rotation!(value;
+                vstd::prelude::verus_exec_expr!({ callback(&detached, withdrawal) }),
+                vstd::prelude::verus_exec_expr!({
+                    restored = Some(detached.restore_after_callback(counters));
+                })
+            );
+            let (state, ready) = restored.unwrap();
+            assert(original.lock().inv(state));
+            assert(state.sealed(original.other(), !original.index()));
+            (state, ready, value, Ghost(source))
+        }
+    }
+    #[verifier::reject_recursive_types(P)]
+    pub struct IdleDetached<'a, 'b, P> {
+        handoff: IdleHandoff<'a>, collection: stripes::IdleCollection,
+        current: &'b Current, queue: &'b QueueLock<P>, ready: Tracked<phase::ready>,
+    }
+    impl<'a, 'b, P> IdleDetached<'a, 'b, P> {
+        pub closed spec fn inv(&self) -> bool {
+            self.handoff.inv() && self.collection.inv(self.handoff.target())
+                && (forall|i: int| 0 <= i < self.handoff.target().len() ==> self.collection.ready(i))
+                && self.current.inv() && self.current.owner() == self.handoff.lock().pred().domain
+                && self.queue.pred().domain == self.current.owner()
+                && self.queue.pred().index == self.handoff.index()
+                && self.queue.pred().preparation.id() == self.current.gate(self.handoff.index())
+                && self.ready@.instance_id() == self.queue.pred().preparation.id()
+        }
+        pub closed spec fn index(&self) -> bool { self.handoff.index() }
+        pub closed spec fn target(&self) -> Seq<Counter> { self.handoff.target() }
+        pub closed spec fn lock(&self) -> TransitionLock { self.handoff.lock() }
+        pub closed spec fn other(&self) -> Seq<Counter> { self.handoff.other() }
+        pub closed spec fn prepared_id(&self) -> vstd::tokens::InstanceId {
+            self.queue.pred().preparation.id()
+        }
+        pub closed spec fn owner(&self) -> *const u8 { self.current.owner() }
+        pub closed spec fn prepared_inv(&self) -> spec_fn(P, Set<vstd::tokens::InstanceId>) -> bool {
+            self.queue.pred().prepared_inv
+        }
+        pub closed spec fn payload_inv(&self) -> spec_fn(P) -> bool { self.queue.pred().payload_inv }
+        pub closed spec fn bound(&self) -> Set<vstd::tokens::InstanceId> {
+            stripes::gate_ids(self.handoff.target())
+        }
+        pub fn drains<'c>(&'c self, counters: &Vec<Counter>) -> (leases: Tracked<&'c super::super::drain::atomic_counter::DrainSet>)
+            requires self.inv(), counters@ == self.target(),
+            ensures leases@.inv(), leases@.domain() == self.bound(),
+        { self.collection.drains(counters) }
+        /// Private completion step: only the enclosing callback driver may
+        /// restore the sealed controller map and return the queue-ready token.
+        fn restore_after_callback(self, counters: &Vec<Counter>)
+            -> (result: (State, Tracked<phase::ready>))
+            requires self.inv(), counters@ == self.target(),
+            ensures self.handoff.lock().inv(result.0), result.0.pending().is_none(),
+                result.0.sealed(self.target(), self.index()),
+                result.0.sealed(self.handoff.other(), !self.index()),
+                result.0.controls(!self.index()) == self.handoff.original().controls(!self.index()),
+                result.1@.instance_id() == self.queue.pred().preparation.id(),
+        {
+            let IdleDetached { handoff, collection, current: _, queue: _, ready } = self;
+            let mut restored = collection.into_polled_collection(counters);
+            restored.restore_all(counters);
+            let Tracked(controls) = restored.into_controls(counters);
+            let IdleHandoff { transition: _, handle: _, index, other_controls, original: _ } = handoff;
+            let state = if index { State { zero: other_controls, one: Tracked(controls), pending: None } }
+                else { State { zero: Tracked(controls), one: other_controls, pending: None } };
+            (state, ready)
+        }
+    }
+    pub fn collect_idle<'a>(state: State, transition: &'a TransitionLock, handle: &'a TransitionHandle<'a>,
+        index: bool, counters: &Vec<Counter>) -> (result: (IdleHandoff<'a>, stripes::IdleCollection))
+        requires transition.inv(state), handle.rwlock() == *transition, state.pending().is_none(),
+            counters@ == transition.pred().counters(index), state.opened(counters@, index),
+            state.sealed(transition.pred().counters(!index), !index),
+        ensures result.0.inv(), result.0.index() == index, result.0.target() == counters@,
+            result.0.original() == state, result.0.lock() == *transition, result.1.inv(counters@),
+            forall|i: int| 0 <= i < counters.len() ==> !result.1.ready(i),
+    {
+        let ghost original = state;
+        assert forall|i: int, j: int| 0 <= i < counters.len() && 0 <= j < counters.len() && i != j
+            implies (#[trigger] counters@[i].id()) != (#[trigger] counters@[j].id()) by {
+            let all = transition.pred().zero + transition.pred().one;
+            let offset = if index { transition.pred().zero.len() as int } else { 0int };
+            assert(all[i + offset] == counters@[i]);
+            assert(all[j + offset] == counters@[j]);
+        };
+        let State { zero, one, pending: _ } = state;
+        let (other_controls, target_controls) = if index { (zero, one) } else { (one, zero) };
+        assert(target_controls@ == original.controls(index));
+        assert(original.opened(counters@, index));
+        assert forall|i: int| #![auto] 0 <= i < counters.len() implies counters@[i].inv()
+            && target_controls@.dom().contains(i as nat)
+            && target_controls@[i as nat].instance_id() == counters@[i].authority_id()
+            && !target_controls@[i as nat].value() by {
+            assert(stripes::control_row(counters@, target_controls@, i));
+            assert(stripes::reopen_row(counters@, target_controls@, i, counters@.len()));
+        };
+        let collection = stripes::IdleCollection::new(counters, target_controls);
+        (IdleHandoff { transition, handle, index, other_controls, original: Ghost(original) }, collection)
     }
     pub struct PendingHandoff<'a> {
         transition: &'a TransitionLock, handle: &'a TransitionHandle<'a>, index: bool,

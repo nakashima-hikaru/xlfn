@@ -13,9 +13,11 @@ drain operation correct would exceed that primitive boundary.
 | Native surface | Current proof surface | Missing connection |
 | --- | --- | --- |
 | `CacheNode.pins: AtomicUsize` in `cache.rs` | `inline_value::Allocation.pins` is a std atomic, but `queued_atomic::Node::new` creates a separate `Pins` with a fresh vstd atomic | Pin tokens must describe the allocation's actual pin field, not a second counter |
-| Pin acquisition and release have no per-node mutex | `acquire_observed` now borrows a reader-owned token without a lock; `observe`, `end_observation` and final-release completion still use `ledger: vstd::RwLock`; nonfinal release now returns without it | Proof-only executable locking changes allowed interleavings; the bookkeeping must become ghost resources attached to real linearization points |
+| Native CacheNode has no per-node mutex | The proof ledger now lives in an erased `AtomicInvariant`; observation, retirement and recovery operations no longer acquire a runtime node lock | The ghost updates still need to be located at the matching native index, admission, pin and queue events |
 | A lookup admission keeps an observed allocation alive while accessing its metadata | `observed_generation` / `observed_resident` now borrow directly from the reader-owned Ticket | Implemented for metadata reads; native field identity and the remaining bookkeeping synchronization are still open |
 | `SealableCounter.state: AtomicUsize` | `drain_gate::atomic_counter` creates an independent vstd atomic and instance | The permission and lifecycle instance must refer to the actual state field; retaining the word-width kernel alone is insufficient |
+| `HandleReadDomain.{debt, queued}: AtomicUsize` | `counter_refinement` proves checked arithmetic against the corrected destruction-in-flight model; `completion` holds a separate finite-width debt value | The exact native debt and queued locations must be tied to retirement registration, certified queue withdrawal and post-destructor discharge across concurrent reclaimers; a fresh vstd counter would not identify either field |
+| Native idle rotation uses the transition mutex, current atomic and retirement queue | The resource-backed `IdleHandoff` keeps a vstd transition WriteHandle and zero-count stripe leases through vstd publication, prepared-queue detachment and Cache/Handle heap-permission recovery; the verified callback runs before sealed controls are restored. Production `RotatingRetirementDomain` now owns the admission domain and both queues, selecting those same fields for registration, publication barriers and certified withdrawal | The production owner is not identified with the vstd transition/queue objects; native atomic and guard semantics, callback-to-native-callsite identity, destructor completion and weak-memory ordering remain unproved |
 | `parking_lot` wait/notify with RAII guards | Executable wait models and vstd locks | Guard identity, unlock/relock, notification discipline and unwind exits must connect to the actual objects |
 | `Box::leak` / `Box::from_raw` in Cache | `HeapPermission` is supplied to initialization and returned by recovery | Allocation identity and exact allocator permission must cross the native APIs once, without moving the inline payload during destruction |
 
@@ -34,14 +36,24 @@ the ledger lock. The resident-load borrow gate now rejects consuming that Ticket
 while the allocation reference remains live. This is a resource-protocol change,
 not a new trusted primitive specification.
 
-The next synchronization gap is the write-side ledger: registration, observation completion,
-final-release completion and recovery still acquire an executable lock absent
-from the native node. The pin decrement now precedes this lock, so a nonfinal
-release no longer serializes through it. Its ghost resources must be transferred at actual index/admission/pin/queue
-linearization points. Moving that lock into a trusted body, or treating its
-serialization as native behavior, would not satisfy the selected policy.
+The ledger now uses the existing vstd `AtomicInvariant`, which is ghost state and
+erases from executable code. The pin decrement still precedes final retirement
+bookkeeping. Two invariant namespaces are kept distinct during recovery. The
+remaining work is to connect each ghost update to the corresponding native
+index, admission, pin or queue operation, using the same allocation and gate
+instances throughout. This invariant removes extra executable node locking; it
+does not identify the separate vstd pin counter with `CacheNode.pins`.
 
 ## Requirements at the currently unsupported primitive boundary
+
+The pinned Verus 0.2026.09.13.671956e can type-check a direct native std
+`AtomicUsize::load`, but does not prove even a freshly constructed atomic's
+initial value. It rejects direct `std::sync::Mutex` and `Condvar` use at their
+types, and rejects native `Box::into_raw`/`from_raw`. The reproducible probes are
+`tools/probe_verus_atomic_contracts.py`, `tools/probe_verus_sync_contracts.py`,
+and `tools/probe_verus_heap_contracts.py`. The std lock probe is diagnostic only:
+production uses `parking_lot`, whose native object/guard identity is a separate
+open obligation. A compiler rejection is never counted as a verified property.
 
 These are unresolved obligations, not authorization to add trusted adapters.
 Under the selected policy they must remain open until they can be established
@@ -66,6 +78,25 @@ do not establish correspondence to a separately allocated native field.
 - Executable erasure must preserve native fields, operations and lock structure.
   A verified program with additional executable synchronization is not automatically
   a refinement of the lock-free native reader path.
+
+### Handle debt location and completion interval
+
+Production `HandleReadDomain::enqueue_reclaim` appends under the selected queue
+lock, then increments `debt` and `queued`. `take_generation` and terminal close
+subtract only `queued` when records leave their queues. `DrainedBindings::drop`
+first destroys the detached records, then subtracts their count from `debt`
+with Release ordering before taking the completion lock and notifying waiters.
+The existing shared completion expression and checked counter kernels prove
+the intended ordering and arithmetic in their executable models.
+
+The remaining concurrent obligation is per-location and cross-location: each
+retirement contributes exactly one debt unit to the native field, detachment
+preserves that unit while destruction is in flight, and only the matching
+completed batch discharges it. An independent vstd debt atomic would add another
+verification twin unless its operations and linear receipts were connected to
+the actual `HandleReadDomain` field and queue callbacks. Under the selected
+no-new-trusted-adapter policy this is future native refinement work, not a
+missing standalone counter lemma or authorization to assume native identity.
 
 Completion requires the same allocation and gate instances through admission,
 observation, pins, rotation, retirement and recovery. Neither this plan, diagnostic

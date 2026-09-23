@@ -50,7 +50,8 @@ impl GenerationIndex {
 ///
 /// The certificate borrows the transition state, preventing it from escaping
 /// the callback and authorizing reclamation after a later generation reuse.
-/// Use `index_for` when selecting a domain's retirement queue.
+/// Pass this to its owning [`RotatingRetirementDomain::take_queue`] when
+/// withdrawing retired work.
 ///
 /// ```compile_fail
 /// use xlfn_kernel::rotating_read_domain::RotatingReadDomain;
@@ -66,21 +67,25 @@ pub struct DrainedGeneration<'drain> {
 
 impl DrainedGeneration<'_> {
     /// Locks and takes a generation queue only after checking the issuing domain.
-    /// `lock_queue` must select that index in this domain's retirement queues;
-    /// `take_queue` receives ownership of its guard and runs exactly once.
-    pub fn take_queue<const N: usize, B, R>(
+    /// The supplied array must be this domain's retirement queues. The
+    /// certificate selects and locks the authorized array element itself;
+    /// `take_queue` receives its guard and runs exactly once.
+    pub(crate) fn take_queue<const N: usize, Q, R>(
         &self,
         domain: &RotatingReadDomain<N>,
-        lock_queue: impl FnOnce(usize) -> B,
-        take_queue: impl FnOnce(B) -> R,
+        queues: &[Mutex<Q>; 2],
+        take_queue: impl FnOnce(MutexGuard<'_, Q>) -> R,
     ) -> Option<R> {
         protocol::take_authorized_queue!(index, guard;
-            self.index_for(domain), lock_queue(index), take_queue(guard))
+            self.index_for(domain), queues[index].lock(), take_queue(guard))
     }
 
     /// Returns the retirement queue index only for the issuing domain.
     #[must_use]
-    pub fn index_for<const N: usize>(&self, domain: &RotatingReadDomain<N>) -> Option<usize> {
+    pub(crate) fn index_for<const N: usize>(
+        &self,
+        domain: &RotatingReadDomain<N>,
+    ) -> Option<usize> {
         protocol::authorize_domain!(self.domain, &domain.current, self.index.index())
     }
 }
@@ -102,22 +107,23 @@ pub struct ClosedDomain<'domain> {
 }
 
 impl ClosedDomain<'_> {
-    /// Locks terminal queues in index order and transfers both guards to the
-    /// take callback. Neither callback runs for a foreign domain certificate.
-    pub fn take_queues<const N: usize, B, R>(
+    /// Locks both supplied retirement queues in index order and transfers both
+    /// guards to the take callback. The supplied array must belong to this
+    /// domain. The callback does not run for a foreign domain certificate.
+    pub(crate) fn take_queues<const N: usize, Q, R>(
         &self,
         domain: &RotatingReadDomain<N>,
-        mut lock_queue: impl FnMut(usize) -> B,
-        take_queues: impl FnOnce(B, B) -> R,
+        queues: &[Mutex<Q>; 2],
+        take_queues: impl FnOnce(MutexGuard<'_, Q>, MutexGuard<'_, Q>) -> R,
     ) -> Option<R> {
         protocol::take_authorized_queues!(indices, first, second;
-            self.indices_for(domain), lock_queue(indices[0]), lock_queue(indices[1]),
+            self.indices_for(domain), queues[indices[0]].lock(), queues[indices[1]].lock(),
             take_queues(first, second))
     }
 
     /// Authorizes both retirement queues only for the issuing domain.
     #[must_use]
-    pub fn indices_for<const N: usize>(
+    pub(crate) fn indices_for<const N: usize>(
         &self,
         domain: &RotatingReadDomain<N>,
     ) -> Option<[usize; 2]> {
@@ -244,7 +250,7 @@ impl<const N: usize> RotatingReadDomain<N> {
     /// publication barrier. Selection is rechecked under that guard; a stale
     /// selection releases its guard and retries before `register` can run.
     /// The register callback receives ownership of the guard and runs once.
-    pub fn register_retired<B, R>(
+    pub(crate) fn register_retired<B, R>(
         &self,
         mut lock: impl FnMut(GenerationIndex) -> B,
         register: impl FnOnce(GenerationIndex, B) -> R,
@@ -284,7 +290,7 @@ impl<const N: usize> RotatingReadDomain<N> {
     /// that acquire the queue later must recheck the current generation.
     /// The guard is dropped before waiting for old readers or invoking the
     /// reclamation callback. Its acquisition/drop must not invoke user code.
-    pub fn quiesce_with_publication_barrier<B, R>(
+    pub(crate) fn quiesce_with_publication_barrier<B, R>(
         &self,
         barrier: impl FnOnce(GenerationIndex) -> B,
         operation: impl for<'drain> FnMut(DrainedGeneration<'drain>) -> R,
@@ -342,7 +348,7 @@ impl<const N: usize> RotatingReadDomain<N> {
     /// waiting. No generation change occurs in that case. On success the
     /// guard follows the same publication ordering as
     /// [`Self::quiesce_with_publication_barrier`].
-    pub fn try_quiesce_if_idle_with_publication_barrier<B, R>(
+    pub(crate) fn try_quiesce_if_idle_with_publication_barrier<B, R>(
         &self,
         barrier: impl FnOnce(GenerationIndex) -> Option<B>,
         operation: impl for<'drain> FnOnce(DrainedGeneration<'drain>) -> R,
@@ -358,7 +364,7 @@ impl<const N: usize> RotatingReadDomain<N> {
     /// but the old readers are still active, or a lock/barrier was busy.
     /// A subsequent poll, idle attempt or blocking quiescence must run the
     /// old generation's callback before its gate may be reused.
-    pub fn poll_quiesce_with_publication_barrier<B, R>(
+    pub(crate) fn poll_quiesce_with_publication_barrier<B, R>(
         &self,
         barrier: impl FnOnce(GenerationIndex) -> Option<B>,
         operation: impl for<'drain> FnOnce(DrainedGeneration<'drain>) -> R,
@@ -415,11 +421,11 @@ impl<const N: usize> RotatingReadDomain<N> {
         let old = self.current_generation();
         let barrier = barrier(old)?;
         before_seal();
-        if !self.generations[old.index()].try_seal_if_idle() {
-            return None;
-        }
-        *transition = Some(old);
-        publish_then_release_barrier(barrier, |_| self.publish_next_locked(old, &transition));
+        protocol::try_begin_idle_rotation!(
+            self.generations[old.index()].try_seal_if_idle(),
+            *transition = Some(old),
+            publish_then_release_barrier(barrier, |_| self.publish_next_locked(old, &transition))
+        );
         let result = protocol::finish_rotation!(result;
             operation(self.drained_generation(old, &mut transition)), *transition = None);
         Some(Ok(result))
@@ -590,6 +596,170 @@ impl<const N: usize> Default for RotatingReadDomain<N> {
     }
 }
 
+/// One admission domain and the two retirement queues it governs.
+///
+/// Registration, publication barriers, and certified withdrawal use these
+/// same queue fields. Moving this owner moves the domain and queues together;
+/// callers cannot substitute another queue array during a certified take.
+pub struct RotatingRetirementDomain<const N: usize, Q> {
+    domain: RotatingReadDomain<N>,
+    queues: [Mutex<Q>; 2],
+}
+
+impl<const N: usize, Q: Default> Default for RotatingRetirementDomain<N, Q> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize, Q: Default> RotatingRetirementDomain<N, Q> {
+    /// Creates an open domain with one empty queue for each generation.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            domain: RotatingReadDomain::new(),
+            queues: [Mutex::new(Q::default()), Mutex::new(Q::default())],
+        }
+    }
+}
+
+impl<const N: usize, Q> RotatingRetirementDomain<N, Q> {
+    /// Reads one queue while holding its lock without exposing a mutable guard.
+    pub fn inspect_queue<R>(&self, index: usize, inspect: impl FnOnce(&Q) -> R) -> R {
+        let queue = self.queues[index].lock();
+        inspect(&queue)
+    }
+
+    /// Reads both queues if neither lock is busy, without exposing their guards.
+    pub fn try_inspect_both<R>(&self, inspect: impl FnOnce(&Q, &Q) -> R) -> Option<R> {
+        let first = self.queues[0].try_lock()?;
+        let second = self.queues[1].try_lock()?;
+        Some(inspect(&first, &second))
+    }
+
+    /// Registers one payload under the selected queue lock, then rechecks the
+    /// selected generation before invoking the callback.
+    pub fn register_retired<R>(
+        &self,
+        register: impl FnOnce(GenerationIndex, MutexGuard<'_, Q>) -> R,
+    ) -> R {
+        self.register_retired_with_hook(|_| {}, register)
+    }
+
+    /// The hook runs after each selection and before acquiring its queue.
+    /// A stale selection can invoke it again; it cannot choose the queue.
+    pub fn register_retired_with_hook<R>(
+        &self,
+        after_selection: impl Fn(GenerationIndex),
+        register: impl FnOnce(GenerationIndex, MutexGuard<'_, Q>) -> R,
+    ) -> R {
+        self.domain.register_retired(
+            |generation| {
+                after_selection(generation);
+                self.queues[generation.index()].lock()
+            },
+            register,
+        )
+    }
+
+    /// Rotates with the old queue locked through publication, then drains it.
+    pub fn quiesce<R>(
+        &self,
+        operation: impl for<'drain> FnMut(DrainedGeneration<'drain>) -> R,
+    ) -> Result<[Option<R>; 2], DomainClosed> {
+        self.domain.quiesce_with_publication_barrier(
+            |generation| self.queues[generation.index()].lock(),
+            operation,
+        )
+    }
+
+    /// Tries to seal only an idle generation while holding its queue barrier.
+    pub fn try_quiesce_if_idle<R>(
+        &self,
+        operation: impl for<'drain> FnOnce(DrainedGeneration<'drain>) -> R,
+    ) -> Option<Result<R, DomainClosed>> {
+        self.domain.try_quiesce_if_idle_with_publication_barrier(
+            |generation| self.queues[generation.index()].try_lock(),
+            operation,
+        )
+    }
+
+    /// Polls a pending rotation or starts one under the old queue barrier.
+    pub fn poll_quiesce<R>(
+        &self,
+        operation: impl for<'drain> FnOnce(DrainedGeneration<'drain>) -> R,
+    ) -> Option<Result<R, DomainClosed>> {
+        self.domain.poll_quiesce_with_publication_barrier(
+            |generation| self.queues[generation.index()].try_lock(),
+            operation,
+        )
+    }
+
+    /// Takes only this owner's queue selected by the drained certificate.
+    pub fn take_queue<R>(
+        &self,
+        certificate: &DrainedGeneration<'_>,
+        take: impl FnOnce(MutexGuard<'_, Q>) -> R,
+    ) -> Option<R> {
+        certificate.take_queue(&self.domain, &self.queues, take)
+    }
+
+    /// Takes this owner's two queues in index order after terminal drain.
+    pub fn take_queues<R>(
+        &self,
+        certificate: &ClosedDomain<'_>,
+        take: impl FnOnce(MutexGuard<'_, Q>, MutexGuard<'_, Q>) -> R,
+    ) -> Option<R> {
+        certificate.take_queues(&self.domain, &self.queues, take)
+    }
+
+    /// Enters the currently published generation.
+    #[inline]
+    pub fn enter(&self, stripe: usize) -> Result<RotatingReadPermit<'_, N>, DomainClosed> {
+        self.domain.enter(stripe)
+    }
+
+    /// Permanently seals both generations and waits for their readers.
+    pub fn seal_and_wait(&self) -> ClosedDomain<'_> {
+        self.domain.seal_and_wait()
+    }
+
+    /// Returns the currently published generation.
+    #[must_use]
+    pub fn current_generation(&self) -> GenerationIndex {
+        self.domain.current_generation()
+    }
+}
+
+impl<Q> RotatingRetirementDomain<DEFAULT_STRIPE_COUNT, Q> {
+    /// Conservatively checks whether this thread may hold a reader permit.
+    pub fn current_thread_may_be_reading(&self) -> bool {
+        self.domain.current_thread_may_be_reading()
+    }
+
+    /// Enters the calling thread's assigned stripe.
+    #[inline]
+    pub fn enter_current_thread(
+        &self,
+    ) -> Result<RotatingReadPermit<'_, DEFAULT_STRIPE_COUNT>, DomainClosed> {
+        self.domain.enter_current_thread()
+    }
+
+    /// Enters with an owned permit. The caller must keep this owner alive
+    /// through the permit's final release notification.
+    ///
+    /// # Safety
+    ///
+    /// The caller must uphold that lifetime condition.
+    #[inline]
+    pub unsafe fn enter_owned_current_thread(
+        &self,
+    ) -> Result<RotatingReadOwnedPermit<DEFAULT_STRIPE_COUNT>, DomainClosed> {
+        // SAFETY: delegated to the caller's owner-lifetime contract.
+        unsafe { self.domain.enter_owned_current_thread() }
+    }
+}
+
 /// An RAII admission permit for one read generation.
 pub struct RotatingReadPermit<'domain, const N: usize> {
     gate: &'domain StripedDrainGate<N>,
@@ -633,71 +803,64 @@ impl<const N: usize> Drop for RotatingReadOwnedPermit<N> {
 mod tests {
     #[test]
     fn drained_certificate_rejects_foreign_domain() {
-        let issuing = super::RotatingReadDomain::<1>::new();
-        let foreign = super::RotatingReadDomain::<1>::new();
+        let issuing = super::RotatingRetirementDomain::<1, usize>::new();
+        let foreign = super::RotatingRetirementDomain::<1, usize>::new();
+        issuing.register_retired(|generation, mut queue| {
+            assert_eq!(generation.index(), 0);
+            *queue = 7;
+        });
         issuing
             .quiesce(|certificate| {
-                assert_eq!(certificate.index_for(&issuing), Some(0));
-                assert_eq!(certificate.index_for(&foreign), None);
+                assert_eq!(certificate.index_for(&issuing.domain), Some(0));
+                assert_eq!(certificate.index_for(&foreign.domain), None);
                 let calls = std::cell::Cell::new(0);
-                let rejected = certificate.take_queue(
-                    &foreign,
-                    |_| {
-                        calls.set(calls.get() + 1);
-                    },
-                    |()| {
-                        calls.set(calls.get() + 1);
-                        7
-                    },
-                );
+                let rejected = foreign.take_queue(&certificate, |_| {
+                    calls.set(calls.get() + 1);
+                    7
+                });
                 assert_eq!(rejected, None);
                 assert_eq!(calls.get(), 0);
-                let taken = certificate.take_queue(
-                    &issuing,
-                    |index| {
-                        calls.set(calls.get() + 1);
-                        index
-                    },
-                    |index| {
-                        calls.set(calls.get() + 1);
-                        index
-                    },
-                );
-                assert_eq!(taken, Some(0));
-                assert_eq!(calls.get(), 2);
+                let taken = issuing.take_queue(&certificate, |mut queue| {
+                    calls.set(calls.get() + 1);
+                    std::mem::replace(&mut *queue, 70)
+                });
+                assert_eq!(taken, Some(7));
+                assert_eq!(calls.get(), 1);
             })
             .unwrap();
+        assert_eq!(issuing.inspect_queue(0, |queue| *queue), 70);
+        assert_eq!(issuing.inspect_queue(1, |queue| *queue), 0);
+        issuing.register_retired(|generation, mut queue| {
+            assert_eq!(generation.index(), 1);
+            *queue = 9;
+        });
+        issuing
+            .quiesce(|certificate| {
+                assert_eq!(certificate.index_for(&issuing.domain), Some(1));
+                let taken = issuing
+                    .take_queue(&certificate, |mut queue| std::mem::replace(&mut *queue, 90));
+                assert_eq!(taken, Some(9));
+            })
+            .unwrap();
+        assert_eq!(issuing.inspect_queue(0, |queue| *queue), 70);
+        assert_eq!(issuing.inspect_queue(1, |queue| *queue), 90);
         let closed = issuing.seal_and_wait();
-        assert_eq!(closed.indices_for(&issuing), Some([0, 1]));
-        assert_eq!(closed.indices_for(&foreign), None);
+        assert_eq!(closed.indices_for(&issuing.domain), Some([0, 1]));
+        assert_eq!(closed.indices_for(&foreign.domain), None);
         let calls = std::cell::Cell::new(0);
         assert_eq!(
-            closed.take_queues(
-                &foreign,
-                |_| {
-                    calls.set(calls.get() + 1);
-                },
-                |(), ()| {
-                    calls.set(calls.get() + 1);
-                }
-            ),
+            foreign.take_queues(&closed, |_, _| {
+                calls.set(calls.get() + 1);
+            }),
             None
         );
         assert_eq!(calls.get(), 0);
-        let taken = closed.take_queues(
-            &issuing,
-            |index| {
-                assert_eq!(index, calls.get());
-                calls.set(calls.get() + 1);
-                index
-            },
-            |first, second| {
-                calls.set(calls.get() + 1);
-                [first, second]
-            },
-        );
-        assert_eq!(taken, Some([0, 1]));
-        assert_eq!(calls.get(), 3);
+        let taken = issuing.take_queues(&closed, |first, second| {
+            calls.set(calls.get() + 1);
+            [*first, *second]
+        });
+        assert_eq!(taken, Some([70, 90]));
+        assert_eq!(calls.get(), 1);
     }
 
     use super::*;

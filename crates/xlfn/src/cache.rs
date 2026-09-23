@@ -25,7 +25,7 @@ use std::time::Instant;
 use triomphe::Arc;
 use xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT;
 use xlfn_kernel::rotating_read_domain::{
-    ClosedDomain, DrainedGeneration, GenerationIndex, RotatingReadDomain, RotatingReadPermit,
+    ClosedDomain, DrainedGeneration, GenerationIndex, RotatingReadPermit, RotatingRetirementDomain,
 };
 
 trait EpochAtomic {
@@ -177,7 +177,8 @@ fn reclaim_cache_entries<V>(entries: ReclaimEntries<'_, V>) {
 pub struct CacheReclamationStats {
     /// Evicted nodes without lease pins, awaiting their grace period.
     pub pending_nodes: usize,
-    /// Sum of their caller-supplied, normalized weights.
+    /// Sum of their caller-supplied weights. Saturates at `u64::MAX` until
+    /// both retirement queues are observed empty under their locks.
     pub pending_weight: u64,
     /// Highest queued node count observed since construction.
     pub peak_pending_nodes: usize,
@@ -917,10 +918,12 @@ struct CacheLookupDomain<V> {
     // D1-D5 are provided by RotatingReadDomain. A cache node must be freed
     // only after the grace period covering every reader that could
     // have observed its pointer has ended.
-    domain: RotatingReadDomain<DEFAULT_STRIPE_COUNT>,
-    pending_reclaims: [Mutex<PendingEntries<V>>; 2],
+    domain: RotatingRetirementDomain<DEFAULT_STRIPE_COUNT, PendingEntries<V>>,
     pending_nodes: AtomicUsize,
     pending_weight: AtomicU64,
+    // Once the sum exceeds u64, keep a conservative backpressure signal
+    // until both retirement queues are observed empty under their locks.
+    pending_weight_saturated: AtomicBool,
     peak_pending_nodes: AtomicUsize,
     peak_pending_weight: AtomicU64,
     reclaimed_nodes: AtomicUsize,
@@ -931,13 +934,10 @@ struct CacheLookupDomain<V> {
 impl<V> CacheLookupDomain<V> {
     fn new() -> Self {
         Self {
-            domain: RotatingReadDomain::new(),
-            pending_reclaims: [
-                Mutex::new(PendingEntries::new()),
-                Mutex::new(PendingEntries::new()),
-            ],
+            domain: RotatingRetirementDomain::new(),
             pending_nodes: AtomicUsize::new(0),
             pending_weight: AtomicU64::new(0),
+            pending_weight_saturated: AtomicBool::new(false),
             peak_pending_nodes: AtomicUsize::new(0),
             peak_pending_weight: AtomicU64::new(0),
             reclaimed_nodes: AtomicUsize::new(0),
@@ -951,6 +951,53 @@ impl<V> CacheLookupDomain<V> {
         self.domain
             .enter_current_thread()
             .map_err(|_| XllError::Closing)
+    }
+
+    fn pending_weight(&self) -> u64 {
+        if self.pending_weight_saturated.load(Ordering::Relaxed) {
+            u64::MAX
+        } else {
+            self.pending_weight.load(Ordering::Relaxed)
+        }
+    }
+
+    fn add_pending_weight(&self, weight: u64) -> u64 {
+        let previous = self
+            .pending_weight
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                if self.pending_weight_saturated.load(Ordering::Relaxed) {
+                    Some(current)
+                } else if let Some(next) = current.checked_add(weight) {
+                    Some(next)
+                } else {
+                    // This closure may retry. Setting a sticky flag early is
+                    // conservative and cannot lose the backpressure signal.
+                    self.pending_weight_saturated.store(true, Ordering::Relaxed);
+                    Some(u64::MAX)
+                }
+            })
+            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+        if self.pending_weight_saturated.load(Ordering::Relaxed) {
+            u64::MAX
+        } else {
+            previous.saturating_add(weight)
+        }
+    }
+
+    fn clear_saturated_weight_if_empty(&self) {
+        if !self.pending_weight_saturated.load(Ordering::Relaxed) {
+            return;
+        }
+        let _ = self.domain.try_inspect_both(|first, second| {
+            if first.is_empty()
+                && second.is_empty()
+                && self.pending_nodes.load(Ordering::Relaxed) == 0
+            {
+                self.pending_weight.store(0, Ordering::Relaxed);
+                self.pending_weight_saturated
+                    .store(false, Ordering::Relaxed);
+            }
+        });
     }
 
     fn enqueue_reclaim(&self, entry: ReclaimEntry<V>) {
@@ -980,16 +1027,19 @@ impl<V> CacheLookupDomain<V> {
                 // lock before publishing its replacement generation: withdrawals
                 // already registered here must happen before new-generation lookups.
                 // The index protects its own entries, not the copied non-owning NodePtr.
-                self.domain.register_retired(
-                    |generation| {
-                        after_generation_load(generation);
-                        self.pending_reclaims[generation.index()].lock()
-                    },
+                self.domain.register_retired_with_hook(
+                    after_generation_load,
                     |_, mut queue| {
                         let weight = entry.weight;
                         crate::retirement_queue::append_retired!(&mut *queue, entry);
-                        let nodes = self.pending_nodes.fetch_add(1, Ordering::Relaxed) + 1;
-                        let weight = self.pending_weight.fetch_add(weight, Ordering::Relaxed) + weight;
+                        let nodes = self
+                            .pending_nodes
+                            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                                current.checked_add(1)
+                            })
+                            .map(|previous| previous + 1)
+                            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+                        let weight = self.add_pending_weight(weight);
                         self.peak_pending_nodes.fetch_max(nodes, Ordering::Relaxed);
                         self.peak_pending_weight
                             .fetch_max(weight, Ordering::Relaxed);
@@ -1009,10 +1059,7 @@ impl<V> CacheLookupDomain<V> {
         let start = Instant::now();
         let batches = self
             .domain
-            .quiesce_with_publication_barrier(
-                |generation| self.pending_reclaims[generation.index()].lock(),
-                |generation| self.drain_generation(generation),
-            )
+            .quiesce(|generation| self.drain_generation(generation))
             .unwrap_or_default()
             .into_iter()
             .flatten();
@@ -1030,10 +1077,10 @@ impl<V> CacheLookupDomain<V> {
             return ReclaimEntries::new(self);
         }
         let start = Instant::now();
-        let Some(result) = self.domain.try_quiesce_if_idle_with_publication_barrier(
-            |generation| self.pending_reclaims[generation.index()].try_lock(),
-            |generation| self.drain_generation(generation),
-        ) else {
+        let Some(result) = self
+            .domain
+            .try_quiesce_if_idle(|generation| self.drain_generation(generation))
+        else {
             return ReclaimEntries::new(self);
         };
         let entries = result.unwrap_or_else(|_| ReclaimEntries::new(self));
@@ -1042,26 +1089,34 @@ impl<V> CacheLookupDomain<V> {
     }
 
     fn drain_generation(&self, generation: DrainedGeneration<'_>) -> ReclaimEntries<'_, V> {
-        generation
-            .take_queue(
-                &self.domain,
-                |index| self.pending_reclaims[index].lock(),
-                |mut queue| {
-                    let entries = crate::retirement_queue::take_retired!(&mut *queue);
-                    self.pending_nodes
-                        .fetch_sub(entries.len(), Ordering::Relaxed);
-                    let weight = entries.iter().map(|entry| entry.weight).sum();
-                    self.pending_weight.fetch_sub(weight, Ordering::Relaxed);
-                    ReclaimEntries {
-                        domain: self,
-                        entries,
-                    }
-                },
-            )
+        self.domain
+            .take_queue(&generation, |mut queue| {
+                let entries = crate::retirement_queue::take_retired!(&mut *queue);
+                self.pending_nodes
+                    .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                        current.checked_sub(entries.len())
+                    })
+                    .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+                if !self.pending_weight_saturated.load(Ordering::Relaxed) {
+                    let weight = entries
+                        .iter()
+                        .fold(0_u64, |sum, entry| sum.saturating_add(entry.weight));
+                    self.pending_weight
+                        .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                            current.checked_sub(weight)
+                        })
+                        .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+                }
+                ReclaimEntries {
+                    domain: self,
+                    entries,
+                }
+            })
             .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop())
     }
 
     fn record_batch(&self, entries: &[ReclaimEntry<V>], start: Instant) {
+        self.clear_saturated_weight_if_empty();
         if !entries.is_empty() {
             self.reclaimed_nodes
                 .fetch_add(entries.len(), Ordering::Relaxed);
@@ -1076,7 +1131,7 @@ impl<V> CacheLookupDomain<V> {
     fn stats(&self) -> CacheReclamationStats {
         CacheReclamationStats {
             pending_nodes: self.pending_nodes.load(Ordering::Relaxed),
-            pending_weight: self.pending_weight.load(Ordering::Relaxed),
+            pending_weight: self.pending_weight(),
             peak_pending_nodes: self.peak_pending_nodes.load(Ordering::Relaxed),
             peak_pending_weight: self.peak_pending_weight.load(Ordering::Relaxed),
             reclaimed_nodes: self.reclaimed_nodes.load(Ordering::Relaxed),
@@ -1090,23 +1145,20 @@ impl<V> CacheLookupDomain<V> {
     }
 
     fn drain_all(&self, closed: ClosedDomain<'_>) -> ReclaimEntries<'_, V> {
-        let batches = closed
-            .take_queues(
-                &self.domain,
-                |index| self.pending_reclaims[index].lock(),
-                |mut first, mut second| {
-                    [
-                        ReclaimEntries {
-                            domain: self,
-                            entries: crate::retirement_queue::take_retired!(&mut *first),
-                        },
-                        ReclaimEntries {
-                            domain: self,
-                            entries: crate::retirement_queue::take_retired!(&mut *second),
-                        },
-                    ]
-                },
-            )
+        let batches = self
+            .domain
+            .take_queues(&closed, |mut first, mut second| {
+                [
+                    ReclaimEntries {
+                        domain: self,
+                        entries: crate::retirement_queue::take_retired!(&mut *first),
+                    },
+                    ReclaimEntries {
+                        domain: self,
+                        entries: crate::retirement_queue::take_retired!(&mut *second),
+                    },
+                ]
+            })
             .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
         merge_reclaims(self, batches)
     }
@@ -1282,8 +1334,7 @@ where
         // the old readers drain. Hot reads only attempt an idle reclamation.
         let retired = if mutation
             && (nodes >= RECLAIM_BACKPRESSURE_NODES
-                || self.domain.pending_weight.load(Ordering::Relaxed)
-                    >= self.weight_budget.max(1) as u64)
+                || self.domain.pending_weight() >= self.weight_budget.max(1) as u64)
         {
             self.domain.quiesce_and_drain()
         } else {
@@ -1952,6 +2003,51 @@ mod tests {
     }
 
     #[test]
+    fn large_retirement_weights_do_not_interrupt_registration_or_drain() {
+        let domain = CacheLookupDomain::<()>::new();
+        domain.enqueue_reclaim(ReclaimEntry::sentinel(&domain, u64::MAX));
+        domain.enqueue_reclaim(ReclaimEntry::sentinel(&domain, u64::MAX));
+        assert_eq!(domain.stats().pending_nodes, 2);
+        assert_eq!(domain.stats().pending_weight, u64::MAX);
+
+        let retired = domain.quiesce_and_drain();
+        assert_eq!(retired.len(), 2);
+        assert_eq!(domain.stats().pending_nodes, 0);
+        assert_eq!(domain.stats().pending_weight, 0);
+        // Sentinel entries exercise queue accounting only, never destruction.
+    }
+
+    #[test]
+    fn saturated_pending_weight_keeps_backpressure_until_both_queues_empty() {
+        let domain = CacheLookupDomain::<()>::new();
+        let reader = domain.domain.enter(0).unwrap();
+        domain.enqueue_reclaim(ReclaimEntry::sentinel(&domain, u64::MAX));
+        assert!(
+            domain
+                .domain
+                .poll_quiesce(|generation| domain.drain_generation(generation))
+                .is_none()
+        );
+        assert_eq!(domain.domain.current_generation().index(), 1);
+        domain.enqueue_reclaim(ReclaimEntry::sentinel(&domain, u64::MAX));
+        drop(reader);
+
+        let first = domain
+            .domain
+            .poll_quiesce(|generation| domain.drain_generation(generation))
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(domain.stats().pending_nodes, 1);
+        assert_eq!(domain.pending_weight(), u64::MAX);
+
+        let second = domain.quiesce_and_drain();
+        assert_eq!(second.len(), 1);
+        assert_eq!(domain.stats().pending_nodes, 0);
+        assert_eq!(domain.pending_weight(), 0);
+    }
+
+    #[test]
     fn enqueue_reclaim_racing_rotation_is_not_lost() {
         let domain = Arc::new(CacheLookupDomain::<()>::new());
         let (loaded_tx, loaded_rx) = mpsc::sync_channel(0);
@@ -1987,8 +2083,8 @@ mod tests {
         enqueuer.join().unwrap();
         rotator.join().unwrap();
 
-        assert!(domain.pending_reclaims[0].lock().is_empty());
-        assert_eq!(domain.pending_reclaims[1].lock().len(), 1);
+        assert!(domain.domain.inspect_queue(0, |queue| queue.is_empty()));
+        assert_eq!(domain.domain.inspect_queue(1, |queue| queue.len()), 1);
         let _ = domain.drain_all(domain.seal());
     }
 
@@ -1997,20 +2093,23 @@ mod tests {
         let domain = Arc::new(CacheLookupDomain::<()>::new());
         domain.enqueue_reclaim(ReclaimEntry::sentinel(&domain, 7));
         let generation = domain.domain.current_generation();
-        let registration = domain.pending_reclaims[generation.index()].lock();
-        let (done_tx, done_rx) = mpsc::channel();
-        let worker_domain = Arc::clone(&domain);
-        let worker = std::thread::spawn(move || {
-            let retired = worker_domain.try_quiesce_and_drain();
-            done_tx
-                .send((retired.len(), worker_domain.domain.current_generation()))
-                .unwrap();
-        });
-        // An unbarred idle rotation publishes a new generation then blocks on
-        // this queue. Release it before assertions so a regression cannot hang.
-        let result = done_rx.recv_timeout(Duration::from_secs(1));
-        let observed_generation = domain.domain.current_generation();
-        drop(registration);
+        let (worker, result, observed_generation) =
+            domain.domain.inspect_queue(generation.index(), |_| {
+                let (done_tx, done_rx) = mpsc::channel();
+                let worker_domain = Arc::clone(&domain);
+                let worker = std::thread::spawn(move || {
+                    let retired = worker_domain.try_quiesce_and_drain();
+                    done_tx
+                        .send((retired.len(), worker_domain.domain.current_generation()))
+                        .unwrap();
+                });
+                // An unbarred idle rotation publishes a new generation then
+                // blocks on this queue. Release it before assertions so a
+                // regression cannot hang.
+                let result = done_rx.recv_timeout(Duration::from_secs(1));
+                let observed_generation = domain.domain.current_generation();
+                (worker, result, observed_generation)
+            });
         worker.join().unwrap();
         assert_eq!(result, Ok((0, generation)));
         assert_eq!(observed_generation, generation);
@@ -2086,13 +2185,12 @@ mod tests {
                     let epoch = cache_ref.generation.advance();
                     cache_ref.index.invalidate_before(epoch);
                     cache_ref.index.maintenance();
-                    assert!(
+                    assert!((0..2).any(|index| {
                         cache_ref
                             .domain
-                            .pending_reclaims
-                            .iter()
-                            .any(|queue| !queue.lock().is_empty())
-                    );
+                            .domain
+                            .inspect_queue(index, |queue| !queue.is_empty())
+                    }));
                     retired_tx.send(()).unwrap();
                     let retired = cache_ref.domain.quiesce_and_drain();
                     reclaim_cache_entries::<DropProbe>(retired);
@@ -2158,22 +2256,21 @@ mod tests {
                 });
 
                 let deadline = std::time::Instant::now() + Duration::from_secs(2);
-                while !cache
-                    .domain
-                    .pending_reclaims
-                    .iter()
-                    .any(|queue| !queue.lock().is_empty())
-                    && std::time::Instant::now() < deadline
+                while !(0..2).any(|index| {
+                    cache
+                        .domain
+                        .domain
+                        .inspect_queue(index, |queue| !queue.is_empty())
+                }) && std::time::Instant::now() < deadline
                 {
                     std::thread::yield_now();
                 }
-                assert!(
+                assert!((0..2).any(|index| {
                     cache
                         .domain
-                        .pending_reclaims
-                        .iter()
-                        .any(|queue| !queue.lock().is_empty())
-                );
+                        .domain
+                        .inspect_queue(index, |queue| !queue.is_empty())
+                }));
                 assert!(clear_done_rx.try_recv().is_err());
                 assert_eq!(drops.load(Ordering::SeqCst), 0);
 

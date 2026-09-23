@@ -26,7 +26,7 @@ mod protocol;
 use crate::{XllError, XllResult};
 use xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT;
 use xlfn_kernel::rotating_read_domain::{
-    DrainedGeneration, RotatingReadDomain, RotatingReadOwnedPermit,
+    DrainedGeneration, RotatingReadOwnedPermit, RotatingRetirementDomain,
 };
 
 #[cfg(test)]
@@ -68,8 +68,7 @@ fn update_count(
 type PendingBindings = SmallVec<[PublishedOwner<BindingRecord>; 4]>;
 
 pub(crate) struct HandleReadDomain {
-    domain: RotatingReadDomain<DEFAULT_STRIPE_COUNT>,
-    pending: [Mutex<PendingBindings>; 2],
+    domain: RotatingRetirementDomain<DEFAULT_STRIPE_COUNT, PendingBindings>,
     // Maintenance hint; pending queue locks and the driver handoff publish work.
     queued: AtomicUsize,
     // Also a destruction-completion counter: release decrements synchronize
@@ -183,8 +182,7 @@ impl Drop for HandleBindingDomainPermit<'_> {
 impl HandleReadDomain {
     pub(crate) fn new() -> Self {
         Self {
-            domain: RotatingReadDomain::new(),
-            pending: [Mutex::new(SmallVec::new()), Mutex::new(SmallVec::new())],
+            domain: RotatingRetirementDomain::new(),
             queued: AtomicUsize::new(0),
             debt: AtomicUsize::new(0),
             peak_debt: AtomicUsize::new(0),
@@ -238,15 +236,12 @@ impl HandleReadDomain {
     ///
     /// Protocol obligation [HD-2]: Retired bindings enter generation-bound queue; immediate drop is forbidden.
     pub(crate) fn enqueue_reclaim(&self, record: PublishedOwner<BindingRecord>) {
-        self.domain.register_retired(
-            |generation| self.pending[generation.index()].lock(),
-            |_, mut queue| {
-                crate::retirement_queue::append_retired!(&mut *queue, record);
-                let debt = update_count(&self.debt, 1, Ordering::Relaxed, counters::add);
-                self.peak_debt.fetch_max(debt, Ordering::Relaxed);
-                update_count(&self.queued, 1, Ordering::Relaxed, counters::add);
-            },
-        );
+        self.domain.register_retired(|_, mut queue| {
+            crate::retirement_queue::append_retired!(&mut *queue, record);
+            let debt = update_count(&self.debt, 1, Ordering::Relaxed, counters::add);
+            self.peak_debt.fetch_max(debt, Ordering::Relaxed);
+            update_count(&self.queued, 1, Ordering::Relaxed, counters::add);
+        });
     }
 
     #[cfg(feature = "bench-internals")]
@@ -283,12 +278,11 @@ impl HandleReadDomain {
     }
 
     fn take_generation(&self, generation: DrainedGeneration<'_>) -> DrainedBindings<'_> {
-        let records = generation
-            .take_queue(
-                &self.domain,
-                |index| self.pending[index].lock(),
-                |mut queue| crate::retirement_queue::take_retired!(&mut *queue),
-            )
+        let records = self
+            .domain
+            .take_queue(&generation, |mut queue| {
+                crate::retirement_queue::take_retired!(&mut *queue)
+            })
             .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
         update_count(
             &self.queued,
@@ -330,9 +324,14 @@ impl HandleReadDomain {
         // reader's notification cannot be cleared without being consumed.
         let previous = self
             .maintenance_requests
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |requests| {
-                requests.checked_add(1)
-            })
+            .fetch_update(
+                Ordering::AcqRel,
+                Ordering::Acquire,
+                |requests| match counters::add(requests, 1) {
+                    counters::CountStep::Success(next) => Some(next),
+                    counters::CountStep::FailStop => None,
+                },
+            )
             .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
         if previous != 0 {
             return;
@@ -342,7 +341,13 @@ impl HandleReadDomain {
             self.poll_maintenance();
             let requested = self
                 .maintenance_requests
-                .fetch_sub(consumed, Ordering::AcqRel);
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |requests| {
+                    match counters::subtract(requests, consumed) {
+                        counters::CountStep::Success(next) => Some(next),
+                        counters::CountStep::FailStop => None,
+                    }
+                })
+                .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
             if requested == consumed {
                 return;
             }
@@ -352,10 +357,10 @@ impl HandleReadDomain {
 
     fn poll_maintenance(&self) {
         while self.queued.load(Ordering::Relaxed) != 0 {
-            let Some(Ok(records)) = self.domain.poll_quiesce_with_publication_barrier(
-                |generation| self.pending[generation.index()].try_lock(),
-                |generation| self.take_generation(generation),
-            ) else {
+            let Some(Ok(records)) = self
+                .domain
+                .poll_quiesce(|generation| self.take_generation(generation))
+            else {
                 break;
             };
             records.reclaim();
@@ -368,10 +373,7 @@ impl HandleReadDomain {
     pub(crate) fn quiesce(&self) {
         let records = self
             .domain
-            .quiesce_with_publication_barrier(
-                |generation| self.pending[generation.index()].lock(),
-                |generation| self.take_generation(generation),
-            )
+            .quiesce(|generation| self.take_generation(generation))
             .unwrap_or_default()
             .into_iter()
             .flatten()
@@ -400,37 +402,34 @@ impl HandleReadDomain {
     /// Protocol obligation [HD-5]: Destruction barrier: waits for domain drain and flushes remaining debt before arena teardown.
     pub(crate) fn seal(&self) {
         let closed = self.domain.seal_and_wait();
-        let [mut records, remaining] = closed
-            .take_queues(
-                &self.domain,
-                |index| self.pending[index].lock(),
-                |mut first, mut second| {
-                    let records = crate::retirement_queue::take_retired!(&mut *first);
-                    update_count(
-                        &self.queued,
-                        records.len(),
-                        Ordering::Relaxed,
-                        counters::subtract,
-                    );
-                    let remaining = crate::retirement_queue::take_retired!(&mut *second);
-                    update_count(
-                        &self.queued,
-                        remaining.len(),
-                        Ordering::Relaxed,
-                        counters::subtract,
-                    );
-                    [
-                        DrainedBindings {
-                            domain: self,
-                            records,
-                        },
-                        DrainedBindings {
-                            domain: self,
-                            records: remaining,
-                        },
-                    ]
-                },
-            )
+        let [mut records, remaining] = self
+            .domain
+            .take_queues(&closed, |mut first, mut second| {
+                let records = crate::retirement_queue::take_retired!(&mut *first);
+                update_count(
+                    &self.queued,
+                    records.len(),
+                    Ordering::Relaxed,
+                    counters::subtract,
+                );
+                let remaining = crate::retirement_queue::take_retired!(&mut *second);
+                update_count(
+                    &self.queued,
+                    remaining.len(),
+                    Ordering::Relaxed,
+                    counters::subtract,
+                );
+                [
+                    DrainedBindings {
+                        domain: self,
+                        records,
+                    },
+                    DrainedBindings {
+                        domain: self,
+                        records: remaining,
+                    },
+                ]
+            })
             .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
         records.extend(remaining);
         records.reclaim();
@@ -472,7 +471,16 @@ mod tests {
 
         impl Maintenance {
             fn maintain(&self) {
-                if self.requests.fetch_add(1, Ordering::AcqRel) != 0 {
+                let previous = self
+                    .requests
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |requests| {
+                        match counters::add(requests, 1) {
+                            counters::CountStep::Success(next) => Some(next),
+                            counters::CountStep::FailStop => None,
+                        }
+                    })
+                    .expect("maintenance request count cannot overflow");
+                if previous != 0 {
                     return;
                 }
                 let mut consumed = 1;
@@ -489,7 +497,15 @@ mod tests {
                             self.queued.store(0, Ordering::Relaxed);
                         }
                     }
-                    let requested = self.requests.fetch_sub(consumed, Ordering::AcqRel);
+                    let requested = self
+                        .requests
+                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |requests| {
+                            match counters::subtract(requests, consumed) {
+                                counters::CountStep::Success(next) => Some(next),
+                                counters::CountStep::FailStop => None,
+                            }
+                        })
+                        .expect("maintenance request count cannot underflow");
                     if requested == consumed {
                         return;
                     }
@@ -607,10 +623,7 @@ mod tests {
         drop(permit);
         let [first, second] = domain
             .domain
-            .quiesce_with_publication_barrier(
-                |generation| domain.pending[generation.index()].lock(),
-                |generation| domain.take_generation(generation),
-            )
+            .quiesce(|generation| domain.take_generation(generation))
             .unwrap();
         let mut batch = first.expect("previous pending generation");
         let next = second.expect("current generation");

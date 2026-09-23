@@ -214,6 +214,84 @@ macro_rules! width {
                 self.lifecycle.borrow().set(true, &mut state.sealed, control);
             });
         }
+        /// Successful idle sealing transfers the zero-count and lifecycle
+        /// authorities from this counter's atomic invariant into one DrainLease.
+        /// A failed stale-load CAS returns the original open controller.
+        pub fn try_seal_if_idle(&self, Tracked(control): Tracked<lifecycle::control>)
+            -> (result: Result<Tracked<DrainLease>, Tracked<lifecycle::control>>)
+            requires self.inv(), control.instance_id() == self.authority_id(), !control.value(),
+            ensures match result {
+                Ok(lease) => lease@.inv() && self.accepts_lease(lease@)
+                    && lease@.gate_id() == self.id()
+                    && lease@.authority_id() == self.authority_id(),
+                Err(returned) => returned@ == control,
+            },
+        {
+            let tracked mut remaining = Some(control);
+            let tracked mut leased = None;
+            let raw = atomic_with_ghost!(self.atomic => load(); ghost state => {
+                self.lifecycle.borrow().agrees(&state.sealed, remaining.tracked_borrow());
+            });
+            match idle_seal_logic!(raw, $sealed, $mask) {
+                Some(next) => {
+                    let result = atomic_with_ghost!(self.atomic => compare_exchange(raw, next); returning result; ghost state => {
+                        if result is Ok {
+                            assert(next == raw | $sealed);
+                            assert((raw & ($sealed | $mask) == 0) ==>
+                                (((raw | $sealed) & $mask) == 0
+                                && ((raw | $sealed) & $sealed) != 0)) by(bit_vector);
+                            assert((raw | $sealed) & $mask == raw & $mask) by(bit_vector);
+                            let tracked mut mode = remaining.tracked_take();
+                            self.lifecycle.borrow().set(true, &mut state.sealed, &mut mode);
+                            let tracked payload = FrozenResources { active: state.active.tracked_take(), control: mode };
+                            let tracked ticket = self.frozen.borrow().freeze(payload, &mut state.frozen, payload);
+                            leased = Some(DrainLease { instance: self.frozen.borrow().clone(), ticket, gate: self.instance.borrow().clone() });
+                        }
+                    });
+                    if result.is_ok() { Ok(Tracked(leased.tracked_unwrap())) }
+                    else { Err(Tracked(remaining.tracked_unwrap())) }
+                },
+                None => Err(Tracked(remaining.tracked_unwrap())),
+            }
+        }
+        /// Roll back only the exact idle seal that produced this counter's
+        /// lease. The CAS preserves a concurrently registered waiting bit.
+        #[verifier::exec_allows_no_decreases_clause]
+        pub fn undo_idle_seal(&self, Tracked(lease): Tracked<DrainLease>) -> (control: Tracked<lifecycle::control>)
+            requires self.inv(), self.accepts_lease(lease),
+            ensures control@.instance_id() == self.authority_id(), !control@.value(),
+        {
+            let tracked mut pending = Some(lease);
+            loop
+                invariant self.inv(), pending.is_some(), self.accepts_lease(pending.unwrap()),
+            {
+                let raw = atomic_with_ghost!(self.atomic => load(); returning raw; ghost state => {
+                    let tracked held = pending.tracked_borrow();
+                    self.frozen.borrow().leased(held.ticket.value(), &state.frozen, &held.ticket);
+                });
+                match undo_idle_seal_logic!(raw, $sealed, $mask) {
+                    Some(next) => {
+                        let tracked mut returned = None;
+                        let result = atomic_with_ghost!(self.atomic => compare_exchange(raw, next); returning result; ghost state => {
+                            if result is Ok {
+                                assert(next == raw & !$sealed);
+                                assert((raw & !$sealed) & $mask == raw & $mask) by(bit_vector);
+                                assert((raw & !$sealed) & $sealed == 0) by(bit_vector);
+                                let tracked held = pending.tracked_take();
+                                self.frozen.borrow().leased(held.ticket.value(), &state.frozen, &held.ticket);
+                                let tracked payload = self.frozen.borrow().thaw(held.ticket.value(), &mut state.frozen, held.ticket);
+                                let tracked mut mode = payload.control;
+                                self.lifecycle.borrow().set(false, &mut state.sealed, &mut mode);
+                                state.active = Some(payload.active);
+                                returned = Some(mode);
+                            }
+                        });
+                        if result.is_ok() { return Tracked(returned.tracked_unwrap()); }
+                    },
+                    None => { assert(false); },
+                }
+            }
+        }
         #[verifier::exec_allows_no_decreases_clause]
         pub fn reopen(&self, Tracked(control): Tracked<&mut lifecycle::control>) -> (opened: bool)
             requires self.inv(), old(control).instance_id() == self.authority_id(),

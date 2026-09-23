@@ -705,6 +705,126 @@ macro_rules! width {
     }
     /// Recover exact pending allocations and clear pending only after the
     /// shared callback completes with matching empty-queue authority.
+    /// Recover the exact old queue from an idle publication while the
+    /// transition handle and zero-count stripe leases remain held.
+    pub fn recover_idle_published<'a, 'b, 'slot, 'domain, T>(
+        published: owned_rotation::IdlePublished<'a, 'b, Retirement<'slot, 'domain, T>>,
+        counters: &Vec<Counter>, domain: &'domain DomainOwner)
+        -> (result: (owned_rotation::IdleDetached<'a, 'b, Retirement<'slot, 'domain, T>>,
+            RecoveredBatch<'domain, T>, Ghost<Seq<Retirement<'slot, 'domain, T>>>))
+        requires published.inv(), counters@ == published.target(), published.owner() == domain.rotation,
+            forall|entry: Retirement<'slot, 'domain, T>| (#[trigger] (published.payload_inv())(entry))
+                ==> entry.inv() && entry.domain() == domain,
+            forall|entry: Retirement<'slot, 'domain, T>, bound: Set<vstd::tokens::InstanceId>|
+                (#[trigger] (published.prepared_inv())(entry, bound)) == entry.prepared_for(bound),
+        ensures result.0.inv(), result.0.owner() == domain.rotation,
+            result.0.bound() == published.bound(), result.0.target() == counters@,
+            result.1.owner() == domain,
+            valid_records(result.2@, domain), prepared_records(result.2@, published.bound()),
+            result.1.memories().len() == result.2@.len(),
+            forall|i: int| 0 <= i < result.2@.len() ==>
+                (#[trigger] result.1.memories()[i])@ == result.2@[result.2@.len() - 1 - i].memory(),
+    {
+        let ghost bound = published.bound();
+        let (detached, withdrawal) = published.detach();
+        let ghost source = withdrawal.source();
+        assert(valid_records(source, domain));
+        assert(prepared_records(source, bound));
+        let (recovered, source) = recover_idle_detached(&detached, withdrawal, counters, domain);
+        (detached, recovered, source)
+    }
+    fn recover_idle_detached<'a, 'b, 'slot, 'domain, T>(
+        detached: &owned_rotation::IdleDetached<'a, 'b, Retirement<'slot, 'domain, T>>,
+        withdrawal: super::super::rotation::locked_detachment::Withdrawal<Retirement<'slot, 'domain, T>>,
+        counters: &Vec<Counter>, domain: &'domain DomainOwner)
+        -> (result: (RecoveredBatch<'domain, T>, Ghost<Seq<Retirement<'slot, 'domain, T>>>))
+        requires detached.inv(), detached.target() == counters@,
+            withdrawal.inv(), withdrawal.owner() == domain.rotation,
+            withdrawal.index() == detached.index(),
+            valid_records(withdrawal.source(), domain),
+            prepared_records(withdrawal.source(), detached.bound()),
+        ensures result.1@ == withdrawal.source(), result.0.owner() == domain,
+            valid_records(result.1@, domain), prepared_records(result.1@, detached.bound()),
+            result.0.memories().len() == result.1@.len(),
+            forall|i: int| 0 <= i < result.1@.len() ==>
+                (#[trigger] result.0.memories()[i])@ == result.1@[result.1@.len() - 1 - i].memory(),
+    {
+        let ghost source = withdrawal.source();
+        let batch = super::super::batches::bind_withdrawal(domain, withdrawal);
+        let Tracked(drains) = detached.drains(counters);
+        let recovered = recover_drain_batch(batch.into_batch(), Tracked(drains));
+        (recovered, Ghost(source))
+    }
+    /// Reclaim the exact old queue inside the idle callback; sealed controls
+    /// become available only after the matching heap permissions are returned.
+    pub fn recover_idle_and_restore<'a, 'b, 'slot, 'domain, T>(
+        published: owned_rotation::IdlePublished<'a, 'b, Retirement<'slot, 'domain, T>>,
+        counters: &Vec<Counter>, domain: &'domain DomainOwner)
+        -> (result: (owned_rotation::State, RecoveredBatch<'domain, T>,
+            Tracked<super::super::rotation::queue_preparation::phase::ready>,
+            Ghost<Seq<Retirement<'slot, 'domain, T>>>))
+        requires published.inv(), counters@ == published.target(), published.owner() == domain.rotation,
+            forall|entry: Retirement<'slot, 'domain, T>| (#[trigger] (published.payload_inv())(entry))
+                ==> entry.inv() && entry.domain() == domain,
+            forall|entry: Retirement<'slot, 'domain, T>, bound: Set<vstd::tokens::InstanceId>|
+                (#[trigger] (published.prepared_inv())(entry, bound)) == entry.prepared_for(bound),
+        ensures published.lock().inv(result.0), result.0.pending().is_none(),
+            result.0.sealed(published.target(), published.index()),
+            result.0.sealed(published.other(), !published.index()),
+            result.2@.instance_id() == published.prepared_id(), result.1.owner() == domain,
+            valid_records(result.3@, domain), prepared_records(result.3@, published.bound()),
+            result.1.memories().len() == result.3@.len(),
+            forall|i: int| 0 <= i < result.3@.len() ==>
+                (#[trigger] result.1.memories()[i])@ == result.3@[result.3@.len() - 1 - i].memory(),
+    {
+        let ghost bound = published.bound();
+        let ghost callback_post: spec_fn(Seq<Retirement<'slot, 'domain, T>>, RecoveredBatch<'domain, T>) -> bool =
+            |source: Seq<Retirement<'slot, 'domain, T>>, recovered: RecoveredBatch<'domain, T>|
+                recovered.owner() == domain && valid_records(source, domain)
+                && prepared_records(source, bound)
+                && recovered.memories().len() == source.len()
+                && (forall|i: int| 0 <= i < source.len() ==>
+                    (#[trigger] recovered.memories()[i])@ == source[source.len() - 1 - i].memory());
+        let callback = |detached: &owned_rotation::IdleDetached<'a, 'b, Retirement<'slot, 'domain, T>>,
+                        withdrawal: super::super::rotation::locked_detachment::Withdrawal<Retirement<'slot, 'domain, T>>|
+            -> (value: RecoveredBatch<'domain, T>)
+            requires detached.inv(), detached.target() == counters@, detached.bound() == bound,
+                withdrawal.inv(), withdrawal.owner() == domain.rotation,
+                withdrawal.index() == detached.index(),
+                valid_records(withdrawal.source(), domain),
+                prepared_records(withdrawal.source(), detached.bound()),
+            ensures callback_post(withdrawal.source(), value),
+        {
+            let ghost source = withdrawal.source();
+            let (recovered, Ghost(recovered_source)) = recover_idle_detached(detached, withdrawal, counters, domain);
+            assert(recovered_source == source);
+            assert(callback_post(source, recovered));
+            recovered
+        };
+        assert forall|detached: &owned_rotation::IdleDetached<'a, 'b, Retirement<'slot, 'domain, T>>,
+                      withdrawal: super::super::rotation::locked_detachment::Withdrawal<Retirement<'slot, 'domain, T>>|
+            published.callback_input(detached, withdrawal) implies
+                call_requires(callback, (detached, withdrawal)) by {
+            if published.callback_input(detached, withdrawal) {
+                assert forall|i: int| 0 <= i < withdrawal.source().len() implies
+                    (#[trigger] withdrawal.source()[i]).inv()
+                    && withdrawal.source()[i].domain() == domain by {
+                    assert((published.payload_inv())(withdrawal.source()[i]));
+                };
+                assert forall|i: int| 0 <= i < withdrawal.source().len() implies
+                    (#[trigger] withdrawal.source()[i]).prepared_for(detached.bound()) by {
+                    assert((published.prepared_inv())(withdrawal.source()[i], bound));
+                };
+            }
+        };
+        assert forall|detached: &owned_rotation::IdleDetached<'a, 'b, Retirement<'slot, 'domain, T>>,
+                      withdrawal: super::super::rotation::locked_detachment::Withdrawal<Retirement<'slot, 'domain, T>>,
+                      value: RecoveredBatch<'domain, T>|
+            (#[trigger] call_ensures(callback, (detached, withdrawal), value)) implies
+                callback_post(withdrawal.source(), value) by {};
+        let (state, ready, recovered, source) = published.run_callback(counters, callback, Ghost(callback_post));
+        (state, recovered, ready, source)
+    }
     pub fn recover_pending_striped<'a, 'slot, 'domain, T>(
         current: &super::super::rotation::current_atomic::Current,
         handoff: owned_rotation::PendingHandoff<'a>, mut collection: atomic_stripes::Collection, counters: &Vec<Counter>,
