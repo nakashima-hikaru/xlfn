@@ -7,7 +7,9 @@ use crate::diagnostics::AddinId;
 use crate::generation::OpeningGeneration;
 use crate::host_callback::HostCallbackSession;
 use crate::registration::RegistrationDescriptor;
-use crate::runtime::open_txn::{GenerationStaged, HostAttached, Initialized, OpeningTxn};
+use crate::runtime::open_txn::{
+    GenerationStaged, HostAttached, Initialized, Initializing, OpeningTxn,
+};
 use crate::runtime::rollback::{active_runtime_generation, rollback_open};
 use crate::runtime::transactions::{open_addin_inner, rollback_active_open};
 use crate::runtime::{AddinLifecycleAccess, Runtime};
@@ -15,6 +17,10 @@ use crate::runtime::{AddinLifecycleAccess, Runtime};
 pub(crate) enum OpenFailure<'runtime, A: Addin> {
     HostAttached {
         transaction: Box<OpeningTxn<'runtime, A, HostAttached>>,
+        error: XllError,
+    },
+    Initializing {
+        transaction: Box<OpeningTxn<'runtime, A, Initializing>>,
         error: XllError,
     },
     Initialized {
@@ -28,7 +34,7 @@ pub(crate) enum OpenFailure<'runtime, A: Addin> {
 }
 
 impl<'runtime, A: Addin> OpenFailure<'runtime, A> {
-    pub(crate) fn rollback(
+    pub(crate) fn recover(
         self,
         runtime: &'runtime Runtime<A>,
         lifecycle: &AddinLifecycleAccess<'_, A>,
@@ -36,6 +42,17 @@ impl<'runtime, A: Addin> OpenFailure<'runtime, A> {
         match self {
             Self::HostAttached { transaction, error } => {
                 rollback_active_open(runtime, lifecycle, Some(*transaction));
+                error
+            }
+            Self::Initializing { transaction, error } => {
+                // There is no application state on which to invoke quiesce.
+                // Abandoning this transaction quarantines it without issuing
+                // the empty-addin rollback certificate or permitting unload.
+                drop(transaction);
+                crate::runtime::recovery::quarantine_for_hazard(
+                    runtime,
+                    crate::shutdown::UnloadHazard::AddinQuiesceFailed,
+                );
                 error
             }
             Self::Initialized { transaction, error } => {
@@ -53,6 +70,15 @@ impl<'runtime, A: Addin> OpenFailure<'runtime, A> {
 impl<'runtime, A: Addin> OpeningTxn<'runtime, A, HostAttached> {
     pub(crate) fn failure(self, error: XllError) -> OpenFailure<'runtime, A> {
         OpenFailure::HostAttached {
+            transaction: Box::new(self),
+            error,
+        }
+    }
+}
+
+impl<'runtime, A: Addin> OpeningTxn<'runtime, A, Initializing> {
+    pub(crate) fn failure(self, error: XllError) -> OpenFailure<'runtime, A> {
+        OpenFailure::Initializing {
             transaction: Box::new(self),
             error,
         }
@@ -144,13 +170,13 @@ where
             descriptors,
             transaction,
         )
-        .map_err(|failure| failure.rollback(runtime, lifecycle))?;
+        .map_err(|failure| failure.recover(runtime, lifecycle))?;
         let transaction = match transaction.install_lifecycle(lifecycle) {
             Ok(transaction) => transaction,
             Err((reason, transaction)) => {
                 return Err(transaction
                     .failure(crate::lifecycle::lifecycle_access_error(reason))
-                    .rollback(runtime, lifecycle));
+                    .recover(runtime, lifecycle));
             }
         };
         transaction.stage_host_mutations(registrations).commit()

@@ -36,6 +36,11 @@ for generation, type, and validity.
 During opening, `OpeningTxn` owns state, service inputs, and the registration journal,
 publishing the full generation only upon success. On interruption, responsibility
 transfers to rollback or quarantine.
+Once `Addin::open` starts, a distinct initializing transaction cannot produce
+an empty-addin rollback proof. If the hook returns an error without state,
+the runtime is quarantined and retains DLL residency because application
+execution sources cannot be quiesced. A successful hook transfers its state
+to the ordinary rollback-capable transaction.
 During teardown, a single removal claim sequences ingress closure, draining execution
 and return producers, stopping async tasks and subscriptions, host unregistration and
 callback ingress closure, add-in quiescence, service sealing, cleanup, and reclamation,

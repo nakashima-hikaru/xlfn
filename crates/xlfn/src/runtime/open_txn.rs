@@ -75,6 +75,14 @@ pub(crate) struct HostAttached {
     host: HostOpeningState,
 }
 
+/// Application initialization has begun, but no state is available to quiesce.
+/// This state deliberately cannot implement `RollbackState`: an unsuccessful
+/// `Addin::open` may leave execution sources that only the application knows.
+pub(crate) struct Initializing {
+    core: OpenCore,
+    host: HostOpeningState,
+}
+
 /// `Addin::open` succeeded and its thread-affine lifecycle state is owned by
 /// the transaction.
 pub(crate) struct Initialized<A: crate::Addin> {
@@ -192,6 +200,17 @@ impl<A: crate::Addin> OpeningState<A> for Begun {
 }
 
 impl<A: crate::Addin> OpeningState<A> for HostAttached {
+    fn attempt_id(&self) -> OpenAttemptId {
+        self.core.attempt_id()
+    }
+
+    fn abandon(self, deps: &OpenDeps<'_, A>) {
+        let Self { core, host: _ } = self;
+        abandon_open(deps, core, LifecycleOwnership::Installed);
+    }
+}
+
+impl<A: crate::Addin> OpeningState<A> for Initializing {
     fn attempt_id(&self) -> OpenAttemptId {
         self.core.attempt_id()
     }
@@ -446,13 +465,21 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Begun> {
 }
 
 impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, HostAttached> {
+    pub(crate) fn begin_initialization(self) -> OpeningTxn<'runtime, A, Initializing> {
+        let mut transaction = self;
+        let HostAttached { core, host } = transaction.take_state();
+        OpeningTxn::new_state(transaction.deps, Initializing { core, host })
+    }
+}
+
+impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Initializing> {
     pub(crate) fn initialized(
         self,
         lifecycle: A::LifecycleState,
         service_inputs: crate::runtime_components::GenerationServiceInputs,
     ) -> OpeningTxn<'runtime, A, Initialized<A>> {
         let mut transaction = self;
-        let HostAttached { mut core, host } = transaction.take_state();
+        let Initializing { mut core, host } = transaction.take_state();
         core.install_service_inputs(service_inputs);
         OpeningTxn::new_state(
             transaction.deps,

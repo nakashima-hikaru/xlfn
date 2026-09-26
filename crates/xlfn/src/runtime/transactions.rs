@@ -186,6 +186,7 @@ pub(crate) fn initialize_addin<'runtime, A>(
 where
     A: Addin,
 {
+    let transaction = transaction.begin_initialization();
     let opened = match A::open(&context) {
         Ok(opened) => opened,
         Err(error) => {

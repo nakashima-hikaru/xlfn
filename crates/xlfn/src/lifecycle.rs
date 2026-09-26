@@ -211,7 +211,7 @@ mod tests {
             match initialize_addin::<LayersPanic>(test_open_context(), transaction) {
                 Ok(result) => result,
                 Err(failure) => {
-                    let error = failure.rollback(&runtime, &lifecycle);
+                    let error = failure.recover(&runtime, &lifecycle);
                     panic!("unexpected add-in initialization failure: {error}");
                 }
             };

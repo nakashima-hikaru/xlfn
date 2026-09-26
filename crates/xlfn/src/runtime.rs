@@ -346,7 +346,7 @@ impl<A: crate::Addin> Runtime<A> {
             .bind_addin_lifecycle()
             .expect("test runtime binds its lifecycle thread");
         let generation = opening.attempt_id().into_runtime_generation();
-        let transaction = opening.attach_host().initialized(
+        let transaction = opening.attach_host().begin_initialization().initialized(
             lifecycle_state,
             crate::runtime_components::GenerationServiceInputs::empty_for_generation(generation),
         );
@@ -384,7 +384,7 @@ impl<A: crate::Addin> Runtime<A> {
         let access = self
             .bind_addin_lifecycle()
             .expect("test runtime binds its lifecycle thread");
-        let transaction = opening.attach_host().initialized(
+        let transaction = opening.attach_host().begin_initialization().initialized(
             Default::default(),
             crate::runtime_components::GenerationServiceInputs::with_rtd_sources(sources),
         );
@@ -420,7 +420,7 @@ impl<A: crate::Addin> Runtime<A> {
         let access = self
             .bind_addin_lifecycle()
             .expect("test runtime binds its lifecycle thread");
-        let transaction = opening.attach_host().initialized(
+        let transaction = opening.attach_host().begin_initialization().initialized(
             lifecycle_state,
             crate::runtime_components::GenerationServiceInputs::with_rtd_sources(sources),
         );

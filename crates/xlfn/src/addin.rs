@@ -543,6 +543,12 @@ pub trait Addin: Send + Sync + 'static {
     /// returned together so the framework can stage them as one transaction.
     /// If a later registration step fails, none of the execution state is
     /// published as an open generation.
+    ///
+    /// Returning an error or panicking before returning `Opened` quarantines
+    /// the runtime and retains DLL residency, including with physical unload
+    /// enabled. No state is available to call `quiesce`, so the framework
+    /// cannot prove that application-created execution sources have stopped.
+    /// That runtime cannot be opened again.
     #[allow(
         clippy::type_complexity,
         reason = "the associated state types are the public Addin open contract"
@@ -598,6 +604,9 @@ pub trait Addin: Send + Sync + 'static {
 /// ensure that the hook itself synchronously establishes that condition before
 /// returning. The framework's own admission and executor accounting is not a
 /// substitute for this application-level guarantee.
+///
+/// If `Addin::open` fails before returning its state, the framework retains
+/// DLL residency and quarantines the runtime rather than invoking this hook.
 pub unsafe trait PhysicallyUnloadableAddin: Addin {
     /// Performs the stronger quiescence required before releasing the DLL's
     /// physical residency lease.

@@ -1,4 +1,4 @@
-use crate::error::{DomainErrorCode, InputError, Shape};
+use crate::error::{DomainErrorCode, InputError};
 use crate::{ExcelError, XllError, XllResult};
 use xlfn_sys::XLOPER12;
 #[cfg(test)]
@@ -6,6 +6,8 @@ use xlfn_sys::XLOPER12Array;
 
 /// Borrowed call-scoped views used while converting one worksheet call.
 pub mod borrowed;
+/// Composable presence and collection conversions for custom input types.
+pub mod convert;
 /// Excel serial-date policy and value types.
 pub mod date;
 /// Internal semantic identity support used by generated input conversion.
@@ -402,15 +404,9 @@ where
     M: InputMode,
     T: ExcelParameter<'call, M>,
 {
-    let cells = grid.cells();
-    let mut budget = ArrayInputBudget::new::<T>(cells.len(), argument)?;
-    let mut data = Vec::with_capacity(cells.len());
-    for element in cells.iter().map(XlValueRef::from_array_cell) {
-        let element = element?;
-        budget.include(element)?;
-        data.push(T::decode(element, argument, context, identity)?);
-    }
-    Ok(data)
+    convert_owned_grid_elements(grid, argument, |element| {
+        T::decode(element, argument, context, identity)
+    })
 }
 
 fn convert_grid_elements_borrowed<'call, T, M>(
@@ -450,20 +446,17 @@ where
         context: &CallContext<'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
-        match value.value_type() {
-            XlValueType::Missing => {
-                M::tag(identity, 0);
-                Ok(Self::Missing)
-            }
-            XlValueType::Nil => {
-                M::tag(identity, 1);
-                Ok(Self::Blank)
-            }
-            _ => {
-                M::tag(identity, 2);
-                T::decode(value, argument, context, identity).map(Self::Value)
-            }
-        }
+        M::tag(
+            identity,
+            match value.value_type() {
+                XlValueType::Missing => 0,
+                XlValueType::Nil => 1,
+                _ => 2,
+            },
+        );
+        convert::optional_value(value, argument, |value, argument| {
+            T::decode(value, argument, context, identity)
+        })
     }
 
     fn encode_decoded(&self, identity: &mut M::Identity) {
@@ -496,16 +489,13 @@ where
         context: &CallContext<'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
-        match value.value_type() {
-            XlValueType::Missing | XlValueType::Nil => {
-                M::bool(identity, false);
-                Ok(None)
-            }
-            _ => {
-                M::bool(identity, true);
-                T::decode(value, argument, context, identity).map(Some)
-            }
-        }
+        M::bool(
+            identity,
+            !matches!(value.value_type(), XlValueType::Missing | XlValueType::Nil),
+        );
+        convert::optional(value, argument, |value, argument| {
+            T::decode(value, argument, context, identity)
+        })
     }
 
     fn encode_decoded(&self, identity: &mut M::Identity) {
@@ -607,18 +597,8 @@ where
         context: &CallContext<'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
-        let grid = GridView::from_value(value, argument)?;
-        let (rows, columns) = grid.shape();
-        if rows != 1 && columns != 1 {
-            return Err(XllError::Shape {
-                expected: Shape {
-                    rows: 1,
-                    columns: rows * columns,
-                },
-                actual: Shape { rows, columns },
-            });
-        }
-        M::u64(identity, (rows * columns) as u64);
+        let grid = convert::grid(value, argument, convert::GridShape::Vector)?;
+        M::u64(identity, grid.cells().len() as u64);
         convert_grid_elements::<T, M>(&grid, argument, context, identity)
     }
 
@@ -649,30 +629,8 @@ where
         context: &CallContext<'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
-        if MAX == 0 {
-            return Err(XllError::input(
-                argument,
-                InputError::Malformed("bounded varargs maximum must be non-zero"),
-            ));
-        }
-        let grid = GridView::from_value(value, argument)?;
-        let (rows, columns) = grid.shape();
-        if rows != 1 && columns != 1 {
-            return Err(XllError::Shape {
-                expected: Shape {
-                    rows: 1,
-                    columns: rows * columns,
-                },
-                actual: Shape { rows, columns },
-            });
-        }
-        let actual = rows * columns;
-        if actual > MAX {
-            return Err(XllError::input(
-                argument,
-                InputError::TooLarge { limit: MAX, actual },
-            ));
-        }
+        let grid = convert::bounded_grid::<MAX>(value, argument)?;
+        let actual = grid.cells().len();
         M::u64(identity, actual as u64);
         let elements = convert_grid_elements::<T, M>(&grid, argument, context, identity)?;
         Self::new(elements).map_err(|error| match error {
@@ -707,15 +665,8 @@ where
         context: &CallContext<'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
-        let grid = GridView::from_value(value, argument)?;
-        let (rows, columns) = grid.shape();
-        if rows != 1 {
-            return Err(XllError::Shape {
-                expected: Shape { rows: 1, columns },
-                actual: Shape { rows, columns },
-            });
-        }
-        M::u64(identity, columns as u64);
+        let grid = convert::grid(value, argument, convert::GridShape::Row)?;
+        M::u64(identity, grid.cells().len() as u64);
         convert_grid_elements::<T, M>(&grid, argument, context, identity).map(Self)
     }
 
@@ -745,15 +696,8 @@ where
         context: &CallContext<'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
-        let grid = GridView::from_value(value, argument)?;
-        let (rows, columns) = grid.shape();
-        if columns != 1 {
-            return Err(XllError::Shape {
-                expected: Shape { rows, columns: 1 },
-                actual: Shape { rows, columns },
-            });
-        }
-        M::u64(identity, rows as u64);
+        let grid = convert::grid(value, argument, convert::GridShape::Column)?;
+        M::u64(identity, grid.cells().len() as u64);
         convert_grid_elements::<T, M>(&grid, argument, context, identity).map(Self)
     }
 
@@ -890,19 +834,6 @@ impl<'call> ExcelInputIdentity for ExcelCellRef<'call> {
     }
 }
 
-pub(crate) fn decode_owned_matrix<'call, T>(
-    value: XlValueRef<'call>,
-    argument: &'static str,
-) -> XllResult<Matrix<T>>
-where
-    T: FromExcel<'call>,
-{
-    let grid = GridView::from_value(value, argument)?;
-    let (rows, columns) = grid.shape();
-    convert_owned_grid_elements(&grid, argument, |element| T::from_excel(element, argument))
-        .and_then(|data| Matrix::new(rows, columns, data))
-}
-
 fn convert_owned_grid_elements<'call, T>(
     grid: &GridView<'call>,
     argument: &'static str,
@@ -924,7 +855,7 @@ impl<'call> FromExcel<'call> for ExcelValue {
         match value.value_type() {
             XlValueType::Missing => Ok(Self::Missing),
             XlValueType::Multi => {
-                decode_owned_matrix::<ExcelCellValue>(value, argument).map(Self::Array)
+                convert::matrix(value, argument, ExcelCellValue::from_excel).map(Self::Array)
             }
             _ => ExcelCellValue::from_excel(value, argument).map(Self::Scalar),
         }

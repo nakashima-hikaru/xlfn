@@ -341,11 +341,22 @@ impl<'call> XlValueRef<'call> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// A borrowed Excel string. Equality compares its UTF-16 code units;
+/// the originating argument name is retained only for conversion diagnostics.
+#[derive(Clone, Copy, Debug)]
 pub struct XlStrRef<'call> {
     utf16: &'call [u16],
     argument: &'static str,
 }
+
+impl PartialEq for XlStrRef<'_> {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.utf16 == other.utf16
+    }
+}
+
+impl Eq for XlStrRef<'_> {}
 
 impl<'call> XlStrRef<'call> {
     #[must_use]
@@ -537,6 +548,55 @@ mod tests {
         XLTYPE_FLOW, XLTYPE_INT, XLTYPE_MISSING, XLTYPE_MULTI, XLTYPE_NIL, XLTYPE_NUM, XLTYPE_REF,
         XLTYPE_SREF, XLTYPE_STR,
     };
+
+    #[test]
+    fn borrowed_string_equality_compares_content_across_argument_names() {
+        let mut strings = [
+            [2_u16, 0x0041, 0x03b1],
+            [2, 0x0041, 0x03b1],
+            [2, 0x0041, 0x03b2],
+        ];
+        let raw = strings.each_mut().map(|string| XLOPER12 {
+            value: XLOPER12Value {
+                string: string.as_mut_ptr(),
+            },
+            xltype: XLTYPE_STR,
+        });
+        let [left, same, different] = raw
+            .each_ref()
+            .map(|value| XlValueRef::from_array_cell(value).unwrap());
+        let left = left.as_str_with_argument("left").unwrap();
+        let same = same.as_str_with_argument("right").unwrap();
+        let different = different.as_str_with_argument("left").unwrap();
+
+        assert_eq!(left, same);
+        assert_ne!(left, different);
+    }
+
+    #[test]
+    fn borrowed_string_equality_preserves_conversion_diagnostics() {
+        let mut invalid_utf16 = [1_u16, 0xd800];
+        let raw = XLOPER12 {
+            value: XLOPER12Value {
+                string: invalid_utf16.as_mut_ptr(),
+            },
+            xltype: XLTYPE_STR,
+        };
+        let value = XlValueRef::from_array_cell(&raw).unwrap();
+        let left = value.as_str_with_argument("left").unwrap();
+        let right = value.as_str_with_argument("right").unwrap();
+
+        assert_eq!(left, right);
+        for (value, expected) in [(left, "left"), (right, "right")] {
+            assert!(matches!(
+                value.to_string(),
+                Err(XllError::Input {
+                    argument,
+                    reason: InputError::InvalidUtf16,
+                }) if argument == expected
+            ));
+        }
+    }
 
     #[test]
     fn xl_value_type_from_raw_and_raw_round_trip() {

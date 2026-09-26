@@ -140,6 +140,9 @@ impl InputMode for FormulaInputMode {
 }
 
 /// Converts a call-scoped Excel value into owned Rust data.
+///
+/// Custom collection types can compose the standard presence, shape, and
+/// allocation policies through [`crate::value::convert`].
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be converted from an Excel argument",
     label = "`{Self}` does not implement `FromExcel`",

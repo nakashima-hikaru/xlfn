@@ -142,6 +142,13 @@ opens, retains the module residency lease, and retains resources whose
 destruction was not proven safe. Ordinary `xlAutoClose` hints never clear this
 state.
 
+An error or panic from `Addin::open` before it returns `Opened` also
+quarantines the runtime, even when physical unload is enabled. Without the
+application state, xlfn cannot call `quiesce` to stop any execution sources
+started during initialization. The DLL stays resident and further opens are
+rejected. Failures before `Addin::open` starts can still roll back normally;
+failures after it returns `Opened` use that state to run quiescence and cleanup.
+
 If Excel requests `xlAutoOpen` while a generation is still open, xlfn performs
 a controlled terminal teardown of the old generation and then opens a new
 generation. A failed reload is quarantined. Normal Excel process termination

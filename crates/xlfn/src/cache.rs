@@ -5,6 +5,8 @@ use crate::{XllError, XllResult};
 mod backend_tests;
 mod node_layout;
 mod pin_transitions;
+#[cfg(test)]
+mod reentrancy_tests;
 use node_layout::verus;
 mod resident_index;
 use crate::sync::{Condvar, Mutex, RwLock};
@@ -1446,8 +1448,9 @@ where
                     // SAFETY: the domain outlives the lookup; the last pin owns retirement.
                     let domain = unsafe { domain_ptr.as_ref() };
                     domain.enqueue_reclaim(entry);
-                    let retired = domain.quiesce_and_drain();
-                    reclaim_cache_entries::<V>(retired);
+                    // The caller may hold the singleflight table lock while
+                    // repeating this lookup. Its maintenance runs after that
+                    // coordination ends and owns all value destruction.
                 }
             },
             success = Some(CacheLease {
@@ -1532,6 +1535,7 @@ where
                 let mut flights = self.flights.lock();
                 let vkey_ref = vkey_opt.as_ref().unwrap();
                 if let Some(lease) = self.get_at_epoch(&vkey_ref.key, current_lookup_epoch) {
+                    drop(flights);
                     self.maintain(false);
                     return Ok(lease);
                 }
@@ -1553,8 +1557,10 @@ where
                         FlightState::Pending => flight.changed.wait(&mut state),
                         FlightState::Finished(Ok(entry)) => break *entry,
                         FlightState::Finished(Err(err)) => {
+                            let error = (**err).clone();
+                            drop(state);
                             self.maintain(false);
-                            return Err((**err).clone());
+                            return Err(error);
                         }
                         FlightState::Retry => {
                             drop(state);

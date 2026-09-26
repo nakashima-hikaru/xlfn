@@ -366,13 +366,16 @@ pub mod v1 {
     /// Retains the quarantine if a newly acquired self-reference cannot be
     /// released after an opening transaction fails.
     fn release_open_residency_after_failure<A: Addin>(
-        runtime: &'static MacroRuntime<A>,
+        runtime: &MacroRuntime<A>,
         newly_acquired: bool,
     ) {
-        // A safe Addin may have started an execution source before its open
-        // attempt failed. Keep the module resident unless the Addin made the
-        // explicit unsafe physical-unload commitment.
-        if !newly_acquired || !runtime.runtime().physical_unload_enabled() {
+        // Only a failure before application initialization or a completed
+        // rollback may release this reference. A state-less Addin::open
+        // failure is quarantined even with the physical-unload opt-in.
+        if !newly_acquired
+            || !runtime.runtime().physical_unload_enabled()
+            || runtime.runtime().phase() != crate::lifecycle::LifecyclePhase::Closed
+        {
             return;
         }
         if let Err(error) = runtime.runtime().release_module_residency() {
@@ -423,6 +426,122 @@ pub mod v1 {
             release_open_residency_after_failure(runtime, true);
         }
         result
+    }
+
+    #[cfg(test)]
+    #[allow(
+        unsafe_code,
+        reason = "Tests opt into the audited physical-unload contract"
+    )]
+    mod open_failure_tests {
+        use super::{MacroRuntime, release_open_residency_after_failure};
+        use crate::XllError;
+        use crate::addin::{Addin, BuildInfo, OpenContext, Opened, PhysicallyUnloadableAddin};
+        use crate::boundary::host::{host_auto_close, host_auto_open, host_auto_remove};
+        use crate::diagnostics::AddinId;
+        use crate::lifecycle::LifecyclePhase;
+        use crate::runtime::test_support::initialize_addin;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct ErrorBeforeState;
+
+        static OPEN_CALLS: AtomicUsize = AtomicUsize::new(0);
+        static QUIESCE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+        impl Addin for ErrorBeforeState {
+            type SharedState = ();
+            type LifecycleState = ();
+            type Layers = ();
+            type Error = XllError;
+
+            fn open(_: &OpenContext) -> Result<Opened<()>, XllError> {
+                OPEN_CALLS.fetch_add(1, Ordering::Relaxed);
+                Err(XllError::Overloaded)
+            }
+
+            fn quiesce(_: &mut (), _: &mut ()) -> Result<(), XllError> {
+                QUIESCE_CALLS.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+        }
+
+        // SAFETY: This test add-in has no external execution sources. Its
+        // failing open exercises the framework's conservative residency rule.
+        unsafe impl PhysicallyUnloadableAddin for ErrorBeforeState {}
+
+        #[inline(never)]
+        fn residency_anchor() {}
+
+        #[test]
+        fn application_open_error_keeps_residency_and_rejects_reopen() {
+            for previously_removed in [false, true] {
+                let macro_runtime = MacroRuntime::<ErrorBeforeState>::new_with_physical_unload();
+                let runtime = macro_runtime.runtime();
+                let newly_acquired = runtime
+                    .ensure_module_residency(residency_anchor as *const ())
+                    .unwrap();
+                assert!(newly_acquired);
+
+                if previously_removed {
+                    let opening = runtime.begin_open().unwrap();
+                    let mut opening = runtime.publish(opening, (), ());
+                    runtime.finish_open(&mut opening, Vec::new()).unwrap();
+                    assert_eq!(host_auto_remove(runtime), 1);
+                }
+
+                let opens_before = OPEN_CALLS.load(Ordering::Relaxed);
+                let quiesces_before = QUIESCE_CALLS.load(Ordering::Relaxed);
+                let transaction = runtime.begin_open().unwrap().attach_host();
+                let lifecycle = runtime.bind_addin_lifecycle().unwrap();
+                let context = OpenContext::new(
+                    std::path::PathBuf::from("test.xll"),
+                    BuildInfo::new(AddinId::parse("test").unwrap(), "0", "test"),
+                    runtime.protocol_generation().unwrap(),
+                );
+                let failure = match initialize_addin::<ErrorBeforeState>(context, transaction) {
+                    Ok(_) => panic!("application initialization must fail"),
+                    Err(failure) => failure,
+                };
+                assert!(matches!(
+                    failure.recover(runtime, &lifecycle),
+                    XllError::Overloaded
+                ));
+                assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
+                assert_eq!(QUIESCE_CALLS.load(Ordering::Relaxed), quiesces_before);
+
+                // Exercise both the failed-open release path and later host
+                // removal/close hints. Neither may release unproven residency.
+                release_open_residency_after_failure(&macro_runtime, newly_acquired);
+                assert!(runtime.module_residency_held());
+                assert_eq!(host_auto_remove(runtime), 1);
+                assert_eq!(host_auto_close(runtime), 1);
+                assert!(runtime.module_residency_held());
+                assert_eq!(
+                    host_auto_open(runtime, &AddinId::parse("test").unwrap(), "0", "test", &[]),
+                    0
+                );
+                assert_eq!(OPEN_CALLS.load(Ordering::Relaxed), opens_before + 1);
+            }
+        }
+
+        #[test]
+        fn failure_before_application_initialization_can_release_residency() {
+            let macro_runtime = MacroRuntime::<ErrorBeforeState>::new_with_physical_unload();
+            let runtime = macro_runtime.runtime();
+            let newly_acquired = runtime
+                .ensure_module_residency(residency_anchor as *const ())
+                .unwrap();
+            let transaction = runtime.begin_open().unwrap().attach_host();
+            let lifecycle = runtime.bind_addin_lifecycle().unwrap();
+            let failure = transaction.failure(XllError::Overloaded);
+            assert!(matches!(
+                failure.recover(runtime, &lifecycle),
+                XllError::Overloaded
+            ));
+            assert_eq!(runtime.phase(), LifecyclePhase::Closed);
+            release_open_residency_after_failure(&macro_runtime, newly_acquired);
+            assert!(!runtime.module_residency_held());
+        }
     }
 
     /// Reports Excel's ambiguous close/deactivation hint without tearing down the runtime.

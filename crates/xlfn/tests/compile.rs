@@ -4,6 +4,7 @@ fn trait_driven_function_signatures_compile() {
     tests.pass("tests/ui/pass/borrowed_inputs.rs");
     tests.pass("tests/ui/pass/case_distinct_udfs.rs");
     tests.pass("tests/ui/pass/cfg_gating.rs");
+    tests.pass("tests/ui/pass/custom_collection_conversions.rs");
     tests.pass("tests/ui/pass/excel_enum.rs");
     tests.pass("tests/ui/pass/output_array.rs");
     tests.pass("tests/ui/pass/physical_unload.rs");

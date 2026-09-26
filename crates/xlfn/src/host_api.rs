@@ -11,7 +11,7 @@ use crate::error::{ExcelApiFailure, ExcelApiFunction, InputError};
 use crate::host_callback::HostCallbackSession;
 use crate::reference::ExcelReference;
 use crate::return_abi::ExcelCallbackStatus;
-use crate::value::{ExcelValue, FromExcel, Matrix, XlValueType, decode_owned_matrix};
+use crate::value::{ExcelValue, FromExcel, Matrix, XlValueType, convert};
 use crate::{XllError, XllResult};
 use std::ptr::NonNull;
 use xlfn_sys::{IDSHEET, XL_COERCE, XL_SHEET_ID, XL_SHEET_NM, XLF_CALLER, XLOPER12};
@@ -153,7 +153,7 @@ impl<'call> ExcelHost<'call> {
     {
         let arguments = [reference.raw_pointer()];
         self.invoke(XL_COERCE, ExcelApiFunction::Coerce, &arguments, |result| {
-            decode_owned_matrix::<T>(result.borrow()?, "reference")
+            convert::matrix(result.borrow()?, "reference", T::from_excel)
         })
     }
 

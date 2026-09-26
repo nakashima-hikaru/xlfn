@@ -33,6 +33,45 @@ The call lifetime is explicit. Owned conversions work for every `'call`; borrowe
 
 Reuse built-in conversions where possible. They already validate malformed pointers, UTF-16, numeric exactness, errors, shape, and memory limits.
 
+### Collection and optional inputs
+
+Use `value::convert` to apply those same rules inside a custom collection
+conversion. Each function accepts an element converter, such as
+`f64::from_excel`, and preserves the argument name in conversion errors:
+
+```rust
+use xlfn::{value::{convert, FromExcel, Matrix, XlValueRef}, XllResult};
+
+struct NumericMatrix(Matrix<f64>);
+
+impl<'call> FromExcel<'call> for NumericMatrix {
+    fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
+        let matrix = convert::matrix(value, argument, f64::from_excel)?;
+        // Apply application-specific constraints to the validated matrix here.
+        Ok(Self(matrix))
+    }
+}
+```
+
+`matrix`, `vector`, `row`, and `column` enforce the corresponding worksheet
+shape. `bounded_var_args` also checks the maximum count before converting any
+elements. These functions share the built-in array allocation limits and
+reject nested arrays. `optional` maps omitted and blank values to `None`;
+`optional_value` preserves their distinction with `OptionalExcelValue`.
+Both accept another collection conversion as their converter:
+
+```rust
+let matrix: Option<Matrix<f64>> = convert::optional(value, argument, |value, argument| {
+    convert::matrix(value, argument, f64::from_excel)
+})?;
+```
+
+The element converter can be another custom `FromExcel` implementation. A
+converter that returns a borrowed view retains the input's call lifetime;
+the helper does not turn that view into an owned value. Custom handle-producer
+inputs still encode their final semantic value with `ExcelInputIdentity`, as
+described below.
+
 Owned types used as ordinary Excel-visible parameters implement one `FromExcel`
 contract. The framework also provides explicit call-scoped views such as
 `&str`, `MatrixRef<'_, T>`, and `ExcelCellRef<'_>`; those are synchronous-only
