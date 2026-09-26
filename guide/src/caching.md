@@ -151,6 +151,19 @@ weight function is rejected, including a different key or endpoint. Reading
 already-cached values is supported. Compute lower layers directly or resolve
 their cache dependencies before entering the initializer.
 
+Keys must keep equality and hashing stable while stored, and cloning a key
+must preserve both. `Hash` and `Eq` must not reenter the same cache, directly
+or through its registry: those operations may run with cache locks or read
+admission held, so recursive cache access can deadlock. `Clone` may run while
+publishing an initialized entry and must not depend on starting another
+cache initialization on the same thread.
+
+Removed keys and values are reclaimed outside cache coordination locks.
+Ordinary maintenance also defers their destructors while an initializer is
+active. Destructors may call a still-live cache, subject to the restrictions
+of any surrounding key, compute, or weight callback. Destruction timing
+remains unspecified.
+
 The compute and weight functions execute application code. They must:
 
 - avoid panics;

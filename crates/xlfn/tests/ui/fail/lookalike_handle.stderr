@@ -9,7 +9,7 @@ help: the trait `IntoExcel` is not implemented for `Handle`
   |
 3 | struct Handle;
   | ^^^^^^^^^^^^^
-  = note: implement `IntoExcel` for `Handle` or return a supported type (e.g. `f64`, `bool`, `String`, `ExcelError`, or a custom handle)
+  = note: implement `IntoExcel` for `Handle` or return a supported type (e.g. `f64`, `bool`, `String`, `ExcelErrorValue`, or a custom handle)
   = help: the following other types implement trait `IntoExcel`:
             &str
             ExcelCellOutput

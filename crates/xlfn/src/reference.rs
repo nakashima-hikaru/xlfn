@@ -148,6 +148,13 @@ impl Iterator for ReferenceAreas<'_> {
     }
 }
 
+/// Converts a call-scoped reference argument into an application type.
+///
+/// `#[excel_arg(reference)]` dispatches to the declared parameter type's
+/// implementation. Delegate to [`ExcelReference::from_excel_reference`] to
+/// validate the reference, then retain its call-scoped view or copy bounded
+/// metadata into an owned value. The argument still requires macro-sheet
+/// execution and does not participate in formula-revision input identity.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be constructed from an Excel cell reference",
     label = "`{Self}` does not implement `FromExcelReference`",
@@ -229,7 +236,10 @@ where
     T: FromExcelReference<'call>,
 {
     // SAFETY: The generated wrapper forwards Excel's live call argument.
-    let borrowed = unsafe { XlValueRef::from_raw(raw) }?;
+    let borrowed = unsafe { XlValueRef::from_raw(raw) }.map_err(|error| match error {
+        XllError::Input { reason, .. } => XllError::input(argument, reason),
+        other => other,
+    })?;
     T::from_excel_reference(borrowed, argument)
 }
 
@@ -270,6 +280,26 @@ mod tests {
                 columns: RangeInclusive { start: 1, last: 3 },
             }]
         );
+    }
+
+    #[test]
+    fn malformed_reference_tag_preserves_the_argument_name() {
+        let mut raw = sref(XLREF12 {
+            rw_first: 0,
+            rw_last: 0,
+            col_first: 0,
+            col_last: 0,
+        });
+        raw.xltype |= 0x2000;
+        // SAFETY: the SRef remains readable; admission rejects the unknown flag.
+        let result = unsafe { reference_from_raw::<ExcelReference<'_>>("source_range", &mut raw) };
+        assert!(matches!(
+            result,
+            Err(XllError::Input {
+                argument: "source_range",
+                reason: InputError::Malformed("unknown xltype flag")
+            })
+        ));
     }
 
     #[test]

@@ -68,6 +68,12 @@ def check(root: Path) -> list[str]:
         if publish is False or publish == []:
             continue
         relative = directory.relative_to(root).as_posix()
+        version = package.get("version")
+        if not isinstance(version, str):
+            errors.append(
+                f"{relative}/Cargo.toml: publishable package needs an explicit version; "
+                "independent release contracts must not inherit workspace.package.version"
+            )
         if not (directory / "README.md").is_file():
             errors.append(f"{relative}/README.md: missing release readme")
         for name, original in originals.items():

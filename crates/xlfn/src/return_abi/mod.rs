@@ -269,11 +269,9 @@ fn encode_scalar(
     allocation_bytes: &mut usize,
 ) -> XllResult<XLOPER12> {
     match value {
-        ExcelCellOutput::Number(number) if number.is_finite() => Ok(XLOPER12::number(number)),
-        ExcelCellOutput::Number(_) => Err(XllError::input(
-            "<return>",
-            crate::error::InputError::NonFinite,
-        )),
+        ExcelCellOutput::Number(number) => {
+            crate::value::output::validate_number(number).map(XLOPER12::number)
+        }
         ExcelCellOutput::Boolean(boolean) => Ok(XLOPER12::boolean(boolean)),
         ExcelCellOutput::Error(error) => Ok(XLOPER12::error(error.code())),
         ExcelCellOutput::String(text) => {
@@ -789,6 +787,68 @@ mod tests {
     use super::*;
     use crate::value::Matrix;
     use crate::{Addin, ExcelError, OpenContext};
+
+    mod output_error_policy {
+        use super::*;
+        use crate::call_return::ExcelReturn;
+        use crate::error::DomainErrorCode;
+        use crate::value::{Column, IntoExcel, Row};
+
+        fn assert_numeric_error(error: XllError) {
+            assert!(
+                matches!(
+                    error,
+                    XllError::Domain {
+                        code: DomainErrorCode::InvalidInput
+                    }
+                ),
+                "output errors must not acquire input-argument metadata: {error}"
+            );
+            assert_eq!(error.excel_error(), ExcelError::Number);
+        }
+
+        fn assert_rejected_output<T: ExcelReturn>(value: T) {
+            let result = ExcelReturn::into_excel(value, &mut ReturnContext::new())
+                .and_then(PreparedReturn::encode);
+            match result {
+                Ok(_) => panic!("non-finite output must be rejected"),
+                Err(error) => assert_numeric_error(error),
+            }
+        }
+
+        fn assert_all_output_shapes<T: IntoExcel>(make: impl Fn() -> T) {
+            assert_rejected_output(make());
+            assert_rejected_output(Matrix::new(1, 1, vec![make()]).unwrap());
+            assert_rejected_output(Row::new(vec![make()]).unwrap());
+            assert_rejected_output(Column::new(vec![make()]).unwrap());
+            let mut builder = XlArrayBuilder::new(1, 1).unwrap();
+            assert_numeric_error(builder.push(make()).unwrap_err());
+            // A rejected cell leaves the builder usable and does not consume a slot.
+            builder.push(1.0).unwrap();
+            assert!(builder.finish().is_ok());
+        }
+
+        #[test]
+        fn non_finite_output_error_is_independent_of_shape_and_converter() {
+            struct UnvalidatedNumber(f64);
+            impl IntoExcel for UnvalidatedNumber {
+                fn into_excel(self) -> XllResult<ExcelCellOutput> {
+                    // The ABI boundary must still validate custom semantic output.
+                    Ok(ExcelCellOutput::Number(self.0))
+                }
+            }
+
+            for number in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                assert_all_output_shapes(|| number);
+                assert_all_output_shapes(|| ExcelCellOutput::Number(number));
+                assert_all_output_shapes(|| UnvalidatedNumber(number));
+                let mut builder = XlArrayBuilder::new(1, 1).unwrap();
+                assert_numeric_error(builder.push_f64(number).unwrap_err());
+                builder.push_f64(1.0).unwrap();
+                assert!(builder.finish().is_ok());
+            }
+        }
+    }
     use std::sync::{Arc, Barrier, mpsc};
     use std::time::Duration;
     use xlfn_sys::{XLTYPE_ERR, XLTYPE_NUM};

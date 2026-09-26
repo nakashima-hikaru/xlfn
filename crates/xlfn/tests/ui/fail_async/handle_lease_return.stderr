@@ -25,7 +25,7 @@ error[E0277]: `xlfn::handle::HandleLease<'_, Dataset>` cannot be converted into 
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `xlfn::handle::HandleLease<'_, Dataset>` does not implement `IntoExcel`
    |
    = help: the trait `IntoExcel` is not implemented for `xlfn::handle::HandleLease<'_, Dataset>`
-   = note: implement `IntoExcel` for `xlfn::handle::HandleLease<'_, Dataset>` or return a supported type (e.g. `f64`, `bool`, `String`, `ExcelError`, or a custom handle)
+   = note: implement `IntoExcel` for `xlfn::handle::HandleLease<'_, Dataset>` or return a supported type (e.g. `f64`, `bool`, `String`, `ExcelErrorValue`, or a custom handle)
    = help: the following other types implement trait `IntoExcel`:
              &str
              ExcelCellOutput

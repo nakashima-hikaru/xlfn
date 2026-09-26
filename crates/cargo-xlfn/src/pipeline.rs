@@ -25,14 +25,12 @@ impl DefaultBuildProfile {
     }
 }
 
-/// One resolved profile shared by Cargo invocation, output lookup, and the
-/// build manifest. Keeping these values together prevents those operations
-/// from observing different profiles for the same target.
+/// One resolved profile shared by Cargo invocation and the build manifest.
+/// Cargo's compiler-artifact message supplies the actual output path.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ResolvedBuildProfile {
     name: String,
     cargo_profile: Option<String>,
-    output_directory: String,
 }
 
 impl ResolvedBuildProfile {
@@ -44,24 +42,14 @@ impl ResolvedBuildProfile {
                 default.cargo_default().map(str::to_owned),
             ),
         };
-        let output_directory = match name.as_str() {
-            "dev" | "test" => "debug".to_owned(),
-            "release" | "bench" => "release".to_owned(),
-            _ => name.clone(),
-        };
         Self {
             name,
             cargo_profile,
-            output_directory,
         }
     }
 
     fn cargo_profile(&self) -> Option<&str> {
         self.cargo_profile.as_deref()
-    }
-
-    pub(crate) fn output_directory(&self) -> &str {
-        &self.output_directory
     }
 }
 
@@ -143,13 +131,12 @@ pub(crate) fn build_and_verify_target(
     let profile = ResolvedBuildProfile::resolve(build, default_profile);
 
     fs::create_dir_all(target_directory)?;
-    build_target(target, metadata, build, &profile, target_directory)?;
-
-    let source = built_library_path(metadata, target.triple(), &profile, target_directory);
+    let built = build_target(target, metadata, build, &profile, target_directory)?;
+    let source = &built.path;
     if !source.is_file() {
         bail!("built XLL DLL was not found at {}", source.display());
     }
-    let source_snapshot = xlfn_package::snapshot_file(target.triple(), &source)?;
+    let source_snapshot = xlfn_package::snapshot_file(target.triple(), source)?;
     let bundle = ResolvedTargetBundle::resolve(metadata, target)?;
 
     let verification_guard = tempfile::Builder::new()
@@ -164,7 +151,15 @@ pub(crate) fn build_and_verify_target(
         &bundle,
         &verification_staging,
     )?;
-    let manifest = build_manifest_input(metadata, build, target, &profile, &bundle, observation);
+    let manifest = build_manifest_input(
+        metadata,
+        build,
+        target,
+        &profile,
+        &bundle,
+        observation,
+        built,
+    );
     Ok(verified.with_build_manifest(manifest)?)
 }
 
@@ -174,7 +169,7 @@ fn build_target(
     build: &BuildSelectionArgs,
     profile: &ResolvedBuildProfile,
     target_directory: &Path,
-) -> Result {
+) -> Result<BuiltLibrary> {
     let mut command = cargo_command();
     command
         .args(["build", "--manifest-path"])
@@ -183,10 +178,7 @@ fn build_target(
         .args(["--target", target.triple()]);
     configure_build(&mut command, metadata, target.triple(), target_directory)?;
     build.apply_to_command(&mut command, profile.cargo_profile());
-    if !command.status()?.success() {
-        bail!("cargo build failed for {}", target.triple());
-    }
-    Ok(())
+    run_cargo_build(&mut command, metadata, "dll")
 }
 
 fn verify_target_snapshot(
@@ -226,6 +218,7 @@ fn build_manifest_input(
     profile: &ResolvedBuildProfile,
     bundle: &ResolvedTargetBundle,
     observation: CrtObservation,
+    built: BuiltLibrary,
 ) -> xlfn_package::BuildManifestInput {
     xlfn_package::BuildManifestInput {
         package: metadata.package_name.clone(),
@@ -237,13 +230,13 @@ fn build_manifest_input(
             explicit: build.features.clone(),
             default_features: !build.no_default_features,
             all_features: build.all_features,
-            resolved: metadata.resolved_features.clone(),
+            resolved: built.features,
         },
         cargo_constraints: xlfn_package::CargoConstraints {
             locked: build.locked,
             frozen: build.frozen,
             offline: build.offline,
-            lockfile_sha256: metadata.lockfile_sha256.clone(),
+            lockfile_sha256: built.lockfile_sha256,
         },
         crt: observation.manifest(metadata.crt),
         bundle_sources: bundle.bundle_sources.clone(),
@@ -261,17 +254,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_profiles_keep_cargo_and_output_paths_aligned() {
+    fn default_profiles_keep_cargo_and_manifest_aligned() {
         let build = BuildSelectionArgs::default();
         let dev = ResolvedBuildProfile::resolve(&build, DefaultBuildProfile::Dev);
         assert_eq!(dev.name, "dev");
         assert_eq!(dev.cargo_profile(), None);
-        assert_eq!(dev.output_directory(), "debug");
 
         let release = ResolvedBuildProfile::resolve(&build, DefaultBuildProfile::Release);
         assert_eq!(release.name, "release");
         assert_eq!(release.cargo_profile(), Some("release"));
-        assert_eq!(release.output_directory(), "release");
     }
 
     #[test]
@@ -283,12 +274,11 @@ mod tests {
         let profile = ResolvedBuildProfile::resolve(&build, DefaultBuildProfile::Release);
         assert_eq!(profile.name, "ci");
         assert_eq!(profile.cargo_profile(), Some("ci"));
-        assert_eq!(profile.output_directory(), "ci");
     }
 
     #[test]
-    fn test_and_bench_profiles_use_cargos_shared_output_directories() {
-        for (name, directory) in [("test", "debug"), ("bench", "release")] {
+    fn test_and_bench_profiles_preserve_the_selected_cargo_profile() {
+        for name in ["test", "bench"] {
             let build = BuildSelectionArgs {
                 profile: Some(name.to_owned()),
                 ..BuildSelectionArgs::default()
@@ -297,7 +287,6 @@ mod tests {
                 let profile = ResolvedBuildProfile::resolve(&build, default);
                 assert_eq!(profile.name, name);
                 assert_eq!(profile.cargo_profile(), Some(name));
-                assert_eq!(profile.output_directory(), directory);
             }
         }
     }

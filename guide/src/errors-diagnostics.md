@@ -29,6 +29,13 @@ The framework maps errors conservatively:
 | invalid/stale handle, closing, overloaded, or reentrant operation | `#N/A` |
 | malformed input, wrong type, callback failure, or internal failure | `#VALUE!` |
 
+Non-finite numeric outputs (`NaN` and either infinity) are
+`DomainErrorCode::InvalidInput` and produce `#NUM!`. This applies equally to
+scalar returns, `Matrix`/`Row`/`Column` cells, incremental `XlArrayBuilder`
+output, and custom `IntoExcel` conversions. These output errors carry no
+worksheet argument name. A non-finite numeric input remains
+`InputError::NonFinite`, with the supplied argument name, and maps to `#VALUE!`.
+
 This mapping is intentionally coarse. The diagnostic stream carries the specific variant, argument, function ID, and diagnostic identifier.
 
 ## Install the file sink

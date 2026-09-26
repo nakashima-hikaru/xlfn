@@ -1,6 +1,13 @@
 use crate::value::ExcelErrorValue;
 use crate::{XllError, XllResult};
 
+/// An owned scalar candidate for RTD publication.
+///
+/// Public variants allow application code to construct and inspect values.
+/// Publication through [`super::source::RtdSink::publish`] or
+/// `RtdSender::try_send` validates finite numbers and Excel's UTF-16
+/// string limit before the value enters runtime storage. Constructing this
+/// enum alone does not establish those constraints.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RtdValue {
     Number(f64),
@@ -80,6 +87,15 @@ impl TryFrom<crate::value::ExcelValue> for RtdValue {
     }
 }
 
+/// Converts an application value into an owned RTD scalar candidate.
+///
+/// `Ok` reports successful application conversion, not admission or delivery.
+/// Implementations may reject application-specific invalid inputs. The
+/// framework validates every resulting [`RtdValue`] at publication, including
+/// values returned by custom implementations, so converters do not need to
+/// duplicate the finite-number or UTF-16 string checks.
+///
+/// Conversion runs on the publishing thread before runtime storage is locked.
 pub trait IntoRtdValue {
     fn into_rtd_value(self) -> XllResult<RtdValue>;
 }

@@ -9,7 +9,7 @@ help: the trait `IntoExcel` is not implemented for `Result`
   |
 3 | struct Result;
   | ^^^^^^^^^^^^^
-  = note: implement `IntoExcel` for `Result` or return a supported type (e.g. `f64`, `bool`, `String`, `ExcelError`, or a custom handle)
+  = note: implement `IntoExcel` for `Result` or return a supported type (e.g. `f64`, `bool`, `String`, `ExcelErrorValue`, or a custom handle)
   = help: the following other types implement trait `IntoExcel`:
             &str
             ExcelCellOutput

@@ -105,6 +105,11 @@ impl Drop for ActiveCacheGuard {
     }
 }
 
+/// A reusable typed descriptor for one cache in a [`CacheRegistry`].
+///
+/// Identity includes `K`, `V`, `Marker`, and the static ID. Descriptors with
+/// the same identity share cached values within one registry. Key operations
+/// and callbacks follow the contract of [`CalculationCache`].
 pub struct CacheEndpoint<K, V, Marker = ()> {
     id: &'static str,
     _key: PhantomData<fn() -> K>,
@@ -439,6 +444,9 @@ struct CacheEntry {
 
 type CacheMap = FxHashMap<(TypeId, &'static str), CacheEntry>;
 
+/// Owns lazily created endpoint caches for its lifetime.
+///
+/// Each endpoint follows [`CalculationCache`]'s key and callback contracts.
 pub struct CacheRegistry {
     identity: endpoint_cache::RegistryIdentity,
     weight_budget_per_endpoint: usize,
@@ -1258,6 +1266,18 @@ pub struct CacheResidentStats {
 /// `CalculationCache` provides memoization for expensive computations across
 /// UDF invocations. Eviction is based on abstract caller-reported weights rather
 /// than physical allocations.
+///
+/// Keys must keep their equality and hash stable while stored. `K::Hash` and
+/// `K::Eq` must not reenter this cache, directly or through a registry: they
+/// may run while cache locks or read admission are held. `K::Clone` must
+/// preserve key identity and must not depend on starting another cache
+/// initialization on the same thread, because cloning may occur during
+/// publication of an initialized entry.
+///
+/// Reclamation of removed keys and values runs outside cache coordination
+/// locks. Ordinary maintenance also defers their destruction while an
+/// initializer is active. Destructors may call a still-live cache, subject to
+/// the restrictions of any surrounding key, compute, or weight callback.
 pub struct CalculationCache<K, V> {
     weight_budget: usize,
     generation: CacheGeneration,

@@ -44,7 +44,7 @@ pub mod v1 {
     #[cfg(feature = "async")]
     pub use crate::cancellation::CancellationToken;
     use crate::error::{InputError, XllError, XllResult};
-    use crate::reference::{ExcelReference, reference_from_raw};
+    use crate::reference::{FromExcelReference, reference_from_raw};
     use crate::registration::{RegistrationDescriptor, RegistrationSignature};
     #[cfg(feature = "async")]
     use crate::return_abi::ffi_boundary_void;
@@ -696,11 +696,14 @@ pub mod v1 {
 
         #[doc(hidden)]
         #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
-        pub unsafe fn convert_reference(
+        pub unsafe fn convert_reference<T>(
             &mut self,
             name: &'static str,
             raw: *mut xlfn_sys::XLOPER12,
-        ) -> XllResult<ExcelReference<'call>> {
+        ) -> XllResult<T>
+        where
+            T: FromExcelReference<'call>,
+        {
             // SAFETY: raw is supplied by Excel for this call.
             unsafe { reference_from_raw(name, raw) }
         }
@@ -751,11 +754,14 @@ pub mod v1 {
     /// Helper free function to convert a reference argument from a raw pointer using the active call frame.
     #[doc(hidden)]
     #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
-    pub unsafe fn convert_reference<'call, M: InputMode>(
+    pub unsafe fn convert_reference<'call, M: InputMode, T>(
         frame: &mut CallFrame<'call, M>,
         name: &'static str,
         raw: *mut xlfn_sys::XLOPER12,
-    ) -> XllResult<ExcelReference<'call>> {
+    ) -> XllResult<T>
+    where
+        T: FromExcelReference<'call>,
+    {
         // SAFETY: caller guarantees raw is live for this call.
         unsafe { frame.convert_reference(name, raw) }
     }

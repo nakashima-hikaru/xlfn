@@ -24,6 +24,35 @@ The function may instead use the `macro_sheet` flag when no context is needed, b
 
 Reference arguments are incompatible with asynchronous functions and cannot use blank, missing, or default policies.
 
+## Custom reference arguments
+
+A parameter marked `#[excel_arg(reference)]` uses its declared type's
+`FromExcelReference<'call>` implementation. The conversion can keep a borrowed
+`ExcelReference<'call>` or copy bounded metadata into an owned type:
+
+```rust
+use xlfn::{reference::{ExcelReference, FromExcelReference}, value::XlValueRef, XllResult};
+
+struct AreaCount(usize);
+
+impl<'call> FromExcelReference<'call> for AreaCount {
+    fn from_excel_reference(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
+        let reference = ExcelReference::from_excel_reference(value, argument)?;
+        Ok(Self(reference.areas().count()))
+    }
+}
+
+#[xlfn::excel_function(name = "RANGE.CUSTOM.AREA.COUNT", macro_sheet)]
+fn custom_area_count(#[excel_arg(reference)] reference: AreaCount) -> f64 {
+    reference.0 as f64
+}
+```
+
+Custom reference arguments have the same execution restrictions as
+`ExcelReference`. They do not participate in formula-revision input identity:
+implementing `ExcelInputIdentity` does not permit a reference-taking function
+to return a newly constructed handle object.
+
 ## Lifetime and thread restrictions
 
 `ExcelReference<'call>` is a borrowed view over Excel-owned memory. It is deliberately neither `Send` nor `Sync`, and it is valid only for the current exported call.

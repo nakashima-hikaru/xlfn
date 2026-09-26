@@ -48,7 +48,7 @@ representation is private.
 
 A topic must contain at least one non-empty part. Each part must fit Excel's 32,767 UTF-16-unit counted-string representation. Topic parts are identity, not display labels; use stable, canonical values.
 
-The runtime also applies bounded admission limits. The standard limits are 253 topic parts, 1 MiB of UTF-8 text per topic, 64 MiB of pending-topic text in aggregate, 4,096 pending preparations, 4,096 active streams, 4,096 queued updates, and 4,096 distinct live source identities. A custom `RuntimeConfig::with_rtd_limits` can choose lower limits during `Addin::open`; use `RtdCapacity::bounded` or `RtdCapacity::disabled` for each resource class so a disabled limit is explicit rather than an untyped zero. Exceeding a limit returns `XllError::Overloaded` (or a topic input error for an invalid topic).
+The runtime also applies bounded admission limits. The standard limits are 253 topic parts, 1 MiB of UTF-8 text per topic, 64 MiB of pending-topic text in aggregate, 4,096 pending preparations, 4,096 active streams, 4,096 queued updates, and 4,096 distinct live source identities. Configure limits during `Addin::open` with `RuntimeConfig::new().with_rtd(RtdConfig::new().with_limits(limits))`; use `RtdCapacity::bounded` or `RtdCapacity::disabled` for each resource class so a disabled limit is explicit rather than an untyped zero. Exceeding a limit returns `XllError::Overloaded` (or a topic input error for an invalid topic).
 
 ## Implement a source
 
@@ -128,6 +128,13 @@ including the add-in state and `Client` placeholder, lives under
 - empty.
 
 `IntoRtdValue` is implemented for common scalar types, including `f64`, `bool`, `i32`, exactly representable `i64`, `ExcelSerialDate`, strings, `ExcelErrorValue`, and `()`.
+
+A custom converter returns an owned `RtdValue` candidate. Conversion success
+does not imply admission or delivery: `RtdSender::try_send` and
+`RtdSink::publish` validate finite numbers and the 32,767 UTF-16-unit string
+limit before storing the value. Converters may perform application-specific
+validation without repeating those transport checks. Public `RtdValue`
+variants remain inspectable and do not themselves prove transport validity.
 
 RTD does not transport arrays. Publish a handle or another scalar identity and expose a separate function when a stream logically updates a complex object.
 

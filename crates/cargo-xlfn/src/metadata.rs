@@ -1,6 +1,7 @@
 use super::*;
 
 pub(crate) struct ProjectMetadata {
+    pub(crate) package_id: cargo_metadata::PackageId,
     pub(crate) package_name: String,
     pub(crate) package_version: String,
     pub(crate) lib_name: String,
@@ -9,8 +10,7 @@ pub(crate) struct ProjectMetadata {
     pub(crate) manifest_directory: PathBuf,
     pub(crate) target_directory: PathBuf,
     pub(crate) crt: ResolvedCrtPolicy,
-    pub(crate) resolved_features: Vec<String>,
-    pub(crate) lockfile_sha256: Option<String>,
+    pub(crate) lockfile_path: PathBuf,
     pub(crate) bundle: Option<BundleMetadata>,
 }
 
@@ -109,25 +109,8 @@ pub(crate) fn project_metadata(
         .cloned()
         .map(parse_bundle_metadata)
         .transpose()?;
-    let mut resolved_features = cargo
-        .resolve
-        .as_ref()
-        .and_then(|resolve| resolve.nodes.iter().find(|node| node.id == package.id))
-        .map(|node| {
-            node.features
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    resolved_features.sort_unstable();
-    resolved_features.dedup();
-    let lockfile = cargo.workspace_root.as_std_path().join("Cargo.lock");
-    let lockfile_sha256 = lockfile
-        .is_file()
-        .then(|| xlfn_package::sha256(&lockfile))
-        .transpose()?;
     Ok(ProjectMetadata {
+        package_id: package.id.clone(),
         package_name: package.name.to_string(),
         package_version: package.version.to_string(),
         lib_name: libraries[0].name.clone(),
@@ -139,8 +122,7 @@ pub(crate) fn project_metadata(
             .clone()
             .unwrap_or_else(|| cargo.target_directory.as_std_path().to_path_buf()),
         crt,
-        resolved_features,
-        lockfile_sha256,
+        lockfile_path: cargo.workspace_root.as_std_path().join("Cargo.lock"),
         bundle,
     })
 }

@@ -117,7 +117,7 @@ pub use addin::{
     PhysicallyUnloadableAddin, RuntimeConfig, ThreadSafeContext,
 };
 #[cfg(feature = "async")]
-pub use addin::{AsyncConfig, AsyncContext, AsyncRuntimeConfig, AsyncWorkerCount};
+pub use addin::{AsyncConfig, AsyncContext, AsyncWorkerCount};
 #[cfg(feature = "handles")]
 pub use addin::{HandleBindingLimit, HandleConfig};
 #[cfg(feature = "rtd")]

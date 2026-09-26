@@ -952,10 +952,8 @@ where
 
 impl IntoExcel for ExcelCellOutput {
     fn into_excel(self) -> XllResult<ExcelCellOutput> {
-        if matches!(self, Self::Number(value) if !value.is_finite()) {
-            return Err(XllError::Domain {
-                code: DomainErrorCode::InvalidInput,
-            });
+        if let Self::Number(value) = &self {
+            output::validate_number(*value)?;
         }
         Ok(self)
     }
@@ -967,13 +965,7 @@ impl IntoExcel for ExcelCellOutput {
 
 impl IntoExcel for f64 {
     fn into_excel(self) -> XllResult<ExcelCellOutput> {
-        if self.is_finite() {
-            Ok(ExcelCellOutput::Number(self))
-        } else {
-            Err(XllError::Domain {
-                code: DomainErrorCode::InvalidInput,
-            })
-        }
+        output::validate_number(self).map(ExcelCellOutput::Number)
     }
 
     fn write_into<S: output::ExcelCellSink>(self, sink: &mut S) -> XllResult<()> {

@@ -142,7 +142,9 @@ matrix and any known unqualified combinations with the release notes.
 `just miri-cache-endpoints` checks the non-owning endpoint-resolution cache
 under both Stacked Borrows and Tree Borrows. It covers registry moves,
 destruction and replacement, clear, and separation between registry and
-endpoint types. It is also included in `just miri`.
+endpoint types. Regression fixtures also check that same-name types and
+same-address prefixes can remain resident without forcing all candidates into
+one set. It is also included in `just miri`.
 
 `just miri-cache-backends` runs the full-cache common regressions for the
 production Quick Cache policy (1 shard), additional Quick Cache configurations

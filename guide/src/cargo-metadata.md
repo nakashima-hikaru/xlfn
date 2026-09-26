@@ -146,6 +146,12 @@ Every package directory contains schema version 6 audit metadata. Its top-level 
 | `integrity`         | explicit trust-boundary statement                                                                 |
 | `files`             | relative path, byte size, and SHA-256 for every distributed file                                  |
 
+`feature_selection.resolved` comes from the selected `cdylib`'s actual Cargo
+compiler artifact, including when Cargo reuses a fresh artifact. It does not
+include features requested only by unbuilt workspace members. The lockfile
+hash is read after each target's successful build, so a multi-target package
+records the lockfile observed for each build separately.
+
 The integrity block deliberately states that hashes are **audit metadata only** and are not verified before executable sidecar code runs. Windows may load and initialize a DLL before application-level protocol or ABI checks can run. Use access-controlled installation directories and code signing for runtime trust; do not treat the JSON file as a secure loader.
 
 ## Metadata review checklist

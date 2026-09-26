@@ -8,6 +8,7 @@
 
 use std::any::TypeId;
 use std::cell::RefCell;
+use std::hash::{Hash, Hasher};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -49,22 +50,27 @@ thread_local! {
 }
 
 #[inline]
-fn set_index(registry: RegistryIdentity, id: &'static str) -> usize {
-    // Addresses select candidates only; the complete typed key and registry
+fn set_index(registry: RegistryIdentity, key: (TypeId, &'static str)) -> usize {
+    // Fixed-size metadata selects candidates only; the complete key and registry
     // identity still authorize every hit. Equal strings at different addresses
     // may miss, then resolve to the same registry-owned cache through the map.
-    // Multiplication spreads aligned and adjacent string addresses without
-    // hashing their bytes. Use u64 arithmetic on both 32- and 64-bit targets.
-    let address = id.as_ptr().addr() as u64;
-    let mixed = (address ^ registry.0).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-    (mixed >> (u64::BITS - SET_BITS)) as usize
+    // Type separates endpoints sharing an ID; length separates prefixes sharing
+    // an address. Hash only standard metadata, never application Hash callbacks
+    // or name bytes, so selection stays constant-time even for long names.
+    let mut hasher = rustc_hash::FxHasher::default();
+    key.0.hash(&mut hasher);
+    hasher.write_u64(registry.0);
+    hasher.write_usize(key.1.as_ptr().addr());
+    hasher.write_usize(key.1.len());
+    // FxHasher rotates entropy into its low bits on both 32- and 64-bit hosts.
+    (hasher.finish() as usize) & (SET_COUNT - 1)
 }
 
 pub(super) fn lookup(
     registry: RegistryIdentity,
     key: (TypeId, &'static str),
 ) -> Option<NonNull<()>> {
-    let index = set_index(registry, key.1);
+    let index = set_index(registry, key);
     ENDPOINTS
         .try_with(|cache| {
             cache.borrow().sets[index]
@@ -83,7 +89,7 @@ pub(super) fn remember(
     key: (TypeId, &'static str),
     pointer: NonNull<()>,
 ) {
-    let index = set_index(registry, key.1);
+    let index = set_index(registry, key);
     // During TLS teardown, the ordinary registry lookup remains available.
     let _ = ENDPOINTS.try_with(|cache| {
         let mut cache = cache.borrow_mut();
@@ -100,7 +106,84 @@ pub(super) fn remember(
 #[cfg(test)]
 mod tests {
     use super::super::{CacheEndpoint, CacheRegistry};
+    use std::any::TypeId;
+    use std::ptr::NonNull;
     use std::time::Duration;
+
+    fn assert_three_keys_can_remain_resident(
+        candidates: impl IntoIterator<Item = (TypeId, &'static str)>,
+    ) {
+        let registry = super::RegistryIdentity::fresh();
+        let mut occupancy = [0; super::SET_COUNT];
+        // A bounded cache permits incidental collisions. Select a fitting
+        // workload instead of requiring three hard-coded TypeIds to hash well
+        // on every compiler and target. Omitting the varied key component
+        // collapses every candidate into one two-way set and fails selection.
+        let keys: Vec<_> = candidates
+            .into_iter()
+            .filter(|key| {
+                let index = super::set_index(registry, *key);
+                if occupancy[index] == super::WAYS {
+                    return false;
+                }
+                occupancy[index] += 1;
+                true
+            })
+            .take(3)
+            .collect();
+        assert_eq!(
+            keys.len(),
+            3,
+            "distinct endpoint keys must not all collapse"
+        );
+
+        let backing = [7_u64, 11, 19];
+        let pointers = backing.each_ref().map(|value| NonNull::from(value).cast());
+        for (&key, &pointer) in keys.iter().zip(&pointers) {
+            super::remember(registry, key, pointer);
+        }
+        for _ in 0..100 {
+            for (&key, &pointer) in keys.iter().zip(&pointers) {
+                assert_eq!(super::lookup(registry, key), Some(pointer));
+            }
+        }
+        // These entries are only inspected as pointers, never dereferenced.
+        // The fresh identity is never attached to a real CacheRegistry.
+    }
+
+    #[test]
+    fn miri_same_name_distinct_types_can_remain_resident() {
+        struct Marker<const N: u8>;
+        let types = [
+            TypeId::of::<(Marker<0>, u64, u64)>(),
+            TypeId::of::<(Marker<1>, u64, u64)>(),
+            TypeId::of::<(Marker<2>, u64, u64)>(),
+            TypeId::of::<(Marker<3>, u64, u64)>(),
+            TypeId::of::<(Marker<4>, u64, u64)>(),
+            TypeId::of::<(Marker<5>, u64, u64)>(),
+            TypeId::of::<(Marker<6>, u64, u64)>(),
+            TypeId::of::<(Marker<7>, u64, u64)>(),
+            TypeId::of::<(Marker<8>, u64, u64)>(),
+            TypeId::of::<(Marker<9>, u64, u64)>(),
+            TypeId::of::<(Marker<10>, u64, u64)>(),
+            TypeId::of::<(Marker<11>, u64, u64)>(),
+            TypeId::of::<(Marker<12>, u64, u64)>(),
+            TypeId::of::<(Marker<13>, u64, u64)>(),
+            TypeId::of::<(Marker<14>, u64, u64)>(),
+            TypeId::of::<(Marker<15>, u64, u64)>(),
+        ];
+        assert_three_keys_can_remain_resident(types.map(|id| (id, "shared-id")));
+    }
+
+    #[test]
+    fn miri_same_address_distinct_prefixes_can_remain_resident() {
+        static NAME: [u8; 64] = [b'x'; 64];
+        let name = std::str::from_utf8(&NAME).unwrap();
+        let type_id = TypeId::of::<((), u64, u64)>();
+        assert_three_keys_can_remain_resident(
+            (1..=name.len()).map(|length| (type_id, &name[..length])),
+        );
+    }
 
     #[test]
     fn warm_endpoint_resolution_does_not_take_the_registry_lock() {
@@ -237,10 +320,11 @@ mod tests {
         static NAMES: [u8; 128] = [b'x'; 128];
         let registry = CacheRegistry::new(64);
         let first_name = std::str::from_utf8(&NAMES[..8]).unwrap();
-        let first_set = super::set_index(registry.identity, first_name);
+        let type_id = TypeId::of::<((), u64, u64)>();
+        let first_set = super::set_index(registry.identity, (type_id, first_name));
         let second_name = (1..=NAMES.len() - 8)
             .map(|start| std::str::from_utf8(&NAMES[start..start + 8]).unwrap())
-            .find(|name| super::set_index(registry.identity, name) != first_set)
+            .find(|name| super::set_index(registry.identity, (type_id, name)) != first_set)
             .expect("adjacent string addresses exercise different resolution sets");
         assert_eq!(first_name, second_name);
         let first = CacheEndpoint::<u64, u64>::new(first_name);

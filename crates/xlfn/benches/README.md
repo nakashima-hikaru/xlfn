@@ -351,9 +351,16 @@ including endpoint resolution and lease release. `distinct_endpoints` uses
 1/8/32 persistent workers with a separate endpoint per worker. `endpoint_cycle`
 uses one worker cycling through 1/8/16 endpoints to expose lookup cost when
 switching endpoints. The bounded resolution cache checks at most two entries
-in one of 32 sets; collisions fall back to the registry. Each batch contains 10,000
-lookups per worker. Setup, endpoint seeding, value assertions and worker warmup
-are outside measurement; worker coordination remains inside each batch.
+in one of 32 sets; collisions fall back to the registry.
+`same_id_marker_cycle` cycles through three or eight marker types sharing one
+static ID, using statically dispatched calls. `same_address_prefix_cycle` cycles
+through three slices with the same starting address and different lengths.
+These cases detect selectors that omit type or length metadata.
+
+Each batch contains 10,000 lookups per worker, except the three-marker case
+which completes 3,333 whole cycles (9,999 lookups). Throughput uses the actual
+lookup count. Setup, endpoint seeding, value assertions and worker warmup are
+outside measurement; worker coordination remains inside each batch.
 
 ```text
 cargo bench -p xlfn --features bench-internals,cache --bench cache_registry --locked

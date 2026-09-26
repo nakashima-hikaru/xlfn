@@ -1,18 +1,5 @@
 use super::*;
 
-pub(crate) fn built_library_path(
-    metadata: &ProjectMetadata,
-    target: &str,
-    profile: &ResolvedBuildProfile,
-    target_directory: &Path,
-) -> PathBuf {
-    target_directory
-        .to_path_buf()
-        .join(target)
-        .join(profile.output_directory())
-        .join(format!("{}.dll", metadata.lib_name.replace('-', "_")))
-}
-
 pub(crate) fn validate_bundle_output_names(
     bundle: &xlfn_package::ResolvedBundle,
     artifact_name: &str,

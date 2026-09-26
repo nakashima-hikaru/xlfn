@@ -173,6 +173,12 @@ pub(crate) struct SourceHandleId {
     pub(crate) sequence: u64,
 }
 
+/// Opaque identity returned by `RtdOpenContext::register_source`.
+///
+/// Copies refer to the same registered source. Registering another source
+/// creates a distinct identity, even if it has the same type or configuration.
+/// The runtime owns source storage; this handle does not extend its lifetime
+/// and cannot be used in a later add-in open generation.
 pub struct RtdSourceHandle<S: RtdSource> {
     pub(crate) id: SourceHandleId,
     _source: PhantomData<fn() -> S>,

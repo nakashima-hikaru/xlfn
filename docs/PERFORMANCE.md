@@ -88,7 +88,76 @@ cargo bench -p xlfn --features bench-internals,cache --bench cache_registry --lo
 
 Both new benchmarks are part of `just bench-ci` and `just bench-full`.
 
-## Validation and limits
+## Follow-up: typed endpoints and shared-address prefixes
+
+Re-review found that the set selector omitted type and name length. Three
+different marker types sharing one ID therefore competed for the same two
+slots, as did three prefixes of one static string. The first case produced
+30,000 misses in 30,000 warmed lookups despite ample unused storage.
+
+The selector now hashes `TypeId`, registry identity, name address, and name
+length with `FxHasher`. It hashes fixed-size metadata rather than scanning name
+bytes, and checks the full registry/type/name key before returning a pointer.
+The low bits of `finish()` select the set on both 32- and 64-bit targets.
+Capacity, replacement, ownership, and the ordinary miss path are unchanged.
+
+Two regression tests select three candidates that fit the two-way sets from a
+larger pool, avoiding dependence on the bucket placement of exactly three
+compiler-generated TypeIds. They then require repeated hits for distinct live
+pointers. Both tests were run against the old selector first and failed:
+only two candidates could fit because the omitted metadata forced every
+candidate into one set. Both are included in `just miri-cache-endpoints`.
+
+The public benchmark adds same-ID marker cycles with three/eight types and a
+three-prefix cycle. Marker calls use static dispatch. One three-marker batch
+has 9,999 lookups; other single-worker batches have 10,000. Setup, assertions,
+and startup are outside measurement; lease access/drop and worker coordination
+are inside. All nine workloads remain in `just bench-ci` and `just bench-full`.
+
+The following comparison uses the checkout based on `4871fdb`, the identical
+new fixture before/after the selector change, a dedicated release target, and
+macOS arm64 / Rust 1.98.1. Values are Criterion batch point estimates in
+microseconds. Warmup was 200 ms, measurement 1 s, with 20 samples. The corrected
+eight-marker row uses a 2 s / 30-sample follow-up because its first run had large
+outliers. No other validation commands from this task ran during timing;
+unrelated background work was not controlled.
+
+| Workload | Before | After |
+| --- | ---: | ---: |
+| Same ID, 3 marker types | 528.57 | 407.95 |
+| Same ID, 8 marker types | 526.11 | 443.03 |
+| Same address, 3 prefix lengths | 513.87 | 423.05 |
+| One worker cycling 1 endpoint | 544.84 | 422.63 |
+| One worker cycling 8 endpoints | 440.01 | 423.95 |
+| One worker cycling 16 endpoints | 439.64 | 426.94 |
+| Distinct endpoints, 1 worker | 620.85 | 441.65 |
+| Distinct endpoints, 8 workers | 1,538.5 | 1,231.8 |
+| Distinct endpoints, 32 workers | 4,786.3 | 4,362.2 |
+
+The three targeted cases improved in this local comparison, and no ordinary
+lookup regression was observed. The original single-endpoint runs had wide
+intervals, so their apparent gains are not evidence for the selector change.
+These are short local observations, not Windows/Excel speed guarantees.
+Ordinary bucket collisions can still occur; fixed capacity does not promise
+that every possible set of endpoint keys remains resident.
+
+### Follow-up validation
+
+Final workspace validation used an isolated checkout of `4871fdb` with only
+this follow-up's six changed files. Their contents were verified against the
+shared checkout; the results do not qualify other concurrent changes there.
+
+- Workspace all-feature nextest: 950 passed.
+- Workspace all-target/all-feature Clippy, formatting, and diff checks: passed.
+- `just features`: all 28 configured feature combinations passed.
+- `just miri-cache-endpoints`: all five tests passed under both Stacked Borrows
+  and Tree Borrows using pinned `nightly-2026-08-22`, on the identical endpoint
+  implementation in the shared checkout.
+- Supplemental x86-64 and i686 MSVC-target type checks passed with
+  `--all-features --features blake3/pure`. Native Windows builds and live Excel
+  execution remain unverified.
+
+## Initial correction validation and limits
 
 - Workspace all-feature nextest: 940 passed, 10 skipped.
 - Workspace all-target/all-feature Clippy: passed.

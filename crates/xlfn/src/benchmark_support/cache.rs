@@ -225,6 +225,52 @@ const REGISTRY_ENDPOINT_IDS: [&str; 32] = [
     "registry-31",
 ];
 
+struct RegistryEndpointMarker<const INDEX: usize>;
+static REGISTRY_SHARED_ID: &str = "registry-shared-id";
+
+#[inline(always)]
+fn visit_registry_marker<const INDEX: usize, const SETUP: bool>(registry: &CacheRegistry) {
+    let endpoint =
+        CacheEndpoint::<u64, u64, RegistryEndpointMarker<INDEX>>::new(REGISTRY_SHARED_ID);
+    if SETUP {
+        drop(
+            endpoint
+                .get_or_try_insert(
+                    registry,
+                    HOT_KEY,
+                    |_| ENTRY_WEIGHT as usize,
+                    || Ok(INDEX as u64),
+                )
+                .expect("registry marker benchmark warm seed failed"),
+        );
+    }
+    let lease = endpoint
+        .get(registry, &HOT_KEY)
+        .expect("registry marker benchmark endpoint resolution failed")
+        .expect("registry marker benchmark warm hit failed");
+    if SETUP {
+        assert_eq!(*lease, INDEX as u64);
+    } else {
+        std::hint::black_box(&*lease);
+    }
+}
+
+#[inline(always)]
+fn visit_registry_markers<const COUNT: usize, const SETUP: bool>(registry: &CacheRegistry) {
+    // Keep the different endpoint types statically selected. Neither the
+    // measured cycle nor its individual gets use function-pointer dispatch.
+    visit_registry_marker::<0, SETUP>(registry);
+    visit_registry_marker::<1, SETUP>(registry);
+    visit_registry_marker::<2, SETUP>(registry);
+    if COUNT == 8 {
+        visit_registry_marker::<3, SETUP>(registry);
+        visit_registry_marker::<4, SETUP>(registry);
+        visit_registry_marker::<5, SETUP>(registry);
+        visit_registry_marker::<6, SETUP>(registry);
+        visit_registry_marker::<7, SETUP>(registry);
+    }
+}
+
 /// Measures the public endpoint API, including registry resolution and leases.
 /// Workers retain their thread-local resolution cache between measured batches.
 pub struct RegistryCacheBenchmark {
@@ -243,20 +289,74 @@ impl RegistryCacheBenchmark {
         Self::new(1, endpoint_count, iterations)
     }
 
+    /// One worker cycles through three or eight marker types sharing one ID.
+    /// The lookup count must contain a whole number of marker cycles.
+    pub fn same_id_marker_cycle(marker_count: usize, iterations: usize) -> Self {
+        match marker_count {
+            3 => Self::marker_cycle::<3>(iterations),
+            8 => Self::marker_cycle::<8>(iterations),
+            _ => panic!("registry marker benchmark supports three or eight marker types"),
+        }
+    }
+
+    fn marker_cycle<const COUNT: usize>(iterations: usize) -> Self {
+        assert!(iterations != 0 && iterations.is_multiple_of(COUNT));
+        let registry = Arc::new(CacheRegistry::new(LOOKUP_WEIGHT_BUDGET));
+        let workers = WorkerPool::new(1, move |_, receiver, done| {
+            // Seed and verify on the measured worker, warming its TLS as well.
+            visit_registry_markers::<COUNT, true>(&registry);
+            while receiver.recv().is_ok() {
+                for _ in 0..iterations / COUNT {
+                    visit_registry_markers::<COUNT, false>(&registry);
+                }
+                done.send(())
+                    .expect("registry marker benchmark driver received completion signal");
+            }
+        });
+        let benchmark = Self {
+            workers,
+            total_iterations: iterations,
+        };
+        benchmark.run();
+        benchmark
+    }
+
+    /// Distinct names share one starting address but have different lengths.
+    pub fn same_address_prefix_cycle(iterations: usize) -> Self {
+        const PREFIX: &str = "registry-prefix-endpoint";
+        Self::with_ids(1, 3, iterations, &[&PREFIX[..8], &PREFIX[..15], PREFIX])
+    }
+
     fn new(worker_count: usize, endpoints_per_worker: usize, iterations_per_worker: usize) -> Self {
+        let endpoint_count = worker_count
+            .checked_mul(endpoints_per_worker)
+            .expect("registry benchmark endpoint count fits usize");
+        assert!(endpoint_count <= REGISTRY_ENDPOINT_IDS.len());
+        Self::with_ids(
+            worker_count,
+            endpoints_per_worker,
+            iterations_per_worker,
+            &REGISTRY_ENDPOINT_IDS[..endpoint_count],
+        )
+    }
+
+    fn with_ids(
+        worker_count: usize,
+        endpoints_per_worker: usize,
+        iterations_per_worker: usize,
+        ids: &[&'static str],
+    ) -> Self {
         assert!(worker_count != 0);
         assert!(endpoints_per_worker != 0);
         assert!(iterations_per_worker != 0);
         let endpoint_count = worker_count
             .checked_mul(endpoints_per_worker)
             .expect("registry benchmark endpoint count fits usize");
-        assert!(endpoint_count <= REGISTRY_ENDPOINT_IDS.len());
+        assert_eq!(endpoint_count, ids.len());
 
         let registry = Arc::new(CacheRegistry::new(LOOKUP_WEIGHT_BUDGET));
-        let endpoints: Vec<CacheEndpoint<u64, u64>> = REGISTRY_ENDPOINT_IDS[..endpoint_count]
-            .iter()
-            .map(|id| CacheEndpoint::new(id))
-            .collect();
+        let endpoints: Vec<CacheEndpoint<u64, u64>> =
+            ids.iter().map(|id| CacheEndpoint::new(id)).collect();
         for (value, endpoint) in endpoints.iter().enumerate() {
             drop(
                 endpoint

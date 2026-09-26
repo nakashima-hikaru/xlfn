@@ -1,109 +1,81 @@
 # 1.0 release readiness
 
-Assessment date: 2026-09-12. Source base: `4604db3` plus the preparation changes
-in this working tree. All Cargo.toml versions remain unchanged; no crate has
-been published by this preparation.
+Assessment date: 2026-09-26. Source base: `4871fdb` plus the preparation
+changes in this working tree. Package version numbers are unchanged and no
+publication has been performed.
 
-**Decision: hold publication pending final Windows CI and real-Excel
-qualification.** The code and release checks have been prepared for review,
-but this record does not certify a successful 1.0 release. Use the
-[release procedure](RELEASING.md) to close the remaining gates and record the
-final candidate commit and artifact digests.
+**Decision: hold publication.** Final-candidate Windows CI, real-Excel
+qualification, controlled performance qualification, and release-version
+selection still need evidence. Local checks prepare the source for that
+decision; they do not certify a 1.0 release.
 
-## Scope prepared for 1.0
+The [compatibility policy](../guide/src/compatibility.md) defines the intended
+stable application contract. The [release procedure](RELEASING.md) describes
+how to collect evidence for an exact candidate. The
+[2026-09-12 assessment](archive/release-readiness/2026-09-12.md) is historical
+evidence, not a current-candidate pass.
 
-The [compatibility policy](../guide/src/compatibility.md) now states the proposed
-stable facade, extension-trait and feature contracts, experimental exclusions,
-minimum-toolchain policy, and source-versus-workbook compatibility boundaries.
-The implementation crates retain an independent pre-1.0 version domain.
+## Preparation in this revision
 
-The preparation fixes these concrete issues:
-
-- `XlValueRef` no longer publicly constructs or exposes raw `XLOPER12` values;
-  custom converters use the safe value API. Compile-fail coverage protects the
-  facade boundary. Code calling the former raw methods must migrate before 1.0.
-- Borrowed arrays validate cell type tags before handing out infallible value
-  views. This adds a linear tag scan; string and other payload conversion is
-  still lazy and allocation-free until requested.
-- `ExcelEnum` rejects names containing NUL or exceeding Excel's UTF-16 string
-  limit during macro expansion, rather than accepting an unusable output name.
-- CLI metadata rejects an incorrectly typed `xlfn` table or `artifact-name`
-  instead of silently choosing defaults. The `test` and `bench` profiles find
-  artifacts in Cargo's actual `debug` and `release` directories.
-- Bundle paths reject embedded and trailing `.` components, as required by
-  the documented path policy.
-- All seven publishable crates include README and canonical MIT/Apache license
-  texts. The internal kernel crate now has its own README. The
-  `release-metadata` gate checks these files, license drift, and exact internal
-  dependency versions, with six regression tests.
-- CI verifies crate archives on Linux and both Windows targets and rejects
-  rustdoc warnings. `just publish-check` now delegates to `cargo package` and
-  cannot invoke publication.
-- Feature documentation includes `handles` and `rtd`, explains their
-  independence, and corrects the hidden macro-support path. Maintainer links
-  point to existing evidence and are included in guide link validation.
-
-## Verification evidence
-
-The local host is Apple Silicon macOS with Rust `1.98.1`. Results below apply
-to preparation checks, not to execution inside Excel. Final results are
-recorded after the implementation changes; a clean candidate must repeat CI.
-
-| Gate | Result | Evidence and limits |
+| Contract | Preparation | Acceptance evidence |
 | --- | --- | --- |
-| Workspace tests, all features | Pass | 881 passed, 10 ignored; 65 compile-pass/fail fixtures within the integration tests; no runnable doc tests |
-| Isolated CI test runner | Pass | `cargo nextest run --profile ci`: 881 passed, 10 skipped |
-| Default and feature combinations | Pass | Separate core/handles/async/RTD test runs including compile contracts; cargo-hack depth-2 powerset, 36 configurations |
-| Clippy, all targets/features, warnings denied | Pass | Repeated after all source changes |
-| Dependency audit | Pass | Advisories, licenses, bans, sources checked with cargo-deny |
-| API compatibility audit | Pass with limits | `xlfn-common`: 196 checks passed; `0.2.0` libraries skip lints against `0.1.0`; macros/CLI not covered |
-| API documentation | Pass | Strict rustdoc on host and Windows x64 target |
-| Crate archive verification | Pass, working tree | Seven publishable crates built after source/license changes with `cargo package --allow-dirty`; clean candidate rerun required |
-| Windows source checking | Pass | Workspace, all features, both MSVC targets; no linking or Windows execution |
-| Standalone consumers on the host | Pass | Locked checks for basic-xll, rtd-source, and xlfn-e2e-fixture on macOS |
-| Windows all-target check on macOS | Environment limited | Criterion's C dependency requires Windows `malloc.h`; use Windows CI for tests/benches |
-| Standalone consumers on Windows targets | Environment limited | Fresh basic-example build requires the unavailable MSVC `ml64.exe`; Windows consumer checks remain a CI gate |
-| Generated Windows bindings | Pass | Regenerated; tracked bindings unchanged |
-| Lean models and four checker executables | Pass | `lake build` plus explicit checker builds |
-| Rust-to-Lean replay and dedicated handle model | Pass | Six ignored replay tests and one ignored Shuttle test passed; ten Lean fixtures accepted/rejected as expected |
-| Miri | Pass with limits | 76 tests across kernel/handles/async/RTD, pinned `nightly-2026-08-22`; dependency provenance warnings described below |
-| Formatting, panic inventory, metadata, guide | Pass | Formatting/whitespace, 46 reviewed panic references, 11 checker tests, metadata check, mdBook build, 29 guide chapters and maintainer links |
-| Borrowed-array benchmark smoke | Completed | Existing raw-identity cases for 100/1,000/10,000 string cells ran; not a controlled before/after comparison |
+| Independent release domains | Every member declares its current version explicitly; the facade, raw ABI, packaging API, and CLI no longer inherit a shared version | Release-metadata regression rejects version inheritance for publishable crates; resolved package versions remain unchanged |
+| Supported feature set | The documented all-capabilities dependency includes `cache` together with `async`, `handles`, and `rtd` | Feature combinations and guide checks |
+| Configuration API | `AsyncConfig` is the concrete type; redundant runtime configuration aliases and setters are removed | External consumer tests cover const construction, feature gating and combined configuration; migration notes identify replacements |
+| Numerical output | Scalar, collection, builder and custom-converter outputs share the finite-number check and `#NUM!` error | Regressions cover NaN and both infinities across output shapes, including builder recovery after rejection |
+| Reference extensions | Generated wrappers dispatch to the declared `FromExcelReference` type; raw admission errors retain the argument name | Owned and borrowed downstream implementations compile; reference-based new-handle creation remains rejected |
+| RTD extensions | Candidate conversion, publication validation and source-handle lifetime are documented separately | Custom converters cannot publish non-finite numbers or strings exceeding the UTF-16 limit; a valid value can follow rejection |
+| Cache callbacks | Key identity and callback reentry restrictions are explicit, including their distinction from deferred destruction | Public Rust documentation and the caching guide agree with the lookup, initialization and reclamation paths |
+| Build provenance | Package manifests take the library path and enabled features from the selected Cargo compiler artifact, and hash the lockfile after each build | A multi-member workspace regression distinguishes metadata feature unification from actual package build features, including fresh artifacts and lockfile updates |
 
-Seven of the ten normally ignored tests were run separately as shown above;
-the other three are manual performance measurements. Miri emitted
-integer-to-pointer provenance warnings in `parking_lot_core` and
-`crossbeam-epoch`. They did not fail the configured tests, but mean the run
-must not be described as strict-provenance coverage of those dependencies.
+This revision builds on the committed corrections for initialization failure
+quarantine, custom collection conversions, content-based borrowed-string
+equality, cache registration cleanup, and deferred key/value destruction.
+Their regression tests remain part of the workspace suite. They do not remove
+the explicit application quiescence contract for physical DLL unloading.
 
-The borrowed-array raw-identity smoke run measured approximately 4.44 µs,
-53.7 µs, and 422.6 µs for 100, 1,000, and 10,000 string cells respectively.
-These include identity hashing and ran alongside other checks on the host;
-they do not isolate tag validation or establish a release performance budget.
-The exact command was `cargo bench --package xlfn --bench argument_ingress
---features bench-internals --locked --
-'^argument_ingress/matrix_string_(100|1k|10k)/raw_identity$'`.
+## Local verification
 
-The previously recorded remote CI at
-[`96d6f56`](https://github.com/nakashima-hikaru/xlfn/actions/runs/34663909108)
-failed in three jobs because the standalone RTD fixture called
-`topic.parts().first()`. The source base already replaced that call with
-`.next()`. This explains that failure but is not a passing CI result for the
-current candidate. No remote workflow was dispatched during this preparation.
+The local environment is Apple Silicon macOS with Rust `1.98.1`. These are
+working-tree results, including the concurrent cache endpoint/benchmark work
+present during validation. They are not evidence for a clean release commit.
+
+| Check | Result |
+| --- | --- |
+| Workspace all-feature tests, serialized libtest | 964 passed, 0 failed, 11 ignored across 20 suites, including doctests and downstream compile contracts |
+| Strict Clippy, workspace/all targets/all features | Passed with `-D warnings` |
+| Feature combinations | All 28 checks from `just features` passed |
+| Strict workspace rustdoc | Passed with `RUSTDOCFLAGS="-D warnings"` |
+| Standalone consumers | `basic-xll`, `rtd-source`, and `xlfn-e2e-fixture` passed host `cargo check --locked`; no Windows DLL execution is implied |
+| Release metadata | Checker and 7 regression tests passed; all 8 workspace member versions match the source base |
+| Package archives | All 7 publishable crates packaged and rebuilt with `--all-features --locked --allow-dirty`; archived README/licenses match their originals, normalized versions and exact internal dependency pins are correct, and path/workspace dependency declarations are removed |
+| Panic boundaries | 50 reviewed direct references; checker and 5 regression tests passed |
+| Dependency policy | `cargo deny check` passed advisories, bans, licenses and sources |
+| User guide | All 29 chapters passed validation; mdBook built successfully |
+| Formatting and patch hygiene | `cargo fmt --all -- --check` and `git diff --check` passed |
+
+Ignored tests are not counted as passes. The dedicated Miri, formal proof and
+ignored model/replay suites have not been rerun for this preparation; earlier
+results do not qualify the final candidate. Working-tree archive verification
+must also be repeated on the selected clean release candidate.
 
 ## Remaining release gates
 
 | Required evidence | Status | Completion criterion |
 | --- | --- | --- |
-| Final clean candidate and version plan | Deferred by request | Select crate versions and update dependency constraints/consumer locks in an authorized release change; retain candidate commit |
-| Exact-candidate Windows CI | Missing | Both architectures, archive builds, SDK ABI, linked XLL validation, Windows traces, and required quality jobs pass |
-| Exact-candidate real-Excel matrix | Missing | Record both bitnesses, supported Windows/Excel builds, feature results, and package digests using the testing guide |
-| Performance qualification | Smoke only | Review controlled candidate/baseline benchmark results, including borrowed-array admission's new linear tag validation |
-| Registry and post-release validation | Not attempted | Check version availability/ownership when release is authorized, then validate registry-based consumers after publication |
+| Final clean candidate and independent versions | Not selected | Review intended versions per crate, exact dependency pins and consumer locks; record the clean source commit |
+| Windows CI for that candidate | Missing | Both MSVC architectures, same-process tests, standalone consumers, archive builds, SDK ABI, linked XLL checks and formal trace replay pass |
+| Real-Excel qualification for the same packages | Missing | Record package hashes, Windows/Excel versions and bitness, locale, operator/date, feature behavior and unload/reload results using the testing guide |
+| Controlled performance qualification | Incomplete | Review candidate/baseline results on the deployment workload, including conversion, RTD, handles and cache pressure; local microbenchmarks alone do not qualify Excel performance |
+| Stable API baseline and release notes | Pending release selection | Review Rust and macro contracts, CLI/package behavior and workbook-visible changes; record the first stable source as the future compatibility baseline |
+| Registry and post-release checks | Not attempted | Once publication is authorized, verify ownership and version availability, publish in dependency order, and validate registry-based consumers |
 
-No completed real-Excel execution record for this candidate was available in
-the repository. Consequently Windows/Excel environment cells remain
-**unqualified**. Do not claim tested Windows 10/11 and Excel build/channel
-combinations until their evidence is attached. Once the required evidence is
-complete, replace this hold decision with the reviewed decision, candidate
-commit, and links to its immutable results.
+`cargo-semver-checks` against `0.1.0` skips compatibility lints for the current
+`0.2.0` packages. A successful historical comparison is not evidence that their
+future 1.0 contract is stable. Macro behavior, extension traits, package schema,
+and workbook-visible errors require their own contract tests and review.
+
+No completed real-Excel record exists in this preparation. Windows/Excel
+environment cells remain **unqualified** until linked evidence identifies the
+same candidate and package digests. Cross-target Rust checking and PE inspection
+do not replace native Windows or Excel execution.

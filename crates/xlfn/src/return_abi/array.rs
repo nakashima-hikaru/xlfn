@@ -94,9 +94,7 @@ impl XlArrayBuilder {
     }
 
     pub fn push_f64(&mut self, value: f64) -> XllResult<()> {
-        if !value.is_finite() {
-            return Err(XllError::input("<array output>", InputError::NonFinite));
-        }
+        let value = crate::value::output::validate_number(value)?;
         self.push_oper(XLOPER12::number(value))
     }
 
@@ -166,10 +164,7 @@ impl XlArrayBuilder {
 
     pub(crate) fn push_cell(&mut self, value: ExcelCellOutput) -> XllResult<()> {
         match value {
-            ExcelCellOutput::Number(value) if value.is_finite() => {
-                self.push_oper(XLOPER12::number(value))
-            }
-            ExcelCellOutput::Number(_) => Err(XllError::input("<return>", InputError::NonFinite)),
+            ExcelCellOutput::Number(value) => self.push_f64(value),
             ExcelCellOutput::Boolean(value) => self.push_oper(XLOPER12::boolean(value)),
             ExcelCellOutput::Error(error) => self.push_oper(XLOPER12::error(error.code())),
             ExcelCellOutput::String(value) => self.push_string(value),

@@ -22,7 +22,8 @@ exclude = [
 resolver = "3"
 
 [workspace.package]
-version = "0.2.0"
+# Package versions are explicit in each manifest: the facade, raw ABI,
+# packaging library and CLI have independent release contracts.
 edition = "2024"
 rust-version = "1.98.1"
 license = "MIT OR Apache-2.0"

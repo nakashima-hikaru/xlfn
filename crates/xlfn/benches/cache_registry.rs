@@ -23,6 +23,21 @@ fn cache_registry_benchmarks(c: &mut Criterion) {
         });
     }
 
+    for markers in [3, 8] {
+        let iterations = ITERATIONS_PER_WORKER / markers * markers;
+        let benchmark = RegistryCacheBenchmark::same_id_marker_cycle(markers, iterations);
+        group.throughput(Throughput::Elements(benchmark.total_iterations() as u64));
+        group.bench_function(BenchmarkId::new("same_id_marker_cycle", markers), |b| {
+            b.iter(|| benchmark.run());
+        });
+    }
+
+    let benchmark = RegistryCacheBenchmark::same_address_prefix_cycle(ITERATIONS_PER_WORKER);
+    group.throughput(Throughput::Elements(benchmark.total_iterations() as u64));
+    group.bench_function(BenchmarkId::new("same_address_prefix_cycle", 3), |b| {
+        b.iter(|| benchmark.run());
+    });
+
     group.finish();
 }
 

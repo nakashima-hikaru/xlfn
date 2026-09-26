@@ -69,7 +69,7 @@ The `xlfn` crate has no default features.
 other's public API. Async handle inputs need both `async` and `handles`.
 `refinement` and `bench-internals` are repository verification facilities,
 outside the supported application API. To use all supported capabilities,
-declare `features = ["async", "handles", "rtd"]` on the `xlfn` dependency.
+declare `features = ["async", "cache", "handles", "rtd"]` on the `xlfn` dependency.
 
 Examples:
 
@@ -128,6 +128,32 @@ Use `my_xlfn::prelude::*` with this declaration. When accessing the framework th
 ## Source and binary compatibility
 
 The `0.x` line is pre-1.0. Treat public Rust APIs, macro diagnostics, package metadata, and generated artifacts as subject to intentional breaking change between minor releases. Pin versions for production builds and review release notes before upgrading.
+
+### Pre-1.0 migration notes
+
+The current preparation keeps package version numbers unchanged. Applications
+moving to this source revision should make these configuration changes:
+
+| Previous API | Current API |
+| --- | --- |
+| `AsyncRuntimeConfig` | `AsyncConfig` |
+| `.with_handle_config(config)` | `.with_handles(config)` |
+| `.with_rtd_limits(limits)` | `.with_rtd(RtdConfig::new().with_limits(limits))` |
+| `.with_async_worker_count(count)` | `.with_async(AsyncConfig::new().with_worker_count(count))` |
+
+The old names are removed. Each capability is configured through its own
+configuration type and attached to `RuntimeConfig` with the corresponding
+`with_*` method.
+
+Non-finite numerical results now consistently produce `#NUM!`, including
+matrix, row, column, array-builder and custom `IntoExcel` outputs. These paths
+previously could report `#VALUE!` while a scalar `f64` reported `#NUM!`. Review
+workbook formulas that distinguish these errors. Input validation is unchanged.
+
+`#[excel_arg(reference)]` now dispatches to the declared argument type's
+`FromExcelReference` implementation, allowing both owned and borrowed custom
+conversions. Reference arguments still cannot participate in a function that
+creates a new handle; custom conversion does not relax that identity rule.
 
 ### Contract intended for 1.0
 

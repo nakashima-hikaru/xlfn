@@ -1,0 +1,28 @@
+error[E0277]: `Dataset` cannot be returned from a macro-sheet Excel function
+  --> tests/ui/fail/handle_return_custom_reference.rs:26:62
+   |
+26 | fn bad(#[excel_arg(reference)] _reference: Reference<'_>) -> Dataset {
+   |                                                              ^^^^^^^ `Dataset` is not a valid return type for a macro-sheet function
+   |
+help: the trait `IntoExcel` is not implemented for `Dataset`
+  --> tests/ui/fail/handle_return_custom_reference.rs:6:1
+   |
+ 6 | struct Dataset;
+   | ^^^^^^^^^^^^^^
+   = note: return a type that implements `IntoExcel`, or implement `IntoExcel` for `Dataset`
+   = help: the following other types implement trait `IntoExcel`:
+             &str
+             ExcelCellOutput
+             ExcelErrorValue
+             ExcelSerialDate
+             bool
+             f64
+             i32
+             i64
+             std::string::String
+   = note: required for `Dataset` to implement `xlfn::call_return::traits::MacroSheetReturn`
+note: required by a bound in `xlfn::call_return::traits::assert_macro_sheet_return`
+  --> src/call_return/traits.rs
+   |
+   | pub fn assert_macro_sheet_return<T: MacroSheetReturn>() {}
+   |                                     ^^^^^^^^^^^^^^^^ required by this bound in `assert_macro_sheet_return`

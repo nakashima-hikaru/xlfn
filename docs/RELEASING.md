@@ -12,7 +12,7 @@ of each crate before collecting final release evidence.
 
 | Crate | Current version | Contract to review |
 | --- | --- | --- |
-| `xlfn` | `0.2.0` | Documented facade and macros; core, async, handles, RTD |
+| `xlfn` | `0.2.0` | Documented facade and macros; core, async, cache, handles, RTD |
 | `cargo-xlfn` | `0.2.0` | CLI flags, defaults, exit status, metadata, package behavior |
 | `xlfn-package` | `0.2.0` | Programmatic packaging API and build-manifest schema |
 | `xlfn-sys` | `0.2.0` | Raw ABI crate; independently versioned, not the safe facade |
@@ -20,15 +20,15 @@ of each crate before collecting final release evidence.
 | `xlfn-macros` | `0.1.0` | Internal expansion implementation, accessed through `xlfn` |
 | `xlfn-kernel` | `0.1.0` | Internal ownership and concurrency primitives |
 
-The first four crates currently inherit one workspace version. An eventual
-workspace version edit would affect all four. Decide their release versions
-explicitly; the facade's 1.0 status must not accidentally announce a stable
-standalone contract for another crate. Keep implementation crates in their
-independent version domain. Update every affected exact path-dependency version
+Every crate declares its version explicitly. The release-metadata gate rejects
+version inheritance for publishable crates, so changing the facade's version
+cannot silently stabilize the raw ABI, packaging library, or CLI. Decide their
+release versions independently and keep implementation crates in their own
+version domain. Update every affected exact path-dependency version
 and standalone consumer lockfile together. A changed crate that is already
 published needs a fresh version even when it is an implementation detail.
 
-No version edits are part of the current preparation. The version-selection,
+No version-number changes are part of the current preparation. The version-selection,
 lockfile refresh, README installation examples, security support policy, and
 final clean verification belong to a separately authorized release change.
 
@@ -59,9 +59,9 @@ python3 -B guide/check.py
 ```
 
 `just check` includes archive verification and strict rustdoc. The archive
-check first runs `just release-metadata` to verify README/license presence,
-license agreement with the repository originals, and exact internal version
-pins. Its regression tests run as part of the same recipe. The archive
+check first runs `just release-metadata` to verify independent package versions,
+README/license presence, license agreement with the repository originals, and
+exact internal version pins. Its regression tests run as part of the same recipe. The archive
 check is `cargo package`, with the non-publishable bindings generator excluded;
 it does not upload anything. It verifies normalized manifests and builds the
 packaged source. Do not use `--no-verify` for release evidence. Review the seven

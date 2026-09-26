@@ -493,6 +493,62 @@ mod tests {
         assert_eq!(channel.receive(), None);
     }
 
+    #[derive(Clone)]
+    struct UnvalidatedCandidate(RtdValue);
+
+    impl IntoRtdValue for UnvalidatedCandidate {
+        fn into_rtd_value(self) -> XllResult<RtdValue> {
+            Ok(self.0)
+        }
+    }
+
+    #[test]
+    fn custom_conversion_cannot_bypass_publication_validation() {
+        let channel = Arc::new(Channel::new(capacity()));
+        let sender = Channel::sender::<UnvalidatedCandidate>(&channel);
+        let (_runtime, server, sink) = crate::subscription::tests::connected_sink::<
+            UnvalidatedCandidate,
+        >(None, "custom-value-validation");
+        for invalid in [
+            RtdValue::Number(f64::NAN),
+            RtdValue::Number(f64::INFINITY),
+            RtdValue::Number(f64::NEG_INFINITY),
+            RtdValue::String("a".repeat(32_768)),
+            RtdValue::String("😀".repeat(16_384)),
+        ] {
+            assert!(
+                sender
+                    .try_send(UnvalidatedCandidate(invalid.clone()))
+                    .is_err()
+            );
+            assert!(sink.publish(UnvalidatedCandidate(invalid)).is_err());
+        }
+        assert!(channel.state.lock().values.is_empty());
+        let rejected = server.begin_refresh().unwrap();
+        assert!(rejected.updates.is_empty());
+        rejected.complete(RefreshOutcome::Delivered).unwrap();
+
+        // The boundary counts UTF-16 units rather than UTF-8 bytes, and a
+        // rejected candidate must not prevent the next valid publication.
+        let valid = format!("{}a", "😀".repeat(16_383));
+        sender
+            .try_send(UnvalidatedCandidate(RtdValue::String(valid.clone())))
+            .unwrap();
+        sink.publish(UnvalidatedCandidate(RtdValue::String(valid.clone())))
+            .unwrap();
+        assert_eq!(
+            channel.receive(),
+            Some(StoredRtdValue::String(valid.clone().into_boxed_str())),
+        );
+        let accepted = server.begin_refresh().unwrap();
+        assert_eq!(accepted.updates.len(), 1);
+        assert_eq!(
+            accepted.updates[0].value,
+            StoredRtdValue::String(valid.into_boxed_str()),
+        );
+        accepted.complete(RefreshOutcome::Delivered).unwrap();
+    }
+
     #[test]
     fn data_wakeup_reaches_publisher_with_cancellation_waiters() {
         let channel = Arc::new(Channel::new(capacity()));

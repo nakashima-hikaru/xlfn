@@ -933,6 +933,9 @@ fn base_cargo_command_does_not_rewrite_rustflags() {
 #[test]
 fn configure_build_sets_target_dir_and_build_dir() {
     let metadata = ProjectMetadata {
+        package_id: cargo_metadata::PackageId {
+            repr: "test-pkg".into(),
+        },
         package_name: "test-pkg".into(),
         package_version: "0.1.0".into(),
         lib_name: "test_pkg".into(),
@@ -941,8 +944,7 @@ fn configure_build_sets_target_dir_and_build_dir() {
         manifest_directory: PathBuf::from("."),
         target_directory: PathBuf::from("target"),
         crt: crt::ResolvedCrtPolicy::resolve(Some(crt::CrtPolicy::Static), None),
-        resolved_features: Vec::new(),
-        lockfile_sha256: None,
+        lockfile_path: PathBuf::from("Cargo.lock"),
         bundle: None,
     };
     let mut command = cargo_command();

@@ -22,7 +22,7 @@ kernel = { version = "=0.1.0", path = "crates/kernel" }
         self.write("crates/api/Cargo.toml", '''
 [package]
 name = "api"
-version.workspace = true
+version = "0.2.0"
 publish.workspace = true
 [dependencies]
 kernel.workspace = true
@@ -56,6 +56,17 @@ publish = false
 
     def test_valid_mixed_versions_and_unpublished_tool(self):
         self.assertEqual(check(self.root), [])
+
+    def test_publishable_package_cannot_inherit_a_shared_version(self):
+        path = self.root / "crates/api/Cargo.toml"
+        self.write(
+            "crates/api/Cargo.toml",
+            path.read_text().replace('version = "0.2.0"', 'version.workspace = true'),
+        )
+        self.assertEqual(check(self.root), [
+            "crates/api/Cargo.toml: publishable package needs an explicit version; "
+            "independent release contracts must not inherit workspace.package.version"
+        ])
 
     def test_missing_readme_and_each_license_are_reported(self):
         for name in ("README.md", *LICENSES):

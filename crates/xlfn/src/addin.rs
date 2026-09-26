@@ -256,7 +256,7 @@ pub struct RuntimeConfig {
     #[cfg(feature = "handles")]
     handles: HandleConfig,
     #[cfg(feature = "async")]
-    async_runtime: AsyncRuntimeConfig,
+    async_runtime: AsyncConfig,
 }
 
 impl RuntimeConfig {
@@ -268,7 +268,7 @@ impl RuntimeConfig {
             #[cfg(feature = "handles")]
             handles: HandleConfig::new(),
             #[cfg(feature = "async")]
-            async_runtime: AsyncRuntimeConfig::new(),
+            async_runtime: AsyncConfig::new(),
         }
     }
 
@@ -290,27 +290,6 @@ impl RuntimeConfig {
     #[must_use]
     pub const fn with_async(mut self, async_runtime: AsyncConfig) -> Self {
         self.async_runtime = async_runtime;
-        self
-    }
-
-    #[cfg(feature = "rtd")]
-    #[must_use]
-    pub const fn with_rtd_limits(mut self, limits: RtdLimits) -> Self {
-        self.rtd = self.rtd.with_limits(limits);
-        self
-    }
-
-    #[cfg(feature = "handles")]
-    #[must_use]
-    pub const fn with_handle_config(mut self, handles: HandleConfig) -> Self {
-        self.handles = handles;
-        self
-    }
-
-    #[cfg(feature = "async")]
-    #[must_use]
-    pub const fn with_async_worker_count(mut self, worker_count: AsyncWorkerCount) -> Self {
-        self.async_runtime = self.async_runtime.with_worker_count(worker_count);
         self
     }
 
@@ -411,12 +390,12 @@ impl TryFrom<usize> for AsyncWorkerCount {
 /// Async worker portion of [`RuntimeConfig`].
 #[cfg(feature = "async")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AsyncRuntimeConfig {
+pub struct AsyncConfig {
     worker_count: AsyncWorkerCount,
 }
 
 #[cfg(feature = "async")]
-impl AsyncRuntimeConfig {
+impl AsyncConfig {
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -436,14 +415,11 @@ impl AsyncRuntimeConfig {
 }
 
 #[cfg(feature = "async")]
-impl Default for AsyncRuntimeConfig {
+impl Default for AsyncConfig {
     fn default() -> Self {
         Self::new()
     }
 }
-
-#[cfg(feature = "async")]
-pub type AsyncConfig = AsyncRuntimeConfig;
 
 /// The result of a successful [`Addin::open`] transaction.
 pub struct Opened<S, L = (), U = ()> {
