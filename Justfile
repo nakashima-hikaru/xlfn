@@ -62,6 +62,13 @@ miri:
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features handles --lib --locked -- miri_
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features async --lib --locked -- miri_
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features rtd --lib --locked -- miri_
+    just miri-cache-endpoints
+
+# Non-owning TLS endpoint references must survive owner moves and reject reuse
+# after owner destruction under both aliasing models.
+miri-cache-endpoints:
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features cache --lib --locked -- cache::endpoint_cache::tests::miri_
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-tree-borrows" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features cache --lib --locked -- cache::endpoint_cache::tests::miri_
 
 # Verus formal verification of concurrent kernel primitives.
 verus:
@@ -183,6 +190,8 @@ bench-ci:
     just bench-one-filter rtd_publish "^rtd_publish/(number|string|string_8k)/(changing|same_value)\z" "bench-internals rtd"
     just bench-one-filter rtd_refresh "^rtd_refresh/(number/end_to_end/dense|short_string/end_to_end/dense|string_8k/(collection|completion|end_to_end)/dense)\z" "bench-internals rtd"
     just bench-one-filter handle_call_resolution "^handle_call_resolution/handles/(1|8)\z"
+    just bench-one cache_registry "bench-internals cache"
+    just bench-one value_boundary_allocations "bench-internals async"
 
 # Pull request benchmark gate (aliases bench-ci to ensure identical thresholds and history).
 bench-pr: bench-ci
@@ -212,6 +221,8 @@ bench-full:
     just bench-one rtd_publish "bench-internals rtd"
     just bench-one rtd_refresh "bench-internals rtd"
     just bench-one handle_call_resolution
+    just bench-one cache_registry "bench-internals cache"
+    just bench-one value_boundary_allocations "bench-internals async"
 
 bench-one name features="bench-internals":
     cargo bench --package xlfn --bench {{name}} --features "{{features}}" --locked
@@ -226,5 +237,3 @@ bench-check:
 miri-cache-backends:
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="" cargo +{{miri-toolchain}} miri test -p xlfn --features "cache bench-internals" --lib cache::backend_tests --locked
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-tree-borrows" cargo +{{miri-toolchain}} miri test -p xlfn --features "cache bench-internals" --lib cache::backend_tests --locked
-
-

@@ -137,7 +137,7 @@ pub(crate) fn publishing_source<T: IntoRtdValue + Clone + Send + Sync + 'static>
     (fixture.finish(), source, slot, disconnected)
 }
 
-fn connected_sink<T: IntoRtdValue + Clone + Send + Sync + 'static>(
+pub(crate) fn connected_sink<T: IntoRtdValue + Clone + Send + Sync + 'static>(
     initial: Option<T>,
     topic: &str,
 ) -> (

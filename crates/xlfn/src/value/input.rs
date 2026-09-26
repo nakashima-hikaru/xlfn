@@ -481,10 +481,11 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
         })?;
         let call = &self.call;
         M::with_argument(fingerprint, index, argument, |identity| {
-            let token = call
-                .scratch()
-                .decode_utf16(value.utf16(argument)?, argument)?;
-            let pending = call.resolve_pending_handle::<T>(token, generation)?;
+            let pending = crate::handle::with_utf16_handle_token(
+                value.utf16(argument)?,
+                argument,
+                |token| call.resolve_pending_handle::<T>(token, generation),
+            )?;
             M::u64(identity, pending.object_id.session());
             M::u64(identity, pending.object_id.sequence());
             Ok(pending)

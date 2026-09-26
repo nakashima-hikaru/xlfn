@@ -63,7 +63,7 @@ struct State {
 
 fn build_state() -> State {
     State {
-        caches: CacheRegistry::new(),
+        caches: CacheRegistry::new(64 * 1024 * 1024),
     }
 }
 
@@ -93,6 +93,11 @@ fn cached_dataset<'a>(state: &'a State, key: DatasetKey) -> XllResult<CacheLease
 `CacheEndpoint<K, V, Marker = ()>` is a `'static` descriptor that holds no references to `CacheRegistry`, completely avoiding self-referential lifetimes in `SharedState`.
 
 An endpoint identity includes its marker type, key type, value type, and static ID. By default, `Marker = ()`. When multiple endpoints share key and value types, an optional marker type (e.g. `CacheEndpoint<DatasetKey, Dataset, LookupMarker>`) provides semantic disambiguation.
+
+Repeated access reuses resolved endpoints on each worker thread. Descriptors
+remain independent of registry lifetimes, and `clear()` still invalidates cached
+values. The internal resolution cache is bounded; accessing many distinct
+endpoints falls back to the registry without changing lookup semantics.
 
 Use versioned IDs when a cached value's meaning changes:
 

@@ -933,10 +933,10 @@ where
         context: &CallContext<'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
-        let token = context
-            .scratch()
-            .decode_utf16(value.utf16(argument)?, argument)?;
-        let handle = context.resolve_handle::<T>(token)?;
+        let handle =
+            crate::handle::with_utf16_handle_token(value.utf16(argument)?, argument, |token| {
+                context.resolve_handle::<T>(token)
+            })?;
         let object_id = handle.object_id();
         M::u64(identity, object_id.session());
         M::u64(identity, object_id.sequence());
@@ -1125,6 +1125,43 @@ mod tests {
         let mut sink = BorrowTrackingSink::default();
         "borrowed-value".write_into(&mut sink).unwrap();
         assert_eq!(sink.borrowed_string_calls, 1);
+    }
+
+    #[test]
+    fn derived_excel_enum_direct_write_uses_borrowed_sink_path() {
+        #[derive(Clone, Copy, crate::ExcelEnum)]
+        enum Label {
+            #[excel_value(name = "borrowed-value")]
+            Renamed,
+        }
+
+        let mut sink = BorrowTrackingSink::default();
+        Label::Renamed.write_into(&mut sink).unwrap();
+        assert_eq!(sink.borrowed_string_calls, 1);
+        assert!(matches!(
+            IntoExcel::into_excel(Label::Renamed).unwrap(),
+            ExcelCellOutput::String(value) if value == "borrowed-value"
+        ));
+    }
+
+    #[test]
+    fn derived_excel_enum_array_output_preserves_variant_text_and_sink_errors() {
+        #[derive(Clone, Copy, crate::ExcelEnum)]
+        enum Label {
+            Ready,
+            #[excel_value(name = "日本語💡")]
+            Unicode,
+        }
+
+        let mut builder = XlArrayBuilder::new(1, 2).unwrap();
+        builder.push(Label::Ready).unwrap();
+        builder.push(Label::Unicode).unwrap();
+        assert!(Label::Ready.write_into(&mut builder).is_err());
+        let output = builder.finish().unwrap();
+        for (raw, expected) in output.cells.iter().zip(["Ready", "日本語💡"]) {
+            let value = XlValueRef::from_array_cell(raw).unwrap();
+            assert_eq!(String::from_excel(value, "enum").unwrap(), expected);
+        }
     }
 
     fn convert<T>(raw: &mut XLOPER12) -> XllResult<T>

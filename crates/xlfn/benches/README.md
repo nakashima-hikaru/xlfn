@@ -315,11 +315,49 @@ publisher topology and token-cache associativity remain benchmark-only
 controls; normal builds retain per-subscription publishers and direct
 mapping.
 
-## Crate replacement evaluation
+## Performance evaluation
 
-[The evaluation record](../../../docs/PERFORMANCE.md) contains paired results
-for immutable RTD topic storage, cache admission/recomputation, and handle-topic
-publication. `rtd_topic_allocations` and `handle_memory` instrument allocation
+[The correction record](../../../docs/PERFORMANCE.md) covers notification
+reservation, public cache resolution, enum output, and handle input, including
+allocation measurements and validation limits.
+`rtd_topic_allocations` and `handle_memory` instrument allocation
 separately from timing. `handle_prepare/revision_churn` is the historical warm
 re-observation case; `handle_prepare/republish` explicitly withdraws and recreates
 topics and must be used to assess publication churn.
+
+## Value boundary allocations
+
+`value_boundary_allocations` measures allocation traffic separately from timing:
+
+```text
+cargo bench -p xlfn --features bench-internals,async --bench value_boundary_allocations
+```
+
+Each case warms up 100 calls and measures 10,000 calls through the system
+allocator. Enum and borrowed-string cases each construct and drop a 1,000-cell
+array containing the same `Ready` labels. The probe requires their allocation
+counts and requested bytes to match. Warm handle inputs, with and without input
+identity, must allocate nothing; the `async` feature additionally checks pending
+handle conversion. Requested bytes are cumulative allocation traffic, not live
+memory or RSS. This fixture does not measure elapsed time or Excel execution.
+With `refinement` enabled the runtime rows report their counts but explicitly
+skip zero-allocation assertions, since trace recording may allocate. Run the
+command above without `refinement` for the allocation regression gate.
+
+## Public cache registry
+
+`cache_registry` measures `CacheEndpoint::get` through a shared `CacheRegistry`,
+including endpoint resolution and lease release. `distinct_endpoints` uses
+1/8/32 persistent workers with a separate endpoint per worker. `endpoint_cycle`
+uses one worker cycling through 1/8/16 endpoints to expose lookup cost when
+switching endpoints. The bounded resolution cache checks at most two entries
+in one of 32 sets; collisions fall back to the registry. Each batch contains 10,000
+lookups per worker. Setup, endpoint seeding, value assertions and worker warmup
+are outside measurement; worker coordination remains inside each batch.
+
+```text
+cargo bench -p xlfn --features bench-internals,cache --bench cache_registry --locked
+```
+
+Both `cache_registry` and `value_boundary_allocations` are included in
+`just bench-ci` and `just bench-full`.

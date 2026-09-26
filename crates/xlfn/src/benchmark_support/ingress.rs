@@ -335,6 +335,34 @@ impl RawArgumentIngressBenchmark {
         })
     }
 
+    #[cfg(feature = "async")]
+    pub fn run_handle_pending<T>(&mut self)
+    where
+        T: ExcelHandleObject,
+    {
+        let ingress = benchmark_ingress();
+        let call = self
+            .runtime
+            .enter(&ingress)
+            .expect("benchmark runtime must be open");
+        let lease = self
+            .runtime
+            .execution_lease(&call)
+            .expect("benchmark execution generation must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
+            let mut arguments =
+                crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(call, scope, 1);
+            // SAFETY: self.raw points to valid benchmark storage that remains live.
+            let value = unsafe { crate::value::XlValueRef::from_raw(&mut self.raw) }
+                .expect("benchmark handle value must be well formed");
+            let pending = arguments
+                .decode_pending_handle::<T>(0, "arg", value, lease.generation())
+                .expect("benchmark pending handle ingress must succeed");
+            std::hint::black_box(&pending);
+            let _ = arguments.finish();
+        })
+    }
+
     pub fn run_handle_with_identity<T>(&mut self) -> [u8; 32]
     where
         T: ExcelHandleObject,

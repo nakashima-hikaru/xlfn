@@ -67,9 +67,9 @@ pub use async_spawn::{AsyncSpawnBenchmark, AsyncSpawnKind, RescheduleFuture, Spa
 pub use cache::{
     ArcCacheBenchmark, ArcCacheEvictionBenchmark, CacheLookupBenchCase,
     ConcurrentClearLatencyBenchmark, CurrentCacheBenchmark, CurrentCacheEvictionBenchmark,
-    NoAdmissionCacheBenchmark, NoPinCacheBenchmark, ScopedBatchCacheBenchmark,
-    ScopedDurationCacheBenchmark, ScopedPerLookupCacheBenchmark, benchmark_cache_backend,
-    cache_backend_debt_probe,
+    NoAdmissionCacheBenchmark, NoPinCacheBenchmark, RegistryCacheBenchmark,
+    ScopedBatchCacheBenchmark, ScopedDurationCacheBenchmark, ScopedPerLookupCacheBenchmark,
+    benchmark_cache_backend, cache_backend_debt_probe,
 };
 pub use call_resolution::{ConcurrentHandleResolutionBenchmark, MultiHandleCallBenchmark};
 pub use formula::{BenchmarkInputIdentity, FormulaRevisionBenchmark, SemanticIdentityBenchmark};

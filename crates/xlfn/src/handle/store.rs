@@ -8,7 +8,9 @@
 use super::binding::BindingReadLease;
 use super::object::PendingObjectBinding;
 use super::registry::{HandleRegistry, HandleRegistrySealed};
-use super::{ExcelHandleObject, Handle, HandleId, HandleToken, ObjectId, TokenWire};
+use super::{ExcelHandleObject, Handle, HandleId, ObjectId};
+#[cfg(any(test, feature = "refinement"))]
+use super::{HandleToken, TokenWire};
 use crate::XllResult;
 use crate::generation::RuntimeGeneration;
 
@@ -71,6 +73,7 @@ impl HandleStore {
             .remove_and_drop_with_observer(token, operation, on_linearized)
     }
 
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn refinement_token(&self, token: &str) -> TokenWire {
         let parsed = self
             .registry

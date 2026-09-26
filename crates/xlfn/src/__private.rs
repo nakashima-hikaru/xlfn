@@ -57,6 +57,8 @@ pub mod v1 {
         PlainInputMode, argument_from_raw, argument_from_raw_with_arguments,
         cell_presence_from_raw,
     };
+    #[doc(hidden)]
+    pub use crate::value::output::ExcelCellSink;
 
     #[doc(hidden)]
     pub const BUILD_TARGET: &str = if cfg!(all(

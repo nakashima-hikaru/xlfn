@@ -3,6 +3,7 @@ use crate::panic_boundary::catch_no_unwind;
 use crate::{XllError, XllResult};
 #[cfg(all(test, feature = "bench-internals"))]
 mod backend_tests;
+mod endpoint_cache;
 mod node_layout;
 mod pin_transitions;
 #[cfg(test)]
@@ -434,6 +435,7 @@ struct CacheEntry {
 type CacheMap = FxHashMap<(TypeId, &'static str), CacheEntry>;
 
 pub struct CacheRegistry {
+    identity: endpoint_cache::RegistryIdentity,
     weight_budget_per_endpoint: usize,
     caches: RwLock<CacheMap>,
 }
@@ -442,6 +444,7 @@ impl CacheRegistry {
     #[must_use]
     pub fn new(weight_budget_per_endpoint: usize) -> Self {
         Self {
+            identity: endpoint_cache::RegistryIdentity::fresh(),
             weight_budget_per_endpoint,
             caches: RwLock::new(FxHashMap::default()),
         }
@@ -457,6 +460,26 @@ impl CacheRegistry {
         V: Send + Sync + 'static,
     {
         let cache_key = endpoint.key();
+        if let Some(cache) = endpoint_cache::lookup(self.identity, cache_key) {
+            // The memoized pointer was downcast with this exact endpoint type
+            // and belongs to this live registry's never-removed allocation.
+            // Registry identities are never reused, including after a move/drop.
+            return Ok(cache.cast());
+        }
+        let cache = self.resolve_cache_uncached::<Marker, K, V>(cache_key)?;
+        endpoint_cache::remember(self.identity, cache_key, cache.cast());
+        Ok(cache)
+    }
+
+    fn resolve_cache_uncached<Marker, K, V>(
+        &self,
+        cache_key: (TypeId, &'static str),
+    ) -> XllResult<NonNull<StoredCache<Marker, K, V>>>
+    where
+        Marker: 'static,
+        K: Clone + Eq + Hash + Send + Sync + 'static,
+        V: Send + Sync + 'static,
+    {
         let caches = self.caches.read();
         if let Some(entry) = caches.get(&cache_key) {
             Self::downcast_cache::<Marker, K, V>(entry)

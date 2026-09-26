@@ -162,6 +162,16 @@ pub(crate) fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::
                     #krate::value::ExcelCellOutput::String(__text.to_owned())
                 )
             }
+
+            fn write_into<__XlfnSink: #krate::__private::v1::ExcelCellSink>(
+                self,
+                __sink: &mut __XlfnSink,
+            ) -> #krate::error::XllResult<()> {
+                let __text = match self {
+                    #(#outputs,)*
+                };
+                __sink.push_str(__text)
+            }
         }
 
         impl #base_impl_generics #krate::value::ExcelInputIdentity

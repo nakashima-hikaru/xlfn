@@ -148,7 +148,7 @@ impl FormulaHandleService {
     }
 
     pub(super) fn refinement_token(&self, token: &str) -> super::TokenWire {
-        self.store.refinement_token(token)
+        self.refinement.token_payload(&self.store, token)
     }
 
     #[cfg(test)]

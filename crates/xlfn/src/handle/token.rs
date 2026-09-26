@@ -214,6 +214,32 @@ impl TokenCodec {
 }
 
 pub(crate) const HANDLE_TOKEN_LENGTH: usize = 82;
+
+/// Resolves an Excel token while its decoded text is local to this operation.
+/// Canonical wire tokens are fixed-width ASCII, so the ordinary lookup needs
+/// no call-arena allocation. Other text still passes through strict UTF-16
+/// decoding before lookup, preserving malformed-input and lookup error order.
+pub(crate) fn with_utf16_handle_token<R>(
+    units: &[u16],
+    argument: &'static str,
+    operation: impl FnOnce(&str) -> XllResult<R>,
+) -> XllResult<R> {
+    if units.len() == HANDLE_TOKEN_LENGTH {
+        let mut bytes = [0; HANDLE_TOKEN_LENGTH];
+        for (byte, &unit) in bytes.iter_mut().zip(units) {
+            if unit > 0x7f {
+                let token = crate::utf16::decode_owned(units, argument)?;
+                return operation(&token);
+            }
+            *byte = unit as u8;
+        }
+        let token = std::str::from_utf8(&bytes).map_err(|_| XllError::InvalidHandle)?;
+        return operation(token);
+    }
+    let token = crate::utf16::decode_owned(units, argument)?;
+    operation(&token)
+}
+
 const VERIFIED_TOKEN_CACHE_SETS: usize = 16;
 const VERIFIED_TOKEN_CACHE_WAYS: usize = 4;
 
@@ -321,6 +347,71 @@ pub(crate) fn verified_token_cache_store(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utf16_token_lookup_preserves_authenticated_identity() {
+        let codec = TokenCodec::new(7, [19; 32]);
+        let id = HandleId {
+            slot: 17,
+            generation: BindingGeneration::ONE,
+        };
+        let token = codec.format(id);
+        let units = token.encode_utf16().collect::<Vec<_>>();
+        let parsed = with_utf16_handle_token(&units, "handle", |decoded| {
+            assert_eq!(decoded, token);
+            codec.parse(std::ptr::from_ref(&codec).addr(), HandleToken::new(decoded))
+        })
+        .unwrap();
+        assert_eq!(parsed.id, id);
+    }
+
+    #[test]
+    fn utf16_token_decode_precedes_lookup_even_for_invalid_wire_lengths() {
+        for units in [
+            vec![],
+            vec![u16::from(b'x'); HANDLE_TOKEN_LENGTH - 1],
+            vec![u16::from(b'x'); HANDLE_TOKEN_LENGTH + 1],
+            vec![0x00e9; HANDLE_TOKEN_LENGTH],
+            vec![0xd83d, 0xde00],
+            vec![0xd800],
+            [vec![u16::from(b'x'); HANDLE_TOKEN_LENGTH - 1], vec![0xd800]].concat(),
+            [vec![u16::from(b'x'); HANDLE_TOKEN_LENGTH], vec![0xdc00]].concat(),
+        ] {
+            let mut looked_up = false;
+            let result = with_utf16_handle_token(&units, "handle", |decoded| {
+                looked_up = true;
+                assert_eq!(decoded, String::from_utf16(&units).unwrap());
+                Err::<(), _>(XllError::InvalidHandle)
+            });
+            match String::from_utf16(&units) {
+                Ok(_) => {
+                    assert!(looked_up);
+                    assert!(matches!(result, Err(XllError::InvalidHandle)));
+                }
+                Err(_) => {
+                    assert!(!looked_up);
+                    assert!(matches!(
+                        result,
+                        Err(XllError::Input {
+                            argument: "handle",
+                            reason: crate::error::InputError::InvalidUtf16,
+                        })
+                    ));
+                }
+            }
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn fixed_width_ascii_tokens_are_preserved(
+            units in proptest::collection::vec(0_u16..=0x7f, HANDLE_TOKEN_LENGTH)
+        ) {
+            let decoded = with_utf16_handle_token(&units, "handle", |token| Ok(token.to_owned()))
+                .unwrap();
+            proptest::prop_assert_eq!(decoded, String::from_utf16(&units).unwrap());
+        }
+    }
 
     fn clear_cache() {
         VERIFIED_TOKEN_CACHE.with(|cache| *cache.borrow_mut() = VerifiedTokenCache::new());

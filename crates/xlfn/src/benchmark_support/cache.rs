@@ -1,4 +1,4 @@
-use crate::cache::{CacheBackend, CalculationCache};
+use crate::cache::{CacheBackend, CacheEndpoint, CacheRegistry, CalculationCache};
 
 /// Selects only the resident backend in cache benchmark executables.
 pub fn benchmark_cache_backend() -> CacheBackend {
@@ -179,6 +179,132 @@ impl CurrentCacheBenchmark {
             workers,
             total_iterations: worker_count * iterations_per_worker,
         }
+    }
+
+    pub fn run(&self) {
+        self.workers.run();
+    }
+
+    pub const fn total_iterations(&self) -> usize {
+        self.total_iterations
+    }
+}
+
+const REGISTRY_ENDPOINT_IDS: [&str; 32] = [
+    "registry-00",
+    "registry-01",
+    "registry-02",
+    "registry-03",
+    "registry-04",
+    "registry-05",
+    "registry-06",
+    "registry-07",
+    "registry-08",
+    "registry-09",
+    "registry-10",
+    "registry-11",
+    "registry-12",
+    "registry-13",
+    "registry-14",
+    "registry-15",
+    "registry-16",
+    "registry-17",
+    "registry-18",
+    "registry-19",
+    "registry-20",
+    "registry-21",
+    "registry-22",
+    "registry-23",
+    "registry-24",
+    "registry-25",
+    "registry-26",
+    "registry-27",
+    "registry-28",
+    "registry-29",
+    "registry-30",
+    "registry-31",
+];
+
+/// Measures the public endpoint API, including registry resolution and leases.
+/// Workers retain their thread-local resolution cache between measured batches.
+pub struct RegistryCacheBenchmark {
+    workers: WorkerPool,
+    total_iterations: usize,
+}
+
+impl RegistryCacheBenchmark {
+    /// Each worker reads its own endpoint through one shared registry.
+    pub fn distinct_endpoints(worker_count: usize, iterations_per_worker: usize) -> Self {
+        Self::new(worker_count, 1, iterations_per_worker)
+    }
+
+    /// One worker cycles through endpoints to exercise resolution-cache capacity.
+    pub fn endpoint_cycle(endpoint_count: usize, iterations: usize) -> Self {
+        Self::new(1, endpoint_count, iterations)
+    }
+
+    fn new(worker_count: usize, endpoints_per_worker: usize, iterations_per_worker: usize) -> Self {
+        assert!(worker_count != 0);
+        assert!(endpoints_per_worker != 0);
+        assert!(iterations_per_worker != 0);
+        let endpoint_count = worker_count
+            .checked_mul(endpoints_per_worker)
+            .expect("registry benchmark endpoint count fits usize");
+        assert!(endpoint_count <= REGISTRY_ENDPOINT_IDS.len());
+
+        let registry = Arc::new(CacheRegistry::new(LOOKUP_WEIGHT_BUDGET));
+        let endpoints: Vec<CacheEndpoint<u64, u64>> = REGISTRY_ENDPOINT_IDS[..endpoint_count]
+            .iter()
+            .map(|id| CacheEndpoint::new(id))
+            .collect();
+        for (value, endpoint) in endpoints.iter().enumerate() {
+            drop(
+                endpoint
+                    .get_or_try_insert(
+                        &registry,
+                        HOT_KEY,
+                        |_| ENTRY_WEIGHT as usize,
+                        || Ok(value as u64),
+                    )
+                    .expect("registry cache benchmark warm seed failed"),
+            );
+        }
+
+        let workers = WorkerPool::new(worker_count, move |worker, receiver, done| {
+            let start = worker * endpoints_per_worker;
+            let endpoints = &endpoints[start..start + endpoints_per_worker];
+            // Seed each worker's TLS on that worker and verify distinct endpoint
+            // values before its first batch can be included in a measurement.
+            for (offset, endpoint) in endpoints.iter().enumerate() {
+                assert_eq!(
+                    *endpoint
+                        .get(&registry, &HOT_KEY)
+                        .expect("registry cache benchmark endpoint resolution failed")
+                        .expect("registry cache benchmark warm hit failed"),
+                    (start + offset) as u64,
+                );
+            }
+            while receiver.recv().is_ok() {
+                for endpoint in endpoints.iter().cycle().take(iterations_per_worker) {
+                    let lease = endpoint
+                        .get(&registry, &HOT_KEY)
+                        .expect("registry cache benchmark endpoint resolution failed")
+                        .expect("registry cache benchmark warm hit failed");
+                    std::hint::black_box(&*lease);
+                }
+                done.send(())
+                    .expect("registry cache benchmark driver received completion signal");
+            }
+        });
+
+        let benchmark = Self {
+            workers,
+            total_iterations: worker_count * iterations_per_worker,
+        };
+        // Finish startup, hit assertions and one complete workload batch before
+        // returning to Criterion. Only subsequent runs are timed.
+        benchmark.run();
+        benchmark
     }
 
     pub fn run(&self) {

@@ -540,8 +540,21 @@ impl<H: SubscriptionHost> PublishCore<H> {
             return Ok(None);
         }
         let mut refresh = self.refresh.lock();
-        let prepared = refresh.prepare_notification(true)?;
+        self.prepare_notification(&mut refresh, true)
+    }
+
+    /// Reserves a notification and publishes its fast-path epoch together.
+    /// The caller holds `refresh`, which also serializes epoch advancement.
+    /// A publisher may arrive with an older epoch after waiting for this lock;
+    /// cache the current epoch of the reserved notification, not that snapshot.
+    fn prepare_notification(
+        &self,
+        refresh: &mut RefreshState<H::Notifier>,
+        has_updates: bool,
+    ) -> XllResult<Option<NotificationAttempt<H::Notifier>>> {
+        let prepared = refresh.prepare_notification(has_updates)?;
         Ok(prepared.map(|prepared| {
+            let epoch = self.publish_epoch.load(Ordering::Acquire);
             self.notified_epoch.store(epoch, Ordering::Release);
             refresh.commit_notification(prepared)
         }))
@@ -1084,9 +1097,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
         refresh.recycled_updates = delivered_updates;
 
         let has_updates = self.has_deliverable_updates();
-        let prepared = refresh.prepare_notification(has_updates)?;
-        let attempt = prepared.map(|p| refresh.commit_notification(p));
-        Ok(attempt)
+        self.prepare_notification(&mut refresh, has_updates)
     }
 
     pub(crate) fn abort_refresh_no_unwind(&self, refresh_id: u64, updates: Vec<RtdUpdate>) {
@@ -1113,8 +1124,9 @@ impl<H: SubscriptionHost> PublishCore<H> {
                     };
                     refresh.recycled_updates = updates;
                     let has_updates = self.has_deliverable_updates();
-                    let prepared = refresh.prepare_notification(has_updates).ok().flatten();
-                    prepared.map(|p| refresh.commit_notification(p))
+                    self.prepare_notification(&mut refresh, has_updates)
+                        .ok()
+                        .flatten()
                 } else {
                     None
                 }
@@ -1138,12 +1150,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
             let mut refresh = self.refresh.lock();
             let retired = refresh.attach_notifier(notifier);
             let has_updates = self.has_deliverable_updates();
-            let prepared = refresh.prepare_notification(has_updates)?;
-            let epoch = self.publish_epoch.load(Ordering::Acquire);
-            let attempt = prepared.map(|p| {
-                self.notified_epoch.store(epoch, Ordering::Release);
-                refresh.commit_notification(p)
-            });
+            let attempt = self.prepare_notification(&mut refresh, has_updates)?;
             (retired, attempt)
         };
         if let Some(attempt) = attempt {
@@ -1163,12 +1170,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
             self.ensure_open()?;
             let mut refresh = self.refresh.lock();
             let has_updates = self.has_deliverable_updates();
-            let prepared = refresh.prepare_notification(has_updates)?;
-            let epoch = self.publish_epoch.load(Ordering::Acquire);
-            prepared.map(|p| {
-                self.notified_epoch.store(epoch, Ordering::Release);
-                refresh.commit_notification(p)
-            })
+            self.prepare_notification(&mut refresh, has_updates)?
         };
         if let Some(attempt) = attempt {
             self.drive_notification(attempt);
@@ -1456,6 +1458,121 @@ mod tests {
     use super::{OperationDropTrace, with_operation_drop_trace};
     use crate::subscription::runtime::SubscriptionRuntime;
     use triomphe::Arc;
+
+    #[test]
+    fn refresh_rearm_preserves_nonblocking_publish_and_next_notification() {
+        use crate::excel_rtd::RtdNotifier;
+        use crate::rtd::test_support::TestNotifierState;
+        use crate::subscription::tests::connected_sink;
+        use crate::subscription::{RefreshOutcome, StoredRtdValue};
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        for completion in ["delivered", "failed", "dropped", "uncollected"] {
+            let (_runtime, server, sink) = connected_sink::<i32>(None, completion);
+            let notifier = std::sync::Arc::new(TestNotifierState::new());
+            server
+                .attach_update_notifier(RtdNotifier::for_test(std::sync::Arc::clone(&notifier)))
+                .unwrap();
+            sink.publish(1).unwrap();
+            assert_eq!(notifier.calls.load(Ordering::Acquire), 1);
+            let publish = &server.test_server().publish;
+            let planned = publish.plan_refresh().unwrap();
+            if completion == "uncollected" {
+                sink.publish(2).unwrap();
+                // No collected values: exercise the separate abort path.
+                drop(planned);
+            } else {
+                let batch = planned.collect();
+                sink.publish(2).unwrap();
+                match completion {
+                    "delivered" => batch.complete(RefreshOutcome::Delivered).unwrap(),
+                    "failed" => batch.complete(RefreshOutcome::Failed).unwrap(),
+                    _ => drop(batch),
+                }
+            }
+            assert_eq!(notifier.calls.load(Ordering::Acquire), 2, "{completion}");
+
+            // A pending notification must keep publishers independent of the
+            // notification-control mutex, including after rearming a refresh.
+            // Release the mutex before checking the timeout so a regression
+            // fails rather than hanging while the scoped worker is joined.
+            let result = std::thread::scope(|scope| {
+                let refresh = publish.refresh.lock();
+                let (sent, received) = std::sync::mpsc::channel();
+                let sink = &sink;
+                scope.spawn(move || sent.send(sink.publish(3)).unwrap());
+                let result = received.recv_timeout(Duration::from_secs(5));
+                drop(refresh);
+                result
+            });
+            result
+                .expect("a rearmed publisher must not wait for the notification mutex")
+                .unwrap();
+            assert_eq!(notifier.calls.load(Ordering::Acquire), 2, "{completion}");
+
+            let latest = server.begin_refresh().unwrap();
+            assert_eq!(latest.updates.len(), 1);
+            assert_eq!(latest.updates[0].value, StoredRtdValue::Integer(3));
+            latest.complete(RefreshOutcome::Delivered).unwrap();
+            sink.publish(4).unwrap();
+            assert_eq!(notifier.calls.load(Ordering::Acquire), 3, "{completion}");
+            let next = server.begin_refresh().unwrap();
+            assert_eq!(next.updates[0].value, StoredRtdValue::Integer(4));
+            next.complete(RefreshOutcome::Delivered).unwrap();
+        }
+    }
+
+    #[test]
+    fn delayed_publish_notification_uses_the_current_refresh_epoch() {
+        use crate::excel_rtd::RtdNotifier;
+        use crate::rtd::test_support::TestNotifierState;
+        use crate::subscription::RefreshOutcome;
+        use std::sync::atomic::Ordering;
+
+        let runtime = SubscriptionRuntime::<crate::excel_rtd::RtdSubscriptionHost>::new();
+        let server = runtime.register_test_server(1);
+        let publish = &server.test_server().publish;
+        let notifier = std::sync::Arc::new(TestNotifierState::new());
+        server
+            .attach_update_notifier(RtdNotifier::for_test(std::sync::Arc::clone(&notifier)))
+            .unwrap();
+        let writer_epoch = publish.publish_epoch.load(Ordering::Acquire);
+        server
+            .begin_refresh()
+            .unwrap()
+            .complete(RefreshOutcome::Delivered)
+            .unwrap();
+        assert_eq!(notifier.calls.load(Ordering::Acquire), 0);
+
+        // Model a writer delayed between releasing its shard and preparing a
+        // notification. Its observed epoch predates a completed refresh; only
+        // the notification-control lock determines the epoch reserved now.
+        let attempt = publish
+            .prepare_notification_for_known_update(writer_epoch)
+            .unwrap()
+            .unwrap();
+        publish.drive_notification(attempt);
+        let current_epoch = publish.publish_epoch.load(Ordering::Acquire);
+        assert_ne!(writer_epoch, current_epoch);
+        assert_eq!(
+            publish.notified_epoch.load(Ordering::Acquire),
+            current_epoch
+        );
+        assert_eq!(notifier.calls.load(Ordering::Acquire), 1);
+
+        // Another stale writer cannot overwrite the already reserved epoch.
+        assert!(
+            publish
+                .prepare_notification_for_known_update(writer_epoch)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            publish.notified_epoch.load(Ordering::Acquire),
+            current_epoch
+        );
+    }
 
     #[test]
     fn terminated_servers_release_payload_storage_before_runtime_drop() {

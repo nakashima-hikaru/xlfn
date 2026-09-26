@@ -6,6 +6,7 @@
 
 use super::HandleTopicKey;
 use super::refinement_wire::TokenWire;
+use super::store::HandleStore;
 #[cfg(any(target_os = "windows", test))]
 use super::{FormulaLifetimeGeneration, FormulaObserverId};
 
@@ -22,6 +23,24 @@ impl HandleRefinementHooks {
         Self {
             #[cfg(any(test, feature = "refinement"))]
             trace: HandleRefinementTrace::new(_session),
+        }
+    }
+
+    /// Build observation-only payloads inside the same feature boundary as
+    /// their consumers. Token authentication updates the thread-local token
+    /// cache, so calling it before a no-op observer cannot be optimized away.
+    #[inline]
+    pub(crate) fn token_payload(&self, store: &HandleStore, token: &str) -> TokenWire {
+        #[cfg(any(test, feature = "refinement"))]
+        return store.refinement_token(token);
+        #[cfg(not(any(test, feature = "refinement")))]
+        {
+            let _ = (store, token);
+            TokenWire {
+                session: 0,
+                slot: 0,
+                generation: 0,
+            }
         }
     }
 
