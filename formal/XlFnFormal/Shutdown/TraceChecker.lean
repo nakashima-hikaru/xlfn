@@ -1,3 +1,4 @@
+import XlFnFormal.Lifecycle.Checker
 import XlFnFormal.Shutdown.Checker
 import XlFnFormal.Shutdown.Refinement
 import Lean.Data.Json
@@ -465,7 +466,29 @@ private def checkReturnedSuccess
   else
     exact .error "returned-success trace does not satisfy the concrete refinement"
 
+/-- Initialization has no committed generation or resource snapshot. Validate
+    its terminal observation against the lifecycle quarantine transition. -/
+private def checkOpenQuarantine (json : Json) : Except String Unit := do
+  let attempt : Nat ← field json "attempt"
+  let _reason ← parseFailure (← json.getObjVal? "reason")
+  let outcome : String ← field json "outcome"
+  if outcome != "quarantined" then
+    throw "an uncommitted open quarantine cannot certify successful shutdown"
+  match Lifecycle.apply? Lifecycle.State.initialState (.beginOpen 0 attempt) with
+  | none => throw "open quarantine attempt must be non-zero"
+  | some opening =>
+      match hStep : Lifecycle.apply? opening (.quarantineOpen attempt) with
+      | none => throw "open quarantine transition rejected"
+      | some terminal =>
+          let _hStep := Lifecycle.apply?_sound hStep
+          if hPhase : terminal.phase = .quarantined then
+            let _hUnsafe := Lifecycle.quarantined_not_returnSafe hPhase
+            return ()
+          else throw "open quarantine did not reach a quarantined lifecycle"
+
 private def checkTrace (json : Json) : Except String Unit := do
+  if (← json.getObjVal? "initial") == .str "opening" then
+    return ← checkOpenQuarantine json
   let trace ← parseTrace json
   if trace.generation == 0 then
     throw "shutdown trace generation must be non-zero"

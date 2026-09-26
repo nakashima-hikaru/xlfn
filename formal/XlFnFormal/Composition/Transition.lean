@@ -8,6 +8,7 @@ inductive Event where
   | beginOpen (sampledEpoch : Lifecycle.Epoch) (attempt : Lifecycle.AttemptId)
   | finishOpenRejectedByClose (attempt : Lifecycle.AttemptId)
   | failOpen (attempt : Lifecycle.AttemptId)
+  | quarantineOpen (attempt : Lifecycle.AttemptId) (reason : Shutdown.Failure)
   | requestFinalClose
   | acquireFinalCloseOwner
   | acquireOpenRollbackOwner
@@ -51,6 +52,16 @@ inductive Step : State → Event → State → Prop where
       (hStep : Lifecycle.Step s.lifecycle (.failOpen attempt) t) :
       Step s (.failOpen attempt)
         { s with lifecycle := t, currentShutdown := none, logicalQuiescenceCertified := false }
+
+  | quarantineOpen
+      {s : State}
+      {attempt : Lifecycle.AttemptId}
+      {reason : Shutdown.Failure}
+      {t : Lifecycle.State}
+      (hNoSession : s.currentShutdown = none)
+      (hStep : Lifecycle.Step s.lifecycle (.quarantineOpen attempt) t) :
+      Step s (.quarantineOpen attempt reason)
+        { lifecycle := t, currentShutdown := none, logicalQuiescenceCertified := false }
 
   | requestFinalClose
       {s : State}

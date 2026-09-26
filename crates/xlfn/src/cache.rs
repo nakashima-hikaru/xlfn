@@ -4,18 +4,22 @@ use crate::{XllError, XllResult};
 #[cfg(all(test, feature = "bench-internals"))]
 mod backend_tests;
 mod endpoint_cache;
+#[cfg(test)]
+mod key_reentrancy_tests;
 mod node_layout;
 mod pin_transitions;
 #[cfg(test)]
 mod reentrancy_tests;
 use node_layout::verus;
 mod resident_index;
+#[cfg(test)]
+mod singleflight_tests;
 use crate::sync::{Condvar, Mutex, RwLock};
+use indexmap::map::{RawEntryApiV1, raw_entry_v1::RawEntryMut};
 use resident_index::{ResidentEntry, ResidentIndex};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxHashMap, FxHasher};
 use smallvec::SmallVec;
 use std::any::{Any, TypeId};
-use std::borrow::Borrow;
 use std::cell::Cell;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
@@ -272,9 +276,10 @@ impl<V: Eq> Eq for CacheLease<'_, V> {}
 /// The scope keeps one lookup-domain permit for its entire lifetime, so a
 /// pointer observed through [`Self::get`] cannot be reclaimed before the
 /// returned reference expires. The type is intentionally neither `Send` nor
-/// `Sync`; keep the scope to a short lexical region containing cache reads.
-/// Do not clear, initialize entries, drop leases, invoke callbacks, or await
-/// within the scope: those operations may wait for this permit to be released.
+/// `Sync`; keep the scope to a short lexical region using only [`Self::get`].
+/// Other cache methods may run deferred key or value destructors. Do not call
+/// them, drop leases, invoke callbacks, or await within the scope: those
+/// operations may wait for this permit to be released.
 #[cfg(feature = "bench-internals")]
 #[must_use = "a CacheReadScope must stay alive while its references are used"]
 pub struct CacheReadScope<'cache, K, V> {
@@ -734,14 +739,16 @@ enum FlightState<V> {
 
 struct Flight<K, V> {
     key: VersionedKey<K>,
+    hash: u64,
     state: Mutex<FlightState<V>>,
     changed: Condvar,
 }
 
 impl<K, V> Flight<K, V> {
-    fn new(key: VersionedKey<K>) -> Self {
+    fn new(key: VersionedKey<K>, hash: u64) -> Self {
         Self {
             key,
+            hash,
             state: Mutex::new(FlightState::Pending),
             changed: Condvar::new(),
         }
@@ -757,51 +764,86 @@ impl<K, V> Drop for Flight<K, V> {
     }
 }
 
-struct FlightHandle<K, V>(Arc<Flight<K, V>>);
+fn flight_hash<K: Hash>(key: &VersionedKey<K>) -> u64 {
+    let mut hasher = FxHasher::default();
+    key.hash(&mut hasher);
+    hasher.finish()
+}
 
-impl<K, V> Clone for FlightHandle<K, V> {
-    fn clone(&self) -> Self {
-        Self(Arc::clone(&self.0))
+/// Key equality is needed only while admitting a caller. Once registered,
+/// the leader owns an allocation identity and its already-computed hash.
+/// Cleanup must not invoke user Hash/Eq, including while unwinding from one
+/// of those callbacks. The unit hasher restricts this table to its raw API.
+struct FlightSet<K, V> {
+    entries: indexmap::IndexMap<Arc<Flight<K, V>>, (), ()>,
+}
+
+impl<K, V> Default for FlightSet<K, V> {
+    fn default() -> Self {
+        Self {
+            entries: indexmap::IndexMap::with_hasher(()),
+        }
     }
 }
 
-impl<K: Hash, V> Hash for FlightHandle<K, V> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.key.hash(state);
+impl<K, V> FlightSet<K, V> {
+    fn get(&self, hash: u64, key: &VersionedKey<K>) -> Option<&Arc<Flight<K, V>>>
+    where
+        K: Eq,
+    {
+        self.entries
+            .raw_entry_v1()
+            .from_hash(hash, |flight| flight.key == *key)
+            .map(|(flight, ())| flight)
+    }
+
+    /// The caller already established absence while holding the table lock.
+    fn insert_unique(&mut self, flight: Arc<Flight<K, V>>) {
+        let hash = flight.hash;
+        let RawEntryMut::Vacant(entry) = self.entries.raw_entry_mut_v1().from_hash(hash, |_| false)
+        else {
+            unreachable!("an always-false search cannot find an occupied entry");
+        };
+        entry.insert_hashed_nocheck(hash, flight, ());
+    }
+
+    fn remove(&mut self, flight: &Arc<Flight<K, V>>) -> Option<Arc<Flight<K, V>>> {
+        match self
+            .entries
+            .raw_entry_mut_v1()
+            .from_hash(flight.hash, |registered| Arc::ptr_eq(registered, flight))
+        {
+            RawEntryMut::Occupied(entry) => Some(entry.swap_remove_entry().0),
+            RawEntryMut::Vacant(_) => None,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
     }
 }
-
-impl<K: Eq, V> PartialEq for FlightHandle<K, V> {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.key == other.0.key
-    }
-}
-
-impl<K: Eq, V> Eq for FlightHandle<K, V> {}
-
-impl<K, V> Borrow<VersionedKey<K>> for FlightHandle<K, V> {
-    fn borrow(&self) -> &VersionedKey<K> {
-        &self.0.key
-    }
-}
-
-type FlightSet<K, V> = FxHashSet<FlightHandle<K, V>>;
 
 struct LeaderGuard<'a, K: Clone + Eq + Hash, V> {
     cache: &'a CalculationCache<K, V>,
     flight: &'a Arc<Flight<K, V>>,
-    completed: bool,
+    registered: bool,
+}
+
+impl<K: Clone + Eq + Hash, V> LeaderGuard<'_, K, V> {
+    fn unregister(&mut self) {
+        let removed = self.cache.flights.lock().remove(self.flight);
+        debug_assert!(removed.is_some(), "the leader owns one registered flight");
+        self.registered = false;
+        // The leader retains its own Arc. Even the table's reference is
+        // released after unlocking, independently of key/value destruction.
+        drop(removed);
+    }
 }
 
 impl<K: Clone + Eq + Hash, V> Drop for LeaderGuard<'_, K, V> {
     fn drop(&mut self) {
-        if !self.completed {
-            let removed = self.cache.flights.lock().take(&self.flight.key);
-            debug_assert!(
-                removed
-                    .as_ref()
-                    .is_some_and(|handle| Arc::ptr_eq(&handle.0, self.flight))
-            );
+        if self.registered {
+            self.unregister();
             {
                 let mut state = self.flight.state.lock();
                 if matches!(*state, FlightState::Pending) {
@@ -1272,7 +1314,7 @@ where
         Self {
             weight_budget,
             generation: CacheGeneration::new(),
-            flights: Mutex::new(FxHashSet::default()),
+            flights: Mutex::new(FlightSet::default()),
             domain: xlfn_kernel::published_owner::PublishedOwner::new(CacheLookupDomain::new()),
             clear_lock: Mutex::new(()),
             index: make_index(capacity),
@@ -1284,6 +1326,7 @@ where
                 // Drop has exclusive access. Clear synchronously releases
                 // all residency pins before the final node drain.
                 cache.index.clear();
+                cache.maintain_keys();
                 let retired = cache.domain.drain_all(closed);
                 reclaim_cache_entries::<V>(retired);
             }),
@@ -1331,15 +1374,28 @@ where
             epoch: self.generation.snapshot(),
             key: key.clone(),
         });
-        self.index.maintenance();
+        self.maintain_keys();
         self.maintain(true);
     }
 
     /// Completes index maintenance and the pending reclamation grace period.
     #[cfg(feature = "bench-internals")]
     pub fn maintenance(&self) {
-        self.index.maintenance();
+        self.maintain_keys();
         reclaim_cache_entries::<V>(self.domain.quiesce_and_drain());
+    }
+
+    fn maintain_keys(&self) {
+        // A key callback may reenter this cache while an outer lookup still
+        // owns admission. A key destructor could clear the cache and wait
+        // for that very reader, so defer it until the outer lookup returns.
+        if std::mem::needs_drop::<K>()
+            && self.index.has_retired_keys()
+            && ACTIVE_CACHE_INITIALIZATION_DEPTH.get() == 0
+            && !self.domain.domain.current_thread_may_be_reading()
+        {
+            self.index.maintenance();
+        }
     }
 
     fn maintain(&self, mutation: bool) {
@@ -1348,9 +1404,10 @@ where
         if ACTIVE_CACHE_INITIALIZATION_DEPTH.get() != 0 {
             return;
         }
-        if mutation {
-            self.index.maintenance_after_mutation();
-        }
+        // Keys can be retired while a value remains pinned by a lease. Their
+        // queue is independent of the value-domain debt and also needs reads
+        // to make progress after a deferred or unwinding mutation.
+        self.maintain_keys();
         let nodes = self.domain.pending_nodes.load(Ordering::Relaxed);
         if nodes == 0 {
             return;
@@ -1360,6 +1417,7 @@ where
         let retired = if mutation
             && (nodes >= RECLAIM_BACKPRESSURE_NODES
                 || self.domain.pending_weight() >= self.weight_budget.max(1) as u64)
+            && !self.domain.domain.current_thread_may_be_reading()
         {
             self.domain.quiesce_and_drain()
         } else {
@@ -1370,7 +1428,7 @@ where
 
     #[must_use]
     pub fn used_weight(&self) -> usize {
-        self.index.maintenance();
+        self.maintain_keys();
         let retired = self.domain.try_quiesce_and_drain();
         reclaim_cache_entries::<V>(retired);
         usize::try_from(self.index.resident_weight()).unwrap_or(usize::MAX)
@@ -1378,7 +1436,7 @@ where
 
     #[must_use]
     pub fn len(&self) -> usize {
-        self.index.maintenance();
+        self.maintain_keys();
         let retired = self.domain.try_quiesce_and_drain();
         reclaim_cache_entries::<V>(retired);
         usize::try_from(self.index.resident_count()).unwrap_or(usize::MAX)
@@ -1400,9 +1458,9 @@ where
             let _guard = self.clear_lock.lock();
             let epoch = self.generation.advance();
             self.index.invalidate_before(epoch);
-            self.index.maintenance();
             self.domain.quiesce_and_drain()
         };
+        self.maintain_keys();
         reclaim_cache_entries::<V>(retired);
     }
 
@@ -1414,10 +1472,10 @@ where
             let _guard = self.clear_lock.lock();
             let epoch = self.generation.advance();
             self.index.invalidate_before(epoch);
-            self.index.maintenance();
             before_quiesce();
             self.domain.quiesce_and_drain()
         };
+        self.maintain_keys();
         reclaim_cache_entries::<V>(retired);
     }
 
@@ -1425,9 +1483,9 @@ where
         let retired = {
             let _guard = self.clear_lock.lock();
             self.index.invalidate_before(epoch);
-            self.index.maintenance();
             self.domain.quiesce_and_drain()
         };
+        self.maintain_keys();
         reclaim_cache_entries::<V>(retired);
     }
 
@@ -1525,12 +1583,13 @@ where
     {
         // This guard predates every initialization guard and singleflight
         // frame below, so their unwind cleanup finishes before reclamation.
-        // Only drain already-retired nodes here: index maintenance could run
-        // unrelated key callbacks while propagating the original panic.
-        // Never wait for readers during unwinding: an outer lookup's key
-        // callback may have invoked this operation while holding a permit.
+        // Drain detached keys with per-key panic containment, except when
+        // an outer lookup still holds admission. Never wait for readers
+        // during unwinding: a key callback may have invoked this operation
+        // while holding a permit.
         let _reclaim_on_unwind = scopeguard::guard_on_unwind(self, |cache| {
             let _ = catch_no_unwind(AssertUnwindSafe(|| {
+                cache.maintain_keys();
                 reclaim_cache_entries::<V>(cache.domain.try_quiesce_and_drain());
             }));
         });
@@ -1554,6 +1613,9 @@ where
                 });
             }
 
+            // User hashing happens before acquiring the coordination lock.
+            // Retain this hash for callback-free insertion and removal.
+            let hash = flight_hash(vkey_opt.as_ref().unwrap());
             let (flight, is_leader) = {
                 let mut flights = self.flights.lock();
                 let vkey_ref = vkey_opt.as_ref().unwrap();
@@ -1562,13 +1624,12 @@ where
                     self.maintain(false);
                     return Ok(lease);
                 }
-                if let Some(handle) = flights.get(vkey_ref) {
-                    (Arc::clone(&handle.0), false)
+                if let Some(flight) = flights.get(hash, vkey_ref) {
+                    (Arc::clone(flight), false)
                 } else {
                     let vkey = vkey_opt.take().unwrap();
-                    let flight = Arc::new(Flight::new(vkey));
-                    let inserted = flights.insert(FlightHandle(Arc::clone(&flight)));
-                    debug_assert!(inserted);
+                    let flight = Arc::new(Flight::new(vkey, hash));
+                    flights.insert_unique(Arc::clone(&flight));
                     (flight, true)
                 }
             };
@@ -1621,7 +1682,7 @@ where
             let mut guard = LeaderGuard {
                 cache: self,
                 flight: &flight,
-                completed: false,
+                registered: true,
             };
 
             let compute_fn = compute_opt.take().expect("compute called once");
@@ -1673,7 +1734,6 @@ where
                     // 3. Publish result to followers.
                     // Increment pins for Flight, transferring 1 pin to FlightState::Finished.
                     node_ref.acquire_anchor_pin();
-                    guard.completed = true;
                     {
                         let mut state = flight.state.lock();
                         *state = FlightState::Finished(Ok((node_ptr, w)));
@@ -1681,12 +1741,7 @@ where
                     flight.changed.notify_all();
 
                     // 4. Only then remove single-flight registration.
-                    let removed = self.flights.lock().take(&flight.key);
-                    debug_assert!(
-                        removed
-                            .as_ref()
-                            .is_some_and(|handle| Arc::ptr_eq(&handle.0, &flight))
-                    );
+                    guard.unregister();
 
                     drop(_active);
                     self.maintain(true);
@@ -1695,7 +1750,6 @@ where
                     return Ok(creator_guard.into_lease());
                 }
                 Err(err) => {
-                    guard.completed = true;
                     let arc_err = Arc::new(err.clone());
                     {
                         let mut state = flight.state.lock();
@@ -1703,12 +1757,7 @@ where
                     }
                     flight.changed.notify_all();
 
-                    let removed = self.flights.lock().take(&flight.key);
-                    debug_assert!(
-                        removed
-                            .as_ref()
-                            .is_some_and(|handle| Arc::ptr_eq(&handle.0, &flight))
-                    );
+                    guard.unregister();
 
                     drop(_active);
                     self.maintain(true);

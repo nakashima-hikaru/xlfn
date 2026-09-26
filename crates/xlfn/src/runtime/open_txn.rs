@@ -217,7 +217,14 @@ impl<A: crate::Addin> OpeningState<A> for Initializing {
 
     fn abandon(self, deps: &OpenDeps<'_, A>) {
         let Self { core, host: _ } = self;
+        let attempt = core.attempt_id();
+        let reason = if std::thread::panicking() {
+            crate::shutdown_trace::ShutdownFailure::BoundaryPanic
+        } else {
+            crate::shutdown_trace::ShutdownFailure::AddinShutdownFailed
+        };
         abandon_open(deps, core, LifecycleOwnership::Installed);
+        deps.observer().quarantine_open(attempt, reason);
     }
 }
 

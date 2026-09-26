@@ -31,6 +31,11 @@ def apply? (s : State) (event : Event) : Option State :=
       else if s.phase = .closing ∧ s.openAttempt = some attempt then
         some { s with openAttempt := none }
       else none
+  | .quarantineOpen attempt =>
+      if (s.phase = .opening ∨ s.phase = .closing) ∧
+          s.openAttempt = some attempt ∧ s.cleanupOwner = none then
+        some { s with phase := .quarantined, openAttempt := none }
+      else none
   | .requestFinalClose =>
       some { s with
         phase := phaseAfterFinalClose s.phase
@@ -119,6 +124,14 @@ theorem apply?_sound
         · simp only [apply?] at h
           rw [if_neg hOpening, if_neg hClosing] at h
           cases h
+  | quarantineOpen attempt =>
+      by_cases hPre : (s.phase = .opening ∨ s.phase = .closing) ∧
+          s.openAttempt = some attempt ∧ s.cleanupOwner = none
+      · simp only [apply?] at h
+        rw [if_pos hPre] at h
+        cases h
+        exact Step.quarantineOpen hPre.1 hPre.2.1 hPre.2.2
+      · simp [apply?, hPre] at h
   | requestFinalClose =>
       simp [apply?] at h
       cases h

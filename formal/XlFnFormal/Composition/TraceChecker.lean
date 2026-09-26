@@ -207,6 +207,10 @@ private def parseCompositionEvent : Json → Except String Event
             (← payloadField json "finishOpenRejectedByClose" "attempt")
       | some "failOpen" =>
           return .failOpen (← payloadField json "failOpen" "attempt")
+      | some "quarantineOpen" => do
+          let payload ← json.getObjVal? "quarantineOpen"
+          return .quarantineOpen (← field payload "attempt")
+            (← parseFailure (← payload.getObjVal? "reason"))
       | some "commitOpen" => do
           let payload ← json.getObjVal? "commitOpen"
           return .commitOpen (← field payload "attempt")
@@ -300,9 +304,14 @@ private def checkTrace (json : Json) : Except String Unit := do
   if trace.traceTruncated then
     throw "composition trace exceeded its in-memory event budget"
   let replayed ← replayEvents trace.events.toList State.initialState
-  let ⟨_final, hSteps⟩ := replayed
+  let ⟨final, hSteps⟩ := replayed
   match trace.outcome with
   | "in_progress" => return ()
+  | "quarantined" =>
+      if final.lifecycle.phase = .quarantined ∧
+          final.currentShutdown = none ∧ final.logicalQuiescenceCertified = false then
+        return ()
+      else throw "quarantined open trace does not reach uncommitted quarantine"
   | "returned_success" | "returnedSuccess" =>
       checkReturnedSuccess rfl hSteps
   | outcome => throw s!"unknown composition trace outcome: {outcome}"

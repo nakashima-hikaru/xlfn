@@ -1,7 +1,7 @@
 //! Quick Cache resident policy. Only stored values own a residency obligation.
 //! Cloned lookup/placeholder results are non-owning snapshots.
 
-use super::{Entry, ResidentEntry, VersionedKey, VersionedKeyRef};
+use super::{Entry, ResidentEntry, ResidentKey, VersionedKey, VersionedKeyRef};
 use quick_cache::{
     OptionsBuilder, Weighter,
     sync::{Cache, DefaultLifecycle},
@@ -19,7 +19,7 @@ impl<K, V> Weighter<K, ResidentEntry<V>> for EntryWeight {
 }
 
 pub(super) struct QuickResidentIndex<K, V> {
-    cache: Cache<VersionedKey<K>, ResidentEntry<V>, EntryWeight, RandomState>,
+    cache: Cache<ResidentKey<K>, ResidentEntry<V>, EntryWeight, RandomState>,
 }
 
 impl<K, V> QuickResidentIndex<K, V>
@@ -64,8 +64,8 @@ where
         self.cache.get(key).map(|entry| entry.snapshot())
     }
 
-    pub(super) fn insert_resident(&self, key: &VersionedKey<K>, entry: ResidentEntry<V>) {
-        self.cache.insert(key.clone(), entry);
+    pub(super) fn insert_resident(&self, key: ResidentKey<K>, entry: ResidentEntry<V>) {
+        self.cache.insert(key, entry);
     }
 
     pub(super) fn invalidate(&self, key: &VersionedKey<K>) {
@@ -73,7 +73,7 @@ where
     }
 
     pub(super) fn invalidate_before(&self, epoch: u64) {
-        self.cache.retain(|key, _| key.epoch >= epoch);
+        self.cache.retain(|key, _| key.get().epoch >= epoch);
     }
 
     pub(super) fn clear(&self) {

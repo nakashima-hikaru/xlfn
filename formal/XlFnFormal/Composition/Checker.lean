@@ -81,6 +81,16 @@ def apply? (s : State) (event : Event) : Option State :=
                 logicalQuiescenceCertified := false }
         | none => none
       else none
+  | .quarantineOpen attempt _reason =>
+      if s.currentShutdown = none then
+        match Lifecycle.apply? s.lifecycle (.quarantineOpen attempt) with
+        | some lifecycle' =>
+            some
+              { lifecycle := lifecycle'
+                currentShutdown := none
+                logicalQuiescenceCertified := false }
+        | none => none
+      else none
   | .requestFinalClose =>
       match Lifecycle.apply? s.lifecycle .requestFinalClose with
       | some lifecycle' => some { s with lifecycle := lifecycle' }
@@ -217,6 +227,16 @@ theorem apply?_sound
             simp [hLifecycle] at h
             cases h
             exact Step.failOpen hNoSession (Lifecycle.apply?_sound hLifecycle)
+      · simp [apply?, hNoSession] at h
+  | quarantineOpen attempt reason =>
+      by_cases hNoSession : s.currentShutdown = none
+      · simp only [apply?, hNoSession] at h
+        cases hLifecycle : Lifecycle.apply? s.lifecycle (.quarantineOpen attempt) with
+        | none => simp [hLifecycle] at h
+        | some lifecycle' =>
+            simp [hLifecycle] at h
+            cases h
+            exact Step.quarantineOpen hNoSession (Lifecycle.apply?_sound hLifecycle)
       · simp [apply?, hNoSession] at h
   | requestFinalClose =>
       simp only [apply?] at h
@@ -397,6 +417,8 @@ theorem apply?_complete
   | finishOpenRejectedByClose hNoSession hStep =>
       simp [apply?, hNoSession, Lifecycle.apply?_complete hStep]
   | failOpen hNoSession hStep =>
+      simp [apply?, hNoSession, Lifecycle.apply?_complete hStep]
+  | quarantineOpen hNoSession hStep =>
       simp [apply?, hNoSession, Lifecycle.apply?_complete hStep]
   | requestFinalClose hStep =>
       simp [apply?, Lifecycle.apply?_complete hStep]

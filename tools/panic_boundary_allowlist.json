@@ -120,6 +120,14 @@
     "reason": "Negative observer asserts the diagnostic reporting boundary contains the fixture tracing panic."
   },
   {
+    "path": "crates/xlfn/src/cache/singleflight_tests.rs",
+    "context": "# [ test ] # [ cfg ( not ( miri ) ) ] fn unwind_cleanup_does_not_call_faulting_keys_again",
+    "code": "let result = std::panic::catch_unwind(AssertUnwindSafe(|| {",
+    "count": 1,
+    "category": "test",
+    "reason": "Inspects the fixed string computation panic to verify singleflight cleanup preserves its original payload without invoking faulting key callbacks."
+  },
+  {
     "path": "crates/xlfn/src/execution.rs",
     "context": "# [ cfg ( test ) ]",
     "code": "use std::panic::catch_unwind;",

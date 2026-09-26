@@ -51,7 +51,7 @@ fn post_compute_hash_panic_must_not_leak_the_creator_pin() {
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         let result = cache.get_or_try_insert_with(
             key,
-            |_| 2, // Overweight: exercises post-compute invalidation.
+            |_| 1, // Resident insertion executes user hashing after computation.
             || {
                 // Initial lookups succeeded; the next hash now fails after
                 // an application value has been created.

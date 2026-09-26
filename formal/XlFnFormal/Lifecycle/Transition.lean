@@ -9,6 +9,7 @@ inductive Event where
   | finishOpen (attempt : AttemptId)
   | finishOpenRejectedByClose (attempt : AttemptId)
   | failOpen (attempt : AttemptId)
+  | quarantineOpen (attempt : AttemptId)
   | requestFinalClose
   | acquireFinalCloseOwner
   | acquireOpenRollbackOwner
@@ -19,6 +20,7 @@ inductive Event where
 
 def phaseAfterFinalClose : Phase → Phase
   | .closed => .closed
+  | .quarantined => .quarantined
   | .opening => .closing
   | .open => .closing
   | .closing => .closing
@@ -71,6 +73,16 @@ inductive Step : State → Event → State → Prop where
       (hPhase : s.phase = .closing)
       (hAttempt : s.openAttempt = some attempt) :
       Step s (.failOpen attempt) { s with openAttempt := none }
+
+  /-- An initialization failure cannot establish application quiescence. -/
+  | quarantineOpen
+      {s : State}
+      {attempt : AttemptId}
+      (hPhase : s.phase = .opening ∨ s.phase = .closing)
+      (hAttempt : s.openAttempt = some attempt)
+      (hNoOwner : s.cleanupOwner = none) :
+      Step s (.quarantineOpen attempt)
+        { s with phase := .quarantined, openAttempt := none }
 
   | requestFinalClose
       {s : State} :

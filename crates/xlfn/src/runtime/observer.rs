@@ -268,6 +268,28 @@ impl RuntimeObserver {
         }
     }
 
+    /// The open attempt ended without an application quiescence certificate.
+    /// No committed shutdown session exists, so this is not a lifted shutdown
+    /// event or a recoverable open rollback.
+    pub(crate) fn quarantine_open(
+        &self,
+        attempt: OpenAttemptId,
+        reason: crate::shutdown_trace::ShutdownFailure,
+    ) {
+        #[cfg(any(test, feature = "refinement"))]
+        {
+            self.record_composition_event(
+                crate::composition_refinement::CompositionEvent::QuarantineOpen {
+                    attempt: attempt.get(),
+                    reason,
+                },
+            );
+            self.trace_handle().quarantine_open(attempt.get(), reason);
+        }
+        #[cfg(not(any(test, feature = "refinement")))]
+        let _ = (attempt, reason);
+    }
+
     pub(crate) fn fail_open(&self, attempt: OpenAttemptId) {
         #[cfg(any(test, feature = "refinement"))]
         {

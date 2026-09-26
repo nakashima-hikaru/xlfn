@@ -339,6 +339,10 @@ lake exe shutdown_trace_checker < shutdown-trace.json
 
 Validates ordered lifecycle certificates and order-independent activity
 ownership observations against the independent shutdown specification.
+An `initial: "opening"` record instead describes an initialization quarantine
+with an attempt ID and failure reason. It is checked against the lifecycle
+`quarantineOpen` transition: no generation was committed, no resource snapshot
+or quiescence certificate exists, and only a `quarantined` outcome is accepted.
 
 ### Composition trace checker
 
@@ -347,6 +351,12 @@ lake exe composition_trace_checker < composition-trace.json
 ```
 
 Replays lifecycle and shutdown composition traces across open/close generations.
+An uncommitted `quarantineOpen` ends the active attempt in `quarantined`, clears
+prior successful-return status, and cannot admit a new open or certify unloading.
+This terminal transition is distinct from `failOpen`, whose rollback can prove
+quiescence and return the runtime to `closed`. Rust replay tests cover both
+initialization errors and panics, including attempts after successful removal,
+and reject forged success, mismatched attempts, and reopening after quarantine.
 
 ### Published-topic trace checker
 

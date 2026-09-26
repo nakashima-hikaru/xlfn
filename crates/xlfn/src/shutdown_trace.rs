@@ -495,14 +495,24 @@ impl TraceOutcome {
 
 #[cfg(any(test, feature = "refinement"))]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub(crate) struct ShutdownTrace {
-    pub(crate) generation: u64,
-    pub(crate) initial: ShutdownResources,
-    pub(crate) activities: Vec<ActivityEvent>,
-    pub(crate) certificates: Vec<CertificateEvent>,
-    #[serde(rename = "trace_truncated")]
-    pub(crate) trace_truncated: bool,
-    pub(crate) outcome: String,
+#[serde(untagged)]
+pub(crate) enum ShutdownTrace {
+    Committed {
+        generation: u64,
+        initial: ShutdownResources,
+        activities: Vec<ActivityEvent>,
+        certificates: Vec<CertificateEvent>,
+        trace_truncated: bool,
+        outcome: String,
+    },
+    /// No generation was committed and no resource/quiescence snapshot is
+    /// available. This lifecycle terminal observation cannot certify unloading.
+    OpenQuarantine {
+        initial: &'static str,
+        attempt: u64,
+        reason: ShutdownFailure,
+        outcome: &'static str,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -537,6 +547,10 @@ enum RecorderState {
     Idle,
     Recording(TraceSession),
     Terminal(TraceSession),
+    OpenQuarantined {
+        attempt: u64,
+        reason: ShutdownFailure,
+    },
 }
 
 /// Passive event sink for the independent Lean shutdown specification.
@@ -584,6 +598,14 @@ impl ShutdownTraceRecorder {
             outcome: TraceOutcome::InProgress,
         });
         Ok(())
+    }
+
+    #[cfg(any(test, feature = "refinement"))]
+    pub(crate) fn quarantine_open(&self, attempt: u64, reason: ShutdownFailure) {
+        // Initialization never started a committed shutdown session. Replace a
+        // previous generation's terminal trace with this attempt's actual
+        // terminal observation, without inventing a resource snapshot.
+        *self.state.lock() = RecorderState::OpenQuarantined { attempt, reason };
     }
 
     /// Record an observation that the operational path has already produced.
@@ -668,8 +690,16 @@ impl ShutdownTraceRecorder {
         let session = match &*state {
             RecorderState::Recording(session) | RecorderState::Terminal(session) => session,
             RecorderState::Idle => return None,
+            RecorderState::OpenQuarantined { attempt, reason } => {
+                return Some(ShutdownTrace::OpenQuarantine {
+                    initial: "opening",
+                    attempt: *attempt,
+                    reason: *reason,
+                    outcome: "quarantined",
+                });
+            }
         };
-        Some(ShutdownTrace {
+        Some(ShutdownTrace::Committed {
             generation: session.generation,
             initial: session.initial.clone(),
             activities: session.activities.clone(),
@@ -693,7 +723,7 @@ impl ShutdownTraceRecorder {
             RecorderState::Recording(session) | RecorderState::Terminal(session) => {
                 session.activities.clone()
             }
-            RecorderState::Idle => Vec::new(),
+            RecorderState::Idle | RecorderState::OpenQuarantined { .. } => Vec::new(),
         }
     }
 
@@ -704,7 +734,7 @@ impl ShutdownTraceRecorder {
             RecorderState::Recording(session) | RecorderState::Terminal(session) => {
                 session.certificates.clone()
             }
-            RecorderState::Idle => Vec::new(),
+            RecorderState::Idle | RecorderState::OpenQuarantined { .. } => Vec::new(),
         }
     }
 
@@ -747,7 +777,10 @@ mod tests {
         });
         assert!(!recorder.active());
         assert!(recorder.certificates().len() == 1);
-        assert_eq!(recorder.trace().unwrap().outcome, "quarantined");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&recorder.trace_json().unwrap()).unwrap()["outcome"],
+            "quarantined"
+        );
     }
 
     #[test]
@@ -774,7 +807,10 @@ mod tests {
         recorder.record(ShutdownEvent::FinishClose);
         recorder.mark_returned_success();
         assert!(!recorder.active());
-        assert_eq!(recorder.trace().unwrap().outcome, "returned_success");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&recorder.trace_json().unwrap()).unwrap()["outcome"],
+            "returned_success"
+        );
     }
 
     #[test]

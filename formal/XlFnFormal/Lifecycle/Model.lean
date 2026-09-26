@@ -16,6 +16,7 @@ inductive Phase where
   | open
   | closing
   | openRollbackPending
+  | quarantined
   deriving DecidableEq, Repr
 
 inductive CleanupOwner where
@@ -58,6 +59,8 @@ def PhaseConsistent (s : State) : Prop :=
       s.openAttempt.isNone
   | .closed =>
       s.openAttempt.isNone
+  | .quarantined =>
+      s.openAttempt.isNone ∧ s.cleanupOwner.isNone
   | .closing =>
       True
 

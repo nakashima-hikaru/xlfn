@@ -1,4 +1,4 @@
-use crate::shutdown_trace::{CertificateEvent, ShutdownResources};
+use crate::shutdown_trace::{CertificateEvent, ShutdownFailure, ShutdownResources};
 use crate::sync::Mutex;
 use serde::Serialize;
 
@@ -17,6 +17,10 @@ pub(crate) enum CompositionEvent {
     },
     FailOpen {
         attempt: u64,
+    },
+    QuarantineOpen {
+        attempt: u64,
+        reason: ShutdownFailure,
     },
     RequestFinalClose,
     AcquireFinalCloseOwner,
@@ -51,6 +55,7 @@ struct Machine {
     events: Vec<CompositionEvent>,
     trace_truncated: bool,
     returned_success: bool,
+    quarantined: bool,
     return_pending: bool,
     terminal_pending: bool,
 }
@@ -61,6 +66,7 @@ impl Machine {
             events: Vec::new(),
             trace_truncated: false,
             returned_success: false,
+            quarantined: false,
             return_pending: false,
             terminal_pending: false,
         }
@@ -87,7 +93,22 @@ impl CompositionTrace {
     }
 
     pub(crate) fn record(&self, event: CompositionEvent) {
-        self.inner.lock().push(event);
+        let mut machine = self.inner.lock();
+        match &event {
+            CompositionEvent::BeginOpen { .. } => {
+                machine.returned_success = false;
+                machine.return_pending = false;
+                machine.terminal_pending = false;
+            }
+            CompositionEvent::QuarantineOpen { .. } => {
+                machine.quarantined = true;
+                machine.returned_success = false;
+                machine.return_pending = false;
+                machine.terminal_pending = false;
+            }
+            _ => {}
+        }
+        machine.push(event);
     }
 
     pub(crate) fn mark_return_pending(&self) {
@@ -116,7 +137,9 @@ impl CompositionTrace {
             initial: "initial",
             events: machine.events.clone(),
             trace_truncated: machine.trace_truncated,
-            outcome: if machine.returned_success {
+            outcome: if machine.quarantined {
+                "quarantined"
+            } else if machine.returned_success {
                 "returned_success"
             } else {
                 "in_progress"

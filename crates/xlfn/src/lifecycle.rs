@@ -601,6 +601,201 @@ mod tests {
     // SAFETY: this test Addin has no application-owned executable sources.
     unsafe impl crate::addin::PhysicallyUnloadableAddin for CleanClose {}
 
+    struct InitializationFailure<const PANIC: bool>;
+
+    impl<const PANIC: bool> Addin for InitializationFailure<PANIC> {
+        type SharedState = ();
+        type LifecycleState = ();
+        type Error = XllError;
+        type Layers = ();
+
+        fn open(_: &OpenContext) -> Result<crate::addin::Opened<(), ()>, XllError> {
+            if PANIC {
+                panic!("injected application initialization panic");
+            }
+            Err(XllError::Overloaded)
+        }
+    }
+
+    fn initialization_quarantine_traces<const PANIC: bool>(
+        previously_removed: bool,
+    ) -> (String, String) {
+        let runtime = Runtime::<InitializationFailure<PANIC>>::new();
+        if previously_removed {
+            crate::diagnostics::reset_diagnostic_router().unwrap();
+            let opening = runtime.begin_open().unwrap();
+            let mut opening = runtime.publish(opening, (), ());
+            runtime.finish_open(&mut opening, Vec::new()).unwrap();
+            assert_eq!(host_auto_remove(&runtime), 1);
+            let previous: serde_json::Value =
+                serde_json::from_str(&runtime.composition_trace_json()).unwrap();
+            assert_eq!(previous["outcome"], "returned_success");
+        }
+        let transaction = runtime.begin_open().unwrap().attach_host();
+        let attempt = runtime.protocol_generation().unwrap();
+        let starting: serde_json::Value =
+            serde_json::from_str(&runtime.composition_trace_json()).unwrap();
+        assert_eq!(starting["outcome"], "in_progress");
+        let context = OpenContext::new(
+            std::path::PathBuf::from("test.xll"),
+            BuildInfo::new(AddinId::parse("test").unwrap(), "0", "test"),
+            attempt,
+        );
+        let lifecycle = lifecycle_access(&runtime);
+        let result = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+            match initialize_addin::<InitializationFailure<PANIC>>(context, transaction) {
+                Ok(_) => panic!("injected initialization failure must fail"),
+                Err(failure) => {
+                    assert!(matches!(
+                        failure.recover(&runtime, &lifecycle),
+                        XllError::Overloaded
+                    ));
+                }
+            }
+        }));
+        assert_eq!(result.is_err(), PANIC);
+        assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
+        let composition = runtime.composition_trace_json();
+        let shutdown = runtime.shutdown_trace_json();
+        let document: serde_json::Value = serde_json::from_str(&composition).unwrap();
+        let events = document["events"].as_array().unwrap();
+        let terminal = &events.last().unwrap()["quarantineOpen"];
+        assert_eq!(document["outcome"], "quarantined");
+        assert!(terminal["attempt"].as_u64().is_some_and(|id| id > 0));
+        assert_eq!(
+            terminal["reason"],
+            if PANIC {
+                "boundaryPanic"
+            } else {
+                "addinShutdownFailed"
+            }
+        );
+        assert!(!events.iter().any(|event| event.get("failOpen").is_some()));
+        assert_commit_open_precedes_lift_shutdown(&composition);
+        let shutdown_document: serde_json::Value = serde_json::from_str(&shutdown).unwrap();
+        assert_eq!(shutdown_document["initial"], "opening");
+        assert_eq!(shutdown_document["attempt"], terminal["attempt"]);
+        assert_eq!(shutdown_document["reason"], terminal["reason"]);
+        assert_eq!(shutdown_document["outcome"], "quarantined");
+        assert!(shutdown_document.get("generation").is_none());
+        // Later host hints cannot replace quarantine with a success outcome.
+        assert_eq!(host_auto_remove(&runtime), 1);
+        assert_eq!(host_auto_close(&runtime), 1);
+        assert!(runtime.begin_open().is_err());
+        assert_eq!(runtime.composition_trace_json(), composition);
+        assert_eq!(runtime.shutdown_trace_json(), shutdown);
+        (composition, shutdown)
+    }
+
+    #[test]
+    fn initialization_quarantine_records_error_and_panic_after_initial_and_reopened_attempts() {
+        let _runtime_guard = crate::runtime::tests::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _trace_guard = COMPOSITION_TRACE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for previously_removed in [false, true] {
+            initialization_quarantine_traces::<false>(previously_removed);
+            initialization_quarantine_traces::<true>(previously_removed);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires XLFN_COMPOSITION_CHECKER and XLFN_SHUTDOWN_CHECKER"]
+    fn rust_composition_initialization_quarantine_traces_are_accepted_by_lean_checker() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let _runtime_guard = crate::runtime::tests::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _trace_guard = COMPOSITION_TRACE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let composition_checker = std::env::var_os("XLFN_COMPOSITION_CHECKER").unwrap();
+        let shutdown_checker = std::env::var_os("XLFN_SHUTDOWN_CHECKER").unwrap();
+        let reject = |checker: &std::ffi::OsString, document: &serde_json::Value| {
+            let mut child = Command::new(checker)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(document.to_string().as_bytes())
+                .unwrap();
+            assert!(
+                !child.wait_with_output().unwrap().status.success(),
+                "invalid trace accepted: {document}"
+            );
+        };
+        for previously_removed in [false, true] {
+            for (label, (composition, shutdown)) in [
+                (
+                    "error",
+                    initialization_quarantine_traces::<false>(previously_removed),
+                ),
+                (
+                    "panic",
+                    initialization_quarantine_traces::<true>(previously_removed),
+                ),
+            ] {
+                let suffix = format!(
+                    "{label}-{}",
+                    if previously_removed {
+                        "reopen"
+                    } else {
+                        "initial"
+                    }
+                );
+                check_composition_trace_with_lean(
+                    &composition_checker,
+                    &suffix,
+                    &composition,
+                    &format!("rust-composition-open-quarantine-{suffix}.json"),
+                );
+                check_composition_trace_with_lean(
+                    &shutdown_checker,
+                    &suffix,
+                    &shutdown,
+                    &format!("rust-shutdown-open-quarantine-{suffix}.json"),
+                );
+                let original: serde_json::Value = serde_json::from_str(&composition).unwrap();
+                let mut false_success = original.clone();
+                false_success["outcome"] = "returned_success".into();
+                reject(&composition_checker, &false_success);
+                let mut wrong_attempt = original.clone();
+                wrong_attempt["events"]
+                    .as_array_mut()
+                    .unwrap()
+                    .last_mut()
+                    .unwrap()["quarantineOpen"]["attempt"] = 0.into();
+                reject(&composition_checker, &wrong_attempt);
+                let sampled_epoch = original["events"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .rev()
+                    .find_map(|event| {
+                        event
+                            .get("beginOpen")
+                            .map(|open| open["sampledEpoch"].clone())
+                    })
+                    .unwrap();
+                let mut reopen = original;
+                reopen["events"].as_array_mut().unwrap().push(serde_json::json!({"beginOpen": {"sampledEpoch": sampled_epoch, "attempt": 99}}));
+                reject(&composition_checker, &reopen);
+                let mut false_shutdown_success: serde_json::Value =
+                    serde_json::from_str(&shutdown).unwrap();
+                false_shutdown_success["outcome"] = "returned_success".into();
+                reject(&shutdown_checker, &false_shutdown_success);
+            }
+        }
+    }
+
     struct TraceDiagnosticSink;
 
     impl crate::diagnostics::DiagnosticSink for TraceDiagnosticSink {

@@ -36,6 +36,18 @@ theorem successful_open_rollback_is_quiescent
   | finishOpenRollback hNoSession hCertificate =>
       exact ⟨rfl, hCertificate.resources_quiescent⟩
 
+/-- Initialization quarantine retains residency; it does not manufacture the
+    resource certificate required by either successful close path. -/
+theorem quarantined_open_has_no_unload_certificate
+    {s t : State} {attempt : Lifecycle.AttemptId} {reason : Shutdown.Failure}
+    (hStep : Step s (.quarantineOpen attempt reason) t) :
+    t.lifecycle.phase = .quarantined ∧ t.currentShutdown = none ∧
+    t.logicalQuiescenceCertified = false ∧ ¬t.lifecycle.ReturnSafe := by
+  cases hStep with
+  | quarantineOpen hNoSession hLifecycle =>
+      cases hLifecycle
+      simp [Lifecycle.State.ReturnSafe]
+
 theorem published_closed_session_has_final_close_owner
     {s t : State}
     (hStep : Step s .publishCommittedClosed t) :

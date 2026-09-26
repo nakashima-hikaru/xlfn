@@ -173,4 +173,17 @@ theorem Steps.returnSafe_has_no_active_owner
     t.cleanupOwner = none :=
   hSafe.2.2
 
+theorem quarantined_not_returnSafe {s : State} (h : s.phase = .quarantined) :
+    ¬s.ReturnSafe := by
+  simp [State.ReturnSafe, h]
+
+theorem quarantined_cannot_beginOpen {s : State} {epoch : Epoch}
+    (h : s.phase = .quarantined) : ¬s.CanBeginOpen epoch := by
+  simp [State.CanBeginOpen, h]
+
+theorem Step.quarantine_sticky {s t : State} {event : Event}
+    (h : s.phase = .quarantined) (hStep : Step s event t) :
+    t.phase = .quarantined := by
+  cases hStep <;> simp_all [State.CanBeginOpen, phaseAfterFinalClose]
+
 end XlFnFormal.Lifecycle

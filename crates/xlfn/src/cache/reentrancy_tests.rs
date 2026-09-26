@@ -207,17 +207,14 @@ fn failed_follower_reclaims_after_flight_state_unlock() {
 
     // Keep the failed flight registered, exactly as between the leader's
     // completion notification and its removal from the flight table.
-    let flight = Arc::new(Flight::new(VersionedKey {
+    let key = VersionedKey {
         epoch: cache.generation.snapshot(),
         key: Key::plain(1),
-    }));
+    };
+    let hash = flight_hash(&key);
+    let flight = Arc::new(Flight::new(key, hash));
     *flight.state.lock() = FlightState::Finished(Err(Arc::new(XllError::Overloaded)));
-    assert!(
-        cache
-            .flights
-            .lock()
-            .insert(FlightHandle(Arc::clone(&flight)))
-    );
+    cache.flights.lock().insert_unique(Arc::clone(&flight));
     let initialization = ActiveCacheGuard::enter().unwrap();
     drop(previous);
     drop(initialization);
@@ -228,5 +225,5 @@ fn failed_follower_reclaims_after_flight_state_unlock() {
     assert!(matches!(result, Err(XllError::Overloaded)));
     reentry.assert_completed();
     assert_eq!(cache.reclamation_stats().pending_nodes, 0);
-    assert!(cache.flights.lock().take(&flight.key).is_some());
+    assert!(cache.flights.lock().remove(&flight).is_some());
 }

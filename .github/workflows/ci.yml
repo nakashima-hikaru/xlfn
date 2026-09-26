@@ -465,6 +465,7 @@ jobs:
 
             - name: Validate a Rust-generated composition trace
               env:
+                  XLFN_SHUTDOWN_CHECKER: ${{ github.workspace }}/formal/.lake/build/bin/shutdown_trace_checker
                   XLFN_COMPOSITION_CHECKER: ${{ github.workspace }}/formal/.lake/build/bin/composition_trace_checker
                   XLFN_COMPOSITION_TRACE: ${{ github.workspace }}/rust-composition-trace.json
                   XLFN_COMPOSITION_TAKEOVER_TRACE: ${{ github.workspace }}/rust-composition-owner-takeover-trace.json
@@ -491,4 +492,6 @@ jobs:
                       rust-composition-open-rollback-trace.json
                       rust-composition-already-closed-trace.json
                       rust-composition-reopen-trace.json
+                      rust-composition-open-quarantine-*.json
+                      rust-shutdown-open-quarantine-*.json
                   if-no-files-found: ignore

@@ -36,6 +36,11 @@ theorem Step.valid_preserved
           exact ⟨hLifecycleValid, by
             simp [State.SessionConsistent, hPhase], by
             simp [State.CurrentShutdownCertified]⟩
+  | quarantineOpen hNoSession hLifecycle =>
+      have hLifecycleValid := Lifecycle.Step.valid_preserved hValid.1 hLifecycle
+      cases hLifecycle
+      exact ⟨hLifecycleValid, by simp [State.SessionConsistent], by
+        simp [State.CurrentShutdownCertified]⟩
   | requestFinalClose hLifecycle =>
       have hLifecycleValid := Lifecycle.Step.valid_preserved
         hValid.1 hLifecycle
@@ -181,6 +186,8 @@ theorem Step.unloadCertificationConsistent_preserved
   | failOpen hNoSession hLifecycle =>
       cases hLifecycle <;>
         simp_all [State.UnloadCertificationConsistent]
+  | quarantineOpen hNoSession hLifecycle =>
+      cases hLifecycle <;> simp [State.UnloadCertificationConsistent]
   | requestFinalClose hLifecycle =>
       cases hLifecycle <;>
         cases hPhase : s.lifecycle.phase <;>

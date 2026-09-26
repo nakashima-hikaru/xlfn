@@ -60,6 +60,13 @@ Eviction, rejection, explicit invalidation and clear release that pin and enqueu
 retirement without running user destructors inside index locks. Existing read
 permits and leases govern node reclamation. Alternate sharded indexes
 are available only through the internal benchmark feature.
+Stored keys have a separate retirement queue: their destructors run after index
+and clear locks are released, with each panic contained independently. Nested
+initialization and lookups defer this work until the outer caller leaves; value
+backpressure also avoids waiting on the calling thread's own read admission.
+Single-flight leaders retain registration ownership until removal completes.
+Removal uses the registration's cached hash and allocation identity, so neither
+normal completion nor unwind cleanup calls user key hashing or equality again.
 Zero-budget nodes are never published and belong to their single lease. They
 can be destroyed directly, except during cache initialization, when destruction
 is deferred until the initialization guard has exited.

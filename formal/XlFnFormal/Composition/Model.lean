@@ -50,6 +50,8 @@ def SessionConsistent (s : State) : Prop :=
   | .opening, none => True
   | .openRollbackPending, none => True
   | .closing, none => True
+  | .quarantined, none => True
+  | .quarantined, some _ => False
   | .open, some session => session.generation = s.lifecycle.generation ∧
       session.state.phase = .open
   | .closing, some session =>

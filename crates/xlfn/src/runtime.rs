@@ -593,7 +593,7 @@ impl<A: crate::Addin> Runtime<A> {
         self.observer().mark_return_pending();
     }
 
-    #[cfg(all(test, feature = "rtd", feature = "handles"))]
+    #[cfg(test)]
     pub(crate) fn shutdown_trace_json(&self) -> String {
         self.observer()
             .trace_handle()
