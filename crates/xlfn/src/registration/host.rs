@@ -421,7 +421,11 @@ fn decode_event_registration_id(result: &ExcelCallbackValue<'_>) -> XllResult<i3
     let raw = result.raw()?;
     // SAFETY: XLTYPE_INT selects the integer union member.
     let value = unsafe { raw.value.integer };
-    if value <= 0 {
+    // xlEventRegister reports failure as zero. Live Windows Excel can return
+    // a nonzero acknowledgement with the high bit set (e.g. 0x9d380001), so
+    // interpreting the signed integer as a positive counter rejects success.
+    // Preserve the raw value; event removal is keyed by event, not this value.
+    if value == 0 {
         return Err(XllError::ExcelApi {
             function: ExcelApiFunction::EventRegister,
             failure: ExcelApiFailure::InvalidRegistrationId(value),
@@ -632,17 +636,21 @@ mod tests {
     }
 
     #[test]
-    fn event_unregister_requires_a_positive_integer() {
-        let positive = ExcelCallbackValue::from_raw_for_test(XLOPER12::integer(1));
-        assert!(validate_event_unregister_result(&positive).is_ok());
+    fn event_registration_and_unregister_accept_nonzero_integer_acknowledgements() {
+        for value in [1, 2, -1, -1_657_274_367, i32::MIN, i32::MAX] {
+            let result = ExcelCallbackValue::from_raw_for_test(XLOPER12::integer(value));
+            assert_eq!(decode_event_registration_id(&result).unwrap(), value);
+            assert!(validate_event_unregister_result(&result).is_ok());
+        }
 
         for raw in [
             XLOPER12::integer(0),
-            XLOPER12::integer(-1),
             XLOPER12::boolean(true),
             XLOPER12::error(XLERR_NAME),
+            XLOPER12::number(1.0),
         ] {
             let result = ExcelCallbackValue::from_raw_for_test(raw);
+            assert!(decode_event_registration_id(&result).is_err());
             assert!(validate_event_unregister_result(&result).is_err());
         }
     }
