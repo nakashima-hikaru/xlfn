@@ -48,6 +48,34 @@ def register_xll(app: Any, xll: Path) -> None:
         raise RuntimeError(f"Excel RegisterXLL returned False: {path}")
 
 
+def registration_diagnostics(app: Any) -> dict[str, Any]:
+    """Read registration metadata after a failure without executing UDFs."""
+    result: dict[str, Any] = {}
+    try:
+        entries = app.RegisteredFunctions
+        if entries is None:
+            result["registered_functions"] = []
+        elif isinstance(entries, (tuple, list)):
+            result["registered_functions"] = [row for row in entries
+                if isinstance(row, (tuple, list)) and len(row) >= 2
+                and str(row[1]).startswith("xll_")]
+        else:
+            result["registered_functions_error"] = f"unexpected metadata: {type(entries).__name__}"
+    except Exception as error:
+        result["registered_functions_error"] = str(error)
+    bindings = {}
+    for name in ("BENCH.ALLOC.BYTES", "BENCH.ALLOC.CALLS", "BENCH.ASYNC", "BENCH.ID", "BENCH.ERRNUM"):
+        try:
+            # Without parentheses, Evaluate reads the hidden registration ID
+            # name. It must not call a UDF on a failed/rolled-back runtime.
+            value = app.Evaluate(name)
+            bindings[name] = {"type": type(value).__name__, "value": value}
+        except Exception as error:
+            bindings[name] = {"error": str(error)}
+    result["name_bindings"] = bindings
+    return result
+
+
 def checkout_commit() -> str | None:
     result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT.parents[1],
                             capture_output=True, text=True, check=False)
@@ -800,6 +828,8 @@ def worker(args: argparse.Namespace, case: Case) -> int:
     except Exception as error:
         record["status"] = "error"
         record["error"] = f"{type(error).__name__}: {error}"
+        if session is not None and args.implementation == "xlfn":
+            record["registration_diagnostics"] = registration_diagnostics(session.app)
     finally:
         if session is not None:
             session.close()
@@ -908,6 +938,8 @@ def main() -> int:
                 print(f"{case.key} {implementation}: {record['status']}", flush=True)
                 if record["status"] != "ok":
                     print(record.get("error", "unknown error"), flush=True)
+                    if "registration_diagnostics" in record:
+                        print(json.dumps(record["registration_diagnostics"], ensure_ascii=False), flush=True)
                 errors += record["status"] != "ok"
     return 1 if errors else 0
 

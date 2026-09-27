@@ -7,7 +7,7 @@ from unittest.mock import Mock
 
 from artifact_manifest import FILES, create, verify
 from generate_registration import source
-from run import XL_ERR_NUM, check_scalar, formula, register_xll
+from run import XL_ERR_NUM, check_scalar, formula, register_xll, registration_diagnostics
 from summarize import PRIMARY, summarize
 from workloads import IDS, Case, cases
 
@@ -88,6 +88,18 @@ class PlanTest(unittest.TestCase):
         app.RegisterXLL.assert_called_once_with(str(Path("benchmark.xll").resolve()))
         app.RegisterXLL.return_value = True
         register_xll(app, Path("benchmark.xll"))
+
+    def test_registration_diagnostics_preserves_value_types_without_calling_udfs(self):
+        app = SimpleNamespace(RegisteredFunctions=(("fixture.xll", "xll_identity", "QQ$"),),
+                              Evaluate=Mock(side_effect=[-123.0, -2146826259, 456.0, -123.0, -2146826259]))
+        result = registration_diagnostics(app)
+        self.assertEqual(result["name_bindings"]["BENCH.ALLOC.BYTES"], {"type": "float", "value": -123.0})
+        self.assertEqual(result["name_bindings"]["BENCH.ERRNUM"]["type"], "int")
+        for call in app.Evaluate.call_args_list:
+            self.assertNotIn("(", call.args[0])
+        app.Evaluate.side_effect = RuntimeError("probe unavailable")
+        self.assertEqual(registration_diagnostics(app)["name_bindings"]["BENCH.ID"],
+                         {"error": "probe unavailable"})
 
     def test_registration_names_match_rust_generator(self):
         generated = source(10)
