@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Threading;
 using ExcelDna.Integration;
+using ExcelDna.Registration;
 
 namespace ExcelComparison;
 
