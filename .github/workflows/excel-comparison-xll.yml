@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build both x86_64 XLL sets
+    name: Build xlfn and NativeAOT Excel-DNA XLLs
     runs-on: windows-2025
     steps:
       - name: Check out repository
@@ -38,7 +38,7 @@ jobs:
         shell: pwsh
         run: python -B -m unittest discover -s benchmarks/excel-comparison -p 'test_*.py'
 
-      - name: Build xlfn and Excel-DNA fixtures
+      - name: Build xlfn and NativeAOT Excel-DNA fixtures
         shell: pwsh
         run: ./benchmarks/excel-comparison/build.ps1
 

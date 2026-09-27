@@ -58,6 +58,7 @@ def create(root: Path, commit: str, run_id: str, run_attempt: str) -> dict:
         "architecture": ARCHITECTURE,
         "target": TARGET,
         "source": "github-actions",
+        "excel_dna_compilation": "NativeAOT",
         "commit": commit,
         "run_id": str(run_id),
         "run_attempt": str(run_attempt),
@@ -75,6 +76,7 @@ def verify(root: Path, *, run_id: str | None = None, commit: str | None = None) 
         "architecture": ARCHITECTURE,
         "target": TARGET,
         "source": "github-actions",
+        "excel_dna_compilation": "NativeAOT",
     }
     for key, value in expected.items():
         if manifest.get(key) != value:

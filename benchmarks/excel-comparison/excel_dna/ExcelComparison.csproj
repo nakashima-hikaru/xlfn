@@ -1,17 +1,14 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net10.0-windows</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <PlatformTarget>x64</PlatformTarget>
+    <PublishAot>true</PublishAot>
+    <SelfContained>true</SelfContained>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <EnableDynamicLoading>true</EnableDynamicLoading>
-    <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
-    <ExcelAddInName>Excel Comparison DNA</ExcelAddInName>
-    <ExcelAddInFileName>ExcelComparison</ExcelAddInFileName>
-    <ExcelDnaCreate32BitAddIn>false</ExcelDnaCreate32BitAddIn>
-    <RunExcelDnaPack>true</RunExcelDnaPack>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="ExcelDna.AddIn" Version="1.9.0" />
+    <PackageReference Include="ExcelDna.AddIn.NativeAOT" Version="1.10.0-preview5" />
   </ItemGroup>
 </Project>

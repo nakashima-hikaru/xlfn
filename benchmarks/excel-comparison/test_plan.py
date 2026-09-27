@@ -81,7 +81,9 @@ class PlanTest(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(image)
             create(root, "abc123", "42", "1")
-            self.assertEqual(verify(root, run_id="42", commit="abc123")["architecture"], "x86_64")
+            manifest = verify(root, run_id="42", commit="abc123")
+            self.assertEqual(manifest["architecture"], "x86_64")
+            self.assertEqual(manifest["excel_dna_compilation"], "NativeAOT")
             with self.assertRaises(ValueError):
                 verify(root, run_id="43")
             (root / FILES[0]).write_bytes(b"changed")

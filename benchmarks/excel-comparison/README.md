@@ -9,13 +9,13 @@ comparison.
 ## Build in CI, run on the Windows Excel machine
 
 The [Excel comparison XLLs workflow](../../.github/workflows/excel-comparison-xll.yml)
-builds **x86_64** xlfn and packed Excel-DNA XLLs for the same commit. It
+builds **x86_64** xlfn and Excel-DNA **NativeAOT** XLLs for the same commit. It
 uploads `excel-comparison-x86_64`, containing both `benchmark.xll` files,
 four registration variants per implementation, and a manifest with SHA-256
 digests. A second CI job downloads and verifies that artifact. CI does not
 run Excel.
 
-On the Excel machine, install the .NET 10 runtime, Python 3.11+, `pywin32`,
+On the Excel machine, install Python 3.11+, `pywin32`,
 `psutil`, and GitHub CLI (`gh`). Use the same Excel build, computer, power
 mode, and trust settings for both add-ins. Run from an ordinary interactive
 desktop session with a trusted add-in location; Excel COM automation is not
@@ -35,7 +35,7 @@ Replace `123456789` with a completed workflow run ID. `fetch-ci.ps1` rejects
 an existing destination so artifacts from different runs cannot be mixed;
 `-Repository OWNER/REPO` and `-Destination PATH` are available if needed. If
 you choose another destination, pass the same path to `run.py --artifacts`.
-The runner verifies the CI manifest, all ten XLL digests, the x86_64 PE
+The runner verifies the CI manifest (including Excel-DNA's NativeAOT build mode), all ten XLL digests, the x86_64 PE
 machine type, and the checkout commit before opening Excel. For a PR artifact,
 check out the CI run's merge commit; `--allow-commit-mismatch` is available
 only when intentionally using a different harness revision. Records include
@@ -47,13 +47,15 @@ the parent kills a timed-out process and records a failed case. `--id S01
 Mac. Choose a new `--out` path for each run; use `--append` only when
 intentionally adding cases to an existing JSONL file.
 
-For development without CI, install the Rust x86_64 MSVC target and .NET 10
-SDK, run `./build.ps1`, then pass `--allow-local-artifacts` to `run.py`.
+For development without CI, install the Rust x86_64 MSVC target, .NET 10
+SDK, and the Visual Studio C++ toolchain needed by NativeAOT; run
+`./build.ps1`, then pass `--allow-local-artifacts` to `run.py`.
 `build.ps1 -Smoke` creates only the 10-extra registration variant. Local
 artifacts are labeled `local-unverified` and do not enter the normal CI path.
 
 The two packed XLLs use identical `BENCH.*` worksheet names and are **never
-loaded together**. The Excel-DNA fixture uses Excel-DNA 1.9.0 on .NET 10; its
+loaded together**. The Excel-DNA fixture uses the 1.10.0-preview5 NativeAOT
+package on .NET 10; its
 Task UDF uses Excel-DNA's built-in async registration, and its streaming UDF
 uses `ExcelAsyncUtil.Observe`. The xlfn fixture uses xlfn's async and RTD
 paths. The worksheet function bodies do only the stated work. C02 generates
@@ -113,7 +115,8 @@ load errors, dynamic-array spill errors, and add-in shutdown behavior before
 interpreting performance. This repository's Mac checks cannot establish
 Windows compilation or live Excel correctness.
 
-Relevant API references: [Excel-DNA extended registration](https://excel-dna.net/docs/guides-basic/extended-registration/),
+Relevant API references: [Excel-DNA NativeAOT support](https://excel-dna.net/docs/guides-basic/dotnet-native-aot-support/),
+[Excel-DNA extended registration](https://excel-dna.net/docs/guides-basic/extended-registration/),
 [Excel-DNA packed add-in build properties](https://excel-dna.net/docs/guides-basic/sdk-style-project-properties/),
 [Excel `Range.Dirty`](https://learn.microsoft.com/en-us/office/vba/api/excel.range.dirty),
 and [Excel RTD throttle](https://learn.microsoft.com/en-us/office/vba/api/excel.rtd.throttleinterval).
