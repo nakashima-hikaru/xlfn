@@ -164,7 +164,7 @@ Use `Result<T, DataError>` in the worksheet function. The generated boundary per
 
 Do not encode expected user errors as panics. Panic containment protects Excel from unwinding across the ABI, but it reports an internal defect rather than a domain error.
 
-## Conversion design rules
+## Before using a custom conversion
 
 A production conversion should satisfy all of these:
 
@@ -175,4 +175,4 @@ A production conversion should satisfy all of these:
 - **Context-light:** conversion should not perform network calls or long-running external work.
 - **Diagnostic:** preserve the argument name and use a meaningful `InputError` or domain code.
 
-For a closed string vocabulary, prefer `ExcelEnum`. For a formula-owned object, use [handles](handles.md) rather than serializing an internal pointer into a string yourself.
+For a closed string vocabulary, prefer `ExcelEnum`. For a formula-owned object, use [handles](../../guide/src/handles.md) rather than serializing an internal pointer into a string yourself.

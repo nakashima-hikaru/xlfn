@@ -81,10 +81,27 @@ Reference arguments cannot use blank, missing, or default policies because they 
 Derive `ExcelEnum` for a small, closed string vocabulary:
 
 ```rust
-{{#include ../../crates/xlfn/tests/ui/pass/excel_enum.rs:17:32}}
+use xlfn::prelude::*;
+
+#[derive(Clone, Copy, ExcelEnum)]
+#[excel_enum(ascii_case_insensitive)]
+enum Direction {
+    #[excel_value(name = "Forward")]
+    Forward,
+    #[excel_value(name = "Reverse")]
+    Reverse,
+}
+
+#[excel_function(name = "DIRECTION.SIGN", thread_safe)]
+fn sign(direction: Direction) -> f64 {
+    match direction {
+        Direction::Forward => 1.0,
+        Direction::Reverse => -1.0,
+    }
+}
 ```
 
-The derive implements input conversion, output conversion, and all normal return-mode marker traits. Requirements:
+The derive implements input and output conversion. Requirements:
 
 - the target is an enum;
 - every variant is unit-like;

@@ -1,106 +1,84 @@
 # Build, validate, and load
 
-An XLL is not complete when `cargo check` succeeds. Excel loads a linked PE image, resolves imports, calls a fixed set of exports, and expects the image architecture to match the Excel process. xlfn therefore supplies `cargo xlfn check` and `cargo xlfn package` as the supported artifact workflows.
+After changing an add-in, validate its linked artifacts, create a package, and
+load that package in Excel. Run the commands below from the add-in package
+directory. For initial project setup, start with [Create your first
+add-in](quick-start.md).
 
 ## Development validation
 
-From the add-in package directory:
+Choose the target for the **Excel process bitness**:
 
-```powershell
-cargo xlfn check
-```
+| Excel process | Rust target | Package directory |
+| --- | --- | --- |
+| 64-bit | `x86_64-pc-windows-msvc` | `package/win-x64/` |
+| 32-bit | `i686-pc-windows-msvc` | `package/win-x86/` |
 
-With no target selection, `check` validates both supported Windows targets. Select one during a focused development loop:
+Validate one target during development:
 
 ```powershell
 cargo xlfn check --target x86_64-pc-windows-msvc
-cargo xlfn check --target i686-pc-windows-msvc
 ```
 
-`cargo xlfn check` does more than type checking. It:
+A successful command builds the `cdylib`, stages its bundle files, and checks
+the PE architecture, required exports, embedded framework metadata, CRT
+policy, and import closure. It leaves no persistent deployment package.
+`cargo check` alone does not perform these linked-artifact checks.
 
-1. builds and links the selected `cdylib`;
-2. creates an isolated staging package;
-3. reads the generated `.xllexp` manifest;
-4. compares required lifecycle, COM, calculation-event, and UDF exports with the PE export table;
-5. verifies the PE machine type against the requested target;
-6. stages configured bundle files;
-7. checks the import closure using the package's system-import policy.
-
-Use Cargo build-selection flags normally:
+Omit `--target` to validate both architectures. Add the same feature and lock
+options that you intend to distribute:
 
 ```powershell
-cargo xlfn check `
-  --target x86_64-pc-windows-msvc `
-  --features async `
-  --locked
+cargo xlfn check --target x86_64-pc-windows-msvc --features async --locked
 ```
 
-The default is `--crt static`, which reduces deployment dependence on a separately installed VC runtime. The command reports that default rather than changing the profile silently. Use `--crt dynamic` when the linked application and its binary dependencies require `/MD`, or `--crt inherit` to preserve Cargo, environment, and toolchain CRT settings exactly.
-
-`static` and `dynamic` are enforced by an internal rustc wrapper only for the selected target; host build scripts and proc macros are unchanged. The linked XLL contains an effective-policy marker which `check` and `package` verify. The CRT observer recognizes an exact, case-insensitive allowlist of release/debug MSVC runtime DLLs and Universal CRT API-set DLLs; lookalike names are not classified. Under `static`, an observed dynamic CRT import is rejected because it commonly indicates that a prebuilt static library used `/MD`. Under `inherit`, the same static-Rust/dynamic-import combination is recorded and warned as potentially mixed.
-
-CRT observation does not approve an external dependency. Any runtime DLL not included in the package must be listed explicitly in `external-imports`, where it remains a deliberate deployment exception and is not validated as part of the package closure.
-
-The policy cannot recompile an existing `.lib`. Build linked binary components with a matching MSVC runtime: `/MT` (or `/MTd`) for `static`, and `/MD` (or `/MDd`) for `dynamic`. Matching CRT settings also do not make cross-module allocator ownership safe: allocate and free an object in the same module, or expose an explicit paired deallocator/caller-owned buffer contract.
+The default profile is `dev` and the default CRT policy is `static`. See
+[CLI options](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/cli-reference.md#build-options) for profile and feature selection,
+and [CRT policy](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/cargo-metadata.md#crt-policy) when linking native components.
 
 ## Release packaging
 
-Build one target:
+Create the directory that you will load or distribute:
 
 ```powershell
-cargo xlfn package --target x86_64-pc-windows-msvc
+cargo xlfn package --target x86_64-pc-windows-msvc --locked
 ```
 
-Build both bitnesses as one output transaction:
-
-```powershell
-cargo xlfn package --all
-```
-
-The default output root is `package/`. A typical result is:
+`package` uses the `release` profile by default. The resulting directory contains:
 
 ```text
-package/
-├── win-x86/
-│   ├── AppTools.xll
-│   ├── build-manifest.json
-│   └── NativeEngine.dll
-└── win-x64/
-    ├── AppTools.xll
-    ├── build-manifest.json
-    └── NativeEngine.dll
+package/win-x64/
+├── AppTools.xll
+├── build-manifest.json
+└── configured sidecar files
 ```
 
-For `--all`, every target is built, staged, and verified before the previous output root is transactionally replaced. The replacement is not reader-visible atomicity; the journal provides crash recovery on the next invocation, while rollback remains best effort. If the final replacement and its rollback both fail, the tool preserves the previous package in a recovery directory and reports that path. Do not delete the recovery directory until the failure has been investigated.
+Use `cargo xlfn package --all --locked` to produce both `win-x86` and `win-x64`.
+Keep the feature options consistent between validation and packaging.
+
+For output selection and replacement/recovery behavior, see
+[`cargo xlfn package`](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/cli-reference.md#cargo-xlfn-package). For signing,
+installation, and upgrades, continue with [Deployment and
+distribution](deployment.md).
 
 ## Loading in Excel
 
-Use **File -> Options -> Add-ins -> Manage: Excel Add-ins -> Go -> Browse**, then choose the XLL whose architecture matches the Excel process.
+1. Keep the complete target directory together, including its sidecars.
+2. In Excel, open **File → Options → Add-ins → Manage: Excel Add-ins → Go → Browse**.
+3. Select the packaged `.xll` matching the Excel process bitness.
+4. Invoke a known worksheet function and verify its expected result.
 
-Keep the entire target directory together. The package verifier validates relative imports and
-bundle files in that directory; moving only the `.xll` invalidates that deployment assumption.
-
-When Excel reports that a file cannot be opened or is not a valid add-in, check these in order:
-
-1. Excel process bitness versus XLL bitness;
-2. whether the complete package directory was copied;
-3. Windows file blocking and code-signing policy;
-4. missing or wrong-architecture binary dependencies;
-5. diagnostics emitted during `xlAutoOpen`;
-6. endpoint protection or application-control policy.
-
-See [Troubleshooting](troubleshooting.md) for a symptom-oriented procedure.
+After replacing an add-in, restart Excel so the test uses the new module.
+If loading fails, start with [Excel refuses to load the
+XLL](troubleshooting.md#excel-refuses-to-load-the-xll). If it loads but a formula
+fails, use the [symptom index](troubleshooting.md#find-your-symptom).
 
 ## What successful validation proves
 
-`cargo xlfn check` proves properties of the linked and staged bytes. It does not prove that:
+`cargo xlfn check` validates the linked and staged bytes. It does not establish
+worksheet correctness, an external component's ABI or thread safety, timely
+cancellation, installation trust, or behavior on a particular Excel build.
 
-- a worksheet function has correct business semantics;
-- an application-defined ABI declaration matches an external binary;
-- an external implementation advertised as thread-safe actually is thread-safe;
-- cancellation is timely;
-- every supported Excel channel behaves identically;
-- installation ACLs or code signatures are correct.
-
-Treat linked-artifact validation, Rust tests, application-adapter tests, and real-Excel qualification as separate release gates. The [Testing and release qualification](testing.md) chapter defines a complete matrix.
+Before distributing an add-in, run the application tests and the
+[real-Excel qualification](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/EXCEL_TESTING.md) for the exact package, feature set,
+and supported environments.

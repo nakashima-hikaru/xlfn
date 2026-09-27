@@ -1,151 +1,79 @@
 # Formula-owned handles
 
-Enable the `handles` feature in the application's `xlfn` dependency. Add `async`
-as well when a generated asynchronous UDF consumes a handle.
+Use a handle when a worksheet formula should create a Rust object that other
+formulas can reuse. Enable `handles`; add `async` only when an asynchronous
+UDF consumes the object. Handle producers require a single worksheet-cell
+caller and run on Excel's main thread. For alternatives, see
+[Choosing a pattern](choosing-pattern.md).
 
-Handles let a worksheet formula own an ownership edge to a typed Rust object without exposing a pointer or serialized object graph. A producer returns the object itself; a consumer accepts a call-scoped `Handle<'_, T>`. xlfn owns the formula binding, the published object identity, and the Rust value lifetime; multiple formula bindings may refer to the same object through an explicit alias. Any resource managed inside `T` remains part of `T`'s application-level contract.
+## Create and use an object
 
-## Define a handle object
+Return an owned object from the producer and accept `Handle<'_, T>` in consumers:
 
 ```rust
 use xlfn::{error::InputError, prelude::*};
 
 #[derive(ExcelHandleObject)]
 pub struct Dataset {
-    times: Vec<f64>,
     values: Vec<f64>,
 }
 
 impl Dataset {
-    fn evaluate(&self, time: f64) -> XllResult<f64> {
-        let first = self.times[0];
-        let last = self.times[self.times.len() - 1];
-        if time < first || time > last {
-            return Err(XllError::input("time", InputError::OutOfRange));
-        }
-
-        let right = self.times.partition_point(|point| *point < time);
-        if right == 0 {
-            return Ok(self.values[0]);
-        }
-        if right == self.times.len() {
-            return Ok(self.values[right - 1]);
-        }
-
-        let left = right - 1;
-        let weight = (time - self.times[left])
-            / (self.times[right] - self.times[left]);
-        Ok(self.values[left]
-            + weight * (self.values[right] - self.values[left]))
+    fn total(&self) -> f64 {
+        self.values.iter().sum()
     }
 }
-```
 
-The derived trait requires the value to be `Any + Send + Sync + 'static`. The object may contain immutable data, synchronized application clients, typed resource identifiers, or other owned Rust values. It must not contain call-scoped Excel references.
-
-## Produce and consume
-
-```rust
 #[excel_function(name = "DATASET.CREATE")]
-fn create_dataset(times: Row<f64>, values: Row<f64>) -> XllResult<Dataset> {
-    let times = times.into_vec();
+fn create_dataset(values: Row<f64>) -> XllResult<Dataset> {
     let values = values.into_vec();
-    if times.len() != values.len() || times.is_empty() {
-        return Err(XllError::input(
-            "times",
-            InputError::Malformed("times and values must have equal non-zero length"),
-        ));
-    }
-    if times[0] < 0.0 || times.windows(2).any(|pair| pair[0] >= pair[1]) {
-        return Err(XllError::input(
-            "times",
-            InputError::Malformed("times must be non-negative and strictly increasing"),
-        ));
-    }
-    if values.iter().any(|val| *val <= 0.0) {
+    if values.is_empty() {
         return Err(XllError::input(
             "values",
-            InputError::Malformed("values must be positive"),
+            InputError::Malformed("at least one value is required"),
         ));
     }
-    Ok(Dataset { times, values })
+    Ok(Dataset { values })
 }
 
-#[excel_function(name = "DATASET.EVALUATE", thread_safe)]
-fn dataset_evaluate(dataset: Handle<'_, Dataset>, time: f64) -> XllResult<f64> {
-    dataset.evaluate(time)
-}
-```
-
-`Handle<'call, T>` is a borrowed, call-scoped capability. It dereferences to `T`,
-and its lifetime cannot outlive the active Excel call. It is neither `Clone` nor
-an owned return value; do not store it in Add-in state, another handle object, or
-an async task.
-
-No `handle` argument attribute is required. Ordinary Rust trait resolution identifies `Handle<'_, T>`.
-
-## Async-scoped handle leases
-
-An async UDF that needs an existing object accepts a generation-scoped lease:
-
-```rust
-#[excel_function(name = "DATASET.ASYNC.EVALUATE")]
-async fn async_evaluate(
-    dataset: HandleLease<'_, Dataset>,
-    time: f64,
-) -> XllResult<f64> {
-    std::future::ready(()).await;
-    dataset.evaluate(time)
+#[excel_function(name = "DATASET.TOTAL", thread_safe)]
+fn dataset_total(dataset: Handle<'_, Dataset>) -> f64 {
+    dataset.total()
 }
 ```
 
-`HandleLease<'generation, T>` is created only by the generated async boundary.
-The token is decoded and the object pin is acquired while the Excel call is
-still admitted; the pending pin is then branded when the async task is
-committed. The lease may be used before and after `.await`, but its generation
-brand prevents it from being returned, stored in `'static` state, or moved into
-an independently spawned thread.
+In Excel, put `=DATASET.CREATE(A1:C1)` in a cell, then pass that cell to
+`=DATASET.TOTAL(D1)` if the producer is in `D1`. The producer cell displays an
+opaque token. Pass the token through formulas; do not interpret its text.
 
-`Handle::pin()` is not part of the public API. A saved token can look up an
-object only while its formula binding remains live; the token does not extend
-the object's lifetime. Synchronous code retains an object through an active
-formula binding, including a new binding published with `HandleAlias<'_, T>`.
-This keeps call-scoped lookup separate from the async task lifetime.
-`HandleLease` is not an Excel return value.
+## Define a handle object
+
+`ExcelHandleObject` requires `Send + Sync + 'static`. The object may contain
+immutable data, synchronized application clients, typed resource identifiers,
+or other owned Rust values. It must not contain call-scoped Excel references.
+xlfn manages the Rust object's lifetime; resources inside it remain subject
+to the application's own concurrency and shutdown rules.
+
+## Borrow an object in a consumer
+
+`Handle<'call, T>` dereferences to `T` and stays valid for the active Excel
+call. It is not `Clone` and cannot be stored in add-in state, another handle
+object, or an async task. No `handle` argument attribute is required: the
+parameter type selects handle input conversion.
 
 ## Re-evaluation semantics
 
-Handle-producing functions are memoized by formula revision.
+The producing cell keeps an object for its current formula and converted
+inputs. Recalculating that same formula reuses the object without calling the
+producer again. Changing an input creates a new object and token. Renaming a
+sheet or workbook alone does not recreate the object.
 
-The worksheet cell is the formula owner. A revision is identified by that caller, the stable producer UDF ID, and an input fingerprint. Recalculation with the same revision reuses the existing formula binding and handle object without invoking the producer again.
+When the object depends on external data, add a version or snapshot ID as a
+formula argument. For example, a `DATASET.LOAD` function could accept a
+snapshot ID from `A1`; updating `A1` then creates a new object.
 
-Changing the caller, producer ID, or input fingerprint creates a new formula binding, object, and token.
-
-A live token never changes the object it identifies.
-
-The input fingerprint is a runtime-local BLAKE3 fingerprint of the converted Rust arguments. It is an implementation detail for memoization, not a stable serialized or cross-version identifier. Framework-provided conversions contribute semantic identities: for example, a `Handle<'_, T>` contributes its `ObjectId`, an enum contributes its normalized variant, and a defaulted argument contributes the value after default conversion. A custom `FromExcel` conversion used by a handle producer must explicitly implement `ExcelInputIdentity`; it describes the semantic Rust value rather than falling back to raw Excel bytes. Raw Excel representation is otherwise retained only by explicitly raw-view parameters such as `XlArrayRef`. Conversion and array layers enforce their own workbook-controlled resource bounds. Different tokens that alias the same object therefore have the same semantic input identity. The fingerprint distinguishes input revisions for memoization; it is not itself the ownership identity.
-
-The caller portion uses Excel's stable sheet identifier. Workbook and worksheet display names are used only to resolve that identifier and are not part of the runtime key, so renaming a sheet, renaming a workbook, or using Save As does not by itself create a new formula revision.
-
-Changing the caller, function ID, or arguments creates a different formula revision. A producer must be deterministic: its output must depend only on its Excel-visible inputs and stable application state explicitly represented by those inputs.
-
-### External state and dependency design
-
-Because the producer runs at most once per formula revision, reading hidden mutable state inside the producer does not produce automatic updates when that state changes. Make varying state an explicit Excel-visible dependency:
-
-```rust
-// NG: hidden mutable state is read but never triggers re-evaluation.
-fn dataset() -> Dataset {
-    database.load_latest()
-}
-
-// OK: changing snapshot_id changes the input fingerprint and revision, creating a new object.
-fn dataset(snapshot_id: String) -> Dataset { .. }
-
-// OK: changing the underlying upstream object changes the downstream input fingerprint;
-// aliases of the same object retain the same semantic identity.
-fn model(dataset: Handle<'_, DatasetSnapshot>) -> Model { .. }
-```
+If a custom argument type is used by a handle producer, implement
+`ExcelInputIdentity` alongside `FromExcel`; see [Custom conversions](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/custom-conversions.md).
 
 ## Handle alias functions
 
@@ -158,35 +86,38 @@ fn alias(dataset: Handle<'_, Dataset>) -> HandleAlias<'_, Dataset> {
 }
 ```
 
-`HandleAlias<'call, T>` is the only handle return capability. It is an
-identity-only, call-scoped capability whose binding snapshot keeps the shared
-object alive until publication or disposal. Consume it while the originating
-call scope is active. Publishing adds a counted binding to the same
-arena-owned object and installs a fresh formula binding; it does not clone
-the business value. Once the call scope ends, an unconsumed alias is not a way to
-keep the object alive. A plain `Handle` cannot be returned, cloned, or retained
-after the call.
+The new formula refers to the same Rust object. `HandleAlias<'_, T>` is a
+call-scoped return value; a plain `Handle<'_, T>` is an input and cannot be
+returned or stored after the call.
+
+## Async-scoped handle leases
+
+An async UDF that needs an existing object accepts a generation-scoped lease:
+
+```rust
+#[excel_function(name = "DATASET.ASYNC.EVALUATE")]
+async fn async_evaluate(
+    dataset: HandleLease<'_, Dataset>,
+) -> XllResult<f64> {
+    std::future::ready(()).await;
+    Ok(dataset.total())
+}
+```
+
+`HandleLease<'generation, T>` is supplied by the generated async boundary.
+It keeps the object readable before and after `.await` until that task ends.
+The lease cannot be returned, stored in `'static` state, or moved into an
+independently spawned thread. See [Async handle inputs](async-functions.md#async-handle-inputs).
+
+`HandleLease` is an async input, not an Excel return value. A saved token can
+look up an object only while its producing formula remains active.
 
 ## Lifetime
 
-Each worksheet formula owns one runtime binding edge. Successful removal
-means the binding has been withdrawn: subsequent lookups cannot resolve that
-binding. It does not guarantee that the object's destructor has completed.
-A lookup that observed a live binding before withdrawal may still succeed,
-and its call scope keeps the object alive until that call ends.
-
-After the last binding is withdrawn, destruction follows the read grace
-period and release of any async handle pins. Removing threads and departing
-readers advance reclamation while borrowing the registry. A generation is
-sealed before its existing readers drain, so newer calls cannot extend its
-grace period. Final registry drain waits for outstanding retirement work;
-async task drain must also release the remaining pins before object
-quiescence completes.
-
-An object's destructor may run on the removing thread, when a call scope
-ends, when an async task releases its last pin, or during shutdown. There is
-no dedicated handle reclamation worker. Do not use removal as a
-synchronization barrier for application side effects in `Drop`.
+After the last formula using an object is removed, it remains alive until
+active calls and async tasks finish using it. Removal can therefore happen
+before the object's `Drop` runs. Destruction may occur on several threads;
+do not rely on `Drop` for thread-affine application cleanup.
 
 Destructors must obey the same shutdown rules as any in-process code:
 
@@ -195,17 +126,11 @@ Destructors must obey the same shutdown rules as any in-process code:
 - do not panic;
 - do not directly destroy a thread-affine application resource from an arbitrary handle destructor.
 
-The runtime supports at most 16,384 live handles per open generation. This is a safety bound, not a capacity target.
-Retired bindings also have a bounded debt policy: new publication may return
-`Overloaded` while retirement is waiting for readers or destructors. Removal
-continues to withdraw existing bindings. Release long-running call scopes
-before retrying publication.
-
-## Resource-backed handle objects
-
-A handle object may represent or refer to a resource that is owned elsewhere in the application. Prefer a safe Rust client plus a typed logical identifier over a raw pointer. If a raw pointer is unavoidable, the application must independently prove that movement, concurrent access, and destruction from every possible drop thread are valid; adding `unsafe impl Send` or `Sync` only to satisfy `ExcelHandleObject` does not establish those properties.
-
-If explicit close and `Drop` can both release the same application resource, make release idempotent. Dependencies between application resources are also application state: do not rely on an incidental Rust drop order when explicit invalidation can make a still-referenced object unusable.
+The default limit is 16,384 live formula bindings per open generation.
+Configure it with `RuntimeConfig::with_handles` and
+`HandleConfig::with_binding_limit`; `HandleBindingLimit` accepts `1..=1_048_576`.
+A new publication may also return `Overloaded` while earlier calls are still
+using removed objects. Let those calls finish before retrying.
 
 ## Shutdown interaction
 
@@ -216,7 +141,7 @@ The close order relevant to handle objects is:
 3. xlfn closes the formula-handle registry and drops remaining Rust handle objects;
 4. `Addin::cleanup` performs bounded best-effort disposal.
 
-A handle object's `Drop` therefore must remain safe after `quiesce` has stopped application workers or owner threads. If resource destruction requires such an owner, release or invalidate the resource during `quiesce` while the owner is still available, and make the later Rust wrapper drop a local or idempotent operation. Do not defer the only copy of an application shutdown protocol to handle `Drop`.
+A handle object's `Drop` therefore must remain safe after `quiesce` has stopped application workers or owner threads. If resource destruction requires such an owner, release or invalidate the resource during `quiesce` while the owner is still available, and make the later Rust wrapper drop a local or idempotent operation. Do not defer the only copy of an application shutdown protocol to handle `Drop`. See [Shutdown and unload](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/shutdown.md).
 
 ## Valid producer contexts
 
@@ -231,11 +156,8 @@ A newly constructed handle object uses main-thread return semantics. Producers c
 `HandleAlias<'_, T>` uses main-thread return semantics. A borrowed
 `Handle<'_, T>` is an input capability only and is not a valid return type.
 
-`HandleLease<'_, T>` is intentionally limited to generated async UDF inputs.
-The framework owns the raw pin and drains all scoped async tasks before
-tearing down the formula-handle service and object arena. Consequently, a
-non-zero pin count during final quiescence is a framework ordering invariant,
-not a recoverable user-held lease.
+`HandleLease<'_, T>` is limited to generated async UDF inputs. It cannot be
+returned to Excel or used to keep an object alive independently of its task.
 
 ## Caller restrictions
 
@@ -243,27 +165,10 @@ Formula ownership requires one worksheet-cell caller. Contexts without a stable 
 
 Document this behavior for users who expose handle producers in automation-heavy workbooks.
 
-## Token security model
+## Handle token lifetime
 
-A token contains runtime/session identity, slot/generation data, and a keyed
-BLAKE3 MAC. Rust type identity is intentionally not part of the wire format:
-after authentication and slot/generation validation, the registry checks the
-requested `T` against the canonical `BindingRecord`. Tokens from another
-process generation, tokens of the wrong type, stale slot generations, and
-modified tokens are rejected.
+Tokens are valid only while the producing formula owns its object in the
+current Excel session. Expired, modified, or wrong-type tokens are rejected.
 
-The token is a bearer capability inside the Excel process. It is not an authorization system, workbook ACL, encryption scheme, or durable serialization format. Do not parse it, persist it as an application identifier, or accept it outside the add-in's worksheet boundary.
-
-## Object design guidance
-
-A good handle object is:
-
-- immutable or internally synchronized;
-- suitable for call-scoped borrowing and counted bindings to an arena-owned value;
-- explicit about any application-level thread affinity;
-- free of workbook-owned pointers;
-- bounded in memory;
-- safe to drop during orderly add-in close.
-
-Use `Arc` inside a value only when it reduces immutable payload copying;
-the registry's bindings and pins determine the handle object's lifetime.
+Use tokens only as worksheet handle inputs. Do not parse them, store them as
+persistent application IDs, or send them to an external service.

@@ -1,6 +1,8 @@
 # Asynchronous functions
 
-The optional `async` feature maps Rust futures to Excel's native asynchronous UDF ABI. Argument conversion occurs synchronously at the generated boundary; the future then owns its Rust inputs and completes through Excel's async-return callback.
+Use an async UDF when one formula should receive one eventual result without
+blocking Excel. Enable `async` and use owned Rust inputs. For repeated updates
+or formula-owned objects, see [Choosing a pattern](choosing-pattern.md).
 
 ## Enable the feature
 
@@ -48,54 +50,13 @@ ends before the future may run. Use owned `String`, `Matrix<T>`, or another
 
 ## State and converted inputs
 
-The framework-owned future retains the open `ServiceAddin` generation lease and cancellation token. `AsyncContext<'_, ServiceAddin>` borrows those capabilities for the invocation, so it cannot be moved into a detached task that outlives the future. Ordinary arguments are fully converted before the future is scheduled, so `String`, `Matrix<T>`, and other owned inputs may move safely into the future. Call-scoped Excel memory never enters the executor.
+Arguments are converted while Excel is making the call. The scheduled future
+owns ordinary inputs such as `String` and `Matrix<T>`; borrowed Excel memory
+cannot outlive that call and is rejected in async signatures.
 
-### Async handle inputs
-
-An async UDF that needs a formula-owned object must accept `HandleLease<'_, T>`, not
-`Handle<'_, T>`:
-
-```rust
-#[excel_function(name = "DATASET.ASYNC_EVALUATE")]
-async fn async_evaluate(dataset: HandleLease<'_, Dataset>, time: f64) -> XllResult<f64> {
-    std::future::ready(()).await;
-    dataset.evaluate(time)
-}
-```
-
-`HandleLease<'generation, T>` is decoded into an internal pending pin before
-the Excel call ends, then branded at the single scoped-task construction point.
-Its registry pin remains active while the future owns the value and is released
-when the task completes, is cancelled, panics, or is dropped during shutdown.
-`Handle<'_, T>` remains call-scoped and is rejected by the async parameter
-assertion. `Handle::pin()` is not available; synchronous code should use the
-token, formula binding, or `HandleAlias` instead.
-
-The add-in controls executor size:
-
-```rust
-impl Addin for ServiceAddin {
-    type SharedState = State;
-    type LifecycleState = ();
-    type Error = XllError;
-    type Layers = ();
-
-    fn open(_: &OpenContext) -> XllResult<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>> {
-        Ok(Opened::new(State::new()).with_runtime_config(
-            RuntimeConfig::new().with_async(
-                AsyncConfig::new().with_worker_count(
-                    AsyncWorkerCount::new(4).expect("4 is within the supported range"),
-                ),
-            ),
-        ))
-    }
-}
-```
-
-`AsyncWorkerCount` accepts only values in `1..=32`; values outside that range
-are rejected. Choose the count from measured workload characteristics.
-CPU-heavy work should usually use a dedicated bounded pool rather than
-occupying every async executor thread.
+`AsyncContext<'_, A>` lets the invocation borrow shared state and observe
+cancellation. The framework keeps that state alive until the task ends. Do not
+move the context into a detached task that could outlive the invocation.
 
 ## Cancellation
 
@@ -138,6 +99,50 @@ async fn fetch_data(
 
 Submit blocking or thread-affine work through an application-owned bounded execution mechanism, then await an owned reply without blocking the xlfn executor. xlfn does not define that mechanism's queueing, affinity, overload, or cancellation semantics. If it is reachable from a `thread_safe` function, its concurrency contract must also satisfy the rules in [Execution modes and contexts](execution-modes.md).
 
+## Executor capacity
+
+Configure the pool in `Addin::open` with a runtime policy:
+
+```rust
+let runtime = RuntimeConfig::new().with_async(
+    AsyncConfig::new().with_worker_count(
+        AsyncWorkerCount::new(4).expect("4 is within the supported range"),
+    ),
+);
+Ok(Opened::new(state).with_runtime_config(runtime))
+```
+
+Import `AsyncConfig`, `AsyncWorkerCount`, and `RuntimeConfig` from `xlfn`.
+The worker count defaults to four and accepts `1..=32`. Choose it from
+measured workload characteristics. This setting does not configure any
+application-owned connection pool, foreign runtime, or blocking executor.
+CPU-heavy work should usually use a separate bounded pool so it does not
+occupy every async executor worker. See [Add-in state](lifecycle.md) for the
+complete `open` pattern.
+
+## Async handle inputs
+
+An async UDF that needs a formula-owned object must accept `HandleLease<'_, T>`, not
+`Handle<'_, T>`:
+
+```rust
+#[excel_function(name = "DATASET.ASYNC_EVALUATE")]
+async fn async_evaluate(dataset: HandleLease<'_, Dataset>, time: f64) -> XllResult<f64> {
+    std::future::ready(()).await;
+    dataset.evaluate(time)
+}
+```
+
+Enable both `handles` and `async`. The lease keeps the object readable across
+`.await` for this framework-managed task. It is released when the task
+completes, is cancelled, panics, or is dropped during shutdown. It cannot be
+returned, stored in `'static` state, or moved into an independently spawned
+thread. `Handle<'_, T>` remains synchronous and call-scoped.
+
+There is no `Handle::pin()` escape from that scope. For synchronous object
+sharing, use another formula binding through `HandleAlias`; see
+[Formula-owned handles](handles.md).
+
 ## Error and panic behavior
 
 The future may return any `Result<T, E>` where `E: IntoXllError` and `T` is a valid async return type. Panics in construction, polling, conversion, or completion are contained at framework boundaries and diagnosed as internal errors.
@@ -146,6 +151,9 @@ Containment is not recovery. A panic can leave an external transaction partially
 
 ## Shutdown
 
-On add-in close, the async manager stops accepting work, cancels tracked tasks, and waits for task guards to become idle before executor state is released. User futures and their captured values can run `Drop` during cancellation, so destructors must not block indefinitely or re-enter a resource while holding incompatible locks.
+During terminal add-in removal, xlfn stops accepting async work, cancels tracked tasks, and waits for those tasks to end before releasing executor resources. User futures and their captured values can run `Drop` during cancellation, so destructors must not block indefinitely or re-enter a resource while holding incompatible locks.
 
 `Addin::quiesce` runs only after framework-managed async tasks have drained. Application-owned background tasks must be stopped and joined by `quiesce`; best-effort resource disposal belongs in `Addin::cleanup`.
+
+See [Shutdown and unload](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/shutdown.md) for close hints, terminal removal,
+quarantine, and the optional physical-unload contract.

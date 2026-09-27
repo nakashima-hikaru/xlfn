@@ -1,76 +1,74 @@
 # Worksheet functions
 
-Apply `#[excel_function]` to a safe, ordinary, non-generic free function:
+Add functions to the project from [Create your first add-in](quick-start.md).
+This chapter covers ordinary inputs, return values, and errors; use
+[Values and arrays](values.md) when a function needs ranges or mixed cell types.
+
+## Expose a Rust calculation
+
+Apply `#[excel_function]` to a safe, non-generic free function:
 
 ```rust
+use xlfn::prelude::*;
+
 #[excel_function(name = "MATH.HYPOT", thread_safe)]
 pub fn hypot(x: f64, y: f64) -> f64 {
     x.hypot(y)
 }
 ```
 
-The function may be synchronous or, with the `async` feature, an `async fn`. The macro rejects unsafe, `extern`, `const`, generic, variadic, and method declarations.
+After rebuilding and loading the add-in, `=MATH.HYPOT(3, 4)` returns `5`.
+Excel supplies `x` and `y`; xlfn converts them to finite Rust numbers before
+calling the function. Text such as `"3"` is rejected rather than silently
+converted. An input Excel error is propagated to the result.
 
-## Inputs and results are trait-driven
+The Excel-visible name can differ from the Rust function name. Choose a project
+prefix for distributed functions, such as `ACME.MATH.HYPOT`, to avoid collisions
+with other add-ins. Registration rejects conflicting names.
 
-An ordinary input type implements `FromExcel`. An ordinary scalar output or matrix cell implements `IntoExcel`; the framework keeps runtime return dispatch, ownership, and execution-mode checks internal.
+## Return an expected error
 
-Application errors use `Result<T, E>` where `E: IntoXllError`:
+Use `XllResult<T>` when the calculation can fail. It is an alias for
+`Result<T, XllError>`:
 
 ```rust
-#[derive(Debug)]
-enum DataProcessingError {
-    InvalidValue,
-}
+use xlfn::error::DomainErrorCode;
+use xlfn::prelude::*;
 
-impl IntoXllError for DataProcessingError {
-    fn into_xll_error(self) -> XllError {
-        match self {
-            Self::InvalidValue => XllError::input(
-                "limit",
-                xlfn::error::InputError::OutOfRange,
-            ),
-        }
+#[excel_function(name = "MATH.SQRT", thread_safe)]
+pub fn square_root(value: f64) -> XllResult<f64> {
+    if value < 0.0 {
+        return Err(XllError::Domain {
+            code: DomainErrorCode::InvalidInput,
+        });
     }
-}
-
-#[excel_function(name = "DATA.EVALUATE", thread_safe)]
-fn evaluate(base: f64, limit: f64) -> Result<f64, DataProcessingError> {
-    if limit < 0.0 {
-        return Err(DataProcessingError::InvalidValue);
-    }
-    Ok((base - limit).max(0.0))
+    Ok(value.sqrt())
 }
 ```
 
-## Argument limits
+`=MATH.SQRT(9)` returns `3`; a negative input returns `#NUM!`. This distinguishes
+an invalid mathematical domain from a value of the wrong type. Use errors for
+expected invalid input, and reserve panics for defects in the program.
 
-- synchronous functions support at most 255 Excel-visible arguments;
-- asynchronous functions support at most 254 because Excel supplies an additional async handle;
-- the optional context argument is injected by the framework and does not count as an Excel-visible argument;
-- argument patterns must be simple identifiers.
+You can return strings, booleans, numbers, and arrays, or wrap those results in
+`XllResult`. If an Excel error is itself the intended value, return
+`ExcelErrorValue`, for example `ExcelErrorValue(ExcelError::NotAvailable)` for
+`#N/A`. [Errors and diagnostics](errors-diagnostics.md) explains the mappings and
+how to record detailed failures.
 
-Large positional APIs are difficult to use even below these hard limits. Prefer domain objects, arrays, handles, or a small coherent worksheet surface.
+## Choose when Excel may run it
 
-## Thread safety is an explicit claim
+The examples above use `thread_safe` because their entire calculation can run
+concurrently. Use that flag only when every function, shared resource, and
+external library on the call path supports concurrent access. It does not add
+synchronization for you.
 
-Add `thread_safe` only when the full call path is safe under Excel multi-threaded recalculation:
+Without a mode flag or context, a synchronous function runs on Excel's main
+thread. Functions that read shared state use an injected context as their first
+parameter; that context also selects their execution mode. See
+[Execution modes and contexts](execution-modes.md) before adding state or Excel
+callbacks. A function that performs asynchronous work uses `async fn` and the
+`async` Cargo feature; see [Asynchronous functions](async-functions.md).
 
-```rust
-#[excel_function(name = "DATASET.EVALUATE", thread_safe)]
-fn evaluate(dataset: Handle<'_, Dataset>, time: f64) -> XllResult<f64> {
-    dataset.evaluate(time)
-}
-```
-
-This includes application state, external adapters, caches, logging, and destruction paths. The attribute is not a performance hint; it is a contract with Excel.
-
-## Return ownership
-
-Return values are converted into framework-owned XLOPER12 storage. Excel eventually calls the generated `xlAutoFree12` export. Do not allocate or free XLOPER12 values in ordinary add-in code.
-
-The framework catches panics at its ABI boundaries and returns a safe Excel error while reporting the detailed failure. Panics remain bugs: containment protects Excel; it does not make a partially completed business operation transactional.
-
-## Registration conflicts
-
-Registration names are conflict-denying. xlfn does not replace another XLL's hidden or public name because it cannot safely reconstruct another add-in's ownership and visibility state. Choose stable, namespaced Excel names such as `ACME.DATA.COMPUTE`.
+Next, accept a range or return a grid in [Values and arrays](values.md), or add
+argument descriptions in [Function metadata](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/function-metadata.md).

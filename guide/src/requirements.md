@@ -1,74 +1,107 @@
-# Requirements and compatibility
+# Requirements and setup
 
-## Build host
+Prepare a Windows build environment and choose the target that matches your
+Excel installation. These are the prerequisites for
+[Create your first add-in](quick-start.md); no xlfn knowledge is required.
 
-Release XLLs target the Microsoft Visual C++ ABI and are expected to be built and linked on Windows with:
+## Choose the Excel bitness
 
-- Windows 10 or Windows 11;
-- Rust 1.98.1 or a compatible toolchain for this source snapshot;
-- the `i686-pc-windows-msvc` and/or `x86_64-pc-windows-msvc` Rust targets;
-- Visual Studio Build Tools with **Desktop development with C++**;
-- Cargo and `cargo-xlfn`.
+In Excel, open **File → Account → About Excel** to find whether the Excel
+process is 32-bit or 64-bit. Match that process, even if Windows itself is 64-bit.
 
-The repository pins the toolchain and both targets in `rust-toolchain.toml`:
+| Excel process | Rust target | Package directory |
+| --- | --- | --- |
+| 64-bit Excel | `x86_64-pc-windows-msvc` | `package/win-x64/` |
+| 32-bit Excel | `i686-pc-windows-msvc` | `package/win-x86/` |
 
-```toml
-[toolchain]
-channel = "1.98.1"
-profile = "minimal"
-components = ["clippy", "rustfmt"]
-targets = ["i686-pc-windows-msvc", "x86_64-pc-windows-msvc"]
+The quick start uses the 64-bit target. For 32-bit Excel, replace the target in
+its build command and load the XLL from `win-x86` instead.
+
+## Install the Windows build tools
+
+You need:
+
+- Windows 10 or Windows 11 and desktop Excel;
+- Rust installed through rustup;
+- Visual Studio Build Tools with the **Desktop development with C++** workload;
+- Git, if you will clone the source repository.
+
+This source snapshot uses Rust 1.98.1. Install it and your selected target:
+
+```powershell
+rustup toolchain install 1.98.1 --profile minimal
+rustup target add --toolchain 1.98.1 x86_64-pc-windows-msvc
 ```
 
-Host-side tests that do not link an XLL may run on other operating systems. Packaging and release qualification still require Windows MSVC artifacts and real Excel.
+Use `i686-pc-windows-msvc` in the second command for 32-bit Excel. If Cargo
+cannot find the MSVC linker, run the build from the Developer PowerShell supplied
+by Visual Studio Build Tools.
 
-> **Source-snapshot installation:** the workspace is configured with publishable crates, but an official crates.io release may not yet be available. Until it is published, install `cargo-xlfn` from an audited Git revision or local checkout and replace generated `version = "0.2"` dependencies with the same Git revision or a local `path`. The version-based dependency examples in this guide show the intended form for a published release.
+## Obtain the source checkout
 
-## Excel bitness
+The quick start uses a local checkout so that the framework and packaging tool
+come from the same source version. In the directory where you keep projects:
 
-Match the XLL to the **Excel process**, not to the operating system:
+```powershell
+git clone https://github.com/nakashima-hikaru/xlfn.git xlfn
+```
 
-| Excel process | Rust target              | Package directory  |
-| ------------- | ------------------------ | ------------------ |
-| 32-bit Excel  | `i686-pc-windows-msvc`   | `package/win-x86/` |
-| 64-bit Excel  | `x86_64-pc-windows-msvc` | `package/win-x64/` |
+If you already have a checkout named `xlfn`, use its parent directory instead of
+cloning again. Stay in that parent directory: the tutorial creates `hello-xlfn`
+beside `xlfn` and installs `cargo-xlfn` from `xlfn/crates/cargo-xlfn`.
 
-A 64-bit edition of Windows can run 32-bit Excel. In that case, use the x86 XLL.
+The source version documented here is `0.2.0`. A crates.io release may not yet
+be available; the local path used by the quick start does not depend on one.
 
-## Excel API level
+## Using a published release instead
 
-xlfn uses the Excel 12/XLOPER12 interface. Asynchronous worksheet functions use Excel's native asynchronous UDF ABI and are intended for Excel versions that provide that ABI; the project documentation uses Excel 2010 or later as the operational baseline for this feature.
+When the matching release is available on crates.io, you can install the CLI
+without a checkout:
 
-Do not convert this implementation target into an unqualified compatibility claim. Qualify each release candidate against the exact Excel channels, bitnesses, and Windows versions that you intend to support.
+```powershell
+cargo +1.98.1 install cargo-xlfn --version 0.2.0 --locked
+```
 
-## Rust crate features
-
-The `xlfn` crate has no default features:
+In your add-in's `Cargo.toml`, use the published dependency instead of the path:
 
 ```toml
 [dependencies]
-xlfn = "0.2"
+xlfn = "=0.2.0"
 ```
 
-Enable only what the add-in uses:
+Follow the remaining quick-start steps with the same `cdylib` target and source
+code. Skip its `cargo install --path ...` command. Check the release's own
+toolchain requirements when choosing a different version.
+
+## Optional capabilities
+
+The first add-in needs no Cargo features. Enable a feature when you reach a
+guide that uses it:
+
+| Feature | Use it for |
+| --- | --- |
+| `async` | a formula that completes asynchronously |
+| `handles` | Rust objects owned by worksheet formulas |
+| `rtd` | a formula that receives repeated updates |
+| `cache` | calculations shared across cells |
+
+For example, a local checkout with async support uses:
 
 ```toml
 [dependencies]
-xlfn = { version = "0.2", features = ["async"] }
+xlfn = { path = "../xlfn/crates/xlfn", features = ["async"] }
 ```
 
-| Feature           | Adds                                                                                                |
-| ----------------- | --------------------------------------------------------------------------------------------------- |
-| `async`           | native asynchronous UDF runtime, `AsyncContext`, cancellation tokens, and calculation-event exports |
-| `handles`         | formula-owned typed objects, aliases, and scoped handle inputs                                     |
-| `rtd`             | streaming sources, subscriptions, and RTD configuration                                             |
-| `cache`           | concurrent calculation cache and endpoints                                                          |
+`handles` and `rtd` are independent. Async handle inputs need both `async` and
+`handles`. The `refinement` and `bench-internals` features are for repository
+verification, not add-in development.
 
-`handles` and `rtd` are independent public capabilities. Use both `async` and
-`handles` for asynchronous handle consumers. The `refinement` and
-`bench-internals` features are for repository verification, not application
-development. See the [compatibility policy](compatibility.md) for stability scope.
+## Other platforms and Excel versions
 
-## Project shape
+Portable Rust tests can run on other operating systems. Producing and loading
+the Windows XLL requires the Windows MSVC tools and Excel. xlfn uses the Excel
+12 C API; native async functions use Excel 2010 or later as their operational
+baseline. Exact Windows and Excel support is established for each release, as
+described in the [compatibility reference](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/compatibility.md).
 
-An XLL package must contain exactly one `cdylib` target and exactly one crate-root type attributed with `#[excel_addin]`. The generated lifecycle and COM exports are part of that definition. Do not hand-write competing `xlAutoOpen`, `xlAutoClose`, `xlAutoRemove`, `xlAutoFree12`, `DllGetClassObject`, or related exports.
+Continue with [Create your first add-in](quick-start.md).

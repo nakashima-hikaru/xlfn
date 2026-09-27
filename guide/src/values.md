@@ -1,158 +1,95 @@
 # Values and arrays
 
-xlfn converts Excel values strictly. Ordinary parameters do not ask Excel to coerce text to numbers, booleans to numbers, or arrays to scalars. This makes worksheet behavior predictable and keeps conversion failures visible.
+Start with an owned `Matrix<T>` when a function accepts or returns a rectangular
+range. Use borrowed views or incremental output when conversion cost matters.
+For exact limits and type tables, use the
+[conversion reference](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/conversion-reference.md).
 
-## Scalar inputs
+xlfn converts Excel values strictly. Ordinary parameters do not ask Excel to
+coerce text to numbers, booleans to numbers, or arrays to scalars.
 
-| Rust type | Accepted Excel value | Notes |
-|---|---|---|
+## Choose a scalar type
+
+| Rust input | Excel value | Notes |
+| --- | --- | --- |
 | `f64` | number or integer | must be finite |
-| `bool` | Boolean | numbers and text are not coerced |
-| `i32` | integer, or an integral number in range | fractional values are rejected |
-| `i64` | integer, or an exactly representable integral number | numeric input is limited to the exact Excel-double integer range, `-2^53..=2^53` |
-| `String` | string | decoded as valid UTF-16 |
-| `&str` | string | decoded into call-local scratch; synchronous functions only |
-| `ExcelErrorValue` | Excel error | preserves the worksheet error |
-| `ExcelCellRef<'call>` | number, Boolean, string, error, or blank | borrowed cell view for the active call |
-| `ExcelSerialDate` | finite number | initially marked with `ExcelDateSystem::Workbook` |
-| `ExcelValue` | supported scalar, error, blank, missing, or array | use for intentionally dynamic input |
+| `bool` | Boolean | no numeric or text coercion |
+| `i32` | integer or integral number | rejects fractions and overflow |
+| `i64` | integer or exactly representable integral number | numeric input is limited to the exact binary64 integer range |
+| `String` | string | owned UTF-8 after validated UTF-16 decoding |
+| `&str` | string | call-local view for synchronous functions |
+| `ExcelErrorValue` | Excel error | preserves the exact Excel error |
+| `ExcelSerialDate` | finite number | retains an unresolved workbook date system |
 
-An Excel error passed to a parameter that expects another type is propagated as that Excel error rather than disguised as a generic type error.
+An Excel error passed where a different type is expected is propagated as the
+original error. Input views such as `ExcelCellRef` and `XlArrayRef` are
+synchronous, call-scoped values; see [Borrow a range](#borrow-a-range-during-a-synchronous-call).
 
-## Scalar outputs
+Built-in scalar outputs are `f64`, `bool`, `i32`, exactly representable `i64`,
+`String`, `&str`, `ExcelSerialDate`, and `ExcelErrorValue`.
+`ExcelCellOutput` and custom types implementing `IntoExcel` are also supported.
+The dynamic `ExcelValue`, borrowed input views, and `()` are not ordinary
+worksheet result types.
 
-The same scalar families can be returned. Important restrictions are:
+Numbers must be finite; strings must fit Excel's counted UTF-16 representation.
+Return `ExcelErrorValue(ExcelError::NotAvailable)` for an intentional `#N/A`
+value. Return `Err(...)` when the function failed: the latter is also reported
+as a failure in diagnostics and instrumentation.
 
-- `f64` must be finite;
-- `i64` must be exactly representable by an Excel number;
-- strings must fit Excel's counted UTF-16 representation;
-- `ExcelValue::Missing` and blank `ExcelCellValue` are input states, not valid worksheet results; use `ExcelErrorValue(ExcelError::NotAvailable)` for an explicit `#N/A` result;
-- `()` is not a normal worksheet scalar result, although it is useful as an RTD value and in internal APIs.
+## Work with a rectangular range
 
-Use `ExcelErrorValue(ExcelError::NotAvailable)` when an Excel error is the intended successful result. Use `Err(...)` when the function itself failed. That distinction improves diagnostics and instrumentation.
-
-## Matrices
-
-For synchronous functions that only inspect or transform an Excel array during the call, use `XlArrayRef<'_>`. It borrows the `xltypeMulti` cell buffer and converts each `XlValueRef` lazily, so input traversal itself allocates nothing:
+Use an owned `Matrix<T>` for rectangular input or output. It can outlive an
+exported call and is suitable when an async function needs owned input.
 
 ```rust
+use xlfn::prelude::*;
+
+#[excel_function(name = "ARRAY.SCALE", thread_safe)]
+fn scale_grid(values: Matrix<f64>, factor: f64) -> XllResult<Matrix<f64>> {
+    let (rows, columns) = (values.rows(), values.columns());
+    let scaled = values.into_vec().into_iter().map(|value| value * factor).collect();
+    Matrix::new(rows, columns, scaled)
+}
+```
+
+With a two by two range in `A1:B2`, `=ARRAY.SCALE(A1:B2, 2)` returns a two by
+two result. `Matrix::new` checks non-zero dimensions, element count, and
+framework limits. A scalar input becomes a one by one matrix. Data is in
+row-major order.
+
+Read dimensions with `rows()` and `columns()`; use `as_slice()`, `row()`,
+`column()`, and `iter()` for access. Indexing with `matrix[(row, column)]`
+panics for an invalid coordinate. Use checked accessors for indices derived
+from workbook input.
+
+### Borrow a range during a synchronous call
+
+`XlArrayRef<'_>` reads a mixed-value array without converting every cell
+eagerly. Cell headers are validated on admission; payload conversion is lazy.
+
+```rust
+use xlfn::prelude::*;
+use xlfn::value::XlArrayRef;
+
 #[excel_function(name = "ARRAY.SUM.BORROWED", thread_safe)]
 fn sum_borrowed(values: XlArrayRef<'_>) -> XllResult<f64> {
-    values
-        .cells()
-        .try_fold(0.0, |sum, cell| Ok(sum + cell.as_f64()?))
+    values.cells().try_fold(0.0, |sum, cell| Ok(sum + cell.as_f64()?))
 }
 ```
 
-For typed, call-local grids use `MatrixRef<'_, T>`. Its elements are copied into
-the call scratch arena and therefore require `T: Copy`; string elements can be
-`&str` without a per-element `String` allocation:
+`MatrixRef<'_, T>` materializes `Copy` elements in call-local scratch. For
+example, `MatrixRef<'_, &str>` avoids a separate owned string for each cell.
+Neither borrowed view can escape the call or be an async argument.
+
+### Build a large result incrementally
+
+When an output is large or produced one cell at a time, `XlArrayBuilder`
+writes the result without an intermediate owned matrix.
 
 ```rust
-#[excel_function(name = "ARRAY.TEXT.COUNT", thread_safe)]
-fn text_count(values: MatrixRef<'_, &str>) -> f64 {
-    values.iter().map(|value| value.len() as f64).sum()
-}
-```
-
-Use the owned `Matrix<T>` path when values must outlive the exported call or cross into async work.
-
-`Matrix<T>` stores a rectangular grid in row-major order:
-
-```rust
-#[excel_function(name = "ARRAY.IDENTITY", thread_safe)]
-fn identity(size: i32) -> XllResult<Matrix<f64>> {
-    let size = usize::try_from(size)
-        .map_err(|_| XllError::input("size", InputError::OutOfRange))?;
-    if size == 0 {
-        return Err(XllError::input(
-            "size",
-            InputError::Malformed("matrix size must be non-zero"),
-        ));
-    }
-    if size > 1_000 {
-        return Err(XllError::input(
-            "size",
-            InputError::TooLarge {
-                limit: 1_000,
-                actual: size,
-            },
-        ));
-    }
-    let count = size.checked_mul(size).ok_or(XllError::Domain {
-        code: DomainErrorCode::Overflow,
-    })?;
-    let mut values = vec![0.0; count];
-    for index in 0..size {
-        values[index * size + index] = 1.0;
-    }
-    Matrix::new(size, size, values)
-}
-```
-
-`Matrix::new(rows, columns, data)` checks shape multiplication, Excel's row and column limits, framework element limits, and data length. A scalar input converts to a `1 x 1` matrix; an Excel multi-value converts to its rectangular shape.
-
-Useful accessors include:
-
-```rust
-matrix.rows();
-matrix.columns();
-matrix.as_slice();
-matrix.row(0);
-matrix.column(0);
-matrix.iter();
-matrix[(0, 0)];
-```
-
-Indexing panics on an invalid coordinate. Use `row` and `column` when invalid coordinates should be handled as ordinary control flow.
-
-## One-dimensional shapes
-
-Use `Row<T>` and `Column<T>` to state orientation explicitly:
-
-```rust
-#[excel_function(name = "ARRAY.CUMSUM", thread_safe)]
-fn cumulative(values: Row<f64>) -> XllResult<Row<f64>> {
-    let mut total = 0.0;
-    Row::new(
-        values
-            .into_vec()
-            .into_iter()
-            .map(|value| {
-                total += value;
-                total
-            })
-            .collect(),
-    )
-}
-```
-
-A `Row<T>` accepts a scalar or `1 x N` input. A `Column<T>` accepts a scalar or `N x 1` input. They reject a genuinely two-dimensional array instead of silently flattening it.
-
-`Vec<T>` and `BoundedVarArgs<T, MAX>` are input-only one-dimensional containers. Prefer `BoundedVarArgs` for worksheet surfaces where a hard maximum is part of the contract:
-
-```rust
-#[excel_function(name = "STAT.MEAN", thread_safe)]
-fn mean(values: BoundedVarArgs<f64, 128>) -> XllResult<f64> {
-    let values = values.as_slice();
-    if values.is_empty() {
-        return Err(XllError::input("values", InputError::Malformed("empty input")));
-    }
-    Ok(values.iter().copied().sum::<f64>() / values.len() as f64)
-}
-```
-
-`MAX` must be greater than zero.
-
-## Efficient large array output
-
-For ordinary owned arrays, prefer `Matrix<T>`, `Row<T>`, and `Column<T>`.
-When the result is large or is naturally produced incrementally, use
-`XlArrayBuilder` to construct the return value without first materializing
-an intermediate `Matrix<T>`.
-
-```rust
+use xlfn::prelude::*;
 use xlfn::output::{XlArrayBuilder, XlArrayOutput};
+use xlfn::value::XlArrayRef;
 
 #[excel_function(name = "ARRAY.DOUBLED", thread_safe)]
 fn doubled(values: XlArrayRef<'_>) -> XllResult<XlArrayOutput> {
@@ -165,33 +102,47 @@ fn doubled(values: XlArrayRef<'_>) -> XllResult<XlArrayOutput> {
 }
 ```
 
-## Array safety limits
+The builder rejects a non-finite output as `#NUM!` and checks dimensions and
+return-storage limits. See the
+[allocation limits](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/conversion-reference.md#arrays-and-allocation-limits)
+before planning a very large result.
 
-The framework validates Excel's structural limits and imposes additional memory bounds before reading or allocating arrays.
+## Keep one-dimensional shape explicit
 
-| Limit | 32-bit target | 64-bit target |
-|---|---:|---:|
-| Excel rows | 1,048,576 | 1,048,576 |
-| Excel columns | 16,384 | 16,384 |
-| framework elements | 1,000,000 | 4,000,000 |
-| referenced XLOPER12 bytes | 64 MiB | 256 MiB |
-| returned allocation bytes | 64 MiB | 256 MiB |
-
-The lower 32-bit limits are intentional. A 32-bit Excel process has a much smaller virtual address space, and one large array can destabilize the host even when the nominal worksheet dimensions are legal.
-
-## Date serials
-
-`ExcelSerialDate` preserves a finite Excel serial plus a date-system marker:
+`Row<T>` accepts a scalar or one row; `Column<T>` accepts a scalar or one
+column. Both reject a genuinely two-dimensional array.
 
 ```rust
-#[excel_function(name = "DATE.SERIAL", thread_safe)]
-fn serial(date: ExcelSerialDate) -> f64 {
-    date.serial()
+use xlfn::prelude::*;
+
+#[excel_function(name = "ARRAY.CUMSUM", thread_safe)]
+fn cumulative(values: Row<f64>) -> XllResult<Row<f64>> {
+    let mut total = 0.0;
+    Row::new(values.into_vec().into_iter().map(|value| {
+        total += value;
+        total
+    }).collect())
 }
 ```
 
-An ordinary worksheet argument does not, by itself, reveal whether the workbook uses the Windows 1900 or Mac 1904 system, so converted inputs use `ExcelDateSystem::Workbook`. Resolve or inject the actual workbook convention in application policy before converting the serial to a civil date. `ExcelSerialDate::is_fictitious_1900_leap_day()` detects serial 60 only after the value has been marked `Windows1900`.
+`Vec<T>` and `BoundedVarArgs<T, MAX>` are input-only one-dimensional
+containers. Use the bounded form when a maximum is part of the worksheet
+contract; `MAX` must be greater than zero.
 
-## Dynamic values
+## Treat dates and dynamic values deliberately
 
-`ExcelValue` is useful for pass-through, inspection, and adapters whose type is intentionally dynamic. Prefer concrete Rust types in normal functions: they produce better Function Wizard signatures, clearer errors, and less downstream branching. Its array form contains only `ExcelCellValue`, so nested arrays and missing cells cannot be represented.
+`ExcelSerialDate` retains a finite Excel serial and an
+`ExcelDateSystem::Workbook` marker. A cell alone does not say whether the
+workbook uses the 1900 or 1904 date system. Resolve that convention in
+application policy before converting to a civil date.
+
+`ExcelValue` is an owned, intentionally dynamic **input** representation.
+It does not implement the ordinary worksheet output contract. Convert it
+deliberately to an output type instead of returning it directly. Prefer
+concrete parameter types when possible: they give clearer errors and less
+downstream branching. Its array form contains only `ExcelCellValue`, so
+nested arrays and missing cells cannot be represented.
+
+Next, use [Optional arguments and enums](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/optional-arguments.md) for blank or
+omitted cells, or [Custom conversions](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/custom-conversions.md) for application
+types in worksheet signatures.

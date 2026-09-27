@@ -1,6 +1,16 @@
 # Cargo metadata reference
 
-`cargo-xlfn` reads package-specific settings from `Cargo.toml`. Paths are interpreted relative to the selected package's manifest directory, not the workspace root or current shell directory.
+Use this reference when setting the output name, CRT policy, or sidecar bundle.
+`cargo-xlfn` reads these settings from the selected package's `Cargo.toml`.
+Configured paths are relative to that manifest's directory.
+
+| Configure | Section |
+| --- | --- |
+| Distributed XLL basename | [Basic metadata](#basic-metadata) |
+| Native runtime linkage | [CRT policy](#crt-policy) |
+| DLLs and other sidecars | [Bundle metadata](#bundle-metadata) |
+| Environment-provided DLLs | [External imports](#external-imports) |
+| Recorded build provenance | [Build manifest](#build-manifestjson) |
 
 ## Basic metadata
 
@@ -27,9 +37,36 @@ The value must be a valid Windows basename. It must:
 
 Do not add the `.xll` extension to `artifact-name`; the tool supplies it.
 
-`crt` accepts `inherit`, `static`, or `dynamic`. The resolution order is an
-explicit CLI `--crt`, then this metadata value, then the `static` default.
-`inherit` is a deliberate no-op and does not mean `dynamic`.
+## CRT policy
+
+Select the policy with `package.metadata.xlfn.crt` or a CLI `--crt` override.
+Resolution order is the explicit CLI option, then metadata, then `static`.
+
+| Policy | Rust target behavior | Native libraries |
+| --- | --- | --- |
+| `static` | Enforces `+crt-static` | Build with `/MT` or `/MTd` |
+| `dynamic` | Enforces `-crt-static` | Build with `/MD` or `/MDd` |
+| `inherit` | Preserves Cargo, environment, and toolchain settings | Match the effective linked policy |
+
+`static` and `dynamic` are enforced by a rustc wrapper for the selected Windows
+target. Host build scripts and proc macros are unchanged; existing wrapper
+chains are preserved. `inherit` is a deliberate no-op, not an alias for `dynamic`.
+The linked XLL's effective-policy marker is verified during `check` and `package`.
+
+The tool recognizes an exact, case-insensitive set of MSVC runtime and Universal
+CRT API-set DLL names. Under `static`, a dynamic CRT import in the XLL is rejected.
+Under `inherit`, static Rust linkage combined with dynamic CRT imports is recorded
+and warned as potentially mixed.
+
+Recognized dynamic CRT DLL names observed directly in the XLL are automatically
+admitted as external dependencies. They do **not** need duplicate entries in
+`external-imports`. This observation does not prove those runtimes are installed.
+A non-system DLL imported only by a sidecar still needs to be packaged or explicitly
+approved through [external imports](#external-imports).
+
+The policy cannot rebuild a precompiled `.lib`. Matching CRT settings also does
+not establish allocator ownership across modules: allocate and free within the
+same module, or use an explicit paired deallocator or caller-owned buffer contract.
 
 ## Bundle metadata
 
@@ -85,7 +122,10 @@ Paths and non-DLL names are rejected. Matching is case-insensitive.
 
 This option is an explicit deployment exception: the dependency need not be packaged because the deployment environment promises to resolve it. Do not list a missing application dependency merely to make validation pass. Record who installs the dependency, where it is loaded from, how it is versioned, and how its bitness is controlled.
 
-Windows system imports are accepted by the versioned built-in `windows-system-v1` policy. Every other direct or transitive import must resolve to a packaged basename or an approved external import.
+Windows system imports are accepted by the versioned built-in `windows-system-v1`
+policy. Other direct or transitive imports must resolve to a packaged basename,
+an explicit external import, or an observed dynamic CRT dependency admitted by
+the [CRT policy](#crt-policy).
 
 ## Full example
 

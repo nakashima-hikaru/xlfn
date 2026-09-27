@@ -1,156 +1,106 @@
-# Testing and release qualification
+# Test your add-in
 
-No single test layer is sufficient for an XLL. Test the add-in's Rust code,
-the linked Windows artifact, and the exact Excel environments that matter to
-the deployment. Repository contributors should use the checks in
-[CONTRIBUTING.md](../../CONTRIBUTING.md); this page focuses on add-in authors
-and release operators.
+Start with fast Rust tests for application behavior, then check the Windows
+artifact. Run [the Excel checklist](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/EXCEL_TESTING.md) before distribution.
+This chapter is for add-in authors; changes to xlfn itself use
+[CONTRIBUTING.md](https://github.com/nakashima-hikaru/xlfn/blob/main/CONTRIBUTING.md).
 
-## Rust and artifact checks
+## Run Rust tests during development
 
-Run the add-in's unit and integration tests with its normal Cargo profile. For
-the xlfn packaging contract, validate the exact target and feature selection:
+From the add-in project directory, run:
+
+```console
+cargo test --locked
+```
+
+Use the same Cargo features that your add-in distributes. If the project has
+feature-specific behavior, test each supported combination separately rather
+than assuming `--all-features` represents a production configuration. Repeat
+performance-sensitive checks with the release profile.
+
+Keep application calculations independent of Excel callbacks where possible.
+They can then be tested on a normal Rust test host:
+
+```rust
+fn scaled_total(values: &[f64], scale: f64) -> f64 {
+    values.iter().sum::<f64>() * scale
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scaled_total;
+
+    #[test]
+    fn scales_the_complete_input() {
+        assert_eq!(scaled_total(&[1.0, 2.0, 3.0], 2.0), 12.0);
+    }
+
+    #[test]
+    fn empty_input_has_zero_total() {
+        assert_eq!(scaled_total(&[], 2.0), 0.0);
+    }
+}
+```
+
+Call the tested function from a small `#[excel_function]` wrapper. Test the
+application's actual edge cases: empty inputs, domain bounds, overflow,
+configuration changes, and failures from external services. A pure Rust test
+does not exercise Excel's argument conversion, registration, or callback ABI;
+include those behaviors in the Excel checklist.
+
+## Test state and external services
+
+Build application state with test implementations of network or resource
+clients, then exercise success, timeout, cancellation, overload, and cleanup.
+Keep the doubles at your application's boundary; tests should not need private
+xlfn runtime types.
+
+For stateful features, test these application behaviors before opening Excel:
+
+| Facility | Useful Rust tests |
+| --- | --- |
+| Handles | Object methods, explicit revision dependencies, safe and idempotent resource disposal |
+| Async | Owned input processing, cooperative cancellation, bounded blocking adapters |
+| RTD | Topic validation, value conversion, producer exit when the sender closes |
+| Caches | Key identity, application weight policy, invalidation when external data changes |
+
+Use deterministic signals or channels to coordinate concurrency tests. Avoid
+using a sleep as proof that a worker has started or stopped. Verify that
+application-owned workers are joined and that shutdown leaves no code running
+against state that has been disposed.
+
+## Check the Windows artifact
+
+On the supported Windows build host, validate each architecture you distribute:
 
 ```powershell
-cargo xlfn check --target x86_64-pc-windows-msvc --all-features --locked
-cargo xlfn check --target i686-pc-windows-msvc --all-features --locked
-cargo xlfn package --all --all-features --locked
+cargo xlfn check --target x86_64-pc-windows-msvc --locked
+cargo xlfn check --target i686-pc-windows-msvc --locked
+cargo xlfn package --all --locked
 ```
 
-Verify that:
+Add the same feature and profile options used for your release. Omit an
+architecture only when your support policy excludes it. See
+[Build, validate, and load](build-validation.md) and the
+[`cargo xlfn` reference](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/cli-reference.md) for prerequisites and options.
 
-- required lifecycle, COM, async, and UDF exports are present;
-- x86 decorated exports are correct;
-- PE machine type matches the target;
-- every packaged import resolves;
-- bundle files have unique case-insensitive basenames;
-- final staged bytes match the manifest records;
-- a consumer crate can use the published `xlfn` crate under both targets.
+Inspect the final package for:
 
-Artifact tests do not start Excel. They complement, rather than replace, the
-add-in's own unit tests and real-Excel qualification.
+- required lifecycle, COM, async, and UDF exports, including x86 decoration;
+- the expected PE machine type;
+- a complete packaged import closure;
+- unique case-insensitive bundle basenames;
+- staged bytes matching the manifest records.
 
-## Real-Excel qualification
+Run tests against the dependency versions that the add-in will ship, including
+registry versions when validating an upgrade. Artifact checks do not start
+Excel. Continue with [Test in Excel before release](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/EXCEL_TESTING.md) to test
+worksheet behavior, lifecycle, and the actual installation environment.
 
-Run the exact final package in every supported environment. At minimum,
-qualify each supported Excel bitness. When support claims include multiple
-Windows builds, Excel channels, or locales, include those combinations
-explicitly.
+## Record what passed
 
-Record:
-
-```text
-source commit:
-package digest:
-Windows edition/build:
-Excel version/build/channel:
-Excel bitness:
-locale:
-installation path/policy:
-operator/date:
-result and evidence:
-```
-
-### Lifecycle
-
-- first load and registration;
-- open failure containment;
-- normal close;
-- forced Excel termination followed by stale RTD registration recovery;
-- unload/reload repeatedly in one process where supported;
-- shutdown while work is queued or running.
-
-### Ordinary functions
-
-- scalar, string, Boolean, integer, error, date, and array round trips;
-- blank versus missing policies;
-- Function Wizard descriptions and help topics;
-- thread-safe, volatile, and hidden registration behavior;
-- wrong input types and propagated Excel errors.
-
-### References
-
-- same-sheet and sheet-qualified references;
-- multi-area references;
-- coordinate bounds and sheet names;
-- owned coercion;
-- 32-bit and 64-bit `IDSHEET` behavior.
-
-### Formula-owned handles
-
-- create and consume a handle;
-- alias an existing handle;
-- recalculate with the same formula revision and confirm object reuse;
-- change an explicit revision input and confirm a new object and token;
-- retire the formula and confirm cleanup;
-- reject wrong-type, stale, forged, and previous-session tokens;
-- verify Formula Wizard, VBA/direct calls, and multi-cell caller behavior;
-- verify workbook-close and add-in-unload cleanup;
-- verify external object destruction on its required application-owned executor.
-
-A stable token does not mean that the producer runs on every recalculation. The
-same formula revision reuses its memoized object; revision changes create a new
-object and token. Test observable object behavior or expose an explicit version
-dependency instead of using token text as an application identifier.
-
-### Async
-
-- immediate and delayed completion;
-- cancellation before worker claim and while awaiting;
-- late completion after cancellation;
-- calculation end/cancel events;
-- Excel close with queued and running work;
-- error and panic containment.
-
-### RTD
-
-- one, two, three, and a larger batch such as 100 updates;
-- number, Boolean, integer, string, error, and empty variants;
-- `ConnectData`, `RefreshData`, `DisconnectData`, and `ServerTerminate`;
-- blocked subscribe and notification during close;
-- repeated publish and retry after a transient notification failure;
-- unload/reload without stale callbacks.
-
-### External adapters
-
-Adapt this matrix to the selected integration mechanism:
-
-- required methods, symbols, endpoints, or protocol fields;
-- version mismatch and missing-capability failure;
-- wrong-architecture binary rejection where applicable;
-- malformed outputs and bounded error conversion;
-- authentication and authorization where applicable;
-- maximum intended concurrency and overload behavior;
-- context, object, connection, and process leak counters where available;
-- exception, panic, crash, timeout, and disconnect containment at the adapter boundary.
-
-## Release evidence
-
-Distinguish these statuses:
-
-- **implemented** — source exists;
-- **unit-tested** — host tests passed;
-- **Windows artifact-tested** — linked x86/x64 package inspection passed;
-- **Excel validated** — named real-Excel environments passed;
-- **signed/deployed** — final binaries passed organizational release controls.
-
-Do not mark one status based on another. Publish the supported environment
-matrix and any known unqualified combinations with the release notes.
-
-### Experimental cache resident backends
-
-`just miri-cache-endpoints` checks the non-owning endpoint-resolution cache
-under both Stacked Borrows and Tree Borrows. It covers registry moves,
-destruction and replacement, clear, and separation between registry and
-endpoint types. Regression fixtures also check that same-name types and
-same-address prefixes can remain resident without forcing all candidates into
-one set. It is also included in `just miri`.
-
-`just miri-cache-backends` runs the full-cache common regressions for the
-production Quick Cache policy (1 shard), additional Quick Cache configurations
-(8/32 shards), and the benchmark sharded maps (8/16/32/64 shards), under Stacked
-Borrows and Tree Borrows with leak and alias checks enabled. Production uses Quick Cache without a runtime backend selector.
-
-Set `XLFN_CACHE_BACKEND=quick1|quick8|quick32|sharded8|sharded16|sharded32|sharded64` when running
-an individual cache Criterion benchmark. This selector is available only
-with `bench-internals` and never changes the production default.
+Keep Rust results, artifact checks, and Excel execution evidence separate.
+Record the source commit, toolchain, target, feature selection, and final
+package digest. Publish only the Excel environments actually tested; the
+[evidence template](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/EXCEL_TESTING.md#choose-environments-and-record-evidence)
+helps make results reproducible.

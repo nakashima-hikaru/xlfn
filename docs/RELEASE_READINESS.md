@@ -9,7 +9,7 @@ qualification, controlled performance qualification, and release-version
 selection still need evidence. Local checks prepare the source for that
 decision; they do not certify a 1.0 release.
 
-The [compatibility policy](../guide/src/compatibility.md) defines the intended
+The [API stability policy](API_STABILITY.md) defines the intended
 stable application contract. The [release procedure](RELEASING.md) describes
 how to collect evidence for an exact candidate. The
 [2026-09-12 assessment](archive/release-readiness/2026-09-12.md) is historical

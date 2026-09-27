@@ -1,49 +1,34 @@
 # Summary
 
-[Introduction](introduction.md)
+[Start here](introduction.md)
 
-# Getting started
+# Your first add-in
 
-- [Requirements and compatibility](requirements.md)
-- [Create your first add-in](quick-start.md)
-- [Project anatomy](project-anatomy.md)
-- [Build, validate, and load](build-validation.md)
+- [Set up your environment](requirements.md)
+- [Build and call a function](quick-start.md)
 
-# Core programming model
+# Write functions
 
-- [Add-in lifecycle and state](lifecycle.md)
 - [Worksheet functions](worksheet-functions.md)
-- [Execution modes and contexts](execution-modes.md)
-- [Function metadata](function-metadata.md)
 - [Values and arrays](values.md)
-- [Optional arguments and enums](optional-arguments.md)
-- [Custom conversions](custom-conversions.md)
+- [Execution modes and contexts](execution-modes.md)
 - [Errors and diagnostics](errors-diagnostics.md)
-- [Excel references](references.md)
 
-# Stateful and long-running functions
+# Add capabilities when needed
 
+- [Choose a calculation pattern](choosing-pattern.md)
+- [Share application state](lifecycle.md)
 - [Formula-owned handles](handles.md)
 - [Asynchronous functions](async-functions.md)
 - [Streaming RTD](rtd.md)
-
-# Advanced runtime facilities
-
 - [Calculation caches](caching.md)
-- [UDF execution layers](udf-layers.md)
 
-# Operations
+# Build and distribute
 
+- [Build and load an XLL](build-validation.md)
+- [Test your add-in](testing.md)
 - [Deployment and distribution](deployment.md)
-- [Testing and release qualification](testing.md)
-- [Security model](security.md)
+
+# Help
+
 - [Troubleshooting](troubleshooting.md)
-
-# Reference
-
-- [Attribute reference](attributes.md)
-- [Conversion reference](conversion-reference.md)
-- [`cargo xlfn` reference](cli-reference.md)
-- [Cargo metadata reference](cargo-metadata.md)
-- [Feature and compatibility reference](compatibility.md)
-- [Glossary](glossary.md)

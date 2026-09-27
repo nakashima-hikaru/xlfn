@@ -28,7 +28,7 @@ pub struct AppTools;
 
 `name` and `category` must contain 1 through 255 UTF-16 code units. `id` must be a non-reserved ASCII slug of at most 64 bytes, begin with a letter, and contain only letters, digits, `-`, or `_`.
 
-The macro emits the standard XLL lifecycle and COM exports. Implement [`Addin`](lifecycle.md) for the attributed type.
+The macro emits the standard XLL lifecycle and COM exports. Implement [`Addin`](../../guide/src/lifecycle.md) for the attributed type.
 
 The default keeps the module resident after terminal removal because a safe
 `Addin` cannot account for executable sources created through arbitrary Rust
@@ -76,10 +76,10 @@ The macro supports at most 255 Excel-visible parameters for synchronous function
 - `macro_sheet` is incompatible with `thread_safe` and async functions.
 - reference arguments require macro-sheet capability.
 - async functions cannot accept reference arguments.
-- a return type must implement the marker trait for the selected execution mode.
-- a volatile function's return type must also implement `VolatileReturn`.
+- a return type must be supported by the selected execution mode; use `IntoExcel` for custom scalar and array-cell types.
+- `volatile` changes recalculation behavior without relaxing the mode's return restrictions.
 
-See [Execution modes and contexts](execution-modes.md) and [Conversion reference](conversion-reference.md).
+See [Execution modes and contexts](../../guide/src/execution-modes.md) and [Conversion reference](conversion-reference.md).
 
 ## `#[excel_context(...)]`
 
@@ -148,7 +148,14 @@ Without an explicit presence policy, the parameter's conversion type controls bl
 Derive strict text conversion for a fieldless enum:
 
 ```rust
-{{#include ../../crates/xlfn/tests/ui/pass/excel_enum.rs:17:24}}
+#[derive(Clone, Copy, ExcelEnum)]
+#[excel_enum(ascii_case_insensitive)]
+enum Direction {
+    #[excel_value(name = "Forward")]
+    Forward,
+    #[excel_value(name = "Reverse")]
+    Reverse,
+}
 ```
 
 - variants must be unit variants;
@@ -158,8 +165,8 @@ Derive strict text conversion for a fieldless enum:
 - effective names must be non-empty and unique under the selected comparison policy.
 
 The derive implements input conversion, normalized variant identity for
-formula-revision handle inputs, scalar output conversion, and all
-execution-mode return markers.
+formula-revision handle inputs, and scalar output conversion. The enum can be
+returned in every execution mode.
 
 ## `#[derive(ExcelHandleObject)]`
 
@@ -177,14 +184,10 @@ publishes it for the producer formula's revision; a changed formula revision
 publishes a new object while a same-revision recalculation reuses the memoized
 object. Accepting `Handle<'_, Dataset>` resolves and type-checks the token.
 `HandleAlias<'_, Dataset>` is the explicit main-thread return capability for
-republishing an existing object. Borrowed `Handle` values are not return values,
-and cannot be used by thread-safe, macro-sheet, or async functions. Async
+republishing an existing object. Borrowed `Handle` values are synchronous inputs,
+including thread-safe functions; they are never return values. Async
 functions that need an existing object use `HandleLease<'_, Dataset>`, which is
 a generation-scoped input created by pinning the authenticated registry object
 at the async boundary.
 
-See [Formula-owned handles](handles.md).
-
-## Treat compile errors as contract failures
-
-The macros deliberately reject ambiguous or unsound declarations. Do not work around a diagnostic by weakening flags or changing an argument to a dynamic type without understanding the Excel ABI consequence. Compile-fail tests are appropriate for your own macro policies and published examples.
+See [Formula-owned handles](../../guide/src/handles.md).

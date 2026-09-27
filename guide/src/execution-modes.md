@@ -1,6 +1,33 @@
 # Execution modes and contexts
 
-xlfn separates Excel-visible arguments from injected capabilities. A context, when present, must be the first parameter and must be passed by value with exactly one `#[excel_context(...)]` role.
+Choose an execution mode based on the Excel operations your function needs.
+For a pure calculation, use the default main-thread mode or declare
+`thread_safe` when the entire call path supports concurrent execution.
+
+A context gives a function access to [application state](lifecycle.md) and
+the operations allowed in that mode. It is optional for functions that need
+neither state nor those operations.
+
+## Compatibility table
+
+| Mode | How selected | Excel MTR | Can use raw references | Can return a new handle object |
+|---|---|---:|---:|---:|
+| Main thread | default (no context) or `main_thread` context | no | no | yes |
+| Thread-safe | `thread_safe` flag (no context) or `thread_safe` context | yes | no | no |
+| Macro-sheet | `macro_sheet` flag (no context) or `macro_sheet` context | no | yes | no |
+| Asynchronous | `async fn` | native async ABI | no | no |
+
+
+## Add a context when needed
+
+A context must be the first parameter, passed by value, with exactly one
+`#[excel_context(...)]` role. It is injected by the framework and does not
+appear as a worksheet argument. When a context selects the mode, omit the
+equivalent flag from `#[excel_function]`.
+
+The examples below assume `use xlfn::prelude::*;` and an add-in named
+`AppTools` whose shared state contains the fields being read. See
+[Share application state](lifecycle.md) for the add-in definition.
 
 ## Main-thread context
 
@@ -13,7 +40,7 @@ fn environment(
 }
 ```
 
-`MainThreadContext` is neither `Send` nor `Sync`. It has one inferred lifetime tied to the current Excel-call scope; the context keeps the open generation alive while exposing state and callback capability. With the `rtd` feature, `context.rtd()` returns the narrower RTD capability that establishes a streaming subscription. Formula-owned object producers use main-thread return semantics, even when they do not explicitly request a context.
+`MainThreadContext` is neither `Send` nor `Sync`. It has one inferred lifetime tied to the current Excel-call scope; the context keeps application state available for the duration of the call. With the `rtd` feature, `context.rtd()` returns the narrower RTD capability that establishes a streaming subscription. Formula-owned object producers use main-thread return semantics, even when they do not explicitly request a context.
 
 Do not combine a main-thread context with `thread_safe`.
 
@@ -71,13 +98,11 @@ async fn slow(
 
 The framework-owned future retains the current open-generation lease and per-call cancellation token. `AsyncContext<'_, AppTools>` borrows those capabilities for the invocation, so it is available only with the `async` feature and only to `async fn`; it cannot escape into a detached task. An async function may omit the context if it does not need state or cancellation.
 
-## Compatibility table
-
-| Mode | How selected | Excel MTR | Can use raw references | Can return a new handle object |
-|---|---|---:|---:|---:|
-| Main thread | default (no context) or `main_thread` context | no | no | yes |
-| Thread-safe | `thread_safe` flag (no context) or `thread_safe` context | yes | no | no |
-| Macro-sheet | `macro_sheet` flag (no context) or `macro_sheet` context | no | yes | no |
-| Asynchronous | `async fn` | native async ABI | no | no |
-
 A function marked `volatile` must still return a type valid for its mode. Handle objects and `HandleAlias<'_, T>` support volatile main-thread return semantics. Borrowed `Handle<'_, T>` values are synchronous call-scoped inputs and cannot be used in async functions. An async function that needs a formula-owned object must use the generation-scoped `HandleLease<'_, T>` input, which pins the registry payload before the task is committed.
+
+## Next steps
+
+- Use [Excel references](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/references.md) when coordinates or coercion matter.
+- Use [Asynchronous functions](async-functions.md) for one eventual result.
+- Check the [return-type table](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/conversion-reference.md#execution-mode-return-matrix)
+  when a function signature fails to compile.

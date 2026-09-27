@@ -1,6 +1,9 @@
 # Calculation caches
 
-The cache module provides concurrent, bounded memoization for application data. It is independent of formula-owned handles: a handle controls worksheet ownership, while a cache controls reuse of an internal computation. Enable the `cache` crate feature to use it.
+Use a calculation cache to reuse an expensive computation across calls.
+Enable `cache`. Keys must identify the full computation, and cached values
+must be owned `Send + Sync + 'static` Rust data. A cache does not give a
+worksheet formula ownership of an object; see [Choosing a pattern](choosing-pattern.md).
 
 Import from:
 
@@ -15,47 +18,32 @@ use xlfn::cache::{
 `CalculationCache<K, V>` is a concurrent weighted cache with a bounded resident budget and caller-defined entry weights:
 
 ```rust
-#[derive(Clone, Eq, Hash, PartialEq)]
-struct DatasetKey {
-    namespace: String,
-    version: i32,
-}
-
-let cache = CalculationCache::<DatasetKey, Dataset>::new(64 * 1024 * 1024);
-
-let dataset = cache.get_or_try_insert_with(
-    key.clone(),
-    |dataset| dataset.estimated_bytes(),
-    || build_dataset(&key),
+let cache = CalculationCache::<String, String>::new(1024);
+let value = cache.get_or_try_insert_with(
+    "abc".to_owned(),
+    String::len,
+    || Ok("ABC".to_owned()),
 )?;
+assert_eq!(&*value, "ABC");
 ```
+
+This small example uses string length as weight. In an application, replace
+the closure with an expensive deterministic calculation and use one
+consistent weight measure throughout that cache.
 
 The returned value is `CacheLease<'_, V>`, which implements `Deref<Target = V>`. Concurrent initializations for the same key are coalesced. A failed initialization is returned to its caller and is not cached.
 
 The weight budget is an abstract integer. It can represent approximate bytes, external-resource units, or another monotone cost, but every call site for a cache must use one consistent definition. Zero is normalized to a minimum positive cache weight. A value heavier than the entire budget is returned but not retained.
 
-Metrics such as `len()` and `used_weight()` observe current residency. Concurrent changes mean these remain operational estimates rather than a transactional snapshot.
-
-Eviction and memory reclamation are separate. A live lease intentionally keeps its value alive after eviction or `clear()`. The implementation may apply synchronous maintenance or backpressure to prevent unbounded retirement debt during continuous mutation. Idle caches can retain retired entries until a subsequent cache operation or destruction.
-
-## Guaranteed observable semantics
-
-The stable cache contract guarantees:
-
-- **Same-key single flight**: Concurrent initializations for the same key coalesce so that the compute closure runs once, returning valid leases to all concurrent callers.
-- **Failed computations**: If an initializer returns an error, nothing is published into the cache, allowing future calls to re-attempt computation.
-- **Clear generation semantics**: Calling `clear()` advances the cache epoch and invalidates existing entries. An in-flight computation that began before `clear()` still returns its value to its immediate caller, but does not repopulate the new generation with a stale result.
-- **Lease stability**: A `CacheLease` remains valid and readable for its full lifetime, even if the underlying entry is evicted or `clear()` is invoked.
-- **Weight normalization**: A weight of 0 is normalized to the minimum positive cache weight. Overweight values exceeding the budget are returned to the caller but are not retained in resident storage.
-- **Reentrancy**: Reentrant cache initialization from within a compute or weight callback on the same thread is unsupported.
+`len()` and `used_weight()` report current residency. A live `CacheLease` keeps
+its value readable even after eviction or `clear()`.
 
 ## Typed endpoint registry
 
 `CacheRegistry` creates caches lazily for static endpoints:
 
 ```rust
-static LOOKUP_DATASETS: CacheEndpoint<DatasetKey, Dataset> =
-    CacheEndpoint::new("lookup-datasets-v1");
+static UPPERCASE: CacheEndpoint<String, String> = CacheEndpoint::new("uppercase-v1");
 
 struct State {
     caches: CacheRegistry,
@@ -63,16 +51,16 @@ struct State {
 
 fn build_state() -> State {
     State {
-        caches: CacheRegistry::new(64 * 1024 * 1024),
+        caches: CacheRegistry::new(1024),
     }
 }
 
-fn cached_dataset<'a>(state: &'a State, key: DatasetKey) -> XllResult<CacheLease<'a, Dataset>> {
+fn uppercase<'a>(state: &'a State, text: String) -> XllResult<CacheLease<'a, String>> {
     state.caches.get_or_try_insert(
-        &LOOKUP_DATASETS,
-        key.clone(),
-        |dataset| dataset.estimated_bytes(),
-        || build_dataset(&key),
+        &UPPERCASE,
+        text.clone(),
+        String::len,
+        || Ok(text.to_uppercase()),
     )
 }
 ```
@@ -80,29 +68,27 @@ fn cached_dataset<'a>(state: &'a State, key: DatasetKey) -> XllResult<CacheLease
 You can also perform operations directly through the endpoint descriptor:
 
 ```rust
-fn cached_dataset<'a>(state: &'a State, key: DatasetKey) -> XllResult<CacheLease<'a, Dataset>> {
-    LOOKUP_DATASETS.get_or_try_insert(
-        &state.caches,
-        key.clone(),
-        |dataset| dataset.estimated_bytes(),
-        || build_dataset(&key),
-    )
-}
+UPPERCASE.get_or_try_insert(
+    &state.caches,
+    text.clone(),
+    String::len,
+    || Ok(text.to_uppercase()),
+)?;
 ```
 
-`CacheEndpoint<K, V, Marker = ()>` is a `'static` descriptor that holds no references to `CacheRegistry`, completely avoiding self-referential lifetimes in `SharedState`.
+`CacheEndpoint<K, V, Marker = ()>` is a reusable descriptor. It borrows no
+registry, so it can be a `static` while each add-in state owns a `CacheRegistry`.
 
 An endpoint identity includes its marker type, key type, value type, and static ID. By default, `Marker = ()`. When multiple endpoints share key and value types, an optional marker type (e.g. `CacheEndpoint<DatasetKey, Dataset, LookupMarker>`) provides semantic disambiguation.
 
-Repeated access reuses resolved endpoints on each worker thread. Descriptors
-remain independent of registry lifetimes, and `clear()` still invalidates cached
-values. The internal resolution cache is bounded; accessing many distinct
-endpoints falls back to the registry without changing lookup semantics.
+A registry keeps its endpoint caches for its own lifetime. Clearing values
+does not change endpoint identity. Endpoints in different registries do not
+share cached values.
 
 Use versioned IDs when a cached value's meaning changes:
 
 ```rust
-CacheEndpoint::new("lookup-datasets-v1")
+CacheEndpoint::new("uppercase-v2")
 ```
 
 Changing an algorithm without changing the endpoint or key can silently reuse a value produced under old semantics in a long-lived Excel process.
@@ -151,18 +137,9 @@ weight function is rejected, including a different key or endpoint. Reading
 already-cached values is supported. Compute lower layers directly or resolve
 their cache dependencies before entering the initializer.
 
-Keys must keep equality and hashing stable while stored, and cloning a key
-must preserve both. `Hash` and `Eq` must not reenter the same cache, directly
-or through its registry: those operations may run with cache locks or read
-admission held, so recursive cache access can deadlock. `Clone` may run while
-publishing an initialized entry and must not depend on starting another
-cache initialization on the same thread.
-
-Removed keys and values are reclaimed outside cache coordination locks.
-Ordinary maintenance also defers their destructors while an initializer is
-active. Destructors may call a still-live cache, subject to the restrictions
-of any surrounding key, compute, or weight callback. Destruction timing
-remains unspecified.
+Keys must keep equality and hashing stable while stored. `Hash`, `Eq`, and
+`Clone` must not start another cache initialization; recursive access can
+deadlock.
 
 The compute and weight functions execute application code. They must:
 
@@ -172,14 +149,5 @@ The compute and weight functions execute application code. They must:
 - avoid callbacks into Excel;
 - use a deterministic key-to-value contract.
 
-Panic containment prevents a permanently stuck initializer, but a panic still indicates a defect.
-
-## Cache versus handle versus RTD
-
-| Need | Facility |
-|---|---|
-| reuse an internal pure or versioned computation | cache |
-| let one worksheet formula own a typed object | handle |
-| update a formula repeatedly from a push source | RTD |
-
-They may be composed. For example, a handle producer can obtain immutable calibrated data from a cache, then create a formula-owned lightweight view over it.
+For the difference between a cache and a worksheet-owned object, see
+[Choose a calculation pattern](choosing-pattern.md).

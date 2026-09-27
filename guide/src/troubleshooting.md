@@ -2,6 +2,24 @@
 
 Start with the earliest failing boundary. Do not debug a worksheet result before confirming that the correct XLL loaded and its dependencies resolved.
 
+## Find your symptom
+
+| Symptom | First check | Detailed procedure |
+| --- | --- | --- |
+| Excel refuses the XLL | Excel bitness and the complete package directory | [Load failure](#excel-refuses-to-load-the-xll) |
+| Add-in loads, function is absent | Registration diagnostics and the loaded module version | [Missing functions](#the-add-in-loads-but-functions-are-missing) |
+| `#VALUE!` | Argument type and blank/missing policy | [Value errors](#a-cell-shows-value) |
+| `#NUM!` | Finite values and numeric range | [Numeric errors](#a-cell-shows-num) |
+| `#N/A` | Handle/session state or an unavailable result | [Unavailable results](#a-cell-shows-na) |
+| Handle appears unchanged | Whether the formula revision changed | [Handle refresh](#a-handle-does-not-appear-to-refresh) |
+| Async formula never completes | Cancellation and blocked workers | [Async completion](#an-async-formula-never-completes) |
+| RTD does not update | Subscription lifetime and publish errors | [RTD updates](#rtd-does-not-update) |
+| External adapter fails | Its diagnostics, ABI, and packaged dependencies | [Adapter initialization](#external-adapter-fails-to-initialize) |
+| Excel hangs on close | Work still running or a held lock | [Close hangs](#excel-hangs-during-close) |
+| Packaging fails | The reported path or unresolved import | [Package validation](#cargo-xlfn-package-refuses-paths-or-imports) |
+
+Before escalating, [collect the environment and diagnostic evidence](#collect-basic-evidence).
+
 ## Collect basic evidence
 
 Record:
@@ -45,6 +63,9 @@ cargo xlfn check --target x86_64-pc-windows-msvc --locked
 ```
 
 Use the x86 target for 32-bit Excel.
+
+See [Build, validate, and load](build-validation.md#loading-in-excel) for the
+normal loading procedure and [Deployment](deployment.md) for installation policy.
 
 ## The add-in loads but functions are missing
 
@@ -169,6 +190,12 @@ Do not add a timeout that lets Excel unload while code may still execute. Captur
 - With `strict-paths = true`, configured paths reject symlinks or reparse points observed during validation; protect the manifest tree from concurrent mutation when that threat is in scope.
 - Every non-system import must be packaged or explicitly approved as an external import.
 - `package --all` requires a dedicated replaceable output directory.
+
+Use [bundle path rules](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/cargo-metadata.md#bundle-path-rules),
+[external-import rules](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/cargo-metadata.md#external-imports), and
+[CLI output rules](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/cli-reference.md#cargo-xlfn-package) for the exact constraints.
+Recognized CRT imports observed directly in the XLL follow the
+[CRT policy](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/cargo-metadata.md#crt-policy).
 
 When commit and rollback both fail, preserve and inspect the recovery path reported by the tool.
 

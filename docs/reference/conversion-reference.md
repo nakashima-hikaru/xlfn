@@ -2,6 +2,10 @@
 
 This chapter summarizes the built-in worksheet conversion surface. The behavioral chapters remain authoritative for design guidance; generated rustdoc remains authoritative for exact method signatures.
 
+For examples, start with [Values and arrays](../../guide/src/values.md) or
+[Custom conversions](custom-conversions.md). Use the tables below when checking
+whether a particular input, result, or execution mode is supported.
+
 ## Input conversions
 
 | Rust parameter type | Accepted Excel representation | Important behavior |
@@ -50,7 +54,7 @@ The built-in `ExcelReference<'call>` preserves:
 - zero-based row and column bounds;
 - a lifetime tied to the active Excel call.
 
-Reference parameters require macro-sheet capability and are unavailable to async functions. They are raw call-scoped capabilities rather than ordinary formula-revision inputs. Copy only bounded metadata out of the borrowed value. Use the main-thread reference APIs to coerce or inspect cells when required.
+Reference parameters require macro-sheet capability and are unavailable to async functions. They are call-scoped capabilities rather than ordinary formula-revision inputs. Copy only bounded metadata out of the borrowed value. Use `MacroSheetContext` to coerce or inspect cells when required; see [Excel references](references.md).
 
 ## Scalar output conversions
 
@@ -78,9 +82,13 @@ The following are direct scalar returns:
 | `RtdValue` | yes | yes | yes | yes | yes |
 | `HandleAlias<'_, T>` | yes | no | no | no | yes |
 | object deriving `ExcelHandleObject` | yes | no | no | no | yes |
-| custom `T` | according to implemented marker traits | according to implemented marker traits | according to implemented marker traits | according to implemented marker traits | according to implemented marker traits |
+| custom `T: IntoExcel` | yes | yes | yes | yes | yes |
 
-“Volatile” is an additional marker, not an execution thread. A volatile thread-safe function, for example, needs both `ThreadSafeReturn` and `VolatileReturn`.
+“Volatile” is a recalculation flag, not an execution thread. Its result must
+still be supported in the selected mode. Implement `IntoExcel` for a custom
+scalar or array-cell type; return-dispatch marker traits are framework details
+and are not application extension points. Async inputs and captured state must
+also satisfy the async function's lifetime and thread-safety requirements.
 
 ## Presence behavior
 
@@ -138,7 +146,7 @@ Scalar(ExcelCellValue) | Missing | Array(Matrix<ExcelCellValue>)
 For `FromExcel<'call>` and the built-in borrowed parameter views:
 
 1. inspect only the active `XlValueRef<'_>`;
-2. copy owned data before returning;
+2. copy any data that must outlive the call into an owned value;
 3. use the supplied static argument name in `XllError::Input`;
 4. reject unsupported coercions and non-finite values explicitly;
 5. bound all allocation from workbook-controlled lengths.
@@ -148,6 +156,7 @@ For `IntoExcel`:
 
 1. validate the application value before allocation;
 2. do not call Excel from thread-safe or async conversion paths;
-3. preserve ownership until Excel calls `xlAutoFree12` through framework-managed return storage.
+3. return a semantic `ExcelCellOutput`; let the framework own and release the
+   encoded result, without allocating or freeing raw Excel return storage.
 
 See [Custom conversions](custom-conversions.md).

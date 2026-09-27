@@ -69,4 +69,4 @@ Build manifests and hashes detect changes relative to recorded inputs; they do n
 
 The Lean 4 model under [`formal/`](formal) proves properties of an abstract shutdown protocol. It does not currently prove that every Rust implementation path refines that model and must not be treated as a complete security proof of the implementation.
 
-For additional design details, see the [security guide](guide/src/security.md), [lifecycle guide](guide/src/lifecycle.md), and [testing guide](guide/src/testing.md).
+For additional design details, see the [security and deployment boundaries](docs/SECURITY_MODEL.md), [lifecycle guide](guide/src/lifecycle.md), and [testing guide](guide/src/testing.md).

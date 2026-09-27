@@ -1,121 +1,117 @@
 # Deployment and distribution
 
-A deployable add-in is a versioned directory, not an isolated `.xll` file. Build, validate, sign, and install the XLL together with every packaged sidecar required by the application and its audit manifest.
+Distribute a complete, versioned target directory. The release workflow is:
+create the package, qualify it in Excel, sign the final files, and install them
+in a controlled location. For the development build/load loop, see
+[Build, validate, and load](build-validation.md).
 
 ## Produce target directories
 
-```powershell
-cargo xlfn package --all --locked
-```
-
-This creates `win-x86` and `win-x64` directories under the selected output root. Distribute only the directory matching the Excel process bitness, or package both with an installer that selects correctly.
-
-Use an explicit output root for release automation:
+From the add-in package directory:
 
 ```powershell
-cargo xlfn package --all --out artifacts/xlfn-1.4.0 --locked
+cargo xlfn package --all --out artifacts/addin-1.4.0 --locked
 ```
 
-The `--all` operation stages and validates both targets before replacing the output root. Do not point it at the repository root, current directory, or a directory that contains unrelated artifacts.
+This produces `win-x86/` and `win-x64/` beneath the selected output root.
+Distribute the directory matching the **Excel process bitness**, or supply both
+with an installer that selects it correctly.
+
+`--all` replaces the entire output root after staging and verification. Use a
+dedicated directory containing no unrelated artifacts. See the
+[CLI reference](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/cli-reference.md#cargo-xlfn-package) for single-target output,
+transaction limits, and recovery behavior.
 
 ## Package contents
 
 Each target directory contains:
 
 - `<artifact-name>.xll`;
-- configured sidecar files and their packaged PE dependencies;
-- `build-manifest.json`.
+- configured sidecar files;
+- `build-manifest.json` with build observations and artifact hashes.
 
-The manifest records schema version 6, package and artifact identity, target, profile, selected
-features, requested and observed CRT policy, configured/resolved bundle sources, import-policy
-version, file sizes, and SHA-256 values. Its integrity section explicitly states that hashes are
-audit metadata and are not verified before DLL execution.
+Keep these files together. A sidecar's renamed or missing DLL can break both
+explicit loading and transitive imports. All required non-system dependencies
+must be packaged or covered by a documented external-import exception.
 
-Keep all files together. Renaming a sidecar DLL or moving it to another directory can break both explicit loading and transitive imports.
+The [manifest reference](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/cargo-metadata.md#build-manifestjson) describes the
+recorded fields. Its hashes support audit; they are not checked by a runtime
+loader before DLL execution.
 
 ## Packaging boundary
 
-Bundle staging and PE dependency validation are build and distribution facilities. They do not load a sidecar at runtime, resolve application symbols, choose an ABI or protocol, construct application objects, or prove that downstream calls are thread-safe or cancellable. If application code uses a packaged component, that code owns the runtime contract and loading policy.
+Bundle configuration controls staging and PE dependency validation. Application
+code owns runtime loading, symbol resolution, ABI/protocol checks, application
+objects, and concurrency or cancellation guarantees. An add-in with no sidecars
+needs no bundle metadata.
 
-If the add-in has no sidecar files, no bundle metadata is required.
-
-## Versioning worksheet APIs
-
-A released workbook depends on more than the crate's semantic version. Treat these as public contracts:
-
-- Excel-visible function names;
-- UDF IDs and generated export identities;
-- argument order, names, defaults, blank/missing policy, and accepted types;
-- enum strings;
-- handle object types and producer semantics;
-- RTD topic identity;
-- add-in ID and category.
-
-Adding a new function is usually compatible. Renaming a function, changing argument order, changing a default, or changing an enum text can silently alter existing workbooks.
-
-For breaking worksheet changes, prefer a new Excel name or an explicit versioned function while the old function remains as a documented compatibility layer for one migration window. Do not leave undocumented shims indefinitely.
+See [bundle metadata](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/cargo-metadata.md#bundle-metadata) to configure sidecars,
+and [CRT policy](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/cargo-metadata.md#crt-policy) when linking native libraries.
 
 ## Installation location
 
-Install into a directory that ordinary workbook input cannot select and unprivileged users cannot replace after approval. Appropriate enterprise mechanisms include a managed per-user directory with restricted ACLs or an administrator-controlled application directory.
+Install into a directory whose contents cannot be replaced by unapproved users
+or selected through workbook input. Use your organization's managed installation
+and access-control policy.
 
-Avoid:
-
-- Downloads and temporary directories;
-- workbook-adjacent writable directories;
-- network shares without a deliberate trust policy;
-- search-path-dependent DLL placement;
-- copying only the XLL while resolving application sidecars from an ambient global directory.
-
-If application code loads a packaged DLL, it should use an explicit path derived from the installed package rather than ambient search paths. xlfn does not perform that load. Transitive dependencies still resolve according to Windows loader behavior and the validated package import closure.
+Avoid temporary or Downloads directories, writable workbook-adjacent directories,
+uncontrolled network shares, and search-path-dependent DLL placement. If the
+application loads a sidecar, derive its explicit path from the installed package.
+xlfn does not perform that load.
 
 ## Code signing
 
-Authenticode signing is intentionally external to xlfn because keys, hardware security modules, timestamps, and enterprise trust policy are deployment concerns. Sign:
+Signing is performed by your release system. Sign the XLL, executable sidecars
+as permitted by their redistribution policy, and the installer or package container.
 
-- the XLL;
-- every first-party executable sidecar;
-- third-party executable sidecars when redistribution terms and signing policy permit;
-- installers or package containers.
-
-Verify signatures after the final byte-producing step. Signing changes the file hash, so generate or update release audit metadata in the order required by your release system. Do not sign one set of bytes and distribute another.
+Verify signatures after the final byte-producing step. Signing changes file
+hashes, so update your release audit metadata to describe the signed files.
+Distribute the same bytes that were qualified and approved by your release process.
+See [Installation location](#installation-location) for where to place the signed package.
 
 ## External imports
 
-The package verifier recognizes a versioned default set of Windows system DLLs and API-set names. A non-packaged import outside that set fails validation unless its basename appears in `external-imports`.
+An external import is a deployment promise: the environment supplies that DLL.
+Document who installs it, its version and bitness, and how it is found. Test the
+complete installation on a clean machine.
 
-An external import is an explicit deployment exception, not a general bypass. Use it only for a component guaranteed by the target environment, document who installs it, and test on a clean machine.
+Use [the metadata rules](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/cargo-metadata.md#external-imports) for explicit
+exceptions and [CRT policy](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/cargo-metadata.md#crt-policy) for automatically
+recognized runtime imports. Do not exempt a missing application DLL merely to
+pass validation.
 
-```toml
-[package.metadata.xlfn.bundle]
-external-imports = ["approved-inbox-component.dll"]
-```
+## Versioning worksheet APIs
 
-Do not add a missing application dependency to `external-imports` merely to pass the verifier.
+A workbook depends on function names, argument semantics, enum text, handle
+producers, and RTD identities. Follow the
+[workbook compatibility guidance](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/compatibility.md#workbook-compatibility)
+when changing those contracts.
+
+For a breaking worksheet change, provide a new Excel name or an explicit migration
+plan. If an old function remains during migration, document its purpose and removal
+schedule. Framework implementation versioning does not migrate deployed workbooks.
 
 ## Upgrade and rollback
 
-Do not overwrite a loaded XLL in place. Excel can retain module and DLL file handles until the process exits. A reliable upgrade procedure is:
+Do not overwrite a loaded XLL in place. For an upgrade:
 
-1. close every Excel process using the add-in;
-2. verify that no background Excel process remains;
-3. install the complete new target directory transactionally with best-effort rollback, or publish it under a versioned path;
-4. preserve the previous signed directory for rollback;
-5. load the new version and run smoke tests;
-6. remove old versions only after the rollback window.
+1. Close every Excel process using the add-in and check for background processes.
+2. Install the complete new target directory, preferably under a versioned path.
+3. Retain the previous signed directory for rollback.
+4. Load the new version and run its smoke tests.
+5. Remove old versions after the rollback window.
 
-When the add-in's executable sidecars, application-owned data or protocol assumptions, token semantics, or RTD ownership schema change, restart Excel rather than attempting an in-process hot swap.
+Changes to executable sidecars, application protocols, handle token semantics,
+or RTD ownership require an Excel restart. For close failures, use
+[Excel hangs during close](troubleshooting.md#excel-hangs-during-close).
 
 ## Distribution checklist
 
-Before publishing:
+Before distributing a package:
 
-- build with `--locked` from a clean checkout;
-- record source commit, toolchain, target, and feature set;
-- run both artifact and real-Excel qualification gates;
-- review `build-manifest.json`, its effective bundle policy, and staged bundle paths;
-- verify x86/x64 architecture independently;
-- sign and verify every executable binary;
-- scan the final package with organizational security tooling;
-- install from the exact final package on a clean test machine;
-- archive release evidence and the rollback package.
+- Build with `--locked` from a clean source revision and record the toolchain and features.
+- Qualify each supported architecture and Excel environment using [Testing](testing.md).
+- Review bundle dependencies, external-import exceptions, and the build manifest.
+- Verify final signatures and deployment access controls.
+- Test first install, upgrade, rollback, and restart on a clean machine.
+- Archive the exact package, its digest, and qualification evidence.

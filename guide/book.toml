@@ -12,6 +12,7 @@ create-missing = false
 [output.html]
 git-repository-url = "https://github.com/nakashima-hikaru/xlfn"
 additional-css = ["theme/custom.css"]
+additional-js = ["theme/navigation.js"]
 
 [output.html.fold]
 enable = true

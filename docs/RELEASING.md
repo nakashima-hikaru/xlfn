@@ -2,7 +2,7 @@
 
 Use this procedure to decide whether a candidate is ready for publication.
 The [readiness record](RELEASE_READINESS.md) contains the current evidence;
-the [compatibility policy](../guide/src/compatibility.md) defines the proposed
+the [API stability policy](API_STABILITY.md) defines the proposed
 1.0 facade contract. Preparing a candidate does not publish it.
 
 ## Version and contract review

@@ -2,7 +2,7 @@
 
 This repository contains both the xlfn user guide and the implementation of
 the framework itself. User-facing testing and release qualification remain in
-the [user guide](guide/src/testing.md); this file describes checks for changes
+the [user guide](guide/src/testing.md) and [Excel checklist](docs/EXCEL_TESTING.md); this file describes checks for changes
 to xlfn itself.
 
 ## Local checks
@@ -156,6 +156,25 @@ The threshold is intentionally broad until main-branch noise is characterized;
 narrow it only after reviewing several stable runs. The built-in Criterion
 latency measure is shared by the benchmark groups, so the threshold is a
 repository-wide first guard rather than a per-family policy.
+
+### Experimental cache resident backends
+
+
+`just miri-cache-endpoints` checks the non-owning endpoint-resolution cache
+under both Stacked Borrows and Tree Borrows. It covers registry moves,
+destruction and replacement, clear, and separation between registry and
+endpoint types. Regression fixtures also check that same-name types and
+same-address prefixes can remain resident without forcing all candidates into
+one set. It is also included in `just miri`.
+
+`just miri-cache-backends` runs the full-cache common regressions for the
+production Quick Cache policy (1 shard), additional Quick Cache configurations
+(8/32 shards), and the benchmark sharded maps (8/16/32/64 shards), under Stacked
+Borrows and Tree Borrows with leak and alias checks enabled. Production uses Quick Cache without a runtime backend selector.
+
+Set `XLFN_CACHE_BACKEND=quick1|quick8|quick32|sharded8|sharded16|sharded32|sharded64` when running
+an individual cache Criterion benchmark. This selector is available only
+with `bench-internals` and never changes the production default.
 
 ## CI command contract
 

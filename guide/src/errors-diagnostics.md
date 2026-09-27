@@ -2,6 +2,31 @@
 
 xlfn separates what Excel sees from what operators need to diagnose. A worksheet receives a conventional Excel error; the runtime can emit structured detail without exposing sensitive internals in the cell.
 
+## Return a worksheet error
+
+Use `XllResult<T>` when a calculation can fail. Add this function to the
+[tutorial project](quick-start.md):
+
+```rust
+use xlfn::error::DomainErrorCode;
+use xlfn::prelude::*;
+
+#[excel_function(name = "HELLO.SQRT", thread_safe)]
+fn square_root(value: f64) -> XllResult<f64> {
+    if value < 0.0 {
+        return Err(XllError::Domain {
+            code: DomainErrorCode::InvalidInput,
+        });
+    }
+    Ok(value.sqrt())
+}
+```
+
+`=HELLO.SQRT(9)` returns `3`; `=HELLO.SQRT(-1)` returns `#NUM!`.
+Return an error for an expected failure. Use diagnostics for the additional
+detail needed to investigate it. If your application already has its own
+error enum, see [custom result errors](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/custom-conversions.md#custom-result-errors).
+
 ## Error types
 
 Most add-ins use `XllResult<T>`, an alias for `Result<T, XllError>`.
@@ -152,3 +177,9 @@ A high-quality worksheet API should make common errors actionable through functi
 - `#VALUE!` for type or structure mismatch.
 
 Use a companion information function only when users genuinely need structured status. Do not leak internal exception text into arbitrary worksheet cells.
+
+## Next steps
+
+- Follow [Troubleshooting](troubleshooting.md) for a specific Excel error or loading problem.
+- Add [execution layers](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/udf-layers.md) for shared instrumentation around calls.
+- Review the contents of diagnostic logs before collecting them from users; remove credentials and customer data.
