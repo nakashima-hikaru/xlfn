@@ -27,6 +27,25 @@ XL_DONE = 0
 XL_MANUAL = -4135
 XL_AUTOMATIC = -4105
 XL_ERR_NUM = -2146826252  # COM Value2 representation of #NUM! (xlErrNum = 2036).
+CELL_ERRORS = {
+    -2146826288: "#NULL!", -2146826281: "#DIV/0!", -2146826273: "#VALUE!",
+    -2146826265: "#REF!", -2146826259: "#NAME?", XL_ERR_NUM: "#NUM!",
+    -2146826246: "#N/A", -2146826243: "#SPILL!",
+}
+
+
+def describe_value(value: Any) -> str:
+    if type(value) is int and value in CELL_ERRORS:
+        return f"{CELL_ERRORS[value]} ({value})"
+    return repr(value)
+
+
+def register_xll(app: Any, xll: Path) -> None:
+    path = str(xll.resolve())
+    # Load into this Excel process and check the host's result. An AddIns
+    # collection entry alone is not evidence that the XLL was loaded.
+    if not app.RegisterXLL(path):
+        raise RuntimeError(f"Excel RegisterXLL returned False: {path}")
 
 
 def checkout_commit() -> str | None:
@@ -119,8 +138,7 @@ class ExcelSession:
         self.app.MultiThreadedCalculation.ThreadCount = threads
         self.app.RTD.ThrottleInterval = throttle_ms
         t = time.perf_counter()
-        self.addin = self.app.AddIns.Add(str(xll.resolve()))
-        self.addin.Installed = True
+        register_xll(self.app, xll)
         self.load_s = time.perf_counter() - t
         self.ready_s = time.perf_counter() - self.started
         self.book = None
@@ -206,8 +224,8 @@ class ExcelSession:
             self.app.MultiThreadedCalculation.ThreadMode = self.original_thread_mode
             self.app.MultiThreadedCalculation.Enabled = self.original_mtr_enabled
             self.app.Calculation = self.original_calculation
-            self.addin.Installed = False
             self.bootstrap_book.Close(SaveChanges=False)
+            # This dedicated Excel process owns the RegisterXLL load.
             self.app.Quit()
         except Exception:
             try:
@@ -221,18 +239,28 @@ def check_scalar(target: Any, case: Case) -> None:
     expected = case.params.get("cells", 1)
     if len(values) != expected:
         raise AssertionError(f"expected {expected} cells, got {len(values)}")
-    if case.id == "S04":
-        period = case.params["period"]
-        mismatches = [row for row, value in enumerate(values, 1)
-                      if value != (XL_ERR_NUM if period > 0 and row % period == 0 else row)]
-        if mismatches:
+    for row, value in enumerate(values, 1):
+        wanted = row
+        if case.id == "S02":
+            argc = case.params["argc"]
+            wanted = argc * row + argc * (argc - 1) // 2
+        elif case.id == "S04":
+            period = case.params["period"]
+            if period > 0 and row % period == 0:
+                wanted = XL_ERR_NUM
+        if case.id == "P04":
+            # Scheduling changes the shared counter; all valid outputs are
+            # finite positive numbers. COM cell errors are negative integers.
+            valid = type(value) in (int, float) and math.isfinite(value) and value >= row
+        elif wanted == XL_ERR_NUM:
+            valid = type(value) is int and value == XL_ERR_NUM
+        else:
+            valid = type(value) in (int, float) and value == wanted
+        if not valid:
+            expectation = f"a finite number >= {row}" if case.id == "P04" else describe_value(wanted)
             raise AssertionError(
-                f"S04 result mismatch at rows {mismatches[:5]}; "
-                f"first values: {values[:5]!r}"
+                f"{case.key} row {row}: expected {expectation}, got {describe_value(value)}"
             )
-    elif case.id not in ("P04",):
-        if not isinstance(values[0], (int, float)) or not isinstance(values[-1], (int, float)):
-            raise AssertionError("scalar result is not numeric")
 
 
 def run_scalar(session: ExcelSession, case: Case, repeat: int) -> dict[str, Any]:
@@ -298,11 +326,13 @@ def run_matrix(session: ExcelSession, case: Case, repeat: int) -> dict[str, Any]
         verify = lambda: float(last.Value2) == count - 1
     session.calculate(anchor)
     if not verify():
-        raise AssertionError(f"matrix result check failed: {case.key}")
+        raise AssertionError(
+            f"matrix result check failed: {case.key}; anchor: {describe_value(anchor.Value2)}"
+        )
     allocations_before = session.app.Evaluate("BENCH.ALLOC.BYTES()") if case.id == "M05" else None
     samples = [session.calculate(anchor) for _ in range(repeat)]
     if not verify():
-        raise AssertionError("matrix result changed")
+        raise AssertionError(f"matrix result changed; anchor: {describe_value(anchor.Value2)}")
     result = interval(samples, sum(samples), "recalculation") | {
         "elements": count, "ns_per_element": statistics.median(samples) * 1e9 / count,
     }
@@ -755,14 +785,18 @@ def worker(args: argparse.Namespace, case: Case) -> int:
             relative = f"{args.implementation}/{xll.name}"
             if record["xll_sha256"] != manifest["files"][relative]["sha256"]:
                 raise ValueError(f"CI XLL changed after verification: {relative}")
+        record["phase"] = "load_xll"
+        record["xll_load_method"] = "RegisterXLL"
         session = ExcelSession(xll, record["threads"], args.throttle_ms, Path(args.pid_file))
         record["excel_version"] = str(session.app.Version)
         record["excel_build"] = str(session.app.Build)
         record["excel_bitness"] = session.app.OperatingSystem
+        record["phase"] = "execute"
         record["metrics"] = execute(session, case, args.repeat)
         record["metrics"]["peak_excel_rss_bytes"] = session.peak_rss
         record["metrics"]["excel_cpu_s"] = session.cpu_s()
         record["status"] = "ok"
+        record["phase"] = "complete"
     except Exception as error:
         record["status"] = "error"
         record["error"] = f"{type(error).__name__}: {error}"
@@ -872,6 +906,8 @@ def main() -> int:
                     except psutil.Error:
                         pass
                 print(f"{case.key} {implementation}: {record['status']}", flush=True)
+                if record["status"] != "ok":
+                    print(record.get("error", "unknown error"), flush=True)
                 errors += record["status"] != "ok"
     return 1 if errors else 0
 

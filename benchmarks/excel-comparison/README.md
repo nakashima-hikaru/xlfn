@@ -38,7 +38,8 @@ you choose another destination, pass the same path to `run.py --artifacts`.
 The runner verifies the CI manifest (including Excel-DNA's NativeAOT build mode), all ten XLL digests, the x86_64 PE
 machine type, and the checkout commit before opening Excel. For a PR artifact,
 check out the CI run's merge commit; `--allow-commit-mismatch` is available
-only when intentionally using a different harness revision. Records include
+only for runner-only changes that remain compatible with the artifact's
+worksheet functions. Changes to either XLL require new artifacts. Records include
 the CI commit and run ID, and pairing requires the same run. Each case starts
 a fresh Excel process;
 the parent kills a timed-out process and records a failed case. `--id S01
@@ -46,6 +47,13 @@ the parent kills a timed-out process and records a failed case. `--id S01
 `py ./run.py --plan` lists cases without opening Excel and also works on a
 Mac. Choose a new `--out` path for each run; use `--append` only when
 intentionally adding cases to an existing JSONL file.
+
+The runner loads the selected XLL with `Application.RegisterXLL` and stops
+if Excel reports a load failure. Formula checks report Excel errors such as
+`#NAME?` explicitly. Scalar checks compare every cell with its expected value;
+S04 checks both the location and type of each intended `#NUM!` result.
+Scalar results from runner revisions through `2c06039` must be rerun: those
+revisions could mistakenly accept Excel error codes as numeric results outside S04.
 
 For development without CI, install the Rust x86_64 MSVC target, .NET 10
 SDK, and the Visual Studio C++ toolchain needed by NativeAOT; run

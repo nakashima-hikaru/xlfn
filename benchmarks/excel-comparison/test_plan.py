@@ -2,10 +2,12 @@ import struct
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 from artifact_manifest import FILES, create, verify
 from generate_registration import source
-from run import XL_ERR_NUM, check_scalar, formula
+from run import XL_ERR_NUM, check_scalar, formula, register_xll
 from summarize import PRIMARY, summarize
 from workloads import IDS, Case, cases
 
@@ -57,6 +59,35 @@ class PlanTest(unittest.TestCase):
             check_scalar(Target([XL_ERR_NUM, 2.0, XL_ERR_NUM, 4.0]), case)
         with self.assertRaises(AssertionError):
             check_scalar(Target([-2146826259] * 4), Case("S04", "period-0", {"cells": 4, "period": 0}))
+
+    def test_scalar_checks_reject_excel_errors_and_wrong_values(self):
+        for id in ("S01", "S03", "P01", "P02", "P03", "P04", "W03", "L02"):
+            case = Case(id, "test", {"cells": 3})
+            with self.subTest(id=id):
+                check_scalar(SimpleNamespace(Value2=((1.0,), (2.0,), (3.0,))), case)
+                for values in ((-2146826259,) * 3, (1.0, -2146826259, 3.0),
+                               (1.0, float("nan"), 3.0), (True, 2.0, 3.0)):
+                    with self.assertRaises(AssertionError):
+                        check_scalar(SimpleNamespace(Value2=tuple((v,) for v in values)), case)
+        with self.assertRaisesRegex(AssertionError, "row 2: expected 2, got 99"):
+            check_scalar(SimpleNamespace(Value2=((1.0,), (99,), (3.0,))),
+                         Case("S01", "test", {"cells": 3}))
+
+    def test_multi_argument_expected_sums(self):
+        for argc in (2, 4, 8):
+            case = Case("S02", str(argc), {"cells": 3, "argc": argc})
+            check_scalar(SimpleNamespace(Value2=tuple(
+                (float(sum(range(row, row + argc))),) for row in range(1, 4))), case)
+            with self.assertRaises(AssertionError):
+                check_scalar(SimpleNamespace(Value2=((1.0,), (2.0,), (3.0,))), case)
+
+    def test_xll_load_failure_stops_before_benchmark(self):
+        app = SimpleNamespace(RegisterXLL=Mock(return_value=False))
+        with self.assertRaisesRegex(RuntimeError, "RegisterXLL returned False"):
+            register_xll(app, Path("benchmark.xll"))
+        app.RegisterXLL.assert_called_once_with(str(Path("benchmark.xll").resolve()))
+        app.RegisterXLL.return_value = True
+        register_xll(app, Path("benchmark.xll"))
 
     def test_registration_names_match_rust_generator(self):
         generated = source(10)
