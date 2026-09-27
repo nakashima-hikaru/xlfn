@@ -624,33 +624,30 @@ mod tests {
 
     #[test]
     fn malformed_registration_recovery_rolls_back_when_binding_is_found() {
-        let prepared = prepared_set();
-        let descriptor = &prepared.as_slice()[0];
-        let callbacks = HostCallbackSession::new();
-        let host = RegistrationHost::new(&callbacks);
-        let unregistered = Cell::new(None);
+        for id in [42.0, -1_678_704_637.0] {
+            let prepared = prepared_set();
+            let descriptor = &prepared.as_slice()[0];
+            let callbacks = HostCallbackSession::new();
+            let host = RegistrationHost::new(&callbacks);
+            let unregistered = Cell::new(None);
 
-        let error = reconcile_malformed_registration_result_with(
-            &host,
-            descriptor,
-            XllError::Closing,
-            |_host, excel_name| {
-                Ok(Some(RegistrationId {
-                    id: 42.0,
-                    excel_name,
-                }))
-            },
-            |_host, registrations| {
-                unregistered.set(Some(registrations[0].registration.id));
-                let mut result = UnregisterResult::new(registrations.len());
-                result.succeeded.extend_from_slice(registrations);
-                result
-            },
-        );
+            let error = reconcile_malformed_registration_result_with(
+                &host,
+                descriptor,
+                XllError::Closing,
+                |_host, excel_name| Ok(Some(RegistrationId { id, excel_name })),
+                |_host, registrations| {
+                    unregistered.set(Some(registrations[0].registration.id));
+                    let mut result = UnregisterResult::new(registrations.len());
+                    result.succeeded.extend_from_slice(registrations);
+                    result
+                },
+            );
 
-        assert_eq!(unregistered.get(), Some(42.0));
-        assert!(error.journal.pending_registrations.is_empty());
-        assert!(!error.journal.is_unknown());
+            assert_eq!(unregistered.get(), Some(id));
+            assert!(error.journal.pending_registrations.is_empty());
+            assert!(!error.journal.is_unknown());
+        }
     }
 
     #[test]

@@ -443,7 +443,9 @@ fn unexpected_result(function: ExcelApiFunction) -> XllError {
 }
 
 pub(crate) fn valid_registration_id(id: f64) -> bool {
-    id.is_finite() && id > 0.0
+    // Excel registration IDs are opaque numeric tokens, not positive counters.
+    // Windows Excel can return a negative ID for a successful xlfRegister call.
+    id.is_finite() && id != 0.0
 }
 
 fn prepared_argument_help_strings(
@@ -569,12 +571,43 @@ mod tests {
     }
 
     #[test]
-    fn registration_ids_must_be_positive_and_finite() {
-        for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+    fn registration_ids_accept_both_signs_but_reject_zero_and_nonfinite_values() {
+        for invalid in [0.0, -0.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             assert!(!valid_registration_id(invalid));
         }
-        assert!(valid_registration_id(1.0));
-        assert!(valid_registration_id(1.5));
+        for valid in [1.0, 1.5, -1.0, -1_678_704_637.0] {
+            assert!(valid_registration_id(valid));
+        }
+    }
+
+    #[test]
+    fn negative_registration_id_survives_registration_and_recovery() {
+        let expected = RegistrationId {
+            id: -1_678_704_637.0,
+            excel_name: "BENCH.ALLOC.BYTES",
+        };
+        let mut result = ExcelCallbackValue::from_raw_for_test(XLOPER12::number(expected.id));
+        assert_eq!(
+            decode_registration_id(&mut result, expected.excel_name).unwrap(),
+            expected
+        );
+        assert_eq!(
+            decode_registration_id_result(&mut result, expected.excel_name).unwrap(),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn error_results_are_not_registration_ids() {
+        let mut result = ExcelCallbackValue::from_raw_for_test(XLOPER12::error(XLERR_NAME));
+        assert!(decode_registration_id(&mut result, "TEST.MISSING").is_err());
+        assert_eq!(
+            decode_registration_id_result(&mut result, "TEST.MISSING").unwrap(),
+            None
+        );
+        let mut result = ExcelCallbackValue::from_raw_for_test(XLOPER12::number(f64::NAN));
+        assert!(decode_registration_id(&mut result, "TEST.INVALID").is_err());
+        assert!(decode_registration_id_result(&mut result, "TEST.INVALID").is_err());
     }
 
     #[test]
