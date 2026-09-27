@@ -224,7 +224,10 @@ def check_scalar(target: Any, case: Case) -> None:
         period = case.params["period"]
         errors = sum(isinstance(value, int) and value < 0 for value in values)
         if errors != (expected // period if period else 0):
-            raise AssertionError(f"error count {errors} is unexpected")
+            raise AssertionError(
+                f"error count {errors}, expected {expected // period if period else 0}; "
+                f"first values: {values[:5]!r}"
+            )
     elif case.id not in ("P04",):
         if not isinstance(values[0], (int, float)) or not isinstance(values[-1], (int, float)):
             raise AssertionError("scalar result is not numeric")
@@ -273,7 +276,7 @@ def run_matrix(session: ExcelSession, case: Case, repeat: int) -> dict[str, Any]
             last = min(rows, first + max(1, 5_000 // cols) - 1)
             block = tuple(tuple(values[((r - 1) * cols + c) % 5] for c in range(cols)) for r in range(first, last + 1))
             sheet.Range(sheet.Cells(first, 2), sheet.Cells(last, cols + 1)).Formula = block
-    source = input_area.Address(False, False)
+    source = input_area.Address
     if case.id == "M01" or case.id == "M04":
         anchor = sheet.Range("A1")
         anchor.Formula = f"=BENCH.MAT.SUM({source})"
