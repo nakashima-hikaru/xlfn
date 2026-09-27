@@ -1,4 +1,6 @@
 //! Paired Excel workload functions. Change both implementations together.
+// MSVC reports LNK4104 for the framework's intentional COM class exports.
+#![allow(linker_messages)]
 
 use std::{
     alloc::{GlobalAlloc, Layout, System},
