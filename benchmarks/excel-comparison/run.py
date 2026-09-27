@@ -104,6 +104,9 @@ class ExcelSession:
         _, self.pid = win32process.GetWindowThreadProcessId(self.pid)
         pid_file.write_text(str(self.pid), encoding="ascii")
         self.process = psutil.Process(self.pid)
+        # Excel cannot switch calculation mode before its first workbook exists.
+        # Keep this book open while benchmark books are opened and closed.
+        self.bootstrap_book = self.app.Workbooks.Add()
         self.original_calculation = self.app.Calculation
         self.original_throttle = self.app.RTD.ThrottleInterval
         self.original_mtr_enabled = self.app.MultiThreadedCalculation.Enabled
@@ -203,6 +206,7 @@ class ExcelSession:
             self.app.MultiThreadedCalculation.Enabled = self.original_mtr_enabled
             self.app.Calculation = self.original_calculation
             self.addin.Installed = False
+            self.bootstrap_book.Close(SaveChanges=False)
             self.app.Quit()
         except Exception:
             try:
