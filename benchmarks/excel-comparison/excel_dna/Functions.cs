@@ -43,7 +43,7 @@ public static class Functions
     [ExcelFunction(Name = "BENCH.CPU", IsThreadSafe = true)]
     public static double Cpu(double value, int micros) { Busy(micros); return value; }
 
-    [ExcelFunction(Name = "BENCH.ERROR", IsThreadSafe = true)]
+    [ExcelFunction(Name = "BENCH.ERRNUM", IsThreadSafe = true)]
     public static object Error(double value, int period)
         => period > 0 && (long)value % period == 0 ? ExcelError.ExcelErrorNum : value;
 

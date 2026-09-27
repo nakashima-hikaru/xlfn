@@ -137,7 +137,7 @@ pub fn cpu(value: f64, micros: i32) -> f64 {
     value
 }
 
-#[excel_function(name = "BENCH.ERROR", thread_safe)]
+#[excel_function(name = "BENCH.ERRNUM", thread_safe)]
 pub fn error(value: f64, period: i32) -> XllResult<f64> {
     if period > 0 && (value as i64) % period as i64 == 0 {
         Err(XllError::Domain {

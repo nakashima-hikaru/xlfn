@@ -5,7 +5,7 @@ from pathlib import Path
 
 from artifact_manifest import FILES, create, verify
 from generate_registration import source
-from run import formula
+from run import XL_ERR_NUM, check_scalar, formula
 from summarize import PRIMARY, summarize
 from workloads import IDS, Case, cases
 
@@ -40,10 +40,23 @@ class PlanTest(unittest.TestCase):
 
     def test_formula_keys(self):
         self.assertEqual(formula("S02", 3, {"argc": 4}), "=BENCH.SUM4(3,4,5,6)")
+        self.assertEqual(formula("S04", 3, {"period": 2}), "=BENCH.ERRNUM(3,2)")
         self.assertEqual(formula("R03", 3, {"cells": 10, "topics": 2}),
                          '=BENCH.RTD("topic-0",0)')
         self.assertEqual(formula("T02", 1, {"length": 8, "kind": "ja"}),
                          "=BENCH.STR.OUT(8,TRUE)")
+
+    def test_error_workload_checks_each_cell(self):
+        class Target:
+            def __init__(self, values):
+                self.Value2 = tuple((value,) for value in values)
+
+        case = Case("S04", "period-2", {"cells": 4, "period": 2})
+        check_scalar(Target([1.0, XL_ERR_NUM, 3.0, XL_ERR_NUM]), case)
+        with self.assertRaises(AssertionError):
+            check_scalar(Target([XL_ERR_NUM, 2.0, XL_ERR_NUM, 4.0]), case)
+        with self.assertRaises(AssertionError):
+            check_scalar(Target([-2146826259] * 4), Case("S04", "period-0", {"cells": 4, "period": 0}))
 
     def test_registration_names_match_rust_generator(self):
         generated = source(10)

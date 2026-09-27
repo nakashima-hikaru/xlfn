@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parent
 XL_DONE = 0
 XL_MANUAL = -4135
 XL_AUTOMATIC = -4105
+XL_ERR_NUM = -2146826252  # COM Value2 representation of #NUM! (xlErrNum = 2036).
 
 
 def checkout_commit() -> str | None:
@@ -53,7 +54,7 @@ def formula(id: str, row: int, params: dict[str, Any]) -> str:
     if id in ("S03", "P01", "P03"):
         return f'=BENCH.CPU({row},{params["delay_us"]})'
     if id == "S04":
-        return f'=BENCH.ERROR({row},{params["period"]})'
+        return f'=BENCH.ERRNUM({row},{params["period"]})'
     if id == "P04":
         return f'=BENCH.CONTENDED({row})'
     if id.startswith("A") or id == "L03" and params.get("workload") == "async":
@@ -222,10 +223,11 @@ def check_scalar(target: Any, case: Case) -> None:
         raise AssertionError(f"expected {expected} cells, got {len(values)}")
     if case.id == "S04":
         period = case.params["period"]
-        errors = sum(isinstance(value, int) and value < 0 for value in values)
-        if errors != (expected // period if period else 0):
+        mismatches = [row for row, value in enumerate(values, 1)
+                      if value != (XL_ERR_NUM if period > 0 and row % period == 0 else row)]
+        if mismatches:
             raise AssertionError(
-                f"error count {errors}, expected {expected // period if period else 0}; "
+                f"S04 result mismatch at rows {mismatches[:5]}; "
                 f"first values: {values[:5]!r}"
             )
     elif case.id not in ("P04",):
