@@ -149,6 +149,24 @@ impl InputMode for FormulaInputMode {
     note = "implement `FromExcel` for this argument type or use a supported argument type"
 )]
 pub trait FromExcel<'call>: Sized {
+    /// Opts into allocation-free validation/identity before materialization.
+    /// `preflight_identity` must reject the same invalid inputs and encode the
+    /// same identity as conversion. Conversion must have no observable effects
+    /// beyond producing its value. Custom converters remain eagerly evaluated
+    /// unless they explicitly establish this contract.
+    const PREFLIGHT: bool = false;
+
+    fn preflight_identity(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        identity: &mut InputIdentityEncoder,
+    ) -> XllResult<()>
+    where
+        Self: ExcelInputIdentity,
+    {
+        Self::from_excel_with_identity(value, argument, identity).map(|_| ())
+    }
+
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self>;
 
     /// Converts an owned input while recording its semantic identity.
@@ -182,11 +200,70 @@ pub trait ExcelInputIdentity {
     fn encode_input_identity(&self, encoder: &mut InputIdentityEncoder);
 }
 
+/// A validated argument retained until formula revision lookup completes.
+/// Borrowed inputs never escape the synchronous Excel call. Owned values also
+/// retain handle pins and the result of evaluating a default exactly once.
+#[doc(hidden)]
+pub enum PreparedArgument<'call, T> {
+    Ready(T),
+    Deferred {
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        materialize: fn(XlValueRef<'call>, &'static str) -> XllResult<T>,
+    },
+}
+
+impl<T> PreparedArgument<'_, T> {
+    pub fn materialize(self) -> XllResult<T> {
+        match self {
+            Self::Ready(value) => Ok(value),
+            Self::Deferred {
+                value,
+                argument,
+                materialize,
+            } => materialize(value, argument),
+        }
+    }
+}
+
 /// Framework-side argument dispatch used by generated ABI wrappers.
 #[doc(hidden)]
 pub trait ExcelParameter<'call, M: InputMode>:
     sealed::ExcelParameterSealed<'call, M> + Sized
 {
+    const DEFERRED: bool = false;
+
+    fn preflight(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<()> {
+        Self::decode(value, argument, context, identity).map(|_| ())
+    }
+
+    fn materialize_input(_value: XlValueRef<'call>, _argument: &'static str) -> XllResult<Self> {
+        unreachable!("only preflight-capable parameters can be deferred")
+    }
+
+    fn prepare(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<PreparedArgument<'call, Self>> {
+        if Self::DEFERRED {
+            Self::preflight(value, argument, context, identity)?;
+            Ok(PreparedArgument::Deferred {
+                value,
+                argument,
+                materialize: Self::materialize_input,
+            })
+        } else {
+            Self::decode(value, argument, context, identity).map(PreparedArgument::Ready)
+        }
+    }
+
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -221,6 +298,21 @@ impl<'call, T> ExcelParameter<'call, FormulaInputMode> for T
 where
     T: FromExcel<'call> + ExcelInputIdentity,
 {
+    const DEFERRED: bool = T::PREFLIGHT;
+
+    fn preflight(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        _: &CallContext<'call>,
+        identity: &mut InputIdentityEncoder,
+    ) -> XllResult<()> {
+        T::preflight_identity(value, argument, identity)
+    }
+
+    fn materialize_input(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
+        T::from_excel(value, argument)
+    }
+
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -450,6 +542,20 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
         self.inputs.take().map_or(Ok(None), M::finish)
     }
 
+    pub(crate) fn prepare<T: ExcelParameter<'call, M>>(
+        &mut self,
+        index: usize,
+        argument: &'static str,
+        value: XlValueRef<'call>,
+    ) -> XllResult<PreparedArgument<'call, T>> {
+        let fingerprint = self.inputs.as_mut().ok_or(XllError::Internal {
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::INPUT_FINGERPRINT,
+        })?;
+        M::with_argument(fingerprint, index, argument, |identity| {
+            T::prepare(value, argument, &self.call, identity)
+        })
+    }
+
     pub(crate) fn decode<T>(
         &mut self,
         index: usize,
@@ -605,4 +711,38 @@ pub unsafe fn cell_presence_from_raw(
         XlValueType::Missing => CellPresence::Missing,
         _ => CellPresence::Value,
     })
+}
+
+#[cfg(test)]
+mod preparation_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn custom_conversion_is_retained_once_before_revision_lookup() {
+        static CONVERSIONS: AtomicUsize = AtomicUsize::new(0);
+        struct Observed(f64);
+        impl<'call> FromExcel<'call> for Observed {
+            fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
+                CONVERSIONS.fetch_add(1, Ordering::Relaxed);
+                f64::from_excel(value, argument).map(Self)
+            }
+        }
+        impl ExcelInputIdentity for Observed {
+            fn encode_input_identity(&self, encoder: &mut InputIdentityEncoder) {
+                encoder.f64(self.0);
+            }
+        }
+        let raw = XLOPER12::number(42.0);
+        crate::call::with_excel_call_scope_and_state(&raw, |raw, scope| {
+            let value = XlValueRef::from_array_cell(raw).unwrap();
+            let mut arguments = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+            let prepared = arguments.prepare::<Observed>(0, "arg", value).unwrap();
+            assert!(matches!(prepared, PreparedArgument::Ready(_)));
+            assert_eq!(CONVERSIONS.load(Ordering::Relaxed), 1);
+            assert!(arguments.finish().unwrap().is_some());
+            assert_eq!(prepared.materialize().unwrap().0, 42.0);
+            assert_eq!(CONVERSIONS.load(Ordering::Relaxed), 1);
+        });
+    }
 }

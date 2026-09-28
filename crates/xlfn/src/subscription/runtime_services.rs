@@ -12,6 +12,8 @@ use xlfn_kernel::operation_gate::OperationGate;
 use xlfn_kernel::quota::Quota;
 
 pub(crate) struct RuntimeServices {
+    #[cfg(feature = "rtd")]
+    pub(super) publishers: super::channel::PublisherPool,
     pub(crate) runtime_gate: OperationGate,
     pub(crate) active_quota: Quota,
     pub(crate) queued_update_quota: Quota,
@@ -22,6 +24,8 @@ pub(crate) struct RuntimeServices {
 impl RuntimeServices {
     pub(crate) const fn new(limits: super::topic::RtdLimits) -> Self {
         Self {
+            #[cfg(feature = "rtd")]
+            publishers: super::channel::PublisherPool::new(),
             runtime_gate: OperationGate::new(),
             active_quota: Quota::new(limits.max_active.get()),
             queued_update_quota: Quota::new(limits.max_queued_updates.get()),

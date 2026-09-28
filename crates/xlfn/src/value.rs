@@ -23,6 +23,8 @@ pub(crate) mod input;
 pub mod matrix;
 /// Output conversion traits and return-cell representations.
 pub(crate) mod output;
+#[cfg(feature = "bench-internals")]
+pub(crate) mod prepared_probe;
 /// Raw, borrowed views over Excel's XLOPER12 input representation.
 #[allow(unsafe_code, reason = "Raw XLOPER12 views are the value ABI leaf")]
 pub mod raw;
@@ -121,6 +123,7 @@ pub enum OptionalExcelValue<T> {
     reason = "XLOPER12 numeric union projection is audited here"
 )]
 impl<'call> FromExcel<'call> for f64 {
+    const PREFLIGHT: bool = true;
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         let number = match value.value_type() {
             // SAFETY: The root type selects the corresponding union member.
@@ -147,6 +150,7 @@ impl ExcelInputIdentity for f64 {
     reason = "XLOPER12 boolean union projection is audited here"
 )]
 impl<'call> FromExcel<'call> for bool {
+    const PREFLIGHT: bool = true;
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         if value.value_type() != XlValueType::Boolean {
             return Err(value.wrong_type(argument, "boolean"));
@@ -186,6 +190,7 @@ fn number_to_integer<T>(
     reason = "XLOPER12 integer union projection is audited here"
 )]
 impl<'call> FromExcel<'call> for i32 {
+    const PREFLIGHT: bool = true;
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         match value.value_type() {
             // SAFETY: XLTYPE_INT selects the integer member.
@@ -214,6 +219,7 @@ impl ExcelInputIdentity for i32 {
     reason = "XLOPER12 integer union projection is audited here"
 )]
 impl<'call> FromExcel<'call> for i64 {
+    const PREFLIGHT: bool = true;
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         match value.value_type() {
             // SAFETY: XLTYPE_INT selects the integer member.
@@ -239,6 +245,15 @@ impl ExcelInputIdentity for i64 {
 }
 
 impl<'call> FromExcel<'call> for String {
+    const PREFLIGHT: bool = true;
+    fn preflight_identity(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        identity: &mut InputIdentityEncoder,
+    ) -> XllResult<()> {
+        identity.semantic_utf16(value.utf16(argument)?)
+    }
+
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         crate::utf16::decode_owned(value.utf16(argument)?, argument)
     }
@@ -276,6 +291,7 @@ impl<'call, M: InputMode> ExcelParameter<'call, M> for &'call str {
     reason = "XLOPER12 error union projection is audited here"
 )]
 impl<'call> FromExcel<'call> for ExcelErrorValue {
+    const PREFLIGHT: bool = true;
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         if value.value_type() != XlValueType::Error {
             return Err(value.wrong_type(argument, "Excel error"));
@@ -295,6 +311,7 @@ impl ExcelInputIdentity for ExcelErrorValue {
 }
 
 impl<'call> FromExcel<'call> for ExcelSerialDate {
+    const PREFLIGHT: bool = true;
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         Self::new(
             <f64 as FromExcel>::from_excel(value, argument)?,
@@ -521,6 +538,40 @@ where
     M: InputMode,
     T: ExcelParameter<'call, M>,
 {
+    const DEFERRED: bool = T::DEFERRED;
+
+    fn preflight(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<()> {
+        let grid = GridView::from_value(value, argument)?;
+        let (rows, columns) = grid.shape();
+        M::u64(identity, rows as u64);
+        M::u64(identity, columns as u64);
+        let mut budget = ArrayInputBudget::new::<T>(grid.cells().len(), argument)?;
+        for cell in grid.cells() {
+            let cell = XlValueRef::from_array_cell(cell)?;
+            budget.include(cell)?;
+            T::preflight(cell, argument, context, identity)?;
+        }
+        Ok(())
+    }
+
+    fn materialize_input(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
+        let grid = GridView::from_value(value, argument)?;
+        let (rows, columns) = grid.shape();
+        let mut data = Vec::with_capacity(grid.cells().len());
+        for cell in grid.cells() {
+            data.push(T::materialize_input(
+                XlValueRef::from_array_cell(cell)?,
+                argument,
+            )?);
+        }
+        Matrix::new(rows, columns, data)
+    }
+
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,

@@ -342,7 +342,7 @@ mod tests {
         .to_string();
         assert!(expanded.contains("FunctionRegistration :: new"));
         assert!(expanded.contains("sync_udf"));
-        assert!(expanded.contains("convert_argument"));
+        assert!(expanded.contains("prepare_argument"));
         assert!(expanded.contains("assert_thread_safe_return"));
         assert!(expanded.contains("assert_volatile_return"));
     }
@@ -838,7 +838,14 @@ mod tests {
         .to_string();
         assert!(expanded.contains("sync_udf"));
         assert!(expanded.contains("assert_main_thread_return"));
-        assert!(expanded.contains("convert_argument"));
+        assert!(expanded.contains("prepare_argument"));
+        assert!(
+            expanded.find("prepare_argument").unwrap()
+                < expanded.find("ExcelReturn :: invoke").unwrap()
+        );
+        assert!(
+            expanded.find("ExcelReturn :: invoke").unwrap() < expanded.find("materialize").unwrap()
+        );
         assert!(!expanded.contains("ExcelHandleReturn"));
         assert!(!expanded.contains("HandleKey"));
     }
@@ -867,7 +874,7 @@ mod tests {
             .expect("missing default branch must be generated");
         assert!(blank < missing);
         assert!(expanded.contains("sync_udf"));
-        assert!(expanded.contains("default_argument"));
+        assert!(expanded.contains("prepare_default"));
     }
 
     #[test]

@@ -628,6 +628,9 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             self.record_cleanup_result(Err(err));
         }
 
+        #[cfg(feature = "rtd")]
+        self.services.publishers.stop();
+
         {
             let mut catalog = self.catalog.lock();
             catalog.identities.clear();

@@ -61,6 +61,7 @@ pub use crate::handle::{
 #[cfg(feature = "rtd")]
 pub use crate::subscription::{channel_protocol_probe, shared_publisher_topology_probe};
 
+pub use crate::value::prepared_probe::InputKind as TwoPhaseInputKind;
 #[cfg(feature = "async")]
 pub use async_spawn::{AsyncSpawnBenchmark, AsyncSpawnKind, RescheduleFuture, SpawnBatchResult};
 #[cfg(feature = "cache")]
@@ -78,7 +79,7 @@ pub use handle::{
     BenchHandleObject, HandleColdBatch, HandleColdGrowthBenchmark, HandleRevisionChurnBenchmark,
     HandleWarmBenchmark,
 };
-pub use ingress::RawArgumentIngressBenchmark;
+pub use ingress::{RawArgumentIngressBenchmark, TwoPhaseBenchmark};
 pub use lookup::{
     ArcHandleLookupBenchmark, HandleDistinctKeyBenchmark, HandleLookupBenchCase,
     HandleLookupBenchmark,

@@ -1,4 +1,4 @@
-//! Benchmark-only shared publisher experiment. No production topology changes.
+//! Production generation pool versus benchmark-only sharded publisher experiment.
 #![allow(
     unsafe_code,
     reason = "Benchmark source owns topic publication barriers and joins its workers"
@@ -385,7 +385,7 @@ fn measure_source<S: RtdSource>(
     rounds.sort_unstable();
     serde_json::json!({ "subscriptions": subscriptions, "updates_per_subscription": updates,
         "rounds_ns": rounds, "median_ns": rounds[rounds.len()/2], "overloaded_retries": retries,
-        "subscription_setup_ns_excluding_pool": setup_ns, "teardown_ns": teardown_ns })
+        "subscription_setup_ns": setup_ns, "teardown_ns": teardown_ns })
 }
 
 pub fn shared_publisher_topology_probe(
@@ -423,10 +423,17 @@ pub fn shared_publisher_topology_probe(
         };
         measure_source(source, registration, jobs, done_rx, subscriptions, updates)
     };
-    result["shared_publishers"] = shared_publishers.into();
+    result["topology"] = if shared_publishers == 0 {
+        "production_generation_pool"
+    } else {
+        "experimental_shards"
+    }
+    .into();
+    result["publisher_start_included_in_setup"] = (shared_publishers == 0).into();
+    result["shared_publishers"] = shared_publishers.max(1).into();
     result["owned_worker_threads"] = (subscriptions
         + if shared_publishers == 0 {
-            subscriptions
+            1
         } else {
             shared_publishers
         })

@@ -1,9 +1,15 @@
 # Performance correction record — 2026-09-26
 
+Current adoption: [shared RTD publisher and prepared formula inputs](PERFORMANCE_REDESIGN_PRODUCTION.md).
+
 The initial record covers the five findings reviewed against `0889a7b` and
 their local corrections, based on `8dc096e`. Dated follow-ups below identify
 their own measurement baselines. These local results are not a Windows/Excel
 performance qualification or a release readiness decision.
+
+The [2026-09-29 work-elimination experiments](PERFORMANCE_REDESIGN_EXPERIMENTS.md)
+compare two-phase raw formula ingress, shared RTD publishers, scoped cache
+reads, and call-admission costs, with raw measurements and adoption gates.
 
 ## Compact handle ownership and bounded metadata — 2026-09-28
 

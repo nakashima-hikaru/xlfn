@@ -1,0 +1,33 @@
+Benchmarking sync_boundary/ingress_udf_only/1
+Benchmarking sync_boundary/ingress_udf_only/1: Warming up for 300.00 ms
+Benchmarking sync_boundary/ingress_udf_only/1: Collecting 30 samples in estimated 10.005 s (551k iterations)
+Benchmarking sync_boundary/ingress_udf_only/1: Analyzing
+sync_boundary/ingress_udf_only/1
+                        time:   [18.164 µs 18.187 µs 18.219 µs]
+                        thrpt:  [54.887 Melem/s 54.984 Melem/s 55.055 Melem/s]
+Found 2 outliers among 30 measurements (6.67%)
+  1 (3.33%) high mild
+  1 (3.33%) high severe
+
+Benchmarking sync_boundary/admission/1
+Benchmarking sync_boundary/admission/1: Warming up for 300.00 ms
+Benchmarking sync_boundary/admission/1: Collecting 30 samples in estimated 10.008 s (376k iterations)
+Benchmarking sync_boundary/admission/1: Analyzing
+sync_boundary/admission/1
+                        time:   [26.492 µs 26.538 µs 26.594 µs]
+                        thrpt:  [37.602 Melem/s 37.682 Melem/s 37.747 Melem/s]
+Found 5 outliers among 30 measurements (16.67%)
+  2 (6.67%) high mild
+  3 (10.00%) high severe
+
+Benchmarking sync_boundary/scalar_return/no_subscriber/1
+Benchmarking sync_boundary/scalar_return/no_subscriber/1: Warming up for 300.00 ms
+Benchmarking sync_boundary/scalar_return/no_subscriber/1: Collecting 30 samples in estimated 10.007 s (199k iterations)
+Benchmarking sync_boundary/scalar_return/no_subscriber/1: Analyzing
+sync_boundary/scalar_return/no_subscriber/1
+                        time:   [50.418 µs 50.473 µs 50.561 µs]
+                        thrpt:  [19.778 Melem/s 19.813 Melem/s 19.834 Melem/s]
+Found 2 outliers among 30 measurements (6.67%)
+  1 (3.33%) high mild
+  1 (3.33%) high severe
+

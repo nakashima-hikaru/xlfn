@@ -6,6 +6,8 @@ use super::*;
 pub struct RawArgumentIngressBenchmark {
     runtime: &'static crate::runtime::Runtime<()>,
     raw: xlfn_sys::XLOPER12,
+    // Cell arrays stay Vec-backed: moving a Box<[XLOPER12]> into this owner
+    // would retag its allocation after raw pointers had already been derived.
     _storage: Option<Box<dyn std::any::Any>>,
 }
 
@@ -53,8 +55,7 @@ impl RawArgumentIngressBenchmark {
                 },
                 xltype: xlfn_sys::XLTYPE_STR,
             })
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
+            .collect::<Vec<_>>();
         let raw = xlfn_sys::XLOPER12 {
             value: xlfn_sys::XLOPER12Value {
                 array: xlfn_sys::XLOPER12Array {
@@ -83,8 +84,7 @@ impl RawArgumentIngressBenchmark {
                 xltype: xlfn_sys::XLTYPE_STR,
             },
             xlfn_sys::XLOPER12::nil(),
-        ]
-        .into_boxed_slice();
+        ];
         let raw = xlfn_sys::XLOPER12 {
             value: xlfn_sys::XLOPER12Value {
                 array: xlfn_sys::XLOPER12Array {
@@ -106,8 +106,7 @@ impl RawArgumentIngressBenchmark {
         let len = rows * columns;
         let mut cells = (0..len)
             .map(|i| xlfn_sys::XLOPER12::number(i as f64))
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
+            .collect::<Vec<_>>();
         let raw = xlfn_sys::XLOPER12 {
             value: xlfn_sys::XLOPER12Value {
                 array: xlfn_sys::XLOPER12Array {
@@ -393,3 +392,6 @@ impl RawArgumentIngressBenchmark {
         })
     }
 }
+
+mod two_phase;
+pub use two_phase::TwoPhaseBenchmark;

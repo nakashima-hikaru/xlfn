@@ -217,6 +217,18 @@ pub struct RtdSink<T> {
 }
 
 impl<T> RtdSink<T> {
+    #[cfg(feature = "rtd")]
+    pub(super) fn erased(&self) -> ErasedSink {
+        self.sink
+    }
+
+    #[cfg(feature = "rtd")]
+    pub(super) fn publisher_queue(
+        &self,
+    ) -> XllResult<triomphe::Arc<super::channel::PublisherQueue>> {
+        self.sink.publisher_queue()
+    }
+
     pub(super) fn publish_stored(&self, value: StoredRtdValue) -> XllResult<()> {
         self.sink.publish_stored(value)
     }

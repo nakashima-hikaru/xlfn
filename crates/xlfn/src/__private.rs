@@ -54,7 +54,7 @@ pub mod v1 {
     use crate::value::ExcelCellOutput;
     pub use crate::value::input::{
         ArgumentContext, ExcelInputIdentity, ExcelParameter, FormulaInputMode, InputMode,
-        PlainInputMode, argument_from_raw, argument_from_raw_with_arguments,
+        PlainInputMode, PreparedArgument, argument_from_raw, argument_from_raw_with_arguments,
         cell_presence_from_raw,
     };
     #[doc(hidden)]
@@ -629,6 +629,39 @@ pub mod v1 {
                 let _ = (udf_id, inputs);
                 Ok(ReturnContext::new())
             }
+        }
+
+        #[doc(hidden)]
+        pub fn prepare_default<T: ExcelParameter<'call, M>>(
+            &mut self,
+            index: usize,
+            name: &'static str,
+            value: T,
+        ) -> XllResult<PreparedArgument<'call, T>> {
+            self.arguments.record_decoded(index, name, &value)?;
+            Ok(PreparedArgument::Ready(value))
+        }
+
+        #[doc(hidden)]
+        #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
+        pub unsafe fn prepare_argument<T: ExcelParameter<'call, M>>(
+            &mut self,
+            index: usize,
+            name: &'static str,
+            raw: *mut xlfn_sys::XLOPER12,
+        ) -> XllResult<PreparedArgument<'call, T>> {
+            // SAFETY: Excel owns raw for the duration of this synchronous call.
+            let borrowed =
+                unsafe { crate::value::XlValueRef::from_raw(raw) }.map_err(
+                    |error| match error {
+                        XllError::Input { reason, .. } => XllError::Input {
+                            argument: name,
+                            reason,
+                        },
+                        other => other,
+                    },
+                )?;
+            self.arguments.prepare(index, name, borrowed)
         }
 
         #[doc(hidden)]
