@@ -5,7 +5,9 @@
 
 use super::ErasedSink;
 use super::topic::RtdTopic;
-use super::value::{IntoRtdValue, StoredRtdValue};
+use super::value::IntoRtdValue;
+#[cfg(any(test, feature = "bench-internals"))]
+use super::value::StoredRtdValue;
 use crate::generation::RuntimeGeneration;
 use crate::sync::Mutex;
 use crate::{XllError, XllResult};
@@ -229,6 +231,7 @@ impl<T> RtdSink<T> {
         self.sink.publisher_queue()
     }
 
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(super) fn publish_stored(&self, value: StoredRtdValue) -> XllResult<()> {
         self.sink.publish_stored(value)
     }

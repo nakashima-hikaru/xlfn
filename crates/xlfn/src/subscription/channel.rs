@@ -460,6 +460,7 @@ impl Channel {
         drop(pending);
     }
 
+    #[cfg(any(test, feature = "bench-internals"))]
     fn receive_batch(&self, batch: &mut smallvec::SmallVec<[StoredRtdValue; 32]>) -> bool {
         debug_assert!(batch.is_empty());
         let mut state = self.state.lock();
