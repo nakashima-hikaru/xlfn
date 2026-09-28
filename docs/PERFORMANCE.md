@@ -5,6 +5,99 @@ their local corrections, based on `8dc096e`. Dated follow-ups below identify
 their own measurement baselines. These local results are not a Windows/Excel
 performance qualification or a release readiness decision.
 
+## Unconditional object capabilities — 2026-09-28
+
+Baseline: `579aa26`, the requested checkpoint of the existing working tree.
+`ObjectBinding::armed` and `RawObjectLeaseGuard::armed` were initialized to
+`true` by every constructor and never changed. Removing the fields makes Drop
+unconditionally release the capability's one binding count or pin. Moves still
+transfer the capability; failed admission constructs no guard. This adds no
+pointer tags, unsafe operations, atomics, or changes to arena synchronization.
+
+Actual production-type sizes, measured in arm64 Rust 1.98.1 libtests:
+
+| Type | Before bytes | After bytes |
+| --- | ---: | ---: |
+| ObjectBinding | 40 | 32 |
+| RawObjectLeaseGuard | 32 | 24 |
+| BindingRecord (contains ObjectBinding) | 72 | 64 |
+
+The layout regression test compares capabilities with their required fields.
+A lifecycle test duplicates bindings and acquires two pins, moves a binding
+through `Option`, and checks count transitions and exactly-once payload drop
+with either the binding or the pin released last. Existing failed-admission
+tests still check that neither pin counter is partially incremented.
+
+### Allocation measurements
+
+Saved before/after `handle_memory` executables used identical
+`bench-internals async` features, the optimized bench profile, and the system
+allocator on macOS arm64. They ran in before/after/after/before order; both
+runs of each version reported identical allocation counts and byte deltas.
+Values are requested live allocation bytes, not RSS or allocator size classes.
+
+| Case | Before bytes | After bytes | Saved bytes |
+| --- | ---: | ---: | ---: |
+| Cold growth, 1,000 bindings | 1,151,460 | 1,143,460 | 8,000 |
+| Cold growth, 10,000 bindings | 10,251,804 | 10,171,804 | 80,000 |
+| Republish, after first 10,000 operations | 10,301,436 | 10,221,436 | 80,000 |
+| Republish, after 500,000 operations | 10,301,436 | 10,221,436 | 80,000 |
+
+The 10,000-binding growth reduction is about 0.78% of measured live bytes,
+not the 20% reduction of `ObjectBinding` itself. Republish still requests
+140,631 allocations for the first 10,000 operations. Empty-service bytes are
+unchanged. Both versions retain 288 bytes after the first sparse fixture;
+all later fixtures report zero after-drop byte delta. The benchmark exercises
+binding allocation/retirement; it does not measure the memory or runtime of
+generated async futures containing `RawObjectLeaseGuard`.
+
+### Timing experiment and decision
+
+The same saved `handle_prepare` binaries ran before-A, after-A, after-B,
+before-B, after compilation and tests finished. Each case uses 50 Criterion
+samples, 0.5 s warmup and a 2 s requested measurement period. Values below are
+Criterion mean point estimates in microseconds per batch. Change compares the
+average of the two after estimates with the average of the two before
+estimates; it is not a combined confidence interval.
+
+| Workload | Before A | After A | After B | Before B | Change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| cold_miss_batch_100 | 78.584 | 79.646 | 79.744 | 79.754 | +0.66% |
+| warm_hit_batch_100 | 6.173 | 6.184 | 6.181 | 6.206 | -0.11% |
+| distinct_key/1 | 67.615 | 68.584 | 68.643 | 67.557 | +1.52% |
+| distinct_key/32 | 554.143 | 542.019 | 538.126 | 540.591 | -1.33% |
+| cold_grow/10000 | 8,586.239 | 8,458.164 | 8,534.491 | 8,463.838 | -0.34% |
+| republish/10_000 | 15,773.992 | 15,627.446 | 15,560.803 | 15,775.831 | -1.15% |
+
+Keep this as a candidate for simpler capability ownership and measured memory
+reduction, not as a demonstrated speedup. Single-worker distinct-key time was
+1.52% worse in this experiment; the short local samples neither establish
+equivalence nor qualify Windows/Excel or async-task tail latency. No extra
+runtime indirection, tag masking, or synchronization was introduced to obtain
+the byte reduction.
+
+Reproduction (copy the before executables before rebuilding the candidate):
+
+```sh
+cargo bench -p xlfn --features 'bench-internals async' --bench handle_memory --bench handle_prepare --no-run --locked
+path/to/handle_memory
+XLFN_BENCH_MEASUREMENT_MS=2000 path/to/handle_prepare --bench 'handle_prepare/(cold_miss_batch_100|warm_hit_batch_100|distinct_key/(1|32)$|cold_grow/10000$|republish/10_000)' --warm-up-time 0.5 --noplot --save-baseline armed-before-a
+```
+
+Repeat with the respective saved executables and baseline labels
+`armed-after-a`, `armed-after-b`, `armed-before-b`.
+
+### Validation
+
+- `xlfn` all-feature lib tests: 699 passed with process-isolated nextest and
+  with serialized libtest; 10 skipped/ignored.
+- All three object tests pass with strict provenance under both Stacked
+  Borrows and Tree Borrows, pinned `nightly-2026-08-22`. The new `miri_` test
+  is selected by the existing handles command in `just miri`.
+- `xlfn` all-target/all-feature Clippy, formatting, and diff checks pass.
+- x86-64 and i686 MSVC all-feature type checks pass with `blake3/pure`.
+  This is supplemental cross-target checking, not native Windows/Excel evidence.
+
 ## Resident entry pointer tag — 2026-09-28
 
 `ResidentEntry::owns_residency` used `AtomicBool::get_mut` only: it was an

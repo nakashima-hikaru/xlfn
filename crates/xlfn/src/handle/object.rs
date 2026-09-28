@@ -160,7 +160,6 @@ impl ObjectArena {
             arena: NonNull::from(arena.as_ref()),
             cell: cell_pointer,
             id,
-            armed: true,
         })
     }
 
@@ -205,7 +204,6 @@ impl ObjectArena {
         Ok(RawObjectLeaseGuard {
             arena: NonNull::from(self),
             id,
-            armed: true,
         })
     }
 
@@ -407,7 +405,6 @@ pub(crate) struct ObjectBinding {
     arena: NonNull<ObjectArena>,
     cell: NonNull<ObjectCell>,
     id: ObjectId,
-    armed: bool,
 }
 
 impl ObjectBinding {
@@ -421,7 +418,7 @@ impl ObjectBinding {
     }
 
     pub(crate) fn object(&self) -> &ObjectCell {
-        // SAFETY: an armed binding contributes one arena count and therefore
+        // SAFETY: every binding contributes one arena count and therefore
         // prevents object reclamation.
         unsafe { self.cell.as_ref() }
     }
@@ -434,7 +431,6 @@ impl ObjectBinding {
             arena: self.arena,
             cell: self.cell,
             id: self.id,
-            armed: true,
         })
     }
 
@@ -503,12 +499,10 @@ impl<'registry> PendingObjectBinding<'registry> {
 
 impl Drop for ObjectBinding {
     fn drop(&mut self) {
-        if self.armed {
-            // SAFETY: retirement passed its grace period while borrowing the
-            // registry owner. The arena checks final-release completion before
-            // allowing its allocation to be reclaimed.
-            unsafe { self.arena.as_ref() }.release_binding(self.id);
-        }
+        // SAFETY: retirement passed its grace period while borrowing the
+        // registry owner. Every binding owns one count until Drop; the arena
+        // checks final-release completion before allowing reclamation.
+        unsafe { self.arena.as_ref() }.release_binding(self.id);
     }
 }
 
@@ -524,16 +518,13 @@ unsafe impl Sync for ObjectBinding {}
 pub(crate) struct RawObjectLeaseGuard {
     arena: NonNull<ObjectArena>,
     id: ObjectId,
-    armed: bool,
 }
 
 impl Drop for RawObjectLeaseGuard {
     fn drop(&mut self) {
-        if self.armed {
-            // SAFETY: async execution and the arena's checked pin count prevent
-            // the unique owner from reclaiming the arena before this release.
-            unsafe { self.arena.as_ref() }.release_pin(self.id);
-        }
+        // SAFETY: every guard owns one pin until Drop. Async execution and the
+        // checked pin count keep the arena alive until this release.
+        unsafe { self.arena.as_ref() }.release_pin(self.id);
     }
 }
 
@@ -545,6 +536,77 @@ unsafe impl Sync for RawObjectLeaseGuard {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capability_layout() {
+        assert_eq!(
+            size_of::<ObjectBinding>(),
+            size_of::<(NonNull<ObjectArena>, NonNull<ObjectCell>, ObjectId)>(),
+        );
+        assert_eq!(
+            size_of::<RawObjectLeaseGuard>(),
+            size_of::<(NonNull<ObjectArena>, ObjectId)>(),
+        );
+        eprintln!(
+            "ObjectBinding={} RawObjectLeaseGuard={} BindingRecord={}",
+            size_of::<ObjectBinding>(),
+            size_of::<RawObjectLeaseGuard>(),
+            size_of::<super::super::binding::BindingRecord>(),
+        );
+    }
+
+    #[test]
+    fn miri_bindings_and_pins_release_once_in_either_order() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct DropProbe(Arc<AtomicUsize>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                assert_eq!(self.0.fetch_add(1, Ordering::SeqCst), 0);
+            }
+        }
+
+        for pin_last in [false, true] {
+            let drops = Arc::new(AtomicUsize::new(0));
+            let arena = PublishedOwner::new(ObjectArena::new());
+            let id = ObjectId::new(1, 1);
+            // SAFETY: arena outlives every binding and pin in this fixture.
+            let binding =
+                unsafe { ObjectArena::insert(&arena, id, DropProbe(Arc::clone(&drops))) }.unwrap();
+            let duplicate = binding.duplicate().unwrap();
+            let pin = binding.acquire_lease().unwrap();
+            let other_pin = duplicate.acquire_lease().unwrap();
+            {
+                let state = arena.state.lock();
+                let entry = &state.objects[&id];
+                assert_eq!((entry.bindings, entry.pins, state.active_pins), (2, 2, 2));
+            }
+            // Move capabilities through Option to exercise ownership transfer
+            // without any extra release or disarming state.
+            let mut binding = Some(binding);
+            drop(binding.take());
+            drop(other_pin);
+            {
+                let state = arena.state.lock();
+                let entry = &state.objects[&id];
+                assert_eq!((entry.bindings, entry.pins, state.active_pins), (1, 1, 1));
+            }
+            if pin_last {
+                drop(duplicate);
+                assert_eq!(drops.load(Ordering::SeqCst), 0);
+                drop(pin);
+            } else {
+                drop(pin);
+                assert_eq!(drops.load(Ordering::SeqCst), 0);
+                drop(duplicate);
+            }
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            let state = arena.state.lock();
+            assert!(state.objects.is_empty());
+            assert_eq!((state.active_pins, state.active_releases), (0, 0));
+        }
+    }
 
     #[test]
     fn failed_pin_admission_preserves_both_counters() {
