@@ -741,7 +741,9 @@ impl<V> CacheNode<V> {
 
 enum FlightState<V> {
     Pending,
-    Finished(Result<(NodePtr<V>, u64), Arc<XllError>>),
+    // The shared Flight owns the error; followers clone its value, not its owner.
+    // Keep it boxed so large error variants do not enlarge every flight.
+    Finished(Result<(NodePtr<V>, u64), Box<XllError>>),
     Retry,
 }
 
@@ -1770,10 +1772,10 @@ where
                     return Ok(creator_guard.into_lease());
                 }
                 Err(err) => {
-                    let arc_err = Arc::new(err.clone());
+                    let error = Box::new(err.clone());
                     {
                         let mut state = flight.state.lock();
-                        *state = FlightState::Finished(Err(arc_err));
+                        *state = FlightState::Finished(Err(error));
                     }
                     flight.changed.notify_all();
 

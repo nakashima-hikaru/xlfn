@@ -213,7 +213,7 @@ fn failed_follower_reclaims_after_flight_state_unlock() {
     };
     let hash = flight_hash(&key);
     let flight = Arc::new(Flight::new(key, hash));
-    *flight.state.lock() = FlightState::Finished(Err(Arc::new(XllError::Overloaded)));
+    *flight.state.lock() = FlightState::Finished(Err(Box::new(XllError::Overloaded)));
     cache.flights.lock().insert_unique(Arc::clone(&flight));
     let initialization = ActiveCacheGuard::enter().unwrap();
     drop(previous);
