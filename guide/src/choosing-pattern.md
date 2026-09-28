@@ -15,8 +15,8 @@ has a different owner and update trigger.
 | Push repeated updates into a cell | [RTD source](rtd.md) | The active subscription | `rtd` |
 | Reuse computed values across calls and bound resident cache weight | [Calculation cache](caching.md) | Your keys, weight budget, eviction, and invalidation | `cache` |
 
-The crate has no default features. Enable only the facilities you choose; see
-[the feature reference](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/compatibility.md#xlfn-features) for dependency syntax.
+The crate has no default features. Enable only the facilities your add-in requires
+in `Cargo.toml`.
 
 ## One result or a stream?
 
@@ -26,12 +26,11 @@ cancellation makes work from an obsolete calculation stop being useful.
 
 RTD keeps a subscription alive and publishes new values as a source changes.
 Use it for a live quote, sensor reading, or progress value that should update
-without the user editing a formula. Sources must still bound their queues and
-stop their workers during shutdown.
+without the user editing a formula.
 
-Neither feature makes blocking work asynchronous. If a library blocks, provide
-an application-owned execution strategy and follow its cancellation and
-[shutdown contract](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/shutdown.md). See [Do not block the async executor](async-functions.md#do-not-block-the-async-executor).
+Neither feature makes blocking work asynchronous. If an operation blocks, run it
+on a dedicated thread pool so it does not block the async runtime or Excel threads.
+See [Do not block the async executor](async-functions.md#do-not-block-the-async-executor).
 
 ## A worksheet object or an internal cache?
 

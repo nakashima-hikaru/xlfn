@@ -1,36 +1,20 @@
 # Create your first add-in
 
-Build one worksheet function and call `=HELLO.ADD(2, 3)` in Excel. This tutorial
-assumes the Windows tools and source checkout from [Requirements](requirements.md)
-are ready. It uses 64-bit Excel; for 32-bit Excel, use the target and package
-directory listed there.
+Build a worksheet function and call `=HELLO.ADD(2, 3)` in Excel.
 
-## 1. Create the project beside the checkout
+This tutorial uses 64-bit Excel (`x86_64-pc-windows-msvc`). For 32-bit Excel, use
+`i686-pc-windows-msvc` and the `package/win-x86/` output directory.
 
-Start in the directory containing your `xlfn` checkout. Install the packaging
-tool from that checkout, then create your add-in:
+## 1. Create the project
+
+Create a new Rust library project:
 
 ```powershell
-cargo +1.98.1 install --path xlfn/crates/cargo-xlfn --locked
 cargo new --lib hello-xlfn
 cd hello-xlfn
-rustup override set 1.98.1
 ```
 
-The directories should now look like this:
-
-```text
-your-projects/
-├── xlfn/
-│   └── crates/
-│       ├── cargo-xlfn/
-│       └── xlfn/
-└── hello-xlfn/        # run the remaining commands here
-    ├── Cargo.toml
-    └── src/lib.rs
-```
-
-Replace `hello-xlfn/Cargo.toml` with:
+Update `Cargo.toml`:
 
 ```toml
 [package]
@@ -42,14 +26,15 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-xlfn = { path = "../xlfn/crates/xlfn" }
+xlfn = "0.2"
 ```
 
-`cdylib` tells Cargo to produce the library that will become the XLL.
+The `crate-type = ["cdylib"]` setting instructs Cargo to produce a dynamic library
+that `cargo-xlfn` packages into an `.xll`.
 
-## 2. Add the function
+## 2. Define the add-in and function
 
-Replace `src/lib.rs` with this complete example:
+Replace `src/lib.rs` with:
 
 ```rust
 use xlfn::prelude::*;
@@ -75,43 +60,36 @@ pub fn add(left: f64, right: f64) -> f64 {
 }
 ```
 
-`HelloXll` defines the add-in. `Opened::new(())` opens it without application
-state. `#[excel_function]` exposes `add` under the Excel name `HELLO.ADD`.
-The `thread_safe` flag lets Excel call this pure calculation concurrently.
+- `HelloXll` defines the add-in entry point and its metadata.
+- `#[excel_function]` exposes the `add` function as `=HELLO.ADD` in Excel.
+- The `thread_safe` flag enables concurrent evaluation on Excel's worker threads.
 
 ## 3. Build the XLL
 
-From `hello-xlfn`, run:
+Build the package:
 
 ```powershell
 cargo xlfn package --target x86_64-pc-windows-msvc
 ```
 
-This builds a release library, checks the linked artifact, and creates:
+This compiles the library and packages the XLL into:
 
 ```text
 package/win-x64/hello-xlfn.xll
 ```
 
-Keep the complete `package/win-x64` directory together when moving the add-in.
-It also contains package metadata and any required companion files.
-
 ## 4. Call it in Excel
 
-In Excel, open **File → Options → Add-ins**. Select **Excel Add-ins** in the
-**Manage** list, choose **Go → Browse**, and select
-`hello-xlfn/package/win-x64/hello-xlfn.xll`.
-
-Enter this formula in a cell:
+1. In Excel, go to **File → Options → Add-ins**.
+2. Set **Manage** to **Excel Add-ins** and click **Go...**.
+3. Click **Browse...** and select `package/win-x64/hello-xlfn.xll`.
+4. Enter this formula in any cell:
 
 ```text
 =HELLO.ADD(2, 3)
 ```
 
-The result should be **5**. If your Excel uses semicolons to separate arguments,
-enter `=HELLO.ADD(2; 3)` instead. For build, loading, or formula errors, see
-[Troubleshooting](troubleshooting.md).
+The cell displays **5**.
 
-Next, add inputs and error handling in [Worksheet functions](worksheet-functions.md).
-You can move functions into ordinary Rust modules as the project grows;
-the macros register them without a separate function table.
+Next, explore [Worksheet functions](worksheet-functions.md) for more input types
+and error handling.

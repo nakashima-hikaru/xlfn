@@ -2,8 +2,6 @@
 
 Start with an owned `Matrix<T>` when a function accepts or returns a rectangular
 range. Use borrowed views or incremental output when conversion cost matters.
-For exact limits and type tables, use the
-[conversion reference](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/conversion-reference.md).
 
 xlfn converts Excel values strictly. Ordinary parameters do not ask Excel to
 coerce text to numbers, booleans to numbers, or arrays to scalars.
@@ -102,10 +100,8 @@ fn doubled(values: XlArrayRef<'_>) -> XllResult<XlArrayOutput> {
 }
 ```
 
-The builder rejects a non-finite output as `#NUM!` and checks dimensions and
-return-storage limits. See the
-[allocation limits](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/conversion-reference.md#arrays-and-allocation-limits)
-before planning a very large result.
+The builder rejects non-finite output as `#NUM!` and checks dimensions and
+return-storage limits.
 
 ## Keep one-dimensional shape explicit
 
@@ -143,6 +139,17 @@ concrete parameter types when possible: they give clearer errors and less
 downstream branching. Its array form contains only `ExcelCellValue`, so
 nested arrays and missing cells cannot be represented.
 
-Next, use [Optional arguments and enums](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/optional-arguments.md) for blank or
-omitted cells, or [Custom conversions](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/custom-conversions.md) for application
-types in worksheet signatures.
+## Optional and omitted arguments
+
+Wrap a parameter in `Option<T>` to accept empty or omitted arguments from Excel.
+When the user leaves an argument blank or passes an empty cell, the parameter
+receives `None`:
+
+```rust
+#[excel_function(name = "CALC.SCALE", thread_safe)]
+fn scale(value: f64, factor: Option<f64>) -> f64 {
+    value * factor.unwrap_or(1.0)
+}
+```
+
+Next, see [Execution modes and contexts](execution-modes.md) to control how Excel runs your functions.

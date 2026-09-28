@@ -131,11 +131,8 @@ dropped before its worker is joined. Dropping the source configuration does
 not stop or destroy a running job.
 
 A producer that finishes successfully closes sender admission and drains
-accepted values. The shared publisher remains available to other topics. The producer must stop any additional threads or callbacks
-before returning. Use bounded, cancellation-aware I/O: a producer that never
-returns delays disconnect and unload. Never abandon an in-process callback
-on timeout and then permit unload; isolate uninterruptible work in another
-process. See [Shutdown and unload](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/shutdown.md).
+accepted values. The shared publisher remains available to other topics.
+Ensure producer workers exit promptly when the sender closes or becomes cancelled.
 
 ## Custom sources
 

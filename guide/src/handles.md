@@ -73,7 +73,7 @@ formula argument. For example, a `DATASET.LOAD` function could accept a
 snapshot ID from `A1`; updating `A1` then creates a new object.
 
 If a custom argument type is used by a handle producer, implement
-`ExcelInputIdentity` and `PrepareExcel` alongside `FromExcel`; see [Custom conversions](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/custom-conversions.md).
+`ExcelInputIdentity` and `PrepareExcel` alongside `FromExcel`.
 
 ## Handle alias functions
 
@@ -147,7 +147,9 @@ The close order relevant to handle objects is:
 3. xlfn closes the formula-handle registry and drops remaining Rust handle objects;
 4. `Addin::cleanup` performs bounded best-effort disposal.
 
-A handle object's `Drop` therefore must remain safe after `quiesce` has stopped application workers or owner threads. If resource destruction requires such an owner, release or invalidate the resource during `quiesce` while the owner is still available, and make the later Rust wrapper drop a local or idempotent operation. Do not defer the only copy of an application shutdown protocol to handle `Drop`. See [Shutdown and unload](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/shutdown.md).
+A handle object's `Drop` must remain safe after `quiesce` has stopped
+application workers. If resource destruction requires an active worker or thread,
+release or invalidate the resource during `quiesce`.
 
 ## Valid producer contexts
 

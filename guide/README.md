@@ -2,8 +2,8 @@
 
 The guide is maintained as mdBook-compatible Markdown. Read
 [`src/introduction.md`](src/introduction.md) on GitHub or use
-[`src/SUMMARY.md`](src/SUMMARY.md) as its table of contents. Detailed
-[reference documents](../docs/reference) and rustdoc hold API specifics.
+[`src/SUMMARY.md`](src/SUMMARY.md) as its table of contents.
+API signatures and types are documented on [docs.rs](https://docs.rs/xlfn).
 
 ## Preview and build
 
@@ -44,7 +44,7 @@ Run the applicable Rust, Windows artifact, and Excel checks separately.
 
 ## Maintain the guide
 
-- Keep task steps in the guide and detailed API rules in `docs/reference/`.
+- Keep task steps in the guide and API details in rustdoc.
 - Keep task pages in the order readers perform the work, with expected results.
 - Update `SUMMARY.md` when adding a chapter and keep existing filenames when possible.
 - Recheck fragment links when changing headings. Use an explicit external GitHub
