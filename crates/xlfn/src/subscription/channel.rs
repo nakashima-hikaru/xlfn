@@ -108,28 +108,105 @@ impl<T> RtdSender<T> {
     }
 }
 
-impl<T: IntoRtdValue> RtdSender<T> {
-    /// Validates and enqueues a value without waiting for queue capacity.
-    ///
-    /// Returns [`XllError::Overloaded`] when the bounded queue is full, or
-    /// [`XllError::Closing`] after admission closes. Value conversion can
-    /// return its own validation error. A concurrent close is rechecked after
-    /// conversion; user conversion code never runs with the queue locked.
-    pub fn try_send(&self, value: T) -> XllResult<()> {
-        if self.is_closed() {
-            return Err(XllError::Closing);
+/// Validated value retained when channel admission fails. It can be retried
+/// without cloning its input or repeating custom conversion.
+/// It can be sent to any sender with the same input type `T`, including another
+/// subscription. It owns the converted RTD value, not the original `T`; the type
+/// marker adds no `Clone`, `Debug`, `Send`, or `Sync` requirement on `T`.
+pub struct RtdPendingValue<T> {
+    value: StoredRtdValue,
+    // Invariant in T; conversion has consumed T, so it imposes no auto-trait bounds.
+    _input: PhantomData<fn(T) -> T>,
+}
+impl<T> std::fmt::Debug for RtdPendingValue<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("RtdPendingValue").field(&self.value).finish()
+    }
+}
+
+/// Failure to convert or admit an update. Full/Closed preserve its payload.
+#[non_exhaustive]
+pub enum RtdSendError<T> {
+    Invalid(XllError),
+    Full(RtdPendingValue<T>),
+    Closed(RtdPendingValue<T>),
+}
+impl<T> RtdSendError<T> {
+    /// Recovers a validated payload; invalid conversion has no recoverable value.
+    pub fn into_pending(self) -> Result<RtdPendingValue<T>, XllError> {
+        match self {
+            Self::Invalid(error) => Err(error),
+            Self::Full(value) | Self::Closed(value) => Ok(value),
         }
-        let value = value.into_rtd_value()?.into_stored()?;
+    }
+}
+impl<T> std::fmt::Display for RtdSendError<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(error) => error.fmt(f),
+            Self::Full(_) => f.write_str("RTD queue is full"),
+            Self::Closed(_) => f.write_str("RTD channel is closed"),
+        }
+    }
+}
+impl<T> std::error::Error for RtdSendError<T> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Invalid(error) => Some(error),
+            Self::Full(_) | Self::Closed(_) => None,
+        }
+    }
+}
+impl<T> std::fmt::Debug for RtdSendError<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(error) => f.debug_tuple("Invalid").field(error).finish(),
+            Self::Full(value) => f.debug_tuple("Full").field(value).finish(),
+            Self::Closed(value) => f.debug_tuple("Closed").field(value).finish(),
+        }
+    }
+}
+impl<T> RtdSendError<T> {
+    /// Discards a retained update when propagation intentionally stops its producer.
+    pub fn into_error(self) -> XllError {
+        match self {
+            RtdSendError::Invalid(error) => error,
+            RtdSendError::Full(_) => XllError::Overloaded,
+            RtdSendError::Closed(_) => XllError::Closing,
+        }
+    }
+}
+
+impl<T: IntoRtdValue> RtdSender<T> {
+    /// Converts once, validates, then tries bounded admission. Full/Closed
+    /// return the converted value for `try_send_pending`; conversion runs even
+    /// on a closed channel so a valid rejected payload remains recoverable.
+    pub fn try_send(&self, value: T) -> Result<(), RtdSendError<T>> {
+        let value = value
+            .into_rtd_value()
+            .and_then(|value| value.into_stored())
+            .map_err(RtdSendError::Invalid)?;
+        self.try_send_pending(RtdPendingValue {
+            value,
+            _input: PhantomData,
+        })
+    }
+}
+impl<T> RtdSender<T> {
+    /// Retries an already validated value without re-running its converter.
+    /// The pending value must have the same input type as this sender; it need
+    /// not originate from this subscription. Full/Closed return it again.
+    pub fn try_send_pending(&self, value: RtdPendingValue<T>) -> Result<(), RtdSendError<T>> {
         let wake_publisher = {
             let mut state = self.channel.state.lock();
             if !state.accepting {
-                return Err(XllError::Closing);
+                return Err(RtdSendError::Closed(value));
             }
             if state.values.len() >= self.channel.capacity.get() {
-                return Err(XllError::Overloaded);
+                return Err(RtdSendError::Full(value));
             }
             let was_empty = state.values.is_empty();
-            state.values.push_back(value);
+            state.values.push_back(value.value);
             was_empty
         };
         if wake_publisher {
@@ -569,7 +646,7 @@ pub fn channel_protocol_probe(
                     loop {
                         match sender.try_send(value as i32) {
                             Ok(()) => break,
-                            Err(XllError::Overloaded) => {
+                            Err(RtdSendError::Full(_)) => {
                                 retries += 1;
                                 std::thread::yield_now();
                             }
@@ -739,6 +816,56 @@ mod tests {
     }
 
     #[test]
+    fn miri_failed_send_preserves_non_clone_payload_and_converts_once() {
+        struct OnceValue {
+            conversions: StdArc<std::sync::atomic::AtomicUsize>,
+            value: i32,
+        }
+        impl IntoRtdValue for OnceValue {
+            fn into_rtd_value(self) -> XllResult<RtdValue> {
+                self.conversions.fetch_add(1, Ordering::Relaxed);
+                Ok(RtdValue::Integer(self.value))
+            }
+        }
+        let conversions = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
+        let channel = Arc::new(Channel::new(NonZeroUsize::new(1).unwrap()));
+        let sender = Channel::sender::<OnceValue>(&channel);
+        sender
+            .try_send(OnceValue {
+                conversions: StdArc::clone(&conversions),
+                value: 1,
+            })
+            .unwrap();
+        let error = sender
+            .try_send(OnceValue {
+                conversions: StdArc::clone(&conversions),
+                value: 2,
+            })
+            .unwrap_err();
+        assert!(matches!(error, RtdSendError::Full(_)));
+        let pending = error.into_pending().unwrap();
+        assert_eq!(channel.receive(), Some(StoredRtdValue::Integer(1)));
+        sender.try_send_pending(pending).unwrap();
+        assert_eq!(channel.receive(), Some(StoredRtdValue::Integer(2)));
+        assert_eq!(conversions.load(Ordering::Relaxed), 2);
+        channel.close();
+        let pending = sender
+            .try_send(OnceValue {
+                conversions: StdArc::clone(&conversions),
+                value: 3,
+            })
+            .unwrap_err()
+            .into_pending()
+            .unwrap();
+        let other = Arc::new(Channel::new(capacity()));
+        Channel::sender::<OnceValue>(&other)
+            .try_send_pending(pending)
+            .unwrap();
+        assert_eq!(other.receive(), Some(StoredRtdValue::Integer(3)));
+        assert_eq!(conversions.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
     fn bounded_channel_validates_before_admission() {
         let channel = Arc::new(Channel::new(capacity()));
         let sender = Channel::sender::<f64>(&channel);
@@ -746,12 +873,12 @@ mod tests {
         assert!(channel.state.lock().values.is_empty());
         sender.try_send(1.0).unwrap();
         sender.try_send(2.0).unwrap();
-        assert!(matches!(sender.try_send(3.0), Err(XllError::Overloaded)));
+        assert!(matches!(sender.try_send(3.0), Err(RtdSendError::Full(_))));
         assert_eq!(channel.receive(), Some(StoredRtdValue::Number(1.0)));
         assert_eq!(channel.receive(), Some(StoredRtdValue::Number(2.0)));
         channel.close();
         assert!(sender.is_closed());
-        assert!(matches!(sender.try_send(3.0), Err(XllError::Closing)));
+        assert!(matches!(sender.try_send(3.0), Err(RtdSendError::Closed(_))));
         assert_eq!(channel.receive(), None);
     }
 
@@ -874,7 +1001,7 @@ mod tests {
         let sender = Channel::sender::<CloseDuringConversion>(&channel);
         assert!(matches!(
             sender.try_send(CloseDuringConversion(Arc::clone(&channel))),
-            Err(XllError::Closing)
+            Err(RtdSendError::Closed(_))
         ));
         assert!(channel.state.lock().values.is_empty());
     }
@@ -959,8 +1086,8 @@ mod tests {
         let (_runtime, server, sink) = sink();
         let source = RtdChannelSource::new(capacity(), |_| {
             Ok(|sender: RtdSender<i32>| {
-                sender.try_send(17)?;
-                sender.try_send(42)
+                sender.try_send(17).map_err(RtdSendError::into_error)?;
+                sender.try_send(42).map_err(RtdSendError::into_error)
             })
         });
         let subscription = source
@@ -1117,14 +1244,17 @@ mod tests {
         });
         closed_rx.recv_timeout(DEADLINE).unwrap();
         assert!(done_rx.try_recv().is_err());
-        assert!(matches!(sender.try_send(1), Err(XllError::Closing)));
+        assert!(matches!(sender.try_send(1), Err(RtdSendError::Closed(_))));
         release_tx.send(()).unwrap();
         done_rx.recv_timeout(DEADLINE).unwrap().unwrap();
         disconnect.join().unwrap();
         assert!(finished.load(Ordering::Acquire));
         drop(runtime);
         assert!(sender_clone.is_closed());
-        assert!(matches!(sender_clone.try_send(2), Err(XllError::Closing)));
+        assert!(matches!(
+            sender_clone.try_send(2),
+            Err(RtdSendError::Closed(_))
+        ));
     }
 
     #[test]
@@ -1143,7 +1273,7 @@ mod tests {
             let sender_tx = sender_tx.clone();
             Ok(move |sender: RtdSender<i32>| {
                 sender_tx.send(sender.clone()).unwrap();
-                sender.try_send(1)?;
+                sender.try_send(1).map_err(RtdSendError::into_error)?;
                 assert!(sender.wait_closed(DEADLINE));
                 Ok(())
             })
@@ -1161,7 +1291,7 @@ mod tests {
         });
         assert!(sender.wait_closed(DEADLINE));
         assert!(done_rx.try_recv().is_err());
-        assert!(matches!(sender.try_send(2), Err(XllError::Closing)));
+        assert!(matches!(sender.try_send(2), Err(RtdSendError::Closed(_))));
         release_tx.send(()).unwrap();
         done_rx.recv_timeout(DEADLINE).unwrap().unwrap();
         disconnect.join().unwrap();
@@ -1187,7 +1317,7 @@ mod tests {
             Box::new(subscription).disconnect_and_wait(),
             Err(XllError::Panic)
         ));
-        assert!(matches!(sender.try_send(1), Err(XllError::Closing)));
+        assert!(matches!(sender.try_send(1), Err(RtdSendError::Closed(_))));
     }
 
     #[test]
@@ -1269,7 +1399,7 @@ mod tests {
             .is_err()
         );
         assert!(finished.load(Ordering::Acquire));
-        assert!(matches!(sender.try_send(1), Err(XllError::Closing)));
+        assert!(matches!(sender.try_send(1), Err(RtdSendError::Closed(_))));
     }
 
     #[test]
@@ -1297,7 +1427,7 @@ mod tests {
             // before setup returns, leaving only the retained sender.
             assert_eq!(Arc::count(&sender.channel), 1);
             drop(runtime);
-            assert!(matches!(sender.try_send(1), Err(XllError::Closing)));
+            assert!(matches!(sender.try_send(1), Err(RtdSendError::Closed(_))));
         }
     }
 }

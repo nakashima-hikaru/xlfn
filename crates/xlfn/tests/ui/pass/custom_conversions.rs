@@ -40,6 +40,13 @@ impl IntoExcel for Positive {
     }
 }
 
+impl<'call> xlfn::value::PrepareExcel<'call> for Positive {
+    type Prepared = Box<Self>;
+    fn prepare(value: xlfn::value::XlValueRef<'call>, argument: &'static str, identity: &mut xlfn::value::InputIdentityEncoder) -> xlfn::XllResult<Self::Prepared> {
+        <Self as xlfn::value::FromExcel>::from_excel_with_identity(value, argument, identity).map(Box::new)
+    }
+    fn materialize(value: Self::Prepared) -> xlfn::XllResult<Self> { Ok(*value) }
+}
 impl ExcelInputIdentity for Positive {
     fn encode_input_identity(&self, encoder: &mut InputIdentityEncoder) {
         encoder.f64(self.0);
@@ -62,6 +69,42 @@ fn custom_matrix(value: Positive) -> XllResult<Matrix<Positive>> {
 #[excel_function(name = "TEST.CUSTOM.HANDLE")]
 fn custom_handle(value: Positive) -> PositiveHandle {
     let _ = value;
+    PositiveHandle
+}
+
+// A custom owned result with a call-borrowed prepared representation.
+struct Text(String);
+impl<'call> FromExcel<'call> for Text {
+    fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
+        String::from_excel(value, argument).map(Self)
+    }
+}
+impl ExcelInputIdentity for Text {
+    fn encode_input_identity(&self, encoder: &mut InputIdentityEncoder) {
+        self.0.encode_input_identity(encoder);
+    }
+}
+impl<'call> xlfn::value::PrepareExcel<'call> for Text {
+    type Prepared = <String as xlfn::value::PrepareExcel<'call>>::Prepared;
+    fn prepare(value: XlValueRef<'call>, argument: &'static str, identity: &mut InputIdentityEncoder) -> XllResult<Self::Prepared> {
+        <String as xlfn::value::PrepareExcel>::prepare(value, argument, identity)
+    }
+    fn materialize(value: Self::Prepared) -> XllResult<Self> {
+        <String as xlfn::value::PrepareExcel>::materialize(value).map(Self)
+    }
+}
+
+#[excel_function(name = "TEST.CUSTOM.PREPARED.CONTAINERS")]
+fn prepared_containers(
+    numeric: Option<Matrix<Positive>>,
+    vector: Vec<Positive>,
+    row: xlfn::value::Row<Positive>,
+    column: xlfn::value::Column<Positive>,
+    text: Option<Matrix<Text>>,
+    optional: xlfn::value::OptionalExcelValue<Matrix<Text>>,
+    bounded: xlfn::value::BoundedVarArgs<Positive, 8>,
+) -> PositiveHandle {
+    let _ = (numeric, vector, row, column, text, optional, bounded);
     PositiveHandle
 }
 

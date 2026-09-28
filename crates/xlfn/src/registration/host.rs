@@ -10,8 +10,10 @@ use crate::error::{ExcelApiFailure, ExcelApiFunction, InputError};
 use crate::host_api::{ExcelHost, HostInvocation};
 use crate::host_callback::HostCallbackSession;
 use crate::return_abi::ExcelCallbackStatus;
+use crate::value::input::PreparedArgument;
 use crate::value::input::sealed::ExcelParameterSealed;
 use crate::value::{CallContext, ExcelParameter, FromExcel, InputMode, XlValueRef, XlValueType};
+use crate::value::{ExcelInputCells, PreparedExcelSequence};
 use crate::{XllError, XllResult};
 use smallvec::SmallVec;
 use std::path::PathBuf;
@@ -522,6 +524,25 @@ pub(crate) struct ModuleName {
 impl<'call, M: InputMode> ExcelParameterSealed<'call, M> for ModuleName {}
 
 impl<'call, M: InputMode> ExcelParameter<'call, M> for ModuleName {
+    type Prepared = ();
+
+    type Elements = PreparedExcelSequence<'call, Self, PreparedArgument<Self, Self::Prepared>>;
+    fn prepare_elements(
+        cells: ExcelInputCells<'call>,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<Self::Elements> {
+        cells.retain(
+            |value, argument| {
+                <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)
+            },
+            PreparedArgument::materialize,
+        )
+    }
+    fn materialize_elements(elements: Self::Elements) -> XllResult<Vec<Self>> {
+        elements.materialize()
+    }
+
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,

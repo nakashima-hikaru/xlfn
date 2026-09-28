@@ -637,7 +637,7 @@ pub mod v1 {
             index: usize,
             name: &'static str,
             value: T,
-        ) -> XllResult<PreparedArgument<'call, T>> {
+        ) -> XllResult<PreparedArgument<T, T::Prepared>> {
             self.arguments.record_decoded(index, name, &value)?;
             Ok(PreparedArgument::Ready(value))
         }
@@ -649,7 +649,7 @@ pub mod v1 {
             index: usize,
             name: &'static str,
             raw: *mut xlfn_sys::XLOPER12,
-        ) -> XllResult<PreparedArgument<'call, T>> {
+        ) -> XllResult<PreparedArgument<T, T::Prepared>> {
             // SAFETY: Excel owns raw for the duration of this synchronous call.
             let borrowed =
                 unsafe { crate::value::XlValueRef::from_raw(raw) }.map_err(

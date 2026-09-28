@@ -4,6 +4,11 @@ Date: 2026-09-29. Base: `3608a70` (cache flight errors changed from Arc to Box).
 This record supersedes the adoption holds in PERFORMANCE_REDESIGN_EXPERIMENTS.md;
 those earlier measurements remain historical prototype evidence.
 
+Historical implementation record for commit `246bb97`. The subsequent
+[public API revision](PERFORMANCE_API_REVISION.md) replaces the preflight flag,
+composes container preparation, and adds recoverable RTD send errors. The
+measurements below describe the original production adoption.
+
 ## RTD publication
 
 `RuntimeServices` owns a lazily started publisher pool, currently one worker per
@@ -145,6 +150,5 @@ Reproduce with `protocol_costs --topology`, `XLFN_TOPOLOGY_SUBSCRIPTIONS` set to
   terminal generation-pool stop, and eager custom-converter exactly-once behavior
   have native regression coverage.
 
-No live Windows Excel/COM run was performed. These production changes remain
-uncommitted; only the separately requested cache flight Arc-to-Box change is
-committed as `3608a70`.
+No live Windows Excel/COM run was performed. These production changes were
+committed as `246bb97`, following the cache flight Arc-to-Box change `3608a70`.

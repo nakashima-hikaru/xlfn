@@ -19,6 +19,16 @@ to freeze when 1.0 is released; it does not announce that release:
   and refinement trace formats are excluded. Code opting into these facilities
   must pin the exact framework version. Experimental features are not implied
   by the supported feature set.
+- `PrepareExcel` exposes the `Prepared` associated type and the `prepare` and
+  `materialize` operations as supported extension points. Hidden dispatch hooks
+  (including `__prepare_elements`) and collection preparation storage are
+  internal and excluded from the stable contract. Input-dependent validation
+  and complete semantic identity precede lookup; a hit may drop prepared state
+  without materialization. Built-in prepared types have opaque storage.
+- `RtdPendingValue<T>` preserves the input type after conversion, allowing retry
+  on another `RtdSender<T>` but not a sender with a different input type. It
+  retains the converted RTD value, not `T`. Full/Closed preserve that value;
+  Invalid conversion does not. Discard through `into_error` is explicit.
 - Macro error wording, rustc diagnostic formatting, backtraces, log prose,
   timing, allocation strategy, and private handle-token text are not stable
   formats. Documented errors and capability/lifetime restrictions remain part

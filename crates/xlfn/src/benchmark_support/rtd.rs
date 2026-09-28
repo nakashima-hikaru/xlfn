@@ -784,7 +784,7 @@ fn pipeline_send(sender: &crate::subscription::RtdSender<f64>, value: f64) -> us
     loop {
         match sender.try_send(value) {
             Ok(()) => return retries,
-            Err(crate::XllError::Overloaded) => {
+            Err(crate::rtd::RtdSendError::Full(_)) => {
                 retries += 1;
                 std::thread::yield_now();
             }

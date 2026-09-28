@@ -83,7 +83,7 @@ retain `XlValueRef` or any pointer derived from it in an owned result.
 
 A function returning a formula-owned handle is memoized by the converted
 semantic inputs. Such a parameter must therefore also implement
-`ExcelInputIdentity`; ordinary functions that do not produce a handle still
+`ExcelInputIdentity` and `PrepareExcel`; ordinary functions that do not produce a handle still
 require only `FromExcel`:
 
 ```rust
@@ -101,6 +101,48 @@ not the original `XLOPER12` representation. Omitting this implementation for
 a custom input in a handle-producing function is a compile-time error. The
 framework supplies semantic identities for built-in conversions and derives a
 variant ordinal for `ExcelEnum` values.
+
+### Typed preparation before formula lookup
+
+Handle-producing UDFs prepare and validate all arguments before revision lookup.
+They materialize only on a miss. Implement `PrepareExcel<'call>` with an explicit
+associated `Prepared` type. For an ordinary owned converter, retain its result:
+
+```rust
+use xlfn::value::{PrepareExcel, InputIdentityEncoder};
+
+impl<'call> PrepareExcel<'call> for PositiveFactor {
+    type Prepared = Self;
+
+    fn prepare(value: XlValueRef<'call>, argument: &'static str,
+        identity: &mut InputIdentityEncoder) -> XllResult<Self> {
+        Self::from_excel_with_identity(value, argument, identity)
+    }
+
+    fn materialize(prepared: Self) -> XllResult<Self> { Ok(prepared) }
+}
+```
+
+A custom prepared type may instead retain a validated borrowed view or typed
+intermediate state. Preparation must reject the same invalid input and encode
+exactly the value materialization produces. All state must be owned or borrowed
+for the current call; neither stage may depend on changing external state.
+Preparation may be dropped without materialization on a warm hit or later error.
+There is no `PREFLIGHT` flag and no default that silently decodes and discards a
+custom value. `ExcelEnum` derives its preparation implementation.
+
+`Option`, `OptionalExcelValue`, `Matrix`, `Vec`, `Row`, `Column`, and
+`BoundedVarArgs` compose preparation, preserving presence/shape semantics.
+Their custom elements retain each typed prepared state. Built-in numeric and
+String sequences validate/hash borrowed cells without allocating the output
+vector or Strings on a warm hit. Collection dispatch and its storage types are
+internal; custom implementations provide only `Prepared`, `prepare`, and
+`materialize`. The framework applies cell and allocation budgets when composing
+their prepared states. All input-dependent validation belongs in `prepare`,
+because a hit skips `materialize` entirely. Borrowed context-bearing views and Handle
+inputs retain their eager decode/pin policy; defaults are evaluated once and
+retained. Async wrappers materialize before scheduling, so Excel's memory cannot
+escape into a future.
 
 ## Custom cell and output conversions
 

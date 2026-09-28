@@ -73,7 +73,7 @@ formula argument. For example, a `DATASET.LOAD` function could accept a
 snapshot ID from `A1`; updating `A1` then creates a new object.
 
 If a custom argument type is used by a handle producer, implement
-`ExcelInputIdentity` alongside `FromExcel`; see [Custom conversions](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/custom-conversions.md).
+`ExcelInputIdentity` and `PrepareExcel` alongside `FromExcel`; see [Custom conversions](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/custom-conversions.md).
 
 ## Handle alias functions
 

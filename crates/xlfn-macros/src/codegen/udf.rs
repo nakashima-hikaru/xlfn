@@ -135,8 +135,8 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
             let converted = &argument.local_ident;
             let raw = &argument.raw_ident;
             let argument_name = &argument.excel_name;
-            let binding_type = if is_async { quote!(#ty) } else {
-                quote!(#krate::__private::v1::PreparedArgument<'_, #ty>)
+            let binding_type = if !is_async && matches!(argument.conversion, model::ArgumentConversion::Reference) { quote!(#krate::__private::v1::PreparedArgument<#ty, ()>) } else if is_async { quote!(#ty) } else {
+                quote!(#krate::__private::v1::PreparedArgument<#ty, _>)
             };
             let default_method = if is_async { quote!(default_argument) } else { quote!(prepare_default) };
             let conversion = match &argument.conversion {

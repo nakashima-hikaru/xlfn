@@ -4,9 +4,25 @@ use crate::value::input::PreparedArgument;
 use crate::value::prepared_probe::{InputKind, Owned};
 
 enum Prepared<'call> {
-    Number(PreparedArgument<'call, f64>),
-    Numbers(PreparedArgument<'call, Matrix<f64>>),
-    Strings(PreparedArgument<'call, Matrix<String>>),
+    Number(PreparedArgument<f64, f64>),
+    Numbers(
+        PreparedArgument<
+            Matrix<f64>,
+            <Matrix<f64> as crate::value::input::ExcelParameter<
+                'call,
+                crate::value::FormulaInputMode,
+            >>::Prepared,
+        >,
+    ),
+    Strings(
+        PreparedArgument<
+            Matrix<String>,
+            <Matrix<String> as crate::value::input::ExcelParameter<
+                'call,
+                crate::value::FormulaInputMode,
+            >>::Prepared,
+        >,
+    ),
 }
 impl Prepared<'_> {
     fn materialize(self) -> crate::XllResult<Owned> {

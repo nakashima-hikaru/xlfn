@@ -410,7 +410,11 @@ pub fn shared_publisher_topology_probe(
             let receiver = receivers.lock()[index].take().unwrap();
             let done_tx = done_tx.clone();
             Ok(move |sender: super::RtdSender<i32>| {
-                run_producer(receiver, done_tx, |value| sender.try_send(value))
+                run_producer(receiver, done_tx, |value| {
+                    sender
+                        .try_send(value)
+                        .map_err(super::RtdSendError::into_error)
+                })
             })
         });
         measure_source(source, registration, jobs, done_rx, subscriptions, updates)

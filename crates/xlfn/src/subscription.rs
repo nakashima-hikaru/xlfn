@@ -40,7 +40,9 @@ pub(crate) type SubscriptionServerHandle =
 #[cfg(all(feature = "rtd", feature = "bench-internals"))]
 pub use channel::channel_protocol_probe;
 #[cfg(feature = "rtd")]
-pub use channel::{RtdChannelSource, RtdChannelSubscription, RtdSender};
+pub use channel::{
+    RtdChannelSource, RtdChannelSubscription, RtdPendingValue, RtdSendError, RtdSender,
+};
 #[cfg(feature = "rtd")]
 pub use source::{RtdSink, RtdSource, RtdSourceHandle, RtdSubscription};
 #[cfg(feature = "rtd")]
