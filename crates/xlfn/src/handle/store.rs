@@ -23,7 +23,7 @@ pub(crate) struct HandleStore {
 }
 
 impl HandleStore {
-    pub(crate) fn try_new(maximum_bindings: usize) -> XllResult<Self> {
+    pub(crate) fn try_new(maximum_bindings: u32) -> XllResult<Self> {
         Ok(Self {
             registry: HandleRegistry::try_new(maximum_bindings)?,
         })

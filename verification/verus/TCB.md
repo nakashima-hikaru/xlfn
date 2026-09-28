@@ -189,11 +189,17 @@ relevant observations remain unproved caller/composition obligations.
 ### 3.7. CacheLease & Temporal Reclamation (shared pin kernel + model)
 
 Pin acquire/release classification is instantiated from shared production
-expressions for u32/u64 (`cache/pin_transitions.rs`). All pin additions, including
+expressions for u32/u64 (`cache/pin_transitions.rs`). Production now selects the
+u32 instance on every architecture and stores pins in `AtomicU32`; the inline
+allocation model uses the same field type. The u64 proof instance remains for
+generic resource lemmas, not as a second native cache representation. All pin additions, including
 resident/flight anchors, use checked acquisition. Production release still
 performs a Release `fetch_sub` first; a previous zero aborts rather than returning
 normally, and only the final pin takes the Acquire fence. The atomic/fence
 implementation and the caller wiring are outside the pure arithmetic proof.
+Native admission domains remain `usize`-sized. On a 64-bit host this pairs
+32-bit pins with 64-bit admission counters; the existing homogeneous proof
+instances do not by themselves prove that mixed-width native composition.
 `pin_ownership.rs` additionally conserves Creator/Resident/Flight/Lease fragments
 and observations in instance-bound tokenized storage. Typed pointer borrowing
 requires the matching initialized `PointsTo<T>` guard borrowed from a
@@ -810,7 +816,7 @@ allocation storage to recover the exact initialized HeapPermission. These method
 accept no fabricated drain histories.
 
 The actual Counter-to-observation borrow and actual drain-to-recovery premises are
-connected. This does not yet instantiate the native Cache index or pin AtomicUsize
+connected. This does not yet instantiate the native Cache index or pin AtomicU32
 registry, migrate its complete queue/preparation/reclamation driver, or prove its
 weak memory and Box/Drop behavior. Those mappings remain required; the new
 capabilities alone do not establish full native Cache refinement.

@@ -132,6 +132,12 @@ Configure it with `RuntimeConfig::with_handles` and
 A new publication may also return `Overloaded` while earlier calls are still
 using removed objects. Let those calls finish before retrying.
 
+Internally, binding slots and their free list use `u32` identities. Each object
+also has separate `u32` binding and async-pin counts: their portable ceiling is
+`u32::MAX` on both 32-bit and 64-bit hosts. An admission that would exceed either
+count returns an overflow error without creating a capability or changing the
+other count. Aggregate arena bookkeeping remains native-sized.
+
 ## Shutdown interaction
 
 The close order relevant to handle objects is:

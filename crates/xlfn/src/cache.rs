@@ -27,7 +27,7 @@ use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 #[cfg(feature = "bench-internals")]
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 use triomphe::Arc;
 use xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT;
@@ -681,7 +681,7 @@ fn retire_resident<V>(node_ptr: NodePtr<V>) {
 
 node_layout::declare_node! {
     struct CacheNode<V> {
-        pins: AtomicUsize,
+        pins: AtomicU32,
         resident: AtomicBool,
         domain: NonNull<CacheLookupDomain<V>>,
     }
@@ -719,7 +719,7 @@ impl<V> CacheNode<V> {
         pin_transitions::acquire_retry!(raw, next;
             load = self.pins.load(Ordering::Relaxed),
             classify = pin_transitions::acquire(raw as _),
-            attempt = self.pins.compare_exchange_weak(raw, next as usize, success, Ordering::Relaxed),
+            attempt = self.pins.compare_exchange_weak(raw, next, success, Ordering::Relaxed),
             success = Ok(true), zero = Ok(false), overflow = Err(PinOverflow);
         )
     }
@@ -1726,7 +1726,7 @@ where
                     // The CreatorPinGuard immediately assumes RAII ownership of this pin.
                     let node = Box::new(CacheNode {
                         value,
-                        pins: AtomicUsize::new(1),
+                        pins: AtomicU32::new(1),
                         resident: AtomicBool::new(publish),
                         published: publish,
                         weight: w,
@@ -2830,12 +2830,12 @@ mod tests {
     #[test]
     fn loom_temporal_reclamation_protocol_exhaustive_verification() {
         use loom::sync::Arc;
-        use loom::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+        use loom::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicUsize, Ordering};
         use loom::thread;
         use std::ptr;
 
         struct LoomCacheNode {
-            pins: AtomicUsize,
+            pins: AtomicU32,
             resident: AtomicBool,
             reclaimed: AtomicBool,
         }
@@ -2878,7 +2878,7 @@ mod tests {
 
         loom::model(|| {
             let node = Box::into_raw(Box::new(LoomCacheNode {
-                pins: AtomicUsize::new(1), // 1 for cache resident
+                pins: AtomicU32::new(1), // 1 for cache resident
                 resident: AtomicBool::new(true),
                 reclaimed: AtomicBool::new(false),
             }));
@@ -2913,7 +2913,7 @@ mod tests {
                                 pin_transitions::acquire_retry!(raw, next;
                                     load = n.pins.load(Ordering::Relaxed),
                                     classify = pin_transitions::acquire(raw as _),
-                                    attempt = n.pins.compare_exchange_weak(raw, next as usize, Ordering::Relaxed, Ordering::Relaxed),
+                                    attempt = n.pins.compare_exchange_weak(raw, next, Ordering::Relaxed, Ordering::Relaxed),
                                     success = Ok(true), zero = Ok(false), overflow = Err(PinOverflow);
                                 )
                             })(),
@@ -2995,12 +2995,12 @@ mod tests {
     #[should_panic(expected = "UAF")]
     fn loom_detects_buggy_unprotected_pointer_observation_race() {
         use loom::sync::Arc;
-        use loom::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+        use loom::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicUsize, Ordering};
         use loom::thread;
         use std::ptr;
 
         struct LoomCacheNode {
-            pins: AtomicUsize,
+            pins: AtomicU32,
             resident: AtomicBool,
             reclaimed: AtomicBool,
         }
@@ -3033,7 +3033,7 @@ mod tests {
 
         loom::model(|| {
             let node = Box::into_raw(Box::new(LoomCacheNode {
-                pins: AtomicUsize::new(1),
+                pins: AtomicU32::new(1),
                 resident: AtomicBool::new(true),
                 reclaimed: AtomicBool::new(false),
             }));
@@ -3440,7 +3440,7 @@ mod tests {
                 let domain = Box::new(CacheLookupDomain::new());
                 let node = NonNull::from(Box::leak(Box::new(CacheNode {
                     value: DropProbe(Arc::clone(&drops)),
-                    pins: AtomicUsize::new(1),
+                    pins: AtomicU32::new(1),
                     resident: AtomicBool::new(true),
                     published: true,
                     weight: 1,
@@ -3488,7 +3488,7 @@ mod tests {
     fn cache_node_pin_overflow_is_prevented() {
         let node = CacheNode {
             value: 42u32,
-            pins: AtomicUsize::new(usize::MAX),
+            pins: AtomicU32::new(u32::MAX),
             resident: AtomicBool::new(true),
             published: true,
             weight: 1,
@@ -3496,14 +3496,14 @@ mod tests {
             domain: NonNull::dangling(),
         };
         assert_eq!(node.try_acquire_pin(), Err(PinOverflow));
-        assert_eq!(node.pins.load(Ordering::SeqCst), usize::MAX);
+        assert_eq!(node.pins.load(Ordering::SeqCst), u32::MAX);
     }
 
     #[test]
     fn final_pin_release_cannot_be_resurrected() {
         let node = CacheNode {
             value: 42_u32,
-            pins: AtomicUsize::new(1),
+            pins: AtomicU32::new(1),
             resident: AtomicBool::new(false),
             published: false,
             weight: 1,
@@ -3519,7 +3519,7 @@ mod tests {
     fn miri_final_cache_pin_acquires_all_holders_before_retirement() {
         let node = CacheNode {
             value: [AtomicUsize::new(0), AtomicUsize::new(0)],
-            pins: AtomicUsize::new(2),
+            pins: AtomicU32::new(2),
             resident: AtomicBool::new(false),
             published: false,
             weight: 1,
@@ -3547,10 +3547,10 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     fn loom_final_pin_fence_acquires_all_holders_before_retirement() {
         use loom::sync::Arc;
-        use loom::sync::atomic::{AtomicUsize, Ordering};
+        use loom::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
         loom::model(|| {
-            let pins = Arc::new(AtomicUsize::new(2));
+            let pins = Arc::new(AtomicU32::new(2));
             let values = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
             let mut holders = Vec::new();
             for index in 0..2 {

@@ -4,7 +4,7 @@ use vstd::prelude::*;
 use super::heap_permission::HeapPermission;
 super::node_layout::declare_node! {
     pub struct Allocation<V> {
-        pins: std::sync::atomic::AtomicUsize,
+        pins: std::sync::atomic::AtomicU32,
         resident: std::sync::atomic::AtomicBool,
         domain: *mut u8,
     }

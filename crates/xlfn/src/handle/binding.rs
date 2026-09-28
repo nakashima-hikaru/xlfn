@@ -47,7 +47,6 @@ impl BindingState {
 
 pub(crate) struct BindingRecord {
     pub(crate) id: HandleId,
-    cell: NonNull<ObjectCell>,
     object: ObjectBinding,
     pub(crate) state: AtomicU8,
 }
@@ -59,10 +58,8 @@ unsafe impl Sync for BindingRecord {}
 
 impl BindingRecord {
     fn new(id: HandleId, object: ObjectBinding) -> Self {
-        let cell = NonNull::from(object.object());
         Self {
             id,
-            cell,
             object,
             state: AtomicU8::new(BindingState::Live as u8),
         }
@@ -74,9 +71,7 @@ impl BindingRecord {
 
     #[inline(always)]
     pub(crate) fn object(&self) -> &ObjectCell {
-        // SAFETY: callers are protected by the HandleReadDomain, which ensures
-        // the ObjectCell cannot be freed until all in-flight readers finish.
-        unsafe { self.cell.as_ref() }
+        self.object.object()
     }
 
     fn duplicate_object_binding(&self) -> XllResult<ObjectBinding> {
@@ -231,7 +226,7 @@ pub(crate) struct BindingSlot {
 
 pub(crate) struct RegistryState {
     pub(crate) slots: Vec<BindingSlot>,
-    pub(crate) free: Vec<usize>,
+    pub(crate) free: Vec<u32>,
     pub(crate) live_bindings: u32,
 }
 
@@ -327,12 +322,7 @@ impl BindingTable {
             });
         }
         let (index, slot, reused, appended) = match state.free.pop() {
-            Some(index) => {
-                let slot = u32::try_from(index).map_err(|_| XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_SLOT,
-                })?;
-                (index, slot, true, false)
-            }
+            Some(slot) => (slot as usize, slot, true, false),
             None => {
                 let index = state.slots.len();
                 // Exhausted generations permanently consume their slot. Do
@@ -419,7 +409,9 @@ impl BindingTable {
             let slot = &mut state.slots[index];
             if let Some(next) = slot.next_generation.next() {
                 slot.next_generation = next;
-                state.free.push(index);
+                state
+                    .free
+                    .push(u32::try_from(index).expect("allocated slot fits u32"));
             }
         }
         state.live_bindings = 0;
@@ -476,7 +468,7 @@ impl Drop for BindingReservation<'_> {
             let slot = state.slots.pop().expect("reservation owns the final slot");
             debug_assert!(slot.record.is_none());
         } else if self.reused {
-            state.free.push(self.index);
+            state.free.push(self.id.slot);
         }
     }
 }
@@ -528,7 +520,7 @@ impl BindingRemoval<'_> {
             .checked_sub(1)
             .expect("binding removal cannot underflow");
         if reusable {
-            state.free.push(self.id.slot as usize);
+            state.free.push(self.id.slot);
         }
         self.active = false;
         // Enqueue before releasing the table lock: seal's retire_all must

@@ -12,8 +12,7 @@ pub(crate) struct TaskControl {
 }
 
 pub(crate) struct ActiveReservation<'a> {
-    pub(crate) shared: &'a ExecutorShared,
-    pub(crate) armed: bool,
+    shared: Option<&'a ExecutorShared>,
 }
 
 impl<'a> ActiveReservation<'a> {
@@ -28,18 +27,12 @@ impl<'a> ActiveReservation<'a> {
             .ok()?;
 
         Some(Self {
-            shared,
-            armed: true,
+            shared: Some(shared),
         })
     }
 
-    pub(crate) fn commit(
-        mut self,
-        shared: &ExecutorShared,
-        generation: GenerationPin,
-        id: u64,
-    ) -> CompletionGuard {
-        self.armed = false;
+    pub(crate) fn commit(mut self, generation: GenerationPin, id: u64) -> CompletionGuard {
+        let shared = self.shared.take().expect("reservation owns active count");
 
         CompletionGuard {
             shared: ExecutorPtr::from_ref(shared),
@@ -52,8 +45,8 @@ impl<'a> ActiveReservation<'a> {
 
 impl<'a> Drop for ActiveReservation<'a> {
     fn drop(&mut self) {
-        if self.armed {
-            release_active(self.shared);
+        if let Some(shared) = self.shared.take() {
+            release_active(shared);
         }
     }
 }
@@ -123,5 +116,38 @@ impl CompletionObservation {
         }
         #[cfg(not(any(test, feature = "refinement")))]
         crate::shutdown_trace::Completion::Completed
+    }
+}
+
+#[cfg(test)]
+mod reservation_tests {
+    use super::*;
+    use crate::async_udf::executor::{Executor, SpawnReservation};
+
+    #[test]
+    fn miri_reservation_transfers_or_releases_exactly_one_active_count() {
+        assert_eq!(
+            size_of::<ActiveReservation<'_>>(),
+            size_of::<&ExecutorShared>()
+        );
+        let executor = Executor::start(1, 1).unwrap();
+        let shared = &*executor.shared;
+        let reservation = shared.reserve_spawn(1).unwrap();
+        assert_eq!(shared.active.load(Ordering::Relaxed), 1);
+        drop(reservation);
+        assert_eq!(shared.active.load(Ordering::Relaxed), 0);
+
+        let SpawnReservation {
+            admission,
+            generation,
+            task_id,
+            reservation,
+            ..
+        } = shared.reserve_spawn(1).unwrap();
+        let completion = reservation.commit(generation, task_id);
+        drop(admission);
+        assert_eq!(shared.active.load(Ordering::Relaxed), 1);
+        drop(completion);
+        assert_eq!(shared.active.load(Ordering::Relaxed), 0);
     }
 }

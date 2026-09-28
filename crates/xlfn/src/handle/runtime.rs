@@ -131,7 +131,7 @@ pub(crate) struct FormulaHandleService {
 }
 
 impl FormulaHandleService {
-    pub(crate) fn try_new(maximum_bindings: usize) -> XllResult<Self> {
+    pub(crate) fn try_new(maximum_bindings: u32) -> XllResult<Self> {
         let store = HandleStore::try_new(maximum_bindings)?;
         let registry_session = store.session();
         Ok(Self {
@@ -163,7 +163,7 @@ impl FormulaHandleService {
 
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn new(maximum_bindings: usize) -> Self {
+    pub(crate) fn new(maximum_bindings: u32) -> Self {
         Self::try_new(maximum_bindings).expect("test host provides an OS CSPRNG")
     }
 
@@ -830,13 +830,7 @@ impl FormulaHandleServiceSlot {
     pub(crate) fn read(&self) -> XllResult<FormulaHandleServiceRead<'_>> {
         self.service
             .read(
-                |config| {
-                    FormulaHandleService::try_new(
-                        usize::try_from(config.maximum_bindings())
-                            .expect("handle capacity fits the platform usize"),
-                    )
-                    .map(Box::new)
-                },
+                |config| FormulaHandleService::try_new(config.maximum_bindings()).map(Box::new),
                 |_runtime| {
                     #[cfg(any(test, feature = "refinement"))]
                     if let Some(trace) = self.trace.get() {

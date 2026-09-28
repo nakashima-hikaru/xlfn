@@ -434,9 +434,7 @@ impl<'a> SpawnReservation<'a> {
             debug_assert!(previous.is_none(), "task ID must be unique per generation");
         }
 
-        let completion = self
-            .reservation
-            .commit(shared, self.generation, self.task_id);
+        let completion = self.reservation.commit(self.generation, self.task_id);
 
         drop(self.admission);
         shared

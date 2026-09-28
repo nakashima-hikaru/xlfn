@@ -5,6 +5,162 @@ their local corrections, based on `8dc096e`. Dated follow-ups below identify
 their own measurement baselines. These local results are not a Windows/Excel
 performance qualification or a release readiness decision.
 
+## Compact handle ownership and bounded metadata — 2026-09-28
+
+Baseline `17cd8ff` commits the previous armed-flag removal. This follow-up
+implements the next representation changes without tagging shared state:
+
+| Candidate | Result |
+| --- | --- |
+| ObjectBinding / RawObjectLeaseGuard metadata | Transparent single-cell-pointer capabilities; arena and object identity live in ObjectCell. |
+| BindingRecord.cell | Removed; projection uses its ObjectBinding. The shared AtomicU8 state remains separate. |
+| ActiveReservation.armed | Replaced with Option<&ExecutorShared>; commit takes that exact reservation's executor rather than accepting another executor argument. |
+| RegistryState.free | Vec<u32>; conversion to usize occurs at collection indexing. Internal maximum-binding parameters remain u32 from config through the table. |
+| ObjectEntry counters | Both per-object counts use documented u32 aliases and checked admission. Aggregate arena counts remain usize. |
+| ResidentEntry tag | Already implemented in the earlier checkpoint; unchanged here. |
+| CacheNode.pins | Evaluated separately, then changed to AtomicU32 with matching production/Loom arithmetic and inline allocation model. |
+
+Both capability drops copy arena/id out of the cell before releasing the last
+count. They never access the cell after release; the registry/async drain still
+retains the arena through final-release completion. No new reconstruction of
+Box ownership occurs on the read path. The native representation remains
+outside the modeled BindingRecord/arena refinement boundary documented in
+`verification/verus/TCB.md`; these tests are not a new formal refinement proof.
+
+Actual arm64 capability sizes are ObjectBinding 32 -> 8 bytes,
+RawObjectLeaseGuard 24 -> 8, and BindingRecord 64 -> 32. ObjectEntry is now
+16 bytes. ObjectCell is 80 bytes including the new shared arena back-pointer.
+ActiveReservation uses one pointer rather than a reference plus bool/padding.
+Both per-object counters have a portable u32::MAX ceiling, documented in the
+handle guide; overflow preserves existing counts and returns no capability.
+
+### Memory experiment
+
+Saved optimized `handle_memory` binaries use `bench-internals async cache` on
+macOS arm64, Rust 1.98.1. These are requested live bytes, not RSS:
+
+| Case | Baseline bytes | Compact bytes | Saved bytes |
+| --- | ---: | ---: | ---: |
+| Cold growth, 1,000 bindings | 1,143,460 | 1,103,076 | 40,384 |
+| Cold growth, 10,000 bindings | 10,171,804 | 9,800,732 | 371,072 |
+| Republish after first 10,000 operations | 10,221,436 | 9,784,828 | 436,608 |
+| Republish after 500,000 operations | 10,221,436 | 9,784,828 | 436,608 |
+
+This reduces the 10,000-binding growth footprint by 3.65% and the retained
+republish footprint by 4.27%. The first 10,000 republish operations still make
+140,631 allocations. Empty-service bytes are unchanged. Both versions retain
+288 bytes after the first sparse fixture and report zero after-drop byte delta
+for subsequent fixtures. For the free list alone, 1,048,576 allocated elements
+require 4 MiB instead of 8 MiB on a 64-bit host; that is element storage, not
+an end-to-end million-binding measurement.
+
+### Handle timing and adoption
+
+Saved `handle_prepare` and `handle_lookup` binaries ran before-A, after-A,
+after-B, before-B without concurrent builds/tests. Criterion used 0.3 s
+warmup and a 1 s requested measurement period (50 prepare samples, 100 lookup
+samples). Entries are mean point estimates in microseconds per batch. Change
+compares the average after estimates with the average before estimates; the
+short experiment is not a statistical equivalence or speed guarantee.
+
+| Workload | Before A | After A | After B | Before B | Change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| prepare/cold_miss_batch_100 | 78.298 | 77.220 | 77.127 | 80.286 | -2.67% |
+| prepare/warm_hit_batch_100 | 5.640 | 5.702 | 5.664 | 5.717 | +0.08% |
+| prepare/distinct_key/1 | 68.594 | 67.418 | 67.480 | 68.182 | -1.37% |
+| prepare/distinct_key/32 | 536.545 | 538.025 | 545.731 | 539.481 | +0.72% |
+| prepare/cold_grow/10000 | 8,220.179 | 8,255.995 | 8,068.384 | 8,443.830 | -2.04% |
+| prepare/republish/10_000 | 15,436.827 | 15,390.209 | 15,120.771 | 15,641.597 | -1.83% |
+| lookup/distinct_tokens/1 | 24.594 | 24.656 | 24.540 | 24.607 | -0.01% |
+| lookup/distinct_tokens/32 | 212.915 | 213.698 | 215.003 | 217.736 | -0.45% |
+| lookup/warm_same_token/1 | 24.558 | 24.583 | 24.554 | 24.564 | +0.03% |
+| lookup/warm_same_token/32 | 221.631 | 212.495 | 210.494 | 221.937 | -4.64% |
+
+Adopt the handle/async representation changes for reduced allocation bytes
+and fewer duplicated ownership fields. This experiment shows no large timing
+regression in the selected cases; native Windows/Excel, generated async-future
+memory, and application-level tail latency remain unmeasured.
+
+### Cache pin-width experiment
+
+`CacheNode<u64>` shrinks from 48 to 40 bytes on this 64-bit host. The backend
+probe reports the same 8-byte-per-resident-node reduction; these are node-size
+estimates, not an allocator/RSS measurement of the whole cache. Over-aligned
+payloads need not save space. `CacheNode.resident` remains an independent
+shared atomic, and pin Release/final Acquire-fence ordering is unchanged.
+
+An exploratory comparison against the pre-Handle-refactor binary showed a
+46.5% cold `large_and_small_matrices` difference. That comparison did not
+isolate the pin width, so it is not evidence of a counter-width regression.
+The final control was rebuilt with the same Handle changes as the u32 candidate.
+Five u32/control/control/u32 cycles then gave ten process samples per version.
+All trace computation counts and hit rates matched. Median microseconds:
+
+| Trace | Phase | Native-width control | u32 pins | Change |
+| --- | --- | ---: | ---: | ---: |
+| fits_half_budget | cold | 270.5 | 273.4 | +1.1% |
+| fits_half_budget | repeat | 134.9 | 134.6 | -0.2% |
+| fits_near_budget | cold | 363.5 | 362.9 | -0.2% |
+| fits_near_budget | repeat | 159.3 | 158.3 | -0.6% |
+| interleaved_scan | cold | 3,684.4 | 3,670.6 | -0.4% |
+| interleaved_scan | repeat | 3,606.5 | 3,612.6 | +0.2% |
+| changing_working_set | cold | 1,505.9 | 1,496.7 | -0.6% |
+| changing_working_set | repeat | 1,523.3 | 1,520.2 | -0.2% |
+| one_large_matrix | cold | 171.0 | 159.5 | -6.7% |
+| one_large_matrix | repeat | 3.9 | 3.9 | +0.5% |
+| large_and_small_matrices | cold | 188.6 | 191.1 | +1.3% |
+| large_and_small_matrices | repeat | 16.6 | 16.9 | +1.8% |
+| variable_weight_pressure | cold | 20,013.2 | 19,936.9 | -0.4% |
+| variable_weight_pressure | repeat | 19,857.4 | 19,816.9 | -0.2% |
+
+Cold large/small samples ranged approximately 125–191 us for the control and
+123–196 us for u32, illustrating why the exploratory cold result was not used
+as an adoption gate. The short runs show no established speedup. Adopt the
+width change for node density and a single portable counter bound, retaining
+the existing fail-stop overflow policy at the now-explicit u32::MAX ceiling.
+This is not a promise of four billion caller leases: resident and flight pins
+also consume the count.
+
+Production and Loom now use the shared u32 pin transitions on every platform.
+The Verus inline allocation uses AtomicU32 too; generic u64 proof instances
+remain for resource lemmas. This does not close the documented native atomic,
+allocation, pointer, or OS primitive TCB boundaries.
+
+Reproduction: build and save both revisions' optimized executables with
+`--features 'bench-internals async cache'` and `--locked`. Use `handle_memory`,
+the `handle_prepare`/`handle_lookup` filters above with
+`XLFN_BENCH_MEASUREMENT_MS=1000 --warm-up-time 0.3`, and standalone
+`cache_workloads` with the default `quick1` backend. Rebuild the cache control
+with the identical Handle implementation before comparing pin widths.
+
+### Validation and remaining boundaries
+
+Local workspace all-feature nextest passed 969 tests (11 skipped); serialized
+xlfn all-feature libtests passed 701 (10 ignored). Targeted cache tests after
+the final layout/Loom adjustments passed 98 (one ignored). Formatting,
+workspace all-target/all-feature Clippy, and the i686/x86_64 MSVC checks with
+`blake3/pure` passed. The native borrow-boundary gate passed all six checks.
+
+Miri passed both Stacked and Tree Borrows for object capabilities (four tests),
+the async reservation (one), Handle lifecycle (15), cache lifecycle (21), and
+the resident-tag/layout checks (two). Strict provenance also passed for the
+object and resident-tag checks and the Stacked Borrows Handle run. Strict
+async and Tree Borrows Handle runs encountered unsupported integer-to-pointer
+conversions in crossbeam-epoch 0.9.21 and parking_lot_core 0.9.12 respectively;
+their non-strict runs passed. These are not strict-provenance passes.
+
+The cache-lease Verus suite verified 856 obligations with zero errors. All 98
+ownership mutation cases and ten shared pin-transition mutation cases passed
+(independent ownership groups reused 34 completed cases and ran the remaining
+64 with three concurrent workers). The release-ordering gate
+passed its baseline and rejected both missing/misplaced final Acquire fences.
+On 64-bit production targets, u32 pins coexist with usize admission domains.
+The homogeneous-width proof instances do not establish that mixed-width native
+composition; native atomics, allocation identity, raw pointers, and OS adapters
+retain the boundaries described in `verification/verus/TCB.md`. Windows target
+checks are compile evidence only; Windows execution and live Excel performance
+remain unverified by this experiment.
+
 ## Unconditional object capabilities — 2026-09-28
 
 Baseline: `579aa26`, the requested checkpoint of the existing working tree.

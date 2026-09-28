@@ -163,7 +163,7 @@ fn double_checked_hit_reclaims_after_singleflight_unlock() {
     let epoch = cache.generation.snapshot();
     let node = Box::new(CacheNode {
         value: DropProbe(None),
-        pins: AtomicUsize::new(1),
+        pins: AtomicU32::new(1),
         resident: AtomicBool::new(true),
         published: true,
         weight: 1,

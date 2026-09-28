@@ -1,10 +1,12 @@
 use super::*;
 use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 #[test]
 fn entry_layout_and_thread_bounds() {
     assert_eq!(size_of::<ResidentEntry<u8>>(), size_of::<Entry<u8>>());
+    #[cfg(target_pointer_width = "64")]
+    assert_eq!(size_of::<CacheNode<u64>>(), 40);
     static_assertions::assert_impl_all!(ResidentEntry<u32>: Send, Sync);
     static_assertions::assert_not_impl_any!(ResidentEntry<Cell<u32>>: Send, Sync);
     static_assertions::assert_not_impl_any!(ResidentEntry<std::rc::Rc<u32>>: Send, Sync);
@@ -18,7 +20,7 @@ fn exercise_tag<V: PartialEq + std::fmt::Debug>(value: V) {
         value,
         // Keep a fixture pin after retirement, so the unused domain is never
         // accessed and the fixture can explicitly destroy the allocation.
-        pins: AtomicUsize::new(2),
+        pins: AtomicU32::new(2),
         resident: AtomicBool::new(true),
         published: true,
         weight: 7,

@@ -104,7 +104,7 @@ impl<V> ResidentEntry<V> {
     const OWNS_RESIDENCY: usize = 1;
 
     pub(super) fn new((node, weight): Entry<V>) -> Self {
-        // CacheNode contains AtomicUsize, so bit zero is available for every V.
+        // CacheNode contains AtomicU32, so bit zero is available for every V.
         // Keep this a per-monomorphization compile-time check if layout changes.
         const { assert!(std::mem::align_of::<CacheNode<V>>() > Self::OWNS_RESIDENCY) };
         Self {

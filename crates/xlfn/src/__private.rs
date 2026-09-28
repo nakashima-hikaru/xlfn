@@ -928,7 +928,12 @@ pub mod v1 {
 
         impl HandleRegistry {
             pub fn new(capacity: usize) -> Self {
-                Self(crate::handle::HandleRegistry::try_new(capacity).expect("valid registry"))
+                Self(
+                    crate::handle::HandleRegistry::try_new(
+                        u32::try_from(capacity).expect("handle capacity fits u32"),
+                    )
+                    .expect("valid registry"),
+                )
             }
 
             pub fn insert_object<T: ExcelHandleObject>(&self, value: T) -> XllResult<String> {

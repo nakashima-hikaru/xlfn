@@ -107,15 +107,14 @@ macro_rules! width {
     };
 }
 
-#[cfg(any(verus_only, target_pointer_width = "32"))]
+// Cache pin counts have one portable u32 ceiling on every architecture.
 width!(word32, u32);
-#[cfg(any(verus_only, target_pointer_width = "64"))]
+// Retain the wider proof instance for generic ownership lemmas.
+#[cfg(verus_only)]
 width!(word64, u64);
 
-#[cfg(all(not(verus_only), target_pointer_width = "32"))]
+#[cfg(not(verus_only))]
 pub(crate) use word32::{acquire, release};
-#[cfg(all(not(verus_only), target_pointer_width = "64"))]
-pub(crate) use word64::{acquire, release};
 
 /// Control flow after an index observation, shared with the ownership proof.
 /// Rollback captures its domain before leaving admission; reclamation follows leave.
