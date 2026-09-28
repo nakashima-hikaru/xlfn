@@ -3,16 +3,53 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from artifact_manifest import FILES, create, verify
 from generate_registration import source
-from run import XL_ERR_NUM, check_scalar, formula, register_xll, registration_diagnostics
+from run import (XL_AUTOMATIC, XL_MANUAL, XL_ERR_NUM, ExcelSession, calculation_mode,
+                 check_scalar, formula, register_xll, registration_diagnostics, run_async)
 from summarize import PRIMARY, summarize
 from workloads import IDS, Case, cases
 
 
 class PlanTest(unittest.TestCase):
+    def test_live_workloads_allow_rtd_completion(self):
+        for case in cases("smoke"):
+            with self.subTest(case=case.key):
+                live = (case.id[0] in "AR" or case.id in ("W01", "W02")
+                        or case.id in ("L01", "L03") and case.params["workload"] in ("async", "rtd"))
+                self.assertEqual(calculation_mode(case), XL_AUTOMATIC if live else XL_MANUAL)
+
+    def test_async_measures_from_entry_without_redundant_invocations(self):
+        session = Mock()
+        submitted = []
+        def submit(sheet, count, make):
+            submitted.append([make(row) for row in range(1, count + 1)])
+            return object()
+        session.add_formulas.side_effect = submit
+        def observe(target, count, expected, timeout, **kwargs):
+            base = 2 if len(submitted) == 1 else 5
+            for i in range(count):
+                self.assertTrue(expected(float(base + i), i))
+            return {"p50_s": 0.1, "p95_s": 0.1, "p99_s": 0.1, "sampled_cells": 3}
+        session.wait_values.side_effect = observe
+        with patch("run.time.perf_counter", side_effect=[10, 10.05, 10.1, 20, 20.05, 20.1]):
+            result = run_async(session, Case("A02", "100", {"cells": 3, "delay_us": 100}), 2)
+        self.assertEqual(submitted, [["=BENCH.ASYNC(2,100)", "=BENCH.ASYNC(3,100)", "=BENCH.ASYNC(4,100)"],
+                                     ["=BENCH.ASYNC(5,100)", "=BENCH.ASYNC(6,100)", "=BENCH.ASYNC(7,100)"]])
+        session.app.Calculate.assert_not_called()
+        for call, start in zip(session.wait_values.call_args_list, (10, 20)):
+            self.assertEqual(call.kwargs["start_time"], start)
+        self.assertAlmostEqual(result["p50_s"], 0.1)
+
+    def test_async_timeout_reports_unsettled_values(self):
+        session = SimpleNamespace(memory=Mock())
+        target = SimpleNamespace(Value2=((1.0,), (-2146826246,), (99.0,)))
+        with patch("run.time.perf_counter", side_effect=[0, 0, 0.2, 31]), patch("run.time.sleep"):
+            with self.assertRaisesRegex(TimeoutError, r"only 1/3.*row 2: #N/A.*row 3: 99"):
+                ExcelSession.wait_values(session, target, 3, lambda v, i: v == i + 1, 30)
+
     def test_every_requested_id_has_a_case_and_primary_metric(self):
         expected = {f"S{i:02}" for i in range(1, 5)}
         expected |= {f"M{i:02}" for i in range(1, 6)}

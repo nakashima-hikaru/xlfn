@@ -1,9 +1,118 @@
 # Performance correction record — 2026-09-26
 
-This record covers the five findings reviewed against `0889a7b` and their local
-corrections. Validation uses the working tree based on `8dc096e`, retaining its
-collection conversion and lifecycle changes. It is not a Windows/Excel
+The initial record covers the five findings reviewed against `0889a7b` and
+their local corrections, based on `8dc096e`. Dated follow-ups below identify
+their own measurement baselines. These local results are not a Windows/Excel
 performance qualification or a release readiness decision.
+
+## Resident entry pointer tag — 2026-09-28
+
+`ResidentEntry::owns_residency` used `AtomicBool::get_mut` only: it was an
+exclusive ownership marker, not an atomic synchronization operation. On this
+64-bit host the flag and padding enlarged each entry from 16 to 24 bytes.
+The entry now stores that marker in bit zero of its node pointer, reducing
+`ResidentEntry` to 16 bytes while leaving the full `u64` weight intact.
+
+`CacheNode<V>` contains an `AtomicUsize`; a generic compile-time alignment
+assertion guards the spare bit. `map_addr` preserves provenance, and
+the private `node()` helper removes the tag before returning a `NodePtr`.
+Restoring `NonNull` uses the constructor/alignment invariant rather than adding
+a null-check branch to every lookup; masking changes only the reserved bit.
+Clones clear the ownership bit. Retirement clears it before releasing the
+resident pin, so repeated retirement and subsequent drop cannot release it
+twice. Only exclusive access mutates the bit; the node's actual resident/pin
+atomics and lookup/grace-period protocol are unchanged. `Send`/`Sync` retain
+the existing `V: Send + Sync` capability bounds.
+
+Regression coverage checks compact layout, thread bounds, zero-sized and
+over-aligned payloads, untagged snapshots, clone-of-clone behavior, exactly-once
+pin release, and clone/snapshot/drop after the allocation is destroyed.
+`just miri-cache-resident-entry`, also called by `just miri`, runs these tests
+with strict provenance under both Stacked Borrows and Tree Borrows. This is
+native representation testing, not a new formal proof of pointer tagging.
+
+### Local measurements
+
+Both binaries use Rust 1.98.1's optimized bench profile and the same working
+tree, differing only in the resident-entry representation. The baseline
+executables were saved before editing. Compilation and tests finished before
+the measured runs. Production `QuickCache { shards: 1 }` was selected, without
+smoke mode. `cache_backends` runs three repetitions per case, with 200 ms
+warmup and at least one second per repetition; throughput below is the median
+in millions of operations/second. These short local runs are observations,
+not statistically established speedups.
+
+| Workload | Workers | Before | Tagged | Change |
+| --- | ---: | ---: | ---: | ---: |
+| Hot | 1 | 23.036 | 22.718 | -1.4% |
+| Hot | 8 | 6.325 | 6.813 | +7.7% |
+| Hot | 32 | 5.157 | 5.320 | +3.2% |
+| Disjoint | 8 | 8.356 | 8.400 | +0.5% |
+| Disjoint | 32 | 7.082 | 6.717 | -5.1% |
+| Mixed | 1 | 16.605 | 16.140 | -2.8% |
+| Mixed | 32 | 4.131 | 4.379 | +6.0% |
+| Eviction | 1 | 1.884 | 1.862 | -1.2% |
+| Eviction | 32 | 0.585 | 0.642 | +9.7% |
+| LiveEviction | 1 | 1.704 | 1.686 | -1.1% |
+| LiveEviction | 32 | 0.255 | 0.289 | +13.5% |
+| Invalidate | 1 | 1.964 | 1.894 | -3.6% |
+| Invalidate | 32 | 0.362 | 0.392 | +8.3% |
+| Clear | 1 | 1.583 | 1.579 | -0.3% |
+
+Tail latency is also mixed. Median sampled read p99 for Mixed/32 fell from
+39,500 to 19,958 ns, while Hot/32 rose from 3,792 to 5,375 ns and Disjoint/32
+from 4,833 to 5,833 ns. Eviction/32 writer p99 fell from 766,583 to 720,750 ns;
+Invalidate/32 fell from 556,125 to 502,583 ns. Scheduling and timer granularity
+affect these samples; no universal throughput or tail improvement is claimed.
+All cases drained to zero pending nodes/weight. ControlledDebt retained
+64 nodes / 512 bytes until reader release and drained to zero in both versions.
+
+`cache_workloads` was run in ten alternating tagged/baseline process pairs.
+The table shows medians of the repeat phase, in microseconds per trace. All
+seven traces preserved hit rate and computation count in cold and repeat phases.
+
+| Trace | Before us | Tagged us | Change | Index bytes before | Tagged |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| fits_half_budget | 140.3 | 134.5 | -4.1% | 5,256 | 4,744 |
+| fits_near_budget | 167.3 | 156.0 | -6.8% | 9,928 | 8,968 |
+| interleaved_scan | 3,605.6 | 3,582.8 | -0.6% | 51,720 | 47,112 |
+| changing_working_set | 1,532.2 | 1,524.2 | -0.5% | 4,104 | 3,720 |
+| one_large_matrix | 4.0 | 3.8 | -5.2% | 100 | 92 |
+| large_and_small_matrices | 17.5 | 16.5 | -5.9% | 2,704 | 2,440 |
+| variable_weight_pressure | 19,831.1 | 19,922.6 | +0.5% | 1,536 | 1,384 |
+
+Cold medians ranged from -3.4% (fits_near_budget) to +2.9%
+(one_large_matrix); large_and_small_matrices was -0.5%. Index bytes are Quick
+Cache's allocation estimate, not process RSS or payload memory. The adopted
+tradeoff is a deterministic 33% entry-size reduction and roughly 8–10% lower
+index storage in these traces, with improved repeat traces but some slower
+single-worker/contended cases and tails. An initial checked-unmask candidate
+was remeasured in reverse order after regressions; the final implementation
+eliminates its redundant null-check branch. The results above describe only
+the final implementation and do not establish that this branch caused every
+earlier timing difference.
+
+Reproduction (save each revision's binaries before rebuilding the other):
+
+```sh
+cargo bench -p xlfn --features 'cache bench-internals' --bench cache_backends --bench cache_workloads --no-run --locked
+XLFN_CACHE_BACKENDS=quick1 path/to/cache_backends
+XLFN_CACHE_BACKEND=quick1 path/to/cache_workloads
+```
+
+### Validation
+
+Validation on macOS 27.0 arm64, Rust 1.98.1, working tree based on `8ba7679`:
+
+- Cache tests with `cache bench-internals`: 98 passed in both process-isolated
+  nextest and serialized libtest; libtest has one ignored test.
+- The two new tests and the existing resident-insertion panic/creator-pin test
+  passed under both Miri aliasing models (`nightly-2026-08-22`).
+- Package all-target Clippy with `cache bench-internals`, formatting and diff
+  checks passed.
+- i686 MSVC cache-feature type check passed. x86-64 MSVC type checking passed
+  with `cache blake3/pure`; the ordinary check requires unavailable `ml64.exe`.
+  Native Windows execution and live Excel timing remain unverified.
 
 ## Changes and regression coverage
 

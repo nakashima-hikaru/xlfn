@@ -64,11 +64,13 @@ artifacts are labeled `local-unverified` and do not enter the normal CI path.
 The two packed XLLs use identical `BENCH.*` worksheet names and are **never
 loaded together**. The Excel-DNA fixture uses the 1.10.0-preview5 NativeAOT
 package on .NET 10; its
-Task UDF uses Excel-DNA's built-in async registration, and its streaming UDF
+Task UDF uses Excel-DNA's built-in **RTD-backed** async registration, and its streaming UDF
 uses `ExcelAsyncUtil.Observe`. The xlfn fixture uses xlfn's async and RTD
 paths. The worksheet function bodies do only the stated work. C02 generates
 the same number of extra one-argument identity functions for each add-in;
-the ordinary fixture functions remain registered too.
+the ordinary fixture functions remain registered too. Async measurements compare
+xlfn native async delivery with Excel-DNA RTD-backed Task delivery, including
+Excel's RTD throttle; they do not isolate native async framework overhead.
 
 ## Workloads and measurement
 
@@ -85,6 +87,13 @@ the ordinary fixture functions remain registered too.
 | C01–C04 | Fresh Excel/add-in load, extra registrations, first call, warm workbook open | Startup/registration/first-call/open-to-complete time |
 | W01–W03 | Mixed/finance-like/10k–100k formula books | End-to-end settle, Excel CPU, peak RSS |
 | L01–L03 | Representative peak memory, 100/1000 recalculations, scalar/async/RTD tails | Peak RSS per cell, latency/RSS drift, p50/p95/p99/max |
+
+Async, RTD, and mixed workloads use automatic calculation for both add-ins so
+RTD completions can update cells. Synchronous workloads use manual calculation.
+The result records `calculation_mode` and, for async workloads, `async_delivery`.
+A01/A02 timing starts before formula entry because automatic calculation may
+begin while formulas are being submitted. No extra recalculation is requested
+while those results are pending.
 
 Synchronous timing starts after formula creation and `Range.Dirty()` and ends
 when Excel reports calculation done. Matrix output is checked at its bottom

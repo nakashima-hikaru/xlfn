@@ -93,11 +93,11 @@ def cases(profile: str = "full") -> list[Case]:
     for n in ([100] if smoke else [10_000, 100_000]):
         add("W03", str(n), cells=n)
     for workload in ("scalar", "matrix", "async", "rtd"):
-        add("L01", workload, cells=(100 if smoke else 10_000))
+        add("L01", workload, workload=workload, cells=(100 if smoke else 10_000))
     for n in ([3] if smoke else [100, 1_000]):
         add("L02", str(n), cells=100 if smoke else 1_000, repetitions=n)
     for workload in ("scalar", "async", "rtd"):
-        add("L03", workload, cells=20 if smoke else 1_000, repetitions=3 if smoke else 100)
+        add("L03", workload, workload=workload, cells=20 if smoke else 1_000, repetitions=3 if smoke else 100)
     return result
 
 

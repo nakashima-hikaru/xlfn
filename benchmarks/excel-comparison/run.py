@@ -40,6 +40,14 @@ def describe_value(value: Any) -> str:
     return repr(value)
 
 
+def calculation_mode(case: Case) -> int:
+    # Task UDFs in the Excel-DNA NativeAOT fixture deliver through RTD.
+    # Manual mode prevents pending RTD results from reaching worksheet cells.
+    live = (case.id.startswith(("A", "R")) or case.id in ("W01", "W02")
+            or case.id in ("L01", "L03") and case.params.get("workload") in ("async", "rtd"))
+    return XL_AUTOMATIC if live else XL_MANUAL
+
+
 def register_xll(app: Any, xll: Path) -> None:
     path = str(xll.resolve())
     # Load into this Excel process and check the host's result. An AddIns
@@ -228,6 +236,7 @@ class ExcelSession:
         indices = list(range(0, count, sample_every))
         if indices[-1] != count - 1:
             indices.append(count - 1)
+        values = []
         while time.perf_counter() - start < timeout_s:
             values = flatten(target.Value2)
             at = time.perf_counter() - start
@@ -240,7 +249,11 @@ class ExcelSession:
                     "sampled_cells": len(indices), "settled_cells": len(seen), "poll_s": at,
                 }
             time.sleep(0.01)
-        raise TimeoutError(f"only {len(seen)}/{len(indices)} observed after {timeout_s}s")
+        pending = [i for i in indices if i not in seen][:5]
+        detail = ", ".join(f"row {i + 1}: {describe_value(values[i])}" for i in pending
+                           if i < len(values))
+        raise TimeoutError(f"only {len(seen)}/{len(indices)} observed after {timeout_s}s; "
+                           f"unsettled values: [{detail}]")
 
     def close(self):
         self._stop_sampler.set()
@@ -392,7 +405,6 @@ def run_text(session: ExcelSession, case: Case, repeat: int) -> dict[str, Any]:
 def run_async(session: ExcelSession, case: Case, repeat: int) -> dict[str, Any]:
     sheet = session.new_book()
     count = case.params["cells"]
-    target = session.add_formulas(sheet, count, lambda row: formula(case.id, row, case.params))
     timeout = min(case.timeout_s, max(30, count * case.params.get("delay_us", 10_000) / 1e6 / 16))
     all_results = []
     submissions = []
@@ -403,8 +415,9 @@ def run_async(session: ExcelSession, case: Case, repeat: int) -> dict[str, Any]:
         target = session.add_formulas(sheet, count,
             lambda row: f'=BENCH.ASYNC({offset + row},{case.params.get("delay_us", 10000)})')
         submissions.append(time.perf_counter() - submit_start)
-        start = time.perf_counter()
-        session.app.Calculate()
+        # Automatic calculation can start during formula entry. Include that
+        # time, and do not trigger another calculation while callbacks arrive.
+        start = submit_start
         observed = session.wait_values(target, count,
             lambda value, i: value == float(offset + i + 1), timeout,
             sample_every=max(1, count // 2_000), start_time=start)
@@ -419,7 +432,7 @@ def run_async(session: ExcelSession, case: Case, repeat: int) -> dict[str, Any]:
         "cell_latency_p95_s": statistics.median([item["p95_s"] for item in all_results]),
         "cell_latency_p99_s": statistics.median([item["p99_s"] for item in all_results]),
         "sampled_cells": all_results[0]["sampled_cells"],
-        "latency_note": "COM polling gives upper-bound arrival observations at ~10 ms resolution",
+        "latency_note": "From formula submission, including entry time; COM polling gives upper-bound arrival observations at ~10 ms resolution",
     }
 
 
@@ -701,6 +714,7 @@ def run_mixed(session: ExcelSession, case: Case, repeat: int) -> dict[str, Any]:
         return run_scalar(session, case, repeat)
     sheet = session.new_book()
     n = case.params["cells"]
+    begin = time.perf_counter()
     scalar = session.add_formulas(sheet, n, lambda row: f"=BENCH.ID({row})")
     auxiliary = max(1, n // 10)
     session.add_formulas(sheet, auxiliary, lambda row: f'=BENCH.ASYNC({row},10000)', "C")
@@ -709,7 +723,6 @@ def run_mixed(session: ExcelSession, case: Case, repeat: int) -> dict[str, Any]:
     if case.id == "W02":
         session.add_formulas(sheet, n,
             lambda row: f"=BENCH.SHARED(D{1 + ((row - 1) % auxiliary)})", "E")
-    begin = time.perf_counter()
     session.calculate()
     session.wait_values(sheet.Range(f"C1:C{auxiliary}"), auxiliary,
         lambda value, i: value == float(i + 1), 120, sample_every=max(1, n // 2_000))
@@ -819,6 +832,11 @@ def worker(args: argparse.Namespace, case: Case) -> int:
         record["excel_version"] = str(session.app.Version)
         record["excel_build"] = str(session.app.Build)
         record["excel_bitness"] = session.app.OperatingSystem
+        mode = calculation_mode(case)
+        session.app.Calculation = mode
+        record["calculation_mode"] = "automatic" if mode == XL_AUTOMATIC else "manual"
+        if case.id.startswith("A") or case.params.get("workload") == "async":
+            record["async_delivery"] = "native" if args.implementation == "xlfn" else "rtd-task"
         record["phase"] = "execute"
         record["metrics"] = execute(session, case, args.repeat)
         record["metrics"]["peak_excel_rss_bytes"] = session.peak_rss
