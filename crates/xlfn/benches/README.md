@@ -368,3 +368,22 @@ cargo bench -p xlfn --features bench-internals,cache --bench cache_registry --lo
 
 Both `cache_registry` and `value_boundary_allocations` are included in
 `just bench-ci` and `just bench-full`.
+
+## Two-phase raw ingress experiment
+
+`two_phase_ingress` compares eager conversion with call-borrowed preparation
+through the real formula handle lookup/publication path. It covers scalar,
+1k/100k numeric matrices, and 10k Unicode string matrices, with warm, cold and
+changed-last-cell cases. It emits timing and allocation JSON independently of
+Criterion. The candidate is benchmark-only; it does not change generated UDFs.
+
+See [the 2026-09-29 redesign experiments](../../../docs/PERFORMANCE_REDESIGN_EXPERIMENTS.md)
+for commands, raw measurements, adoption decisions and remaining contract gates.
+
+The production adoption is recorded in
+[`PERFORMANCE_REDESIGN_PRODUCTION.md`](../../../docs/PERFORMANCE_REDESIGN_PRODUCTION.md).
+`two_phase_ingress` now compares production `ArgumentContext::prepare` with eager
+decode. The topology probe selector `XLFN_TOPOLOGY_PUBLISHERS=0` now runs the
+production generation pool (one publisher); positive values select the retained
+experimental sharded pool. Historical zero-selector measurements used the old
+per-subscription implementation, so compare using the recorded worker count.

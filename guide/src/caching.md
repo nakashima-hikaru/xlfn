@@ -38,6 +38,12 @@ The weight budget is an abstract integer. It can represent approximate bytes, ex
 `len()` and `used_weight()` report current residency. A live `CacheLease` keeps
 its value readable even after eviction or `clear()`.
 
+Each node uses a portable `u32` pin count, including its resident, initialization
+and lease pins, on both 32-bit and 64-bit hosts. The existing invariant policy
+stops the process if another pin would exceed `u32::MAX`; the count never wraps
+or resurrects a node after its final pin is released. Cache budgets, weights,
+collection indices and admission-domain counters retain their existing types.
+
 ## Typed endpoint registry
 
 `CacheRegistry` creates caches lazily for static endpoints:

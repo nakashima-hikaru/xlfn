@@ -1,0 +1,8 @@
+__pycache__/
+artifacts/
+results*.jsonl
+results*.csv
+excel_dna/GeneratedRegistration.cs
+excel_dna/bin/
+excel_dna/obj/
+xlfn/target/

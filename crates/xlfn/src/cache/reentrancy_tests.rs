@@ -163,7 +163,7 @@ fn double_checked_hit_reclaims_after_singleflight_unlock() {
     let epoch = cache.generation.snapshot();
     let node = Box::new(CacheNode {
         value: DropProbe(None),
-        pins: AtomicUsize::new(1),
+        pins: AtomicU32::new(1),
         resident: AtomicBool::new(true),
         published: true,
         weight: 1,
@@ -213,7 +213,7 @@ fn failed_follower_reclaims_after_flight_state_unlock() {
     };
     let hash = flight_hash(&key);
     let flight = Arc::new(Flight::new(key, hash));
-    *flight.state.lock() = FlightState::Finished(Err(Arc::new(XllError::Overloaded)));
+    *flight.state.lock() = FlightState::Finished(Err(Box::new(XllError::Overloaded)));
     cache.flights.lock().insert_unique(Arc::clone(&flight));
     let initialization = ActiveCacheGuard::enter().unwrap();
     drop(previous);

@@ -89,6 +89,30 @@ impl InputIdentityEncoder {
         self.bytes(value.as_bytes());
     }
 
+    /// The same UTF-8 framing as `string`, without an
+    /// owned string. Validate before writing the length-prefixed payload.
+    pub(crate) fn semantic_utf16(&mut self, units: &[u16]) -> XllResult<()> {
+        let mut length = 0;
+        for ch in char::decode_utf16(units.iter().copied()) {
+            length += ch
+                .map_err(|_| XllError::input(self.argument, InputError::InvalidUtf16))?
+                .len_utf8();
+        }
+        self.u64(length as u64);
+        let mut buffer = [0_u8; 256];
+        let mut used = 0;
+        for ch in char::decode_utf16(units.iter().copied()) {
+            let ch = ch.map_err(|_| XllError::input(self.argument, InputError::InvalidUtf16))?;
+            if buffer.len() - used < 4 {
+                self.write(&buffer[..used]);
+                used = 0;
+            }
+            used += ch.encode_utf8(&mut buffer[used..]).len();
+        }
+        self.write(&buffer[..used]);
+        Ok(())
+    }
+
     /// Encodes raw Excel text without interpreting surrogate pairs. Borrowed
     /// raw views can observe invalid UTF-16 units, so preserve every unit and
     /// its length. UTF-8 semantic strings use the separate `string` encoding.

@@ -20,7 +20,6 @@ use std::time::{Duration, Instant};
 use xlfn_kernel::drain_gate::{DrainGate, DrainPermit};
 
 pub(crate) const MAX_PENDING: usize = 4096;
-pub(crate) const MAX_ASYNC_HANDLE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug)]
 pub(crate) struct AsyncStopped {

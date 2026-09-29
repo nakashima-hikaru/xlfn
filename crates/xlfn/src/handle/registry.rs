@@ -71,21 +71,18 @@ pub(crate) struct HandleRegistry {
 }
 
 impl HandleRegistry {
-    pub(crate) fn try_new(maximum_bindings: usize) -> XllResult<Self> {
+    pub(crate) fn try_new(maximum_bindings: u32) -> XllResult<Self> {
         Self::try_new_with(maximum_bindings, |entropy| getrandom::fill(entropy), true)
     }
 
     pub(crate) fn try_new_with<E>(
-        maximum_bindings: usize,
+        maximum_bindings: u32,
         fill: impl FnOnce(&mut [u8; 40]) -> Result<(), E>,
         report_failure: bool,
     ) -> XllResult<Self>
     where
         E: std::fmt::Debug,
     {
-        let maximum_bindings = u32::try_from(maximum_bindings).map_err(|_| XllError::Domain {
-            code: DomainErrorCode::Overflow,
-        })?;
         let mut entropy = [0_u8; 40];
         if let Err(source) = fill(&mut entropy) {
             let error = XllError::Internal {
@@ -148,7 +145,7 @@ impl HandleRegistry {
 
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn new(maximum_bindings: usize) -> Self {
+    pub(crate) fn new(maximum_bindings: u32) -> Self {
         Self::try_new(maximum_bindings).expect("test host provides an OS CSPRNG")
     }
 

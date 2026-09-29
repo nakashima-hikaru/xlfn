@@ -1,8 +1,7 @@
 # Excel functions, written in Rust
 
 xlfn turns typed Rust functions into native Microsoft Excel XLL add-ins.
-You write the calculation; xlfn registers the function and converts its inputs
-and results at the Excel boundary.
+You write the calculation; xlfn handles registration and value conversion at the Excel boundary.
 
 ```rust
 use xlfn::prelude::*;
@@ -14,39 +13,31 @@ fn add(left: f64, right: f64) -> f64 {
 ```
 
 With an add-in definition, this becomes `=HELLO.ADD(2, 3)` in a worksheet.
-The [first add-in tutorial](quick-start.md) provides the complete project.
+The [quick start](quick-start.md) provides a complete working example.
 
-## Start here
+## Getting started
 
-You need working knowledge of Rust and access to Windows and desktop Excel
-to build and load an XLL. No knowledge of the Excel C API is needed for the
-tutorial.
+To build and load an XLL, you need Windows and desktop Excel:
 
-1. [Set up your environment](requirements.md): select the target matching your Excel installation.
-2. [Create your first add-in](quick-start.md): build one function and see `5` in a cell.
+1. [Set up your environment](requirements.md): install build tools and the matching target.
+2. [Create your first add-in](quick-start.md): build your first function and verify `=HELLO.ADD(2, 3)` in Excel.
 
-## Find what you need
+## Guide overview
 
-After the tutorial, open only the chapter that matches your next task:
+Explore specific topics as your add-in grows:
 
-| I want to… | Start with |
+| Task | Chapter |
 | --- | --- |
-| Accept a range or return a table | [Values and arrays](values.md) |
-| Run calculations on Excel's worker threads | [Execution modes](execution-modes.md) |
-| Keep objects, cache results, or work in the background | [Choose a calculation pattern](choosing-pattern.md) |
-| Return an error or collect diagnostic logs | [Errors and diagnostics](errors-diagnostics.md) |
-| Package an add-in for other people | [Build and load](build-validation.md), then [distribution](deployment.md) |
-| Fix a loading, formula, or update problem | [Troubleshooting](troubleshooting.md) |
+| Accept ranges or return grids | [Values and arrays](values.md) |
+| Run calculations on Excel worker threads | [Execution modes](execution-modes.md) |
+| Manage state, cache values, or stream updates | [Choose a calculation pattern](choosing-pattern.md) |
+| Return Excel errors and collect logs | [Errors and diagnostics](errors-diagnostics.md) |
+| Build and validate the XLL package | [Build and load](build-validation.md) |
+| Test your add-in | [Test your add-in](testing.md) |
+| Deploy to end users | [Deployment and distribution](deployment.md) |
+| Resolve build, load, or formula issues | [Troubleshooting](troubleshooting.md) |
 
-For exact attribute options, conversions, and packaging settings, use the
-[reference documents](https://github.com/nakashima-hikaru/xlfn/tree/main/docs/reference)
-or the guide's search.
+## API documentation and examples
 
-## Examples and API documentation
-
-The repository contains a [basic add-in](https://github.com/nakashima-hikaru/xlfn/tree/main/examples/basic-xll)
-and an [RTD source example](https://github.com/nakashima-hikaru/xlfn/tree/main/examples/rtd-source).
-Use [rustdoc](https://docs.rs/xlfn) for API signatures.
-
-xlfn is pre-1.0. See [compatibility](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/compatibility.md) before upgrading and
-[Validate in Excel](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/EXCEL_TESTING.md) before distributing an add-in.
+- [API Reference (docs.rs)](https://docs.rs/xlfn) covers function signatures, types, and attributes.
+- Working examples are available in the [examples directory](https://github.com/nakashima-hikaru/xlfn/tree/main/examples) of the repository.

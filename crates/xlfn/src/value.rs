@@ -23,6 +23,8 @@ pub(crate) mod input;
 pub mod matrix;
 /// Output conversion traits and return-cell representations.
 pub(crate) mod output;
+#[cfg(feature = "bench-internals")]
+pub(crate) mod prepared_probe;
 /// Raw, borrowed views over Excel's XLOPER12 input representation.
 #[allow(unsafe_code, reason = "Raw XLOPER12 views are the value ABI leaf")]
 pub mod raw;
@@ -30,6 +32,7 @@ pub mod raw;
 pub use crate::input_identity::InputIdentityEncoder;
 #[cfg(any(test, feature = "handles", feature = "bench-internals"))]
 pub(crate) use input::FormulaInputMode;
+use input::PreparedArgument;
 #[cfg(test)]
 pub(crate) use input::argument_from_raw;
 #[cfg(all(test, feature = "handles"))]
@@ -37,7 +40,8 @@ pub(crate) use input::argument_from_raw_with_context;
 #[cfg(any(test, feature = "bench-internals"))]
 pub(crate) use input::{ArgumentContext, argument_from_raw_with_arguments};
 pub(crate) use input::{CallContext, ExcelParameter};
-pub use input::{ExcelInputIdentity, FromExcel};
+pub(crate) use input::{ExcelInputCells, PreparedExcelSequence};
+pub use input::{ExcelInputIdentity, FromExcel, PrepareExcel};
 pub(crate) use input::{InputMode, PlainInputMode};
 pub use output::IntoExcel;
 
@@ -250,9 +254,207 @@ impl ExcelInputIdentity for String {
     }
 }
 
+impl<'call> PrepareExcel<'call> for XlArrayRef<'call> {
+    type Prepared = Self;
+    fn prepare(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        identity: &mut InputIdentityEncoder,
+    ) -> XllResult<Self> {
+        Self::from_excel_with_identity(value, argument, identity)
+    }
+    fn materialize(value: Self) -> XllResult<Self> {
+        Ok(value)
+    }
+}
+impl<'call> PrepareExcel<'call> for f64 {
+    type Prepared = Self;
+    fn prepare(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        identity: &mut InputIdentityEncoder,
+    ) -> XllResult<Self> {
+        Self::from_excel_with_identity(value, argument, identity)
+    }
+    fn materialize(value: Self) -> XllResult<Self> {
+        Ok(value)
+    }
+    fn __prepare_elements(
+        cells: ExcelInputCells<'call>,
+        identity: &mut InputIdentityEncoder,
+    ) -> XllResult<PreparedExcelSequence<'call, Self, Self::Prepared>> {
+        cells.borrowed::<Self>(identity)
+    }
+}
+impl<'call> PrepareExcel<'call> for bool {
+    type Prepared = Self;
+    fn prepare(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        identity: &mut InputIdentityEncoder,
+    ) -> XllResult<Self> {
+        Self::from_excel_with_identity(value, argument, identity)
+    }
+    fn materialize(value: Self) -> XllResult<Self> {
+        Ok(value)
+    }
+    fn __prepare_elements(
+        cells: ExcelInputCells<'call>,
+        identity: &mut InputIdentityEncoder,
+    ) -> XllResult<PreparedExcelSequence<'call, Self, Self::Prepared>> {
+        cells.borrowed::<Self>(identity)
+    }
+}
+impl<'call> PrepareExcel<'call> for i32 {
+    type Prepared = Self;
+    fn prepare(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        identity: &mut InputIdentityEncoder,
+    ) -> XllResult<Self> {
+        Self::from_excel_with_identity(value, argument, identity)
+    }
+    fn materialize(value: Self) -> XllResult<Self> {
+        Ok(value)
+    }
+    fn __prepare_elements(
+        cells: ExcelInputCells<'call>,
+        identity: &mut InputIdentityEncoder,
+    ) -> XllResult<PreparedExcelSequence<'call, Self, Self::Prepared>> {
+        cells.borrowed::<Self>(identity)
+    }
+}
+impl<'call> PrepareExcel<'call> for i64 {
+    type Prepared = Self;
+    fn prepare(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        identity: &mut InputIdentityEncoder,
+    ) -> XllResult<Self> {
+        Self::from_excel_with_identity(value, argument, identity)
+    }
+    fn materialize(value: Self) -> XllResult<Self> {
+        Ok(value)
+    }
+    fn __prepare_elements(
+        cells: ExcelInputCells<'call>,
+        identity: &mut InputIdentityEncoder,
+    ) -> XllResult<PreparedExcelSequence<'call, Self, Self::Prepared>> {
+        cells.borrowed::<Self>(identity)
+    }
+}
+impl<'call> PrepareExcel<'call> for ExcelErrorValue {
+    type Prepared = Self;
+    fn prepare(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        identity: &mut InputIdentityEncoder,
+    ) -> XllResult<Self> {
+        Self::from_excel_with_identity(value, argument, identity)
+    }
+    fn materialize(value: Self) -> XllResult<Self> {
+        Ok(value)
+    }
+    fn __prepare_elements(
+        cells: ExcelInputCells<'call>,
+        identity: &mut InputIdentityEncoder,
+    ) -> XllResult<PreparedExcelSequence<'call, Self, Self::Prepared>> {
+        cells.borrowed::<Self>(identity)
+    }
+}
+impl<'call> PrepareExcel<'call> for ExcelSerialDate {
+    type Prepared = Self;
+    fn prepare(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        identity: &mut InputIdentityEncoder,
+    ) -> XllResult<Self> {
+        Self::from_excel_with_identity(value, argument, identity)
+    }
+    fn materialize(value: Self) -> XllResult<Self> {
+        Ok(value)
+    }
+    fn __prepare_elements(
+        cells: ExcelInputCells<'call>,
+        identity: &mut InputIdentityEncoder,
+    ) -> XllResult<PreparedExcelSequence<'call, Self, Self::Prepared>> {
+        cells.borrowed::<Self>(identity)
+    }
+}
+impl<'call> PrepareExcel<'call> for ExcelCellValue {
+    type Prepared = Self;
+    fn prepare(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        identity: &mut InputIdentityEncoder,
+    ) -> XllResult<Self> {
+        Self::from_excel_with_identity(value, argument, identity)
+    }
+    fn materialize(value: Self) -> XllResult<Self> {
+        Ok(value)
+    }
+}
+impl<'call> PrepareExcel<'call> for ExcelValue {
+    type Prepared = Self;
+    fn prepare(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        identity: &mut InputIdentityEncoder,
+    ) -> XllResult<Self> {
+        Self::from_excel_with_identity(value, argument, identity)
+    }
+    fn materialize(value: Self) -> XllResult<Self> {
+        Ok(value)
+    }
+}
+/// Validated borrowed UTF-16 input; construction remains inside preparation.
+pub struct PreparedString<'call> {
+    units: &'call [u16],
+    argument: &'static str,
+}
+impl<'call> PrepareExcel<'call> for String {
+    type Prepared = PreparedString<'call>;
+    fn prepare(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        identity: &mut InputIdentityEncoder,
+    ) -> XllResult<Self::Prepared> {
+        let units = value.utf16(argument)?;
+        identity.semantic_utf16(units)?;
+        Ok(PreparedString { units, argument })
+    }
+    fn materialize(value: Self::Prepared) -> XllResult<Self> {
+        crate::utf16::decode_owned(value.units, value.argument)
+    }
+    fn __prepare_elements(
+        cells: ExcelInputCells<'call>,
+        identity: &mut InputIdentityEncoder,
+    ) -> XllResult<PreparedExcelSequence<'call, Self, Self::Prepared>> {
+        cells.borrowed::<Self>(identity)
+    }
+}
+
 impl<'call, M: InputMode> input::sealed::ExcelParameterSealed<'call, M> for &'call str {}
 
 impl<'call, M: InputMode> ExcelParameter<'call, M> for &'call str {
+    type Prepared = ();
+
+    type Elements = PreparedExcelSequence<'call, Self, PreparedArgument<Self, Self::Prepared>>;
+    fn prepare_elements(
+        cells: ExcelInputCells<'call>,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<Self::Elements> {
+        cells.retain(
+            |value, argument| {
+                <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)
+            },
+            PreparedArgument::materialize,
+        )
+    }
+    fn materialize_elements(elements: Self::Elements) -> XllResult<Vec<Self>> {
+        elements.materialize()
+    }
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -440,6 +642,53 @@ where
     M: InputMode,
     T: ExcelParameter<'call, M>,
 {
+    type Prepared = OptionalExcelValue<PreparedArgument<T, T::Prepared>>;
+    fn prepare(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<PreparedArgument<Self, Self::Prepared>> {
+        if !M::RECORDS_IDENTITY {
+            return Self::decode(value, argument, context, identity).map(PreparedArgument::Ready);
+        }
+        M::tag(
+            identity,
+            match value.value_type() {
+                XlValueType::Missing => 0,
+                XlValueType::Nil => 1,
+                _ => 2,
+            },
+        );
+        let prepared = convert::optional_value(value, argument, |value, argument| {
+            T::prepare(value, argument, context, identity)
+        })?;
+        Ok(PreparedArgument::Prepared {
+            value: prepared,
+            materialize: |value| match value {
+                OptionalExcelValue::Missing => Ok(Self::Missing),
+                OptionalExcelValue::Blank => Ok(Self::Blank),
+                OptionalExcelValue::Value(value) => value.materialize().map(Self::Value),
+            },
+        })
+    }
+
+    type Elements = PreparedExcelSequence<'call, Self, PreparedArgument<Self, Self::Prepared>>;
+    fn prepare_elements(
+        cells: ExcelInputCells<'call>,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<Self::Elements> {
+        cells.retain(
+            |value, argument| {
+                <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)
+            },
+            PreparedArgument::materialize,
+        )
+    }
+    fn materialize_elements(elements: Self::Elements) -> XllResult<Vec<Self>> {
+        elements.materialize()
+    }
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -483,6 +732,45 @@ where
     M: InputMode,
     T: ExcelParameter<'call, M>,
 {
+    type Prepared = Option<PreparedArgument<T, T::Prepared>>;
+    fn prepare(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<PreparedArgument<Self, Self::Prepared>> {
+        if !M::RECORDS_IDENTITY {
+            return Self::decode(value, argument, context, identity).map(PreparedArgument::Ready);
+        }
+        M::bool(
+            identity,
+            !matches!(value.value_type(), XlValueType::Missing | XlValueType::Nil),
+        );
+        let prepared = convert::optional(value, argument, |value, argument| {
+            T::prepare(value, argument, context, identity)
+        })?;
+        Ok(PreparedArgument::Prepared {
+            value: prepared,
+            materialize: |value| value.map(PreparedArgument::materialize).transpose(),
+        })
+    }
+
+    type Elements = PreparedExcelSequence<'call, Self, PreparedArgument<Self, Self::Prepared>>;
+    fn prepare_elements(
+        cells: ExcelInputCells<'call>,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<Self::Elements> {
+        cells.retain(
+            |value, argument| {
+                <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)
+            },
+            PreparedArgument::materialize,
+        )
+    }
+    fn materialize_elements(elements: Self::Elements) -> XllResult<Vec<Self>> {
+        elements.materialize()
+    }
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -521,6 +809,47 @@ where
     M: InputMode,
     T: ExcelParameter<'call, M>,
 {
+    type Prepared = (usize, usize, &'static str, T::Elements);
+    fn prepare(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<PreparedArgument<Self, Self::Prepared>> {
+        if !M::RECORDS_IDENTITY {
+            return Self::decode(value, argument, context, identity).map(PreparedArgument::Ready);
+        }
+        let grid = GridView::from_value(value, argument)?;
+        let (rows, columns) = grid.shape();
+        M::u64(identity, rows as u64);
+        M::u64(identity, columns as u64);
+        let elements = T::prepare_elements(ExcelInputCells { grid, argument }, context, identity)?;
+        Ok(PreparedArgument::Prepared {
+            value: (rows, columns, argument, elements),
+            materialize: |(rows, columns, argument, elements)| {
+                let _ = (rows, columns, argument);
+                let values = T::materialize_elements(elements)?;
+                Matrix::new(rows, columns, values)
+            },
+        })
+    }
+
+    type Elements = PreparedExcelSequence<'call, Self, PreparedArgument<Self, Self::Prepared>>;
+    fn prepare_elements(
+        cells: ExcelInputCells<'call>,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<Self::Elements> {
+        cells.retain(
+            |value, argument| {
+                <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)
+            },
+            PreparedArgument::materialize,
+        )
+    }
+    fn materialize_elements(elements: Self::Elements) -> XllResult<Vec<Self>> {
+        elements.materialize()
+    }
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -556,6 +885,24 @@ where
     M: InputMode,
     T: ExcelParameter<'call, M> + Copy,
 {
+    type Prepared = ();
+
+    type Elements = PreparedExcelSequence<'call, Self, PreparedArgument<Self, Self::Prepared>>;
+    fn prepare_elements(
+        cells: ExcelInputCells<'call>,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<Self::Elements> {
+        cells.retain(
+            |value, argument| {
+                <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)
+            },
+            PreparedArgument::materialize,
+        )
+    }
+    fn materialize_elements(elements: Self::Elements) -> XllResult<Vec<Self>> {
+        elements.materialize()
+    }
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -591,6 +938,46 @@ where
     M: InputMode,
     T: ExcelParameter<'call, M>,
 {
+    type Prepared = (usize, usize, &'static str, T::Elements);
+    fn prepare(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<PreparedArgument<Self, Self::Prepared>> {
+        if !M::RECORDS_IDENTITY {
+            return Self::decode(value, argument, context, identity).map(PreparedArgument::Ready);
+        }
+        let grid = convert::grid(value, argument, convert::GridShape::Vector)?;
+        let (rows, columns) = grid.shape();
+        M::u64(identity, grid.cells().len() as u64);
+        let elements = T::prepare_elements(ExcelInputCells { grid, argument }, context, identity)?;
+        Ok(PreparedArgument::Prepared {
+            value: (rows, columns, argument, elements),
+            materialize: |(rows, columns, argument, elements)| {
+                let _ = (rows, columns, argument);
+                let values = T::materialize_elements(elements)?;
+                Ok(values)
+            },
+        })
+    }
+
+    type Elements = PreparedExcelSequence<'call, Self, PreparedArgument<Self, Self::Prepared>>;
+    fn prepare_elements(
+        cells: ExcelInputCells<'call>,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<Self::Elements> {
+        cells.retain(
+            |value, argument| {
+                <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)
+            },
+            PreparedArgument::materialize,
+        )
+    }
+    fn materialize_elements(elements: Self::Elements) -> XllResult<Vec<Self>> {
+        elements.materialize()
+    }
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -623,6 +1010,49 @@ where
     M: InputMode,
     T: ExcelParameter<'call, M>,
 {
+    type Prepared = (usize, usize, &'static str, T::Elements);
+    fn prepare(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<PreparedArgument<Self, Self::Prepared>> {
+        if !M::RECORDS_IDENTITY {
+            return Self::decode(value, argument, context, identity).map(PreparedArgument::Ready);
+        }
+        let grid = convert::bounded_grid::<MAX>(value, argument)?;
+        let (rows, columns) = grid.shape();
+        M::u64(identity, grid.cells().len() as u64);
+        let elements = T::prepare_elements(ExcelInputCells { grid, argument }, context, identity)?;
+        Ok(PreparedArgument::Prepared {
+            value: (rows, columns, argument, elements),
+            materialize: |(rows, columns, argument, elements)| {
+                let _ = (rows, columns, argument);
+                let values = T::materialize_elements(elements)?;
+                Self::new(values).map_err(|error| match error {
+                    XllError::Input { reason, .. } => XllError::Input { argument, reason },
+                    other => other,
+                })
+            },
+        })
+    }
+
+    type Elements = PreparedExcelSequence<'call, Self, PreparedArgument<Self, Self::Prepared>>;
+    fn prepare_elements(
+        cells: ExcelInputCells<'call>,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<Self::Elements> {
+        cells.retain(
+            |value, argument| {
+                <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)
+            },
+            PreparedArgument::materialize,
+        )
+    }
+    fn materialize_elements(elements: Self::Elements) -> XllResult<Vec<Self>> {
+        elements.materialize()
+    }
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -659,6 +1089,46 @@ where
     M: InputMode,
     T: ExcelParameter<'call, M>,
 {
+    type Prepared = (usize, usize, &'static str, T::Elements);
+    fn prepare(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<PreparedArgument<Self, Self::Prepared>> {
+        if !M::RECORDS_IDENTITY {
+            return Self::decode(value, argument, context, identity).map(PreparedArgument::Ready);
+        }
+        let grid = convert::grid(value, argument, convert::GridShape::Row)?;
+        let (rows, columns) = grid.shape();
+        M::u64(identity, grid.cells().len() as u64);
+        let elements = T::prepare_elements(ExcelInputCells { grid, argument }, context, identity)?;
+        Ok(PreparedArgument::Prepared {
+            value: (rows, columns, argument, elements),
+            materialize: |(rows, columns, argument, elements)| {
+                let _ = (rows, columns, argument);
+                let values = T::materialize_elements(elements)?;
+                Ok(Self(values))
+            },
+        })
+    }
+
+    type Elements = PreparedExcelSequence<'call, Self, PreparedArgument<Self, Self::Prepared>>;
+    fn prepare_elements(
+        cells: ExcelInputCells<'call>,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<Self::Elements> {
+        cells.retain(
+            |value, argument| {
+                <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)
+            },
+            PreparedArgument::materialize,
+        )
+    }
+    fn materialize_elements(elements: Self::Elements) -> XllResult<Vec<Self>> {
+        elements.materialize()
+    }
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -690,6 +1160,46 @@ where
     M: InputMode,
     T: ExcelParameter<'call, M>,
 {
+    type Prepared = (usize, usize, &'static str, T::Elements);
+    fn prepare(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<PreparedArgument<Self, Self::Prepared>> {
+        if !M::RECORDS_IDENTITY {
+            return Self::decode(value, argument, context, identity).map(PreparedArgument::Ready);
+        }
+        let grid = convert::grid(value, argument, convert::GridShape::Column)?;
+        let (rows, columns) = grid.shape();
+        M::u64(identity, grid.cells().len() as u64);
+        let elements = T::prepare_elements(ExcelInputCells { grid, argument }, context, identity)?;
+        Ok(PreparedArgument::Prepared {
+            value: (rows, columns, argument, elements),
+            materialize: |(rows, columns, argument, elements)| {
+                let _ = (rows, columns, argument);
+                let values = T::materialize_elements(elements)?;
+                Ok(Self(values))
+            },
+        })
+    }
+
+    type Elements = PreparedExcelSequence<'call, Self, PreparedArgument<Self, Self::Prepared>>;
+    fn prepare_elements(
+        cells: ExcelInputCells<'call>,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<Self::Elements> {
+        cells.retain(
+            |value, argument| {
+                <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)
+            },
+            PreparedArgument::materialize,
+        )
+    }
+    fn materialize_elements(elements: Self::Elements) -> XllResult<Vec<Self>> {
+        elements.materialize()
+    }
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -755,6 +1265,24 @@ impl ExcelInputIdentity for ExcelCellValue {
 impl<'call, M: InputMode> input::sealed::ExcelParameterSealed<'call, M> for ExcelCellRef<'call> {}
 
 impl<'call, M: InputMode> ExcelParameter<'call, M> for ExcelCellRef<'call> {
+    type Prepared = ();
+
+    type Elements = PreparedExcelSequence<'call, Self, PreparedArgument<Self, Self::Prepared>>;
+    fn prepare_elements(
+        cells: ExcelInputCells<'call>,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<Self::Elements> {
+        cells.retain(
+            |value, argument| {
+                <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)
+            },
+            PreparedArgument::materialize,
+        )
+    }
+    fn materialize_elements(elements: Self::Elements) -> XllResult<Vec<Self>> {
+        elements.materialize()
+    }
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -927,6 +1455,24 @@ where
     M: InputMode,
     T: crate::handle::ExcelHandleObject,
 {
+    type Prepared = ();
+
+    type Elements = PreparedExcelSequence<'call, Self, PreparedArgument<Self, Self::Prepared>>;
+    fn prepare_elements(
+        cells: ExcelInputCells<'call>,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<Self::Elements> {
+        cells.retain(
+            |value, argument| {
+                <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)
+            },
+            PreparedArgument::materialize,
+        )
+    }
+    fn materialize_elements(elements: Self::Elements) -> XllResult<Vec<Self>> {
+        elements.materialize()
+    }
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,

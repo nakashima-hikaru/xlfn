@@ -1,106 +1,73 @@
 # Test your add-in
 
-Start with fast Rust tests for application behavior, then check the Windows
-artifact. Run [the Excel checklist](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/EXCEL_TESTING.md) before distribution.
-This chapter is for add-in authors; changes to xlfn itself use
-[CONTRIBUTING.md](https://github.com/nakashima-hikaru/xlfn/blob/main/CONTRIBUTING.md).
+Testing an xlfn add-in typically involves two levels: fast unit tests for
+your calculation logic using standard `cargo test`, and artifact verification
+using `cargo xlfn check` followed by validation in Excel.
 
-## Run Rust tests during development
+## Unit test calculation logic
 
-From the add-in project directory, run:
-
-```console
-cargo test --locked
-```
-
-Use the same Cargo features that your add-in distributes. If the project has
-feature-specific behavior, test each supported combination separately rather
-than assuming `--all-features` represents a production configuration. Repeat
-performance-sensitive checks with the release profile.
-
-Keep application calculations independent of Excel callbacks where possible.
-They can then be tested on a normal Rust test host:
+`#[excel_function]` converts Excel values to Rust types and delegates to your
+function. To keep calculations easily testable without mock Excel environments,
+keep the core computation in pure Rust functions:
 
 ```rust
-fn scaled_total(values: &[f64], scale: f64) -> f64 {
-    values.iter().sum::<f64>() * scale
+pub fn compute_hypot(x: f64, y: f64) -> f64 {
+    x.hypot(y)
+}
+
+#[excel_function(name = "MATH.HYPOT", thread_safe)]
+pub fn hypot(x: f64, y: f64) -> f64 {
+    compute_hypot(x, y)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::scaled_total;
+    use super::compute_hypot;
 
     #[test]
-    fn scales_the_complete_input() {
-        assert_eq!(scaled_total(&[1.0, 2.0, 3.0], 2.0), 12.0);
-    }
-
-    #[test]
-    fn empty_input_has_zero_total() {
-        assert_eq!(scaled_total(&[], 2.0), 0.0);
+    fn test_hypot() {
+        assert_eq!(compute_hypot(3.0, 4.0), 5.0);
     }
 }
 ```
 
-Call the tested function from a small `#[excel_function]` wrapper. Test the
-application's actual edge cases: empty inputs, domain bounds, overflow,
-configuration changes, and failures from external services. A pure Rust test
-does not exercise Excel's argument conversion, registration, or callback ABI;
-include those behaviors in the Excel checklist.
+Pure Rust functions can be tested on any platform with `cargo test`.
+Because pure unit tests do not exercise Excel's argument conversion or C API
+boundary, verify the integrated XLL artifact as well.
 
-## Test state and external services
+## Verify the XLL artifact with `cargo xlfn check`
 
-Build application state with test implementations of network or resource
-clients, then exercise success, timeout, cancellation, overload, and cleanup.
-Keep the doubles at your application's boundary; tests should not need private
-xlfn runtime types.
-
-For stateful features, test these application behaviors before opening Excel:
-
-| Facility | Useful Rust tests |
-| --- | --- |
-| Handles | Object methods, explicit revision dependencies, safe and idempotent resource disposal |
-| Async | Owned input processing, cooperative cancellation, bounded blocking adapters |
-| RTD | Topic validation, value conversion, producer exit when the sender closes |
-| Caches | Key identity, application weight policy, invalidation when external data changes |
-
-Use deterministic signals or channels to coordinate concurrency tests. Avoid
-using a sleep as proof that a worker has started or stopped. Verify that
-application-owned workers are joined and that shutdown leaves no code running
-against state that has been disposed.
-
-## Check the Windows artifact
-
-On the supported Windows build host, validate each architecture you distribute:
+`cargo xlfn check` verifies the built binary and bundle without starting Excel.
+Run it for your target architectures:
 
 ```powershell
-cargo xlfn check --target x86_64-pc-windows-msvc --locked
-cargo xlfn check --target i686-pc-windows-msvc --locked
-cargo xlfn package --all --locked
+cargo xlfn check --target x86_64-pc-windows-msvc
+cargo xlfn check --target i686-pc-windows-msvc
 ```
 
-Add the same feature and profile options used for your release. Omit an
-architecture only when your support policy excludes it. See
-[Build, validate, and load](build-validation.md) and the
-[`cargo xlfn` reference](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/cli-reference.md) for prerequisites and options.
+This checks:
 
-Inspect the final package for:
+- PE architecture matching the target (64-bit vs 32-bit);
+- Required Excel exports and symbol decorations (including x86 stdcall);
+- Embedded registration metadata;
+- Packaged companion files and CRT dependency closure.
 
-- required lifecycle, COM, async, and UDF exports, including x86 decoration;
-- the expected PE machine type;
-- a complete packaged import closure;
-- unique case-insensitive bundle basenames;
-- staged bytes matching the manifest records.
+For more details on building and checking artifacts, see
+[Build, validate, and load](build-validation.md).
 
-Run tests against the dependency versions that the add-in will ship, including
-registry versions when validating an upgrade. Artifact checks do not start
-Excel. Continue with [Test in Excel before release](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/EXCEL_TESTING.md) to test
-worksheet behavior, lifecycle, and the actual installation environment.
+## Test in Excel
 
-## Record what passed
+Artifact checks verify binary structure, but end-to-end worksheet behavior
+requires loading the add-in into Excel:
 
-Keep Rust results, artifact checks, and Excel execution evidence separate.
-Record the source commit, toolchain, target, feature selection, and final
-package digest. Publish only the Excel environments actually tested; the
-[evidence template](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/EXCEL_TESTING.md#choose-environments-and-record-evidence)
-helps make results reproducible.
+1. Build the package:
+   ```powershell
+   cargo xlfn package --target x86_64-pc-windows-msvc
+   ```
+2. In Excel, load the `.xll` via **File → Options → Add-ins → Excel Add-ins → Browse**.
+3. Verify worksheet calls:
+   - Call your functions with valid inputs and confirm expected outputs.
+   - Test invalid inputs and boundary cases to confirm appropriate Excel error
+     codes (`#VALUE!`, `#NUM!`, `#N/A`).
+   - For stateful, async, or RTD functions, verify that recalculation, updates,
+     and add-in unload behave cleanly.

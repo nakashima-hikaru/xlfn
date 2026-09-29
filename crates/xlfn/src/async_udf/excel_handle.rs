@@ -1,10 +1,9 @@
 use super::completion::{OwnedDeliveryOutcome, return_error};
-use super::manager::MAX_ASYNC_HANDLE_BYTES;
 use crate::error::InputError;
 use crate::return_abi::AsyncReturnValue;
 use crate::{XllError, XllResult};
 use std::ptr::NonNull;
-use xlfn_sys::{XLOPER12, XLOPER12BigData, XLOPER12BigDataHandle, XLOPER12Value, XLTYPE_BIG_DATA};
+use xlfn_sys::{XLOPER12, XLOPER12BigData, XLOPER12Value, XLTYPE_BIG_DATA};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DeliveryState {
@@ -20,13 +19,12 @@ enum DeliveryState {
 pub(crate) struct ExcelAsyncResponder {
     pub(crate) udf_id: &'static str,
     pub(crate) raw: XLOPER12,
-    pub(crate) bytes: Option<Box<[u8]>>,
     pub(crate) fallback_error: Option<XllError>,
     state: DeliveryState,
 }
 
-// SAFETY: construction owns any pointed-to bytes; an opaque zero-length handle
-// is only copied back to Excel and is never dereferenced by Rust.
+// SAFETY: the opaque Excel handle is only copied back to Excel through the
+// thread-safe xlAsyncReturn callback and is never dereferenced by Rust.
 unsafe impl Send for ExcelAsyncResponder {}
 
 impl ExcelAsyncResponder {
@@ -43,60 +41,25 @@ impl ExcelAsyncResponder {
         }
         // SAFETY: XLTYPE_BIG_DATA selects the big_data union field.
         let big_data = unsafe { value.value.big_data };
-        let byte_count = usize::try_from(big_data.byte_count).map_err(|_| {
-            XllError::input(
-                "async_handle",
-                InputError::Malformed("negative async handle size"),
-            )
-        })?;
-        if byte_count > MAX_ASYNC_HANDLE_BYTES {
-            return Err(XllError::input(
-                "async_handle",
-                InputError::Malformed("async handle is too large"),
-            ));
-        }
-        let mut bytes = if byte_count == 0 {
-            None
-        } else {
-            // SAFETY: a positive byte count selects the data pointer representation.
-            let data = unsafe { big_data.handle.data };
-            if data.is_null() {
-                return Err(XllError::input(
-                    "async_handle",
-                    InputError::Malformed("null async handle data"),
-                ));
-            }
-            // SAFETY: Excel promises byte_count readable bytes for this call.
-            Some(
-                unsafe { std::slice::from_raw_parts(data, byte_count) }
-                    .to_vec()
-                    .into_boxed_slice(),
-            )
-        };
-        let handle = bytes
-            .as_mut()
-            .map_or(big_data.handle, |bytes| XLOPER12BigDataHandle {
-                data: bytes.as_mut_ptr(),
-            });
+        // An async handle is an opaque hdata token even when cbData is nonzero.
+        // Copy the token, never read it as a byte-buffer address.
         Ok(Self {
             udf_id,
             raw: XLOPER12 {
                 value: XLOPER12Value {
                     big_data: XLOPER12BigData {
-                        handle,
+                        handle: big_data.handle,
                         byte_count: big_data.byte_count,
                     },
                 },
                 xltype: XLTYPE_BIG_DATA,
             },
-            bytes,
             fallback_error: None,
             state: DeliveryState::Pending,
         })
     }
 
     fn pointer(&mut self) -> NonNull<XLOPER12> {
-        let _ = &self.bytes;
         NonNull::from_mut(&mut self.raw)
     }
 

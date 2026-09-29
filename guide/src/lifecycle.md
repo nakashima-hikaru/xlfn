@@ -48,8 +48,7 @@ worksheet calls borrow that instance until the generation is closed.
 `type Error` implements `IntoXllError`; `XllError` is a convenient starting
 point. Return errors from initialization rather than panicking. The framework
 records a failed open and prevents worksheet calls from using partial state.
-An error or panic after `Addin::open` starts quarantines that runtime and
-rejects further opens; see [Failure and quarantine](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/shutdown.md#failure-and-quarantine).
+An error or panic during `Addin::open` prevents the add-in from completing registration.
 
 ## Choose where each resource belongs
 
@@ -125,21 +124,18 @@ Services not configured explicitly use their defaults. Application-created
 executors, connection pools, and queues remain the application's responsibility.
 Calculation caches are configured separately; see [Calculation caches](caching.md).
 
-Use `type Layers = ();` when no execution layers are needed. To install a layer,
-return `.with_layers((layer,))` and set `type Layers` to the corresponding tuple.
-See [UDF execution layers](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/udf-layers.md) for a complete example.
+Use `type Layers = ();` when no execution layers are needed. Custom layers
+can be provided to wrap UDF executions with cross-cutting logic like metrics
+or tracing.
 
 ## Plan shutdown alongside initialization
 
 For every resource created in `open`, decide how it stops. The key hooks are:
 
-- `quiesce`: stop new application work, cancel and join application-owned
-  workers, and make later object destruction safe;
-- `cleanup`: perform bounded best-effort disposal after quiescence and report
-  recoverable failures through `CleanupReporter`.
+- `quiesce`: stop new application work, cancel background workers, and prepare
+  for safe object destruction;
+- `cleanup`: perform best-effort cleanup after quiescence and report any
+  recoverable issues through `CleanupReporter`.
 
 Framework-managed async tasks drain before `quiesce`; remaining handle objects
-can be destroyed after it. Their destructors must still be safe after
-application workers or owner threads have stopped. The full ordering, error
-behavior, and optional physical-unload contract are in
-[Shutdown and unload](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/shutdown.md).
+are dropped after it. Destructors should avoid blocking or calling into Excel.

@@ -40,8 +40,10 @@ impl HandleLookupBenchmark {
         assert!(iterations_per_worker != 0);
 
         let runtime = Arc::new(
-            FormulaHandleService::try_new(worker_count)
-                .expect("benchmark host provides an OS CSPRNG"),
+            FormulaHandleService::try_new(
+                u32::try_from(worker_count).expect("handle capacity fits u32"),
+            )
+            .expect("benchmark host provides an OS CSPRNG"),
         );
         let mut tokens = Vec::with_capacity(worker_count);
         for worker in 0..worker_count {
@@ -233,8 +235,10 @@ impl HandleDistinctKeyBenchmark {
         assert!(iterations_per_worker != 0);
 
         let runtime = Arc::new(
-            FormulaHandleService::try_new(worker_count)
-                .expect("benchmark host provides an OS CSPRNG"),
+            FormulaHandleService::try_new(
+                u32::try_from(worker_count).expect("handle capacity fits u32"),
+            )
+            .expect("benchmark host provides an OS CSPRNG"),
         );
         let factory_calls = Arc::new(AtomicUsize::new(0));
         let keys = (0..worker_count)

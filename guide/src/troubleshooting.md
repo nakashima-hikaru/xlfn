@@ -184,21 +184,16 @@ Do not add a timeout that lets Excel unload while code may still execute. Captur
 
 ## `cargo xlfn package` refuses paths or imports
 
-- `artifact-name` must be a valid non-reserved Windows basename.
-- Bundle metadata paths are relative to the package manifest directory.
+- `artifact-name` must be a valid non-reserved Windows filename.
+- Configured companion/sidecar paths are relative to the package manifest directory.
 - Bundled basenames must be unique case-insensitively and must not collide with the XLL or `build-manifest.json`.
-- With `strict-paths = true`, configured paths reject symlinks or reparse points observed during validation; protect the manifest tree from concurrent mutation when that threat is in scope.
-- Every non-system import must be packaged or explicitly approved as an external import.
-- `package --all` requires a dedicated replaceable output directory.
+- Non-system DLL dependencies must be located and packaged alongside the add-in.
+- Ensure the build output directory is writable and not locked by another process.
 
-Use [bundle path rules](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/cargo-metadata.md#bundle-path-rules),
-[external-import rules](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/cargo-metadata.md#external-imports), and
-[CLI output rules](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/cli-reference.md#cargo-xlfn-package) for the exact constraints.
-Recognized CRT imports observed directly in the XLL follow the
-[CRT policy](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/cargo-metadata.md#crt-policy).
+## Reporting an issue
 
-When commit and rollback both fail, preserve and inspect the recovery path reported by the tool.
-
-## Escalating an issue
-
-A useful OSS issue contains a minimal reproducer, exact command output, environment matrix, diagnostic IDs, and a statement of whether the failure occurs in Rust tests, package validation, or real Excel. Remove proprietary workbooks and external binaries unless redistribution is authorized; replace them with a minimal mock when possible.
+When filing a bug or asking for help, include:
+- Windows version and Excel version (including bitness: 32-bit or 64-bit);
+- Rust toolchain and target triple used to build;
+- Exact command run and complete terminal output;
+- If relevant, the formula called and any diagnostic error output from the logs.

@@ -5,12 +5,12 @@
 //! Copied entries are non-owning: callers must use their lookup domain before
 //! dereferencing them. Notifications never reclaim nodes themselves.
 
-use super::{NodePtr, VersionedKey, VersionedKeyRef, retire_resident};
+use super::{CacheNode, NodePtr, VersionedKey, VersionedKeyRef, retire_resident};
 use quick_cache::Equivalent;
 use std::borrow::Borrow;
 use std::hash::{Hash, Hasher};
+use std::ptr::NonNull;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 mod key_retirement;
 use key_retirement::RetiredKeys;
@@ -21,6 +21,9 @@ mod sharded;
 use quick::QuickResidentIndex;
 #[cfg(feature = "bench-internals")]
 use sharded::ShardedResidentIndex;
+
+#[cfg(test)]
+mod tests;
 
 type Entry<V> = (NodePtr<V>, u64);
 
@@ -84,29 +87,56 @@ impl<K> Drop for ResidentKey<K> {
 /// Ownership begins before calling any user key Clone/Hash/Eq implementation.
 /// Moving this value into an index transfers the pin even if insertion unwinds.
 pub(super) struct ResidentEntry<V> {
-    node: NodePtr<V>,
+    // Low bit set: this entry owns the residency obligation. Never dereference
+    // this pointer directly; node() restores the allocation address first.
+    tagged_node: NonNull<CacheNode<V>>,
     weight: u64,
-    owns_residency: AtomicBool,
 }
 
+// SAFETY: Like NodePtr, this capability shares V and may retire it on another
+// thread. The tag is modified only through exclusive access; V must be Send + Sync.
+unsafe impl<V: Send + Sync> Send for ResidentEntry<V> {}
+// SAFETY: Shared access only reads the tag or creates non-owning snapshots.
+// Retirement requires exclusive access, and V has NodePtr's Send + Sync bounds.
+unsafe impl<V: Send + Sync> Sync for ResidentEntry<V> {}
+
 impl<V> ResidentEntry<V> {
+    const OWNS_RESIDENCY: usize = 1;
+
     pub(super) fn new((node, weight): Entry<V>) -> Self {
+        // CacheNode contains AtomicU32, so bit zero is available for every V.
+        // Keep this a per-monomorphization compile-time check if layout changes.
+        const { assert!(std::mem::align_of::<CacheNode<V>>() > Self::OWNS_RESIDENCY) };
         Self {
-            node,
+            tagged_node: node.0.map_addr(|addr| addr | Self::OWNS_RESIDENCY),
             weight,
-            owns_residency: AtomicBool::new(true),
         }
     }
 
+    fn node(&self) -> NodePtr<V> {
+        // map_addr preserves provenance, including for a stale non-owning clone.
+        // The original address is nonzero and aligned; clearing the tag cannot
+        // turn it into null. No allocation access occurs here.
+        let pointer = self
+            .tagged_node
+            .as_ptr()
+            .map_addr(|addr| addr & !Self::OWNS_RESIDENCY);
+        // SAFETY: new() starts with an aligned, nonnull allocation address.
+        // Every mutation only sets or clears the spare bit, so masking it
+        // restores that nonnull address even when a snapshot is stale.
+        NodePtr(unsafe { NonNull::new_unchecked(pointer) })
+    }
+
     fn snapshot(&self) -> Entry<V> {
-        (self.node, self.weight)
+        (self.node(), self.weight)
     }
 
     fn retire(&mut self) {
-        if *self.owns_residency.get_mut() {
-            *self.owns_residency.get_mut() = false;
+        if self.tagged_node.addr().get() & Self::OWNS_RESIDENCY != 0 {
+            let node = self.node();
+            self.tagged_node = node.0;
             // This releases only residency; value destruction follows grace.
-            retire_resident(self.node);
+            retire_resident(node);
         }
     }
 }
@@ -114,9 +144,8 @@ impl<V> ResidentEntry<V> {
 impl<V> Clone for ResidentEntry<V> {
     fn clone(&self) -> Self {
         Self {
-            node: self.node,
+            tagged_node: self.node().0,
             weight: self.weight,
-            owns_residency: AtomicBool::new(false),
         }
     }
 }

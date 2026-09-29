@@ -12,7 +12,7 @@ Use `RtdChannelSource` for ordinary producers. The source owns a factory that
 runs synchronously during subscription setup and returns an owned producer
 job for the topic. Each job runs once on a framework-owned thread and receives
 only a typed, bounded `RtdSender`. Its captures may include resources that are
-neither `Clone` nor `Sync`. A separate publisher forwards accepted values to Excel.
+neither `Clone` nor `Sync`. A generation-owned shared publisher forwards accepted values to Excel.
 The capacity passed to `RtdChannelSource::new` limits queued values per subscription.
 
 ```rust
@@ -25,8 +25,10 @@ cancellation-aware I/O so the callback returns promptly after admission
 closes. The factory validates the topic before any worker starts. Producer
 errors and panics close the channel and are reported during disconnect.
 
-Each active channel subscription uses two threads: one producer and one
-publisher. Account for that cost when choosing the number of live topics.
+Each active subscription uses one producer thread. All channel subscriptions in
+a runtime generation share one publisher, for N+1 threads in total. The publisher
+processes at most 32 values per topic turn before yielding to another ready
+topic. A stalled publication can delay other topics on the shared worker.
 
 ## Register and subscribe
 
@@ -99,9 +101,16 @@ The runtime also applies bounded admission limits. The standard limits are 253 t
 ## Backpressure and errors
 
 `RtdSender::try_send` validates values before enqueueing and never waits for
-queue capacity. It returns `XllError::Overloaded` when the per-subscription
-queue is full and `XllError::Closing` after admission closes. Handle an error
-by stopping or retrying with a bounded policy. Enqueue success is not a
+queue capacity. `RtdSendError::Full` and `RtdSendError::Closed` retain the
+validated update as `RtdPendingValue<T>`. Recover it with `into_pending()` and retry
+on any `RtdSender<T>` of the same input type with `try_send_pending()`, without
+cloning the original input or re-running its
+converter. Use a bounded retry policy and stop when the channel closes.
+`RtdSendError::Invalid` contains a conversion/validation error and no payload.
+Conversion happens before admission, including when the channel is closed.
+Calling `.map_err(RtdSendError::into_error)?` deliberately discards its retained
+payload and maps Full/Closed to Overloaded/Closing. There is no implicit lossy
+`From` conversion. Enqueue success is not a
 delivery acknowledgement: disconnect can discard pending values. If the
 publisher encounters a runtime error, it closes admission, wakes the producer,
 and reports that error during disconnect. `Closing` is treated as normal
@@ -113,18 +122,17 @@ Publishing validates and queues a value; xlfn notifies Excel and handles
 ## Stop a producer
 
 During disconnect, the channel stops accepting values, discards queued
-updates, and joins its producer and publisher. Sender clones may outlive the
+updates, waits for in-flight publication, revokes its sink, and joins its
+producer. The generation joins the shared publisher after all subscriptions
+have disconnected. Sender clones may outlive the
 subscription, but can only return `XllError::Closing`; they retain no live RTD
 capability or queued payloads. Producer captures belong to that job and are
 dropped before its worker is joined. Dropping the source configuration does
 not stop or destroy a running job.
 
-A producer that finishes successfully drains accepted values before the
-publisher stops. The producer must stop any additional threads or callbacks
-before returning. Use bounded, cancellation-aware I/O: a producer that never
-returns delays disconnect and unload. Never abandon an in-process callback
-on timeout and then permit unload; isolate uninterruptible work in another
-process. See [Shutdown and unload](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/shutdown.md).
+A producer that finishes successfully closes sender admission and drains
+accepted values. The shared publisher remains available to other topics.
+Ensure producer workers exit promptly when the sender closes or becomes cancelled.
 
 ## Custom sources
 

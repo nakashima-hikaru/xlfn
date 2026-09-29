@@ -63,6 +63,12 @@ miri:
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features async --lib --locked -- miri_
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features rtd --lib --locked -- miri_
     just miri-cache-endpoints
+    just miri-cache-resident-entry
+
+# Resident pointer tags preserve provenance and release ownership exactly once.
+miri-cache-resident-entry:
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-strict-provenance" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features cache --lib --locked -- cache::resident_index::tests
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-tree-borrows" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features cache --lib --locked -- cache::resident_index::tests
 
 # Non-owning TLS endpoint references must survive owner moves and reject reuse
 # after owner destruction under both aliasing models.

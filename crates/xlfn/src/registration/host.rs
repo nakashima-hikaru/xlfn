@@ -10,8 +10,10 @@ use crate::error::{ExcelApiFailure, ExcelApiFunction, InputError};
 use crate::host_api::{ExcelHost, HostInvocation};
 use crate::host_callback::HostCallbackSession;
 use crate::return_abi::ExcelCallbackStatus;
+use crate::value::input::PreparedArgument;
 use crate::value::input::sealed::ExcelParameterSealed;
 use crate::value::{CallContext, ExcelParameter, FromExcel, InputMode, XlValueRef, XlValueType};
+use crate::value::{ExcelInputCells, PreparedExcelSequence};
 use crate::{XllError, XllResult};
 use smallvec::SmallVec;
 use std::path::PathBuf;
@@ -421,7 +423,11 @@ fn decode_event_registration_id(result: &ExcelCallbackValue<'_>) -> XllResult<i3
     let raw = result.raw()?;
     // SAFETY: XLTYPE_INT selects the integer union member.
     let value = unsafe { raw.value.integer };
-    if value <= 0 {
+    // xlEventRegister reports failure as zero. Live Windows Excel can return
+    // a nonzero acknowledgement with the high bit set (e.g. 0x9d380001), so
+    // interpreting the signed integer as a positive counter rejects success.
+    // Preserve the raw value; event removal is keyed by event, not this value.
+    if value == 0 {
         return Err(XllError::ExcelApi {
             function: ExcelApiFunction::EventRegister,
             failure: ExcelApiFailure::InvalidRegistrationId(value),
@@ -443,7 +449,9 @@ fn unexpected_result(function: ExcelApiFunction) -> XllError {
 }
 
 pub(crate) fn valid_registration_id(id: f64) -> bool {
-    id.is_finite() && id > 0.0
+    // Excel registration IDs are opaque numeric tokens, not positive counters.
+    // Windows Excel can return a negative ID for a successful xlfRegister call.
+    id.is_finite() && id != 0.0
 }
 
 fn prepared_argument_help_strings(
@@ -516,6 +524,25 @@ pub(crate) struct ModuleName {
 impl<'call, M: InputMode> ExcelParameterSealed<'call, M> for ModuleName {}
 
 impl<'call, M: InputMode> ExcelParameter<'call, M> for ModuleName {
+    type Prepared = ();
+
+    type Elements = PreparedExcelSequence<'call, Self, PreparedArgument<Self, Self::Prepared>>;
+    fn prepare_elements(
+        cells: ExcelInputCells<'call>,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<Self::Elements> {
+        cells.retain(
+            |value, argument| {
+                <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)
+            },
+            PreparedArgument::materialize,
+        )
+    }
+    fn materialize_elements(elements: Self::Elements) -> XllResult<Vec<Self>> {
+        elements.materialize()
+    }
+
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -569,12 +596,43 @@ mod tests {
     }
 
     #[test]
-    fn registration_ids_must_be_positive_and_finite() {
-        for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+    fn registration_ids_accept_both_signs_but_reject_zero_and_nonfinite_values() {
+        for invalid in [0.0, -0.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             assert!(!valid_registration_id(invalid));
         }
-        assert!(valid_registration_id(1.0));
-        assert!(valid_registration_id(1.5));
+        for valid in [1.0, 1.5, -1.0, -1_678_704_637.0] {
+            assert!(valid_registration_id(valid));
+        }
+    }
+
+    #[test]
+    fn negative_registration_id_survives_registration_and_recovery() {
+        let expected = RegistrationId {
+            id: -1_678_704_637.0,
+            excel_name: "BENCH.ALLOC.BYTES",
+        };
+        let mut result = ExcelCallbackValue::from_raw_for_test(XLOPER12::number(expected.id));
+        assert_eq!(
+            decode_registration_id(&mut result, expected.excel_name).unwrap(),
+            expected
+        );
+        assert_eq!(
+            decode_registration_id_result(&mut result, expected.excel_name).unwrap(),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn error_results_are_not_registration_ids() {
+        let mut result = ExcelCallbackValue::from_raw_for_test(XLOPER12::error(XLERR_NAME));
+        assert!(decode_registration_id(&mut result, "TEST.MISSING").is_err());
+        assert_eq!(
+            decode_registration_id_result(&mut result, "TEST.MISSING").unwrap(),
+            None
+        );
+        let mut result = ExcelCallbackValue::from_raw_for_test(XLOPER12::number(f64::NAN));
+        assert!(decode_registration_id(&mut result, "TEST.INVALID").is_err());
+        assert!(decode_registration_id_result(&mut result, "TEST.INVALID").is_err());
     }
 
     #[test]
@@ -599,17 +657,21 @@ mod tests {
     }
 
     #[test]
-    fn event_unregister_requires_a_positive_integer() {
-        let positive = ExcelCallbackValue::from_raw_for_test(XLOPER12::integer(1));
-        assert!(validate_event_unregister_result(&positive).is_ok());
+    fn event_registration_and_unregister_accept_nonzero_integer_acknowledgements() {
+        for value in [1, 2, -1, -1_657_274_367, i32::MIN, i32::MAX] {
+            let result = ExcelCallbackValue::from_raw_for_test(XLOPER12::integer(value));
+            assert_eq!(decode_event_registration_id(&result).unwrap(), value);
+            assert!(validate_event_unregister_result(&result).is_ok());
+        }
 
         for raw in [
             XLOPER12::integer(0),
-            XLOPER12::integer(-1),
             XLOPER12::boolean(true),
             XLOPER12::error(XLERR_NAME),
+            XLOPER12::number(1.0),
         ] {
             let result = ExcelCallbackValue::from_raw_for_test(raw);
+            assert!(decode_event_registration_id(&result).is_err());
             assert!(validate_event_unregister_result(&result).is_err());
         }
     }

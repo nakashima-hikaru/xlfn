@@ -1,0 +1,23 @@
+error[E0603]: struct `ExcelInputCells` is private
+ --> tests/ui/fail/preparation_collection_is_internal.rs:1:19
+  |
+1 | use xlfn::value::{ExcelInputCells, PreparedExcelSequence};
+  |                   ^^^^^^^^^^^^^^^ private struct
+  |
+note: the struct `ExcelInputCells` is defined here
+ --> src/value.rs
+  |
+  | pub(crate) use input::{ExcelInputCells, PreparedExcelSequence};
+  |                        ^^^^^^^^^^^^^^^
+
+error[E0603]: struct `PreparedExcelSequence` is private
+ --> tests/ui/fail/preparation_collection_is_internal.rs:1:36
+  |
+1 | use xlfn::value::{ExcelInputCells, PreparedExcelSequence};
+  |                                    ^^^^^^^^^^^^^^^^^^^^^ private struct
+  |
+note: the struct `PreparedExcelSequence` is defined here
+ --> src/value.rs
+  |
+  | pub(crate) use input::{ExcelInputCells, PreparedExcelSequence};
+  |                                         ^^^^^^^^^^^^^^^^^^^^^

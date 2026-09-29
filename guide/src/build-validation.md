@@ -32,9 +32,7 @@ options that you intend to distribute:
 cargo xlfn check --target x86_64-pc-windows-msvc --features async --locked
 ```
 
-The default profile is `dev` and the default CRT policy is `static`. See
-[CLI options](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/cli-reference.md#build-options) for profile and feature selection,
-and [CRT policy](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/cargo-metadata.md#crt-policy) when linking native components.
+The default profile is `dev` and the default CRT policy is `static`.
 
 ## Release packaging
 
@@ -56,9 +54,7 @@ package/win-x64/
 Use `cargo xlfn package --all --locked` to produce both `win-x86` and `win-x64`.
 Keep the feature options consistent between validation and packaging.
 
-For output selection and replacement/recovery behavior, see
-[`cargo xlfn package`](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/cli-reference.md#cargo-xlfn-package). For signing,
-installation, and upgrades, continue with [Deployment and
+For signing, installation, and upgrades, continue with [Deployment and
 distribution](deployment.md).
 
 ## Loading in Excel
@@ -79,6 +75,5 @@ fails, use the [symptom index](troubleshooting.md#find-your-symptom).
 worksheet correctness, an external component's ABI or thread safety, timely
 cancellation, installation trust, or behavior on a particular Excel build.
 
-Before distributing an add-in, run the application tests and the
-[real-Excel qualification](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/EXCEL_TESTING.md) for the exact package, feature set,
-and supported environments.
+Before distributing an add-in, run your test suite and verify behavior directly
+in Excel (see [Test your add-in](testing.md)).

@@ -19,6 +19,8 @@ fn trait_driven_function_signatures_compile() {
     tests.compile_fail("tests/ui/fail/return_trait_missing.rs");
     tests.compile_fail("tests/ui/fail/sys_module_is_not_public.rs");
     tests.compile_fail("tests/ui/fail/value_raw_abi_is_not_public.rs");
+    tests.compile_fail("tests/ui/fail/prepared_borrow_cannot_escape.rs");
+    tests.compile_fail("tests/ui/fail/preparation_collection_is_internal.rs");
     tests.compile_fail("tests/ui/fail/udf_layers_is_sealed.rs");
 
     #[cfg(feature = "handles")]
@@ -31,6 +33,12 @@ fn trait_driven_function_signatures_compile() {
         tests.compile_fail("tests/ui/fail/nested_handle_storage.rs");
         tests.compile_fail("tests/ui/fail/handle_cannot_outlive_registry.rs");
         tests.compile_fail("tests/ui/fail/unscoped_call_scope.rs");
+    }
+
+    #[cfg(feature = "rtd")]
+    {
+        tests.pass("tests/ui/pass/rtd_typed_retry.rs");
+        tests.compile_fail("tests/ui/fail/rtd_retry_wrong_input_type.rs");
     }
 
     #[cfg(feature = "cache")]

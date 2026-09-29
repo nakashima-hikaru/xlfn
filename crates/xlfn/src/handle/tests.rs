@@ -594,7 +594,7 @@ fn slot_reuse_can_publish_while_old_record_waits_for_grace() {
     loop {
         if let Some(state) = registry.bindings.try_read_state()
             && state.slots[parsed_old.id.slot as usize].record.is_none()
-            && state.free.contains(&(parsed_old.id.slot as usize))
+            && state.free.contains(&parsed_old.id.slot)
         {
             break;
         }

@@ -135,7 +135,15 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
             let converted = &argument.local_ident;
             let raw = &argument.raw_ident;
             let argument_name = &argument.excel_name;
+            let binding_type = if !is_async && matches!(argument.conversion, model::ArgumentConversion::Reference) { quote!(#krate::__private::v1::PreparedArgument<#ty, ()>) } else if is_async { quote!(#ty) } else {
+                quote!(#krate::__private::v1::PreparedArgument<#ty, _>)
+            };
+            let default_method = if is_async { quote!(default_argument) } else { quote!(prepare_default) };
             let conversion = match &argument.conversion {
+                model::ArgumentConversion::Reference if !is_async => quote! {
+                    unsafe { #krate::__private::v1::convert_reference(__frame, #argument_name, #raw) }
+                        .map(#krate::__private::v1::PreparedArgument::Ready)
+                },
                 model::ArgumentConversion::Reference => quote! {
                     // SAFETY: Excel supplies the live reference pointer for this ABI call.
                     unsafe {
@@ -143,6 +151,11 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                     }
                 },
                 model::ArgumentConversion::Value(_) => {
+                    let convert = if is_async {
+                        quote!(#krate::__private::v1::convert_argument::<#return_type, #ty>(__frame, #index, #argument_name, #raw))
+                    } else {
+                        quote!(__frame.prepare_argument::<#ty>(#index, #argument_name, #raw))
+                    };
                     let async_assertion = is_async.then(|| {
                         quote!(#krate::__private::v1::assert_async_parameter::<#return_type, #ty>();)
                     });
@@ -152,12 +165,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                             #krate::__private::v1::assert_excel_parameter::<#return_type, #ty>(__frame);
                             // SAFETY: Excel supplies the live XLOPER12 pointer for this ABI call.
                             unsafe {
-                                #krate::__private::v1::convert_argument::<#return_type, #ty>(
-                                    __frame,
-                                    #index,
-                                    #argument_name,
-                                    #raw,
-                                )
+                                #convert
                             }
                         }
                     }
@@ -195,7 +203,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                     ),
                     model::PresenceAction::Default(default) => quote!(
                         #krate::__private::v1::CellPresence::Blank => {
-                            #krate::__private::v1::CallFrame::default_argument(
+                            #krate::__private::v1::CallFrame::#default_method(
                                 __frame,
                                 #index,
                                 #argument_name,
@@ -216,7 +224,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                     ),
                     model::PresenceAction::Default(default) => quote!(
                         #krate::__private::v1::CellPresence::Missing => {
-                            #krate::__private::v1::CallFrame::default_argument(
+                            #krate::__private::v1::CallFrame::#default_method(
                                 __frame,
                                 #index,
                                 #argument_name,
@@ -228,7 +236,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                 quote! {
                     // SAFETY: the raw argument belongs to the current Excel
                     // call and is validated by the conversion boundary.
-                    let #converted: #ty = match unsafe {
+                    let #converted: #binding_type = match unsafe {
                         #krate::__private::v1::argument_presence(__frame, #argument_name, #raw)
                     }? {
                         #blank_arm
@@ -243,10 +251,18 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                     }
                 } else {
                     quote! {
-                        let #converted: #ty = #conversion?;
+                        let #converted: #binding_type = #conversion?;
                     }
                 }
             }
+        })
+        .collect::<Vec<_>>();
+
+    let materializations = arguments
+        .iter()
+        .map(|argument| {
+            let converted = &argument.local_ident;
+            quote!(let #converted = #converted.materialize()?;)
         })
         .collect::<Vec<_>>();
 
@@ -477,7 +493,10 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                         __frame.return_context(#udf_id)?;
                     #krate::__private::v1::ExcelReturn::invoke(
                         &mut __return_context,
-                        || ::core::result::Result::Ok(#invocation),
+                        || {
+                            #(#materializations)*
+                            ::core::result::Result::Ok(#invocation)
+                        },
                     )
                 },
             )

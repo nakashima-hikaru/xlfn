@@ -151,6 +151,17 @@ pub(crate) fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::
             }
         }
 
+        impl #from_excel_impl_generics #krate::value::PrepareExcel<'__xlfn_call>
+            for #ident #type_generics #from_excel_where_clause
+        {
+            type Prepared = Self;
+            fn prepare(value: #krate::value::XlValueRef<'__xlfn_call>, argument: &'static str,
+                identity: &mut #krate::value::InputIdentityEncoder) -> #krate::XllResult<Self> {
+                <Self as #krate::value::FromExcel>::from_excel_with_identity(value, argument, identity)
+            }
+            fn materialize(value: Self) -> #krate::XllResult<Self> { Ok(value) }
+        }
+
         impl #base_impl_generics #krate::value::IntoExcel
             for #ident #type_generics #base_where_clause
         {

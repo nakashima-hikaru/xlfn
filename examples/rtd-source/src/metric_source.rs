@@ -31,13 +31,13 @@ pub(crate) fn metric_source() -> MetricSource {
         Ok(move |sender: RtdSender<RtdValue>| {
             while !sender.is_closed() {
                 match client.try_next_metric(&symbol) {
-                    Ok(Some(value)) => sender.try_send(RtdValue::Number(value))?,
+                    Ok(Some(value)) => sender.try_send(RtdValue::Number(value)).map_err(xlfn::rtd::RtdSendError::into_error)?,
                     Ok(None) => {
                         sender.wait_closed(Duration::from_millis(50));
                     }
                     Err(_) => {
                         sender
-                            .try_send(RtdValue::Error(ExcelErrorValue(ExcelError::NotAvailable)))?;
+                            .try_send(RtdValue::Error(ExcelErrorValue(ExcelError::NotAvailable))).map_err(xlfn::rtd::RtdSendError::into_error)?;
                         break;
                     }
                 }

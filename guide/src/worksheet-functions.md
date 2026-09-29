@@ -70,5 +70,22 @@ parameter; that context also selects their execution mode. See
 callbacks. A function that performs asynchronous work uses `async fn` and the
 `async` Cargo feature; see [Asynchronous functions](async-functions.md).
 
-Next, accept a range or return a grid in [Values and arrays](values.md), or add
-argument descriptions in [Function metadata](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/function-metadata.md).
+## Function metadata
+
+Rust doc comments on `#[excel_function]` automatically populate Excel's
+Function Wizard description. You can also specify metadata explicitly via attributes:
+
+```rust
+/// Adds two numbers together.
+#[excel_function(
+    name = "MATH.ADD",
+    category = "Math",
+    description = "Calculates the sum of two numbers",
+    thread_safe
+)]
+pub fn add(left: f64, right: f64) -> f64 {
+    left + right
+}
+```
+
+Next, see [Values and arrays](values.md) for accepting ranges and returning grids.

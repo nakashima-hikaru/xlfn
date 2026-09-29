@@ -249,6 +249,40 @@ jobs:
                     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
                   }
 
+            - name: Package basic example XLL
+              shell: pwsh
+              run: |
+                  cargo run --locked --package cargo-xlfn -- package `
+                    --manifest-path examples/basic-xll/Cargo.toml `
+                    --target ${{ matrix.target }} `
+                    --out examples/basic-xll/package `
+                    --locked
+                  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+            - name: Upload basic example XLL (${{ matrix.target }})
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+              with:
+                  name: basic-xll-${{ matrix.target }}
+                  path: examples/basic-xll/package/
+                  if-no-files-found: error
+
+            - name: Package async/RTD fixture XLL
+              shell: pwsh
+              run: |
+                  cargo run --locked --package cargo-xlfn -- package `
+                    --manifest-path tests/xlfn-e2e-fixture/Cargo.toml `
+                    --target ${{ matrix.target }} `
+                    --out tests/xlfn-e2e-fixture/package `
+                    --locked
+                  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+            - name: Upload async/RTD fixture XLL (${{ matrix.target }})
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+              with:
+                  name: xlfn-e2e-fixture-${{ matrix.target }}
+                  path: tests/xlfn-e2e-fixture/package/
+                  if-no-files-found: error
+
     excel-abi-probe:
         name: Excel SDK ABI probe (${{ matrix.target }})
         runs-on: windows-latest

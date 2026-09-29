@@ -73,7 +73,7 @@ formula argument. For example, a `DATASET.LOAD` function could accept a
 snapshot ID from `A1`; updating `A1` then creates a new object.
 
 If a custom argument type is used by a handle producer, implement
-`ExcelInputIdentity` alongside `FromExcel`; see [Custom conversions](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/custom-conversions.md).
+`ExcelInputIdentity` and `PrepareExcel` alongside `FromExcel`.
 
 ## Handle alias functions
 
@@ -132,6 +132,12 @@ Configure it with `RuntimeConfig::with_handles` and
 A new publication may also return `Overloaded` while earlier calls are still
 using removed objects. Let those calls finish before retrying.
 
+Internally, binding slots and their free list use `u32` identities. Each object
+also has separate `u32` binding and async-pin counts: their portable ceiling is
+`u32::MAX` on both 32-bit and 64-bit hosts. An admission that would exceed either
+count returns an overflow error without creating a capability or changing the
+other count. Aggregate arena bookkeeping remains native-sized.
+
 ## Shutdown interaction
 
 The close order relevant to handle objects is:
@@ -141,7 +147,9 @@ The close order relevant to handle objects is:
 3. xlfn closes the formula-handle registry and drops remaining Rust handle objects;
 4. `Addin::cleanup` performs bounded best-effort disposal.
 
-A handle object's `Drop` therefore must remain safe after `quiesce` has stopped application workers or owner threads. If resource destruction requires such an owner, release or invalidate the resource during `quiesce` while the owner is still available, and make the later Rust wrapper drop a local or idempotent operation. Do not defer the only copy of an application shutdown protocol to handle `Drop`. See [Shutdown and unload](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/shutdown.md).
+A handle object's `Drop` must remain safe after `quiesce` has stopped
+application workers. If resource destruction requires an active worker or thread,
+release or invalidate the resource during `quiesce`.
 
 ## Valid producer contexts
 

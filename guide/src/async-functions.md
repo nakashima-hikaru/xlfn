@@ -145,15 +145,12 @@ sharing, use another formula binding through `HandleAlias`; see
 
 ## Error and panic behavior
 
-The future may return any `Result<T, E>` where `E: IntoXllError` and `T` is a valid async return type. Panics in construction, polling, conversion, or completion are contained at framework boundaries and diagnosed as internal errors.
-
-Containment is not recovery. A panic can leave an external transaction partially complete. Keep business operations explicit and idempotent where retries are possible.
+The future may return any `Result<T, E>` where `E: IntoXllError` and `T` is a
+valid async return type. Panics are contained at framework boundaries and reported
+as internal diagnostic errors.
 
 ## Shutdown
 
-During terminal add-in removal, xlfn stops accepting async work, cancels tracked tasks, and waits for those tasks to end before releasing executor resources. User futures and their captured values can run `Drop` during cancellation, so destructors must not block indefinitely or re-enter a resource while holding incompatible locks.
-
-`Addin::quiesce` runs only after framework-managed async tasks have drained. Application-owned background tasks must be stopped and joined by `quiesce`; best-effort resource disposal belongs in `Addin::cleanup`.
-
-See [Shutdown and unload](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/shutdown.md) for close hints, terminal removal,
-quarantine, and the optional physical-unload contract.
+During add-in shutdown, xlfn stops accepting new async tasks, cancels in-flight
+work, and drains active tasks before `Addin::quiesce` runs. Application-owned
+background tasks should be joined in `Addin::quiesce`.

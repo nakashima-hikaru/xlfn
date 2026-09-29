@@ -163,7 +163,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
     }
 
     #[inline]
-    fn services(&self) -> &RuntimeServices {
+    pub(super) fn services(&self) -> &RuntimeServices {
         // SAFETY: runtime services are reclaimed after all servers.
         unsafe { self.services.as_ref() }
     }

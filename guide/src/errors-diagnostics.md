@@ -22,10 +22,8 @@ fn square_root(value: f64) -> XllResult<f64> {
 }
 ```
 
-`=HELLO.SQRT(9)` returns `3`; `=HELLO.SQRT(-1)` returns `#NUM!`.
-Return an error for an expected failure. Use diagnostics for the additional
-detail needed to investigate it. If your application already has its own
-error enum, see [custom result errors](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/custom-conversions.md#custom-result-errors).
+Return an error for an expected failure. If your application defines its own
+error type, implement `IntoXllError` to convert it to `XllError`.
 
 ## Error types
 
@@ -180,6 +178,5 @@ Use a companion information function only when users genuinely need structured s
 
 ## Next steps
 
-- Follow [Troubleshooting](troubleshooting.md) for a specific Excel error or loading problem.
-- Add [execution layers](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/udf-layers.md) for shared instrumentation around calls.
-- Review the contents of diagnostic logs before collecting them from users; remove credentials and customer data.
+- See [Troubleshooting](troubleshooting.md) for resolving specific Excel errors.
+- See [Choose a calculation pattern](choosing-pattern.md) to explore stateful and asynchronous designs.

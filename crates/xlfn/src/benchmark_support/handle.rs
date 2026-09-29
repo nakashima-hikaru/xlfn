@@ -37,8 +37,10 @@ impl HandleColdBatch {
     pub fn new(iterations: usize) -> Self {
         Self {
             runtime: Arc::new(
-                FormulaHandleService::try_new(iterations.max(1))
-                    .expect("benchmark host provides an OS CSPRNG"),
+                FormulaHandleService::try_new(
+                    u32::try_from(iterations.max(1)).expect("handle capacity fits u32"),
+                )
+                .expect("benchmark host provides an OS CSPRNG"),
             ),
             keys: (0..iterations)
                 .map(|i| benchmark_revision_key("BENCH.COLD", i as u64))
@@ -131,8 +133,10 @@ impl HandleColdGrowthBenchmark {
         assert!(count <= maximum_bindings);
         Self {
             runtime: Arc::new(
-                FormulaHandleService::try_new(maximum_bindings)
-                    .expect("benchmark host provides an OS CSPRNG"),
+                FormulaHandleService::try_new(
+                    u32::try_from(maximum_bindings).expect("handle capacity fits u32"),
+                )
+                .expect("benchmark host provides an OS CSPRNG"),
             ),
             keys: (0..count)
                 .map(|i| benchmark_revision_key("BENCH.COLD_GROW", i as u64))
@@ -171,8 +175,10 @@ pub struct HandleRevisionChurnBenchmark {
 impl HandleRevisionChurnBenchmark {
     pub fn new(topics: usize, churn_cycles: usize) -> Self {
         let runtime = Arc::new(
-            FormulaHandleService::try_new(topics.max(1))
-                .expect("benchmark host provides an OS CSPRNG"),
+            FormulaHandleService::try_new(
+                u32::try_from(topics.max(1)).expect("handle capacity fits u32"),
+            )
+            .expect("benchmark host provides an OS CSPRNG"),
         );
         let keys: Vec<_> = (0..topics)
             .map(|i| benchmark_revision_key("BENCH.CHURN", i as u64))

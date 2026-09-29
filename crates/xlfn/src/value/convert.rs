@@ -313,6 +313,21 @@ mod tests {
             }
         }
 
+        impl<'call> crate::value::PrepareExcel<'call> for OptionalMatrix {
+            type Prepared = Self;
+            fn prepare(
+                value: crate::value::XlValueRef<'call>,
+                argument: &'static str,
+                identity: &mut crate::value::InputIdentityEncoder,
+            ) -> crate::XllResult<Self> {
+                <Self as crate::value::FromExcel>::from_excel_with_identity(
+                    value, argument, identity,
+                )
+            }
+            fn materialize(value: Self) -> crate::XllResult<Self> {
+                Ok(value)
+            }
+        }
         impl ExcelInputIdentity for OptionalMatrix {
             fn encode_input_identity(&self, encoder: &mut InputIdentityEncoder) {
                 encoder.bool(self.0.is_some());

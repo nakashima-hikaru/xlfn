@@ -18,6 +18,8 @@ use xlfn_kernel::quota::QuotaPermit;
 #[derive(Clone, Copy)]
 pub(crate) struct ErasedSink {
     publish_core: NonNull<()>,
+    #[cfg(feature = "rtd")]
+    services: NonNull<super::RuntimeServices>,
     publish: unsafe fn(NonNull<()>, TopicId, ConnectionGeneration, StoredRtdValue) -> XllResult<()>,
     pub(crate) topic_id: TopicId,
     pub(crate) connection_generation: ConnectionGeneration,
@@ -44,10 +46,21 @@ impl ErasedSink {
 
         Self {
             publish_core: NonNull::from(publish).cast(),
+            #[cfg(feature = "rtd")]
+            services: NonNull::from(publish.services()),
             publish: publish_through::<H>,
             topic_id,
             connection_generation,
         }
+    }
+
+    #[cfg(feature = "rtd")]
+    pub(super) fn publisher_queue(
+        &self,
+    ) -> XllResult<triomphe::Arc<super::channel::PublisherQueue>> {
+        // SAFETY: services outlive the publish core; subscribe holds the sink
+        // capability while obtaining the generation-owned publisher queue.
+        unsafe { self.services.as_ref() }.publishers.queue()
     }
 
     #[inline]

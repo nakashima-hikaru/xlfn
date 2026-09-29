@@ -192,3 +192,8 @@ workspace = true
 name = "handle_memory"
 harness = false
 required-features = ["bench-internals"]
+
+[[bench]]
+name = "two_phase_ingress"
+harness = false
+required-features = ["bench-internals"]

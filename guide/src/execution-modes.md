@@ -102,7 +102,6 @@ A function marked `volatile` must still return a type valid for its mode. Handle
 
 ## Next steps
 
-- Use [Excel references](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/references.md) when coordinates or coercion matter.
-- Use [Asynchronous functions](async-functions.md) for one eventual result.
-- Check the [return-type table](https://github.com/nakashima-hikaru/xlfn/blob/main/docs/reference/conversion-reference.md#execution-mode-return-matrix)
-  when a function signature fails to compile.
+- See [Errors and diagnostics](errors-diagnostics.md) for returning Excel errors and configuring logs.
+- See [Asynchronous functions](async-functions.md) for non-blocking calculations.
+- Refer to [docs.rs](https://docs.rs/xlfn) for full context and trait definitions.

@@ -890,14 +890,14 @@ fn production_close_waits_until_blocking_poll_returns() {
 }
 
 #[test]
-fn async_handle_payload_is_deep_copied() {
-    let mut bytes = vec![1_u8, 2, 3, 4];
-    let original = bytes.as_mut_ptr();
+fn async_handle_preserves_opaque_token_with_nonzero_size() {
+    // Deliberately not a readable buffer: native async hdata is an opaque token.
+    let original = std::ptr::without_provenance_mut::<u8>(0x12345);
     let mut raw = XLOPER12 {
         value: XLOPER12Value {
             big_data: XLOPER12BigData {
                 handle: XLOPER12BigDataHandle { data: original },
-                byte_count: bytes.len() as i32,
+                byte_count: std::mem::size_of::<usize>() as i32,
             },
         },
         xltype: XLTYPE_BIG_DATA,
@@ -910,13 +910,8 @@ fn async_handle_payload_is_deep_copied() {
     let big_data = unsafe { owned.raw.value.big_data };
     // SAFETY: the big_data union contains the raw byte pointer in `handle.data`.
     let copied = unsafe { big_data.handle.data };
-    assert_ne!(copied, original);
-    bytes.fill(9);
-    assert_eq!(
-        // SAFETY: copied points to the owned four-byte payload.
-        unsafe { std::slice::from_raw_parts(copied, 4) },
-        &[1, 2, 3, 4]
-    );
+    assert_eq!(copied, original);
+    assert_eq!(big_data.byte_count, std::mem::size_of::<usize>() as i32);
     let result = AsyncReturnValue::error(&XllError::Closing);
     // SAFETY: the test callback owns the async-return boundary and both
     // pointers remain live for the duration of the call.
