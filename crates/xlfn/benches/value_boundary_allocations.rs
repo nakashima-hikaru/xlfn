@@ -2,7 +2,10 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use xlfn::benchmark_support::{BenchHandleObject, RawArgumentIngressBenchmark};
+use xlfn::benchmark_support::{
+    BenchHandleObject, RawArgumentIngressBenchmark, SemanticIdentityBenchmark,
+    Utf16IdentityBenchmark,
+};
 use xlfn::output::XlArrayBuilder;
 
 const WARMUP_CALLS: usize = 100;
@@ -94,6 +97,33 @@ enum Status {
 }
 
 fn main() {
+    let text = Utf16IdentityBenchmark::new(&"日本語💡".repeat(80));
+    measure("identity/utf16_1k", || {
+        black_box(text.run());
+    });
+    let matrix = SemanticIdentityBenchmark::new(
+        xlfn::value::Matrix::new(1, 1_000, vec![42.0; 1_000]).unwrap(),
+    );
+    let single = measure("identity/matrix_1k", || {
+        black_box(matrix.run());
+    });
+    let multiple = measure("identity/eight_matrix_1k", || {
+        black_box(matrix.run_arguments(8));
+    });
+    assert_eq!(
+        multiple, single,
+        "hash workspace must be reused within a call"
+    );
+    for cells in [1, 1_000] {
+        measure(&format!("array{cells}/one_string_rest_numbers"), || {
+            let mut builder = XlArrayBuilder::new(1, cells).unwrap();
+            builder.push("Ready").unwrap();
+            for _ in 1..cells {
+                builder.push_f64(1.0).unwrap();
+            }
+            black_box(builder.finish().unwrap());
+        });
+    }
     let strings = measure("array1000/str", || {
         let mut builder = XlArrayBuilder::new(1, ARRAY_CELLS).unwrap();
         for _ in 0..ARRAY_CELLS {

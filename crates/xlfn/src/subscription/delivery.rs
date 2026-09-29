@@ -15,12 +15,26 @@ use rustc_hash::FxHashMap;
 use std::ptr::NonNull;
 use xlfn_kernel::quota::QuotaPermit;
 
+#[cfg(feature = "rtd")]
+pub(crate) type PublishBatch = smallvec::SmallVec<[StoredRtdValue; 32]>;
+
+#[cfg(feature = "rtd")]
+type PublishBatchFn = unsafe fn(
+    NonNull<()>,
+    TopicId,
+    ConnectionGeneration,
+    PublishBatch,
+    &std::sync::atomic::AtomicBool,
+) -> XllResult<()>;
+
 #[derive(Clone, Copy)]
 pub(crate) struct ErasedSink {
     publish_core: NonNull<()>,
     #[cfg(feature = "rtd")]
     services: NonNull<super::RuntimeServices>,
     publish: unsafe fn(NonNull<()>, TopicId, ConnectionGeneration, StoredRtdValue) -> XllResult<()>,
+    #[cfg(feature = "rtd")]
+    publish_batch: PublishBatchFn,
     pub(crate) topic_id: TopicId,
     pub(crate) connection_generation: ConnectionGeneration,
 }
@@ -44,11 +58,27 @@ impl ErasedSink {
             core.publish(topic_id, connection_generation, value)
         }
 
+        #[cfg(feature = "rtd")]
+        unsafe fn publish_batch_through<H: SubscriptionHost>(
+            core: NonNull<()>,
+            topic_id: TopicId,
+            generation: ConnectionGeneration,
+            values: PublishBatch,
+            stopping: &std::sync::atomic::AtomicBool,
+        ) -> XllResult<()> {
+            // SAFETY: same erased type and subscription lifetime as the
+            // scalar entry; the channel owns publication until batch exit.
+            let core = unsafe { core.cast::<PublishCore<H>>().as_ref() };
+            core.publish_batch(topic_id, generation, values, stopping)
+        }
+
         Self {
             publish_core: NonNull::from(publish).cast(),
             #[cfg(feature = "rtd")]
             services: NonNull::from(publish.services()),
             publish: publish_through::<H>,
+            #[cfg(feature = "rtd")]
+            publish_batch: publish_batch_through::<H>,
             topic_id,
             connection_generation,
         }
@@ -73,6 +103,25 @@ impl ErasedSink {
                 self.topic_id,
                 self.connection_generation,
                 value,
+            )
+        }
+    }
+
+    #[cfg(feature = "rtd")]
+    pub(crate) fn publish_batch(
+        &self,
+        values: PublishBatch,
+        stopping: &std::sync::atomic::AtomicBool,
+    ) -> XllResult<()> {
+        // SAFETY: construction fixes the core type. Channel teardown joins
+        // in-flight publication before relinquishing the sink capability.
+        unsafe {
+            (self.publish_batch)(
+                self.publish_core,
+                self.topic_id,
+                self.connection_generation,
+                values,
+                stopping,
             )
         }
     }

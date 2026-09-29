@@ -28,6 +28,7 @@
 - [Build and load an XLL](build-validation.md)
 - [Test your add-in](testing.md)
 - [Deployment and distribution](deployment.md)
+- [Compatibility and versioning](compatibility.md)
 
 # Help
 

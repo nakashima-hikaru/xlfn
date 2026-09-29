@@ -387,3 +387,13 @@ decode. The topology probe selector `XLFN_TOPOLOGY_PUBLISHERS=0` now runs the
 production generation pool (one publisher); positive values select the retained
 experimental sharded pool. Historical zero-selector measurements used the old
 per-subscription implementation, so compare using the recorded worker count.
+
+## Semantic identity regression fixtures
+
+`input_identity` includes short/long ASCII and Unicode UTF-16, sparse Unicode,
+the Excel string limit, and one/eight numeric matrix arguments. Input storage
+is prepared outside timing. `value_boundary_allocations` checks that eight
+large arguments reuse the same number of hash allocations as one argument;
+it also reports one-string/rest-numeric arrays to expose speculative arena
+reservation costs. See [the boundary and RTD review](../../../docs/PERFORMANCE.md)
+for paired measurements, rejected alternatives, and validation limits.

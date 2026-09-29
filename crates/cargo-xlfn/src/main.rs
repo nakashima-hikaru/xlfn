@@ -34,7 +34,7 @@ fn main() {
         }
     }
     if let Err(error) = run() {
-        eprintln!("cargo xlfn: {error}");
+        eprintln!("cargo xlfn: {error:#}");
         std::process::exit(1);
     }
 }

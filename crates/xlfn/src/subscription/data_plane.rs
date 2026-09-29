@@ -836,62 +836,136 @@ impl<H: SubscriptionHost> PublishCore<H> {
                 continue;
             }
 
-            let (committed, inserted) = {
-                let TopicShard {
-                    active_by_topic,
-                    pending: pending_buffers,
-                    ..
-                } = &mut *shard;
-                let active = active_by_topic
-                    .get_mut(&topic_id)
-                    .filter(|active| active.generation == generation)
-                    .ok_or(XllError::Closing)?;
-                if let Some(ValueSlot::Resident(latest)) = active.latest_slot_state()
-                    && latest.value == value
-                {
-                    return Ok(());
-                }
-                let conn_gen = active.generation;
-                let committed = active.committed;
-                let sequence = active.allocate_sequence()?;
-                let pending = &mut pending_buffers[buffer];
-                let pending_entry = pending.entry(topic_id);
-                let inserted = match pending_entry {
-                    indexmap::map::Entry::Occupied(mut entry) => {
-                        let existing = entry.get_mut();
-                        existing.connection_generation = conn_gen;
-                        existing.sequence = sequence;
-                        false
-                    }
-                    indexmap::map::Entry::Vacant(entry) => {
-                        // SAFETY: the runtime-owned queue quota outlives this
-                        // publish core and every queued-update permit.
-                        let permit = unsafe { Quota::try_acquire(self.queued_update_quota()) }
-                            .map_err(|_| XllError::Overloaded)?;
-                        entry.insert(QueuedUpdate {
-                            connection_generation: conn_gen,
-                            sequence,
-                            _permit: permit,
-                        });
-                        true
-                    }
-                };
-                active.values[buffer] = ValueSlot::Resident(VersionedRtdValue {
-                    generation: conn_gen,
-                    sequence,
-                    value,
-                });
-                active.latest_slot = Some(buffer as u8);
-                (committed, inserted)
-            };
-            if inserted {
-                self.record_pending_insert(&mut shard, shard_index, committed);
-            }
+            let committed = self.commit_value(&mut shard, buffer, topic_id, generation, value)?;
             break (epoch, committed);
         };
 
         if committed && let Some(attempt) = self.prepare_notification_for_known_update(epoch)? {
             self.drive_notification(attempt);
+        }
+        Ok(())
+    }
+
+    // Shared single-value commit keeps dedup, quotas, and sequence accounting
+    // identical for direct sinks and bounded channel batches.
+    // Only a changed value on a committed connection needs notification.
+    #[inline]
+    fn commit_value(
+        &self,
+        shard: &mut TopicShard,
+        buffer: usize,
+        topic_id: TopicId,
+        generation: ConnectionGeneration,
+        value: StoredRtdValue,
+    ) -> XllResult<bool> {
+        let (committed, inserted) = {
+            let TopicShard {
+                active_by_topic,
+                pending: pending_buffers,
+                ..
+            } = &mut *shard;
+            let active = active_by_topic
+                .get_mut(&topic_id)
+                .filter(|active| active.generation == generation)
+                .ok_or(XllError::Closing)?;
+            if let Some(ValueSlot::Resident(latest)) = active.latest_slot_state()
+                && latest.value == value
+            {
+                return Ok(false);
+            }
+            let conn_gen = active.generation;
+            let committed = active.committed;
+            let sequence = active.allocate_sequence()?;
+            let pending = &mut pending_buffers[buffer];
+            let pending_entry = pending.entry(topic_id);
+            let inserted = match pending_entry {
+                indexmap::map::Entry::Occupied(mut entry) => {
+                    let existing = entry.get_mut();
+                    existing.connection_generation = conn_gen;
+                    existing.sequence = sequence;
+                    false
+                }
+                indexmap::map::Entry::Vacant(entry) => {
+                    // SAFETY: the runtime-owned queue quota outlives this
+                    // publish core and every queued-update permit.
+                    let permit = unsafe { Quota::try_acquire(self.queued_update_quota()) }
+                        .map_err(|_| XllError::Overloaded)?;
+                    entry.insert(QueuedUpdate {
+                        connection_generation: conn_gen,
+                        sequence,
+                        _permit: permit,
+                    });
+                    true
+                }
+            };
+            active.values[buffer] = ValueSlot::Resident(VersionedRtdValue {
+                generation: conn_gen,
+                sequence,
+                value,
+            });
+            active.latest_slot = Some(buffer as u8);
+            (committed, inserted)
+        };
+        if inserted {
+            self.record_pending_insert(shard, shard_index(topic_id), committed);
+        }
+        Ok(committed)
+    }
+
+    /// Amortizes admission and shard locking over an already-notified FIFO
+    /// batch. A notification boundary always unlocks and calls the host before
+    /// the next value, preserving cancellation and reentrant refresh behavior.
+    #[cfg(feature = "rtd")]
+    pub(crate) fn publish_batch(
+        &self,
+        topic_id: TopicId,
+        generation: ConnectionGeneration,
+        values: super::delivery::PublishBatch,
+        stopping: &std::sync::atomic::AtomicBool,
+    ) -> XllResult<()> {
+        if values.is_empty() || stopping.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let _operation = self.enter_operation()?;
+        let mut values = values.into_iter();
+        while let Some(mut value) = values.next() {
+            let (epoch, notify) = loop {
+                self.ensure_open()?;
+                let epoch = self.publish_epoch.load(Ordering::Acquire);
+                let mut shard = self.shards[shard_index(topic_id)].lock();
+                if self.publish_epoch.load(Ordering::Acquire) != epoch {
+                    continue;
+                }
+                let notify = loop {
+                    if stopping.load(Ordering::Acquire) {
+                        return Ok(());
+                    }
+                    self.ensure_open()?;
+                    let committed = self.commit_value(
+                        &mut shard,
+                        (epoch & 1) as usize,
+                        topic_id,
+                        generation,
+                        value,
+                    )?;
+                    if committed && self.notified_epoch.load(Ordering::Acquire) != epoch {
+                        break true;
+                    }
+                    // Refresh may rotate its epoch without this shard lock.
+                    // Reacquire against the new epoch before the next value.
+                    if self.publish_epoch.load(Ordering::Acquire) != epoch {
+                        break false;
+                    }
+                    let Some(next) = values.next() else {
+                        return Ok(());
+                    };
+                    value = next;
+                };
+                break (epoch, notify);
+            };
+            if notify && let Some(attempt) = self.prepare_notification_for_known_update(epoch)? {
+                self.drive_notification(attempt);
+            }
         }
         Ok(())
     }

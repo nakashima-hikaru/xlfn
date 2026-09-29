@@ -1,0 +1,52 @@
+{
+  "nextest": {
+    "passed": 986,
+    "skipped": 11
+  },
+  "serialized_xlfn_all_features_libtest": {
+    "passed": 718,
+    "ignored": 10
+  },
+  "miri": {
+    "miri-stacked-miri_mixed_array_text": [
+      "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 428 filtered out; finished in 5.40s"
+    ],
+    "miri-stacked-miri_channel_cancel_discards_local_batch": [
+      "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 428 filtered out; finished in 8.90s"
+    ],
+    "miri-tree-miri_mixed_array_text": [
+      "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 428 filtered out; finished in 5.38s"
+    ],
+    "miri-tree-malformed_utf16": [
+      "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 428 filtered out; finished in 12.82s"
+    ],
+    "miri-stacked-batched_publish": [
+      "ok. 3 passed; 0 failed; 0 ignored; 0 measured; 426 filtered out; finished in 4.26s"
+    ],
+    "miri-stacked-reused_hash_workspace": [
+      "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 428 filtered out; finished in 34.92s"
+    ],
+    "miri-tree-batched_publish": [
+      "ok. 3 passed; 0 failed; 0 ignored; 0 measured; 426 filtered out; finished in 4.18s"
+    ],
+    "miri-stacked-malformed_utf16": [
+      "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 428 filtered out; finished in 12.81s"
+    ],
+    "miri-tree-miri_channel_cancel_discards_local_batch": [
+      "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 428 filtered out; finished in 8.96s"
+    ],
+    "miri-tree-reused_hash_workspace": [
+      "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 428 filtered out; finished in 34.92s"
+    ]
+  },
+  "miri_toolchain": "nightly-2026-08-22",
+  "miri_flags": "strict provenance for new tests; normal provenance for channel cancellation; Stacked and Tree Borrows",
+  "other_checks": [
+    "serialized workspace libtest",
+    "workspace all-targets all-features clippy",
+    "28 feature combinations",
+    "rustdoc -D warnings",
+    "fmt",
+    "panic boundaries: 50 reviewed references"
+  ]
+}

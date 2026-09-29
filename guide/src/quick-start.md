@@ -58,6 +58,7 @@ impl Addin for HelloXll {
 pub fn add(left: f64, right: f64) -> f64 {
     left + right
 }
+# fn main() {}
 ```
 
 - `HelloXll` defines the add-in entry point and its metadata.

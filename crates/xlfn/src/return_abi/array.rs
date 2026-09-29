@@ -232,6 +232,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn miri_mixed_array_text_survives_arena_growth_and_owner_moves() {
+        let texts = [String::new(), "日本語💡".to_owned(), "a".repeat(1_200)];
+        let mut builder = XlArrayBuilder::new(1, 15).unwrap();
+        for index in 0..15 {
+            if index % 4 == 0 {
+                builder.push_f64(index as f64).unwrap();
+            } else {
+                builder.push(texts[index % texts.len()].as_str()).unwrap();
+            }
+        }
+        let outputs = Box::new([builder.finish().unwrap()]);
+        for (index, cell) in outputs[0].cells.iter().enumerate() {
+            let value = crate::value::XlValueRef::from_array_cell(cell).unwrap();
+            if index % 4 == 0 {
+                assert_eq!(value.as_f64().unwrap(), index as f64);
+            } else {
+                assert_eq!(
+                    value.as_str().unwrap().to_string().unwrap(),
+                    texts[index % texts.len()]
+                );
+            }
+        }
+    }
+
+    #[test]
     fn rejected_string_push_does_not_create_storage() {
         let mut builder = XlArrayBuilder::new(1, 1).unwrap();
         builder.push(7.0).unwrap();

@@ -9,6 +9,7 @@ This chapter covers ordinary inputs, return values, and errors; use
 Apply `#[excel_function]` to a safe, non-generic free function:
 
 ```rust
+{{#include ../fixtures/addin.md}}
 use xlfn::prelude::*;
 
 #[excel_function(name = "MATH.HYPOT", thread_safe)]
@@ -32,6 +33,7 @@ Use `XllResult<T>` when the calculation can fail. It is an alias for
 `Result<T, XllError>`:
 
 ```rust
+{{#include ../fixtures/addin.md}}
 use xlfn::error::DomainErrorCode;
 use xlfn::prelude::*;
 
@@ -76,6 +78,8 @@ Rust doc comments on `#[excel_function]` automatically populate Excel's
 Function Wizard description. You can also specify metadata explicitly via attributes:
 
 ```rust
+{{#include ../fixtures/addin.md}}
+# use xlfn::prelude::*;
 /// Adds two numbers together.
 #[excel_function(
     name = "MATH.ADD",

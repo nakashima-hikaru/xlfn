@@ -78,16 +78,8 @@ jobs:
             - name: Verify release metadata and crate archives without publishing
               run: just package-check
 
-            - name: Build the user guide
-              run: mdbook build guide
-
-            - name: Validate rendered guide navigation
-              run: |
-                  python -B -m unittest discover -s guide -p 'test_check.py'
-                  python -B guide/check.py --html
-
-            - name: Validate the user guide
-              run: python guide/check.py
+            - name: Validate the user guide and compile its Rust examples
+              run: just guide-check
 
     rust-quality-windows:
         name: Rust ${{ matrix.check.name }} (windows-latest)
@@ -102,6 +94,8 @@ jobs:
                       command: just features
                     - name: tests
                       command: just test-ci
+                    - name: production feature tests
+                      command: just test-features
                     - name: handle model
                       command: >-
                           cargo test

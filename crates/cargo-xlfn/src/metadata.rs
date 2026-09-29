@@ -81,6 +81,15 @@ pub(crate) fn project_metadata(
                 .context("[package.metadata.xlfn] must be a table")
         })
         .transpose()?;
+    if let Some(metadata) = metadata {
+        for key in metadata.keys() {
+            if !matches!(key.as_str(), "artifact-name" | "crt" | "bundle") {
+                bail!(
+                    "unknown [package.metadata.xlfn] setting {key:?}; expected artifact-name, crt, or bundle"
+                );
+            }
+        }
+    }
     let metadata_crt = metadata
         .and_then(|value| value.get("crt"))
         .map(CrtPolicy::parse_metadata)

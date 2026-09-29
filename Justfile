@@ -140,11 +140,23 @@ test-async:
         -- \
         --test-threads=1
 
+# Exercise production feature selections without benchmark/refinement helpers.
+test-features:
+    cargo hack test \
+        --package xlfn \
+        --feature-powerset \
+        --exclude-features default,bench-internals,refinement \
+        --lib \
+        --locked \
+        -- \
+        --test-threads=1
+
+# Check every combination, including internal instrumentation interactions.
 features:
     cargo hack check \
         --package xlfn \
         --feature-powerset \
-        --depth 2 \
+        --exclude-features default \
         --lib \
         --locked
 
@@ -175,7 +187,14 @@ publish-check: package-check
 
 quick: fmt panic-boundaries clippy test
 
-check: fmt panic-boundaries clippy features test bench-check deny semver doc package-check
+# Validate the published guide and compile its examples against this checkout.
+guide-check:
+    python3 -B -m unittest discover -s guide -p 'test_*.py'
+    mdbook build guide
+    python3 -B guide/check.py --html
+    python3 -B guide/check_examples.py
+
+check: fmt panic-boundaries clippy features test test-features bench-check deny semver doc guide-check package-check
 
 # --- Benchmark recipes ---
 
