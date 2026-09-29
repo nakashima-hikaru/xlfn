@@ -261,6 +261,7 @@ enum RtdNotifierKind {
         callback: CallbackPtr,
         operations: NonNull<ServerOperationBarrier>,
     },
+    #[cfg(feature = "rtd")]
     Test(Arc<crate::rtd::test_support::TestNotifierState>),
 }
 
@@ -293,7 +294,7 @@ impl RtdNotifier {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "rtd"))]
     pub(crate) fn for_test(state: Arc<crate::rtd::test_support::TestNotifierState>) -> Self {
         Self {
             inner: RtdNotifierKind::Test(state),
@@ -324,6 +325,7 @@ impl RtdNotifier {
                     // SAFETY: callback.0 points to RetainedUpdateCallback pinned in ServerCallbacks.records.
                     unsafe { callback.0.as_ref() }.notify()
                 }
+                #[cfg(feature = "rtd")]
                 RtdNotifierKind::Test(state) => state.notify(),
             }
         }

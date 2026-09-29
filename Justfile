@@ -145,6 +145,7 @@ test-features:
     cargo hack test \
         --package xlfn \
         --feature-powerset \
+        --keep-going \
         --exclude-features default,bench-internals,refinement \
         --lib \
         --locked \
