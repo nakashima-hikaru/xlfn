@@ -34,25 +34,17 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install mdBook
+      - name: Install guide validation tools
         uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
         with:
-          tool: mdbook@0.5.4
+          tool: just,mdbook@0.5.4
           fallback: none
 
-      - name: Validate the user guide
-        run: python guide/check.py
+      - name: Build and validate the user guide and its Rust examples
+        run: just guide-check
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
-
-      - name: Build the user guide
-        run: mdbook build guide
-
-      - name: Validate rendered navigation and assets
-        run: |
-          python -B -m unittest discover -s guide -p 'test_check.py'
-          python -B guide/check.py --html
 
       - name: Upload the Pages artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
