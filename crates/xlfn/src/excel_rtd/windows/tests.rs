@@ -6,10 +6,14 @@
 use super::server::shutdown_subscriptions;
 use super::*;
 
+#[cfg(feature = "rtd")]
+use crate::XllResult;
 use crate::handle::FormulaLifetimeBackend;
 #[cfg(feature = "rtd")]
 use crate::subscription::{RtdSink, RtdSource, RtdSubscription, RtdTopic};
 use crate::subscription::{RtdUpdate, StoredRtdValue};
+#[cfg(feature = "rtd")]
+use crate::sync::Mutex;
 use std::marker::PhantomData;
 use std::ptr;
 use std::rc::Rc;
