@@ -162,7 +162,7 @@ impl SharedTopic {
             if self.stopped.load(Ordering::Acquire) {
                 break;
             }
-            if let Err(failure) = sink.publish_stored(value) {
+            if let Err(failure) = sink.erased().publish_stored(value) {
                 error = Some(failure);
                 self.stopped.store(true, Ordering::Release);
                 break;

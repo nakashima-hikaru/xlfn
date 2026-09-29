@@ -18,6 +18,8 @@ use xlfn::cache::{
 `CalculationCache<K, V>` is a concurrent weighted cache with a bounded resident budget and caller-defined entry weights:
 
 ```rust
+# use xlfn::cache::CalculationCache;
+# fn example() -> xlfn::XllResult<()> {
 let cache = CalculationCache::<String, String>::new(1024);
 let value = cache.get_or_try_insert_with(
     "abc".to_owned(),
@@ -25,6 +27,8 @@ let value = cache.get_or_try_insert_with(
     || Ok("ABC".to_owned()),
 )?;
 assert_eq!(&*value, "ABC");
+# Ok(())
+# }
 ```
 
 This small example uses string length as weight. In an application, replace
@@ -49,6 +53,8 @@ collection indices and admission-domain counters retain their existing types.
 `CacheRegistry` creates caches lazily for static endpoints:
 
 ```rust
+# use xlfn::prelude::*;
+# use xlfn::cache::{CacheEndpoint, CacheLease, CacheRegistry};
 static UPPERCASE: CacheEndpoint<String, String> = CacheEndpoint::new("uppercase-v1");
 
 struct State {
@@ -74,12 +80,16 @@ fn uppercase<'a>(state: &'a State, text: String) -> XllResult<CacheLease<'a, Str
 You can also perform operations directly through the endpoint descriptor:
 
 ```rust
+# fn example() -> xlfn::XllResult<()> {
+{{#include ../fixtures/cache.md}}
 UPPERCASE.get_or_try_insert(
     &state.caches,
     text.clone(),
     String::len,
     || Ok(text.to_uppercase()),
 )?;
+# Ok(())
+# }
 ```
 
 `CacheEndpoint<K, V, Marker = ()>` is a reusable descriptor. It borrows no
@@ -94,7 +104,8 @@ share cached values.
 Use versioned IDs when a cached value's meaning changes:
 
 ```rust
-CacheEndpoint::new("uppercase-v2")
+# use xlfn::cache::CacheEndpoint;
+static UPPERCASE: CacheEndpoint<String, String> = CacheEndpoint::new("uppercase-v2");
 ```
 
 Changing an algorithm without changing the endpoint or key can silently reuse a value produced under old semantics in a long-lived Excel process.
@@ -104,6 +115,8 @@ Changing an algorithm without changing the endpoint or key can silently reuse a 
 Do not use raw `f64` as an ordinary hash key. `CanonicalF64` rejects NaN and infinity and normalizes signed zero:
 
 ```rust
+# use xlfn::cache::CanonicalF64;
+# fn example(x: f64, y: f64) -> xlfn::XllResult<()> {
 #[derive(Clone, Eq, Hash, PartialEq)]
 struct QueryKey {
     x: CanonicalF64,
@@ -114,6 +127,8 @@ let key = QueryKey {
     x: CanonicalF64::new(x)?,
     y: CanonicalF64::new(y)?,
 };
+# Ok(())
+# }
 ```
 
 This solves basic finite-value hashing; it does not define a tolerance. When approximate equality is a domain requirement, quantize explicitly and document the error bound.
@@ -123,6 +138,7 @@ This solves basic finite-value hashing; it does not define a tolerance. When app
 `clear()` advances a generation and invalidates older entries. In-flight computations that began before the clear may finish and return to their caller, but they cannot repopulate the new generation with stale results.
 
 ```rust
+{{#include ../fixtures/cache.md}}
 state.caches.clear();
 ```
 

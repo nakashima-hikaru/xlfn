@@ -73,7 +73,10 @@ pub use cache::{
     benchmark_cache_backend, cache_backend_debt_probe,
 };
 pub use call_resolution::{ConcurrentHandleResolutionBenchmark, MultiHandleCallBenchmark};
-pub use formula::{BenchmarkInputIdentity, FormulaRevisionBenchmark, SemanticIdentityBenchmark};
+pub use formula::{
+    BenchmarkInputIdentity, FormulaRevisionBenchmark, SemanticIdentityBenchmark,
+    Utf16IdentityBenchmark,
+};
 pub use formula_caller::{FormulaCallerBenchCase, FormulaCallerBenchmark};
 pub use handle::{
     BenchHandleObject, HandleColdBatch, HandleColdGrowthBenchmark, HandleRevisionChurnBenchmark,

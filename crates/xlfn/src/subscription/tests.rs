@@ -177,6 +177,106 @@ fn rtd_capacity_distinguishes_disabled_and_bounded_limits() {
 }
 
 #[test]
+fn batched_publish_preserves_dedup_sequences_and_older_refresh_completion() {
+    let (_runtime, server, sink) = connected_sink::<i32>(None, "batched-sequence");
+    let notifier = Arc::new(TestNotifierState::new());
+    server
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&notifier)))
+        .unwrap();
+    let stopping = AtomicBool::new(false);
+    let publish = |values: &[i32]| {
+        sink.erased()
+            .publish_batch(
+                values
+                    .iter()
+                    .copied()
+                    .map(StoredRtdValue::Integer)
+                    .collect(),
+                &stopping,
+            )
+            .unwrap();
+    };
+    publish(&[1, 1, 2, 2, 3]);
+    assert_eq!(notifier.calls.load(Ordering::Acquire), 1);
+    assert_eq!(server.test_server().publish.queued_update_count(), 1);
+    let first = server.begin_refresh().unwrap();
+    assert_eq!(first.updates[0].sequence, 2);
+    assert_eq!(first.updates[0].value, StoredRtdValue::Integer(3));
+    publish(&[4, 4, 5]);
+    first.complete(RefreshOutcome::Delivered).unwrap();
+    let second = server.begin_refresh().unwrap();
+    assert_eq!(second.updates[0].sequence, 4);
+    assert_eq!(second.updates[0].value, StoredRtdValue::Integer(5));
+    second.complete(RefreshOutcome::Delivered).unwrap();
+    assert_eq!(server.test_server().publish.queued_update_count(), 0);
+    stopping.store(true, Ordering::Release);
+    publish(&[6, 7]);
+    assert_eq!(server.pending_update_count(), 0);
+}
+
+#[test]
+fn batched_publish_rechecks_epoch_after_refresh_during_notification() {
+    let (_runtime, server, sink) = connected_sink::<i32>(None, "batch-reentrant-refresh");
+    let notifier = Arc::new(TestNotifierState::new());
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    *notifier.entered.lock() = Some(entered_tx);
+    *notifier.release.lock() = Some(release_rx);
+    server
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&notifier)))
+        .unwrap();
+    let publisher = std::thread::spawn(move || {
+        sink.erased().publish_batch(
+            [StoredRtdValue::Integer(1), StoredRtdValue::Integer(2)]
+                .into_iter()
+                .collect(),
+            &AtomicBool::new(false),
+        )
+    });
+    for value in [1, 2] {
+        entered_rx.recv().unwrap();
+        let refresh = server.begin_refresh().unwrap();
+        assert_eq!(refresh.updates.len(), 1);
+        assert_eq!(refresh.updates[0].value, StoredRtdValue::Integer(value));
+        refresh.complete(RefreshOutcome::Delivered).unwrap();
+        release_tx.send(()).unwrap();
+    }
+    publisher.join().unwrap().unwrap();
+    assert_eq!(notifier.calls.load(Ordering::Acquire), 2);
+    assert_eq!(server.test_server().publish.queued_update_count(), 0);
+}
+
+#[test]
+fn batched_publish_overflow_keeps_the_accepted_prefix_deliverable() {
+    let (_runtime, server, sink) = connected_sink::<i32>(None, "batch-overflow");
+    {
+        let mut shard = server.test_server().publish.lock_shard_for_test(1);
+        shard
+            .active_by_topic
+            .get_mut(&TopicId(1))
+            .unwrap()
+            .next_sequence = u64::MAX - 1;
+    }
+    let result = sink.erased().publish_batch(
+        [StoredRtdValue::Integer(1), StoredRtdValue::Integer(2)]
+            .into_iter()
+            .collect(),
+        &AtomicBool::new(false),
+    );
+    assert!(matches!(
+        result,
+        Err(XllError::Internal {
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::REFERENCE_OVERFLOW,
+        })
+    ));
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates[0].sequence, u64::MAX - 1);
+    assert_eq!(batch.updates[0].value, StoredRtdValue::Integer(1));
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+    assert_eq!(server.test_server().publish.queued_update_count(), 0);
+}
+
+#[test]
 fn server_publish_isolation() {
     let fixture = SourceFixture::new();
     let (source_a, _sink_a, _) = fixture.add(Some(1.0f64));

@@ -34,6 +34,46 @@ cargo xlfn check --target x86_64-pc-windows-msvc --features async --locked
 
 The default profile is `dev` and the default CRT policy is `static`.
 
+`--features` accepts comma- or whitespace-separated feature names. Repeated
+names are normalized in the build manifest. `--no-default-features`,
+`--all-features`, `--locked`, `--offline`, and `--frozen` apply to both dependency
+resolution and the actual build. Use `--package` to select a member of a virtual
+workspace, or `--manifest-path` to select its manifest.
+
+## Configure the package
+
+Set the output basename and companion files in the add-in's `Cargo.toml`:
+
+```toml
+[package.metadata.xlfn]
+artifact-name = "AppTools"
+crt = "static"
+
+[package.metadata.xlfn.bundle]
+x86 = ["native/win-x86/engine.dll"]
+x64 = ["native/win-x64/engine.dll"]
+```
+
+`artifact-name` defaults to the Cargo package name. Use a portable ASCII Windows
+basename and omit the `.xll` extension, which the CLI adds. Configured bundle
+paths are relative to the package manifest directory and are staged by basename
+beside the XLL. Only list files your add-in actually needs. Basename collisions,
+unknown settings, and malformed values are errors.
+
+`crt` accepts `static`, `dynamic`, or `inherit`; `--crt` overrides the manifest.
+The default `static` policy applies to target Rust crates. Companion DLLs retain
+their own runtime requirements. With `dynamic`, deploy the matching Microsoft
+VC runtime. `inherit` leaves the Rust CRT choice to the build configuration and
+records the observed result. Build caches are separated by CRT policy.
+
+Bundle `strict-paths` defaults to `true` and rejects linked path components.
+Setting it to `false` allows links within the package directory; absolute paths,
+parent traversal, and links escaping that directory are still rejected.
+`external-imports = ["engine.dll"]`
+declares dependencies supplied by the installation environment instead of the
+bundle; it does not locate, install, or validate those external DLLs. Prefer
+bundling dependencies when possible.
+
 ## Release packaging
 
 Create the directory that you will load or distribute:
@@ -46,7 +86,7 @@ cargo xlfn package --target x86_64-pc-windows-msvc --locked
 
 ```text
 package/win-x64/
-├── AppTools.xll
+├── <artifact-name>.xll
 ├── build-manifest.json
 └── configured sidecar files
 ```

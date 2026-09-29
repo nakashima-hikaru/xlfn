@@ -40,6 +40,7 @@ Use an owned `Matrix<T>` for rectangular input or output. It can outlive an
 exported call and is suitable when an async function needs owned input.
 
 ```rust
+{{#include ../fixtures/addin.md}}
 use xlfn::prelude::*;
 
 #[excel_function(name = "ARRAY.SCALE", thread_safe)]
@@ -66,6 +67,7 @@ from workbook input.
 eagerly. Cell headers are validated on admission; payload conversion is lazy.
 
 ```rust
+{{#include ../fixtures/addin.md}}
 use xlfn::prelude::*;
 use xlfn::value::XlArrayRef;
 
@@ -85,6 +87,7 @@ When an output is large or produced one cell at a time, `XlArrayBuilder`
 writes the result without an intermediate owned matrix.
 
 ```rust
+{{#include ../fixtures/addin.md}}
 use xlfn::prelude::*;
 use xlfn::output::{XlArrayBuilder, XlArrayOutput};
 use xlfn::value::XlArrayRef;
@@ -109,6 +112,7 @@ return-storage limits.
 column. Both reject a genuinely two-dimensional array.
 
 ```rust
+{{#include ../fixtures/addin.md}}
 use xlfn::prelude::*;
 
 #[excel_function(name = "ARRAY.CUMSUM", thread_safe)]
@@ -146,6 +150,8 @@ When the user leaves an argument blank or passes an empty cell, the parameter
 receives `None`:
 
 ```rust
+{{#include ../fixtures/addin.md}}
+# use xlfn::prelude::*;
 #[excel_function(name = "CALC.SCALE", thread_safe)]
 fn scale(value: f64, factor: Option<f64>) -> f64 {
     value * factor.unwrap_or(1.0)

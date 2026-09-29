@@ -39,6 +39,7 @@ fn scale(
 ) -> f64 {
     value * context.state().scale
 }
+# fn main() {}
 ```
 
 Use the `Addin` implementation on the type declared by your project's
@@ -62,10 +63,13 @@ An error or panic during `Addin::open` prevents the add-in from completing regis
 default runtime settings. Add the pieces that your application needs:
 
 ```rust
-Opened::new(shared_state)
+# use xlfn::prelude::*;
+# let (shared_state, lifecycle_state, layers) = ((), (), ());
+# let runtime_config = xlfn::RuntimeConfig::new();
+let opened = Opened::new(shared_state)
     .with_lifecycle(lifecycle_state)
     .with_layers(layers)
-    .with_runtime_config(runtime_config)
+    .with_runtime_config(runtime_config);
 ```
 
 A thread-affine resource belongs in `LifecycleState`. Expose a safe,
@@ -99,6 +103,7 @@ lock or another synchronization mechanism appropriate to the application:
 
 ```rust
 use std::sync::RwLock;
+# struct Settings;
 
 struct SharedState {
     settings: RwLock<Settings>,

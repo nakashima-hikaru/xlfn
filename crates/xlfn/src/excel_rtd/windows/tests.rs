@@ -3,12 +3,17 @@
     reason = "Windows RTD tests implement the audited non-owning subscription lifetime contract"
 )]
 
+use super::server::shutdown_subscriptions;
 use super::*;
 
+#[cfg(feature = "rtd")]
+use crate::XllResult;
 use crate::handle::FormulaLifetimeBackend;
-use crate::subscription::{
-    RtdSink, RtdSource, RtdSubscription, RtdTopic, RtdUpdate, StoredRtdValue,
-};
+#[cfg(feature = "rtd")]
+use crate::subscription::{RtdSink, RtdSource, RtdSubscription, RtdTopic};
+use crate::subscription::{RtdUpdate, StoredRtdValue};
+#[cfg(feature = "rtd")]
+use crate::sync::Mutex;
 use std::marker::PhantomData;
 use std::ptr;
 use std::rc::Rc;
@@ -1197,12 +1202,14 @@ fn get_test_class_factory(active: &ActiveServer) -> TestClassFactory {
     TestClassFactory(NonNull::new(output.cast()).expect("DllGetClassObject returned null factory"))
 }
 
+#[cfg(feature = "rtd")]
 struct DispatchTestSubscription {
     sink: Arc<Mutex<Option<RtdSink<f64>>>>,
     disconnected: Arc<AtomicBool>,
 }
 
 // SAFETY: DispatchTestSubscription is a mock subscription for testing.
+#[cfg(feature = "rtd")]
 unsafe impl RtdSubscription for DispatchTestSubscription {
     fn request_cancel(&self) {}
 
@@ -1213,12 +1220,14 @@ unsafe impl RtdSubscription for DispatchTestSubscription {
     }
 }
 
+#[cfg(feature = "rtd")]
 #[derive(Clone)]
 struct DispatchTestSource {
     sink: Arc<Mutex<Option<RtdSink<f64>>>>,
     disconnected: Arc<AtomicBool>,
 }
 
+#[cfg(feature = "rtd")]
 impl DispatchTestSource {
     fn new(disconnected: Arc<AtomicBool>) -> Self {
         Self {
@@ -1240,6 +1249,7 @@ impl DispatchTestSource {
 
 // SAFETY: the test source stores the sink in its shared slot, and the returned
 // subscription clears that slot before disconnect completes.
+#[cfg(feature = "rtd")]
 unsafe impl RtdSource for DispatchTestSource {
     type Value = f64;
     type Subscription = DispatchTestSubscription;
@@ -2421,6 +2431,7 @@ fn idispatch_validates_flags_counts_types_and_reversed_arguments() {
 }
 
 #[test]
+#[cfg(feature = "rtd")]
 fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
     let _guard = TEST_LOCK.lock().unwrap();
     let disconnected = Arc::new(AtomicBool::new(false));
@@ -2679,6 +2690,7 @@ fn existing_server_attaches_each_backend_without_replacement() {
 }
 
 #[test]
+#[cfg(feature = "rtd")]
 fn repeated_ensure_server_calls_do_not_rearm_subscription_notifications() {
     let _guard = TEST_LOCK.lock().unwrap();
     let (arena, source, sink, _) = crate::subscription::tests::publishing_source::<f64>(None);

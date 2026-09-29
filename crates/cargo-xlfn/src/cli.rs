@@ -92,13 +92,16 @@ pub(crate) struct BuildSelectionArgs {
 
 impl BuildSelectionArgs {
     pub(crate) fn normalized_features(&self) -> Vec<String> {
-        self.features
+        let mut features = self
+            .features
             .iter()
             .flat_map(|f| f.split(','))
-            .map(str::trim)
-            .filter(|f| !f.is_empty())
+            .flat_map(str::split_whitespace)
             .map(str::to_owned)
-            .collect()
+            .collect::<Vec<_>>();
+        features.sort_unstable();
+        features.dedup();
+        features
     }
 
     pub(crate) fn apply_to_command(&self, command: &mut Command, default_profile: Option<&str>) {

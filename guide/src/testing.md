@@ -11,6 +11,8 @@ function. To keep calculations easily testable without mock Excel environments,
 keep the core computation in pure Rust functions:
 
 ```rust
+{{#include ../fixtures/addin.md}}
+# use xlfn::prelude::*;
 pub fn compute_hypot(x: f64, y: f64) -> f64 {
     x.hypot(y)
 }

@@ -32,6 +32,7 @@ The examples below assume `use xlfn::prelude::*;` and an add-in named
 ## Main-thread context
 
 ```rust
+{{#include ../fixtures/app.md}}
 #[excel_function(name = "APP.ENVIRONMENT")]
 fn environment(
     #[excel_context(main_thread)] context: MainThreadContext<'_, AppTools>,
@@ -47,6 +48,7 @@ Do not combine a main-thread context with `thread_safe`.
 ## Thread-safe context
 
 ```rust
+{{#include ../fixtures/app.md}}
 #[excel_function(name = "APP.VERSION")]
 fn version(
     #[excel_context(thread_safe)] context: ThreadSafeContext<'_, AppTools>,
@@ -66,6 +68,9 @@ Do not move call-scoped Excel values, raw references, or callback capabilities t
 ## Macro-sheet context
 
 ```rust
+{{#include ../fixtures/app.md}}
+use xlfn::reference::ExcelReference;
+
 #[excel_function(name = "APP.RANGE.NAME")]
 fn range_name(
     #[excel_context(macro_sheet)] context: MacroSheetContext<'_, AppTools>,
@@ -86,6 +91,7 @@ The `macro_sheet` attribute flag on `#[excel_function(macro_sheet)]` selects mac
 ## Asynchronous context
 
 ```rust
+{{#include ../fixtures/app.md}}
 #[excel_function(name = "APP.SLOW")]
 async fn slow(
     #[excel_context(asynchronous)] context: AsyncContext<'_, AppTools>,

@@ -1,0 +1,28 @@
+{
+  "baseline": [
+    "identity/utf16_1k: calls=10000 Counts { allocations: 10000, deallocations: 10000, reallocations: 0, requested_bytes: 60240000 }",
+    "identity/matrix_1k: calls=10000 Counts { allocations: 10000, deallocations: 10000, reallocations: 0, requested_bytes: 60240000 }",
+    "identity/eight_matrix_1k: calls=10000 Counts { allocations: 80000, deallocations: 80000, reallocations: 0, requested_bytes: 481920000 }",
+    "array1/one_string_rest_numbers: calls=10000 Counts { allocations: 20000, deallocations: 20000, reallocations: 0, requested_bytes: 5280000 }",
+    "array1000/one_string_rest_numbers: calls=10000 Counts { allocations: 20000, deallocations: 20000, reallocations: 0, requested_bytes: 324960000 }",
+    "array1000/str: calls=10000 Counts { allocations: 60000, deallocations: 60000, reallocations: 0, requested_bytes: 477920000 }",
+    "array1000/enum: calls=10000 Counts { allocations: 60000, deallocations: 60000, reallocations: 0, requested_bytes: 477920000 }",
+    "f64/plain: calls=10000 Counts { allocations: 0, deallocations: 0, reallocations: 0, requested_bytes: 0 }",
+    "handle/plain: calls=10000 Counts { allocations: 0, deallocations: 0, reallocations: 0, requested_bytes: 0 }",
+    "handle/with_identity: calls=10000 Counts { allocations: 0, deallocations: 0, reallocations: 0, requested_bytes: 0 }",
+    "handle/async_pending: calls=10000 Counts { allocations: 0, deallocations: 0, reallocations: 0, requested_bytes: 0 }"
+  ],
+  "candidate": [
+    "identity/utf16_1k: calls=10000 Counts { allocations: 10000, deallocations: 10000, reallocations: 0, requested_bytes: 60240000 }",
+    "identity/matrix_1k: calls=10000 Counts { allocations: 10000, deallocations: 10000, reallocations: 0, requested_bytes: 60240000 }",
+    "identity/eight_matrix_1k: calls=10000 Counts { allocations: 10000, deallocations: 10000, reallocations: 0, requested_bytes: 60240000 }",
+    "array1/one_string_rest_numbers: calls=10000 Counts { allocations: 20000, deallocations: 20000, reallocations: 0, requested_bytes: 5280000 }",
+    "array1000/one_string_rest_numbers: calls=10000 Counts { allocations: 20000, deallocations: 20000, reallocations: 0, requested_bytes: 324960000 }",
+    "array1000/str: calls=10000 Counts { allocations: 60000, deallocations: 60000, reallocations: 0, requested_bytes: 477920000 }",
+    "array1000/enum: calls=10000 Counts { allocations: 60000, deallocations: 60000, reallocations: 0, requested_bytes: 477920000 }",
+    "f64/plain: calls=10000 Counts { allocations: 0, deallocations: 0, reallocations: 0, requested_bytes: 0 }",
+    "handle/plain: calls=10000 Counts { allocations: 0, deallocations: 0, reallocations: 0, requested_bytes: 0 }",
+    "handle/with_identity: calls=10000 Counts { allocations: 0, deallocations: 0, reallocations: 0, requested_bytes: 0 }",
+    "handle/async_pending: calls=10000 Counts { allocations: 0, deallocations: 0, reallocations: 0, requested_bytes: 0 }"
+  ]
+}

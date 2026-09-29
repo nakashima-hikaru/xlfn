@@ -6,15 +6,11 @@
 #[cfg(test)]
 use crate::XllError;
 #[cfg(test)]
-use crate::XllResult;
-#[cfg(test)]
 use crate::handle::FormulaHandleService;
 #[cfg(test)]
 use crate::subscription::RtdValue;
 #[cfg(test)]
 use crate::subscription::SubscriptionRuntime;
-#[cfg(test)]
-use crate::sync::Mutex;
 #[cfg(test)]
 use crate::win32::{CO_E_SERVER_STOPPING, E_UNEXPECTED};
 use crate::win32::{GUID, S_OK};

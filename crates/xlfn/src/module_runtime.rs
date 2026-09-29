@@ -363,7 +363,7 @@ pub(crate) fn close_callbacks_for_test() {
     MODULE_RUNTIME.close_callbacks_internal();
 }
 
-#[cfg(all(test, target_os = "windows"))]
+#[cfg(all(test, target_os = "windows", any(feature = "rtd", feature = "handles")))]
 pub(crate) fn certify_quiescence_for_test() {
     let closing = begin_open().rollback(|| {});
     let drained = closing.seal_and_drain();

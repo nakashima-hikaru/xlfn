@@ -400,7 +400,7 @@ impl Channel {
                     !this.panic_publish.swap(false, Ordering::Relaxed),
                     "injected publisher panic"
                 );
-                let mut batch = smallvec::SmallVec::<[StoredRtdValue; 32]>::new();
+                let mut batch = super::delivery::PublishBatch::new();
                 {
                     let mut state = this.state.lock();
                     if !state.stopping {
@@ -412,13 +412,7 @@ impl Channel {
                         }
                     }
                 }
-                for value in batch {
-                    if this.stopping.load(Ordering::Acquire) {
-                        break;
-                    }
-                    sink.publish_stored(value)?;
-                }
-                Ok(())
+                sink.publish_batch(batch, &this.stopping)
             }))
             .unwrap_or(Err(XllError::Panic));
             if result.is_err() {

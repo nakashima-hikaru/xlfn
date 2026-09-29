@@ -74,7 +74,7 @@ jobs:
             echo "::warning::Set the BENCHER_API_KEY secret and BENCHER_PROJECT repository variable to publish benchmark history."
           fi
 
-      - name: Track benchmarks with Bencher (main / nightly)
+      - name: Track benchmarks with Bencher (branch / nightly)
         if: steps.bencher-config.outputs.enabled == 'true' && github.event_name != 'pull_request'
         shell: bash
         env:
@@ -85,7 +85,7 @@ jobs:
           bencher run \
             --project "$BENCHER_PROJECT" \
             --key "$BENCHER_API_KEY" \
-            --branch main \
+            --branch "$GITHUB_REF_NAME" \
             --testbed "$BENCHER_TESTBED" \
             --adapter rust_criterion \
             --github-actions "$GITHUB_TOKEN" \

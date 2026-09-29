@@ -1,0 +1,25 @@
+{
+  "revision": "4092109cd6d2222fd83d1c4f81373a14da2830d8",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: aarch64-apple-darwin\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+  "host": "macOS arm64",
+  "binaries": {
+    "baseline": {
+      "input_identity": "e3c97144451614c29551c4730bb7b50a100688e92c6b71a801d0e7543b2e5167",
+      "rtd_publish": "26f52d7b0a1f247113d49ea16d4086874c01b5f7657fc5710f9a9c849dd15ee3",
+      "value_boundary_allocations": "9d98b46f3177c76b7f6e5947192aea29f492967cc793fea5a25c2fd402732a09",
+      "two_phase_ingress": "6fc397cd710ef1dfd174288a310c47d68802a40de729b5804ea23efd7d3cccf6"
+    },
+    "candidate": {
+      "input_identity": "a9729bd4766a2cc5f39681f4b6375c2b9f7a79c8584b7e21892237bf372bd426",
+      "rtd_publish": "cca979f149ab70d7f05ee4a829110794ec107339c421ca82a4855e46bebd0901",
+      "value_boundary_allocations": "bef9eb298101c5827c7cdcdf0eb40a61a5e007d331aae176549951377539c10f",
+      "two_phase_ingress": "1e98919d877ec07e49d69d658af4d29640e43a22662df522770651ce20e7f8e5"
+    }
+  },
+  "production_source_sha256": {
+    "crates/xlfn/src/input_identity.rs": "af1ac5660baa5e1e50f106428e5511e247d3d9b77abfc0c7de559abfbf6058ee",
+    "crates/xlfn/src/subscription/data_plane.rs": "4da74a1193ed7322e2b8c2ba4a83df0a80eca2e6b19e55d6eea4b0e037482038",
+    "crates/xlfn/src/subscription/channel.rs": "a12a44788c9da299322e28fcac196350d3cc049e5a58ddd5bccaad390eaa350b",
+    "crates/xlfn/src/subscription/delivery.rs": "97fff662a37614a0409bd14b82d38013ff97be63d8335ddbb69013e8e6a01980"
+  }
+}

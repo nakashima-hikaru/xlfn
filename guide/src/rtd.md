@@ -71,18 +71,28 @@ RTD does not transport arrays. Publish a handle or another scalar identity and e
 ## Define a topic
 
 ```rust
+{{#include ../fixtures/app.md}}
+# use xlfn::rtd::{RtdSource, RtdSourceHandle};
+# fn example<S: RtdSource>(context: MainThreadContext<'_, AppTools>, source_handle: RtdSourceHandle<S>, topic: String, metric: String) -> XllResult<()> {
 let parts = [
     "events",
     topic.as_str(),
     metric.as_str(),
 ];
 context.rtd().subscribe(&source_handle, &parts)?;
+# Ok(())
+# }
 ```
 
 For one part:
 
 ```rust
+{{#include ../fixtures/app.md}}
+# use xlfn::rtd::{RtdSource, RtdSourceHandle};
+# fn example<S: RtdSource>(context: MainThreadContext<'_, AppTools>, source_handle: RtdSourceHandle<S>) -> XllResult<()> {
 context.rtd().subscribe(&source_handle, &["service-health"])?;
+# Ok(())
+# }
 ```
 
 Topic parts identify the subscription. Use stable, canonical values rather than
@@ -125,8 +135,9 @@ During disconnect, the channel stops accepting values, discards queued
 updates, waits for in-flight publication, revokes its sink, and joins its
 producer. The generation joins the shared publisher after all subscriptions
 have disconnected. Sender clones may outlive the
-subscription, but can only return `XllError::Closing`; they retain no live RTD
-capability or queued payloads. Producer captures belong to that job and are
+subscription, but valid sends return `RtdSendError::Closed`; conversion errors
+can still return `RtdSendError::Invalid`. They retain no live RTD capability or
+queued payloads. Producer captures belong to that job and are
 dropped before its worker is joined. Dropping the source configuration does
 not stop or destroy a running job.
 

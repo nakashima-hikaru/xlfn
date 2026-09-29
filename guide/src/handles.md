@@ -11,6 +11,7 @@ caller and run on Excel's main thread. For alternatives, see
 Return an owned object from the producer and accept `Handle<'_, T>` in consumers:
 
 ```rust
+{{#include ../fixtures/addin.md}}
 use xlfn::{error::InputError, prelude::*};
 
 #[derive(ExcelHandleObject)]
@@ -80,6 +81,7 @@ If a custom argument type is used by a handle producer, implement
 A function may explicitly republish an existing handle through `HandleAlias`:
 
 ```rust
+{{#include ../fixtures/dataset.md}}
 #[excel_function(name = "DATASET.ALIAS")]
 fn alias(dataset: Handle<'_, Dataset>) -> HandleAlias<'_, Dataset> {
     dataset.alias()
@@ -95,6 +97,7 @@ returned or stored after the call.
 An async UDF that needs an existing object accepts a generation-scoped lease:
 
 ```rust
+{{#include ../fixtures/dataset.md}}
 #[excel_function(name = "DATASET.ASYNC.EVALUATE")]
 async fn async_evaluate(
     dataset: HandleLease<'_, Dataset>,

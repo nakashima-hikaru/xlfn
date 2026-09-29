@@ -57,6 +57,7 @@ enum ArgumentIdentity {
 
 pub struct InputIdentityEncoder {
     sink: ArgumentSink,
+    spare: Option<Box<HashedArgument>>,
     error: Option<XllError>,
     argument: &'static str,
 }
@@ -68,6 +69,7 @@ impl InputIdentityEncoder {
                 bytes: [0; INLINE_ARGUMENT_BYTES],
                 len: 0,
             },
+            spare: None,
             error: None,
             argument,
         }
@@ -90,19 +92,32 @@ impl InputIdentityEncoder {
     }
 
     /// The same UTF-8 framing as `string`, without an
-    /// owned string. Validate before writing the length-prefixed payload.
+    /// owned string. The unit-wise length plan avoids decoding surrogate
+    /// pairs twice; strict decoding below rejects malformed text before the
+    /// argument fingerprint can be completed.
     pub(crate) fn semantic_utf16(&mut self, units: &[u16]) -> XllResult<()> {
-        let mut length = 0;
-        for ch in char::decode_utf16(units.iter().copied()) {
-            length += ch
-                .map_err(|_| XllError::input(self.argument, InputError::InvalidUtf16))?
-                .len_utf8();
-        }
+        let length = crate::utf16::Utf16Decoder::new(units).utf8_len();
         self.u64(length as u64);
         let mut buffer = [0_u8; 256];
+        if length == units.len() {
+            for chunk in units.chunks(buffer.len()) {
+                for (byte, &unit) in buffer.iter_mut().zip(chunk) {
+                    *byte = unit as u8;
+                }
+                self.write(&buffer[..chunk.len()]);
+            }
+            return Ok(());
+        }
         let mut used = 0;
         for ch in char::decode_utf16(units.iter().copied()) {
-            let ch = ch.map_err(|_| XllError::input(self.argument, InputError::InvalidUtf16))?;
+            let ch = match ch {
+                Ok(ch) => ch,
+                Err(_) => {
+                    let error = XllError::input(self.argument, InputError::InvalidUtf16);
+                    self.fail(error.clone());
+                    return Err(error);
+                }
+            };
             if buffer.len() - used < 4 {
                 self.write(&buffer[..used]);
                 used = 0;
@@ -190,11 +205,16 @@ impl InputIdentityEncoder {
     fn promote_to_hashed(&mut self) {
         let previous = std::mem::replace(
             &mut self.sink,
-            ArgumentSink::Hashed(Box::new(HashedArgument {
-                hasher: blake3::Hasher::new(),
-                buffer: [0; HASH_BUFFER_BYTES],
-                buffered: 0,
-            })),
+            ArgumentSink::Hashed(if let Some(mut state) = self.spare.take() {
+                state.hasher.reset();
+                state
+            } else {
+                Box::new(HashedArgument {
+                    hasher: blake3::Hasher::new(),
+                    buffer: [0; HASH_BUFFER_BYTES],
+                    buffered: 0,
+                })
+            }),
         );
         let ArgumentSink::Inline { bytes, len } = previous else {
             unreachable!("identity encoder promotes only from inline mode");
@@ -236,17 +256,17 @@ impl InputIdentityEncoder {
         *buffered = 0;
     }
 
-    fn finish_into(self, root: &mut blake3::Hasher) -> XllResult<()> {
-        match self.error {
-            Some(error) => Err(error),
-            None => match self.sink {
+    fn finish_into(&mut self, root: &mut blake3::Hasher) -> XllResult<()> {
+        match &self.error {
+            Some(error) => Err(error.clone()),
+            None => match &mut self.sink {
                 ArgumentSink::Inline { bytes, len } => {
                     root.update(&[ArgumentEncoding::Inline as u8]);
-                    root.update(&(len as u64).to_le_bytes());
-                    root.update(&bytes[..len]);
+                    root.update(&(*len as u64).to_le_bytes());
+                    root.update(&bytes[..*len]);
                     Ok(())
                 }
-                ArgumentSink::Hashed(mut state) => {
+                ArgumentSink::Hashed(state) => {
                     Self::flush_hashed(&mut state.hasher, &state.buffer, &mut state.buffered);
                     root.update(&[ArgumentEncoding::Hashed as u8]);
                     root.update(state.hasher.finalize().as_bytes());
@@ -299,9 +319,12 @@ pub struct InputFingerprintBuilder {
     root: blake3::Hasher,
     expected_arguments: usize,
     next_argument: usize,
+    // One owned workspace reused between arguments, released with the call.
+    scratch: Option<Box<HashedArgument>>,
 }
 
 impl InputFingerprintBuilder {
+    #[inline]
     pub(crate) fn new(expected_arguments: usize) -> Self {
         let mut root = blake3::Hasher::new();
         root.update(INPUT_FINGERPRINT_DOMAIN);
@@ -310,6 +333,7 @@ impl InputFingerprintBuilder {
             root,
             expected_arguments,
             next_argument: 0,
+            scratch: None,
         }
     }
 
@@ -329,12 +353,21 @@ impl InputFingerprintBuilder {
         self.root.update(&(argument.len() as u64).to_le_bytes());
         self.root.update(argument.as_bytes());
         let mut encoder = InputIdentityEncoder::new(argument);
-        let value = encode(&mut encoder)?;
-        encoder.finish_into(&mut self.root)?;
+        encoder.spare = self.scratch.take();
+        let result = encode(&mut encoder).and_then(|value| {
+            encoder.finish_into(&mut self.root)?;
+            Ok(value)
+        });
+        self.scratch = match encoder.sink {
+            ArgumentSink::Hashed(state) => Some(state),
+            ArgumentSink::Inline { .. } => encoder.spare,
+        };
+        let value = result?;
         self.next_argument += 1;
         Ok(value)
     }
 
+    #[inline]
     pub(crate) fn finish(self) -> XllResult<InputFingerprint> {
         if self.next_argument != self.expected_arguments {
             return Err(XllError::Internal {
@@ -351,6 +384,78 @@ impl InputFingerprintBuilder {
 mod tests {
     use super::*;
     use crate::value::{ExcelCellValue, ExcelValue, Matrix, OptionalExcelValue};
+
+    proptest::proptest! {
+        #[test]
+        fn semantic_utf16_matches_owned_unicode(text in ".{0,512}") {
+            let units = text.encode_utf16().collect::<Vec<_>>();
+            let mut actual = InputIdentityEncoder::new("text");
+            actual.semantic_utf16(&units).unwrap();
+            let mut expected = InputIdentityEncoder::new("text");
+            expected.string(&text);
+            let mut a = blake3::Hasher::new();
+            let mut b = blake3::Hasher::new();
+            actual.finish_into(&mut a).unwrap();
+            expected.finish_into(&mut b).unwrap();
+            proptest::prop_assert_eq!(a.finalize(), b.finalize());
+        }
+    }
+
+    #[test]
+    fn malformed_utf16_cannot_finalize_a_partial_identity() {
+        for prefix in [0, 1, 127, 128, 255, 256, 4096] {
+            for invalid in [0xd800, 0xdc00] {
+                let mut units = vec![0x61; prefix];
+                units.push(invalid);
+                let mut encoder = InputIdentityEncoder::new("text");
+                assert!(encoder.semantic_utf16(&units).is_err());
+                // Even a caller that ignores the conversion error cannot
+                // publish the valid prefix as a successful identity.
+                assert!(encoder.finish_into(&mut blake3::Hasher::new()).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn reused_hash_workspace_preserves_argument_framing_and_nested_encoders() {
+        let mut builder = InputFingerprintBuilder::new(6);
+        let mut reference = blake3::Hasher::new();
+        reference.update(INPUT_FINGERPRINT_DOMAIN);
+        reference.update(&6_u64.to_le_bytes());
+        for (index, length) in [8192, 1, 129, 128, 4095, 4097].into_iter().enumerate() {
+            let bytes = vec![index as u8; length];
+            builder
+                .with_argument(index, "arg", |encoder| {
+                    for chunk in bytes.chunks(17) {
+                        encoder.write(chunk);
+                    }
+                    let mut nested = InputFingerprintBuilder::new(1);
+                    nested.with_argument(0, "nested", |encoder| {
+                        encoder.bytes(&vec![0xfe; 2048]);
+                        Ok(())
+                    })?;
+                    nested.finish()?;
+                    Ok(())
+                })
+                .unwrap();
+            reference.update(&[0xa0]);
+            reference.update(&(index as u64).to_le_bytes());
+            reference.update(&3_u64.to_le_bytes());
+            reference.update(b"arg");
+            if length <= INLINE_ARGUMENT_BYTES {
+                reference.update(&[ArgumentEncoding::Inline as u8]);
+                reference.update(&(length as u64).to_le_bytes());
+                reference.update(&bytes);
+            } else {
+                reference.update(&[ArgumentEncoding::Hashed as u8]);
+                reference.update(blake3::hash(&bytes).as_bytes());
+            }
+        }
+        assert_eq!(
+            builder.finish().unwrap().as_bytes(),
+            reference.finalize().as_bytes()
+        );
+    }
 
     #[derive(Clone, Copy)]
     struct Pair(u32, u32);

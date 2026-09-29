@@ -912,6 +912,33 @@ fn metadata_uses_the_same_feature_and_resolution_constraints_as_build() {
 }
 
 #[test]
+fn feature_selection_normalizes_cargo_separators_for_metadata_and_build() {
+    let selection = BuildSelectionArgs {
+        features: vec!["rtd,async handles".into(), "async\tcache".into()],
+        ..BuildSelectionArgs::default()
+    };
+    assert_eq!(
+        selection.normalized_features(),
+        ["async", "cache", "handles", "rtd"]
+    );
+    let mut metadata = MetadataCommand::new();
+    selection.apply_to_metadata(&mut metadata);
+    let mut build = Command::new("cargo");
+    selection.apply_to_command(&mut build, None);
+    for command in [metadata.cargo_command(), build] {
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            arguments.array_windows::<2>().any(|[flag, value]| {
+                flag == "--features" && value == "async,cache,handles,rtd"
+            })
+        );
+    }
+}
+
+#[test]
 fn base_cargo_command_does_not_rewrite_rustflags() {
     let command = cargo_command();
     let arguments = command
@@ -1040,6 +1067,33 @@ fn project_metadata_rejects_malformed_xlfn_settings() {
         let error = project_metadata_fixture(metadata)
             .err()
             .expect("malformed settings must not silently use defaults");
+        assert!(error.to_string().contains(expected), "{error:#}");
+    }
+}
+
+#[test]
+fn project_metadata_rejects_unknown_settings_instead_of_using_defaults() {
+    for (metadata, expected) in [
+        (
+            "[package.metadata.xlfn]\nartifact_name = \"DataTools\"",
+            "unknown [package.metadata.xlfn] setting \"artifact_name\"",
+        ),
+        (
+            "[package.metadata.xlfn]\nCRT = \"dynamic\"",
+            "unknown [package.metadata.xlfn] setting \"CRT\"",
+        ),
+        (
+            "[package.metadata.xlfn.bundel]\nx64 = [\"engine.dll\"]",
+            "unknown [package.metadata.xlfn] setting \"bundel\"",
+        ),
+        (
+            "[package.metadata.xlfn.bundle]\nexternal_imports = [\"engine.dll\"]",
+            "unknown field `external_imports`",
+        ),
+    ] {
+        let error = project_metadata_fixture(metadata)
+            .err()
+            .expect("unknown settings must not silently use defaults");
         assert!(error.to_string().contains(expected), "{error:#}");
     }
 }

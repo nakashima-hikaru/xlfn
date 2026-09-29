@@ -370,7 +370,11 @@ impl<A: crate::Addin> Runtime<A> {
         }
     }
 
-    #[cfg(all(test, feature = "rtd"))]
+    #[cfg(all(
+        test,
+        feature = "rtd",
+        any(feature = "handles", not(target_os = "windows"))
+    ))]
     pub(crate) fn publish_with_sources<'runtime>(
         &self,
         opening: OpeningTxn<'runtime, A, Begun>,
@@ -706,7 +710,11 @@ impl<A: crate::Addin> Runtime<A> {
     }
 
     #[inline]
-    #[cfg(all(test, feature = "rtd"))]
+    #[cfg(all(
+        test,
+        feature = "rtd",
+        any(feature = "handles", not(target_os = "windows"))
+    ))]
     pub(crate) fn with_subscriptions<R>(
         &self,
         operation: impl FnOnce(&crate::subscription::SubscriptionRuntime) -> R,

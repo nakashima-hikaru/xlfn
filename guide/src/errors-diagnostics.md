@@ -8,6 +8,7 @@ Use `XllResult<T>` when a calculation can fail. Add this function to the
 [tutorial project](quick-start.md):
 
 ```rust
+{{#include ../fixtures/addin.md}}
 use xlfn::error::DomainErrorCode;
 use xlfn::prelude::*;
 
@@ -66,6 +67,7 @@ This mapping is intentionally coarse. The diagnostic stream carries the specific
 A basic production setup installs the built-in bounded file sink during `Addin::open`:
 
 ```rust
+{{#include ../fixtures/diagnostics.md}}
 impl Addin for AppTools {
     type SharedState = State;
     type LifecycleState = ();
@@ -121,6 +123,10 @@ impl DiagnosticSink for Telemetry {
 Install the custom sink during `Addin::open`:
 
 ```rust
+{{#include ../fixtures/diagnostics.md}}
+# use xlfn::diagnostics::{DiagnosticEvent, DiagnosticSink};
+# struct Telemetry;
+# impl DiagnosticSink for Telemetry { fn report(&self, _: &DiagnosticEvent<'_>) {} }
 impl Addin for AppTools {
     type SharedState = State;
     type LifecycleState = ();
@@ -140,7 +146,11 @@ impl Addin for AppTools {
 }
 ```
 
-The runtime places a bounded asynchronous queue of 1,024 events in front of the sink. When producers outrun delivery, events are dropped rather than blocking worksheet execution. Monitor `xlfn::diagnostics::stats().dropped_events` as an operational signal.
+The runtime places a bounded asynchronous queue of 1,024 events in front of the sink. When producers outrun delivery, events are dropped rather than blocking worksheet execution. Monitor dropped events as an operational signal:
+
+```rust
+let dropped = xlfn::diagnostics::diagnostic_stats().dropped_events;
+```
 
 The sink itself must still be bounded and panic-free. A slow or reentrant sink can delay shutdown even though ordinary producers use a queue.
 
@@ -155,6 +165,8 @@ Do not assume a tracing subscriber is infallible. The runtime contains panics ar
 The runtime attaches a `DiagnosticId` to internal failures and emitted diagnostic events. Sinks can inspect this identifier via `.as_u64()` or format it as hexadecimal:
 
 ```rust
+# use xlfn::diagnostics::{DiagnosticEvent, DiagnosticSink};
+# struct Telemetry;
 impl DiagnosticSink for Telemetry {
     fn report(&self, event: &DiagnosticEvent<'_>) {
         let numeric_id = event.diagnostic_id().as_u64();

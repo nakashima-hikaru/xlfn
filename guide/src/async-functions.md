@@ -16,6 +16,7 @@ The project uses Excel 2010 or later as the operational baseline for this capabi
 ## Define an async function
 
 ```rust
+{{#include ../fixtures/async-service.md}}
 #[excel_function(name = "SERVICE.FETCH")]
 async fn fetch(
     #[excel_context(asynchronous)] context: AsyncContext<'_, ServiceAddin>,
@@ -31,6 +32,8 @@ async fn fetch(
 An async function may omit the context when it needs neither state nor cancellation:
 
 ```rust
+{{#include ../fixtures/addin.md}}
+# use xlfn::prelude::*;
 #[excel_function(name = "TEXT.NORMALIZE")]
 async fn normalize(value: String) -> String {
     value.trim().to_owned()
@@ -62,11 +65,15 @@ move the context into a detached task that could outlive the invocation.
 
 `AsyncContext` exposes:
 
-```rust
+```rust,no_run
+{{#include ../fixtures/async-service.md}}
+# async fn example(context: AsyncContext<'_, ServiceAddin>) -> XllResult<()> {
 context.cancellation().is_cancelled();
 context.cancellation_guarantee();
 context.check_cancelled()?;
 context.cancellation().cancelled().await;
+# Ok(())
+# }
 ```
 
 Excel async calls currently receive `CancellationGuarantee::BestEffort`. The token becomes cancelled when the runtime observes the relevant Excel cancellation/lifecycle event or closes the add-in. Programmatic recalculation paths do not always produce the same calculation-event sequence, so code must not assume calculation-scoped cancellation unless the reported guarantee says so.
@@ -86,7 +93,8 @@ The runtime linearizes cancellation against result delivery: after cancellation 
 
 A Rust `async fn` is not automatically non-blocking. This is poor:
 
-```rust,ignore
+```rust,no_run
+{{#include ../fixtures/async-service.md}}
 #[excel_function(name = "DATA.FETCH")]
 async fn fetch_data(
     #[excel_context(asynchronous)] context: AsyncContext<'_, ServiceAddin>,
@@ -104,12 +112,16 @@ Submit blocking or thread-affine work through an application-owned bounded execu
 Configure the pool in `Addin::open` with a runtime policy:
 
 ```rust
+# use xlfn::{prelude::*, AsyncConfig, AsyncWorkerCount, RuntimeConfig};
+# fn example() -> XllResult<Opened<()>> {
+# let state = ();
 let runtime = RuntimeConfig::new().with_async(
     AsyncConfig::new().with_worker_count(
         AsyncWorkerCount::new(4).expect("4 is within the supported range"),
     ),
 );
 Ok(Opened::new(state).with_runtime_config(runtime))
+# }
 ```
 
 Import `AsyncConfig`, `AsyncWorkerCount`, and `RuntimeConfig` from `xlfn`.
@@ -126,6 +138,7 @@ An async UDF that needs a formula-owned object must accept `HandleLease<'_, T>`,
 `Handle<'_, T>`:
 
 ```rust
+{{#include ../fixtures/dataset.md}}
 #[excel_function(name = "DATASET.ASYNC_EVALUATE")]
 async fn async_evaluate(dataset: HandleLease<'_, Dataset>, time: f64) -> XllResult<f64> {
     std::future::ready(()).await;

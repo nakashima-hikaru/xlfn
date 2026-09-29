@@ -5,6 +5,9 @@ src = "src"
 title = "xlfn User Guide"
 description = "Build safe Rust Excel XLL add-ins with xlfn"
 
+[rust]
+edition = "2024"
+
 [build]
 build-dir = "book"
 create-missing = false

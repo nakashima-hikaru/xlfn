@@ -4,6 +4,7 @@ xlfn turns typed Rust functions into native Microsoft Excel XLL add-ins.
 You write the calculation; xlfn handles registration and value conversion at the Excel boundary.
 
 ```rust
+{{#include ../fixtures/addin.md}}
 use xlfn::prelude::*;
 
 #[excel_function(name = "HELLO.ADD", thread_safe)]
