@@ -245,7 +245,33 @@ impl<'call> RegistrationHost<'call> {
         )
     }
 
-    pub(crate) fn delete_name(&self, excel_name: &'static str) -> RegistrationMutation<()> {
+    /// Deletes registration metadata only while its current binding is still
+    /// owned by one of the registrations awaiting cleanup. An absent name is
+    /// already resolved; a changed or unreadable binding is never deleted.
+    pub(crate) fn delete_name_if_binding_matches(
+        &self,
+        excel_name: &'static str,
+        expected_ids: impl IntoIterator<Item = f64>,
+    ) -> RegistrationMutation<()> {
+        match self.registration_id(excel_name) {
+            Ok(None) => RegistrationMutation::Applied {
+                value: (),
+                cleanup: Ok(()),
+            },
+            Ok(Some(current)) => {
+                if expected_ids.into_iter().any(|id| id == current.id) {
+                    self.delete_name(excel_name)
+                } else {
+                    RegistrationMutation::Rejected {
+                        error: XllError::MetadataDebtBindingChanged { name: excel_name },
+                    }
+                }
+            }
+            Err(error) => RegistrationMutation::Rejected { error },
+        }
+    }
+
+    fn delete_name(&self, excel_name: &'static str) -> RegistrationMutation<()> {
         let mut name = match TemporaryString::new(excel_name) {
             Ok(value) => value,
             Err(error) => return RegistrationMutation::Rejected { error },
@@ -280,11 +306,6 @@ impl<'call> RegistrationHost<'call> {
             ExcelApiFunction::EventRegister,
             DecodeFailureDisposition::Rejected,
         )
-    }
-
-    pub(crate) fn metadata_debt_binding(&self, excel_name: &'static str) -> XllResult<Option<f64>> {
-        self.registration_id(excel_name)
-            .map(|registration| registration.map(|value| value.id))
     }
 }
 
@@ -575,6 +596,142 @@ impl ModuleName {
 
 fn decode_module_name<'call>(value: XlValueRef<'call>) -> XllResult<ModuleName> {
     ModuleName::from_value(value, "module")
+}
+
+#[cfg(all(
+    test,
+    any(not(target_os = "windows"), feature = "async", feature = "handles")
+))]
+pub(super) mod test_support {
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use xlfn_sys::{XL_FREE, XLOPER12, XLRET_FAILED, XLRET_SUCCESS};
+
+    pub(crate) struct Reply {
+        function: i32,
+        value: XLOPER12,
+        status: i32,
+        release_status: i32,
+    }
+
+    impl Reply {
+        pub(crate) fn success(function: i32, value: XLOPER12) -> Self {
+            Self {
+                function,
+                value,
+                status: XLRET_SUCCESS,
+                release_status: XLRET_SUCCESS,
+            }
+        }
+
+        pub(crate) fn status(mut self, status: i32) -> Self {
+            self.status = status;
+            self
+        }
+
+        pub(crate) fn release_status(mut self, status: i32) -> Self {
+            self.release_status = status;
+            self
+        }
+    }
+
+    #[derive(Default)]
+    struct ScriptState {
+        replies: VecDeque<Reply>,
+        calls: Vec<i32>,
+        release_status: Option<i32>,
+        unexpected_calls: usize,
+    }
+
+    thread_local! {
+        static SCRIPT: RefCell<ScriptState> = RefCell::new(ScriptState::default());
+    }
+
+    pub(crate) struct CallbackScript {
+        _guard: crate::test_callback::CallbackTestGuard,
+    }
+
+    impl CallbackScript {
+        pub(crate) fn install(replies: impl IntoIterator<Item = Reply>) -> Self {
+            let guard = crate::test_callback::lock();
+            crate::module_runtime::reset_callbacks_for_test();
+            SCRIPT.with_borrow_mut(|script| {
+                *script = ScriptState {
+                    replies: replies.into_iter().collect(),
+                    ..ScriptState::default()
+                };
+            });
+            // SAFETY: the callback has Excel's exact ABI and remains live for
+            // the test process. The shared test guard excludes other scripts.
+            unsafe {
+                xlfn_sys::install_callback_for_abi_probe(
+                    callback as *const () as *mut std::ffi::c_void,
+                );
+            }
+            Self { _guard: guard }
+        }
+
+        pub(crate) fn assert_calls(&self, expected: &[i32]) {
+            SCRIPT.with_borrow(|script| {
+                let calls = script
+                    .calls
+                    .iter()
+                    .copied()
+                    .filter(|function| *function != XL_FREE)
+                    .collect::<Vec<_>>();
+                assert_eq!(calls, expected);
+                assert!(script.replies.is_empty(), "expected callback was skipped");
+                assert_eq!(script.unexpected_calls, 0);
+                assert!(script.release_status.is_none(), "result was not released");
+                assert_eq!(
+                    script.calls.iter().filter(|call| **call == XL_FREE).count(),
+                    expected.len(),
+                    "each callback result must be released exactly once"
+                );
+            });
+        }
+    }
+
+    impl Drop for CallbackScript {
+        fn drop(&mut self) {
+            crate::test_callback::install();
+            crate::module_runtime::reset_callbacks_for_test();
+            SCRIPT.with_borrow_mut(|script| *script = ScriptState::default());
+        }
+    }
+
+    unsafe extern "system" fn callback(
+        function: i32,
+        _argument_count: i32,
+        _arguments: *mut *mut XLOPER12,
+        result: *mut XLOPER12,
+    ) -> i32 {
+        SCRIPT.with_borrow_mut(|script| {
+            script.calls.push(function);
+            if function == XL_FREE {
+                return match script.release_status.take() {
+                    Some(status) => status,
+                    None => {
+                        script.unexpected_calls += 1;
+                        XLRET_FAILED
+                    }
+                };
+            }
+            let Some(reply) = script.replies.pop_front() else {
+                script.unexpected_calls += 1;
+                return XLRET_FAILED;
+            };
+            script.release_status = Some(reply.release_status);
+            if reply.function != function || result.is_null() {
+                script.unexpected_calls += 1;
+                return XLRET_FAILED;
+            }
+            // SAFETY: the callback supplies writable result storage for this
+            // invocation. Test replies contain only immediate scalar values.
+            unsafe { *result = reply.value };
+            reply.status
+        })
+    }
 }
 
 #[cfg(test)]

@@ -38,7 +38,7 @@ pub(crate) struct AsyncManager {
     pub(crate) published_executor: AtomicPtr<ExecutorShared>,
     /// Readers admitted through this gate may dereference the publication.
     /// Close withdraws publication, drains readers, then reclaims the Box only
-    /// after active tasks and workers have also quiesced.
+    /// after active tasks, scheduler callbacks, and workers have also quiesced.
     pub(crate) spawn_admission: DrainGate,
     pub(crate) state_changed: Condvar,
     pub(crate) generation_transition: Mutex<()>,
@@ -172,11 +172,6 @@ impl AsyncManager {
         };
         let mut guard = shared.wait_lock.lock();
         while shared.active.load(Ordering::Acquire) != 0 {
-            if shared.fatal_worker_failure.load(Ordering::Acquire)
-                && shared.live_workers.load(Ordering::Acquire) == 0
-            {
-                return false;
-            }
             shared.idle.wait(&mut guard);
         }
         true
@@ -410,11 +405,7 @@ impl AsyncManager {
         // Excel owns the XLL module lifetime. Returning while a worker can
         // still execute this module is unsound, so shutdown deliberately has
         // no timeout: a non-cooperative poll keeps xlAutoRemove blocked.
-        if !executor.wait_for_idle() && !executor.drain_after_worker_failure() {
-            // No worker remains that can release the outstanding task guards.
-            // Returning an AsyncStopped certificate would permit unsafe removal.
-            std::process::abort();
-        }
+        executor.wait_for_idle();
         let issues = executor.finish_close();
         self.finish_close();
         crate::shutdown::StopOutcome {

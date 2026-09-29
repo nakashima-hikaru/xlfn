@@ -1,10 +1,56 @@
 use super::executor::{ExecutorPtr, ExecutorShared};
+use super::future::NoUnwindFuture;
 use super::generation::GenerationPin;
 use super::manager::MAX_PENDING;
 use super::worker::release_active;
 use crate::cancellation::CancellationSource;
-use futures_util::future::AbortHandle;
+use futures_util::future::{AbortHandle, AbortRegistration, Abortable};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::Ordering;
+use std::task::{Context, Poll};
+
+/// Owns task destruction order independently of compiler-generated async
+/// captures. Even before the first poll, user cleanup precedes the release
+/// that permits generation and executor reclamation.
+pub(crate) struct TrackedFuture<F> {
+    future: NoUnwindFuture<Abortable<F>>,
+    completion: CompletionGuard,
+}
+
+impl<F> TrackedFuture<F> {
+    pub(crate) fn new(
+        future: F,
+        registration: AbortRegistration,
+        completion: CompletionGuard,
+    ) -> Self {
+        Self {
+            future: NoUnwindFuture::new(
+                "async task destruction",
+                Abortable::new(future, registration),
+            ),
+            completion,
+        }
+    }
+}
+
+impl<F: Future<Output = ()>> Future for TrackedFuture<F> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<()> {
+        // SAFETY: the inline future is never moved after this wrapper is pinned;
+        // its field is destroyed before the completion guard releases ownership.
+        let this = unsafe { self.get_unchecked_mut() };
+        // SAFETY: the enclosing pin protects this field through destruction.
+        match unsafe { Pin::new_unchecked(&mut this.future) }.poll(context) {
+            Poll::Ready(result) => {
+                this.completion.observation.finished(result.is_ok());
+                Poll::Ready(())
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
 
 pub(crate) struct TaskControl {
     pub(crate) abort: AbortHandle,
@@ -64,7 +110,8 @@ impl Drop for CompletionGuard {
             .generation
             .take()
             .expect("completion owns its generation pin");
-        // SAFETY: executor shared state remains valid through Drop.
+        // SAFETY: task destruction runs under a scheduler callback permit,
+        // a joined worker, or the caller's executor publication admission.
         let shared = unsafe { self.shared.get() };
         generation.get().remove_task(self.id);
         shared
@@ -72,15 +119,15 @@ impl Drop for CompletionGuard {
             .record(crate::shutdown_trace::ShutdownEvent::EndAsyncTask(
                 self.observation.completion(),
             ));
-        // Release the generation before active: shutdown may reclaim the
-        // entire executor immediately after the last active task departs.
+        // Release the generation before active. Final shutdown additionally
+        // drains scheduler callbacks and joins workers before reclamation.
         drop(generation);
         release_active(shared);
     }
 }
 
-// SAFETY: the pointed-to states are Sync, and their unique owners defer
-// reclamation until this completion guard releases the tracked task counts.
+// SAFETY: the pointed-to states are Sync; task counts, scheduler callback
+// admission, and worker joins collectively retain their unique owners.
 unsafe impl Send for CompletionGuard {}
 
 pub(crate) struct CompletionObservation {

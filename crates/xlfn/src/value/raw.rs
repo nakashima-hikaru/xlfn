@@ -89,6 +89,10 @@ impl std::fmt::Display for XlValueType {
     }
 }
 
+/// A call-scoped semantic view of one Excel value.
+///
+/// The validated base type is observable through [`Self::value_type`]. Excel
+/// ownership flags remain internal to the framework.
 #[derive(Clone, Copy)]
 pub struct XlValueRef<'call> {
     pub(super) raw: &'call XLOPER12,
@@ -188,13 +192,6 @@ impl<'call> XlValueRef<'call> {
     #[inline]
     pub(crate) const fn raw(&self) -> &'call XLOPER12 {
         self.raw
-    }
-
-    /// Returns the raw `xltype` field value of the underlying `XLOPER12`.
-    #[must_use]
-    #[inline]
-    pub const fn raw_xltype(self) -> u32 {
-        self.raw.xltype
     }
 
     #[inline]
@@ -374,6 +371,9 @@ impl<'call> XlStrRef<'call> {
     }
 }
 
+/// A borrowed array that preserves each cell's validated Excel value type.
+/// Numeric `Integer` and `Number` cells remain distinct, including in formula
+/// input identity. Use a typed numeric collection for converted semantics.
 #[derive(Clone, Copy)]
 pub struct XlArrayRef<'call> {
     cells: &'call [XLOPER12],
@@ -472,6 +472,7 @@ enum RawValueKind {
     Missing = 5,
     Blank = 6,
     Array = 7,
+    Integer = 8,
 }
 
 pub(crate) fn encode_raw_value(
@@ -491,9 +492,9 @@ pub(crate) fn encode_raw_value(
             encoder.u32(unsafe { value.raw.value.boolean } as u32);
         }
         XlValueType::Integer => {
-            encoder.tag(RawValueKind::Number as u8);
+            encoder.tag(RawValueKind::Integer as u8);
             // SAFETY: XLTYPE_INT selects the integer union member.
-            encoder.f64(unsafe { value.raw.value.integer } as f64);
+            encoder.i64(i64::from(unsafe { value.raw.value.integer }));
         }
         XlValueType::String => {
             encoder.tag(RawValueKind::String as u8);
@@ -650,7 +651,7 @@ mod tests {
         };
         let value_ref = XlValueRef::from_array_cell(&valid_oper).unwrap();
         assert_eq!(value_ref.value_type(), XlValueType::Number);
-        assert_eq!(value_ref.raw_xltype(), XLTYPE_NUM | XLBIT_XL_FREE);
+        assert_eq!(value_ref.as_f64().unwrap(), 42.0);
         assert!(!value_ref.is_blank());
 
         let valid_dll_free_oper = XLOPER12 {
@@ -659,7 +660,7 @@ mod tests {
         };
         let dll_free_ref = XlValueRef::from_array_cell(&valid_dll_free_oper).unwrap();
         assert_eq!(dll_free_ref.value_type(), XlValueType::Number);
-        assert_eq!(dll_free_ref.raw_xltype(), XLTYPE_NUM | XLBIT_DLL_FREE);
+        assert_eq!(dll_free_ref.as_f64().unwrap(), 42.0);
 
         let invalid_flag_oper = XLOPER12 {
             value: XLOPER12Value { integer: 0 },

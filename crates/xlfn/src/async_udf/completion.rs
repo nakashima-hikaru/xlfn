@@ -48,8 +48,9 @@ where
     T: ExcelReturn + Send + 'static,
 {
     let evaluated = {
-        let mut future = std::pin::pin!(future);
-        futures_util::future::poll_fn(|context| {
+        let mut future =
+            std::pin::pin!(super::future::NoUnwindFuture::new(responder.udf_id, future));
+        let evaluated = futures_util::future::poll_fn(|context| {
             // Consume the payload before any future wrapper is dropped or
             // cancellation can take an early return from this function.
             match catch_no_unwind(AssertUnwindSafe(|| future.as_mut().poll(context))) {
@@ -58,7 +59,13 @@ where
                 Err(panic) => std::task::Poll::Ready(Err(panic)),
             }
         })
-        .await
+        .await;
+        // Destruction is part of evaluating the UDF. A successful poll whose
+        // future cannot be disposed must produce the same error as a poll panic.
+        match future.as_mut().finish() {
+            Ok(()) => evaluated,
+            Err(panic) => Err(panic),
+        }
     };
     #[cfg(test)]
     if let Some(hook) = *super::boundary::AFTER_ASYNC_EVALUATION_HOOK.lock() {

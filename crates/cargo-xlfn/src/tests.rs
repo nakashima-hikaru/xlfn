@@ -14,6 +14,8 @@ struct InjectedFileOps {
     failed_renames: BTreeSet<usize>,
     failed_removes: BTreeSet<usize>,
     failed_syncs: BTreeSet<usize>,
+    fail_sync_after_backup: bool,
+    fail_sync_after_install: bool,
     rename_count: Cell<usize>,
     remove_count: Cell<usize>,
     sync_count: Cell<usize>,
@@ -74,6 +76,19 @@ impl DistributionFileOps for InjectedFileOps {
     fn sync_directory(&self, path: &Path) -> io::Result<()> {
         let call = self.sync_count.get() + 1;
         self.sync_count.set(call);
+        if let Some(FileOperation::Rename { to, .. }) = self.operations.borrow().last() {
+            let backup = to.file_name().is_some_and(|name| name == "previous");
+            let install = to.file_name().is_some_and(|name| name == "win-x64");
+            let rename_succeeded = !self.failed_renames.contains(&self.rename_count.get());
+            if rename_succeeded
+                && ((self.fail_sync_after_backup && backup)
+                    || (self.fail_sync_after_install && install))
+            {
+                return Err(io::Error::other(
+                    "injected sync failure after namespace change",
+                ));
+            }
+        }
         if self.failed_syncs.contains(&call) {
             return Err(io::Error::other(format!(
                 "injected directory sync failure #{call}"
@@ -350,6 +365,7 @@ fn post_commit_verification_failure_restores_previous_distribution() {
             .to_string()
             .contains("post-commit verification failed")
     );
+    assert!(matches!(&error, DistributionError::Invalid(_)));
     assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
     assert!(!destination.join("new.xll").exists());
     assert!(!staging.exists());
@@ -378,6 +394,8 @@ fn post_commit_verification_failure_without_previous_removes_install() {
         &file_ops,
     )
     .unwrap_err();
+
+    assert!(matches!(&error, DistributionError::Invalid(_)));
 
     assert!(
         error
@@ -608,6 +626,137 @@ fn directory_sync_failure_leaves_a_recoverable_install() {
 }
 
 #[test]
+fn backup_sync_failure_reports_interrupted_destination_and_recovery_paths() {
+    let (directory, destination, staging) = distribution_fixture();
+    let prepared = prepared_test_directory(&staging);
+    let file_ops = InjectedFileOps {
+        fail_sync_after_backup: true,
+        ..InjectedFileOps::default()
+    };
+
+    let error = xlfn_package::PreparedDistribution::new(prepared)
+        .commit_with(&destination, &file_ops)
+        .unwrap_err();
+    let DistributionError::Interrupted {
+        destination: interrupted_destination,
+        transaction,
+        previous,
+        source,
+    } = error
+    else {
+        panic!("a failure after moving the destination must expose recovery locations");
+    };
+    assert_eq!(interrupted_destination, destination);
+    assert!(matches!(*source, DistributionError::Io(_)));
+    assert!(!destination.exists());
+    let previous = previous.unwrap();
+    assert_eq!(previous, transaction.join("previous"));
+    assert_eq!(fs::read(previous.join("old.xll")).unwrap(), b"old");
+    assert!(transaction.join(TRANSACTION_JOURNAL).is_file());
+
+    let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
+    recover_stale_transactions(
+        directory.path(),
+        "win-x64",
+        &guard,
+        &SystemDistributionFileOps,
+    )
+    .unwrap();
+    assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
+    assert!(transaction_directories(directory.path()).is_empty());
+}
+
+#[test]
+fn source_rejection_after_backup_reports_interruption() {
+    let (directory, destination, staging) = distribution_fixture();
+    let prepared = prepared_test_directory(&staging);
+    let source_checks = Cell::new(0);
+    let error = commit_prepared_directory_with(
+        &prepared,
+        &destination,
+        |_| {
+            source_checks.set(source_checks.get() + 1);
+            if source_checks.get() == 2 {
+                Err(DistributionError::Invalid(
+                    "source verification rejected".to_owned(),
+                ))
+            } else {
+                Ok(())
+            }
+        },
+        |path| Ok(prepared.verify_committed_contents(path)?),
+        &SystemDistributionFileOps,
+    )
+    .unwrap_err();
+    let DistributionError::Interrupted {
+        previous, source, ..
+    } = error
+    else {
+        panic!("a rejected source after moving the destination must report interruption");
+    };
+    assert!(matches!(*source, DistributionError::Invalid(_)));
+    assert!(!destination.exists());
+    assert_eq!(fs::read(previous.unwrap().join("old.xll")).unwrap(), b"old");
+
+    let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
+    recover_stale_transactions(
+        directory.path(),
+        "win-x64",
+        &guard,
+        &SystemDistributionFileOps,
+    )
+    .unwrap();
+    assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
+}
+
+#[test]
+fn first_install_sync_failure_reports_interruption_without_previous_package() {
+    let (directory, destination, staging) = distribution_fixture();
+    fs::remove_dir_all(&destination).unwrap();
+    let prepared = prepared_test_directory(&staging);
+    let file_ops = InjectedFileOps {
+        fail_sync_after_install: true,
+        ..InjectedFileOps::default()
+    };
+    let error = xlfn_package::PreparedDistribution::new(prepared)
+        .commit_with(&destination, &file_ops)
+        .unwrap_err();
+    let DistributionError::Interrupted {
+        transaction,
+        previous,
+        ..
+    } = error
+    else {
+        panic!("a failure after installing a destination must report interruption");
+    };
+    assert!(previous.is_none());
+    assert_eq!(fs::read(destination.join("new.xll")).unwrap(), b"new");
+    assert!(transaction.join(TRANSACTION_JOURNAL).is_file());
+
+    let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
+    recover_stale_transactions(
+        directory.path(),
+        "win-x64",
+        &guard,
+        &SystemDistributionFileOps,
+    )
+    .unwrap();
+    assert!(!destination.exists());
+    assert!(transaction_directories(directory.path()).is_empty());
+}
+
+#[test]
+fn failed_backup_rename_leaves_destination_and_plain_error() {
+    let (_directory, destination, staging) = distribution_fixture();
+    let prepared = prepared_test_directory(&staging);
+    let error = xlfn_package::PreparedDistribution::new(prepared)
+        .commit_with(&destination, &InjectedFileOps::failing_renames([1]))
+        .unwrap_err();
+    assert!(matches!(error, DistributionError::Io(_)));
+    assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
+}
+
+#[test]
 fn initial_journal_sync_failure_leaves_only_a_recoverable_private_transaction() {
     let (directory, destination, staging) = distribution_fixture();
     let file_ops = InjectedFileOps::failing_syncs([1]);
@@ -712,6 +861,45 @@ fn distribution_preserves_recovery_path_when_commit_and_rollback_fail() {
             .iter()
             .any(|operation| matches!(operation, FileOperation::RemoveDirectory(_)))
     );
+}
+
+#[test]
+fn rollback_sync_failure_keeps_restored_destination_recoverable() {
+    let (directory, destination, staging) = distribution_fixture();
+    let mut file_ops = InjectedFileOps::failing_renames([2]);
+    file_ops.fail_sync_after_install = true;
+    let prepared = prepared_test_directory(&staging);
+
+    let error = commit_test_directory_with(&prepared, &destination, &file_ops).unwrap_err();
+    let recovery = error
+        .downcast_ref::<DistributionError>()
+        .and_then(|error| match error {
+            DistributionError::Recovery(error) => Some(error),
+            _ => None,
+        })
+        .expect("a failed rollback sync must retain its recovery context");
+    assert_eq!(recovery.destination, destination);
+    assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
+    assert_eq!(fs::read(staging.join("new.xll")).unwrap(), b"new");
+    assert!(!recovery.recovery_path.exists());
+    let transaction = recovery.recovery_path.parent().unwrap();
+    assert_eq!(
+        read_transaction_journal(&transaction.join(TRANSACTION_JOURNAL))
+            .unwrap()
+            .state,
+        TransactionState::RollbackPending
+    );
+
+    let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
+    recover_stale_transactions(
+        directory.path(),
+        "win-x64",
+        &guard,
+        &SystemDistributionFileOps,
+    )
+    .unwrap();
+    assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
+    assert!(transaction_directories(directory.path()).is_empty());
 }
 
 #[test]
@@ -1189,4 +1377,58 @@ fn virtual_workspace_root_remains_ambiguous() {
     let error = select_discovery_package(&discovery, &args, workspace).unwrap_err();
 
     assert!(error.to_string().contains("--package or --manifest-path"));
+}
+
+#[test]
+fn stale_recovery_sync_failure_reports_interruption_and_can_be_retried() {
+    let (directory, destination, staging) = distribution_fixture();
+    let prepared = prepared_test_directory(&staging);
+    let interrupted_install = xlfn_package::PreparedDistribution::new(prepared)
+        .commit_with(
+            &destination,
+            &InjectedFileOps {
+                fail_sync_after_install: true,
+                ..InjectedFileOps::default()
+            },
+        )
+        .unwrap_err();
+    let DistributionError::Interrupted { transaction, .. } = interrupted_install else {
+        panic!("the installed destination must leave a recoverable transaction");
+    };
+    assert_eq!(fs::read(destination.join("new.xll")).unwrap(), b"new");
+
+    let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
+    let file_ops = InjectedFileOps::failing_syncs([1]);
+    let recovery_error =
+        recover_stale_transactions(directory.path(), "win-x64", &guard, &file_ops).unwrap_err();
+    let DistributionError::Interrupted {
+        destination: interrupted_destination,
+        transaction: interrupted_transaction,
+        previous,
+        source,
+    } = recovery_error
+    else {
+        panic!("recovery must report its transaction after moving the destination");
+    };
+    assert_eq!(interrupted_destination, destination);
+    assert_eq!(interrupted_transaction, transaction);
+    assert!(matches!(*source, DistributionError::Io(_)));
+    assert!(!destination.exists());
+    assert_eq!(previous.as_ref(), Some(&transaction.join("previous")));
+    assert_eq!(fs::read(previous.unwrap().join("old.xll")).unwrap(), b"old");
+    assert_eq!(
+        fs::read(transaction.join("recovery-install/new.xll")).unwrap(),
+        b"new"
+    );
+
+    recover_stale_transactions(
+        directory.path(),
+        "win-x64",
+        &guard,
+        &SystemDistributionFileOps,
+    )
+    .unwrap();
+    assert_eq!(fs::read(destination.join("old.xll")).unwrap(), b"old");
+    assert!(!destination.join("new.xll").exists());
+    assert!(transaction_directories(directory.path()).is_empty());
 }

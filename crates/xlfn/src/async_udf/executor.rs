@@ -2,7 +2,7 @@ use super::generation::{
     ControlPhase, ExecutorControl, GenerationPin, GenerationState, task_shard,
 };
 use super::queue::RunnableQueue;
-use super::task::{ActiveReservation, TaskControl};
+use super::task::{ActiveReservation, TaskControl, TrackedFuture};
 use super::worker::{cancelled_calculation_error, run_executor};
 use crate::addin::AsyncWorkerCount;
 use crate::cancellation::CancellationSource;
@@ -16,7 +16,7 @@ use crate::shutdown::CleanupIssueKind;
 use crate::sync::{Condvar, Mutex};
 use crate::{XllError, XllResult};
 use crossbeam_utils::sync::Parker;
-use futures_util::future::{AbortHandle, Abortable};
+use futures_util::future::AbortHandle;
 #[cfg(feature = "handles")]
 use std::marker::PhantomData;
 #[cfg(feature = "handles")]
@@ -28,6 +28,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 #[cfg(test)]
 use std::time::{Duration, Instant};
+use xlfn_kernel::operation_gate::OperationGate;
 use xlfn_kernel::published_owner::PublishedOwner;
 
 pub(crate) struct Executor {
@@ -38,7 +39,7 @@ pub(crate) struct Executor {
 /// Non-owning executor capability used by workers and detached async tasks.
 ///
 /// The unique allocation remains in `Executor`. Shutdown drains all tasks and
-/// joins every worker before reclaiming it.
+/// scheduler callbacks, then joins every worker before reclaiming it.
 #[derive(Clone, Copy)]
 pub(crate) struct ExecutorPtr(NonNull<ExecutorShared>);
 
@@ -75,11 +76,12 @@ unsafe impl Sync for ExecutorPtr {}
 /// - `AsyncManager` publishes only a non-owning pointer protected by spawn
 ///   admission; publication never participates in ownership.
 /// - Workers and active tasks carry non-owning capabilities. Global active
-///   accounting and worker joins must complete before the Box is reclaimed.
+///   accounting, scheduler callbacks, and worker joins must complete before
+///   the Box is reclaimed.
 /// - `Executor` exclusively owns the worker JoinHandles.
 /// - The runnable queue is terminated explicitly with `queue.seal_and_wake_all()`.
-/// - After sealing the queue, workers drain normally; if no workers remain,
-///   `Executor::drain_after_worker_failure` explicitly drains queued runnables.
+/// - After sealing the queue, workers drain normally; the last failed worker
+///   explicitly drains abandoned runnables.
 ///
 /// Lifecycle invariants:
 /// I1. `current`'s `GenerationState` always exists in `control.generations` until `ControlPhase::Closing`.
@@ -90,16 +92,24 @@ unsafe impl Sync for ExecutorPtr {}
 /// `generation_publication`. Only non-current generations with zero pins may
 /// be reclaimed; canceled task controls do not determine task lifetimes.
 ///
-/// Two-Stage Shutdown & Queue Invariants (Q1–Q5):
+/// Two-Stage Shutdown & Queue Invariants (Q1–Q7):
 /// - Q1: New `Runnable`s can only be enqueued while `queue.schedule_admission` is OPEN.
 /// - Q2: After `queue.seal_and_wake_all()` completes, no new `Runnable` can enter the injector or local queues.
 /// - Q3: `closing == true` terminates *spawn admission* for new tasks, but does NOT seal `schedule_admission`.
 ///   Aborting/canceling active tasks may re-schedule `Runnable`s until all active tasks complete (`active == 0`).
-///   Only then is `finish_close()` or `drain_after_worker_failure()` allowed to seal `schedule_admission`.
+///   Final close seals `schedule_admission` after active tasks drain. Failure
+///   recovery may seal it earlier because late scheduling destroys runnables.
 /// - Q4: Sleeping workers in `idle_workers` are woken whenever work is enqueued or batch-stolen.
 /// - Q5: Worker panic recovers all remaining tasks from its local queue back to the global injector.
+/// - Q6: Worker failure closes spawn admission and cancels admitted tasks. The
+///   last exiting worker drains queued runnables; scheduling after that exit
+///   destroys the runnable directly under callback lifetime admission.
+/// - Q7: Every scheduler callback retains `scheduler_callbacks` through
+///   synchronous destruction and final task release. The owner drains this
+///   gate after active reaches zero and before reclaiming shared state.
 pub(crate) struct ExecutorShared {
     pub(crate) queue: RunnableQueue,
+    scheduler_callbacks: OperationGate,
     pub(crate) next_id: AtomicU64,
     pub(crate) active: AtomicUsize,
     pub(crate) live_workers: AtomicUsize,
@@ -124,6 +134,10 @@ pub(crate) struct ExecutorShared {
     pub(crate) after_generation_snapshot_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
     pub(crate) after_generation_admission_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    pub(crate) before_scheduler_admission_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    pub(crate) after_scheduler_drop_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl Executor {
@@ -167,6 +181,7 @@ impl Executor {
         let initial_pointer = NonNull::from(initial_generation.as_ref());
         let shared = PublishedOwner::new(ExecutorShared {
             queue,
+            scheduler_callbacks: OperationGate::new(),
             next_id: AtomicU64::new(1),
             active: AtomicUsize::new(0),
             live_workers: AtomicUsize::new(0),
@@ -187,6 +202,10 @@ impl Executor {
             after_generation_snapshot_hook: Mutex::new(None),
             #[cfg(test)]
             after_generation_admission_hook: Mutex::new(None),
+            #[cfg(test)]
+            before_scheduler_admission_hook: Mutex::new(None),
+            #[cfg(test)]
+            after_scheduler_drop_hook: Mutex::new(None),
         });
         let shared_pointer = ExecutorPtr::from_ref(shared.as_ref());
         let mut workers = scopeguard::guard(
@@ -234,17 +253,14 @@ impl Executor {
         self.shared.observer.set_trace_sink(trace);
     }
 
-    pub(crate) fn wait_for_idle(&self) -> bool {
+    pub(crate) fn wait_for_idle(&self) {
         let mut guard = self.shared.wait_lock.lock();
         while self.shared.active.load(Ordering::Acquire) != 0 {
-            if self.shared.fatal_worker_failure.load(Ordering::Acquire)
-                && self.shared.live_workers.load(Ordering::Acquire) == 0
-            {
-                return false;
-            }
+            // The last failed worker drains queued tasks. A scheduler already
+            // holding a runnable can still be executing on an external waker
+            // thread, so live_workers == 0 does not certify final destruction.
             self.shared.idle.wait(&mut guard);
         }
-        true
     }
 
     #[cfg(test)]
@@ -252,11 +268,6 @@ impl Executor {
         let deadline = Instant::now() + timeout;
         let mut guard = self.shared.wait_lock.lock();
         while self.shared.active.load(Ordering::Acquire) != 0 {
-            if self.shared.fatal_worker_failure.load(Ordering::Acquire)
-                && self.shared.live_workers.load(Ordering::Acquire) == 0
-            {
-                return false;
-            }
             let now = Instant::now();
             if now >= deadline {
                 return false;
@@ -266,26 +277,11 @@ impl Executor {
         true
     }
 
-    pub(crate) fn drain_after_worker_failure(&self) -> bool {
-        debug_assert!(
-            self.shared.fatal_worker_failure.load(Ordering::Acquire),
-            "drain_after_worker_failure requires a fatal worker failure"
-        );
-        debug_assert_eq!(
-            self.shared.live_workers.load(Ordering::Acquire),
-            0,
-            "drain_after_worker_failure requires all workers to have exited"
-        );
-        self.shared.queue.seal_and_wake_all();
-        while let Some(runnable) = self.shared.queue.drain_abandoned() {
-            let _ = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
-                drop(runnable);
-            }));
-        }
-        self.shared.active.load(Ordering::Acquire) == 0
-    }
-
     pub(crate) fn finish_close(mut self) -> Vec<crate::shutdown::CleanupIssue> {
+        self.shared
+            .scheduler_callbacks
+            .close_and_wait_begin()
+            .wait();
         self.shared.queue.seal_and_wake_all();
         self.join_workers()
     }
@@ -308,6 +304,10 @@ impl Executor {
 impl Drop for Executor {
     fn drop(&mut self) {
         if self.workers.is_empty() {
+            self.shared
+                .scheduler_callbacks
+                .close_and_wait_begin()
+                .wait();
             return;
         }
         // Owning this allocation also owns the shutdown obligation. An
@@ -315,9 +315,11 @@ impl Drop for Executor {
         // workers that still hold non-owning executor/generation pointers.
         let tasks = self.shared.request_close();
         super::worker::cancel_tasks(tasks);
-        if !self.wait_for_idle() && !self.drain_after_worker_failure() {
-            xlfn_kernel::invariant::fail_stop();
-        }
+        self.wait_for_idle();
+        self.shared
+            .scheduler_callbacks
+            .close_and_wait_begin()
+            .wait();
         self.shared.queue.seal_and_wake_all();
         let _ = self.join_workers();
     }
@@ -441,11 +443,7 @@ impl<'a> SpawnReservation<'a> {
             .observer
             .record(crate::shutdown_trace::ShutdownEvent::StartAsyncTask);
 
-        let wrapped = async move {
-            let _completion = completion;
-            let result = Abortable::new(future, registration).await;
-            _completion.observation.finished(result.is_ok());
-        };
+        let wrapped = TrackedFuture::new(future, registration, completion);
         #[cfg(test)]
         {
             let hook = shared.before_task_schedule_hook.lock().clone();
@@ -455,8 +453,43 @@ impl<'a> SpawnReservation<'a> {
         }
         let shared_ptr = self.shared;
         let schedule = move |runnable| {
-            // SAFETY: task execution contributes to executor active count which prevents reclamation.
-            unsafe { shared_ptr.get() }.queue.schedule(runnable);
+            // SAFETY: this runnable retains its task's completion guard until
+            // the callback enters its own lifetime gate below.
+            let shared = unsafe { shared_ptr.get() };
+            #[cfg(test)]
+            {
+                let hook = shared.before_scheduler_admission_hook.lock().clone();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
+            // SAFETY: this runnable's active task retains the executor until
+            // admission succeeds. Its owner then seals and drains this same
+            // gate after active reaches zero, retaining it through the owned
+            // guard's final release notification before shared reclamation.
+            let Ok(_callback) = (unsafe { shared.scheduler_callbacks.enter_owned() }) else {
+                // Callback admission is sealed only after all task futures
+                // have been destroyed, when no runnable can call us again.
+                xlfn_kernel::invariant::fail_stop();
+            };
+            if shared.fatal_worker_failure.load(Ordering::Acquire)
+                && shared.live_workers.load(Ordering::Acquire) == 0
+            {
+                // A reservation may finish scheduling after the last failed
+                // worker drained its queue. Reclaim it here rather than admit
+                // work to a queue with no consumer. NoUnwindFuture protects
+                // async-task's otherwise aborting future-destruction boundary.
+                drop(runnable);
+                #[cfg(test)]
+                {
+                    let hook = shared.after_scheduler_drop_hook.lock().clone();
+                    if let Some(hook) = hook {
+                        hook();
+                    }
+                }
+            } else {
+                shared.queue.schedule(runnable);
+            }
         };
         let (runnable, task) = async_task::spawn(wrapped, schedule);
         task.detach();
@@ -492,6 +525,16 @@ impl ExecutorShared {
     ) -> Result<SpawnReservation<'_>, (XllError, bool)> {
         if self.closing.load(Ordering::Acquire) {
             return Err((XllError::Closing, true));
+        }
+        if self.fatal_worker_failure.load(Ordering::Acquire)
+            || self.live_workers.load(Ordering::Acquire) == 0
+        {
+            return Err((
+                XllError::Internal {
+                    diagnostic_id: DiagnosticId::ASYNC_SPAWN,
+                },
+                true,
+            ));
         }
 
         let generation_pin = {

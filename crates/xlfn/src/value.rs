@@ -1742,11 +1742,7 @@ mod tests {
         let mut builder = crate::input_identity::InputFingerprintBuilder::new(1);
         builder
             .with_argument(0, "arg", |encoder| {
-                encoder.u64(value.rows() as u64);
-                encoder.u64(value.columns() as u64);
-                for cell in value.cells() {
-                    encode_raw_value(cell, true, encoder);
-                }
+                value.encode_input_identity(encoder);
                 Ok(())
             })
             .unwrap();
@@ -2521,6 +2517,92 @@ mod tests {
                 raw_array_identity(positive_view)
             );
         });
+    }
+
+    #[test]
+    #[cfg(feature = "handles")]
+    fn raw_array_type_changes_recreate_handle_results() {
+        use crate::handle::{
+            FormulaCaller, FormulaHandleService, FormulaRevisionKey, HandleTopicKey,
+        };
+        use crate::input_identity::{InputFingerprint, InputFingerprintBuilder};
+
+        struct ObservedType {
+            _kind: XlValueType,
+        }
+        impl crate::handle::ExcelHandleObject for ObservedType {}
+
+        fn prepare(cell: XLOPER12) -> (InputFingerprint, XlValueType) {
+            let mut cells = [cell];
+            let raw = XLOPER12 {
+                value: XLOPER12Value {
+                    array: XLOPER12Array {
+                        rows: 1,
+                        columns: 1,
+                        values: cells.as_mut_ptr(),
+                    },
+                },
+                xltype: XLTYPE_MULTI,
+            };
+            let value = XlValueRef::from_array_cell(&raw).unwrap();
+            let mut builder = InputFingerprintBuilder::new(1);
+            let prepared = builder
+                .with_argument(0, "values", |identity| {
+                    <XlArrayRef<'_> as PrepareExcel>::prepare(value, "values", identity)
+                })
+                .unwrap();
+            let view = <XlArrayRef<'_> as PrepareExcel>::materialize(prepared).unwrap();
+            let kind = view.get(0, 0).unwrap().value_type();
+            (builder.finish().unwrap(), kind)
+        }
+
+        let integer = prepare(XLOPER12::integer(1));
+        let same_integer = prepare(XLOPER12::integer(1));
+        let number = prepare(XLOPER12::number(1.0));
+        let same_number = prepare(XLOPER12::number(1.0));
+        let mut flagged_number = XLOPER12::number(1.0);
+        flagged_number.xltype |= xlfn_sys::XLBIT_XL_FREE;
+        let flagged_number = prepare(flagged_number);
+        assert_eq!(integer.1, XlValueType::Integer);
+        assert_eq!(number.1, XlValueType::Number);
+        assert_ne!(integer.0, number.0);
+        assert_eq!(integer.0, same_integer.0);
+        assert_eq!(number.0, same_number.0);
+        assert_eq!(number, flagged_number);
+
+        let handles = FormulaHandleService::try_new(8).unwrap();
+        let mut factory_calls = 0;
+        let mut invoke = |input: (InputFingerprint, XlValueType)| {
+            let key = HandleTopicKey::Formula(FormulaRevisionKey::new(
+                FormulaCaller {
+                    sheet_id: 1,
+                    row: 1,
+                    column: 1,
+                },
+                "TEST.RAW_ARRAY.TYPE",
+                input.0,
+            ));
+            handles
+                .prepare_observed(
+                    key,
+                    || {
+                        factory_calls += 1;
+                        Ok(ObservedType { _kind: input.1 })
+                    },
+                    |_, _| Ok(()),
+                )
+                .unwrap()
+                .into_token()
+        };
+        let integer_token = invoke(integer);
+        assert_eq!(integer_token, invoke(same_integer));
+        let number_token = invoke(number);
+        assert_ne!(integer_token, number_token);
+        assert_eq!(number_token, invoke(same_number));
+        assert_eq!(number_token, invoke(flagged_number));
+        assert_eq!(factory_calls, 2);
+        handles.terminate_all_topics();
+        let _ = handles.seal();
     }
 
     #[test]

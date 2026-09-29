@@ -38,6 +38,10 @@ impl Drop for WorkerExitGuard {
         if std::thread::panicking() {
             self.recover_local_queue();
             shared.fatal_worker_failure.store(true, Ordering::Release);
+            // A failed executor stops accepting work and cancels every
+            // admitted task immediately. Remaining workers can drain those
+            // tasks; waiting until xlAutoRemove would strand pending cells.
+            cancel_tasks(shared.request_close());
         } else {
             // Normal workers exit only when the queue is sealed and empty.
             debug_assert!(
@@ -47,7 +51,13 @@ impl Drop for WorkerExitGuard {
         }
 
         // An Acquire zero observation must see recovered queues and failures.
-        let _ = xlfn_kernel::invariant::checked_atomic_dec_release(&shared.live_workers);
+        let last = xlfn_kernel::invariant::checked_atomic_dec_release(&shared.live_workers) == 1;
+        if last && shared.fatal_worker_failure.load(Ordering::Acquire) {
+            shared.queue.seal_and_wake_all();
+            while let Some(runnable) = shared.queue.drain_abandoned() {
+                let _ = catch_no_unwind(AssertUnwindSafe(|| drop(runnable)));
+            }
+        }
         let _guard = shared.wait_lock.lock();
         shared.idle.notify_all();
     }

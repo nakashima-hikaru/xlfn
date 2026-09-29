@@ -111,6 +111,15 @@ fn wait_for_async_callback_count(expected: usize) {
     }
 }
 
+fn wait_for_executor_idle(manager: &AsyncManager) {
+    let executor = manager.snapshot_spawn_executor().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while executor.active.load(Ordering::Acquire) != 0 {
+        assert!(Instant::now() < deadline, "executor did not become idle");
+        std::thread::yield_now();
+    }
+}
+
 #[test]
 fn executor_runs_tasks_and_joins_on_close() {
     let manager = AsyncManager::new();
@@ -809,6 +818,313 @@ fn lone_worker_panic_drops_tasks_left_on_the_queue() {
 }
 
 #[test]
+fn failed_executor_cancels_pending_tasks_and_rejects_new_admission_without_close() {
+    struct DropSignal(Arc<AtomicBool>);
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    let manager = AsyncManager::new();
+    manager.start(1).unwrap();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    manager
+        .spawn(
+            TEST_GENERATION,
+            async move {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                panic!("injected worker failure before removal");
+            },
+            test_cancellation_source(),
+        )
+        .unwrap();
+    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let dropped = Arc::new(AtomicBool::new(false));
+    let pending = DropSignal(Arc::clone(&dropped));
+    manager
+        .spawn(
+            TEST_GENERATION,
+            async move {
+                let _pending = pending;
+                std::future::pending::<()>().await;
+            },
+            test_cancellation_source(),
+        )
+        .unwrap();
+    release_tx.send(()).unwrap();
+
+    let executor = manager.snapshot_spawn_executor().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while executor.live_workers.load(Ordering::Acquire) != 0
+        || executor.active.load(Ordering::Acquire) != 0
+    {
+        assert!(
+            Instant::now() < deadline,
+            "failed worker must drain abandoned tasks"
+        );
+        std::thread::yield_now();
+    }
+    assert!(dropped.load(Ordering::Acquire));
+    assert!(executor.fatal_worker_failure.load(Ordering::Acquire));
+    assert!(manager.reserve_spawn(TEST_GENERATION).is_err());
+    drop(executor);
+    assert_eq!(manager.close().issues.len(), 1);
+}
+
+#[test]
+fn failed_last_worker_reclaims_a_reservation_that_schedules_after_recovery() {
+    let manager = Arc::new(AsyncManager::new());
+    manager.start(1).unwrap();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    manager
+        .spawn(
+            TEST_GENERATION,
+            async move {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                panic!("injected last worker failure during commit");
+            },
+            test_cancellation_source(),
+        )
+        .unwrap();
+    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+    let entered = Arc::new(std::sync::Barrier::new(2));
+    let resume = Arc::new(std::sync::Barrier::new(2));
+    let hook_entered = Arc::clone(&entered);
+    let hook_resume = Arc::clone(&resume);
+    manager.set_before_task_schedule_hook(Some(Arc::new(move || {
+        hook_entered.wait();
+        hook_resume.wait();
+    })));
+    let spawning_manager = Arc::clone(&manager);
+    let spawning = std::thread::spawn(move || {
+        spawning_manager.spawn(
+            TEST_GENERATION,
+            std::future::pending(),
+            test_cancellation_source(),
+        )
+    });
+    entered.wait();
+    release_tx.send(()).unwrap();
+    let executor = manager.snapshot_spawn_executor().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while executor.live_workers.load(Ordering::Acquire) != 0 {
+        assert!(Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    assert_eq!(executor.active.load(Ordering::Acquire), 1);
+    resume.wait();
+    spawning.join().unwrap().unwrap();
+    assert_eq!(executor.active.load(Ordering::Acquire), 0);
+    drop(executor);
+    assert_eq!(manager.close().issues.len(), 1);
+}
+
+#[test]
+fn failed_executor_close_waits_for_external_scheduler_and_its_final_release() {
+    struct PendingFuture {
+        waker: Option<std::sync::mpsc::Sender<std::task::Waker>>,
+        dropped: Arc<AtomicBool>,
+    }
+    impl std::future::Future for PendingFuture {
+        type Output = ();
+        fn poll(
+            mut self: std::pin::Pin<&mut Self>,
+            context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<()> {
+            if let Some(waker) = self.waker.take() {
+                waker.send(context.waker().clone()).unwrap();
+            }
+            std::task::Poll::Pending
+        }
+    }
+    impl Drop for PendingFuture {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::Release);
+        }
+    }
+
+    let manager = Arc::new(AsyncManager::new());
+    manager.start(1).unwrap();
+    let (waker_tx, waker_rx) = std::sync::mpsc::channel();
+    let dropped = Arc::new(AtomicBool::new(false));
+    manager
+        .spawn(
+            TEST_GENERATION,
+            PendingFuture {
+                waker: Some(waker_tx),
+                dropped: Arc::clone(&dropped),
+            },
+            test_cancellation_source(),
+        )
+        .unwrap();
+    let waker = waker_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    manager
+        .spawn(
+            TEST_GENERATION,
+            async move {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                panic!("injected worker failure with an external scheduler");
+            },
+            test_cancellation_source(),
+        )
+        .unwrap();
+    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+    let before_entered = Arc::new(std::sync::Barrier::new(2));
+    let before_resume = Arc::new(std::sync::Barrier::new(2));
+    let after_entered = Arc::new(std::sync::Barrier::new(2));
+    let after_resume = Arc::new(std::sync::Barrier::new(2));
+    {
+        let executor = manager.snapshot_spawn_executor().unwrap();
+        let entered = Arc::clone(&before_entered);
+        let resume = Arc::clone(&before_resume);
+        *executor.before_scheduler_admission_hook.lock() = Some(Arc::new(move || {
+            entered.wait();
+            resume.wait();
+        }));
+        let entered = Arc::clone(&after_entered);
+        let resume = Arc::clone(&after_resume);
+        *executor.after_scheduler_drop_hook.lock() = Some(Arc::new(move || {
+            entered.wait();
+            resume.wait();
+        }));
+    }
+    let waking = std::thread::spawn(move || waker.wake());
+    // async-task has marked the task scheduled, but has not entered our
+    // callback gate. Cancellation cannot enqueue a second runnable for it.
+    before_entered.wait();
+    release_tx.send(()).unwrap();
+    {
+        let executor = manager.snapshot_spawn_executor().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while executor.live_workers.load(Ordering::Acquire) != 0 {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert_eq!(executor.active.load(Ordering::Acquire), 1);
+    }
+
+    let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+    let closing_manager = Arc::clone(&manager);
+    let closing = std::thread::spawn(move || {
+        closed_tx
+            .send(closing_manager.close().issues.len())
+            .unwrap();
+    });
+    assert!(matches!(
+        closed_rx.recv_timeout(Duration::from_millis(25)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+    before_resume.wait();
+    // The future and final active guard have now been released. The callback
+    // gate still protects the shared state until the external callback exits.
+    after_entered.wait();
+    assert!(dropped.load(Ordering::Acquire));
+    assert!(matches!(
+        closed_rx.recv_timeout(Duration::from_millis(25)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+    after_resume.wait();
+    waking.join().unwrap();
+    assert_eq!(closed_rx.recv_timeout(Duration::from_secs(2)).unwrap(), 1);
+    closing.join().unwrap();
+}
+
+#[test]
+fn cancellation_contains_user_future_destruction_before_and_after_first_poll() {
+    struct PanickingFuture {
+        polled: Arc<AtomicBool>,
+        dropped: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl std::future::Future for PanickingFuture {
+        type Output = ();
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<()> {
+            self.polled.store(true, Ordering::Release);
+            std::task::Poll::Pending
+        }
+    }
+    impl Drop for PanickingFuture {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::Release);
+            panic!("injected cancelled future destructor panic");
+        }
+    }
+
+    for before_poll in [false, true] {
+        let manager = AsyncManager::new();
+        manager.start(1).unwrap();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        if before_poll {
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            manager
+                .spawn(
+                    TEST_GENERATION,
+                    async move {
+                        started_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                    },
+                    test_cancellation_source(),
+                )
+                .unwrap();
+            started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        }
+        let polled = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        manager
+            .spawn(
+                TEST_GENERATION,
+                PanickingFuture {
+                    polled: Arc::clone(&polled),
+                    dropped: Arc::clone(&dropped),
+                },
+                test_cancellation_source(),
+            )
+            .unwrap();
+        if !before_poll {
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while !polled.load(Ordering::Acquire) {
+                assert!(Instant::now() < deadline);
+                std::thread::yield_now();
+            }
+        }
+        manager.cancel_current_generation();
+        if before_poll {
+            release_tx.send(()).unwrap();
+        }
+        wait_for_executor_idle(&manager);
+        assert_eq!(dropped.load(Ordering::Acquire), 1);
+        assert_eq!(polled.load(Ordering::Acquire), !before_poll);
+        let executor = manager.snapshot_spawn_executor().unwrap();
+        assert_eq!(executor.live_workers.load(Ordering::Acquire), 1);
+        assert!(!executor.fatal_worker_failure.load(Ordering::Acquire));
+        drop(executor);
+        assert!(manager.advance_generation());
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        manager
+            .spawn(
+                manager.current_generation(),
+                async move { completed_tx.send(()).unwrap() },
+                test_cancellation_source(),
+            )
+            .unwrap();
+        completed_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(manager.close().issues.is_empty());
+    }
+}
+
+#[test]
 fn pending_task_limit_is_reserved_atomically() {
     let manager = AsyncManager::new();
     manager.start(2).unwrap();
@@ -964,6 +1280,69 @@ fn async_boundary_returns_completed_value_through_callback() {
     }
     assert_eq!(wait_for_async_callback(), 42);
     assert_eq!(crate::test_callback::free_calls(), 0);
+    assert!(runtime.close_async().issues.is_empty());
+}
+
+#[test]
+fn async_boundary_future_destructor_panic_reports_error_and_preserves_worker() {
+    struct PanickingDropFuture;
+    impl std::future::Future for PanickingDropFuture {
+        type Output = XllResult<f64>;
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            std::task::Poll::Ready(Ok(1.0))
+        }
+    }
+    impl Drop for PanickingDropFuture {
+        fn drop(&mut self) {
+            panic!("injected completed UDF future destructor panic");
+        }
+    }
+
+    let runtime = Box::leak(Box::new(Runtime::<TestU32Addin>::new()));
+    let _guard = test_lock_for_runtime(runtime);
+    let open_attempt = runtime.begin_open().unwrap();
+    let mut open_attempt = runtime.publish(open_attempt, 7_u32, ());
+    runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+    runtime.start_async(1).unwrap();
+    let _callback_guard = reset_test_callback();
+    let mut handle = XLOPER12 {
+        value: XLOPER12Value {
+            big_data: XLOPER12BigData {
+                handle: XLOPER12BigDataHandle {
+                    data: std::ptr::null_mut(),
+                },
+                byte_count: 0,
+            },
+        },
+        xltype: XLTYPE_BIG_DATA,
+    };
+    // SAFETY: the handle is a live stack-local opaque async token.
+    unsafe {
+        async_udf_boundary_named(
+            runtime,
+            "future_drop",
+            "FUTURE.DROP",
+            &mut handle,
+            |_, _, _| Ok(PanickingDropFuture),
+        );
+    }
+    assert_eq!(wait_for_async_callback(), -1);
+    wait_for_executor_idle(runtime.async_manager());
+    let executor = runtime.async_manager().snapshot_spawn_executor().unwrap();
+    assert_eq!(executor.live_workers.load(Ordering::Acquire), 1);
+    assert!(!executor.fatal_worker_failure.load(Ordering::Acquire));
+    drop(executor);
+    // SAFETY: the same opaque token is live for this second test call.
+    unsafe {
+        async_udf_boundary_named(runtime, "next_udf", "NEXT.UDF", &mut handle, |_, _, _| {
+            Ok(async { Ok::<_, XllError>(42.0) })
+        });
+    }
+    wait_for_async_callback_count(2);
+    assert_eq!(crate::test_callback::last_async_value(), 42);
     assert!(runtime.close_async().issues.is_empty());
 }
 
@@ -1698,7 +2077,7 @@ fn miri_canceled_running_task_keeps_its_generation_until_completion() {
         let ExecutorState::Running(executor) = &*state else {
             unreachable!()
         };
-        assert!(executor.wait_for_idle());
+        executor.wait_for_idle();
     }
     assert!(manager.advance_generation());
     {

@@ -5,6 +5,7 @@ mod boundary;
 mod completion;
 mod excel_handle;
 mod executor;
+mod future;
 mod generation;
 mod instrumentation;
 mod manager;

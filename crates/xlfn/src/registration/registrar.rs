@@ -219,7 +219,10 @@ impl HostRegistrar {
                 continue;
             }
 
-            match host.delete_name(registration.registration.excel_name) {
+            match host.delete_name_if_binding_matches(
+                registration.registration.excel_name,
+                [registration.registration.id],
+            ) {
                 RegistrationMutation::Applied { cleanup, .. } => {
                     registration.state = super::RegistrationCleanupState::NameDeleted;
                     if let Err(error) = cleanup {
@@ -690,6 +693,165 @@ mod tests {
         assert_eq!(registration.cleanup_severity(), CleanupSeverity::BestEffort);
         registration.state = RegistrationCleanupState::NameDeleted;
         assert_eq!(registration.cleanup_severity(), CleanupSeverity::BestEffort);
+    }
+
+    #[cfg(any(not(target_os = "windows"), feature = "async", feature = "handles"))]
+    mod name_cleanup {
+        use super::*;
+        use crate::registration::host::test_support::{CallbackScript, Reply};
+        use xlfn_sys::{
+            XLF_EVALUATE, XLF_SET_NAME, XLF_UNREGISTER, XLOPER12, XLRET_ABORT, XLRET_FAILED,
+            XLRET_UNCALCED,
+        };
+
+        fn registration() -> PendingRegistration {
+            RegistrationId {
+                id: -7.0,
+                excel_name: "TEST.OWNED",
+            }
+            .into()
+        }
+
+        #[test]
+        fn ordinary_unregister_preserves_a_rebound_name() {
+            let script = CallbackScript::install([
+                Reply::success(XLF_UNREGISTER, XLOPER12::boolean(true)),
+                Reply::success(XLF_EVALUATE, XLOPER12::number(9.0)),
+            ]);
+            let callbacks = HostCallbackSession::new();
+            let host = RegistrationHost::new(&callbacks);
+
+            let outcome = HostRegistrar::unregister_pending(&host, &[registration()]);
+
+            assert!(outcome.failed.is_empty());
+            assert!(outcome.succeeded.is_empty());
+            assert_eq!(outcome.metadata_debt.len(), 1);
+            assert!(matches!(
+                outcome.metadata_debt[0].last_error(),
+                XllError::MetadataDebtBindingChanged { name: "TEST.OWNED" }
+            ));
+            assert_eq!(outcome.metadata_debt[0].expected_registration_id(), -7.0);
+            script.assert_calls(&[XLF_UNREGISTER, XLF_EVALUATE]);
+        }
+
+        #[test]
+        fn ordinary_unregister_resolves_matching_and_absent_names() {
+            for absent in [false, true] {
+                let mut replies = vec![
+                    Reply::success(XLF_UNREGISTER, XLOPER12::boolean(true)),
+                    Reply::success(
+                        XLF_EVALUATE,
+                        if absent {
+                            XLOPER12::error(xlfn_sys::XLERR_NAME)
+                        } else {
+                            XLOPER12::number(-7.0)
+                        },
+                    ),
+                ];
+                let mut expected_calls = vec![XLF_UNREGISTER, XLF_EVALUATE];
+                if !absent {
+                    replies.push(Reply::success(XLF_SET_NAME, XLOPER12::boolean(true)));
+                    expected_calls.push(XLF_SET_NAME);
+                }
+                let script = CallbackScript::install(replies);
+                let callbacks = HostCallbackSession::new();
+                let host = RegistrationHost::new(&callbacks);
+
+                let outcome = HostRegistrar::unregister_pending(&host, &[registration()]);
+
+                assert!(outcome.failed.is_empty());
+                assert!(outcome.metadata_debt.is_empty());
+                assert!(outcome.cleanup_issues.is_empty());
+                assert_eq!(outcome.succeeded.len(), 1);
+                assert_eq!(
+                    outcome.succeeded[0].state,
+                    RegistrationCleanupState::NameDeleted
+                );
+                script.assert_calls(&expected_calls);
+            }
+        }
+
+        #[test]
+        fn ordinary_unregister_retains_debt_when_binding_cannot_be_observed() {
+            for probe in [
+                Reply::success(XLF_EVALUATE, XLOPER12::boolean(true)),
+                Reply::success(XLF_EVALUATE, XLOPER12::nil()).status(XLRET_UNCALCED),
+                Reply::success(XLF_EVALUATE, XLOPER12::nil()).status(XLRET_ABORT),
+                Reply::success(XLF_EVALUATE, XLOPER12::number(-7.0)).release_status(XLRET_FAILED),
+            ] {
+                let script = CallbackScript::install([
+                    Reply::success(XLF_UNREGISTER, XLOPER12::boolean(true)),
+                    probe,
+                ]);
+                let callbacks = HostCallbackSession::new();
+                let host = RegistrationHost::new(&callbacks);
+
+                let outcome = HostRegistrar::unregister_pending(&host, &[registration()]);
+
+                assert!(outcome.failed.is_empty());
+                assert!(outcome.succeeded.is_empty());
+                assert_eq!(outcome.metadata_debt.len(), 1);
+                assert_eq!(outcome.metadata_debt[0].expected_registration_id(), -7.0);
+                script.assert_calls(&[XLF_UNREGISTER, XLF_EVALUATE]);
+            }
+        }
+
+        #[test]
+        fn ordinary_unregister_respects_callback_suppression() {
+            let script = CallbackScript::install([]);
+            let callbacks = HostCallbackSession::new();
+            callbacks.suppress_for_test(ExcelCallbackStatus::Abort);
+            let host = RegistrationHost::new(&callbacks);
+
+            let outcome = HostRegistrar::unregister_pending(&host, &[registration()]);
+
+            assert!(outcome.succeeded.is_empty());
+            assert!(outcome.metadata_debt.is_empty());
+            assert_eq!(outcome.failed.len(), 1);
+            assert_eq!(
+                outcome.failed[0].0.state,
+                RegistrationCleanupState::Registered
+            );
+            script.assert_calls(&[]);
+        }
+
+        #[test]
+        fn ordinary_unregister_retains_indeterminate_name_deletion() {
+            let script = CallbackScript::install([
+                Reply::success(XLF_UNREGISTER, XLOPER12::boolean(true)),
+                Reply::success(XLF_EVALUATE, XLOPER12::number(-7.0)),
+                Reply::success(XLF_SET_NAME, XLOPER12::nil()).status(XLRET_ABORT),
+            ]);
+            let callbacks = HostCallbackSession::new();
+            let host = RegistrationHost::new(&callbacks);
+
+            let outcome = HostRegistrar::unregister_pending(&host, &[registration()]);
+
+            assert!(outcome.succeeded.is_empty());
+            assert!(outcome.failed.is_empty());
+            assert_eq!(outcome.metadata_debt.len(), 1);
+            assert!(!host.permits_callbacks());
+            script.assert_calls(&[XLF_UNREGISTER, XLF_EVALUATE, XLF_SET_NAME]);
+        }
+
+        #[test]
+        fn ordinary_unregister_commits_name_deletion_before_result_cleanup() {
+            let script = CallbackScript::install([
+                Reply::success(XLF_UNREGISTER, XLOPER12::boolean(true)),
+                Reply::success(XLF_EVALUATE, XLOPER12::number(-7.0)),
+                Reply::success(XLF_SET_NAME, XLOPER12::boolean(true)).release_status(XLRET_FAILED),
+            ]);
+            let callbacks = HostCallbackSession::new();
+            let host = RegistrationHost::new(&callbacks);
+
+            let outcome = HostRegistrar::unregister_pending(&host, &[registration()]);
+
+            assert!(outcome.failed.is_empty());
+            assert!(outcome.metadata_debt.is_empty());
+            assert_eq!(outcome.succeeded.len(), 1);
+            assert_eq!(outcome.cleanup_issues.len(), 1);
+            script.assert_calls(&[XLF_UNREGISTER, XLF_EVALUATE, XLF_SET_NAME]);
+        }
     }
 
     #[cfg(feature = "async")]

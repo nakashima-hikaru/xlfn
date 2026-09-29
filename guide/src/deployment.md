@@ -45,6 +45,17 @@ Excel locks loaded `.xll` and `.dll` files while the application is running:
 2. Replace the package files.
 3. Restart Excel and verify the updated functions.
 
+If packaging reports `distribution commit interrupted`, the output directory
+may contain the previous package, the new package, or no package. The error
+identifies the transaction location; the packaging API also exposes the possible
+previous-package location. Keep any retained transaction and backup directories
+in place, and retry the same packaging command. Its commit step recovers retained
+transactions before replacing the output again.
+
+Follow the transaction journal when recovering an interrupted update. A backup
+left after a committed update is only pending cleanup; the newly installed
+package remains authoritative.
+
 ## Versioning worksheet functions
 
 When evolving your add-in:

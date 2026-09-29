@@ -57,6 +57,8 @@ fn claim_idle_worker(mask: &impl IdleWorkerMask) -> Option<usize> {
 ///   *spawn admission* for new tasks, but does *NOT* seal `schedule_admission`. In-flight tasks
 ///   and abort/cancellation wakers can continue scheduling `Runnable`s until all active tasks
 ///   drain (`active == 0`). Only then is `schedule_admission` sealed during final close.
+///   After the last worker fails it is sealed earlier: further scheduling drops
+///   runnables, with the executor's separate callback gate retaining destruction.
 /// - **Q4 (Liveness / No Lost Wakeups)**: Whenever work is enqueued or batch-stolen into a local
 ///   queue with extra tasks, if sleeping workers exist in `idle_workers`, at least one worker
 ///   is unparked and guaranteed to observe the work.
