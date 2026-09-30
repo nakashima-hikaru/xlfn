@@ -1287,6 +1287,77 @@ mod tests {
         );
     }
 
+    fn uncommitted_final_close_trace() -> String {
+        let uncommitted = std::sync::Arc::new(Runtime::<CleanClose>::new());
+        let opening = uncommitted.begin_open().unwrap();
+        let mut opening = uncommitted.publish(opening, (), ());
+        let closing_runtime = std::sync::Arc::clone(&uncommitted);
+        let (owner_tx, owner_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let close_waiter = std::thread::spawn(move || {
+            let removal_attempt = closing_runtime
+                .begin_final_removal()
+                .expect("final close must acquire after open rejection");
+            owner_tx.send(()).expect("final close owner signal");
+            release_rx.recv().expect("final close release signal");
+            drop(removal_attempt);
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while uncommitted.phase() != crate::lifecycle::LifecyclePhase::Closing
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            uncommitted.phase(),
+            crate::lifecycle::LifecyclePhase::Closing
+        );
+        assert!(matches!(
+            uncommitted.finish_open(&mut opening, Vec::new()),
+            Err(XllError::Closing)
+        ));
+        owner_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("final close owner was not acquired");
+        release_tx.send(()).expect("final close release signal");
+        close_waiter.join().expect("final close waiter panicked");
+        assert_eq!(host_auto_remove::<CleanClose>(&uncommitted), 1);
+        uncommitted.composition_trace_json()
+    }
+
+    #[test]
+    fn open_rejection_is_recorded_before_final_close_owner_acquisition() {
+        let _test_guard = COMPOSITION_TRACE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let trace = uncommitted_final_close_trace();
+        let document: serde_json::Value =
+            serde_json::from_str(&trace).expect("composition trace must be valid JSON");
+        let events = document["events"]
+            .as_array()
+            .expect("composition trace must contain an events array");
+        let begin = events
+            .iter()
+            .position(|event| event.get("beginOpen").is_some())
+            .expect("trace must record open beginning");
+        let request = events
+            .iter()
+            .position(|event| event == "requestFinalClose")
+            .expect("trace must record final close request");
+        let rejection = events
+            .iter()
+            .position(|event| event.get("finishOpenRejectedByClose").is_some())
+            .expect("trace must record open rejection");
+        let owner = events
+            .iter()
+            .position(|event| event == "acquireFinalCloseOwner")
+            .expect("trace must record final close owner acquisition");
+        assert!(
+            begin < request && request < rejection && rejection < owner,
+            "final close overtook the open rejection record: {trace}"
+        );
+    }
+
     #[test]
     #[ignore = "requires XLFN_COMPOSITION_CHECKER to point to the Lean executable"]
     fn rust_composition_uncommitted_and_rollback_traces_are_accepted_by_lean_checker() {
@@ -1333,38 +1404,9 @@ mod tests {
             );
         };
 
-        let uncommitted = std::sync::Arc::new(Runtime::<CleanClose>::new());
-        let opening = uncommitted.begin_open().unwrap();
-        let mut opening = uncommitted.publish(opening, (), ());
-        let closing_runtime = std::sync::Arc::clone(&uncommitted);
-        let (owner_tx, owner_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let close_waiter = std::thread::spawn(move || {
-            let removal_attempt = closing_runtime
-                .begin_final_removal()
-                .expect("final close must acquire after open rejection");
-            owner_tx.send(()).expect("final close owner signal");
-            release_rx.recv().expect("final close release signal");
-            drop(removal_attempt);
-        });
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-        while uncommitted.phase() != crate::lifecycle::LifecyclePhase::Closing
-            && std::time::Instant::now() < deadline
-        {
-            std::thread::yield_now();
-        }
-        assert_eq!(
-            uncommitted.phase(),
-            crate::lifecycle::LifecyclePhase::Closing
-        );
-        assert!(uncommitted.finish_open(&mut opening, Vec::new()).is_err());
-        owner_rx.recv().expect("final close owner was not acquired");
-        release_tx.send(()).expect("final close release signal");
-        close_waiter.join().expect("final close waiter panicked");
-        assert_eq!(host_auto_remove::<CleanClose>(&uncommitted), 1);
         check(
             "uncommitted final close",
-            uncommitted.composition_trace_json(),
+            uncommitted_final_close_trace(),
             "rust-composition-uncommitted-trace.json",
         );
 

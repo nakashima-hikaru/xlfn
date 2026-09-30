@@ -729,9 +729,11 @@ fn commit_inner<A: crate::Addin>(
         let authority = deps.lifecycle_control();
         let closing = module_opening.rollback(|| {});
         authority.complete_open_abort_locked(&mut control, closing);
+        // Clearing the open attempt makes final close claimable. Record that
+        // transition before a close waiter can acquire the lifecycle lock.
+        deps.observer().reject_open_locked(&control, attempt_id);
         deps.lifecycle().notify_all();
         drop(control);
-        deps.observer().reject_open(attempt_id);
         Err(XllError::Closing)
     }
 }

@@ -253,7 +253,12 @@ impl RuntimeObserver {
         let _ = (deps, attempt, _generation);
     }
 
-    pub(crate) fn reject_open(&self, attempt: OpenAttemptId) {
+    /// Records open rejection while its lifecycle transition is still locked.
+    pub(crate) fn reject_open_locked<A: crate::Addin>(
+        &self,
+        _control: &crate::lifecycle::LifecycleAccess<'_, A>,
+        attempt: OpenAttemptId,
+    ) {
         #[cfg(any(test, feature = "refinement"))]
         {
             self.record_composition_event(
