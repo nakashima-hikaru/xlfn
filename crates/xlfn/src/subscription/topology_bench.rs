@@ -416,7 +416,8 @@ pub fn shared_publisher_topology_probe(
                         .map_err(super::RtdSendError::into_error)
                 })
             })
-        });
+        })
+        .with_max_producers(NonZeroUsize::new(subscriptions.max(1)).unwrap());
         measure_source(source, registration, jobs, done_rx, subscriptions, updates)
     } else {
         let pool = Arc::new(SharedPool::new(shared_publishers));

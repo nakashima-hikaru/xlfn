@@ -23,10 +23,29 @@ In this illustrative loop, `try_next_metric` is a non-blocking poll and
 `wait_closed` makes the polling delay interruptible. Use bounded or
 cancellation-aware I/O so the callback returns promptly after admission
 closes. The factory validates the topic before any worker starts. Producer
-errors and panics close the channel and are reported during disconnect.
+errors and panics close sender admission and are diagnosed immediately, even
+while the subscription remains connected. Diagnostics include the topic and
+the original failure. `RetainLastValue` is the default producer error policy:
+accepted values drain and the cell keeps the final value. Configure
+`.with_error_policy(RtdProducerErrorPolicy::PublishError(ExcelError::NotAvailable))`
+to replace it with an Excel error after accepted updates drain. The adapter
+reserves one terminal error slot in addition to the bounded data queue, so even
+a full queue cannot hide a producer failure. A successful producer return
+does not publish an error.
 
 Each active subscription uses one producer thread. All channel subscriptions in
-a runtime generation share one publisher, for N+1 threads in total. The publisher
+a runtime generation share one publisher, for N+1 threads in total. Each source
+admits at most 64 producer workers by default; configure a lower or higher
+nonzero bound with `.with_max_producers(limit)`. A worker retains its reservation
+until disconnect joins it, including when it has already exited. Reconfiguring
+the bound preserves existing reservations; reducing it below the retained
+worker count rejects new subscriptions until enough workers are joined.
+At capacity, setup returns `XllError::Overloaded` before invoking the factory.
+This source-local bound is independent of the runtime's active-stream limit.
+The adapter is intended for tens of independent blocking feeds. For thousands
+of topics, use a custom `RtdSource` that multiplexes them onto shared I/O workers;
+a framework async or multiplexed adapter can be added when that scale is needed.
+The publisher
 processes at most 32 values per topic turn before yielding to another ready
 topic. A stalled publication can delay other topics on the shared worker.
 
@@ -124,7 +143,12 @@ payload and maps Full/Closed to Overloaded/Closing. There is no implicit lossy
 delivery acknowledgement: disconnect can discard pending values. If the
 publisher encounters a runtime error, it closes admission, wakes the producer,
 and reports that error during disconnect. `Closing` is treated as normal
-shutdown.
+shutdown when it follows cancellation. Returning `Closing` from a producer
+before cancellation is diagnosed as a producer failure.
+
+Producer errors and panics are reported once at completion and are not repeated
+as disconnect errors. Disconnect still returns publication or worker-join
+failures; it remains the lifetime barrier for workers and sinks.
 
 Publishing validates and queues a value; xlfn notifies Excel and handles
 `RefreshData`.

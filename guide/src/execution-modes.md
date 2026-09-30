@@ -80,7 +80,7 @@ fn range_name(
 }
 ```
 
-A macro-sheet context permits Excel callback operations that are not allowed in thread-safe functions. It is neither `Send` nor `Sync`; its one inferred lifetime is the current Excel-call scope. It provides:
+A macro-sheet context permits Excel callback operations that are not allowed in thread-safe functions. It is neither `Send` nor `Sync`; its one inferred lifetime is the current Excel-call scope. The generated Excel entrypoint supplies its callback authority; creating an input-memory scope cannot create or reset it. Context clones share the same session. Once Excel returns `Abort` or `Uncalced`, later callbacks through every context for that invocation are suppressed. It provides:
 
 - `coerce` for an owned `ExcelValue`;
 - `coerce_matrix<T>` for an owned matrix;

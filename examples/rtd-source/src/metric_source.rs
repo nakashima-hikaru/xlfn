@@ -3,7 +3,7 @@ use std::{num::NonZeroUsize, time::Duration};
 use xlfn::{
     error::InputError,
     prelude::*,
-    rtd::{RtdChannelSource, RtdSender, RtdValue},
+    rtd::{RtdChannelSource, RtdProducerErrorPolicy, RtdSender, RtdValue},
 };
 
 use super::Client;
@@ -35,14 +35,15 @@ pub(crate) fn metric_source() -> MetricSource {
                     Ok(None) => {
                         sender.wait_closed(Duration::from_millis(50));
                     }
-                    Err(_) => {
-                        sender
-                            .try_send(RtdValue::Error(ExcelErrorValue(ExcelError::NotAvailable))).map_err(xlfn::rtd::RtdSendError::into_error)?;
-                        break;
-                    }
+                    Err(error) => return Err(XllError::Native {
+                        code: error.raw_os_error().unwrap_or(0),
+                        message: error.to_string(),
+                    }),
                 }
             }
             Ok(())
         })
     })
+    .with_max_producers(NonZeroUsize::new(32).unwrap())
+    .with_error_policy(RtdProducerErrorPolicy::PublishError(ExcelError::NotAvailable))
 }

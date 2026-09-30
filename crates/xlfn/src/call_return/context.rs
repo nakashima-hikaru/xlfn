@@ -37,23 +37,23 @@ impl<'call, 'scope> ReturnContext<'call, 'scope> {
         }
     }
 
-    #[doc(hidden)]
-    /// Creates return services for one generated synchronous UDF call.
-    pub fn for_call<A: crate::Addin>(
+    #[cfg(test)]
+    /// Creates return services while borrowing existing callback authority.
+    pub(crate) fn for_call<A: crate::Addin>(
         call: &'call crate::runtime::CallGuard<'_, A>,
         udf_id: &'static str,
         inputs: Option<[u8; 32]>,
-        scope: &'scope crate::call::CallScope<'scope>,
+        callbacks: &'scope crate::host_callback::HostCallbackSession,
     ) -> Self {
         #[cfg(feature = "handles")]
         let publisher = inputs.map(|inputs| FormulaPublisher {
             runtime: call.handle_call_access(),
             udf_id,
             inputs: InputFingerprint::from_bytes(inputs),
-            host: ExcelHost::new(scope.callbacks()),
+            host: ExcelHost::new(callbacks),
         });
         #[cfg(not(feature = "handles"))]
-        let _ = (call, udf_id, inputs, scope);
+        let _ = (call, udf_id, inputs, callbacks);
         Self {
             #[cfg(feature = "handles")]
             publisher,
@@ -75,12 +75,13 @@ impl<'call> ReturnContext<'call, 'call> {
         handles: crate::value::input::HandleCallAccess<'call>,
         udf_id: &'static str,
         inputs: Option<[u8; 32]>,
+        callbacks: &'call crate::host_callback::HostCallbackSession,
     ) -> Self {
         let publisher = inputs.map(|inputs| FormulaPublisher {
             runtime: handles.runtime,
             udf_id,
             inputs: InputFingerprint::from_bytes(inputs),
-            host: ExcelHost::new(handles.scope.callbacks()),
+            host: ExcelHost::new(callbacks),
         });
         Self {
             publisher,

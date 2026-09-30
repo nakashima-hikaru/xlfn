@@ -1,4 +1,3 @@
-use crate::call::CallScope;
 #[cfg(feature = "async")]
 use crate::cancellation::{CancellationGuarantee, CancellationToken};
 use crate::diagnostics::{AddinId, DiagnosticInitError, DiagnosticSink};
@@ -727,6 +726,10 @@ impl<A: Addin> Clone for MainThreadContext<'_, A> {
 /// This context is borrowed entirely from the active call. Unlike
 /// `AsyncContext`, it cannot outlive the callback scope and therefore does
 /// not need an owned generation lease.
+///
+/// Only the generated Excel entrypoint can supply this context. Clones share
+/// the same callback session: Abort or Uncalced suppresses all later callbacks
+/// for this invocation, including callbacks made through a clone.
 pub struct MacroSheetContext<'call, A: Addin> {
     state: &'call A::SharedState,
     host: ExcelHost<'call>,
@@ -752,13 +755,13 @@ impl<A: Addin> AsRef<A::SharedState> for MacroSheetContext<'_, A> {
 impl<A: Addin> MacroSheetContext<'_, A> {
     #[doc(hidden)]
     #[must_use]
-    pub fn new<'ctx>(
+    pub(crate) fn new<'ctx>(
         state: &'ctx A::SharedState,
-        scope: &'ctx CallScope<'ctx>,
+        host: ExcelHost<'ctx>,
     ) -> MacroSheetContext<'ctx, A> {
         MacroSheetContext {
             state,
-            host: ExcelHost::new(scope.callbacks()),
+            host,
             _not_send_or_sync: PhantomData,
         }
     }
@@ -892,7 +895,8 @@ mod tests {
         let mut opening = runtime.publish(opening, state, ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
         let thread_safe = ThreadSafeContext::<TestU32Addin>::new(&state);
-        crate::call::with_excel_call_scope_and_state(&state, |state, scope| {
+        let callbacks = crate::host_callback::HostCallbackSession::new();
+        crate::call::with_excel_call_scope_and_state(&state, |state, _scope| {
             #[cfg(feature = "rtd")]
             runtime
                 .with_generation_services(|services| {
@@ -900,10 +904,13 @@ mod tests {
                         state,
                         crate::rtd::RtdCallContext::new(
                             services.rtd_call_access(),
-                            crate::host_api::ExcelHost::new(scope.callbacks()),
+                            crate::host_api::ExcelHost::new(&callbacks),
                         ),
                     );
-                    let macro_sheet = MacroSheetContext::<TestU32Addin>::new(state, scope);
+                    let macro_sheet = MacroSheetContext::<TestU32Addin>::new(
+                        state,
+                        crate::host_api::ExcelHost::new(&callbacks),
+                    );
 
                     assert_eq!(thread_safe.state(), &17);
                     assert_eq!(main_thread.state(), &17);
@@ -917,7 +924,10 @@ mod tests {
             #[cfg(not(feature = "rtd"))]
             {
                 let main_thread = MainThreadContext::<TestU32Addin>::new(state);
-                let macro_sheet = MacroSheetContext::<TestU32Addin>::new(state, scope);
+                let macro_sheet = MacroSheetContext::<TestU32Addin>::new(
+                    state,
+                    crate::host_api::ExcelHost::new(&callbacks),
+                );
 
                 assert_eq!(thread_safe.state(), &17);
                 assert_eq!(main_thread.state(), &17);
@@ -932,15 +942,14 @@ mod tests {
 
     #[cfg(not(target_os = "windows"))]
     #[test]
-    fn one_call_scope_suppresses_later_macro_sheet_callbacks_after_abort() {
+    fn nested_memory_scopes_and_clones_preserve_terminal_callback_suppression() {
         use xlfn_sys::{
-            XL_SHEET_NM, XLOPER12, XLOPER12SRef, XLOPER12Value, XLREF12, XLRET_ABORT, XLTYPE_SREF,
+            XL_SHEET_NM, XLOPER12, XLOPER12SRef, XLOPER12Value, XLREF12, XLRET_ABORT,
+            XLRET_UNCALCED, XLTYPE_SREF,
         };
 
         let _callback_guard = crate::test_callback::lock();
         crate::test_callback::install();
-        crate::test_callback::reset();
-        crate::test_callback::set_terminal(XL_SHEET_NM, XLRET_ABORT);
 
         let mut raw = XLOPER12 {
             value: XLOPER12Value {
@@ -956,25 +965,38 @@ mod tests {
             },
             xltype: XLTYPE_SREF,
         };
-        // SAFETY: `raw` remains live for the reference and callback scope.
+        // SAFETY: `raw` remains live for every use of this reference.
         let reference: crate::reference::ExcelReference<'_> =
             unsafe { crate::reference::reference_from_raw("reference", &mut raw) }.unwrap();
         let state = ();
-        crate::call::with_excel_call_scope_and_state(&state, |state, scope| {
-            let runtime = crate::runtime::Runtime::<()>::new();
-            let opening = runtime.begin_open().unwrap();
-            let mut opening = runtime.publish(opening, (), ());
-            runtime.finish_open(&mut opening, Vec::new()).unwrap();
-            let context = MacroSheetContext::<()>::new(state, scope);
+        for status in [XLRET_ABORT, XLRET_UNCALCED] {
+            crate::test_callback::reset();
+            crate::test_callback::set_terminal(XL_SHEET_NM, status);
+            let callbacks = crate::host_callback::HostCallbackSession::new();
+            let context =
+                MacroSheetContext::<()>::new(&state, crate::host_api::ExcelHost::new(&callbacks));
+            let cloned_before_terminal = context.clone();
             assert!(context.sheet_name(&reference).is_err());
-            let _ = context.coerce(&reference);
+            assert_eq!(crate::test_callback::total_calls(), 2);
+            assert_eq!(crate::test_callback::free_calls(), 1);
+
+            // Both safe lifetime helpers can be nested inside a UDF. They
+            // allocate input storage but cannot reset its callback authority.
+            crate::call::with_excel_call_scope(|_scope| {
+                assert!(cloned_before_terminal.coerce(&reference).is_err());
+                crate::call::with_excel_call_scope_and_state(&state, |_state, _scope| {
+                    let cloned_after_terminal = context.clone();
+                    assert!(cloned_after_terminal.sheet_name(&reference).is_err());
+                });
+            });
+            assert!(context.coerce(&reference).is_err());
             assert_eq!(crate::test_callback::total_calls(), 2);
             assert_eq!(crate::test_callback::free_calls(), 1);
             assert_eq!(
-                crate::test_callback::total_calls() - crate::test_callback::free_calls(),
-                1
+                callbacks.terminal_status(),
+                Some(crate::ExcelCallbackStatus::from_raw(status))
             );
-        });
+        }
     }
 
     #[cfg(all(feature = "rtd", not(target_os = "windows")))]
@@ -1066,14 +1088,15 @@ mod tests {
             .unwrap();
 
         let _state = ();
-        crate::call::with_excel_call_scope(|scope| {
+        let callbacks = crate::host_callback::HostCallbackSession::new();
+        crate::call::with_excel_call_scope(|_scope| {
             runtime
                 .with_generation_services(|services| {
                     let context = MainThreadContext::<()>::new(
                         &_state,
                         crate::rtd::RtdCallContext::new(
                             services.rtd_call_access(),
-                            crate::host_api::ExcelHost::new(scope.callbacks()),
+                            crate::host_api::ExcelHost::new(&callbacks),
                         ),
                     );
                     assert!(matches!(

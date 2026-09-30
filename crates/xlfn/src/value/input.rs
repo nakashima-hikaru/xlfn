@@ -428,7 +428,6 @@ where
 #[cfg(feature = "handles")]
 pub(crate) struct HandleCallAccess<'call> {
     pub(crate) runtime: crate::handle::FormulaHandleServiceResolver<'call>,
-    pub(crate) scope: &'call CallScope<'call>,
 }
 
 /// Runtime services available to one admitted Excel-visible call.
@@ -541,13 +540,9 @@ impl<'call> CallContext<'call> {
         match std::mem::replace(&mut self.access, CallAccess::Plain(scope)) {
             CallAccess::Runtime(access) => Some(HandleCallAccess {
                 runtime: access.handles,
-                scope: access.scope,
             }),
             #[cfg(all(test, feature = "handles"))]
-            CallAccess::HandleOnly { scope, handles } => Some(HandleCallAccess {
-                runtime: handles,
-                scope,
-            }),
+            CallAccess::HandleOnly { handles, .. } => Some(HandleCallAccess { runtime: handles }),
             CallAccess::Plain(_) => None,
         }
     }

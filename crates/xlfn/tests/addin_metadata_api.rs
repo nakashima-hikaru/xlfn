@@ -44,7 +44,9 @@ fn generated_metadata_export_returns_unicode_name_before_auto_open() {
     // SAFETY: XLTYPE_ERR selects the error union member.
     assert_eq!(unsafe { root.value.error }, xlfn_sys::XLERR_VALUE);
 
-    assert_eq!(xlAutoClose(), 1);
+    // SAFETY: The unopened runtime has no lifecycle callbacks to invoke; this
+    // test simulates Excel's close entrypoint on the current lifecycle thread.
+    assert_eq!(unsafe { xlAutoClose() }, 1);
     // SAFETY: The action is live after close; the earlier root remains read-only.
     let after_close = unsafe { xlAddInManagerInfo12(&mut XLOPER12::integer(1)) };
     assert_eq!(after_close, name);

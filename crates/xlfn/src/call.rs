@@ -8,7 +8,6 @@
 //! not belong in this call-local storage.
 
 use crate::XllResult;
-use crate::host_callback::HostCallbackSession;
 use std::marker::PhantomData;
 use std::panic::AssertUnwindSafe;
 
@@ -84,10 +83,12 @@ impl<'scope> HandleDomainWitness<'scope> {
     }
 }
 
-/// A generative lifetime token for one generated Excel call boundary.
+/// A generative lifetime token for call-local input storage.
+///
+/// This token does not authorize Excel callbacks. Host authority is carried
+/// separately by the frame created at an actual Excel entrypoint.
 #[doc(hidden)]
 pub struct CallScope<'call> {
-    callbacks: HostCallbackSession,
     scratch: CallScratch,
     handle_permits: std::cell::RefCell<HandlePermits>,
     lifetime: PhantomData<&'call mut &'call ()>,
@@ -96,15 +97,10 @@ pub struct CallScope<'call> {
 impl<'call> CallScope<'call> {
     fn new() -> Self {
         Self {
-            callbacks: HostCallbackSession::new(),
             scratch: CallScratch::new(),
             handle_permits: std::cell::RefCell::new(HandlePermits::Empty),
             lifetime: PhantomData,
         }
-    }
-
-    pub(crate) fn callbacks(&self) -> &HostCallbackSession {
-        &self.callbacks
     }
 
     pub(crate) fn scratch(&'call self) -> &'call CallScratch {
@@ -164,6 +160,7 @@ impl<'call> CallScope<'call> {
 }
 
 /// Runs an operation under a fresh lifetime that cannot escape in its result.
+/// This memory scope never grants or resets Excel callback authority.
 #[doc(hidden)]
 pub fn with_excel_call_scope<R>(
     operation: impl for<'scope> FnOnce(&'scope CallScope<'scope>) -> R,
@@ -173,6 +170,7 @@ pub fn with_excel_call_scope<R>(
 }
 
 /// Runs an operation under a fresh call scope while borrowing existing state.
+/// This memory scope never grants or resets Excel callback authority.
 #[doc(hidden)]
 pub fn with_excel_call_scope_and_state<S, R>(
     state: &S,
@@ -186,6 +184,7 @@ pub fn with_excel_call_scope_and_state<S, R>(
 /// entered runtime call guard for exactly that scope. Generation-scoped
 /// services therefore come from the guard's pinned publication without
 /// extending the guard's borrow into the generated call frame.
+#[cfg(feature = "bench-internals")]
 pub(crate) fn with_excel_call_scope_and_call<A: crate::Addin, R>(
     call: &crate::runtime::CallGuard<'_, A>,
     operation: impl for<'scope> FnOnce(
@@ -195,6 +194,22 @@ pub(crate) fn with_excel_call_scope_and_call<A: crate::Addin, R>(
 ) -> R {
     let scope = CallScope::new();
     operation(call, &scope)
+}
+
+/// Reborrows existing entrypoint authority alongside a fresh memory scope.
+/// Unlike the public lifetime helpers, this cannot be invoked without the
+/// private session already issued by the Excel entrypoint.
+pub(crate) fn with_excel_callback_scope_and_call<A: crate::Addin, R>(
+    call: &crate::runtime::CallGuard<'_, A>,
+    callbacks: &crate::host_callback::HostCallbackSession,
+    operation: impl for<'scope> FnOnce(
+        &'scope crate::runtime::CallGuard<'_, A>,
+        &'scope CallScope<'scope>,
+        &'scope crate::host_callback::HostCallbackSession,
+    ) -> R,
+) -> R {
+    let scope = CallScope::new();
+    operation(call, &scope, callbacks)
 }
 
 #[cfg(test)]

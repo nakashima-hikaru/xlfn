@@ -480,7 +480,10 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
         }
     } else {
         quote! {
-            #krate::__private::v1::sync_udf::<_, #return_type, _>(
+            // SAFETY: the generated wrapper is invoked by Excel using the
+            // registered execution mode and starts this invocation exactly once.
+            unsafe {
+                #krate::__private::v1::sync_udf::<_, #return_type, _>(
                 &crate::__XLFN_RUNTIME,
                 #udf_id,
                 #excel_name,
@@ -499,7 +502,8 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                         },
                     )
                 },
-            )
+                )
+            }
         }
     };
     let wrapper = if is_async {
@@ -508,7 +512,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
             #[doc = concat!("Excel async ABI wrapper for `", #excel_name, "`.")]
             #[doc = ""]
             #[doc = "# Safety"]
-            #[doc = "Every argument pointer and the async handle must be a live XLOPER12 supplied by Excel for this call."]
+            #[doc = "Excel must invoke this entrypoint in its registered execution mode on the permitted thread. Every argument pointer and the async handle must be a live XLOPER12 supplied by Excel for this call. Never call this wrapper to restart an active invocation after Abort or Uncalced."]
             #[unsafe(no_mangle)]
             pub unsafe extern "system" fn #export_ident(
                 #(#raw_names: *mut #krate::__private::v1::XLOPER12,)*
@@ -523,7 +527,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
             #[doc = concat!("Excel ABI wrapper for `", #excel_name, "`.")]
             #[doc = ""]
             #[doc = "# Safety"]
-            #[doc = "Every argument pointer must be a live XLOPER12 supplied by Excel for this call."]
+            #[doc = "Excel must invoke this entrypoint in its registered execution mode on the permitted thread. Every argument pointer must be a live XLOPER12 supplied by Excel for this call. Never call this wrapper to restart an active invocation after Abort or Uncalced."]
             #[unsafe(no_mangle)]
             pub unsafe extern "system" fn #export_ident(
                 #(#raw_names: *mut #krate::__private::v1::XLOPER12),*

@@ -189,7 +189,7 @@ pub mod v1 {
                 state,
                 crate::rtd::RtdCallContext::new(
                     _frame.rtd_access(),
-                    crate::host_api::ExcelHost::new(_frame.scope.callbacks()),
+                    crate::host_api::ExcelHost::new(_frame.callbacks),
                 ),
             )
         }
@@ -203,7 +203,10 @@ pub mod v1 {
         frame: &CallFrame<'call, M>,
         state: &'call A::SharedState,
     ) -> crate::addin::MacroSheetContext<'call, A> {
-        crate::addin::MacroSheetContext::new(state, frame.scope)
+        crate::addin::MacroSheetContext::new(
+            state,
+            crate::host_api::ExcelHost::new(frame.callbacks),
+        )
     }
 
     #[doc(hidden)]
@@ -397,8 +400,17 @@ pub mod v1 {
     }
 
     /// Opens the add-in by registering all collected functions and initializing state.
+    ///
+    /// # Safety
+    /// This must be called from Excel's `xlAutoOpen` entrypoint on its lifecycle
+    /// thread, while Excel permits the lifecycle callbacks performed here.
+    /// It must not be used to renew callback authority inside another invocation.
     #[doc(hidden)]
-    pub fn open_generated_addin<A: Addin>(
+    #[allow(
+        unsafe_code,
+        reason = "Excel lifecycle entrypoint grants callback authority"
+    )]
+    pub unsafe fn open_generated_addin<A: Addin>(
         runtime: &'static MacroRuntime<A>,
         addin_id: &'static str,
         _display_name: &'static str,
@@ -441,14 +453,32 @@ pub mod v1 {
     }
 
     /// Cleans up a deactivated add-in and follows its physical-unload contract.
+    ///
+    /// # Safety
+    /// This must be called from Excel's `xlAutoClose` entrypoint on its lifecycle
+    /// thread, while Excel permits the lifecycle callbacks performed here.
+    /// It must not be used to renew callback authority inside another invocation.
     #[doc(hidden)]
-    pub fn auto_close_generated_addin<A: Addin>(runtime: &'static MacroRuntime<A>) -> i32 {
+    #[allow(
+        unsafe_code,
+        reason = "Excel lifecycle entrypoint grants callback authority"
+    )]
+    pub unsafe fn auto_close_generated_addin<A: Addin>(runtime: &'static MacroRuntime<A>) -> i32 {
         host_auto_close::<A>(runtime.runtime())
     }
 
     /// Performs explicit terminal removal and unregisters all functions.
+    ///
+    /// # Safety
+    /// This must be called from Excel's `xlAutoRemove` entrypoint on its lifecycle
+    /// thread, while Excel permits the lifecycle callbacks performed here.
+    /// It must not be used to renew callback authority inside another invocation.
     #[doc(hidden)]
-    pub fn auto_remove_generated_addin<A: Addin>(runtime: &'static MacroRuntime<A>) -> i32 {
+    #[allow(
+        unsafe_code,
+        reason = "Excel lifecycle entrypoint grants callback authority"
+    )]
+    pub unsafe fn auto_remove_generated_addin<A: Addin>(runtime: &'static MacroRuntime<A>) -> i32 {
         host_auto_remove::<A>(runtime.runtime())
     }
 
@@ -483,19 +513,20 @@ pub mod v1 {
     #[doc(hidden)]
     pub struct CallFrame<'call, M: InputMode> {
         arguments: ArgumentContext<'call, M>,
-        scope: &'call CallScope<'call>,
+        callbacks: &'call crate::host_callback::HostCallbackSession,
     }
 
     impl<'call, M: InputMode> CallFrame<'call, M> {
         #[doc(hidden)]
-        pub fn new<A: Addin>(
+        pub(crate) fn new<A: Addin>(
             call: &'call crate::runtime::CallGuard<'_, A>,
             scope: &'call CallScope<'call>,
+            callbacks: &'call crate::host_callback::HostCallbackSession,
             argument_count: usize,
         ) -> Self {
             Self {
                 arguments: ArgumentContext::new(call, scope, argument_count),
-                scope,
+                callbacks,
             }
         }
 
@@ -513,7 +544,12 @@ pub mod v1 {
             #[cfg(feature = "handles")]
             {
                 let handles = self.arguments.take_handle_access();
-                Ok(ReturnContext::for_frame(handles, udf_id, inputs))
+                Ok(ReturnContext::for_frame(
+                    handles,
+                    udf_id,
+                    inputs,
+                    self.callbacks,
+                ))
             }
             #[cfg(not(feature = "handles"))]
             {
@@ -703,8 +739,15 @@ pub mod v1 {
     }
 
     /// Top-level synchronous UDF execution boundary.
+    ///
+    /// # Safety
+    /// This must be called exactly once from an actual Excel UDF entrypoint
+    /// with the registered execution mode on Excel's permitted thread. It
+    /// creates fresh callback authority and must never be called to restart
+    /// an active invocation, including after Abort or Uncalced.
     #[doc(hidden)]
-    pub fn sync_udf<A: Addin, R: ExcelReturn, F>(
+    #[allow(unsafe_code, reason = "Generated Excel entrypoint authority boundary")]
+    pub unsafe fn sync_udf<A: Addin, R: ExcelReturn, F>(
         runtime: &'static MacroRuntime<A>,
         udf_id: &'static str,
         excel_name: &'static str,
@@ -718,14 +761,26 @@ pub mod v1 {
         ) -> XllResult<ExcelOutput>,
     {
         udf_boundary_named(runtime.runtime(), udf_id, excel_name, |_, call| {
-            crate::call::with_excel_call_scope_and_call(call, |call, scope| {
-                let mut frame = CallFrame::<R::InputMode>::new(call, scope, argument_count);
-                execute(call.state(), &mut frame)
-            })
+            let callbacks = crate::host_callback::HostCallbackSession::new();
+            crate::call::with_excel_callback_scope_and_call(
+                call,
+                &callbacks,
+                |call, scope, callbacks| {
+                    let mut frame =
+                        CallFrame::<R::InputMode>::new(call, scope, callbacks, argument_count);
+                    execute(call.state(), &mut frame)
+                },
+            )
         })
     }
 
     /// Top-level asynchronous UDF execution boundary.
+    ///
+    /// # Safety
+    /// Excel must invoke this boundary exactly once in the registered async
+    /// execution mode, with a live async handle and live argument pointers.
+    /// It grants entrypoint callback authority during input conversion and
+    /// must never restart another active invocation after Abort or Uncalced.
     #[cfg(feature = "async")]
     #[doc(hidden)]
     #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
@@ -755,12 +810,22 @@ pub mod v1 {
                 excel_name,
                 async_handle,
                 |call, lease, cancellation| {
-                    crate::call::with_excel_call_scope_and_call(call, |call, scope| {
-                        let mut frame = CallFrame::<R::InputMode>::new(call, scope, argument_count);
-                        let future = execute(call, lease, cancellation, &mut frame)?;
-                        frame.arguments.finish()?;
-                        Ok(future)
-                    })
+                    let callbacks = crate::host_callback::HostCallbackSession::new();
+                    crate::call::with_excel_callback_scope_and_call(
+                        call,
+                        &callbacks,
+                        |call, scope, callbacks| {
+                            let mut frame = CallFrame::<R::InputMode>::new(
+                                call,
+                                scope,
+                                callbacks,
+                                argument_count,
+                            );
+                            let future = execute(call, lease, cancellation, &mut frame)?;
+                            frame.arguments.finish()?;
+                            Ok(future)
+                        },
+                    )
                 },
             )
         }
@@ -768,6 +833,12 @@ pub mod v1 {
 
     /// Top-level asynchronous UDF execution boundary for generation-scoped
     /// handle leases.
+    ///
+    /// # Safety
+    /// Excel must invoke this boundary exactly once in the registered async
+    /// execution mode, with a live async handle and live argument pointers.
+    /// It grants entrypoint callback authority during input conversion and
+    /// must never restart another active invocation after Abort or Uncalced.
     #[cfg(all(feature = "async", feature = "handles"))]
     #[doc(hidden)]
     #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
@@ -797,12 +868,22 @@ pub mod v1 {
                 excel_name,
                 async_handle,
                 |call, lease, cancellation| {
-                    crate::call::with_excel_call_scope_and_call(call, |call, scope| {
-                        let mut frame = CallFrame::<R::InputMode>::new(call, scope, argument_count);
-                        let build = execute(call, lease, cancellation, &mut frame)?;
-                        frame.arguments.finish()?;
-                        Ok(build)
-                    })
+                    let callbacks = crate::host_callback::HostCallbackSession::new();
+                    crate::call::with_excel_callback_scope_and_call(
+                        call,
+                        &callbacks,
+                        |call, scope, callbacks| {
+                            let mut frame = CallFrame::<R::InputMode>::new(
+                                call,
+                                scope,
+                                callbacks,
+                                argument_count,
+                            );
+                            let build = execute(call, lease, cancellation, &mut frame)?;
+                            frame.arguments.finish()?;
+                            Ok(build)
+                        },
+                    )
                 },
             )
         }

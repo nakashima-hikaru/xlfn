@@ -1557,8 +1557,9 @@ mod tests {
             .into_admitted()
             .expect("test call enters during OPEN");
         let call = runtime.enter(&ingress).unwrap();
-        crate::call::with_excel_call_scope(|scope| {
-            let mut context = ReturnContext::for_call(&call, "scalar", None, scope);
+        let callbacks = crate::host_callback::HostCallbackSession::new();
+        crate::call::with_excel_call_scope(|_scope| {
+            let mut context = ReturnContext::for_call(&call, "scalar", None, &callbacks);
             let value =
                 <f64 as crate::call_return::ExcelReturn>::invoke(&mut context, || Ok(4.5)).unwrap();
             assert!(matches!(

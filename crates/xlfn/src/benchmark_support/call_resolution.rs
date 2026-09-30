@@ -61,22 +61,27 @@ impl MultiHandleCallBenchmark {
             .runtime
             .enter(&ingress)
             .expect("benchmark runtime must be open");
-        crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
-            let mut frame = crate::__private::v1::CallFrame::<
-                <f64 as crate::call_return::ExcelReturn>::InputMode,
-            >::new(call, scope, 1);
-            for raw in &mut self.raw_tokens {
-                // SAFETY: raw points to valid benchmark storage.
-                let handle: crate::handle::Handle<'_, BenchHandleObject> = unsafe {
-                    frame
-                        .convert_argument(0, "arg", raw)
-                        .expect("benchmark argument conversion must succeed")
-                };
-                std::hint::black_box(handle);
-            }
-            let return_ctx = frame.return_context("bench_udf");
-            let _ = std::hint::black_box(return_ctx);
-        });
+        let callbacks = crate::host_callback::HostCallbackSession::new();
+        crate::call::with_excel_callback_scope_and_call(
+            &call,
+            &callbacks,
+            |call, scope, callbacks| {
+                let mut frame = crate::__private::v1::CallFrame::<
+                    <f64 as crate::call_return::ExcelReturn>::InputMode,
+                >::new(call, scope, callbacks, 1);
+                for raw in &mut self.raw_tokens {
+                    // SAFETY: raw points to valid benchmark storage.
+                    let handle: crate::handle::Handle<'_, BenchHandleObject> = unsafe {
+                        frame
+                            .convert_argument(0, "arg", raw)
+                            .expect("benchmark argument conversion must succeed")
+                    };
+                    std::hint::black_box(handle);
+                }
+                let return_ctx = frame.return_context("bench_udf");
+                let _ = std::hint::black_box(return_ctx);
+            },
+        );
     }
 }
 

@@ -7,7 +7,7 @@ use super::source::{RtdSink, RtdSource, RtdSubscription};
 use super::topic::RtdTopic;
 use super::value::{IntoRtdValue, StoredRtdValue};
 use crate::sync::{Condvar, Mutex};
-use crate::{XllError, XllResult};
+use crate::{ExcelError, XllError, XllResult};
 use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
@@ -19,6 +19,49 @@ use triomphe::Arc;
 
 type Producer<T> = dyn FnOnce(RtdSender<T>) -> XllResult<()> + Send;
 type ProducerFactory<T> = dyn Fn(RtdTopic) -> XllResult<Box<Producer<T>>> + Send + Sync;
+
+/// Cell behavior when an RTD producer returns an error or panics.
+///
+/// Both policies report the failure to the diagnostic sink immediately.
+/// Successful completion and cancellation do not publish an error value.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum RtdProducerErrorPolicy {
+    /// Drain accepted updates and retain the last value (the default).
+    #[default]
+    RetainLastValue,
+    /// Drain accepted updates, then publish this Excel error as the final value.
+    PublishError(ExcelError),
+}
+
+struct ProducerSlots {
+    state: Mutex<ProducerSlotState>,
+}
+
+struct ProducerSlotState {
+    limit: NonZeroUsize,
+    used: usize,
+}
+
+impl ProducerSlots {
+    fn reserve(this: &Arc<Self>) -> XllResult<ProducerPermit> {
+        let mut state = this.state.lock();
+        if state.used >= state.limit.get() {
+            return Err(XllError::Overloaded);
+        }
+        state.used += 1;
+        Ok(ProducerPermit(Arc::clone(this)))
+    }
+}
+
+// Retained until join, including for a producer that has already exited.
+struct ProducerPermit(Arc<ProducerSlots>);
+
+impl Drop for ProducerPermit {
+    fn drop(&mut self) {
+        self.0.state.lock().used -= 1;
+    }
+}
 
 /// A safe RTD source with a bounded queue and framework-owned workers.
 ///
@@ -39,6 +82,8 @@ type ProducerFactory<T> = dyn Fn(RtdTopic) -> XllResult<Box<Producer<T>>> + Send
 pub struct RtdChannelSource<T> {
     capacity: NonZeroUsize,
     factory: Box<ProducerFactory<T>>,
+    producers: Arc<ProducerSlots>,
+    error_policy: RtdProducerErrorPolicy,
 }
 
 impl<T: IntoRtdValue + Send + 'static> RtdChannelSource<T> {
@@ -47,8 +92,9 @@ impl<T: IntoRtdValue + Send + 'static> RtdChannelSource<T> {
     /// `factory` runs synchronously during subscription setup and returns an
     /// owned job, or fails before any worker starts. Each job runs once on its
     /// own worker and may own resources that are neither `Clone` nor `Sync`.
-    /// Its error or panic closes sender admission and is reported during
-    /// disconnect. A successful return closes sender admission and drains
+    /// Its error or panic closes sender admission and is diagnosed immediately;
+    /// [`Self::with_error_policy`] selects the final cell value. A successful
+    /// return closes sender admission and drains
     /// accepted values. The shared publisher remains available to other topics.
     /// Job resources are dropped before the producer worker is joined.
     pub fn new<P>(
@@ -63,7 +109,49 @@ impl<T: IntoRtdValue + Send + 'static> RtdChannelSource<T> {
             factory: Box::new(move |topic| {
                 factory(topic).map(|job| Box::new(job) as Box<Producer<T>>)
             }),
+            producers: Arc::new(ProducerSlots {
+                state: Mutex::new(ProducerSlotState {
+                    limit: NonZeroUsize::new(64).expect("default producer limit is nonzero"),
+                    used: 0,
+                }),
+            }),
+            error_policy: RtdProducerErrorPolicy::default(),
         }
+    }
+
+    /// Limits producer threads owned by this source, including exited workers
+    /// that have not been joined. The default is 64. At capacity, subscription
+    /// setup returns [`XllError::Overloaded`] before invoking the factory.
+    ///
+    /// Each subscription retains its slot until disconnect joins its worker.
+    /// Changing this limit preserves existing reservations; lowering it below
+    /// the retained worker count rejects setup until enough workers are joined.
+    /// This adapter is intended for tens of independent blocking producers;
+    /// thousands of topics should use a custom multiplexed source instead.
+    /// All sources in a generation additionally share one publisher thread.
+    #[must_use]
+    pub fn with_max_producers(self, limit: NonZeroUsize) -> Self {
+        self.producers.state.lock().limit = limit;
+        self
+    }
+
+    /// Selects whether a producer failure retains its final accepted value or
+    /// replaces it with an Excel error. Failure publication uses a reserved
+    /// terminal slot, so a full data queue cannot hide the error.
+    #[must_use]
+    pub fn with_error_policy(mut self, policy: RtdProducerErrorPolicy) -> Self {
+        self.error_policy = policy;
+        self
+    }
+
+    #[must_use]
+    pub fn max_producers(&self) -> NonZeroUsize {
+        self.producers.state.lock().limit
+    }
+
+    #[must_use]
+    pub const fn error_policy(&self) -> RtdProducerErrorPolicy {
+        self.error_policy
     }
 }
 
@@ -326,6 +414,7 @@ impl Drop for PublisherPool {
 
 struct ChannelState {
     values: VecDeque<StoredRtdValue>,
+    terminal_error: Option<ExcelError>,
     accepting: bool,
     stopping: bool,
     scheduled: bool,
@@ -358,6 +447,7 @@ impl Channel {
             scheduler: Mutex::new(None),
             state: Mutex::new(ChannelState {
                 values: VecDeque::new(),
+                terminal_error: None,
                 accepting: true,
                 stopping: false,
                 scheduled: false,
@@ -382,7 +472,10 @@ impl Channel {
             return;
         };
         let mut state = this.state.lock();
-        if state.stopping || state.scheduled || state.values.is_empty() {
+        if state.stopping
+            || state.scheduled
+            || (state.values.is_empty() && state.terminal_error.is_none())
+        {
             return;
         }
         state.scheduled = true;
@@ -405,7 +498,11 @@ impl Channel {
                     let mut state = this.state.lock();
                     if !state.stopping {
                         for _ in 0..32 {
-                            let Some(value) = state.values.pop_front() else {
+                            let Some(value) = state.values.pop_front().or_else(|| {
+                                state.terminal_error.take().map(|error| {
+                                    StoredRtdValue::Error(crate::value::ExcelErrorValue(error))
+                                })
+                            }) else {
                                 break;
                             };
                             batch.push(value);
@@ -430,6 +527,7 @@ impl Channel {
         Self::schedule(this);
     }
 
+    #[cfg(any(test, feature = "bench-internals"))]
     fn producer_finished(&self) {
         {
             let mut state = self.state.lock();
@@ -440,6 +538,41 @@ impl Channel {
         self.closed.notify_all();
     }
 
+    fn producer_completed(
+        this: &Arc<Self>,
+        topic: &RtdTopic,
+        result: XllResult<()>,
+        policy: RtdProducerErrorPolicy,
+    ) {
+        let mut failure = result.err();
+        {
+            let mut state = this.state.lock();
+            if state.stopping && matches!(failure, Some(XllError::Closing)) {
+                failure = None;
+            }
+            state.accepting = false;
+            this.accepting.store(false, Ordering::Release);
+            if failure.is_some()
+                && !state.stopping
+                && let RtdProducerErrorPolicy::PublishError(error) = policy
+            {
+                state.terminal_error = Some(error);
+            }
+        }
+        this.changed.notify_all();
+        this.closed.notify_all();
+        Self::schedule(this);
+        if let Some(error) = failure.as_ref() {
+            crate::diagnostics::report_no_unwind(
+                "RTD producer",
+                &XllError::RtdProducerFailure {
+                    topic: format!("{:?}", topic.parts().collect::<Vec<_>>()),
+                    source: Box::new(error.clone()),
+                },
+            );
+        }
+    }
+
     fn close(&self) {
         let pending = {
             let mut state = self.state.lock();
@@ -447,6 +580,7 @@ impl Channel {
             self.accepting.store(false, Ordering::Release);
             state.stopping = true;
             self.stopping.store(true, Ordering::Release);
+            state.terminal_error = None;
             std::mem::take(&mut state.values)
         };
         self.changed.notify_all();
@@ -501,9 +635,12 @@ impl Channel {
 /// Its private handles can only be created by the adapter. Dropping this value
 /// also closes admission, joins the producer, and waits for publication.
 /// Failed setup cannot leave a usable sink behind.
+/// Producer failures are diagnosed at completion and do not become duplicate
+/// disconnect failures. Disconnect reports publication and worker-join errors.
 pub struct RtdChannelSubscription {
     channel: Arc<Channel>,
-    producer: Option<JoinHandle<XllResult<()>>>,
+    producer: Option<JoinHandle<()>>,
+    producer_permit: Option<ProducerPermit>,
 }
 
 impl RtdChannelSubscription {
@@ -518,6 +655,7 @@ impl RtdChannelSubscription {
         Ok(Self {
             channel,
             producer: None,
+            producer_permit: None,
         })
     }
 
@@ -536,7 +674,8 @@ impl RtdChannelSubscription {
         let producer = self
             .producer
             .take()
-            .map(|worker| crate::panic_boundary::contain_panic(worker.join()));
+            .map(|worker| crate::panic_boundary::contain_panic(worker.join()).map(|()| Ok(())));
+        self.producer_permit.take();
         for result in [publisher, producer].into_iter().flatten() {
             match result {
                 Ok(Ok(()) | Err(XllError::Closing)) => {}
@@ -576,15 +715,22 @@ unsafe impl<T: IntoRtdValue + Send + 'static> RtdSource for RtdChannelSource<T> 
     type Subscription = RtdChannelSubscription;
 
     fn subscribe(&self, topic: &RtdTopic, sink: RtdSink<T>) -> XllResult<Self::Subscription> {
+        let permit = ProducerSlots::reserve(&self.producers)?;
         let producer = (self.factory)(topic.clone())?;
         let channel = Arc::new(Channel::new(self.capacity));
         let mut subscription = RtdChannelSubscription::start_publisher(Arc::clone(&channel), sink)?;
+        subscription.producer_permit = Some(permit);
+        let topic = topic.clone();
+        let error_policy = self.error_policy;
         subscription.producer = Some(
             Builder::new()
                 .name("xlfn-rtd-producer".into())
                 .spawn(move || {
-                    let _finish = scopeguard::guard((), |_| channel.producer_finished());
-                    producer(Channel::sender(&channel))
+                    let result = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
+                        producer(Channel::sender(&channel))
+                    }))
+                    .unwrap_or(Err(XllError::Panic));
+                    Channel::producer_completed(&channel, &topic, result, error_policy);
                 })
                 .map_err(spawn_error)?,
         );
@@ -718,7 +864,12 @@ mod tests {
 
     fn wait_drained(channel: &Channel) {
         let mut state = channel.state.lock();
-        while !state.stopping && (state.accepting || !state.values.is_empty() || state.scheduled) {
+        while !state.stopping
+            && (state.accepting
+                || !state.values.is_empty()
+                || state.terminal_error.is_some()
+                || state.scheduled)
+        {
             #[cfg(miri)]
             channel.changed.wait(&mut state);
             #[cfg(not(miri))]
@@ -727,6 +878,243 @@ mod tests {
                 "publisher stalled"
             );
         }
+    }
+
+    fn with_producer_diagnostics(test: impl FnOnce(mpsc::Receiver<XllError>)) {
+        struct Capture(mpsc::Sender<XllError>);
+        impl crate::diagnostics::DiagnosticSink for Capture {
+            fn report(&self, event: &crate::diagnostics::DiagnosticEvent<'_>) {
+                // Other tests may fail their own producers while this
+                // process-wide test sink is installed.
+                if let XllError::RtdProducerFailure { topic, .. } = event.error()
+                    && topic.contains("diagnostic-channel-")
+                {
+                    self.0.send(event.error().clone()).unwrap();
+                }
+            }
+        }
+
+        let _module_lease = crate::ingress::acquire_test_module_lease();
+        let _diagnostic_lock = crate::diagnostics::DIAGNOSTIC_TEST_MUTEX.lock();
+        let ingress = crate::module_runtime::ingress();
+        if ingress.phase() != crate::ingress::PHASE_CLOSED {
+            ingress.begin_close_with(|| {});
+            let _ = ingress.seal_and_drain();
+        }
+        let _ = crate::diagnostics::close_diagnostic_router();
+        ingress.begin_opening();
+        crate::diagnostics::reset_diagnostic_router().unwrap();
+        let (events_tx, events_rx) = mpsc::channel();
+        crate::diagnostics::set_diagnostic_sink(Capture(events_tx)).unwrap();
+        let _cleanup = scopeguard::guard((), |_| {
+            let _ = crate::diagnostics::clear_diagnostic_sink();
+            ingress.begin_close_with(|| {});
+            let _ = ingress.seal_and_drain();
+        });
+        test(events_rx);
+    }
+
+    #[test]
+    fn producer_failure_is_diagnosed_and_final_policy_applied_before_disconnect() {
+        with_producer_diagnostics(|events| {
+            for panic in [false, true] {
+                for policy in [
+                    RtdProducerErrorPolicy::RetainLastValue,
+                    RtdProducerErrorPolicy::PublishError(ExcelError::NotAvailable),
+                ] {
+                    let (_runtime, server, sink) = sink();
+                    let (sender_tx, sender_rx) = mpsc::channel();
+                    let source = RtdChannelSource::new(capacity(), move |_| {
+                        let sender_tx = sender_tx.clone();
+                        Ok(move |sender: RtdSender<i32>| {
+                            sender.try_send(42).unwrap();
+                            sender_tx.send(sender).unwrap();
+                            assert!(!panic, "injected producer failure");
+                            Err(XllError::Overloaded)
+                        })
+                    })
+                    .with_error_policy(policy);
+                    let subscription = source
+                        .subscribe(
+                            &RtdTopic::single("diagnostic-channel-policy").unwrap(),
+                            sink,
+                        )
+                        .unwrap();
+                    let sender = sender_rx.recv_timeout(DEADLINE).unwrap();
+                    assert!(sender.wait_closed(DEADLINE));
+                    let event = events.recv_timeout(DEADLINE).unwrap();
+                    let XllError::RtdProducerFailure { topic, source } = event else {
+                        panic!("missing producer diagnostic context");
+                    };
+                    assert_eq!(topic, "[\"diagnostic-channel-policy\"]");
+                    if panic {
+                        assert!(matches!(*source, XllError::Panic));
+                    } else {
+                        assert!(matches!(*source, XllError::Overloaded));
+                    }
+                    wait_drained(&subscription.channel);
+                    let batch = server.begin_refresh().unwrap();
+                    let expected = match policy {
+                        RtdProducerErrorPolicy::RetainLastValue => StoredRtdValue::Integer(42),
+                        RtdProducerErrorPolicy::PublishError(error) => {
+                            StoredRtdValue::Error(crate::value::ExcelErrorValue(error))
+                        }
+                    };
+                    assert_eq!(batch.updates[0].value, expected);
+                    batch.complete(RefreshOutcome::Delivered).unwrap();
+                    Box::new(subscription).disconnect_and_wait().unwrap();
+                }
+            }
+            crate::diagnostics::clear_diagnostic_sink().unwrap();
+            assert!(
+                events.try_recv().is_err(),
+                "producer failure was diagnosed twice"
+            );
+        });
+    }
+
+    #[test]
+    fn producer_terminal_error_follows_full_queue_across_publisher_turns() {
+        let (_runtime, server, sink) = sink();
+        let queue = Arc::new(PublisherQueue {
+            ready: Mutex::new(Ready {
+                channels: VecDeque::new(),
+                stopping: false,
+            }),
+            changed: Condvar::new(),
+        });
+        let channel = Arc::new(Channel::new(NonZeroUsize::new(64).unwrap()));
+        channel.publication.lock().sink = Some(sink.erased());
+        *channel.scheduler.lock() = Some(Arc::clone(&queue));
+        for value in 0..64 {
+            Channel::sender::<i32>(&channel).try_send(value).unwrap();
+        }
+        Channel::producer_completed(
+            &channel,
+            &RtdTopic::single("full-queue-failure").unwrap(),
+            Err(XllError::Overloaded),
+            RtdProducerErrorPolicy::PublishError(ExcelError::NotAvailable),
+        );
+        for expected in [
+            StoredRtdValue::Integer(31),
+            StoredRtdValue::Integer(63),
+            StoredRtdValue::Error(crate::value::ExcelErrorValue(ExcelError::NotAvailable)),
+        ] {
+            let ready = queue.ready.lock().channels.pop_front().unwrap();
+            Channel::publish_batch(&ready);
+            let batch = server.begin_refresh().unwrap();
+            assert_eq!(batch.updates[0].value, expected);
+            batch.complete(RefreshOutcome::Delivered).unwrap();
+        }
+        assert!(queue.ready.lock().channels.is_empty());
+        channel.close();
+        channel.publication.lock().sink.take();
+        channel.scheduler.lock().take();
+    }
+
+    #[test]
+    fn cancellation_closing_is_normal_but_unsolicited_closing_is_diagnosed() {
+        with_producer_diagnostics(|events| {
+            let (_runtime, server, sink) = sink();
+            let (sender_tx, sender_rx) = mpsc::channel();
+            let source = RtdChannelSource::new(capacity(), move |_| {
+                let sender_tx = sender_tx.clone();
+                Ok(move |sender: RtdSender<i32>| {
+                    sender_tx.send(sender.clone()).unwrap();
+                    sender.wait_closed(DEADLINE);
+                    Err(XllError::Closing)
+                })
+            })
+            .with_error_policy(RtdProducerErrorPolicy::PublishError(
+                ExcelError::NotAvailable,
+            ));
+            let subscription = source
+                .subscribe(
+                    &RtdTopic::single("diagnostic-channel-cancel").unwrap(),
+                    sink.clone(),
+                )
+                .unwrap();
+            sender_rx.recv_timeout(DEADLINE).unwrap();
+            Box::new(subscription).disconnect_and_wait().unwrap();
+            let cancelled = server.begin_refresh().unwrap();
+            assert!(cancelled.updates.is_empty());
+            cancelled.complete(RefreshOutcome::Delivered).unwrap();
+
+            let source = RtdChannelSource::new(capacity(), |_| {
+                Ok(|_: RtdSender<i32>| Err(XllError::Closing))
+            })
+            .with_error_policy(RtdProducerErrorPolicy::PublishError(
+                ExcelError::NotAvailable,
+            ));
+            let subscription = source
+                .subscribe(
+                    &RtdTopic::single("diagnostic-channel-unexpected-close").unwrap(),
+                    sink,
+                )
+                .unwrap();
+            let event = events.recv_timeout(DEADLINE).unwrap();
+            assert!(matches!(
+                event,
+                XllError::RtdProducerFailure { source, .. } if matches!(*source, XllError::Closing)
+            ));
+            wait_drained(&subscription.channel);
+            let failure = server.begin_refresh().unwrap();
+            assert_eq!(
+                failure.updates[0].value,
+                StoredRtdValue::Error(crate::value::ExcelErrorValue(ExcelError::NotAvailable))
+            );
+            failure.complete(RefreshOutcome::Delivered).unwrap();
+            Box::new(subscription).disconnect_and_wait().unwrap();
+            crate::diagnostics::clear_diagnostic_sink().unwrap();
+            assert!(
+                events.try_recv().is_err(),
+                "cancellation was diagnosed as failure"
+            );
+        });
+    }
+
+    #[test]
+    fn producer_limit_counts_completed_unjoined_workers_and_survives_reconfiguration() {
+        let (_runtime, _server, sink) = sink();
+        let calls = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
+        let called = StdArc::clone(&calls);
+        let (sender_tx, sender_rx) = mpsc::channel();
+        let source = RtdChannelSource::new(capacity(), move |_| {
+            called.fetch_add(1, Ordering::Relaxed);
+            let sender_tx = sender_tx.clone();
+            Ok(move |sender: RtdSender<i32>| {
+                sender_tx.send(sender).unwrap();
+                Ok(())
+            })
+        })
+        .with_max_producers(NonZeroUsize::new(1).unwrap());
+        let topic = RtdTopic::single("bounded-producer").unwrap();
+        let first = source.subscribe(&topic, sink.clone()).unwrap();
+        assert!(
+            sender_rx
+                .recv_timeout(DEADLINE)
+                .unwrap()
+                .wait_closed(DEADLINE)
+        );
+        let deadline = std::time::Instant::now() + DEADLINE;
+        while !first.producer.as_ref().unwrap().is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "producer did not exit"
+            );
+            std::thread::yield_now();
+        }
+        // Reconfiguring the source must not reset its retained reservations.
+        let source = source.with_max_producers(NonZeroUsize::new(1).unwrap());
+        assert!(matches!(
+            source.subscribe(&topic, sink.clone()),
+            Err(XllError::Overloaded)
+        ));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        Box::new(first).disconnect_and_wait().unwrap();
+        let second = source.subscribe(&topic, sink).unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        Box::new(second).disconnect_and_wait().unwrap();
     }
 
     #[test]
@@ -1169,24 +1557,34 @@ mod tests {
     fn factory_error_or_panic_fails_subscription_setup_synchronously() {
         for panic in [false, true] {
             let (_runtime, _server, sink) = sink();
+            let factory_calls = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
             let source = RtdChannelSource::new(
                 capacity(),
                 move |topic| -> XllResult<fn(RtdSender<i32>) -> XllResult<()>> {
                     assert!(topic.parts().eq(["invalid"]));
+                    if factory_calls.fetch_add(1, Ordering::Relaxed) > 0 {
+                        return Ok(|_| Ok(()));
+                    }
                     if panic {
                         panic!("injected factory panic");
                     }
                     Err(XllError::Overloaded)
                 },
-            );
+            )
+            .with_max_producers(NonZeroUsize::new(1).unwrap());
             let result = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
-                source.subscribe(&RtdTopic::single("invalid").unwrap(), sink)
+                source.subscribe(&RtdTopic::single("invalid").unwrap(), sink.clone())
             }));
             if panic {
                 assert!(result.is_err());
             } else {
                 assert!(matches!(result, Ok(Err(XllError::Overloaded))));
             }
+            // Error and unwind must release their pre-factory reservation.
+            let retry = source
+                .subscribe(&RtdTopic::single("invalid").unwrap(), sink)
+                .unwrap();
+            Box::new(retry).disconnect_and_wait().unwrap();
         }
     }
 
@@ -1293,7 +1691,7 @@ mod tests {
     }
 
     #[test]
-    fn panic_in_producer_closes_sender_and_is_reported_after_join() {
+    fn panic_in_producer_closes_sender_without_repeating_failure_on_disconnect() {
         let (_runtime, _server, sink) = sink();
         let (sender_tx, sender_rx) = mpsc::channel();
         let source = RtdChannelSource::new(capacity(), move |_| {
@@ -1308,15 +1706,12 @@ mod tests {
             .unwrap();
         let sender = sender_rx.recv_timeout(DEADLINE).unwrap();
         assert!(sender.wait_closed(DEADLINE));
-        assert!(matches!(
-            Box::new(subscription).disconnect_and_wait(),
-            Err(XllError::Panic)
-        ));
+        Box::new(subscription).disconnect_and_wait().unwrap();
         assert!(matches!(sender.try_send(1), Err(RtdSendError::Closed(_))));
     }
 
     #[test]
-    fn producer_error_closes_sender_and_is_reported_after_join() {
+    fn producer_error_closes_sender_without_repeating_failure_on_disconnect() {
         let (_runtime, _server, sink) = sink();
         let (sender_tx, sender_rx) = mpsc::channel();
         let source = RtdChannelSource::new(capacity(), move |_| {
@@ -1331,10 +1726,7 @@ mod tests {
             .unwrap();
         let sender = sender_rx.recv_timeout(DEADLINE).unwrap();
         assert!(sender.wait_closed(DEADLINE));
-        assert!(matches!(
-            Box::new(subscription).disconnect_and_wait(),
-            Err(XllError::Overloaded)
-        ));
+        Box::new(subscription).disconnect_and_wait().unwrap();
     }
 
     #[test]
@@ -1355,10 +1747,7 @@ mod tests {
                 .subscribe(&RtdTopic::single("custom-payload").unwrap(), sink)
                 .unwrap();
             if explicit_disconnect {
-                assert!(matches!(
-                    Box::new(subscription).disconnect_and_wait(),
-                    Err(XllError::Panic)
-                ));
+                Box::new(subscription).disconnect_and_wait().unwrap();
             } else {
                 drop(subscription);
             }

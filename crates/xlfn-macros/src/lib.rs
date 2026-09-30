@@ -146,35 +146,59 @@ fn expand_excel_addin(
         #(#gating)*
         #krate::__private::v1::__xlfn_excel_rtd_exports!(&crate::__XLFN_RUNTIME);
 
+        /// Initializes the add-in from Excel's lifecycle entrypoint.
+        ///
+        /// # Safety
+        /// Excel must invoke this on its lifecycle thread while lifecycle
+        /// callbacks are permitted; do not call it to renew UDF callback authority.
         #(#gating)*
         #[unsafe(no_mangle)]
-        pub extern "system" fn xlAutoOpen() -> i32 {
+        pub unsafe extern "system" fn xlAutoOpen() -> i32 {
             #krate::__private::v1::export_status_boundary(0, || {
-                #krate::__private::v1::open_generated_addin::<#ident>(
-                &crate::__XLFN_RUNTIME,
-                #id,
-                #display_name,
-                #category,
-                env!("CARGO_PKG_VERSION"),
-                #krate::__private::v1::BUILD_TARGET,
-                xlAutoOpen as *const (),
-                )
+                // SAFETY: Excel invokes this lifecycle entrypoint with callback authority.
+                unsafe {
+                    #krate::__private::v1::open_generated_addin::<#ident>(
+                        &crate::__XLFN_RUNTIME,
+                        #id,
+                        #display_name,
+                        #category,
+                        env!("CARGO_PKG_VERSION"),
+                        #krate::__private::v1::BUILD_TARGET,
+                        xlAutoOpen as *const (),
+                    )
+                }
             })
         }
 
+        /// Deactivates the add-in from Excel's lifecycle entrypoint.
+        ///
+        /// # Safety
+        /// Excel must invoke this on its lifecycle thread while lifecycle
+        /// callbacks are permitted; do not call it to renew UDF callback authority.
         #(#gating)*
         #[unsafe(no_mangle)]
-        pub extern "system" fn xlAutoClose() -> i32 {
+        pub unsafe extern "system" fn xlAutoClose() -> i32 {
             #krate::__private::v1::export_status_boundary(0, || {
-                #krate::__private::v1::auto_close_generated_addin::<#ident>(&crate::__XLFN_RUNTIME)
+                // SAFETY: Excel invokes this lifecycle entrypoint with callback authority.
+                unsafe {
+                    #krate::__private::v1::auto_close_generated_addin::<#ident>(&crate::__XLFN_RUNTIME)
+                }
             })
         }
 
+        /// Removes the add-in from Excel's lifecycle entrypoint.
+        ///
+        /// # Safety
+        /// Excel must invoke this on its lifecycle thread while lifecycle
+        /// callbacks are permitted; do not call it to renew UDF callback authority.
         #(#gating)*
         #[unsafe(no_mangle)]
-        pub extern "system" fn xlAutoRemove() -> i32 {
+        pub unsafe extern "system" fn xlAutoRemove() -> i32 {
             #krate::__private::v1::export_status_boundary(0, || {
-                #krate::__private::v1::auto_remove_generated_addin::<#ident>(&crate::__XLFN_RUNTIME)
+                // SAFETY: Excel invokes this lifecycle entrypoint with callback authority.
+                unsafe {
+                    #krate::__private::v1::auto_remove_generated_addin::<#ident>(&crate::__XLFN_RUNTIME)
+                }
             })
         }
 
@@ -328,6 +352,10 @@ mod tests {
                     "xlAddInManagerInfo12" => "export_metadata_boundary",
                     name => panic!("unexpected generated lifecycle export {name}"),
                 };
+                assert!(
+                    matches!(function.sig.safety, syn::Safety::Unsafe(_)),
+                    "Excel exports must require the host entrypoint contract"
+                );
                 assert_outer_abi_boundary(function, expected);
                 exports += 1;
             }

@@ -250,6 +250,12 @@ pub enum XllError {
         #[source]
         source: Box<XllError>,
     },
+    #[error("RTD producer failed for topic {topic}: {source}")]
+    RtdProducerFailure {
+        topic: String,
+        #[source]
+        source: Box<XllError>,
+    },
     #[error("Excel error value {0:?}")]
     ExcelValue(ExcelError),
     #[error("invalid handle")]
@@ -277,6 +283,7 @@ impl XllError {
     #[must_use]
     pub const fn excel_error(&self) -> ExcelError {
         match self {
+            Self::RtdProducerFailure { source, .. } => source.excel_error(),
             Self::Domain { .. } => ExcelError::Number,
             Self::Input {
                 reason: InputError::NumericOverflow,

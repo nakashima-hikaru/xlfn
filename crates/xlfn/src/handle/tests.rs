@@ -3324,7 +3324,8 @@ fn resolver_keeps_one_runtime_read_guard_across_arguments_and_return_context() {
         .unwrap()
         .into_token();
 
-    crate::call::with_excel_call_scope(|scope| {
+    let callbacks = crate::host_callback::HostCallbackSession::new();
+    crate::call::with_excel_call_scope_and_state(&callbacks, |callbacks, scope| {
         let resolver = FormulaHandleServiceResolver::new(slot);
         let mut call_ctx = crate::value::CallContext::from_handle_access(scope, resolver);
 
@@ -3347,6 +3348,7 @@ fn resolver_keeps_one_runtime_read_guard_across_arguments_and_return_context() {
             moved_access.expect("test context has handle access"),
             "test_udf",
             Some([0; 32]),
+            callbacks,
         );
         let err = return_ctx
             .publish_new_handle(|| Ok(TestObj(456)))

@@ -41,7 +41,8 @@ pub(crate) type SubscriptionServerHandle =
 pub use channel::channel_protocol_probe;
 #[cfg(feature = "rtd")]
 pub use channel::{
-    RtdChannelSource, RtdChannelSubscription, RtdPendingValue, RtdSendError, RtdSender,
+    RtdChannelSource, RtdChannelSubscription, RtdPendingValue, RtdProducerErrorPolicy,
+    RtdSendError, RtdSender,
 };
 #[cfg(feature = "rtd")]
 pub use source::{RtdSink, RtdSource, RtdSourceHandle, RtdSubscription};

@@ -13,6 +13,7 @@ fn trait_driven_function_signatures_compile() {
     tests.pass("tests/ui/pass/udf_layers_tuple.rs");
     tests.compile_fail("tests/ui/fail/argument_trait_missing.rs");
     tests.compile_fail("tests/ui/fail/context_*.rs");
+    tests.compile_fail("tests/ui/fail/callback_*.rs");
     tests.compile_fail("tests/ui/fail/lookalike_*.rs");
     tests.compile_fail("tests/ui/fail/nested_return_array.rs");
     tests.compile_fail("tests/ui/fail/removed_export_macro.rs");

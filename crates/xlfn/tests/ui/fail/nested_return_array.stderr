@@ -14,8 +14,8 @@ help: the trait `xlfn::call_return::traits::ExcelReturn` is conditionally implem
 note: required by a bound in `xlfn::__private::v1::sync_udf`
  --> src/__private.rs
   |
-  |     pub fn sync_udf<A: Addin, R: ExcelReturn, F>(
-  |                                  ^^^^^^^^^^^ required by this bound in `sync_udf`
+  |     pub unsafe fn sync_udf<A: Addin, R: ExcelReturn, F>(
+  |                                         ^^^^^^^^^^^ required by this bound in `sync_udf`
 
 error[E0277]: `xlfn::value::Matrix<xlfn::value::Matrix<f64>>` cannot be returned from a main-thread Excel worksheet function
  --> tests/ui/fail/nested_return_array.rs:7:13

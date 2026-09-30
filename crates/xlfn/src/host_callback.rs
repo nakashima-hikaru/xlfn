@@ -21,6 +21,9 @@ impl HostCallbackState {
     }
 }
 
+/// Callback authority owned by an actual Excel entrypoint. Memory scopes do
+/// not own or construct it, and every context for that invocation borrows the
+/// same terminal state. No public safe constructor may mint this authority.
 pub(crate) struct HostCallbackSession {
     state: Cell<HostCallbackState>,
     _not_send_or_sync: PhantomData<Rc<()>>,
