@@ -120,6 +120,7 @@ impl<'runtime, A: Addin> OpeningTxn<'runtime, A, GenerationStaged<A>> {
 pub(super) fn open_addin_boundary<A>(
     runtime: &Runtime<A>,
     lifecycle: &AddinLifecycleAccess<'_, A>,
+    mut callbacks: HostCallbackSession,
     addin_id: &AddinId,
     version: &'static str,
     target: &'static str,
@@ -132,7 +133,6 @@ where
     let removal_epoch = runtime.removal_epoch();
     let result = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
         if runtime.phase() == crate::lifecycle::LifecyclePhase::OpenRollbackPending {
-            let mut callbacks = HostCallbackSession::new();
             let outcome = rollback_open::<A>(
                 runtime,
                 lifecycle,
@@ -153,7 +153,16 @@ where
             return Err(XllError::Closing);
         }
 
-        let mut transaction = runtime.begin_open_if_epoch(removal_epoch)?.attach_host();
+        if let Some(status) = callbacks.terminal_status() {
+            return Err(XllError::ExcelApi {
+                function: crate::error::ExcelApiFunction::Register,
+                failure: crate::error::ExcelApiFailure::Suppressed(status),
+            });
+        }
+
+        let mut transaction = runtime
+            .begin_open_if_epoch(removal_epoch)?
+            .attach_host(callbacks);
         let transaction = match crate::registration::retry_metadata_debt(
             &runtime.host,
             transaction.callbacks_mut(),

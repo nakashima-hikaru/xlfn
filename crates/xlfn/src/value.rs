@@ -125,6 +125,7 @@ pub enum OptionalExcelValue<T> {
     reason = "XLOPER12 numeric union projection is audited here"
 )]
 impl<'call> FromExcel<'call> for f64 {
+    #[inline]
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         let number = match value.value_type() {
             // SAFETY: The root type selects the corresponding union member.
@@ -283,7 +284,7 @@ impl<'call> PrepareExcel<'call> for f64 {
         cells: ExcelInputCells<'call>,
         identity: &mut InputIdentityEncoder,
     ) -> XllResult<PreparedExcelSequence<'call, Self, Self::Prepared>> {
-        cells.borrowed::<Self>(identity)
+        cells.borrowed_f64(identity)
     }
 }
 impl<'call> PrepareExcel<'call> for bool {
@@ -549,6 +550,7 @@ impl ArrayInputBudget {
         Ok(budget)
     }
 
+    #[inline]
     fn include(&mut self, element: XlValueRef<'_>) -> XllResult<()> {
         if element.value_type() == XlValueType::Multi {
             return Err(XllError::input(

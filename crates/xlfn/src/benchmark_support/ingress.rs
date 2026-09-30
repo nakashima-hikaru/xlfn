@@ -218,6 +218,34 @@ impl RawArgumentIngressBenchmark {
         })
     }
 
+    pub fn run_prepared_with_identity<T>(&mut self) -> [u8; 32]
+    where
+        T: for<'call> ExcelParameter<'call, crate::value::FormulaInputMode>,
+    {
+        let ingress = benchmark_ingress();
+        let call = self
+            .runtime
+            .enter(&ingress)
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
+            let mut arguments =
+                crate::value::ArgumentContext::<crate::value::FormulaInputMode>::new(
+                    call, scope, 1,
+                );
+            // SAFETY: self.raw points into fixture storage retained for the call.
+            let raw = unsafe { crate::value::XlValueRef::from_raw(&mut self.raw) }
+                .expect("benchmark prepared input must be well formed");
+            let value = arguments
+                .prepare::<T>(0, "arg", raw)
+                .expect("benchmark input preparation must succeed");
+            std::hint::black_box(&value);
+            arguments
+                .finish()
+                .expect("formula revision fingerprint must finish")
+                .expect("formula revision return must produce fingerprint")
+        })
+    }
+
     pub fn run_borrowed_str(&mut self) {
         let ingress = benchmark_ingress();
         let call = self

@@ -290,6 +290,10 @@ impl<'call> RegistrationHost<'call> {
     }
 
     pub(crate) fn unregister_event(&self, event: i32) -> RegistrationMutation<()> {
+        // The public xlEventRegister page specifies a string procedure for
+        // registration, but does not document nil-procedure removal. Keep this
+        // operation subject to version/bitness live-Excel qualification; a
+        // malformed acknowledgement cannot certify host-side event removal.
         let mut nil_procedure = XLOPER12::nil();
         let mut event_value = XLOPER12::integer(event);
         let arguments = [
@@ -304,7 +308,7 @@ impl<'call> RegistrationHost<'call> {
         mutation_from_invocation(
             invocation,
             ExcelApiFunction::EventRegister,
-            DecodeFailureDisposition::Rejected,
+            DecodeFailureDisposition::Indeterminate,
         )
     }
 }
@@ -444,11 +448,11 @@ fn decode_event_registration_id(result: &ExcelCallbackValue<'_>) -> XllResult<i3
     let raw = result.raw()?;
     // SAFETY: XLTYPE_INT selects the integer union member.
     let value = unsafe { raw.value.integer };
-    // xlEventRegister reports failure as zero. Live Windows Excel can return
-    // a nonzero acknowledgement with the high bit set (e.g. 0x9d380001), so
-    // interpreting the signed integer as a positive counter rejects success.
-    // Preserve the raw value; event removal is keyed by event, not this value.
-    if value == 0 {
+    // Microsoft specifies xltypeInt > 0 for success and zero for failure.
+    // Negative integers are outside that contract and cannot certify that
+    // registration/removal succeeded. Event removal is keyed by the event,
+    // rather than by this acknowledgement value.
+    if value <= 0 {
         return Err(XllError::ExcelApi {
             function: ExcelApiFunction::EventRegister,
             failure: ExcelApiFailure::InvalidRegistrationId(value),
@@ -602,7 +606,7 @@ fn decode_module_name<'call>(value: XlValueRef<'call>) -> XllResult<ModuleName> 
     test,
     any(not(target_os = "windows"), feature = "async", feature = "handles")
 ))]
-pub(super) mod test_support {
+pub(crate) mod test_support {
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use xlfn_sys::{XL_FREE, XLOPER12, XLRET_FAILED, XLRET_SUCCESS};
@@ -814,23 +818,138 @@ mod tests {
     }
 
     #[test]
-    fn event_registration_and_unregister_accept_nonzero_integer_acknowledgements() {
-        for value in [1, 2, -1, -1_657_274_367, i32::MIN, i32::MAX] {
+    fn event_registration_and_unregister_accept_only_positive_integer_acknowledgements() {
+        for value in [1, 2, i32::MAX] {
             let result = ExcelCallbackValue::from_raw_for_test(XLOPER12::integer(value));
             assert_eq!(decode_event_registration_id(&result).unwrap(), value);
             assert!(validate_event_unregister_result(&result).is_ok());
         }
 
+        for value in [0, -1, -1_657_274_367, i32::MIN] {
+            let result = ExcelCallbackValue::from_raw_for_test(XLOPER12::integer(value));
+            assert!(matches!(
+                decode_event_registration_id(&result),
+                Err(XllError::ExcelApi {
+                    function: ExcelApiFunction::EventRegister,
+                    failure: ExcelApiFailure::InvalidRegistrationId(invalid),
+                }) if invalid == value
+            ));
+            assert!(validate_event_unregister_result(&result).is_err());
+        }
+
         for raw in [
-            XLOPER12::integer(0),
             XLOPER12::boolean(true),
             XLOPER12::error(XLERR_NAME),
             XLOPER12::number(1.0),
+            XLOPER12::nil(),
+            XLOPER12::missing(),
         ] {
             let result = ExcelCallbackValue::from_raw_for_test(raw);
             assert!(decode_event_registration_id(&result).is_err());
             assert!(validate_event_unregister_result(&result).is_err());
         }
+    }
+
+    #[test]
+    #[cfg(feature = "async")]
+    fn positive_event_acknowledgements_commit_registration_and_removal() {
+        use super::test_support::{CallbackScript, Reply};
+
+        for event in [CALCULATION_CANCELED_EVENT, CALCULATION_ENDED_EVENT] {
+            for acknowledgement in [1, i32::MAX] {
+                let script = CallbackScript::install([
+                    Reply::success(XL_EVENT_REGISTER, XLOPER12::integer(acknowledgement)),
+                    Reply::success(XL_EVENT_REGISTER, XLOPER12::integer(acknowledgement)),
+                ]);
+                let callbacks = HostCallbackSession::new();
+                let host = RegistrationHost::new(&callbacks);
+                let registration = host.register_event("test_event_handler", event);
+                assert!(matches!(
+                    registration,
+                    RegistrationMutation::Applied {
+                        value: EventRegistration {
+                            procedure: "test_event_handler",
+                            event: registered_event,
+                            registration_id,
+                            unregistered: false,
+                        },
+                        cleanup: Ok(()),
+                    } if registered_event == event && registration_id == acknowledgement
+                ));
+                assert!(matches!(
+                    host.unregister_event(event),
+                    RegistrationMutation::Applied {
+                        value: (),
+                        cleanup: Ok(()),
+                    }
+                ));
+                script.assert_calls(&[XL_EVENT_REGISTER, XL_EVENT_REGISTER]);
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "async")]
+    fn invalid_event_acknowledgements_leave_host_mutations_indeterminate() {
+        use super::test_support::{CallbackScript, Reply};
+
+        for result in [
+            XLOPER12::integer(0),
+            XLOPER12::integer(-1),
+            XLOPER12::integer(i32::MIN),
+            XLOPER12::number(1.0),
+            XLOPER12::boolean(true),
+            XLOPER12::nil(),
+        ] {
+            let script = CallbackScript::install([
+                Reply::success(XL_EVENT_REGISTER, result),
+                Reply::success(XL_EVENT_REGISTER, result),
+            ]);
+            let callbacks = HostCallbackSession::new();
+            let host = RegistrationHost::new(&callbacks);
+            assert!(matches!(
+                host.register_event("test_event_handler", CALCULATION_ENDED_EVENT),
+                RegistrationMutation::Indeterminate {
+                    status: ExcelCallbackStatus::Success,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                host.unregister_event(CALCULATION_ENDED_EVENT),
+                RegistrationMutation::Indeterminate {
+                    status: ExcelCallbackStatus::Success,
+                    ..
+                }
+            ));
+            script.assert_calls(&[XL_EVENT_REGISTER, XL_EVENT_REGISTER]);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "async")]
+    fn unconfirmed_event_removal_retains_the_pending_registration() {
+        use super::test_support::{CallbackScript, Reply};
+
+        let script =
+            CallbackScript::install([Reply::success(XL_EVENT_REGISTER, XLOPER12::integer(-1))]);
+        let callbacks = HostCallbackSession::new();
+        let host = RegistrationHost::new(&callbacks);
+        let pending = EventRegistration {
+            procedure: "test_event_handler",
+            event: CALCULATION_ENDED_EVENT,
+            registration_id: 1,
+            unregistered: false,
+        };
+        let outcome =
+            crate::registration::HostRegistrar::unregister_events_detailed(&host, &[pending]);
+        assert!(outcome.succeeded.is_empty());
+        assert_eq!(outcome.failed.len(), 1);
+        let (retained, _) = &outcome.failed[0];
+        assert_eq!(retained.procedure, "test_event_handler");
+        assert_eq!(retained.event, CALCULATION_ENDED_EVENT);
+        assert_eq!(retained.registration_id, 1);
+        assert!(!retained.unregistered);
+        script.assert_calls(&[XL_EVENT_REGISTER]);
     }
 
     #[test]

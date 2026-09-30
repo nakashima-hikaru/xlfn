@@ -262,6 +262,23 @@ impl<'call> ExcelInputCells<'call> {
             state: SequenceState::Borrowed(self, T::from_excel),
         })
     }
+
+    pub(crate) fn borrowed_f64(
+        self,
+        identity: &mut InputIdentityEncoder,
+    ) -> XllResult<PreparedExcelSequence<'call, f64, f64>> {
+        let mut budget =
+            super::ArrayInputBudget::new::<f64>(self.grid.cells().len(), self.argument)?;
+        let argument = self.argument;
+        identity.f64_sequence(self.grid.cells().iter().map(|cell| {
+            let value = XlValueRef::from_array_cell(cell)?;
+            budget.include(value)?;
+            f64::from_excel(value, argument)
+        }))?;
+        Ok(PreparedExcelSequence {
+            state: SequenceState::Borrowed(self, f64::from_excel),
+        })
+    }
 }
 
 /// Prepared collection with opaque storage; callers cannot forge validation.

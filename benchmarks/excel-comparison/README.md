@@ -6,6 +6,12 @@ paired CSV. It needs **64-bit Excel for Windows (Microsoft 365 with dynamic
 arrays)** to run. The smoke profile checks the harness; use `full` for a
 comparison.
 
+The separate [lifecycle terminal-status record](lifecycle-terminal.md) covers
+callback suppression during reload and rollback. The
+[async event qualification gate](event-qualification/README.md) records the
+remaining live-Excel check for nil-procedure event removal. Worksheet comparison
+results do not establish either native lifecycle behavior or event removal.
+
 ## Build in CI, run on the Windows Excel machine
 
 The [Excel comparison XLLs workflow](../../.github/workflows/excel-comparison-xll.yml)

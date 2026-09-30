@@ -1,0 +1,318 @@
+--- a/crates/xlfn/Cargo.toml
++++ b/crates/xlfn/Cargo.toml
+@@ -197,3 +197,8 @@
+ name = "two_phase_ingress"
+ harness = false
+ required-features = ["bench-internals"]
++
++[[bench]]
++name = "object_lease"
++harness = false
++required-features = ["bench-internals", "async"]
+--- a/crates/xlfn/src/handle.rs
++++ b/crates/xlfn/src/handle.rs
+@@ -14,6 +14,8 @@
+ mod lifetime;
+ #[allow(unsafe_code, reason = "Stable typed object pointers are audited here")]
+ mod object;
++#[cfg(all(feature = "bench-internals", feature = "async"))]
++pub use object::{ObjectFinalPinRelease, ObjectLeaseBenchCase, ObjectLeaseBenchmark};
+ mod prepare;
+ #[cfg(feature = "bench-internals")]
+ mod protocol_bench;
+--- a/crates/xlfn/src/handle/object.rs
++++ b/crates/xlfn/src/handle/object.rs
+@@ -542,6 +542,173 @@
+ // SAFETY: RawObjectLeaseGuard immutable borrows can be shared across threads.
+ unsafe impl Sync for RawObjectLeaseGuard {}
+ 
++#[cfg(all(feature = "bench-internals", feature = "async"))]
++pub use benchmark::{ObjectFinalPinRelease, ObjectLeaseBenchCase, ObjectLeaseBenchmark};
++
++#[cfg(all(feature = "bench-internals", feature = "async"))]
++mod benchmark {
++    use super::*;
++    use std::hint::black_box;
++    use std::sync::{Arc, mpsc};
++
++    /// The object distribution for a shared-arena pin workload.
++    #[derive(Clone, Copy)]
++    pub enum ObjectLeaseBenchCase {
++        SameObject,
++        DistinctObjects,
++    }
++
++    impl ObjectLeaseBenchCase {
++        pub const ALL: [Self; 2] = [Self::SameObject, Self::DistinctObjects];
++
++        pub const fn name(self) -> &'static str {
++            match self {
++                Self::SameObject => "same_object",
++                Self::DistinctObjects => "distinct_objects",
++            }
++        }
++    }
++
++    /// Persistent workers exercising production pin admission and release.
++    /// Threads, bindings, allocations, and channels are prepared before timing.
++    pub struct ObjectLeaseBenchmark {
++        binding: Option<ObjectBinding>,
++        arena: Arc<PublishedOwner<ObjectArena>>,
++        iterations_per_worker: usize,
++        start_tx: Vec<mpsc::SyncSender<()>>,
++        done_rx: Vec<mpsc::Receiver<()>>,
++        workers: Vec<std::thread::JoinHandle<()>>,
++    }
++
++    impl ObjectLeaseBenchmark {
++        pub fn new(
++            case: ObjectLeaseBenchCase,
++            worker_count: usize,
++            iterations_per_worker: usize,
++        ) -> Self {
++            assert!(worker_count != 0);
++            assert!(iterations_per_worker != 0);
++            let arena = Arc::new(PublishedOwner::new(ObjectArena::new()));
++            // SAFETY: this benchmark retains the published arena owner until
++            // all worker bindings, pins, and release completions have drained.
++            let binding = unsafe { ObjectArena::insert(&arena, ObjectId::new(1, 1), 42_u64) }
++                .expect("benchmark seed binding");
++            let mut start_tx = Vec::with_capacity(worker_count);
++            let mut done_rx = Vec::with_capacity(worker_count);
++            let mut workers = Vec::with_capacity(worker_count);
++            for worker in 0..worker_count {
++                let worker_binding = match case {
++                    ObjectLeaseBenchCase::SameObject => {
++                        binding.duplicate().expect("benchmark duplicate binding")
++                    }
++                    ObjectLeaseBenchCase::DistinctObjects => {
++                        let id = ObjectId::new(
++                            1,
++                            u64::try_from(worker + 2).expect("worker object ID fits u64"),
++                        );
++                        // SAFETY: every worker retains an arena owner through
++                        // explicit binding destruction and its release tail.
++                        unsafe { ObjectArena::insert(&arena, id, 42_u64) }
++                            .expect("benchmark worker binding")
++                    }
++                };
++                let worker_arena = Arc::clone(&arena);
++                let (start, receive) = mpsc::sync_channel::<()>(1);
++                start_tx.push(start);
++                let (done, completed) = mpsc::sync_channel(1);
++                done_rx.push(completed);
++                workers.push(std::thread::spawn(move || {
++                    while receive.recv().is_ok() {
++                        for _ in 0..iterations_per_worker {
++                            let pin = worker_binding.acquire_lease().expect("benchmark pin");
++                            drop(black_box(pin));
++                        }
++                        done.send(()).expect("benchmark driver receives completion");
++                    }
++                    drop(worker_binding);
++                    drop(worker_arena);
++                }));
++            }
++            Self {
++                binding: Some(binding),
++                arena,
++                iterations_per_worker,
++                start_tx,
++                done_rx,
++                workers,
++            }
++        }
++
++        /// One uncontended pin cycle without worker dispatch.
++        pub fn run_serial(&self) {
++            let pin = self
++                .binding
++                .as_ref()
++                .expect("benchmark binding is live")
++                .acquire_lease()
++                .expect("benchmark pin");
++            drop(black_box(pin));
++        }
++
++        pub fn run(&self) {
++            for start in &self.start_tx {
++                start.send(()).expect("benchmark worker receives start");
++            }
++            for done in &self.done_rx {
++                done.recv().expect("benchmark worker completed batch");
++            }
++        }
++
++        pub fn total_iterations(&self) -> usize {
++            self.start_tx.len() * self.iterations_per_worker
++        }
++    }
++
++    impl Drop for ObjectLeaseBenchmark {
++        fn drop(&mut self) {
++            self.start_tx.clear();
++            for worker in self.workers.drain(..) {
++                // A failed worker disconnects its own completion channel, so
++                // the driver reports failure without blocking on other live
++                // senders. Cleanup must not panic again while unwinding it.
++                let _ = crate::panic_boundary::contain_panic(worker.join());
++            }
++            drop(self.binding.take());
++            self.arena.assert_reclaimable();
++        }
++    }
++
++    /// Setup for an isolated final-pin drop. Criterion prepares this outside
++    /// timing; `release` returns the arena owner for untimed output cleanup.
++    pub struct ObjectFinalPinRelease {
++        pin: Option<RawObjectLeaseGuard>,
++        _arena: PublishedOwner<ObjectArena>,
++    }
++
++    impl ObjectFinalPinRelease {
++        pub fn prepare() -> Self {
++            let arena = PublishedOwner::new(ObjectArena::new());
++            // SAFETY: this fixture retains the arena through the pin's final
++            // release, including application destruction and completion.
++            let binding = unsafe { ObjectArena::insert(&arena, ObjectId::new(1, 1), 42_u64) }
++                .expect("benchmark final-pin binding");
++            let pin = binding.acquire_lease().expect("benchmark final pin");
++            drop(binding);
++            Self {
++                pin: Some(pin),
++                _arena: arena,
++            }
++        }
++
++        pub fn release(mut self) -> Self {
++            drop(black_box(
++                self.pin.take().expect("benchmark pin releases once"),
++            ));
++            self
++        }
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+--- a/crates/xlfn/src/benchmark_support.rs
++++ b/crates/xlfn/src/benchmark_support.rs
+@@ -54,6 +54,9 @@
+ #[cfg(feature = "rtd")]
+ mod rtd;
+ mod sync_boundary;
++
++#[cfg(feature = "async")]
++pub use crate::handle::{ObjectFinalPinRelease, ObjectLeaseBenchCase, ObjectLeaseBenchmark};
+ 
+ pub use crate::handle::{
+     handle_removal_probe, handle_retirement_debt_probe, token_cache_associativity_probe,
+--- a/crates/xlfn/src/benchmark_support/ingress.rs
++++ b/crates/xlfn/src/benchmark_support/ingress.rs
+@@ -218,6 +218,34 @@
+         })
+     }
+ 
++    pub fn run_prepared_with_identity<T>(&mut self) -> [u8; 32]
++    where
++        T: for<'call> ExcelParameter<'call, crate::value::FormulaInputMode>,
++    {
++        let ingress = benchmark_ingress();
++        let call = self
++            .runtime
++            .enter(&ingress)
++            .expect("benchmark runtime must be open");
++        crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
++            let mut arguments =
++                crate::value::ArgumentContext::<crate::value::FormulaInputMode>::new(
++                    call, scope, 1,
++                );
++            // SAFETY: self.raw points into fixture storage retained for the call.
++            let raw = unsafe { crate::value::XlValueRef::from_raw(&mut self.raw) }
++                .expect("benchmark prepared input must be well formed");
++            let value = arguments
++                .prepare::<T>(0, "arg", raw)
++                .expect("benchmark input preparation must succeed");
++            std::hint::black_box(&value);
++            arguments
++                .finish()
++                .expect("formula revision fingerprint must finish")
++                .expect("formula revision return must produce fingerprint")
++        })
++    }
++
+     pub fn run_borrowed_str(&mut self) {
+         let ingress = benchmark_ingress();
+         let call = self
+--- a/crates/xlfn/benches/argument_ingress.rs
++++ b/crates/xlfn/benches/argument_ingress.rs
+@@ -92,6 +92,13 @@
+         b.iter(|| mat_100k.run_with_identity::<Matrix<f64>>());
+     });
+ 
++    for (cells, label) in [(1, "1"), (16, "16"), (1_000, "1k"), (100_000, "100k")] {
++        let mut prepared = RawArgumentIngressBenchmark::number_matrix(cells, 1);
++        group.bench_function(format!("matrix_f64_{label}/prepare_identity"), |b| {
++            b.iter(|| prepared.run_prepared_with_identity::<Matrix<f64>>());
++        });
++    }
++
+     // 7. Vec<f64> 100k
+     let mut vec_100k = RawArgumentIngressBenchmark::number_vec(100_000);
+     group.bench_function("vec_f64_100k/plain", |b| {
+--- a/crates/xlfn/benches/formula_revision.rs
++++ b/crates/xlfn/benches/formula_revision.rs
+@@ -1,10 +1,10 @@
+ use criterion::{Criterion, criterion_group, criterion_main};
+-use xlfn::benchmark_support::{BENCHMARK_MEASUREMENT_TIME, FormulaRevisionBenchmark};
++use xlfn::benchmark_support::{FormulaRevisionBenchmark, benchmark_measurement_time};
+ use xlfn::value::Matrix;
+ 
+ fn formula_revision_benchmarks(c: &mut Criterion) {
+     let mut group = c.benchmark_group("formula_revision/warm_hit");
+-    group.measurement_time(BENCHMARK_MEASUREMENT_TIME);
++    group.measurement_time(benchmark_measurement_time());
+ 
+     let f64_value = FormulaRevisionBenchmark::new(42.0_f64);
+     group.bench_function("f64", |b| {
+--- /dev/null
++++ b/crates/xlfn/benches/object_lease.rs
+@@ -0,0 +1,37 @@
++use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
++use xlfn::benchmark_support::{
++    ObjectFinalPinRelease, ObjectLeaseBenchCase, ObjectLeaseBenchmark, benchmark_measurement_time,
++};
++
++const ITERATIONS_PER_WORKER: usize = 1_000;
++const WORKERS: [usize; 3] = [1, 4, 16];
++
++fn object_lease_benchmarks(c: &mut Criterion) {
++    let mut group = c.benchmark_group("object_lease");
++    group.measurement_time(benchmark_measurement_time());
++    let serial = ObjectLeaseBenchmark::new(ObjectLeaseBenchCase::SameObject, 1, 1);
++    group.throughput(Throughput::Elements(1));
++    group.bench_function("pin_acquire_release_serial", |b| {
++        b.iter(|| serial.run_serial())
++    });
++    group.bench_function("final_pin_release", |b| {
++        b.iter_batched(
++            ObjectFinalPinRelease::prepare,
++            ObjectFinalPinRelease::release,
++            BatchSize::NumIterations(1_024),
++        );
++    });
++    for case in ObjectLeaseBenchCase::ALL {
++        for workers in WORKERS {
++            let benchmark = ObjectLeaseBenchmark::new(case, workers, ITERATIONS_PER_WORKER);
++            group.throughput(Throughput::Elements(benchmark.total_iterations() as u64));
++            group.bench_with_input(BenchmarkId::new(case.name(), workers), &workers, |b, _| {
++                b.iter(|| benchmark.run());
++            });
++        }
++    }
++    group.finish();
++}
++
++criterion_group!(benches, object_lease_benchmarks);
++criterion_main!(benches);

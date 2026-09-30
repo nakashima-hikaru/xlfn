@@ -1,10 +1,10 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use xlfn::benchmark_support::{BENCHMARK_MEASUREMENT_TIME, FormulaRevisionBenchmark};
+use xlfn::benchmark_support::{FormulaRevisionBenchmark, benchmark_measurement_time};
 use xlfn::value::Matrix;
 
 fn formula_revision_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("formula_revision/warm_hit");
-    group.measurement_time(BENCHMARK_MEASUREMENT_TIME);
+    group.measurement_time(benchmark_measurement_time());
 
     let f64_value = FormulaRevisionBenchmark::new(42.0_f64);
     group.bench_function("f64", |b| {

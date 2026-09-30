@@ -202,7 +202,10 @@ bench-ci:
     just bench-one-filter formula_revision "^formula_revision/warm_hit/(f64|matrix_f64_100k)\z"
     just bench-one-filter handle_lookup "^handle_lookup/(warm_same_token|distinct_tokens)/(1|32)\z"
     just bench-one formula_caller
-    just bench-one-filter argument_ingress "^argument_ingress/(f64/with_identity|string_short/borrowed|matrix_string_10k/borrowed|matrix_f64_100k/with_identity|excel_value_matrix_100k/with_identity|handle/with_identity)\z"
+    just bench-one-filter argument_ingress "^argument_ingress/(f64/with_identity|string_short/borrowed|matrix_string_10k/borrowed|matrix_f64_100k/(with_identity|prepare_identity)|excel_value_matrix_100k/with_identity|handle/with_identity)\z"
+    just bench-one-filter array_numeric_output "^array_numeric_output/(matrix_build_return|builder_build_return)/100000\z"
+    just bench-one-filter object_lease "^object_lease/(pin_acquire_release_serial|final_pin_release|same_object/4|distinct_objects/4)\z" "bench-internals async"
+    just bench-one-filter cache_miss_concurrency "^cache_miss_concurrency/(distinct_keys/(cheap_u64|numeric_reduce_4096)/cache/workers_(1|4)|same_key/cheap_u64/cache/workers_4)\z" "bench-internals cache"
     just bench-one-filter array_string_output "^array_string_output/borrowed_str/16384\z"
     just bench-one-filter rtd_publish "^rtd_publish/(number|string|string_8k)/(changing|same_value)\z" "bench-internals rtd"
     just bench-one-filter rtd_refresh "^rtd_refresh/(number/end_to_end/dense|short_string/end_to_end/dense|string_8k/(collection|completion|end_to_end)/dense)\z" "bench-internals rtd"
@@ -216,6 +219,8 @@ bench-pr: bench-ci
 # Scaling curves across worker thread counts, batch sizes, and data dimensions.
 # Run periodically, nightly, or on-demand to observe throughput scaling characteristics.
 bench-scaling:
+    just bench-one object_lease "bench-internals async"
+    just bench-one cache_miss_concurrency "bench-internals cache"
     just bench-one-filter async_spawn "^async_spawn/(matrix_spawn|matrix_reschedule|spawn_and_drain)" "bench-internals async"
     just bench-one-filter sync_boundary "^sync_boundary/(admission|scalar_return/no_subscriber)/(4|16)\z"
     just bench-one-filter handle_prepare "^handle_prepare/(distinct_key/(4|16)|cold_grow|revision_churn)"
@@ -226,6 +231,9 @@ bench-scaling:
 
 # Full unfiltered benchmark suite.
 bench-full:
+    just bench-one array_numeric_output
+    just bench-one object_lease "bench-internals async"
+    just bench-one cache_miss_concurrency "bench-internals cache"
     just bench-one async_spawn "bench-internals async"
     just bench-one sync_boundary
     just bench-one handle_prepare

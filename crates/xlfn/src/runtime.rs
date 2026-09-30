@@ -134,16 +134,29 @@ impl<A: crate::Addin> Runtime<A> {
     pub(crate) fn open_addin_boundary(
         &self,
         lifecycle: &AddinLifecycleAccess<'_, A>,
+        callbacks: crate::host_callback::HostCallbackSession,
         addin_id: &crate::diagnostics::AddinId,
         version: &'static str,
         target: &'static str,
         descriptors: &[crate::registration::RegistrationDescriptor],
     ) -> i32 {
-        open::open_addin_boundary(self, lifecycle, addin_id, version, target, descriptors)
+        open::open_addin_boundary(
+            self,
+            lifecycle,
+            callbacks,
+            addin_id,
+            version,
+            target,
+            descriptors,
+        )
     }
 
-    pub(crate) fn remove_addin(&self, lifecycle: &AddinLifecycleAccess<'_, A>) -> i32 {
-        transactions::remove_addin(self, lifecycle)
+    pub(crate) fn remove_addin(
+        &self,
+        lifecycle: &AddinLifecycleAccess<'_, A>,
+        callbacks: &mut crate::host_callback::HostCallbackSession,
+    ) -> i32 {
+        transactions::remove_addin(self, lifecycle, callbacks)
     }
 
     pub(crate) fn quarantine_runtime(&self) {
@@ -346,10 +359,15 @@ impl<A: crate::Addin> Runtime<A> {
             .bind_addin_lifecycle()
             .expect("test runtime binds its lifecycle thread");
         let generation = opening.attempt_id().into_runtime_generation();
-        let transaction = opening.attach_host().begin_initialization().initialized(
-            lifecycle_state,
-            crate::runtime_components::GenerationServiceInputs::empty_for_generation(generation),
-        );
+        let transaction = opening
+            .attach_host(crate::host_callback::HostCallbackSession::new())
+            .begin_initialization()
+            .initialized(
+                lifecycle_state,
+                crate::runtime_components::GenerationServiceInputs::empty_for_generation(
+                    generation,
+                ),
+            );
         let transaction = match transaction.stage_opening_generation(OpeningGeneration {
             shared_state: state,
             layers,
@@ -388,10 +406,13 @@ impl<A: crate::Addin> Runtime<A> {
         let access = self
             .bind_addin_lifecycle()
             .expect("test runtime binds its lifecycle thread");
-        let transaction = opening.attach_host().begin_initialization().initialized(
-            Default::default(),
-            crate::runtime_components::GenerationServiceInputs::with_rtd_sources(sources),
-        );
+        let transaction = opening
+            .attach_host(crate::host_callback::HostCallbackSession::new())
+            .begin_initialization()
+            .initialized(
+                Default::default(),
+                crate::runtime_components::GenerationServiceInputs::with_rtd_sources(sources),
+            );
         let transaction = match transaction.stage_opening_generation(OpeningGeneration {
             shared_state: state,
             layers,
@@ -424,10 +445,13 @@ impl<A: crate::Addin> Runtime<A> {
         let access = self
             .bind_addin_lifecycle()
             .expect("test runtime binds its lifecycle thread");
-        let transaction = opening.attach_host().begin_initialization().initialized(
-            lifecycle_state,
-            crate::runtime_components::GenerationServiceInputs::with_rtd_sources(sources),
-        );
+        let transaction = opening
+            .attach_host(crate::host_callback::HostCallbackSession::new())
+            .begin_initialization()
+            .initialized(
+                lifecycle_state,
+                crate::runtime_components::GenerationServiceInputs::with_rtd_sources(sources),
+            );
         let transaction = match transaction.stage_opening_generation(OpeningGeneration {
             shared_state: state,
             layers,
@@ -525,9 +549,20 @@ impl<A: crate::Addin> Runtime<A> {
         attempt.finish_in_place(registrations)
     }
 
-    #[cfg(all(test, feature = "async", not(target_os = "windows")))]
+    #[cfg(all(
+        test,
+        any(not(target_os = "windows"), feature = "async", feature = "handles")
+    ))]
     pub(crate) fn merge_host_for_test(&self, journal: crate::registration::HostMutationJournal) {
         self.host.merge(journal);
+    }
+
+    #[cfg(all(
+        test,
+        any(not(target_os = "windows"), feature = "async", feature = "handles")
+    ))]
+    pub(crate) fn metadata_debt_count_for_test(&self) -> usize {
+        self.host.metadata_debt_snapshot().len()
     }
 
     pub(crate) fn enter<'call>(

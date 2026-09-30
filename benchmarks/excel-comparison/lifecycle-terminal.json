@@ -1,0 +1,60 @@
+{
+  "checked_on": "2026-09-30",
+  "host": "macOS arm64",
+  "toolchain": "1.98.1",
+  "host_sdk": "MacOSX15.2.sdk",
+  "contract_source": "https://learn.microsoft.com/ja-jp/office/client-developer/excel/excel4-excel12",
+  "baseline_regression": {
+    "revision": "c87ed9fcf44f572ead9e9a170ce3d69db48a0340",
+    "instrumentation": "new boundary fixture plus test module wiring, callback fixture visibility and metadata debt count accessor; original production lifecycle unchanged",
+    "normal_reload_control_passed": 1,
+    "terminal_tests_failed": 3,
+    "observed_phase": "Quarantined",
+    "required_phase": "Closed",
+    "frozen_test_executable_sha256": "b0d36e5242e7707bcf616c6d9d38c8f30a23da0152af2b23aeca8fccc76b9d5b"
+  },
+  "candidate_validation": {
+    "targeted_host_registration_session_tests_passed": 31,
+    "workspace_nextest_passed": 1045,
+    "workspace_nextest_skipped": 11,
+    "isolated_full_run_leaky_tests": 1,
+    "leaky_test_recheck": {
+      "test": "cargo::build_output_tests::selects_the_actual_cdylib_path_and_features_including_fresh_builds",
+      "result": "passed without a leak marker in an isolated single-test rerun"
+    },
+    "serialized_xlfn_lib_passed": 768,
+    "serialized_xlfn_lib_ignored": 10,
+    "feature_combinations_checked": 48,
+    "minimal_feature_boundary_tests_passed": 4,
+    "clippy": "workspace all targets/all features passed",
+    "rustdoc": "workspace all features, warnings denied passed",
+    "panic_boundaries_reviewed": 50,
+    "format_and_diff_check": "passed",
+    "artifact_isolation": "candidate final suite used a separate target directory; baseline-contaminated shared-target reruns were discarded and the default xlfn cache was rebuilt",
+    "miri": {
+      "toolchain": "nightly-2026-08-22",
+      "features": "handles with no default features",
+      "strict_provenance": true,
+      "stacked_borrows_boundary_tests_passed": 4,
+      "tree_borrows_boundary_tests_passed": 4
+    },
+    "cross_target_type_checks": {
+      "x86_64-pc-windows-msvc": "passed with all features and blake3/pure",
+      "i686-pc-windows-msvc": "passed with all features and blake3/pure"
+    }
+  },
+  "live_excel": {
+    "status": "unverified",
+    "version": null,
+    "build": null,
+    "process_bitness": null,
+    "observations": []
+  },
+  "event_removal_qualification_record": "event-qualification/records.json",
+  "limits": [
+    "mock callbacks do not establish real Excel behavior",
+    "MSVC target type checks are not native Windows execution",
+    "existing formal lifecycle proofs do not cover the Excel C API terminal-status contract",
+    "nil-procedure event removal still requires exact-version and bitness live qualification"
+  ]
+}

@@ -16,11 +16,11 @@ pub(crate) fn retry_metadata_debt(
     callbacks: &HostCallbackSession,
 ) -> XllResult<()> {
     let debts = ledger.metadata_debt_snapshot();
+    let host = RegistrationHost::new(callbacks);
     if debts.is_empty() {
-        return Ok(());
+        return terminal_retry_error(&host).map_or(Ok(()), Err);
     }
 
-    let host = RegistrationHost::new(callbacks);
     let outcome = retry_metadata_debt_with_host(&host, &debts);
     ledger.replace_metadata_debt(outcome.remaining);
     for error in outcome.cleanup_issues {
@@ -103,11 +103,23 @@ fn retry_metadata_debt_with_host(
         }
     }
 
+    // Successful deletion commits before releasing the callback result. Its
+    // final xlFree may still stop this Excel entrypoint even when there is no
+    // later debt whose admission check would observe that terminal status.
+    terminal = terminal.or_else(|| terminal_retry_error(host));
     MetadataDebtRetryResult {
         remaining,
         cleanup_issues,
         terminal,
     }
+}
+
+fn terminal_retry_error(host: &RegistrationHost<'_>) -> Option<crate::XllError> {
+    host.terminal_status()
+        .map(|status| crate::XllError::ExcelApi {
+            function: crate::error::ExcelApiFunction::Evaluate,
+            failure: crate::error::ExcelApiFailure::Suppressed(status),
+        })
 }
 
 #[cfg(all(
@@ -120,7 +132,9 @@ mod tests {
     use crate::registration::RegistrationId;
     use crate::registration::host::test_support::{CallbackScript, Reply};
     use crate::return_abi::ExcelCallbackStatus;
-    use xlfn_sys::{XLF_EVALUATE, XLF_SET_NAME, XLOPER12, XLRET_ABORT, XLRET_FAILED};
+    use xlfn_sys::{
+        XLF_EVALUATE, XLF_SET_NAME, XLOPER12, XLRET_ABORT, XLRET_FAILED, XLRET_UNCALCED,
+    };
 
     fn debt(name: &'static str, id: f64) -> MetadataDebt {
         MetadataDebt::new(
@@ -287,5 +301,83 @@ mod tests {
         assert_eq!(outcome.cleanup_issues.len(), 1);
         assert!(outcome.terminal.is_none());
         script.assert_calls(&[XLF_EVALUATE, XLF_SET_NAME]);
+    }
+
+    #[test]
+    fn retry_reports_terminal_cleanup_after_the_last_committed_deletion() {
+        for status in [XLRET_ABORT, XLRET_UNCALCED] {
+            let script = CallbackScript::install([
+                Reply::success(XLF_EVALUATE, XLOPER12::number(7.0)),
+                Reply::success(XLF_SET_NAME, XLOPER12::boolean(true)).release_status(status),
+            ]);
+            let callbacks = HostCallbackSession::new();
+            let host = RegistrationHost::new(&callbacks);
+            let debts = debts([debt("TEST.OWNED", 7.0)]);
+
+            let outcome = retry_metadata_debt_with_host(&host, &debts);
+
+            assert!(outcome.remaining.is_empty());
+            assert_eq!(outcome.cleanup_issues.len(), 1);
+            assert!(matches!(
+                outcome.terminal,
+                Some(XllError::ExcelApi {
+                    failure: crate::error::ExcelApiFailure::Suppressed(terminal),
+                    ..
+                }) if terminal == ExcelCallbackStatus::from_raw(status),
+            ));
+            assert!(host.registration_id("TEST.LATER").is_err());
+            script.assert_calls(&[XLF_EVALUATE, XLF_SET_NAME]);
+        }
+    }
+
+    #[test]
+    fn retry_returns_terminal_failure_after_clearing_the_last_ledger_debt() {
+        for status in [XLRET_ABORT, XLRET_UNCALCED] {
+            let script = CallbackScript::install([
+                Reply::success(XLF_EVALUATE, XLOPER12::number(7.0)),
+                Reply::success(XLF_SET_NAME, XLOPER12::boolean(true)).release_status(status),
+            ]);
+            let callbacks = HostCallbackSession::new();
+            let ledger = HostLedger::new();
+            ledger.retain_metadata_debt(vec![debt("TEST.OWNED", 7.0)]);
+
+            assert!(matches!(
+                retry_metadata_debt(&ledger, &callbacks),
+                Err(XllError::ExcelApi {
+                    failure: crate::error::ExcelApiFailure::Suppressed(terminal),
+                    ..
+                }) if terminal == ExcelCallbackStatus::from_raw(status),
+            ));
+            assert!(!ledger.has_metadata_debt());
+            assert_eq!(
+                callbacks.terminal_status(),
+                Some(ExcelCallbackStatus::from_raw(status))
+            );
+            script.assert_calls(&[XLF_EVALUATE, XLF_SET_NAME]);
+        }
+    }
+
+    #[test]
+    fn retry_cannot_succeed_with_empty_debt_in_an_already_terminal_entrypoint() {
+        for status in [ExcelCallbackStatus::Abort, ExcelCallbackStatus::Uncalced] {
+            let script = CallbackScript::install([]);
+            let callbacks = HostCallbackSession::new();
+            callbacks.suppress_for_test(status);
+            let ledger = HostLedger::new();
+
+            assert!(matches!(
+                retry_metadata_debt(&ledger, &callbacks),
+                Err(XllError::ExcelApi {
+                    failure: crate::error::ExcelApiFailure::Suppressed(terminal),
+                    ..
+                }) if terminal == status,
+            ));
+            let outcome =
+                retry_metadata_debt_with_host(&RegistrationHost::new(&callbacks), &BTreeMap::new());
+            assert!(outcome.terminal.is_some());
+            assert!(outcome.remaining.is_empty());
+            assert!(!ledger.has_metadata_debt());
+            script.assert_calls(&[]);
+        }
     }
 }

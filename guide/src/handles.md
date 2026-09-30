@@ -69,6 +69,12 @@ inputs. Recalculating that same formula reuses the object without calling the
 producer again. Changing an input creates a new object and token. Renaming a
 sheet or workbook alone does not recreate the object.
 
+Reuse still validates the contents of range inputs and computes their identity.
+For a large dataset, put the producer in one cell and pass its token to all
+consumers. Each consumer then borrows the stored Rust object rather than
+reconverting and hashing the original range. The producer pays that range scan
+when it recalculates; a warm hit does not make the scan disappear.
+
 When the object depends on external data, add a version or snapshot ID as a
 formula argument. For example, a `DATASET.LOAD` function could accept a
 snapshot ID from `A1`; updating `A1` then creates a new object.

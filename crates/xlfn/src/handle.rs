@@ -14,6 +14,8 @@ mod formula;
 mod lifetime;
 #[allow(unsafe_code, reason = "Stable typed object pointers are audited here")]
 mod object;
+#[cfg(all(feature = "bench-internals", feature = "async"))]
+pub use object::{ObjectFinalPinRelease, ObjectLeaseBenchCase, ObjectLeaseBenchmark};
 mod prepare;
 #[cfg(feature = "bench-internals")]
 mod protocol_bench;

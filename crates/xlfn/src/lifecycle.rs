@@ -205,7 +205,7 @@ mod tests {
         let transaction = runtime
             .begin_open_if_epoch(removal_epoch)
             .unwrap()
-            .attach_host();
+            .attach_host(crate::host_callback::HostCallbackSession::new());
         let lifecycle = lifecycle_access(&runtime);
         let (transaction, _) =
             match initialize_addin::<LayersPanic>(test_open_context(), transaction) {
@@ -236,7 +236,10 @@ mod tests {
         let first_generation = runtime.last_committed_generation();
 
         let lifecycle = lifecycle_access(&runtime);
-        assert_eq!(remove_addin::<LayersPanic>(&runtime, &lifecycle), 1);
+        assert_eq!(
+            remove_addin::<LayersPanic>(&runtime, &lifecycle, &mut HostCallbackSession::new()),
+            1
+        );
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
         runtime.clear_host_intent();
         let second_open = runtime.begin_open().unwrap();
@@ -354,7 +357,7 @@ mod tests {
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
 
         let lifecycle = lifecycle_access(&runtime);
-        remove_addin_inner::<RetryClose>(&runtime, &lifecycle);
+        remove_addin_inner::<RetryClose>(&runtime, &lifecycle, &mut HostCallbackSession::new());
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
         assert_eq!(attempts.load(std::sync::atomic::Ordering::Acquire), 1);
         assert!(runtime.take_current_generation().is_none() && !runtime.has_opening_generation());
@@ -409,7 +412,7 @@ mod tests {
         );
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
-        remove_addin_inner::<CleanupPanic>(&runtime, &lifecycle);
+        remove_addin_inner::<CleanupPanic>(&runtime, &lifecycle, &mut HostCallbackSession::new());
 
         assert_eq!(
             runtime.phase(),
@@ -547,7 +550,11 @@ mod tests {
             if close_boundary {
                 assert_eq!(host_auto_close(&runtime), 1);
             } else {
-                let result = remove_addin_inner::<QuiesceFailure>(&runtime, &lifecycle);
+                let result = remove_addin_inner::<QuiesceFailure>(
+                    &runtime,
+                    &lifecycle,
+                    &mut HostCallbackSession::new(),
+                );
                 assert!(matches!(result, RemovalSuccess::Quarantined));
             }
             assert!(runtime.module_residency_held());
@@ -645,7 +652,10 @@ mod tests {
                 serde_json::from_str(&runtime.composition_trace_json()).unwrap();
             assert_eq!(previous["outcome"], "returned_success");
         }
-        let transaction = runtime.begin_open().unwrap().attach_host();
+        let transaction = runtime
+            .begin_open()
+            .unwrap()
+            .attach_host(crate::host_callback::HostCallbackSession::new());
         let attempt = runtime.protocol_generation().unwrap();
         let starting: serde_json::Value =
             serde_json::from_str(&runtime.composition_trace_json()).unwrap();
@@ -1385,7 +1395,8 @@ mod tests {
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
         let lifecycle = lifecycle_access(&runtime);
-        let success = remove_addin_inner::<CleanClose>(&runtime, &lifecycle);
+        let success =
+            remove_addin_inner::<CleanClose>(&runtime, &lifecycle, &mut HostCallbackSession::new());
         assert!(runtime.begin_open().is_err());
         let RemovalSuccess::Closed {
             witness,

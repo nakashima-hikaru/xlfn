@@ -160,6 +160,7 @@ impl<'call> XlValueRef<'call> {
         Self::from_array_cell(raw)
     }
 
+    #[inline]
     pub(crate) fn from_array_cell(raw: &'call XLOPER12) -> XllResult<Self> {
         if raw.xltype & !(XLTYPE_MASK | XLBIT_XL_FREE | XLBIT_DLL_FREE) != 0 {
             return Err(XllError::input(

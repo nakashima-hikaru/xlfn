@@ -235,12 +235,16 @@ where
 }
 
 #[must_use]
-pub(crate) fn remove_addin<A>(runtime: &Runtime<A>, lifecycle: &AddinLifecycleAccess<'_, A>) -> i32
+pub(crate) fn remove_addin<A>(
+    runtime: &Runtime<A>,
+    lifecycle: &AddinLifecycleAccess<'_, A>,
+    callbacks: &mut HostCallbackSession,
+) -> i32
 where
     A: Addin,
 {
     let close_result = catch_no_unwind(AssertUnwindSafe(|| {
-        remove_addin_inner::<A>(runtime, lifecycle)
+        remove_addin_inner::<A>(runtime, lifecycle, callbacks)
     }));
     let success = match close_result {
         Ok(success) => success,
@@ -291,22 +295,25 @@ pub(crate) enum RemovalControl {
     },
 }
 
-/// Owns the terminal-removal attempt and its callback session. Cleanup is
+/// Owns the terminal-removal attempt and borrows its Excel-entry session. Cleanup is
 /// explicit: the transaction is consumed only after a close certificate is
 /// produced, while an active drop can only preserve quarantine.
-struct RemovalTransaction<'runtime, A: Addin> {
+struct RemovalTransaction<'runtime, 'call, A: Addin> {
     deps: ShutdownDeps<'runtime, A>,
-    callbacks: HostCallbackSession,
+    callbacks: &'call mut HostCallbackSession,
     attempt: Option<RemovalOwner<'runtime, A>>,
 }
 
-impl<'runtime, A: Addin> RemovalTransaction<'runtime, A> {
-    fn begin(runtime: &'runtime Runtime<A>) -> Option<Self> {
+impl<'runtime, 'call, A: Addin> RemovalTransaction<'runtime, 'call, A> {
+    fn begin(
+        runtime: &'runtime Runtime<A>,
+        callbacks: &'call mut HostCallbackSession,
+    ) -> Option<Self> {
         let deps = runtime.shutdown_deps();
         let claim = runtime.lifecycle_orchestrator().begin_final_removal()?;
         Some(Self {
             deps,
-            callbacks: HostCallbackSession::new(),
+            callbacks,
             attempt: Some(RemovalOwner::new(deps, claim)),
         })
     }
@@ -316,11 +323,11 @@ impl<'runtime, A: Addin> RemovalTransaction<'runtime, A> {
     }
 
     fn callbacks(&self) -> &HostCallbackSession {
-        &self.callbacks
+        self.callbacks
     }
 
     fn callbacks_mut(&mut self) -> &mut HostCallbackSession {
-        &mut self.callbacks
+        self.callbacks
     }
 
     fn take_attempt(&mut self) -> RemovalOwner<'runtime, A> {
@@ -330,7 +337,7 @@ impl<'runtime, A: Addin> RemovalTransaction<'runtime, A> {
     }
 }
 
-impl<A: Addin> Drop for RemovalTransaction<'_, A> {
+impl<A: Addin> Drop for RemovalTransaction<'_, '_, A> {
     fn drop(&mut self) {
         if self.attempt.is_some() {
             // No callback or partial cleanup is legal from Drop. The runtime
@@ -344,11 +351,12 @@ impl<A: Addin> Drop for RemovalTransaction<'_, A> {
 pub(crate) fn remove_addin_inner<'runtime, A>(
     runtime: &'runtime Runtime<A>,
     lifecycle: &AddinLifecycleAccess<'_, A>,
+    callbacks: &mut HostCallbackSession,
 ) -> RemovalSuccess<'runtime, A>
 where
     A: Addin,
 {
-    match remove_addin_inner_unchecked::<A>(runtime, lifecycle) {
+    match remove_addin_inner_unchecked::<A>(runtime, lifecycle, callbacks) {
         Ok(success) => success,
         Err(control) => commit_removal_control(runtime, control),
     }
@@ -357,6 +365,7 @@ where
 pub(crate) fn remove_addin_inner_unchecked<'runtime, A>(
     runtime: &'runtime Runtime<A>,
     lifecycle: &AddinLifecycleAccess<'_, A>,
+    callbacks: &mut HostCallbackSession,
 ) -> Result<RemovalSuccess<'runtime, A>, RemovalControl>
 where
     A: Addin,
@@ -366,7 +375,7 @@ where
     // Even an apparently closed runtime must pass through begin_final_removal:
     // a concurrent xlAutoOpen may already have sampled the previous close
     // epoch without having acquired its open-attempt token yet.
-    let Some(mut transaction) = RemovalTransaction::begin(runtime) else {
+    let Some(mut transaction) = RemovalTransaction::begin(runtime, callbacks) else {
         return Ok(RemovalSuccess::AlreadyClosed);
     };
     let shutdown_deps = transaction.deps();

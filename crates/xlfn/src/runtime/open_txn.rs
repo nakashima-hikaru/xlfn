@@ -118,9 +118,9 @@ pub(crate) struct HostOpeningState {
 }
 
 impl HostOpeningState {
-    fn new() -> Self {
+    fn new(callbacks: HostCallbackSession) -> Self {
         Self {
-            callbacks: HostCallbackSession::new(),
+            callbacks,
             journal: HostMutationJournal::default(),
         }
     }
@@ -442,14 +442,17 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Begun> {
         )
     }
 
-    pub(crate) fn attach_host(self) -> OpeningTxn<'runtime, A, HostAttached> {
+    pub(crate) fn attach_host(
+        self,
+        callbacks: HostCallbackSession,
+    ) -> OpeningTxn<'runtime, A, HostAttached> {
         let mut transaction = self;
         let Begun { core } = transaction.take_state();
         OpeningTxn::new_state(
             transaction.deps,
             HostAttached {
                 core,
-                host: HostOpeningState::new(),
+                host: HostOpeningState::new(callbacks),
             },
         )
     }

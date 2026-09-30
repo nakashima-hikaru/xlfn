@@ -3,14 +3,15 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use xlfn::benchmark_support::{
-    BenchHandleObject, RawArgumentIngressBenchmark, SemanticIdentityBenchmark,
-    Utf16IdentityBenchmark,
+    BenchHandleObject, NumericArrayOutputBenchmark, RawArgumentIngressBenchmark,
+    SemanticIdentityBenchmark, Utf16IdentityBenchmark,
 };
 use xlfn::output::XlArrayBuilder;
 
 const WARMUP_CALLS: usize = 100;
 const MEASURED_CALLS: usize = 10_000;
 const ARRAY_CELLS: usize = 1_000;
+const ARRAY_OUTPUT_CALLS: usize = 100;
 
 struct CountingAllocator;
 static ENABLED: AtomicBool = AtomicBool::new(false);
@@ -60,6 +61,10 @@ struct Counts {
 }
 
 fn measure(case: &str, mut operation: impl FnMut()) -> Counts {
+    measure_calls(case, MEASURED_CALLS, &mut operation)
+}
+
+fn measure_calls(case: &str, calls: usize, mut operation: impl FnMut()) -> Counts {
     for _ in 0..WARMUP_CALLS {
         operation();
     }
@@ -68,7 +73,7 @@ fn measure(case: &str, mut operation: impl FnMut()) -> Counts {
     REALLOCATIONS.store(0, Ordering::Relaxed);
     REQUESTED_BYTES.store(0, Ordering::Relaxed);
     ENABLED.store(true, Ordering::Relaxed);
-    for _ in 0..MEASURED_CALLS {
+    for _ in 0..calls {
         operation();
     }
     ENABLED.store(false, Ordering::Relaxed);
@@ -78,7 +83,7 @@ fn measure(case: &str, mut operation: impl FnMut()) -> Counts {
         reallocations: REALLOCATIONS.load(Ordering::Relaxed),
         requested_bytes: REQUESTED_BYTES.load(Ordering::Relaxed),
     };
-    println!("{case}: calls={MEASURED_CALLS} {counts:?}");
+    println!("{case}: calls={calls} {counts:?}");
     counts
 }
 
@@ -142,6 +147,33 @@ fn main() {
         enums, strings,
         "enum labels must use the borrowed string path"
     );
+
+    for cells in [1_000, 100_000] {
+        let benchmark = NumericArrayOutputBenchmark::new(cells);
+        let matrix = measure_calls(
+            &format!("array_numeric_output/{cells}/matrix_build_return"),
+            ARRAY_OUTPUT_CALLS,
+            || benchmark.run_matrix(),
+        );
+        let direct = measure_calls(
+            &format!("array_numeric_output/{cells}/builder_build_return"),
+            ARRAY_OUTPUT_CALLS,
+            || benchmark.run_direct(),
+        );
+        if !cfg!(feature = "refinement") {
+            assert_eq!(matrix.allocations, direct.allocations + ARRAY_OUTPUT_CALLS);
+            assert_eq!(
+                matrix.deallocations,
+                direct.deallocations + ARRAY_OUTPUT_CALLS
+            );
+            assert_eq!(matrix.reallocations, direct.reallocations);
+            assert_eq!(
+                matrix.requested_bytes,
+                direct.requested_bytes + ARRAY_OUTPUT_CALLS * cells * std::mem::size_of::<f64>(),
+                "direct output must avoid the intermediate numerical result buffer",
+            );
+        }
+    }
 
     let mut numeric = RawArgumentIngressBenchmark::number(42.0);
     let numbers = measure("f64/plain", || numeric.run_plain::<f64>());

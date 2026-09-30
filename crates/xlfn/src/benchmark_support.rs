@@ -61,6 +61,9 @@ pub use crate::handle::{
 #[cfg(feature = "rtd")]
 pub use crate::subscription::{channel_protocol_probe, shared_publisher_topology_probe};
 
+#[cfg(feature = "async")]
+pub use crate::handle::{ObjectFinalPinRelease, ObjectLeaseBenchCase, ObjectLeaseBenchmark};
+
 pub use crate::value::prepared_probe::InputKind as TwoPhaseInputKind;
 #[cfg(feature = "async")]
 pub use async_spawn::{AsyncSpawnBenchmark, AsyncSpawnKind, RescheduleFuture, SpawnBatchResult};
@@ -87,7 +90,7 @@ pub use lookup::{
     ArcHandleLookupBenchmark, HandleDistinctKeyBenchmark, HandleLookupBenchCase,
     HandleLookupBenchmark,
 };
-pub use output::BorrowedStringArrayOutputBenchmark;
+pub use output::{BorrowedStringArrayOutputBenchmark, NumericArrayOutputBenchmark};
 #[cfg(feature = "rtd")]
 pub use rtd::{
     RTD_REFRESH_SCALING_CASES, RtdChannelPipelineBenchmark, RtdPrepareBenchmark,

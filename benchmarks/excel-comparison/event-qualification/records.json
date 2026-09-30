@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "contract_reviewed_on": "2026-09-30",
+  "contract_sources": [
+    "https://learn.microsoft.com/en-us/office/client-developer/excel/xleventregister",
+    "https://learn.microsoft.com/en-us/office/client-developer/excel/handling-events"
+  ],
+  "registration_acknowledgement_contract": "xltypeInt with signed value greater than zero",
+  "removal_convention": {
+    "procedure_argument_type": "xltypeNil",
+    "event_argument_type": "xltypeInt",
+    "public_documentation": "not specified by the referenced xlEventRegister page",
+    "live_excel_status": "unverified"
+  },
+  "qualification_status": "unverified",
+  "qualification_scope": "one exact Excel product/version/build/channel and process bitness per real run",
+  "unverified_reason": "Live Windows Excel is unavailable on the local macOS host; no native event-registration/removal observations were collected.",
+  "observations": []
+}

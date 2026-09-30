@@ -92,6 +92,13 @@ fn argument_ingress_benchmarks(c: &mut Criterion) {
         b.iter(|| mat_100k.run_with_identity::<Matrix<f64>>());
     });
 
+    for (cells, label) in [(1, "1"), (16, "16"), (1_000, "1k"), (100_000, "100k")] {
+        let mut prepared = RawArgumentIngressBenchmark::number_matrix(cells, 1);
+        group.bench_function(format!("matrix_f64_{label}/prepare_identity"), |b| {
+            b.iter(|| prepared.run_prepared_with_identity::<Matrix<f64>>());
+        });
+    }
+
     // 7. Vec<f64> 100k
     let mut vec_100k = RawArgumentIngressBenchmark::number_vec(100_000);
     group.bench_function("vec_f64_100k/plain", |b| {

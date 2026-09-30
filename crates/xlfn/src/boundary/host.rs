@@ -7,6 +7,7 @@
 use crate::addin::Addin;
 use crate::boundary::report_boundary_error;
 use crate::diagnostics::AddinId;
+use crate::host_callback::HostCallbackSession;
 use crate::lifecycle::{HostLifecycleIntent, LifecyclePhase, lifecycle_access_error};
 use crate::registration::RegistrationDescriptor;
 use crate::runtime::Runtime;
@@ -61,6 +62,9 @@ where
     let Some(_boundary) = HostLifecycleGuard::enter(runtime) else {
         return 0;
     };
+    // One Excel invocation owns one terminal callback state, including a
+    // controlled removal and its replacement open transaction.
+    let mut callbacks = HostCallbackSession::new();
     if runtime.phase() == LifecyclePhase::Quarantined {
         return 0;
     }
@@ -77,8 +81,16 @@ where
     let removal_completed_before_open = runtime.phase() == crate::lifecycle::LifecyclePhase::Closed
         && runtime.host_intent() == HostLifecycleIntent::ExplicitRemovalComplete;
     if controlled_reload {
-        let result = runtime.remove_addin(&lifecycle);
+        let result = runtime.remove_addin(&lifecycle, &mut callbacks);
         if result == 0 || runtime.phase() != crate::lifecycle::LifecyclePhase::Closed {
+            return 0;
+        }
+        if !callbacks.permits_callbacks() {
+            // Detaching the old generation may succeed despite metadata or
+            // xlFree failures. Abort/Uncalced still require returning to Excel
+            // before any replacement callbacks. Preserve the completed-removal
+            // marker for a later close or a new Excel open invocation.
+            runtime.complete_explicit_removal();
             return 0;
         }
         lifecycle = match runtime.bind_addin_lifecycle() {
@@ -92,7 +104,14 @@ where
         };
         runtime.clear_host_intent();
     }
-    let result = runtime.open_addin_boundary(&lifecycle, addin_id, version, target, descriptors);
+    let result = runtime.open_addin_boundary(
+        &lifecycle,
+        callbacks,
+        addin_id,
+        version,
+        target,
+        descriptors,
+    );
     if controlled_reload
         && result == 0
         && runtime.phase() != crate::lifecycle::LifecyclePhase::Quarantined
@@ -121,7 +140,8 @@ where
     let Some(_boundary) = HostLifecycleGuard::enter(runtime) else {
         return 1;
     };
-    deactivate_addin(runtime, "xlAutoClose lifecycle thread");
+    let mut callbacks = HostCallbackSession::new();
+    deactivate_addin(runtime, &mut callbacks, "xlAutoClose lifecycle thread");
     if runtime.phase() == LifecyclePhase::Closed
         && runtime.host_intent() == HostLifecycleIntent::ExplicitRemovalComplete
     {
@@ -150,11 +170,16 @@ where
     let Some(_boundary) = HostLifecycleGuard::enter(runtime) else {
         return 1;
     };
-    deactivate_addin(runtime, "xlAutoRemove lifecycle thread");
+    let mut callbacks = HostCallbackSession::new();
+    deactivate_addin(runtime, &mut callbacks, "xlAutoRemove lifecycle thread");
     1
 }
 
-fn deactivate_addin<A: Addin>(runtime: &Runtime<A>, boundary: &'static str) {
+fn deactivate_addin<A: Addin>(
+    runtime: &Runtime<A>,
+    callbacks: &mut HostCallbackSession,
+    boundary: &'static str,
+) {
     if runtime.phase() == LifecyclePhase::Quarantined {
         return;
     }
@@ -168,11 +193,18 @@ fn deactivate_addin<A: Addin>(runtime: &Runtime<A>, boundary: &'static str) {
         }
     };
     runtime.request_explicit_removal();
-    let result = runtime.remove_addin(&lifecycle);
+    let result = runtime.remove_addin(&lifecycle, callbacks);
     if result == 1 && runtime.phase() == LifecyclePhase::Closed {
         runtime.complete_explicit_removal();
     }
 }
+
+#[cfg(all(
+    test,
+    any(not(target_os = "windows"), feature = "async", feature = "handles")
+))]
+#[path = "host_terminal_tests.rs"]
+mod terminal_tests;
 
 #[cfg(test)]
 mod tests {

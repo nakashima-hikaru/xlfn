@@ -85,6 +85,9 @@ Neither borrowed view can escape the call or be an async argument.
 
 When an output is large or produced one cell at a time, `XlArrayBuilder`
 writes the result without an intermediate owned matrix.
+Use it when the function can calculate each output cell directly. Returning an
+existing `Matrix<T>` remains convenient when the application already needs that
+owned matrix; converting it to Excel still encodes each cell into return storage.
 
 ```rust
 {{#include ../fixtures/addin.md}}
@@ -105,6 +108,20 @@ fn doubled(values: XlArrayRef<'_>) -> XllResult<XlArrayOutput> {
 
 The builder rejects non-finite output as `#NUM!` and checks dimensions and
 return-storage limits.
+
+### Reuse a large dataset across formulas
+
+Passing a range to a handle producer still checks its contents on recalculation
+to determine whether the existing object can be reused. A warm hit therefore
+still scans a large input; it avoids reconstructing the object, not reading the
+range.
+
+For several formulas that use the same large dataset, create one
+[formula-owned handle](handles.md#create-and-use-an-object) and pass its token to
+the consumers. Consumers borrow the existing Rust object instead of converting
+and hashing the original cells for each formula. Keep the dataset in the
+producer's owned object, and add an explicit version argument when it depends on
+external data.
 
 ## Keep one-dimensional shape explicit
 

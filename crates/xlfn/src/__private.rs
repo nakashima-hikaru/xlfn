@@ -1020,7 +1020,10 @@ pub mod v1 {
 
                 let opens_before = OPEN_CALLS.load(Ordering::Relaxed);
                 let quiesces_before = QUIESCE_CALLS.load(Ordering::Relaxed);
-                let transaction = runtime.begin_open().unwrap().attach_host();
+                let transaction = runtime
+                    .begin_open()
+                    .unwrap()
+                    .attach_host(crate::host_callback::HostCallbackSession::new());
                 let lifecycle = runtime.bind_addin_lifecycle().unwrap();
                 let context = OpenContext::new(
                     std::path::PathBuf::from("test.xll"),
@@ -1060,7 +1063,10 @@ pub mod v1 {
             let newly_acquired = runtime
                 .ensure_module_residency(residency_anchor as *const ())
                 .unwrap();
-            let transaction = runtime.begin_open().unwrap().attach_host();
+            let transaction = runtime
+                .begin_open()
+                .unwrap()
+                .attach_host(crate::host_callback::HostCallbackSession::new());
             let lifecycle = runtime.bind_addin_lifecycle().unwrap();
             let failure = transaction.failure(XllError::Overloaded);
             assert!(matches!(

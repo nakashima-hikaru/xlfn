@@ -208,9 +208,12 @@ impl ObjectArena {
     }
 
     fn release_binding(&self, id: ObjectId) {
-        let _release = self.begin_release();
+        // Declare the completion guard outside the lock's scope so even an
+        // unwinding transition unlocks before the guard takes this mutex.
+        let _release;
         let retired = {
             let mut state = self.state.lock();
+            _release = self.begin_release(&mut state);
             let entry = state
                 .objects
                 .get_mut(&id)
@@ -237,9 +240,10 @@ impl ObjectArena {
     }
 
     fn release_pin(&self, id: ObjectId) {
-        let _release = self.begin_release();
+        let _release;
         let retired = {
             let mut state = self.state.lock();
+            _release = self.begin_release(&mut state);
             let reclaim = {
                 let entry = state
                     .objects
@@ -288,14 +292,18 @@ impl ObjectArena {
     /// Keep final-release completion distinct from the payload counts: user
     /// destruction can reenter the registry after the last payload is removed.
     /// The arena must still exist for diagnostics and the final notification.
-    fn begin_release(&self) -> impl Drop + '_ {
-        {
-            let mut state = self.state.lock();
-            state.active_releases = state
-                .active_releases
-                .checked_add(1)
-                .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
-        }
+    ///
+    /// Register completion while the caller holds the same lock that removes
+    /// its capability. This closes the payload-to-release accounting handoff
+    /// without acquiring the arena mutex a separate time.
+    fn begin_release<'arena>(
+        &'arena self,
+        state: &mut ObjectArenaState,
+    ) -> impl Drop + 'arena + use<'arena> {
+        state.active_releases = state
+            .active_releases
+            .checked_add(1)
+            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
         scopeguard::guard(self, |arena| {
             let mut state = arena.state.lock();
             state.active_releases = state
@@ -542,6 +550,173 @@ unsafe impl Send for RawObjectLeaseGuard {}
 // SAFETY: RawObjectLeaseGuard immutable borrows can be shared across threads.
 unsafe impl Sync for RawObjectLeaseGuard {}
 
+#[cfg(all(feature = "bench-internals", feature = "async"))]
+pub use benchmark::{ObjectFinalPinRelease, ObjectLeaseBenchCase, ObjectLeaseBenchmark};
+
+#[cfg(all(feature = "bench-internals", feature = "async"))]
+mod benchmark {
+    use super::*;
+    use std::hint::black_box;
+    use std::sync::{Arc, mpsc};
+
+    /// The object distribution for a shared-arena pin workload.
+    #[derive(Clone, Copy)]
+    pub enum ObjectLeaseBenchCase {
+        SameObject,
+        DistinctObjects,
+    }
+
+    impl ObjectLeaseBenchCase {
+        pub const ALL: [Self; 2] = [Self::SameObject, Self::DistinctObjects];
+
+        pub const fn name(self) -> &'static str {
+            match self {
+                Self::SameObject => "same_object",
+                Self::DistinctObjects => "distinct_objects",
+            }
+        }
+    }
+
+    /// Persistent workers exercising production pin admission and release.
+    /// Threads, bindings, allocations, and channels are prepared before timing.
+    pub struct ObjectLeaseBenchmark {
+        binding: Option<ObjectBinding>,
+        arena: Arc<PublishedOwner<ObjectArena>>,
+        iterations_per_worker: usize,
+        start_tx: Vec<mpsc::SyncSender<()>>,
+        done_rx: Vec<mpsc::Receiver<()>>,
+        workers: Vec<std::thread::JoinHandle<()>>,
+    }
+
+    impl ObjectLeaseBenchmark {
+        pub fn new(
+            case: ObjectLeaseBenchCase,
+            worker_count: usize,
+            iterations_per_worker: usize,
+        ) -> Self {
+            assert!(worker_count != 0);
+            assert!(iterations_per_worker != 0);
+            let arena = Arc::new(PublishedOwner::new(ObjectArena::new()));
+            // SAFETY: this benchmark retains the published arena owner until
+            // all worker bindings, pins, and release completions have drained.
+            let binding = unsafe { ObjectArena::insert(&arena, ObjectId::new(1, 1), 42_u64) }
+                .expect("benchmark seed binding");
+            let mut start_tx = Vec::with_capacity(worker_count);
+            let mut done_rx = Vec::with_capacity(worker_count);
+            let mut workers = Vec::with_capacity(worker_count);
+            for worker in 0..worker_count {
+                let worker_binding = match case {
+                    ObjectLeaseBenchCase::SameObject => {
+                        binding.duplicate().expect("benchmark duplicate binding")
+                    }
+                    ObjectLeaseBenchCase::DistinctObjects => {
+                        let id = ObjectId::new(
+                            1,
+                            u64::try_from(worker + 2).expect("worker object ID fits u64"),
+                        );
+                        // SAFETY: every worker retains an arena owner through
+                        // explicit binding destruction and its release tail.
+                        unsafe { ObjectArena::insert(&arena, id, 42_u64) }
+                            .expect("benchmark worker binding")
+                    }
+                };
+                let worker_arena = Arc::clone(&arena);
+                let (start, receive) = mpsc::sync_channel::<()>(1);
+                start_tx.push(start);
+                let (done, completed) = mpsc::sync_channel(1);
+                done_rx.push(completed);
+                workers.push(std::thread::spawn(move || {
+                    while receive.recv().is_ok() {
+                        for _ in 0..iterations_per_worker {
+                            let pin = worker_binding.acquire_lease().expect("benchmark pin");
+                            drop(black_box(pin));
+                        }
+                        done.send(()).expect("benchmark driver receives completion");
+                    }
+                    drop(worker_binding);
+                    drop(worker_arena);
+                }));
+            }
+            Self {
+                binding: Some(binding),
+                arena,
+                iterations_per_worker,
+                start_tx,
+                done_rx,
+                workers,
+            }
+        }
+
+        /// One uncontended pin cycle without worker dispatch.
+        pub fn run_serial(&self) {
+            let pin = self
+                .binding
+                .as_ref()
+                .expect("benchmark binding is live")
+                .acquire_lease()
+                .expect("benchmark pin");
+            drop(black_box(pin));
+        }
+
+        pub fn run(&self) {
+            for start in &self.start_tx {
+                start.send(()).expect("benchmark worker receives start");
+            }
+            for done in &self.done_rx {
+                done.recv().expect("benchmark worker completed batch");
+            }
+        }
+
+        pub fn total_iterations(&self) -> usize {
+            self.start_tx.len() * self.iterations_per_worker
+        }
+    }
+
+    impl Drop for ObjectLeaseBenchmark {
+        fn drop(&mut self) {
+            self.start_tx.clear();
+            for worker in self.workers.drain(..) {
+                // A failed worker disconnects its own completion channel, so
+                // the driver reports failure without blocking on other live
+                // senders. Cleanup must not panic again while unwinding it.
+                let _ = crate::panic_boundary::contain_panic(worker.join());
+            }
+            drop(self.binding.take());
+            self.arena.assert_reclaimable();
+        }
+    }
+
+    /// Setup for an isolated final-pin drop. Criterion prepares this outside
+    /// timing; `release` returns the arena owner for untimed output cleanup.
+    pub struct ObjectFinalPinRelease {
+        pin: Option<RawObjectLeaseGuard>,
+        _arena: PublishedOwner<ObjectArena>,
+    }
+
+    impl ObjectFinalPinRelease {
+        pub fn prepare() -> Self {
+            let arena = PublishedOwner::new(ObjectArena::new());
+            // SAFETY: this fixture retains the arena through the pin's final
+            // release, including application destruction and completion.
+            let binding = unsafe { ObjectArena::insert(&arena, ObjectId::new(1, 1), 42_u64) }
+                .expect("benchmark final-pin binding");
+            let pin = binding.acquire_lease().expect("benchmark final pin");
+            drop(binding);
+            Self {
+                pin: Some(pin),
+                _arena: arena,
+            }
+        }
+
+        pub fn release(mut self) -> Self {
+            drop(black_box(
+                self.pin.take().expect("benchmark pin releases once"),
+            ));
+            self
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -594,7 +769,15 @@ mod tests {
             {
                 let state = arena.state.lock();
                 let entry = &state.objects[&id];
-                assert_eq!((entry.bindings, entry.pins, state.active_pins), (2, 2, 2));
+                assert_eq!(
+                    (
+                        entry.bindings,
+                        entry.pins,
+                        state.active_pins,
+                        state.active_releases,
+                    ),
+                    (2, 2, 2, 0),
+                );
             }
             // Move capabilities through Option to exercise ownership transfer
             // without any extra release or disarming state.
@@ -604,7 +787,15 @@ mod tests {
             {
                 let state = arena.state.lock();
                 let entry = &state.objects[&id];
-                assert_eq!((entry.bindings, entry.pins, state.active_pins), (1, 1, 1));
+                assert_eq!(
+                    (
+                        entry.bindings,
+                        entry.pins,
+                        state.active_pins,
+                        state.active_releases,
+                    ),
+                    (1, 1, 1, 0),
+                );
             }
             if pin_last {
                 drop(duplicate);
@@ -619,6 +810,124 @@ mod tests {
             let state = arena.state.lock();
             assert!(state.objects.is_empty());
             assert_eq!((state.active_pins, state.active_releases), (0, 0));
+        }
+    }
+
+    #[test]
+    fn miri_final_release_retains_arena_through_reentrant_and_panicking_drop() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct ReleaseObserver {
+            arena: NonNull<ObjectArena>,
+            id: ObjectId,
+            release_depth: usize,
+            drops: Arc<AtomicUsize>,
+            nested: Option<ObjectBinding>,
+            panic: bool,
+        }
+        // SAFETY: this fixture's published arena outlives the observing
+        // payload, and every access uses the arena's shared mutex.
+        unsafe impl Send for ReleaseObserver {}
+        // SAFETY: the raw pointer is immutable; the observing payload only
+        // accesses the pointed-to arena during its exclusive destruction.
+        unsafe impl Sync for ReleaseObserver {}
+        impl Drop for ReleaseObserver {
+            fn drop(&mut self) {
+                // SAFETY: the test retains the unique published arena owner
+                // until this destructor and its release guard have finished.
+                let arena = unsafe { self.arena.as_ref() };
+                {
+                    // Lock reentry proves application destruction happens
+                    // after the capability-transition lock was released.
+                    let state = arena.state.lock();
+                    assert!(!state.objects.contains_key(&self.id));
+                    assert_eq!(state.active_pins, 0);
+                    assert_eq!(state.active_releases, self.release_depth);
+                }
+                assert!(matches!(
+                    arena.finish_quiescence(),
+                    Err(XllError::Internal {
+                        diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_OBJECTS,
+                    })
+                ));
+                arena.seal();
+                drop(self.nested.take());
+                {
+                    let state = arena.state.lock();
+                    assert_eq!(state.active_releases, self.release_depth);
+                    assert!(state.objects.is_empty());
+                }
+                assert_eq!(self.drops.fetch_add(1, Ordering::SeqCst), 0);
+                if self.panic {
+                    panic!("application destructor panic");
+                }
+            }
+        }
+
+        for pin_last in [false, true] {
+            for panic in [false, true] {
+                let arena = PublishedOwner::new(ObjectArena::new());
+                let outer_drops = Arc::new(AtomicUsize::new(0));
+                let nested_drops = Arc::new(AtomicUsize::new(0));
+                let arena_pointer = NonNull::from(arena.as_ref());
+                let nested_id = ObjectId::new(1, 2);
+                // SAFETY: all fixture capabilities drain before arena drop.
+                let nested = unsafe {
+                    ObjectArena::insert(
+                        &arena,
+                        nested_id,
+                        ReleaseObserver {
+                            arena: arena_pointer,
+                            id: nested_id,
+                            release_depth: 2,
+                            drops: Arc::clone(&nested_drops),
+                            nested: None,
+                            panic: false,
+                        },
+                    )
+                }
+                .unwrap();
+                let outer_id = ObjectId::new(1, 1);
+                // SAFETY: the observing payload borrows the stable arena
+                // allocation only while this fixture retains its owner.
+                let binding = unsafe {
+                    ObjectArena::insert(
+                        &arena,
+                        outer_id,
+                        ReleaseObserver {
+                            arena: arena_pointer,
+                            id: outer_id,
+                            release_depth: 1,
+                            drops: Arc::clone(&outer_drops),
+                            nested: Some(nested),
+                            panic,
+                        },
+                    )
+                }
+                .unwrap();
+                let pin = binding.acquire_lease().unwrap();
+                if pin_last {
+                    drop(binding);
+                    drop(pin);
+                } else {
+                    drop(pin);
+                    drop(binding);
+                }
+                assert_eq!(outer_drops.load(Ordering::SeqCst), 1);
+                assert_eq!(nested_drops.load(Ordering::SeqCst), 1);
+                {
+                    let state = arena.state.lock();
+                    assert!(state.objects.is_empty());
+                    assert_eq!((state.active_pins, state.active_releases), (0, 0));
+                }
+                if panic {
+                    assert!(matches!(arena.finish_quiescence(), Err(XllError::Panic)));
+                } else {
+                    assert!(arena.finish_quiescence().is_ok());
+                }
+                arena.assert_reclaimable();
+            }
         }
     }
 

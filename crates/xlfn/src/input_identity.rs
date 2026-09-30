@@ -149,8 +149,63 @@ impl InputIdentityEncoder {
     }
 
     /// Adds an `f64` using its converted Rust bit pattern.
+    #[inline]
     pub fn f64(&mut self, value: f64) {
         self.u64(value.to_bits());
+    }
+
+    /// Appends converted numeric cells with the same framing as repeated
+    /// `f64` calls. Selects the hashed sink once for the remaining sequence;
+    /// validation stays with the iterator and completes before lookup.
+    pub(crate) fn f64_sequence(
+        &mut self,
+        mut values: impl Iterator<Item = XllResult<f64>>,
+    ) -> XllResult<()> {
+        if let Some(error) = &self.error {
+            return Err(error.clone());
+        }
+        while let Some(value) = values.next() {
+            let value = match value {
+                Ok(value) => value,
+                Err(error) => {
+                    self.fail(error.clone());
+                    return Err(error);
+                }
+            };
+            let bytes = value.to_bits().to_le_bytes();
+            if let ArgumentSink::Inline { bytes: buffer, len } = &mut self.sink {
+                if *len + bytes.len() <= INLINE_ARGUMENT_BYTES {
+                    buffer[*len..*len + bytes.len()].copy_from_slice(&bytes);
+                    *len += bytes.len();
+                    continue;
+                }
+                self.promote_to_hashed();
+            }
+            let ArgumentSink::Hashed(state) = &mut self.sink else {
+                unreachable!("numeric sequence promotes before streaming");
+            };
+            Self::write_hashed(
+                &mut state.hasher,
+                &mut state.buffer,
+                &mut state.buffered,
+                &bytes,
+            );
+            let result: XllResult<()> = values.try_for_each(|value| {
+                let bytes = value?.to_bits().to_le_bytes();
+                Self::write_hashed(
+                    &mut state.hasher,
+                    &mut state.buffer,
+                    &mut state.buffered,
+                    &bytes,
+                );
+                Ok(())
+            });
+            if let Err(error) = &result {
+                self.fail(error.clone());
+            }
+            return result;
+        }
+        Ok(())
     }
 
     /// Adds a little-endian `u32`.
@@ -159,6 +214,7 @@ impl InputIdentityEncoder {
     }
 
     /// Adds a little-endian `u64`.
+    #[inline]
     pub fn u64(&mut self, value: u64) {
         self.write(&value.to_le_bytes());
     }
@@ -168,6 +224,7 @@ impl InputIdentityEncoder {
         self.write(&value.to_le_bytes());
     }
 
+    #[inline]
     fn write(&mut self, bytes: &[u8]) {
         if self.error.is_some() {
             return;
@@ -226,6 +283,7 @@ impl InputIdentityEncoder {
         state.buffered = len;
     }
 
+    #[inline]
     fn write_hashed(
         hasher: &mut blake3::Hasher,
         buffer: &mut [u8; HASH_BUFFER_BYTES],
@@ -398,6 +456,64 @@ mod tests {
             actual.finish_into(&mut a).unwrap();
             expected.finish_into(&mut b).unwrap();
             proptest::prop_assert_eq!(a.finalize(), b.finalize());
+        }
+    }
+
+    #[test]
+    fn numeric_sequences_preserve_framing_bits_and_hash_buffer_boundaries() {
+        let prefixes: &[usize] = if cfg!(miri) {
+            &[0, 127]
+        } else {
+            &[0, 1, 16, 127, 128, 129]
+        };
+        let counts: &[usize] = if cfg!(miri) {
+            &[15, 64, 513]
+        } else {
+            &[0, 1, 15, 16, 17, 63, 64, 65, 511, 512, 513, 1025]
+        };
+        for &prefix in prefixes {
+            for &count in counts {
+                let mut actual = InputIdentityEncoder::new("values");
+                let mut expected = InputIdentityEncoder::new("values");
+                actual.write(&vec![0xa5; prefix]);
+                expected.write(&vec![0xa5; prefix]);
+                let values = (0..count).map(|index| match index % 3 {
+                    0 => -0.0,
+                    1 => -(index as f64),
+                    _ => index as f64 / 7.0,
+                });
+                for value in values.clone() {
+                    expected.f64(value);
+                }
+                actual.f64_sequence(values.map(Ok)).unwrap();
+                let mut a = blake3::Hasher::new();
+                let mut b = blake3::Hasher::new();
+                actual.finish_into(&mut a).unwrap();
+                expected.finish_into(&mut b).unwrap();
+                assert_eq!(a.finalize(), b.finalize(), "prefix={prefix}, count={count}");
+            }
+        }
+    }
+
+    #[test]
+    fn numeric_sequence_validation_errors_poison_partial_identity() {
+        for prefix in [0, 1, 63, 64, 65, 512] {
+            let mut encoder = InputIdentityEncoder::new("values");
+            let values = (0..prefix)
+                .map(|index| Ok(index as f64))
+                .chain(std::iter::once(Err(XllError::input(
+                    "<array cell>",
+                    InputError::NonFinite,
+                ))));
+            assert!(encoder.f64_sequence(values).is_err());
+            encoder.f64(42.0);
+            assert!(matches!(
+                encoder.finish_into(&mut blake3::Hasher::new()),
+                Err(XllError::Input {
+                    argument: "values",
+                    reason: InputError::NonFinite,
+                })
+            ));
         }
     }
 

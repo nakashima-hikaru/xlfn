@@ -397,3 +397,23 @@ large arguments reuse the same number of hash allocations as one argument;
 it also reports one-string/rest-numeric arrays to expose speculative arena
 reservation costs. See [the boundary and RTD review](../../../docs/PERFORMANCE.md)
 for paired measurements, rejected alternatives, and validation limits.
+
+## Large arrays, handle pins, and concurrent cache misses
+
+The [2026-09-30 measurements](../../../benchmarks/performance/README.md) record
+same-condition input/identity and object-pin comparisons, numeric Matrix versus
+XlArrayBuilder output, allocation probes, and fixed-budget concurrent misses.
+`argument_ingress/*/prepare_identity` stops after complete validation and identity
+recording, matching the input phase of a warm formula-handle hit. `two_phase_ingress`
+adds real formula publication and separately probes warm, cold, and changed inputs.
+
+`object_lease` measures the production arena's pin admission/release with serial
+and persistent-worker cases; final-pin setup and arena cleanup are outside timing.
+`array_numeric_output` includes result construction, return publication and free;
+`matrix_convert_return` excludes construction of the existing owned Matrix.
+`cache_miss_concurrency` keeps one 1 MiB resident budget and reports cold batches at
+1, 4, 16, and 32 workers, plus compute/dispatch controls and untimed correctness
+probes. Same-key reuse combines pending followers and resident hits.
+
+Selected cases run in `just bench-ci`; full concurrency curves run in
+`just bench-scaling`. These are Excel-independent benchmarks.
