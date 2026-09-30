@@ -174,7 +174,7 @@ mod tests {
         let runtime = Runtime::<LayersPanic>::new();
         let stale_epoch = runtime.removal_epoch();
 
-        assert_eq!(host_auto_remove::<LayersPanic>(&runtime), 1);
+        assert_eq!(host_auto_close::<LayersPanic>(&runtime), 1);
         assert!(runtime.begin_open_if_epoch(stale_epoch).is_err());
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
     }
@@ -451,42 +451,47 @@ mod tests {
     }
 
     #[test]
-    fn wrong_thread_removal_quarantines_before_touching_lifecycle_state() {
-        let runtime = std::sync::Arc::new(Runtime::<WrongThreadRemoval>::new());
-        let drops = std::sync::Arc::new(AtomicUsize::new(0));
-        let opening = runtime.begin_open().unwrap();
-        let mut opening = runtime.publish_with_lifecycle(
-            opening,
-            (),
-            DropObserved(std::sync::Arc::clone(&drops)),
-            (),
-        );
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
-        assert!(
-            runtime
-                .ensure_module_residency(lifecycle_residency_probe_anchor as *const ())
-                .is_ok()
-        );
-        let lifecycle = lifecycle_access(&runtime);
+    fn wrong_thread_deactivation_quarantines_before_touching_lifecycle_state() {
+        for deactivate in [
+            host_auto_remove::<WrongThreadRemoval>,
+            host_auto_close::<WrongThreadRemoval>,
+        ] {
+            let runtime = std::sync::Arc::new(Runtime::<WrongThreadRemoval>::new());
+            let drops = std::sync::Arc::new(AtomicUsize::new(0));
+            let opening = runtime.begin_open().unwrap();
+            let mut opening = runtime.publish_with_lifecycle(
+                opening,
+                (),
+                DropObserved(std::sync::Arc::clone(&drops)),
+                (),
+            );
+            runtime.finish_open(&mut opening, Vec::new()).unwrap();
+            assert!(
+                runtime
+                    .ensure_module_residency(lifecycle_residency_probe_anchor as *const ())
+                    .is_ok()
+            );
+            let lifecycle = lifecycle_access(&runtime);
 
-        let removal_runtime = std::sync::Arc::clone(&runtime);
-        std::thread::spawn(move || {
-            assert_eq!(host_auto_remove::<WrongThreadRemoval>(&removal_runtime), 1);
-        })
-        .join()
-        .expect("wrong-thread removal worker panicked");
+            let removal_runtime = std::sync::Arc::clone(&runtime);
+            std::thread::spawn(move || {
+                assert_eq!(deactivate(&removal_runtime), 1);
+            })
+            .join()
+            .expect("wrong-thread removal worker panicked");
 
-        assert_eq!(
-            runtime.phase(),
-            crate::lifecycle::LifecyclePhase::Quarantined
-        );
-        assert!(runtime.module_residency_held());
-        assert_eq!(drops.load(Ordering::Acquire), 0);
-        assert!(
-            runtime
-                .with_addin_lifecycle_for_test(&lifecycle, |_| ())
-                .is_ok()
-        );
+            assert_eq!(
+                runtime.phase(),
+                crate::lifecycle::LifecyclePhase::Quarantined
+            );
+            assert!(runtime.module_residency_held());
+            assert_eq!(drops.load(Ordering::Acquire), 0);
+            assert!(
+                runtime
+                    .with_addin_lifecycle_for_test(&lifecycle, |_| ())
+                    .is_ok()
+            );
+        }
     }
 
     struct QuiesceFailure;
@@ -518,36 +523,45 @@ mod tests {
 
     #[test]
     fn quiesce_failure_enters_quarantine_without_dropping_state() {
-        let runtime = Runtime::<QuiesceFailure>::new();
-        let drops = std::sync::Arc::new(AtomicUsize::new(0));
-        let opening = runtime.begin_open().unwrap();
-        let mut opening = runtime.publish_with_lifecycle(
-            opening,
-            (),
-            DropObserved(std::sync::Arc::clone(&drops)),
-            (),
-        );
-        let lifecycle = lifecycle_access(&runtime);
-        assert!(
+        for close_boundary in [false, true] {
+            let runtime = Runtime::<QuiesceFailure>::new();
+            let drops = std::sync::Arc::new(AtomicUsize::new(0));
+            let opening = runtime.begin_open().unwrap();
+            let mut opening = runtime.publish_with_lifecycle(
+                opening,
+                (),
+                DropObserved(std::sync::Arc::clone(&drops)),
+                (),
+            );
+            let lifecycle = lifecycle_access(&runtime);
+            assert!(
+                runtime
+                    .with_addin_lifecycle_for_test(&lifecycle, |_| ())
+                    .is_ok()
+            );
+            runtime.finish_open(&mut opening, Vec::new()).unwrap();
+
             runtime
-                .with_addin_lifecycle_for_test(&lifecycle, |_| ())
-                .is_ok()
-        );
-        runtime.finish_open(&mut opening, Vec::new()).unwrap();
-
-        let result = { remove_addin_inner::<QuiesceFailure>(&runtime, &lifecycle) };
-
-        assert!(matches!(result, RemovalSuccess::Quarantined));
-        assert_eq!(
-            runtime.phase(),
-            crate::lifecycle::LifecyclePhase::Quarantined
-        );
-        assert_eq!(drops.load(Ordering::Acquire), 0);
-        assert_eq!(host_auto_close::<QuiesceFailure>(&runtime), 1);
-        assert_eq!(
-            runtime.phase(),
-            crate::lifecycle::LifecyclePhase::Quarantined
-        );
+                .ensure_module_residency(lifecycle_residency_probe_anchor as *const ())
+                .unwrap();
+            if close_boundary {
+                assert_eq!(host_auto_close(&runtime), 1);
+            } else {
+                let result = remove_addin_inner::<QuiesceFailure>(&runtime, &lifecycle);
+                assert!(matches!(result, RemovalSuccess::Quarantined));
+            }
+            assert!(runtime.module_residency_held());
+            assert_eq!(
+                runtime.phase(),
+                crate::lifecycle::LifecyclePhase::Quarantined
+            );
+            assert_eq!(drops.load(Ordering::Acquire), 0);
+            assert_eq!(host_auto_close::<QuiesceFailure>(&runtime), 1);
+            assert_eq!(
+                runtime.phase(),
+                crate::lifecycle::LifecyclePhase::Quarantined
+            );
+        }
     }
 
     #[test]
@@ -1440,7 +1454,7 @@ mod tests {
         );
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
 
-        assert_eq!(host_auto_remove::<AlwaysFailClose>(&runtime), 1);
+        assert_eq!(host_auto_close::<AlwaysFailClose>(&runtime), 1);
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
     }
 
@@ -1473,7 +1487,7 @@ mod tests {
             release_tx.send(()).unwrap();
         });
         let started = std::time::Instant::now();
-        assert_eq!(host_auto_remove::<CleanClose>(runtime), 1);
+        assert_eq!(host_auto_close::<CleanClose>(runtime), 1);
         assert!(started.elapsed() >= std::time::Duration::from_millis(20));
         releaser.join().unwrap();
         holder.join().unwrap();
@@ -1481,30 +1495,40 @@ mod tests {
     }
 
     #[test]
-    fn xl_auto_close_is_a_hint_until_explicit_removal() {
-        let runtime = Runtime::<CleanClose>::new();
+    fn xl_auto_close_alone_quiesces_and_cleans_the_generation_once() {
+        let _test_guard = LAYERS_PANIC_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        LAYERS_PANIC_CLOSES.store(0, Ordering::Release);
+        LAYERS_PANIC_QUIESCES.store(0, Ordering::Release);
+        let runtime = Runtime::<LayersPanic>::new();
         let open_attempt = runtime.begin_open().unwrap();
         let mut open_attempt = runtime.publish(open_attempt, (), ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
 
-        assert_eq!(host_auto_close::<CleanClose>(&runtime), 1);
-        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Open);
-        let ingress = crate::module_runtime::ingress()
-            .enter_with(|| {})
-            .into_admitted()
-            .expect("test call enters during OPEN");
-        assert!(runtime.enter(&ingress).is_ok());
-        drop(ingress);
-
-        assert_eq!(host_auto_remove::<CleanClose>(&runtime), 1);
+        assert_eq!(host_auto_close::<LayersPanic>(&runtime), 1);
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
+        assert!(!runtime.has_current_generation());
+        assert!(!runtime.has_opening_generation());
+        assert!(
+            crate::module_runtime::ingress()
+                .enter_udf_with(|| {})
+                .into_admitted()
+                .is_err()
+        );
+
+        assert_eq!(host_auto_remove::<LayersPanic>(&runtime), 1);
+        assert_eq!(host_auto_close::<LayersPanic>(&runtime), 1);
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
+        assert_eq!(LAYERS_PANIC_QUIESCES.load(Ordering::Acquire), 1);
+        assert_eq!(LAYERS_PANIC_CLOSES.load(Ordering::Acquire), 1);
     }
 
     #[inline(never)]
     fn lifecycle_residency_probe_anchor() {}
 
     #[test]
-    fn residency_release_requires_removal_then_close_hint() {
+    fn xl_auto_close_releases_residency_after_logical_cleanup() {
         let runtime = Runtime::<CleanClose>::new_with_physical_unload();
         assert!(
             runtime
@@ -1516,11 +1540,39 @@ mod tests {
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
 
         let _ = host_auto_close::<CleanClose>(&runtime);
-        assert!(runtime.module_residency_held());
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
+        assert!(!runtime.module_residency_held());
+    }
+
+    #[test]
+    fn xl_auto_remove_retains_residency_until_xl_auto_close() {
+        let runtime = Runtime::<CleanClose>::new_with_physical_unload();
+        runtime
+            .ensure_module_residency(lifecycle_residency_probe_anchor as *const ())
+            .unwrap();
+        let open_attempt = runtime.begin_open().unwrap();
+        let mut open_attempt = runtime.publish(open_attempt, (), ());
+        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+
         assert_eq!(host_auto_remove::<CleanClose>(&runtime), 1);
         assert!(runtime.module_residency_held());
         let _ = host_auto_close::<CleanClose>(&runtime);
         assert!(!runtime.module_residency_held());
+    }
+
+    #[test]
+    fn xl_auto_close_keeps_residency_without_the_physical_unload_opt_in() {
+        let runtime = Runtime::<CleanClose>::new();
+        runtime
+            .ensure_module_residency(lifecycle_residency_probe_anchor as *const ())
+            .unwrap();
+        let open_attempt = runtime.begin_open().unwrap();
+        let mut open_attempt = runtime.publish(open_attempt, (), ());
+        runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
+
+        assert_eq!(host_auto_close::<CleanClose>(&runtime), 1);
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
+        assert!(runtime.module_residency_held());
     }
 
     #[test]
@@ -1616,10 +1668,7 @@ mod tests {
             .expect("async close-order task did not start");
 
         crate::test_callback::set_terminal(XLF_UNREGISTER, XLRET_ABORT);
-        let lifecycle = lifecycle_access(runtime);
-        let close = remove_addin_inner::<CleanClose>(runtime, &lifecycle);
-
-        assert!(matches!(close, RemovalSuccess::Quarantined));
+        assert_eq!(host_auto_close::<CleanClose>(runtime), 1);
         assert_eq!(
             runtime.phase(),
             crate::lifecycle::LifecyclePhase::Quarantined
@@ -1783,7 +1832,7 @@ mod tests {
                 })
                 .unwrap();
 
-            assert_eq!(host_auto_remove::<OrderedClose>(&runtime), 1);
+            assert_eq!(host_auto_close::<OrderedClose>(&runtime), 1);
             assert_eq!(*events.lock().unwrap(), ["subscription", "handle", "state"]);
         }
     }

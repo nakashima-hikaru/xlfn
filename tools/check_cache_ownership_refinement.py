@@ -6,7 +6,7 @@ These mutate the ownership proof, not the production pin transition expressions.
 
 from pathlib import Path
 
-from check_drain_gate_refinement import check_mutations
+from verus_mutations import check_mutations
 
 
 if __name__ == "__main__":

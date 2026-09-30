@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Reject early destruction completion and shared completion-tail regressions."""
 from pathlib import Path
-from check_drain_gate_refinement import check_mutations
+from verus_mutations import check_mutations
 
 PROOF = Path("verification/verus/handle_domain")
 PROTOCOL = Path("crates/xlfn/src/handle/domain/protocol.rs")

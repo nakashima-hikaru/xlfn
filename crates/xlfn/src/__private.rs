@@ -19,6 +19,15 @@ pub mod v1 {
             .unwrap_or_else(|_| crate::return_abi::closing_error_pointer())
     }
 
+    /// Final metadata boundary, whose detached fallback is always #VALUE!.
+    #[doc(hidden)]
+    pub fn export_metadata_boundary(
+        operation: impl FnOnce() -> *mut xlfn_sys::XLOPER12,
+    ) -> *mut xlfn_sys::XLOPER12 {
+        crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(operation))
+            .unwrap_or_else(|_| crate::return_abi::metadata::invalid_action_pointer())
+    }
+
     /// Final status-returning boundary for generated Excel and COM exports.
     #[doc(hidden)]
     pub fn export_status_boundary(failure: i32, operation: impl FnOnce() -> i32) -> i32 {
@@ -43,12 +52,13 @@ pub mod v1 {
     pub use crate::call::{CallScope, with_excel_call_scope, with_excel_call_scope_and_state};
     #[cfg(feature = "async")]
     pub use crate::cancellation::CancellationToken;
-    use crate::error::{InputError, XllError, XllResult};
+    use crate::error::{XllError, XllResult};
     use crate::reference::{FromExcelReference, reference_from_raw};
     use crate::registration::{RegistrationDescriptor, RegistrationSignature};
     #[cfg(feature = "async")]
     use crate::return_abi::ffi_boundary_void;
-    use crate::return_abi::{ffi_boundary, free_return_boundary, udf_boundary_named};
+    pub use crate::return_abi::metadata::AddinMetadata;
+    use crate::return_abi::{free_return_boundary, udf_boundary_named};
     use crate::runtime::Runtime;
     #[cfg(feature = "handles")]
     use crate::value::ExcelCellOutput;
@@ -430,7 +440,7 @@ pub mod v1 {
         result
     }
 
-    /// Reports Excel's ambiguous close/deactivation hint without tearing down the runtime.
+    /// Cleans up a deactivated add-in and follows its physical-unload contract.
     #[doc(hidden)]
     pub fn auto_close_generated_addin<A: Addin>(runtime: &'static MacroRuntime<A>) -> i32 {
         host_auto_close::<A>(runtime.runtime())
@@ -451,24 +461,21 @@ pub mod v1 {
         drop(free_operation);
     }
 
-    /// Supplies Add-in metadata to Excel's Add-in Manager.
+    /// Supplies immutable metadata in every add-in lifecycle phase.
+    ///
+    /// # Safety
+    /// `action` must be the live XLOPER12 supplied by Excel. Excel may only read
+    /// the returned static value while the XLL is loaded, and must not pass it
+    /// to xlAutoFree12 because its free bits are unset.
     #[doc(hidden)]
     #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
-    pub unsafe fn addin_manager_info<A: Addin>(
-        runtime: &'static MacroRuntime<A>,
-        display_name: &'static str,
+    pub unsafe fn addin_manager_info(
+        metadata: &'static AddinMetadata,
         action: *mut xlfn_sys::XLOPER12,
     ) -> *mut xlfn_sys::XLOPER12 {
-        ffi_boundary(runtime.runtime(), || {
-            with_excel_call_scope(|call_scope| {
-                // SAFETY: action is a live XLOPER12 passed by Excel.
-                let action_value: f64 = unsafe { argument_from_raw(call_scope, "action", action)? };
-                if action_value == 1.0 {
-                    Ok(display_name.to_owned())
-                } else {
-                    Err(XllError::input("action", InputError::OutOfRange))
-                }
-            })
+        crate::return_abi::metadata::metadata_boundary(|| {
+            // SAFETY: action is the live XLOPER12 supplied by Excel.
+            unsafe { metadata.query(action) }
         })
     }
 
@@ -1014,6 +1021,12 @@ mod tests {
                 std::ptr::null_mut()
             })
         }
+        extern "system" fn metadata(dropped: &Arc<AtomicUsize>) -> *mut xlfn_sys::XLOPER12 {
+            v1::export_metadata_boundary(|| {
+                let _guard = PanicGuard(Arc::clone(dropped));
+                std::ptr::null_mut()
+            })
+        }
         extern "system" fn status(dropped: &Arc<AtomicUsize>) -> i32 {
             v1::export_status_boundary(-1, || {
                 let _guard = PanicGuard(Arc::clone(dropped));
@@ -1029,6 +1042,10 @@ mod tests {
         let dropped = Arc::new(AtomicUsize::new(0));
         let pointer = value(&dropped);
         assert_eq!(pointer, crate::return_abi::closing_error_pointer());
+        assert_eq!(
+            metadata(&dropped),
+            crate::return_abi::metadata::invalid_action_pointer()
+        );
         assert_eq!(status(&dropped), -1);
         void(&dropped);
         assert_eq!(dropped.load(Ordering::Acquire), 0);

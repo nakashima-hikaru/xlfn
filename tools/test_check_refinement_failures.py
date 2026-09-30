@@ -1,5 +1,5 @@
 import unittest
-from check_drain_gate_refinement import is_idle_callback_ownership_rejection, is_verification_failure
+from verus_mutations import is_idle_callback_ownership_rejection, is_verification_failure
 
 
 class VerificationFailureTests(unittest.TestCase):
@@ -44,7 +44,7 @@ class BaselineGateTests(unittest.TestCase):
         from pathlib import Path
         from subprocess import CompletedProcess
         from unittest.mock import patch
-        import check_drain_gate_refinement as gate
+        import verus_mutations as gate
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "proof/src").mkdir(parents=True)

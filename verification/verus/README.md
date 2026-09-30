@@ -116,7 +116,26 @@ weak-memory correspondence remain open unless explicitly stated otherwise.
 
 ---
 
-The `just verus` gate also runs `tools/check_drain_gate_refinement.py`: five unsafe mutations of the shared control flow must fail proof obligations (release before lock, omitted notification, notification after unlock, return with active readers, and omitted re-registration). This checks proof sensitivity, not completeness of the backend refinement.
+The `just verus` gate runs all eight proof targets, the mutation suites below,
+and the separate Verus/native borrow-rejection checks. Mutations check proof
+sensitivity, not completeness of the native backend refinement. Parser errors,
+timeouts and unrelated compiler errors never count as proof rejection; one
+explicitly named ownership-order case requires the exact Rust E0382 diagnostic.
+
+| Mutation target | Cases | Purpose |
+| :--- | ---: | :--- |
+| DrainGate | 67 | Counter arithmetic, all-stripe drain authority, rollback and wait/notification order |
+| PublishedOwner | 5 | Matching initialized allocation, layout, provenance and deallocation permission |
+| RotatingReadDomain | 87 | Generation/owner identity, held transition and queue guards, publication and withdrawal |
+| Cache | 108 | Pin/admission arithmetic, observation lifetime, inline allocation and certified recovery |
+| Handle | 154 | Binding ownership, retained reads, publication, batch coverage and post-destructor debt discharge |
+
+The inventory has 72 changes to production-shared sources and 349 changes to
+proof/model sources. The same shared source is checked through different proof
+targets where composition introduces additional ownership and lifecycle
+obligations. The 2026-09-30 review found no identical mutated input with the
+same proof target, baseline and rejection criterion. It retained all 421 cases;
+distinct inputs alone do not establish that every case is semantically necessary.
 
 Initial DrainGate validation snapshot (2026-09-21, macOS aarch64; subsequent changes and evidence are recorded in [the worklist](REFINEMENT_WORKLIST.md)):
 
@@ -135,7 +154,7 @@ Initial DrainGate validation snapshot (2026-09-21, macOS aarch64; subsequent cha
 
 ---
 
-## 5. Usage
+## 6. Usage
 
 ```bash
 # Run Verus formal verification
@@ -144,3 +163,36 @@ just verus
 # Audit verification codebase for assume / unapproved external_body violations
 just verus-audit
 ```
+
+`tools/check_verus_refinement.py` collects the six mutation suites before running
+Verus. Baselines are shared only when the proof entry point and every path and
+byte in the copied input tree match. Results are never cached between invocations
+or machines. The current unsharded invocation verifies eight distinct baselines
+instead of the former eight ordinary runs plus 105 mutation-group baselines.
+Every mutation starts from an immutable snapshot in its own temporary directory.
+The default is two verifier processes, with the available CPU budget divided
+between their internal verification threads. All existing proof and diagnostic
+criteria and the 120-second per-process timeout remain enabled.
+
+```bash
+# Inspect every mutation's target, input hashes and rejection criterion.
+python3 -B tools/check_verus_refinement.py --list
+
+# Run all cases and save per-baseline/per-case timings.
+python3 -B tools/check_verus_refinement.py --jobs 2 --report /tmp/verus-timings.json
+```
+
+CI runs four disjoint mutation shards (106/105/105/105 cases), each with two
+processes and two verifier threads per process. Each shard verifies its own eight
+baseline snapshots. Trust auditing, Verus/native lifetime rejection and the Loom
+release-ordering gate run once in a separate job. The existing `Verus formal
+verification` check requires every job to succeed and validates that the reports
+contain all current mutation inputs exactly once; a missing or changed case,
+missing shard, different baseline or different Verus version fails the gate.
+All cases still run on every CI invocation.
+
+On macOS aarch64 with Verus 0.2026.09.13.671956e, the first eight Handle groups
+(24 unchanged mutation cases) took 234.62 seconds with the original sequential
+runner and 134.28 seconds with the new runner. Normal baseline runs fell from
+eight to one; the new runner used two processes with four threads each. This
+sample measures local execution and does not predict the duration of Linux CI.

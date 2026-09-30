@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Sensitivity of typed PublishedOwner permission proofs (not production mutations)."""
 from pathlib import Path
-from check_drain_gate_refinement import check_mutations
+from verus_mutations import check_mutations
 
 if __name__ == "__main__":
     check_mutations(

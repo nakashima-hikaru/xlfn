@@ -116,6 +116,9 @@ fn expand_excel_addin(
         quote!(#krate::__private::v1::MacroRuntime::new())
     };
     validate_addin_metadata(&display_name, &id, &category, &item)?;
+    let name_units: Vec<_> = display_name.encode_utf16().collect();
+    let name_length =
+        u16::try_from(name_units.len()).expect("validated Excel metadata string length");
     Ok(quote! {
         #item
 
@@ -124,6 +127,11 @@ fn expand_excel_addin(
         static __XLFN_RUNTIME: #krate::__private::v1::MacroRuntime<
             #ident,
         > = #runtime_constructor;
+
+        #(#gating)*
+        #[doc(hidden)]
+        static __XLFN_METADATA: #krate::__private::v1::AddinMetadata =
+            #krate::__private::v1::AddinMetadata::new(&[#name_length, #(#name_units),*]);
 
         #(#gating)*
         #[used]
@@ -194,12 +202,11 @@ fn expand_excel_addin(
         pub unsafe extern "system" fn xlAddInManagerInfo12(
             __action: *mut #krate::__private::v1::XLOPER12,
         ) -> *mut #krate::__private::v1::XLOPER12 {
-            #krate::__private::v1::export_value_boundary(|| {
+            #krate::__private::v1::export_metadata_boundary(|| {
                 // SAFETY: Excel supplies `__action` as a live XLOPER12 for this ABI call.
                 unsafe {
                     #krate::__private::v1::addin_manager_info(
-                        &crate::__XLFN_RUNTIME,
-                        #display_name,
+                        &crate::__XLFN_METADATA,
                         __action,
                     )
                 }
@@ -318,7 +325,7 @@ mod tests {
                 let expected = match function.sig.ident.to_string().as_str() {
                     "xlAutoOpen" | "xlAutoClose" | "xlAutoRemove" => "export_status_boundary",
                     "xlAutoFree12" => "export_void_boundary",
-                    "xlAddInManagerInfo12" => "export_value_boundary",
+                    "xlAddInManagerInfo12" => "export_metadata_boundary",
                     name => panic!("unexpected generated lifecycle export {name}"),
                 };
                 assert_outer_abi_boundary(function, expected);

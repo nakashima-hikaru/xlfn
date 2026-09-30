@@ -1,4 +1,6 @@
-use crate::call_return::{ExcelReturn, ReturnContext, ReturnPayload};
+use crate::call_return::ReturnPayload;
+#[cfg(test)]
+use crate::call_return::{ExcelReturn, ReturnContext};
 use crate::execution::{CallId, CallMetadata, CallOutcome};
 #[cfg(test)]
 use crate::execution::{UdfCompletionOutcome, UdfDeliveryOutcome, UdfErrorKind};
@@ -18,6 +20,7 @@ use xlfn_sys::{XLBIT_DLL_FREE, XLOPER12, XLOPER12Array, XLOPER12Value, XLTYPE_MU
 
 pub(crate) mod array;
 pub(crate) mod conversion;
+pub(crate) mod metadata;
 pub(crate) mod ownership;
 pub(crate) mod storage;
 
@@ -384,8 +387,8 @@ impl AsyncReturnValue {
     }
 }
 
-/// Runs a return-producing framework callback behind the runtime's terminal
-/// return-admission gate.
+/// Exercises generation-owned return allocation behind its admission gates.
+#[cfg(test)]
 #[doc(hidden)]
 #[must_use]
 pub(crate) fn ffi_boundary<A, F, T>(runtime: &'static Runtime<A>, operation: F) -> *mut XLOPER12

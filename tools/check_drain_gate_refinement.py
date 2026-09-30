@@ -7,13 +7,9 @@ except for explicitly named ownership-order mutations rejected by Rust E0382.
 """
 
 from pathlib import Path
-import re
-import shutil
-import subprocess
-import tempfile
+from verus_mutations import check_mutations
 
 
-ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL = Path("crates/xlfn-kernel/src/drain_gate/protocol.rs")
 PROOF = Path("verification/verus/drain_gate")
 TRANSITIONS = Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs")
@@ -57,58 +53,6 @@ MUTATIONS = {
     ),
 }
 
-
-
-def is_verification_failure(returncode: int, output: str) -> bool:
-    """Require a failed proof result plus a specific verifier diagnostic."""
-    proof_failure = any(marker in output for marker in (
-        "precondition not satisfied", "postcondition not satisfied",
-        "invariant not satisfied", "assertion failed", "bitvector assertion not satisfied",
-        "could not show invariant", "Cannot show invariant holds at end of block",
-        "constructed value may fail to meet its declared type invariant",
-        "unable to prove assertion safety condition",
-    ))
-    verified_failure = re.search(r"verification results:: \d+ verified, [1-9]\d* errors", output)
-    return returncode != 0 and proof_failure and verified_failure is not None
-
-
-def is_idle_callback_ownership_rejection(returncode: int, output: str) -> bool:
-    """The reordered callback must move its linear handoff before borrowing it."""
-    return returncode != 0 and "error[E0382]: borrow of moved value: `detached`" in output
-
-
-def check_mutations(proof: Path, protocol: Path, dependencies: tuple[Path, ...],
-                    mutations: dict[str, tuple[str, str]],
-                    ownership_rejections: frozenset[str] = frozenset()) -> None:
-    source = (ROOT / protocol).read_text()
-    with tempfile.TemporaryDirectory(prefix="xlfn-refinement-") as directory:
-        tree = Path(directory)
-        shutil.copytree(ROOT / proof, tree / proof)
-        for relative in (protocol, *dependencies):
-            (tree / relative).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(ROOT / relative, tree / relative)
-        command = ["verus", "--crate-type=lib", str(proof / "src/lib.rs")]
-        baseline = subprocess.run(command, cwd=tree, capture_output=True, text=True, timeout=120)
-        baseline_output = baseline.stdout + baseline.stderr
-        if baseline.returncode != 0 or re.search(r"verification results:: [1-9]\d* verified, 0 errors", baseline_output) is None:
-            raise SystemExit(f"FAIL: unmodified baseline must verify before mutations:\n{baseline_output}")
-        for name, (before, after) in mutations.items():
-            if source.count(before) != 1:
-                raise SystemExit(f"FAIL: mutation anchor changed: {name}")
-            (tree / protocol).write_text(source.replace(before, after))
-            result = subprocess.run(
-                command,
-                cwd=tree, capture_output=True, text=True, timeout=120,
-            )
-            output = result.stdout + result.stderr
-            if name in ownership_rejections:
-                if not is_idle_callback_ownership_rejection(result.returncode, output):
-                    raise SystemExit(f"FAIL: {name} was not rejected by ownership checking:\n{output}")
-                print(f"PASS: ownership rejected {name}", flush=True)
-                continue
-            if not is_verification_failure(result.returncode, output):
-                raise SystemExit(f"FAIL: {name} did not fail verification:\n{output}")
-            print(f"PASS: rejected {name}", flush=True)
 
 
 def main() -> None:
