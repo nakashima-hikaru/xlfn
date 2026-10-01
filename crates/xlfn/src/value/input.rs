@@ -197,6 +197,11 @@ pub trait ExcelInputIdentity {
 /// hidden dispatch hooks are framework implementation details.
 pub trait PrepareExcel<'call>: FromExcel<'call> + ExcelInputIdentity {
     type Prepared;
+    // Built-ins with borrowed collection state can defer typed scratch copies
+    // without retaining a per-cell prepared allocation. Custom preparation
+    // keeps its existing eager MatrixRef policy.
+    #[doc(hidden)]
+    const __BORROWED_ELEMENTS: bool = false;
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -311,6 +316,31 @@ impl<T, P> PreparedExcelSequence<'_, T, P> {
             }
         }
     }
+
+    fn materialize_borrowed<'call>(self, scope: &'call CallScope<'call>) -> XllResult<&'call [T]>
+    where
+        T: Copy,
+    {
+        match self.state {
+            SequenceState::Retained(values, materialize) => {
+                let length = values.len();
+                let mut values = values.into_iter();
+                scope.scratch().collect_copy(length, |_| {
+                    materialize(values.next().expect("prepared sequence keeps its length"))
+                })
+            }
+            SequenceState::Borrowed(cells, materialize) => {
+                scope
+                    .scratch()
+                    .collect_copy(cells.grid.cells().len(), |index| {
+                        materialize(
+                            XlValueRef::from_array_cell(&cells.grid.cells()[index])?,
+                            cells.argument,
+                        )
+                    })
+            }
+        }
+    }
 }
 
 /// Internal wrapper also retaining explicitly supplied default values.
@@ -336,6 +366,7 @@ impl<T, P> PreparedArgument<T, P> {
 pub trait ExcelParameter<'call, M: InputMode>:
     sealed::ExcelParameterSealed<'call, M> + Sized
 {
+    const DEFER_BORROWED_MATRIX: bool = false;
     type Prepared;
     fn prepare(
         value: XlValueRef<'call>,
@@ -352,6 +383,19 @@ pub trait ExcelParameter<'call, M: InputMode>:
         identity: &mut M::Identity,
     ) -> XllResult<Self::Elements>;
     fn materialize_elements(elements: Self::Elements) -> XllResult<Vec<Self>>;
+
+    fn materialize_elements_borrowed(
+        elements: Self::Elements,
+        scope: &'call CallScope<'call>,
+    ) -> XllResult<&'call [Self]>
+    where
+        Self: Copy,
+    {
+        let values = Self::materialize_elements(elements)?;
+        scope
+            .scratch()
+            .collect_copy(values.len(), |index| Ok(values[index]))
+    }
 
     fn decode(
         value: XlValueRef<'call>,
@@ -403,6 +447,7 @@ impl<'call, T> ExcelParameter<'call, FormulaInputMode> for T
 where
     T: PrepareExcel<'call>,
 {
+    const DEFER_BORROWED_MATRIX: bool = T::__BORROWED_ELEMENTS;
     type Prepared = T::Prepared;
     fn prepare(
         value: XlValueRef<'call>,
@@ -434,6 +479,16 @@ where
         identity: &mut InputIdentityEncoder,
     ) -> XllResult<Self> {
         T::from_excel_with_identity(value, argument, identity)
+    }
+
+    fn materialize_elements_borrowed(
+        elements: Self::Elements,
+        scope: &'call CallScope<'call>,
+    ) -> XllResult<&'call [Self]>
+    where
+        Self: Copy,
+    {
+        elements.materialize_borrowed(scope)
     }
 
     fn encode_decoded(&self, identity: &mut InputIdentityEncoder) {
@@ -537,7 +592,7 @@ impl<'call> CallContext<'call> {
         self.scope().scratch()
     }
 
-    fn scope(&self) -> &'call CallScope<'call> {
+    pub(crate) fn scope(&self) -> &'call CallScope<'call> {
         match &self.access {
             CallAccess::Plain(scope) => scope,
             CallAccess::Runtime(access) => access.scope,

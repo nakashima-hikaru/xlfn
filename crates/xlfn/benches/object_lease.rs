@@ -30,6 +30,19 @@ fn object_lease_benchmarks(c: &mut Criterion) {
             });
         }
     }
+    for workers in WORKERS {
+        let benchmark = ObjectLeaseBenchmark::new(
+            ObjectLeaseBenchCase::SameObject,
+            workers,
+            ITERATIONS_PER_WORKER,
+        );
+        group.throughput(Throughput::Elements(benchmark.total_iterations() as u64));
+        group.bench_with_input(
+            BenchmarkId::new("dispatch_only_control", workers),
+            &workers,
+            |b, _| b.iter(|| benchmark.run_dispatch_control()),
+        );
+    }
     group.finish();
 }
 

@@ -1,5 +1,9 @@
 # Benchmark notes
 
+The [2026-10-01 comparison](../../../benchmarks/performance/2026-10-01.md)
+covers deferred numeric borrowed input, nonfinal pin release, keyed cold-cache
+coordination, and striped callback admission.
+
 ## `cache_lookup`
 
 This benchmark compares `CalculationCache<u64, u64>` (Quick Cache by default)

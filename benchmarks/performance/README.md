@@ -1,5 +1,9 @@
 # Large-array and handle-release measurements, 2026-09-30
 
+The follow-up [2026-10-01 comparison](2026-10-01.md) measures deferred borrowed
+numeric inputs and the remaining pin, cache-flight, and callback admission
+coordination changes against the committed version of this implementation.
+
 Numeric input preparation and identity encoding now stream validated cells into
 the selected encoder sink. Object release now registers completion and updates
 binding/pin counts under one lock. The release guard still completes under a

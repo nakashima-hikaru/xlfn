@@ -22,6 +22,11 @@ impl CallScratch {
         }
     }
 
+    #[cfg(all(test, feature = "bench-internals"))]
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        self.arena.allocated_bytes()
+    }
+
     pub(crate) fn decode_utf16<'call>(
         &'call self,
         units: &[u16],

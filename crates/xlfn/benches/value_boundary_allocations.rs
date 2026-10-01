@@ -119,6 +119,10 @@ fn main() {
         multiple, single,
         "hash workspace must be reused within a call"
     );
+    if !cfg!(feature = "refinement") {
+        assert!(single.allocations + single.reallocations <= 2 * MEASURED_CALLS);
+        assert!(single.requested_bytes <= 16 * 1024 * MEASURED_CALLS);
+    }
     for cells in [1, 1_000] {
         measure(&format!("array{cells}/one_string_rest_numbers"), || {
             let mut builder = XlArrayBuilder::new(1, cells).unwrap();
@@ -178,6 +182,46 @@ fn main() {
     let mut numeric = RawArgumentIngressBenchmark::number(42.0);
     let numbers = measure("f64/plain", || numeric.run_plain::<f64>());
     assert_runtime_allocation_free("f64/plain", numbers);
+
+    for cells in [1_000, 100_000] {
+        let mut numeric = RawArgumentIngressBenchmark::number_matrix(cells, 1);
+        let prepared = measure_calls(
+            &format!("matrix_ref_f64_{cells}/prepare_identity"),
+            ARRAY_OUTPUT_CALLS,
+            || {
+                black_box(numeric.run_borrowed_numeric_matrix_prepared(false));
+            },
+        );
+        let materialized = measure_calls(
+            &format!("matrix_ref_f64_{cells}/prepare_materialize"),
+            ARRAY_OUTPUT_CALLS,
+            || {
+                black_box(numeric.run_borrowed_numeric_matrix_prepared(true));
+            },
+        );
+        if !cfg!(feature = "refinement") {
+            assert!(prepared.allocations + prepared.reallocations <= 2 * ARRAY_OUTPUT_CALLS);
+            assert!(
+                prepared.requested_bytes <= 16 * 1024 * ARRAY_OUTPUT_CALLS,
+                "warm numeric MatrixRef preparation must use only the hash workspace",
+            );
+            assert_eq!(
+                materialized.allocations,
+                prepared.allocations + ARRAY_OUTPUT_CALLS
+            );
+            assert_eq!(
+                materialized.deallocations,
+                prepared.deallocations + ARRAY_OUTPUT_CALLS,
+            );
+            assert_eq!(materialized.reallocations, prepared.reallocations);
+            assert!(
+                materialized.requested_bytes
+                    >= prepared.requested_bytes
+                        + ARRAY_OUTPUT_CALLS * cells * std::mem::size_of::<f64>(),
+                "preparation must avoid the typed numeric scratch buffer",
+            );
+        }
+    }
 
     let mut handle = RawArgumentIngressBenchmark::handle();
     let plain = measure("handle/plain", || {

@@ -80,7 +80,7 @@ pub use formula::{
     BenchmarkInputIdentity, FormulaRevisionBenchmark, SemanticIdentityBenchmark,
     Utf16IdentityBenchmark,
 };
-pub use formula_caller::{FormulaCallerBenchCase, FormulaCallerBenchmark};
+pub use formula_caller::{FormulaCallerBenchCase, FormulaCallerBenchmark, FormulaCallerWorkerPool};
 pub use handle::{
     BenchHandleObject, HandleColdBatch, HandleColdGrowthBenchmark, HandleRevisionChurnBenchmark,
     HandleWarmBenchmark,

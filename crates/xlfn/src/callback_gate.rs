@@ -1,32 +1,18 @@
 use crate::return_abi::ExcelCallbackStatus;
 use crate::sync::Mutex;
+use std::sync::atomic::{AtomicU8, Ordering};
+use xlfn_kernel::drain_gate::{DEFAULT_STRIPE_COUNT, StripedDrainGate, StripedOwnedDrainPermit};
 use xlfn_sys::XLRET_FAILED;
 
-/// The module-wide callback lifecycle is independent from the state of any
-/// one Excel invocation. `Closing` rejects new callbacks while outstanding
-/// results hold their `ModuleCallbackPermit` until cleanup completes. Once all
-/// admitted callbacks and their results are released, the gate transitions to
-/// `Closed`.
+/// Module closure rejects new callbacks before sealing the striped counters.
+/// Already admitted results retain their permit through the final `xlFree`.
+/// Closing is observed as Closed once all retained permits have drained.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
 pub(crate) enum ModuleCallbackLifecycle {
     Open,
     Closing,
     Closed,
-}
-
-#[derive(Debug)]
-struct ModuleCallbackState {
-    lifecycle: ModuleCallbackLifecycle,
-    active: usize,
-}
-
-impl ModuleCallbackState {
-    const fn new(lifecycle: ModuleCallbackLifecycle) -> Self {
-        Self {
-            lifecycle,
-            active: 0,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -36,105 +22,113 @@ pub(crate) struct CallbackAdmissionSuppressed {
 
 /// Module-wide admission for calls into Excel's callback ABI.
 ///
-/// Admission is deliberately short-lived and never holds the state mutex
-/// while Excel is executing. Concurrent callbacks are therefore admitted in
-/// parallel. Invocation-local terminal statuses belong to
-/// `HostCallbackSession`; putting them here would incorrectly make one
-/// invocation suppress unrelated callbacks in other threads.
+/// Ordinary callbacks acquire and release only the calling thread's counter.
+/// The transition mutex serializes close/reopen, never callback execution or
+/// cleanup. Invocation-local terminal statuses remain in HostCallbackSession.
+/// The module owns this gate for process lifetime; the kernel gate owns the
+/// admission/release ordering and the counter overflow checks.
 pub(crate) struct ModuleCallbackAdmission {
-    state: Mutex<ModuleCallbackState>,
+    phase: AtomicU8,
+    callbacks: StripedDrainGate<DEFAULT_STRIPE_COUNT>,
+    transition: Mutex<()>,
 }
 
 impl ModuleCallbackAdmission {
     pub(crate) const fn new(initial: ModuleCallbackLifecycle) -> Self {
         Self {
-            state: Mutex::new(ModuleCallbackState::new(initial)),
+            phase: AtomicU8::new(initial as u8),
+            callbacks: match initial {
+                ModuleCallbackLifecycle::Open => StripedDrainGate::new_open(),
+                ModuleCallbackLifecycle::Closing | ModuleCallbackLifecycle::Closed => {
+                    StripedDrainGate::new_sealed()
+                }
+            },
+            transition: Mutex::new(()),
         }
     }
 
     pub(crate) fn reset(&self) {
-        let mut state = self.state.lock();
-        if state.active != 0 {
+        let _transition = self.transition.lock();
+        let active = self.callbacks.active();
+        if active != 0 {
             tracing::error!(
-                active = state.active,
+                active,
                 "callback admission reopened while callbacks are still active"
             );
             std::process::abort();
         }
-        state.lifecycle = ModuleCallbackLifecycle::Open;
+        // A closed gate stays unavailable until every stripe has reopened.
+        // Repeating reset on an already open, idle gate requires no counter
+        // reset and preserves reservations that start after the active check.
+        if self.callbacks.is_sealed() {
+            self.callbacks
+                .reopen()
+                .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+        }
+        self.phase
+            .store(ModuleCallbackLifecycle::Open as u8, Ordering::Release);
     }
 
     pub(crate) fn close(&self) {
-        let mut state = self.state.lock();
-        match state.lifecycle {
-            ModuleCallbackLifecycle::Closed => return,
-            ModuleCallbackLifecycle::Open => state.lifecycle = ModuleCallbackLifecycle::Closing,
-            ModuleCallbackLifecycle::Closing => {}
-        }
-
-        if state.active == 0 {
-            state.lifecycle = ModuleCallbackLifecycle::Closed;
-        }
+        let _transition = self.transition.lock();
+        // Publish rejection first: no late entrant may use a stripe that the
+        // seal loop has not reached yet. A racing reservation is rechecked by
+        // enter and either retained as an admitted callback or released there.
+        self.phase
+            .store(ModuleCallbackLifecycle::Closing as u8, Ordering::Release);
+        self.callbacks.seal();
     }
 
+    #[inline]
     fn enter(&'static self) -> Result<ModuleCallbackPermit, CallbackAdmissionSuppressed> {
-        let mut state = self.state.lock();
-        if state.lifecycle != ModuleCallbackLifecycle::Open {
-            return Err(CallbackAdmissionSuppressed {
-                status: ExcelCallbackStatus::Failed(XLRET_FAILED),
-            });
+        let suppressed = || CallbackAdmissionSuppressed {
+            status: ExcelCallbackStatus::Failed(XLRET_FAILED),
+        };
+        if self.phase.load(Ordering::Acquire) != ModuleCallbackLifecycle::Open as u8 {
+            return Err(suppressed());
         }
-
-        state.active = state.active.checked_add(1).unwrap_or_else(|| {
-            tracing::error!("module callback admission counter exhausted; fail-stopping");
-            std::process::abort();
-        });
-        Ok(ModuleCallbackPermit { admission: self })
+        let permit = self
+            .callbacks
+            .try_enter_owned_current()
+            .map_err(|_| suppressed())?;
+        if self.phase.load(Ordering::Acquire) != ModuleCallbackLifecycle::Open as u8 {
+            drop(permit);
+            return Err(suppressed());
+        }
+        Ok(ModuleCallbackPermit { _permit: permit })
     }
 
     #[cfg(test)]
     fn lifecycle(&self) -> ModuleCallbackLifecycle {
-        self.state.lock().lifecycle
+        if self.phase.load(Ordering::Acquire) == ModuleCallbackLifecycle::Open as u8 {
+            ModuleCallbackLifecycle::Open
+        } else if self.callbacks.active() == 0 {
+            ModuleCallbackLifecycle::Closed
+        } else {
+            ModuleCallbackLifecycle::Closing
+        }
     }
 
     #[cfg(test)]
     fn blocked_status(&self) -> Option<ExcelCallbackStatus> {
-        let state = self.state.lock();
-        match state.lifecycle {
-            ModuleCallbackLifecycle::Open => None,
-            ModuleCallbackLifecycle::Closing | ModuleCallbackLifecycle::Closed => {
-                Some(ExcelCallbackStatus::Failed(XLRET_FAILED))
-            }
-        }
+        (self.phase.load(Ordering::Acquire) != ModuleCallbackLifecycle::Open as u8)
+            .then_some(ExcelCallbackStatus::Failed(XLRET_FAILED))
     }
 
     #[cfg(test)]
     fn active(&self) -> usize {
-        self.state.lock().active
+        self.callbacks.active()
     }
 }
 
-/// Module admission capability. For short-lived operations (like async return),
-/// the token is dropped after the host call returns. For callback results,
-/// ownership of the permit is transferred into `ExcelCallbackValue` to hold
-/// the module open until cleanup completes.
+/// One callback reservation, retained until its host result is released.
+/// The owned striped permit can be transferred to another cleanup thread;
+/// release always uses its original stripe rather than the dropping thread.
 pub(crate) struct ModuleCallbackPermit {
-    admission: &'static ModuleCallbackAdmission,
+    _permit: StripedOwnedDrainPermit<DEFAULT_STRIPE_COUNT>,
 }
 
-impl Drop for ModuleCallbackPermit {
-    fn drop(&mut self) {
-        let mut state = self.admission.state.lock();
-        state.active = state.active.checked_sub(1).unwrap_or_else(|| {
-            tracing::error!("module callback admission underflow; fail-stopping");
-            std::process::abort();
-        });
-        if state.active == 0 && state.lifecycle == ModuleCallbackLifecycle::Closing {
-            state.lifecycle = ModuleCallbackLifecycle::Closed;
-        }
-    }
-}
-
+#[inline]
 pub(crate) fn enter_callback() -> Result<ModuleCallbackPermit, CallbackAdmissionSuppressed> {
     crate::module_runtime::global().callback_admission().enter()
 }
@@ -143,6 +137,7 @@ pub(crate) fn enter_callback() -> Result<ModuleCallbackPermit, CallbackAdmission
 mod tests {
     use super::*;
     use std::sync::mpsc;
+    use std::sync::{Arc, Barrier};
     use std::time::Duration;
 
     #[test]
@@ -217,5 +212,73 @@ mod tests {
             gate.blocked_status(),
             Some(ExcelCallbackStatus::Failed(XLRET_FAILED))
         );
+    }
+
+    #[test]
+    fn miri_callback_permit_releases_the_acquiring_stripe_on_another_thread() {
+        static GATE: ModuleCallbackAdmission =
+            ModuleCallbackAdmission::new(ModuleCallbackLifecycle::Open);
+        let gate = &GATE;
+        let permit = gate.enter().unwrap();
+        gate.close();
+        assert_eq!(gate.lifecycle(), ModuleCallbackLifecycle::Closing);
+        std::thread::spawn(move || drop(permit)).join().unwrap();
+        assert_eq!(gate.active(), 0);
+        assert_eq!(gate.lifecycle(), ModuleCallbackLifecycle::Closed);
+        gate.reset();
+        let next_epoch = gate.enter().unwrap();
+        assert_eq!(gate.active(), 1);
+        drop(next_epoch);
+    }
+
+    #[test]
+    fn close_rejects_all_workers_while_their_callback_results_are_retained() {
+        const WORKERS: usize = 8;
+        let gate: &'static ModuleCallbackAdmission = Box::leak(Box::new(
+            ModuleCallbackAdmission::new(ModuleCallbackLifecycle::Open),
+        ));
+        let acquired = Arc::new(Barrier::new(WORKERS + 1));
+        let closed = Arc::new(Barrier::new(WORKERS + 1));
+        let workers: Vec<_> = (0..WORKERS)
+            .map(|_| {
+                let acquired = Arc::clone(&acquired);
+                let closed = Arc::clone(&closed);
+                std::thread::spawn(move || {
+                    let result_permit = gate.enter().unwrap();
+                    acquired.wait();
+                    closed.wait();
+                    assert!(gate.enter().is_err());
+                    drop(result_permit);
+                })
+            })
+            .collect();
+        acquired.wait();
+        assert_eq!(gate.active(), WORKERS);
+        // Close is nonblocking even when invoked from an admitted callback.
+        gate.close();
+        assert_eq!(gate.lifecycle(), ModuleCallbackLifecycle::Closing);
+        closed.wait();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(gate.lifecycle(), ModuleCallbackLifecycle::Closed);
+        gate.reset();
+        assert!(gate.enter().is_ok());
+    }
+
+    #[test]
+    fn miri_module_closure_rejects_an_unsealed_callback_stripe() {
+        static GATE: ModuleCallbackAdmission =
+            ModuleCallbackAdmission::new(ModuleCallbackLifecycle::Open);
+        let gate = &GATE;
+        // Exercise the close handoff: the phase is closed to new calls before
+        // the counter seal loop has reached the current thread's stripe.
+        gate.phase
+            .store(ModuleCallbackLifecycle::Closing as u8, Ordering::Release);
+        assert!(!gate.callbacks.is_sealed());
+        assert!(gate.enter().is_err());
+        gate.close();
+        gate.reset();
+        assert!(gate.enter().is_ok());
     }
 }

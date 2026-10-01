@@ -81,6 +81,9 @@ fn argument_ingress_benchmarks(c: &mut Criterion) {
         group.bench_function(format!("matrix_string_{label}/raw_identity"), |b| {
             b.iter(|| borrowed.run_borrowed_array_with_identity());
         });
+        group.bench_function(format!("matrix_ref_str_{label}/prepare_identity"), |b| {
+            b.iter(|| borrowed.run_borrowed_string_matrix_prepared());
+        });
     }
 
     // 6. Matrix<f64> 100k
@@ -96,6 +99,15 @@ fn argument_ingress_benchmarks(c: &mut Criterion) {
         let mut prepared = RawArgumentIngressBenchmark::number_matrix(cells, 1);
         group.bench_function(format!("matrix_f64_{label}/prepare_identity"), |b| {
             b.iter(|| prepared.run_prepared_with_identity::<Matrix<f64>>());
+        });
+        group.bench_function(format!("matrix_ref_f64_{label}/prepare_identity"), |b| {
+            b.iter(|| prepared.run_borrowed_numeric_matrix_prepared(false));
+        });
+        group.bench_function(format!("matrix_ref_f64_{label}/prepare_materialize"), |b| {
+            b.iter(|| prepared.run_borrowed_numeric_matrix_prepared(true));
+        });
+        group.bench_function(format!("matrix_ref_f64_{label}/plain"), |b| {
+            b.iter(|| prepared.run_borrowed_numeric_matrix_plain());
         });
     }
 

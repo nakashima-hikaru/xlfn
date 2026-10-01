@@ -1,0 +1,230 @@
+{
+  "date": "2026-10-01",
+  "host": {
+    "os": "macOS",
+    "arch": "arm64",
+    "cpu": "Apple M1",
+    "logical_cpus": 8,
+    "physical_cpus": 8,
+    "sdk": "/Library/Developer/CommandLineTools/SDKs/MacOSX15.2.sdk"
+  },
+  "toolchain": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "candidate": "uncommitted working tree; source hashes in 2026-10-01-paired.json",
+  "checks": [
+    {
+      "check": "workspace nextest",
+      "command": "cargo nextest run --workspace --all-features --locked --status-level fail --final-status-level fail",
+      "result": "passed",
+      "passed": 1061,
+      "skipped": 11,
+      "run_id": "419bf374-a232-4e3f-b257-88cb15a50a01",
+      "local_log": "target/performance-fix-20261001/nextest-final.log",
+      "log_sha256": "6822a80d80109bb1be654b2efd42cde3216d43ce278ac6a32c39553d4e545e0c",
+      "completion_excerpt": " Nextest run ID 419bf374-a232-4e3f-b257-88cb15a50a01 with nextest profile: default\n    Starting 1061 tests across 15 binaries (11 tests skipped)\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n     Summary [  38.389s] 1061 tests run: 1061 passed, 11 skipped"
+    },
+    {
+      "check": "serialized xlfn libtests",
+      "command": "cargo test -p xlfn --all-features --lib --locked -- --test-threads=1",
+      "result": "passed",
+      "passed": 784,
+      "ignored": 10,
+      "local_log": "target/performance-fix-20261001/libtests.log",
+      "log_sha256": "3ba2715290687b0296a61489940e09480e6fd4d468b3d0898a8aa327859d3dfd",
+      "completion_excerpt": "test value::tests::vec_semantic_identity_ignores_1d_orientation ... ok\n\ntest result: ok. 784 passed; 0 failed; 10 ignored; 0 measured; 0 filtered out; finished in 13.27s\n"
+    },
+    {
+      "check": "workspace Clippy",
+      "command": "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+      "result": "passed",
+      "local_log": "target/performance-fix-20261001/clippy.log",
+      "log_sha256": "3739786f5f99e8318e4f9a1b2465b910bf452e65ad29226880b9fb1fe5852071",
+      "completion_excerpt": "    Checking shuttle v0.9.4\n    Checking usage-rs v6.9.1\n    Checking cargo-xlfn v0.2.0 (/Users/nakashimahikaru/forge/repo/xlfn/crates/cargo-xlfn)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 23.18s"
+    },
+    {
+      "check": "workspace rustdoc",
+      "command": "RUSTDOCFLAGS=\"-D warnings\" cargo doc --workspace --all-features --no-deps --locked",
+      "result": "passed",
+      "local_log": "target/performance-fix-20261001/doc.log",
+      "log_sha256": "b3d48b40aca44f2bfc1a2d00587b7c52b7f47265dd6726e18807da45960b51dd",
+      "completion_excerpt": "    Checking usage-rs v6.9.1\n Documenting cargo-xlfn v0.2.0 (/Users/nakashimahikaru/forge/repo/xlfn/crates/cargo-xlfn)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 18.07s\n   Generated /Users/nakashimahikaru/forge/repo/xlfn/target/performance-fix-20261001/root-doc/doc/cargo_xlfn/index.html and 7 other files"
+    },
+    {
+      "check": "format",
+      "command": "cargo fmt --all -- --check",
+      "result": "passed"
+    },
+    {
+      "check": "diff whitespace",
+      "command": "git diff --check",
+      "result": "passed"
+    },
+    {
+      "check": "panic boundaries",
+      "command": "just panic-boundaries",
+      "result": "passed",
+      "script_tests": 5,
+      "reviewed_references": 50,
+      "new_catch_boundaries": 0
+    },
+    {
+      "check": "guide",
+      "command": "just guide-check",
+      "result": "passed",
+      "script_tests": 7,
+      "chapters": 18,
+      "compiled_chapter_examples": 18,
+      "compiled_standalone_examples": 1
+    },
+    {
+      "check": "feature powerset",
+      "command": "cargo hack check --package xlfn --feature-powerset --exclude-features default --lib --locked",
+      "result": "passed",
+      "combinations": 48,
+      "scope": "library, internal features included",
+      "details_record": "target/performance-fix-20261001/numeric-verification.json"
+    },
+    {
+      "check": "MSVC cross-target library x86_64-pc-windows-msvc",
+      "command": "cargo check -p xlfn --target x86_64-pc-windows-msvc --all-features --features blake3/pure --lib --locked",
+      "result": "passed",
+      "execution": "macOS cross-target type check only",
+      "local_log": "target/performance-fix-20261001/msvc-x64.log",
+      "log_sha256": "59675d68637e9af3c5cb5bbc59b38b2a011f8b59c4acd33931ef8d330a1b1d74",
+      "completion_excerpt": "   Compiling serde_derive v1.0.229\n   Compiling xlfn-macros v0.1.0 (/Users/nakashimahikaru/forge/repo/xlfn/crates/xlfn-macros)\n    Checking xlfn v0.2.0 (/Users/nakashimahikaru/forge/repo/xlfn/crates/xlfn)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 13.19s"
+    },
+    {
+      "check": "MSVC cross-target library i686-pc-windows-msvc",
+      "command": "cargo check -p xlfn --target i686-pc-windows-msvc --all-features --features blake3/pure --lib --locked",
+      "result": "passed",
+      "execution": "macOS cross-target type check only",
+      "local_log": "target/performance-fix-20261001/msvc-x86.log",
+      "log_sha256": "b6aec74a892ffb397119a7058c95944ad22c9f3c447c73cd60e48e4e547b8eb8",
+      "completion_excerpt": "   Compiling thiserror-impl v2.0.21\n   Compiling xlfn-macros v0.1.0 (/Users/nakashimahikaru/forge/repo/xlfn/crates/xlfn-macros)\n    Checking xlfn v0.2.0 (/Users/nakashimahikaru/forge/repo/xlfn/crates/xlfn)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 13.33s"
+    },
+    {
+      "check": "transition borrow rejection",
+      "command": "python3 -B tools/check_transition_borrows.py",
+      "result": "passed",
+      "rejected_mutation_fences": 15
+    },
+    {
+      "check": "native publication borrow rejection",
+      "command": "python3 -B tools/check_native_publication_borrow.py",
+      "result": "passed",
+      "rejected_mutation_fences": 6
+    }
+  ],
+  "miri": {
+    "toolchain": "nightly-2026-08-22",
+    "strict_provenance": true,
+    "models": [
+      "Stacked Borrows",
+      "Tree Borrows"
+    ],
+    "passed_per_model": 20,
+    "failed": 0,
+    "groups": [
+      {
+        "scope": "prepared inputs",
+        "features": [
+          "bench-internals"
+        ],
+        "filter": "value::prepared_probe::tests",
+        "passed_per_model": 10,
+        "default_features": false,
+        "test_threads": 1,
+        "command": "cargo +nightly-2026-08-22 miri test -p xlfn --no-default-features --features bench-internals --lib --locked -- value::prepared_probe::tests --test-threads=1"
+      },
+      {
+        "scope": "ObjectArena release",
+        "features": [
+          "async"
+        ],
+        "filter": "handle::object::tests::miri_",
+        "passed_per_model": 5,
+        "default_features": true,
+        "test_threads": 1,
+        "production_unobserved_path": "explicit false instantiation via counted-pin transfer helper",
+        "command": "cargo +nightly-2026-08-22 miri test -p xlfn --features async --lib --locked -- handle::object::tests::miri_ --test-threads=1"
+      },
+      {
+        "scope": "cache flight coordination",
+        "features": [
+          "cache"
+        ],
+        "passed_per_model": 3,
+        "default_features": false,
+        "filter": "cache::singleflight_tests::",
+        "test_threads": 1,
+        "tests": [
+          "colliding_flights_remove_by_identity_after_table_growth",
+          "coordination_uses_both_hash_halves_without_changing_key_identity",
+          "success_and_error_completion_do_not_reenter_key_callbacks"
+        ],
+        "command": "cargo +nightly-2026-08-22 miri test -p xlfn --no-default-features --features cache --lib --locked -- cache::singleflight_tests:: --test-threads=1"
+      },
+      {
+        "scope": "module callback admission",
+        "features": [],
+        "filter": "callback_gate::tests::miri_",
+        "passed_per_model": 2,
+        "default_features": false,
+        "test_threads": 1,
+        "command": "cargo +nightly-2026-08-22 miri test -p xlfn --no-default-features --lib --locked -- callback_gate::tests::miri_ --test-threads=1"
+      }
+    ],
+    "environment": {
+      "SDKROOT": "/Library/Developer/CommandLineTools/SDKs/MacOSX15.2.sdk",
+      "CARGO_BUILD_WARNINGS": "allow",
+      "RUSTFLAGS": "-A deprecated",
+      "MIRIFLAGS_by_model": {
+        "Stacked Borrows": "-Zmiri-strict-provenance",
+        "Tree Borrows": "-Zmiri-strict-provenance -Zmiri-tree-borrows"
+      }
+    }
+  },
+  "focused_native": {
+    "prepared_input_tests": 10,
+    "object_release_tests": 8,
+    "callback_admission_tests": 7,
+    "cache_lib_tests": {
+      "passed": 102,
+      "ignored": 1
+    },
+    "cache_contract_tests": 21,
+    "final_singleflight_tests": 7
+  },
+  "performance_integrity": {
+    "cases": 80,
+    "rounds": 4,
+    "results": 320,
+    "order": [
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline"
+    ],
+    "build_targets_separate": true,
+    "compilation_outside_timing": true,
+    "executable_hashes_match": true,
+    "harness_patch_reverse_check": "passed",
+    "final_allocation_probe": "passed",
+    "deterministic_cache_policy_rows_matched": 14
+  },
+  "limits": [
+    "No native Windows execution or live Excel latency/qualification run.",
+    "Focused Miri does not cover the whole framework.",
+    "No new formal proof of native mutex/destructor or callback phase/striped-counter composition.",
+    "Short local ABBA exploration; normal benchmark CI still uses ten-second measurements.",
+    "The borrowed numeric preparation path increases cold materialization time by 6.2% for 100k cells in this workload.",
+    "Flight shards add one constructor allocation and 4048 bytes per cache on the measured arm64 layout."
+  ],
+  "environment_for_native_commands": {
+    "SDKROOT": "/Library/Developer/CommandLineTools/SDKs/MacOSX15.2.sdk"
+  },
+  "independent_review": {
+    "input_claims": "confirmed; owned-Matrix cold recommendation removed because no paired owned materialization measurement",
+    "release_and_callback_claims": "confirmed",
+    "cache_and_provenance": "confirmed; warm cache attribution and pending metrics made precise"
+  }
+}

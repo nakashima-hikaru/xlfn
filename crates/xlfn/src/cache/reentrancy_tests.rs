@@ -120,7 +120,11 @@ fn double_checked_hit_reclaims_after_singleflight_unlock() {
         .unwrap();
     cache.clear();
 
-    let flights = cache.flights.lock();
+    let blocked_key = VersionedKey {
+        epoch: cache.generation.snapshot(),
+        key: Key::plain(1),
+    };
+    let flights = cache.flights.shard(flight_hash(&blocked_key)).lock();
     let (observed_tx, observed_rx) = mpsc::channel();
     let worker_cache = StdArc::clone(&cache);
     let computed = StdArc::new(AtomicBool::new(false));
@@ -214,7 +218,11 @@ fn failed_follower_reclaims_after_flight_state_unlock() {
     let hash = flight_hash(&key);
     let flight = Arc::new(Flight::new(key, hash));
     *flight.state.lock() = FlightState::Finished(Err(Box::new(XllError::Overloaded)));
-    cache.flights.lock().insert_unique(Arc::clone(&flight));
+    cache
+        .flights
+        .shard(hash)
+        .lock()
+        .insert_unique(Arc::clone(&flight));
     let initialization = ActiveCacheGuard::enter().unwrap();
     drop(previous);
     drop(initialization);
@@ -225,5 +233,5 @@ fn failed_follower_reclaims_after_flight_state_unlock() {
     assert!(matches!(result, Err(XllError::Overloaded)));
     reentry.assert_completed();
     assert_eq!(cache.reclamation_stats().pending_nodes, 0);
-    assert!(cache.flights.lock().remove(&flight).is_some());
+    assert!(cache.flights.shard(hash).lock().remove(&flight).is_some());
 }

@@ -156,4 +156,95 @@ impl FormulaCallerBenchmark {
     }
 }
 
+/// Persistent workers exercising caller resolution through production module
+/// admission. Each worker owns its own invocation-local callback session.
+pub struct FormulaCallerWorkerPool {
+    start_tx: Vec<std::sync::mpsc::SyncSender<()>>,
+    start: Arc<std::sync::Barrier>,
+    done_rx: std::sync::mpsc::Receiver<()>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl FormulaCallerWorkerPool {
+    pub fn new(workers: usize, iterations: usize, case: FormulaCallerBenchCase) -> Self {
+        Self::build(workers, iterations, case, false)
+    }
+
+    pub fn dispatch_only(workers: usize) -> Self {
+        Self::build(workers, 0, FormulaCallerBenchCase::Ref, true)
+    }
+
+    fn build(
+        workers: usize,
+        iterations: usize,
+        case: FormulaCallerBenchCase,
+        dispatch_only: bool,
+    ) -> Self {
+        assert!(workers != 0);
+        // Install the process-global deterministic stub once, before any
+        // worker can acquire a module callback permit.
+        let _ = FormulaCallerBenchmark::new(case);
+        let ready = Arc::new(std::sync::Barrier::new(workers + 1));
+        let start = Arc::new(std::sync::Barrier::new(workers + 1));
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(workers);
+        let mut start_tx = Vec::with_capacity(workers);
+        let mut threads = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            let (worker_tx, worker_rx) = std::sync::mpsc::sync_channel::<()>(1);
+            start_tx.push(worker_tx);
+            let done = done_tx.clone();
+            let ready = Arc::clone(&ready);
+            let start = Arc::clone(&start);
+            threads.push(std::thread::spawn(move || {
+                let benchmark = FormulaCallerBenchmark {
+                    callbacks: HostCallbackSession::new(),
+                };
+                let expected_sheet = match case {
+                    FormulaCallerBenchCase::Ref => 17,
+                    FormulaCallerBenchCase::SRef => 19,
+                };
+                assert_eq!(benchmark.run(), (expected_sheet, 11, 3));
+                ready.wait();
+                while worker_rx.recv().is_ok() {
+                    start.wait();
+                    if !dispatch_only {
+                        for _ in 0..iterations {
+                            std::hint::black_box(benchmark.run());
+                        }
+                    }
+                    done.send(()).unwrap();
+                }
+            }));
+        }
+        ready.wait();
+        Self {
+            start_tx,
+            start,
+            done_rx,
+            workers: threads,
+        }
+    }
+
+    /// Batch timing includes dispatch, a simultaneous-start barrier, caller
+    /// resolution, callback cleanup, and completion coordination.
+    pub fn run_batch(&self) {
+        for worker in &self.start_tx {
+            worker.send(()).unwrap();
+        }
+        self.start.wait();
+        for _ in 0..self.workers.len() {
+            self.done_rx.recv().unwrap();
+        }
+    }
+}
+
+impl Drop for FormulaCallerWorkerPool {
+    fn drop(&mut self) {
+        self.start_tx.clear();
+        for worker in self.workers.drain(..) {
+            let _ = crate::panic_boundary::contain_panic(worker.join());
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------

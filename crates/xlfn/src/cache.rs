@@ -15,6 +15,7 @@ mod resident_index;
 #[cfg(test)]
 mod singleflight_tests;
 use crate::sync::{Condvar, Mutex, RwLock};
+use crossbeam_utils::CachePadded;
 use indexmap::map::{RawEntryApiV1, raw_entry_v1::RawEntryMut};
 use resident_index::{ResidentEntry, ResidentIndex};
 use rustc_hash::{FxHashMap, FxHasher};
@@ -827,9 +828,51 @@ impl<K, V> FlightSet<K, V> {
             RawEntryMut::Vacant(_) => None,
         }
     }
+}
 
-    fn clear(&mut self) {
-        self.entries.clear();
+// Coordination is partitioned independently of the resident policy: all
+// resident entries still share the caller's one weight budget. Selection is
+// by the versioned key's hash, never by the calling thread, so equal requests
+// always enroll in the same flight even when their read-domain stripes differ.
+const FLIGHT_COORDINATION_SHARDS: usize = 32;
+type FlightShard<K, V> = CachePadded<Mutex<FlightSet<K, V>>>;
+
+struct FlightRegistry<K, V> {
+    shards: Box<[FlightShard<K, V>]>,
+}
+
+impl<K, V> FlightRegistry<K, V> {
+    fn new() -> Self {
+        Self {
+            shards: (0..FLIGHT_COORDINATION_SHARDS)
+                .map(|_| CachePadded::new(Mutex::new(FlightSet::default())))
+                .collect(),
+        }
+    }
+
+    fn shard_index(hash: u64) -> usize {
+        // Fold both halves so keys with aligned low bits still distribute.
+        (hash ^ (hash >> 32)) as usize & (FLIGHT_COORDINATION_SHARDS - 1)
+    }
+
+    fn shard(&self, hash: u64) -> &Mutex<FlightSet<K, V>> {
+        &self.shards[Self::shard_index(hash)]
+    }
+
+    fn clear(&self) {
+        for shard in &self.shards {
+            let detached = std::mem::take(&mut *shard.lock());
+            // Owner destruction has exclusive access, but still keep all key
+            // and final-anchor destruction outside a coordination lock.
+            drop(detached);
+        }
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.shards
+            .iter()
+            .all(|shard| shard.lock().entries.is_empty())
     }
 }
 
@@ -841,7 +884,12 @@ struct LeaderGuard<'a, K: Clone + Eq + Hash, V> {
 
 impl<K: Clone + Eq + Hash, V> LeaderGuard<'_, K, V> {
     fn unregister(&mut self) {
-        let removed = self.cache.flights.lock().remove(self.flight);
+        let removed = self
+            .cache
+            .flights
+            .shard(self.flight.hash)
+            .lock()
+            .remove(self.flight);
         debug_assert!(removed.is_some(), "the leader owns one registered flight");
         self.registered = false;
         // The leader retains its own Arc. Even the table's reference is
@@ -1283,7 +1331,7 @@ pub struct CacheResidentStats {
 pub struct CalculationCache<K, V> {
     weight_budget: usize,
     generation: CacheGeneration,
-    flights: Mutex<FlightSet<K, V>>,
+    flights: FlightRegistry<K, V>,
     domain: xlfn_kernel::published_owner::PublishedOwner<CacheLookupDomain<V>>,
     clear_lock: Mutex<()>,
     index: ResidentIndex<K, V>,
@@ -1336,14 +1384,14 @@ where
         Self {
             weight_budget,
             generation: CacheGeneration::new(),
-            flights: Mutex::new(FlightSet::default()),
+            flights: FlightRegistry::new(),
             domain: xlfn_kernel::published_owner::PublishedOwner::new(CacheLookupDomain::new()),
             clear_lock: Mutex::new(()),
             index: make_index(capacity),
             clear_fn: Some(|ptr| {
                 // SAFETY: [TR-RECLAIM-1] ptr points to a valid CalculationCache<K, V> during Drop.
                 let cache = unsafe { &*(ptr as *const Self) };
-                cache.flights.lock().clear();
+                cache.flights.clear();
                 let closed = cache.domain.seal();
                 // Drop has exclusive access. Clear synchronously releases
                 // all residency pins before the final node drain.
@@ -1639,7 +1687,7 @@ where
             // Retain this hash for callback-free insertion and removal.
             let hash = flight_hash(vkey_opt.as_ref().unwrap());
             let (flight, is_leader) = {
-                let mut flights = self.flights.lock();
+                let mut flights = self.flights.shard(hash).lock();
                 let vkey_ref = vkey_opt.as_ref().unwrap();
                 if let Some(lease) = self.get_at_epoch(&vkey_ref.key, current_lookup_epoch) {
                     drop(flights);

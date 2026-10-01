@@ -270,6 +270,7 @@ impl<'call> PrepareExcel<'call> for XlArrayRef<'call> {
 }
 impl<'call> PrepareExcel<'call> for f64 {
     type Prepared = Self;
+    const __BORROWED_ELEMENTS: bool = true;
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -289,6 +290,7 @@ impl<'call> PrepareExcel<'call> for f64 {
 }
 impl<'call> PrepareExcel<'call> for bool {
     type Prepared = Self;
+    const __BORROWED_ELEMENTS: bool = true;
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -308,6 +310,7 @@ impl<'call> PrepareExcel<'call> for bool {
 }
 impl<'call> PrepareExcel<'call> for i32 {
     type Prepared = Self;
+    const __BORROWED_ELEMENTS: bool = true;
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -327,6 +330,7 @@ impl<'call> PrepareExcel<'call> for i32 {
 }
 impl<'call> PrepareExcel<'call> for i64 {
     type Prepared = Self;
+    const __BORROWED_ELEMENTS: bool = true;
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -346,6 +350,7 @@ impl<'call> PrepareExcel<'call> for i64 {
 }
 impl<'call> PrepareExcel<'call> for ExcelErrorValue {
     type Prepared = Self;
+    const __BORROWED_ELEMENTS: bool = true;
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -365,6 +370,7 @@ impl<'call> PrepareExcel<'call> for ExcelErrorValue {
 }
 impl<'call> PrepareExcel<'call> for ExcelSerialDate {
     type Prepared = Self;
+    const __BORROWED_ELEMENTS: bool = true;
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -887,7 +893,34 @@ where
     M: InputMode,
     T: ExcelParameter<'call, M> + Copy,
 {
-    type Prepared = ();
+    type Prepared = (
+        usize,
+        usize,
+        T::Elements,
+        &'call crate::call::CallScope<'call>,
+    );
+    fn prepare(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<PreparedArgument<Self, Self::Prepared>> {
+        if !M::RECORDS_IDENTITY || !T::DEFER_BORROWED_MATRIX {
+            return Self::decode(value, argument, context, identity).map(PreparedArgument::Ready);
+        }
+        let grid = GridView::from_value(value, argument)?;
+        let (rows, columns) = grid.shape();
+        M::u64(identity, rows as u64);
+        M::u64(identity, columns as u64);
+        let elements = T::prepare_elements(ExcelInputCells { grid, argument }, context, identity)?;
+        Ok(PreparedArgument::Prepared {
+            value: (rows, columns, elements, context.scope()),
+            materialize: |(rows, columns, elements, scope)| {
+                let data = T::materialize_elements_borrowed(elements, scope)?;
+                MatrixRef::from_slice(rows, columns, data)
+            },
+        })
+    }
 
     type Elements = PreparedExcelSequence<'call, Self, PreparedArgument<Self, Self::Prepared>>;
     fn prepare_elements(

@@ -269,6 +269,83 @@ impl RawArgumentIngressBenchmark {
         })
     }
 
+    /// Numeric typed borrowed-matrix preparation, with materialization only
+    /// when requested. Dropping prepared state models the warm lookup path;
+    /// materializing models the additional input work on a cold lookup.
+    pub fn run_borrowed_numeric_matrix_prepared(&mut self, materialize: bool) -> [u8; 32] {
+        let ingress = benchmark_ingress();
+        let call = self
+            .runtime
+            .enter(&ingress)
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
+            let mut arguments =
+                crate::value::ArgumentContext::<crate::value::FormulaInputMode>::new(
+                    call, scope, 1,
+                );
+            // SAFETY: the fixture owns the root and cells for the complete call.
+            let raw = unsafe { crate::value::XlValueRef::from_raw(&mut self.raw) }
+                .expect("benchmark prepared input must be well formed");
+            let prepared = arguments
+                .prepare::<crate::value::MatrixRef<'_, f64>>(0, "arg", raw)
+                .expect("benchmark borrowed matrix preparation must succeed");
+            let identity = arguments.finish().unwrap().unwrap();
+            if materialize {
+                let matrix = prepared
+                    .materialize()
+                    .expect("benchmark borrowed matrix materialization must succeed");
+                std::hint::black_box(matrix);
+            } else {
+                std::hint::black_box(prepared);
+            }
+            identity
+        })
+    }
+
+    pub fn run_borrowed_numeric_matrix_plain(&mut self) {
+        let ingress = benchmark_ingress();
+        let call = self
+            .runtime
+            .enter(&ingress)
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
+            let mut arguments =
+                crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(call, scope, 1);
+            // SAFETY: the fixture owns the root and cells for the complete call.
+            let matrix = unsafe {
+                crate::value::argument_from_raw_with_arguments::<
+                    crate::value::PlainInputMode,
+                    crate::value::MatrixRef<'_, f64>,
+                >(&mut arguments, 0, "arg", &mut self.raw)
+            }
+            .expect("benchmark borrowed numeric matrix ingress must succeed");
+            std::hint::black_box(matrix);
+            arguments.finish().unwrap();
+        })
+    }
+
+    pub fn run_borrowed_string_matrix_prepared(&mut self) -> [u8; 32] {
+        let ingress = benchmark_ingress();
+        let call = self
+            .runtime
+            .enter(&ingress)
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
+            let mut arguments =
+                crate::value::ArgumentContext::<crate::value::FormulaInputMode>::new(
+                    call, scope, 1,
+                );
+            // SAFETY: the fixture retains its root, cells and UTF-16 payloads.
+            let raw = unsafe { crate::value::XlValueRef::from_raw(&mut self.raw) }
+                .expect("benchmark prepared text input must be well formed");
+            let prepared = arguments
+                .prepare::<crate::value::MatrixRef<'_, &str>>(0, "arg", raw)
+                .expect("benchmark borrowed text matrix preparation must succeed");
+            std::hint::black_box(prepared);
+            arguments.finish().unwrap().unwrap()
+        })
+    }
+
     pub fn run_borrowed_array_with_identity(&mut self) -> [u8; 32] {
         let ingress = benchmark_ingress();
         let call = self

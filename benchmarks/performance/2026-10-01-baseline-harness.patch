@@ -1,0 +1,425 @@
+--- a/crates/xlfn/benches/argument_ingress.rs
++++ b/crates/xlfn/benches/argument_ingress.rs
+@@ -81,6 +81,9 @@
+         group.bench_function(format!("matrix_string_{label}/raw_identity"), |b| {
+             b.iter(|| borrowed.run_borrowed_array_with_identity());
+         });
++        group.bench_function(format!("matrix_ref_str_{label}/prepare_identity"), |b| {
++            b.iter(|| borrowed.run_borrowed_string_matrix_prepared());
++        });
+     }
+ 
+     // 6. Matrix<f64> 100k
+@@ -96,6 +99,15 @@
+         let mut prepared = RawArgumentIngressBenchmark::number_matrix(cells, 1);
+         group.bench_function(format!("matrix_f64_{label}/prepare_identity"), |b| {
+             b.iter(|| prepared.run_prepared_with_identity::<Matrix<f64>>());
++        });
++        group.bench_function(format!("matrix_ref_f64_{label}/prepare_identity"), |b| {
++            b.iter(|| prepared.run_borrowed_numeric_matrix_prepared(false));
++        });
++        group.bench_function(format!("matrix_ref_f64_{label}/prepare_materialize"), |b| {
++            b.iter(|| prepared.run_borrowed_numeric_matrix_prepared(true));
++        });
++        group.bench_function(format!("matrix_ref_f64_{label}/plain"), |b| {
++            b.iter(|| prepared.run_borrowed_numeric_matrix_plain());
+         });
+     }
+ 
+--- a/crates/xlfn/benches/object_lease.rs
++++ b/crates/xlfn/benches/object_lease.rs
+@@ -30,6 +30,19 @@
+             });
+         }
+     }
++    for workers in WORKERS {
++        let benchmark = ObjectLeaseBenchmark::new(
++            ObjectLeaseBenchCase::SameObject,
++            workers,
++            ITERATIONS_PER_WORKER,
++        );
++        group.throughput(Throughput::Elements(benchmark.total_iterations() as u64));
++        group.bench_with_input(
++            BenchmarkId::new("dispatch_only_control", workers),
++            &workers,
++            |b, _| b.iter(|| benchmark.run_dispatch_control()),
++        );
++    }
+     group.finish();
+ }
+ 
+--- a/crates/xlfn/benches/formula_caller.rs
++++ b/crates/xlfn/benches/formula_caller.rs
+@@ -1,11 +1,12 @@
+-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
++use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+ use xlfn::benchmark_support::{
+-    BENCHMARK_MEASUREMENT_TIME, FormulaCallerBenchCase, FormulaCallerBenchmark,
++    FormulaCallerBenchCase, FormulaCallerBenchmark, FormulaCallerWorkerPool,
++    benchmark_measurement_time,
+ };
+ 
+ fn formula_caller_benchmarks(c: &mut Criterion) {
+     let mut group = c.benchmark_group("resolve_formula_caller");
+-    group.measurement_time(BENCHMARK_MEASUREMENT_TIME);
++    group.measurement_time(benchmark_measurement_time());
+ 
+     for case in [FormulaCallerBenchCase::Ref, FormulaCallerBenchCase::SRef] {
+         let benchmark = FormulaCallerBenchmark::new(case);
+@@ -15,6 +16,24 @@
+     }
+ 
+     group.finish();
++
++    const ITERATIONS: usize = 1_000;
++    let mut group = c.benchmark_group("resolve_formula_caller/concurrent");
++    group.measurement_time(benchmark_measurement_time());
++    for workers in [1, 4, 16, 32] {
++        group.throughput(Throughput::Elements((workers * ITERATIONS) as u64));
++        for case in [FormulaCallerBenchCase::Ref, FormulaCallerBenchCase::SRef] {
++            let pool = FormulaCallerWorkerPool::new(workers, ITERATIONS, case);
++            group.bench_function(BenchmarkId::new(case.name(), workers), |b| {
++                b.iter(|| pool.run_batch());
++            });
++        }
++        let dispatch = FormulaCallerWorkerPool::dispatch_only(workers);
++        group.bench_function(BenchmarkId::new("dispatch_only", workers), |b| {
++            b.iter(|| dispatch.run_batch());
++        });
++    }
++    group.finish();
+ }
+ 
+ criterion_group!(benches, formula_caller_benchmarks);
+--- a/crates/xlfn/benches/value_boundary_allocations.rs
++++ b/crates/xlfn/benches/value_boundary_allocations.rs
+@@ -119,6 +119,10 @@
+         multiple, single,
+         "hash workspace must be reused within a call"
+     );
++    if !cfg!(feature = "refinement") {
++        assert!(single.allocations + single.reallocations <= 2 * MEASURED_CALLS);
++        assert!(single.requested_bytes <= 16 * 1024 * MEASURED_CALLS);
++    }
+     for cells in [1, 1_000] {
+         measure(&format!("array{cells}/one_string_rest_numbers"), || {
+             let mut builder = XlArrayBuilder::new(1, cells).unwrap();
+@@ -179,6 +183,25 @@
+     let numbers = measure("f64/plain", || numeric.run_plain::<f64>());
+     assert_runtime_allocation_free("f64/plain", numbers);
+ 
++    for cells in [1_000, 100_000] {
++        let mut numeric = RawArgumentIngressBenchmark::number_matrix(cells, 1);
++        let _prepared = measure_calls(
++            &format!("matrix_ref_f64_{cells}/prepare_identity"),
++            ARRAY_OUTPUT_CALLS,
++            || {
++                black_box(numeric.run_borrowed_numeric_matrix_prepared(false));
++            },
++        );
++        let _materialized = measure_calls(
++            &format!("matrix_ref_f64_{cells}/prepare_materialize"),
++            ARRAY_OUTPUT_CALLS,
++            || {
++                black_box(numeric.run_borrowed_numeric_matrix_prepared(true));
++            },
++        );
++
++    }
++
+     let mut handle = RawArgumentIngressBenchmark::handle();
+     let plain = measure("handle/plain", || {
+         handle.run_handle_plain::<BenchHandleObject>()
+--- a/crates/xlfn/src/benchmark_support.rs
++++ b/crates/xlfn/src/benchmark_support.rs
+@@ -80,7 +80,9 @@
+     BenchmarkInputIdentity, FormulaRevisionBenchmark, SemanticIdentityBenchmark,
+     Utf16IdentityBenchmark,
+ };
+-pub use formula_caller::{FormulaCallerBenchCase, FormulaCallerBenchmark};
++pub use formula_caller::{
++    FormulaCallerBenchCase, FormulaCallerBenchmark, FormulaCallerWorkerPool,
++};
+ pub use handle::{
+     BenchHandleObject, HandleColdBatch, HandleColdGrowthBenchmark, HandleRevisionChurnBenchmark,
+     HandleWarmBenchmark,
+--- a/crates/xlfn/src/benchmark_support/formula_caller.rs
++++ b/crates/xlfn/src/benchmark_support/formula_caller.rs
+@@ -156,4 +156,95 @@
+     }
+ }
+ 
++/// Persistent workers exercising caller resolution through production module
++/// admission. Each worker owns its own invocation-local callback session.
++pub struct FormulaCallerWorkerPool {
++    start_tx: Vec<std::sync::mpsc::SyncSender<()>>,
++    start: Arc<std::sync::Barrier>,
++    done_rx: std::sync::mpsc::Receiver<()>,
++    workers: Vec<std::thread::JoinHandle<()>>,
++}
++
++impl FormulaCallerWorkerPool {
++    pub fn new(workers: usize, iterations: usize, case: FormulaCallerBenchCase) -> Self {
++        Self::build(workers, iterations, case, false)
++    }
++
++    pub fn dispatch_only(workers: usize) -> Self {
++        Self::build(workers, 0, FormulaCallerBenchCase::Ref, true)
++    }
++
++    fn build(
++        workers: usize,
++        iterations: usize,
++        case: FormulaCallerBenchCase,
++        dispatch_only: bool,
++    ) -> Self {
++        assert!(workers != 0);
++        // Install the process-global deterministic stub once, before any
++        // worker can acquire a module callback permit.
++        let _ = FormulaCallerBenchmark::new(case);
++        let ready = Arc::new(std::sync::Barrier::new(workers + 1));
++        let start = Arc::new(std::sync::Barrier::new(workers + 1));
++        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(workers);
++        let mut start_tx = Vec::with_capacity(workers);
++        let mut threads = Vec::with_capacity(workers);
++        for _ in 0..workers {
++            let (worker_tx, worker_rx) = std::sync::mpsc::sync_channel::<()>(1);
++            start_tx.push(worker_tx);
++            let done = done_tx.clone();
++            let ready = Arc::clone(&ready);
++            let start = Arc::clone(&start);
++            threads.push(std::thread::spawn(move || {
++                let benchmark = FormulaCallerBenchmark {
++                    callbacks: HostCallbackSession::new(),
++                };
++                let expected_sheet = match case {
++                    FormulaCallerBenchCase::Ref => 17,
++                    FormulaCallerBenchCase::SRef => 19,
++                };
++                assert_eq!(benchmark.run(), (expected_sheet, 11, 3));
++                ready.wait();
++                while worker_rx.recv().is_ok() {
++                    start.wait();
++                    if !dispatch_only {
++                        for _ in 0..iterations {
++                            std::hint::black_box(benchmark.run());
++                        }
++                    }
++                    done.send(()).unwrap();
++                }
++            }));
++        }
++        ready.wait();
++        Self {
++            start_tx,
++            start,
++            done_rx,
++            workers: threads,
++        }
++    }
++
++    /// Batch timing includes dispatch, a simultaneous-start barrier, caller
++    /// resolution, callback cleanup, and completion coordination.
++    pub fn run_batch(&self) {
++        for worker in &self.start_tx {
++            worker.send(()).unwrap();
++        }
++        self.start.wait();
++        for _ in 0..self.workers.len() {
++            self.done_rx.recv().unwrap();
++        }
++    }
++}
++
++impl Drop for FormulaCallerWorkerPool {
++    fn drop(&mut self) {
++        self.start_tx.clear();
++        for worker in self.workers.drain(..) {
++            let _ = crate::panic_boundary::contain_panic(worker.join());
++        }
++    }
++}
++
+ // ---------------------------------------------------------------------------
+--- a/crates/xlfn/src/benchmark_support/ingress.rs
++++ b/crates/xlfn/src/benchmark_support/ingress.rs
+@@ -269,6 +269,83 @@
+         })
+     }
+ 
++    /// Numeric typed borrowed-matrix preparation, with materialization only
++    /// when requested. Dropping prepared state models the warm lookup path;
++    /// materializing models the additional input work on a cold lookup.
++    pub fn run_borrowed_numeric_matrix_prepared(&mut self, materialize: bool) -> [u8; 32] {
++        let ingress = benchmark_ingress();
++        let call = self
++            .runtime
++            .enter(&ingress)
++            .expect("benchmark runtime must be open");
++        crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
++            let mut arguments =
++                crate::value::ArgumentContext::<crate::value::FormulaInputMode>::new(
++                    call, scope, 1,
++                );
++            // SAFETY: the fixture owns the root and cells for the complete call.
++            let raw = unsafe { crate::value::XlValueRef::from_raw(&mut self.raw) }
++                .expect("benchmark prepared input must be well formed");
++            let prepared = arguments
++                .prepare::<crate::value::MatrixRef<'_, f64>>(0, "arg", raw)
++                .expect("benchmark borrowed matrix preparation must succeed");
++            let identity = arguments.finish().unwrap().unwrap();
++            if materialize {
++                let matrix = prepared
++                    .materialize()
++                    .expect("benchmark borrowed matrix materialization must succeed");
++                std::hint::black_box(matrix);
++            } else {
++                std::hint::black_box(prepared);
++            }
++            identity
++        })
++    }
++
++    pub fn run_borrowed_numeric_matrix_plain(&mut self) {
++        let ingress = benchmark_ingress();
++        let call = self
++            .runtime
++            .enter(&ingress)
++            .expect("benchmark runtime must be open");
++        crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
++            let mut arguments =
++                crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(call, scope, 1);
++            // SAFETY: the fixture owns the root and cells for the complete call.
++            let matrix = unsafe {
++                crate::value::argument_from_raw_with_arguments::<
++                    crate::value::PlainInputMode,
++                    crate::value::MatrixRef<'_, f64>,
++                >(&mut arguments, 0, "arg", &mut self.raw)
++            }
++            .expect("benchmark borrowed numeric matrix ingress must succeed");
++            std::hint::black_box(matrix);
++            arguments.finish().unwrap();
++        })
++    }
++
++    pub fn run_borrowed_string_matrix_prepared(&mut self) -> [u8; 32] {
++        let ingress = benchmark_ingress();
++        let call = self
++            .runtime
++            .enter(&ingress)
++            .expect("benchmark runtime must be open");
++        crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
++            let mut arguments =
++                crate::value::ArgumentContext::<crate::value::FormulaInputMode>::new(
++                    call, scope, 1,
++                );
++            // SAFETY: the fixture retains its root, cells and UTF-16 payloads.
++            let raw = unsafe { crate::value::XlValueRef::from_raw(&mut self.raw) }
++                .expect("benchmark prepared text input must be well formed");
++            let prepared = arguments
++                .prepare::<crate::value::MatrixRef<'_, &str>>(0, "arg", raw)
++                .expect("benchmark borrowed text matrix preparation must succeed");
++            std::hint::black_box(prepared);
++            arguments.finish().unwrap().unwrap()
++        })
++    }
++
+     pub fn run_borrowed_array_with_identity(&mut self) -> [u8; 32] {
+         let ingress = benchmark_ingress();
+         let call = self
+--- a/crates/xlfn/src/handle/object.rs
++++ b/crates/xlfn/src/handle/object.rs
+@@ -557,7 +557,7 @@
+ mod benchmark {
+     use super::*;
+     use std::hint::black_box;
+-    use std::sync::{Arc, mpsc};
++    use std::sync::{Arc, Barrier, mpsc};
+ 
+     /// The object distribution for a shared-arena pin workload.
+     #[derive(Clone, Copy)]
+@@ -583,8 +583,9 @@
+         binding: Option<ObjectBinding>,
+         arena: Arc<PublishedOwner<ObjectArena>>,
+         iterations_per_worker: usize,
+-        start_tx: Vec<mpsc::SyncSender<()>>,
++        start_tx: Vec<mpsc::SyncSender<bool>>,
+         done_rx: Vec<mpsc::Receiver<()>>,
++        barrier: Arc<Barrier>,
+         workers: Vec<std::thread::JoinHandle<()>>,
+     }
+ 
+@@ -604,6 +605,7 @@
+             let mut start_tx = Vec::with_capacity(worker_count);
+             let mut done_rx = Vec::with_capacity(worker_count);
+             let mut workers = Vec::with_capacity(worker_count);
++            let barrier = Arc::new(Barrier::new(worker_count + 1));
+             for worker in 0..worker_count {
+                 let worker_binding = match case {
+                     ObjectLeaseBenchCase::SameObject => {
+@@ -621,15 +623,26 @@
+                     }
+                 };
+                 let worker_arena = Arc::clone(&arena);
+-                let (start, receive) = mpsc::sync_channel::<()>(1);
++                let worker_barrier = Arc::clone(&barrier);
++                let (start, receive) = mpsc::sync_channel::<bool>(1);
+                 start_tx.push(start);
+                 let (done, completed) = mpsc::sync_channel(1);
+                 done_rx.push(completed);
+                 workers.push(std::thread::spawn(move || {
+-                    while receive.recv().is_ok() {
+-                        for _ in 0..iterations_per_worker {
+-                            let pin = worker_binding.acquire_lease().expect("benchmark pin");
+-                            drop(black_box(pin));
++                    while let Ok(pin_cycles) = receive.recv() {
++                        // Every worker starts the batch together. Sequential
++                        // channel dispatch must not turn the one-worker case
++                        // into a staggered, less contended concurrency curve.
++                        worker_barrier.wait();
++                        if pin_cycles {
++                            for _ in 0..iterations_per_worker {
++                                let pin = worker_binding.acquire_lease().expect("benchmark pin");
++                                drop(black_box(pin));
++                            }
++                        } else {
++                            for _ in 0..iterations_per_worker {
++                                black_box(42_u64);
++                            }
+                         }
+                         done.send(()).expect("benchmark driver receives completion");
+                     }
+@@ -643,6 +656,7 @@
+                 iterations_per_worker,
+                 start_tx,
+                 done_rx,
++                barrier,
+                 workers,
+             }
+         }
+@@ -659,9 +673,23 @@
+         }
+ 
+         pub fn run(&self) {
++            self.run_batch(true);
++        }
++
++        /// Same workers, dispatch, start barrier, loop count, and completion
++        /// channels without arena operations. A control, not a subtractable
++        /// estimate of lock overhead.
++        pub fn run_dispatch_control(&self) {
++            self.run_batch(false);
++        }
++
++        fn run_batch(&self, pin_cycles: bool) {
+             for start in &self.start_tx {
+-                start.send(()).expect("benchmark worker receives start");
+-            }
++                start
++                    .send(pin_cycles)
++                    .expect("benchmark worker receives start");
++            }
++            self.barrier.wait();
+             for done in &self.done_rx {
+                 done.recv().expect("benchmark worker completed batch");
+             }

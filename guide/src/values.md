@@ -81,6 +81,11 @@ fn sum_borrowed(values: XlArrayRef<'_>) -> XllResult<f64> {
 example, `MatrixRef<'_, &str>` avoids a separate owned string for each cell.
 Neither borrowed view can escape the call or be an async argument.
 
+A synchronous handle producer accepting `MatrixRef<'_, f64>` validates and
+identifies the input on every recalculation, but creates the scratch slice only
+when it needs to run the function. Reusing its cached object avoids copying the
+numeric cells into scratch.
+
 ### Build a large result incrementally
 
 When an output is large or produced one cell at a time, `XlArrayBuilder`
