@@ -72,7 +72,7 @@ def registration_diagnostics(app: Any) -> dict[str, Any]:
     except Exception as error:
         result["registered_functions_error"] = str(error)
     bindings = {}
-    for name in ("BENCH.ALLOC.BYTES", "BENCH.ALLOC.CALLS", "BENCH.ASYNC", "BENCH.ID", "BENCH.ERRNUM"):
+    for name in ("BENCH.ALLOC.BYTES", "BENCH.ASYNC", "BENCH.ID", "BENCH.ERRNUM"):
         try:
             # Without parentheses, Evaluate reads the hidden registration ID
             # name. It must not call a UDF on a failed/rolled-back runtime.

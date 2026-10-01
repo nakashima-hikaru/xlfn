@@ -72,12 +72,6 @@ and pin workloads improved sufficiently to adopt the change for the stated
 priorities, while retaining the small-input and plain-conversion regressions
 as limits to revisit on the deployment host.
 
-A trial that copied numeric encodings through a 512-byte temporary buffer was
-rejected: numeric preparation became about 18% slower in its paired comparison.
-[2026-09-30-rejected-buffer.json](2026-09-30-rejected-buffer.json) records that
-result. The adopted implementation streams into the existing hash workspace
-after selecting its sink once; it does not use that extra buffer.
-
 ## Input semantics and materialization
 
 Every source cell still passes raw-cell validation, the input budget, and
@@ -177,7 +171,7 @@ two-phase results are retained in
 
 ## Validation and limits
 
-[2026-09-30-validation.json](2026-09-30-validation.json) records the checks:
+The implementation passed the following checks:
 
 - Workspace Clippy for all targets/features passed.
 - Process-isolated nextest: 1,035 passed, 11 skipped.

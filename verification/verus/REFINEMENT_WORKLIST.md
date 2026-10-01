@@ -2567,13 +2567,14 @@ load expression. Strengthened TCB audit, formatting and whitespace checks pass.
 
 ## Atomic contract probe distinguishes accepted calls from state refinement
 
-Added tools/probe_verus_atomic_contracts.py to make the native contract boundary
-reproducible against the installed verifier. Direct std AtomicBool load verifies,
-but initial-value assertions for fresh AtomicBool and AtomicUsize fail SMT
-verification. The permission-backed PAtomicBool control verifies the corresponding
-assertion. The diagnostic labels these outcomes proved/unproved; it is deliberately
-not a correctness gate that requires future verifier versions to remain incomplete.
-Unexpected compiler/tool failures stop the diagnostic.
+Added a standalone diagnostic for the native contract boundary against the
+installed verifier. Direct std AtomicBool load verified, but initial-value
+assertions for fresh AtomicBool and AtomicUsize failed SMT verification. The
+permission-backed PAtomicBool control verified the corresponding assertion.
+The diagnostic labeled these outcomes proved/unproved and rejected unexpected
+compiler/tool failures. It was not a correctness gate requiring future verifier
+versions to remain incomplete. The script was removed on 2026-10-02; the results
+here record the original diagnostic run.
 
 Inspection of the matching vstd revision confirms the primitive owns its native
 atomic and uses SeqCst operations; the ghost constructor builds a new primitive.
@@ -2636,10 +2637,11 @@ adapters and the full main-path completion audit remain outstanding.
 ## Native Box support probe and in-place destructor validation
 
 Probed the actual allocation/recovery APIs before attempting a new adapter.
-The installed Verus proves Box::new contents and permission-guarded ptr_ref;
-Box::into_raw/from_raw and Box::leak-to-pointer remain unsupported. The diagnostic
-is recorded in tools/probe_verus_heap_contracts.py and adds no assumption or
-external body. This prevents treating a returned HeapPermission as an already
+The installed Verus proved Box::new contents and permission-guarded ptr_ref;
+Box::into_raw/from_raw and Box::leak-to-pointer were unsupported. The standalone
+diagnostic added no assumption or external body and was removed on 2026-10-02.
+These results record the old raw/leak APIs, before the Rust 1.99 ownership API
+change. This prevents treating a returned HeapPermission as an already
 verified native Box conversion. A proper primitive contract/implementation
 connection is still required; arbitrary destructor behavior is not proven here.
 
@@ -2911,14 +2913,15 @@ verification. `just verus-audit` found zero project-local assumptions or axioms.
 
 ## Native synchronization contract boundary (2026-09-23)
 
-The installed Verus 0.2026.09.13.671956e rejects direct use of
-`std::sync::Mutex` and `Condvar` at their types, before it can verify a guard
-or wait/notify contract. `tools/probe_verus_sync_contracts.py` records this as
-`unsupported`; it would report a future accepted but unproved assertion as
-`unproved`. This is a diagnostic, not a mutation test or proof of production
-`parking_lot` behavior. The existing atomic and heap probes still find direct
-native `AtomicUsize` initial-value assertions unproved and Box raw conversions
-unsupported. All three probes were rerun locally.
+The installed Verus 0.2026.09.13.671956e rejected direct use of
+`std::sync::Mutex` and `Condvar` at their types, before it could verify a guard
+or wait/notify contract. The standalone diagnostic recorded this as `unsupported`
+and distinguished accepted but unproved assertions as `unproved`. This was a
+diagnostic, not a mutation test or proof of production `parking_lot` behavior.
+The atomic and heap diagnostics also found direct native `AtomicUsize`
+initial-value assertions unproved and Box raw conversions unsupported. All three
+were rerun locally for this increment. Their scripts were removed on 2026-10-02;
+this section preserves those historical results.
 
 The deliberately raw-backed `PublishedOwner` cannot be replaced with a moving
 `Box` field as a proof shortcut: its published pointers must survive owner

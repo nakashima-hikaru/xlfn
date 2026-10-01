@@ -26,12 +26,10 @@ use xlfn::{
 };
 
 struct CountingAllocator;
-static ALLOC_CALLS: AtomicU64 = AtomicU64::new(0);
 static ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
 
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
         ALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
         unsafe { System.alloc(layout) }
     }
@@ -41,7 +39,6 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
         ALLOC_BYTES.fetch_add(size as u64, Ordering::Relaxed);
         unsafe { System.realloc(pointer, layout, size) }
     }
@@ -214,11 +211,6 @@ pub fn contended(
     value: f64,
 ) -> f64 {
     value + context.state().contended.fetch_add(1, Ordering::AcqRel) as f64
-}
-
-#[excel_function(name = "BENCH.ALLOC.CALLS", thread_safe)]
-pub fn alloc_calls() -> f64 {
-    ALLOC_CALLS.load(Ordering::Relaxed) as f64
 }
 
 #[excel_function(name = "BENCH.ALLOC.BYTES", thread_safe)]

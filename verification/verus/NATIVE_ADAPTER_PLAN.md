@@ -44,20 +44,21 @@ index, admission, pin or queue operation, using the same allocation and gate
 instances throughout. This invariant removes extra executable node locking; it
 does not identify the separate vstd pin counter with `CacheNode.pins`.
 
-## Requirements at the currently unsupported primitive boundary
+## Requirements at the recorded primitive boundary
 
-The pinned Verus 0.2026.09.13.671956e can type-check a direct native std
-`AtomicUsize::load`, but does not prove even a freshly constructed atomic's
-initial value. It rejects direct `std::sync::Mutex` and `Condvar` use at their
-types, and rejects native `Box::into_raw`/`from_raw`. The reproducible probes are
-`tools/probe_verus_atomic_contracts.py`, `tools/probe_verus_sync_contracts.py`,
-and `tools/probe_verus_heap_contracts.py`. The std lock probe is diagnostic only:
+Diagnostics recorded for Verus 0.2026.09.13.671956e type-checked a direct native
+std `AtomicUsize::load`, but did not prove even a freshly constructed atomic's
+initial value. They rejected direct `std::sync::Mutex` and `Condvar` use at their
+types, and native `Box::into_raw`/`from_raw`. The standalone diagnostic scripts
+were removed on 2026-10-02; the recorded outcomes in [TCB.md](TCB.md) are historical
+observations, not fresh verifier results. The std lock diagnostic has limited
+scope:
 production uses `parking_lot`, whose native object/guard identity is a separate
 open obligation. A compiler rejection is never counted as a verified property.
 
 Rust 1.99 production now uses `Box::into_non_null`/`from_non_null` for Cache
-and PublishedOwner. The older heap probes describe the previous raw/leak APIs;
-the new primitives have not been probed or connected to the permission proofs.
+and PublishedOwner. The recorded heap diagnostics describe the previous raw/leak
+APIs; the new primitives have not been probed or connected to the permission proofs.
 The native allocation boundary remains open.
 
 These are unresolved obligations, not authorization to add trusted adapters.

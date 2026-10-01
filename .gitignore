@@ -7,6 +7,8 @@ target/
 *.xll
 .DS_Store
 .cache
+__pycache__/
+*.py[cod]
 
 formal/.lake/
 

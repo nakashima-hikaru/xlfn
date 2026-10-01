@@ -1199,13 +1199,14 @@ The standard atomic primitive semantics remain library TCB.
 
 ### Direct std atomic calls do not provide the value-history contract
 
-The installed Verus accepts a direct AtomicBool Acquire load, but fails the true
-single-threaded assertions that a newly created AtomicBool(false) loads false and
-an AtomicUsize(1) loads 1. The same initial-value assertion succeeds for
-vstd::atomic::PAtomicBool with its linear permission. These are specification
-coverage probes, not native atomic failures. Reproduce with
-`python3 -B tools/probe_verus_atomic_contracts.py`; it reports proved/unproved
-separately and rejects compiler/tool errors instead of counting them as evidence.
+Recorded diagnostics with Verus 0.2026.09.13.671956e accepted a direct AtomicBool
+Acquire load, but left unproved the single-threaded initial-value assertions
+that a newly created AtomicBool(false) loads false and
+an AtomicUsize(1) loads 1. The same initial-value assertion succeeded for
+vstd::atomic::PAtomicBool with its linear permission. These were specification
+coverage diagnostics, not native atomic failures. The standalone diagnostic was
+removed on 2026-10-02; these outcomes are historical observations, not a fresh
+verifier run or a maintained correctness gate.
 
 Thus the resident-load adapter establishes field access and placement but cannot
 claim initialized residency or coherent store history from std calls alone.
@@ -1258,13 +1259,12 @@ Verus. CI execution itself has not been performed locally.
 
 ### Native Box recovery support boundary
 
-`tools/probe_verus_heap_contracts.py` distinguishes proved, unproved and unsupported
-outcomes using the installed verifier. With 0.2026.09.13.671956e, Box::new's value
-and a PointsTo-guarded pointer borrow verify. Box::into_raw, Box::from_raw and the
-Box::leak-to-pointer expression formerly used by Cache are unsupported. Compiler rejection
-is reported as unsupported, never as successful verification; unexpected compiler
-errors fail the diagnostic. This is an informational probe, not a gate requiring
-future Verus versions to retain those limitations.
+Recorded diagnostics with Verus 0.2026.09.13.671956e proved Box::new's value
+and a PointsTo-guarded pointer borrow. Box::into_raw, Box::from_raw and the
+Box::leak-to-pointer expression formerly used by Cache were unsupported. Compiler
+rejection was recorded as unsupported, never as successful verification. The
+standalone diagnostic was removed on 2026-10-02; these historical observations
+do not require future Verus versions to retain those limitations.
 
 Rust 1.99 production now transfers and recovers these allocations with
 `Box::into_non_null`/`from_non_null`. Those primitives have not been probed
@@ -1349,11 +1349,11 @@ weak-memory refinement remain open.
 
 ### Native std synchronization support probe
 
-`tools/probe_verus_sync_contracts.py` checks the installed verifier against a
-direct `std::sync::Mutex` protected-value assertion and `Condvar::new`. With
-0.2026.09.13.671956e, both are rejected as unsupported types/functions, before
-a guard or wait postcondition can be proved. This probe is diagnostic only;
-production `DrainGate` uses `parking_lot`, which needs its own native identity,
+Recorded diagnostics with Verus 0.2026.09.13.671956e rejected a direct
+`std::sync::Mutex` protected-value assertion and `Condvar::new` as unsupported
+types/functions, before a guard or wait postcondition could be proved. The
+standalone diagnostic was removed on 2026-10-02; this is historical evidence only.
+Production `DrainGate` uses `parking_lot`, which needs its own native identity,
 guard and wait/notify correspondence. Neither an unsupported compiler result
 nor a modeled vstd lock establishes that correspondence. No project-owned
 external type/function specification or trusted adapter was added.

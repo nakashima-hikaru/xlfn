@@ -128,7 +128,7 @@ class PlanTest(unittest.TestCase):
 
     def test_registration_diagnostics_preserves_value_types_without_calling_udfs(self):
         app = SimpleNamespace(RegisteredFunctions=(("fixture.xll", "xll_identity", "QQ$"),),
-                              Evaluate=Mock(side_effect=[-123.0, -2146826259, 456.0, -123.0, -2146826259]))
+                              Evaluate=Mock(side_effect=[-123.0, 456.0, -123.0, -2146826259]))
         result = registration_diagnostics(app)
         self.assertEqual(result["name_bindings"]["BENCH.ALLOC.BYTES"], {"type": "float", "value": -123.0})
         self.assertEqual(result["name_bindings"]["BENCH.ERRNUM"]["type"], "int")
