@@ -48,6 +48,9 @@ jobs:
               with:
                   python-version: "3.13"
 
+            - name: Test Verus installer
+              run: python3 -B -m unittest discover -s tools -p test_install_verus.py
+
             - name: Install development tools
               uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
               with:

@@ -36,7 +36,7 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
 echo "==> Downloading Verus ${VERUS_VERSION} (${ASSET_NAME})..."
-curl -sSL --retry 3 "${DOWNLOAD_URL}" -o "${TMP_DIR}/${ASSET_NAME}"
+curl -fsSL --retry 3 "${DOWNLOAD_URL}" -o "${TMP_DIR}/${ASSET_NAME}"
 
 echo "==> Extracting Verus..."
 unzip -q "${TMP_DIR}/${ASSET_NAME}" -d "${TMP_DIR}/extracted"
@@ -49,6 +49,32 @@ if [ -z "${VERUS_EXTRACTED_DIR}" ] || [ ! -d "${VERUS_EXTRACTED_DIR}" ]; then
     exit 1
 fi
 
+# Verus launches the Rust compiler it was built against, independently of the
+# workspace toolchain. Read the release's own metadata so VERUS_VERSION overrides
+# also install the matching compiler. The toolchain string can contain a rustup
+# annotation after its exact name, e.g. "1.98.1-x86_64-unknown-linux-gnu (default)".
+VERUS_RUST_TOOLCHAIN="$(python3 -B - "${VERUS_EXTRACTED_DIR}/version.json" "${VERUS_VERSION}" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+
+try:
+    release = json.loads(Path(sys.argv[1]).read_text())["verus"]
+    if release["version"] != sys.argv[2]:
+        raise ValueError("release version does not match the requested Verus version")
+    toolchain = release["toolchain"].split()[0]
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", toolchain) is None:
+        raise ValueError("invalid Rust toolchain name")
+except (OSError, KeyError, TypeError, ValueError, IndexError, AttributeError) as error:
+    raise SystemExit(f"Invalid Verus release metadata: {error}")
+print(toolchain)
+PY
+)"
+
+echo "==> Installing Verus Rust toolchain ${VERUS_RUST_TOOLCHAIN}..."
+rustup toolchain install "${VERUS_RUST_TOOLCHAIN}" --profile minimal
+
 mkdir -p "${INSTALL_DIR}"
 
 echo "==> Installing binaries to ${INSTALL_DIR}..."
@@ -59,5 +85,6 @@ if [ "${OS}" = "Darwin" ]; then
     xattr -dr com.apple.quarantine "${INSTALL_DIR}" 2>/dev/null || true
 fi
 
+echo "==> Verifying installed Verus..."
+"${INSTALL_DIR}/verus" --version
 echo "==> Verus installed successfully to ${INSTALL_DIR}."
-"${INSTALL_DIR}/verus" --version || true
