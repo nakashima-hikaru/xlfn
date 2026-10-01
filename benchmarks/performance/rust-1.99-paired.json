@@ -1,0 +1,1102 @@
+{
+  "baseline_revision": "b9596f8e221ef3804bb802c0795d7e7e8660f8df",
+  "host": "Darwin arm64",
+  "features": [
+    "bench-internals",
+    "async",
+    "cache",
+    "rtd"
+  ],
+  "warmup_seconds": 0.3,
+  "measurement_seconds": 1.0,
+  "samples": 50,
+  "filters": {
+    "sync_boundary": "^sync_boundary/(admission|scalar_return/no_subscriber)/1$",
+    "cache_lookup": "^cache_lookup/cache_hit/u64/current/warm$",
+    "cache_miss_concurrency": "^cache_miss_concurrency/(distinct_keys/cheap_u64/cache/workers_1|same_key/cheap_u64/cache/workers_4)$",
+    "async_spawn": "^async_spawn/(per_iteration/1|matrix_reschedule/workers_4/16)$",
+    "rtd_publish": "^rtd_publish/number/(changing|same_value)$",
+    "rtd_refresh": "^rtd_refresh/number/end_to_end/dense$"
+  },
+  "order": [
+    "baseline",
+    "candidate",
+    "candidate",
+    "baseline"
+  ],
+  "executable_sha256": {
+    "baseline/sync_boundary": "d0dca8c231d4135b3c3b6ef5203045c6e722072b6425a0c5ea15a480addb578b",
+    "baseline/cache_lookup": "0b200f3aa4f2845fd299ead47b269222762aa82d5aae596ad95d32bea774befe",
+    "baseline/cache_miss_concurrency": "2ccdb7f42496028e5045ebad13fc73d0bee9a95c436fa710fe08b70db79fc487",
+    "baseline/async_spawn": "e03f18d480f6bacfb0fb83bdfe55f38ff44c25f41bd03addb26b2ae56db12ac2",
+    "baseline/rtd_publish": "5b0dc702a05a43f91ac10978a1fa2533586cbe7969bb70b1e9b9df22c6282d18",
+    "baseline/rtd_refresh": "f22a51880602b60fe40280424677052c666a4bac0565c6b38ca7b6e3aeb3d9cc",
+    "candidate/sync_boundary": "f07542c926418b10244905eb5b7e58494a95bd387d6afbad009cfe261824ae99",
+    "candidate/cache_lookup": "55eab27cd2d6c0eba874efe404d251f9a6e4ca16de1887ef5b3caa31f0c29948",
+    "candidate/cache_miss_concurrency": "9f347c6491816f0db401486c2d62462a56ce1b590498e57ef07447626277032d",
+    "candidate/async_spawn": "978c10dbbe2e8f175568db845b3a5a9bd529ad6b1a992b72e8d0ec882f6b8bdc",
+    "candidate/rtd_publish": "475cc025d20fd62f2912e90bbbab78324d3d836fe9cc43e1e87d9d537442300f",
+    "candidate/rtd_refresh": "dcc7fb802c17caf08f740396023f80a2f18e56df7dcb9e74279600bc6d197719"
+  },
+  "runs": [
+    {
+      "round": 0,
+      "kind": "baseline",
+      "benchmark": "sync_boundary/admission/1",
+      "median_ns": 26697.940287226003,
+      "mean_ns": 26711.31577865922,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 26685.24751047901,
+        "upper_bound": 26739.992362811812
+      }
+    },
+    {
+      "round": 0,
+      "kind": "baseline",
+      "benchmark": "sync_boundary/scalar_return/no_subscriber/1",
+      "median_ns": 54129.5876369863,
+      "mean_ns": 54143.331526536334,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 54104.53992827463,
+        "upper_bound": 54191.050585160236
+      }
+    },
+    {
+      "round": 0,
+      "kind": "baseline",
+      "benchmark": "cache_lookup/cache_hit/u64/current/warm",
+      "median_ns": 29807.755569479254,
+      "mean_ns": 29871.048400685086,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 29796.046997139154,
+        "upper_bound": 29951.105350760077
+      }
+    },
+    {
+      "round": 0,
+      "kind": "baseline",
+      "benchmark": "cache_miss_concurrency/distinct_keys/cheap_u64/cache/workers_1",
+      "median_ns": 52066.58299946581,
+      "mean_ns": 52240.408892098356,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 51786.16670645133,
+        "upper_bound": 52720.64830903921
+      }
+    },
+    {
+      "round": 0,
+      "kind": "baseline",
+      "benchmark": "cache_miss_concurrency/same_key/cheap_u64/cache/workers_4",
+      "median_ns": 145429.0692857143,
+      "mean_ns": 146114.53905623528,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 144785.45912721468,
+        "upper_bound": 147463.6873676456
+      }
+    },
+    {
+      "round": 0,
+      "kind": "baseline",
+      "benchmark": "async_spawn/matrix_reschedule/workers_4/16",
+      "median_ns": 1014634.4615384615,
+      "mean_ns": 1019027.4384615384,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 1010283.250923077,
+        "upper_bound": 1027894.0713076924
+      }
+    },
+    {
+      "round": 0,
+      "kind": "baseline",
+      "benchmark": "async_spawn/per_iteration/1",
+      "median_ns": 101059.71614583334,
+      "mean_ns": 100695.80727589926,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 99506.73642858193,
+        "upper_bound": 101772.34402083312
+      }
+    },
+    {
+      "round": 0,
+      "kind": "baseline",
+      "benchmark": "rtd_publish/number/changing",
+      "median_ns": 358992.0633503401,
+      "mean_ns": 358901.13904297265,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 357927.45460329007,
+        "upper_bound": 359985.66908519185
+      }
+    },
+    {
+      "round": 0,
+      "kind": "baseline",
+      "benchmark": "rtd_publish/number/same_value",
+      "median_ns": 276208.4264794686,
+      "mean_ns": 276199.6131469105,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 275899.88825984526,
+        "upper_bound": 276506.4942905479
+      }
+    },
+    {
+      "round": 0,
+      "kind": "baseline",
+      "benchmark": "rtd_refresh/number/end_to_end/dense",
+      "median_ns": 336311.5722154223,
+      "mean_ns": 336045.06999967113,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 335531.14147283655,
+        "upper_bound": 336528.9141974998
+      }
+    },
+    {
+      "round": 1,
+      "kind": "candidate",
+      "benchmark": "sync_boundary/admission/1",
+      "median_ns": 26511.946396396394,
+      "mean_ns": 26537.73334937404,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 26508.396284537164,
+        "upper_bound": 26569.92902807481
+      }
+    },
+    {
+      "round": 1,
+      "kind": "candidate",
+      "benchmark": "sync_boundary/scalar_return/no_subscriber/1",
+      "median_ns": 52079.36782560706,
+      "mean_ns": 52262.15348766268,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 52088.231017530576,
+        "upper_bound": 52577.42496479206
+      }
+    },
+    {
+      "round": 1,
+      "kind": "candidate",
+      "benchmark": "cache_lookup/cache_hit/u64/current/warm",
+      "median_ns": 31713.4165,
+      "mean_ns": 31770.054569144646,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 31696.402145047294,
+        "upper_bound": 31847.15872604963
+      }
+    },
+    {
+      "round": 1,
+      "kind": "candidate",
+      "benchmark": "cache_miss_concurrency/distinct_keys/cheap_u64/cache/workers_1",
+      "median_ns": 51231.90322775628,
+      "mean_ns": 51462.8485964719,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 51143.0867442581,
+        "upper_bound": 51838.03189134823
+      }
+    },
+    {
+      "round": 1,
+      "kind": "candidate",
+      "benchmark": "cache_miss_concurrency/same_key/cheap_u64/cache/workers_4",
+      "median_ns": 142489.87282608697,
+      "mean_ns": 142725.03966818546,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 141695.77910665039,
+        "upper_bound": 143848.5376243535
+      }
+    },
+    {
+      "round": 1,
+      "kind": "candidate",
+      "benchmark": "async_spawn/matrix_reschedule/workers_4/16",
+      "median_ns": 1006491.923076923,
+      "mean_ns": 1059532.7615384618,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 1014629.1047307693,
+        "upper_bound": 1133300.5785384614
+      }
+    },
+    {
+      "round": 1,
+      "kind": "candidate",
+      "benchmark": "async_spawn/per_iteration/1",
+      "median_ns": 101751.99719785576,
+      "mean_ns": 102535.62766684618,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 100897.1627736496,
+        "upper_bound": 104408.27416572941
+      }
+    },
+    {
+      "round": 1,
+      "kind": "candidate",
+      "benchmark": "rtd_publish/number/changing",
+      "median_ns": 338485.844017094,
+      "mean_ns": 338377.14379230735,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 338076.26038472,
+        "upper_bound": 338679.9813393898
+      }
+    },
+    {
+      "round": 1,
+      "kind": "candidate",
+      "benchmark": "rtd_publish/number/same_value",
+      "median_ns": 268925.26666666666,
+      "mean_ns": 269119.3050387158,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 268825.7374553733,
+        "upper_bound": 269425.92856325733
+      }
+    },
+    {
+      "round": 1,
+      "kind": "candidate",
+      "benchmark": "rtd_refresh/number/end_to_end/dense",
+      "median_ns": 344066.4626984127,
+      "mean_ns": 344134.5690027941,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 343344.9442086746,
+        "upper_bound": 344978.9070375488
+      }
+    },
+    {
+      "round": 2,
+      "kind": "candidate",
+      "benchmark": "sync_boundary/admission/1",
+      "median_ns": 26619.472902618312,
+      "mean_ns": 26641.863210060936,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 26618.008896388204,
+        "upper_bound": 26668.533797567816
+      }
+    },
+    {
+      "round": 2,
+      "kind": "candidate",
+      "benchmark": "sync_boundary/scalar_return/no_subscriber/1",
+      "median_ns": 51988.52673534462,
+      "mean_ns": 52018.60252684587,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 51975.51102168674,
+        "upper_bound": 52072.944581985794
+      }
+    },
+    {
+      "round": 2,
+      "kind": "candidate",
+      "benchmark": "cache_lookup/cache_hit/u64/current/warm",
+      "median_ns": 31429.428354978354,
+      "mean_ns": 31489.017854950558,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 31413.888571302337,
+        "upper_bound": 31570.8748236569
+      }
+    },
+    {
+      "round": 2,
+      "kind": "candidate",
+      "benchmark": "cache_miss_concurrency/distinct_keys/cheap_u64/cache/workers_1",
+      "median_ns": 51200.182870370365,
+      "mean_ns": 51402.0882631246,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 50994.120524463564,
+        "upper_bound": 51831.588793847084
+      }
+    },
+    {
+      "round": 2,
+      "kind": "candidate",
+      "benchmark": "cache_miss_concurrency/same_key/cheap_u64/cache/workers_4",
+      "median_ns": 143360.77883928572,
+      "mean_ns": 143835.19374175582,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 143207.1458855844,
+        "upper_bound": 144477.41248945985
+      }
+    },
+    {
+      "round": 2,
+      "kind": "candidate",
+      "benchmark": "async_spawn/matrix_reschedule/workers_4/16",
+      "median_ns": 1018090.1456016179,
+      "mean_ns": 1019097.4950662325,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 1010058.7389170722,
+        "upper_bound": 1029280.3191400152
+      }
+    },
+    {
+      "round": 2,
+      "kind": "candidate",
+      "benchmark": "async_spawn/per_iteration/1",
+      "median_ns": 107090.55277777778,
+      "mean_ns": 108558.1637124135,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 106716.95251662408,
+        "upper_bound": 110572.74557094015
+      }
+    },
+    {
+      "round": 2,
+      "kind": "candidate",
+      "benchmark": "rtd_publish/number/changing",
+      "median_ns": 338141.22569444444,
+      "mean_ns": 338473.9407631296,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 338052.55323175585,
+        "upper_bound": 338963.68867718487
+      }
+    },
+    {
+      "round": 2,
+      "kind": "candidate",
+      "benchmark": "rtd_publish/number/same_value",
+      "median_ns": 269425.8959499813,
+      "mean_ns": 269896.5578005981,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 269373.2198412368,
+        "upper_bound": 270568.05495281407
+      }
+    },
+    {
+      "round": 2,
+      "kind": "candidate",
+      "benchmark": "rtd_refresh/number/end_to_end/dense",
+      "median_ns": 329005.787037037,
+      "mean_ns": 329772.1342291307,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 328482.45883553044,
+        "upper_bound": 331834.53150855046
+      }
+    },
+    {
+      "round": 3,
+      "kind": "baseline",
+      "benchmark": "sync_boundary/admission/1",
+      "median_ns": 26739.436127507855,
+      "mean_ns": 26763.66195306192,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 26734.46583129243,
+        "upper_bound": 26800.697426832383
+      }
+    },
+    {
+      "round": 3,
+      "kind": "baseline",
+      "benchmark": "sync_boundary/scalar_return/no_subscriber/1",
+      "median_ns": 54135.566692183726,
+      "mean_ns": 54151.46945682893,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 54118.239784985024,
+        "upper_bound": 54186.8210981359
+      }
+    },
+    {
+      "round": 3,
+      "kind": "baseline",
+      "benchmark": "cache_lookup/cache_hit/u64/current/warm",
+      "median_ns": 30082.84589160839,
+      "mean_ns": 30102.90564172627,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 30033.06040240832,
+        "upper_bound": 30178.9112126464
+      }
+    },
+    {
+      "round": 3,
+      "kind": "baseline",
+      "benchmark": "cache_miss_concurrency/distinct_keys/cheap_u64/cache/workers_1",
+      "median_ns": 52158.17551480052,
+      "mean_ns": 52305.12860499711,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 51763.76403212732,
+        "upper_bound": 52903.54055837653
+      }
+    },
+    {
+      "round": 3,
+      "kind": "baseline",
+      "benchmark": "cache_miss_concurrency/same_key/cheap_u64/cache/workers_4",
+      "median_ns": 145909.48541666666,
+      "mean_ns": 149679.49654416082,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 146470.43542438358,
+        "upper_bound": 153866.17631981152
+      }
+    },
+    {
+      "round": 3,
+      "kind": "baseline",
+      "benchmark": "async_spawn/matrix_reschedule/workers_4/16",
+      "median_ns": 1029571.464364035,
+      "mean_ns": 1117973.0346479819,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 1067539.728414175,
+        "upper_bound": 1174241.3053128682
+      }
+    },
+    {
+      "round": 3,
+      "kind": "baseline",
+      "benchmark": "async_spawn/per_iteration/1",
+      "median_ns": 105053.79792888563,
+      "mean_ns": 105603.22057928635,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 103613.88399736452,
+        "upper_bound": 107739.29462772654
+      }
+    },
+    {
+      "round": 3,
+      "kind": "baseline",
+      "benchmark": "rtd_publish/number/changing",
+      "median_ns": 357140.93255813955,
+      "mean_ns": 357964.0732232175,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 357037.36682605074,
+        "upper_bound": 359072.83861098625
+      }
+    },
+    {
+      "round": 3,
+      "kind": "baseline",
+      "benchmark": "rtd_publish/number/same_value",
+      "median_ns": 276480.06084656087,
+      "mean_ns": 277001.5892749169,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 276574.2805169877,
+        "upper_bound": 277482.77515823144
+      }
+    },
+    {
+      "round": 3,
+      "kind": "baseline",
+      "benchmark": "rtd_refresh/number/end_to_end/dense",
+      "median_ns": 335566.15179175115,
+      "mean_ns": 335340.080408423,
+      "mean_95_ci": {
+        "confidence_level": 0.95,
+        "lower_bound": 334722.56734734064,
+        "upper_bound": 335971.22519729024
+      }
+    }
+  ],
+  "effective_measurement_seconds": {
+    "sync_boundary": 10.0,
+    "cache_lookup": 1.0,
+    "cache_miss_concurrency": 1.0,
+    "async_spawn": 1.0,
+    "rtd_publish": 1.0,
+    "rtd_refresh": 1.0
+  },
+  "started_at_utc": "2026-10-01T14:36:55.506800+00:00",
+  "builds": {
+    "baseline": {
+      "source": {
+        "revision": "b9596f8e221ef3804bb802c0795d7e7e8660f8df"
+      },
+      "source_sha256": "fb03fe417c05988dced61e32255378c605c8457fd982cafb06eb7b72c73a0940",
+      "toolchain": "1.98.1",
+      "rustc_vv": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: aarch64-apple-darwin\nrelease: 1.98.1\nLLVM version: 22.1.8",
+      "target": "aarch64-apple-darwin",
+      "features": [
+        "bench-internals",
+        "async",
+        "cache",
+        "rtd"
+      ],
+      "profile": "release",
+      "environment": {
+        "SDKROOT": "/Library/Developer/CommandLineTools/SDKs/MacOSX15.2.sdk",
+        "RUSTFLAGS": null,
+        "CARGO_ENCODED_RUSTFLAGS": null
+      },
+      "build_command": {
+        "argv": [
+          "cargo",
+          "+1.98.1",
+          "bench",
+          "-p",
+          "xlfn",
+          "--features",
+          "bench-internals,async,cache,rtd",
+          "--target",
+          "aarch64-apple-darwin",
+          "--no-run",
+          "--locked",
+          "--message-format=json",
+          "--bench",
+          "sync_boundary",
+          "--bench",
+          "cache_lookup",
+          "--bench",
+          "cache_miss_concurrency",
+          "--bench",
+          "async_spawn",
+          "--bench",
+          "rtd_publish",
+          "--bench",
+          "rtd_refresh"
+        ],
+        "cwd": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-source",
+        "target_directory": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-build",
+        "environment_overrides": {},
+        "effective_encoded_rustflags": "--remap-path-prefix=/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-source=/xlfn/source\u001f--remap-path-prefix=/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-build=/xlfn/target"
+      },
+      "executables": {
+        "sync_boundary": {
+          "path": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-build/aarch64-apple-darwin/release/deps/sync_boundary-588b62c5c3b31f5b",
+          "sha256": "d0dca8c231d4135b3c3b6ef5203045c6e722072b6425a0c5ea15a480addb578b"
+        },
+        "async_spawn": {
+          "path": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-build/aarch64-apple-darwin/release/deps/async_spawn-c4b27464cfdf06dd",
+          "sha256": "e03f18d480f6bacfb0fb83bdfe55f38ff44c25f41bd03addb26b2ae56db12ac2"
+        },
+        "rtd_publish": {
+          "path": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-build/aarch64-apple-darwin/release/deps/rtd_publish-cf7408755c95b5f1",
+          "sha256": "5b0dc702a05a43f91ac10978a1fa2533586cbe7969bb70b1e9b9df22c6282d18"
+        },
+        "rtd_refresh": {
+          "path": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-build/aarch64-apple-darwin/release/deps/rtd_refresh-935c13027a74e234",
+          "sha256": "f22a51880602b60fe40280424677052c666a4bac0565c6b38ca7b6e3aeb3d9cc"
+        },
+        "cache_lookup": {
+          "path": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-build/aarch64-apple-darwin/release/deps/cache_lookup-cda3d4dedfc990c1",
+          "sha256": "0b200f3aa4f2845fd299ead47b269222762aa82d5aae596ad95d32bea774befe"
+        },
+        "cache_miss_concurrency": {
+          "path": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-build/aarch64-apple-darwin/release/deps/cache_miss_concurrency-178585decbaab49c",
+          "sha256": "2ccdb7f42496028e5045ebad13fc73d0bee9a95c436fa710fe08b70db79fc487"
+        }
+      },
+      "sizes": {
+        "extra_registration_counts": [
+          0,
+          10,
+          100,
+          1000,
+          5000
+        ],
+        "files": [
+          {
+            "extra_registrations": 0,
+            "bytes": 1708144,
+            "sha256": "24956b7bf780617016dd9aa2d3ad5656c1f69e6caa6af2b6e972827bb40603c3",
+            "path": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/size-binaries/baseline/registration-0.dylib",
+            "build_command": {
+              "argv": [
+                "cargo",
+                "+1.98.1",
+                "build",
+                "--manifest-path",
+                "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-source/benchmarks/excel-comparison/xlfn/Cargo.toml",
+                "--release",
+                "--target",
+                "aarch64-apple-darwin",
+                "--locked",
+                "--message-format=json"
+              ],
+              "cwd": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-source",
+              "target_directory": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-size-build",
+              "environment_overrides": {
+                "BENCH_EXTRA_FUNCTIONS": "0"
+              },
+              "effective_encoded_rustflags": "--remap-path-prefix=/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-source=/xlfn/source\u001f--remap-path-prefix=/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-size-build=/xlfn/target"
+            }
+          },
+          {
+            "extra_registrations": 10,
+            "bytes": 1770848,
+            "sha256": "0263b1916d505772f137d6766cb268b5867276195cd33a6a3bc06b5ff869f235",
+            "path": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/size-binaries/baseline/registration-10.dylib",
+            "build_command": {
+              "argv": [
+                "cargo",
+                "+1.98.1",
+                "build",
+                "--manifest-path",
+                "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-source/benchmarks/excel-comparison/xlfn/Cargo.toml",
+                "--release",
+                "--target",
+                "aarch64-apple-darwin",
+                "--locked",
+                "--message-format=json"
+              ],
+              "cwd": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-source",
+              "target_directory": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-size-build",
+              "environment_overrides": {
+                "BENCH_EXTRA_FUNCTIONS": "10"
+              },
+              "effective_encoded_rustflags": "--remap-path-prefix=/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-source=/xlfn/source\u001f--remap-path-prefix=/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-size-build=/xlfn/target"
+            }
+          },
+          {
+            "extra_registrations": 100,
+            "bytes": 2445664,
+            "sha256": "6c99976b97c23162d4be6e8619d61ecb283086ed8e5157e68af1dc73c182b815",
+            "path": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/size-binaries/baseline/registration-100.dylib",
+            "build_command": {
+              "argv": [
+                "cargo",
+                "+1.98.1",
+                "build",
+                "--manifest-path",
+                "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-source/benchmarks/excel-comparison/xlfn/Cargo.toml",
+                "--release",
+                "--target",
+                "aarch64-apple-darwin",
+                "--locked",
+                "--message-format=json"
+              ],
+              "cwd": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-source",
+              "target_directory": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-size-build",
+              "environment_overrides": {
+                "BENCH_EXTRA_FUNCTIONS": "100"
+              },
+              "effective_encoded_rustflags": "--remap-path-prefix=/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-source=/xlfn/source\u001f--remap-path-prefix=/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-size-build=/xlfn/target"
+            }
+          },
+          {
+            "extra_registrations": 1000,
+            "bytes": 9030224,
+            "sha256": "7d14d7c97118a8f61427d05667430634cca8c218f95225be391e55bca6292806",
+            "path": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/size-binaries/baseline/registration-1000.dylib",
+            "build_command": {
+              "argv": [
+                "cargo",
+                "+1.98.1",
+                "build",
+                "--manifest-path",
+                "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-source/benchmarks/excel-comparison/xlfn/Cargo.toml",
+                "--release",
+                "--target",
+                "aarch64-apple-darwin",
+                "--locked",
+                "--message-format=json"
+              ],
+              "cwd": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-source",
+              "target_directory": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-size-build",
+              "environment_overrides": {
+                "BENCH_EXTRA_FUNCTIONS": "1000"
+              },
+              "effective_encoded_rustflags": "--remap-path-prefix=/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-source=/xlfn/source\u001f--remap-path-prefix=/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-size-build=/xlfn/target"
+            }
+          },
+          {
+            "extra_registrations": 5000,
+            "bytes": 38336128,
+            "sha256": "4bea56107f9e1e53f066e597cf3322baab51435b2dd5985c09b4bc9b9d339400",
+            "path": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/size-binaries/baseline/registration-5000.dylib",
+            "build_command": {
+              "argv": [
+                "cargo",
+                "+1.98.1",
+                "build",
+                "--manifest-path",
+                "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-source/benchmarks/excel-comparison/xlfn/Cargo.toml",
+                "--release",
+                "--target",
+                "aarch64-apple-darwin",
+                "--locked",
+                "--message-format=json"
+              ],
+              "cwd": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-source",
+              "target_directory": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-size-build",
+              "environment_overrides": {
+                "BENCH_EXTRA_FUNCTIONS": "5000"
+              },
+              "effective_encoded_rustflags": "--remap-path-prefix=/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-source=/xlfn/source\u001f--remap-path-prefix=/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-size-build=/xlfn/target"
+            }
+          }
+        ],
+        "size_slope_bytes_per_extra_registration": 7326.028442250945,
+        "interval_slopes": [
+          {
+            "from": 0,
+            "to": 10,
+            "bytes_per_extra_registration": 6270.4
+          },
+          {
+            "from": 10,
+            "to": 100,
+            "bytes_per_extra_registration": 7497.955555555555
+          },
+          {
+            "from": 100,
+            "to": 1000,
+            "bytes_per_extra_registration": 7316.177777777778
+          },
+          {
+            "from": 1000,
+            "to": 5000,
+            "bytes_per_extra_registration": 7326.476
+          }
+        ],
+        "target": "aarch64-apple-darwin",
+        "fixture_manifest": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/baseline-source/benchmarks/excel-comparison/xlfn/Cargo.toml",
+        "features": [
+          "async",
+          "rtd"
+        ]
+      }
+    },
+    "candidate": {
+      "source": {
+        "revision": "b9596f8e221ef3804bb802c0795d7e7e8660f8df",
+        "working_tree_diff_sha256": "1fa3e0357e8a878eb60cf37304ffb3f543be988432bb204debb938a862e4da41",
+        "working_tree_status": "M Cargo.toml\n M Justfile\n M README.md\n M benchmarks/performance/compare.py\n M crates/xlfn-kernel/src/invariant.rs\n M crates/xlfn-kernel/src/published_owner.rs\n M crates/xlfn-package/src/staging.rs\n M crates/xlfn/src/async_udf/executor.rs\n M crates/xlfn/src/async_udf/future.rs\n M crates/xlfn/src/async_udf/generation.rs\n M crates/xlfn/src/async_udf/task.rs\n M crates/xlfn/src/cache.rs\n M crates/xlfn/src/excel_rtd/windows/automation.rs\n M crates/xlfn/src/excel_rtd/windows/class_factory.rs\n M crates/xlfn/src/excel_rtd/windows/server.rs\n M crates/xlfn/src/excel_rtd/windows/tests.rs\n M crates/xlfn/src/handle/domain.rs\n M crates/xlfn/src/return_abi/mod.rs\n M crates/xlfn/src/subscription/data_plane.rs\n M examples/basic-xll/Cargo.toml\n M examples/rtd-source/Cargo.toml\n M guide/src/requirements.md\n M probes/excel-abi-probe/Cargo.toml\n M rust-toolchain.toml\n M tests/xlfn-e2e-fixture/Cargo.toml\n?? benchmarks/performance/toolchain_compare.py\n?? tools/rust-1.99-pin-audit.md"
+      },
+      "source_sha256": "1c8ab6313dfdf9b4ed509c08baecf1106485e67cdaee4e364c1514ee74032010",
+      "toolchain": "1.99.0",
+      "rustc_vv": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: aarch64-apple-darwin\nrelease: 1.99.0\nLLVM version: 23.1.1",
+      "target": "aarch64-apple-darwin",
+      "features": [
+        "bench-internals",
+        "async",
+        "cache",
+        "rtd"
+      ],
+      "profile": "release",
+      "environment": {
+        "SDKROOT": "/Library/Developer/CommandLineTools/SDKs/MacOSX15.2.sdk",
+        "RUSTFLAGS": null,
+        "CARGO_ENCODED_RUSTFLAGS": null
+      },
+      "build_command": {
+        "argv": [
+          "cargo",
+          "+1.99.0",
+          "bench",
+          "-p",
+          "xlfn",
+          "--features",
+          "bench-internals,async,cache,rtd",
+          "--target",
+          "aarch64-apple-darwin",
+          "--no-run",
+          "--locked",
+          "--message-format=json",
+          "--bench",
+          "sync_boundary",
+          "--bench",
+          "cache_lookup",
+          "--bench",
+          "cache_miss_concurrency",
+          "--bench",
+          "async_spawn",
+          "--bench",
+          "rtd_publish",
+          "--bench",
+          "rtd_refresh"
+        ],
+        "cwd": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-source",
+        "target_directory": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-build",
+        "environment_overrides": {},
+        "effective_encoded_rustflags": "--remap-path-prefix=/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-source=/xlfn/source\u001f--remap-path-prefix=/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-build=/xlfn/target"
+      },
+      "executables": {
+        "async_spawn": {
+          "path": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-build/aarch64-apple-darwin/release/deps/async_spawn-6e11af57ba65ac44",
+          "sha256": "978c10dbbe2e8f175568db845b3a5a9bd529ad6b1a992b72e8d0ec882f6b8bdc"
+        },
+        "sync_boundary": {
+          "path": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-build/aarch64-apple-darwin/release/deps/sync_boundary-b874eee77d168422",
+          "sha256": "f07542c926418b10244905eb5b7e58494a95bd387d6afbad009cfe261824ae99"
+        },
+        "cache_lookup": {
+          "path": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-build/aarch64-apple-darwin/release/deps/cache_lookup-c73051948e72fdbb",
+          "sha256": "55eab27cd2d6c0eba874efe404d251f9a6e4ca16de1887ef5b3caa31f0c29948"
+        },
+        "rtd_publish": {
+          "path": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-build/aarch64-apple-darwin/release/deps/rtd_publish-70ccb59b087e7ce9",
+          "sha256": "475cc025d20fd62f2912e90bbbab78324d3d836fe9cc43e1e87d9d537442300f"
+        },
+        "cache_miss_concurrency": {
+          "path": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-build/aarch64-apple-darwin/release/deps/cache_miss_concurrency-d721f246a6120b67",
+          "sha256": "9f347c6491816f0db401486c2d62462a56ce1b590498e57ef07447626277032d"
+        },
+        "rtd_refresh": {
+          "path": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-build/aarch64-apple-darwin/release/deps/rtd_refresh-266e8aff5937a841",
+          "sha256": "dcc7fb802c17caf08f740396023f80a2f18e56df7dcb9e74279600bc6d197719"
+        }
+      },
+      "sizes": {
+        "extra_registration_counts": [
+          0,
+          10,
+          100,
+          1000,
+          5000
+        ],
+        "files": [
+          {
+            "extra_registrations": 0,
+            "bytes": 1724240,
+            "sha256": "59440046957922ed3d7b786c11d65159c9070d5df7f668719013835f2d9543f1",
+            "path": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/size-binaries/candidate/registration-0.dylib",
+            "build_command": {
+              "argv": [
+                "cargo",
+                "+1.99.0",
+                "build",
+                "--manifest-path",
+                "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-source/benchmarks/excel-comparison/xlfn/Cargo.toml",
+                "--release",
+                "--target",
+                "aarch64-apple-darwin",
+                "--locked",
+                "--message-format=json"
+              ],
+              "cwd": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-source",
+              "target_directory": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-size-build",
+              "environment_overrides": {
+                "BENCH_EXTRA_FUNCTIONS": "0"
+              },
+              "effective_encoded_rustflags": "--remap-path-prefix=/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-source=/xlfn/source\u001f--remap-path-prefix=/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-size-build=/xlfn/target"
+            }
+          },
+          {
+            "extra_registrations": 10,
+            "bytes": 1789920,
+            "sha256": "2e4f129d6f8678282af614a99f0f101979aee9b3295ee3f23f8603752f4221b7",
+            "path": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/size-binaries/candidate/registration-10.dylib",
+            "build_command": {
+              "argv": [
+                "cargo",
+                "+1.99.0",
+                "build",
+                "--manifest-path",
+                "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-source/benchmarks/excel-comparison/xlfn/Cargo.toml",
+                "--release",
+                "--target",
+                "aarch64-apple-darwin",
+                "--locked",
+                "--message-format=json"
+              ],
+              "cwd": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-source",
+              "target_directory": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-size-build",
+              "environment_overrides": {
+                "BENCH_EXTRA_FUNCTIONS": "10"
+              },
+              "effective_encoded_rustflags": "--remap-path-prefix=/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-source=/xlfn/source\u001f--remap-path-prefix=/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-size-build=/xlfn/target"
+            }
+          },
+          {
+            "extra_registrations": 100,
+            "bytes": 2447456,
+            "sha256": "f40257cf86cb0d3ab1470ed9de312679281f827ef20ebf956008f8295fdbc3df",
+            "path": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/size-binaries/candidate/registration-100.dylib",
+            "build_command": {
+              "argv": [
+                "cargo",
+                "+1.99.0",
+                "build",
+                "--manifest-path",
+                "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-source/benchmarks/excel-comparison/xlfn/Cargo.toml",
+                "--release",
+                "--target",
+                "aarch64-apple-darwin",
+                "--locked",
+                "--message-format=json"
+              ],
+              "cwd": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-source",
+              "target_directory": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-size-build",
+              "environment_overrides": {
+                "BENCH_EXTRA_FUNCTIONS": "100"
+              },
+              "effective_encoded_rustflags": "--remap-path-prefix=/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-source=/xlfn/source\u001f--remap-path-prefix=/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-size-build=/xlfn/target"
+            }
+          },
+          {
+            "extra_registrations": 1000,
+            "bytes": 9055392,
+            "sha256": "081f887b1be055e3b715e25c12f12a284e66858ea123479ed6e5c075b21ddfb8",
+            "path": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/size-binaries/candidate/registration-1000.dylib",
+            "build_command": {
+              "argv": [
+                "cargo",
+                "+1.99.0",
+                "build",
+                "--manifest-path",
+                "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-source/benchmarks/excel-comparison/xlfn/Cargo.toml",
+                "--release",
+                "--target",
+                "aarch64-apple-darwin",
+                "--locked",
+                "--message-format=json"
+              ],
+              "cwd": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-source",
+              "target_directory": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-size-build",
+              "environment_overrides": {
+                "BENCH_EXTRA_FUNCTIONS": "1000"
+              },
+              "effective_encoded_rustflags": "--remap-path-prefix=/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-source=/xlfn/source\u001f--remap-path-prefix=/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-size-build=/xlfn/target"
+            }
+          },
+          {
+            "extra_registrations": 5000,
+            "bytes": 38377040,
+            "sha256": "4307d5bd70a4316e471a56770647455f553e1fb853caf6a7608c870025137959",
+            "path": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/size-binaries/candidate/registration-5000.dylib",
+            "build_command": {
+              "argv": [
+                "cargo",
+                "+1.99.0",
+                "build",
+                "--manifest-path",
+                "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-source/benchmarks/excel-comparison/xlfn/Cargo.toml",
+                "--release",
+                "--target",
+                "aarch64-apple-darwin",
+                "--locked",
+                "--message-format=json"
+              ],
+              "cwd": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-source",
+              "target_directory": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-size-build",
+              "environment_overrides": {
+                "BENCH_EXTRA_FUNCTIONS": "5000"
+              },
+              "effective_encoded_rustflags": "--remap-path-prefix=/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-source=/xlfn/source\u001f--remap-path-prefix=/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-size-build=/xlfn/target"
+            }
+          }
+        ],
+        "size_slope_bytes_per_extra_registration": 7331.646692781584,
+        "interval_slopes": [
+          {
+            "from": 0,
+            "to": 10,
+            "bytes_per_extra_registration": 6568.0
+          },
+          {
+            "from": 10,
+            "to": 100,
+            "bytes_per_extra_registration": 7305.955555555555
+          },
+          {
+            "from": 100,
+            "to": 1000,
+            "bytes_per_extra_registration": 7342.151111111111
+          },
+          {
+            "from": 1000,
+            "to": 5000,
+            "bytes_per_extra_registration": 7330.412
+          }
+        ],
+        "target": "aarch64-apple-darwin",
+        "fixture_manifest": "/Users/nakashimahikaru/forge/repo/xlfn/target/rust-1.99-comparison/candidate-source/benchmarks/excel-comparison/xlfn/Cargo.toml",
+        "features": [
+          "async",
+          "rtd"
+        ]
+      }
+    }
+  },
+  "summary": [
+    {
+      "benchmark": "async_spawn/matrix_reschedule/workers_4/16",
+      "baseline_ns": 1022102.9629512483,
+      "candidate_ns": 1012291.0343392704,
+      "change_percent": -0.9599745786517011
+    },
+    {
+      "benchmark": "async_spawn/per_iteration/1",
+      "baseline_ns": 103056.7570373595,
+      "candidate_ns": 104421.27498781677,
+      "change_percent": 1.3240451084276073
+    },
+    {
+      "benchmark": "cache_lookup/cache_hit/u64/current/warm",
+      "baseline_ns": 29945.300730543822,
+      "candidate_ns": 31571.422427489175,
+      "change_percent": 5.4303067836174
+    },
+    {
+      "benchmark": "cache_miss_concurrency/distinct_keys/cheap_u64/cache/workers_1",
+      "baseline_ns": 52112.379257133165,
+      "candidate_ns": 51216.04304906332,
+      "change_percent": -1.7200063033912416
+    },
+    {
+      "benchmark": "cache_miss_concurrency/same_key/cheap_u64/cache/workers_4",
+      "baseline_ns": 145669.27735119048,
+      "candidate_ns": 142925.32583268633,
+      "change_percent": -1.8836858179016258
+    },
+    {
+      "benchmark": "rtd_publish/number/changing",
+      "baseline_ns": 358066.49795423984,
+      "candidate_ns": 338313.53485576925,
+      "change_percent": -5.51656276454967
+    },
+    {
+      "benchmark": "rtd_publish/number/same_value",
+      "baseline_ns": 276344.2436630147,
+      "candidate_ns": 269175.581308324,
+      "change_percent": -2.594105909234168
+    },
+    {
+      "benchmark": "rtd_refresh/number/end_to_end/dense",
+      "baseline_ns": 335938.8620035867,
+      "candidate_ns": 336536.12486772484,
+      "change_percent": 0.1777891550194477
+    },
+    {
+      "benchmark": "sync_boundary/admission/1",
+      "baseline_ns": 26718.68820736693,
+      "candidate_ns": 26565.709649507353,
+      "change_percent": -0.5725526518079449
+    },
+    {
+      "benchmark": "sync_boundary/scalar_return/no_subscriber/1",
+      "baseline_ns": 54132.57716458502,
+      "candidate_ns": 52033.94728047584,
+      "change_percent": -3.8768334966364004
+    }
+  ],
+  "completed_at_utc": "2026-10-01T14:39:17.227159+00:00",
+  "interpretation": "Source and compiler adoption comparison; source changes and LLVM effects are combined. Criterion times describe framework batches on this host, not live Excel UDF latency.",
+  "target": "aarch64-apple-darwin",
+  "measurement_host": "macOS-27.0-arm64-arm-64bit-Mach-O",
+  "processor": "Apple M1",
+  "size_limitations": "Rust source/build paths are remapped. Mach-O LC_ID_DYLIB retains the physical output name: its padded command is 176 bytes for baseline and 184 for candidate at every count. This fixed 8-byte metadata difference does not affect the registration slope. These are unstripped macOS fixture libraries; native Windows PE sizes remain unmeasured."
+}

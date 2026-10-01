@@ -163,7 +163,7 @@ unsafe fn reclaim_cache_node<V>(entry: ReclaimEntry<V>) {
     let ReclaimEntry { pointer: ptr, .. } = entry;
     // SAFETY: the caller establishes quiescence; consuming entry transfers the
     // unique retirement ownership into Box without copying the inline payload.
-    let node = unsafe { Box::from_raw(ptr) };
+    let node = unsafe { Box::from_non_null(ptr) };
     // Drop in place: moving an inline, potentially large V onto the stack
     // just to catch its destructor would add copies and risk stack overflow.
     // Box's drop glue frees the node even if V's destructor unwinds. All
@@ -949,7 +949,7 @@ impl<V> Drop for CreatorPinGuard<'_, V> {
 }
 
 struct ReclaimEntry<V> {
-    pointer: *mut CacheNode<V>,
+    pointer: NonNull<CacheNode<V>>,
     weight: u64,
     domain: NonNull<CacheLookupDomain<V>>,
 }
@@ -961,7 +961,7 @@ impl<V> ReclaimEntry<V> {
         let node = unsafe { pointer.as_ref() };
         if node.release_pin() {
             Some(Self {
-                pointer: pointer.as_ptr(),
+                pointer,
                 weight: node.weight,
                 domain: node_layout::domain!(node),
             })
@@ -974,7 +974,7 @@ impl<V> ReclaimEntry<V> {
     #[cfg(test)]
     fn sentinel(domain: &CacheLookupDomain<V>, weight: u64) -> Self {
         Self {
-            pointer: std::ptr::null_mut(),
+            pointer: NonNull::dangling(),
             weight,
             domain: NonNull::from(domain),
         }
@@ -1783,7 +1783,8 @@ where
                         generation: flight.key.epoch,
                         domain: NonNull::from(&*self.domain),
                     });
-                    let node_ptr = NodePtr(NonNull::from(Box::leak(node)));
+                    // Transfer allocation ownership to the pin/reclamation protocol.
+                    let node_ptr = NodePtr(Box::into_non_null(node));
                     let creator_guard = CreatorPinGuard::new(node_ptr.0);
 
                     // SAFETY: node_ptr points to the newly allocated CacheNode kept alive by creator_guard.
@@ -3488,7 +3489,7 @@ mod tests {
             for index in indexes {
                 let drops = Arc::new(AtomicUsize::new(0));
                 let domain = Box::new(CacheLookupDomain::new());
-                let node = NonNull::from(Box::leak(Box::new(CacheNode {
+                let node = Box::into_non_null(Box::new(CacheNode {
                     value: DropProbe(Arc::clone(&drops)),
                     pins: AtomicU32::new(1),
                     resident: AtomicBool::new(true),
@@ -3496,7 +3497,7 @@ mod tests {
                     weight: 1,
                     generation: 0,
                     domain: NonNull::from(&*domain),
-                })));
+                }));
                 let creator = CreatorPinGuard::new(node);
                 // SAFETY: creator owns the initial pin in this live allocation.
                 unsafe { node.as_ref() }.acquire_anchor_pin();

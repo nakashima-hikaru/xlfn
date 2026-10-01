@@ -174,7 +174,7 @@ fn double_checked_hit_reclaims_after_singleflight_unlock() {
         generation: epoch,
         domain: NonNull::from(&*cache.domain),
     });
-    let pointer = NodePtr(NonNull::from(Box::leak(node)));
+    let pointer = NodePtr(Box::into_non_null(node));
     cache.index.insert_resident(
         &VersionedKey {
             epoch,

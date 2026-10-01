@@ -94,7 +94,7 @@ impl GenerationPin {
         // reclamation while this lifetime reservation is added.
         state
             .pins
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |pins| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |pins| {
                 pins.checked_add(1)
             })
             .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());

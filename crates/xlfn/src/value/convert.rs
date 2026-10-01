@@ -1,4 +1,4 @@
-//! Composable input conversions for custom [`FromExcel`](crate::value::FromExcel) implementations.
+//! Composable input conversions for custom [`FromExcel`] implementations.
 //!
 //! These functions apply the same presence, shape, and allocation limits as
 //! built-in worksheet parameters. The supplied converter handles one cell;

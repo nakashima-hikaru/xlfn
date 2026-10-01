@@ -1,9 +1,10 @@
 # Developer and CI command surface. Keep CI workflows and the testing guide
 # aligned with these recipes.
 
-# parking_lot_core 0.9.12 passes a reference to Linux's variadic futex syscall;
-# newer Miri rejects its argument type. Revisit this pin after an upstream fix.
-miri-toolchain := "nightly-2026-08-22"
+# Supports the Rust 1.99 ownership APIs and MSRV. Newer Miri rejects the
+# reference passed to Linux's variadic futex syscall by parking_lot_core 0.9.12
+# (upstream #542 / fix #539). Revisit this pin after an upstream release.
+miri-toolchain := "nightly-2026-09-02"
 
 default:
     @just --list
@@ -62,8 +63,14 @@ miri:
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features handles --lib --locked -- miri_
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features async --lib --locked -- miri_
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features rtd --lib --locked -- miri_
+    just miri-cache-ownership
     just miri-cache-endpoints
     just miri-cache-resident-entry
+
+# Creator rollback, final-pin ordering and zero-budget Box recovery.
+miri-cache-ownership:
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features cache --lib --locked -- cache::tests::miri_
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-tree-borrows" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features cache --lib --locked -- cache::tests::miri_
 
 # Resident pointer tags preserve provenance and release ownership exactly once.
 miri-cache-resident-entry:

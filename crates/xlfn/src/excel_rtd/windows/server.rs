@@ -768,7 +768,7 @@ fn ensure_server_impl(
         _module_lease: ComObjectLease::new(ComObjectKind::Server),
     });
 
-    let pointer = Box::into_raw(server) as usize;
+    let pointer = Box::into_non_null(server).as_ptr() as usize;
     let entry = ActiveServer {
         class_id,
         prog_id: format!("XlFnRtd_{}", guid_compact(class_id)),
@@ -832,7 +832,7 @@ pub(super) unsafe extern "system" fn server_add_ref(this: *mut RtdServer) -> u32
         // SAFETY: COM and internal callers invoke AddRef only on a live RtdServer.
         let references = unsafe { &(*this).references };
         references
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
                 count.checked_add(1)
             })
             .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop())
@@ -857,8 +857,8 @@ pub(super) unsafe extern "system" fn server_release(this: *mut RtdServer) -> u32
 
         if remaining == 0 {
             // SAFETY: the transition to zero proves exclusive ownership of the Box
-            // allocation originally produced by Box::into_raw.
-            drop(unsafe { Box::from_raw(this.as_ptr()) });
+            // allocation originally produced by Box::into_non_null.
+            drop(unsafe { Box::from_non_null(this) });
         }
 
         remaining

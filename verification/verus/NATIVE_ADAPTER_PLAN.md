@@ -19,7 +19,7 @@ drain operation correct would exceed that primitive boundary.
 | `HandleReadDomain.{debt, queued}: AtomicUsize` | `counter_refinement` proves checked arithmetic against the corrected destruction-in-flight model; `completion` holds a separate finite-width debt value | The exact native debt and queued locations must be tied to retirement registration, certified queue withdrawal and post-destructor discharge across concurrent reclaimers; a fresh vstd counter would not identify either field |
 | Native idle rotation uses the transition mutex, current atomic and retirement queue | The resource-backed `IdleHandoff` keeps a vstd transition WriteHandle and zero-count stripe leases through vstd publication, prepared-queue detachment and Cache/Handle heap-permission recovery; the verified callback runs before sealed controls are restored. Production `RotatingRetirementDomain` now owns the admission domain and both queues, selecting those same fields for registration, publication barriers and certified withdrawal | The production owner is not identified with the vstd transition/queue objects; native atomic and guard semantics, callback-to-native-callsite identity, destructor completion and weak-memory ordering remain unproved |
 | `parking_lot` wait/notify with RAII guards | Executable wait models and vstd locks | Guard identity, unlock/relock, notification discipline and unwind exits must connect to the actual objects |
-| `Box::leak` / `Box::from_raw` in Cache | `HeapPermission` is supplied to initialization and returned by recovery | Allocation identity and exact allocator permission must cross the native APIs once, without moving the inline payload during destruction |
+| `Box::into_non_null` / `Box::from_non_null` in Cache | `HeapPermission` is supplied to initialization and returned by recovery | Allocation identity and exact allocator permission must cross the native APIs once, without moving the inline payload during destruction |
 
 ## Reader-owned observation implementation
 
@@ -54,6 +54,11 @@ types, and rejects native `Box::into_raw`/`from_raw`. The reproducible probes ar
 and `tools/probe_verus_heap_contracts.py`. The std lock probe is diagnostic only:
 production uses `parking_lot`, whose native object/guard identity is a separate
 open obligation. A compiler rejection is never counted as a verified property.
+
+Rust 1.99 production now uses `Box::into_non_null`/`from_non_null` for Cache
+and PublishedOwner. The older heap probes describe the previous raw/leak APIs;
+the new primitives have not been probed or connected to the permission proofs.
+The native allocation boundary remains open.
 
 These are unresolved obligations, not authorization to add trusted adapters.
 Under the selected policy they must remain open until they can be established

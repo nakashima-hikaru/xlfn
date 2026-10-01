@@ -3009,7 +3009,7 @@ trusted adapter is added to fill the gap.
 | Admission and permit release | `drain_gate.rs` and `rotating_read_domain.rs` use shared counter transitions and reader retry expressions | Dual-width counter and stripe resource proofs | Native atomic location/history and `parking_lot` guard identity |
 | Seal, drain and generation publish | `RotatingRetirementDomain` owns the admission domain and both queues; publication barriers select its own fields | Shared rotation order, pending/idle collection and all-stripe modeled drain authority | Native cross-location ordering and callback-to-native-field correspondence |
 | Retirement registration and certified detachment | Cache, Handle bindings and Handle topics call the owner's registration and certificate take methods | Shared select/recheck/append and exact queue withdrawal expressions, with resource-backed Cache/Handle batches | Native `Mutex`/`SmallVec` representation and destructor behavior |
-| Cache reclaim | `cache.rs` consumes detached entries after quiescence | Shared pin kernel and modeled observation/heap permission recovery | Actual `CacheNode.pins`, native allocation and `Box::from_raw` identity |
+| Cache reclaim | `cache.rs` consumes detached entries after quiescence | Shared pin kernel and modeled observation/heap permission recovery | Actual `CacheNode.pins`, native allocation and `Box::from_non_null` identity |
 | Handle reclaim | `handle/domain.rs` retains detached batches through destruction and debt completion | Modeled reader shares, bounded drain, exact batch recovery and shared completion tail | Native AtomicPtr/guard/debt history, raw allocation and `Drop` behavior |
 
 Lean and Verus share invariant identifiers and corresponding protocol claims,

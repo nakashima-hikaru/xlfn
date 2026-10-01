@@ -27,8 +27,7 @@ impl<T> PublishedOwner<T> {
 impl<T: ?Sized> PublishedOwner<T> {
     pub fn from_box(value: Box<T>) -> Self {
         Self {
-            // SAFETY: Box allocations are non-null, including zero-sized T.
-            pointer: unsafe { NonNull::new_unchecked(Box::into_raw(value)) },
+            pointer: Box::into_non_null(value),
         }
     }
 
@@ -52,7 +51,7 @@ impl<T: ?Sized> PublishedOwner<T> {
     pub fn into_box(self) -> Box<T> {
         let owner = std::mem::ManuallyDrop::new(self);
         // SAFETY: [PO-1] this unique owner consumes the original Box allocation once.
-        unsafe { Box::from_raw(owner.pointer.as_ptr()) }
+        unsafe { Box::from_non_null(owner.pointer) }
     }
 }
 
@@ -78,7 +77,7 @@ impl<T: ?Sized> Drop for PublishedOwner<T> {
     fn drop(&mut self) {
         // SAFETY: this is the sole owner of the original Box allocation. Raw
         // pointer publishers must end access before owner destruction.
-        unsafe { drop(Box::from_raw(self.pointer.as_ptr())) };
+        unsafe { drop(Box::from_non_null(self.pointer)) };
     }
 }
 

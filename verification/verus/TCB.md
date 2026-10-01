@@ -1027,7 +1027,7 @@ allocation or establish that the native pin atomic governs this permission.
 `reclaim_cache_node` now takes ReclaimEntry<V> by value instead of accepting its
 copyable raw pointer. Both the certified-batch loop and never-published fast path
 move the entry into this boundary. Only there is the pointer extracted for
-Box::from_raw. The inline value is still destroyed in place; the existing panic
+Box::from_non_null. The inline value is still destroyed in place; the existing panic
 containment and Box deallocation path are preserved.
 
 A native compile-fail probe rejects passing the same entry twice with E0382. The
@@ -1261,10 +1261,15 @@ Verus. CI execution itself has not been performed locally.
 `tools/probe_verus_heap_contracts.py` distinguishes proved, unproved and unsupported
 outcomes using the installed verifier. With 0.2026.09.13.671956e, Box::new's value
 and a PointsTo-guarded pointer borrow verify. Box::into_raw, Box::from_raw and the
-Box::leak-to-pointer expression used by Cache are unsupported. Compiler rejection
+Box::leak-to-pointer expression formerly used by Cache are unsupported. Compiler rejection
 is reported as unsupported, never as successful verification; unexpected compiler
 errors fail the diagnostic. This is an informational probe, not a gate requiring
 future Verus versions to retain those limitations.
+
+Rust 1.99 production now transfers and recovers these allocations with
+`Box::into_non_null`/`from_non_null`. Those primitives have not been probed
+or linked to HeapPermission by the installed verifier. This ownership API
+change does not close the native refinement boundary.
 
 Thus recovering HeapPermission from the retirement ledger still does not establish
 the native Box handoff. Adding a local trusted specification for that handoff would
@@ -1338,7 +1343,7 @@ are proved with Verus closure contracts; Cache and Handle callbacks each prove
 exact source-sequence heap-permission recovery and matching queue-ready identity.
 
 This adds no project-owned trusted specification. The vstd objects remain
-separate from native `AtomicUsize`, transition mutex, queue, `Box::from_raw` and
+separate from native `AtomicUsize`, transition mutex, queue, `Box::from_non_null` and
 destructors. Their field identity and native callback callsite, unwind and
 weak-memory refinement remain open.
 

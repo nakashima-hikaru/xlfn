@@ -1,5 +1,5 @@
-error[E0599]: no method named `callbacks` found for reference `&xlfn::call::CallScope<'_>` in the current scope
+error[E0599]: no method named `callbacks` found for reference `&xlfn::__private::v1::CallScope<'_>` in the current scope
  --> tests/ui/fail/context_callback_scope.rs:3:32
   |
 3 |         let _authority = scope.callbacks();
-  |                                ^^^^^^^^^ method not found in `&xlfn::call::CallScope<'_>`
+  |                                ^^^^^^^^^ method not found in `&xlfn::__private::v1::CallScope<'_>`

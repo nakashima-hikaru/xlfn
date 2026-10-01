@@ -1,5 +1,10 @@
 # Large-array and handle-release measurements, 2026-09-30
 
+The [Rust 1.99 adoption comparison](rust-1.99.md) records the source/toolchain
+upgrade against Rust 1.98.1, including representative framework timings and
+the registration fixture's binary-size slope. Its paired runner also supports
+native `i686-pc-windows-msvc` and `x86_64-pc-windows-msvc` runs.
+
 The follow-up [2026-10-01 comparison](2026-10-01.md) measures deferred borrowed
 numeric inputs and the remaining pin, cache-flight, and callback admission
 coordination changes against the committed version of this implementation.
@@ -202,9 +207,13 @@ previous Windows numbers cannot be directly compared with this host's values.
 
 ## Reproduction
 
-Run from the repository root with Rust 1.98.1. For the recorded macOS setup,
-use SDK 15.2; on another host choose its native toolchain/SDK and treat the
-results as a separate measurement. Start with a fresh output directory.
+These are the historical Rust 1.98.1 commands. Run them from a checkout of
+`b9596f8e221ef3804bb802c0795d7e7e8660f8df`, which retains the compatible
+candidate sources and toolchain. The current checkout requires Rust 1.99;
+use the [Rust 1.99 comparison](rust-1.99.md) for the current source tree.
+For the recorded macOS setup, use SDK 15.2; on another host choose its native
+toolchain/SDK and treat the results as a separate measurement. Start with a
+fresh output directory.
 
 ```sh
 rtk proxy mkdir -p target/performance-repro/baseline

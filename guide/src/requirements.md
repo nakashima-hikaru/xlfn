@@ -18,7 +18,7 @@ process is 32-bit or 64-bit. Match that process bitness, even if Windows itself 
 You need:
 
 - Windows 10 or Windows 11 with desktop Excel;
-- Rust **1.98.1 or later**;
+- Rust **1.99.0 or later**;
 - Visual Studio Build Tools with the **Desktop development with C++** workload.
 
 Add the target corresponding to your Excel installation:

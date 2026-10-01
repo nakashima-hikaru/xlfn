@@ -1,0 +1,117 @@
+{
+  "date": "2026-10-01",
+  "baseline_revision": "b9596f8e221ef3804bb802c0795d7e7e8660f8df",
+  "candidate": "uncommitted Rust 1.99 adoption changes",
+  "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
+  "llvm": "23.1.1",
+  "host": "aarch64-apple-darwin",
+  "build_environment": {
+    "SDKROOT": "/Library/Developer/CommandLineTools/SDKs/MacOSX15.2.sdk"
+  },
+  "checks": [
+    {
+      "command": "cargo nextest run --workspace --all-features --locked --no-fail-fast",
+      "result": "passed",
+      "passed": 1061,
+      "skipped": 11,
+      "note": "Includes the compile-fail suite after reviewing and updating 24 compiler diagnostic snapshots; its 60 cases retain the same acceptance/rejection behavior."
+    },
+    {
+      "command": "cargo clippy --workspace --all-targets --all-features --locked",
+      "result": "passed",
+      "raw_borrows_via_references": "deny"
+    },
+    {
+      "command": "just features",
+      "result": "passed",
+      "feature_combinations": 48
+    },
+    {
+      "command": "RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps --locked",
+      "result": "passed"
+    },
+    {
+      "command": "just guide-check",
+      "result": "passed",
+      "chapters": 18,
+      "standalone_source_projects": 1
+    },
+    {
+      "command": "cargo check --manifest-path <manifest> --locked",
+      "result": "passed",
+      "manifests": [
+        "examples/basic-xll/Cargo.toml",
+        "examples/rtd-source/Cargo.toml",
+        "tests/xlfn-e2e-fixture/Cargo.toml",
+        "probes/excel-abi-probe/Cargo.toml"
+      ],
+      "note": "Host checks; the Excel SDK C++ ABI probe was not run against a Windows SDK."
+    },
+    {
+      "command": "cargo check --workspace --lib --bins --all-features --locked --target <target> --features blake3/pure",
+      "result": "passed",
+      "targets": ["i686-pc-windows-msvc", "x86_64-pc-windows-msvc"],
+      "note": "Supplemental cross-target type/lint checks. Pure blake3 avoids a missing MSVC C compiler. All-target cross checks are blocked by the alloca dev dependency's missing Windows C headers. These are not native Windows execution results."
+    },
+    {
+      "command": "just miri",
+      "result": "passed",
+      "toolchain": "nightly-2026-09-02",
+      "target": "aarch64-apple-darwin",
+      "selections": {
+        "kernel_miri": 23,
+        "handles_miri": 35,
+        "async_miri": 29,
+        "rtd_miri": 27,
+        "cache_endpoints_stacked": 5,
+        "cache_endpoints_tree": 5,
+        "cache_resident_strict_stacked": 2,
+        "cache_resident_strict_tree": 2
+      },
+      "note": "The newly added cache ownership recipe was verified separately below. Selection counts overlap and are not unique test counts. Default suites retain parking_lot_core/crossbeam-epoch exposed-provenance warnings; they are not full strict-provenance certification."
+    },
+    {
+      "command": "cargo +nightly-2026-09-02 miri test -p xlfn --no-default-features --features cache --lib --locked -- cache::tests::miri_ --test-threads=1",
+      "result": "passed",
+      "stacked_passed": 8,
+      "tree_passed": 8,
+      "note": "Includes creator rollback, final-pin acquisition ordering, zero-budget recovery, and endpoint cases. Connected to just miri via miri-cache-ownership."
+    },
+    {
+      "command": "cargo +nightly-2026-09-02 miri test --target x86_64-unknown-linux-gnu -p <package> <features> --lib --locked -- miri_ --test-threads=1",
+      "result": "passed",
+      "kernel_passed": 23,
+      "async_passed": 29,
+      "note": "Linux-target interpretation by Miri on macOS, using a separate target directory. The async dev dependency was cross-compiled with clang and freestanding headers. This is not native Linux execution."
+    },
+    {
+      "command": "python3 -B -m unittest discover -s benchmarks/performance -p 'test_*.py'",
+      "result": "passed",
+      "passed": 6,
+      "note": "Checks stale/missing executable provenance, Windows executable suffixes, effective measurement duration and preservation of Cargo flag precedence."
+    },
+    {
+      "command": "python3 -B -m unittest discover -s tools -p test_check_release_metadata.py; python3 -B tools/check_release_metadata.py",
+      "result": "passed",
+      "unit_tests_passed": 7
+    },
+    {
+      "command": "cargo fmt --all -- --check; git diff --check",
+      "result": "passed"
+    }
+  ],
+  "miri_pin": {
+    "selected": "nightly-2026-09-02",
+    "newer_linux_trial": "nightly-2026-09-28",
+    "newer_linux_result": "blocked by parking_lot_core 0.9.12 variadic futex reference argument",
+    "upstream_issue": "https://github.com/Amanieu/parking_lot/issues/542",
+    "upstream_fix": "https://github.com/Amanieu/parking_lot/pull/539",
+    "note": "The selected nightly supports Rust 1.99 APIs and preserves the existing Linux CI platform without a dependency patch."
+  },
+  "unverified": [
+    "Native Windows tests and COM activation for this candidate",
+    "i686/x86_64 MSVC performance and binary-size curves",
+    "Live Excel behavior and UDF latency",
+    "Verus connection of the new Box non-null primitives to heap permissions"
+  ]
+}

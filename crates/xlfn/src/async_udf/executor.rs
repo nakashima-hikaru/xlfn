@@ -591,7 +591,7 @@ impl ExecutorShared {
 
         let task_id = self
             .next_id
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
             .map_err(|_| (XllError::Overloaded, false))?;
 
         Ok(SpawnReservation {

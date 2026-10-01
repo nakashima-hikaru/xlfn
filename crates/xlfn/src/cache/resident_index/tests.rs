@@ -16,7 +16,7 @@ fn entry_layout_and_thread_bounds() {
 }
 
 fn exercise_tag<V: PartialEq + std::fmt::Debug>(value: V) {
-    let pointer = NonNull::from(Box::leak(Box::new(CacheNode {
+    let pointer = Box::into_non_null(Box::new(CacheNode {
         value,
         // Keep a fixture pin after retirement, so the unused domain is never
         // accessed and the fixture can explicitly destroy the allocation.
@@ -26,7 +26,7 @@ fn exercise_tag<V: PartialEq + std::fmt::Debug>(value: V) {
         weight: 7,
         generation: 0,
         domain: NonNull::dangling(),
-    })));
+    }));
     let mut owner = ResidentEntry::new((NodePtr(pointer), 7));
     assert_eq!(owner.tagged_node.addr().get() & 1, 1);
     assert_eq!(owner.snapshot().0.0, pointer);
@@ -52,7 +52,7 @@ fn exercise_tag<V: PartialEq + std::fmt::Debug>(value: V) {
     assert_eq!(node.pins.load(Ordering::Relaxed), 1);
     assert!(!node.resident.load(Ordering::Relaxed));
     // SAFETY: only the fixture pin remains; no reference is used after this.
-    unsafe { drop(Box::from_raw(pointer.as_ptr())) };
+    unsafe { drop(Box::from_non_null(pointer)) };
     // Non-owning entries may outlive the allocation. Clone, snapshot and drop
     // must only manipulate pointer metadata, never touch the retired node.
     let stale = snapshot.clone();

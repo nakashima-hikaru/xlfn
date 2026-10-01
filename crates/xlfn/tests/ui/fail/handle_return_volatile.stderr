@@ -20,8 +20,8 @@ help: the trait `IntoExcel` is not implemented for `Dataset`
              i32
              i64
              std::string::String
-   = note: required for `Dataset` to implement `xlfn::call_return::traits::VolatileReturn`
-note: required by a bound in `xlfn::call_return::traits::assert_volatile_return`
+   = note: required for `Dataset` to implement `xlfn::__private::v1::VolatileReturn`
+note: required by a bound in `xlfn::__private::v1::assert_volatile_return`
   --> src/call_return/traits.rs
    |
    | pub fn assert_volatile_return<T: VolatileReturn>() {}

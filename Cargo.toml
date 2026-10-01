@@ -25,7 +25,7 @@ resolver = "3"
 # Package versions are explicit in each manifest: the facade, raw ABI,
 # packaging library and CLI have independent release contracts.
 edition = "2024"
-rust-version = "1.98.1"
+rust-version = "1.99.0"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/nakashima-hikaru/xlfn"
 publish = true
@@ -90,6 +90,7 @@ windows-link = "=0.100.0"
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)'] }
 unsafe_op_in_unsafe_fn = "deny"
+raw_borrows_via_references = "deny"
 unused_must_use = "deny"
 linker_messages = "deny"
 dangling_pointers_from_locals = "deny"

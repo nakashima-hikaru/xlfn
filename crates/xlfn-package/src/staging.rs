@@ -520,7 +520,7 @@ pub(crate) fn validate_private_windows_directory(path: &Path) -> PackageResult {
                 std::ptr::null_mut(),
                 &mut dacl,
                 std::ptr::null_mut(),
-                &mut security_descriptor as *mut *mut std::ffi::c_void,
+                &raw mut security_descriptor,
             )
         };
         if status != ERROR_SUCCESS as u32 {
@@ -633,7 +633,7 @@ pub(crate) fn validate_private_windows_directory(path: &Path) -> PackageResult {
         let acl_ok = unsafe {
             GetAclInformation(
                 checked_dacl,
-                (&mut size_information as *mut ACL_SIZE_INFORMATION).cast(),
+                (&raw mut size_information).cast(),
                 std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
                 AclSizeInformation,
             )

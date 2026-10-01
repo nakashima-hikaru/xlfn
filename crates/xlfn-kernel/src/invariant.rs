@@ -34,7 +34,7 @@ fn checked_atomic_sub_ordered(
     failure: Ordering,
 ) -> usize {
     counter
-        .fetch_update(success, failure, |value| value.checked_sub(amount))
+        .try_update(success, failure, |value| value.checked_sub(amount))
         .unwrap_or_else(|_| fail_stop())
 }
 
@@ -70,7 +70,7 @@ pub fn checked_atomic_dec_release(counter: &AtomicUsize) -> usize {
 #[inline]
 pub fn checked_atomic_sub_u64(counter: &AtomicU64, amount: u64) -> u64 {
     counter
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
             value.checked_sub(amount)
         })
         .unwrap_or_else(|_| fail_stop())

@@ -2,7 +2,7 @@
 name = "basic-xlfn"
 version = "0.2.0"
 edition = "2024"
-rust-version = "1.98.1"
+rust-version = "1.99.0"
 license = "MIT OR Apache-2.0"
 publish = false
 
@@ -16,6 +16,7 @@ xlfn = { version = "=0.2.0", path = "../../crates/xlfn" }
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
+raw_borrows_via_references = "deny"
 unused_must_use = "deny"
 linker_messages = "deny"
 dangling_pointers_from_locals = "deny"

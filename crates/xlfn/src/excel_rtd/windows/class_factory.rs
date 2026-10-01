@@ -109,7 +109,7 @@ unsafe fn dll_get_class_object_inner(
     // an additional reference that it releases when the factory is destroyed.
     unsafe { server_add_ref(server) };
 
-    let factory = Box::into_raw(Box::new(ClassFactory {
+    let factory = Box::into_non_null(Box::new(ClassFactory {
         vtable: &CLASS_FACTORY_VTABLE,
         references: AtomicU32::new(1),
         server,
@@ -118,11 +118,12 @@ unsafe fn dll_get_class_object_inner(
 
     // SAFETY: `factory` is a newly allocated live COM object, `interface_id` is
     // a validated readable GUID pointer, and `output` is writable.
-    let status = unsafe { factory_query_interface(factory, interface_id.cast::<GUID>(), output) };
+    let status =
+        unsafe { factory_query_interface(factory.as_ptr(), interface_id.cast::<GUID>(), output) };
 
     // SAFETY: release the construction reference. QueryInterface acquired a
     // separate reference if it succeeded.
-    unsafe { factory_release(factory) };
+    unsafe { factory_release(factory.as_ptr()) };
 
     status
 }
@@ -169,7 +170,7 @@ unsafe extern "system" fn factory_add_ref(this: *mut ClassFactory) -> u32 {
         // preserves the shared COM reference count.
         let references = unsafe { &(*this).references };
         references
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
                 count.checked_add(1)
             })
             .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop())
@@ -194,7 +195,7 @@ pub(super) unsafe extern "system" fn factory_release(this: *mut ClassFactory) ->
         if remaining == 0 {
             // SAFETY: observing the transition to zero proves this is the final
             // reference and uniquely owns the original Box allocation.
-            let factory = unsafe { Box::from_raw(this.as_ptr()) };
+            let factory = unsafe { Box::from_non_null(this) };
 
             // SAFETY: each factory owns one server reference acquired when the
             // factory was constructed.

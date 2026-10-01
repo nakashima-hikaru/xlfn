@@ -62,13 +62,13 @@ error[E0277]: `RefCell<xlfn::call::permits::Retained<handle::domain::HandleDomai
   |
   = help: within `Nested<'call>`, the trait `Sync` is not implemented for `RefCell<xlfn::call::permits::Retained<handle::domain::HandleDomainPermit>>`
   = note: if you want to do aliasing and mutation between multiple threads, use `std::sync::RwLock` instead
-note: required because it appears within the type `xlfn::call::CallScope<'call>`
+note: required because it appears within the type `xlfn::__private::v1::CallScope<'call>`
  --> src/call.rs
   |
   | pub struct CallScope<'call> {
   |            ^^^^^^^^^
-  = note: required because it appears within the type `&'call xlfn::call::CallScope<'call>`
-note: required because it appears within the type `PhantomData<&'call xlfn::call::CallScope<'call>>`
+  = note: required because it appears within the type `&'call xlfn::__private::v1::CallScope<'call>`
+note: required because it appears within the type `PhantomData<&'call xlfn::__private::v1::CallScope<'call>>`
  --> $RUST/core/src/marker.rs
   |
   | pub struct PhantomData<T: PointeeSized>;
@@ -198,13 +198,13 @@ note: required because it appears within the type `xlfn::call::CallScratch`
   |
   | pub(crate) struct CallScratch {
   |                   ^^^^^^^^^^^
-note: required because it appears within the type `xlfn::call::CallScope<'call>`
+note: required because it appears within the type `xlfn::__private::v1::CallScope<'call>`
  --> src/call.rs
   |
   | pub struct CallScope<'call> {
   |            ^^^^^^^^^
-  = note: required because it appears within the type `&'call xlfn::call::CallScope<'call>`
-note: required because it appears within the type `PhantomData<&'call xlfn::call::CallScope<'call>>`
+  = note: required because it appears within the type `&'call xlfn::__private::v1::CallScope<'call>`
+note: required because it appears within the type `PhantomData<&'call xlfn::__private::v1::CallScope<'call>>`
  --> $RUST/core/src/marker.rs
   |
   | pub struct PhantomData<T: PointeeSized>;
@@ -248,13 +248,13 @@ note: required because it appears within the type `xlfn::call::CallScratch`
   |
   | pub(crate) struct CallScratch {
   |                   ^^^^^^^^^^^
-note: required because it appears within the type `xlfn::call::CallScope<'call>`
+note: required because it appears within the type `xlfn::__private::v1::CallScope<'call>`
  --> src/call.rs
   |
   | pub struct CallScope<'call> {
   |            ^^^^^^^^^
-  = note: required because it appears within the type `&'call xlfn::call::CallScope<'call>`
-note: required because it appears within the type `PhantomData<&'call xlfn::call::CallScope<'call>>`
+  = note: required because it appears within the type `&'call xlfn::__private::v1::CallScope<'call>`
+note: required because it appears within the type `PhantomData<&'call xlfn::__private::v1::CallScope<'call>>`
  --> $RUST/core/src/marker.rs
   |
   | pub struct PhantomData<T: PointeeSized>;

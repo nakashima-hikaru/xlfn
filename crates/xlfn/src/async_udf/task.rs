@@ -41,7 +41,9 @@ impl<F: Future<Output = ()>> Future for TrackedFuture<F> {
         // SAFETY: the inline future is never moved after this wrapper is pinned;
         // its field is destroyed before the completion guard releases ownership.
         let this = unsafe { self.get_unchecked_mut() };
-        // SAFETY: the enclosing pin protects this field through destruction.
+        // SAFETY: the enclosing pin protects this field after this reborrow
+        // ends; no method moves it and field drop destroys it in place before
+        // completion. The &mut pointer upholds PinSafePointer's contract.
         match unsafe { Pin::new_unchecked(&mut this.future) }.poll(context) {
             Poll::Ready(result) => {
                 this.completion.observation.finished(result.is_ok());

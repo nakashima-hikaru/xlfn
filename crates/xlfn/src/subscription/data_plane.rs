@@ -1269,7 +1269,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
 
             let previous_epoch = self
                 .publish_epoch
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
                     epoch.checked_add(1)
                 })
                 .map_err(|_| XllError::Internal {

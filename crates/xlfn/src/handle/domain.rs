@@ -324,7 +324,7 @@ impl HandleReadDomain {
         // reader's notification cannot be cleared without being consumed.
         let previous = self
             .maintenance_requests
-            .fetch_update(
+            .try_update(
                 Ordering::AcqRel,
                 Ordering::Acquire,
                 |requests| match counters::add(requests, 1) {
@@ -339,15 +339,15 @@ impl HandleReadDomain {
         let mut consumed = 1;
         loop {
             self.poll_maintenance();
-            let requested = self
-                .maintenance_requests
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |requests| {
-                    match counters::subtract(requests, consumed) {
-                        counters::CountStep::Success(next) => Some(next),
-                        counters::CountStep::FailStop => None,
-                    }
-                })
-                .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+            let requested =
+                self.maintenance_requests
+                    .try_update(Ordering::AcqRel, Ordering::Acquire, |requests| {
+                        match counters::subtract(requests, consumed) {
+                            counters::CountStep::Success(next) => Some(next),
+                            counters::CountStep::FailStop => None,
+                        }
+                    })
+                    .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
             if requested == consumed {
                 return;
             }

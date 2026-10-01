@@ -3,7 +3,7 @@
 [![Crates.io](https://img.shields.io/crates/v/xlfn.svg)](https://crates.io/crates/xlfn)
 [![docs.rs](https://docs.rs/xlfn/badge.svg)](https://docs.rs/xlfn)
 [![CI](https://github.com/nakashima-hikaru/xlfn/actions/workflows/ci.yml/badge.svg)](https://github.com/nakashima-hikaru/xlfn/actions/workflows/ci.yml)
-[![Rust 1.98.1](https://img.shields.io/badge/Rust-1.98.1-000000?logo=rust)](rust-toolchain.toml)
+[![Rust 1.99.0](https://img.shields.io/badge/Rust-1.99.0-000000?logo=rust)](rust-toolchain.toml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 Build native Microsoft Excel XLL add-ins in Rust. Write worksheet functions in Rust;
@@ -29,7 +29,7 @@ Enable optional capabilities with Cargo features:
 
 ## Quick start
 
-You need Windows 10 or 11, Rust **1.98.1 or later**, and Visual Studio Build Tools
+You need Windows 10 or 11, Rust **1.99.0 or later**, and Visual Studio Build Tools
 with **Desktop development with C++**. Choose the target to match your Excel
 installation: `x86_64-pc-windows-msvc` for 64-bit Excel or
 `i686-pc-windows-msvc` for 32-bit Excel.

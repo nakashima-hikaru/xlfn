@@ -1193,8 +1193,8 @@ fn get_test_class_factory(active: &ActiveServer) -> TestClassFactory {
     // implementation constant.
     let status = unsafe {
         dll_get_class_object(
-            (&active.class_id as *const GUID).cast(),
-            (&iid as *const GUID).cast(),
+            (&raw const active.class_id).cast(),
+            (&raw const iid).cast(),
             &mut output,
         )
     };
@@ -1419,19 +1419,11 @@ fn refresh_data_arrays_have_two_rows_for_small_and_large_batches() {
             // both VARIANT outputs are initialized writable storage.
             unsafe {
                 assert_eq!(
-                    SafeArrayGetElement(
-                        array,
-                        topic_index.as_mut_ptr(),
-                        (&mut topic as *mut VARIANT).cast(),
-                    ),
+                    SafeArrayGetElement(array, topic_index.as_mut_ptr(), (&raw mut topic).cast(),),
                     S_OK
                 );
                 assert_eq!(
-                    SafeArrayGetElement(
-                        array,
-                        value_index.as_mut_ptr(),
-                        (&mut value as *mut VARIANT).cast(),
-                    ),
+                    SafeArrayGetElement(array, value_index.as_mut_ptr(), (&raw mut value).cast(),),
                     S_OK
                 );
             }
@@ -1500,19 +1492,11 @@ fn refresh_data_preserves_every_rtd_scalar_variant_by_column_and_row() {
         // and both VARIANT outputs are writable.
         unsafe {
             assert_eq!(
-                SafeArrayGetElement(
-                    array,
-                    topic_index.as_mut_ptr(),
-                    (&mut topic as *mut VARIANT).cast(),
-                ),
+                SafeArrayGetElement(array, topic_index.as_mut_ptr(), (&raw mut topic).cast(),),
                 S_OK
             );
             assert_eq!(
-                SafeArrayGetElement(
-                    array,
-                    value_index.as_mut_ptr(),
-                    (&mut value as *mut VARIANT).cast(),
-                ),
+                SafeArrayGetElement(array, value_index.as_mut_ptr(), (&raw mut value).cast(),),
                 S_OK
             );
             assert_eq!(topic.Anonymous.Anonymous.vt, VT_I4);
@@ -1658,7 +1642,7 @@ fn topic_key_from_safearray_handles_single_and_rejects_multi_or_invalid_dimensio
         var.Anonymous.Anonymous.vt = VT_BSTR;
         var.Anonymous.Anonymous.Anonymous.bstrVal = bstr;
         let index = 0i32;
-        SafeArrayPutElement(array, &index, (&mut var as *mut VARIANT).cast());
+        SafeArrayPutElement(array, &index, (&raw mut var).cast());
         VariantClear(&mut var);
     }
 
@@ -1700,7 +1684,7 @@ fn topic_key_from_safearray_handles_single_and_rejects_multi_or_invalid_dimensio
             var.Anonymous.Anonymous.vt = VT_BSTR;
             var.Anonymous.Anonymous.Anonymous.bstrVal = bstr;
             let index = i as i32;
-            SafeArrayPutElement(array_multi, &index, (&mut var as *mut VARIANT).cast());
+            SafeArrayPutElement(array_multi, &index, (&raw mut var).cast());
             VariantClear(&mut var);
         }
     }
@@ -1899,7 +1883,7 @@ fn com_query_failures_clear_stale_output_pointers() {
         unsafe {
             dll_get_class_object(
                 ptr::null(),
-                (&class_factory_iid as *const GUID).cast(),
+                (&raw const class_factory_iid).cast(),
                 &mut output,
             )
         },
@@ -1913,7 +1897,7 @@ fn com_query_failures_clear_stale_output_pointers() {
         // intentionally exercises validation.
         unsafe {
             dll_get_class_object(
-                (&ensured.active.class_id as *const GUID).cast(),
+                (&raw const ensured.active.class_id).cast(),
                 ptr::null(),
                 &mut output,
             )
@@ -1928,8 +1912,8 @@ fn com_query_failures_clear_stale_output_pointers() {
         // unsupported IID intentionally forces factory QI failure.
         unsafe {
             dll_get_class_object(
-                (&ensured.active.class_id as *const GUID).cast(),
-                (&unsupported_iid as *const GUID).cast(),
+                (&raw const ensured.active.class_id).cast(),
+                (&raw const unsupported_iid).cast(),
                 &mut output,
             )
         },
@@ -2316,7 +2300,7 @@ fn idispatch_validates_flags_counts_types_and_reversed_arguments() {
         // the valid VARIANT before the local is cleared.
         assert_eq!(
             // SAFETY: see the bounds and lifetime justification above.
-            unsafe { SafeArrayPutElement(array, &index, (&mut topic as *mut VARIANT).cast(),) },
+            unsafe { SafeArrayPutElement(array, &index, (&raw mut topic).cast(),) },
             S_OK
         );
         // SAFETY: `topic` contains one owned BSTR initialized above.
@@ -2539,19 +2523,11 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
     // the VARIANT outputs are writable.
     unsafe {
         assert_eq!(
-            SafeArrayGetElement(
-                array,
-                topic_index.as_mut_ptr(),
-                (&mut topic as *mut VARIANT).cast(),
-            ),
+            SafeArrayGetElement(array, topic_index.as_mut_ptr(), (&raw mut topic).cast(),),
             S_OK
         );
         assert_eq!(
-            SafeArrayGetElement(
-                array,
-                value_index.as_mut_ptr(),
-                (&mut value as *mut VARIANT).cast(),
-            ),
+            SafeArrayGetElement(array, value_index.as_mut_ptr(), (&raw mut value).cast(),),
             S_OK
         );
         assert_eq!(topic.Anonymous.Anonymous.vt, VT_I4);
@@ -2639,8 +2615,8 @@ fn wrong_clsid_is_not_served() {
     // points to a writable COM interface output slot.
     let status = unsafe {
         dll_get_class_object(
-            (&wrong as *const GUID).cast(),
-            (&class_factory_iid as *const GUID).cast(),
+            (&raw const wrong).cast(),
+            (&raw const class_factory_iid).cast(),
             &mut output,
         )
     };
@@ -2843,10 +2819,7 @@ fn unwrap_dispatch_variant_enforces_single_level_indirection() {
 
     // SAFETY: `direct` is a readable VARIANT on the stack.
     let unwrapped = unsafe { unwrap_dispatch_variant(&mut direct) };
-    assert_eq!(
-        unwrapped.map(|p| p.as_ptr()),
-        Some(&mut direct as *mut VARIANT)
-    );
+    assert_eq!(unwrapped.map(|p| p.as_ptr()), Some(&raw mut direct));
 
     // 2. VT_BYREF | VT_VARIANT -> VT_I4 -> returns inner VARIANT pointer
     let mut inner = VARIANT::default();
@@ -2859,10 +2832,7 @@ fn unwrap_dispatch_variant_enforces_single_level_indirection() {
 
     // SAFETY: both VARIANTs are readable on the stack.
     let unwrapped = unsafe { unwrap_dispatch_variant(&mut byref_valid) };
-    assert_eq!(
-        unwrapped.map(|p| p.as_ptr()),
-        Some(&mut inner as *mut VARIANT)
-    );
+    assert_eq!(unwrapped.map(|p| p.as_ptr()), Some(&raw mut inner));
 
     // 3. VT_BYREF | VT_VARIANT -> null -> returns None
     let mut byref_null = VARIANT::default();

@@ -224,9 +224,7 @@ impl PreparedReturn {
 
 impl ReturnBlock {
     fn into_non_null(block: Box<Self>) -> NonNull<XLOPER12> {
-        let pointer = Box::into_raw(block);
-        // SAFETY: Box::into_raw always returns a non-null, properly aligned pointer.
-        unsafe { NonNull::new_unchecked(pointer.cast::<XLOPER12>()) }
+        Box::into_non_null(block).cast()
     }
 }
 
@@ -708,30 +706,34 @@ unsafe fn enter_return_free_operation(pointer: *mut XLOPER12) -> Option<ReturnFr
 }
 
 unsafe fn free_return_block(pointer: *mut XLOPER12, operation: Option<&ReturnFreeGuard>) {
-    if pointer.is_null() || is_detached_error_pointer(pointer) {
+    let Some(pointer) = NonNull::new(pointer) else {
+        return;
+    };
+    if is_detached_error_pointer(pointer.as_ptr()) {
         return;
     }
-    let block_pointer = pointer.cast::<ReturnBlock>();
+    let mut block_pointer = pointer.cast::<ReturnBlock>();
     // SAFETY: caller contract guarantees pointer refers to a live
     // ReturnBlock produced by publish_excel or its heap fallback.
-    let block = unsafe { &mut *block_pointer };
+    let block = unsafe { block_pointer.as_mut() };
     debug_assert_eq!(block.magic, RETURN_MAGIC);
 
     debug_assert!(block.obligation.is_none());
     let operation = operation.expect("Excel return destruction owns a free guard");
     operation.obligation.observe_release_block();
 
-    destroy_return_block(block_pointer, block.backing);
+    let backing = block.backing;
+    destroy_return_block(block_pointer, backing);
 }
 
-fn destroy_return_block(pointer: *mut ReturnBlock, backing: ReturnBlockBacking) {
+fn destroy_return_block(pointer: NonNull<ReturnBlock>, backing: ReturnBlockBacking) {
     match backing {
         ReturnBlockBacking::Heap => {
-            // SAFETY: Heap backing was created with Box::into_raw and is
+            // SAFETY: Heap backing was created with Box::into_non_null and is
             // destroyed exactly once on this path.
-            unsafe { drop(Box::from_raw(pointer)) };
+            unsafe { drop(Box::from_non_null(pointer)) };
         }
-        ReturnBlockBacking::ThreadLocal => destroy_thread_local_return_block(pointer),
+        ReturnBlockBacking::ThreadLocal => destroy_thread_local_return_block(pointer.as_ptr()),
     }
 }
 

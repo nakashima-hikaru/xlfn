@@ -6,7 +6,7 @@ The vstd idle-publication path now also runs verified Cache and Handle recovery
 callbacks before restoring sealed controller state, using the production-shared
 `finish_rotation!` ordering. The callbacks return the exact withdrawn queue's
 heap permissions and matching ready token. Native field identity, callback
-callsite correspondence, `Box::from_raw`/`Drop`, and weak-memory ordering remain
+callsite correspondence, `Box::from_non_null`/`Drop`, and weak-memory ordering remain
 unproved; this does not change the no-new-trusted-adapter policy.
 
 Production Cache and Handle retirement now hold their read domain and both

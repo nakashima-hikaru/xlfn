@@ -52,7 +52,10 @@ impl<F: Future> Future for NoUnwindFuture<F> {
         if this.destroyed {
             xlfn_kernel::invariant::fail_stop();
         }
-        // SAFETY: the enclosing pin protects the inline future's address.
+        // SAFETY: the enclosing pin keeps F at this address until destroy drops
+        // it in place, even after this reborrow ends. The pointer being pinned
+        // is &mut F, whose pointer traits uphold PinSafePointer's contract;
+        // ManuallyDrop is only dereferenced before constructing that pointer.
         unsafe { Pin::new_unchecked(&mut *this.future) }.poll(context)
     }
 }

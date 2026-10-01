@@ -365,13 +365,13 @@ unsafe fn collect_dispatch_arguments(
             return Err(DISP_E_PARAMNOTFOUND);
         }
 
-        arguments[parameter_index] = &mut raw_variants[named_index] as *mut VARIANT;
+        arguments[parameter_index] = &raw mut raw_variants[named_index];
     }
 
     let mut value_index = named_count;
     for parameter_index in (0..expected).rev() {
         if arguments[parameter_index].is_null() {
-            arguments[parameter_index] = &mut raw_variants[value_index] as *mut VARIANT;
+            arguments[parameter_index] = &raw mut raw_variants[value_index];
             value_index += 1;
         }
     }
@@ -937,9 +937,7 @@ pub(super) unsafe fn topic_key_from_safearray(strings: *mut *mut SAFEARRAY) -> X
                 // SAFETY: `index` is within the validated SAFEARRAY bounds and
                 // `bstr_ptr` points to writable storage. For a VT_BSTR array,
                 // SafeArrayGetElement returns a copied BSTR owned by the caller.
-                if unsafe {
-                    SafeArrayGetElement(array_ptr, &index, (&mut bstr_ptr as *mut *mut u16).cast())
-                } < 0
+                if unsafe { SafeArrayGetElement(array_ptr, &index, (&raw mut bstr_ptr).cast()) } < 0
                 {
                     return Err(XllError::InvalidHandle);
                 }
@@ -968,10 +966,7 @@ pub(super) unsafe fn topic_key_from_safearray(strings: *mut *mut SAFEARRAY) -> X
                 // SAFETY: `index` is within the validated SAFEARRAY bounds and
                 // `value` points to initialized writable VARIANT storage. On
                 // success VariantGuard clears the copied value exactly once.
-                if unsafe {
-                    SafeArrayGetElement(array_ptr, &index, (&mut value as *mut VARIANT).cast())
-                } < 0
-                {
+                if unsafe { SafeArrayGetElement(array_ptr, &index, (&raw mut value).cast()) } < 0 {
                     return Err(XllError::InvalidHandle);
                 }
 
