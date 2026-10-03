@@ -26,6 +26,8 @@ converted. An input Excel error is propagated to the result.
 The Excel-visible name can differ from the Rust function name. Choose a project
 prefix for distributed functions, such as `ACME.MATH.HYPOT`, to avoid collisions
 with other add-ins. Registration rejects conflicting names.
+The macro rejects names longer than 255 UTF-16 code units, invalid name
+characters such as spaces or hyphens, and cell references such as `A1` or `R1C1`.
 
 ## Return an expected error
 

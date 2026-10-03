@@ -1,0 +1,11 @@
+error: invalid Excel function name: Excel function name exceeds the 255 UTF-16 unit limit
+ --> tests/ui/function_name_length.rs:4:4
+  |
+4 | fn ascii_too_long() -> f64 {
+  |    ^^^^^^^^^^^^^^
+
+error: invalid Excel function name: Excel function name exceeds the 255 UTF-16 unit limit
+ --> tests/ui/function_name_length.rs:9:4
+  |
+9 | fn utf16_too_long() -> f64 {
+  |    ^^^^^^^^^^^^^^

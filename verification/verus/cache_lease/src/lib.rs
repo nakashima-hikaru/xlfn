@@ -119,7 +119,7 @@ pub open spec fn step_leave_lookup(s: CacheTemporalState) -> Option<CacheTempora
     }
 }
 
-/// CacheLease is dropped / release_inner is called.
+/// One active pin is released through `release_node_pin`, including CacheLease drop.
 pub open spec fn step_release_pin(s: CacheTemporalState) -> Option<CacheTemporalState> {
     if s.pins > 0 {
         Some(CacheTemporalState {

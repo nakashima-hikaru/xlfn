@@ -66,6 +66,7 @@ miri:
     just miri-cache-ownership
     just miri-cache-endpoints
     just miri-cache-resident-entry
+    just miri-cache-residency
 
 # Creator rollback, final-pin ordering and zero-budget Box recovery.
 miri-cache-ownership:

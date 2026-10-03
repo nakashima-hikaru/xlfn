@@ -1,0 +1,47 @@
+error: invalid Excel function name: Excel function name must not be an A1 or R1C1 reference
+ --> tests/ui/function_name_reference.rs:4:4
+  |
+4 | fn a1_reference() -> f64 {
+  |    ^^^^^^^^^^^^
+
+error: invalid Excel function name: Excel function name must not be an A1 or R1C1 reference
+ --> tests/ui/function_name_reference.rs:9:4
+  |
+9 | fn final_cell() -> f64 {
+  |    ^^^^^^^^^^
+
+error: invalid Excel function name: Excel function name must not be an A1 or R1C1 reference
+  --> tests/ui/function_name_reference.rs:14:4
+   |
+14 | fn r1c1_reference() -> f64 {
+   |    ^^^^^^^^^^^^^^
+
+error: invalid Excel function name: Excel function name must not be an A1 or R1C1 reference
+  --> tests/ui/function_name_reference.rs:19:4
+   |
+19 | fn reversed_reference() -> f64 {
+   |    ^^^^^^^^^^^^^^^^^^
+
+error: invalid Excel function name: Excel function name must not be C, R, TRUE, or FALSE
+  --> tests/ui/function_name_reference.rs:24:4
+   |
+24 | fn reserved_column() -> f64 {
+   |    ^^^^^^^^^^^^^^^
+
+error: invalid Excel function name: Excel function name must not be C, R, TRUE, or FALSE
+  --> tests/ui/function_name_reference.rs:29:4
+   |
+29 | fn reserved_logical_value() -> f64 {
+   |    ^^^^^^^^^^^^^^^^^^^^^^
+
+error: invalid Excel function name: Excel function name must not be an A1 or R1C1 reference
+  --> tests/ui/function_name_reference.rs:34:4
+   |
+34 | fn fullwidth_reference() -> f64 {
+   |    ^^^^^^^^^^^^^^^^^^^
+
+error: invalid Excel function name: Excel function name must not be an A1 or R1C1 reference
+  --> tests/ui/function_name_reference.rs:39:4
+   |
+39 | fn arabic_indic_reference() -> f64 {
+   |    ^^^^^^^^^^^^^^^^^^^^^^

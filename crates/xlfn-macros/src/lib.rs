@@ -162,7 +162,7 @@ fn expand_excel_addin(
                         #id,
                         #display_name,
                         #category,
-                        env!("CARGO_PKG_VERSION"),
+                        ::core::env!("CARGO_PKG_VERSION"),
                         #krate::__private::v1::BUILD_TARGET,
                         xlAutoOpen as *const (),
                     )
@@ -266,7 +266,7 @@ mod tests {
         assert_eq!(spec.arguments[0].excel_name, "match");
 
         let parsed = model::parse_udf(
-            quote!(name = "r#type"),
+            quote!(name = "TYPE.VALUE"),
             function(quote!(
                 fn r#type(#[excel_arg(name = "r#match")] r#match: f64) -> f64 {
                     r#match
@@ -275,7 +275,7 @@ mod tests {
         )
         .unwrap();
         let spec = model::analyze(parsed).unwrap();
-        assert_eq!(spec.metadata.excel_name, "r#type");
+        assert_eq!(spec.metadata.excel_name, "TYPE.VALUE");
         assert_eq!(spec.arguments[0].excel_name, "r#match");
     }
 

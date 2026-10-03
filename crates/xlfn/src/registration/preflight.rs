@@ -17,7 +17,7 @@ pub(crate) fn validate_descriptors(descriptors: &[RegistrationDescriptor]) -> Xl
             .map(|argument| argument.name)
             .collect::<Vec<_>>();
         if descriptor.export_name.is_empty()
-            || descriptor.excel_name.is_empty()
+            || xlfn_common::validate_function_name(descriptor.excel_name).is_err()
             || descriptor.arguments.len() > max_arguments
             || xlfn_common::validate_argument_names(&argument_names).is_err()
             || !exports.insert(descriptor.export_name.to_ascii_lowercase())

@@ -337,12 +337,12 @@ pub(super) fn analyze(parsed: ParsedUdf) -> syn::Result<UdfSpec> {
         .name
         .clone()
         .unwrap_or_else(|| function_ident.unraw().to_string());
-    if excel_name.trim().is_empty() {
-        return Err(syn::Error::new_spanned(
+    xlfn_common::validate_function_name(&excel_name).map_err(|error| {
+        syn::Error::new_spanned(
             &function_ident,
-            "Excel function name cannot be empty",
-        ));
-    }
+            format!("invalid Excel function name: {error}"),
+        )
+    })?;
 
     let return_type = match &function.sig.output {
         syn::ReturnType::Default => syn::parse_quote!(()),
@@ -360,7 +360,6 @@ pub(super) fn analyze(parsed: ParsedUdf) -> syn::Result<UdfSpec> {
         help_topic: options.help_topic.clone().unwrap_or_default(),
     };
     for (field, value) in [
-        ("Excel function name", metadata.excel_name.as_str()),
         ("Excel function category", metadata.category.as_str()),
         ("Excel function description", metadata.description.as_str()),
         ("Excel function help topic", metadata.help_topic.as_str()),

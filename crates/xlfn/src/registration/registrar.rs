@@ -448,10 +448,10 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use xlfn_common::{ExecutionKind, FunctionVisibility};
 
-    fn prepared_set() -> PreparedRegistrationSet {
+    fn test_descriptor() -> RegistrationDescriptor {
         const ARGUMENTS: &[super::super::ArgumentDescriptor] = &[];
         const ABI_ARGUMENTS: &[ArgumentAbi] = &[];
-        preflight_registration(&[RegistrationDescriptor {
+        RegistrationDescriptor {
             export_name: "test_export",
             excel_name: "TEST.EXPORT",
             signature: RegistrationSignature {
@@ -464,8 +464,27 @@ mod tests {
             help_topic: "",
             visibility: FunctionVisibility::Public,
             arguments: ARGUMENTS,
-        }])
-        .unwrap()
+        }
+    }
+
+    fn prepared_set() -> PreparedRegistrationSet {
+        preflight_registration(&[test_descriptor()]).unwrap()
+    }
+
+    #[test]
+    fn preflight_rejects_invalid_excel_names() {
+        for name in ["bad name", "bad-name", "A1", "R1C1", "C"] {
+            let descriptor = RegistrationDescriptor {
+                excel_name: name,
+                ..test_descriptor()
+            };
+            assert!(matches!(
+                preflight_registration(&[descriptor]),
+                Err(XllError::Internal {
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRY,
+                })
+            ));
+        }
     }
 
     #[test]
