@@ -186,6 +186,27 @@ impl AsyncManager {
         })
     }
 
+    /// Rejects a saturated executor before converting owned Excel inputs.
+    ///
+    /// This does not admit a task: the authoritative reservation still happens
+    /// after preparation. No generation admission is held while a custom
+    /// converter runs, so reentrant calculation transitions remain possible.
+    pub(crate) fn preflight_spawn(&self, generation: u64) -> XllResult<()> {
+        let executor = self.published_executor().ok_or(XllError::Closing)?;
+        if executor.active.load(Ordering::Relaxed) < MAX_PENDING {
+            return Ok(());
+        }
+        // Only the saturated path needs generation/error ordering and a fresh
+        // atomic capacity decision. Capacity may have become available since
+        // the hint; release this temporary reservation before user preparation.
+        drop(
+            executor
+                .reserve_spawn(generation)
+                .map_err(|(error, _)| error)?,
+        );
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn snapshot_spawn_executor(&self) -> Result<ExecutorRead<'_>, (XllError, bool)> {
         self.published_executor().ok_or((XllError::Closing, false))

@@ -74,7 +74,21 @@ pub(crate) fn quarantine_runtime_resources<A: Addin>(runtime: &Runtime<A>) {
     // Claiming the existing authority is itself an invariant boundary. Keep
     // it outside the best-effort cleanup catch so a missing authority cannot
     // be swallowed as an ordinary quarantine cleanup failure.
-    let module_cleanup_authority = runtime.lifecycle_control().take_module_cleanup_authority();
+    use crate::module_runtime::ModuleCleanupClaim;
+    let module_cleanup_authority = match runtime.lifecycle_control().take_module_cleanup_authority()
+    {
+        ModuleCleanupClaim::Ready(authority) => Some(authority),
+        ModuleCleanupClaim::RetainedUndrained(epoch) => {
+            // The terminal export drain was not certified. Its capability and
+            // generation roots remain in terminal quarantine; never retry it
+            // from recovery, Drop, or a later host lifecycle hint.
+            if !epoch.is_current() {
+                fail_stop_invariant("retained module epoch changed", &XllError::Closing);
+            }
+            return;
+        }
+        ModuleCleanupClaim::Missing => None,
+    };
     if module_cleanup_authority.is_none()
         && (runtime
             .lifecycle_control()
@@ -91,8 +105,18 @@ pub(crate) fn quarantine_runtime_resources<A: Addin>(runtime: &Runtime<A>) {
         );
     }
     let _ = catch_no_unwind(AssertUnwindSafe(|| {
-        if let Some(module_cleanup_authority) = module_cleanup_authority {
-            module_cleanup_authority.finish();
+        if let Some(module_cleanup_authority) = module_cleanup_authority
+            && let Err((error, authority)) = module_cleanup_authority.finish()
+        {
+            runtime.lifecycle_orchestrator().quarantine();
+            runtime
+                .lifecycle_control()
+                .retain_failed_module_cleanup(authority);
+            runtime.observer().quarantine(
+                crate::shutdown::UnloadHazard::ExportDrainPreparationFailed.shutdown_failure(),
+            );
+            report_boundary_error("quarantine execution drain preparation", &error);
+            return;
         }
         let quarantined = runtime.quarantine_snapshot();
         if let Some((generation, reason)) = quarantined.last() {

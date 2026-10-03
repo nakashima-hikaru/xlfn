@@ -106,11 +106,7 @@ impl SyncBoundaryWorkerPool {
                                     r,
                                     "bench_udf",
                                     "BENCH.UDF",
-                                    |_, _| {
-                                        Ok(crate::call_return::ReturnPayload::Scalar(
-                                            crate::value::ExcelCellOutput::Number(42.0),
-                                        ))
-                                    },
+                                    |_, _| crate::call_return::ReturnPayload::scalar(42.0),
                                 );
                                 #[allow(
                                     unsafe_code,

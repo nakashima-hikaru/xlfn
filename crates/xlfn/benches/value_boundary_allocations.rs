@@ -4,7 +4,7 @@ use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use xlfn::benchmark_support::{
     BenchHandleObject, NumericArrayOutputBenchmark, RawArgumentIngressBenchmark,
-    SemanticIdentityBenchmark, Utf16IdentityBenchmark,
+    ScalarOutputBenchmark, SemanticIdentityBenchmark, Utf16IdentityBenchmark,
 };
 use xlfn::output::XlArrayBuilder;
 
@@ -102,6 +102,47 @@ enum Status {
 }
 
 fn main() {
+    for (label, payload) in [
+        ("ascii_short", "Ready".to_owned()),
+        ("ascii_limit", "x".repeat(32_767)),
+        ("unicode_short", "日本語💡".to_owned()),
+        ("unicode_limit", "日".repeat(32_767)),
+        ("empty", String::new()),
+    ] {
+        let length = payload.len();
+        let benchmark = ScalarOutputBenchmark::new(payload);
+        let borrowed = measure_calls(
+            &format!("scalar_output/{label}/borrowed"),
+            ARRAY_OUTPUT_CALLS,
+            || benchmark.run_borrowed(),
+        );
+        let owned = measure_calls(
+            &format!("scalar_output/{label}/owned"),
+            ARRAY_OUTPUT_CALLS,
+            || benchmark.run_owned(),
+        );
+        if !cfg!(feature = "refinement") {
+            let clones = usize::from(length != 0) * ARRAY_OUTPUT_CALLS;
+            assert_eq!(owned.allocations, borrowed.allocations + clones);
+            assert_eq!(owned.deallocations, borrowed.deallocations + clones);
+            assert_eq!(owned.reallocations, borrowed.reallocations);
+            assert_eq!(
+                owned.requested_bytes,
+                borrowed.requested_bytes + ARRAY_OUTPUT_CALLS * length,
+                "borrowed scalar output must avoid an intermediate UTF-8 allocation"
+            );
+        }
+    }
+    let scalar = ScalarOutputBenchmark::new("Ready".to_owned());
+    let text = measure("scalar_output/Ready/borrowed", || scalar.run_borrowed());
+    let enumeration = measure("scalar_output/Ready/enum", || scalar.run_enum());
+    assert_eq!(
+        enumeration, text,
+        "scalar enum labels must use the borrowed writer"
+    );
+    let numbers = measure("scalar_output/number", || scalar.run_number());
+    assert_runtime_allocation_free("scalar_output/number", numbers);
+
     let text = Utf16IdentityBenchmark::new(&"日本語💡".repeat(80));
     measure("identity/utf16_1k", || {
         black_box(text.run());

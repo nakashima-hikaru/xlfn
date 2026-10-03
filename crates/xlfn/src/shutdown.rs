@@ -236,6 +236,7 @@ pub(crate) enum UnloadHazard {
     DiagnosticWorkerStillRunning,
     RegistrationStateUnknown,
     CloseInvariantViolation,
+    ExportDrainPreparationFailed,
     RtdGitCallbackStillRegistered,
     RtdGitRevocationDebt,
 }
@@ -250,6 +251,7 @@ impl UnloadHazard {
                 crate::shutdown_trace::ShutdownFailure::AsyncShutdownFailed
             }
             Self::SubscriptionProducerStillRunning
+            | Self::ExportDrainPreparationFailed
             | Self::RtdGitCallbackStillRegistered
             | Self::RtdGitRevocationDebt => {
                 crate::shutdown_trace::ShutdownFailure::RtdShutdownFailed

@@ -16,11 +16,7 @@ mod key_retirement;
 use key_retirement::RetiredKeys;
 
 mod quick;
-#[cfg(feature = "bench-internals")]
-mod sharded;
 use quick::QuickResidentIndex;
-#[cfg(feature = "bench-internals")]
-use sharded::ShardedResidentIndex;
 
 #[cfg(test)]
 mod tests;
@@ -162,18 +158,11 @@ impl<K: Eq> Equivalent<VersionedKey<K>> for VersionedKeyRef<'_, K> {
     }
 }
 
-/// Production has one variant, stored inline: no runtime backend selection.
-/// Qualification tests/benchmarks opt into candidates via `bench-internals`.
+/// Resident policy and deferred key destruction for the production cache.
 pub(super) struct ResidentIndex<K, V> {
-    // Field order keeps the queue alive until every backend key is retired.
-    backend: Backend<K, V>,
+    // Field order keeps the key queue alive until the resident policy is dropped.
+    index: QuickResidentIndex<K, V>,
     retired_keys: Option<Arc<RetiredKeys<K>>>,
-}
-
-enum Backend<K, V> {
-    #[cfg(feature = "bench-internals")]
-    Sharded(Box<ShardedResidentIndex<K, V>>),
-    Quick(QuickResidentIndex<K, V>),
 }
 
 impl<K, V> ResidentIndex<K, V>
@@ -181,53 +170,26 @@ where
     K: Clone + Eq + Hash + Send + Sync + 'static,
     V: Send + Sync + 'static,
 {
-    #[cfg(feature = "bench-internals")]
-    pub(super) fn sharded(capacity: u64, shards: usize) -> Self {
+    pub(super) fn new(capacity: u64) -> Self {
         Self {
-            backend: Backend::Sharded(Box::new(ShardedResidentIndex::new(capacity, shards))),
-            retired_keys: std::mem::needs_drop::<K>().then(|| Arc::new(RetiredKeys::new())),
-        }
-    }
-
-    pub(super) fn quick(capacity: u64, shards: usize) -> Self {
-        Self {
-            backend: Backend::Quick(QuickResidentIndex::new(capacity, shards)),
+            index: QuickResidentIndex::new(capacity),
             retired_keys: std::mem::needs_drop::<K>().then(|| Arc::new(RetiredKeys::new())),
         }
     }
 
     #[cfg(feature = "bench-internals")]
-    pub(super) fn memory_estimate(&self) -> (usize, bool) {
-        match &self.backend {
-            Backend::Sharded(index) => (index.estimated_index_bytes(), false),
-            Backend::Quick(index) => (index.estimated_index_bytes(), false),
-        }
+    pub(super) fn memory_estimate(&self) -> usize {
+        self.index.estimated_index_bytes()
     }
 
     #[inline]
     pub(super) fn get(&self, key: &VersionedKeyRef<'_, K>) -> Option<Entry<V>> {
-        match &self.backend {
-            #[cfg(feature = "bench-internals")]
-            Backend::Sharded(index) => index.get(&self.own_key(VersionedKey {
-                epoch: key.epoch,
-                key: key.key.clone(),
-            })),
-            Backend::Quick(index) => index.get(key),
-        }
+        self.index.get(key)
     }
 
     /// Stores an initialized entry in the resident index.
     pub(super) fn insert_resident(&self, key: &VersionedKey<K>, entry: ResidentEntry<V>) {
-        let key = self.own_key(key.clone());
-        match &self.backend {
-            #[cfg(feature = "bench-internals")]
-            Backend::Sharded(index) => {
-                index.publish(key, entry);
-            }
-            Backend::Quick(index) => {
-                index.insert_resident(key, entry);
-            }
-        }
+        self.index.insert_resident(self.own_key(key.clone()), entry);
     }
 
     fn own_key(&self, key: VersionedKey<K>) -> ResidentKey<K> {
@@ -238,19 +200,11 @@ where
     }
 
     pub(super) fn invalidate(&self, key: &VersionedKey<K>) {
-        match &self.backend {
-            #[cfg(feature = "bench-internals")]
-            Backend::Sharded(index) => index.invalidate(key),
-            Backend::Quick(index) => index.invalidate(key),
-        }
+        self.index.invalidate(key);
     }
 
     pub(super) fn invalidate_before(&self, epoch: u64) {
-        match &self.backend {
-            #[cfg(feature = "bench-internals")]
-            Backend::Sharded(index) => index.invalidate_before(epoch),
-            Backend::Quick(index) => index.invalidate_before(epoch),
-        }
+        self.index.invalidate_before(epoch);
     }
 
     /// Runs key destructors only after the caller has left all cache locks.
@@ -269,26 +223,14 @@ where
     }
 
     pub(super) fn clear(&self) {
-        match &self.backend {
-            #[cfg(feature = "bench-internals")]
-            Backend::Sharded(index) => index.clear(),
-            Backend::Quick(index) => index.clear(),
-        }
+        self.index.clear();
     }
 
     pub(super) fn resident_count(&self) -> u64 {
-        match &self.backend {
-            #[cfg(feature = "bench-internals")]
-            Backend::Sharded(index) => index.resident_count(),
-            Backend::Quick(index) => index.resident_count(),
-        }
+        self.index.resident_count()
     }
 
     pub(super) fn resident_weight(&self) -> u64 {
-        match &self.backend {
-            #[cfg(feature = "bench-internals")]
-            Backend::Sharded(index) => index.resident_weight(),
-            Backend::Quick(index) => index.resident_weight(),
-        }
+        self.index.resident_weight()
     }
 }

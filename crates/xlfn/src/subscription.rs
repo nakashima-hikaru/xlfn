@@ -16,6 +16,7 @@ mod catalog;
 mod channel;
 mod data_plane;
 mod delivery;
+mod disconnect;
 mod host;
 mod identity;
 mod runtime;
@@ -23,10 +24,6 @@ mod runtime_services;
 mod server;
 mod source;
 mod topic;
-#[cfg(all(feature = "rtd", feature = "bench-internals"))]
-mod topology_bench;
-#[cfg(all(feature = "rtd", feature = "bench-internals"))]
-pub use topology_bench::shared_publisher_topology_probe;
 mod value;
 
 pub(crate) type ErasedSink = delivery::ErasedSink;
@@ -91,10 +88,7 @@ pub(crate) use server::{PANIC_AFTER_TERMINATION_GUARD, TerminationAdmission};
 pub(crate) use source::{SourceArena, SourceRegistration};
 #[cfg(feature = "rtd")]
 pub(crate) use topic::BorrowedTopicParts;
-#[cfg(any(
-    all(test, feature = "rtd"),
-    all(feature = "bench-internals", feature = "rtd")
-))]
+#[cfg(all(test, feature = "rtd"))]
 pub(crate) use topic::SubscriptionId;
 pub(crate) use topic::SubscriptionKey;
 #[cfg(any(

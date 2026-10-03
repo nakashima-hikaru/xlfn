@@ -2,7 +2,9 @@
 
 use super::RegistrationId;
 use crate::XllError;
+use smol_str::{SmolStr, StrExt};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PendingRegistration {
@@ -20,11 +22,20 @@ pub(crate) enum RegistrationCleanupState {
 /// The single host-name identity rule used by descriptor validation and
 /// cleanup debt retention.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct ExcelNameKey(String);
+pub(crate) struct ExcelNameKey(SmolStr);
 
 impl ExcelNameKey {
     pub(crate) fn new(name: &str) -> Self {
-        Self(name.to_ascii_uppercase())
+        if name.len() <= 23 {
+            return Self(name.to_ascii_uppercase_smolstr());
+        }
+        // The library's long-string helper first allocates a String, then
+        // copies it into an Arc. Normalize the fresh Arc in place instead.
+        let mut normalized: Arc<str> = Arc::from(name);
+        Arc::get_mut(&mut normalized)
+            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop())
+            .make_ascii_uppercase();
+        Self(SmolStr::from(normalized))
     }
 }
 
@@ -205,4 +216,33 @@ pub(crate) struct EventRegistration {
     pub(crate) event: i32,
     pub(crate) registration_id: i32,
     pub(crate) unregistered: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ExcelNameKey;
+    use std::collections::{BTreeMap, HashMap};
+
+    #[test]
+    fn excel_name_identity_stays_ascii_only_across_storage_sizes() {
+        for name in [
+            String::new(),
+            "price".into(),
+            "a".repeat(23),
+            "a".repeat(24),
+            "long_name".repeat(128),
+            "école価格".into(),
+            "école価格".repeat(16),
+        ] {
+            let expected = name.to_ascii_uppercase();
+            let key = ExcelNameKey::new(&name);
+            assert_eq!(key.0.as_str(), expected);
+            assert_eq!(key, ExcelNameKey::new(&expected));
+            let ordered = BTreeMap::from([(key.clone(), 1)]);
+            let hashed = HashMap::from([(key, 1)]);
+            assert_eq!(ordered.get(&ExcelNameKey::new(&expected)), Some(&1));
+            assert_eq!(hashed.get(&ExcelNameKey::new(&expected)), Some(&1));
+        }
+        assert_ne!(ExcelNameKey::new("é"), ExcelNameKey::new("É"));
+    }
 }

@@ -76,7 +76,7 @@ impl<T: IntoExcel> ExcelReturn for T {
     type InputMode = PlainInputMode;
 
     fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<ReturnPayload> {
-        IntoExcel::into_excel(self).map(ReturnPayload::Scalar)
+        ReturnPayload::scalar(self)
     }
 }
 

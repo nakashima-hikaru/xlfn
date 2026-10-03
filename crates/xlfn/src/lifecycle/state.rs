@@ -28,7 +28,7 @@ use crate::generation::{ExecutionGeneration, OpeningGeneration, ShutdownGenerati
 use crate::generation::{OpenAttemptId, RemovalAttemptId, RuntimeGeneration};
 use crate::lifecycle::{HostLifecycleIntent, LifecyclePhase};
 use crate::module_runtime::{
-    ModuleAuthority, ModuleCleanupAuthority, ModuleEpochId, ModuleEpochLease,
+    ModuleAuthority, ModuleCleanupAuthority, ModuleCleanupClaim, ModuleEpochId, ModuleEpochLease,
 };
 use crate::runtime_components::GenerationServices;
 
@@ -529,10 +529,21 @@ impl<A: crate::Addin> CloseResources<A> {
         )
     }
 
-    fn take_cleanup(self) -> (Option<ModuleCleanupAuthority>, Self) {
+    fn take_cleanup(self) -> (ModuleCleanupClaim, Self) {
         match self {
             Self::Available { payload, authority } => {
-                (Some(authority.into_cleanup()), Self::Unowned { payload })
+                if authority.is_retained_undrained() {
+                    let epoch = authority.id();
+                    (
+                        ModuleCleanupClaim::RetainedUndrained(epoch),
+                        Self::Available { payload, authority },
+                    )
+                } else {
+                    (
+                        ModuleCleanupClaim::Ready(authority.into_cleanup()),
+                        Self::Unowned { payload },
+                    )
+                }
             }
             Self::Claimed {
                 payload,
@@ -542,18 +553,34 @@ impl<A: crate::Addin> CloseResources<A> {
                         module_epoch,
                         returned: Some(authority),
                     },
-            } => (
-                Some(authority.into_cleanup()),
-                Self::Claimed {
-                    payload,
-                    claim: RemovalClaimState {
-                        attempt,
-                        module_epoch,
-                        returned: None,
+            } => {
+                if authority.is_retained_undrained() {
+                    let epoch = authority.id();
+                    return (
+                        ModuleCleanupClaim::RetainedUndrained(epoch),
+                        Self::Claimed {
+                            payload,
+                            claim: RemovalClaimState {
+                                attempt,
+                                module_epoch,
+                                returned: Some(authority),
+                            },
+                        },
+                    );
+                }
+                (
+                    ModuleCleanupClaim::Ready(authority.into_cleanup()),
+                    Self::Claimed {
+                        payload,
+                        claim: RemovalClaimState {
+                            attempt,
+                            module_epoch,
+                            returned: None,
+                        },
                     },
-                },
-            ),
-            other => (None, other),
+                )
+            }
+            other => (ModuleCleanupClaim::Missing, other),
         }
     }
 
@@ -911,9 +938,9 @@ impl<A: crate::Addin> ClosingState<A> {
         }
     }
 
-    fn take_cleanup(self) -> (Option<ModuleCleanupAuthority>, Self) {
+    fn take_cleanup(self) -> (ModuleCleanupClaim, Self) {
         match self {
-            Self::OpeningActive { .. } => (None, self),
+            Self::OpeningActive { .. } => (ModuleCleanupClaim::Missing, self),
             Self::Ready { resources } => {
                 let (authority, resources) = resources.take_cleanup();
                 (authority, Self::Ready { resources })
@@ -1530,9 +1557,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         })
     }
 
-    pub(in crate::lifecycle) fn take_module_cleanup_for_quarantine(
-        &self,
-    ) -> Option<ModuleCleanupAuthority> {
+    pub(in crate::lifecycle) fn take_module_cleanup_for_quarantine(&self) -> ModuleCleanupClaim {
         let mut access = self.access();
         access.transition(|core| {
             let state = mem::replace(&mut core.state, LifecycleState::Closed(ClosedState::Idle));
@@ -1549,11 +1574,23 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                     let (authority, resources) = resources.take_cleanup();
                     (authority, LifecycleState::Quarantined(resources))
                 }
-                other => (None, other),
+                other => (ModuleCleanupClaim::Missing, other),
             };
             core.state = state;
             (authority, TransitionEffect::Keep)
         })
+    }
+
+    pub(in crate::lifecycle) fn retain_failed_module_cleanup(
+        &self,
+        authority: ModuleCleanupAuthority,
+    ) {
+        let mut access = self.access();
+        access.transition(|core| {
+            core.state
+                .install_module_authority(authority.into_authority());
+            ((), TransitionEffect::Keep)
+        });
     }
 
     pub(in crate::lifecycle) fn complete_open_abort(

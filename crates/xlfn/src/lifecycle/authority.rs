@@ -10,7 +10,9 @@ use crate::lifecycle::{
     FinalRemovalReady, HostLifecycleIntent, LifecycleAccess, LifecycleCoordinator,
     OpenFailureDisposition, OpenRollbackReady, RemovalClaim,
 };
-use crate::module_runtime::{ModuleAuthority, ModuleCleanupAuthority, ModuleClosing};
+use crate::module_runtime::{
+    ModuleAuthority, ModuleCleanupAuthority, ModuleCleanupClaim, ModuleClosing,
+};
 use crate::{XllError, XllResult};
 
 /// Lifecycle-only write capability issued by a [`LifecycleCoordinator`].
@@ -223,8 +225,12 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
         self.coordinator.take_module_closing_for_close(control)
     }
 
-    pub(crate) fn take_module_cleanup_authority(&self) -> Option<ModuleCleanupAuthority> {
+    pub(crate) fn take_module_cleanup_authority(&self) -> ModuleCleanupClaim {
         self.coordinator.take_module_cleanup_for_quarantine()
+    }
+
+    pub(crate) fn retain_failed_module_cleanup(&self, authority: ModuleCleanupAuthority) {
+        self.coordinator.retain_failed_module_cleanup(authority);
     }
 
     pub(crate) fn take_opening_for_rollback(&self) -> Option<OpeningGeneration<A>> {

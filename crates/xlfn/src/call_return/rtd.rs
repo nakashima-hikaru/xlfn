@@ -20,7 +20,7 @@ impl super::ExcelReturn for RtdValue {
             RtdValue::Error(value) => ExcelCellOutput::Error(value.0),
             RtdValue::Empty => ExcelCellOutput::Error(crate::ExcelError::NotAvailable),
         };
-        Ok(ReturnPayload::Scalar(cell))
+        ReturnPayload::scalar(cell)
     }
 }
 

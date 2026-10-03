@@ -7,12 +7,12 @@ use super::RuntimeServices;
 use super::catalog::{PreparationFinish, SubscriptionCatalog, SubscriptionEntry};
 use super::data_plane::PublishCore;
 use super::delivery::ErasedSink;
+use super::disconnect::OwnedSubscription;
 use super::host::SubscriptionHost;
 use super::identity::allocate_runtime_id;
 use super::server::{
     OwnedServerOperation, ServerTerminationPhase, SubscriptionServer, SubscriptionServerHandle,
     TerminationAdmission, TerminationCoordinator, cleanup_catalog_binding_and_pending,
-    disconnect_one_no_unwind,
 };
 use super::source::{RtdSource, RtdSourceHandle, SourceArena};
 use super::topic::{
@@ -38,6 +38,10 @@ pub(crate) struct SubscriptionRuntime<H: SubscriptionHost> {
     pub(crate) generation: RuntimeGeneration,
     pub(crate) runtime_id: u64,
     pub(crate) limits: RtdLimits,
+    // Deferred jobs carry non-owning admissions into the following server and
+    // service allocations. Reclaim their worker before those allocations even
+    // if unwinding interrupts the explicit close sequence.
+    pub(super) disconnects: super::disconnect::DisconnectPool<H>,
     pub(crate) host: H,
     // Pointer-bearing server roots are declared before every field they
     // reference so Rust's declaration-order drop reclaims servers first.
@@ -105,6 +109,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             next_connection_generation: AtomicU64::new(1),
             termination_coordinator: TerminationCoordinator::default(),
             services: PublishedOwner::new(RuntimeServices::new(limits)),
+            disconnects: super::disconnect::DisconnectPool::new(limits.max_active.get()),
             #[cfg(test)]
             test_enter_hook: Mutex::new(None),
         }
@@ -365,12 +370,23 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             return Err(error);
         }
 
+        // Prepare worker startup and terminal cleanup capacity before any
+        // source receives a sink. Existing owners keep this capacity until
+        // their sink-user barrier finishes, including deferred disconnection.
+        let cleanup = match self.disconnects.reserve() {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                let _ = self.rollback_connection(server, topic_id, conn_gen, id);
+                return Err(error);
+            }
+        };
+
         let erased_sink = ErasedSink::for_publish(server.publish.as_ref(), topic_id, conn_gen);
 
         let sub_res = catch_unwind(AssertUnwindSafe(|| source.subscribe(&topic, erased_sink)));
 
         let subscription = match sub_res {
-            Ok(Ok(sub)) => sub,
+            Ok(Ok(sub)) => OwnedSubscription::new(sub, cleanup),
             Ok(Err(err)) => {
                 let _ = self.rollback_connection(server, topic_id, conn_gen, id);
                 return Err(err);
@@ -404,7 +420,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         let (latest_value, observed_sequence) = match install_result {
             Ok(res) => res,
             Err(sub) => {
-                let cleanup_res = disconnect_one_no_unwind(sub);
+                let cleanup_res = sub.disconnect_and_wait();
                 let rollback_res = self.rollback_connection(server, topic_id, conn_gen, id);
                 let first_error = cleanup_res.err().or_else(|| rollback_res.err());
                 if let Some(error) = first_error {
@@ -496,7 +512,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         let mut first_error = None;
 
         if let Some(sub) = subscription {
-            let res = disconnect_one_no_unwind(sub);
+            let res = sub.disconnect_and_wait();
             if let Err(ref err) = res {
                 self.record_cleanup_result(res.clone());
                 first_error = Some(err.clone());
@@ -506,6 +522,13 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         first_error.map_or(Ok(()), Err)
     }
 
+    #[cfg_attr(
+        windows,
+        allow(
+            dead_code,
+            reason = "synchronous backend disconnection retains its sink-user barrier contract; COM uses the deferred entry point"
+        )
+    )]
     pub(crate) fn disconnect(
         &self,
         server_handle: &SubscriptionServerHandle<H>,
@@ -549,7 +572,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             );
         }
 
-        let disconnect_result = subscription.map(disconnect_one_no_unwind);
+        let disconnect_result = subscription.map(OwnedSubscription::disconnect_and_wait);
         let first_error = disconnect_result.and_then(|res| res.err());
 
         if let Some(ref err) = first_error {
@@ -557,6 +580,51 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         }
 
         first_error.map_or(Ok(()), Err)
+    }
+
+    /// COM-only disconnection: revoke the connection before returning, then
+    /// join its sink users on an owned worker so the caller's STA can dispatch
+    /// an outstanding UpdateNotify or a producer's COM call. Synchronous
+    /// backend disconnection keeps its existing barrier contract.
+    pub(crate) fn disconnect_deferred(
+        &self,
+        server_handle: &SubscriptionServerHandle<H>,
+        topic_id: TopicId,
+        completion: Box<dyn Send>,
+    ) -> XllResult<()> {
+        if !server_handle.belongs_to(self) {
+            return Err(XllError::StaleHandle);
+        }
+        let server = server_handle.server()?;
+        // SAFETY: the COM caller owns runtime admission while transferring
+        // this operation to the generation-owned queue. Close drains that
+        // queue's admissions and joins the worker before reclaiming servers.
+        let operation = unsafe { server.enter_owned_operation() }?;
+        let mut subscriptions = server.subscriptions.lock();
+        if !subscriptions.contains_key(&topic_id) {
+            return Ok(());
+        }
+        // The admitted owner already holds worker startup and queue capacity;
+        // terminal disconnection cannot be rejected by resource admission.
+        let Some(retired) = server.publish.disconnect_connection(topic_id)? else {
+            return Ok(());
+        };
+        let subscription = subscriptions
+            .remove(&topic_id)
+            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+        drop(subscriptions);
+        self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::RemoveSubscription);
+        {
+            let mut catalog = self.catalog.lock();
+            cleanup_catalog_binding_and_pending(
+                &mut catalog,
+                retired.id,
+                server.generation,
+                retired.generation,
+            );
+        }
+        subscription.defer(completion, operation);
+        Ok(())
     }
 
     pub(crate) fn close(&self) -> XllResult<()> {
@@ -626,6 +694,20 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
 
         if let Some(err) = first_error {
             self.record_cleanup_result(Err(err));
+        }
+
+        // Deferred jobs have drained admission and live owners have now
+        // finished their barriers. Join the worker's COM apartment teardown
+        // before any server, source, service, or module can be reclaimed.
+        if let Err(error) = self.disconnects.stop() {
+            // The dispatch preflight did not execute the worker join. Keep
+            // the runtime's worker owner intact for caller quarantine, and
+            // wake close waiters with the same terminal cleanup failure.
+            self.record_cleanup_result(Err(error));
+            let mut term_state = self.termination_coordinator.state.lock();
+            term_state.phase = ServerTerminationPhase::Failed;
+            self.termination_coordinator.completed.notify_all();
+            return self.cleanup_result();
         }
 
         #[cfg(feature = "rtd")]

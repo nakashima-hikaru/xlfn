@@ -49,6 +49,12 @@ mod windows;
 pub(crate) use windows::ComModuleLifetime;
 
 #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
+pub(crate) use windows::drain_with_com_dispatch;
+
+#[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
+pub(crate) use windows::ComApartmentGuard;
+
+#[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
 pub(crate) use windows::RtdNotifier;
 
 #[cfg(all(

@@ -79,7 +79,7 @@ impl Drop for KeyOwner {
         };
         let (sent, received) = mpsc::channel();
         let worker = std::thread::spawn(move || {
-            // Exercise both the backend shard lock and the outer clear lock.
+            // Exercise both the resident policy lock and the outer clear lock.
             drop(cache.get(&Key::plain(99)));
             cache.clear();
             let _ = sent.send(());
@@ -92,20 +92,6 @@ impl Drop for KeyOwner {
                 .completed_during_drop
                 .fetch_add(1, Ordering::Release);
         }
-    }
-}
-
-fn caches(capacity: usize) -> Vec<CalculationCache<Key, u32>> {
-    #[cfg(feature = "bench-internals")]
-    {
-        vec![
-            CalculationCache::new_with_backend(capacity, CacheBackend::QuickCache { shards: 1 }),
-            CalculationCache::new_with_backend(capacity, CacheBackend::Sharded { shards: 8 }),
-        ]
-    }
-    #[cfg(not(feature = "bench-internals"))]
-    {
-        vec![CalculationCache::new(capacity)]
     }
 }
 
@@ -140,57 +126,55 @@ fn assert_reentered(observed: &Observation, expected: usize) {
 
 #[test]
 fn clear_destroys_keys_after_releasing_all_cache_locks() {
-    for cache in caches(8) {
-        let cache = StdArc::new(cache);
-        let observed = StdArc::new(Observation::default());
-        insert_owned_key(&cache, &observed, 1, false);
-        cache.clear();
-        assert_reentered(&observed, 1);
-        assert_eq!(cache.reclamation_stats().pending_nodes, 0);
-    }
+    let cache = CalculationCache::new(8);
+    let cache = StdArc::new(cache);
+    let observed = StdArc::new(Observation::default());
+    insert_owned_key(&cache, &observed, 1, false);
+    cache.clear();
+    assert_reentered(&observed, 1);
+    assert_eq!(cache.reclamation_stats().pending_nodes, 0);
 }
 
 #[test]
 fn eviction_destroys_keys_after_releasing_all_cache_locks() {
-    for cache in caches(4) {
-        let cache = StdArc::new(cache);
-        let observed = StdArc::new(Observation::default());
-        for id in 0..4 {
-            insert_owned_key(&cache, &observed, id, false);
-        }
-        // Evict more than Quick Cache's default two-entry deferred batch in
-        // one request; every evicted key must still be destroyed lock-free.
-        drop(
-            cache
-                .get_or_try_insert_with(Key::plain(8), |_| 4, || Ok(8))
-                .unwrap(),
-        );
-        assert_reentered(&observed, 4);
-        assert_eq!(cache.reclamation_stats().pending_nodes, 0);
+    let cache = CalculationCache::new(4);
+    let cache = StdArc::new(cache);
+    let observed = StdArc::new(Observation::default());
+    for id in 0..4 {
+        insert_owned_key(&cache, &observed, id, false);
     }
+    // Evict more than Quick Cache's default two-entry deferred batch in
+    // one request; every evicted key must still be destroyed lock-free.
+    drop(
+        cache
+            .get_or_try_insert_with(Key::plain(8), |_| 4, || Ok(8))
+            .unwrap(),
+    );
+    assert_reentered(&observed, 4);
+    assert_eq!(cache.reclamation_stats().pending_nodes, 0);
 }
 
 #[test]
 fn panicking_key_does_not_skip_remaining_retirement_or_final_drop() {
-    for cache in caches(8) {
-        let cache = StdArc::new(cache);
-        let observed = StdArc::new(Observation::default());
-        for id in 0..3 {
-            insert_owned_key(&cache, &observed, id, true);
-        }
-        cache.clear();
-        assert_eq!(observed.drops.load(Ordering::Relaxed), 3);
-        assert_eq!(cache.reclamation_stats().pending_nodes, 0);
-        insert_owned_key(&cache, &observed, 4, true);
-        drop(cache);
-        assert_eq!(observed.drops.load(Ordering::Relaxed), 4);
+    let cache = CalculationCache::new(8);
+    let cache = StdArc::new(cache);
+    let observed = StdArc::new(Observation::default());
+    for id in 0..3 {
+        insert_owned_key(&cache, &observed, id, true);
     }
+    cache.clear();
+    assert_eq!(observed.drops.load(Ordering::Relaxed), 3);
+    assert_eq!(cache.reclamation_stats().pending_nodes, 0);
+    insert_owned_key(&cache, &observed, 4, true);
+    drop(cache);
+    assert_eq!(observed.drops.load(Ordering::Relaxed), 4);
 }
 
 #[test]
 fn nested_key_callbacks_defer_destructors_until_outer_lookup_leaves() {
     for panics in [false, true] {
-        for cache in caches(1).into_iter().chain(caches(8)) {
+        for capacity in [1, 8] {
+            let cache = CalculationCache::new(capacity);
             let cache = StdArc::new(cache);
             let observed = StdArc::new(Observation::default());
             insert_owned_key(&cache, &observed, 1, false);

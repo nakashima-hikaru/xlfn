@@ -1,5 +1,6 @@
 use crate::panic_boundary::catch_no_unwind;
 use crate::sync::Mutex;
+use crossbeam_utils::CachePadded;
 use rustc_hash::FxHashMap;
 use std::future::Future;
 use std::marker::PhantomData;
@@ -8,7 +9,11 @@ use std::pin::Pin;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::task::{Context, Poll};
+use xlfn_kernel::drain_gate::{DEFAULT_STRIPE_COUNT, current_thread_stripe};
 use xlfn_kernel::published_owner::PublishedOwner;
+
+#[cfg(feature = "bench-internals")]
+pub(crate) mod benchmark;
 
 const STATE_RUNNING: u8 = 0;
 const STATE_CANCELED: u8 = 1;
@@ -61,22 +66,35 @@ struct CancellationRegistryState {
     free: Vec<u32>,
 }
 
+const CANCELLATION_SHARDS: usize = DEFAULT_STRIPE_COUNT;
+const CANCELLATION_SHARD_BITS: u32 = CANCELLATION_SHARDS.trailing_zeros();
+const _: () = assert!(CANCELLATION_SHARDS.is_power_of_two());
+
 pub(crate) struct CancellationRegistry {
-    state: Mutex<CancellationRegistryState>,
+    // A source keeps its allocation shard in its slot ID. Completion may run
+    // on another worker, but must return the slot to that same shard. Tokens
+    // still point into process-stable, uniquely owned slot allocations.
+    shards: [CachePadded<Mutex<CancellationRegistryState>>; CANCELLATION_SHARDS],
 }
 
 impl CancellationRegistry {
     pub(crate) const fn new() -> Self {
         Self {
-            state: Mutex::new(CancellationRegistryState {
-                slots: Vec::new(),
-                free: Vec::new(),
-            }),
+            shards: [const {
+                CachePadded::new(Mutex::new(CancellationRegistryState {
+                    slots: Vec::new(),
+                    free: Vec::new(),
+                }))
+            }; CANCELLATION_SHARDS],
         }
     }
 
     fn allocate(&self) -> (NonNull<CancellationSlot>, u64, u32) {
-        let mut state = self.state.lock();
+        self.allocate_in_shard(current_thread_stripe())
+    }
+
+    fn allocate_in_shard(&self, shard: usize) -> (NonNull<CancellationSlot>, u64, u32) {
+        let mut state = self.shards[shard].lock();
         if let Some(index) = state.free.pop() {
             let slot = &state.slots[index as usize];
             let mut waiters = slot.waiters.lock();
@@ -90,10 +108,15 @@ impl CancellationRegistry {
             slot.generation.store(generation, Ordering::Release);
             slot.cancelled.store(false, Ordering::Release);
             slot.delivery_state.store(STATE_RUNNING, Ordering::Release);
-            (NonNull::from(&**slot), generation, index)
+            (
+                NonNull::from(&**slot),
+                generation,
+                Self::slot_id(shard, index),
+            )
         } else {
             let index =
                 u32::try_from(state.slots.len()).expect("cancellation slot index exhausted");
+            let slot_id = Self::slot_id(shard, index);
             let slot = PublishedOwner::new(CancellationSlot {
                 generation: AtomicU64::new(1),
                 cancelled: AtomicBool::new(false),
@@ -106,14 +129,24 @@ impl CancellationRegistry {
             });
             let ptr = NonNull::from(&*slot);
             state.slots.push(slot);
-            (ptr, 1, index)
+            (ptr, 1, slot_id)
         }
     }
 
+    fn slot_id(shard: usize, index: u32) -> u32 {
+        assert!(
+            index <= u32::MAX >> CANCELLATION_SHARD_BITS,
+            "cancellation slot index exhausted"
+        );
+        (index << CANCELLATION_SHARD_BITS) | shard as u32
+    }
+
     fn release(&self, slot_index: u32, expected_gen: u64) {
+        let shard = (slot_index as usize) & (CANCELLATION_SHARDS - 1);
+        let index = slot_index >> CANCELLATION_SHARD_BITS;
         let waiters = {
-            let mut state = self.state.lock();
-            let slot = &state.slots[slot_index as usize];
+            let mut state = self.shards[shard].lock();
+            let slot = &state.slots[index as usize];
             let mut waiters = slot.waiters.lock();
             if waiters.generation != expected_gen {
                 return;
@@ -123,7 +156,7 @@ impl CancellationRegistry {
             // A wrapped generation could make a process-live old token valid
             // again. Exhausted slots remain allocated, but are never reused.
             if expected_gen != u64::MAX {
-                state.free.push(slot_index);
+                state.free.push(index);
             }
             detached
         };
@@ -705,6 +738,67 @@ mod tests {
         assert!(!token2.is_cancelled());
         assert!(token1.is_cancelled());
         drop(source2);
+    }
+
+    #[test]
+    fn unrelated_pool_shard_does_not_block_source_lifecycle() {
+        let registry = CancellationRegistry::new();
+        let shard = current_thread_stripe();
+        let _busy = registry.shards[(shard + 1) % CANCELLATION_SHARDS].lock();
+        let (source, token) = local_source(&registry);
+        assert!(!token.is_cancelled());
+        drop(source);
+        assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn miri_cross_thread_source_drop_returns_slot_to_allocation_shard() {
+        let registry = CancellationRegistry::new();
+        let (source, old_token) = local_source(&registry);
+        let slot_id = source.slot_index;
+        let count = StdArc::new(WakeCount(AtomicUsize::new(0)));
+        let waker = waker(StdArc::clone(&count));
+        let mut waiter = owned_waiter(old_token);
+        assert!(
+            Pin::new(&mut waiter)
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        std::thread::scope(|scope| {
+            scope.spawn(move || drop(source)).join().unwrap();
+        });
+        assert_eq!(count.0.load(Ordering::Acquire), 1);
+        assert!(old_token.is_cancelled());
+        let (next_source, next_token) = local_source(&registry);
+        assert_eq!(next_source.slot_index, slot_id);
+        assert_eq!(next_token.slot, old_token.slot);
+        assert_eq!(next_token.generation, old_token.generation + 1);
+        assert!(!next_token.is_cancelled());
+        assert!(
+            Pin::new(&mut waiter)
+                .poll(&mut Context::from_waker(&waker))
+                .is_ready()
+        );
+        assert!(!next_token.is_cancelled());
+    }
+
+    #[test]
+    fn slot_ids_distinguish_equal_local_indices_in_different_shards() {
+        let registry = CancellationRegistry::new();
+        let (first, first_generation, first_id) = registry.allocate_in_shard(0);
+        let (second, second_generation, second_id) =
+            registry.allocate_in_shard(CANCELLATION_SHARDS - 1);
+        assert_ne!(first_id, second_id);
+        assert_ne!(first, second);
+        registry.release(second_id, second_generation);
+        // SAFETY: the local registry retains both slot allocations.
+        assert!(!unsafe { first.as_ref() }.cancelled.load(Ordering::Acquire));
+        let (reused, generation, id) = registry.allocate_in_shard(CANCELLATION_SHARDS - 1);
+        assert_eq!(reused, second);
+        assert_eq!(id, second_id);
+        assert_eq!(generation, second_generation + 1);
+        registry.release(first_id, first_generation);
+        registry.release(id, generation);
     }
 
     #[test]

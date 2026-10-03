@@ -19,6 +19,38 @@ pub(crate) const PHASE_CLOSED: u8 = 3;
 
 const INGRESS_STRIPE_COUNT: usize = DEFAULT_STRIPE_COUNT;
 
+#[cfg(test)]
+std::thread_local! {
+    static DRAIN_PREPARATION_FAULT: std::cell::Cell<Option<(usize, usize)>> = const { std::cell::Cell::new(None) };
+}
+
+/// Injects a preparation failure before one of the two terminal waits. The
+/// thread-local scope avoids affecting another runtime's concurrent fixture.
+#[cfg(test)]
+pub(crate) struct DrainPreparationFault;
+
+#[cfg(test)]
+impl DrainPreparationFault {
+    pub(crate) fn at(wait: usize) -> Self {
+        assert!(matches!(wait, 1 | 2));
+        DRAIN_PREPARATION_FAULT.with(|fault| {
+            assert!(fault.replace(Some((wait, 0))).is_none());
+        });
+        Self
+    }
+
+    pub(crate) fn attempts(&self) -> usize {
+        DRAIN_PREPARATION_FAULT.with(|fault| fault.get().expect("active drain fault").1)
+    }
+}
+
+#[cfg(test)]
+impl Drop for DrainPreparationFault {
+    fn drop(&mut self) {
+        DRAIN_PREPARATION_FAULT.with(|fault| fault.set(None));
+    }
+}
+
 #[inline]
 fn current_ingress_stripe() -> usize {
     current_thread_stripe()
@@ -466,13 +498,39 @@ impl ExportIngress {
         self.exports.wait_until_idle();
     }
 
+    fn drain_exports(&self, wait: impl FnOnce() + Send) -> crate::XllResult<()> {
+        #[cfg(test)]
+        if DRAIN_PREPARATION_FAULT.with(|fault| {
+            let Some((target, attempts)) = fault.get() else {
+                return false;
+            };
+            let attempts = attempts + 1;
+            fault.set(Some((target, attempts)));
+            attempts == target
+        }) {
+            return Err(crate::XllError::Native {
+                code: -1,
+                message: "injected export drain preparation failure".into(),
+            });
+        }
+        #[cfg(all(windows, any(feature = "rtd", feature = "handles")))]
+        {
+            crate::excel_rtd::drain_with_com_dispatch(wait).map_err(|(error, _wait)| error)
+        }
+        #[cfg(not(all(windows, any(feature = "rtd", feature = "handles"))))]
+        {
+            wait();
+            Ok(())
+        }
+    }
+
     /// Waits for the current epoch to drain and seals it CLOSED in the same
     /// synchronization region that observes `active == 0`.
-    pub(crate) fn seal_and_drain(&self) -> ExportsDrained {
+    pub(crate) fn seal_and_drain(&self) -> crate::XllResult<ExportsDrained> {
         self.seal_and_drain_with_hook(|| {})
     }
 
-    fn seal_and_drain_with_hook<F>(&self, before_close: F) -> ExportsDrained
+    fn seal_and_drain_with_hook<F>(&self, before_close: F) -> crate::XllResult<ExportsDrained>
     where
         F: FnOnce(),
     {
@@ -484,7 +542,7 @@ impl ExportIngress {
             "ingress sealed before begin_close"
         );
         let mut before_close = Some(before_close);
-        self.wait_for_quiescence();
+        self.drain_exports(|| self.exports.wait_until_idle())?;
 
         if let Some(before_close) = before_close.take() {
             before_close();
@@ -493,7 +551,7 @@ impl ExportIngress {
         // Closing entries may have started after the zero observation. Seal
         // every stripe to prevent a late reservation from being missed by the
         // terminal CLOSED transition, then drain those reservations.
-        self.exports.seal_and_wait();
+        self.drain_exports(|| self.exports.seal_and_wait())?;
 
         match self.phase.compare_exchange(
             PHASE_CLOSING,
@@ -511,9 +569,9 @@ impl ExportIngress {
         {
             TEST_EPOCH_GATE.release();
         }
-        ExportsDrained {
+        Ok(ExportsDrained {
             epoch: self.epoch.load(Ordering::Acquire),
-        }
+        })
     }
 
     pub(crate) fn phase(&self) -> u8 {
@@ -596,7 +654,7 @@ mod tests {
         std::thread::yield_now();
         assert_eq!(ingress.active_calls(), 1);
         drop(entry);
-        let certificate = worker.join().unwrap();
+        let certificate = worker.join().unwrap().unwrap();
 
         assert_eq!(certificate.epoch, 1);
         assert_eq!(ingress.phase(), PHASE_CLOSED);
@@ -625,7 +683,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
             drop(entry);
 
-            let _drained = drain.join().unwrap();
+            let _drained = drain.join().unwrap().unwrap();
         });
 
         assert_eq!(ingress.phase(), PHASE_CLOSED);
@@ -675,14 +733,14 @@ mod tests {
         let ingress = ExportIngress::new();
         ingress.begin_opening();
         ingress.begin_close_with(|| {});
-        let first = ingress.seal_and_drain();
+        let first = ingress.seal_and_drain().unwrap();
         ingress.begin_opening();
         ingress.complete_open(|| Ok::<(), ()>(())).unwrap().unwrap();
         let entry = ingress.enter_with(|| {});
         assert!(matches!(&entry, ExportEntry::Admitted(_)));
         drop(entry);
         ingress.begin_close_with(|| {});
-        let second = ingress.seal_and_drain();
+        let second = ingress.seal_and_drain().unwrap();
         assert!(second.epoch > first.epoch);
     }
 
@@ -746,7 +804,7 @@ mod tests {
         release_tx.send(()).unwrap();
         drop(entry);
 
-        worker.join().unwrap();
+        worker.join().unwrap().unwrap();
         assert_eq!(ingress.phase(), PHASE_CLOSED);
         assert_eq!(ingress.active_calls(), 0);
     }

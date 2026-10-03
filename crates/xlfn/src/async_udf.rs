@@ -24,6 +24,11 @@ pub use executor::{AsyncTaskScope, HandleScopedBuilder};
 pub(crate) use executor::{HandleScopedTaskBuilder, ScopedTaskFuture};
 pub(crate) use manager::{AsyncManager, AsyncStopped};
 
+#[cfg(all(feature = "bench-internals", feature = "handles"))]
+pub use boundary::HandleScopedDeliveryBenchmark;
+#[cfg(feature = "bench-internals")]
+pub use generation::AsyncTaskDrainBenchmark;
+
 // Test modules exercise the protocol pieces directly. Keep these imports
 // scoped to tests so the production module has no ambient prelude.
 #[cfg(test)]

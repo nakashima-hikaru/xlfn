@@ -6,6 +6,7 @@ use crate::execution::{CallId, CallMetadata, CallOutcome};
 use crate::execution::{UdfCompletionOutcome, UdfDeliveryOutcome, UdfErrorKind};
 use crate::panic_boundary::catch_no_unwind;
 use crate::runtime::Runtime;
+#[cfg(test)]
 use crate::value::ExcelCellOutput;
 use crate::{XllError, XllResult};
 use std::cell::{Cell, UnsafeCell};
@@ -16,12 +17,15 @@ use xlfn_kernel::published_owner::PublishedOwner;
 
 #[cfg(test)]
 use std::sync::atomic::Ordering;
-use xlfn_sys::{XLBIT_DLL_FREE, XLOPER12, XLOPER12Array, XLOPER12Value, XLTYPE_MULTI, XLTYPE_STR};
+#[cfg(test)]
+use xlfn_sys::XLTYPE_STR;
+use xlfn_sys::{XLBIT_DLL_FREE, XLOPER12, XLOPER12Array, XLOPER12Value, XLTYPE_MULTI};
 
 pub(crate) mod array;
 pub(crate) mod conversion;
 pub(crate) mod metadata;
 pub(crate) mod ownership;
+pub(crate) mod scalar;
 pub(crate) mod storage;
 
 pub(crate) use conversion::{CallbackCleanupDebt, ExcelCallbackStatus};
@@ -29,6 +33,7 @@ pub(crate) use ownership::ReturnFreeBoundaryGuard;
 pub(crate) use ownership::{ReturnFreeGuard, ReturnObligation, ReturnProducerGuard, ReturnTracker};
 
 pub use array::{XlArrayBuilder, XlArrayOutput};
+pub(crate) use scalar::XlScalarOutput;
 pub(crate) use storage::ReturnStorage;
 
 const RETURN_MAGIC: u64 = 0x584c_4c52_4554_3132;
@@ -130,16 +135,11 @@ impl PreparedReturn {
     fn encode(value: ReturnPayload) -> XllResult<Self> {
         match value {
             ReturnPayload::Array(encoded) => Self::from_array_output(encoded),
-            ReturnPayload::Scalar(cell) => {
-                let mut storage = None;
-                let mut allocation_bytes = base_allocation_payload_bytes(0)?;
-                let oper = encode_scalar(cell, &mut storage, &mut allocation_bytes)?;
-                Ok(Self {
-                    oper,
-                    storage,
-                    array: None,
-                })
-            }
+            ReturnPayload::Scalar(encoded) => Ok(Self {
+                oper: encoded.oper,
+                storage: encoded.storage,
+                array: None,
+            }),
         }
     }
 
@@ -260,55 +260,6 @@ impl Drop for ReturnBlock {
             if PANIC_ON_RETURN_BLOCK_DROP.swap(false, Ordering::SeqCst) {
                 panic!("injected ReturnBlock drop panic");
             }
-        }
-    }
-}
-
-fn encode_scalar(
-    value: ExcelCellOutput,
-    storage: &mut Option<ReturnStorage>,
-    allocation_bytes: &mut usize,
-) -> XllResult<XLOPER12> {
-    match value {
-        ExcelCellOutput::Number(number) => {
-            crate::value::output::validate_number(number).map(XLOPER12::number)
-        }
-        ExcelCellOutput::Boolean(boolean) => Ok(XLOPER12::boolean(boolean)),
-        ExcelCellOutput::Error(error) => Ok(XLOPER12::error(error.code())),
-        ExcelCellOutput::String(text) => {
-            let utf16_length = crate::utf16::checked_utf16_len(
-                &text,
-                "<return>",
-                crate::utf16::EXCEL_STRING_LIMIT,
-            )?;
-            let string_bytes = utf16_length
-                .checked_add(1)
-                .ok_or(XllError::Domain {
-                    code: crate::error::DomainErrorCode::Overflow,
-                })?
-                .checked_mul(std::mem::size_of::<u16>())
-                .ok_or(XllError::Domain {
-                    code: crate::error::DomainErrorCode::Overflow,
-                })?;
-            let additional = string_bytes;
-            *allocation_bytes =
-                allocation_bytes
-                    .checked_add(additional)
-                    .ok_or(XllError::Domain {
-                        code: crate::error::DomainErrorCode::Overflow,
-                    })?;
-            enforce_return_limit(*allocation_bytes)?;
-            let storage = storage.get_or_insert_with(ReturnStorage::new);
-            let pointer = storage.alloc_counted_utf16_with_length(
-                &text,
-                "<return>",
-                crate::utf16::EXCEL_STRING_LIMIT,
-                utf16_length,
-            )?;
-            Ok(XLOPER12 {
-                value: XLOPER12Value { string: pointer },
-                xltype: XLTYPE_STR,
-            })
         }
     }
 }
@@ -1061,11 +1012,8 @@ mod tests {
         let _test = test_lock();
         let fixture = open_static_test_runtime();
         let runtime = fixture.runtime();
-        let pointer = allocate_excel_for_test(
-            runtime,
-            ReturnPayload::Scalar(ExcelCellOutput::String("日本語".to_owned())),
-        )
-        .unwrap();
+        let pointer =
+            allocate_excel_for_test(runtime, ReturnPayload::scalar("日本語").unwrap()).unwrap();
         // SAFETY: pointer is live and non-null.
         let oper = unsafe { &*pointer };
         // SAFETY: pointer is live and the type selects the string member.
@@ -1204,7 +1152,7 @@ mod tests {
         let runtime = fixture.runtime();
         let pointer = allocate_excel_for_test(
             runtime,
-            ReturnPayload::Scalar(ExcelCellOutput::Error(ExcelError::NotAvailable)),
+            ReturnPayload::scalar(ExcelCellOutput::Error(ExcelError::NotAvailable)).unwrap(),
         )
         .unwrap();
         // SAFETY: pointer is a live encoded return value.
@@ -1351,7 +1299,7 @@ mod tests {
             fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<ReturnPayload> {
                 self.converting.send(()).unwrap();
                 self.release.recv().unwrap();
-                Ok(ReturnPayload::Scalar(ExcelCellOutput::Number(1.0)))
+                ReturnPayload::scalar(1.0)
             }
         }
 
@@ -1564,10 +1512,16 @@ mod tests {
             let mut context = ReturnContext::for_call(&call, "scalar", None, &callbacks);
             let value =
                 <f64 as crate::call_return::ExcelReturn>::invoke(&mut context, || Ok(4.5)).unwrap();
-            assert!(matches!(
-                value,
-            ReturnPayload::Scalar(ExcelCellOutput::Number(number)) if number == 4.5
-            ));
+            let ReturnPayload::Scalar(value) = value else {
+                panic!("scalar return expected");
+            };
+            assert_eq!(
+                crate::value::XlValueRef::from_array_cell(value.as_raw())
+                    .unwrap()
+                    .as_f64()
+                    .unwrap(),
+                4.5
+            );
         });
     }
 
@@ -1580,8 +1534,7 @@ mod tests {
         let excel_ptr = ffi_boundary(runtime, || Ok(42.0));
         let blocks = live_return_blocks();
         let mut async_value =
-            AsyncReturnValue::from_value(ReturnPayload::Scalar(ExcelCellOutput::Number(42.0)))
-                .unwrap();
+            AsyncReturnValue::from_value(ReturnPayload::scalar(42.0).unwrap()).unwrap();
 
         // SAFETY: excel_ptr is a valid ReturnBlock pointer.
         let excel_oper = unsafe { &*excel_ptr };
@@ -1604,10 +1557,8 @@ mod tests {
         builder.push(42.0).unwrap();
         let array =
             AsyncReturnValue::from_value(ReturnPayload::Array(builder.finish().unwrap())).unwrap();
-        let string = AsyncReturnValue::from_value(ReturnPayload::Scalar(ExcelCellOutput::String(
-            "価格 💡".to_owned(),
-        )))
-        .unwrap();
+        let string =
+            AsyncReturnValue::from_value(ReturnPayload::scalar("価格 💡").unwrap()).unwrap();
         // Both the root and the arena owners move after their payload pointers
         // are encoded. Only borrow a root after it reaches its delivery site.
         let mut values = vec![array, string];
@@ -1720,7 +1671,7 @@ mod tests {
         let mut producer = tracker.try_enter_producer().unwrap();
         assert_eq!(tracker.outstanding_obligations(), 1);
 
-        let ptr = PreparedReturn::encode(ReturnPayload::Scalar(ExcelCellOutput::Number(42.0)))
+        let ptr = PreparedReturn::encode(ReturnPayload::scalar(42.0).unwrap())
             .unwrap()
             .publish_excel(&mut producer);
         assert_eq!(tracker.outstanding_obligations(), 1);
@@ -1765,8 +1716,7 @@ mod tests {
         let mut producer = tracker.try_enter_producer().unwrap();
         assert_eq!(tracker.outstanding_obligations(), 1);
 
-        let err_res =
-            PreparedReturn::encode(ReturnPayload::Scalar(ExcelCellOutput::Number(f64::NAN)));
+        let err_res = ReturnPayload::scalar(ExcelCellOutput::Number(f64::NAN));
         let err = match err_res {
             Ok(_) => panic!("expected encoding failure"),
             Err(e) => e,
@@ -1847,7 +1797,7 @@ mod tests {
 
         for _ in 0..100 {
             let ptr = udf_boundary_named(runtime, "test_fast_path", "TEST.FAST_PATH", |_, _| {
-                Ok(ReturnPayload::Scalar(ExcelCellOutput::Number(42.0)))
+                ReturnPayload::scalar(42.0)
             });
             // SAFETY: ptr is a live ReturnBlock produced above.
             let free_guard = unsafe { free_return_boundary(ptr) };

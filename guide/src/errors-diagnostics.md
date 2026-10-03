@@ -146,7 +146,12 @@ impl Addin for AppTools {
 }
 ```
 
-The runtime places a bounded asynchronous queue of 1,024 events in front of the sink. When producers outrun delivery, events are dropped rather than blocking worksheet execution. Monitor dropped events as an operational signal:
+The runtime queues up to 1,024 events and limits additional cloned payloads to
+16 MiB, including the event currently being delivered. Admitted events retain
+their complete structured error. Oversize payloads, error chains deeper than
+128 nodes, and exhausted budgets are dropped before cloning. Payload accounting
+includes owned strings, paths, and source boxes; it excludes allocator overhead
+and fixed queue storage. Monitor dropped events as an operational signal:
 
 ```rust
 let dropped = xlfn::diagnostics::diagnostic_stats().dropped_events;
@@ -157,6 +162,10 @@ The sink itself must still be bounded and panic-free. A slow or reentrant sink c
 ## `tracing` integration
 
 The runtime emits structured `tracing` events in addition to the configured diagnostic sink. The host application owns the global subscriber. A library should not call `set_global_default` unconditionally; use an application-level subscriber policy that composes with other instrumentation.
+
+The `error` and `error_debug` text fields are each bounded to 16 KiB plus a
+truncation suffix. Ordinary text is unchanged. Subscribers run synchronously,
+so their own formatting, delivery, and blocking policy still affect callers.
 
 Do not assume a tracing subscriber is infallible. The runtime contains panics around its own diagnostic boundaries, but add-in logging code should remain simple and non-panicking.
 

@@ -1,4 +1,4 @@
-use super::task::TaskControl;
+use super::task::{TaskControl, TaskControlBatch};
 use crate::sync::Mutex;
 use crossbeam_utils::CachePadded;
 use rustc_hash::FxHashMap;
@@ -60,7 +60,7 @@ impl GenerationState {
         existed
     }
 
-    pub(crate) fn drain_tasks(&self) -> Vec<TaskControl> {
+    pub(crate) fn drain_tasks(&self) -> TaskControlBatch {
         // Admission is drained before cancellation reaches this method, so
         // controls can only disappear while the lengths are sampled. This
         // cold scan provides an upper bound without forcing every spawn and
@@ -72,7 +72,7 @@ impl GenerationState {
             .sum();
         // Callers drop/wake the controls after releasing the executor control
         // lock. No TaskControl destructor runs while a shard lock is held.
-        let mut result = Vec::with_capacity(capacity);
+        let mut result = TaskControlBatch::with_capacity(capacity);
         for shard in self.shards.iter() {
             let mut tasks = shard.tasks.lock();
             result.extend(tasks.drain().map(|(_, task)| task));
@@ -128,6 +128,49 @@ pub(crate) struct ExecutorControl {
     /// Unique generation owners. Moving hash-table entries never retags the
     /// published allocations while reservations and task completions use them.
     pub(crate) generations: FxHashMap<u64, PublishedOwner<GenerationState>>,
+}
+
+#[cfg(feature = "bench-internals")]
+pub struct AsyncTaskDrainBenchmark {
+    state: GenerationState,
+}
+
+#[cfg(feature = "bench-internals")]
+impl AsyncTaskDrainBenchmark {
+    pub fn new(count: usize) -> Self {
+        let state = GenerationState::new(1);
+        for id in 0..count as u64 {
+            let (abort, _) = futures_util::future::AbortHandle::new_pair();
+            let (cancellation, _) = crate::cancellation::CancellationSource::new(
+                crate::cancellation::CancellationGuarantee::BestEffort,
+            );
+            state.shards[task_shard(id)].tasks.lock().insert(
+                id,
+                TaskControl {
+                    abort,
+                    cancellation,
+                },
+            );
+        }
+        Self { state }
+    }
+
+    /// Includes draining and dropping controls; excludes fixture construction.
+    pub fn run(&self) -> usize {
+        let controls = self.state.drain_tasks();
+        let count = controls.len();
+        std::hint::black_box(controls);
+        count
+    }
+
+    pub fn sizes() -> (usize, usize) {
+        let state = GenerationState::new(1);
+        let controls = state.drain_tasks();
+        (
+            std::mem::size_of::<TaskControl>(),
+            std::mem::size_of_val(&controls),
+        )
+    }
 }
 
 #[cfg(test)]

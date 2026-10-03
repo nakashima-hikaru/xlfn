@@ -9,26 +9,6 @@ fn main() {
         return;
     }
 
-    if std::env::args().any(|arg| arg == "--topology") {
-        let subscriptions: usize = std::env::var("XLFN_TOPOLOGY_SUBSCRIPTIONS")
-            .unwrap()
-            .parse()
-            .unwrap();
-        let publishers: usize = std::env::var("XLFN_TOPOLOGY_PUBLISHERS")
-            .unwrap()
-            .parse()
-            .unwrap();
-        println!(
-            "rtd_topology_probe {}",
-            xlfn::benchmark_support::shared_publisher_topology_probe(
-                subscriptions,
-                publishers,
-                1000
-            )
-        );
-        return;
-    }
-
     if std::env::args().any(|arg| arg == "--pipeline") {
         for producers in [1, 4] {
             for capacity in [64, 1024] {

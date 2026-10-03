@@ -8,7 +8,7 @@ import XlFnFormal.TemporalReclamation.Safety
     ## Subsystem Protocol Architecture Mapping:
     | Subsystem    | Admission / Domain Gate | Pin Capability | Retirement Point    | Reclamation Point   |
     |--------------|-------------------------|----------------|---------------------|---------------------|
-    | Cache        | CacheLookupDomain permit| CacheLease pin | Moka eviction       | CacheNode drop      |
+    | Cache        | CacheLookupDomain permit| CacheLease pin | Quick Cache eviction| CacheNode drop      |
     | Handle       | HandleReadDomain permit | scoped HandleLease | Binding removal  | ObjectArena remove  |
     | RTD Callback | ServerOperationBarrier  | (immediate)    | Callback replace    | Callback Box drop   |
     | Async        | Generation admission    | Active task    | Generation rollover | State Box drop      |

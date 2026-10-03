@@ -82,6 +82,9 @@ pub(crate) enum ModuleAuthority {
     Open(ModuleEpochLease),
     Closing(ModuleClosing),
     Drained(ModuleExportsDrained),
+    /// Drain preparation failed. Keep the epoch and its resources resident;
+    /// quarantine must not retry cleanup or manufacture a drained witness.
+    RetainedUndrained(ModuleClosing),
 }
 
 /// The cleanup authority retained after a close transition has begun.
@@ -92,6 +95,15 @@ pub(crate) enum ModuleAuthority {
 pub(crate) enum ModuleCleanupAuthority {
     Closing(ModuleClosing),
     Drained(ModuleExportsDrained),
+    RetainedUndrained(ModuleClosing),
+}
+
+/// Claiming cleanup distinguishes a deliberately retained epoch from a lost
+/// affine authority. The retained capability remains in lifecycle state.
+pub(crate) enum ModuleCleanupClaim {
+    Ready(ModuleCleanupAuthority),
+    RetainedUndrained(ModuleEpochId),
+    Missing,
 }
 
 /// Affine module capability after the module close has been linearized.
@@ -122,6 +134,15 @@ impl std::fmt::Debug for ModuleEpochLease {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ModuleEpochLease")
+            .field("epoch", &self.id.epoch)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for ModuleClosing {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ModuleClosing")
             .field("epoch", &self.id.epoch)
             .finish()
     }
@@ -174,6 +195,7 @@ impl ModuleAuthority {
             Self::Open(lease) => lease.id(),
             Self::Closing(closing) => closing.id(),
             Self::Drained(drained) => drained.id(),
+            Self::RetainedUndrained(closing) => closing.id(),
         }
     }
 
@@ -181,7 +203,7 @@ impl ModuleAuthority {
         match self {
             Self::Open(lease) => lease.begin_close(|| {}),
             Self::Closing(closing) => closing,
-            Self::Drained(_) => xlfn_kernel::invariant::fail_stop(),
+            Self::Drained(_) | Self::RetainedUndrained(_) => xlfn_kernel::invariant::fail_stop(),
         }
     }
 
@@ -190,7 +212,12 @@ impl ModuleAuthority {
             Self::Open(lease) => ModuleCleanupAuthority::Closing(lease.begin_close(|| {})),
             Self::Closing(closing) => ModuleCleanupAuthority::Closing(closing),
             Self::Drained(drained) => ModuleCleanupAuthority::Drained(drained),
+            Self::RetainedUndrained(closing) => ModuleCleanupAuthority::RetainedUndrained(closing),
         }
+    }
+
+    pub(crate) fn is_retained_undrained(&self) -> bool {
+        matches!(self, Self::RetainedUndrained(_))
     }
 }
 
@@ -199,20 +226,31 @@ impl ModuleCleanupAuthority {
         match self {
             Self::Closing(closing) => ModuleAuthority::Closing(closing),
             Self::Drained(drained) => ModuleAuthority::Drained(drained),
+            Self::RetainedUndrained(closing) => ModuleAuthority::RetainedUndrained(closing),
         }
     }
 
     /// Completes the module-side cleanup without minting a predecessor
     /// capability. A progressed `Drained` authority can only close callback
     /// admission; it cannot be converted back into `ModuleClosing`.
-    pub(crate) fn finish(self) {
+    pub(crate) fn finish(self) -> Result<(), (crate::XllError, Self)> {
         match self {
             Self::Closing(closing) => {
-                let drained = closing.seal_and_drain();
+                let drained = match closing.seal_and_drain() {
+                    Ok(drained) => drained,
+                    Err((error, closing)) => {
+                        return Err((error, Self::RetainedUndrained(closing)));
+                    }
+                };
                 drained.close_callbacks();
             }
             Self::Drained(drained) => drained.close_callbacks(),
+            Self::RetainedUndrained(_) => {
+                // This authority is deliberately never claimed for cleanup.
+                xlfn_kernel::invariant::fail_stop();
+            }
         }
+        Ok(())
     }
 }
 
@@ -221,13 +259,16 @@ impl ModuleClosing {
         self.id
     }
 
-    pub(crate) fn seal_and_drain(self) -> ModuleExportsDrained {
-        let exports = self.module.seal_and_drain_internal();
-        ModuleExportsDrained {
+    pub(crate) fn seal_and_drain(self) -> Result<ModuleExportsDrained, (crate::XllError, Self)> {
+        let exports = match self.module.seal_and_drain_internal() {
+            Ok(exports) => exports,
+            Err(error) => return Err((error, self)),
+        };
+        Ok(ModuleExportsDrained {
             module: self.module,
             id: self.id,
             exports,
-        }
+        })
     }
 }
 
@@ -331,7 +372,7 @@ impl ModuleRuntime {
         self.callback_admission.close();
     }
 
-    fn seal_and_drain_internal(&'static self) -> ExportsDrained {
+    fn seal_and_drain_internal(&'static self) -> crate::XllResult<ExportsDrained> {
         self.ingress.seal_and_drain()
     }
 
@@ -366,7 +407,9 @@ pub(crate) fn close_callbacks_for_test() {
 #[cfg(all(test, target_os = "windows", any(feature = "rtd", feature = "handles")))]
 pub(crate) fn certify_quiescence_for_test() {
     let closing = begin_open().rollback(|| {});
-    let drained = closing.seal_and_drain();
+    let drained = closing
+        .seal_and_drain()
+        .unwrap_or_else(|_| panic!("test module drain preparation failed"));
     let _ = drained.certify();
 }
 

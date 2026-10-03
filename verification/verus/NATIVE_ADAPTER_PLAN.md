@@ -21,6 +21,16 @@ drain operation correct would exceed that primitive boundary.
 | `parking_lot` wait/notify with RAII guards | Executable wait models and vstd locks | Guard identity, unlock/relock, notification discipline and unwind exits must connect to the actual objects |
 | `Box::into_non_null` / `Box::from_non_null` in Cache | `HeapPermission` is supplied to initialization and returned by recovery | Allocation identity and exact allocator permission must cross the native APIs once, without moving the inline payload during destruction |
 
+Windows export-drain preparation is another native boundary. Failure to prepare
+COM dispatch retains the affine `ModuleClosing` capability as
+`RetainedUndrained` in terminal quarantine, without issuing `ExportsDrained` or
+retrying cleanup. The DLL residency lease remains held. Rust regressions
+exercise capability retention, and the existing Shutdown trace checker checks
+the failure prefix under the `rtdShutdownFailed` classification. These checks
+do not connect COM setup, event or thread creation, or the retained capability's
+concrete identity to the Verus resource permissions. Committed cleanup
+quarantine also remains outside the Composition return-safety proof.
+
 ## Reader-owned observation implementation
 
 `Ticket` now owns both a receipt and the linear Cache observation. Its type

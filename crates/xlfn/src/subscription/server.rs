@@ -8,6 +8,7 @@ use super::data_plane::{
     OwnedPublishOperation, PublishCore, PublishTerminationStart, RtdRefreshBatch,
     ScopedPublishOperation,
 };
+use super::disconnect::OwnedSubscription;
 use super::host::SubscriptionHost;
 use super::runtime::{SubscriptionConnection, SubscriptionRuntime};
 use super::source::RtdSubscription;
@@ -128,8 +129,24 @@ impl<H: SubscriptionHost> SubscriptionServerHandle<H> {
         self.runtime().connect_transaction(self, topic_id, id)
     }
 
+    #[cfg_attr(
+        windows,
+        allow(
+            dead_code,
+            reason = "synchronous backend disconnection retains its sink-user barrier contract; COM uses the deferred entry point"
+        )
+    )]
     pub(crate) fn disconnect(&self, topic_id: TopicId) -> XllResult<()> {
         self.runtime().disconnect(self, topic_id)
+    }
+
+    pub(crate) fn disconnect_deferred(
+        &self,
+        topic_id: TopicId,
+        completion: Box<dyn Send>,
+    ) -> XllResult<()> {
+        self.runtime()
+            .disconnect_deferred(self, topic_id, completion)
     }
 
     pub(crate) fn terminate(&self) -> XllResult<()> {
@@ -146,7 +163,7 @@ unsafe impl<H: SubscriptionHost> Sync for SubscriptionServerHandle<H> {}
 pub(crate) struct SubscriptionServer<H: SubscriptionHost> {
     pub(crate) generation: ServerGeneration,
     pub(crate) publish: xlfn_kernel::published_owner::PublishedOwner<PublishCore<H>>,
-    pub(crate) subscriptions: Mutex<FxHashMap<TopicId, Box<dyn RtdSubscription>>>,
+    pub(super) subscriptions: Mutex<FxHashMap<TopicId, OwnedSubscription<H>>>,
     pub(crate) termination_coordinator: TerminationCoordinator,
 }
 
@@ -360,7 +377,7 @@ pub(crate) struct ServerTermination<'a, H: SubscriptionHost> {
     pub(crate) server: &'a SubscriptionServer<H>,
     pub(crate) wait: PublishTerminationStart<'a, H>,
     pub(crate) notifier: Option<H::Notifier>,
-    pub(crate) initial_subscriptions: Vec<Box<dyn RtdSubscription>>,
+    pub(super) initial_subscriptions: Vec<OwnedSubscription<H>>,
 }
 
 impl<H: SubscriptionHost> ServerTermination<'_, H> {
@@ -466,12 +483,12 @@ pub(crate) fn disconnect_one_no_unwind(subscription: Box<dyn RtdSubscription>) -
     }
 }
 
-pub(crate) fn disconnect_all_no_unwind(
-    subscriptions: impl IntoIterator<Item = Box<dyn RtdSubscription>>,
+fn disconnect_all_no_unwind<H: SubscriptionHost>(
+    subscriptions: impl IntoIterator<Item = OwnedSubscription<H>>,
 ) -> XllResult<()> {
     let mut first_error = None;
     for subscription in subscriptions {
-        if let Err(error) = disconnect_one_no_unwind(subscription)
+        if let Err(error) = subscription.disconnect_and_wait()
             && first_error.is_none()
         {
             first_error = Some(error);

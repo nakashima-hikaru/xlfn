@@ -27,21 +27,14 @@ where
     K: Clone + Eq + Hash + Send + Sync + 'static,
     V: Send + Sync + 'static,
 {
-    pub(super) fn new(capacity: u64, requested_shards: usize) -> Self {
+    pub(super) fn new(capacity: u64) -> Self {
         // Weight is bytes, not an item count: never preallocate the entire
         // byte budget as entries. Match Quick Cache's minimum shard size.
         let estimated = usize::try_from(capacity)
             .unwrap_or(usize::MAX)
             .clamp(1, 1024);
-        let mut shards = requested_shards.max(1).next_power_of_two();
-        while shards > 1 && estimated.div_ceil(shards) < 32 {
-            shards /= 2;
-        }
-        // Quick Cache rounds each shard capacity up. Round the total down
-        // first so aggregate residency cannot exceed the caller's budget.
-        let capacity = capacity / shards as u64 * shards as u64;
         let options = OptionsBuilder::new()
-            .shards(shards)
+            .shards(1)
             .estimated_items_capacity(estimated)
             .weight_capacity(capacity)
             // The default 97% hot quota rejects a single full-budget entry,

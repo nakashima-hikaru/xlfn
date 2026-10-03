@@ -1,147 +1,44 @@
 # Benchmark notes
 
-The [2026-10-01 comparison](../../../benchmarks/performance/2026-10-01.md)
-covers deferred numeric borrowed input, nonfinal pin release, keyed cold-cache
-coordination, and striped callback admission.
+## `async_task_drain`
+
+This production-path benchmark drains 0, 1, 4, 5, 32, or 128 task controls
+from all 32 generation shards, then drops the controls outside the shard locks.
+Fixture construction, cancellation slot allocation, and fixture destruction
+are excluded from timing. It does not measure normal task spawning or full
+executor shutdown. The group follows the standard ten-second policy and
+supports `XLFN_BENCH_MEASUREMENT_MS` for local comparisons.
+
+`async_task_drain_allocations` separately warms cancellation slot recycling,
+then counts only allocator traffic during drain and control destruction.
+It requires zero allocations for 0–4 controls and exactly one allocation with
+no reallocations for the larger cases. The allocation probe is in
+`just bench-ci`; both targets are in `just bench-full`.
+
+```sh
+rtk cargo bench -p xlfn --features bench-internals,async --bench async_task_drain --locked
+rtk cargo bench -p xlfn --features bench-internals,async --bench async_task_drain_allocations --locked
+```
 
 ## `cache_lookup`
 
-This benchmark compares `CalculationCache<u64, u64>` (Quick Cache by default)
-with a benchmark-only Arc control storing `(Arc<u64>, weight)`. Capacity, key
-shape, warm hit rate, and persistent worker topology match.
+This benchmark measures production `CalculationCache<u64, u64>` lookup and
+lease release. It covers one warm key, one shared hot key, and disjoint keys
+with 1, 2, 8, and 32 persistent workers, plus live-lease retirement with a
+one-entry resident budget. Fixture creation and worker warmup are outside
+timing; dispatch and completion coordination remain in each measured batch.
+Allocation counts are measured separately after warmup.
 
-The lookup cases are:
-
-- one warm key with one worker;
-- one hot key with 1, 2, 8, and 32 workers;
-- one disjoint key per worker with 1, 2, 8, and 32 workers;
-- deterministic live-lease retirement with a one-entry cache.
-
-The steady-state hit rows also include two benchmark-only diagnostic controls:
-
-- `no_admission_control`: lookup and node pin, without lookup admission;
-- `no_pin_control`: lookup and lookup admission, with raw node access and no pin accounting.
-
-These controls separate admission and pin costs without adding either mechanism to the production cache API. The
-diagnostic controls assume that the warmed cache is not evicted or mutated
-while the worker pool is running.
-
-Run the full benchmark with the normal ten-second measurement policy:
-
-```text
-cargo bench -p xlfn --bench cache_lookup --features bench-internals,cache
+```sh
+rtk cargo bench -p xlfn --bench cache_lookup --features bench-internals,cache --locked
 ```
-
-For a short local smoke run, set `XLFN_BENCH_MEASUREMENT_MS` and reduce the
-warm-up time:
-
-```text
-XLFN_BENCH_MEASUREMENT_MS=50 cargo bench -p xlfn --bench cache_lookup \
-  --features bench-internals,cache -- --noplot --warm-up-time 0.05
-```
-
-The allocation probe runs outside Criterion's timed section and reports
-allocator calls from one warm batch after the worker pool and cache have
-already been initialized.
-
-## 2026-09-05 smoke result
-
-The lookup rows below used 50 ms measurement time, 100 samples, and 50 ms
-warm-up. The live-lease row used the same measurement time with Criterion's
-default warm-up. Values are the time for one benchmark batch; each batch
-contains 1,000 hits per worker. These numbers validate the benchmark and are
-not a replacement for a full ten-second comparison on the target deployment
-host.
-
-| Case | Current | Arc control |
-| --- | ---: | ---: |
-| warm, 1 worker | 114.97 µs | 107.50 µs |
-| hot key, 1 worker | 114.87 µs | 109.08 µs |
-| hot key, 2 workers | 276.75 µs | 279.50 µs |
-| hot key, 8 workers | 1.1808 ms | 1.6017 ms |
-| hot key, 32 workers | 4.7483 ms | 8.5208 ms |
-| disjoint, 1 worker | 115.57 µs | 109.10 µs |
-| disjoint, 2 workers | 228.12 µs | 209.56 µs |
-| disjoint, 8 workers | 960.78 µs | 955.29 µs |
-| disjoint, 32 workers | 3.8993 ms | 3.8682 ms |
-| live-lease retirement, 1 worker | 699.19 µs | 588.79 µs |
-
-The warm-hit allocation probe reported 8 allocations for current and 0 for
-the Arc control in this run. The current-path allocation count is diagnostic
-and should be investigated separately from the ownership comparison; it is
-not folded into the Criterion timing conclusion.
-
-## 2026-09-05 current vs Arc full run
-
-The requested ten-second run completed before adding the diagnostic controls.
-Values are the median time for one batch of 1,000 hits per worker:
-
-| Case | Current | Arc control |
-| --- | ---: | ---: |
-| warm, 1 worker | 114.89 µs | 108.35 µs |
-| hot key, 1 worker | 114.38 µs | 108.42 µs |
-| hot key, 2 workers | 263.88 µs | 262.21 µs |
-| hot key, 8 workers | 1.4032 ms | 1.6133 ms |
-| hot key, 32 workers | 5.9926 ms | 7.0730 ms |
-| disjoint, 1 worker | 116.89 µs | 109.68 µs |
-| disjoint, 2 workers | 216.68 µs | 220.02 µs |
-| disjoint, 8 workers | 1.1044 ms | 1.1793 ms |
-| disjoint, 32 workers | 4.9006 ms | 4.1825 ms |
-| live-lease retirement, 1 worker | 691.61 µs | 576.87 µs |
-
-## 2026-09-05 diagnostic run
-
-The diagnostic rows used 1 s measurement time and 50 samples, with a 3 s
-follow-up for the 32-worker rows. Values are batch medians:
-
-| Case | Current | No admission | No pin | Arc control |
-| --- | ---: | ---: | ---: | ---: |
-| warm, 1 worker | 116.79 µs | 93.75 µs | 95.80 µs | 110.44 µs |
-| hot key, 1 worker | 116.65 µs | 93.50 µs | 95.96 µs | 109.71 µs |
-| hot key, 32 workers | 6.6656 ms | 6.5591 ms | 6.1722 ms | 7.3071 ms |
-| disjoint, 1 worker | 116.97 µs | 94.42 µs | 96.15 µs | 110.16 µs |
-| disjoint, 32 workers | 4.2866 ms | 4.0903 ms | 3.9854 ms | 4.0644 ms |
-
-There is no `miss_singleflight` row in this benchmark yet.
-
-## Scoped-read diagnostic
-
-The benchmark also exercises the phase-1 `CacheReadScope` path. It is gated by
-`bench-internals` and is not part of the production cache API yet. The scope
-holds one lookup-domain permit, uses borrowed `VersionedKeyRef` lookups, and
-avoids per-node pin increments and decrements while the lexical scope is alive.
-
-- `scoped_per_lookup`: one scope for each hit;
-- `scoped_batch`: one scope for the whole 1,000-hit worker batch;
-- `scoped_duration/lookups_N`: one scope with `N` repeated hits, to expose the
-  cost of keeping an observation scope open;
-- `concurrent_clear_latency/scope_N`: clear reaches reclamation while the
-  scoped reader is held, then the reader is released through a benchmark-only
-  synchronization hook. Its time includes coordination overhead and is a
-  protocol diagnostic, not a production clear-latency SLA.
-
-One local 1 s / 50-sample warm-hit run measured 114.34 µs for `current`,
-110.99 µs for `scoped_per_lookup`, 108.03 µs for `scoped_batch`, and
-106.86 µs for `arc_control`. This suggests that batching the observation
-permit removes a small recurring cost, while a scope per lookup is only about
-3% faster than the current lease path in this setup. The 32-worker scoped rows
-were scheduler-sensitive and should be re-measured on the target host before
-they are used for a design decision.
-
-A separate 500 ms / 30-sample run measured `scoped_duration/lookups_N` at
-approximately 2.56 µs, 3.48 µs, 12.59 µs, and 97.98 µs for
-`N = 1, 10, 100, 1,000`, respectively. These are batch times for one worker;
-Criterion throughput normalizes them by the number of hits. A separate 250 ms
-/ 15-sample clear-latency run measured approximately 17.3 µs, 18.0 µs, 25.5
-µs, and 87.6 µs for the same `N` values, showing the expected cost of holding
-the active scope while it performs post-clear lookups.
 
 ## `cache_reclamation`
 
 This benchmark measures eviction/reclamation through the ordinary
 `CalculationCache::get_or_try_insert_with` and `CacheLease::drop` APIs. It does
-not call `len`, `used_weight`, `clear`, or a benchmark-only read scope in any
-measured workload. Every operation uses a fresh, worker-disjoint key.
+not call `len`, `used_weight`, or `clear` in measured workloads. Every
+operation uses a fresh, worker-disjoint key.
 
 The matrix contains 1, 8, and 32 persistent workers, each with 64-byte or
 64-KiB payloads, and two separate workloads:
@@ -309,25 +206,22 @@ cargo bench -p xlfn --all-features --bench protocol_costs
 cargo bench -p xlfn --all-features --bench protocol_costs -- --pipeline
 cargo bench -p xlfn --all-features --bench rtd_publish -- channel_pipeline
 cargo bench -p xlfn --all-features --bench rtd_refresh -- channel_pipeline
-XLFN_TOPOLOGY_SUBSCRIPTIONS=512 XLFN_TOPOLOGY_PUBLISHERS=1 cargo bench -p xlfn --all-features --bench protocol_costs -- --topology
 cargo bench -p xlfn --all-features --bench protocol_costs -- --token-cache
 ```
 
 The pipeline includes RtdSender, publisher, ErasedSink, PublishCore, and refresh
-planning/completion with sequence checks. Excel/COM is not timed. Shared
-publisher topology and token-cache associativity remain benchmark-only
-controls; normal builds retain per-subscription publishers and direct
-mapping.
+planning/completion with sequence checks. Excel/COM is not timed. The
+token-cache probe measures the production 16-set, four-way token cache with
+colliding tokens and registry switches.
 
 ## Performance evaluation
 
-[The correction record](../../../docs/PERFORMANCE.md) covers notification
-reservation, public cache resolution, enum output, and handle input, including
-allocation measurements and validation limits.
-`rtd_topic_allocations` and `handle_memory` instrument allocation
-separately from timing. `handle_prepare/revision_churn` is the historical warm
-re-observation case; `handle_prepare/republish` explicitly withdraws and recreates
-topics and must be used to assess publication churn.
+The benchmarks cover public cache resolution, input identity, output conversion
+and handle ownership. `handle_memory` instruments allocation separately from
+timing.
+`handle_prepare/revision_churn` measures warm re-observation;
+`handle_prepare/republish` withdraws and recreates topics to measure publication
+churn.
 
 ## Value boundary allocations
 
@@ -373,24 +267,13 @@ cargo bench -p xlfn --features bench-internals,cache --bench cache_registry --lo
 Both `cache_registry` and `value_boundary_allocations` are included in
 `just bench-ci` and `just bench-full`.
 
-## Two-phase raw ingress experiment
+## Two-phase raw ingress
 
-`two_phase_ingress` compares eager conversion with call-borrowed preparation
-through the real formula handle lookup/publication path. It covers scalar,
-1k/100k numeric matrices, and 10k Unicode string matrices, with warm, cold and
-changed-last-cell cases. It emits timing and allocation JSON independently of
-Criterion. The candidate is benchmark-only; it does not change generated UDFs.
-
-See [the 2026-09-29 redesign experiments](../../../docs/PERFORMANCE_REDESIGN_EXPERIMENTS.md)
-for commands, raw measurements, adoption decisions and remaining contract gates.
-
-The production adoption is recorded in
-[`PERFORMANCE_REDESIGN_PRODUCTION.md`](../../../docs/PERFORMANCE_REDESIGN_PRODUCTION.md).
-`two_phase_ingress` now compares production `ArgumentContext::prepare` with eager
-decode. The topology probe selector `XLFN_TOPOLOGY_PUBLISHERS=0` now runs the
-production generation pool (one publisher); positive values select the retained
-experimental sharded pool. Historical zero-selector measurements used the old
-per-subscription implementation, so compare using the recorded worker count.
+`two_phase_ingress` compares production `ArgumentContext::prepare` with eager
+decoding through the real formula handle lookup/publication path. It covers
+scalar, 1k/100k numeric matrices and 10k Unicode string matrices, with warm,
+cold and changed-last-cell cases. It emits timing and allocation JSON
+independently of Criterion. These measurements exclude Excel/COM execution.
 
 ## Semantic identity regression fixtures
 
@@ -399,14 +282,10 @@ the Excel string limit, and one/eight numeric matrix arguments. Input storage
 is prepared outside timing. `value_boundary_allocations` checks that eight
 large arguments reuse the same number of hash allocations as one argument;
 it also reports one-string/rest-numeric arrays to expose speculative arena
-reservation costs. See [the boundary and RTD review](../../../docs/PERFORMANCE.md)
-for paired measurements, rejected alternatives, and validation limits.
+reservation costs.
 
 ## Large arrays, handle pins, and concurrent cache misses
 
-The [2026-09-30 measurements](../../../benchmarks/performance/README.md) record
-same-condition input/identity and object-pin comparisons, numeric Matrix versus
-XlArrayBuilder output, allocation probes, and fixed-budget concurrent misses.
 `argument_ingress/*/prepare_identity` stops after complete validation and identity
 recording, matching the input phase of a warm formula-handle hit. `two_phase_ingress`
 adds real formula publication and separately probes warm, cold, and changed inputs.

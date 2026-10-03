@@ -298,6 +298,7 @@ impl<T> RtdSender<T> {
             was_empty
         };
         if wake_publisher {
+            #[cfg(any(test, feature = "bench-internals"))]
             self.channel.changed.notify_one();
             Channel::schedule(&self.channel);
         }
@@ -427,6 +428,7 @@ struct Channel {
     panic_publish: AtomicBool,
     scheduler: Mutex<Option<Arc<PublisherQueue>>>,
     state: Mutex<ChannelState>,
+    #[cfg(any(test, feature = "bench-internals"))]
     changed: Condvar,
     // Cancellation waiters must never consume a publisher wakeup.
     closed: Condvar,
@@ -452,6 +454,7 @@ impl Channel {
                 stopping: false,
                 scheduled: false,
             }),
+            #[cfg(any(test, feature = "bench-internals"))]
             changed: Condvar::new(),
             closed: Condvar::new(),
             accepting: AtomicBool::new(true),
@@ -522,6 +525,7 @@ impl Channel {
         {
             let mut state = this.state.lock();
             state.scheduled = false;
+            #[cfg(any(test, feature = "bench-internals"))]
             this.changed.notify_all();
         }
         Self::schedule(this);
@@ -559,6 +563,7 @@ impl Channel {
                 state.terminal_error = Some(error);
             }
         }
+        #[cfg(any(test, feature = "bench-internals"))]
         this.changed.notify_all();
         this.closed.notify_all();
         Self::schedule(this);
@@ -583,6 +588,7 @@ impl Channel {
             state.terminal_error = None;
             std::mem::take(&mut state.values)
         };
+        #[cfg(any(test, feature = "bench-internals"))]
         self.changed.notify_all();
         self.closed.notify_all();
         drop(pending);

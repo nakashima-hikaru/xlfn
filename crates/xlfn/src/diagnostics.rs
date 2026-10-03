@@ -22,10 +22,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 use xlfn_kernel::service_slot::ReplaceableServiceSlot;
 
+#[cfg(feature = "bench-internals")]
+pub(crate) mod benchmark;
 /// Public diagnostic events, sink configuration, and observable statistics.
 pub mod event;
 /// Private file-sink and startup-log integration.
 pub(crate) mod file;
+mod payload;
 /// Private bounded worker and ownership handoff.
 pub(crate) mod worker;
 
@@ -42,9 +45,12 @@ pub use event::{
     AddinId, DiagnosticEvent, DiagnosticInitError, DiagnosticSink, DiagnosticStats, InvalidAddinId,
     diagnostic_stats,
 };
-use worker::{AsyncDiagnosticSink, DiagnosticObserver, OwnedDiagnosticEvent};
+use worker::{AsyncDiagnosticSink, DiagnosticEventMetadata, DiagnosticObserver};
 
 const DIAGNOSTIC_QUEUE_CAPACITY: usize = 1024;
+// Dynamic storage cloned for queued and currently delivered structured errors.
+// Fixed channel storage is separately bounded by DIAGNOSTIC_QUEUE_CAPACITY.
+const DIAGNOSTIC_PAYLOAD_MAX_BYTES: usize = 16 * 1024 * 1024;
 const LOG_MAX_BYTES: u64 = 4 * 1024 * 1024;
 const LOG_GENERATIONS: usize = 3;
 const DIAGNOSTIC_TEXT_MAX_BYTES: usize = 16 * 1024;
@@ -192,10 +198,9 @@ impl DiagnosticRouter {
                 self.observer
                     .record(crate::shutdown_trace::ShutdownEvent::RecordCleanupIssue);
                 if let Some(sink) = self.sink.read_if_ready() {
-                    sink.report(|| OwnedDiagnosticEvent {
+                    sink.report(&XllError::Panic, || DiagnosticEventMetadata {
                         udf_id: "diagnostic sink replacement",
                         argument: None,
-                        error: XllError::Panic,
                         diagnostic_id: DiagnosticId::from_u64(
                             NEXT_ID.fetch_add(1, Ordering::Relaxed),
                         ),
@@ -494,16 +499,15 @@ pub(crate) fn report_no_unwind(udf_id: &'static str, error: &XllError) -> Diagno
             udf = udf_id,
             argument,
             diagnostic_id = diagnostic_id.as_u64(),
-            error = %error,
-            error_debug = ?error,
+            error = %payload::TracedError(error),
+            error_debug = ?payload::TracedError(error),
             "XLL invocation failed"
         );
         let read = router().sink.read_if_ready();
         if let Some(sink) = read.as_deref() {
-            sink.report(|| OwnedDiagnosticEvent {
+            sink.report(error, || DiagnosticEventMetadata {
                 udf_id,
                 argument,
-                error: error.clone(),
                 diagnostic_id,
                 timestamp: SystemTime::now(),
             });
@@ -568,6 +572,86 @@ mod tests {
                 "report_no_unwind must not unwind when tracing subscriber panics"
             );
             assert_eq!(payload_drops.load(Ordering::Acquire), 0);
+        }
+    }
+
+    #[test]
+    fn tracing_bounds_large_text_and_retains_fields_and_full_sink_error() {
+        let _router_guard = prepare_global_router();
+        #[derive(Default)]
+        struct Fields {
+            display: String,
+            debug: String,
+            names: Vec<String>,
+        }
+        impl tracing::field::Visit for Fields {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.names.push(field.name().to_owned());
+                match field.name() {
+                    "error" => self.display = format!("{value:?}"),
+                    "error_debug" => self.debug = format!("{value:?}"),
+                    _ => {}
+                }
+            }
+        }
+        struct Subscriber(Arc<Mutex<Vec<Fields>>>);
+        impl tracing::Subscriber for Subscriber {
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                assert!(event.metadata().fields().field("argument").is_some());
+                let mut fields = Fields::default();
+                event.record(&mut fields);
+                self.0.lock().push(fields);
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+        struct FullSink(std::sync::mpsc::SyncSender<usize>);
+        impl DiagnosticSink for FullSink {
+            fn report(&self, event: &DiagnosticEvent<'_>) {
+                if let XllError::Native { message, .. } = event.error() {
+                    self.0.send(message.len()).unwrap();
+                }
+            }
+        }
+        let (sender, receiver) = std::sync::mpsc::sync_channel(2);
+        set_diagnostic_sink(FullSink(sender)).unwrap();
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let dispatch = tracing::Dispatch::new(Subscriber(Arc::clone(&records)));
+        let small = XllError::Native {
+            code: 7,
+            message: "ordinary 日本語".to_owned(),
+        };
+        let large = XllError::Native {
+            code: 8,
+            message: "x".repeat(1024 * 1024),
+        };
+        tracing::dispatcher::with_default(&dispatch, || {
+            report_no_unwind("traced-error", &small);
+            report_no_unwind("traced-error", &large);
+        });
+        clear_diagnostic_sink().unwrap();
+        assert_eq!(receiver.recv().unwrap(), "ordinary 日本語".len());
+        assert_eq!(receiver.recv().unwrap(), 1024 * 1024);
+        let records = records.lock();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].display, small.to_string());
+        assert_eq!(records[0].debug, format!("{small:?}"));
+        for fields in records.iter() {
+            for name in ["udf", "diagnostic_id", "error", "error_debug", "message"] {
+                assert!(fields.names.iter().any(|actual| actual == name));
+            }
+        }
+        for text in [&records[1].display, &records[1].debug] {
+            assert!(text.ends_with(DIAGNOSTIC_TRUNCATION_SUFFIX));
+            assert!(text.len() <= DIAGNOSTIC_TEXT_MAX_BYTES + DIAGNOSTIC_TRUNCATION_SUFFIX.len());
         }
     }
 
@@ -747,10 +831,9 @@ mod tests {
             .unwrap(),
         );
         for id in 1..=3 {
-            sink.report(|| OwnedDiagnosticEvent {
+            sink.report(&XllError::Panic, || DiagnosticEventMetadata {
                 udf_id: "panic payload delivery",
                 argument: None,
-                error: XllError::Panic,
                 diagnostic_id: DiagnosticId::from_u64(id),
                 timestamp: SystemTime::now(),
             });
@@ -803,10 +886,9 @@ mod tests {
         owners.reserve(16);
         let sink = Box::new(owners.pop().unwrap());
         for id in 1..=8 {
-            sink.report(|| OwnedDiagnosticEvent {
+            sink.report(&XllError::Panic, || DiagnosticEventMetadata {
                 udf_id: "observer ownership",
                 argument: None,
-                error: XllError::Panic,
                 diagnostic_id: DiagnosticId::from_u64(id),
                 timestamp: SystemTime::UNIX_EPOCH,
             });
@@ -836,10 +918,9 @@ mod tests {
             .read_if_ready()
             .as_ref()
             .unwrap()
-            .report(|| OwnedDiagnosticEvent {
+            .report(&XllError::Panic, || DiagnosticEventMetadata {
                 udf_id: "reload",
                 argument: None,
-                error: XllError::Panic,
                 diagnostic_id: DiagnosticId::from_u64(1),
                 timestamp: SystemTime::now(),
             });
@@ -854,10 +935,9 @@ mod tests {
             .read_if_ready()
             .as_ref()
             .unwrap()
-            .report(|| OwnedDiagnosticEvent {
+            .report(&XllError::Panic, || DiagnosticEventMetadata {
                 udf_id: "reload",
                 argument: None,
-                error: XllError::Panic,
                 diagnostic_id: DiagnosticId::from_u64(2),
                 timestamp: SystemTime::now(),
             });
@@ -907,10 +987,9 @@ mod tests {
             .read_if_ready()
             .as_ref()
             .unwrap()
-            .report(|| OwnedDiagnosticEvent {
+            .report(&XllError::Panic, || DiagnosticEventMetadata {
                 udf_id: "retiring",
                 argument: None,
-                error: XllError::Panic,
                 diagnostic_id: DiagnosticId::from_u64(1),
                 timestamp: SystemTime::now(),
             });
@@ -1083,10 +1162,9 @@ mod tests {
             .read_if_ready()
             .as_ref()
             .unwrap()
-            .report(|| OwnedDiagnosticEvent {
+            .report(&XllError::Panic, || DiagnosticEventMetadata {
                 udf_id: "terminal-close-race",
                 argument: None,
-                error: XllError::Panic,
                 diagnostic_id: DiagnosticId::from_u64(1),
                 timestamp: SystemTime::now(),
             });
@@ -1261,25 +1339,25 @@ mod tests {
         );
         let before = dropped_diagnostic_events();
 
-        sink.report(|| OwnedDiagnosticEvent {
+        sink.report(&XllError::Panic, || DiagnosticEventMetadata {
             udf_id: "bounded",
             argument: None,
-            error: XllError::Panic,
             diagnostic_id: DiagnosticId::from_u64(1),
             timestamp: SystemTime::now(),
         });
         started_rx.recv().unwrap();
         for diagnostic_id in 2..=(DIAGNOSTIC_QUEUE_CAPACITY as u64 + 2) {
-            sink.report(|| OwnedDiagnosticEvent {
+            sink.report(&XllError::Panic, || DiagnosticEventMetadata {
                 udf_id: "bounded",
                 argument: None,
-                error: XllError::Panic,
                 diagnostic_id: DiagnosticId::from_u64(diagnostic_id),
                 timestamp: SystemTime::now(),
             });
         }
         assert!(dropped_diagnostic_events() > before);
-        sink.report(|| panic!("a full queue must not build the dropped event"));
+        sink.report(&XllError::Panic, || {
+            panic!("a full queue must not build the dropped event")
+        });
 
         release_tx.send(()).unwrap();
         sink.shutdown().unwrap();
@@ -1298,10 +1376,9 @@ mod tests {
             .unwrap(),
         );
         let report = || {
-            sink.report(|| OwnedDiagnosticEvent {
+            sink.report(&XllError::Panic, || DiagnosticEventMetadata {
                 udf_id: "reservation rollback",
                 argument: None,
-                error: XllError::Panic,
                 diagnostic_id: DiagnosticId::from_u64(1),
                 timestamp: SystemTime::now(),
             });
@@ -1313,13 +1390,17 @@ mod tests {
         }
         assert!(
             catch_unwind(AssertUnwindSafe(|| {
-                sink.report(|| panic!("injected event construction panic"));
+                sink.report(&XllError::Panic, || {
+                    panic!("injected event construction panic")
+                });
             }))
             .is_err()
         );
         report();
         assert_eq!(sink.pending(), DIAGNOSTIC_QUEUE_CAPACITY as u64 + 1);
-        sink.report(|| panic!("the restored capacity must now be fully reserved"));
+        sink.report(&XllError::Panic, || {
+            panic!("the restored capacity must now be fully reserved")
+        });
         release_tx.send(()).unwrap();
         sink.shutdown().unwrap();
     }
@@ -1337,17 +1418,16 @@ mod tests {
             })
             .unwrap(),
         );
-        let event = |error| OwnedDiagnosticEvent {
+        let event = || DiagnosticEventMetadata {
             udf_id: "overload benchmark",
             argument: None,
-            error,
             diagnostic_id: DiagnosticId::from_u64(1),
             timestamp: SystemTime::now(),
         };
-        sink.report(|| event(XllError::Panic));
+        sink.report(&XllError::Panic, event);
         started_rx.recv().unwrap();
         for _ in 0..DIAGNOSTIC_QUEUE_CAPACITY {
-            sink.report(|| event(XllError::Panic));
+            sink.report(&XllError::Panic, event);
         }
         for bytes in [0, 65_536, 1_048_576] {
             let error = XllError::Native {
@@ -1358,7 +1438,7 @@ mod tests {
             for sample in 0..12 {
                 let start = std::time::Instant::now();
                 for _ in 0..256 {
-                    sink.report(|| event(std::hint::black_box(&error).clone()));
+                    sink.report(std::hint::black_box(&error), event);
                 }
                 let elapsed = start.elapsed().as_nanos();
                 if sample != 0 {

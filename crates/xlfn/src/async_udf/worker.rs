@@ -1,5 +1,5 @@
 use super::executor::{ExecutorPtr, ExecutorShared};
-use super::task::TaskControl;
+use super::task::{TaskControl, TaskControlBatch};
 use crate::XllError;
 use crate::cancellation::CancellationSource;
 use crate::panic_boundary::catch_no_unwind;
@@ -76,7 +76,7 @@ pub(crate) fn cancelled_calculation_error() -> XllError {
 }
 
 /// Cancels and aborts a batch of tasks outside of any lock.
-pub(crate) fn cancel_tasks(tasks: Vec<TaskControl>) {
+pub(crate) fn cancel_tasks(tasks: TaskControlBatch) {
     for TaskControl {
         abort,
         cancellation,

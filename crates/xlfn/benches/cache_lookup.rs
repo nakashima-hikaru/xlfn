@@ -3,12 +3,9 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Duration;
 use xlfn::benchmark_support::{
-    ArcCacheBenchmark, ArcCacheEvictionBenchmark, CacheLookupBenchCase,
-    ConcurrentClearLatencyBenchmark, CurrentCacheBenchmark, CurrentCacheEvictionBenchmark,
-    NoAdmissionCacheBenchmark, NoPinCacheBenchmark, ScopedBatchCacheBenchmark,
-    ScopedDurationCacheBenchmark, ScopedPerLookupCacheBenchmark, benchmark_measurement_time,
+    CacheLookupBenchCase, CurrentCacheBenchmark, CurrentCacheEvictionBenchmark,
+    benchmark_measurement_time,
 };
 
 struct CountingAllocator;
@@ -66,158 +63,39 @@ fn report_steady_state_allocations(label: &str, run: impl Fn()) {
 }
 
 fn cache_lookup_benchmarks(c: &mut Criterion) {
-    println!(
-        "cache_resident_backend {:?}",
-        xlfn::benchmark_support::benchmark_cache_backend()
-    );
     let mut group = c.benchmark_group("cache_lookup");
     group.measurement_time(benchmark_measurement_time());
 
-    {
-        let current =
-            CurrentCacheBenchmark::new(CacheLookupBenchCase::HotKey, 1, ITERATIONS_PER_WORKER);
-        let no_admission =
-            NoAdmissionCacheBenchmark::new(CacheLookupBenchCase::HotKey, 1, ITERATIONS_PER_WORKER);
-        let no_pin =
-            NoPinCacheBenchmark::new(CacheLookupBenchCase::HotKey, 1, ITERATIONS_PER_WORKER);
-        let scoped_per_lookup = ScopedPerLookupCacheBenchmark::new(
-            CacheLookupBenchCase::HotKey,
-            1,
-            ITERATIONS_PER_WORKER,
-        );
-        let scoped_batch =
-            ScopedBatchCacheBenchmark::new(CacheLookupBenchCase::HotKey, 1, ITERATIONS_PER_WORKER);
-        let arc = ArcCacheBenchmark::new(CacheLookupBenchCase::HotKey, 1, ITERATIONS_PER_WORKER);
-        report_steady_state_allocations("warm/current", || current.run());
-        report_steady_state_allocations("warm/no_admission_control", || no_admission.run());
-        report_steady_state_allocations("warm/no_pin_control", || no_pin.run());
-        report_steady_state_allocations("warm/scoped_per_lookup", || scoped_per_lookup.run());
-        report_steady_state_allocations("warm/scoped_batch", || scoped_batch.run());
-        report_steady_state_allocations("warm/arc_control", || arc.run());
-        group.throughput(Throughput::Elements(current.total_iterations() as u64));
-        group.bench_function(BenchmarkId::new("cache_hit/u64/current", "warm"), |b| {
-            b.iter(|| current.run())
-        });
-        group.bench_function(
-            BenchmarkId::new("cache_hit/u64/no_admission_control", "warm"),
-            |b| b.iter(|| no_admission.run()),
-        );
-        group.bench_function(
-            BenchmarkId::new("cache_hit/u64/no_pin_control", "warm"),
-            |b| b.iter(|| no_pin.run()),
-        );
-        group.bench_function(
-            BenchmarkId::new("cache_hit/u64/scoped_per_lookup", "warm"),
-            |b| b.iter(|| scoped_per_lookup.run()),
-        );
-        group.bench_function(
-            BenchmarkId::new("cache_hit/u64/scoped_batch", "warm"),
-            |b| b.iter(|| scoped_batch.run()),
-        );
-        group.bench_function(BenchmarkId::new("cache_hit/u64/arc_control", "warm"), |b| {
-            b.iter(|| arc.run())
-        });
-    }
+    let warm = CurrentCacheBenchmark::new(CacheLookupBenchCase::HotKey, 1, ITERATIONS_PER_WORKER);
+    report_steady_state_allocations("warm/current", || warm.run());
+    group.throughput(Throughput::Elements(warm.total_iterations() as u64));
+    group.bench_function(BenchmarkId::new("cache_hit/u64/current", "warm"), |b| {
+        b.iter(|| warm.run());
+    });
 
     for (case, group_name) in [
         (CacheLookupBenchCase::HotKey, "cache_hit_hot_key"),
         (CacheLookupBenchCase::DisjointKeys, "cache_hit_disjoint"),
     ] {
         for workers in THREAD_COUNTS {
-            let current = CurrentCacheBenchmark::new(case, workers, ITERATIONS_PER_WORKER);
-            let no_admission = NoAdmissionCacheBenchmark::new(case, workers, ITERATIONS_PER_WORKER);
-            let no_pin = NoPinCacheBenchmark::new(case, workers, ITERATIONS_PER_WORKER);
-            let scoped_per_lookup =
-                ScopedPerLookupCacheBenchmark::new(case, workers, ITERATIONS_PER_WORKER);
-            let scoped_batch = ScopedBatchCacheBenchmark::new(case, workers, ITERATIONS_PER_WORKER);
-            let arc = ArcCacheBenchmark::new(case, workers, ITERATIONS_PER_WORKER);
+            let benchmark = CurrentCacheBenchmark::new(case, workers, ITERATIONS_PER_WORKER);
             let id = format!("threads_{workers}/u64");
-            report_steady_state_allocations(&format!("{}/current", case.name()), || current.run());
-            report_steady_state_allocations(
-                &format!("{}/no_admission_control", case.name()),
-                || no_admission.run(),
-            );
-            report_steady_state_allocations(&format!("{}/no_pin_control", case.name()), || {
-                no_pin.run()
+            report_steady_state_allocations(&format!("{}/current", case.name()), || {
+                benchmark.run()
             });
-            report_steady_state_allocations(&format!("{}/scoped_per_lookup", case.name()), || {
-                scoped_per_lookup.run()
-            });
-            report_steady_state_allocations(&format!("{}/scoped_batch", case.name()), || {
-                scoped_batch.run()
-            });
-            report_steady_state_allocations(&format!("{}/arc_control", case.name()), || arc.run());
-            group.throughput(Throughput::Elements(current.total_iterations() as u64));
+            group.throughput(Throughput::Elements(benchmark.total_iterations() as u64));
             group.bench_with_input(
                 BenchmarkId::new(format!("{group_name}/current"), &id),
                 &workers,
-                |b, _| b.iter(|| current.run()),
-            );
-            group.bench_with_input(
-                BenchmarkId::new(format!("{group_name}/no_admission_control"), &id),
-                &workers,
-                |b, _| b.iter(|| no_admission.run()),
-            );
-            group.bench_with_input(
-                BenchmarkId::new(format!("{group_name}/no_pin_control"), &id),
-                &workers,
-                |b, _| b.iter(|| no_pin.run()),
-            );
-            group.bench_with_input(
-                BenchmarkId::new(format!("{group_name}/scoped_per_lookup"), &id),
-                &workers,
-                |b, _| b.iter(|| scoped_per_lookup.run()),
-            );
-            group.bench_with_input(
-                BenchmarkId::new(format!("{group_name}/scoped_batch"), &id),
-                &workers,
-                |b, _| b.iter(|| scoped_batch.run()),
-            );
-            group.bench_with_input(
-                BenchmarkId::new(format!("{group_name}/arc_control"), &id),
-                &workers,
-                |b, _| b.iter(|| arc.run()),
+                |b, _| b.iter(|| benchmark.run()),
             );
         }
     }
 
-    for lookups_per_scope in [1, 10, 100, ITERATIONS_PER_WORKER] {
-        let duration = ScopedDurationCacheBenchmark::new(
-            CacheLookupBenchCase::HotKey,
-            1,
-            1,
-            lookups_per_scope,
-        );
-        group.throughput(Throughput::Elements(duration.total_iterations() as u64));
-        group.bench_function(
-            format!("scoped_duration/lookups_{lookups_per_scope}"),
-            |b| b.iter(|| duration.run()),
-        );
-
-        let clear = ConcurrentClearLatencyBenchmark::new(lookups_per_scope);
-        group.throughput(Throughput::Elements(1));
-        group.bench_function(
-            format!("concurrent_clear_latency/scope_{lookups_per_scope}"),
-            |b| {
-                b.iter_custom(|iterations| {
-                    let mut elapsed = Duration::ZERO;
-                    for _ in 0..iterations {
-                        elapsed += clear.run();
-                    }
-                    elapsed
-                })
-            },
-        );
-    }
-
-    let current = CurrentCacheEvictionBenchmark::new(EVICTION_ITERATIONS);
-    let arc = ArcCacheEvictionBenchmark::new(EVICTION_ITERATIONS);
-    group.throughput(Throughput::Elements(current.total_iterations() as u64));
+    let eviction = CurrentCacheEvictionBenchmark::new(EVICTION_ITERATIONS);
+    group.throughput(Throughput::Elements(eviction.total_iterations() as u64));
     group.bench_function("eviction_with_live_lease/current", |b| {
-        b.iter(|| current.run())
-    });
-    group.bench_function("eviction_with_live_lease/arc_control", |b| {
-        b.iter(|| arc.run())
+        b.iter(|| eviction.run());
     });
 
     group.finish();

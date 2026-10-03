@@ -5,6 +5,7 @@ use super::manager::MAX_PENDING;
 use super::worker::release_active;
 use crate::cancellation::CancellationSource;
 use futures_util::future::{AbortHandle, AbortRegistration, Abortable};
+use smallvec::SmallVec;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::Ordering;
@@ -58,6 +59,9 @@ pub(crate) struct TaskControl {
     pub(crate) abort: AbortHandle,
     pub(crate) cancellation: CancellationSource,
 }
+
+/// Temporary cancellation ownership, consumed after executor locks are released.
+pub(crate) type TaskControlBatch = SmallVec<[TaskControl; 4]>;
 
 pub(crate) struct ActiveReservation<'a> {
     shared: Option<&'a ExecutorShared>,

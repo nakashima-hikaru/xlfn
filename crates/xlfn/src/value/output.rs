@@ -44,6 +44,10 @@ pub trait IntoExcel {
     /// Writes directly into a semantic cell sink when the value has a
     /// primitive representation. Custom conversions keep the semantic
     /// fallback and never need to know the sink's ABI.
+    /// Implementations must write exactly one cell with the same semantic
+    /// value as `into_excel`, propagating conversion and sink errors. Scalar
+    /// and array returns use this writer; borrowed text is encoded before its
+    /// source is released.
     #[doc(hidden)]
     fn write_into<S: ExcelCellSink>(self, sink: &mut S) -> XllResult<()>
     where

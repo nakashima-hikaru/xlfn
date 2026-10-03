@@ -182,7 +182,7 @@ mod tests {
         read(PHASE_OPEN, 1);
         ingress.begin_close_with(|| {});
         read(PHASE_CLOSING, 1);
-        ingress.seal_and_drain();
+        ingress.seal_and_drain().unwrap();
         read(PHASE_CLOSED, 0);
     }
 
@@ -232,7 +232,7 @@ mod tests {
         let draining = Arc::clone(&ingress);
         let (drained_tx, drained_rx) = mpsc::sync_channel(0);
         let closer = std::thread::spawn(move || {
-            draining.seal_and_drain();
+            draining.seal_and_drain().unwrap();
             drained_tx.send(()).unwrap();
         });
         assert!(drained_rx.recv_timeout(Duration::from_millis(20)).is_err());

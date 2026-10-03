@@ -2072,10 +2072,16 @@ mod tests {
         let value =
             <AliasedReturn as ExcelReturn>::into_excel(Ok::<_, XllError>(4.5), &mut context)
                 .unwrap();
-        assert!(matches!(
-            value,
-            ReturnPayload::Scalar(ExcelCellOutput::Number(number)) if number == 4.5
-        ));
+        let ReturnPayload::Scalar(value) = value else {
+            panic!("scalar return expected");
+        };
+        assert_eq!(
+            XlValueRef::from_array_cell(value.as_raw())
+                .unwrap()
+                .as_f64()
+                .unwrap(),
+            4.5
+        );
     }
 
     #[test]

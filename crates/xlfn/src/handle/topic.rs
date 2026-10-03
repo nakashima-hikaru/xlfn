@@ -2,7 +2,10 @@
 //!
 //! Read-side maps publish non-owning pointers to topics. Retired topic owners
 //! are reclaimed only after the rotating read domain completes their grace
-//! period. Single-flight completion cells share a small synchronization
+//! period. Removers start rotation without waiting for active readers, and
+//! departing readers retry maintenance: newer readers cannot prolong an old
+//! grace period or leave the final retirement waiting for another deletion.
+//! Single-flight completion cells share a small synchronization
 //! allocation; the initializer reservation owns completion, and service close
 //! explicitly waits for it. Reference counts do not govern service, topic or
 //! object lifetime.
@@ -25,9 +28,7 @@ use smallvec::SmallVec;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::ptr::NonNull;
-#[cfg(test)]
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::thread::ThreadId;
 use triomphe::Arc;
 use xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT;
@@ -94,18 +95,27 @@ unsafe impl Sync for PublishedTopicPtr {}
 /// A scoped read capability that protects published topics from being reclaimed
 /// while they are being inspected.
 pub(crate) struct TopicReadLease<'a> {
-    published: &'a PublishedTopics,
-    _permit: RotatingReadPermit<'a, DEFAULT_STRIPE_COUNT>,
-    _guard: super::runtime::TopicReadGuard,
+    table: &'a TopicTable,
+    permit: Option<RotatingReadPermit<'a, DEFAULT_STRIPE_COUNT>>,
 }
 
 impl<'a> TopicReadLease<'a> {
     pub(crate) fn load(&self, key: &HandleTopicKey) -> Option<PublishedTopicRef<'_>> {
-        let ptr = self.published.load(key)?;
+        let ptr = self.table.published.load(key)?;
         Some(PublishedTopicRef {
             ptr: ptr.0,
             _marker: PhantomData,
         })
+    }
+}
+
+impl Drop for TopicReadLease<'_> {
+    fn drop(&mut self) {
+        drop(self.permit.take());
+        // The table borrow protects this completion tail as well as the
+        // permit. FormulaHandleService also retains prepare admission until
+        // this drop returns, so close cannot recover the service mid-tail.
+        self.table.maintain_after_reader();
     }
 }
 
@@ -221,6 +231,10 @@ pub(crate) struct TopicTable {
     state: RwLock<TopicTableState>,
     published: PublishedTopics,
     read_domain: RotatingRetirementDomain<DEFAULT_STRIPE_COUNT, RetiredTopics>,
+    // Maintenance hint; registration and rotation synchronize through the
+    // retirement queue locks. Ordinary warm reads take the zero-debt path.
+    queued: AtomicUsize,
+    maintenance_requests: AtomicUsize,
 }
 
 impl TopicTable {
@@ -229,6 +243,8 @@ impl TopicTable {
             state: RwLock::new(TopicTableState::default()),
             published: PublishedTopics::new(),
             read_domain: RotatingRetirementDomain::new(),
+            queued: AtomicUsize::new(0),
+            maintenance_requests: AtomicUsize::new(0),
         }
     }
 
@@ -238,43 +254,93 @@ impl TopicTable {
             .enter_current_thread()
             .map_err(|_| XllError::Closing)?;
         Ok(TopicReadLease {
-            published: &self.published,
-            _permit: permit,
-            _guard: super::runtime::TopicReadGuard::enter(),
+            table: self,
+            permit: Some(permit),
         })
     }
 
     fn enqueue_reclaim(&self, topic: PublishedOwner<PublishedTopic>) {
-        // Map withdrawal precedes registration here. Rotation takes this
+        // Map withdrawal and retirement registration share the table writer
+        // lock with close. Rotation takes this
         // queue lock before publishing its next generation, establishing the
         // ordering needed by readers of copied, non-owning topic pointers.
-        self.read_domain
-            .register_retired(|_, mut queue| queue.push(topic));
+        self.read_domain.register_retired(|_, mut queue| {
+            queue.push(topic);
+            self.queued
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |queued| {
+                    queued.checked_add(1)
+                })
+                .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+        });
     }
 
     fn drain_generation(&self, generation: DrainedGeneration<'_>) -> RetiredTopics {
-        self.read_domain
+        let retired = self
+            .read_domain
             .take_queue(&generation, |mut queue| std::mem::take(&mut *queue))
-            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop())
+            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+        xlfn_kernel::invariant::checked_atomic_sub_relaxed(&self.queued, retired.len());
+        retired
     }
 
+    #[cfg(test)]
     pub(crate) fn try_quiesce_and_drain(&self) -> RetiredTopics {
-        let Some(empty) = self
-            .read_domain
-            .try_inspect_both(|first, second| first.is_empty() && second.is_empty())
-        else {
-            return SmallVec::new();
-        };
-        if empty {
+        if self.queued.load(Ordering::Relaxed) == 0 {
             return SmallVec::new();
         }
         let Some(result) = self
             .read_domain
-            .try_quiesce_if_idle(|generation| self.drain_generation(generation))
+            .poll_quiesce(|generation| self.drain_generation(generation))
         else {
             return SmallVec::new();
         };
         result.unwrap_or_default()
+    }
+
+    fn maintain_after_reader(&self) {
+        // Acquire the seal's Release sequence after the permit's Release
+        // RMW. If departure preceded seal, the writer observes the idle gate
+        // and drains; otherwise this fence makes its queued work visible.
+        // This is the same final-reader handoff as HandleReadDomain.
+        std::sync::atomic::fence(Ordering::Acquire);
+        if self.queued.load(Ordering::Relaxed) != 0 {
+            self.maintain();
+        }
+    }
+
+    fn maintain(&self) {
+        // One requester drives each poll. A departing reader that encounters
+        // its transition/queue lock registers a further pass before returning,
+        // so the active driver cannot discard the final-reader notification.
+        let previous = self
+            .maintenance_requests
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |requests| {
+                requests.checked_add(1)
+            })
+            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+        if previous != 0 {
+            return;
+        }
+        let mut consumed = 1;
+        loop {
+            while self.queued.load(Ordering::Relaxed) != 0 {
+                let Some(Ok(retired)) = self
+                    .read_domain
+                    .poll_quiesce(|generation| self.drain_generation(generation))
+                else {
+                    break;
+                };
+                // Only framework-owned strings are destroyed here. The queue,
+                // transition and topic-table guards have all ended.
+                drop(retired);
+            }
+            let requested =
+                xlfn_kernel::invariant::checked_atomic_sub(&self.maintenance_requests, consumed);
+            if requested == consumed {
+                return;
+            }
+            consumed = requested - consumed;
+        }
     }
 
     pub(crate) fn seal_and_drain(&self) -> RetiredTopics {
@@ -283,6 +349,7 @@ impl TopicTable {
             .take_queues(&closed, |mut first, mut second| {
                 let mut all = std::mem::take(&mut *first);
                 all.append(&mut *second);
+                xlfn_kernel::invariant::checked_atomic_sub_relaxed(&self.queued, all.len());
                 all
             })
             .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop())
@@ -625,12 +692,9 @@ impl TopicTable {
         let mut state = self.state.write();
         let key = state.by_observer_id.remove(&owner)?;
         let (removal, retired) = self.remove_topic_locked(&mut state, key)?;
-        drop(state);
         self.enqueue_reclaim(retired);
-        if !super::runtime::is_current_thread_reading_topic() {
-            let drained = self.try_quiesce_and_drain();
-            drop(drained);
-        }
+        drop(state);
+        self.maintain();
         Some(removal)
     }
 
@@ -639,12 +703,9 @@ impl TopicTable {
         let mut state = self.state.write();
         let key = state.by_lifetime_key.get(lifetime_key).copied()?;
         let (removal, retired) = self.remove_topic_locked(&mut state, key)?;
-        drop(state);
         self.enqueue_reclaim(retired);
-        if !super::runtime::is_current_thread_reading_topic() {
-            let drained = self.try_quiesce_and_drain();
-            drop(drained);
-        }
+        drop(state);
+        self.maintain();
         Some(removal)
     }
 
@@ -663,13 +724,10 @@ impl TopicTable {
             return None;
         }
         let (removal, retired) = self.remove_topic_locked(&mut state, key)?;
+        self.enqueue_reclaim(retired);
         drop(state);
         on_linearized();
-        self.enqueue_reclaim(retired);
-        if !super::runtime::is_current_thread_reading_topic() {
-            let drained = self.try_quiesce_and_drain();
-            drop(drained);
-        }
+        self.maintain();
         Some(removal)
     }
 
@@ -741,10 +799,7 @@ impl TopicTable {
         by_lifetime_key.clear();
         by_observer_id.clear();
         drop(state);
-        if !super::runtime::is_current_thread_reading_topic() {
-            let drained = self.try_quiesce_and_drain();
-            drop(drained);
-        }
+        self.maintain();
         removals
     }
 
@@ -761,21 +816,14 @@ impl TopicTable {
             .map(|(key, _)| *key)
             .collect::<Vec<_>>();
         let mut removals = Vec::with_capacity(keys.len());
-        let mut retired_topics = Vec::with_capacity(keys.len());
         for key in keys {
             if let Some((removal, retired)) = self.remove_topic_locked(&mut state, key) {
                 removals.push(removal);
-                retired_topics.push(retired);
+                self.enqueue_reclaim(retired);
             }
         }
         drop(state);
-        for retired in retired_topics {
-            self.enqueue_reclaim(retired);
-        }
-        if !super::runtime::is_current_thread_reading_topic() {
-            let drained = self.try_quiesce_and_drain();
-            drop(drained);
-        }
+        self.maintain();
         removals
     }
 }
@@ -851,12 +899,16 @@ pub(crate) enum PrepareDecision {
 #[cfg(test)]
 mod tests {
     use super::{PublishedTopic, TopicTable};
+    use crate::XllError;
+    use crate::handle::runtime::FormulaHandleService;
+    use crate::handle::{ExcelHandleObject, formula::test_topic_key};
+    use std::sync::atomic::Ordering;
     use std::sync::{Arc, mpsc};
     use std::time::Duration;
     use xlfn_kernel::published_owner::PublishedOwner;
 
     #[test]
-    fn idle_topic_reclamation_skips_busy_registration_without_publishing() {
+    fn topic_reclamation_skips_busy_registration_without_publishing() {
         let table = Arc::new(TopicTable::new());
         table.enqueue_reclaim(PublishedOwner::new(PublishedTopic::new(
             "token".to_owned(),
@@ -876,9 +928,133 @@ mod tests {
         // The inspection lock is released before joining the worker.
         worker.join().unwrap();
         let (count, observed_generation) =
-            outcome.expect("idle reclamation must not wait for registration");
+            outcome.expect("topic reclamation must not wait for registration");
         assert_eq!(count, 0);
         assert_eq!(observed_generation, generation);
         assert_eq!(table.try_quiesce_and_drain().len(), 1);
+    }
+
+    #[test]
+    fn miri_warm_observation_retirements_drain_without_a_followup_deletion() {
+        struct Payload;
+        impl ExcelHandleObject for Payload {}
+        const TOPICS: usize = if cfg!(miri) { 8 } else { 1_000 };
+        let runtime = FormulaHandleService::try_new(TOPICS as u32).unwrap();
+        for index in 0..TOPICS {
+            let key = test_topic_key(&format!("warm-retirement-{index}"));
+            runtime
+                .prepare_observed(key, || Ok(Payload), |_, _| Ok(()))
+                .unwrap();
+        }
+
+        let key = test_topic_key("warm-retirement-0");
+        let result = runtime.prepare_observed::<Payload, _>(
+            key,
+            || panic!("the warm path must not recreate its object"),
+            |_, _| {
+                runtime.terminate_all_topics();
+                assert_eq!(runtime.store.len(), 0);
+                assert_eq!(runtime.topics.queued.load(Ordering::Relaxed), TOPICS);
+                Ok(())
+            },
+        );
+        assert!(matches!(result, Err(XllError::StaleHandle)));
+        // The production warm path has released its final read lease. No
+        // further delete, prepare, explicit maintenance or close is needed.
+        assert_eq!(runtime.topics.queued.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            runtime.topics.maintenance_requests.load(Ordering::Relaxed),
+            0
+        );
+        assert!(
+            runtime
+                .topics
+                .read_domain
+                .try_inspect_both(|first, second| first.is_empty() && second.is_empty())
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn miri_last_old_topic_reader_reclaims_while_a_later_reader_remains() {
+        struct Payload;
+        impl ExcelHandleObject for Payload {}
+        let runtime = FormulaHandleService::try_new(1).unwrap();
+        let key = test_topic_key("later-topic-reader");
+        runtime
+            .prepare_observed(key, || Ok(Payload), |_, _| Ok(()))
+            .unwrap();
+        let old = runtime.topics.enter_read_lease().unwrap();
+        assert!(old.load(&key).is_some());
+        let initial = runtime.topics.read_domain.current_generation();
+        runtime.terminate_all_topics();
+        assert_ne!(runtime.topics.read_domain.current_generation(), initial);
+        assert_eq!(runtime.topics.queued.load(Ordering::Relaxed), 1);
+        // Overlapping reads no longer require a globally idle moment. A later
+        // reader enters the new generation and cannot extend the old grace.
+        let later = runtime.topics.enter_read_lease().unwrap();
+        assert!(later.load(&key).is_none());
+        drop(old);
+        assert_eq!(runtime.topics.queued.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            runtime.topics.maintenance_requests.load(Ordering::Relaxed),
+            0
+        );
+        drop(later);
+    }
+
+    #[test]
+    fn miri_nested_topic_reader_release_keeps_the_outer_reference_alive() {
+        struct Payload;
+        impl ExcelHandleObject for Payload {}
+        let runtime = FormulaHandleService::try_new(1).unwrap();
+        let key = test_topic_key("nested-topic-reader");
+        runtime
+            .prepare_observed(key, || Ok(Payload), |_, _| Ok(()))
+            .unwrap();
+        let outer = runtime.topics.enter_read_lease().unwrap();
+        let inner = runtime.topics.enter_read_lease().unwrap();
+        let publication = outer.load(&key).unwrap();
+        runtime.terminate_all_topics();
+        drop(inner);
+        assert_eq!(runtime.topics.queued.load(Ordering::Relaxed), 1);
+        assert_eq!(publication.state(), super::PublishedTopicState::Stale);
+        drop(outer);
+        assert_eq!(runtime.topics.queued.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn miri_cross_thread_topic_retirement_drains_on_the_last_reader_release() {
+        struct Payload;
+        impl ExcelHandleObject for Payload {}
+        let runtime = Arc::new(FormulaHandleService::try_new(1).unwrap());
+        let key = test_topic_key("cross-thread-topic-reader");
+        runtime
+            .prepare_observed(key, || Ok(Payload), |_, _| Ok(()))
+            .unwrap();
+        let (entered_tx, entered_rx) = mpsc::sync_channel(0);
+        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        let reading = Arc::clone(&runtime);
+        let reader = std::thread::spawn(move || {
+            reading.prepare_observed::<Payload, _>(
+                key,
+                || panic!("the warm path must not recreate its object"),
+                |_, _| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                },
+            )
+        });
+        entered_rx.recv().unwrap();
+        runtime.terminate_all_topics();
+        assert_eq!(runtime.topics.queued.load(Ordering::Relaxed), 1);
+        release_tx.send(()).unwrap();
+        assert!(matches!(reader.join().unwrap(), Err(XllError::StaleHandle)));
+        assert_eq!(runtime.topics.queued.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            runtime.topics.maintenance_requests.load(Ordering::Relaxed),
+            0
+        );
     }
 }

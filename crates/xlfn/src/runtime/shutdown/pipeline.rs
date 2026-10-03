@@ -202,6 +202,26 @@ pub(crate) struct ExecutionDrained {
     returns: crate::shutdown::ReturnsQuiescent,
 }
 
+pub(crate) enum ExecutionDrainError {
+    Preparation(crate::XllError),
+    ReturnQuiescence(crate::XllError),
+}
+
+impl ExecutionDrainError {
+    pub(crate) fn hazard(&self) -> crate::shutdown::UnloadHazard {
+        match self {
+            Self::Preparation(_) => crate::shutdown::UnloadHazard::ExportDrainPreparationFailed,
+            Self::ReturnQuiescence(_) => crate::shutdown::UnloadHazard::CloseInvariantViolation,
+        }
+    }
+
+    pub(crate) fn into_error(self) -> crate::XllError {
+        match self {
+            Self::Preparation(error) | Self::ReturnQuiescence(error) => error,
+        }
+    }
+}
+
 /// The producer stage owns the execution-drain witness while async work and
 /// subscription producers are stopped. Keeping these certificates together
 /// prevents one pipeline from accidentally assembling a terminal proof with
@@ -300,14 +320,33 @@ impl ExecutionDrained {
     pub(crate) fn begin<A: Addin>(
         deps: ShutdownDeps<'_, A>,
         module: crate::module_runtime::ModuleClosing,
-    ) -> Result<Self, (crate::XllError, crate::module_runtime::ModuleExportsDrained)> {
-        let module = module.seal_and_drain();
+    ) -> Result<
+        Self,
+        (
+            ExecutionDrainError,
+            crate::module_runtime::ModuleCleanupAuthority,
+        ),
+    > {
+        let module = match module.seal_and_drain() {
+            Ok(module) => module,
+            Err((error, closing)) => {
+                return Err((
+                    ExecutionDrainError::Preparation(error),
+                    crate::module_runtime::ModuleCleanupAuthority::RetainedUndrained(closing),
+                ));
+            }
+        };
 
         deps.observer().calls_drained();
 
         let returns = match deps.wait_for_return_quiescence() {
             Ok(returns) => returns,
-            Err(error) => return Err((error, module)),
+            Err(error) => {
+                return Err((
+                    ExecutionDrainError::ReturnQuiescence(error),
+                    crate::module_runtime::ModuleCleanupAuthority::Drained(module),
+                ));
+            }
         };
 
         deps.observer().returns_drained();
@@ -808,14 +847,18 @@ impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ResourcesReclaimed> {
 pub(crate) fn drain_execution<A: Addin>(
     deps: ShutdownDeps<'_, A>,
     owner: &mut RemovalOwner<'_, A>,
-) -> crate::XllResult<ExecutionDrained> {
+) -> Result<ExecutionDrained, ExecutionDrainError> {
     let module = owner.take_module_closing();
     match ExecutionDrained::begin(deps, module) {
         Ok(stage) => Ok(stage),
         Err((error, module)) => {
-            owner.return_module_authority(crate::module_runtime::ModuleCleanupAuthority::Drained(
-                module,
-            ));
+            if matches!(error, ExecutionDrainError::Preparation(_)) {
+                // Terminal retention must precede the owner's release and
+                // notification. A waiting remover must never reclaim this
+                // undrained capability as an ordinary Closing authority.
+                deps.quarantine_state();
+            }
+            owner.return_module_authority(module);
             Err(error)
         }
     }

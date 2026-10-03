@@ -133,7 +133,7 @@ impl<'call> RegistrationHost<'call> {
             Err(error) => return RegistrationMutation::Rejected { error },
         };
 
-        let mut pointers = vec![
+        let mut pointers: SmallVec<[NonNull<XLOPER12>; 16]> = smallvec::smallvec![
             module.pointer(),
             procedure.pointer(),
             type_text.pointer(),
@@ -609,7 +609,46 @@ fn decode_module_name<'call>(value: XlValueRef<'call>) -> XllResult<ModuleName> 
 pub(crate) mod test_support {
     use std::cell::RefCell;
     use std::collections::VecDeque;
-    use xlfn_sys::{XL_FREE, XLOPER12, XLRET_FAILED, XLRET_SUCCESS};
+    use xlfn_sys::{
+        XL_FREE, XLF_REGISTER, XLOPER12, XLRET_FAILED, XLRET_SUCCESS, XLTYPE_NUM, XLTYPE_STR,
+    };
+
+    #[derive(Clone, Debug, PartialEq)]
+    pub(super) enum RegisterArgument {
+        Text(String),
+        Number(f64),
+        UnexpectedType(u32),
+    }
+
+    type RegisterHook = Box<dyn FnOnce(&[*mut XLOPER12])>;
+
+    pub(super) unsafe fn read_registration_arguments(
+        arguments: &[*mut XLOPER12],
+    ) -> Vec<RegisterArgument> {
+        arguments
+            .iter()
+            .map(|argument| {
+                // SAFETY: the caller retains every operand and its payload.
+                let argument = unsafe { &**argument };
+                match argument.xltype {
+                    XLTYPE_STR => {
+                        // SAFETY: the active string is a live counted buffer.
+                        let text = unsafe { argument.value.string };
+                        // SAFETY: the count prefix describes the live payload.
+                        let count = usize::from(unsafe { *text });
+                        // SAFETY: the live counted buffer includes its prefix.
+                        let payload = unsafe { text.add(1) };
+                        // SAFETY: count initialized units follow the prefix.
+                        let units = unsafe { std::slice::from_raw_parts(payload, count) };
+                        RegisterArgument::Text(String::from_utf16_lossy(units))
+                    }
+                    // SAFETY: the discriminant selects the numeric member.
+                    XLTYPE_NUM => RegisterArgument::Number(unsafe { argument.value.number }),
+                    other => RegisterArgument::UnexpectedType(other),
+                }
+            })
+            .collect()
+    }
 
     pub(crate) struct Reply {
         function: i32,
@@ -645,6 +684,10 @@ pub(crate) mod test_support {
         calls: Vec<i32>,
         release_status: Option<i32>,
         unexpected_calls: usize,
+        registration_arguments: Vec<RegisterArgument>,
+        registration_arguments_at_release: Vec<RegisterArgument>,
+        registration_pointers: Vec<*mut XLOPER12>,
+        registration_hook: Option<RegisterHook>,
     }
 
     thread_local! {
@@ -694,6 +737,17 @@ pub(crate) mod test_support {
                 );
             });
         }
+
+        pub(super) fn assert_registration_arguments(&self, expected: &[RegisterArgument]) {
+            SCRIPT.with_borrow(|script| {
+                assert_eq!(script.registration_arguments, expected);
+                assert_eq!(script.registration_arguments_at_release, expected);
+            });
+        }
+
+        pub(super) fn on_register(&self, hook: impl FnOnce(&[*mut XLOPER12]) + 'static) {
+            SCRIPT.with_borrow_mut(|script| script.registration_hook = Some(Box::new(hook)));
+        }
     }
 
     impl Drop for CallbackScript {
@@ -706,13 +760,30 @@ pub(crate) mod test_support {
 
     unsafe extern "system" fn callback(
         function: i32,
-        _argument_count: i32,
-        _arguments: *mut *mut XLOPER12,
+        argument_count: i32,
+        arguments: *mut *mut XLOPER12,
         result: *mut XLOPER12,
     ) -> i32 {
+        if function == XLF_REGISTER {
+            let hook = SCRIPT.with_borrow_mut(|script| script.registration_hook.take());
+            if let Some(hook) = hook {
+                // SAFETY: operands remain live throughout this callback,
+                // including while a nested registration allocates and releases.
+                let arguments =
+                    unsafe { std::slice::from_raw_parts(arguments, argument_count as usize) };
+                hook(arguments);
+            }
+        }
         SCRIPT.with_borrow_mut(|script| {
             script.calls.push(function);
             if function == XL_FREE {
+                if !script.registration_pointers.is_empty() {
+                    // SAFETY: register retains its temporary operand owners
+                    // through release of the callback result.
+                    script.registration_arguments_at_release =
+                        unsafe { read_registration_arguments(&script.registration_pointers) };
+                    script.registration_pointers.clear();
+                }
                 return match script.release_status.take() {
                     Some(status) => status,
                     None => {
@@ -730,6 +801,16 @@ pub(crate) mod test_support {
                 script.unexpected_calls += 1;
                 return XLRET_FAILED;
             }
+            if function == XLF_REGISTER {
+                // SAFETY: Excel's callback contract supplies this many live
+                // operand pointers for the invocation. Copy their contents
+                // before registration drops the temporary UTF-16 owners.
+                let arguments =
+                    unsafe { std::slice::from_raw_parts(arguments, argument_count as usize) };
+                // SAFETY: the callback retains each operand through XL_FREE.
+                script.registration_arguments = unsafe { read_registration_arguments(arguments) };
+                script.registration_pointers = arguments.to_vec();
+            }
             // SAFETY: the callback supplies writable result storage for this
             // invocation. Test replies contain only immediate scalar values.
             unsafe { *result = reply.value };
@@ -744,6 +825,100 @@ mod tests {
     use crate::error::ExcelApiFailure;
 
     #[test]
+    #[cfg(any(not(target_os = "windows"), feature = "async", feature = "handles"))]
+    fn registration_arguments_keep_utf16_owners_live_when_pointer_storage_spills() {
+        use super::test_support::{CallbackScript, RegisterArgument, Reply};
+        use crate::registration::{ArgumentAbi, ArgumentDescriptor, RegistrationDescriptor};
+
+        const ARGUMENTS: [ArgumentDescriptor; 6] = [
+            ArgumentDescriptor {
+                name: "a",
+                description: "日本語",
+            },
+            ArgumentDescriptor {
+                name: "b",
+                description: "This long description spills the temporary UTF-16 inline buffer while remaining valid registration metadata.",
+            },
+            ArgumentDescriptor {
+                name: "c",
+                description: "third",
+            },
+            ArgumentDescriptor {
+                name: "d",
+                description: "fourth",
+            },
+            ArgumentDescriptor {
+                name: "e",
+                description: "fifth",
+            },
+            ArgumentDescriptor {
+                name: "f",
+                description: "sixth",
+            },
+        ];
+        const ABIS: [ArgumentAbi; 6] = [ArgumentAbi::CoercedValue; 6];
+        let module = "C:\\test\\addin.xll";
+        let module_units = module.encode_utf16().collect::<Vec<_>>();
+
+        // Ten fixed operands plus n help strings and their blank trailer
+        // exercise empty, inline-full, and heap-spilled pointer storage.
+        for count in [0, 5, 6] {
+            let descriptor = RegistrationDescriptor {
+                export_name: "xll_test",
+                excel_name: "TEST.REGISTER",
+                signature: super::super::RegistrationSignature {
+                    execution: xlfn_common::ExecutionKind::MainThread,
+                    arguments: &ABIS[..count],
+                    volatile: false,
+                },
+                category: "Test",
+                description: "機能の説明",
+                help_topic: "",
+                visibility: FunctionVisibility::Public,
+                arguments: &ARGUMENTS[..count],
+            };
+            let prepared = super::super::preflight_registration(&[descriptor]).unwrap();
+            let script =
+                CallbackScript::install([Reply::success(XLF_REGISTER, XLOPER12::number(42.0))]);
+            let callbacks = HostCallbackSession::new();
+            let host = RegistrationHost::new(&callbacks);
+            let outcome = host.register(&module_units, &prepared.as_slice()[0]);
+            assert!(
+                matches!(outcome, RegistrationMutation::Applied { value, cleanup: Ok(()) } if value.id == 42.0)
+            );
+
+            let text = |value: &str| RegisterArgument::Text(value.to_owned());
+            let names = ARGUMENTS[..count]
+                .iter()
+                .map(|argument| argument.name)
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut expected = vec![
+                text(module),
+                text("xll_test"),
+                text(&"Q".repeat(count + 1)),
+                text("TEST.REGISTER"),
+                text(&names),
+                RegisterArgument::Number(1.0),
+                text("Test"),
+                text(""),
+                text(""),
+                text("機能の説明"),
+            ];
+            if count > 0 {
+                expected.extend(
+                    ARGUMENTS[..count]
+                        .iter()
+                        .map(|argument| text(argument.description)),
+                );
+                expected.push(text(""));
+            }
+            script.assert_registration_arguments(&expected);
+            script.assert_calls(&[XLF_REGISTER]);
+        }
+    }
+
+    #[test]
     fn temporary_strings_are_counted_utf16() {
         let mut text = TemporaryString::new("価格").unwrap();
         let pointer = text.pointer();
@@ -754,6 +929,63 @@ mod tests {
         // SAFETY: the counted allocation contains the prefix and two units.
         let units = unsafe { std::slice::from_raw_parts(units, 3) };
         assert_eq!(units, &[2, 0x4fa1, 0x683c]);
+    }
+
+    #[test]
+    #[cfg(any(not(target_os = "windows"), feature = "async", feature = "handles"))]
+    fn registration_spills_survive_nested_registration_and_result_release() {
+        use super::test_support::{CallbackScript, Reply, read_registration_arguments};
+        use crate::registration::{RegistrationDescriptor, RegistrationSignature};
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let descriptor = RegistrationDescriptor {
+            export_name: "nested_registration",
+            excel_name: "TEST.NESTED.REGISTRATION",
+            signature: RegistrationSignature {
+                execution: xlfn_common::ExecutionKind::MainThread,
+                arguments: &[],
+                volatile: false,
+            },
+            category: "Test",
+            description: "A long help description spills UTF-16 storage and must remain readable after a nested registration has released its independent storage.",
+            help_topic: "https://example.invalid/documentation/registration/lifetime/nested/very-long-help-topic",
+            visibility: FunctionVisibility::Public,
+            arguments: &[],
+        };
+        let prepared = super::super::preflight_registration(&[descriptor]).unwrap();
+        let inner = prepared.clone();
+        let outer_module = "C:\\outer\\".repeat(500).encode_utf16().collect::<Vec<_>>();
+        let inner_module = "C:\\inner\\".repeat(500).encode_utf16().collect::<Vec<_>>();
+        let script = CallbackScript::install([
+            Reply::success(XLF_REGISTER, XLOPER12::number(11.0)),
+            Reply::success(XLF_REGISTER, XLOPER12::number(42.0)),
+        ]);
+        let nested_succeeded = Rc::new(Cell::new(false));
+        let operands_survived = Rc::new(Cell::new(false));
+        let succeeded = Rc::clone(&nested_succeeded);
+        let survived = Rc::clone(&operands_survived);
+        script.on_register(move |outer_pointers| {
+            // SAFETY: the outer callback keeps all operands live during reentry.
+            let before = unsafe { read_registration_arguments(outer_pointers) };
+            let callbacks = HostCallbackSession::new();
+            succeeded.set(matches!(
+                RegistrationHost::new(&callbacks).register(&inner_module, &inner.as_slice()[0]),
+                RegistrationMutation::Applied { value, cleanup: Ok(()) } if value.id == 11.0
+            ));
+            // SAFETY: nested result release must not reclaim outer operands.
+            let after = unsafe { read_registration_arguments(outer_pointers) };
+            survived.set(before == after);
+        });
+        let callbacks = HostCallbackSession::new();
+        let outcome =
+            RegistrationHost::new(&callbacks).register(&outer_module, &prepared.as_slice()[0]);
+        assert!(
+            matches!(outcome, RegistrationMutation::Applied { value, cleanup: Ok(()) } if value.id == 42.0)
+        );
+        assert!(nested_succeeded.get());
+        assert!(operands_survived.get());
+        script.assert_calls(&[XLF_REGISTER, XLF_REGISTER]);
     }
 
     #[test]

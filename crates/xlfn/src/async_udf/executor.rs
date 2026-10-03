@@ -2,7 +2,7 @@ use super::generation::{
     ControlPhase, ExecutorControl, GenerationPin, GenerationState, task_shard,
 };
 use super::queue::RunnableQueue;
-use super::task::{ActiveReservation, TaskControl, TrackedFuture};
+use super::task::{ActiveReservation, TaskControl, TaskControlBatch, TrackedFuture};
 use super::worker::{cancelled_calculation_error, run_executor};
 use crate::addin::AsyncWorkerCount;
 use crate::cancellation::CancellationSource;
@@ -362,11 +362,22 @@ pub trait HandleScopedBuilder<T> {
 }
 
 #[cfg(feature = "handles")]
+// Only the generated inner future carries the scope brand. Delivery state
+// remains owned and 'static, so its concrete future can live directly in the
+// executor task allocation after the inner future's single lifetime erasure.
 pub(crate) trait HandleScopedTaskBuilder {
+    type Output: Send + 'static;
+    type Delivery: Send + 'static;
+
     fn build_task<'generation>(
         self,
         scope: AsyncTaskScope<'generation>,
-    ) -> ScopedTaskFuture<'generation>;
+    ) -> (ScopedTaskFuture<'generation, Self::Output>, Self::Delivery);
+
+    fn deliver(
+        delivery: Self::Delivery,
+        future: ScopedTaskFuture<'static, Self::Output>,
+    ) -> impl Future<Output = ()> + Send + 'static;
 }
 
 #[cfg(feature = "handles")]
@@ -384,10 +395,8 @@ impl<'generation> AsyncTaskScope<'generation> {
 }
 
 #[cfg(feature = "handles")]
-pub(crate) type ScopedTaskFuture<'generation> =
-    Pin<Box<dyn Future<Output = ()> + Send + 'generation>>;
-#[cfg(feature = "handles")]
-type ErasedTaskFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+pub(crate) type ScopedTaskFuture<'generation, Output = ()> =
+    Pin<Box<dyn Future<Output = Output> + Send + 'generation>>;
 
 /// Erases the compile-time handle-generation brand after the generated
 /// future has been constrained to contain only task-owned data.
@@ -403,12 +412,17 @@ type ErasedTaskFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 /// `RawObjectLeaseGuard`. The async shutdown pipeline drains these tasks
 /// before tearing down the formula-handle service and its arena.
 #[cfg(feature = "handles")]
-unsafe fn erase_scoped_task_future<'generation>(
-    future: ScopedTaskFuture<'generation>,
-) -> ErasedTaskFuture {
+unsafe fn erase_scoped_task_future<'generation, Output: Send + 'static>(
+    future: ScopedTaskFuture<'generation, Output>,
+) -> ScopedTaskFuture<'static, Output> {
     // SAFETY: upheld by `HandleScopedBuilder`'s late-bound method and the
     // `'static` builder bound, plus the shutdown ordering documented above.
-    unsafe { std::mem::transmute::<ScopedTaskFuture<'generation>, ErasedTaskFuture>(future) }
+    unsafe {
+        std::mem::transmute::<
+            ScopedTaskFuture<'generation, Output>,
+            ScopedTaskFuture<'static, Output>,
+        >(future)
+    }
 }
 
 impl<'a> SpawnReservation<'a> {
@@ -507,14 +521,14 @@ impl<'a> SpawnReservation<'a> {
     {
         let brand = GenerationLeaseBrand;
         let scope = AsyncTaskScope::new(runtime_generation, &brand);
-        let future = build.build_task(scope);
+        let (future, delivery) = build.build_task(scope);
         // The scope brand is intentionally erased once, at this executor
         // boundary. All task state remains owned or guarded by its pin.
         // SAFETY: `HandleScopedTaskBuilder` is late-bound over the private
         // scope brand, and the shutdown protocol drains this task before the
         // pinned handle service can be reclaimed.
         let future = unsafe { erase_scoped_task_future(future) };
-        self.commit(future, cancellation);
+        self.commit(B::deliver(delivery, future), cancellation);
     }
 }
 
@@ -603,10 +617,10 @@ impl ExecutorShared {
         })
     }
 
-    pub(crate) fn cancel_generation(&self, generation: u64) -> Vec<TaskControl> {
+    pub(crate) fn cancel_generation(&self, generation: u64) -> TaskControlBatch {
         let control = self.control.lock();
         let Some(state) = control.generations.get(&generation) else {
-            return Vec::new();
+            return TaskControlBatch::new();
         };
         debug_assert_eq!(state.id, generation);
         state.admission.close_and_wait_begin().wait();
@@ -671,11 +685,11 @@ impl ExecutorShared {
         true
     }
 
-    pub(crate) fn request_close(&self) -> Vec<TaskControl> {
+    pub(crate) fn request_close(&self) -> TaskControlBatch {
         let mut control = self.control.lock();
 
         if matches!(control.phase, ControlPhase::Closing) {
-            return Vec::new();
+            return TaskControlBatch::new();
         }
 
         self.closing.store(true, Ordering::Release);
@@ -688,7 +702,7 @@ impl ExecutorShared {
             generation.admission.close_and_wait_begin().wait();
         }
 
-        let mut tasks = Vec::new();
+        let mut tasks = TaskControlBatch::new();
         for generation in control.generations.values() {
             tasks.extend(generation.drain_tasks());
         }

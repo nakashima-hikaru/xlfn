@@ -1672,11 +1672,21 @@ fn server_terminate_returns_cleanup_error_to_caller_and_waiter() {
     conn.commit().unwrap();
 
     {
+        let subscription = server
+            .test_server()
+            .subscriptions
+            .lock()
+            .remove(&TopicId(1))
+            .unwrap();
+        let subscription = subscription.map_subscription_for_test(|inner| {
+            super::server::disconnect_one_no_unwind(inner).unwrap();
+            Box::new(FailingDisconnectSubscription)
+        });
         server
             .test_server()
             .subscriptions
             .lock()
-            .insert(TopicId(1), Box::new(FailingDisconnectSubscription));
+            .insert(TopicId(1), subscription);
     }
 
     let server_clone = server;
@@ -1765,11 +1775,21 @@ fn disconnect_propagates_subscription_cleanup_error() {
     conn.commit().unwrap();
 
     {
+        let subscription = server
+            .test_server()
+            .subscriptions
+            .lock()
+            .remove(&TopicId(1))
+            .unwrap();
+        let subscription = subscription.map_subscription_for_test(|inner| {
+            super::server::disconnect_one_no_unwind(inner).unwrap();
+            Box::new(FailingDisconnectSubscription)
+        });
         server
             .test_server()
             .subscriptions
             .lock()
-            .insert(TopicId(1), Box::new(FailingDisconnectSubscription));
+            .insert(TopicId(1), subscription);
     }
 
     let error = server.disconnect(TopicId(1)).unwrap_err();
@@ -1798,11 +1818,21 @@ fn rollback_records_subscription_cleanup_error() {
         .unwrap();
 
     {
+        let subscription = server
+            .test_server()
+            .subscriptions
+            .lock()
+            .remove(&TopicId(1))
+            .unwrap();
+        let subscription = subscription.map_subscription_for_test(|inner| {
+            super::server::disconnect_one_no_unwind(inner).unwrap();
+            Box::new(FailingDisconnectSubscription)
+        });
         server
             .test_server()
             .subscriptions
             .lock()
-            .insert(TopicId(1), Box::new(FailingDisconnectSubscription));
+            .insert(TopicId(1), subscription);
     }
 
     conn.rollback();
@@ -1859,19 +1889,33 @@ fn request_cancel_panic_propagates_to_termination() {
     conn.commit().unwrap();
 
     {
-        server.test_server().subscriptions.lock().insert(
-            TopicId(1),
+        let subscription = server
+            .test_server()
+            .subscriptions
+            .lock()
+            .remove(&TopicId(1))
+            .unwrap();
+        let subscription = subscription.map_subscription_for_test(|inner| {
+            super::server::disconnect_one_no_unwind(inner).unwrap();
             Box::new(PanickingCancelSubscription {
                 payload_drops: Arc::clone(&payload_drops),
                 phases: Arc::clone(&phases),
-            }),
-        );
+            })
+        });
+        server
+            .test_server()
+            .subscriptions
+            .lock()
+            .insert(TopicId(1), subscription);
         server.test_server().subscriptions.lock().insert(
             TopicId(2),
-            Box::new(PanickingCancelSubscription {
-                payload_drops: Arc::clone(&payload_drops),
-                phases: Arc::clone(&phases),
-            }),
+            super::disconnect::OwnedSubscription::new(
+                Box::new(PanickingCancelSubscription {
+                    payload_drops: Arc::clone(&payload_drops),
+                    phases: Arc::clone(&phases),
+                }),
+                runtime.disconnects.reserve().unwrap(),
+            ),
         );
     }
 
@@ -3647,13 +3691,15 @@ fn miri_runtime_drop_disconnects_subscriptions_before_reclaiming_sources() {
     let rejected = Arc::new(AtomicBool::new(false));
     {
         let mut subscriptions = server.test_server().subscriptions.lock();
-        let inner = subscriptions.remove(&TopicId(1)).unwrap();
+        let subscription = subscriptions.remove(&TopicId(1)).unwrap();
         subscriptions.insert(
             TopicId(1),
-            Box::new(PublishOnCancel {
-                inner,
-                sink: sink_slot.lock().as_ref().unwrap().clone(),
-                rejected: Arc::clone(&rejected),
+            subscription.map_subscription_for_test(|inner| {
+                Box::new(PublishOnCancel {
+                    inner,
+                    sink: sink_slot.lock().as_ref().unwrap().clone(),
+                    rejected: Arc::clone(&rejected),
+                })
             }),
         );
     }

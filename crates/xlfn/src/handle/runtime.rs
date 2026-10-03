@@ -98,29 +98,6 @@ impl Drop for HandleInitializationGuard {
     }
 }
 
-thread_local! {
-    static CURRENT_THREAD_READING_TOPIC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-pub(crate) fn is_current_thread_reading_topic() -> bool {
-    CURRENT_THREAD_READING_TOPIC.get()
-}
-
-pub(crate) struct TopicReadGuard;
-
-impl TopicReadGuard {
-    pub(crate) fn enter() -> Self {
-        CURRENT_THREAD_READING_TOPIC.set(true);
-        Self
-    }
-}
-
-impl Drop for TopicReadGuard {
-    fn drop(&mut self) {
-        CURRENT_THREAD_READING_TOPIC.set(false);
-    }
-}
-
 /// Runtime-owned handle topics. Application code never inserts or removes
 /// entries directly; generated UDF boundaries and Excel RTD callbacks do so.
 pub(crate) struct FormulaHandleService {

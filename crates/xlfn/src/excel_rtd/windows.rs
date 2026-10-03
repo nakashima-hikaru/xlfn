@@ -63,6 +63,7 @@ use class_factory::{
 #[cfg(test)]
 use com_abi::IUnknown_Vtbl;
 use com_abi::{IID_IUNKNOWN, com_boundary, guid_eq};
+pub(crate) use event::drain_with_com_dispatch;
 #[cfg(feature = "handles")]
 pub(super) use excel_rtd::observe;
 #[cfg(feature = "rtd")]
@@ -99,6 +100,7 @@ use server_gate::{
     ServerPhase, ServerTermination, ServerTerminationRequest, TerminationWorker,
     TerminationWorkerStatus,
 };
+pub(crate) use update_event::ComApartmentGuard;
 pub(crate) use update_event::RtdNotifier;
 use update_event::retry_git_revocation_debt;
 #[cfg(test)]

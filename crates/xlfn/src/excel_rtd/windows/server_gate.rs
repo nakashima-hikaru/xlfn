@@ -2,6 +2,7 @@ use super::event::{ManualResetEvent, Win32EventError};
 use crate::sync::{Condvar, Mutex, MutexGuard};
 use rustc_hash::FxHashMap;
 use std::marker::PhantomData;
+use std::ptr::NonNull;
 use std::rc::Rc;
 use std::thread::ThreadId;
 
@@ -37,6 +38,16 @@ pub(super) struct ServerOperation<'a> {
     thread_id: ThreadId,
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
+
+/// An admitted COM operation transferred to the generation cleanup worker.
+/// Its owner must retain a server COM reference until this guard is dropped.
+pub(super) struct OwnedServerCall {
+    barrier: NonNull<ServerOperationBarrier>,
+}
+
+// SAFETY: the retained server reference keeps the synchronized barrier live;
+// this guard counts unbound work and has no apartment-affine COM interface.
+unsafe impl Send for OwnedServerCall {}
 
 pub(super) struct ServerNotificationOperation<'a> {
     barrier: &'a ServerOperationBarrier,
@@ -92,6 +103,23 @@ impl ServerOperationBarrier {
             barrier: self,
             thread_id,
             _not_send_or_sync: PhantomData,
+        })
+    }
+
+    /// # Safety
+    /// The caller must keep this barrier allocated through the returned
+    /// guard's destruction, including when it completes on another thread.
+    pub(super) unsafe fn enter_owned(&self) -> Option<OwnedServerCall> {
+        let mut state = self.state.lock();
+        if state.phase != ServerPhase::Open {
+            return None;
+        }
+        state.in_flight = state
+            .in_flight
+            .checked_add(1)
+            .expect("RTD COM operation count cannot overflow");
+        Some(OwnedServerCall {
+            barrier: NonNull::from(self),
         })
     }
 
@@ -386,6 +414,27 @@ impl Drop for ServerOperation<'_> {
             && matches!(state.phase, ServerPhase::Terminating { .. })
         {
             self.barrier
+                .quiescent
+                .set()
+                .unwrap_or_else(|_| std::process::abort());
+        }
+    }
+}
+
+impl Drop for OwnedServerCall {
+    fn drop(&mut self) {
+        // SAFETY: the owner retains its server reference through this Drop.
+        let barrier = unsafe { self.barrier.as_ref() };
+        let mut state = barrier.state.lock();
+        state.in_flight = state
+            .in_flight
+            .checked_sub(1)
+            .expect("RTD transferred COM operation count remains balanced");
+        if state.in_flight == 0
+            && state.notifications_in_flight == 0
+            && matches!(state.phase, ServerPhase::Terminating { .. })
+        {
+            barrier
                 .quiescent
                 .set()
                 .unwrap_or_else(|_| std::process::abort());

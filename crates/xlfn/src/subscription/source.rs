@@ -13,10 +13,12 @@ use std::marker::PhantomData;
 
 /// A subscription whose cancellation and disconnection protocol is explicit.
 ///
-/// The subscription object remains uniquely owned by its server. Shutdown
-/// closes callback admission before invoking `request_cancel`, then consumes
-/// the object through `disconnect_and_wait`. No detached shared cancellation
-/// object participates in the ownership graph.
+/// The subscription object has one owner: its server, or the generation's
+/// bounded cleanup queue after COM disconnection revokes the connection.
+/// Deferred COM cleanup and shutdown invoke `request_cancel`, then consume
+/// the object through `disconnect_and_wait`. Shutdown drains this work before
+/// reclaiming its server or source. No detached shared cancellation object
+/// participates in the ownership graph.
 /// # Safety
 ///
 /// `disconnect_and_wait` must stop every callback and worker that can use any
@@ -24,6 +26,12 @@ use std::marker::PhantomData;
 /// method, whether it returns `Ok`, returns `Err`, or unwinds. No sink clone
 /// may be used after any of those exits. Preserve this guarantee during
 /// unwinding, for example with a cleanup guard that joins every sink user.
+/// This barrier also applies when no prior `request_cancel` call was made.
+/// Cancellation and disconnection must not synchronously initiate this
+/// add-in's own removal: removal waits for this subscription's cleanup.
+/// These methods may run on different framework-owned threads, including a
+/// Windows MTA cleanup worker. They must not rely on the subscribing thread's
+/// affinity or pass an apartment-bound COM interface without marshaling.
 ///
 /// The framework contains cleanup panics and may reclaim the publish core
 /// afterward. Neither an error nor a panic extends the lifetime of a sink.

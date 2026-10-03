@@ -144,3 +144,10 @@ For every resource created in `open`, decide how it stops. The key hooks are:
 
 Framework-managed async tasks drain before `quiesce`; remaining handle objects
 are dropped after it. Destructors should avoid blocking or calling into Excel.
+
+If shutdown cannot establish safety, the framework quarantines the runtime.
+It rejects new worksheet work and reopening, and retains the resources needed
+by outstanding work and any held DLL residency lease. A close or remove
+callback return does not permit unloading a quarantined add-in; restart Excel
+to recover. Failure to prepare the Windows COM wait for outstanding calls also
+enters quarantine, without retrying that wait from cleanup or destructors.

@@ -928,9 +928,9 @@ borrowed ledger remains in the older proof adapters, but is no longer the queued
 node's resource representation. Node/Entry no longer carry its scope lifetime.
 
 These are resource adapters. Mapping native index lookup to the resident fragment,
-returning native scoped references through this representation, native weak memory
-and Box/Drop remain unproved. No extra native lock or representation change was
-introduced by this proof-only migration.
+returning native typed value references borrowed from `CacheLease`, native weak
+memory and Box/Drop remain unproved. No extra native lock or representation change
+was introduced by this proof-only migration.
 
 The `lookup_pin` adapter now directly composes counter `acquire_scope`, node
 observation, atomic lease acquisition, observation end and `release_scope`. A

@@ -11,8 +11,8 @@ use std::hint::black_box;
 use std::sync::{Arc, Barrier, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use xlfn::benchmark_support::{benchmark_cache_backend, benchmark_measurement_time};
-use xlfn::cache::{CacheBackend, CalculationCache};
+use xlfn::benchmark_support::benchmark_measurement_time;
+use xlfn::cache::CalculationCache;
 
 const WORKERS: [usize; 4] = [1, 4, 16, 32];
 const REQUESTS_PER_WORKER: usize = 256;
@@ -160,16 +160,10 @@ struct Pool {
 }
 
 impl Pool {
-    fn new(
-        workers: usize,
-        keys: Keys,
-        compute: Compute,
-        operation: Operation,
-        backend: CacheBackend,
-    ) -> Self {
+    fn new(workers: usize, keys: Keys, compute: Compute, operation: Operation) -> Self {
         assert!(workers != 0);
         assert!(REQUESTS_PER_WORKER * workers * VALUE_BYTES < BUDGET_BYTES);
-        let cache = Arc::new(CalculationCache::new_with_backend(BUDGET_BYTES, backend));
+        let cache = Arc::new(CalculationCache::new(BUDGET_BYTES));
         // This is a representative numerical reduction, not an Excel call or
         // input-conversion measurement. The fixed source is allocated once.
         let input: Arc<[f64]> = (0..NUMERIC_ELEMENTS)
@@ -320,8 +314,6 @@ impl Drop for Pool {
 }
 
 fn benchmarks(c: &mut Criterion) {
-    let backend = benchmark_cache_backend();
-    println!("cache_miss_resident_backend {backend:?}");
     let mut group = c.benchmark_group("cache_miss_concurrency");
     group.measurement_time(benchmark_measurement_time());
     for workers in WORKERS {
@@ -330,7 +322,6 @@ fn benchmarks(c: &mut Criterion) {
             Keys::Distinct,
             Compute::Cheap,
             Operation::DispatchOnly,
-            backend,
         );
         dispatch.verify();
         group.throughput(Throughput::Elements(dispatch.total_requests() as u64));
@@ -344,7 +335,7 @@ fn benchmarks(c: &mut Criterion) {
         for compute in [Compute::Cheap, Compute::NumericReduce] {
             for keys in [Keys::Distinct, Keys::Same] {
                 for operation in [Operation::Cache, Operation::ComputeOnly] {
-                    let pool = Pool::new(workers, keys, compute, operation, backend);
+                    let pool = Pool::new(workers, keys, compute, operation);
                     pool.verify();
                     group.bench_function(
                         BenchmarkId::new(

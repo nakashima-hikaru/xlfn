@@ -923,89 +923,78 @@ pub(super) unsafe fn topic_key_from_safearray(strings: *mut *mut SAFEARRAY) -> X
         return Err(XllError::InvalidHandle);
     }
 
-    let mut parts = Vec::with_capacity(count);
+    // The validated cardinality is exactly one, so its only index is the
+    // lower bound. Return the decoded key directly without a parts buffer.
+    let index = lower;
+    match vt {
+        VT_BSTR => {
+            let mut bstr_ptr: *mut u16 = ptr::null_mut();
 
-    for offset in 0..count {
-        let index = i64::from(lower)
-            .checked_add(i64::try_from(offset).map_err(|_| XllError::InvalidHandle)?)
-            .and_then(|index| i32::try_from(index).ok())
-            .ok_or(XllError::InvalidHandle)?;
-        let part_str = match vt {
-            VT_BSTR => {
-                let mut bstr_ptr: *mut u16 = ptr::null_mut();
-
-                // SAFETY: `index` is within the validated SAFEARRAY bounds and
-                // `bstr_ptr` points to writable storage. For a VT_BSTR array,
-                // SafeArrayGetElement returns a copied BSTR owned by the caller.
-                if unsafe { SafeArrayGetElement(array_ptr, &index, (&raw mut bstr_ptr).cast()) } < 0
-                {
-                    return Err(XllError::InvalidHandle);
-                }
-
-                let Some(bstr) = NonNull::new(bstr_ptr) else {
-                    return Err(XllError::InvalidHandle);
-                };
-
-                let _bstr_guard = BstrGuard(bstr);
-
-                // SAFETY: `bstr` is a live BSTR returned by
-                // SafeArrayGetElement and remains live while `_bstr_guard` exists.
-                let length = unsafe { SysStringLen(bstr.as_ptr()) } as usize;
-                checked_topic_part_length(length)?;
-
-                // SAFETY: a BSTR contains at least SysStringLen UTF-16 code
-                // units, and `_bstr_guard` keeps the allocation alive.
-                let units = unsafe { std::slice::from_raw_parts(bstr.as_ptr(), length) };
-
-                String::from_utf16(units)
-                    .map_err(|_| XllError::input("RTD topic", InputError::InvalidUtf16))?
+            // SAFETY: `index` is within the validated SAFEARRAY bounds and
+            // `bstr_ptr` points to writable storage. For a VT_BSTR array,
+            // SafeArrayGetElement returns a copied BSTR owned by the caller.
+            if unsafe { SafeArrayGetElement(array_ptr, &index, (&raw mut bstr_ptr).cast()) } < 0 {
+                return Err(XllError::InvalidHandle);
             }
-            VT_VARIANT | VT_EMPTY => {
-                let mut value = VARIANT::default();
 
-                // SAFETY: `index` is within the validated SAFEARRAY bounds and
-                // `value` points to initialized writable VARIANT storage. On
-                // success VariantGuard clears the copied value exactly once.
-                if unsafe { SafeArrayGetElement(array_ptr, &index, (&raw mut value).cast()) } < 0 {
-                    return Err(XllError::InvalidHandle);
-                }
+            let Some(bstr) = NonNull::new(bstr_ptr) else {
+                return Err(XllError::InvalidHandle);
+            };
 
-                let _value = VariantGuard(NonNull::from_mut(&mut value));
+            let _bstr_guard = BstrGuard(bstr);
 
-                // SAFETY: SafeArrayGetElement successfully initialized `value`,
-                // so its VARIANT header and discriminated payload may be read.
-                let variant = unsafe { value.Anonymous.Anonymous };
+            // SAFETY: `bstr` is a live BSTR returned by
+            // SafeArrayGetElement and remains live while `_bstr_guard` exists.
+            let length = unsafe { SysStringLen(bstr.as_ptr()) } as usize;
+            checked_topic_part_length(length)?;
 
-                if variant.vt != VT_BSTR {
-                    return Err(XllError::InvalidHandle);
-                }
+            // SAFETY: a BSTR contains at least SysStringLen UTF-16 code
+            // units, and `_bstr_guard` keeps the allocation alive.
+            let units = unsafe { std::slice::from_raw_parts(bstr.as_ptr(), length) };
 
-                // SAFETY: the VARIANT discriminant was checked to be VT_BSTR,
-                // so `bstrVal` is the active union member.
-                let Some(bstr) = NonNull::new(unsafe { variant.Anonymous.bstrVal as *mut u16 })
-                else {
-                    return Err(XllError::InvalidHandle);
-                };
+            String::from_utf16(units)
+                .map_err(|_| XllError::input("RTD topic", InputError::InvalidUtf16))
+        }
+        VT_VARIANT | VT_EMPTY => {
+            let mut value = VARIANT::default();
 
-                // SAFETY: `bstr` is owned by the live VARIANT and remains valid
-                // until `_value` clears that VARIANT.
-                let length = unsafe { SysStringLen(bstr.as_ptr()) } as usize;
-                checked_topic_part_length(length)?;
-
-                // SAFETY: the BSTR contains at least `length` UTF-16 code units
-                // and `_value` keeps the owning VARIANT alive.
-                let units = unsafe { std::slice::from_raw_parts(bstr.as_ptr(), length) };
-
-                String::from_utf16(units)
-                    .map_err(|_| XllError::input("RTD topic", InputError::InvalidUtf16))?
+            // SAFETY: `index` is within the validated SAFEARRAY bounds and
+            // `value` points to initialized writable VARIANT storage. On
+            // success VariantGuard clears the copied value exactly once.
+            if unsafe { SafeArrayGetElement(array_ptr, &index, (&raw mut value).cast()) } < 0 {
+                return Err(XllError::InvalidHandle);
             }
-            _ => return Err(XllError::InvalidHandle),
-        };
 
-        parts.push(part_str);
+            let _value = VariantGuard(NonNull::from_mut(&mut value));
+
+            // SAFETY: SafeArrayGetElement successfully initialized `value`,
+            // so its VARIANT header and discriminated payload may be read.
+            let variant = unsafe { value.Anonymous.Anonymous };
+
+            if variant.vt != VT_BSTR {
+                return Err(XllError::InvalidHandle);
+            }
+
+            // SAFETY: the VARIANT discriminant was checked to be VT_BSTR,
+            // so `bstrVal` is the active union member.
+            let Some(bstr) = NonNull::new(unsafe { variant.Anonymous.bstrVal as *mut u16 }) else {
+                return Err(XllError::InvalidHandle);
+            };
+
+            // SAFETY: `bstr` is owned by the live VARIANT and remains valid
+            // until `_value` clears that VARIANT.
+            let length = unsafe { SysStringLen(bstr.as_ptr()) } as usize;
+            checked_topic_part_length(length)?;
+
+            // SAFETY: the BSTR contains at least `length` UTF-16 code units
+            // and `_value` keeps the owning VARIANT alive.
+            let units = unsafe { std::slice::from_raw_parts(bstr.as_ptr(), length) };
+
+            String::from_utf16(units)
+                .map_err(|_| XllError::input("RTD topic", InputError::InvalidUtf16))
+        }
+        _ => Err(XllError::InvalidHandle),
     }
-
-    parts.pop().ok_or(XllError::InvalidHandle)
 }
 
 struct BstrGuard(NonNull<u16>);

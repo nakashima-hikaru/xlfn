@@ -344,6 +344,18 @@ with an attempt ID and failure reason. It is checked against the lifecycle
 `quarantineOpen` transition: no generation was committed, no resource snapshot
 or quiescence certificate exists, and only a `quarantined` outcome is accepted.
 
+The Windows COM export-drain preparation failure hazard maps to the existing
+`rtdShutdownFailed` classification. When it is the primary shutdown failure,
+the trace ends in quarantine before `callsDrained`, while Rust retains the
+undrained module authority and DLL residency. The shutdown checker validates
+this failure prefix, rejects certificates after terminal quarantine, and
+rejects a successful-return outcome for a quarantined trace. Rust regressions
+check that this failure issues no `callsDrained` certificate while retaining
+live owners; the checker does not derive certificate eligibility from the
+activity ledger. The Composition checker does not model terminal quarantine
+of a committed cleanup; its successful-return theorem does not cover this
+failure path.
+
 ### Composition trace checker
 
 ```text
@@ -387,6 +399,11 @@ The formalization ends at the temporal ownership and capability boundaries.
 Low-level NonNull address values, allocator implementation, atomic memory
 ordering/interleavings, scheduler fairness, Excel internals, COM implementation
 correctness, and arbitrary user code are outside the Lean model.
+
+COM apartment setup, event creation, helper-thread creation, and retention of
+the native `ModuleClosing` capability after preparation failure remain native
+implementation obligations. A checked quarantine trace does not prove those
+OS operations or the concrete retained owner's identity.
 
 In Rust, movable owners of published allocations use `PublishedOwner<T>` so
 moving an owner does not introduce a `Box` unique retag while raw readers are

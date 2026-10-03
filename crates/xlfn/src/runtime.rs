@@ -927,6 +927,7 @@ impl<A: crate::Addin> CallGuard<'_, A> {
 pub(crate) mod tests {
     use super::*;
     use crate::runtime::shutdown::{FinalRemoval, OpenRollback, QuiescenceProof, RemovalOwner};
+    use std::sync::atomic::Ordering;
     use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, Instant};
@@ -962,7 +963,7 @@ pub(crate) mod tests {
         mut removal_attempt: RemovalOwner<'_, A>,
     ) {
         let module_closing = removal_attempt.take_module_closing();
-        let drained = module_closing.seal_and_drain();
+        let drained = module_closing.seal_and_drain().unwrap();
         let (module_quiescent, _exports) = drained.certify();
         let module_epoch = module_quiescent.id();
         let subscriptions_stopped = runtime
@@ -997,7 +998,7 @@ pub(crate) mod tests {
         mut rollback_attempt: RemovalOwner<'a, A>,
     ) -> RemovalOwner<'a, A> {
         let module_closing = rollback_attempt.take_module_closing();
-        let drained = module_closing.seal_and_drain();
+        let drained = module_closing.seal_and_drain().unwrap();
         let (module_quiescent, _exports) = drained.certify();
         let module_epoch = module_quiescent.id();
         let certificate = rollback_attempt
@@ -1018,6 +1019,221 @@ pub(crate) mod tests {
     }
 
     pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct DrainPreparationAddin;
+
+    #[inline(never)]
+    fn drain_preparation_residency_anchor() {}
+
+    struct RetainedState {
+        drops: Arc<std::sync::atomic::AtomicUsize>,
+        cleanups: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Drop for RetainedState {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    impl crate::Addin for DrainPreparationAddin {
+        type SharedState = RetainedState;
+        type LifecycleState = RetainedState;
+        type Error = XllError;
+        type Layers = ();
+
+        fn open(
+            _: &crate::addin::OpenContext,
+        ) -> Result<
+            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            Self::Error,
+        > {
+            unreachable!("drain tests publish their observed state directly")
+        }
+
+        fn cleanup(state: &mut RetainedState, _: &mut crate::shutdown::CleanupReporter<'_>) {
+            state.cleanups.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    fn assert_retained_drain<A: crate::Addin>(
+        runtime: &Runtime<A>,
+        epoch: crate::module_runtime::ModuleEpochId,
+    ) {
+        assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
+        let access = runtime.lifecycle.access();
+        assert_eq!(access.module_epoch_id(), Some(epoch));
+        assert!(access.removal_attempt().is_none());
+        drop(access);
+        assert!(runtime.module_residency_held());
+        assert!(matches!(
+            runtime.lifecycle_control().take_module_cleanup_authority(),
+            crate::module_runtime::ModuleCleanupClaim::RetainedUndrained(retained) if retained == epoch
+        ));
+        assert_eq!(
+            crate::module_runtime::ingress().phase(),
+            crate::ingress::PHASE_CLOSING
+        );
+        assert!(!crate::excel_rtd::logical_quiescence_certified());
+    }
+
+    #[test]
+    fn export_drain_preparation_failure_retains_generation_without_retry() {
+        for wait in [1, 2] {
+            let fixture = StaticTestRuntime::<DrainPreparationAddin>::new();
+            let runtime = fixture.runtime();
+            let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let cleanups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let state = || RetainedState {
+                drops: Arc::clone(&drops),
+                cleanups: Arc::clone(&cleanups),
+            };
+            let opening = runtime.begin_open().unwrap();
+            let mut opening = runtime.publish_with_lifecycle(opening, state(), state(), ());
+            runtime.finish_open(&mut opening, Vec::new()).unwrap();
+            runtime
+                .ensure_module_residency(drain_preparation_residency_anchor as *const ())
+                .unwrap();
+            let epoch = runtime.lifecycle.access().module_epoch_id().unwrap();
+            let generation = runtime.last_committed_generation();
+            // The first failure must retain a genuinely live export. For the
+            // second, the first wait completes before preparation fails.
+            let entry =
+                (wait == 1).then(|| (admitted_export(), runtime.observer().observe_external()));
+            let call = entry
+                .as_ref()
+                .map(|(entry, _)| runtime.enter(entry).unwrap());
+            let fault = crate::ingress::DrainPreparationFault::at(wait);
+            assert_eq!(crate::boundary::host::host_auto_remove(runtime), 1);
+            assert_retained_drain(runtime, epoch);
+            assert!(runtime.has_current_generation());
+            assert!(runtime.protocol_generation().is_none());
+            assert_eq!(runtime.last_committed_generation(), generation);
+            assert_eq!(drops.load(Ordering::Acquire), 0);
+            assert_eq!(cleanups.load(Ordering::Acquire), 0);
+            let trace = runtime.shutdown_trace_json();
+            let document: serde_json::Value = serde_json::from_str(&trace).unwrap();
+            assert_eq!(document["outcome"], "quarantined");
+            assert!(trace.contains("rtdShutdownFailed"));
+            assert!(!trace.contains("callsDrained"));
+            assert!(!trace.contains("returnsDrained"));
+            assert!(!trace.contains("closedCommitted"));
+            if let Some(directory) = std::env::var_os("XLFN_EXPORT_DRAIN_TRACE_DIR") {
+                std::fs::write(
+                    std::path::Path::new(&directory)
+                        .join(format!("export-drain-preparation-{wait}.json")),
+                    &trace,
+                )
+                .unwrap();
+            }
+            drop(call);
+            drop(entry);
+            // Recovery and late host hints cannot retry the drain even after
+            // the last admission has left the retained generation.
+            recovery::quarantine_runtime_resources(runtime);
+            assert_eq!(crate::boundary::host::host_auto_close(runtime), 1);
+            assert_eq!(crate::boundary::host::host_auto_remove(runtime), 1);
+            assert_eq!(
+                crate::boundary::host::host_auto_open(
+                    runtime,
+                    &crate::diagnostics::AddinId::parse("drain-test").unwrap(),
+                    "0",
+                    "test",
+                    &[]
+                ),
+                0
+            );
+            assert_retained_drain(runtime, epoch);
+            assert_eq!(fault.attempts(), wait);
+            assert_eq!(drops.load(Ordering::Acquire), 0);
+            assert_eq!(cleanups.load(Ordering::Acquire), 0);
+            drop(fault);
+        }
+    }
+
+    #[test]
+    fn export_drain_preparation_quarantines_before_owner_release() {
+        let fixture = StaticTestRuntime::<TestU32Addin>::new();
+        let runtime = fixture.runtime();
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish(opening, 23, ());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        runtime
+            .ensure_module_residency(drain_preparation_residency_anchor as *const ())
+            .unwrap();
+        let epoch = runtime.lifecycle.access().module_epoch_id().unwrap();
+        let mut owner = runtime.begin_final_removal().unwrap();
+        runtime.observer().begin_close();
+        let fault = crate::ingress::DrainPreparationFault::at(1);
+        let Err(failure) = shutdown::drain_execution(runtime.shutdown_deps(), &mut owner) else {
+            panic!("injected drain preparation succeeded");
+        };
+        assert_eq!(
+            failure.hazard(),
+            crate::shutdown::UnloadHazard::ExportDrainPreparationFailed
+        );
+        // Quarantine is visible while the failed owner is still alive, before
+        // its returned capability becomes available and waiters are notified.
+        assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
+        assert!(runtime.lifecycle.access().removal_attempt().is_some());
+        let waiter = thread::spawn(move || assert!(runtime.begin_final_removal().is_none()));
+        waiter.join().unwrap();
+        drop(owner);
+        recovery::quarantine_for_hazard(runtime, failure.hazard());
+        assert_retained_drain(runtime, epoch);
+        assert!(runtime.begin_final_removal().is_none());
+        assert_eq!(fault.attempts(), 1);
+        drop(fault);
+    }
+
+    #[test]
+    fn export_drain_preparation_recovery_retains_the_cleanup_authority() {
+        let fixture = StaticTestRuntime::<TestU32Addin>::new();
+        let runtime = fixture.runtime();
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish(opening, 23, ());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        runtime
+            .ensure_module_residency(drain_preparation_residency_anchor as *const ())
+            .unwrap();
+        let epoch = runtime.lifecycle.access().module_epoch_id().unwrap();
+        let entry = admitted_export();
+        let fault = crate::ingress::DrainPreparationFault::at(1);
+        // This path has no RemovalOwner: quarantine claims Closing cleanup
+        // authority directly, and must reinstall it if preparation fails.
+        runtime.quarantine_runtime();
+        assert_retained_drain(runtime, epoch);
+        drop(entry);
+        recovery::quarantine_runtime_resources(runtime);
+        assert_retained_drain(runtime, epoch);
+        assert_eq!(fault.attempts(), 1);
+        drop(fault);
+    }
+
+    #[test]
+    fn export_drain_preparation_rollback_returns_authority_before_recovery() {
+        let fixture = StaticTestRuntime::<TestU32Addin>::new();
+        let runtime = fixture.runtime();
+        let opening = runtime.begin_open().unwrap();
+        assert!(opening.fail_for_test().requires_rollback());
+        runtime
+            .ensure_module_residency(drain_preparation_residency_anchor as *const ())
+            .unwrap();
+        let epoch = runtime.lifecycle.access().module_epoch_id().unwrap();
+        let fault = crate::ingress::DrainPreparationFault::at(1);
+        let lifecycle = runtime.bind_addin_lifecycle().unwrap();
+        let outcome = rollback::rollback_open(
+            runtime,
+            &lifecycle,
+            &mut crate::host_callback::HostCallbackSession::new(),
+            None,
+        );
+        assert!(!outcome.is_finalized());
+        assert_retained_drain(runtime, epoch);
+        recovery::quarantine_runtime_resources(runtime);
+        assert_eq!(fault.attempts(), 1);
+        drop(fault);
+    }
 
     #[test]
     fn miri_published_generation_remains_readable_through_close_transition() {
@@ -1253,7 +1469,7 @@ pub(crate) mod tests {
         assert!(runtime.take_current_generation().is_some());
 
         let module_closing = removal_attempt.take_module_closing();
-        let drained = module_closing.seal_and_drain();
+        let drained = module_closing.seal_and_drain().unwrap();
         let (module_quiescent, _exports) = drained.certify();
         let module_epoch = module_quiescent.id();
         runtime.disable_trace_for_test();

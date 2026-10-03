@@ -8,8 +8,8 @@ use super::global_interface_table::get_git;
 use super::module_state::{ComObjectKind, ComObjectLease};
 use super::registration::guid_compact;
 use super::server_gate::{
-    ServerCloseError, ServerOperationBarrier, ServerPhase, ServerTerminationRequest,
-    TerminationWorker,
+    OwnedServerCall, ServerCloseError, ServerOperationBarrier, ServerPhase,
+    ServerTerminationRequest, TerminationWorker,
 };
 use super::update_event::{
     CallbackPtr, GitCookieLease, RetainedUpdateCallback, RtdNotifier, RtdUpdateEvent,
@@ -164,6 +164,13 @@ impl Drop for ServerStartReservation<'_> {
 
 struct OwnedServerReference {
     pub(super) pointer: usize,
+}
+
+struct DeferredDisconnectLease {
+    // Signal COM quiescence before releasing the reference that owns the
+    // barrier. Shutdown pumps STA dispatch while waiting for this admission.
+    _call: OwnedServerCall,
+    _reference: OwnedServerReference,
 }
 
 impl OwnedServerReference {
@@ -1272,19 +1279,36 @@ unsafe fn disconnect_data_inner(this: *mut RtdServer, topic_id: i32) -> i32 {
     // SAFETY: `this` remains valid for the duration of DisconnectData.
     let generation = unsafe { (*this).generation };
 
+    if let Some(subscription_server) = subscription_server.as_ref() {
+        // DisconnectData can run while this STA is servicing UpdateNotify,
+        // or while a publisher/producer is waiting for an STA COM call. Do not
+        // wait for either worker here. Revoke its topic now and transfer the
+        // final sink-user barrier to a generation-owned cleanup worker.
+        // SAFETY: COM owns a live server reference throughout this method.
+        let reference = unsafe { OwnedServerReference::acquire(this) };
+        // SAFETY: the lease retains `reference` until after this guard drops.
+        let call = match unsafe { (*this).operations.enter_owned() } {
+            Some(call) => call,
+            None => return E_FAIL,
+        };
+        let lease = Box::new(DeferredDisconnectLease {
+            _call: call,
+            _reference: reference,
+        });
+        match subscription_server.disconnect_deferred(crate::subscription::TopicId(topic_id), lease)
+        {
+            Err(error) if !matches!(error, crate::XllError::Closing) => {
+                crate::diagnostics::report_no_unwind("IRtdServer::DisconnectData", &error);
+                return E_FAIL;
+            }
+            _ => {}
+        }
+    }
+
     if let Some(handles) = handles {
         // SAFETY: Excel RTD server outlives or is bounded by the lifecycle coordinator
         // which withdraws/shuts down the server before dropping the backend.
         unsafe { handles.as_ref() }.disconnect(lifetime_generation(generation), topic_id);
-    }
-
-    if let Some(subscription_server) = subscription_server.as_ref() {
-        match subscription_server.disconnect(crate::subscription::TopicId(topic_id)) {
-            Err(error) if !matches!(error, crate::XllError::Closing) => {
-                crate::diagnostics::report_no_unwind("IRtdServer::DisconnectData", &error);
-            }
-            _ => {}
-        }
     }
 
     S_OK

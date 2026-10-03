@@ -1,12 +1,20 @@
-//! Semantic payload handed from call dispatch to the ABI encoder.
+//! Owned cell encoding handed from call dispatch to ABI publication.
 
-use crate::return_abi::XlArrayOutput;
-use crate::value::ExcelCellOutput;
+use crate::XllResult;
+use crate::return_abi::{XlArrayOutput, XlScalarOutput};
+use crate::value::IntoExcel;
 
-/// A fully converted worksheet return, before it is encoded into an
+/// A fully encoded worksheet return, before its root is placed in an
 /// Excel-owned `XLOPER12` return block.
 #[doc(hidden)]
 pub enum ReturnPayload {
-    Scalar(ExcelCellOutput),
+    Scalar(XlScalarOutput),
     Array(XlArrayOutput),
+}
+
+impl ReturnPayload {
+    #[inline]
+    pub(crate) fn scalar(value: impl IntoExcel) -> XllResult<Self> {
+        XlScalarOutput::encode(value).map(Self::Scalar)
+    }
 }

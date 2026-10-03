@@ -1,9 +1,8 @@
 //! Deterministic recalculation traces with real weighted payloads and miss work.
-//! Run one backend per process via XLFN_CACHE_BACKEND; output is JSONL.
+//! Measures the production cache; output is JSONL.
 use std::cell::Cell;
 use std::hint::black_box;
 use std::time::Instant;
-use xlfn::benchmark_support::benchmark_cache_backend;
 use xlfn::cache::CalculationCache;
 
 const KIB: usize = 1024;
@@ -24,7 +23,6 @@ fn mix(mut value: u64) -> u64 {
 }
 
 fn main() {
-    let backend = benchmark_cache_backend();
     let traces = [
         Trace {
             name: "fits_half_budget",
@@ -89,7 +87,7 @@ fn main() {
     ];
 
     for trace in traces {
-        let cache = CalculationCache::<u64, Box<[u64]>>::new_with_backend(trace.budget, backend);
+        let cache = CalculationCache::<u64, Box<[u64]>>::new(trace.budget);
         for phase in ["cold", "repeat"] {
             let computes = Cell::new(0_usize);
             let computed_bytes = Cell::new(0_usize);
@@ -121,14 +119,13 @@ fn main() {
             println!(
                 "{}",
                 serde_json::json!({
-                    "backend": format!("{backend:?}"), "trace": trace.name, "phase": phase,
+                    "trace": trace.name, "phase": phase,
                     "requests": trace.keys.len(), "computes": computes.get(),
                     "hit_rate": 1.0 - computes.get() as f64 / trace.keys.len() as f64,
                     "computed_payload_bytes": computed_bytes.get(),
                     "elapsed_ns": elapsed.as_nanos(), "budget_bytes": trace.budget,
                     "resident_weight": resident.weight, "resident_entries": resident.entries,
                     "index_bytes_estimate": resident.index_bytes_estimate,
-                    "index_metadata_opaque": resident.index_metadata_opaque,
                     "peak_pending_nodes": debt.peak_pending_nodes,
                     "peak_pending_weight": debt.peak_pending_weight,
                     "pending_nodes": debt.pending_nodes,

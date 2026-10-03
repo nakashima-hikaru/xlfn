@@ -60,8 +60,6 @@ pub mod v1 {
     pub use crate::return_abi::metadata::AddinMetadata;
     use crate::return_abi::{free_return_boundary, udf_boundary_named};
     use crate::runtime::Runtime;
-    #[cfg(feature = "handles")]
-    use crate::value::ExcelCellOutput;
     pub use crate::value::input::{
         ArgumentContext, ExcelInputIdentity, ExcelParameter, FormulaInputMode, InputMode,
         PlainInputMode, PreparedArgument, argument_from_raw, argument_from_raw_with_arguments,
@@ -919,7 +917,7 @@ pub mod v1 {
     {
         context
             .publish_new_handle(operation)
-            .map(|token| ExcelOutput::Scalar(ExcelCellOutput::String(token)))
+            .and_then(ExcelOutput::scalar)
     }
 
     #[cfg(feature = "handles")]

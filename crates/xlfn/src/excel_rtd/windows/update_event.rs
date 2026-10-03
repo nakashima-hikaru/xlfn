@@ -27,13 +27,13 @@ unsafe impl Send for CallbackPtr {}
 // SAFETY: RetainedUpdateCallback is Send and Sync, and its address is stable on heap.
 unsafe impl Sync for CallbackPtr {}
 
-struct ComApartmentGuard {
+pub(crate) struct ComApartmentGuard {
     should_uninit: bool,
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
 impl ComApartmentGuard {
-    fn enter() -> Result<Self, i32> {
+    pub(crate) fn enter() -> Result<Self, i32> {
         use crate::win32::CoInitializeEx;
 
         // SAFETY: the reserved pointer is null as required by CoInitializeEx.

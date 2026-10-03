@@ -1,5 +1,7 @@
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use xlfn::benchmark_support::{AsyncSpawnBenchmark, AsyncSpawnKind, benchmark_measurement_time};
+use xlfn::benchmark_support::{
+    AsyncSpawnBenchmark, AsyncSpawnKind, CancellationLifecycleBenchmark, benchmark_measurement_time,
+};
 
 const WORKER_COUNTS: [usize; 4] = [1, 4, 8, 16];
 const PRODUCER_COUNTS: [usize; 4] = [1, 4, 16, 32];
@@ -8,6 +10,22 @@ const MATRIX_ITERATIONS_PER_THREAD: usize = 64;
 const RESCHEDULE_YIELDS: usize = 4;
 
 fn concurrent_spawns(c: &mut Criterion) {
+    let mut lifecycle = c.benchmark_group("cancellation_lifecycle");
+    lifecycle.measurement_time(benchmark_measurement_time());
+    for workers in [1_usize, 4, 8, 32] {
+        const CYCLES: usize = 10_000;
+        for (label, dispatch_only) in [("allocate_release", false), ("dispatch_control", true)] {
+            let benchmark = CancellationLifecycleBenchmark::new(workers, dispatch_only);
+            lifecycle.throughput(Throughput::Elements((workers * CYCLES) as u64));
+            lifecycle.bench_function(BenchmarkId::new(label, workers), |b| {
+                b.iter(|| {
+                    assert_eq!(benchmark.run(CYCLES), workers * CYCLES);
+                });
+            });
+        }
+    }
+    lifecycle.finish();
+
     let mut returns = c.benchmark_group("async_return");
     returns.measurement_time(benchmark_measurement_time());
     returns.bench_function("scalar", |b| {

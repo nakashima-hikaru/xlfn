@@ -61,9 +61,8 @@ pub struct SpawnBatchResult {
 impl AsyncSpawnBenchmark {
     pub fn encode_scalar_return() {
         let value = crate::return_abi::AsyncReturnValue::from_value(
-            crate::call_return::ReturnPayload::Scalar(crate::value::ExcelCellOutput::Number(
-                std::hint::black_box(42.0),
-            )),
+            crate::call_return::ReturnPayload::scalar(std::hint::black_box(42.0))
+                .expect("finite scalar output must encode"),
         )
         .expect("finite scalar output must encode");
         std::hint::black_box(&value);

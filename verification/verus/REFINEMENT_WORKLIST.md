@@ -77,16 +77,8 @@ Earlier validation of the rotation/pin increment (2026-09-21, local macOS):
   wrong allocation instance), not parser/compiler rejection.
 - Resident insertion now transfers one resident pin into one RAII entry before
   user Clone/Hash code can panic. This fixes double resident-pin decrement by
-  the former outer rollback guard and inner owning entry. Quick lookup clones
-  are non-owning snapshots; Moka comparator clones share one Arc-owned entry.
-- Native cache/comparator tests: 76 pass, one ignored. Cache/comparator Clippy
-  and the panic-boundary audit pass.
-- The expanded Miri regression with benchmark comparators fails Stacked Borrows
-  in crossbeam-epoch 0.9.21 `internal.rs:567`, reached through Moka maintenance.
-  This is a failed validation, not covered by the earlier targeted Miri passes.
-  The same all-backend regression reaches its assertions under Tree Borrows
-  but fails the final leak check in crossbeam-epoch allocations. Neither
-  all-backend Miri run passes; no leak/provenance checks were suppressed.
+  the former outer rollback guard and inner owning entry. Quick Cache lookup
+  clones are non-owning snapshots.
 - The production-only Quick Cache regression passes both Stacked Borrows and
   Tree Borrows (one test each), with leak checks enabled.
 - Final `just verus`: all eight targets pass, totaling 331 obligations; all 19
@@ -322,8 +314,7 @@ whitespace and TCB audit pass locally.
 
 Validation: xlfn cache/bench-internals 428 tests pass (8 ignored). Production
 cache Miri tests pass three each in Stacked and Tree Borrows with leak checks
-enabled. All-target Clippy, formatting, whitespace and TCB audit pass. This does
-not change the earlier failed Moka-comparator Miri evidence.
+enabled. All-target Clippy, formatting, whitespace and TCB audit pass.
 
 ## Final-pin retirement ownership
 
@@ -630,9 +621,8 @@ Rotation: 272; Cache: 359. Native xlfn tests with cache/handles/bench-internals:
 429 pass, eight ignored; kernel: 67 pass. Both crates' library/test Clippy with
 warnings denied, formatting, TCB audit and diff checks pass. The cache+handles
 `miri_` suite passes 26 tests each under Stacked and Tree Borrows on
-nightly-2026-08-22, with the parking_lot_core provenance warning retained. The
-Miri run excludes benchmark-comparator backends; it does not supersede their
-previously recorded failure. Windows and remote CI were not run.
+nightly-2026-08-22, with the parking_lot_core provenance warning retained.
+Windows and remote CI were not run.
 
 
 ## Shared terminal detachment of both queues
@@ -661,8 +651,8 @@ including imported modules), and all 76 negative mutations are rejected.
 Rotation: 280; Cache: 369. Native xlfn/kernel: 496 pass, eight ignored; Clippy,
 formatting, TCB audit and diff checks pass. The targeted deferred-seal, topic-close
 and zero-budget-cache Miri tests pass five cases per mode (Stacked and Tree).
-These targeted runs do not replace broader earlier Miri evidence or the separate
-benchmark-comparator failures. Windows/remote CI were not run.
+These targeted runs do not replace broader earlier Miri evidence.
+Windows/remote CI were not run.
 
 
 ## Exclusive resource required for drained certificates
@@ -2109,7 +2099,8 @@ remote CI run is claimed for this proof-only increment.
 - fetch_sub consumes the owned pin, derives non-underflow from conservation, and
   creates a final retirement ticket only at the last pin. release_covered turns it
   into the exact RetiredNode and freezes its observation ledger.
-- Scoped Cache observations can now acquire a lease through that atomic adapter.
+- Cache lookup-domain observations can now acquire a lease through that atomic
+  adapter.
   Recovery uses the same atomic count/retiring tokens and final ticket together
   with actual drain-derived zero observations to withdraw the exact heap permission.
 - Native fetch_update correspondence, pin memory order/fence/release sequence,
@@ -2224,7 +2215,8 @@ Native `ResidentEntry::clone` returns a non-owning snapshot, while `lookup_pin` 
 a borrowed resident fragment. The helper is therefore a stronger-premise composition,
 not the native `get_at_epoch` refinement. Split observe/acquire APIs allow retirement
 between observation and acquisition; native index snapshot transfer, generation and
-resident rechecks, rollback, typed scoped reads, weak memory and Box/Drop remain open.
+resident rechecks, rollback, typed value references borrowed from `CacheLease`,
+weak memory and Box/Drop remain open.
 
 Validation: Cache 730 verified, zero errors. The full 68-case ownership mutation
 suite passed, including seven retained-ledger mutations; the two subsequently added

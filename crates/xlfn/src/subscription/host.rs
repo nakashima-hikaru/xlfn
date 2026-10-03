@@ -4,7 +4,7 @@ use crate::XllResult;
 
 pub(crate) trait SubscriptionHost: Clone + Send + Sync + 'static {
     // Owned publish operations transfer this guard to their completing thread.
-    type AdmissionGuard: Send;
+    type AdmissionGuard: Send + 'static;
     type Notifier: Clone + Send + Sync + 'static;
 
     fn enter_with<F>(&self, operation: F) -> XllResult<Self::AdmissionGuard>

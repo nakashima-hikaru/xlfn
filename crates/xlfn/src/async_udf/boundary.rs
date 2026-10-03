@@ -27,23 +27,49 @@ struct InstrumentedHandleTask<Build, G: crate::execution::UdfLayerGuard, T> {
     _result: std::marker::PhantomData<fn() -> T>,
 }
 
+#[cfg(all(feature = "handles", feature = "bench-internals"))]
+mod scoped_bench;
+#[cfg(all(feature = "handles", feature = "bench-internals"))]
+pub use scoped_bench::HandleScopedDeliveryBenchmark;
+#[cfg(all(test, feature = "handles"))]
+mod scoped_tests;
+
 #[cfg(feature = "handles")]
 impl<Build, G, T> HandleScopedTaskBuilder for InstrumentedHandleTask<Build, G, T>
 where
-    Build: HandleScopedBuilder<T>,
+    Build: HandleScopedBuilder<T> + 'static,
     G: crate::execution::UdfLayerGuard,
     T: ExcelReturn + Send + 'static,
 {
+    type Output = XllResult<T>;
+    type Delivery = (
+        ExcelAsyncResponder,
+        CancellationToken,
+        AsyncObservation<G>,
+        &'static str,
+    );
+
     fn build_task<'generation>(
         self,
         scope: super::executor::AsyncTaskScope<'generation>,
-    ) -> ScopedTaskFuture<'generation> {
+    ) -> (ScopedTaskFuture<'generation, Self::Output>, Self::Delivery) {
         let future = self.build.build(scope);
-        Box::pin(async move {
-            let completion = execute_async_udf(self.responder, self.token, future).await;
-            report_completion(self.udf_id, &completion);
-            self.observation.finish(&completion);
-        })
+        (
+            future,
+            (self.responder, self.token, self.observation, self.udf_id),
+        )
+    }
+
+    fn deliver(
+        delivery: Self::Delivery,
+        future: ScopedTaskFuture<'static, Self::Output>,
+    ) -> impl Future<Output = ()> + Send + 'static {
+        let (responder, token, observation, udf_id) = delivery;
+        async move {
+            let completion = execute_async_udf(responder, token, future).await;
+            report_completion(udf_id, &completion);
+            observation.finish(&completion);
+        }
     }
 }
 
@@ -59,18 +85,29 @@ struct UninstrumentedHandleTask<Build, T> {
 #[cfg(feature = "handles")]
 impl<Build, T> HandleScopedTaskBuilder for UninstrumentedHandleTask<Build, T>
 where
-    Build: HandleScopedBuilder<T>,
+    Build: HandleScopedBuilder<T> + 'static,
     T: ExcelReturn + Send + 'static,
 {
+    type Output = XllResult<T>;
+    type Delivery = (ExcelAsyncResponder, CancellationToken, &'static str);
+
     fn build_task<'generation>(
         self,
         scope: super::executor::AsyncTaskScope<'generation>,
-    ) -> ScopedTaskFuture<'generation> {
+    ) -> (ScopedTaskFuture<'generation, Self::Output>, Self::Delivery) {
         let future = self.build.build(scope);
-        Box::pin(async move {
-            let completion = execute_async_udf(self.responder, self.token, future).await;
-            report_completion(self.udf_id, &completion);
-        })
+        (future, (self.responder, self.token, self.udf_id))
+    }
+
+    fn deliver(
+        delivery: Self::Delivery,
+        future: ScopedTaskFuture<'static, Self::Output>,
+    ) -> impl Future<Output = ()> + Send + 'static {
+        let (responder, token, udf_id) = delivery;
+        async move {
+            let completion = execute_async_udf(responder, token, future).await;
+            report_completion(udf_id, &completion);
+        }
     }
 }
 
@@ -238,6 +275,9 @@ unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
         }
     };
     let future = catch_no_unwind(AssertUnwindSafe(|| {
+        runtime
+            .async_manager()
+            .preflight_spawn(calculation_id.get())?;
         start(guard, runtime.execution_lease(guard)?, token)
     }))
     .unwrap_or(Err(XllError::Panic));
@@ -310,6 +350,9 @@ unsafe fn async_udf_boundary_uninstrumented<A, Start, Fut, T>(
         }
     };
     let future = catch_no_unwind(AssertUnwindSafe(|| {
+        runtime
+            .async_manager()
+            .preflight_spawn(calculation_id.get())?;
         start(guard, runtime.execution_lease(guard)?, token)
     }))
     .unwrap_or(Err(XllError::Panic));
@@ -511,6 +554,9 @@ unsafe fn async_udf_boundary_instrumented_handle<A, Start, Build, T>(
         }
     };
     let prepared = catch_no_unwind(AssertUnwindSafe(|| {
+        runtime
+            .async_manager()
+            .preflight_spawn(calculation_id.get())?;
         let lease = runtime.execution_lease(guard)?;
         let generation = lease.generation();
         start(guard, lease, token).map(|build| (generation, build))
@@ -592,6 +638,9 @@ unsafe fn async_udf_boundary_uninstrumented_handle<A, Start, Build, T>(
         }
     };
     let prepared = catch_no_unwind(AssertUnwindSafe(|| {
+        runtime
+            .async_manager()
+            .preflight_spawn(calculation_id.get())?;
         let lease = runtime.execution_lease(guard)?;
         let generation = lease.generation();
         start(guard, lease, token).map(|build| (generation, build))

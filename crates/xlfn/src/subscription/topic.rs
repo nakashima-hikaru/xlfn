@@ -86,6 +86,9 @@ impl RtdLimits {
     }
 
     #[must_use]
+    /// Bound live subscriptions plus disconnected subscriptions whose source
+    /// cleanup has not completed. Capacity returns after the sink-user barrier,
+    /// so terminal disconnect always has reserved cleanup capacity.
     pub const fn with_max_active(mut self, value: RtdCapacity) -> Self {
         self.max_active = value;
         self
@@ -115,6 +118,7 @@ impl RtdLimits {
     }
 
     #[must_use]
+    /// Capacity for live subscriptions and source owners awaiting cleanup.
     pub const fn max_active(&self) -> RtdCapacity {
         self.max_active
     }
@@ -527,7 +531,7 @@ mod borrowed_tests {
             (Ok(owned), Ok(borrowed)) => {
                 assert!(borrowed.matches(&owned));
                 assert_eq!(borrowed.metadata.byte_len, owned.byte_len());
-                // Independently retain the pre-experiment canonical hash recipe.
+                // Independently verify the canonical hash recipe.
                 let mut hasher = FxHasher::default();
                 N.hash(&mut hasher);
                 for part in parts {

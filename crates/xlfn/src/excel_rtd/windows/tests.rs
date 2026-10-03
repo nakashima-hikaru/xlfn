@@ -1603,6 +1603,10 @@ fn direct_refresh_conversion_failure_keeps_outputs_empty_after_partial_fill() {
 
 #[test]
 fn topic_key_limits_reject_extreme_bounds_and_oversized_strings() {
+    assert!(matches!(
+        checked_topic_part_count(1, 0),
+        Err(XllError::InvalidHandle)
+    ));
     assert_eq!(
         checked_topic_part_count(0, 252).unwrap(),
         MAX_RTD_TOPIC_PARTS
@@ -1611,6 +1615,83 @@ fn topic_key_limits_reject_extreme_bounds_and_oversized_strings() {
     assert!(checked_topic_part_count(i32::MIN, i32::MAX).is_err());
     assert!(checked_topic_part_length(crate::utf16::EXCEL_STRING_LIMIT).is_ok());
     assert!(checked_topic_part_length(crate::utf16::EXCEL_STRING_LIMIT + 1).is_err());
+}
+
+#[test]
+fn topic_key_from_safearray_preserves_bstr_ownership_and_text_errors() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let texts = [
+        "topic_日本語💡".encode_utf16().collect::<Vec<_>>(),
+        vec![0xd800],
+        vec![u16::from(b'a'); crate::utf16::EXCEL_STRING_LIMIT + 1],
+    ];
+
+    for element_type in [VT_BSTR, VT_VARIANT] {
+        for (case, units) in texts.iter().enumerate() {
+            let bound = SAFEARRAYBOUND {
+                cElements: 1,
+                lLbound: if element_type == VT_BSTR { -17 } else { 7 },
+            };
+            // SAFETY: the bound describes one element of the requested type.
+            let array = unsafe { SafeArrayCreate(element_type, 1, &bound) };
+            assert!(!array.is_null());
+            let array = scopeguard::guard(array, |array| {
+                // SAFETY: this guard uniquely owns the live test array.
+                assert_eq!(unsafe { SafeArrayDestroy(array) }, S_OK);
+            });
+            // SAFETY: units contains the complete readable UTF-16 payload,
+            // including malformed text for strict decoder error coverage.
+            let bstr = unsafe { SysAllocStringLen(units.as_ptr(), units.len() as u32) };
+            assert!(!bstr.is_null());
+            let mut source = VARIANT::default();
+            // Initialize the active discriminant and payload together before
+            // the source guard takes ownership.
+            source.Anonymous.Anonymous.vt = VT_BSTR;
+            source.Anonymous.Anonymous.Anonymous.bstrVal = bstr;
+            let mut source = scopeguard::guard(source, |mut source| {
+                // SAFETY: this guard uniquely owns the initialized BSTR variant.
+                assert_eq!(unsafe { VariantClear(&mut source) }, S_OK);
+            });
+            let data = if element_type == VT_BSTR {
+                // SafeArrayPutElement takes a BSTR pointer without another
+                // indirection; a VARIANT element takes its storage address.
+                bstr.cast_mut().cast()
+            } else {
+                (&raw mut *source).cast()
+            };
+            // SAFETY: index is the only element's lower bound and data has the
+            // representation required by the validated array element type.
+            assert_eq!(
+                unsafe { SafeArrayPutElement(*array, &bound.lLbound, data) },
+                S_OK
+            );
+            // SafeArrayPutElement copied the text. The parser must use only
+            // that array-owned copy after the original BSTR is released.
+            drop(source);
+
+            for _ in 0..2 {
+                let mut array_pointer = *array;
+                // SAFETY: the test retains array ownership throughout each
+                // parse; parsing must release only its copied element.
+                let key = unsafe { topic_key_from_safearray(&mut array_pointer) };
+                match case {
+                    0 => assert_eq!(key.unwrap(), "topic_日本語💡"),
+                    1 => assert!(matches!(
+                        key,
+                        Err(XllError::Input {
+                            argument: "RTD topic",
+                            reason: crate::error::InputError::InvalidUtf16,
+                        })
+                    )),
+                    2 => assert!(matches!(key, Err(XllError::Input {
+                        argument: "RTD topic",
+                        reason: crate::error::InputError::TooLarge { limit, actual },
+                    }) if limit == crate::utf16::EXCEL_STRING_LIMIT && actual == units.len())),
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -2597,6 +2678,328 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
     drop(factory);
     drop(ensured);
     shutdown_subscriptions(&subscriptions).unwrap();
+}
+
+#[test]
+#[cfg(feature = "rtd")]
+fn sta_disconnect_returns_before_notification_dispatch_and_termination_drains_cleanup() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let (returned_tx, returned_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let sta = thread::spawn(move || {
+        const COINIT_APARTMENTTHREADED: u32 = 2;
+        // SAFETY: this fresh thread enters an STA exactly once; the guard
+        // balances initialization on this same thread after all COM teardown.
+        assert_eq!(
+            unsafe { CoInitializeEx(ptr::null(), COINIT_APARTMENTTHREADED) },
+            S_OK
+        );
+        let _apartment = TestComApartment {
+            should_uninitialize: true,
+            _not_send_or_sync: PhantomData,
+        };
+        let registration = crate::subscription::SourceRegistration::new(
+            crate::generation::RuntimeGeneration::new(1).unwrap(),
+        );
+        let (sender_tx, sender_rx) = mpsc::sync_channel(1);
+        let source = registration
+            .register(crate::subscription::RtdChannelSource::new(
+                std::num::NonZeroUsize::new(64).unwrap(),
+                move |_| {
+                    let sender_tx = sender_tx.clone();
+                    Ok(move |sender: crate::subscription::RtdSender<i32>| {
+                        sender_tx.send(sender.clone()).unwrap();
+                        assert!(sender.wait_closed(Duration::from_secs(5)));
+                        Ok(())
+                    })
+                },
+            ))
+            .unwrap();
+        let subscriptions = SubscriptionRuntime::with_sources_for_internal(registration.finish());
+        let ensured = ensure_server_without_handles(Some(&subscriptions)).unwrap();
+        let handle = ensured.subscription_server.unwrap();
+        let prepared = subscriptions
+            .prepare(
+                &source,
+                RtdTopic::single("sta-disconnect").unwrap().borrowed(),
+            )
+            .unwrap();
+        handle
+            .connect_transaction(crate::subscription::TopicId(1), prepared.id())
+            .unwrap()
+            .commit()
+            .unwrap();
+        prepared.commit();
+        let sender = sender_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let notifier = Arc::new(crate::rtd::test_support::TestNotifierState::new());
+        *notifier.entered.lock() = Some(entered_tx);
+        // This fake callback waits for the STA's next action, modeling an
+        // UpdateNotify queued for STA dispatch. It uses real channel locking
+        // and native DisconnectData/ServerTerminate admission and teardown.
+        *notifier.release.lock() = Some(release_rx);
+        handle
+            .attach_update_notifier(RtdNotifier::for_test(notifier))
+            .unwrap();
+        sender.try_send(1).unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let server = ensured.active.pointer as *mut RtdServer;
+        // SAFETY: `ensured` and ACTIVE_SERVER retain this live COM server.
+        assert_eq!(unsafe { disconnect_data(server, 1) }, S_OK);
+        assert_eq!(handle.pending_update_count(), 0);
+        // SAFETY: the same retained reference keeps the admission state live.
+        assert_eq!(unsafe { (*server).operations.state.lock().in_flight }, 1);
+        // SAFETY: the retained server is live; cleanup admission makes this
+        // termination deferred while the fake STA dispatch is still pending.
+        assert_eq!(unsafe { server_terminate(server) }, S_OK);
+        // SAFETY: the server remains retained until teardown completes.
+        assert!(matches!(
+            unsafe { (*server).operations.state.lock().phase },
+            ServerPhase::Terminating { deferred: true, .. }
+        ));
+        returned_tx.send(()).unwrap();
+        shutdown_subscriptions(&subscriptions).unwrap();
+        assert!(sender.is_closed());
+        // SAFETY: close joined every deferred worker and retained reference;
+        // the original ensured reference still keeps the server alive here.
+        assert_eq!(unsafe { (*server).operations.state.lock().in_flight }, 0);
+        drop(ensured);
+    });
+    // Recover the old blocking path on timeout, so a regression fails without
+    // leaving a permanently blocked STA behind in the native test process.
+    let returned_before_release = returned_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+    release_tx.send(()).unwrap();
+    sta.join().unwrap();
+    assert!(
+        returned_before_release,
+        "DisconnectData blocked STA dispatch"
+    );
+}
+
+#[test]
+#[cfg(all(feature = "rtd", feature = "handles"))]
+fn sta_final_remove_dispatches_com_before_ingress_drain_and_coalesces_reentry() {
+    // Standard IUnknown marshaling exercises real STA dispatch without an
+    // Excel-installed IRtdUpdateEvent proxy/stub. A remote QueryInterface for
+    // this unknown IID triggers the callback while final removal drains RTD.
+    const PROBE_IID: GUID = GUID {
+        data1: 0x43d9e1c2,
+        data2: 0x8a5a,
+        data3: 0x4876,
+        data4: [0xad, 0xb3, 0xc1, 0xa5, 0xfd, 0x8a, 0x57, 0x09],
+    };
+    #[repr(C)]
+    struct Probe {
+        vtable: &'static IUnknown_Vtbl,
+        references: AtomicU32,
+        callback: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    }
+    unsafe extern "system" fn query(
+        this: *mut c_void,
+        iid: *const GUID,
+        output: *mut *mut c_void,
+    ) -> i32 {
+        // SAFETY: COM supplies a live interface and readable/writable slots.
+        let probe = unsafe { &*this.cast::<Probe>() };
+        // SAFETY: the caller supplies writable interface output.
+        unsafe { *output = ptr::null_mut() };
+        // SAFETY: the caller supplies a readable GUID.
+        if guid_eq(unsafe { *iid }, IID_IUNKNOWN) {
+            probe.references.fetch_add(1, Ordering::Relaxed);
+            // SAFETY: the returned pointer carries the newly acquired ref.
+            unsafe { *output = this };
+            return S_OK;
+        }
+        // SAFETY: the same readable GUID is retained for this invocation.
+        if guid_eq(unsafe { *iid }, PROBE_IID) {
+            let callback = probe.callback.lock().take();
+            if let Some(callback) = callback {
+                let _ = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(callback));
+            }
+        }
+        E_NOINTERFACE
+    }
+    unsafe extern "system" fn add_ref(this: *mut c_void) -> u32 {
+        // SAFETY: COM retains the interface while acquiring another ref.
+        unsafe { &*this.cast::<Probe>() }
+            .references
+            .fetch_add(1, Ordering::Relaxed)
+            + 1
+    }
+    unsafe extern "system" fn release(this: *mut c_void) -> u32 {
+        // SAFETY: the caller consumes one live interface ref.
+        let prior = unsafe { &*this.cast::<Probe>() }
+            .references
+            .fetch_sub(1, Ordering::Release);
+        if prior == 1 {
+            std::sync::atomic::fence(Ordering::Acquire);
+            // SAFETY: this is the final ref to the original Box allocation.
+            unsafe { drop(Box::from_raw(this.cast::<Probe>())) };
+        }
+        prior - 1
+    }
+    static PROBE_VTABLE: IUnknown_Vtbl = IUnknown_Vtbl {
+        QueryInterface: query,
+        AddRef: add_ref,
+        Release: release,
+    };
+
+    let (returned_tx, returned_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let fallback_release = release_tx.clone();
+    let sta = thread::spawn(move || {
+        const COINIT_APARTMENTTHREADED: u32 = 2;
+        // SAFETY: this fresh thread initializes COM once and balances it here.
+        assert_eq!(
+            unsafe { CoInitializeEx(ptr::null(), COINIT_APARTMENTTHREADED) },
+            S_OK
+        );
+        let _apartment = TestComApartment {
+            should_uninitialize: true,
+            _not_send_or_sync: PhantomData,
+        };
+        let _guard = TEST_LOCK.lock().unwrap();
+        close_test_ingress();
+        let fixture = crate::runtime::StaticTestRuntime::<()>::new();
+        let runtime = fixture.runtime();
+        runtime
+            .ensure_module_residency(crate::boundary::host::host_auto_remove::<()> as *const ())
+            .unwrap();
+        let registration = crate::subscription::SourceRegistration::new(
+            crate::generation::RuntimeGeneration::new(1).unwrap(),
+        );
+        let (sender_tx, sender_rx) = mpsc::sync_channel(1);
+        let source = registration
+            .register(crate::subscription::RtdChannelSource::new(
+                std::num::NonZeroUsize::new(64).unwrap(),
+                move |_| {
+                    let sender_tx = sender_tx.clone();
+                    Ok(move |sender: crate::subscription::RtdSender<i32>| {
+                        sender_tx.send(sender.clone()).unwrap();
+                        assert!(sender.wait_closed(Duration::from_secs(10)));
+                        Ok(())
+                    })
+                },
+            ))
+            .unwrap();
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish_with_sources(opening, (), (), registration.finish());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let ensured = runtime
+            .with_subscriptions(|subscriptions| {
+                let ensured = ensure_server_without_handles(Some(subscriptions)).unwrap();
+                let handle = ensured.subscription_server.unwrap();
+                let prepared = subscriptions
+                    .prepare(
+                        &source,
+                        RtdTopic::single("final-remove").unwrap().borrowed(),
+                    )
+                    .unwrap();
+                handle
+                    .connect_transaction(crate::subscription::TopicId(1), prepared.id())
+                    .unwrap()
+                    .commit()
+                    .unwrap();
+                prepared.commit();
+                ensured
+            })
+            .unwrap();
+        let sender = sender_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let notifier = Arc::new(crate::rtd::test_support::TestNotifierState::new());
+        *notifier.entered.lock() = Some(entered_tx);
+        *notifier.release.lock() = Some(release_rx);
+        ensured
+            .subscription_server
+            .unwrap()
+            .attach_update_notifier(RtdNotifier::for_test(notifier))
+            .unwrap();
+        sender.try_send(1).unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        // SAFETY: ACTIVE_SERVER and this reference retain the live server.
+        assert_eq!(
+            unsafe { disconnect_data(ensured.active.pointer as *mut RtdServer, 1) },
+            S_OK
+        );
+        // Final removal must be allowed to reclaim its COM object count.
+        drop(ensured);
+
+        let dispatched = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&dispatched);
+        let probe = TestUnknownReference::new(
+            Box::into_raw(Box::new(Probe {
+                vtable: &PROBE_VTABLE,
+                references: AtomicU32::new(1),
+                callback: Mutex::new(Some(Box::new(move || {
+                    assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closing);
+                    let epoch = runtime.removal_epoch();
+                    let intent = runtime.host_intent();
+                    assert_eq!(crate::boundary::host::host_auto_remove(runtime), 1);
+                    assert_eq!(crate::boundary::host::host_auto_close(runtime), 1);
+                    assert_eq!(runtime.removal_epoch(), epoch);
+                    assert_eq!(runtime.host_intent(), intent);
+                    assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closing);
+                    assert!(runtime.module_residency_held());
+                    observed.store(true, Ordering::Release);
+                    release_tx.send(()).unwrap();
+                }))),
+            }))
+            .cast(),
+        );
+        // SAFETY: this thread owns an STA and a live IUnknown interface.
+        let git = unsafe { super::global_interface_table::get_git() }.unwrap();
+        let mut cookie = 0;
+        // SAFETY: the interface, IID, and writable cookie remain live here.
+        assert_eq!(
+            unsafe { git.register(probe.as_ptr(), &IID_IUNKNOWN, &mut cookie) },
+            S_OK
+        );
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let incoming = thread::spawn(move || {
+            let _apartment = TestComApartment::enter();
+            ready_tx.send(()).unwrap();
+            while crate::module_runtime::ingress().phase() == crate::ingress::PHASE_OPEN {
+                thread::yield_now();
+            }
+            // SAFETY: this thread initialized COM; GIT owns the registered ref.
+            let git = unsafe { super::global_interface_table::get_git() }.unwrap();
+            // SAFETY: the cookie remains registered through this thread's join.
+            let interface = unsafe { git.get_interface(cookie, &IID_IUNKNOWN) }.unwrap();
+            let interface = TestUnknownReference::new(interface.as_ptr());
+            let mut output = ptr::null_mut();
+            // SAFETY: this apartment-local proxy and both GUID/output slots
+            // satisfy QueryInterface's ABI; the probe deliberately rejects IID.
+            assert_eq!(
+                unsafe {
+                    (interface.iunknown_vtable().QueryInterface)(
+                        interface.as_ptr(),
+                        &PROBE_IID,
+                        &mut output,
+                    )
+                },
+                E_NOINTERFACE
+            );
+        });
+        ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(crate::boundary::host::host_auto_remove(runtime), 1);
+        returned_tx.send(()).unwrap();
+        // Also recover a regression that blocked the first ingress drain: the
+        // test driver releases its fake notifier on timeout, then this pump
+        // completes a still-queued probe before joining its MTA caller.
+        assert!(drain_with_com_dispatch(move || incoming.join().unwrap()).is_ok());
+        assert!(dispatched.load(Ordering::Acquire));
+        assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
+        assert!(sender.is_closed());
+        // SAFETY: no proxy user remains after the MTA caller was joined.
+        assert_eq!(unsafe { git.revoke(cookie) }, S_OK);
+    });
+    let completed_with_sta_dispatch = returned_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+    let _ = fallback_release.send(());
+    sta.join().unwrap();
+    assert!(
+        completed_with_sta_dispatch,
+        "final removal blocked STA dispatch"
+    );
 }
 
 #[test]

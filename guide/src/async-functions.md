@@ -128,6 +128,12 @@ Import `AsyncConfig`, `AsyncWorkerCount`, and `RuntimeConfig` from `xlfn`.
 The worker count defaults to four and accepts `1..=32`. Choose it from
 measured workload characteristics. This setting does not configure any
 application-owned connection pool, foreign runtime, or blocking executor.
+The framework admits at most 4,096 active tasks. When that capacity is already
+exhausted, it rejects the call before converting owned inputs; this admission
+error takes precedence over input errors in the rejected call. A capacity
+check does not reserve a task while a custom input converter runs. The runtime
+checks admission again after conversion to cover concurrent submissions,
+cancellation, and calculation-generation changes.
 CPU-heavy work should usually use a separate bounded pool so it does not
 occupy every async executor worker. See [Add-in state](lifecycle.md) for the
 complete `open` pattern.

@@ -3,15 +3,6 @@ use std::{cell::Cell, time::Instant};
 
 use crate::subscription::TOPIC_SHARDS;
 
-/// Format the internal fixed-width topic key on the RTD observation path.
-pub fn rtd_transport_key(runtime_id: u64, subscription_id: u64) {
-    let key = crate::subscription::SubscriptionKey::from_internal(
-        runtime_id,
-        crate::subscription::SubscriptionId(subscription_id),
-    );
-    std::hint::black_box(key.to_transport().as_str());
-}
-
 struct BenchmarkSubscription;
 
 // SAFETY: the benchmark subscription owns no background activity or retained
@@ -518,12 +509,6 @@ impl RtdRefreshScalingBenchmark {
     }
 
     /// Retains the runtime and its terminal server handle for footprint probes.
-    pub fn terminate_server(&self) {
-        self.server
-            .terminate()
-            .expect("server termination must succeed");
-    }
-
     fn publish_updates(&self) {
         let revision = self.publish_revision.get();
         self.publish_revision.set(revision.wrapping_add(1));

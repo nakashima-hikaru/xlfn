@@ -34,7 +34,9 @@ a full queue cannot hide a producer failure. A successful producer return
 does not publish an error.
 
 Each active subscription uses one producer thread. All channel subscriptions in
-a runtime generation share one publisher, for N+1 threads in total. Each source
+a runtime generation share one publisher and one cleanup worker, for N+2
+threads during streaming. The first connection prepares the cleanup worker,
+which remains until close. Each source
 admits at most 64 producer workers by default; configure a lower or higher
 nonzero bound with `.with_max_producers(limit)`. A worker retains its reservation
 until disconnect joins it, including when it has already exited. Reconfiguring
@@ -127,6 +129,12 @@ A topic must contain at least one non-empty part. Each part must fit Excel's 32,
 
 The runtime also applies bounded admission limits. The standard limits are 253 topic parts, 1 MiB of UTF-8 text per topic, 64 MiB of pending-topic text in aggregate, 4,096 pending preparations, 4,096 active streams, 4,096 queued updates, and 4,096 distinct live source identities. Configure limits during `Addin::open` with `RuntimeConfig::new().with_rtd(RtdConfig::new().with_limits(limits))`; use `RtdCapacity::bounded` or `RtdCapacity::disabled` for each resource class so a disabled limit is explicit rather than an untyped zero. Exceeding a limit returns `XllError::Overloaded` (or a topic input error for an invalid topic).
 
+The active-stream limit includes disconnected subscriptions until their source
+cleanup finishes. Each connection reserves its terminal cleanup capacity and
+prepares the worker before starting its source. While cleanup holds the final
+slot, a new connection returns `Overloaded`; an admitted subscription's
+`DisconnectData` can always revoke its topic and transfer its cleanup.
+
 ## Backpressure and errors
 
 `RtdSender::try_send` validates values before enqueueing and never waits for
@@ -158,7 +166,17 @@ Publishing validates and queues a value; xlfn notifies Excel and handles
 During disconnect, the channel stops accepting values, discards queued
 updates, waits for in-flight publication, revokes its sink, and joins its
 producer. The generation joins the shared publisher after all subscriptions
-have disconnected. Sender clones may outlive the
+have disconnected. Excel's `DisconnectData` first revokes the topic, then
+transfers this cleanup to the generation-owned worker so Excel's thread can
+service an outstanding COM callback. The Windows cleanup worker initializes
+COM as an MTA. Sender cancellation follows when the
+worker reaches this subscription; `DisconnectData` does not wait for its
+producer to exit. Live subscriptions and queued or running cleanups together
+are bounded by the runtime's active-stream limit; a stalled cleanup delays later
+cleanups. Close drains and joins this worker before reclaiming the server or
+source. Cleanup failures are diagnosed and retained for shutdown. The
+`RtdSubscription::disconnect_and_wait` lifetime barrier remains synchronous.
+Sender clones may outlive the
 subscription, but valid sends return `RtdSendError::Closed`; conversion errors
 can still return `RtdSendError::Invalid`. They retain no live RTD capability or
 queued payloads. Producer captures belong to that job and are
@@ -168,6 +186,8 @@ not stop or destroy a running job.
 A producer that finishes successfully closes sender admission and drains
 accepted values. The shared publisher remains available to other topics.
 Ensure producer workers exit promptly when the sender closes or becomes cancelled.
+Producer and custom cleanup code must not synchronously initiate this add-in's
+own removal through Excel: removal waits for those same workers to stop.
 
 ## Custom sources
 

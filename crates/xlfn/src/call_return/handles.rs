@@ -13,7 +13,7 @@ impl<'call, T: ExcelHandleObject> super::ExcelReturn for crate::handle::HandleAl
     fn into_excel(self, context: &mut ReturnContext<'_, '_>) -> XllResult<ReturnPayload> {
         context
             .publish_existing_alias(|| Ok(self))
-            .map(|token| ReturnPayload::Scalar(crate::value::ExcelCellOutput::String(token)))
+            .and_then(ReturnPayload::scalar)
     }
 
     fn invoke(
@@ -22,7 +22,7 @@ impl<'call, T: ExcelHandleObject> super::ExcelReturn for crate::handle::HandleAl
     ) -> XllResult<ReturnPayload> {
         context
             .publish_existing_alias(operation)
-            .map(|token| ReturnPayload::Scalar(crate::value::ExcelCellOutput::String(token)))
+            .and_then(ReturnPayload::scalar)
     }
 }
 

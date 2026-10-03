@@ -1,5 +1,64 @@
 use crate::return_abi::XlArrayBuilder;
 
+/// Scalar construction, primitive writer dispatch, return publication and
+/// cleanup through the production synchronous boundary. Fixture text is
+/// allocated before measurement; only the owned control clones it per call.
+pub struct ScalarOutputBenchmark {
+    runtime: &'static crate::runtime::Runtime<()>,
+    text: String,
+}
+
+#[derive(Clone, Copy, crate::ExcelEnum)]
+enum ScalarBenchmarkStatus {
+    Ready,
+}
+
+impl ScalarOutputBenchmark {
+    pub fn new(text: String) -> Self {
+        Self {
+            runtime: super::get_benchmark_runtime(),
+            text,
+        }
+    }
+
+    pub fn run_borrowed(&self) {
+        self.run(self.text.as_str(), xlfn_sys::XLTYPE_STR);
+    }
+
+    pub fn run_owned(&self) {
+        self.run(self.text.clone(), xlfn_sys::XLTYPE_STR);
+    }
+
+    pub fn run_enum(&self) {
+        self.run(ScalarBenchmarkStatus::Ready, xlfn_sys::XLTYPE_STR);
+    }
+
+    pub fn run_number(&self) {
+        self.run(std::hint::black_box(42.0), xlfn_sys::XLTYPE_NUM);
+    }
+
+    fn run<T: crate::call_return::ExcelReturn>(&self, value: T, expected_type: u32) {
+        let pointer = crate::return_abi::udf_boundary_named(
+            self.runtime,
+            "bench_scalar_output",
+            "BENCH.SCALAR.OUTPUT",
+            |_, _| {
+                let mut context = crate::call_return::ReturnContext::new();
+                T::invoke(&mut context, || Ok(value))
+            },
+        );
+        // SAFETY: the boundary returned a live return block or static error.
+        let value_type = unsafe { (*pointer).base_type() };
+        assert_eq!(
+            value_type, expected_type,
+            "scalar benchmark must encode successfully"
+        );
+        std::hint::black_box(pointer);
+        // SAFETY: return this framework-owned allocation exactly once.
+        let _ = unsafe { crate::return_abi::free_return_boundary(pointer) };
+    }
+}
+
 /// Compares numerical result construction and the production synchronous
 /// return boundary. Input fixtures are prepared before the measured operation;
 /// both paths include result allocation, publication, and `xlAutoFree12` cleanup.

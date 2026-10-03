@@ -882,6 +882,183 @@ mod preparation_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    fn array_root(cells: &mut [XLOPER12]) -> XLOPER12 {
+        XLOPER12 {
+            value: xlfn_sys::XLOPER12Value {
+                array: xlfn_sys::XLOPER12Array {
+                    rows: cells.len() as i32,
+                    columns: 1,
+                    values: cells.as_mut_ptr(),
+                },
+            },
+            xltype: xlfn_sys::XLTYPE_MULTI,
+        }
+    }
+
+    #[test]
+    fn miri_prepared_borrowed_strings_preserve_identity_and_survive_chunk_growth() {
+        for length in [1, 16, if cfg!(miri) { 65 } else { 4_096 }] {
+            let source = (0..length)
+                .map(|index| match index % 4 {
+                    0 => String::new(),
+                    1 => "ASCII".into(),
+                    2 => "価格💡école".into(),
+                    _ => "long".repeat(256),
+                })
+                .collect::<Vec<_>>();
+            let mut strings = source
+                .iter()
+                .map(|text| {
+                    std::iter::once(text.encode_utf16().count() as u16)
+                        .chain(text.encode_utf16())
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let mut cells = strings
+                .iter_mut()
+                .map(|units| XLOPER12 {
+                    value: xlfn_sys::XLOPER12Value {
+                        string: units.as_mut_ptr(),
+                    },
+                    xltype: xlfn_sys::XLTYPE_STR,
+                })
+                .collect::<Vec<_>>();
+            let root = array_root(&mut cells);
+            crate::call::with_excel_call_scope_and_state(&root, |root, scope| {
+                let value = XlValueRef::from_array_cell(root).unwrap();
+                let mut eager = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                let expected = eager.decode::<Vec<&str>>(0, "values", value).unwrap();
+                let identity = eager.finish().unwrap();
+                let mut arguments = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                let warm = arguments.prepare::<Vec<&str>>(0, "values", value).unwrap();
+                assert_eq!(arguments.finish().unwrap(), identity);
+                drop(warm);
+
+                let mut arguments = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                let cold = arguments.prepare::<Vec<&str>>(0, "values", value).unwrap();
+                assert_eq!(arguments.finish().unwrap(), identity);
+                let extra = vec![b'z' as u16; 32_767];
+                assert_eq!(
+                    scope.scratch().decode_utf16(&extra, "extra").unwrap().len(),
+                    extra.len()
+                );
+                let materialized = cold.materialize().unwrap();
+                assert_eq!(materialized.as_slice(), expected);
+                assert_eq!(
+                    materialized.as_slice(),
+                    source.iter().map(String::as_str).collect::<Vec<_>>()
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn prepared_borrowed_strings_keep_validation_order_and_poison_identity() {
+        let mut malformed = [1_u16, 0xd800];
+        let text = XLOPER12 {
+            value: xlfn_sys::XLOPER12Value {
+                string: malformed.as_mut_ptr(),
+            },
+            xltype: xlfn_sys::XLTYPE_STR,
+        };
+        for cells in [[text, XLOPER12::number(1.0)], [XLOPER12::number(1.0), text]] {
+            let mut cells = cells;
+            let root = array_root(&mut cells);
+            crate::call::with_excel_call_scope_and_state(&root, |root, scope| {
+                let value = XlValueRef::from_array_cell(root).unwrap();
+                let mut eager = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                let expected = eager.decode::<Vec<&str>>(0, "values", value).unwrap_err();
+                let mut prepared = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                let error = match prepared.prepare::<Vec<&str>>(0, "values", value) {
+                    Ok(_) => panic!("invalid input must fail during preparation"),
+                    Err(error) => error,
+                };
+                assert_eq!(error.to_string(), expected.to_string());
+                assert!(prepared.finish().is_err());
+            });
+        }
+    }
+
+    #[test]
+    fn custom_prepared_resources_drop_on_warm_cold_and_partial_error_paths() {
+        use std::sync::Arc;
+        struct Resource {
+            value: f64,
+            drops: Arc<AtomicUsize>,
+            _owned: Box<[u8; 32]>,
+        }
+        impl Drop for Resource {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        fn materialize(value: Resource) -> XllResult<f64> {
+            Ok(value.value)
+        }
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut cells = [
+            XLOPER12::number(1.0),
+            XLOPER12::number(2.0),
+            XLOPER12::number(3.0),
+        ];
+        let root = array_root(&mut cells);
+        for cold in [false, true] {
+            crate::call::with_excel_call_scope_and_state(&root, |root, _scope| {
+                let grid = super::super::GridView::from_value(
+                    XlValueRef::from_array_cell(root).unwrap(),
+                    "values",
+                )
+                .unwrap();
+                let prepared = ExcelInputCells {
+                    grid,
+                    argument: "values",
+                }
+                .retain(
+                    |value, argument| {
+                        Ok(Resource {
+                            value: f64::from_excel(value, argument)?,
+                            drops: Arc::clone(&drops),
+                            _owned: Box::new([0; 32]),
+                        })
+                    },
+                    materialize,
+                )
+                .unwrap();
+                if cold {
+                    assert_eq!(prepared.materialize().unwrap(), [1.0, 2.0, 3.0]);
+                } else {
+                    drop(prepared);
+                }
+            });
+        }
+        assert_eq!(drops.load(Ordering::Relaxed), 6);
+        cells[2] = XLOPER12::error(crate::ExcelError::Value.code());
+        let root = array_root(&mut cells);
+        crate::call::with_excel_call_scope_and_state(&root, |root, _scope| {
+            let grid = super::super::GridView::from_value(
+                XlValueRef::from_array_cell(root).unwrap(),
+                "values",
+            )
+            .unwrap();
+            let result = ExcelInputCells {
+                grid,
+                argument: "values",
+            }
+            .retain(
+                |value, argument| {
+                    Ok(Resource {
+                        value: f64::from_excel(value, argument)?,
+                        drops: Arc::clone(&drops),
+                        _owned: Box::new([0; 32]),
+                    })
+                },
+                materialize,
+            );
+            assert!(result.is_err());
+        });
+        assert_eq!(drops.load(Ordering::Relaxed), 8);
+    }
+
     #[test]
     fn miri_prepared_containers_preserve_identity_and_materialized_values() {
         fn check<T>(raw: &XLOPER12)

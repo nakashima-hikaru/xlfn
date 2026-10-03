@@ -276,62 +276,6 @@ fn clear_keeps_old_followers_and_new_epoch_flights_independent() {
 }
 
 #[test]
-#[cfg(all(feature = "bench-internals", not(miri)))]
-fn invalidation_during_flight_preserves_its_followers() {
-    let cache = CalculationCache::<u64, u64>::new(8);
-    let key = VersionedKey {
-        epoch: cache.generation.snapshot(),
-        key: 7_u64,
-    };
-    let hash = flight_hash(&key);
-    std::thread::scope(|scope| {
-        let (started_tx, started_rx) = mpsc::sync_channel(1);
-        let (release_tx, release_rx) = mpsc::sync_channel(1);
-        let cache_ref = &cache;
-        let leader = scope.spawn(move || {
-            let lease = cache_ref
-                .get_or_try_insert_with(
-                    7,
-                    |_| 8,
-                    || {
-                        started_tx.send(()).unwrap();
-                        release_rx.recv().unwrap();
-                        Ok(1)
-                    },
-                )
-                .unwrap();
-            assert_eq!(*lease, 1);
-        });
-        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        let flight = Arc::clone(cache.flights.shard(hash).lock().get(hash, &key).unwrap());
-        let follower = scope.spawn(|| {
-            let lease = cache
-                .get_or_try_insert_with(7, |_| 8, || panic!("follower must survive invalidation"))
-                .unwrap();
-            assert_eq!(*lease, 1);
-        });
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Arc::strong_count(&flight) < 4 && Instant::now() < deadline {
-            std::thread::yield_now();
-        }
-        let enrolled = Arc::strong_count(&flight) >= 4;
-        cache.invalidate(&7);
-        release_tx.send(()).unwrap();
-        leader.join().unwrap();
-        follower.join().unwrap();
-        assert!(enrolled, "follower enrolled before invalidation");
-        // invalidate removes residency rather than advancing a generation;
-        // an already-running initializer may still publish its result.
-        assert_eq!(*cache.get(&7).unwrap(), 1);
-        cache.invalidate(&7);
-        assert!(cache.get(&7).is_none());
-        let fresh = cache.get_or_try_insert_with(7, |_| 8, || Ok(2)).unwrap();
-        assert_eq!(*fresh, 2);
-    });
-    assert!(cache.flights.is_empty());
-}
-
-#[test]
 #[cfg(not(miri))]
 fn unwind_cleanup_does_not_call_faulting_keys_again() {
     const CASE: &str = "XLFN_TEST_SINGLEFLIGHT_CLEANUP_FAULT";

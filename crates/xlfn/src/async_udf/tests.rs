@@ -1284,6 +1284,151 @@ fn async_boundary_returns_completed_value_through_callback() {
 }
 
 #[test]
+fn saturated_async_boundary_skips_owned_input_preparation_and_recovers() {
+    struct EnabledSubscriber;
+    impl tracing::Subscriber for EnabledSubscriber {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, _: &tracing::Event<'_>) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+    let runtime = Box::leak(Box::new(Runtime::<TestU32Addin>::new()));
+    let _guard = test_lock_for_runtime(runtime);
+    let opening = runtime.begin_open().unwrap();
+    let mut opening = runtime.publish(opening, 7_u32, ());
+    runtime.finish_open(&mut opening, Vec::new()).unwrap();
+    runtime.start_async(2).unwrap();
+    let _callback_guard = reset_test_callback();
+    let generation = runtime.async_manager().current_generation();
+    for _ in 0..MAX_PENDING {
+        runtime
+            .async_manager()
+            .spawn(
+                generation,
+                std::future::pending(),
+                test_cancellation_source(),
+            )
+            .unwrap();
+    }
+    let mut handle = XLOPER12 {
+        value: XLOPER12Value {
+            big_data: XLOPER12BigData {
+                handle: XLOPER12BigDataHandle {
+                    data: std::ptr::NonNull::<u8>::dangling().as_ptr(),
+                },
+                byte_count: 1,
+            },
+        },
+        xltype: XLTYPE_BIG_DATA,
+    };
+    for instrumented in [false, true] {
+        let prepared = AtomicBool::new(false);
+        let mut invoke = || {
+            // SAFETY: the valid opaque handle is live throughout this boundary call.
+            unsafe {
+                async_udf_boundary_named(
+                    runtime,
+                    "saturated",
+                    "SATURATED",
+                    &mut handle,
+                    |_, _, _| {
+                        prepared.store(true, Ordering::Relaxed);
+                        let owned = vec![0.0; 100_000];
+                        Ok(async move { Ok::<_, XllError>(owned.len() as f64) })
+                    },
+                );
+            }
+        };
+        if instrumented {
+            tracing::subscriber::with_default(EnabledSubscriber, &mut invoke);
+        } else {
+            invoke();
+        }
+        assert!(
+            !prepared.load(Ordering::Relaxed),
+            "rejected calls must not prepare owned inputs"
+        );
+    }
+    assert_eq!(crate::test_callback::async_return_calls(), 2);
+    assert_eq!(
+        runtime
+            .async_manager()
+            .snapshot_spawn_executor()
+            .unwrap()
+            .active
+            .load(Ordering::Acquire),
+        MAX_PENDING
+    );
+    runtime.async_manager().cancel_current_generation();
+    wait_for_executor_idle(runtime.async_manager());
+    // Cancellation seals that calculation. Rotation opens the next one;
+    // rotation alone deliberately preserves pending work in older generations.
+    assert!(runtime.async_manager().advance_generation());
+    let prepared = AtomicBool::new(false);
+    // SAFETY: the valid opaque handle is live throughout the call.
+    unsafe {
+        async_udf_boundary_named(runtime, "recovered", "RECOVERED", &mut handle, |_, _, _| {
+            prepared.store(true, Ordering::Relaxed);
+            Ok(async { Ok::<_, XllError>(42.0) })
+        });
+    }
+    wait_for_async_callback_count(3);
+    assert!(prepared.load(Ordering::Relaxed));
+    assert_eq!(crate::test_callback::last_async_value(), 42);
+    assert!(runtime.close_async().issues.is_empty());
+}
+
+#[test]
+fn async_preparation_can_reenter_generation_transition() {
+    let runtime = Box::leak(Box::new(Runtime::<TestU32Addin>::new()));
+    let _guard = test_lock_for_runtime(runtime);
+    let opening = runtime.begin_open().unwrap();
+    let mut opening = runtime.publish(opening, 7_u32, ());
+    runtime.finish_open(&mut opening, Vec::new()).unwrap();
+    runtime.start_async(1).unwrap();
+    let _callback_guard = reset_test_callback();
+    let generation = runtime.async_manager().current_generation();
+    let mut handle = XLOPER12 {
+        value: XLOPER12Value {
+            big_data: XLOPER12BigData {
+                handle: XLOPER12BigDataHandle {
+                    data: std::ptr::NonNull::<u8>::dangling().as_ptr(),
+                },
+                byte_count: 1,
+            },
+        },
+        xltype: XLTYPE_BIG_DATA,
+    };
+    // SAFETY: the valid opaque handle is live throughout the call.
+    unsafe {
+        async_udf_boundary_named(runtime, "reentrant", "REENTRANT", &mut handle, |_, _, _| {
+            assert!(runtime.async_manager().advance_generation());
+            Ok(async { Ok::<_, XllError>(42.0) })
+        });
+    }
+    assert_eq!(runtime.async_manager().current_generation(), generation + 1);
+    assert_eq!(crate::test_callback::async_return_calls(), 1);
+    assert_eq!(crate::test_callback::last_async_value(), -1);
+    assert_eq!(
+        runtime
+            .async_manager()
+            .snapshot_spawn_executor()
+            .unwrap()
+            .active
+            .load(Ordering::Acquire),
+        0
+    );
+    assert!(runtime.close_async().issues.is_empty());
+}
+
+#[test]
 fn async_boundary_future_destructor_panic_reports_error_and_preserves_worker() {
     struct PanickingDropFuture;
     impl std::future::Future for PanickingDropFuture {
@@ -1859,10 +2004,12 @@ fn rejection_priority_old_generation_over_max_pending() {
         let (source, _token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
         let _ = manager.spawn(TEST_GENERATION, std::future::pending::<()>(), source);
     }
-    // The production boundary reserves capacity before it owns a cancellation
-    // source. Use that path here so the assertion does not observe a token
-    // whose source was dropped by the test-only `spawn` helper and whose slot
-    // may be reused by another parallel test.
+    // Inspect admission directly rather than retaining a test-helper token
+    // whose canceled source slot may be reused by another parallel test.
+    assert!(matches!(
+        manager.preflight_spawn(TEST_GENERATION),
+        Err(XllError::Overloaded)
+    ));
     let res_curr = manager.reserve_spawn(TEST_GENERATION).map(drop);
     assert!(matches!(res_curr, Err(XllError::Overloaded)));
 
@@ -1873,6 +2020,11 @@ fn rejection_priority_old_generation_over_max_pending() {
         let (source, _token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
         let _ = manager.spawn(gen2, std::future::pending::<()>(), source);
     }
+
+    assert!(matches!(
+        manager.preflight_spawn(TEST_GENERATION),
+        Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
+    ));
 
     let (source_old, token_old) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
     let res_old = manager.spawn(TEST_GENERATION, std::future::pending::<()>(), source_old);
@@ -1914,6 +2066,45 @@ fn test_generation_state_sharded_removal_and_drain() {
             .iter()
             .all(|shard| shard.tasks.lock().is_empty())
     );
+}
+
+#[test]
+fn drained_batches_retain_cancellation_until_consumed_outside_locks() {
+    for count in [0, 1, 4, 5, 33] {
+        let state = GenerationState::new(TEST_GENERATION);
+        let mut observers = Vec::new();
+        for id in 0..count {
+            let (abort, _) = AbortHandle::new_pair();
+            let (cancellation, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
+            observers.push((abort.clone(), token));
+            state.shards[task_shard(id)].tasks.lock().insert(
+                id,
+                TaskControl {
+                    abort,
+                    cancellation,
+                },
+            );
+        }
+
+        let controls = state.drain_tasks();
+        assert_eq!(controls.len(), count as usize);
+        assert!(state.shards.iter().all(|shard| {
+            let tasks = shard.tasks.try_lock().expect("drain releases shard locks");
+            tasks.is_empty()
+        }));
+        assert!(
+            observers
+                .iter()
+                .all(|(abort, token)| { !abort.is_aborted() && !token.is_cancelled() })
+        );
+
+        super::worker::cancel_tasks(controls);
+        assert!(
+            observers
+                .iter()
+                .all(|(abort, token)| { abort.is_aborted() && token.is_cancelled() })
+        );
+    }
 }
 
 #[test]

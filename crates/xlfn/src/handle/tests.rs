@@ -1802,16 +1802,26 @@ fn scoped_handle_task_drain_releases_pin_before_handle_quiescence() {
     }
 
     impl HandleScopedTaskBuilder for PendingTask {
+        type Output = ();
+        type Delivery = ();
+
         fn build_task<'generation>(
             self,
             scope: crate::async_udf::AsyncTaskScope<'generation>,
-        ) -> ScopedTaskFuture<'generation> {
+        ) -> (ScopedTaskFuture<'generation>, ()) {
             let lease = self.pending.bind(scope);
-            Box::pin(async move {
-                self.started.send(()).unwrap();
-                let _lease = lease;
-                std::future::pending::<()>().await;
-            })
+            (
+                Box::pin(async move {
+                    self.started.send(()).unwrap();
+                    let _lease = lease;
+                    std::future::pending::<()>().await;
+                }),
+                (),
+            )
+        }
+
+        fn deliver(_: (), future: ScopedTaskFuture<'static>) -> impl Future<Output = ()> + Send {
+            future
         }
     }
 

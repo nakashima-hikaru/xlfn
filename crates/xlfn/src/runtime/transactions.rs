@@ -399,11 +399,13 @@ where
     let mut owner = transaction.take_attempt();
     let execution_drained = match drain_execution(shutdown_deps, &mut owner) {
         Ok(stage) => stage,
-        Err(error) => {
+        Err(failure) => {
+            let hazard = failure.hazard();
+            let error = failure.into_error();
             return Err(handle_unload_hazard(
                 runtime,
-                crate::shutdown::UnloadHazard::CloseInvariantViolation,
-                "xlAutoRemove return quiescence",
+                hazard,
+                "xlAutoRemove execution drain",
                 &error,
             ));
         }

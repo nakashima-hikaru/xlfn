@@ -95,8 +95,16 @@ where
     let mut rollback_attempt = rollback_attempt;
     let execution_drained = match drain_execution(shutdown_deps, &mut rollback_attempt) {
         Ok(stage) => stage,
-        Err(error) => {
-            report_boundary_error("xlAutoOpen return quiescence", &error);
+        Err(failure) => {
+            let hazard = failure.hazard();
+            report_boundary_error("xlAutoOpen execution drain", &failure.into_error());
+            if hazard == crate::shutdown::UnloadHazard::ExportDrainPreparationFailed {
+                // drain_execution established terminal quarantine before the
+                // owner is released. Return its retained capability before
+                // recovery inspects canonical cleanup ownership.
+                drop(rollback_attempt);
+                super::recovery::quarantine_for_hazard(runtime, hazard);
+            }
             return incomplete(runtime);
         }
     };
