@@ -226,8 +226,9 @@ class ExcelSession:
             self.app.Calculate()
         while self.app.CalculationState != XL_DONE:
             time.sleep(0.005)
+        elapsed = time.perf_counter() - start
         self.memory()
-        return time.perf_counter() - start
+        return elapsed
 
     def wait_values(self, target: Any, count: int, expected: Any, timeout_s: float,
                     sample_every: int = 1, start_time: float | None = None) -> dict[str, Any]:
@@ -370,18 +371,26 @@ def run_matrix(session: ExcelSession, case: Case, repeat: int) -> dict[str, Any]
         raise AssertionError(
             f"matrix result check failed: {case.key}; anchor: {describe_value(anchor.Value2)}"
         )
-    allocations_before = session.app.Evaluate("BENCH.ALLOC.BYTES()") if case.id == "M05" else None
-    samples = [session.calculate(anchor) for _ in range(repeat)]
-    if not verify():
-        raise AssertionError(f"matrix result changed; anchor: {describe_value(anchor.Value2)}")
-    result = interval(samples, sum(samples), "recalculation") | {
-        "elements": count, "ns_per_element": statistics.median(samples) * 1e9 / count,
-    }
-    if case.id == "M05":
-        result["fixture_allocated_bytes"] = session.app.Evaluate("BENCH.ALLOC.BYTES()") - allocations_before
-        result["fixture_allocated_bytes_per_element_per_recalc"] = result["fixture_allocated_bytes"] / count / repeat
-        result["allocation_note"] = "Rust process allocator and .NET managed allocation counters have different scope; do not compare ratio"
-    return result
+    try:
+        if case.id == "M05":
+            if session.app.Evaluate("BENCH.ALLOC.TRACK(TRUE)") != 1:
+                raise AssertionError("allocation tracking could not be enabled")
+            allocations_before = session.app.Evaluate("BENCH.ALLOC.BYTES()")
+        samples = [session.calculate(anchor) for _ in range(repeat)]
+        if not verify():
+            raise AssertionError(f"matrix result changed; anchor: {describe_value(anchor.Value2)}")
+        result = interval(samples, sum(samples), "recalculation") | {
+            "elements": count, "ns_per_element": statistics.median(samples) * 1e9 / count,
+        }
+        if case.id == "M05":
+            result["fixture_allocated_bytes"] = session.app.Evaluate("BENCH.ALLOC.BYTES()") - allocations_before
+            result["fixture_allocated_bytes_per_element_per_recalc"] = result["fixture_allocated_bytes"] / count / repeat
+            result["allocation_note"] = "Rust allocation tracking enabled only for this observation window; .NET managed allocation counters have different scope; do not compare ratio"
+        return result
+    finally:
+        if case.id == "M05":
+            if session.app.Evaluate("BENCH.ALLOC.TRACK(FALSE)") != 0:
+                raise AssertionError("allocation tracking could not be disabled")
 
 
 def run_text(session: ExcelSession, case: Case, repeat: int) -> dict[str, Any]:

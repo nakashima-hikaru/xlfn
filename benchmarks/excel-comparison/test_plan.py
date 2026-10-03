@@ -9,12 +9,42 @@ from artifact_manifest import FILES, create, verify
 from generate_registration import source
 from run import (XL_AUTOMATIC, XL_MANUAL, XL_ERR_NUM, ExcelSession, calculation_mode,
                  check_scalar, formula, register_xll, registration_diagnostics, run_async,
-                 run_async_gate)
+                 run_async_gate, run_matrix)
 from summarize import PRIMARY, summarize
 from workloads import IDS, Case, cases
 
 
 class PlanTest(unittest.TestCase):
+    def test_calculation_timer_stops_before_process_sampling(self):
+        for full in (False, True):
+            with self.subTest(full=full):
+                clock = [10.0]
+                session = object.__new__(ExcelSession)
+                session.app = Mock()
+                session.app.CalculationState = 0
+
+                def calculate():
+                    clock[0] += 0.25
+
+                def sample_memory():
+                    clock[0] += 50.0
+
+                session.app.Calculate.side_effect = calculate
+                session.app.CalculateFull.side_effect = calculate
+                session.memory = Mock(side_effect=sample_memory)
+                target = Mock()
+                with patch("run.time.perf_counter", side_effect=lambda: clock[0]):
+                    elapsed = session.calculate(target, full=full)
+                self.assertEqual(elapsed, 0.25)
+                target.Dirty.assert_called_once_with()
+                session.memory.assert_called_once_with()
+                if full:
+                    session.app.CalculateFull.assert_called_once_with()
+                    session.app.Calculate.assert_not_called()
+                else:
+                    session.app.Calculate.assert_called_once_with()
+                    session.app.CalculateFull.assert_not_called()
+
     def test_live_workloads_allow_rtd_completion(self):
         for case in cases("smoke"):
             with self.subTest(case=case.key):
@@ -122,6 +152,18 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(plan["C02/5000"].params["registrations"], 5_000)
         self.assertEqual(plan["R07/long"].params["duration_s"], 1_800)
 
+    def test_gated_async_cases_fit_native_pending_capacity(self):
+        full = {case.key: case for case in cases("full") if case.id in ("A03", "A04")}
+        self.assertEqual(set(full), {"A03/100", "A03/1000", "A03/4096", "A04/burst-4096"})
+        self.assertEqual(full["A03/4096"].params["cells"], 4_096)
+        self.assertEqual(full["A04/burst-4096"].params["cells"], 4_096)
+        for profile in ("full", "smoke"):
+            for case in cases(profile):
+                if case.id in ("A03", "A04"):
+                    with self.subTest(case=case.key, profile=profile):
+                        self.assertLessEqual(case.params["cells"], 4_096)
+                        self.assertEqual(case.params["delay_us"], -1)
+
     def test_formula_keys(self):
         self.assertEqual(formula("S02", 3, {"argc": 4}), "=BENCH.SUM4(3,4,5,6)")
         self.assertEqual(formula("S04", 3, {"period": 2}), "=BENCH.ERRNUM(3,2)")
@@ -129,6 +171,81 @@ class PlanTest(unittest.TestCase):
                          '=BENCH.RTD("topic-0",0)')
         self.assertEqual(formula("T02", 1, {"length": 8, "kind": "ja"}),
                          "=BENCH.STR.OUT(8,TRUE)")
+
+    def test_matrix_allocation_tracking_is_limited_to_mixed_measurement(self):
+        for id in ("M01", "M05"):
+            with self.subTest(id=id):
+                session = Mock()
+                anchor = SimpleNamespace(Value2=15.0 if id == "M05" else 10.0)
+                input_area = SimpleNamespace(Address="$B$1:$F$1")
+                session.new_book.return_value.Range.side_effect = (
+                    lambda *args: anchor if args == ("A1",) else input_area)
+                events = []
+
+                def calculate(target):
+                    events.append("calculate")
+                    return 0.1
+
+                reads = iter((100.0, 300.0))
+
+                def evaluate(expression):
+                    events.append(expression)
+                    if expression == "BENCH.ALLOC.TRACK(TRUE)":
+                        return 1.0
+                    if expression == "BENCH.ALLOC.TRACK(FALSE)":
+                        return 0.0
+                    self.assertEqual(expression, "BENCH.ALLOC.BYTES()")
+                    return next(reads)
+
+                session.calculate.side_effect = calculate
+                session.app.Evaluate.side_effect = evaluate
+                result = run_matrix(session, Case(id, "test", {"rows": 1, "cols": 5}), 2)
+                if id == "M05":
+                    self.assertEqual(events, ["calculate", "BENCH.ALLOC.TRACK(TRUE)",
+                                             "BENCH.ALLOC.BYTES()", "calculate", "calculate",
+                                             "BENCH.ALLOC.BYTES()", "BENCH.ALLOC.TRACK(FALSE)"])
+                    self.assertEqual(result["fixture_allocated_bytes"], 200.0)
+                    self.assertEqual(result["fixture_allocated_bytes_per_element_per_recalc"], 20.0)
+                else:
+                    self.assertEqual(events, ["calculate"] * 3)
+                    self.assertNotIn("fixture_allocated_bytes", result)
+
+    def test_matrix_allocation_tracking_stops_after_measurement_errors(self):
+        for failure in ("enable", "before", "calculate", "verify", "after"):
+            with self.subTest(failure=failure):
+                session = Mock()
+                anchor = SimpleNamespace(Value2=15.0)
+                input_area = SimpleNamespace(Address="$B$1:$F$1")
+                session.new_book.return_value.Range.side_effect = (
+                    lambda *args: anchor if args == ("A1",) else input_area)
+                reads = 0
+
+                def evaluate(expression):
+                    nonlocal reads
+                    if expression == "BENCH.ALLOC.TRACK(TRUE)":
+                        if failure == "enable":
+                            return -1.0
+                        return 1.0
+                    if expression == "BENCH.ALLOC.TRACK(FALSE)":
+                        return 0.0
+                    reads += 1
+                    if (reads == 1 and failure == "before") or (reads == 2 and failure == "after"):
+                        raise RuntimeError("allocation read failed")
+                    return 100.0
+
+                def measured_calculation(target):
+                    if failure == "calculate":
+                        raise RuntimeError("calculation failed")
+                    if failure == "verify":
+                        anchor.Value2 = 0.0
+                    return 0.1
+
+                session.calculate.side_effect = lambda target: (
+                    0.1 if session.calculate.call_count == 1 else measured_calculation(target))
+                session.app.Evaluate.side_effect = evaluate
+                with self.assertRaises((AssertionError, RuntimeError)):
+                    run_matrix(session, Case("M05", "test", {"rows": 1, "cols": 5}), 1)
+                session.app.Evaluate.assert_called_with("BENCH.ALLOC.TRACK(FALSE)")
 
     def test_error_workload_checks_each_cell(self):
         class Target:

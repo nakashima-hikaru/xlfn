@@ -104,6 +104,11 @@ public static class Functions
     [ExcelFunction(Name = "BENCH.ALLOC.BYTES", IsThreadSafe = true)]
     public static double AllocBytes() => GC.GetTotalAllocatedBytes(true);
 
+    // Matching control for the harness. The CLR's cumulative counter is always
+    // available, so enabling or disabling the observation window is a no-op.
+    [ExcelFunction(Name = "BENCH.ALLOC.TRACK")]
+    public static double AllocTrack(bool enabled) => enabled ? 1.0 : 0.0;
+
     [ExcelAsyncFunction(Name = "BENCH.ASYNC")]
     public static async Task<double> AsyncValue(double value, int delayUs)
     {

@@ -78,6 +78,16 @@ the ordinary fixture functions remain registered too. Async measurements compare
 xlfn native async delivery with Excel-DNA RTD-backed Task delivery, including
 Excel's RTD throttle; they do not isolate native async framework overhead.
 
+The synchronous paths have different representation costs. xlfn uses
+XLOPER12 arguments and returns with strict cell validation and an
+`xlAutoFree12` cleanup obligation. Excel-DNA uses typed numeric and string
+marshaling; its numeric-array path can use dense FP12 storage. Rust strings
+also require UTF-16 to UTF-8 conversion on input and conversion back on output.
+T01 counts Unicode scalar values in Rust but reads the UTF-16 length in C#;
+the current ASCII and Japanese BMP inputs have the same expected count.
+These cases compare the exposed APIs, including those costs. They do not
+isolate equivalent host ABI paths or the function body alone.
+
 ## Workloads and measurement
 
 | IDs | What the harness does | Main observed value |
@@ -86,7 +96,7 @@ Excel's RTD throttle; they do not isolate native async framework overhead.
 | M01–M05 | Numeric input/output/copy, equal-element tall/wide/square, mixed Excel cell types | Recalculation time per element; M05 also records add-in allocation counters |
 | T01–T03 | ASCII/Japanese input/output/copy, 8–4096 characters | Recalculation time per character |
 | P01–P04 | 1/2/4/8/16 Excel calculation threads; CPU/light/heavy/contended atomic UDF | Throughput, speedup versus one thread, parallel efficiency, batch tails |
-| A01–A04 | Immediate/delayed async; gated 100/1k/10k fan-out and gated simultaneous completion | Submission and completion throughput, COM-observed cell-arrival tails |
+| A01–A04 | Immediate/delayed async; gated 100/1k/4096 fan-out and 4096 simultaneous completions | Submission and completion throughput, COM-observed cell-arrival tails |
 | A05–A06 | Dirty/clear/close pending calls; repeatedly replace arguments before prior completion | Task cleanup, final-result correctness, stale result count |
 | R01–R03 | Unique/shared/grouped topics, including 100k unique | Subscribe time, incremental RSS, pulse update time |
 | R04–R07 | 1–2000 requested updates/topic/s, burst, churn, 30-minute run | Source emissions, observed cell updates, tail, RSS/latency drift |
@@ -102,9 +112,19 @@ begin while formulas are being submitted. No extra recalculation is requested
 while async results are pending, including the A03/A04 gated calls. Those cases
 release the gate through `Application.Evaluate("BENCH.ASYNC.RELEASE(1)")`, without
 writing a control formula to the worksheet or requesting another calculation.
+The full profile uses A03 variants `100`, `1000`, and `4096`, and A04 variant
+`burst-4096`. Both implementations receive the same counts, which fit xlfn's
+4096 simultaneously pending native async tasks. Earlier A03/`10000` and
+A04/`burst` full-profile results used 10,000 gated tasks; that count exceeds
+xlfn's capacity and cannot reach the all-active condition. Keep those historical
+rows separate from the new variants. This measures a single simultaneous batch;
+it does not release tasks in waves. The smoke profile still uses 20 tasks.
 
 Synchronous timing starts after formula creation and `Range.Dirty()` and ends
-when Excel reports calculation done. Matrix output is checked at its bottom
+when Excel reports calculation done. The explicit RSS read after each
+recalculation happens after the timer stops; the background RSS sampler still
+runs throughout the case. Older runners also included that explicit
+process-information read in each recalculation sample. Matrix output is checked at its bottom
 right spill cell. Async timing checks the **actual cell values**, not just
 Excel's calculation state. A03/A04 wait until the requested number of calls
 is active before releasing a shared gate. RTD timing waits for subscription
@@ -125,11 +145,28 @@ version/build, thread setting, RTD throttle, add-in SHA-256, individual
 metrics, errors, and peak Excel RSS. `summarize.py` compares only successful
 records with matching settings and reports an xlfn advantage ratio greater
 than 1 when xlfn wins. It also derives P-series speedup and efficiency. Raw
-M05 allocation counts have different scope: xlfn counts allocations through
-its process allocator and Excel-DNA counts managed allocations. Use timing and
+M05 allocation counts have different scope: xlfn counts Rust allocator requests
+in the add-in and Excel-DNA counts managed allocations. Use timing and
 RSS for cross-framework comparison; inspect raw allocations only within an
 implementation. `R07` RSS growth is observational and affected by Excel's
 own caching and garbage collection.
+
+Rust allocation counting is disabled by default. M05 enables it after warmup
+with `BENCH.ALLOC.TRACK(TRUE)` and disables it in a `finally` block after the
+counter reads and recalculations. These control calls are outside the timed
+recalculations. The matching Excel-DNA control is a no-op because its CLR
+allocation counter is already available. M05 timing includes Rust's counting
+overhead; other workloads only check the disabled flag when allocating.
+Earlier fixtures incremented a shared atomic counter on every Rust allocation
+and reallocation throughout every workload. Those historical results include
+that instrumentation cost and should be rerun with newly built XLLs before
+attributing the differences to the frameworks.
+
+The Rust RTD fixture starts its source worker at the first subscription and
+waits when there is no periodic or pulse work. Earlier fixtures started a
+worker during add-in open and woke it every millisecond even in synchronous
+workloads. That background activity is another reason to rerun the historical
+CSV with newly built XLLs; its effect on the recorded timings is unmeasured.
 
 C01 starts a new Excel process, but the operating system may still cache add-in
 files between cases. For storage-cold startup, reboot or flush the machine's

@@ -6,7 +6,7 @@ use std::{
     alloc::{GlobalAlloc, Layout, System},
     collections::HashMap,
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
@@ -26,11 +26,14 @@ use xlfn::{
 };
 
 struct CountingAllocator;
+static TRACK_ALLOCATIONS: AtomicBool = AtomicBool::new(false);
 static ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
 
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        if TRACK_ALLOCATIONS.load(Ordering::Relaxed) {
+            ALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        }
         unsafe { System.alloc(layout) }
     }
 
@@ -39,7 +42,9 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        ALLOC_BYTES.fetch_add(size as u64, Ordering::Relaxed);
+        if TRACK_ALLOCATIONS.load(Ordering::Relaxed) {
+            ALLOC_BYTES.fetch_add(size as u64, Ordering::Relaxed);
+        }
         unsafe { System.realloc(pointer, layout, size) }
     }
 }
@@ -218,6 +223,13 @@ pub fn alloc_bytes() -> f64 {
     ALLOC_BYTES.load(Ordering::Relaxed) as f64
 }
 
+/// Enables allocation counting without resetting the cumulative counter.
+#[excel_function(name = "BENCH.ALLOC.TRACK")]
+pub fn alloc_track(enabled: bool) -> f64 {
+    TRACK_ALLOCATIONS.store(enabled, Ordering::Relaxed);
+    if enabled { 1.0 } else { 0.0 }
+}
+
 struct ActiveGuard<'a>(&'a State);
 impl Drop for ActiveGuard<'_> {
     fn drop(&mut self) {
@@ -319,11 +331,7 @@ pub fn rtd_pulse(
     #[excel_context(main_thread)] context: MainThreadContext<'_, BenchAddin>,
     sequence: f64,
 ) -> f64 {
-    context
-        .state()
-        .rtd_shared
-        .pulse
-        .store(sequence as u64, Ordering::Release);
+    context.state().rtd_shared.set_pulse(sequence as u64);
     sequence
 }
 
@@ -349,12 +357,23 @@ struct RtdEntry {
 
 struct RtdShared {
     entries: Mutex<HashMap<u64, RtdEntry>>,
+    wake: Condvar,
     next_id: AtomicU64,
     pulse: AtomicU64,
     periodic_count: AtomicU64,
     fast_count: AtomicU64,
     emitted: AtomicU64,
     stop: AtomicBool,
+}
+
+impl RtdShared {
+    fn set_pulse(&self, sequence: u64) {
+        // The worker checks its wait predicate while holding entries. Taking
+        // the same mutex keeps a pulse from being lost between check and wait.
+        let _entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+        self.pulse.store(sequence, Ordering::Release);
+        self.wake.notify_one();
+    }
 }
 
 struct BenchRtdSource {
@@ -366,6 +385,7 @@ impl BenchRtdSource {
     fn new() -> (Self, Arc<RtdShared>) {
         let shared = Arc::new(RtdShared {
             entries: Mutex::new(HashMap::new()),
+            wake: Condvar::new(),
             next_id: AtomicU64::new(1),
             pulse: AtomicU64::new(0),
             periodic_count: AtomicU64::new(0),
@@ -373,22 +393,42 @@ impl BenchRtdSource {
             emitted: AtomicU64::new(0),
             stop: AtomicBool::new(false),
         });
-        let worker_shared = shared.clone();
-        let worker = thread::spawn(move || {
+        (
+            Self {
+                shared: shared.clone(),
+                worker: Mutex::new(None),
+            },
+            shared,
+        )
+    }
+
+    fn ensure_worker(&self) {
+        let mut worker = self.worker.lock().unwrap_or_else(|p| p.into_inner());
+        if worker.is_some() {
+            return;
+        }
+        let worker_shared = self.shared.clone();
+        *worker = Some(thread::spawn(move || {
             let mut handled_pulse = 0;
-            while !worker_shared.stop.load(Ordering::Acquire) {
-                let pulse = worker_shared.pulse.load(Ordering::Acquire);
-                if pulse == handled_pulse
+            let mut entries = worker_shared
+                .entries
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            loop {
+                while !worker_shared.stop.load(Ordering::Acquire)
+                    && worker_shared.pulse.load(Ordering::Acquire) == handled_pulse
                     && worker_shared.periodic_count.load(Ordering::Acquire) == 0
                 {
-                    thread::sleep(Duration::from_millis(1));
-                    continue;
+                    entries = worker_shared
+                        .wake
+                        .wait(entries)
+                        .unwrap_or_else(|p| p.into_inner());
                 }
+                if worker_shared.stop.load(Ordering::Acquire) {
+                    break;
+                }
+                let pulse = worker_shared.pulse.load(Ordering::Acquire);
                 let now = Instant::now();
-                let mut entries = worker_shared
-                    .entries
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner());
                 for entry in entries.values_mut() {
                     if entry.cancelled.load(Ordering::Acquire) {
                         continue;
@@ -397,37 +437,46 @@ impl BenchRtdSource {
                         entry.last_pulse = pulse;
                         let _ = entry.sink.publish(RtdValue::Number(pulse as f64));
                         worker_shared.emitted.fetch_add(1, Ordering::Relaxed);
-                    } else if let Some(interval) = entry.interval {
-                        if now >= entry.next_due {
-                            entry.sequence += 1;
-                            let _ = entry.sink.publish(RtdValue::Number(entry.sequence as f64));
-                            worker_shared.emitted.fetch_add(1, Ordering::Relaxed);
-                            entry.next_due = now + interval;
-                        }
+                    } else if let Some(interval) = entry.interval
+                        && now >= entry.next_due
+                    {
+                        entry.sequence += 1;
+                        let _ = entry.sink.publish(RtdValue::Number(entry.sequence as f64));
+                        worker_shared.emitted.fetch_add(1, Ordering::Relaxed);
+                        entry.next_due = now + interval;
                     }
                 }
-                drop(entries);
                 handled_pulse = pulse;
                 if worker_shared.fast_count.load(Ordering::Acquire) > 0 {
+                    drop(entries);
                     std::hint::spin_loop();
-                } else {
-                    thread::sleep(Duration::from_millis(1));
+                    entries = worker_shared
+                        .entries
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
+                } else if worker_shared.periodic_count.load(Ordering::Acquire) > 0 {
+                    entries = worker_shared
+                        .wake
+                        .wait_timeout(entries, Duration::from_millis(1))
+                        .unwrap_or_else(|p| p.into_inner())
+                        .0;
                 }
             }
-        });
-        (
-            Self {
-                shared: shared.clone(),
-                worker: Mutex::new(Some(worker)),
-            },
-            shared,
-        )
+        }));
     }
 }
 
 impl Drop for BenchRtdSource {
     fn drop(&mut self) {
-        self.shared.stop.store(true, Ordering::Release);
+        {
+            let _entries = self
+                .shared
+                .entries
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            self.shared.stop.store(true, Ordering::Release);
+            self.shared.wake.notify_one();
+        }
         if let Some(worker) = self.worker.lock().unwrap_or_else(|p| p.into_inner()).take() {
             let _ = worker.join();
         }
@@ -449,12 +498,12 @@ unsafe impl RtdSubscription for BenchSubscription {
 
     fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
         self.cancelled.store(true, Ordering::Release);
-        let removed = self
+        let mut entries = self
             .shared
             .entries
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(&self.id);
+            .unwrap_or_else(|p| p.into_inner());
+        let removed = entries.remove(&self.id);
         if removed
             .as_ref()
             .is_some_and(|entry| entry.interval.is_some())
@@ -468,6 +517,8 @@ unsafe impl RtdSubscription for BenchSubscription {
         }) {
             self.shared.fast_count.fetch_sub(1, Ordering::AcqRel);
         }
+        drop(entries);
+        self.shared.wake.notify_one();
         Ok(())
     }
 }
@@ -487,30 +538,37 @@ unsafe impl RtdSource for BenchRtdSource {
         if !period_ms.is_finite() || period_ms < 0.0 {
             return Err(XllError::input("period_ms", InputError::OutOfRange));
         }
+        let interval = (period_ms > 0.0).then(|| Duration::from_secs_f64(period_ms / 1000.0));
+        let next_due = Instant::now() + interval.unwrap_or_default();
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
         let cancelled = Arc::new(AtomicBool::new(false));
+        // Starting before sink transfer keeps a spawn failure from leaving a
+        // sink in the shared map without a subscription to disconnect it.
+        self.ensure_worker();
+        let mut entries = self
+            .shared
+            .entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         if period_ms > 0.0 {
             self.shared.periodic_count.fetch_add(1, Ordering::AcqRel);
         }
         if period_ms > 0.0 && period_ms < 1.0 {
             self.shared.fast_count.fetch_add(1, Ordering::AcqRel);
         }
-        self.shared
-            .entries
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(
-                id,
-                RtdEntry {
-                    sink,
-                    cancelled: cancelled.clone(),
-                    interval: (period_ms > 0.0)
-                        .then(|| Duration::from_secs_f64(period_ms / 1000.0)),
-                    next_due: Instant::now() + Duration::from_secs_f64(period_ms / 1000.0),
-                    sequence: 0,
-                    last_pulse: self.shared.pulse.load(Ordering::Acquire),
-                },
-            );
+        entries.insert(
+            id,
+            RtdEntry {
+                sink,
+                cancelled: cancelled.clone(),
+                interval,
+                next_due,
+                sequence: 0,
+                last_pulse: self.shared.pulse.load(Ordering::Acquire),
+            },
+        );
+        drop(entries);
+        self.shared.wake.notify_one();
         Ok(BenchSubscription {
             shared: self.shared.clone(),
             id,
@@ -520,3 +578,61 @@ unsafe impl RtdSource for BenchRtdSource {
 }
 
 include!(concat!(env!("OUT_DIR"), "/extra.rs"));
+
+#[cfg(test)]
+mod rtd_source_tests {
+    use super::BenchRtdSource;
+    use std::sync::{Arc, atomic::Ordering, mpsc};
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn rtd_source_has_no_worker_before_first_subscription() {
+        let (source, shared) = BenchRtdSource::new();
+        shared.set_pulse(7);
+        assert!(source.worker.lock().unwrap().is_none());
+        assert_eq!(shared.emitted.load(Ordering::Relaxed), 0);
+        drop(source);
+        assert!(shared.stop.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn concurrent_start_reuses_worker_and_idle_shutdown_wakes_it() {
+        let (source, shared) = BenchRtdSource::new();
+        let source = Arc::new(source);
+        let starters: Vec<_> = (0..4)
+            .map(|_| {
+                let source = source.clone();
+                thread::spawn(move || {
+                    source.ensure_worker();
+                    source
+                        .worker
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .unwrap()
+                        .thread()
+                        .id()
+                })
+            })
+            .collect();
+        let ids: Vec<_> = starters
+            .into_iter()
+            .map(|starter| starter.join().unwrap())
+            .collect();
+        assert!(ids.iter().all(|id| *id == ids[0]));
+
+        shared.set_pulse(1);
+        let (finished, receiver) = mpsc::channel();
+        let closer = thread::spawn(move || {
+            drop(source);
+            finished.send(()).unwrap();
+        });
+        receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("source shutdown must wake and join its idle worker");
+        closer.join().unwrap();
+        assert!(shared.stop.load(Ordering::Acquire));
+        assert_eq!(shared.emitted.load(Ordering::Relaxed), 0);
+    }
+}

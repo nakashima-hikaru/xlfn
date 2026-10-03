@@ -61,6 +61,13 @@ fn argument_ingress_benchmarks(c: &mut Criterion) {
     group.bench_function("string_unicode_limit/owned", |b| {
         b.iter(|| unicode_limit.run_plain::<String>());
     });
+    let mut japanese_4k = RawArgumentIngressBenchmark::string(&"日".repeat(4_096));
+    group.bench_function("string_japanese_4k/owned", |b| {
+        b.iter(|| japanese_4k.run_plain::<String>());
+    });
+    group.bench_function("string_japanese_4k/borrowed", |b| {
+        b.iter(|| japanese_4k.run_borrowed_str());
+    });
     let mut unicode_sparse =
         RawArgumentIngressBenchmark::string(&format!("{}é", "a".repeat(1_000)));
     group.bench_function("string_unicode_sparse/borrowed", |b| {

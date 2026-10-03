@@ -39,7 +39,7 @@ impl<'input> Utf16Decoder<'input> {
         unsafe_code,
         reason = "publishes only the initialized UTF-8 prefix produced by a strict Unicode decoder"
     )]
-    #[inline]
+    #[inline(always)]
     pub(crate) fn decode_into<'output>(
         &self,
         output: &'output mut [MaybeUninit<u8>],
@@ -50,6 +50,13 @@ impl<'input> Utf16Decoder<'input> {
             for (byte, &unit) in output.iter_mut().zip(self.units) {
                 byte.write(unit as u8);
             }
+            self.utf8_len
+        } else if self.units.len().checked_mul(3) == Some(self.utf8_len) {
+            // Three bytes is the plan's maximum contribution per unit.
+            // Equality proves that every unit is a non-surrogate BMP scalar
+            // in 0x800..=0xffff. Encode this fixed-width case without a
+            // recovering decoder or a variable-length output cursor.
+            decode_three_byte_bmp(self.units, output);
             self.utf8_len
         } else {
             let mut initialized = 0;
@@ -104,9 +111,21 @@ impl<'input> Utf16Decoder<'input> {
         // SAFETY: each byte in this prefix was initialized above, either by
         // ASCII narrowing or by encoding validated Unicode scalar values.
         let bytes = unsafe { output[..initialized].assume_init_ref() };
-        // SAFETY: both initialization paths produce valid UTF-8, and lone
-        // surrogates return before the prefix can be exposed.
+        // SAFETY: ASCII narrowing, the proven non-surrogate BMP path, and
+        // strict scalar encoding all produce valid UTF-8. Lone surrogates
+        // return before the prefix can be exposed.
         Ok(unsafe { std::str::from_utf8_unchecked(bytes) })
+    }
+}
+
+// Keep the fixed-width loop out of the general decoder's register allocation
+// and code layout. The caller's maximum-length proof excludes surrogates.
+#[inline(never)]
+fn decode_three_byte_bmp(units: &[u16], output: &mut [MaybeUninit<u8>]) {
+    for (bytes, &unit) in output.as_chunks_mut::<3>().0.iter_mut().zip(units) {
+        bytes[0].write((0xe0 | (unit >> 12)) as u8);
+        bytes[1].write((0x80 | ((unit >> 6) & 0x3f)) as u8);
+        bytes[2].write((0x80 | (unit & 0x3f)) as u8);
     }
 }
 
@@ -290,10 +309,15 @@ mod tests {
             vec![],
             vec![0, 0x41, 0x7f],
             vec![0x80, 0x7ff, 0x800, 0xffff],
+            vec![0x800, 0xd7ff, 0xe000, 0xffff],
             vec![0xd800, 0xdc00, 0xdbff, 0xdfff],
             vec![0x41, 0xd800],
             vec![0xdc00, 0x41],
             vec![0xd800, 0x41],
+            vec![0xd800, 0xdbff],
+            vec![0xdc00, 0xdfff],
+            vec![0x7ff, 0xd800, 0xdc00, 0x800, 0xdbff, 0xdfff],
+            vec![0xd800, 0xdc00, 0x41, 0xdbff, 0x42],
         ] {
             let decoder = Utf16Decoder::new(&units);
             let mut storage = vec![MaybeUninit::uninit(); decoder.utf8_len() + 16];

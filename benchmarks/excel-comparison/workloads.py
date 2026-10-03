@@ -60,9 +60,11 @@ def cases(profile: str = "full") -> list[Case]:
     add("A01", "immediate", cells=20 if smoke else 1_000, delay_us=0)
     for us in (100, 1_000, 10_000, 100_000):
         add("A02", f"{us}us", cells=20 if smoke else 1_000, delay_us=us)
-    for n in ([20] if smoke else [100, 1_000, 10_000]):
+    # All gated tasks must fit simultaneously within xlfn's 4096 pending-task
+    # limit. Use the same counts for both implementations.
+    for n in ([20] if smoke else [100, 1_000, 4_096]):
         add("A03", str(n), cells=n, delay_us=-1)
-    add("A04", "burst", cells=20 if smoke else 10_000, delay_us=-1)
+    add("A04", "burst" if smoke else "burst-4096", cells=20 if smoke else 4_096, delay_us=-1)
     for mode in ("recalc", "clear", "close"):
         add("A05", mode, cells=20 if smoke else 1_000, delay_us=1_000_000, mode=mode)
     add("A06", "repeated", cells=20 if smoke else 1_000, delay_us=10_000,
