@@ -1661,10 +1661,8 @@ fn topic_key_from_safearray_preserves_bstr_ownership_and_text_errors() {
             };
             // SAFETY: index is the only element's lower bound and data has the
             // representation required by the validated array element type.
-            assert_eq!(
-                unsafe { SafeArrayPutElement(*array, &bound.lLbound, data) },
-                S_OK
-            );
+            let status = unsafe { SafeArrayPutElement(*array, &bound.lLbound, data) };
+            assert_eq!(status, S_OK);
             // SafeArrayPutElement copied the text. The parser must use only
             // that array-owned copy after the original BSTR is released.
             drop(source);
@@ -2690,10 +2688,8 @@ fn sta_disconnect_returns_before_notification_dispatch_and_termination_drains_cl
         const COINIT_APARTMENTTHREADED: u32 = 2;
         // SAFETY: this fresh thread enters an STA exactly once; the guard
         // balances initialization on this same thread after all COM teardown.
-        assert_eq!(
-            unsafe { CoInitializeEx(ptr::null(), COINIT_APARTMENTTHREADED) },
-            S_OK
-        );
+        let status = unsafe { CoInitializeEx(ptr::null(), COINIT_APARTMENTTHREADED) };
+        assert_eq!(status, S_OK);
         let _apartment = TestComApartment {
             should_uninitialize: true,
             _not_send_or_sync: PhantomData,
@@ -2753,8 +2749,9 @@ fn sta_disconnect_returns_before_notification_dispatch_and_termination_drains_cl
         // termination deferred while the fake STA dispatch is still pending.
         assert_eq!(unsafe { server_terminate(server) }, S_OK);
         // SAFETY: the server remains retained until teardown completes.
+        let phase = unsafe { (*server).operations.state.lock().phase };
         assert!(matches!(
-            unsafe { (*server).operations.state.lock().phase },
+            phase,
             ServerPhase::Terminating { deferred: true, .. }
         ));
         returned_tx.send(()).unwrap();
@@ -2850,10 +2847,8 @@ fn sta_final_remove_dispatches_com_before_ingress_drain_and_coalesces_reentry() 
     let sta = thread::spawn(move || {
         const COINIT_APARTMENTTHREADED: u32 = 2;
         // SAFETY: this fresh thread initializes COM once and balances it here.
-        assert_eq!(
-            unsafe { CoInitializeEx(ptr::null(), COINIT_APARTMENTTHREADED) },
-            S_OK
-        );
+        let status = unsafe { CoInitializeEx(ptr::null(), COINIT_APARTMENTTHREADED) };
+        assert_eq!(status, S_OK);
         let _apartment = TestComApartment {
             should_uninitialize: true,
             _not_send_or_sync: PhantomData,
@@ -2917,10 +2912,8 @@ fn sta_final_remove_dispatches_com_before_ingress_drain_and_coalesces_reentry() 
         sender.try_send(1).unwrap();
         entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         // SAFETY: ACTIVE_SERVER and this reference retain the live server.
-        assert_eq!(
-            unsafe { disconnect_data(ensured.active.pointer as *mut RtdServer, 1) },
-            S_OK
-        );
+        let status = unsafe { disconnect_data(ensured.active.pointer as *mut RtdServer, 1) };
+        assert_eq!(status, S_OK);
         // Final removal must be allowed to reclaim its COM object count.
         drop(ensured);
 
@@ -2950,10 +2943,8 @@ fn sta_final_remove_dispatches_com_before_ingress_drain_and_coalesces_reentry() 
         let git = unsafe { super::global_interface_table::get_git() }.unwrap();
         let mut cookie = 0;
         // SAFETY: the interface, IID, and writable cookie remain live here.
-        assert_eq!(
-            unsafe { git.register(probe.as_ptr(), &IID_IUNKNOWN, &mut cookie) },
-            S_OK
-        );
+        let status = unsafe { git.register(probe.as_ptr(), &IID_IUNKNOWN, &mut cookie) };
+        assert_eq!(status, S_OK);
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let incoming = thread::spawn(move || {
             let _apartment = TestComApartment::enter();
@@ -2969,16 +2960,14 @@ fn sta_final_remove_dispatches_com_before_ingress_drain_and_coalesces_reentry() 
             let mut output = ptr::null_mut();
             // SAFETY: this apartment-local proxy and both GUID/output slots
             // satisfy QueryInterface's ABI; the probe deliberately rejects IID.
-            assert_eq!(
-                unsafe {
-                    (interface.iunknown_vtable().QueryInterface)(
-                        interface.as_ptr(),
-                        &PROBE_IID,
-                        &mut output,
-                    )
-                },
-                E_NOINTERFACE
-            );
+            let status = unsafe {
+                (interface.iunknown_vtable().QueryInterface)(
+                    interface.as_ptr(),
+                    &PROBE_IID,
+                    &mut output,
+                )
+            };
+            assert_eq!(status, E_NOINTERFACE);
         });
         ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(crate::boundary::host::host_auto_remove(runtime), 1);
