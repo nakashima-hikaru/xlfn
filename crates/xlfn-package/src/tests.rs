@@ -1321,6 +1321,91 @@ fn bundle_rejects_symlink_escape_and_strict_mode_rejects_any_symlink() {
     assert!(strict.to_string().contains("rejects symlink"));
 }
 
+#[cfg(unix)]
+#[test]
+fn relaxed_bundle_preserves_symlink_names_for_staging_and_imports() {
+    use std::os::unix::fs::symlink;
+
+    let manifest = tempfile::tempdir().unwrap();
+    let bytes = synthetic_export_pe(1, &[SyntheticExportTarget::Direct], &[(0, "Entry")]);
+    let source = manifest.path().join("Inside-v2.bin");
+    fs::write(&source, &bytes).unwrap();
+    symlink(&source, manifest.path().join("Alias.dll")).unwrap();
+    symlink(&source, manifest.path().join("SecondAlias.dll")).unwrap();
+    let bundle = resolve_bundle_files_with_policy(
+        manifest.path(),
+        "x86_64-pc-windows-msvc",
+        &["Alias.dll".to_owned(), "SecondAlias.dll".to_owned()],
+        &[],
+        false,
+    )
+    .unwrap();
+    let canonical_source = fs::canonicalize(&source).unwrap();
+    for file in bundle.resolved_files() {
+        assert_eq!(file.source, canonical_source);
+        assert_eq!(file.staged_name, file.configured_path);
+    }
+    let staging = PrivateStagingDirectory::create(&manifest.path().join("stage")).unwrap();
+    let staged = stage_bundle(&bundle, &staging).unwrap();
+    assert_eq!(fs::read(staging.path().join("Alias.dll")).unwrap(), bytes);
+    assert_eq!(
+        fs::read(staging.path().join("SecondAlias.dll")).unwrap(),
+        bytes
+    );
+    assert!(!staging.path().join("Inside-v2.bin").exists());
+
+    let mut root = graph_image(&["Alias.dll", "SecondAlias.dll"], &[]);
+    root.import_targets.insert(
+        "Alias.dll".to_owned(),
+        BTreeSet::from([ImportTarget::Name("Entry".to_owned())]),
+    );
+    verify_dependency_closure(
+        Path::new("Addin.xll"),
+        "x86_64-pc-windows-msvc",
+        &staged,
+        root,
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn relaxed_bundle_validates_alias_basenames_and_collisions() {
+    use std::os::unix::fs::symlink;
+
+    let manifest = tempfile::tempdir().unwrap();
+    let source = manifest.path().join("Inside.bin");
+    fs::write(&source, []).unwrap();
+    for (alias, diagnostic) in [
+        ("version.dll", "must not shadow Windows system DLL"),
+        ("CON.dll", "reserved Windows device name"),
+    ] {
+        symlink(&source, manifest.path().join(alias)).unwrap();
+        let error = resolve_bundle_files_with_policy(
+            manifest.path(),
+            "x86_64-pc-windows-msvc",
+            &[alias.to_owned()],
+            &[],
+            false,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains(diagnostic), "{error}");
+    }
+    fs::create_dir(manifest.path().join("one")).unwrap();
+    fs::create_dir(manifest.path().join("two")).unwrap();
+    symlink(&source, manifest.path().join("one/Alias.dll")).unwrap();
+    symlink(&source, manifest.path().join("two/alias.DLL")).unwrap();
+    let error = resolve_bundle_files_with_policy(
+        manifest.path(),
+        "x86_64-pc-windows-msvc",
+        &["one/Alias.dll".to_owned(), "two/alias.DLL".to_owned()],
+        &[],
+        false,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("duplicate bundle basename"));
+}
+
 #[test]
 fn private_staging_directory_rejects_existing_destination() {
     let destination = tempfile::tempdir().unwrap();

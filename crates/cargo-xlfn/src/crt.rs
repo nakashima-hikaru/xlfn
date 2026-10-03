@@ -131,6 +131,7 @@ pub(crate) fn configure_wrapper(
     command: &mut Command,
     resolved: ResolvedCrtPolicy,
     target: &str,
+    upstream: Option<&Path>,
 ) -> Result<()> {
     if !target.ends_with("-pc-windows-msvc") {
         return Ok(());
@@ -138,7 +139,7 @@ pub(crate) fn configure_wrapper(
     validate_explicit_policy_target(resolved.policy, target)?;
     let current_executable = std::env::current_exe()
         .context("failed to locate cargo-xlfn for the internal rustc wrapper")?;
-    if let Some(upstream) = std::env::var_os("RUSTC_WRAPPER") {
+    if let Some(upstream) = upstream {
         command.env(UPSTREAM_WRAPPER, upstream);
     } else {
         command.env_remove(UPSTREAM_WRAPPER);
@@ -376,6 +377,7 @@ mod tests {
             &mut command,
             ResolvedCrtPolicy::resolve(Some(CrtPolicy::Inherit), None),
             "x86_64-unknown-linux-gnu",
+            None,
         )
         .unwrap();
         assert!(command.get_envs().next().is_none());

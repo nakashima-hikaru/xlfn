@@ -19,12 +19,14 @@ usage.workspace = true
 cargo_metadata.workspace = true
 xlfn-package.workspace = true
 fs-err.workspace = true
+home.workspace = true
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_path_to_error.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
+toml.workspace = true
 
 [lints]
 workspace = true

@@ -2824,29 +2824,19 @@ fn server_notification_retry_sequence_eventually_succeeds() {
 }
 
 #[test]
-fn server_notification_retry_suppressed_after_max_attempts() {
+fn server_notification_heartbeat_recovers_after_bounded_retries() {
     let (arena, source, sink, _) = publishing_source(Some(0.0f64));
     let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime.register_test_server(1);
 
     let state = Arc::new(TestNotifierState::new());
-    // 4 consecutive errors
-    state
-        .outcomes
-        .lock()
-        .push_back(TestNotifyOutcome::Error(XllError::Panic));
-    state
-        .outcomes
-        .lock()
-        .push_back(TestNotifyOutcome::Error(XllError::Panic));
-    state
-        .outcomes
-        .lock()
-        .push_back(TestNotifyOutcome::Error(XllError::Panic));
-    state
-        .outcomes
-        .lock()
-        .push_back(TestNotifyOutcome::Error(XllError::Panic));
+    for _ in 0..6 {
+        state
+            .outcomes
+            .lock()
+            .push_back(TestNotifyOutcome::Error(XllError::Panic));
+    }
+    state.outcomes.lock().push_back(TestNotifyOutcome::Success);
 
     server
         .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state)))
@@ -2869,8 +2859,91 @@ fn server_notification_retry_suppressed_after_max_attempts() {
     let sink = sink.lock().clone().unwrap();
     sink.publish(1.0).unwrap();
 
-    // Max 3 attempts allowed, then suppressed
+    // Publishing cannot spin on a failed host. Each heartbeat provides a
+    // separate retry budget, and a later heartbeat can observe host recovery.
     assert_eq!(state.calls.load(Ordering::SeqCst), 3);
+    sink.publish(2.0).unwrap();
+    assert_eq!(state.calls.load(Ordering::SeqCst), 3);
+    server.pulse_notification().unwrap();
+    assert_eq!(state.calls.load(Ordering::SeqCst), 6);
+    sink.publish(3.0).unwrap();
+    assert_eq!(state.calls.load(Ordering::SeqCst), 6);
+    server.pulse_notification().unwrap();
+    assert_eq!(state.calls.load(Ordering::SeqCst), 7);
+    server.pulse_notification().unwrap();
+    assert_eq!(state.calls.load(Ordering::SeqCst), 7);
+
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates.len(), 1);
+    assert_eq!(batch.updates[0].value, StoredRtdValue::Number(3.0));
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+    assert_eq!(server.pending_update_count(), 0);
+    server.pulse_notification().unwrap();
+    assert_eq!(state.calls.load(Ordering::SeqCst), 7);
+}
+
+#[test]
+fn concurrent_heartbeat_does_not_duplicate_notification_retry() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (arena, source, sink, _) = publishing_source(Some(0.0f64));
+    let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+    let server = runtime.register_test_server(1);
+    let state = Arc::new(TestNotifierState::new());
+    for _ in 0..3 {
+        state
+            .outcomes
+            .lock()
+            .push_back(TestNotifyOutcome::Error(XllError::Panic));
+    }
+    server
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state)))
+        .unwrap();
+    let prepared = runtime
+        .prepare(
+            &source,
+            RtdTopic::single("concurrent-heartbeat").unwrap().borrowed(),
+        )
+        .unwrap();
+    let id = prepared.id();
+    prepared.commit();
+    runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap()
+        .commit()
+        .unwrap();
+    sink.lock().clone().unwrap().publish(1.0).unwrap();
+    assert_eq!(state.calls.load(Ordering::SeqCst), 3);
+
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    *state.entered.lock() = Some(entered_tx);
+    *state.release.lock() = Some(release_rx);
+    let retry = std::thread::spawn(move || server.pulse_notification());
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    let (pulsed_tx, pulsed_rx) = mpsc::channel();
+    let concurrent = std::thread::spawn(move || {
+        let result = server.pulse_notification();
+        pulsed_tx.send(()).unwrap();
+        result
+    });
+    let concurrent_completed = pulsed_rx.recv_timeout(Duration::from_secs(2));
+    let calls_while_retrying = state.calls.load(Ordering::SeqCst);
+    // Release both possible callbacks before asserting, so a duplicate-call
+    // regression cannot strand a worker and block runtime destruction.
+    release_tx.send(()).unwrap();
+    release_tx.send(()).unwrap();
+    retry.join().unwrap().unwrap();
+    concurrent.join().unwrap().unwrap();
+    state.release.lock().take();
+
+    concurrent_completed.unwrap();
+    assert_eq!(calls_while_retrying, 4);
+    assert_eq!(state.calls.load(Ordering::SeqCst), 4);
+    server.pulse_notification().unwrap();
+    assert_eq!(state.calls.load(Ordering::SeqCst), 4);
 }
 
 #[test]

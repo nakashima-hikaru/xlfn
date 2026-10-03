@@ -11,6 +11,7 @@ pub(crate) struct ProjectMetadata {
     pub(crate) target_directory: PathBuf,
     pub(crate) crt: ResolvedCrtPolicy,
     pub(crate) lockfile_path: PathBuf,
+    pub(crate) rustc_wrapper: Option<PathBuf>,
     pub(crate) bundle: Option<BundleMetadata>,
 }
 
@@ -45,6 +46,7 @@ pub(crate) fn project_metadata(
     build.apply_resolution_constraints(&mut discovery_command);
     let discovery = discovery_command.exec()?;
     let current_directory = std::env::current_dir()?;
+    let settings = cargo_settings::CargoSettings::load(&current_directory)?;
     let selected = select_discovery_package(&discovery, args, &current_directory)?;
     let selected_id = selected.id.clone();
     let selected_manifest = selected.manifest_path.clone();
@@ -131,7 +133,8 @@ pub(crate) fn project_metadata(
             .clone()
             .unwrap_or_else(|| cargo.target_directory.as_std_path().to_path_buf()),
         crt,
-        lockfile_path: cargo.workspace_root.as_std_path().join("Cargo.lock"),
+        lockfile_path: settings.lockfile_path(cargo.workspace_root.as_std_path()),
+        rustc_wrapper: settings.rustc_wrapper,
         bundle,
     })
 }

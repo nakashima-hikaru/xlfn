@@ -1160,6 +1160,7 @@ fn configure_build_sets_target_dir_and_build_dir() {
         target_directory: PathBuf::from("target"),
         crt: crt::ResolvedCrtPolicy::resolve(Some(crt::CrtPolicy::Static), None),
         lockfile_path: PathBuf::from("Cargo.lock"),
+        rustc_wrapper: None,
         bundle: None,
     };
     let mut command = cargo_command();

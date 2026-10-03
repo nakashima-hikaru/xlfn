@@ -69,6 +69,8 @@ records the observed result. Build caches are separated by CRT policy.
 Bundle `strict-paths` defaults to `true` and rejects linked path components.
 Setting it to `false` allows links within the package directory; absolute paths,
 parent traversal, and links escaping that directory are still rejected.
+The configured basename is preserved in the distribution even when a link's
+target has a different name.
 `external-imports = ["engine.dll"]`
 declares dependencies supplied by the installation environment instead of the
 bundle; it does not locate, install, or validate those external DLLs. Prefer

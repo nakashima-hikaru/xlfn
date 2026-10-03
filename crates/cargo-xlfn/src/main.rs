@@ -40,6 +40,7 @@ fn main() {
 }
 
 mod cargo;
+mod cargo_settings;
 mod check;
 mod cli;
 mod distribution;

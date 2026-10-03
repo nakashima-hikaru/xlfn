@@ -4,13 +4,13 @@ pub(crate) fn validate_bundle_output_names(
     bundle: &xlfn_package::ResolvedBundle,
     artifact_name: &str,
 ) -> Result {
-    for (configured_path, source) in bundle.resolved_files() {
-        let name = source
-            .file_name()
-            .and_then(|name| name.to_str())
-            .context("bundle file basename is not valid UTF-8")?;
+    for file in bundle.resolved_files() {
+        let name = file.staged_name;
         if is_reserved_distribution_name(name, artifact_name) {
-            bail!("bundle file {configured_path:?} uses reserved distribution basename {name:?}");
+            bail!(
+                "bundle file {:?} uses reserved distribution basename {name:?}",
+                file.configured_path
+            );
         }
     }
     Ok(())

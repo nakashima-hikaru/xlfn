@@ -88,19 +88,11 @@ impl ResolvedTargetBundle {
         validate_bundle_output_names(&bundle, &metadata.artifact_name)?;
         let bundle_sources = bundle
             .resolved_files()
-            .map(
-                |(configured_path, staged_source)| -> Result<xlfn_package::BundleSource> {
-                    let staged_relative_path = staged_source
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .context("bundle file basename is not valid UTF-8")?;
-                    Ok(xlfn_package::BundleSource {
-                        configured_path: configured_path.to_owned(),
-                        staged_relative_path: staged_relative_path.to_owned(),
-                    })
-                },
-            )
-            .collect::<Result<Vec<_>>>()?;
+            .map(|file| xlfn_package::BundleSource {
+                configured_path: file.configured_path.to_owned(),
+                staged_relative_path: file.staged_name.to_owned(),
+            })
+            .collect();
         let declared_external_imports = bundle
             .external_imports()
             .map(str::to_owned)
@@ -252,6 +244,57 @@ fn build_manifest_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn bundle_manifest_and_reserved_names_use_the_configured_alias() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("Inside.bin");
+        fs::write(&source, b"payload").unwrap();
+        symlink(&source, directory.path().join("Alias.dll")).unwrap();
+        let mut metadata = ProjectMetadata {
+            package_id: cargo_metadata::PackageId {
+                repr: "selected".into(),
+            },
+            package_name: "selected".into(),
+            package_version: "0.0.0".into(),
+            lib_name: "selected".into(),
+            artifact_name: "selected".into(),
+            manifest_path: directory.path().join("Cargo.toml"),
+            manifest_directory: directory.path().to_owned(),
+            target_directory: directory.path().join("target"),
+            crt: ResolvedCrtPolicy::resolve(None, None),
+            lockfile_path: directory.path().join("Cargo.lock"),
+            rustc_wrapper: None,
+            bundle: Some(BundleMetadata {
+                x64: vec!["Alias.dll".to_owned()],
+                strict_paths: false,
+                ..BundleMetadata::default()
+            }),
+        };
+        let resolved = ResolvedTargetBundle::resolve(&metadata, WindowsTarget::X64).unwrap();
+        let sources = serde_json::to_value(&resolved.bundle_sources).unwrap();
+        assert_eq!(
+            sources,
+            serde_json::json!([{
+                "configured_path": "Alias.dll",
+                "staged_relative_path": "Alias.dll",
+            }])
+        );
+        for name in ["selected.xll", "build-manifest.json"] {
+            symlink(&source, directory.path().join(name)).unwrap();
+            metadata.bundle.as_mut().unwrap().x64 = vec![name.to_owned()];
+            let error = ResolvedTargetBundle::resolve(&metadata, WindowsTarget::X64)
+                .err()
+                .unwrap();
+            assert!(
+                error.to_string().contains("reserved distribution basename"),
+                "{error}"
+            );
+        }
+    }
 
     #[test]
     fn default_profiles_keep_cargo_and_manifest_aligned() {

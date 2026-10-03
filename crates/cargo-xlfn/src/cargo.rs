@@ -118,7 +118,12 @@ pub(crate) fn configure_build(
         .join("build-cache");
     fs::create_dir_all(&build_dir)?;
     command.env("CARGO_BUILD_BUILD_DIR", build_dir);
-    crt::configure_wrapper(command, metadata.crt, target)
+    crt::configure_wrapper(
+        command,
+        metadata.crt,
+        target,
+        metadata.rustc_wrapper.as_deref(),
+    )
 }
 
 #[cfg(test)]

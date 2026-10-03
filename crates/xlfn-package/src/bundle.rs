@@ -58,6 +58,17 @@ pub struct ResolvedBundle {
     pub(crate) external_imports: BTreeSet<String>,
 }
 
+/// One resolved input and the independent basename used in the distribution.
+#[derive(Clone, Copy, Debug)]
+pub struct ResolvedBundleFile<'a> {
+    /// The path configured relative to the package manifest directory.
+    pub configured_path: &'a str,
+    /// The canonical source whose immutable snapshot supplies the file bytes.
+    pub source: &'a Path,
+    /// The configured basename preserved when placing the file beside the XLL.
+    pub staged_name: &'a str,
+}
+
 impl ResolvedBundle {
     #[must_use]
     pub const fn empty() -> Self {
@@ -67,10 +78,12 @@ impl ResolvedBundle {
         }
     }
 
-    pub fn resolved_files(&self) -> impl Iterator<Item = (&str, &Path)> {
-        self.files
-            .iter()
-            .map(|file| (file.configured_path.as_str(), file.source.as_path()))
+    pub fn resolved_files(&self) -> impl Iterator<Item = ResolvedBundleFile<'_>> {
+        self.files.iter().map(|file| ResolvedBundleFile {
+            configured_path: &file.configured_path,
+            source: &file.source,
+            staged_name: &file.name,
+        })
     }
 
     pub fn external_imports(&self) -> impl Iterator<Item = &str> {
@@ -191,10 +204,10 @@ pub(crate) fn resolve_bundle_files_with_policy_impl(
         if !same_file_identity(&opened_source, &canonical_source)? {
             return Err(unstable_bundle_source(target, &unresolved_source));
         }
-        let name = source
+        let name = Path::new(configured_path)
             .file_name()
             .and_then(|name| name.to_str())
-            .ok_or_else(|| format!("bundle file has no UTF-8 basename: {}", source.display()))?
+            .ok_or_else(|| format!("bundle file has no UTF-8 basename: {configured_path:?}"))?
             .to_owned();
         let name_key = windows_name_key("bundle file", &name)?;
         if is_system(&name_key) {

@@ -159,7 +159,9 @@ pub(crate) fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::
                 identity: &mut #krate::value::InputIdentityEncoder) -> #krate::XllResult<Self> {
                 <Self as #krate::value::FromExcel>::from_excel_with_identity(value, argument, identity)
             }
-            fn materialize(value: Self) -> #krate::XllResult<Self> { Ok(value) }
+            fn materialize(value: Self) -> #krate::XllResult<Self> {
+                ::core::result::Result::Ok(value)
+            }
         }
 
         impl #base_impl_generics #krate::value::IntoExcel

@@ -59,7 +59,7 @@ pub(crate) use staging::*;
 pub use architecture::Architecture;
 pub use artifact::{VerifiedArtifact, VerifiedPackage, verify_staged_package};
 pub use bundle::{
-    BundleMetadata, ResolvedBundle, StagedBundle, resolve_bundle_files,
+    BundleMetadata, ResolvedBundle, ResolvedBundleFile, StagedBundle, resolve_bundle_files,
     resolve_bundle_files_with_metadata, resolve_bundle_files_with_policy, snapshot_file,
     stage_bundle, verify_bundle_files,
 };

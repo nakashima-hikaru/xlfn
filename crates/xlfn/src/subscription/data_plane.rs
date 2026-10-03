@@ -1244,6 +1244,16 @@ impl<H: SubscriptionHost> PublishCore<H> {
             self.ensure_open()?;
             let mut refresh = self.refresh.lock();
             let has_updates = self.has_deliverable_updates();
+            // Heartbeat gives a failed notification a fresh, bounded retry
+            // opportunity. Reserve its new ticket under this same lock so
+            // concurrent pulses cannot replace an in-flight or accepted call.
+            if has_updates
+                && let DeliveryPhase::BetweenRefreshes {
+                    signal: signal @ SignalState::Suppressed { .. },
+                } = &mut refresh.phase
+            {
+                *signal = SignalState::Dormant;
+            }
             self.prepare_notification(&mut refresh, has_updates)?
         };
         if let Some(attempt) = attempt {

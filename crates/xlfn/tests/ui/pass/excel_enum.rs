@@ -33,4 +33,25 @@ fn sign(direction: Direction) -> f64 {
     }
 }
 
-fn main() {}
+mod shadowed_result {
+    use Status::*;
+
+    #[derive(Clone, Copy, Debug, PartialEq, xlfn::ExcelEnum)]
+    pub enum Status {
+        Ok,
+        Failed,
+    }
+
+    pub fn check_materialize() {
+        for status in [Ok, Failed] {
+            assert_eq!(
+                <Status as xlfn::value::PrepareExcel<'static>>::materialize(status).unwrap(),
+                status,
+            );
+        }
+    }
+}
+
+fn main() {
+    shadowed_result::check_materialize();
+}

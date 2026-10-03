@@ -15,6 +15,7 @@ fn metadata() -> ProjectMetadata {
         target_directory: PathBuf::from("target"),
         crt: ResolvedCrtPolicy::resolve(None, None),
         lockfile_path: PathBuf::from("Cargo.lock"),
+        rustc_wrapper: None,
         bundle: None,
     }
 }
