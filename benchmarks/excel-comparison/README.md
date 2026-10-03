@@ -99,7 +99,9 @@ RTD completions can update cells. Synchronous workloads use manual calculation.
 The result records `calculation_mode` and, for async workloads, `async_delivery`.
 A01/A02 timing starts before formula entry because automatic calculation may
 begin while formulas are being submitted. No extra recalculation is requested
-while those results are pending.
+while async results are pending, including the A03/A04 gated calls. Those cases
+release the gate through `Application.Evaluate("BENCH.ASYNC.RELEASE(1)")`, without
+writing a control formula to the worksheet or requesting another calculation.
 
 Synchronous timing starts after formula creation and `Range.Dirty()` and ends
 when Excel reports calculation done. Matrix output is checked at its bottom

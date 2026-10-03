@@ -443,7 +443,9 @@ def run_async_gate(session: ExcelSession, case: Case) -> dict[str, Any]:
     target = session.add_formulas(sheet, n, lambda row: f"=BENCH.ASYNC({row},-1)")
     submission_s = time.perf_counter() - submit_start
     ready_start = time.perf_counter()
-    session.app.Calculate()
+    # Automatic formula entry has already started the async calls. An explicit
+    # calculation can wait for native async completion before we can release
+    # the gate, or replace the handles belonging to the original calculation.
     while time.perf_counter() - ready_start < 120:
         active = int(session.app.Evaluate("BENCH.ASYNC.ACTIVE()"))
         if active == n:
@@ -453,10 +455,10 @@ def run_async_gate(session: ExcelSession, case: Case) -> dict[str, Any]:
         raise TimeoutError(f"only {active}/{n} async calls were active before release")
     ready_s = time.perf_counter() - ready_start
     release_start = time.perf_counter()
-    gate = sheet.Range("ZZ1")
-    gate.Formula = "=BENCH.ASYNC.RELEASE(1)"
-    gate.Calculate()
-    if gate.Value2 != 1:
+    # Invoke the control UDF without writing a cell or starting another pass
+    # while the gated native handles are still pending.
+    released = session.app.Evaluate("BENCH.ASYNC.RELEASE(1)")
+    if released != 1:
         raise AssertionError("async release failed")
     observed = session.wait_values(target, n, lambda value, i: value == float(i + 1),
                                    120, sample_every=max(1, n // 2_000), start_time=release_start)

@@ -8,7 +8,8 @@ from unittest.mock import Mock, patch
 from artifact_manifest import FILES, create, verify
 from generate_registration import source
 from run import (XL_AUTOMATIC, XL_MANUAL, XL_ERR_NUM, ExcelSession, calculation_mode,
-                 check_scalar, formula, register_xll, registration_diagnostics, run_async)
+                 check_scalar, formula, register_xll, registration_diagnostics, run_async,
+                 run_async_gate)
 from summarize import PRIMARY, summarize
 from workloads import IDS, Case, cases
 
@@ -49,6 +50,50 @@ class PlanTest(unittest.TestCase):
         with patch("run.time.perf_counter", side_effect=[0, 0, 0.2, 31]), patch("run.time.sleep"):
             with self.assertRaisesRegex(TimeoutError, r"only 1/3.*row 2: #N/A.*row 3: 99"):
                 ExcelSession.wait_values(session, target, 3, lambda v, i: v == i + 1, 30)
+
+    def test_async_gate_releases_existing_calls_without_recalculation(self):
+        for id in ("A03", "A04"):
+            with self.subTest(id=id):
+                session = Mock()
+                target = object()
+                session.add_formulas.return_value = target
+                session.app.Calculate.side_effect = AssertionError(
+                    "recalculation while native async handles are pending")
+                session.new_book.return_value.Range.side_effect = AssertionError(
+                    "writing a release formula starts another calculation")
+                evaluations = []
+                active = iter((1.0, 3.0))
+
+                def evaluate(expression):
+                    evaluations.append(expression)
+                    if expression == "BENCH.ASYNC.ACTIVE()":
+                        return next(active)
+                    if expression == "BENCH.ASYNC.RELEASE(1)":
+                        self.assertEqual(evaluations[:-1], ["BENCH.ASYNC.ACTIVE()"] * 2)
+                        return 1.0
+                    self.fail(f"unexpected evaluation: {expression}")
+
+                session.app.Evaluate.side_effect = evaluate
+
+                def observe(actual_target, count, expected, timeout, **kwargs):
+                    self.assertIs(actual_target, target)
+                    self.assertEqual(evaluations[-1], "BENCH.ASYNC.RELEASE(1)")
+                    self.assertEqual(count, 3)
+                    self.assertEqual(timeout, 120)
+                    for i in range(count):
+                        self.assertTrue(expected(float(i + 1), i))
+                    return {"poll_s": 0.1, "p50_s": 0.1, "p95_s": 0.1,
+                            "p99_s": 0.1, "sampled_cells": count}
+
+                session.wait_values.side_effect = observe
+                with patch("run.time.sleep"):
+                    result = run_async_gate(session, Case(id, "test", {"cells": 3}))
+                self.assertEqual(result["active_before_release"], 3)
+                session.app.Calculate.assert_not_called()
+                self.assertEqual(session.app.Evaluate.call_count, 3)
+                make = session.add_formulas.call_args.args[2]
+                self.assertEqual([make(row) for row in range(1, 4)],
+                                 ["=BENCH.ASYNC(1,-1)", "=BENCH.ASYNC(2,-1)", "=BENCH.ASYNC(3,-1)"])
 
     def test_every_requested_id_has_a_case_and_primary_metric(self):
         expected = {f"S{i:02}" for i in range(1, 5)}
