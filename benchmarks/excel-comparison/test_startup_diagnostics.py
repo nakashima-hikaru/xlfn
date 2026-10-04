@@ -19,7 +19,7 @@ class StartupDiagnosticsTest(unittest.TestCase):
         self.path.parent.mkdir(parents=True)
 
     def test_existing_sessions_are_excluded_from_json_serializable_delta(self):
-        self.path.write_text("previous failure\n", encoding="utf-8")
+        self.path.write_bytes(b"previous failure\n")
         baseline = snapshot_startup_log()
         with self.path.open("ab") as stream:
             stream.write("xlAutoOpen failed: 登録エラー\n".encode())
@@ -30,32 +30,47 @@ class StartupDiagnosticsTest(unittest.TestCase):
         json.dumps(result)
 
     def test_unchanged_log_does_not_repeat_an_old_failure(self):
-        self.path.write_text("old failure\n", encoding="utf-8")
+        self.path.write_bytes(b"old failure\n")
         result = read_startup_log_delta(snapshot_startup_log())
         self.assertEqual(result["text"], "")
         self.assertEqual(result["bytes_added"], 0)
 
     def test_log_created_during_session_is_read(self):
-        baseline = snapshot_startup_log()
-        self.path.write_text("new failure\n", encoding="utf-8")
-        self.assertEqual(read_startup_log_delta(baseline)["text"], "new failure\n")
+        # Write exact bytes: diagnostics preserve LF and Windows CRLF alike.
+        for newline in (b"\n", b"\r\n"):
+            with self.subTest(newline=newline):
+                self.path.unlink(missing_ok=True)
+                baseline = snapshot_startup_log()
+                content = b"new failure" + newline
+                self.path.write_bytes(content)
+                result = read_startup_log_delta(baseline)
+                self.assertEqual(result["text"], content.decode("utf-8"))
+                self.assertEqual(result["bytes_added"], len(content))
 
     def test_rotated_log_reads_new_file_only(self):
-        self.path.write_text("previous session\n", encoding="utf-8")
-        baseline = snapshot_startup_log()
-        self.path.rename(self.path.with_suffix(".log.1"))
-        self.path.write_text("new failure after rotation\n", encoding="utf-8")
-        result = read_startup_log_delta(baseline)
-        self.assertTrue(result["file_reset"])
-        self.assertEqual(result["text"], "new failure after rotation\n")
+        for index, newline in enumerate((b"\n", b"\r\n")):
+            with self.subTest(newline=newline):
+                self.path.write_bytes(b"previous session" + newline)
+                baseline = snapshot_startup_log()
+                self.path.rename(self.path.with_suffix(f".log.{index}"))
+                content = b"new failure after rotation" + newline
+                self.path.write_bytes(content)
+                result = read_startup_log_delta(baseline)
+                self.assertTrue(result["file_reset"])
+                self.assertEqual(result["text"], content.decode("utf-8"))
+                self.assertEqual(result["bytes_added"], len(content))
 
     def test_truncated_log_reads_new_bytes(self):
-        self.path.write_text("previous session with a long message\n", encoding="utf-8")
-        baseline = snapshot_startup_log()
-        self.path.write_text("new failure\n", encoding="utf-8")
-        result = read_startup_log_delta(baseline)
-        self.assertTrue(result["file_reset"])
-        self.assertEqual(result["text"], "new failure\n")
+        for newline in (b"\n", b"\r\n"):
+            with self.subTest(newline=newline):
+                self.path.write_bytes(b"previous session with a long message" + newline)
+                baseline = snapshot_startup_log()
+                content = b"new failure" + newline
+                self.path.write_bytes(content)
+                result = read_startup_log_delta(baseline)
+                self.assertTrue(result["file_reset"])
+                self.assertEqual(result["text"], content.decode("utf-8"))
+                self.assertEqual(result["bytes_added"], len(content))
 
     def test_large_delta_is_bounded_to_new_bytes(self):
         self.path.write_bytes(b"previous session\n")
@@ -77,7 +92,7 @@ class StartupDiagnosticsTest(unittest.TestCase):
         self.assertEqual(result["status"], "unavailable")
 
     def test_snapshot_error_does_not_read_unknown_previous_bytes(self):
-        self.path.write_text("old failure\n", encoding="utf-8")
+        self.path.write_bytes(b"old failure\n")
         with patch.object(Path, "stat", side_effect=PermissionError("denied")):
             baseline = snapshot_startup_log()
         result = read_startup_log_delta(baseline)
