@@ -1,0 +1,310 @@
+PS C:\Users\takan\xlfn\benchmarks\excel-comparison> py .\run.py --profile full --artifacts C:\Users\takan\artifacts-6c5f059 --allow-commit-mismatch --out .\results-full.jsonl
+S01/1000 xlfn: ok
+S01/1000 excel_dna: ok
+S01/10000 xlfn: ok
+S01/10000 excel_dna: ok
+S01/100000 xlfn: ok
+S01/100000 excel_dna: ok
+S02/2 xlfn: ok
+S02/2 excel_dna: ok
+S02/4 xlfn: ok
+S02/4 excel_dna: ok
+S02/8 xlfn: ok
+S02/8 excel_dna: ok
+S03/0us xlfn: ok
+S03/0us excel_dna: ok
+S03/1us xlfn: ok
+S03/1us excel_dna: ok
+S03/10us xlfn: ok
+S03/10us excel_dna: ok
+S03/100us xlfn: ok
+S03/100us excel_dna: ok
+S03/1000us xlfn: ok
+S03/1000us excel_dna: ok
+S04/period-0 xlfn: ok
+S04/period-0 excel_dna: ok
+S04/period-2 xlfn: ok
+S04/period-2 excel_dna: ok
+S04/period-10 xlfn: ok
+S04/period-10 excel_dna: ok
+S04/period-100 xlfn: ok
+S04/period-100 excel_dna: ok
+M01/10x10 xlfn: ok
+M01/10x10 excel_dna: ok
+M01/100x100 xlfn: ok
+M01/100x100 excel_dna: ok
+M01/1000x100 xlfn: ok
+M01/1000x100 excel_dna: ok
+M02/10x10 xlfn: ok
+M02/10x10 excel_dna: ok
+M02/100x100 xlfn: ok
+M02/100x100 excel_dna: ok
+M02/1000x100 xlfn: ok
+M02/1000x100 excel_dna: ok
+M03/10x10 xlfn: ok
+M03/10x10 excel_dna: ok
+M03/100x100 xlfn: ok
+M03/100x100 excel_dna: ok
+M03/1000x100 xlfn: ok
+M03/1000x100 excel_dna: ok
+M04/1000x10 xlfn: ok
+M04/1000x10 excel_dna: ok
+M04/100x100 xlfn: ok
+M04/100x100 excel_dna: ok
+M04/10x1000 xlfn: ok
+M04/10x1000 excel_dna: ok
+M05/10x10 xlfn: ok
+M05/10x10 excel_dna: ok
+M05/100x100 xlfn: ok
+M05/100x100 excel_dna: ok
+M05/1000x100 xlfn: ok
+M05/1000x100 excel_dna: ok
+T01/ascii-8 xlfn: ok
+T01/ascii-8 excel_dna: ok
+T01/ascii-64 xlfn: ok
+T01/ascii-64 excel_dna: ok
+T01/ascii-512 xlfn: ok
+T01/ascii-512 excel_dna: ok
+T01/ascii-4096 xlfn: ok
+T01/ascii-4096 excel_dna: ok
+T01/ja-8 xlfn: ok
+T01/ja-8 excel_dna: ok
+T01/ja-64 xlfn: ok
+T01/ja-64 excel_dna: ok
+T01/ja-512 xlfn: ok
+T01/ja-512 excel_dna: ok
+T01/ja-4096 xlfn: ok
+T01/ja-4096 excel_dna: ok
+T02/ascii-8 xlfn: ok
+T02/ascii-8 excel_dna: ok
+T02/ascii-64 xlfn: ok
+T02/ascii-64 excel_dna: ok
+T02/ascii-512 xlfn: ok
+T02/ascii-512 excel_dna: ok
+T02/ascii-4096 xlfn: ok
+T02/ascii-4096 excel_dna: ok
+T02/ja-8 xlfn: ok
+T02/ja-8 excel_dna: ok
+T02/ja-64 xlfn: ok
+T02/ja-64 excel_dna: ok
+T02/ja-512 xlfn: ok
+T02/ja-512 excel_dna: ok
+T02/ja-4096 xlfn: ok
+T02/ja-4096 excel_dna: ok
+T03/ascii-8 xlfn: ok
+T03/ascii-8 excel_dna: ok
+T03/ascii-64 xlfn: ok
+T03/ascii-64 excel_dna: ok
+T03/ascii-512 xlfn: ok
+T03/ascii-512 excel_dna: ok
+T03/ascii-4096 xlfn: ok
+T03/ascii-4096 excel_dna: ok
+T03/ja-8 xlfn: ok
+T03/ja-8 excel_dna: ok
+T03/ja-64 xlfn: ok
+T03/ja-64 excel_dna: ok
+T03/ja-512 xlfn: ok
+T03/ja-512 excel_dna: ok
+T03/ja-4096 xlfn: ok
+T03/ja-4096 excel_dna: ok
+P01/1 xlfn: ok
+P01/1 excel_dna: ok
+P01/2 xlfn: ok
+P01/2 excel_dna: ok
+P01/4 xlfn: ok
+P01/4 excel_dna: ok
+P01/8 xlfn: ok
+P01/8 excel_dna: ok
+P01/16 xlfn: ok
+P01/16 excel_dna: ok
+P02/1 xlfn: ok
+P02/1 excel_dna: ok
+P02/2 xlfn: ok
+P02/2 excel_dna: ok
+P02/4 xlfn: ok
+P02/4 excel_dna: ok
+P02/8 xlfn: ok
+P02/8 excel_dna: ok
+P02/16 xlfn: ok
+P02/16 excel_dna: ok
+P03/100us-1 xlfn: ok
+P03/100us-1 excel_dna: ok
+P03/100us-2 xlfn: ok
+P03/100us-2 excel_dna: ok
+P03/100us-4 xlfn: ok
+P03/100us-4 excel_dna: ok
+P03/100us-8 xlfn: ok
+P03/100us-8 excel_dna: ok
+P03/100us-16 xlfn: ok
+P03/100us-16 excel_dna: ok
+P03/1000us-1 xlfn: ok
+P03/1000us-1 excel_dna: ok
+P03/1000us-2 xlfn: ok
+P03/1000us-2 excel_dna: ok
+P03/1000us-4 xlfn: ok
+P03/1000us-4 excel_dna: ok
+P03/1000us-8 xlfn: ok
+P03/1000us-8 excel_dna: ok
+P03/1000us-16 xlfn: ok
+P03/1000us-16 excel_dna: ok
+P04/1 xlfn: ok
+P04/1 excel_dna: ok
+P04/2 xlfn: ok
+P04/2 excel_dna: ok
+P04/4 xlfn: ok
+P04/4 excel_dna: ok
+P04/8 xlfn: ok
+P04/8 excel_dna: ok
+P04/16 xlfn: ok
+P04/16 excel_dna: ok
+A01/immediate xlfn: ok
+A01/immediate excel_dna: error
+com_error: (-2147418111, '呼び出し先が呼び出しを拒否しました。', None, None)
+A02/100us xlfn: ok
+A02/100us excel_dna: error
+com_error: (-2147418111, '呼び出し先が呼び出しを拒否しました。', None, None)
+A02/1000us xlfn: ok
+A02/1000us excel_dna: error
+com_error: (-2147418111, '呼び出し先が呼び出しを拒否しました。', None, None)
+A02/10000us xlfn: ok
+A02/10000us excel_dna: ok
+A02/100000us xlfn: ok
+A02/100000us excel_dna: error
+com_error: (-2147418111, '呼び出し先が呼び出しを拒否しました。', None, None)
+A03/100 xlfn: error
+worker timeout/failure: Command '['C:\\Users\\takan\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe', 'C:\\Users\\takan\\xlfn\\benchmarks\\excel-comparison\\run.py', '--worker', '--profile', 'full', '--artifacts', 'C:\\Users\\takan\\artifacts-6c5f059', '--implementation', 'xlfn', '--case-key', 'A03/100', '--repeat', '5', '--threads', '1', '--throttle-ms', '100', '--pid-file', 'C:\\Users\\takan\\AppData\\Local\\Temp\\tmpjf_g6m4z\\excel.pid', '--allow-commit-mismatch']' timed out after 660 seconds
+A03/100 excel_dna: ok
+A03/1000 xlfn: error
+worker timeout/failure: Command '['C:\\Users\\takan\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe', 'C:\\Users\\takan\\xlfn\\benchmarks\\excel-comparison\\run.py', '--worker', '--profile', 'full', '--artifacts', 'C:\\Users\\takan\\artifacts-6c5f059', '--implementation', 'xlfn', '--case-key', 'A03/1000', '--repeat', '5', '--threads', '1', '--throttle-ms', '100', '--pid-file', 'C:\\Users\\takan\\AppData\\Local\\Temp\\tmpe34yn3bz\\excel.pid', '--allow-commit-mismatch']' timed out after 660 seconds
+A03/1000 excel_dna: ok
+A03/4096 xlfn: error
+worker timeout/failure: Command '['C:\\Users\\takan\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe', 'C:\\Users\\takan\\xlfn\\benchmarks\\excel-comparison\\run.py', '--worker', '--profile', 'full', '--artifacts', 'C:\\Users\\takan\\artifacts-6c5f059', '--implementation', 'xlfn', '--case-key', 'A03/4096', '--repeat', '5', '--threads', '1', '--throttle-ms', '100', '--pid-file', 'C:\\Users\\takan\\AppData\\Local\\Temp\\tmp3hhpvb_x\\excel.pid', '--allow-commit-mismatch']' timed out after 660 seconds
+A03/4096 excel_dna: error
+com_error: (-2147418111, '呼び出し先が呼び出しを拒否しました。', None, None)
+A04/burst-4096 xlfn: error
+worker timeout/failure: Command '['C:\\Users\\takan\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe', 'C:\\Users\\takan\\xlfn\\benchmarks\\excel-comparison\\run.py', '--worker', '--profile', 'full', '--artifacts', 'C:\\Users\\takan\\artifacts-6c5f059', '--implementation', 'xlfn', '--case-key', 'A04/burst-4096', '--repeat', '5', '--threads', '1', '--throttle-ms', '100', '--pid-file', 'C:\\Users\\takan\\AppData\\Local\\Temp\\tmpqjedfo_6\\excel.pid', '--allow-commit-mismatch']' timed out after 660 seconds
+A04/burst-4096 excel_dna: error
+com_error: (-2147418111, '呼び出し先が呼び出しを拒否しました。', None, None)
+A05/recalc xlfn: error
+AssertionError: no pending async work at cancellation; increase delay
+{"registered_functions": [["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_alloc_bytes", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_alloc_track", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_value", ">QQX$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_active", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_finished", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_release", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_contended", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_cpu", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_error", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_identity", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_copy", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_make", "QQQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_mixed", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_sum", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_value", "QQQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_count", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_emitted", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_pulse", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_shared_read", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_copy", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_input", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_output", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum2", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum4", "QQQQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum8", "QQQQQQQQQ$"]], "name_bindings": {"BENCH.ALLOC.BYTES": {"type": "float", "value": -1682505725.0}, "BENCH.ASYNC": {"type": "float", "value": 366936069.0}, "BENCH.ID": {"type": "float", "value": 688717836.0}, "BENCH.ERRNUM": {"type": "float", "value": -1778319349.0}}}
+A05/recalc excel_dna: ok
+A05/clear xlfn: error
+AssertionError: no pending async work at cancellation; increase delay
+{"registered_functions": [["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_alloc_bytes", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_alloc_track", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_value", ">QQX$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_active", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_finished", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_release", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_contended", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_cpu", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_error", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_identity", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_copy", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_make", "QQQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_mixed", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_sum", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_value", "QQQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_count", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_emitted", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_pulse", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_shared_read", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_copy", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_input", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_output", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum2", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum4", "QQQQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum8", "QQQQQQQQQ$"]], "name_bindings": {"BENCH.ALLOC.BYTES": {"type": "float", "value": -1682505725.0}, "BENCH.ASYNC": {"type": "float", "value": 366936069.0}, "BENCH.ID": {"type": "float", "value": 688717836.0}, "BENCH.ERRNUM": {"type": "float", "value": -1778319349.0}}}
+A05/clear excel_dna: ok
+A05/close xlfn: error
+AssertionError: no pending async work at cancellation; increase delay
+{"registered_functions": [["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_alloc_bytes", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_alloc_track", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_value", ">QQX$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_active", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_finished", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_release", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_contended", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_cpu", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_error", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_identity", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_copy", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_make", "QQQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_mixed", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_sum", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_value", "QQQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_count", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_emitted", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_pulse", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_shared_read", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_copy", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_input", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_output", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum2", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum4", "QQQQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum8", "QQQQQQQQQ$"]], "name_bindings": {"BENCH.ALLOC.BYTES": {"type": "float", "value": -1682505725.0}, "BENCH.ASYNC": {"type": "float", "value": 366936069.0}, "BENCH.ID": {"type": "float", "value": 688717836.0}, "BENCH.ERRNUM": {"type": "float", "value": -1778319349.0}}}
+A05/close excel_dna: ok
+A06/repeated xlfn: ok
+A06/repeated excel_dna: error
+com_error: (-2147418111, '呼び出し先が呼び出しを拒否しました。', None, None)
+R01/100 xlfn: ok
+R01/100 excel_dna: ok
+R01/1000 xlfn: ok
+R01/1000 excel_dna: ok
+R01/10000 xlfn: ok
+R01/10000 excel_dna: ok
+R01/100000 xlfn: ok
+R01/100000 excel_dna: ok
+R02/shared xlfn: ok
+R02/shared excel_dna: error
+com_error: (-2147418111, '呼び出し先が呼び出しを拒否しました。', None, None)
+R03/10000-10 xlfn: error
+TimeoutError: only 1000/2001 observed after 120s; unsettled values: [row 1: 0.0, row 11: 0.0, row 21: 0.0, row 31: 0.0, row 41: 0.0]
+{"registered_functions": [["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_alloc_bytes", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_alloc_track", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_value", ">QQX$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_active", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_finished", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_release", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_contended", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_cpu", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_error", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_identity", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_copy", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_make", "QQQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_mixed", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_sum", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_value", "QQQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_count", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_emitted", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_pulse", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_shared_read", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_copy", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_input", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_output", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum2", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum4", "QQQQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum8", "QQQQQQQQQ$"]], "name_bindings": {"BENCH.ALLOC.BYTES": {"type": "float", "value": -1682505725.0}, "BENCH.ASYNC": {"type": "float", "value": 366936069.0}, "BENCH.ID": {"type": "float", "value": 688717836.0}, "BENCH.ERRNUM": {"type": "float", "value": -1778319349.0}}}
+R03/10000-10 excel_dna: ok
+R03/10000-100 xlfn: error
+com_error: (-2147418111, '呼び出し先が呼び出しを拒否しました。', None, None)
+{"registered_functions": [["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_alloc_bytes", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_alloc_track", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_value", ">QQX$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_active", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_finished", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_release", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_contended", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_cpu", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_error", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_identity", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_copy", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_make", "QQQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_mixed", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_sum", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_value", "QQQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_count", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_emitted", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_pulse", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_shared_read", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_copy", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_input", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_output", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum2", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum4", "QQQQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum8", "QQQQQQQQQ$"]], "name_bindings": {"BENCH.ALLOC.BYTES": {"type": "float", "value": -1682505725.0}, "BENCH.ASYNC": {"type": "float", "value": 366936069.0}, "BENCH.ID": {"type": "float", "value": 688717836.0}, "BENCH.ERRNUM": {"type": "float", "value": -1778319349.0}}}
+R03/10000-100 excel_dna: error
+com_error: (-2147418111, '呼び出し先が呼び出しを拒否しました。', None, None)
+R03/100000-1000 xlfn: error
+TimeoutError: only 0/2001 observed after 120s; unsettled values: [row 1: 0.0, row 51: 0.0, row 101: 0.0, row 151: 0.0, row 201: 0.0]
+{"registered_functions": [["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_alloc_bytes", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_alloc_track", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_value", ">QQX$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_active", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_finished", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_release", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_contended", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_cpu", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_error", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_identity", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_copy", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_make", "QQQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_mixed", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_sum", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_value", "QQQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_count", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_emitted", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_pulse", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_shared_read", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_copy", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_input", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_output", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum2", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum4", "QQQQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum8", "QQQQQQQQQ$"]], "name_bindings": {"BENCH.ALLOC.BYTES": {"type": "float", "value": -1682505725.0}, "BENCH.ASYNC": {"type": "float", "value": 366936069.0}, "BENCH.ID": {"type": "float", "value": 688717836.0}, "BENCH.ERRNUM": {"type": "float", "value": -1778319349.0}}}
+R03/100000-1000 excel_dna: error
+com_error: (-2147418111, '呼び出し先が呼び出しを拒否しました。', None, None)
+R04/1hz xlfn: ok
+R04/1hz excel_dna: ok
+R04/10hz xlfn: error
+com_error: (-2147418111, '呼び出し先が呼び出しを拒否しました。', None, None)
+{"registered_functions": [["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_alloc_bytes", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_alloc_track", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_value", ">QQX$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_active", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_finished", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_release", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_contended", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_cpu", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_error", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_identity", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_copy", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_make", "QQQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_mixed", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_sum", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_value", "QQQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_count", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_emitted", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_pulse", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_shared_read", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_copy", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_input", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_output", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum2", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum4", "QQQQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum8", "QQQQQQQQQ$"]], "name_bindings": {"BENCH.ALLOC.BYTES": {"type": "float", "value": -1682505725.0}, "BENCH.ASYNC": {"type": "float", "value": 366936069.0}, "BENCH.ID": {"type": "float", "value": 688717836.0}, "BENCH.ERRNUM": {"type": "float", "value": -1778319349.0}}}
+R04/10hz excel_dna: error
+com_error: (-2147418111, '呼び出し先が呼び出しを拒否しました。', None, None)
+R04/100hz xlfn: error
+com_error: (-2147418111, '呼び出し先が呼び出しを拒否しました。', None, None)
+{"registered_functions": [["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_alloc_bytes", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_alloc_track", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_value", ">QQX$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_active", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_finished", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_release", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_contended", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_cpu", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_error", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_identity", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_copy", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_make", "QQQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_mixed", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_sum", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_value", "QQQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_count", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_emitted", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_pulse", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_shared_read", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_copy", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_input", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_output", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum2", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum4", "QQQQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum8", "QQQQQQQQQ$"]], "name_bindings": {"BENCH.ALLOC.BYTES": {"type": "float", "value": -1682505725.0}, "BENCH.ASYNC": {"type": "float", "value": 366936069.0}, "BENCH.ID": {"type": "float", "value": 688717836.0}, "BENCH.ERRNUM": {"type": "float", "value": -1778319349.0}}}
+R04/100hz excel_dna: error
+com_error: (-2147418111, '呼び出し先が呼び出しを拒否しました。', None, None)
+R04/1000hz xlfn: error
+worker timeout/failure: Command '['C:\\Users\\takan\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe', 'C:\\Users\\takan\\xlfn\\benchmarks\\excel-comparison\\run.py', '--worker', '--profile', 'full', '--artifacts', 'C:\\Users\\takan\\artifacts-6c5f059', '--implementation', 'xlfn', '--case-key', 'R04/1000hz', '--repeat', '5', '--threads', '1', '--throttle-ms', '100', '--pid-file', 'C:\\Users\\takan\\AppData\\Local\\Temp\\tmp9_3_u7jr\\excel.pid', '--allow-commit-mismatch']' timed out after 660 seconds
+R04/1000hz excel_dna: error
+com_error: (-2147418111, '呼び出し先が呼び出しを拒否しました。', None, None)
+R04/2000hz xlfn: error
+worker timeout/failure: Command '['C:\\Users\\takan\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe', 'C:\\Users\\takan\\xlfn\\benchmarks\\excel-comparison\\run.py', '--worker', '--profile', 'full', '--artifacts', 'C:\\Users\\takan\\artifacts-6c5f059', '--implementation', 'xlfn', '--case-key', 'R04/2000hz', '--repeat', '5', '--threads', '1', '--throttle-ms', '100', '--pid-file', 'C:\\Users\\takan\\AppData\\Local\\Temp\\tmpoksdlt9_\\excel.pid', '--allow-commit-mismatch']' timed out after 660 seconds
+R04/2000hz excel_dna: error
+com_error: (-2147418111, '呼び出し先が呼び出しを拒否しました。', None, None)
+R05/burst xlfn: error
+TimeoutError: only 1/2001 observed after 120s; unsettled values: [row 1: 0.0, row 6: 0.0, row 11: 0.0, row 16: 0.0, row 21: 0.0]
+{"registered_functions": [["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_alloc_bytes", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_alloc_track", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_value", ">QQX$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_active", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_finished", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_release", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_contended", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_cpu", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_error", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_identity", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_copy", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_make", "QQQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_mixed", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_sum", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_value", "QQQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_count", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_emitted", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_pulse", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_shared_read", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_copy", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_input", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_output", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum2", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum4", "QQQQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum8", "QQQQQQQQQ$"]], "name_bindings": {"BENCH.ALLOC.BYTES": {"type": "float", "value": -1682505725.0}, "BENCH.ASYNC": {"type": "float", "value": 366936069.0}, "BENCH.ID": {"type": "float", "value": 688717836.0}, "BENCH.ERRNUM": {"type": "float", "value": -1778319349.0}}}
+R05/burst excel_dna: error
+com_error: (-2147418111, '呼び出し先が呼び出しを拒否しました。', None, None)
+R06/churn xlfn: ok
+R06/churn excel_dna: ok
+R07/long xlfn: error
+worker timeout/failure: Command '['C:\\Users\\takan\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe', 'C:\\Users\\takan\\xlfn\\benchmarks\\excel-comparison\\run.py', '--worker', '--profile', 'full', '--artifacts', 'C:\\Users\\takan\\artifacts-6c5f059', '--implementation', 'xlfn', '--case-key', 'R07/long', '--repeat', '5', '--threads', '1', '--throttle-ms', '100', '--pid-file', 'C:\\Users\\takan\\AppData\\Local\\Temp\\tmpzqfzfn6r\\excel.pid', '--allow-commit-mismatch']' timed out after 2460 seconds
+R07/long excel_dna: error
+worker timeout/failure: Command '['C:\\Users\\takan\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe', 'C:\\Users\\takan\\xlfn\\benchmarks\\excel-comparison\\run.py', '--worker', '--profile', 'full', '--artifacts', 'C:\\Users\\takan\\artifacts-6c5f059', '--implementation', 'excel_dna', '--case-key', 'R07/long', '--repeat', '5', '--threads', '1', '--throttle-ms', '100', '--pid-file', 'C:\\Users\\takan\\AppData\\Local\\Temp\\tmp3p8sd6j2\\excel.pid', '--allow-commit-mismatch']' timed out after 2460 seconds
+C01/cold xlfn: ok
+C01/cold excel_dna: ok
+C02/10 xlfn: error
+AssertionError: last generated registration is unavailable
+{"registered_functions": [], "name_bindings": {"BENCH.ALLOC.BYTES": {"type": "int", "value": -2146826259}, "BENCH.ASYNC": {"type": "int", "value": -2146826259}, "BENCH.ID": {"type": "int", "value": -2146826259}, "BENCH.ERRNUM": {"type": "int", "value": -2146826259}}}
+C02/10 excel_dna: ok
+C02/100 xlfn: ok
+C02/100 excel_dna: ok
+C02/1000 xlfn: ok
+C02/1000 excel_dna: ok
+C02/5000 xlfn: ok
+C02/5000 excel_dna: ok
+C03/first xlfn: ok
+C03/first excel_dna: ok
+C04/warm-open xlfn: ok
+C04/warm-open excel_dna: ok
+W01/mixed xlfn: error
+TimeoutError: only 100/1000 observed after 120s; unsettled values: [row 1: 0.0, row 3: 0.0, row 4: 0.0, row 5: 0.0, row 6: 0.0]
+{"registered_functions": [["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_alloc_bytes", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_alloc_track", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_value", ">QQX$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_active", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_finished", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_release", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_contended", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_cpu", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_error", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_identity", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_copy", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_make", "QQQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_mixed", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_sum", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_value", "QQQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_count", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_emitted", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_pulse", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_shared_read", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_copy", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_input", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_output", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum2", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum4", "QQQQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum8", "QQQQQQQQQ$"]], "name_bindings": {"BENCH.ALLOC.BYTES": {"type": "float", "value": -1682505725.0}, "BENCH.ASYNC": {"type": "float", "value": 366936069.0}, "BENCH.ID": {"type": "float", "value": 688717836.0}, "BENCH.ERRNUM": {"type": "float", "value": -1778319349.0}}}
+W01/mixed excel_dna: error
+com_error: (-2147418111, '呼び出し先が呼び出しを拒否しました。', None, None)
+W02/finance xlfn: error
+TimeoutError: only 100/1000 observed after 120s; unsettled values: [row 1: 0.0, row 2: 0.0, row 4: 0.0, row 5: 0.0, row 6: 0.0]
+{"registered_functions": [["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_alloc_bytes", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_alloc_track", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_value", ">QQX$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_active", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_finished", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_release", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_contended", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_cpu", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_error", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_identity", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_copy", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_make", "QQQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_mixed", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_sum", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_value", "QQQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_count", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_emitted", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_pulse", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_shared_read", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_copy", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_input", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_output", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum2", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum4", "QQQQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum8", "QQQQQQQQQ$"]], "name_bindings": {"BENCH.ALLOC.BYTES": {"type": "float", "value": -1682505725.0}, "BENCH.ASYNC": {"type": "float", "value": 366936069.0}, "BENCH.ID": {"type": "float", "value": 688717836.0}, "BENCH.ERRNUM": {"type": "float", "value": -1778319349.0}}}
+W02/finance excel_dna: ok
+W03/10000 xlfn: ok
+W03/10000 excel_dna: ok
+W03/100000 xlfn: ok
+W03/100000 excel_dna: ok
+L01/scalar xlfn: ok
+L01/scalar excel_dna: ok
+L01/matrix xlfn: ok
+L01/matrix excel_dna: ok
+L01/async xlfn: ok
+L01/async excel_dna: error
+com_error: (-2147418111, '呼び出し先が呼び出しを拒否しました。', None, None)
+L01/rtd xlfn: ok
+L01/rtd excel_dna: ok
+L02/100 xlfn: ok
+L02/100 excel_dna: ok
+L02/1000 xlfn: ok
+L02/1000 excel_dna: ok
+L03/scalar xlfn: ok
+L03/scalar excel_dna: ok
+L03/async xlfn: ok
+L03/async excel_dna: error
+com_error: (-2147418111, '呼び出し先が呼び出しを拒否しました。', None, None)
+L03/rtd xlfn: error
+TimeoutError: only 1/1000 observed after 120s; unsettled values: [row 1: 0.0, row 2: 0.0, row 3: 0.0, row 4: 0.0, row 5: 0.0]
+{"registered_functions": [["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_alloc_bytes", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_alloc_track", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_value", ">QQX$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_active", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_finished", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_async_release", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_contended", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_cpu", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_error", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_identity", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_copy", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_make", "QQQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_mixed", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_matrix_sum", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_value", "QQQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_count", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_emitted", "Q$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_rtd_pulse", "QQ"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_shared_read", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_copy", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_input", "QQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_string_output", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum2", "QQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum4", "QQQQQ$"], ["C:\\Users\\takan\\artifacts-6c5f059\\xlfn\\benchmark.xll", "xll_sum8", "QQQQQQQQQ$"]], "name_bindings": {"BENCH.ALLOC.BYTES": {"type": "float", "value": -1682505725.0}, "BENCH.ASYNC": {"type": "float", "value": 366936069.0}, "BENCH.ID": {"type": "float", "value": 688717836.0}, "BENCH.ERRNUM": {"type": "float", "value": -1778319349.0}}}
+L03/rtd excel_dna: error
+com_error: (-2147418111, '呼び出し先が呼び出しを拒否しました。', None, None)
