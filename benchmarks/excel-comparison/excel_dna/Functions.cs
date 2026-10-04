@@ -8,16 +8,17 @@ namespace ExcelComparison;
 public sealed class BenchAddIn : IExcelAddIn
 {
     public void AutoOpen() { }
-    public void AutoClose() => RtdEngine.Close();
+    public void AutoClose()
+    {
+        try { RtdEngine.Close(); }
+        finally { AsyncGateControl.Close(); }
+    }
 }
 
 public static class Functions
 {
     private static long _sharedRead;
     private static long _contended;
-    private static long _asyncActive;
-    private static long _asyncFinished;
-    private static readonly TaskCompletionSource<bool> Burst = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     [ExcelFunction(Name = "BENCH.ID", IsThreadSafe = true)]
     public static double Identity(double value) => value;
@@ -112,36 +113,41 @@ public static class Functions
     [ExcelAsyncFunction(Name = "BENCH.ASYNC")]
     public static async Task<double> AsyncValue(double value, int delayUs)
     {
-        Interlocked.Increment(ref _asyncActive);
+        AsyncGateControl.Enter();
+        bool completed = false;
         try
         {
             if (delayUs < 0)
-                await Burst.Task.ConfigureAwait(false);
+                await AsyncGateControl.WaitAsync().ConfigureAwait(false);
             else if (delayUs > 0 && delayUs < 1000)
                 await Task.Run(() => Busy(delayUs)).ConfigureAwait(false);
             else if (delayUs > 0)
                 await Task.Delay(TimeSpan.FromMilliseconds(delayUs / 1000.0)).ConfigureAwait(false);
+            completed = true;
             return value;
         }
-        finally
-        {
-            Interlocked.Decrement(ref _asyncActive);
-            Interlocked.Increment(ref _asyncFinished);
-        }
+        finally { AsyncGateControl.Finish(completed); }
+    }
+
+    [ExcelFunction(Name = "BENCH.ASYNC.ARM")]
+    public static double AsyncArm(string directory, int expected)
+    {
+        AsyncGateControl.Arm(directory, expected);
+        return 1;
     }
 
     [ExcelFunction(Name = "BENCH.ASYNC.RELEASE")]
     public static double AsyncRelease(double sequence)
     {
-        Burst.TrySetResult(true);
+        AsyncGateControl.Release();
         return sequence;
     }
 
     [ExcelFunction(Name = "BENCH.ASYNC.ACTIVE", IsThreadSafe = true)]
-    public static double AsyncActive() => Interlocked.Read(ref _asyncActive);
+    public static double AsyncActive() => AsyncGateControl.Active;
 
     [ExcelFunction(Name = "BENCH.ASYNC.FINISHED", IsThreadSafe = true)]
-    public static double AsyncFinished() => Interlocked.Read(ref _asyncFinished);
+    public static double AsyncFinished() => AsyncGateControl.Finished;
 
     [ExcelFunction(Name = "BENCH.RTD")]
     public static object Rtd(string topic, double periodMs)
@@ -172,22 +178,61 @@ internal static class RtdEngine
 {
     private sealed class Entry(IExcelObserver observer, double periodMs)
     {
-        public IExcelObserver Observer = observer;
-        public double PeriodMs = periodMs;
-        public long NextDue = Stopwatch.GetTimestamp() + (long)(periodMs * Stopwatch.Frequency / 1000);
-        public long Sequence;
+        private readonly object _publicationGate = new();
+        private IExcelObserver? _observer = observer;
+        private int _cancelled;
+        public readonly double PeriodMs = periodMs;
+        private long _nextDue = Stopwatch.GetTimestamp() + (long)(periodMs * Stopwatch.Frequency / 1000);
+        private long _sequence;
         public long LastPulse;
+
+        public void Cancel() => Volatile.Write(ref _cancelled, 1);
+
+        public void Drain()
+        {
+            // Subscription removal releases Gate before waiting for an
+            // admitted callback. No callback can start after cancellation.
+            lock (_publicationGate) _observer = null;
+        }
+
+        public void Publish(long pulse, long now)
+        {
+            lock (_publicationGate)
+            {
+                if (Volatile.Read(ref _cancelled) != 0 || _observer is null) return;
+                long value;
+                if (pulse > LastPulse)
+                {
+                    LastPulse = pulse;
+                    value = pulse;
+                }
+                else if (PeriodMs > 0 && now >= _nextDue)
+                {
+                    value = ++_sequence;
+                    _nextDue = now + (long)(PeriodMs * Stopwatch.Frequency / 1000);
+                }
+                else return;
+                try { _observer.OnNext((double)value); } catch { /* disconnected */ }
+                Interlocked.Increment(ref _emitted);
+            }
+        }
     }
 
     private sealed class Subscription(long id) : IDisposable
     {
         public void Dispose()
         {
+            Entry? removed;
             lock (Gate)
             {
-                if (Entries.Remove(id, out Entry? entry) && entry.PeriodMs > 0)
-                    --_periodicCount;
+                Entries.Remove(id, out removed);
+                if (removed is not null)
+                {
+                    removed.Cancel();
+                    if (removed.PeriodMs > 0) --_periodicCount;
+                }
             }
+            removed?.Drain();
         }
     }
 
@@ -201,6 +246,7 @@ internal static class RtdEngine
     private static long _handledPulse;
     private static int _periodicCount;
     private static long _emitted;
+    [ThreadStatic] private static List<Entry>? _snapshot;
 
     public static int Count { get { lock (Gate) return Entries.Count; } }
     public static long Emitted => Interlocked.Read(ref _emitted);
@@ -237,33 +283,28 @@ internal static class RtdEngine
     private static void Tick(object? state)
     {
         _ = state;
+        List<Entry> snapshot;
+        long pulse;
+        long now;
         lock (Gate)
         {
-            long pulse = Interlocked.Read(ref _pulse);
+            pulse = Interlocked.Read(ref _pulse);
             if (pulse == _handledPulse && _periodicCount == 0) return;
-            long now = Stopwatch.GetTimestamp();
-            foreach (Entry entry in Entries.Values)
-            {
-                if (pulse > entry.LastPulse)
-                {
-                    entry.LastPulse = pulse;
-                    try { entry.Observer.OnNext((double)pulse); } catch { /* disconnected */ }
-                    Interlocked.Increment(ref _emitted);
-                }
-                else if (entry.PeriodMs > 0 && now >= entry.NextDue)
-                {
-                    try { entry.Observer.OnNext((double)++entry.Sequence); } catch { /* disconnected */ }
-                    Interlocked.Increment(ref _emitted);
-                    entry.NextDue = now + (long)(entry.PeriodMs * Stopwatch.Frequency / 1000);
-                }
-            }
+            now = Stopwatch.GetTimestamp();
+            snapshot = _snapshot ??= new List<Entry>();
+            snapshot.AddRange(Entries.Values);
             _handledPulse = pulse;
         }
+        // Match the Rust fixture: source bookkeeping never holds its map
+        // lock across the observer's framework notification.
+        try { foreach (Entry entry in snapshot) entry.Publish(pulse, now); }
+        finally { snapshot.Clear(); }
     }
 
     public static void Close()
     {
         Thread? thread;
+        Entry[] removed;
         lock (Gate)
         {
             _fastStop = true;
@@ -271,9 +312,13 @@ internal static class RtdEngine
             _fastThread = null;
             _timer?.Dispose();
             _timer = null;
+            removed = new Entry[Entries.Count];
+            Entries.Values.CopyTo(removed, 0);
+            foreach (Entry entry in removed) entry.Cancel();
             Entries.Clear();
             _periodicCount = 0;
         }
+        foreach (Entry entry in removed) entry.Drain();
         thread?.Join(TimeSpan.FromSeconds(1));
     }
 }

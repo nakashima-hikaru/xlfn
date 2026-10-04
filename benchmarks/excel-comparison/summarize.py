@@ -18,7 +18,7 @@ PRIMARY = {
     "P03": ("calls_per_s", "higher"), "P04": ("calls_per_s", "higher"),
     "A01": ("throughput_per_s", "higher"), "A02": ("cell_latency_p50_s", "lower"),
     "A03": ("throughput_per_s", "higher"), "A04": ("cell_latency_p99_s", "lower"),
-    "A05": ("task_cleanup_observed_s", "lower"),
+    "A05": ("task_drain_after_release_s", "lower"),
     "A06": ("dirty_generations_per_s", "higher"),
     "R01": ("subscription_s", "lower"), "R02": ("update_settle_s", "lower"),
     "R03": ("update_cells_per_s", "higher"),
@@ -52,6 +52,10 @@ def summarize(records: list[dict]) -> list[dict]:
                "excel_dna_status": dna["status"] if dna else "missing",
                "xlfn_value": None, "excel_dna_value": None, "xlfn_advantage_ratio": None,
                "comparable": False, "reason": "missing or failed run"}
+        unsupported = [f"{record['implementation']}: {record.get('unsupported_reason', 'unsupported')}"
+                       for record in (xlfn, dna) if record and record["status"] == "unsupported"]
+        if unsupported:
+            row["reason"] = "; ".join(unsupported)
         if xlfn and dna and xlfn["status"] == dna["status"] == "ok":
             # A pair is comparable only when the run settings and variants match.
             conditions = ("profile", "params", "threads", "rtd_throttle_ms",

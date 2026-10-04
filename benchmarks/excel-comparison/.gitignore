@@ -5,4 +5,6 @@ results*.csv
 excel_dna/GeneratedRegistration.cs
 excel_dna/bin/
 excel_dna/obj/
+control-tests/bin/
+control-tests/obj/
 xlfn/target/

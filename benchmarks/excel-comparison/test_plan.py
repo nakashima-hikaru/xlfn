@@ -1,5 +1,9 @@
+import json
+import re
 import struct
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,14 +11,150 @@ from unittest.mock import Mock, patch
 
 from artifact_manifest import FILES, create, verify
 from generate_registration import source
-from run import (XL_AUTOMATIC, XL_MANUAL, XL_ERR_NUM, ExcelSession, calculation_mode,
-                 check_scalar, formula, register_xll, registration_diagnostics, run_async,
-                 run_async_gate, run_matrix)
+from run import (XL_AUTOMATIC, XL_MANUAL, XL_ERR_NUM, AsyncControl, ComObject, ComRetry,
+                 ExcelSession, UnsupportedCase, WorkerProgress, calculation_mode,
+                 check_final_values, check_scalar, close_worker_session, formula, register_xll,
+                 registration_diagnostics, run_async, reap_excel_process,
+                 recover_worker_record, run_async_cancel, run_async_gate, run_async_repeated, run_matrix)
 from summarize import PRIMARY, summarize
 from workloads import IDS, Case, cases
 
 
 class PlanTest(unittest.TestCase):
+    def test_teardown_failure_survives_successful_fallback_quit(self):
+        session = object.__new__(ExcelSession)
+        session.progress = None
+        session._stop_sampler = Mock()
+        session._sampler = Mock()
+        session.close_book = Mock(side_effect=RuntimeError("workbook close failed"))
+        session.app = Mock()
+        with self.assertRaisesRegex(RuntimeError, "workbook close failed"):
+            session.close()
+        session.app.Quit.assert_called_once_with()
+        self.assertEqual(session.last_stage, "close_failed")
+        session.app.Quit.side_effect = RuntimeError("quit also failed")
+        with self.assertRaisesRegex(RuntimeError, "workbook close failed.*quit also failed"):
+            session.close()
+
+    def test_worker_close_cannot_preserve_ok_or_hide_execution_failure(self):
+        for original_error in (None, "original execution failed"):
+            with self.subTest(original_error=original_error), tempfile.TemporaryDirectory() as directory:
+                record = {"status": "ok", "phase": "close", "stage": "excel_quit"}
+                if original_error is not None:
+                    record.update(status="error", error=original_error, failure_phase="execute")
+                progress = WorkerProgress(Path(directory) / "progress.json", record)
+                session = SimpleNamespace(close=Mock(side_effect=RuntimeError("quit failed")))
+                close_worker_session(session, progress)
+                self.assertEqual(record["status"], "error")
+                self.assertIn("quit failed", record["cleanup_error"])
+                if original_error is not None:
+                    self.assertEqual(record["error"], original_error)
+                    self.assertEqual(record["failure_phase"], "execute")
+                else:
+                    self.assertEqual(record["failure_phase"], "close")
+
+    def test_reaper_kills_only_the_exact_surviving_worker_process(self):
+        class ProcessError(Exception):
+            pass
+        class Timeout(ProcessError):
+            pass
+        class Missing(ProcessError):
+            pass
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "excel.pid"
+            path.write_text(json.dumps({"pid": 123, "create_time": 42.0}))
+            process = Mock()
+            process.create_time.return_value = 42.0
+            process.wait.side_effect = [Timeout(), None]
+            module = SimpleNamespace(Process=Mock(return_value=process), Error=ProcessError,
+                                     TimeoutExpired=Timeout, NoSuchProcess=Missing)
+            with patch.dict("sys.modules", {"psutil": module}):
+                result = reap_excel_process(path, grace_s=5)
+                self.assertTrue(result["forced_kill"])
+                process.kill.assert_called_once_with()
+                process.reset_mock()
+                process.create_time.return_value = 43.0
+                result = reap_excel_process(path, grace_s=5)
+                self.assertTrue(result["pid_reused"])
+                process.kill.assert_not_called()
+                process.wait.assert_not_called()
+
+    def test_progress_serializes_concurrent_stage_and_snapshot_updates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "progress.json"
+            progress = WorkerProgress(path, {})
+            errors = []
+            def write(prefix):
+                try:
+                    for index in range(20):
+                        progress.stage(prefix, index=index)
+                        progress.update(**{prefix: {"index": index}})
+                except Exception as error:
+                    errors.append(error)
+            workers = [threading.Thread(target=write, args=(name,)) for name in ("main", "controller")]
+            for thread in workers:
+                thread.start()
+            for thread in workers:
+                thread.join(timeout=3)
+            self.assertFalse(errors)
+            result = json.loads(path.read_text())
+            self.assertEqual(len(result["stage_history"]), 40)
+            self.assertEqual(result["main"], {"index": 19})
+            self.assertEqual(result["controller"], {"index": 19})
+
+    def test_only_explicit_com_rejections_are_retried_with_a_deadline(self):
+        class ComError(Exception):
+            def __init__(self, hresult):
+                self.hresult = hresult
+
+        for hresult in (-2147418111, -2147417846):
+            with self.subTest(hresult=hresult), patch("run.time.sleep"):
+                retry = ComRetry()
+                operation = Mock(side_effect=[ComError(hresult), 7])
+                self.assertEqual(retry.call("Excel.Value2", operation), 7)
+                self.assertEqual(retry.stats["rejected_calls"], 1)
+                self.assertEqual(operation.call_count, 2)
+        retry = ComRetry(timeout_s=0)
+        operation = Mock(side_effect=ComError(-2147418111))
+        with self.assertRaisesRegex(TimeoutError, "Excel.Value2"):
+            retry.call("Excel.Value2", operation)
+        operation.assert_called_once_with()
+        operation = Mock(side_effect=ComError(-2147352567))
+        with self.assertRaises(ComError):
+            retry.call("Excel.Formula=", operation)
+        operation.assert_called_once_with()
+
+    def test_com_policy_reaches_nested_dispatch_and_unwraps_arguments(self):
+        class Dispatch:
+            _oleobj_ = object()
+            Value2 = 5
+            def Range(self, start, end):
+                self.args = (start, end)
+                return self
+
+        raw = Dispatch()
+        app = ComObject(raw, ComRetry())
+        target = app.Range(app, app)
+        self.assertEqual(raw.args, (raw, raw))
+        self.assertEqual(target.Value2, 5)
+        target.Value2 = 9
+        self.assertEqual(raw.Value2, 9)
+
+    def test_partial_worker_record_preserves_metadata_and_original_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "progress.json"
+            record = {"id": "A03", "variant": "3", "implementation": "xlfn",
+                      "xll_sha256": "abc", "excel_build": "123", "phase": "execute",
+                      "status": "error", "error": "gate failed"}
+            progress = WorkerProgress(path, record)
+            progress.stage("excel_quit")
+            recovered = recover_worker_record(path, Case("A03", "3", {}), "xlfn", TimeoutError("expired"))
+            self.assertEqual(recovered["stage"], "excel_quit")
+            self.assertEqual(recovered["xll_sha256"], "abc")
+            self.assertEqual(recovered["excel_build"], "123")
+            self.assertEqual(recovered["worker_error"], "gate failed")
+            self.assertEqual(recovered["status"], "error")
+
     def test_calculation_timer_stops_before_process_sampling(self):
         for full in (False, True):
             with self.subTest(full=full):
@@ -83,31 +223,41 @@ class PlanTest(unittest.TestCase):
 
     def test_async_gate_releases_existing_calls_without_recalculation(self):
         for id in ("A03", "A04"):
-            with self.subTest(id=id):
+            with self.subTest(id=id), tempfile.TemporaryDirectory() as directory:
                 session = Mock()
-                target = object()
-                session.add_formulas.return_value = target
+                session.control_root = Path(directory)
+                target = SimpleNamespace(Value2=((1.0,), (2.0,), (3.0,)))
                 session.app.Calculate.side_effect = AssertionError(
                     "recalculation while native async handles are pending")
-                session.new_book.return_value.Range.side_effect = AssertionError(
-                    "writing a release formula starts another calculation")
-                evaluations = []
-                active = iter((1.0, 3.0))
+                control_path = None
 
                 def evaluate(expression):
-                    evaluations.append(expression)
-                    if expression == "BENCH.ASYNC.ACTIVE()":
-                        return next(active)
-                    if expression == "BENCH.ASYNC.RELEASE(1)":
-                        self.assertEqual(evaluations[:-1], ["BENCH.ASYNC.ACTIVE()"] * 2)
-                        return 1.0
-                    self.fail(f"unexpected evaluation: {expression}")
+                    nonlocal control_path
+                    self.assertIs(threading.current_thread(), threading.main_thread())
+                    match = re.fullmatch(r'BENCH.ASYNC.ARM\("(.+)",3\)', expression)
+                    self.assertIsNotNone(match)
+                    control_path = Path(match[1])
+                    return 1.0
 
                 session.app.Evaluate.side_effect = evaluate
 
+                def submit(sheet, count, make):
+                    (control_path / "ready.json").write_text(json.dumps({"active": 3, "expected": 3}))
+                    deadline = time.perf_counter() + 2
+                    # Simulate Excel blocking the caller in formula assignment
+                    # until the independent controller releases all work.
+                    while not (control_path / "release").exists():
+                        self.assertLess(time.perf_counter(), deadline, "gate needs blocked COM caller")
+                        time.sleep(0.001)
+                    (control_path / "released.json").write_text(json.dumps({"active_before_release": 3}))
+                    (control_path / "state.json").write_text(json.dumps({"active": 0, "expected": 3, "started": 3, "finished": 3, "released": True, "control_error": None}))
+                    return target
+
+                session.add_formulas.side_effect = submit
+
                 def observe(actual_target, count, expected, timeout, **kwargs):
                     self.assertIs(actual_target, target)
-                    self.assertEqual(evaluations[-1], "BENCH.ASYNC.RELEASE(1)")
+                    self.assertTrue((control_path / "release").exists())
                     self.assertEqual(count, 3)
                     self.assertEqual(timeout, 120)
                     for i in range(count):
@@ -116,14 +266,152 @@ class PlanTest(unittest.TestCase):
                             "p99_s": 0.1, "sampled_cells": count}
 
                 session.wait_values.side_effect = observe
-                with patch("run.time.sleep"):
-                    result = run_async_gate(session, Case(id, "test", {"cells": 3}))
+                result = run_async_gate(session, Case(id, "test", {"cells": 3}))
                 self.assertEqual(result["active_before_release"], 3)
+                self.assertEqual(result["control_channel"], "fixture-file-v1")
                 session.app.Calculate.assert_not_called()
-                self.assertEqual(session.app.Evaluate.call_count, 3)
+                self.assertEqual(session.app.Evaluate.call_count, 1)
                 make = session.add_formulas.call_args.args[2]
                 self.assertEqual([make(row) for row in range(1, 4)],
                                  ["=BENCH.ASYNC(1,-1)", "=BENCH.ASYNC(2,-1)", "=BENCH.ASYNC(3,-1)"])
+
+    def test_gate_final_snapshot_rejects_late_or_unsampled_wrong_values(self):
+        session = Mock()
+        session.add_formulas.return_value = SimpleNamespace(Value2=((1.0,), (99.0,), (3.0,)))
+        session.wait_values.return_value = {"poll_s": 0.1}
+        control = Mock(ready_at=1.0, release_at=2.0)
+        control.wait_ready.return_value = {"active": 3}
+        control.wait_released.return_value = {"active_before_release": 3}
+        with patch("run.AsyncControl", return_value=control):
+            with self.assertRaisesRegex(AssertionError, "final snapshot row 2"):
+                run_async_gate(session, Case("A04", "test", {"cells": 3}))
+        control.close.assert_called_once_with()
+
+    def test_repeated_async_rejects_late_wrong_values_after_arrival_observation(self):
+        session = Mock()
+        session.new_book.return_value.Range.return_value.Value2 = ((4.0,), (2.0,), (6.0,))
+        session.wait_values.return_value = {"sampled_cells": 3}
+        with self.assertRaisesRegex(AssertionError, "1 stale values"):
+            run_async_repeated(session, Case("A06", "test", {
+                "cells": 3, "repetitions": 2, "delay_us": 10000}))
+
+    def test_full_snapshot_checks_cells_between_latency_samples(self):
+        values = [(float(row),) for row in range(1, 4097)]
+        values[1] = (99.0,)
+        with self.assertRaisesRegex(AssertionError, "row 2"):
+            check_final_values(SimpleNamespace(Value2=tuple(values)), 4096,
+                               lambda value, i: value == float(i + 1))
+
+    def test_async_controller_releases_on_failed_readiness_without_passing(self):
+        for evidence in (None, {"active": 2, "expected": 3}):
+            with self.subTest(evidence=evidence), tempfile.TemporaryDirectory() as directory:
+                control = AsyncControl(SimpleNamespace(control_root=Path(directory)), 3, timeout_s=0.02)
+                if evidence is not None:
+                    (control.path / "ready.json").write_text(json.dumps(evidence))
+                control.start()
+                with self.assertRaises((TimeoutError, AssertionError)):
+                    control.wait_ready()
+                self.assertTrue((control.path / "release").exists())
+                control.close()
+
+    def test_async_control_failure_rejects_even_valid_release_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            control = AsyncControl(SimpleNamespace(control_root=Path(directory)), 3)
+            (control.path / "released.json").write_text(json.dumps({"active_before_release": 3}))
+            (control.path / "control-error.txt").write_text("state write failed")
+            with self.assertRaisesRegex(RuntimeError, "state write failed"):
+                control.wait_released()
+            control.close()
+
+    def test_async_drain_does_not_accept_initial_zero_active_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            control = AsyncControl(SimpleNamespace(control_root=Path(directory)), 3)
+            initial = {"active": 0, "started": 0, "finished": 0, "released": False, "expected": 3}
+            drained = {"active": 0, "started": 3, "finished": 3, "released": True, "expected": 3}
+            with patch.object(control, "read", side_effect=[initial, drained]) as read, patch("run.time.sleep"):
+                self.assertEqual(control.wait_drained(), drained)
+            self.assertEqual(read.call_count, 2)
+            control.close()
+
+    def test_async_cancel_watchdog_unblocks_a_stalled_action_and_rejects_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            control = AsyncControl(SimpleNamespace(control_root=Path(directory)), 3, timeout_s=0.02)
+            (control.path / "ready.json").write_text(json.dumps({"active": 3, "expected": 3}))
+            control.start(release_when_ready=False)
+            self.assertEqual(control.wait_ready()["active"], 3)
+            control.thread.join(timeout=1)
+            self.assertTrue((control.path / "release").exists())
+            with self.assertRaisesRegex(TimeoutError, "cancellation action"):
+                control.read("state.json")
+            control.close()
+
+    def test_native_cancel_is_explicitly_unsupported_before_starting_work(self):
+        session = Mock(implementation="xlfn")
+        with self.assertRaisesRegex(UnsupportedCase, "user-driven.*pending"):
+            run_async_cancel(session, Case("A05", "clear", {"cells": 3, "mode": "clear"}))
+        session.new_book.assert_not_called()
+        session.add_formulas.assert_not_called()
+
+    def test_dna_cancel_action_precedes_gate_release_and_checks_late_results(self):
+        for mode in ("recalc", "clear", "close"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                session = Mock(implementation="excel_dna", control_root=Path(directory))
+                target = Mock(Value2=((1.0,), (2.0,), (3.0,)))
+                control_path = None
+                fixture_thread = None
+                acted = threading.Event()
+
+                def evaluate(expression):
+                    nonlocal control_path, fixture_thread
+                    match = re.fullmatch(r'BENCH.ASYNC.ARM\("(.+)",3\)', expression)
+                    self.assertIsNotNone(match)
+                    control_path = Path(match[1])
+                    def fixture():
+                        deadline = time.perf_counter() + 2
+                        while not (control_path / "release").exists() and time.perf_counter() < deadline:
+                            time.sleep(0.001)
+                        (control_path / "released.json").write_text(json.dumps({"active_before_release": 3}))
+                        (control_path / "state.json").write_text(json.dumps({"active": 0, "expected": 3, "started": 3, "finished": 3, "released": True, "control_error": None}))
+                    fixture_thread = threading.Thread(target=fixture)
+                    fixture_thread.start()
+                    return 1.0
+
+                def action():
+                    self.assertFalse((control_path / "release").exists())
+                    self.assertTrue((control_path / "ready.json").exists())
+                    acted.set()
+
+                def submit(sheet, count, make):
+                    if session.add_formulas.call_count == 1:
+                        self.assertEqual(make(1), "=BENCH.ASYNC(1,-1)")
+                        (control_path / "state.json").write_text(json.dumps({"active": 3}))
+                        (control_path / "ready.json").write_text(json.dumps({"active": 3, "expected": 3}))
+                    else:
+                        action()
+                        self.assertEqual(make(1), "=BENCH.ASYNC(4,0)")
+                        target.Value2 = ((4.0,), (5.0,), (6.0,))
+                    return target
+
+                def clear():
+                    action()
+                    target.Value2 = ((None,), (None,), (None,))
+
+                session.app.Evaluate.side_effect = evaluate
+                session.add_formulas.side_effect = submit
+                target.ClearContents.side_effect = clear
+                session.close_book.side_effect = action
+                session.wait_values.return_value = {"poll_s": 0.01}
+                try:
+                    result = run_async_cancel(session, Case("A05", mode, {"cells": 3, "mode": mode}))
+                finally:
+                    if fixture_thread is not None:
+                        fixture_thread.join(timeout=3)
+                self.assertTrue(acted.is_set())
+                self.assertEqual(result["pending_before"], 3)
+                self.assertEqual(result["active_after_observation"], 0)
+                self.assertEqual(result["stale_cells_after_observation"], None if mode == "close" else 0)
+                self.assertNotIn("task_cleanup_observed_s", result)
+                session.app.Calculate.assert_not_called()
 
     def test_every_requested_id_has_a_case_and_primary_metric(self):
         expected = {f"S{i:02}" for i in range(1, 5)}
@@ -163,6 +451,10 @@ class PlanTest(unittest.TestCase):
                     with self.subTest(case=case.key, profile=profile):
                         self.assertLessEqual(case.params["cells"], 4_096)
                         self.assertEqual(case.params["delay_us"], -1)
+                if case.id == "A05":
+                    with self.subTest(case=case.key, profile=profile):
+                        self.assertEqual(case.params["delay_us"], -1)
+                        self.assertEqual(case.params["replacement_delay_us"], 0)
 
     def test_formula_keys(self):
         self.assertEqual(formula("S02", 3, {"argc": 4}), "=BENCH.SUM4(3,4,5,6)")
@@ -322,6 +614,17 @@ class PlanTest(unittest.TestCase):
         right["excel_build"] = "1"
         right["ci_run_id"] = "43"
         self.assertFalse(summarize([left, right])[0]["comparable"])
+
+    def test_unsupported_cancellation_cannot_produce_a_comparison(self):
+        native = {"id": "A05", "variant": "clear", "implementation": "xlfn",
+                  "status": "unsupported", "unsupported_reason": "user-driven cancellation required"}
+        dna = {"id": "A05", "variant": "clear", "implementation": "excel_dna",
+               "status": "ok", "metrics": {"task_drain_after_release_s": 0.1}}
+        row = summarize([native, dna])[0]
+        self.assertEqual(row["xlfn_status"], "unsupported")
+        self.assertFalse(row["comparable"])
+        self.assertIsNone(row["xlfn_advantage_ratio"])
+        self.assertIn("user-driven cancellation required", row["reason"])
 
     def test_ci_artifact_manifest_requires_complete_matching_x64_set(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -66,7 +66,8 @@ def cases(profile: str = "full") -> list[Case]:
         add("A03", str(n), cells=n, delay_us=-1)
     add("A04", "burst" if smoke else "burst-4096", cells=20 if smoke else 4_096, delay_us=-1)
     for mode in ("recalc", "clear", "close"):
-        add("A05", mode, cells=20 if smoke else 1_000, delay_us=1_000_000, mode=mode)
+        add("A05", mode, cells=20 if smoke else 1_000, delay_us=-1,
+            replacement_delay_us=0, mode=mode)
     add("A06", "repeated", cells=20 if smoke else 1_000, delay_us=10_000,
         repetitions=3 if smoke else 100)
 

@@ -97,7 +97,8 @@ isolate equivalent host ABI paths or the function body alone.
 | T01–T03 | ASCII/Japanese input/output/copy, 8–4096 characters | Recalculation time per character |
 | P01–P04 | 1/2/4/8/16 Excel calculation threads; CPU/light/heavy/contended atomic UDF | Throughput, speedup versus one thread, parallel efficiency, batch tails |
 | A01–A04 | Immediate/delayed async; gated 100/1k/4096 fan-out and 4096 simultaneous completions | Submission and completion throughput, COM-observed cell-arrival tails |
-| A05–A06 | Dirty/clear/close pending calls; repeatedly replace arguments before prior completion | Task cleanup, final-result correctness, stale result count |
+| A05 | Excel-DNA pending result invalidation by replacing arguments, clearing cells, or closing a workbook; native cancellation requires interactive qualification | Drain after deliberate old-task release, final-result correctness; native COM status is `unsupported` |
+| A06 | Repeated argument replacement and recalculation | Final-result correctness and stale result count; overlapping pending generations are not established |
 | R01–R03 | Unique/shared/grouped topics, including 100k unique | Subscribe time, incremental RSS, pulse update time |
 | R04–R07 | 1–2000 requested updates/topic/s, burst, churn, 30-minute run | Source emissions, observed cell updates, tail, RSS/latency drift |
 | C01–C04 | Fresh Excel/add-in load, extra registrations, first call, warm workbook open | Startup/registration/first-call/open-to-complete time |
@@ -109,9 +110,14 @@ RTD completions can update cells. Synchronous workloads use manual calculation.
 The result records `calculation_mode` and, for async workloads, `async_delivery`.
 A01/A02 timing starts before formula entry because automatic calculation may
 begin while formulas are being submitted. No extra recalculation is requested
-while async results are pending, including the A03/A04 gated calls. Those cases
-release the gate through `Application.Evaluate("BENCH.ASYNC.RELEASE(1)")`, without
-writing a control formula to the worksheet or requesting another calculation.
+while async results are pending, including the A03/A04 gated calls. Before
+submission, those cases arm `BENCH.ASYNC.ARM(control_dir, expected_count)`.
+A fixture worker publishes `ready.json` once all requested calls are active;
+an independent runner thread writes `release`, and the fixture acknowledges
+`released.json`. Pending-state observation and release use files, so they can
+progress while Excel blocks the main COM caller in formula entry. No Excel
+call is made from the controller thread. Both fixtures use the same protocol.
+Failure to reach readiness triggers an emergency release and an error result.
 The full profile uses A03 variants `100`, `1000`, and `4096`, and A04 variant
 `burst-4096`. Both implementations receive the same counts, which fit xlfn's
 4096 simultaneously pending native async tasks. Earlier A03/`10000` and
@@ -120,6 +126,28 @@ xlfn's capacity and cannot reach the all-active condition. Keep those historical
 rows separate from the new variants. This measures a single simultaneous batch;
 it does not release tasks in waves. The smoke profile still uses 20 tasks.
 
+A05 reports native xlfn COM runs as `unsupported` and makes the runner exit
+nonzero. Microsoft documents that calculation events are not raised during
+[programmatic recalculation](https://learn.microsoft.com/en-us/office/client-developer/excel/handling-events),
+and native async formula entry may wait for task completion. Increasing the
+delay or releasing old work before the action cannot establish cancellation.
+For Excel-DNA, A05 verifies file-based pending evidence, applies the requested
+worksheet/workbook action, deliberately releases the old tasks, and checks
+their drain and resulting cells. `task_drain_after_release_s` measures that
+deliberate drain; it does not prove cancellation of the underlying Task.
+The summary preserves the native unsupported reason and emits no paired ratio.
+
+Native A05 needs a fresh interactive Excel process and an instrumented XLL,
+following the [calculation-event qualification procedure](event-qualification/README.md).
+Arm the gate while idle, then enter the gated formulas through Excel's UI.
+After `ready.json` confirms all calls are pending, use the UI to change the
+arguments/recalculate, clear the cells, or close the workbook in separate runs.
+Capture CalculationCanceled/CalculationEnded entries with generation IDs,
+then release any surviving old work through the file channel. Verify that
+late old results cannot replace the new values or repopulate cleared cells;
+for close, retain task/handle traces because worksheet cells no longer exist.
+Keep the native cancellation result unverified until these observations exist.
+
 Synchronous timing starts after formula creation and `Range.Dirty()` and ends
 when Excel reports calculation done. The explicit RSS read after each
 recalculation happens after the timer stops; the background RSS sampler still
@@ -127,7 +155,9 @@ runs throughout the case. Older runners also included that explicit
 process-information read in each recalculation sample. Matrix output is checked at its bottom
 right spill cell. Async timing checks the **actual cell values**, not just
 Excel's calculation state. A03/A04 wait until the requested number of calls
-is active before releasing a shared gate. RTD timing waits for subscription
+is active before releasing a shared gate, and verify every cell in a final
+snapshot after sampled latency timing stops. A06 also rejects any incorrect
+value in its final complete snapshot. RTD timing waits for subscription
 count, then checks cell values after a pulse. RTD update-rate results include
 both the source's actual emission rate and the values observed in a cell; the
 latter is a lower bound because Excel can coalesce updates. The runner sets
@@ -135,6 +165,17 @@ latter is a lower bound because Excel can coalesce updates. The runner sets
 it closes the Excel process. Async and RTD tails are sampled through COM at
 about 10 ms intervals, so they are **arrival observations**, not precise
 in-process callback latency. `R07` is 30 minutes in the full profile.
+
+R04 samples one representative cell for every topic. `observed_updates_per_s`
+counts numeric changes after the initial snapshot, while
+`observed_distinct_values` retains the distinct-value count. The initial value
+zero does not qualify a publication; a first positive sequence does. Each topic
+must show observed progress when the window accommodates a source period plus
+the configured throttle; a shorter window without progress is unsupported.
+Source emissions alone cannot qualify delivery. Per-topic changes, last values,
+and time since the last change expose partial or stalled delivery.
+`weak_progress` marks sparse observation, such as two distinct values over ten
+seconds at 1 Hz, without requiring Excel to match the requested cadence.
 
 A02's 100-µs case uses a timed CPU wait in both fixtures, since ordinary
 async timers need not resolve 100 µs. Delays of 1 ms and above use async
@@ -150,6 +191,21 @@ in the add-in and Excel-DNA counts managed allocations. Use timing and
 RSS for cross-framework comparison; inspect raw allocations only within an
 implementation. `R07` RSS growth is observational and affected by Excel's
 own caching and garbage collection.
+
+Workers save metadata, execution stages, and the completed/error record before
+teardown. An outer timeout preserves the last saved stage and original error,
+including hangs in workbook close or Excel quit. Explicit COM call-rejected
+and retry-later responses are retried for at most 10 seconds per call;
+`com_retry` records their counts, wait time, operation, and HRESULT. Other
+COM errors propagate immediately. Rejection waits remain part of the measured
+end-to-end time. xlfn failures also retain only startup-log bytes written since
+that worker started, so failed/rolled-back registration can be diagnosed.
+Teardown failures remain errors even when a fallback Quit succeeds. The parent
+checks the recorded PID and process creation time after every worker, waits
+briefly for normal exit, and reaps a surviving dedicated Excel process. A
+forced termination cannot preserve an `ok` result; PID reuse never authorizes
+terminating a different process. Execution and cleanup errors are retained
+separately when both occur.
 
 Rust allocation counting is disabled by default. M05 enables it after warmup
 with `BENCH.ALLOC.TRACK(TRUE)` and disables it in a `finally` block after the
@@ -167,6 +223,22 @@ waits when there is no periodic or pulse work. Earlier fixtures started a
 worker during add-in open and woke it every millisecond even in synchronous
 workloads. That background activity is another reason to rerun the historical
 CSV with newly built XLLs; its effect on the recorded timings is unmeasured.
+
+## Local harness checks
+
+From the repository root, these checks exercise planning, observations,
+diagnostics, and both fixture control channels without opening Excel:
+
+```sh
+python -B -m unittest discover -s benchmarks/excel-comparison -p 'test_*.py'
+cargo test --manifest-path benchmarks/excel-comparison/xlfn/Cargo.toml --locked --lib
+dotnet run --project benchmarks/excel-comparison/control-tests/ControlTests.csproj -- normal
+dotnet run --project benchmarks/excel-comparison/control-tests/ControlTests.csproj --no-build -- emergency
+```
+
+They do not establish native Windows XLL loading, Excel RTD delivery, or
+interactive native cancellation. The XLL artifact workflow runs the same
+fixture checks before building the comparison artifacts.
 
 C01 starts a new Excel process, but the operating system may still cache add-in
 files between cases. For storage-cold startup, reboot or flush the machine's

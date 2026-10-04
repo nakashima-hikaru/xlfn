@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import artifact_manifest
+from startup_diagnostics import read_startup_log_delta, snapshot_startup_log
 from workloads import Case, cases
 
 ROOT = Path(__file__).resolve().parent
@@ -32,6 +33,108 @@ CELL_ERRORS = {
     -2146826265: "#REF!", -2146826259: "#NAME?", XL_ERR_NUM: "#NUM!",
     -2146826246: "#N/A", -2146826243: "#SPILL!",
 }
+COM_BUSY_HRESULTS = {0x80010001, 0x8001010A}  # rejected / retry later, not executed
+
+
+class WorkerProgress:
+    """Keep the current record available even if a COM call or teardown hangs."""
+    def __init__(self, path: Path, record: dict[str, Any]):
+        self.path = path
+        self.record = record
+        self.started = time.perf_counter()
+        self.lock = threading.RLock()
+
+    def save(self) -> None:
+        with self.lock:
+            temporary = self.path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(self.record, ensure_ascii=False), encoding="utf-8")
+            temporary.replace(self.path)
+
+    def stage(self, name: str, **details: Any) -> None:
+        with self.lock:
+            self.record["stage"] = name
+            self.record["stage_details"] = details
+            self.record.setdefault("stage_history", []).append(
+                {"stage": name, "elapsed_s": time.perf_counter() - self.started, **details})
+            self.save()
+
+    def update(self, **fields: Any) -> None:
+        # Callers pass complete snapshots, never live mutable counter maps.
+        with self.lock:
+            self.record.update(fields)
+            self.save()
+
+
+class ComRetry:
+    """Retry only calls Excel explicitly rejected before executing them."""
+    def __init__(self, timeout_s: float = 10, progress: WorkerProgress | None = None):
+        self.timeout_s = timeout_s
+        self.progress = progress
+        self.stats: dict[str, Any] = {"rejected_calls": 0, "retry_wait_s": 0.0,
+                                      "retry_timeout_s": timeout_s}
+
+    def call(self, operation: str, function: Any, *args: Any, **kwargs: Any) -> Any:
+        started = None
+        while True:
+            try:
+                return function(*args, **kwargs)
+            except Exception as error:
+                hresult = getattr(error, "hresult", None)
+                if not isinstance(hresult, int) or hresult & 0xFFFFFFFF not in COM_BUSY_HRESULTS:
+                    raise
+                now = time.perf_counter()
+                if started is None:
+                    started = now
+                self.stats["rejected_calls"] += 1
+                self.stats["last_rejected_operation"] = operation
+                self.stats["last_rejected_hresult"] = f"0x{hresult & 0xFFFFFFFF:08X}"
+                remaining = self.timeout_s - (now - started)
+                if self.progress is not None:
+                    self.progress.update(com_retry=dict(self.stats))
+                if remaining <= 0:
+                    raise TimeoutError(f"Excel COM remained busy for {self.timeout_s}s: {operation}") from error
+                wait = min(0.05, remaining)
+                time.sleep(wait)
+                self.stats["retry_wait_s"] += wait
+                if self.progress is not None:
+                    self.progress.update(com_retry=dict(self.stats))
+
+
+class ComObject:
+    """Apply the same bounded rejection policy to nested Excel dispatch objects."""
+    def __init__(self, raw: Any, retry: ComRetry, name: str = "Excel"):
+        object.__setattr__(self, "_raw", raw)
+        object.__setattr__(self, "_retry", retry)
+        object.__setattr__(self, "_name", name)
+
+    @staticmethod
+    def _unwrap(value: Any) -> Any:
+        return value._raw if isinstance(value, ComObject) else value
+
+    def _wrap(self, value: Any, name: str) -> Any:
+        if hasattr(value, "_oleobj_"):
+            return ComObject(value, self._retry, name)
+        if callable(value):
+            def invoke(*args: Any, **kwargs: Any) -> Any:
+                result = self._retry.call(name, value,
+                    *(self._unwrap(arg) for arg in args),
+                    **{key: self._unwrap(arg) for key, arg in kwargs.items()})
+                return self._wrap(result, name)
+            return invoke
+        return value
+
+    def __getattr__(self, name: str) -> Any:
+        operation = f"{self._name}.{name}"
+        return self._wrap(self._retry.call(operation, getattr, self._raw, name), operation)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        self._retry.call(f"{self._name}.{name}=", setattr, self._raw, name, self._unwrap(value))
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        result = self._retry.call(self._name, self._raw,
+            *(self._unwrap(arg) for arg in args),
+            **{key: self._unwrap(arg) for key, arg in kwargs.items()})
+        return self._wrap(result, self._name)
 
 
 def describe_value(value: Any) -> str:
@@ -142,24 +245,42 @@ def interval(values: list[float], elapsed: float, unit: str) -> dict[str, Any]:
     }
 
 
+def check_final_values(target: Any, count: int, expected: Any) -> None:
+    """Validate the complete final snapshot after sampled arrival timing stops."""
+    values = flatten(target.Value2)
+    if len(values) != count:
+        raise AssertionError(f"final snapshot contains {len(values)}/{count} cells")
+    for index, value in enumerate(values):
+        if not expected(value, index):
+            raise AssertionError(f"final snapshot row {index + 1}: unexpected {describe_value(value)}")
+
+
 class ExcelSession:
-    def __init__(self, xll: Path, threads: int, throttle_ms: int, pid_file: Path):
+    def __init__(self, xll: Path, threads: int, throttle_ms: int, pid_file: Path,
+                 progress: WorkerProgress | None = None):
         import psutil
         import win32com.client
 
         self.psutil = psutil
+        self.control_root = pid_file.parent
+        self.progress = progress
+        self.com_retry = ComRetry(progress=progress)
+        if progress is not None:
+            progress.update(com_retry=dict(self.com_retry.stats))
         self.started = time.perf_counter()
-        self.app = win32com.client.DispatchEx("Excel.Application")
+        self.stage("excel_start")
+        self.app = ComObject(win32com.client.DispatchEx("Excel.Application"), self.com_retry)
+        self.hwnd = int(self.app.Hwnd)
+        import win32process
+
+        _, self.pid = win32process.GetWindowThreadProcessId(self.hwnd)
+        self.process = psutil.Process(self.pid)
+        pid_file.write_text(json.dumps({"pid": self.pid, "create_time": self.process.create_time()}),
+                            encoding="ascii")
         self.app.Visible = False
         self.app.DisplayAlerts = False
         self.app.AskToUpdateLinks = False
         self.app.EnableEvents = False
-        self.pid = int(self.app.Hwnd)
-        import win32process
-
-        _, self.pid = win32process.GetWindowThreadProcessId(self.pid)
-        pid_file.write_text(str(self.pid), encoding="ascii")
-        self.process = psutil.Process(self.pid)
         # Excel cannot switch calculation mode before its first workbook exists.
         # Keep this book open while benchmark books are opened and closed.
         self.bootstrap_book = self.app.Workbooks.Add()
@@ -173,6 +294,7 @@ class ExcelSession:
         self.app.MultiThreadedCalculation.ThreadMode = 1  # xlThreadModeManual
         self.app.MultiThreadedCalculation.ThreadCount = threads
         self.app.RTD.ThrottleInterval = throttle_ms
+        self.stage("register_xll", xll=str(xll))
         t = time.perf_counter()
         register_xll(self.app, xll)
         self.load_s = time.perf_counter() - t
@@ -183,6 +305,11 @@ class ExcelSession:
         self._stop_sampler = threading.Event()
         self._sampler = threading.Thread(target=self._sample_memory, daemon=True)
         self._sampler.start()
+
+    def stage(self, name: str, **details: Any) -> None:
+        self.last_stage = name
+        if self.progress is not None:
+            self.progress.stage(name, **details)
 
     def _sample_memory(self):
         while not self._stop_sampler.wait(0.01):
@@ -257,10 +384,14 @@ class ExcelSession:
                            f"unsettled values: [{detail}]")
 
     def close(self):
+        self.stage("close_begin")
         self._stop_sampler.set()
         self._sampler.join(timeout=1)
+        failures = []
         try:
+            self.stage("close_workbook")
             self.close_book()
+            self.stage("restore_excel_settings")
             self.app.RTD.ThrottleInterval = self.original_throttle
             self.app.MultiThreadedCalculation.ThreadCount = self.original_threads
             self.app.MultiThreadedCalculation.ThreadMode = self.original_thread_mode
@@ -268,12 +399,19 @@ class ExcelSession:
             self.app.Calculation = self.original_calculation
             self.bootstrap_book.Close(SaveChanges=False)
             # This dedicated Excel process owns the RegisterXLL load.
+            self.stage("excel_quit")
             self.app.Quit()
-        except Exception:
+        except Exception as error:
+            failures.append({"stage": self.last_stage, "error": f"{type(error).__name__}: {error}"})
             try:
+                self.stage("excel_quit_after_cleanup_error")
                 self.app.Quit()
-            except Exception:
-                pass
+            except Exception as error:
+                failures.append({"stage": self.last_stage, "error": f"{type(error).__name__}: {error}"})
+        if failures:
+            self.stage("close_failed", failures=failures)
+            raise RuntimeError(f"Excel teardown failed: {json.dumps(failures)}")
+        self.stage("closed")
 
 
 def check_scalar(target: Any, case: Case) -> None:
@@ -420,10 +558,12 @@ def run_async(session: ExcelSession, case: Case, repeat: int) -> dict[str, Any]:
     for rep in range(repeat):
         # Different arguments force a new async invocation even if Excel caches.
         offset = rep * count + 1
+        session.stage("async_submit", repetition=rep, cells=count)
         submit_start = time.perf_counter()
         target = session.add_formulas(sheet, count,
             lambda row: f'=BENCH.ASYNC({offset + row},{case.params.get("delay_us", 10000)})')
         submissions.append(time.perf_counter() - submit_start)
+        session.stage("async_observe", repetition=rep)
         # Automatic calculation can start during formula entry. Include that
         # time, and do not trigger another calculation while callbacks arrive.
         start = submit_start
@@ -445,34 +585,173 @@ def run_async(session: ExcelSession, case: Case, repeat: int) -> dict[str, Any]:
     }
 
 
+class AsyncControl:
+    """Observe and release fixture gates without calling Excel from this thread."""
+    def __init__(self, session: ExcelSession, expected: int, timeout_s: float = 120):
+        self.session = session
+        self.expected = expected
+        self.timeout_s = timeout_s
+        self.path = Path(tempfile.mkdtemp(prefix="async-", dir=session.control_root))
+        self.ready: dict[str, Any] | None = None
+        self.ready_at: float | None = None
+        self.release_at: float | None = None
+        self.error: Exception | None = None
+        self.done = threading.Event()
+        self.stop = threading.Event()
+        self.thread: threading.Thread | None = None
+        progress = getattr(session, "progress", None)
+        self.progress = progress if isinstance(progress, WorkerProgress) else None
+        self.diagnostics: dict[str, Any] = {"directory": str(self.path), "expected": expected}
+        self.diagnostic_lock = threading.Lock()
+        if self.progress is not None:
+            self.progress.update(async_control=dict(self.diagnostics))
+
+    def note(self, **details: Any) -> None:
+        with self.diagnostic_lock:
+            self.diagnostics.update(details)
+            if self.progress is not None:
+                self.progress.update(async_control=dict(self.diagnostics))
+
+    def read(self, name: str) -> dict[str, Any] | None:
+        if self.error is not None:
+            raise self.error
+        try:
+            error = (self.path / "control-error.txt").read_text(encoding="utf-8")
+        except FileNotFoundError:
+            pass
+        else:
+            raise RuntimeError(f"fixture async control failed: {error}")
+        try:
+            return json.loads((self.path / name).read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+
+    def arm(self) -> None:
+        self.session.stage("async_arm", expected=self.expected, control_dir=str(self.path))
+        directory = str(self.path).replace('"', '""')
+        if self.session.app.Evaluate(f'BENCH.ASYNC.ARM("{directory}",{self.expected})') != 1:
+            raise AssertionError("async control could not be armed")
+
+    def release(self) -> None:
+        if self.release_at is None:
+            self.release_at = time.perf_counter()
+            (self.path / "release").write_text("", encoding="ascii")
+            self.note(release_requested=True)
+
+    def start(self, release_when_ready: bool = True) -> None:
+        def control() -> None:
+            try:
+                deadline = time.perf_counter() + self.timeout_s
+                while not self.stop.is_set() and time.perf_counter() < deadline:
+                    ready = self.read("ready.json")
+                    if ready is not None:
+                        if ready.get("expected") != self.expected or ready.get("active") != self.expected:
+                            raise AssertionError(f"invalid async ready evidence: {ready}")
+                        self.ready = ready
+                        self.ready_at = time.perf_counter()
+                        self.note(ready=ready)
+                        if release_when_ready:
+                            self.release()
+                        self.done.set()
+                        # Keep an independent escape path while the cancellation
+                        # action runs on Excel's COM thread. A stalled action
+                        # must become an error, never an indefinitely held gate.
+                        while (not release_when_ready and self.release_at is None
+                               and not self.stop.is_set() and time.perf_counter() < deadline):
+                            self.stop.wait(0.005)
+                        if not self.stop.is_set() and self.release_at is None:
+                            raise TimeoutError("async cancellation action did not release the gate before its deadline")
+                        return
+                    self.stop.wait(0.005)
+                if not self.stop.is_set():
+                    raise TimeoutError(f"async ready marker missing after {self.timeout_s}s; "
+                                       f"last state: {self.read('state.json')}")
+            except Exception as error:
+                self.error = error
+                self.note(error=f"{type(error).__name__}: {error}")
+                # Unblock outstanding calls so the main COM thread can report
+                # the error. This emergency release can never count as a pass.
+                self.release()
+            finally:
+                self.done.set()
+
+        self.thread = threading.Thread(target=control, daemon=True)
+        self.thread.start()
+
+    def wait_ready(self) -> dict[str, Any]:
+        if not self.done.wait(self.timeout_s + 1):
+            raise TimeoutError("async controller did not finish")
+        if self.error is not None:
+            raise self.error
+        if self.ready is None:
+            raise AssertionError("async controller stopped without ready evidence")
+        return self.ready
+
+    def wait_released(self) -> dict[str, Any]:
+        deadline = time.perf_counter() + 30
+        while time.perf_counter() < deadline:
+            released = self.read("released.json")
+            if released is not None:
+                self.note(released=released)
+                return released
+            time.sleep(0.005)
+        raise TimeoutError("fixture did not acknowledge async gate release")
+
+    def wait_drained(self) -> dict[str, Any]:
+        deadline = time.perf_counter() + 30
+        state = None
+        while time.perf_counter() < deadline:
+            state = self.read("state.json")
+            if state is not None:
+                if state.get("control_error"):
+                    raise AssertionError(f"async control failed: {state}")
+                # The release acknowledgement can become visible before the
+                # controller replaces its initial zero-active snapshot.
+                if (state.get("released") is True and state.get("expected") == self.expected
+                        and state.get("started", 0) >= self.expected
+                        and state.get("finished") == state.get("started")
+                        and state.get("active") == 0):
+                    self.note(drained=state)
+                    return state
+            time.sleep(0.01)
+        raise TimeoutError(f"async tasks did not drain after release: {state}")
+
+    def close(self) -> None:
+        self.stop.set()
+        self.release()
+        if self.thread is not None:
+            self.thread.join(timeout=1)
+
+
+class UnsupportedCase(RuntimeError):
+    pass
+
+
 def run_async_gate(session: ExcelSession, case: Case) -> dict[str, Any]:
     sheet = session.new_book()
     n = case.params["cells"]
-    submit_start = time.perf_counter()
-    target = session.add_formulas(sheet, n, lambda row: f"=BENCH.ASYNC({row},-1)")
-    submission_s = time.perf_counter() - submit_start
-    ready_start = time.perf_counter()
-    # Automatic formula entry has already started the async calls. An explicit
-    # calculation can wait for native async completion before we can release
-    # the gate, or replace the handles belonging to the original calculation.
-    while time.perf_counter() - ready_start < 120:
-        active = int(session.app.Evaluate("BENCH.ASYNC.ACTIVE()"))
-        if active == n:
-            break
-        time.sleep(0.01)
-    if active != n:
-        raise TimeoutError(f"only {active}/{n} async calls were active before release")
-    ready_s = time.perf_counter() - ready_start
-    release_start = time.perf_counter()
-    # Invoke the control UDF without writing a cell or starting another pass
-    # while the gated native handles are still pending.
-    released = session.app.Evaluate("BENCH.ASYNC.RELEASE(1)")
-    if released != 1:
-        raise AssertionError("async release failed")
-    observed = session.wait_values(target, n, lambda value, i: value == float(i + 1),
-                                   120, sample_every=max(1, n // 2_000), start_time=release_start)
-    total_s = submission_s + ready_s + observed["poll_s"]
-    return {"formula_count": n, "active_before_release": active,
+    control = AsyncControl(session, n)
+    try:
+        control.arm()
+        session.stage("async_gated_submit", cells=n)
+        submit_start = time.perf_counter()
+        control.start()
+        target = session.add_formulas(sheet, n, lambda row: f"=BENCH.ASYNC({row},-1)")
+        submission_s = time.perf_counter() - submit_start
+        ready = control.wait_ready()
+        released = control.wait_released()
+        if released.get("active_before_release") != n:
+            raise AssertionError(f"async calls were not all pending at release: {released}")
+        session.stage("async_gate_observe", ready=ready, released=released)
+        observed = session.wait_values(target, n, lambda value, i: value == float(i + 1),
+            120, sample_every=max(1, n // 2_000), start_time=control.release_at)
+        total_s = time.perf_counter() - submit_start
+        ready_s = control.ready_at - submit_start
+        state = control.wait_drained()
+        check_final_values(target, n, lambda value, i: value == float(i + 1))
+    finally:
+        control.close()
+    return {"formula_count": n, "active_before_release": ready["active"],
             "submission_s": submission_s, "time_until_all_active_s": ready_s,
             "release_to_settle_s": observed["poll_s"],
             "total_to_settle_s": total_s,
@@ -481,55 +760,69 @@ def run_async_gate(session: ExcelSession, case: Case) -> dict[str, Any]:
             "cell_latency_p95_s": observed["p95_s"],
             "cell_latency_p99_s": observed["p99_s"],
             "sampled_cells": observed["sampled_cells"],
-            "latency_note": "COM-observed cell arrival after gate release, ~10 ms polling granularity"}
+            "control_channel": "fixture-file-v1",
+            "fixture_after_drain": state,
+            "latency_note": "COM-observed cell arrival from independent file release; includes file polling and Excel scheduling, ~10 ms cell polling"}
 
 
 def run_async_cancel(session: ExcelSession, case: Case) -> dict[str, Any]:
+    if session.implementation == "xlfn":
+        raise UnsupportedCase(
+            "A05 requires a user-driven Excel cancellation while native async calls are pending. "
+            "Excel COM formula entry may wait for native completion, and programmatic recalculation "
+            "does not raise CalculationCanceled/CalculationEnded events. A COM-only run cannot "
+            "qualify recalc/clear/close cancellation; run the documented interactive procedure.")
     sheet = session.new_book()
     n = case.params["cells"]
-    target = session.add_formulas(sheet, n,
-        lambda row: f'=BENCH.ASYNC({row},{case.params["delay_us"]})')
-    session.app.Calculate()
-    active_before = int(session.app.Evaluate("BENCH.ASYNC.ACTIVE()"))
-    if active_before == 0:
-        raise AssertionError("no pending async work at cancellation; increase delay")
-    begin = time.perf_counter()
     rss_before = session.memory()
     mode = case.params["mode"]
-    if mode == "recalc":
-        target = session.add_formulas(sheet, n,
-            lambda row: f'=BENCH.ASYNC({n + row},{case.params["delay_us"]})')
-        session.app.Calculate()
-    elif mode == "clear":
-        target.ClearContents()
-    else:
-        session.close_book()
-    action_s = time.perf_counter() - begin
-    if mode == "close":
-        session.new_book()
-    # A successful cancellation in one implementation may still leave the
-    # underlying task running. Report active task cleanup separately.
-    while time.perf_counter() - begin < 30:
-        active = int(session.app.Evaluate("BENCH.ASYNC.ACTIVE()"))
-        if active == 0:
-            break
-        time.sleep(0.01)
-    cleanup_s = time.perf_counter() - begin
-    if active != 0:
-        raise TimeoutError(f"{active} async tasks still active 30 s after cancellation")
-    stale = None
-    if mode == "recalc":
-        observed = session.wait_values(target, n, lambda value, i: value == float(n + i + 1),
-                                       30, sample_every=max(1, n // 2_000))
-        stale = sum(value == float(i + 1) for i, value in enumerate(flatten(target.Value2)))
-    elif mode == "clear":
-        stale = sum(value is not None for value in flatten(target.Value2))
-    return {"formula_count": n, "pending_before": active_before,
-            "action_s": action_s, "task_cleanup_observed_s": cleanup_s,
-            "active_after_observation": active, "stale_cells_after_observation": stale,
+    control = AsyncControl(session, n)
+    try:
+        control.arm()
+        session.stage("async_cancel_submit", cells=n)
+        control.start(release_when_ready=False)
+        target = session.add_formulas(sheet, n, lambda row: f"=BENCH.ASYNC({row},-1)")
+        ready = control.wait_ready()
+        session.stage("async_cancel_action", mode=mode, ready=ready)
+        begin = time.perf_counter()
+        if mode == "recalc":
+            # The new generation is finite; only the old generation uses the
+            # gate. Do not conflate its normal completion with old-task cancel.
+            delay = case.params.get("replacement_delay_us", 0)
+            target = session.add_formulas(sheet, n, lambda row: f"=BENCH.ASYNC({n + row},{delay})")
+        elif mode == "clear":
+            target.ClearContents()
+        else:
+            session.close_book()
+        action_s = time.perf_counter() - begin
+        before_release = control.read("state.json")
+        control.release()
+        released = control.wait_released()
+        session.stage("async_cancel_drain", before_release=before_release, released=released)
+        if mode == "close":
+            session.new_book()
+        state = control.wait_drained()
+        cleanup_s = time.perf_counter() - control.release_at
+        stale = None
+        observed = None
+        if mode == "recalc":
+            observed = session.wait_values(target, n, lambda value, i: value == float(n + i + 1),
+                30, sample_every=max(1, n // 2_000))
+            stale = sum(value != float(n + i + 1) for i, value in enumerate(flatten(target.Value2)))
+        elif mode == "clear":
+            stale = sum(value is not None for value in flatten(target.Value2))
+        if stale:
+            raise AssertionError(f"{stale} cells violated the post-cancellation result")
+    finally:
+        control.close()
+    return {"formula_count": n, "pending_before": ready["active"],
+            "action_s": action_s, "task_drain_after_release_s": cleanup_s,
+            "active_after_observation": state["active"], "stale_cells_after_observation": stale,
+            "fixture_before_release": before_release, "fixture_after_drain": state,
             "rss_before_action_bytes": rss_before, "rss_after_observation_bytes": session.memory(),
-            "settle_s": observed["poll_s"] if mode == "recalc" else None,
-            "cancellation_note": "Task cleanup and Excel callback invalidation are distinct; close mode has no workbook cells to inspect"}
+            "settle_s": observed["poll_s"] if observed is not None else None,
+            "control_channel": "fixture-file-v1",
+            "cancellation_note": "Excel-DNA RTD-task result invalidation after recalc/clear/close. Old tasks are deliberately released after the action; drain timing does not prove task cancellation. Close has no cells to inspect."}
 
 
 def run_async_repeated(session: ExcelSession, case: Case) -> dict[str, Any]:
@@ -548,6 +841,8 @@ def run_async_repeated(session: ExcelSession, case: Case) -> dict[str, Any]:
         sample_every=max(1, n // 2_000))
     values = flatten(target.Value2)
     stale = sum(value != float(expected_start + i + 1) for i, value in enumerate(values))
+    if len(values) != n or stale:
+        raise AssertionError(f"final repeated-async snapshot has {len(values)}/{n} cells and {stale} stale values")
     elapsed = time.perf_counter() - start
     return {"recalculations": case.params["repetitions"], "formula_count": n,
             "elapsed_s": elapsed, "dirty_generations_per_s": case.params["repetitions"] / elapsed,
@@ -577,6 +872,79 @@ def pulse(session: ExcelSession, sequence: int) -> None:
         raise AssertionError("RTD pulse was not accepted")
 
 
+def run_rtd_rate(session: ExcelSession, target: Any, case: Case, subscription_s: float) -> dict[str, Any]:
+    n, topics = case.params["cells"], case.params["topics"]
+    duration = case.params["duration_s"]
+    throttle_s = float(session.app.RTD.ThrottleInterval) / 1000
+    period_s = case.params["period_ms"] / 1000
+    # The first `topics` rows contain one representative for every topic.
+    sampled = target.Resize(topics, 1)
+
+    def numeric(value: Any) -> bool:
+        return (isinstance(value, (float, int)) and not isinstance(value, bool)
+                and math.isfinite(value) and value >= 0)
+
+    emitted_before = float(session.app.Evaluate("BENCH.RTD.EMITTED()"))
+    baseline = flatten(sampled.Value2)
+    if len(baseline) != topics:
+        raise AssertionError(f"RTD sample has {len(baseline)} cells, expected {topics}")
+    last = [value if numeric(value) else None for value in baseline]
+    observed = [{value} if numeric(value) else set() for value in baseline]
+    changes = [0] * topics
+    last_change_s = [0.0] * topics
+    begin = time.perf_counter()
+    while time.perf_counter() - begin < duration:
+        values = flatten(sampled.Value2)
+        if len(values) != topics:
+            raise AssertionError(f"RTD sample has {len(values)} cells, expected {topics}")
+        at = time.perf_counter() - begin
+        for topic, value in enumerate(values):
+            if numeric(value):
+                observed[topic].add(value)
+                if last[topic] is None and value == 0:
+                    # Zero can become visible after the initial #N/A without
+                    # a source publication. Periodic source sequences start
+                    # at one; the first positive sequence is real delivery.
+                    last[topic] = value
+                elif value != last[topic]:
+                    changes[topic] += 1
+                    last_change_s[topic] = at
+                    last[topic] = value
+        session.memory()
+        time.sleep(0.005)
+    elapsed = time.perf_counter() - begin
+    emitted_after = float(session.app.Evaluate("BENCH.RTD.EMITTED()"))
+    emissions = emitted_after - emitted_before
+    stalled = [topic for topic, count in enumerate(changes) if count == 0]
+    # This is a diagnostic for sparse delivery, not a requested-cadence test.
+    # In particular, two distinct values in a ten-second 1Hz run stay visible
+    # as weak progress even though one observed transition is a valid minimum.
+    weak = (min(changes) <= 1 and emissions >= 3 * topics
+            and elapsed >= 3 * max(period_s, throttle_s, 0.005))
+    result = {"subscription_s": subscription_s,
+        "observed_updates_per_s": changes[0] / elapsed,
+        "source_emissions_per_s": emissions / elapsed,
+        "source_emissions_per_topic_s": emissions / elapsed / topics,
+        "requested_updates_per_topic_s": case.params["requested_hz"],
+        "observed_distinct_values": len(observed[0]), "duration_s": duration,
+        "observation_s": elapsed, "formula_count": n, "topic_count": topics,
+        "sampled_topics": topics, "topics_with_observed_progress": topics - len(stalled),
+        "observed_changes_by_topic": changes, "observed_last_values_by_topic": last,
+        "last_change_age_s_by_topic": [elapsed - at for at in last_change_s],
+        "source_emissions": emissions,
+        "delivery_observation": "incomplete_progress" if stalled else "weak_progress" if weak else "progress",
+        "delivery_note": "One cell per topic; changes exclude the initial snapshot and initial zero. A first positive sequence after #N/A is delivery. Polling is a lower bound and RTD throttle may coalesce updates. Weak progress is diagnostic, not a cadence failure."}
+    session.stage("rtd_rate_observation", **result)
+    if emissions <= 0:
+        raise AssertionError("RTD source emitted no periodic updates")
+    if stalled:
+        detail = f"no observed numeric progress for topics {stalled}; last values: {last}"
+        if elapsed <= period_s + throttle_s + 0.005:
+            raise UnsupportedCase(f"RTD observation window is shorter than a source period plus throttle: {detail}")
+        raise AssertionError(f"RTD source emitted {emissions} updates but {detail}")
+    return result
+
+
 def run_rtd(session: ExcelSession, case: Case, repeat: int) -> dict[str, Any]:
     sheet = session.new_book()
     n, topics = case.params["cells"], case.params["topics"]
@@ -588,26 +956,7 @@ def run_rtd(session: ExcelSession, case: Case, repeat: int) -> dict[str, Any]:
     subscription_s = time.perf_counter() - start
     samples = []
     if case.id == "R04":
-        duration = case.params["duration_s"]
-        emitted_before = float(session.app.Evaluate("BENCH.RTD.EMITTED()"))
-        begin = time.perf_counter()
-        observed = set()
-        while time.perf_counter() - begin < duration:
-            value = target.Cells(1, 1).Value2
-            if isinstance(value, (float, int)) and value >= 0:
-                observed.add(value)
-            session.memory()
-            time.sleep(0.005)
-        emitted_after = float(session.app.Evaluate("BENCH.RTD.EMITTED()"))
-        if emitted_after <= emitted_before:
-            raise AssertionError("RTD source emitted no periodic updates")
-        return {"subscription_s": subscription_s, "observed_updates_per_s": len(observed) / duration,
-            "source_emissions_per_s": (emitted_after - emitted_before) / duration,
-            "source_emissions_per_topic_s": (emitted_after - emitted_before) / duration / topics,
-            "requested_updates_per_topic_s": case.params["requested_hz"],
-            "observed_distinct_values": len(observed), "duration_s": duration,
-            "formula_count": n, "topic_count": topics,
-            "delivery_note": "Cell polling is a lower bound; Excel RTD throttle may coalesce updates"}
+        return run_rtd_rate(session, target, case, subscription_s)
     if case.id == "R06":
         for _ in range(case.params["repetitions"]):
             begin = time.perf_counter()
@@ -812,6 +1161,60 @@ def artifact(root: Path, implementation: str, case: Case) -> Path:
     return root / implementation / filename
 
 
+def recover_worker_record(path: Path, case: Case, implementation: str,
+                          error: Exception) -> dict[str, Any]:
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        record = {"id": case.id, "variant": case.variant, "implementation": implementation}
+    if "error" in record:
+        record["worker_error"] = record["error"]
+    record["status"] = "error"
+    record["error"] = f"worker timeout/failure: {error}"
+    record["recovered_partial_record"] = path.is_file()
+    return record
+
+
+def close_worker_session(session: ExcelSession, progress: WorkerProgress) -> None:
+    try:
+        session.close()
+    except Exception as error:
+        record = progress.record
+        cleanup_error = f"{type(error).__name__}: {error}"
+        # Preserve an execution error as the primary cause when both fail.
+        progress.update(status="error", execution_status=record.get("status"),
+            error=record.get("error", cleanup_error), cleanup_error=cleanup_error,
+            failure_phase=record.get("failure_phase", "close"),
+            failure_stage=record.get("failure_stage", record.get("stage")))
+
+
+def reap_excel_process(pid_file: Path, grace_s: float) -> dict[str, Any]:
+    """Reap only the exact Excel process created by this worker, including on success."""
+    if not pid_file.is_file():
+        return {"pid_recorded": False}
+    import psutil
+
+    result: dict[str, Any] = {"forced_kill": False}
+    try:
+        identity = json.loads(pid_file.read_text(encoding="ascii"))
+        result["pid"] = identity["pid"]
+        process = psutil.Process(identity["pid"])
+        if process.create_time() != identity["create_time"]:
+            return result | {"original_process_exited": True, "pid_reused": True}
+        try:
+            process.wait(timeout=grace_s)
+        except psutil.TimeoutExpired:
+            process.kill()
+            result["forced_kill"] = True
+            process.wait(timeout=5)
+        result["original_process_exited"] = True
+    except psutil.NoSuchProcess:
+        result["original_process_exited"] = True
+    except (psutil.Error, OSError, ValueError, KeyError, TypeError) as error:
+        result["error"] = f"{type(error).__name__}: {error}"
+    return result
+
+
 def worker(args: argparse.Namespace, case: Case) -> int:
     artifact_root = Path(args.artifacts)
     manifest_path = artifact_root / "manifest.json"
@@ -831,37 +1234,47 @@ def worker(args: argparse.Namespace, case: Case) -> int:
         "ci_run_attempt": manifest["run_attempt"] if manifest else None,
         "runner_commit": checkout_commit(),
     }
+    progress = WorkerProgress(Path(args.progress_file), record)
+    startup_log = snapshot_startup_log()
     session = None
     try:
         if manifest is not None:
             relative = f"{args.implementation}/{xll.name}"
             if record["xll_sha256"] != manifest["files"][relative]["sha256"]:
                 raise ValueError(f"CI XLL changed after verification: {relative}")
-        record["phase"] = "load_xll"
-        record["xll_load_method"] = "RegisterXLL"
-        session = ExcelSession(xll, record["threads"], args.throttle_ms, Path(args.pid_file))
-        record["excel_version"] = str(session.app.Version)
-        record["excel_build"] = str(session.app.Build)
-        record["excel_bitness"] = session.app.OperatingSystem
+        progress.update(phase="load_xll", xll_load_method="RegisterXLL")
+        progress.stage("load_begin")
+        session = ExcelSession(xll, record["threads"], args.throttle_ms, Path(args.pid_file), progress)
+        session.implementation = args.implementation
+        progress.update(excel_version=str(session.app.Version), excel_build=str(session.app.Build),
+                        excel_bitness=session.app.OperatingSystem)
         mode = calculation_mode(case)
         session.app.Calculation = mode
-        record["calculation_mode"] = "automatic" if mode == XL_AUTOMATIC else "manual"
+        progress.update(calculation_mode="automatic" if mode == XL_AUTOMATIC else "manual")
         if case.id.startswith("A") or case.params.get("workload") == "async":
-            record["async_delivery"] = "native" if args.implementation == "xlfn" else "rtd-task"
-        record["phase"] = "execute"
-        record["metrics"] = execute(session, case, args.repeat)
-        record["metrics"]["peak_excel_rss_bytes"] = session.peak_rss
-        record["metrics"]["excel_cpu_s"] = session.cpu_s()
-        record["status"] = "ok"
-        record["phase"] = "complete"
+            progress.update(async_delivery="native" if args.implementation == "xlfn" else "rtd-task")
+        progress.update(phase="execute")
+        progress.stage("execute_begin")
+        metrics = execute(session, case, args.repeat)
+        metrics["peak_excel_rss_bytes"] = session.peak_rss
+        metrics["excel_cpu_s"] = session.cpu_s()
+        progress.update(metrics=metrics, status="ok")
+    except UnsupportedCase as error:
+        progress.update(status="unsupported", unsupported_reason=str(error), error=str(error))
     except Exception as error:
-        record["status"] = "error"
-        record["error"] = f"{type(error).__name__}: {error}"
+        # Persist the cause before diagnostic COM calls or teardown can hang.
+        progress.update(status="error", error=f"{type(error).__name__}: {error}",
+                        failure_phase=record.get("phase"), failure_stage=record.get("stage"))
+        if args.implementation == "xlfn":
+            progress.update(startup_log=read_startup_log_delta(startup_log))
         if session is not None and args.implementation == "xlfn":
-            record["registration_diagnostics"] = registration_diagnostics(session.app)
+            progress.stage("registration_diagnostics")
+            progress.update(registration_diagnostics=registration_diagnostics(session.app))
     finally:
         if session is not None:
-            session.close()
+            progress.update(phase="close")
+            close_worker_session(session, progress)
+    progress.update(phase="complete" if record["status"] == "ok" else record.get("failure_phase", "execute"))
     print(json.dumps(record, ensure_ascii=False), flush=True)
     return 0 if record["status"] == "ok" else 1
 
@@ -886,6 +1299,7 @@ def main() -> int:
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--case-key", help=argparse.SUPPRESS)
     parser.add_argument("--pid-file", help=argparse.SUPPRESS)
+    parser.add_argument("--progress-file", help=argparse.SUPPRESS)
     args = parser.parse_args()
     selected = [case for case in cases(args.profile)
                 if (not args.id or case.id in args.id) and (not args.variant or case.variant == args.variant)]
@@ -899,7 +1313,7 @@ def main() -> int:
         parser.error("Excel execution requires Windows; --plan works on this machine")
     if args.worker:
         case = next((case for case in selected if case.key == args.case_key), None)
-        if case is None or args.implementation is None or args.pid_file is None:
+        if case is None or args.implementation is None or args.pid_file is None or args.progress_file is None:
             parser.error("invalid worker arguments")
         return worker(args, case)
     if args.repeat < 1 or args.threads < 1 or args.throttle_ms < 1:
@@ -928,11 +1342,13 @@ def main() -> int:
                 parser.error(f"missing {xll}; build artifacts first")
             with tempfile.TemporaryDirectory() as tmp:
                 pid_file = Path(tmp) / "excel.pid"
+                progress_file = Path(tmp) / "progress.json"
                 cmd = [sys.executable, str(Path(__file__).resolve()), "--worker",
                        "--profile", args.profile, "--artifacts", args.artifacts,
                        "--implementation", implementation, "--case-key", case.key,
                        "--repeat", str(args.repeat), "--threads", str(args.threads),
-                       "--throttle-ms", str(args.throttle_ms), "--pid-file", str(pid_file)]
+                       "--throttle-ms", str(args.throttle_ms), "--pid-file", str(pid_file),
+                       "--progress-file", str(progress_file)]
                 if args.allow_local_artifacts:
                     cmd.append("--allow-local-artifacts")
                 if args.allow_commit_mismatch:
@@ -945,25 +1361,17 @@ def main() -> int:
                         raise RuntimeError(child.stderr or "worker returned no result")
                     record = json.loads(rows[-1])
                 except (subprocess.TimeoutExpired, RuntimeError) as error:
-                    if pid_file.exists():
-                        import psutil
-                        try:
-                            psutil.Process(int(pid_file.read_text())).kill()
-                        except psutil.Error:
-                            pass
-                    record = {"id": case.id, "variant": case.variant,
-                              "implementation": implementation, "status": "error",
-                              "error": f"worker timeout/failure: {error}"}
+                    record = recover_worker_record(progress_file, case, implementation, error)
+                cleanup = reap_excel_process(pid_file, grace_s=5 if record["status"] == "ok" else 0)
+                record["excel_process_cleanup"] = cleanup
+                if cleanup.get("forced_kill") or cleanup.get("error"):
+                    error = cleanup.get("error", "Excel survived worker teardown and required forced termination")
+                    if record["status"] != "error":
+                        record.update(execution_status=record["status"], status="error",
+                                      error=record.get("error", error), failure_phase="close", phase="close")
+                    record.setdefault("cleanup_error", error)
                 with out.open("a", encoding="utf-8") as file:
                     file.write(json.dumps(record, ensure_ascii=False) + "\n")
-                if record["status"] != "ok" and pid_file.exists():
-                    import psutil
-                    try:
-                        process = psutil.Process(int(pid_file.read_text()))
-                        if process.is_running():
-                            process.kill()
-                    except psutil.Error:
-                        pass
                 print(f"{case.key} {implementation}: {record['status']}", flush=True)
                 if record["status"] != "ok":
                     print(record.get("error", "unknown error"), flush=True)

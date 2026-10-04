@@ -38,6 +38,16 @@ jobs:
         shell: pwsh
         run: python -B -m unittest discover -s benchmarks/excel-comparison -p 'test_*.py'
 
+      - name: Test fixture control and RTD concurrency
+        shell: pwsh
+        run: |
+          cargo test --manifest-path benchmarks/excel-comparison/xlfn/Cargo.toml --locked --lib
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet run --project benchmarks/excel-comparison/control-tests/ControlTests.csproj -- normal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet run --project benchmarks/excel-comparison/control-tests/ControlTests.csproj --no-build -- emergency
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Build xlfn and NativeAOT Excel-DNA fixtures
         shell: pwsh
         run: ./benchmarks/excel-comparison/build.ps1
