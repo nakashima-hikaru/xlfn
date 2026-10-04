@@ -16,21 +16,25 @@ coerce text to numbers, booleans to numbers, or arrays to scalars.
 | `i64` | integer or exactly representable integral number | numeric input is limited to the exact binary64 integer range |
 | `String` | string | owned UTF-8 after validated UTF-16 decoding |
 | `&str` | string | call-local view for synchronous functions |
-| `ExcelErrorValue` | Excel error | preserves the exact Excel error |
+| `ExcelError` | Excel error | preserves the exact Excel error |
 | `ExcelSerialDate` | finite number | retains an unresolved workbook date system |
 
 An Excel error passed where a different type is expected is propagated as the
 original error. Input views such as `ExcelCellRef` and `XlArrayRef` are
 synchronous, call-scoped values; see [Borrow a range](#borrow-a-range-during-a-synchronous-call).
 
-Built-in scalar outputs are `f64`, `bool`, `i32`, exactly representable `i64`,
-`String`, `&str`, `ExcelSerialDate`, and `ExcelErrorValue`.
+Built-in scalar outputs are `f64`, `f32`, `bool`, `i8`, `i16`, `i32`, `u8`,
+`u16`, `u32`, exactly representable `i64`, `u64`, `isize`, and `usize`, plus
+`String`, `&str`, `ExcelSerialDate`, and `ExcelError`.
+Integer outputs wider than 32 bits are limited to the binary64 exact-integer
+range `-2^53..=2^53` (or `0..=2^53` for unsigned integers); larger values fail
+with overflow rather than silently rounding.
 `ExcelCellOutput` and custom types implementing `IntoExcel` are also supported.
 The dynamic `ExcelValue`, borrowed input views, and `()` are not ordinary
 worksheet result types.
 
 Numbers must be finite; strings must fit Excel's counted UTF-16 representation.
-Return `ExcelErrorValue(ExcelError::NotAvailable)` for an intentional `#N/A`
+Return `ExcelError::NotAvailable` for an intentional `#N/A`
 value. Return `Err(...)` when the function failed: the latter is also reported
 as a failure in diagnostics and instrumentation.
 
@@ -102,8 +106,8 @@ use xlfn::value::XlArrayRef;
 
 #[excel_function(name = "ARRAY.DOUBLED", thread_safe)]
 fn doubled(values: XlArrayRef<'_>) -> XllResult<XlArrayOutput> {
-    let (rows, columns) = values.shape();
-    let mut output = XlArrayBuilder::new(rows, columns)?;
+    let shape = values.shape();
+    let mut output = XlArrayBuilder::new(shape.rows, shape.columns)?;
     for cell in values.cells() {
         output.push_f64(cell.as_f64()? * 2.0)?;
     }
@@ -148,8 +152,10 @@ fn cumulative(values: Row<f64>) -> XllResult<Row<f64>> {
 ```
 
 `Vec<T>` and `BoundedVarArgs<T, MAX>` are input-only one-dimensional
-containers. Use the bounded form when a maximum is part of the worksheet
-contract; `MAX` must be greater than zero.
+containers: they do not retain row or column orientation. Choose `Row<T>` or
+`Column<T>` explicitly when returning a one-dimensional result. Use the bounded
+form when a maximum is part of the worksheet contract; `MAX` must be greater
+than zero.
 
 ## Treat dates and dynamic values deliberately
 
@@ -179,5 +185,13 @@ fn scale(value: f64, factor: Option<f64>) -> f64 {
     value * factor.unwrap_or(1.0)
 }
 ```
+
+`Option<T>` and `OptionalExcelValue<T>` describe input presence only. A return
+value cannot preserve the distinction between an omitted argument and a blank
+cell, so choose an explicit value, empty string, or `ExcelError` on output.
+
+All value types are exposed through `xlfn::value`; their implementation modules
+are private. Borrowed UTF-16 text can be decoded with the fallible
+`XlStrRef::try_to_string` method.
 
 Next, see [Execution modes and contexts](execution-modes.md) to control how Excel runs your functions.

@@ -9,14 +9,20 @@ use crate::{XllError, XllResult};
 pub(crate) const MAX_REGISTER_ARGUMENT_HELP_ENTRIES: usize = 244;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Static argument help metadata emitted by the function macro.
 pub struct ArgumentDescriptor {
+    /// Worksheet-visible argument name.
     pub name: &'static str,
+    /// Argument help shown by Excel.
     pub description: &'static str,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Whether Excel coerces an argument or passes its worksheet reference.
 pub enum ArgumentAbi {
+    /// Excel supplies a coerced value operand.
     CoercedValue,
+    /// Excel supplies a reference operand for an eligible execution mode.
     RawReference,
 }
 

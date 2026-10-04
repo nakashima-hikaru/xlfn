@@ -39,9 +39,11 @@ fn sum(values: XlArrayRef<'_>) -> XllResult<f64> {
 fn normalize(values: XlArrayRef<'_>) -> XllResult<XlArrayOutput> {
     let mean = values
         .cells()
-        .try_fold(0.0, |sum, cell| Ok(sum + cell.as_f64()?))?
+        .try_fold(0.0, |sum, cell| -> XllResult<f64> {
+            Ok(sum + cell.as_f64()?)
+        })?
         / values.len() as f64;
-    let (rows, columns) = values.shape();
+    let xlfn::error::Shape { rows, columns } = values.shape();
     let mut output = XlArrayBuilder::new(rows, columns)?;
     for cell in values.cells() {
         output.push_f64(cell.as_f64()? - mean)?;

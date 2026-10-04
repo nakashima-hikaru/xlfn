@@ -1,6 +1,7 @@
 //! Allocation-free bounds for diagnostic cloning and tracing output.
 
 use crate::XllError;
+use std::borrow::Cow;
 use std::fmt;
 
 // Error chains are application-owned. Bound admission before their recursive
@@ -16,6 +17,13 @@ pub(super) fn clone_bytes(error: &XllError) -> Option<usize> {
     for _ in 0..MAX_ERROR_DEPTH {
         let (local, source) = match current {
             XllError::Native { message, .. } => (message.len(), None),
+            XllError::Custom { message, .. } => (
+                match message {
+                    Cow::Borrowed(_) => 0,
+                    Cow::Owned(message) => message.len(),
+                },
+                None,
+            ),
             XllError::LibraryLoad { path, .. } => (path.as_os_str().as_encoded_bytes().len(), None),
             XllError::RtdSubscriptionShutdown { key, source, .. } => (
                 key.len().checked_add(size_of::<XllError>())?,
@@ -128,6 +136,11 @@ struct DebugError<'a>(&'a XllError);
 impl fmt::Debug for DebugError<'_> {
     fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
+            XllError::Custom { excel, message } => output
+                .debug_struct("Custom")
+                .field("excel", excel)
+                .field("message", &DebugText(message))
+                .finish(),
             XllError::Native { code, message } => output
                 .debug_struct("Native")
                 .field("code", code)
@@ -158,6 +171,34 @@ impl fmt::Debug for DebugError<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_errors_charge_only_owned_messages_and_bound_tracing_text() {
+        use crate::error::ExcelError;
+        let borrowed = XllError::custom(ExcelError::NotAvailable, "static application detail");
+        let owned = XllError::custom(ExcelError::NotAvailable, "owned detail".to_owned());
+        assert_eq!(clone_bytes(&borrowed), Some(0));
+        assert_eq!(clone_bytes(&owned), Some(12));
+        assert_eq!(format!("{}", TracedError(&owned)), owned.to_string());
+        assert_eq!(format!("{:?}", TracedError(&owned)), format!("{owned:?}"));
+
+        let oversize = XllError::custom(
+            ExcelError::NotAvailable,
+            "x".repeat(super::super::DIAGNOSTIC_PAYLOAD_MAX_BYTES + 1),
+        );
+        assert_eq!(clone_bytes(&oversize), None);
+        for text in [
+            format!("{}", TracedError(&oversize)),
+            format!("{:?}", TracedError(&oversize)),
+        ] {
+            assert!(text.ends_with(super::super::DIAGNOSTIC_TRUNCATION_SUFFIX));
+            assert!(
+                text.len()
+                    <= super::super::DIAGNOSTIC_TEXT_MAX_BYTES
+                        + super::super::DIAGNOSTIC_TRUNCATION_SUFFIX.len()
+            );
+        }
+    }
 
     #[test]
     fn clone_budget_counts_owned_lengths_boxes_and_paths() {

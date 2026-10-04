@@ -244,7 +244,7 @@ command above without `refinement` for the allocation regression gate.
 
 ## Public cache registry
 
-`cache_registry` measures `CacheEndpoint::get` through a shared `CacheRegistry`,
+`cache_registry` measures `CacheRegistry::get` through a shared `CacheRegistry`,
 including endpoint resolution and lease release. `distinct_endpoints` uses
 1/8/32 persistent workers with a separate endpoint per worker. `endpoint_cycle`
 uses one worker cycling through 1/8/16 endpoints to expose lookup cost when

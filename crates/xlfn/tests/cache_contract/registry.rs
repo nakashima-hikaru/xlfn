@@ -28,19 +28,15 @@ fn versioned_endpoint_ids_are_distinct() {
     let ep1 = CacheEndpoint::<String, String, MarkerA>::new("v1");
     let ep2 = CacheEndpoint::<String, String, MarkerA>::new("v2");
 
-    ep1.get_or_try_insert(
-        &registry,
-        "k1".to_string(),
-        |_| 1,
-        || Ok("val1".to_string()),
-    )
-    .unwrap();
+    registry
+        .get_or_try_insert(&ep1, "k1".to_string(), |_| 1, || Ok("val1".to_string()))
+        .unwrap();
 
     assert_eq!(
-        &*ep1.get(&registry, &"k1".to_string()).unwrap().unwrap(),
+        &*registry.get(&ep1, &"k1".to_string()).unwrap().unwrap(),
         "val1"
     );
-    assert!(ep2.get(&registry, &"k1".to_string()).unwrap().is_none());
+    assert!(registry.get(&ep2, &"k1".to_string()).unwrap().is_none());
 }
 
 #[test]

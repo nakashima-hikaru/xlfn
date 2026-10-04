@@ -76,9 +76,9 @@ impl Addin for BenchAddin {
         let (source, rtd_shared) = BenchRtdSource::new();
         let rtd = context.rtd().register_source(source)?;
         let limits = RtdLimits::standard()
-            .with_max_pending(RtdCapacity::from_usize(120_000))
-            .with_max_active(RtdCapacity::from_usize(120_000))
-            .with_max_queued_updates(RtdCapacity::from_usize(120_000));
+            .with_max_pending(RtdCapacity::disabled_if_zero(120_000))
+            .with_max_active(RtdCapacity::disabled_if_zero(120_000))
+            .with_max_queued_updates(RtdCapacity::disabled_if_zero(120_000));
         let config =
             RuntimeConfig::new()
                 .with_rtd(RtdConfig::new().with_limits(limits))

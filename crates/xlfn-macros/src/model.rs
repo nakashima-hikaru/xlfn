@@ -406,26 +406,10 @@ fn analyze_execution(
             format!("a main-thread context function cannot be marked {quote}thread_safe{quote}"),
         ));
     }
-    if matches!(context_kind, Some(ContextKind::ThreadSafe)) && options.thread_safe {
-        return Err(syn::Error::new_spanned(
-            &function.sig.inputs,
-            format!(
-                "a thread-safe context function must not repeat the {quote}thread_safe{quote} mode flag"
-            ),
-        ));
-    }
     if matches!(context_kind, Some(ContextKind::MacroSheet)) && options.thread_safe {
         return Err(syn::Error::new_spanned(
             &function.sig.inputs,
             format!("a macro-sheet context function cannot be marked {quote}thread_safe{quote}"),
-        ));
-    }
-    if matches!(context_kind, Some(ContextKind::MacroSheet)) && options.macro_sheet {
-        return Err(syn::Error::new_spanned(
-            &function.sig.inputs,
-            format!(
-                "a macro-sheet context function must not repeat the {quote}macro_sheet{quote} mode flag"
-            ),
         ));
     }
     if options.macro_sheet && options.thread_safe {

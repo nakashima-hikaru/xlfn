@@ -704,7 +704,7 @@ pub(super) unsafe fn write_value_variant(result: *mut VARIANT, value: &StoredRtd
         }
         StoredRtdValue::Error(value) => {
             variant.Anonymous.Anonymous.vt = VT_ERROR;
-            variant.Anonymous.Anonymous.Anonymous.scode = 2000 + value.0.code();
+            variant.Anonymous.Anonymous.Anonymous.scode = 2000 + value.code();
         }
         StoredRtdValue::Empty => {
             variant.Anonymous.Anonymous.vt = VT_EMPTY;

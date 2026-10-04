@@ -69,6 +69,7 @@ unsafe extern "system" fn callback(
     XLRET_SUCCESS
 }
 
+/// Benchmark fixture for generation-scoped handle delivery through the async boundary.
 pub struct HandleScopedDeliveryBenchmark {
     // Drop drains async task pins before the handle arena is sealed.
     manager: AsyncManager,
@@ -79,6 +80,7 @@ pub struct HandleScopedDeliveryBenchmark {
 }
 
 impl HandleScopedDeliveryBenchmark {
+    /// Starts a worker and seeds a handle, optionally recording instrumentation.
     pub fn new(instrumented: bool) -> Self {
         crate::module_runtime::reset_callbacks_for_test();
         // SAFETY: callback has the Excel ABI and remains process-live.
@@ -116,6 +118,7 @@ impl HandleScopedDeliveryBenchmark {
         }
     }
 
+    /// Runs and drains the given number of scoped deliveries.
     pub fn run(&self, iterations: usize) {
         let before = DELIVERIES.load(Ordering::Relaxed);
         for _ in 0..iterations {

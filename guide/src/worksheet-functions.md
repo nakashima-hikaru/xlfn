@@ -56,7 +56,7 @@ expected invalid input, and reserve panics for defects in the program.
 
 You can return strings, booleans, numbers, and arrays, or wrap those results in
 `XllResult`. If an Excel error is itself the intended value, return
-`ExcelErrorValue`, for example `ExcelErrorValue(ExcelError::NotAvailable)` for
+`ExcelError`, for example `ExcelError::NotAvailable` for
 `#N/A`. [Errors and diagnostics](errors-diagnostics.md) explains the mappings and
 how to record detailed failures.
 

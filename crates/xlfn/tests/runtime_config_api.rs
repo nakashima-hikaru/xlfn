@@ -50,7 +50,7 @@ fn rtd_config_distinguishes_disabled_and_bounded_admission() {
 
     const LIMITS: RtdLimits = RtdLimits::standard()
         .with_max_pending(RtdCapacity::disabled())
-        .with_max_active(RtdCapacity::from_usize(1));
+        .with_max_active(RtdCapacity::disabled_if_zero(1));
     const CONFIG: RuntimeConfig =
         RuntimeConfig::new().with_rtd(RtdConfig::new().with_limits(LIMITS));
     assert_ne!(CONFIG, RuntimeConfig::default());

@@ -21,12 +21,19 @@ const STATE_DELIVERING: u8 = 2;
 #[cfg(feature = "async")]
 const STATE_DONE: u8 = 3;
 
+/// Scope whose termination can request cooperative cancellation of a task.
+///
+/// A token reports requests; it does not stop an application operation that
+/// ignores the token or cannot be interrupted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CancellationGuarantee {
     #[cfg(feature = "async")]
+    /// Cancellation is available when observed, without a verified calculation boundary.
     BestEffort,
+    /// Cancellation follows the associated Excel calculation scope.
     CalculationScoped,
     #[cfg(feature = "async")]
+    /// Cancellation follows the associated subscription scope.
     SubscriptionScoped,
 }
 
@@ -290,6 +297,7 @@ impl CancellationToken {
     }
 
     #[must_use]
+    /// Returns the cancellation scope established when this token was created.
     pub const fn guarantee(&self) -> CancellationGuarantee {
         self.guarantee
     }
@@ -304,6 +312,10 @@ impl CancellationToken {
     }
 }
 
+/// Future returned by [`CancellationToken::cancelled`].
+///
+/// It wakes when the token's scope is cancelled or ends. Dropping the future
+/// unregisters its waiter and does not cancel the scope.
 pub struct Cancelled<'token> {
     token: CancellationToken,
     waiter_id: Option<u64>,

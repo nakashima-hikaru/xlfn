@@ -1565,7 +1565,10 @@ mod tests {
         let mut string = values.pop().unwrap();
         // SAFETY: the inline root and its owned UTF-16 storage remain live.
         let borrowed = unsafe { crate::value::XlValueRef::from_raw(string.as_raw()) }.unwrap();
-        assert_eq!(borrowed.as_str().unwrap().to_string().unwrap(), "価格 💡");
+        assert_eq!(
+            borrowed.as_str().unwrap().try_to_string().unwrap(),
+            "価格 💡"
+        );
 
         let mut array = values.pop().unwrap();
         // SAFETY: the inline root and its owned cell/string buffers remain live.
@@ -1573,14 +1576,20 @@ mod tests {
         let array_ref =
             <crate::value::XlArrayRef as crate::value::FromExcel>::from_excel(borrowed, "array")
                 .unwrap();
-        assert_eq!(array_ref.shape(), (1, 2));
+        assert_eq!(
+            array_ref.shape(),
+            crate::error::Shape {
+                rows: 1,
+                columns: 2
+            }
+        );
         assert_eq!(
             array_ref
                 .get(0, 0)
                 .unwrap()
                 .as_str()
                 .unwrap()
-                .to_string()
+                .try_to_string()
                 .unwrap(),
             "日本語 💡"
         );

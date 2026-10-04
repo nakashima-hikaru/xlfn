@@ -196,14 +196,14 @@ mod tests {
             let registry = &registry;
             let worker = scope.spawn(move || {
                 drop(
-                    endpoint
-                        .get_or_try_insert(registry, 1, |_| 1, || Ok(7))
+                    registry
+                        .get_or_try_insert(&endpoint, 1, |_| 1, || Ok(7))
                         .unwrap(),
                 );
                 ready_tx.send(()).unwrap();
                 start_rx.recv().unwrap();
                 for _ in 0..100 {
-                    assert_eq!(*endpoint.get(registry, &1).unwrap().unwrap(), 7);
+                    assert_eq!(*registry.get(&endpoint, &1).unwrap().unwrap(), 7);
                 }
                 done_tx.send(()).unwrap();
             });
@@ -223,36 +223,36 @@ mod tests {
         let endpoint = CacheEndpoint::<u64, String>::new("registry-lifetime");
         let first = CacheRegistry::new(64);
         drop(
-            endpoint
-                .get_or_try_insert(&first, 1, String::len, || Ok("old".into()))
+            first
+                .get_or_try_insert(&endpoint, 1, String::len, || Ok("old".into()))
                 .unwrap(),
         );
         let identity = first.identity;
         // The box allocation remains stable when the registry owner moves.
         let mut registry = first;
         assert_eq!(registry.identity, identity);
-        assert_eq!(&*endpoint.get(&registry, &1).unwrap().unwrap(), "old");
+        assert_eq!(&*registry.get(&endpoint, &1).unwrap().unwrap(), "old");
         registry.clear();
-        assert!(endpoint.get(&registry, &1).unwrap().is_none());
+        assert!(registry.get(&endpoint, &1).unwrap().is_none());
         drop(
-            endpoint
-                .get_or_try_insert(&registry, 1, String::len, || Ok("new".into()))
+            registry
+                .get_or_try_insert(&endpoint, 1, String::len, || Ok("new".into()))
                 .unwrap(),
         );
-        assert_eq!(&*endpoint.get(&registry, &1).unwrap().unwrap(), "new");
+        assert_eq!(&*registry.get(&endpoint, &1).unwrap().unwrap(), "new");
 
         // Replace in the same stack slot: stale TLS pointers cannot authorize
         // access to the destroyed registry even if allocator addresses repeat.
         registry = CacheRegistry::new(64);
         assert_ne!(registry.identity, identity);
-        assert!(endpoint.get(&registry, &1).unwrap().is_none());
+        assert!(registry.get(&endpoint, &1).unwrap().is_none());
         drop(
-            endpoint
-                .get_or_try_insert(&registry, 1, String::len, || Ok("replacement".into()))
+            registry
+                .get_or_try_insert(&endpoint, 1, String::len, || Ok("replacement".into()))
                 .unwrap(),
         );
         assert_eq!(
-            &*endpoint.get(&registry, &1).unwrap().unwrap(),
+            &*registry.get(&endpoint, &1).unwrap().unwrap(),
             "replacement"
         );
     }
@@ -266,30 +266,30 @@ mod tests {
         let marked = CacheEndpoint::<u64, u64, Marker>::new("same-name");
         let strings = CacheEndpoint::<u64, String>::new("same-name");
         drop(
-            numbers
-                .get_or_try_insert(&first, 1, |_| 1, || Ok(7))
+            first
+                .get_or_try_insert(&numbers, 1, |_| 1, || Ok(7))
                 .unwrap(),
         );
         drop(
-            numbers
-                .get_or_try_insert(&second, 1, |_| 1, || Ok(9))
+            second
+                .get_or_try_insert(&numbers, 1, |_| 1, || Ok(9))
                 .unwrap(),
         );
         drop(
-            marked
-                .get_or_try_insert(&first, 1, |_| 1, || Ok(11))
+            first
+                .get_or_try_insert(&marked, 1, |_| 1, || Ok(11))
                 .unwrap(),
         );
         drop(
-            strings
-                .get_or_try_insert(&first, 1, String::len, || Ok("text".into()))
+            first
+                .get_or_try_insert(&strings, 1, String::len, || Ok("text".into()))
                 .unwrap(),
         );
         for _ in 0..3 {
-            assert_eq!(*numbers.get(&first, &1).unwrap().unwrap(), 7);
-            assert_eq!(*numbers.get(&second, &1).unwrap().unwrap(), 9);
-            assert_eq!(*marked.get(&first, &1).unwrap().unwrap(), 11);
-            assert_eq!(&*strings.get(&first, &1).unwrap().unwrap(), "text");
+            assert_eq!(*first.get(&numbers, &1).unwrap().unwrap(), 7);
+            assert_eq!(*second.get(&numbers, &1).unwrap().unwrap(), 9);
+            assert_eq!(*first.get(&marked, &1).unwrap().unwrap(), 11);
+            assert_eq!(&*first.get(&strings, &1).unwrap().unwrap(), "text");
         }
     }
 
@@ -302,15 +302,15 @@ mod tests {
         for (value, id) in ids.iter().enumerate() {
             let endpoint = CacheEndpoint::<u64, u64>::new(id);
             drop(
-                endpoint
-                    .get_or_try_insert(&registry, 1, |_| 1, || Ok(value as u64))
+                registry
+                    .get_or_try_insert(&endpoint, 1, |_| 1, || Ok(value as u64))
                     .unwrap(),
             );
         }
         for _ in 0..2 {
             for (value, id) in ids.iter().enumerate() {
                 let endpoint = CacheEndpoint::<u64, u64>::new(id);
-                assert_eq!(*endpoint.get(&registry, &1).unwrap().unwrap(), value as u64);
+                assert_eq!(*registry.get(&endpoint, &1).unwrap().unwrap(), value as u64);
             }
         }
     }
@@ -330,14 +330,14 @@ mod tests {
         let first = CacheEndpoint::<u64, u64>::new(first_name);
         let second = CacheEndpoint::<u64, u64>::new(second_name);
         drop(
-            first
-                .get_or_try_insert(&registry, 1, |_| 1, || Ok(7))
+            registry
+                .get_or_try_insert(&first, 1, |_| 1, || Ok(7))
                 .unwrap(),
         );
-        assert_eq!(*second.get(&registry, &1).unwrap().unwrap(), 7);
+        assert_eq!(*registry.get(&second, &1).unwrap().unwrap(), 7);
         assert_eq!(registry.endpoint_count(), 1);
         registry.clear();
-        assert!(first.get(&registry, &1).unwrap().is_none());
-        assert!(second.get(&registry, &1).unwrap().is_none());
+        assert!(registry.get(&first, &1).unwrap().is_none());
+        assert!(registry.get(&second, &1).unwrap().is_none());
     }
 }

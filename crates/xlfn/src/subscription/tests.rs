@@ -164,10 +164,10 @@ pub(crate) fn connected_sink<T: IntoRtdValue + Clone + Send + Sync + 'static>(
 
 #[test]
 fn rtd_capacity_distinguishes_disabled_and_bounded_limits() {
-    assert_eq!(RtdCapacity::from_usize(0), RtdCapacity::Disabled);
+    assert_eq!(RtdCapacity::disabled_if_zero(0), RtdCapacity::Disabled);
     assert!(RtdCapacity::disabled().is_disabled());
 
-    let bounded = RtdCapacity::from_usize(4);
+    let bounded = RtdCapacity::disabled_if_zero(4);
     assert_eq!(
         bounded,
         RtdCapacity::Bounded(NonZeroUsize::new(4).expect("test limit is non-zero"))
@@ -1274,7 +1274,7 @@ fn stale_sink_returns_closing() {
 #[test]
 fn global_quota_enforcement() {
     let limits = RtdLimits {
-        max_queued_updates: RtdCapacity::from_usize(10),
+        max_queued_updates: RtdCapacity::disabled_if_zero(10),
         ..RtdLimits::standard()
     };
     let fixture = SourceFixture::new();
@@ -2102,7 +2102,7 @@ fn released_source_identity_returns_to_the_live_quota() {
     let runtime = Arc::new(SubscriptionRuntime::with_host(
         RuntimeGeneration::new(1).expect("test generation is non-zero"),
         RtdLimits {
-            max_source_ids: RtdCapacity::from_usize(1),
+            max_source_ids: RtdCapacity::disabled_if_zero(1),
             ..RtdLimits::standard()
         },
         RtdSubscriptionHost::default(),
@@ -2147,7 +2147,7 @@ fn failed_pending_admission_rolls_back_new_source_identity() {
         RuntimeGeneration::new(1).expect("test generation is non-zero"),
         RtdLimits {
             max_pending: RtdCapacity::disabled(),
-            max_source_ids: RtdCapacity::from_usize(1),
+            max_source_ids: RtdCapacity::disabled_if_zero(1),
             ..RtdLimits::standard()
         },
         RtdSubscriptionHost::default(),
@@ -2197,7 +2197,7 @@ fn source_limit_counts_distinct_live_sources_not_topics() {
     let runtime = Arc::new(SubscriptionRuntime::with_host(
         RuntimeGeneration::new(1).expect("test generation is non-zero"),
         RtdLimits {
-            max_source_ids: RtdCapacity::from_usize(1),
+            max_source_ids: RtdCapacity::disabled_if_zero(1),
             ..RtdLimits::standard()
         },
         RtdSubscriptionHost::default(),
@@ -2238,7 +2238,7 @@ fn source_limit_rejects_a_second_live_source() {
     let runtime = Arc::new(SubscriptionRuntime::with_host(
         RuntimeGeneration::new(1).expect("test generation is non-zero"),
         RtdLimits {
-            max_source_ids: RtdCapacity::from_usize(1),
+            max_source_ids: RtdCapacity::disabled_if_zero(1),
             ..RtdLimits::standard()
         },
         RtdSubscriptionHost::default(),
@@ -2574,7 +2574,7 @@ fn borrowed_admission_rejection_preserves_counts_and_runtime_checks() {
     let (arena, source, _, _) = publishing_source::<f64>(None);
     let runtime = SubscriptionRuntime::with_host(
         RuntimeGeneration::new(1).unwrap(),
-        RtdLimits::standard().with_max_pending(RtdCapacity::from_usize(1)),
+        RtdLimits::standard().with_max_pending(RtdCapacity::disabled_if_zero(1)),
         Default::default(),
         arena,
     );

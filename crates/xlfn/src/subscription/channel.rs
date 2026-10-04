@@ -144,11 +144,13 @@ impl<T: IntoRtdValue + Send + 'static> RtdChannelSource<T> {
         self
     }
 
+    /// Returns the configured maximum number of retained producer workers.
     #[must_use]
     pub fn max_producers(&self) -> NonZeroUsize {
         self.producers.state.lock().limit
     }
 
+    /// Returns the configured behavior after a producer failure.
     #[must_use]
     pub const fn error_policy(&self) -> RtdProducerErrorPolicy {
         self.error_policy
@@ -215,8 +217,11 @@ impl<T> std::fmt::Debug for RtdPendingValue<T> {
 /// Failure to convert or admit an update. Full/Closed preserve its payload.
 #[non_exhaustive]
 pub enum RtdSendError<T> {
+    /// Application conversion or candidate validation failed.
     Invalid(XllError),
+    /// The bounded queue is full; the validated payload can be retried.
     Full(RtdPendingValue<T>),
+    /// Admission has closed; the validated payload is retained for recovery.
     Closed(RtdPendingValue<T>),
 }
 impl<T> RtdSendError<T> {
@@ -490,31 +495,30 @@ impl Channel {
         if let Some(sink) = publication.sink {
             // Catch within the publication lock: disconnect observes the error
             // and the worker remains available to unrelated subscriptions.
-            let result = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
-                #[cfg(test)]
-                assert!(
-                    !this.panic_publish.swap(false, Ordering::Relaxed),
-                    "injected publisher panic"
-                );
-                let mut batch = super::delivery::PublishBatch::new();
-                {
-                    let mut state = this.state.lock();
-                    if !state.stopping {
-                        for _ in 0..32 {
-                            let Some(value) = state.values.pop_front().or_else(|| {
-                                state.terminal_error.take().map(|error| {
-                                    StoredRtdValue::Error(crate::value::ExcelErrorValue(error))
-                                })
-                            }) else {
-                                break;
-                            };
-                            batch.push(value);
+            let result =
+                crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
+                    #[cfg(test)]
+                    assert!(
+                        !this.panic_publish.swap(false, Ordering::Relaxed),
+                        "injected publisher panic"
+                    );
+                    let mut batch = super::delivery::PublishBatch::new();
+                    {
+                        let mut state = this.state.lock();
+                        if !state.stopping {
+                            for _ in 0..32 {
+                                let Some(value) = state.values.pop_front().or_else(|| {
+                                    state.terminal_error.take().map(StoredRtdValue::Error)
+                                }) else {
+                                    break;
+                                };
+                                batch.push(value);
+                            }
                         }
                     }
-                }
-                sink.publish_batch(batch, &this.stopping)
-            }))
-            .unwrap_or(Err(XllError::Panic));
+                    sink.publish_batch(batch, &this.stopping)
+                }))
+                .unwrap_or(Err(XllError::Panic));
             if result.is_err() {
                 publication.result = result;
                 publication.sink = None;
@@ -962,9 +966,7 @@ mod tests {
                     let batch = server.begin_refresh().unwrap();
                     let expected = match policy {
                         RtdProducerErrorPolicy::RetainLastValue => StoredRtdValue::Integer(42),
-                        RtdProducerErrorPolicy::PublishError(error) => {
-                            StoredRtdValue::Error(crate::value::ExcelErrorValue(error))
-                        }
+                        RtdProducerErrorPolicy::PublishError(error) => StoredRtdValue::Error(error),
                     };
                     assert_eq!(batch.updates[0].value, expected);
                     batch.complete(RefreshOutcome::Delivered).unwrap();
@@ -1004,7 +1006,7 @@ mod tests {
         for expected in [
             StoredRtdValue::Integer(31),
             StoredRtdValue::Integer(63),
-            StoredRtdValue::Error(crate::value::ExcelErrorValue(ExcelError::NotAvailable)),
+            StoredRtdValue::Error(crate::ExcelError::NotAvailable),
         ] {
             let ready = queue.ready.lock().channels.pop_front().unwrap();
             Channel::publish_batch(&ready);
@@ -1067,7 +1069,7 @@ mod tests {
             let failure = server.begin_refresh().unwrap();
             assert_eq!(
                 failure.updates[0].value,
-                StoredRtdValue::Error(crate::value::ExcelErrorValue(ExcelError::NotAvailable))
+                StoredRtdValue::Error(crate::ExcelError::NotAvailable)
             );
             failure.complete(RefreshOutcome::Delivered).unwrap();
             Box::new(subscription).disconnect_and_wait().unwrap();

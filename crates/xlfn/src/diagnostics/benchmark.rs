@@ -8,16 +8,24 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Production diagnostic reporting workload to exercise.
 pub enum DiagnosticBenchCase {
+    /// Reporting with diagnostic delivery disabled.
     Disabled,
+    /// Worker delivery of a small error.
     SmallError,
+    /// Reporting against a saturated delivery queue.
     FullQueue,
+    /// A burst of large errors against bounded delivery.
     LargeBurst,
+    /// Tracing formatting of a small error.
     TraceSmall,
+    /// Tracing formatting of a large error.
     TraceLarge,
 }
 
 impl DiagnosticBenchCase {
+    /// Returns the stable benchmark case name.
     pub const fn name(self) -> &'static str {
         match self {
             Self::Disabled => "disabled",
@@ -29,6 +37,7 @@ impl DiagnosticBenchCase {
         }
     }
 
+    /// Returns whether this workload uses burst delivery.
     pub const fn is_burst(self) -> bool {
         matches!(self, Self::LargeBurst)
     }
@@ -110,13 +119,18 @@ pub struct DiagnosticBenchmark {
 }
 
 #[derive(Debug)]
+/// Observed reporting attempts, queue drops, and tracing output.
 pub struct DiagnosticProbeResult {
+    /// Number of attempted reports.
     pub attempts: usize,
+    /// Number of events dropped by bounded delivery.
     pub dropped: u64,
+    /// Bytes formatted by the tracing subscriber.
     pub formatted_bytes: usize,
 }
 
 impl DiagnosticBenchmark {
+    /// Installs the diagnostic workload and waits for worker readiness.
     pub fn new(case: DiagnosticBenchCase) -> Self {
         router()
             .reset()

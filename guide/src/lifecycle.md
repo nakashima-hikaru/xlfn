@@ -27,7 +27,7 @@ impl Addin for ServiceAddin {
     type Error = XllError;
     type Layers = ();
 
-    fn open(_: &OpenContext) -> XllResult<Opened<State>> {
+    fn open(_: &OpenContext) -> OpenResult<Self> {
         Ok(Opened::new(State { scale: 2.0 }))
     }
 }
@@ -46,7 +46,8 @@ Use the `Addin` implementation on the type declared by your project's
 `#[excel_addin]` attribute. Each successful open creates a fresh state instance;
 worksheet calls borrow that instance until the generation is closed.
 
-`type Error` implements `IntoXllError`; `XllError` is a convenient starting
+`OpenResult<Self>` uses the state, layers, and error types declared by this
+implementation. `type Error` implements `IntoXllError`; `XllError` is a convenient starting
 point. Return errors from initialization rather than panicking. The framework
 records a failed open and prevents worksheet calls from using partial state.
 An error or panic during `Addin::open` prevents the add-in from completing registration.
@@ -57,7 +58,7 @@ An error or panic during `Addin::open` prevents the add-in from completing regis
 | --- | --- | --- |
 | `SharedState` | Immutable data, synchronized clients, calculation caches | `Send + Sync + 'static`; borrowed by worksheet calls |
 | `LifecycleState` | Owners tied to the Excel lifecycle thread | `'static`; accessed by `open`, `quiesce`, and `cleanup` on that thread |
-| `Layers` | UDF admission policy and instrumentation | `()` or a tuple of `UdfLayer` values |
+| `Layers` | UDF admission policy and instrumentation | `()` or a tuple of one to sixteen `UdfLayer` values |
 
 `Opened::new(state)` starts with `LifecycleState = ()`, `Layers = ()`, and
 default runtime settings. Add the pieces that your application needs:

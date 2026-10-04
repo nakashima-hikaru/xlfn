@@ -134,6 +134,10 @@ impl<K, V, Marker> std::fmt::Debug for CacheEndpoint<K, V, Marker> {
     }
 }
 
+/// A shared view that pins a cached value until the lease is dropped.
+///
+/// Eviction and clearing do not invalidate existing leases; the cache owner
+/// must remain alive for the lease lifetime.
 pub struct CacheLease<'a, V> {
     node: NonNull<CacheNode<V>>,
     _marker: PhantomData<&'a V>,
@@ -271,6 +275,7 @@ impl<V: Eq> Eq for CacheLease<'_, V> {}
 
 impl<K, V, Marker> CacheEndpoint<K, V, Marker> {
     #[must_use]
+    /// Creates a descriptor whose ID and type parameters identify a registry cache.
     pub const fn new(id: &'static str) -> Self {
         Self {
             id,
@@ -281,6 +286,7 @@ impl<K, V, Marker> CacheEndpoint<K, V, Marker> {
     }
 
     #[must_use]
+    /// Returns the static cache identity string.
     pub const fn id(&self) -> &'static str {
         self.id
     }
@@ -290,35 +296,6 @@ impl<K: 'static, V: 'static, Marker: 'static> CacheEndpoint<K, V, Marker> {
     #[must_use]
     pub(crate) fn key(&self) -> (TypeId, &'static str) {
         (TypeId::of::<(Marker, K, V)>(), self.id)
-    }
-}
-
-impl<K, V, Marker> CacheEndpoint<K, V, Marker>
-where
-    Marker: 'static,
-    K: Clone + Eq + Hash + Send + Sync + 'static,
-    V: Send + Sync + 'static,
-{
-    pub fn get_or_try_insert<'a, F, W>(
-        &self,
-        registry: &'a CacheRegistry,
-        key: K,
-        weight: W,
-        compute: F,
-    ) -> XllResult<CacheLease<'a, V>>
-    where
-        F: FnOnce() -> XllResult<V>,
-        W: FnOnce(&V) -> usize,
-    {
-        registry.get_or_try_insert(self, key, weight, compute)
-    }
-
-    pub fn get<'a>(
-        &self,
-        registry: &'a CacheRegistry,
-        key: &K,
-    ) -> XllResult<Option<CacheLease<'a, V>>> {
-        registry.get(self, key)
     }
 }
 
@@ -391,6 +368,7 @@ pub struct CacheRegistry {
 
 impl CacheRegistry {
     #[must_use]
+    /// Creates a registry with an independent resident weight budget per endpoint.
     pub fn new(weight_budget_per_endpoint: usize) -> Self {
         Self {
             identity: endpoint_cache::RegistryIdentity::fresh(),
@@ -450,6 +428,11 @@ impl CacheRegistry {
         }
     }
 
+    /// Resolves an endpoint and returns or initializes a pinned value.
+    ///
+    /// All callers for the endpoint must use the same weight measure. The
+    /// compute, reentry, generation, and retention rules are those of
+    /// [`CalculationCache::get_or_try_insert_with`].
     pub fn get_or_try_insert<'a, K, V, Marker, F, W>(
         &'a self,
         endpoint: &CacheEndpoint<K, V, Marker>,
@@ -470,6 +453,9 @@ impl CacheRegistry {
         stored.cache.get_or_try_insert_with(key, weight, compute)
     }
 
+    /// Resolves an endpoint and looks up a value in its current generation.
+    ///
+    /// Endpoint resolution can fail; absence is reported as `Ok(None)`.
     pub fn get<'a, K, V, Marker>(
         &'a self,
         endpoint: &CacheEndpoint<K, V, Marker>,
@@ -503,6 +489,7 @@ impl CacheRegistry {
         Ok(NonNull::from(stored))
     }
 
+    /// Invalidates the currently registered endpoint caches without removing their identities.
     pub fn clear(&self) {
         // Entries are never removed during the registry's lifetime. Snapshot
         // pointers to their Box allocations, not to the movable map entries.
@@ -532,9 +519,11 @@ impl CacheRegistry {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+/// A finite floating-point cache key with signed zero canonicalized.
 pub struct CanonicalF64(u64);
 
 impl CanonicalF64 {
+    /// Rejects nonfinite values and canonicalizes both signed zeros to positive zero.
     pub fn new(value: f64) -> XllResult<Self> {
         if !value.is_finite() {
             return Err(XllError::input("cache_key", InputError::NonFinite));
@@ -544,6 +533,7 @@ impl CanonicalF64 {
     }
 
     #[must_use]
+    /// Returns the finite, canonical floating-point value.
     pub fn get(self) -> f64 {
         f64::from_bits(self.0)
     }
@@ -1211,8 +1201,11 @@ impl<V> CacheLookupDomain<V> {
 #[cfg(feature = "bench-internals")]
 #[derive(Clone, Copy, Debug)]
 pub struct CacheResidentStats {
+    /// Number of resident entries.
     pub entries: u64,
+    /// Total resident entry weight.
     pub weight: u64,
+    /// Approximate bytes used by the resident index.
     pub index_bytes_estimate: usize,
     /// Resident node headers plus caller-reported payload weights. Excludes
     /// live non-resident leases and queued retirement debt.
@@ -1297,6 +1290,7 @@ where
 
     #[cfg(any(test, feature = "bench-internals"))]
     #[must_use]
+    /// Returns the configured resident weight budget.
     pub const fn weight_budget(&self) -> usize {
         self.weight_budget
     }
@@ -1311,6 +1305,7 @@ where
 
     #[cfg(feature = "bench-internals")]
     #[must_use]
+    /// Observes resident entry counts, weight, and estimated storage costs.
     pub fn resident_stats(&self) -> CacheResidentStats {
         let entries = self.index.resident_count();
         let weight = self.index.resident_weight();
@@ -1376,6 +1371,7 @@ where
     }
 
     #[must_use]
+    /// Returns current resident weight after nonblocking maintenance.
     pub fn used_weight(&self) -> usize {
         self.maintain_keys();
         let retired = self.domain.try_quiesce_and_drain();
@@ -1384,6 +1380,7 @@ where
     }
 
     #[must_use]
+    /// Returns current resident entry count after nonblocking maintenance.
     pub fn len(&self) -> usize {
         self.maintain_keys();
         let retired = self.domain.try_quiesce_and_drain();
@@ -1392,6 +1389,7 @@ where
     }
 
     #[must_use]
+    /// Returns whether the cache has no resident entries.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -1423,6 +1421,7 @@ where
         reclaim_cache_entries::<V>(retired);
     }
 
+    /// Returns a pinned resident value from the current cache generation.
     pub fn get<'a>(&'a self, key: &K) -> Option<CacheLease<'a, V>> {
         let epoch = self.generation.snapshot();
         let lease = self.get_at_epoch(key, epoch);
@@ -2824,15 +2823,15 @@ mod tests {
         static ENDPOINT_A: CacheEndpoint<u32, u32, MarkerA> = CacheEndpoint::new("SHARED_ID");
         static ENDPOINT_B: CacheEndpoint<u32, u32, MarkerB> = CacheEndpoint::new("SHARED_ID");
         let registry = CacheRegistry::new(64);
-        ENDPOINT_A
-            .get_or_try_insert(&registry, 1, |_| 1, || Ok(10))
+        registry
+            .get_or_try_insert(&ENDPOINT_A, 1, |_| 1, || Ok(10))
             .unwrap();
-        ENDPOINT_B
-            .get_or_try_insert(&registry, 1, |_| 1, || Ok(20))
+        registry
+            .get_or_try_insert(&ENDPOINT_B, 1, |_| 1, || Ok(20))
             .unwrap();
         assert_eq!(registry.endpoint_count(), 2);
-        assert_eq!(*ENDPOINT_A.get(&registry, &1).unwrap().unwrap(), 10);
-        assert_eq!(*ENDPOINT_B.get(&registry, &1).unwrap().unwrap(), 20);
+        assert_eq!(*registry.get(&ENDPOINT_A, &1).unwrap().unwrap(), 10);
+        assert_eq!(*registry.get(&ENDPOINT_B, &1).unwrap().unwrap(), 20);
     }
 
     #[test]
@@ -2842,26 +2841,26 @@ mod tests {
         let registry = CacheRegistry::new(64);
 
         assert_eq!(
-            *ENDPOINT
-                .get_or_try_insert(&registry, 1, |_| 1, || Ok(100))
+            *registry
+                .get_or_try_insert(&ENDPOINT, 1, |_| 1, || Ok(100))
                 .unwrap(),
             100
         );
-        assert_eq!(*ENDPOINT.get(&registry, &1).unwrap().unwrap(), 100);
+        assert_eq!(*registry.get(&ENDPOINT, &1).unwrap().unwrap(), 100);
 
         registry.clear();
 
         // Old generation value is missed
-        assert!(ENDPOINT.get(&registry, &1).unwrap().is_none());
+        assert!(registry.get(&ENDPOINT, &1).unwrap().is_none());
 
         // New value can be inserted in the new generation
         assert_eq!(
-            *ENDPOINT
-                .get_or_try_insert(&registry, 1, |_| 1, || Ok(200))
+            *registry
+                .get_or_try_insert(&ENDPOINT, 1, |_| 1, || Ok(200))
                 .unwrap(),
             200
         );
-        assert_eq!(*ENDPOINT.get(&registry, &1).unwrap().unwrap(), 200);
+        assert_eq!(*registry.get(&ENDPOINT, &1).unwrap().unwrap(), 200);
     }
 
     #[test]
@@ -3727,9 +3726,9 @@ mod tests {
             for _ in 0..8 {
                 scope.spawn(|| {
                     start.wait();
-                    let lease = ENDPOINT
+                    let lease = registry
                         .get_or_try_insert(
-                            &registry,
+                            &ENDPOINT,
                             7,
                             |_| 1,
                             || {
@@ -3758,20 +3757,20 @@ mod tests {
         let drops = Arc::new(AtomicUsize::new(0));
         let registry = CacheRegistry::new(64);
         let primary = CacheEndpoint::<u64, DropProbe>::new("registry-growth-primary");
-        let lease = primary
-            .get_or_try_insert(&registry, 1, |_| 1, || Ok(DropProbe(Arc::clone(&drops))))
+        let lease = registry
+            .get_or_try_insert(&primary, 1, |_| 1, || Ok(DropProbe(Arc::clone(&drops))))
             .unwrap();
         for length in 1..=NAMES.len() {
             let endpoint = CacheEndpoint::<u64, u64>::new(&NAMES[..length]);
             drop(
-                endpoint
-                    .get_or_try_insert(&registry, 1, |_| 1, || Ok(length as u64))
+                registry
+                    .get_or_try_insert(&endpoint, 1, |_| 1, || Ok(length as u64))
                     .unwrap(),
             );
         }
         assert_eq!(registry.endpoint_count(), NAMES.len() + 1);
         registry.clear();
-        assert!(primary.get(&registry, &1).unwrap().is_none());
+        assert!(registry.get(&primary, &1).unwrap().is_none());
         assert_eq!(lease.0.load(Ordering::Relaxed), 0);
         assert_eq!(drops.load(Ordering::Relaxed), 0);
         drop(lease);
@@ -3785,19 +3784,16 @@ mod tests {
         let registry = CacheRegistry::new(64);
         let first = CacheEndpoint::<u64, u64>::new("registry-reentrant-first");
         let second = CacheEndpoint::<u64, u64>::new("registry-reentrant-second");
-        let lease = first
-            .get_or_try_insert(
-                &registry,
-                1,
+        let lease = registry.get_or_try_insert(&first, 1,
                 |_| 1,
                 || {
                     // Binding a new cache may take the registry owner lock, so
                     // the outer user callback must not hold it or a map guard.
-                    assert!(second.get(&registry, &2)?.is_none());
+                    assert!(registry.get(&second, &2)?.is_none());
                     // Nested value initialization retains the existing typed
                     // rejection contract even across different endpoints.
                     assert!(matches!(
-                        second.get_or_try_insert(&registry, 2, |_| 1, || Ok(9)),
+                        registry.get_or_try_insert(&second, 2, |_| 1, || Ok(9)),
                         Err(XllError::Internal { diagnostic_id })
                             if diagnostic_id == crate::diagnostics::id::DiagnosticId::CACHE_REENTRANT
                     ));
@@ -3806,8 +3802,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(*lease, 7);
-        let other = second
-            .get_or_try_insert(&registry, 2, |_| 1, || Ok(9))
+        let other = registry
+            .get_or_try_insert(&second, 2, |_| 1, || Ok(9))
             .unwrap();
         assert_eq!(*other, 9);
         assert_eq!(registry.endpoint_count(), 2);

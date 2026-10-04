@@ -1,4 +1,4 @@
-use crate::value::ExcelErrorValue;
+use crate::ExcelError;
 use crate::{XllError, XllResult};
 
 /// An owned scalar candidate for RTD publication.
@@ -10,11 +10,17 @@ use crate::{XllError, XllResult};
 /// enum alone does not establish those constraints.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RtdValue {
+    /// A number that must be finite when published.
     Number(f64),
+    /// A Boolean scalar.
     Boolean(bool),
+    /// A signed integer scalar.
     Integer(i32),
+    /// An owned string subject to Excel's UTF-16 limit at publication.
     String(String),
-    Error(ExcelErrorValue),
+    /// An intentional Excel error value.
+    Error(ExcelError),
+    /// No current RTD value.
     Empty,
 }
 
@@ -24,7 +30,7 @@ pub(crate) enum StoredRtdValue {
     Boolean(bool),
     Integer(i32),
     String(Box<str>),
-    Error(ExcelErrorValue),
+    Error(ExcelError),
     Empty,
 }
 
@@ -71,7 +77,7 @@ impl TryFrom<crate::value::ExcelValue> for RtdValue {
                 Self::String(value)
             }
             crate::value::ExcelValue::Scalar(crate::value::ExcelCellValue::Error(value)) => {
-                Self::Error(crate::value::ExcelErrorValue(value))
+                Self::Error(value)
             }
             crate::value::ExcelValue::Missing
             | crate::value::ExcelValue::Scalar(crate::value::ExcelCellValue::Blank) => Self::Empty,
@@ -97,6 +103,7 @@ impl TryFrom<crate::value::ExcelValue> for RtdValue {
 ///
 /// Conversion runs on the publishing thread before runtime storage is locked.
 pub trait IntoRtdValue {
+    /// Converts an application value; publication validates the candidate.
     fn into_rtd_value(self) -> XllResult<RtdValue>;
 }
 
@@ -161,7 +168,7 @@ impl IntoRtdValue for &str {
     }
 }
 
-impl IntoRtdValue for ExcelErrorValue {
+impl IntoRtdValue for ExcelError {
     fn into_rtd_value(self) -> XllResult<RtdValue> {
         Ok(RtdValue::Error(self))
     }
@@ -170,5 +177,25 @@ impl IntoRtdValue for ExcelErrorValue {
 impl IntoRtdValue for () {
     fn into_rtd_value(self) -> XllResult<RtdValue> {
         Ok(RtdValue::Empty)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::value::{ExcelCellValue, ExcelValue};
+
+    #[test]
+    fn excel_error_is_preserved_in_direct_and_dynamic_rtd_values() {
+        let error = ExcelError::NotAvailable;
+        assert_eq!(error.into_rtd_value().unwrap(), RtdValue::Error(error));
+        assert_eq!(
+            RtdValue::try_from(ExcelValue::Scalar(ExcelCellValue::Error(error))).unwrap(),
+            RtdValue::Error(error)
+        );
+        assert_eq!(
+            RtdValue::Error(error).into_stored().unwrap(),
+            StoredRtdValue::Error(error)
+        );
     }
 }

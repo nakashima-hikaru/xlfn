@@ -41,6 +41,7 @@ pub struct XlArrayBuilder {
 }
 
 impl XlArrayBuilder {
+    /// Allocates an array builder after validating positive dimensions and payload limits.
     pub fn new(rows: usize, columns: usize) -> XllResult<Self> {
         let len = rows.checked_mul(columns).ok_or(XllError::Domain {
             code: DomainErrorCode::Overflow,
@@ -93,6 +94,7 @@ impl XlArrayBuilder {
         Ok(())
     }
 
+    /// Appends one finite number in row-major order.
     pub fn push_f64(&mut self, value: f64) -> XllResult<()> {
         let value = crate::value::output::validate_number(value)?;
         self.push_oper(XLOPER12::number(value))
@@ -171,11 +173,13 @@ impl XlArrayBuilder {
         }
     }
 
+    /// Encodes one output value into the next row-major cell.
     pub fn push<T: IntoExcel>(&mut self, value: T) -> XllResult<()> {
         self.ensure_capacity()?;
         value.write_into(self)
     }
 
+    /// Completes the array, rejecting an incomplete cell count.
     pub fn finish(self) -> XllResult<XlArrayOutput> {
         let expected = self.rows * self.columns;
 
@@ -249,7 +253,7 @@ mod tests {
                 assert_eq!(value.as_f64().unwrap(), index as f64);
             } else {
                 assert_eq!(
-                    value.as_str().unwrap().to_string().unwrap(),
+                    value.as_str().unwrap().try_to_string().unwrap(),
                     texts[index % texts.len()]
                 );
             }

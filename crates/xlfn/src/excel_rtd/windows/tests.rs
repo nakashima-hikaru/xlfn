@@ -1458,12 +1458,7 @@ fn refresh_data_preserves_every_rtd_scalar_variant_by_column_and_row() {
         RtdUpdate::for_test(202, RtdValue::Integer(-17)),
         RtdUpdate::for_test(203, RtdValue::Boolean(true)),
         RtdUpdate::for_test(204, RtdValue::String("stream value".to_owned())),
-        RtdUpdate::for_test(
-            205,
-            RtdValue::Error(crate::value::ExcelErrorValue(
-                crate::ExcelError::NotAvailable,
-            )),
-        ),
+        RtdUpdate::for_test(205, RtdValue::Error(crate::ExcelError::NotAvailable)),
         RtdUpdate::for_test(206, RtdValue::Empty),
         RtdUpdate::for_test(207, RtdValue::String(String::new())),
         RtdUpdate::for_test(208, RtdValue::String("A\0B😀漢".to_owned())),
@@ -1534,7 +1529,7 @@ fn refresh_data_preserves_every_rtd_scalar_variant_by_column_and_row() {
                     assert_eq!(value.Anonymous.Anonymous.vt, VT_ERROR);
                     assert_eq!(
                         value.Anonymous.Anonymous.Anonymous.scode,
-                        2000 + expected.0.code()
+                        2000 + expected.code()
                     );
                 }
                 StoredRtdValue::Empty => {

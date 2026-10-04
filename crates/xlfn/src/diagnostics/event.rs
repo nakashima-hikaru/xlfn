@@ -36,40 +36,55 @@ pub struct DiagnosticEvent<'a> {
 }
 
 impl DiagnosticEvent<'_> {
+    /// Returns the worksheet function or lifecycle boundary that emitted the event.
     #[must_use]
     pub const fn udf_id(&self) -> &'static str {
         self.udf_id
     }
 
+    /// Returns the argument name associated with an input error, when present.
     #[must_use]
     pub const fn argument(&self) -> Option<&'static str> {
         self.argument
     }
 
+    /// Returns the full structured error retained by the diagnostic queue.
     #[must_use]
     pub const fn error(&self) -> &XllError {
         self.error
     }
 
+    /// Returns the identifier used to correlate this event in diagnostic output.
     #[must_use]
     pub const fn diagnostic_id(&self) -> DiagnosticId {
         self.diagnostic_id
     }
 
+    /// Returns the time at which the error was reported.
     #[must_use]
     pub const fn timestamp(&self) -> SystemTime {
         self.timestamp
     }
 }
 
+/// A failure to create, install, or replace a diagnostic sink.
+///
+/// Converts into [`XllError`] with `From` and [`crate::error::IntoXllError`].
+/// I/O failures retain their operating-system context; router lifecycle failures
+/// become closing or reentrancy errors.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum DiagnosticInitError {
+    /// The diagnostic file or another sink resource could not be initialized.
     #[error(transparent)]
     Io(#[from] io::Error),
+    /// The bounded diagnostic delivery worker could not be started.
     #[error("failed to start diagnostic logger worker: {0}")]
     WorkerSpawn(#[source] io::Error),
+    /// The diagnostic worker attempted to replace its own sink.
     #[error("diagnostic sink mutation was requested from its own worker")]
     ReentrantMutation,
+    /// The process diagnostic router is closing or closed.
     #[error("the diagnostic router is closing or closed")]
     RouterClosed,
 }
@@ -94,11 +109,20 @@ pub(crate) enum DiagnosticShutdownError {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AddinId(SmolStr);
 
+/// An add-in identifier violates the filename or length rules.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("invalid addin id")]
 pub struct InvalidAddinId;
 
 impl AddinId {
+    /// Validates an add-in identifier for use as a Windows-safe log directory name.
+    ///
+    /// Identifiers must contain at most 64 bytes, must not start with `.`, and
+    /// must satisfy the framework's portable Windows basename rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidAddinId`] for an invalid or reserved basename.
     pub fn parse(value: &str) -> Result<Self, InvalidAddinId> {
         if value.len() > 64 || value.starts_with('.') {
             return Err(InvalidAddinId);
@@ -110,6 +134,7 @@ impl AddinId {
         Ok(Self(SmolStr::new(value)))
     }
 
+    /// Returns the validated identifier as text.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -117,7 +142,8 @@ impl AddinId {
 
 #[cfg(test)]
 #[derive(Debug)]
-pub struct DiagnosticsDrained {
+/// Test-only evidence that all queued diagnostics were drained.
+pub(crate) struct DiagnosticsDrained {
     pub(super) _private: (),
 }
 

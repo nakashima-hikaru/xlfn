@@ -73,3 +73,45 @@ the verification worklists. A release must retain those limits in its claims.
 Every release candidate still needs Windows artifact/ABI tests and direct Excel
 qualification for its exact built artifacts. Follow [Test your add-in](testing.md)
 and [Deployment and distribution](deployment.md) for application testing.
+
+## Public API cleanup in this checkout
+
+The current pre-1.0 cleanup requires these source migrations. No compatibility
+aliases are retained for removed wrappers, paths, or method names.
+
+| Previous spelling | Current spelling |
+| --- | --- |
+| `ExcelErrorValue(ExcelError::NotAvailable)` | `ExcelError::NotAvailable` for inputs, outputs, and RTD values |
+| `value::raw::*`, `value::borrowed::*`, `value::matrix::*`, `value::date::*` | The corresponding `value::*` imports |
+| `diagnostics::event::*`, `diagnostics::id::DiagnosticId` | The corresponding `diagnostics::*` imports |
+| `xlfn::XlValueType` | `xlfn::value::XlValueType` |
+| `XlStrRef::to_string()` | `XlStrRef::try_to_string()` |
+| Tuple returned by `XlArrayRef::shape()` | `error::Shape { rows, columns }` |
+| `endpoint.get(&registry, key)` | `registry.get(&endpoint, key)` |
+| `endpoint.get_or_try_insert(&registry, key, weight, compute)` | `registry.get_or_try_insert(&endpoint, key, weight, compute)` |
+| `RtdCapacity::from_usize(n)` | `RtdCapacity::disabled_if_zero(n)`; zero disables admission |
+
+`ExcelError` and `XlValueType` now require a fallback arm in application matches.
+Framework-owned structured `XllError` variants can be inspected with `..`, but
+cannot be constructed by applications. Use `XllError::custom(excel, message)`
+for an application failure with diagnostic text and a chosen worksheet error.
+`Result<T, ExcelError>`, I/O errors, and diagnostic initialization errors have
+explicit boundary conversions.
+
+Matching execution flags and context modes may be repeated; conflicting modes
+remain compile errors. `OpenResult<Self>` abbreviates the add-in open result.
+Layer tuples are documented by `execution::UdfLayers`.
+
+The input-only value types retain missing and blank semantics. Return shapes
+remain explicit through `Row`, `Column`, or `Matrix`; there is no implicit
+`Vec` orientation, `Option::None` return, or blank-to-empty-string conversion.
+Finite numeric output support now also includes `f32`, small integer types,
+`u32`, `u64`, `usize`, and `isize`. Wide integers reject values outside the
+exact binary64 integer range rather than rounding silently.
+
+`CalculationCache` owns one typed cache, while `CacheRegistry` owns multiple
+lazy typed caches. Their lookup results differ because registry resolution can
+fail. Weight callbacks remain supplied per initialization, allowing a caller
+to capture computation-specific resource costs; each cache must still use one
+consistent weight measure. An add-in implementation and its lifecycle state
+remain explicit, and context types retain their standard `AsRef` integration.

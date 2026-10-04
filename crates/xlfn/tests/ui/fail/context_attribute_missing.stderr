@@ -6,7 +6,7 @@ error[E0277]: the trait bound `xlfn::MainThreadContext<'_, ()>: xlfn::__private:
   |
   = help: the following other types implement trait `FromExcel<'call>`:
             ExcelCellValue
-            ExcelErrorValue
+            ExcelError
             ExcelSerialDate
             XlArrayRef<'call>
             bool
@@ -34,7 +34,7 @@ error[E0277]: `xlfn::MainThreadContext<'_, ()>` cannot be converted from an Exce
   = note: implement `FromExcel` for this argument type or use a supported argument type
   = help: the following other types implement trait `FromExcel<'call>`:
             ExcelCellValue
-            ExcelErrorValue
+            ExcelError
             ExcelSerialDate
             XlArrayRef<'call>
             bool

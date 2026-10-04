@@ -1,7 +1,7 @@
 //! Raw and borrowed ABI views over Excel's `XLOPER12` representation.
 
 use super::{FromExcel, MAX_ARRAY_BYTES, MAX_ARRAY_ELEMENTS};
-use crate::error::InputError;
+use crate::error::{InputError, Shape};
 use crate::input_identity::InputIdentityEncoder;
 use crate::{ExcelError, XllError, XllResult};
 use std::marker::PhantomData;
@@ -14,25 +14,38 @@ const EXCEL_MAX_COLUMNS: usize = 16_384;
 
 /// The validated semantic value type of an Excel `XLOPER12`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[non_exhaustive]
 pub enum XlValueType {
+    /// A binary64 number.
     Number,
+    /// A counted UTF-16 string.
     String,
+    /// A Boolean.
     Boolean,
+    /// A worksheet reference that may contain multiple areas.
     Reference,
+    /// An Excel error code.
     Error,
+    /// An Excel control-flow value.
     Flow,
+    /// A rectangular array of cells.
     Multi,
+    /// An omitted argument.
     Missing,
+    /// A blank cell.
     Nil,
+    /// A single-area worksheet reference.
     SimpleReference,
+    /// A signed 32-bit integer.
     Integer,
+    /// An Excel binary-data value.
     BigData,
 }
 
 impl XlValueType {
     /// Decodes a raw base xltype mask into a validated [`XlValueType`].
     #[must_use]
-    pub const fn from_raw(raw: u32) -> Option<Self> {
+    pub(crate) const fn from_raw(raw: u32) -> Option<Self> {
         match raw {
             xlfn_sys::XLTYPE_NUM => Some(Self::Number),
             xlfn_sys::XLTYPE_STR => Some(Self::String),
@@ -47,25 +60,6 @@ impl XlValueType {
             xlfn_sys::XLTYPE_INT => Some(Self::Integer),
             xlfn_sys::XLTYPE_BIG_DATA => Some(Self::BigData),
             _ => None,
-        }
-    }
-
-    /// Returns the underlying raw Excel `xltype` constant for this value type.
-    #[must_use]
-    pub const fn raw(self) -> u32 {
-        match self {
-            Self::Number => xlfn_sys::XLTYPE_NUM,
-            Self::String => xlfn_sys::XLTYPE_STR,
-            Self::Boolean => xlfn_sys::XLTYPE_BOOL,
-            Self::Reference => xlfn_sys::XLTYPE_REF,
-            Self::Error => xlfn_sys::XLTYPE_ERR,
-            Self::Flow => xlfn_sys::XLTYPE_FLOW,
-            Self::Multi => xlfn_sys::XLTYPE_MULTI,
-            Self::Missing => xlfn_sys::XLTYPE_MISSING,
-            Self::Nil => xlfn_sys::XLTYPE_NIL,
-            Self::SimpleReference => xlfn_sys::XLTYPE_SREF,
-            Self::Integer => xlfn_sys::XLTYPE_INT,
-            Self::BigData => xlfn_sys::XLTYPE_BIG_DATA,
         }
     }
 }
@@ -97,6 +91,16 @@ impl std::fmt::Display for XlValueType {
 pub struct XlValueRef<'call> {
     pub(super) raw: &'call XLOPER12,
     _not_send_or_sync: PhantomData<Rc<()>>,
+}
+
+impl std::fmt::Debug for XlValueRef<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Header validation does not eagerly validate nested payloads. Keep
+        // formatting infallible and avoid dereferencing those payloads.
+        f.debug_struct("XlValueRef")
+            .field("value_type", &self.value_type())
+            .finish_non_exhaustive()
+    }
 }
 
 pub(crate) enum GridView<'call> {
@@ -180,6 +184,7 @@ impl<'call> XlValueRef<'call> {
         })
     }
 
+    /// Returns the validated semantic kind without exposing ownership flags.
     #[must_use]
     #[inline]
     pub const fn value_type(self) -> XlValueType {
@@ -195,21 +200,25 @@ impl<'call> XlValueRef<'call> {
         self.raw
     }
 
+    /// Reads a finite number without text or Boolean coercion.
     #[inline]
     pub fn as_f64(self) -> XllResult<f64> {
         <f64 as FromExcel>::from_excel(self, "<array cell>")
     }
 
+    /// Reads a Boolean without numeric or text coercion.
     #[inline]
     pub fn as_bool(self) -> XllResult<bool> {
         <bool as FromExcel>::from_excel(self, "<array cell>")
     }
 
+    /// Borrows the Excel UTF-16 string without decoding its payload.
     #[inline]
     pub fn as_str(self) -> XllResult<XlStrRef<'call>> {
         self.as_str_with_argument("<array cell>")
     }
 
+    /// Borrows a string and uses `argument` in subsequent decode errors.
     #[inline]
     pub fn as_str_with_argument(self, argument: &'static str) -> XllResult<XlStrRef<'call>> {
         Ok(XlStrRef {
@@ -218,6 +227,7 @@ impl<'call> XlValueRef<'call> {
         })
     }
 
+    /// Returns whether this is a blank cell rather than an omitted argument.
     #[must_use]
     #[inline]
     pub const fn is_blank(self) -> bool {
@@ -357,17 +367,20 @@ impl PartialEq for XlStrRef<'_> {
 impl Eq for XlStrRef<'_> {}
 
 impl<'call> XlStrRef<'call> {
+    /// Returns the borrowed UTF-16 code units without the Excel length prefix.
     #[must_use]
     #[inline]
     pub const fn as_utf16(self) -> &'call [u16] {
         self.utf16
     }
 
+    /// Decodes each Unicode character, preserving malformed surrogate errors.
     pub fn chars(self) -> impl Iterator<Item = Result<char, std::char::DecodeUtf16Error>> + 'call {
         char::decode_utf16(self.utf16.iter().copied())
     }
 
-    pub fn to_string(self) -> XllResult<String> {
+    /// Decodes into owned UTF-8, rejecting malformed UTF-16.
+    pub fn try_to_string(self) -> XllResult<String> {
         crate::utf16::decode_owned(self.utf16, self.argument)
     }
 }
@@ -381,6 +394,15 @@ pub struct XlArrayRef<'call> {
     rows: usize,
     columns: usize,
     _not_send_or_sync: PhantomData<Rc<()>>,
+}
+
+impl std::fmt::Debug for XlArrayRef<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("XlArrayRef")
+            .field("shape", &self.shape())
+            .field("len", &self.cells.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'call> XlArrayRef<'call> {
@@ -413,31 +435,40 @@ impl<'call> XlArrayRef<'call> {
         })
     }
 
+    /// Returns the number of rows.
     #[must_use]
     pub const fn rows(self) -> usize {
         self.rows
     }
 
+    /// Returns the number of columns.
     #[must_use]
     pub const fn columns(self) -> usize {
         self.columns
     }
 
+    /// Returns the rectangular shape used by conversion diagnostics.
     #[must_use]
-    pub const fn shape(self) -> (usize, usize) {
-        (self.rows, self.columns)
+    pub const fn shape(self) -> Shape {
+        Shape {
+            rows: self.rows,
+            columns: self.columns,
+        }
     }
 
+    /// Returns the total number of cells.
     #[must_use]
     pub const fn len(self) -> usize {
         self.cells.len()
     }
 
+    /// Returns whether the array has no cells.
     #[must_use]
     pub const fn is_empty(self) -> bool {
         self.cells.is_empty()
     }
 
+    /// Reads a cell at zero-based coordinates, returning `None` out of bounds.
     #[must_use]
     pub fn get(self, row: usize, column: usize) -> Option<XlValueRef<'call>> {
         if row >= self.rows || column >= self.columns {
@@ -450,6 +481,7 @@ impl<'call> XlArrayRef<'call> {
         })
     }
 
+    /// Iterates over cells in row-major order without decoding their payloads.
     pub fn cells(self) -> impl ExactSizeIterator<Item = XlValueRef<'call>> + 'call {
         self.cells.iter().map(|raw| XlValueRef {
             raw,
@@ -591,7 +623,7 @@ mod tests {
         assert_eq!(left, right);
         for (value, expected) in [(left, "left"), (right, "right")] {
             assert!(matches!(
-                value.to_string(),
+                value.try_to_string(),
                 Err(XllError::Input {
                     argument,
                     reason: InputError::InvalidUtf16,
@@ -601,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn xl_value_type_from_raw_and_raw_round_trip() {
+    fn xl_value_type_decodes_only_supported_base_types() {
         let cases = [
             (XLTYPE_NUM, XlValueType::Number),
             (XLTYPE_STR, XlValueType::String),
@@ -619,7 +651,6 @@ mod tests {
 
         for (raw, expected_type) in cases {
             assert_eq!(XlValueType::from_raw(raw), Some(expected_type));
-            assert_eq!(expected_type.raw(), raw);
         }
 
         assert_eq!(XlValueType::from_raw(0), None);
@@ -679,6 +710,22 @@ mod tests {
         let nil_ref = XlValueRef::from_array_cell(&nil_oper).unwrap();
         assert_eq!(nil_ref.value_type(), XlValueType::Nil);
         assert!(nil_ref.is_blank());
+    }
+
+    #[test]
+    fn borrowed_value_debug_does_not_decode_unvalidated_payloads() {
+        let raw = XLOPER12 {
+            value: XLOPER12Value {
+                string: std::ptr::null_mut(),
+            },
+            xltype: XLTYPE_STR,
+        };
+        let value = XlValueRef::from_array_cell(&raw).unwrap();
+        assert_eq!(
+            format!("{value:?}"),
+            "XlValueRef { value_type: String, .. }"
+        );
+        assert!(value.as_str().is_err());
     }
 
     #[test]
@@ -743,7 +790,7 @@ mod tests {
             XlValueType::String
         );
         assert!(matches!(
-            array.get(0, 0).unwrap().as_str().unwrap().to_string(),
+            array.get(0, 0).unwrap().as_str().unwrap().try_to_string(),
             Err(XllError::Input {
                 reason: InputError::InvalidUtf16,
                 ..

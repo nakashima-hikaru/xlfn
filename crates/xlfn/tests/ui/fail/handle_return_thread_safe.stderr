@@ -13,13 +13,13 @@ help: the trait `IntoExcel` is not implemented for `Dataset`
    = help: the following other types implement trait `IntoExcel`:
              &str
              ExcelCellOutput
-             ExcelErrorValue
+             ExcelError
              ExcelSerialDate
              bool
+             f32
              f64
-             i32
-             i64
-             std::string::String
+             i16
+           and $N others
    = note: required for `Dataset` to implement `xlfn::__private::v1::ThreadSafeReturn`
 note: required by a bound in `xlfn::__private::v1::assert_thread_safe_return`
   --> src/call_return/traits.rs

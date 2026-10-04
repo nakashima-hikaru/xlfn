@@ -160,7 +160,7 @@ mod tests {
             .unwrap()
             .as_str()
             .unwrap()
-            .to_string()
+            .try_to_string()
             .unwrap()
     }
 
@@ -295,7 +295,7 @@ mod tests {
 
     #[test]
     fn scalar_encoding_preserves_number_bits_and_string_validation() {
-        for value in [-0.0, 0.0, 42.0] {
+        for value in [-0.0_f64, 0.0, 42.0] {
             let output = XlScalarOutput::encode(value).unwrap();
             assert!(output.storage.is_none());
             assert_eq!(

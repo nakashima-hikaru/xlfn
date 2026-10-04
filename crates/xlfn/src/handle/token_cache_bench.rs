@@ -3,6 +3,7 @@ use super::token::{HandleId, HandleToken, TokenCodec};
 use crate::generation::BindingGeneration;
 use std::time::Instant;
 
+/// Measures production token authentication for warm, colliding, and overflow cases.
 pub fn token_cache_associativity_probe() -> serde_json::Value {
     let codec = TokenCodec::new(7, [19; 32]);
     let corpus: Vec<_> = (0..1024)

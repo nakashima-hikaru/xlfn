@@ -588,13 +588,17 @@ mod benchmark {
     /// The object distribution for a shared-arena pin workload.
     #[derive(Clone, Copy)]
     pub enum ObjectLeaseBenchCase {
+        /// All workers acquire pins on one shared object.
         SameObject,
+        /// Each worker acquires pins on a separate object in the same arena.
         DistinctObjects,
     }
 
     impl ObjectLeaseBenchCase {
+        /// Every supported object distribution.
         pub const ALL: [Self; 2] = [Self::SameObject, Self::DistinctObjects];
 
+        /// Stable case label used in benchmark output.
         pub const fn name(self) -> &'static str {
             match self {
                 Self::SameObject => "same_object",
@@ -616,6 +620,9 @@ mod benchmark {
     }
 
     impl ObjectLeaseBenchmark {
+        /// Prepares persistent workers and bindings outside the measured region.
+        ///
+        /// Both the worker count and iterations per worker must be nonzero.
         pub fn new(
             case: ObjectLeaseBenchCase,
             worker_count: usize,
@@ -698,6 +705,7 @@ mod benchmark {
             drop(black_box(pin));
         }
 
+        /// Runs one synchronized pin-acquire/release batch on every worker.
         pub fn run(&self) {
             self.run_batch(true);
         }
@@ -721,6 +729,7 @@ mod benchmark {
             }
         }
 
+        /// Returns the total number of pin cycles in one worker batch.
         pub fn total_iterations(&self) -> usize {
             self.start_tx.len() * self.iterations_per_worker
         }
@@ -748,6 +757,7 @@ mod benchmark {
     }
 
     impl ObjectFinalPinRelease {
+        /// Prepares an object retained by its last pin, outside the timed region.
         pub fn prepare() -> Self {
             let arena = PublishedOwner::new(ObjectArena::new());
             // SAFETY: this fixture retains the arena through the pin's final
@@ -762,6 +772,7 @@ mod benchmark {
             }
         }
 
+        /// Drops the final pin and returns the arena owner for untimed cleanup.
         pub fn release(mut self) -> Self {
             drop(black_box(
                 self.pin.take().expect("benchmark pin releases once"),

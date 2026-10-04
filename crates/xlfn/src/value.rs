@@ -1,18 +1,21 @@
+//! Strict worksheet input conversion and explicit scalar and collection values.
+//!
+//! Input values preserve blank and omitted arguments. Worksheet outputs use
+//! [`ExcelCellOutput`](crate::value::ExcelCellOutput) and explicit
+//! [`Row`](crate::value::Row), [`Column`](crate::value::Column), or
+//! [`Matrix`](crate::value::Matrix) shapes;
+//! they cannot preserve the input-only absence distinctions.
+
 use crate::error::{DomainErrorCode, InputError};
 use crate::{ExcelError, XllError, XllResult};
 use xlfn_sys::XLOPER12;
 #[cfg(test)]
 use xlfn_sys::XLOPER12Array;
 
-/// Borrowed call-scoped views used while converting one worksheet call.
-pub mod borrowed;
 /// Composable presence and collection conversions for custom input types.
 pub mod convert;
 /// Excel serial-date policy and value types.
-pub mod date;
-/// Internal semantic identity support used by generated input conversion.
-#[doc(hidden)]
-pub mod identity;
+mod date;
 /// Input conversion traits and presence/default handling.
 #[allow(
     unsafe_code,
@@ -20,14 +23,14 @@ pub mod identity;
 )]
 pub(crate) mod input;
 /// Owned rectangular and bounded collection values.
-pub mod matrix;
+mod matrix;
 /// Output conversion traits and return-cell representations.
 pub(crate) mod output;
 #[cfg(feature = "bench-internals")]
 pub(crate) mod prepared_probe;
 /// Raw, borrowed views over Excel's XLOPER12 input representation.
 #[allow(unsafe_code, reason = "Raw XLOPER12 views are the value ABI leaf")]
-pub mod raw;
+mod raw;
 
 pub use crate::input_identity::InputIdentityEncoder;
 #[cfg(any(test, feature = "handles", feature = "bench-internals"))]
@@ -62,15 +65,21 @@ pub(crate) const MAX_ARRAY_BYTES: usize = core::cfg_select! {
     _ => 256 * 1024 * 1024,
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ExcelErrorValue(pub ExcelError);
-
+/// An owned input cell, preserving a blank separately from an empty string.
+///
+/// This input representation is not an implicit worksheet output. Construct
+/// an [`ExcelCellOutput`] to choose the meaning of a blank explicitly.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ExcelCellValue {
+    /// A finite Excel number.
     Number(f64),
+    /// An Excel Boolean without coercion.
     Boolean(bool),
+    /// An owned UTF-8 string decoded from Excel's UTF-16 representation.
     String(String),
+    /// An Excel error value.
     Error(ExcelError),
+    /// A blank cell, distinct from an empty string.
     Blank,
 }
 
@@ -81,17 +90,29 @@ pub enum ExcelCellValue {
 /// cannot be moved into an asynchronous future.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ExcelCellRef<'call> {
+    /// A finite Excel number.
     Number(f64),
+    /// An Excel Boolean without coercion.
     Boolean(bool),
+    /// UTF-8 text borrowed from the active call scope.
     String(&'call str),
+    /// An Excel error value.
     Error(ExcelError),
+    /// A blank cell, distinct from an empty string.
     Blank,
 }
 
+/// An owned, dynamic input argument that preserves shape and omission.
+///
+/// The array contains cells, not nested arrays or omitted arguments. Convert
+/// this input deliberately into an output representation before returning it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ExcelValue {
+    /// One scalar cell.
     Scalar(ExcelCellValue),
+    /// An omitted worksheet argument.
     Missing,
+    /// A row-major rectangular input array.
     Array(Matrix<ExcelCellValue>),
 }
 
@@ -102,9 +123,13 @@ pub enum ExcelValue {
 /// is the intended worksheet result.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ExcelCellOutput {
+    /// A finite worksheet number; conversion rejects non-finite values.
     Number(f64),
+    /// A worksheet Boolean.
     Boolean(bool),
+    /// An owned worksheet string, including an explicit empty string.
     String(String),
+    /// An intentional worksheet error value.
     Error(ExcelError),
 }
 
@@ -112,11 +137,14 @@ pub enum ExcelCellOutput {
 ///
 /// Excel does not preserve these meanings for UDF return values: both are
 /// displayed as numeric zero. Return an explicit value, empty string, or
-/// `ExcelErrorValue` instead.
+/// [`ExcelError`] instead.
 #[derive(Clone, Debug, PartialEq)]
 pub enum OptionalExcelValue<T> {
+    /// The argument was omitted from the formula.
     Missing,
+    /// The supplied cell was blank.
     Blank,
+    /// A present argument converted to `T`.
     Value(T),
 }
 
@@ -348,7 +376,7 @@ impl<'call> PrepareExcel<'call> for i64 {
         cells.borrowed::<Self>(identity)
     }
 }
-impl<'call> PrepareExcel<'call> for ExcelErrorValue {
+impl<'call> PrepareExcel<'call> for ExcelError {
     type Prepared = Self;
     const __BORROWED_ELEMENTS: bool = true;
     fn prepare(
@@ -484,7 +512,7 @@ impl<'call, M: InputMode> ExcelParameter<'call, M> for &'call str {
     unsafe_code,
     reason = "XLOPER12 error union projection is audited here"
 )]
-impl<'call> FromExcel<'call> for ExcelErrorValue {
+impl<'call> FromExcel<'call> for ExcelError {
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         if value.value_type() != XlValueType::Error {
             return Err(value.wrong_type(argument, "Excel error"));
@@ -492,14 +520,13 @@ impl<'call> FromExcel<'call> for ExcelErrorValue {
         // SAFETY: XLTYPE_ERR selects the error member.
         let code = unsafe { value.raw.value.error };
         ExcelError::from_code(code)
-            .map(Self)
             .ok_or_else(|| XllError::input(argument, InputError::Malformed("unknown error code")))
     }
 }
 
-impl ExcelInputIdentity for ExcelErrorValue {
+impl ExcelInputIdentity for ExcelError {
     fn encode_input_identity(&self, encoder: &mut InputIdentityEncoder) {
-        encoder.i64(i64::from(self.0.code()));
+        encoder.i64(i64::from(self.code()));
     }
 }
 
@@ -1264,9 +1291,7 @@ impl<'call> FromExcel<'call> for ExcelCellValue {
                 <bool as FromExcel>::from_excel(value, argument).map(Self::Boolean)
             }
             XlValueType::String => String::from_excel(value, argument).map(Self::String),
-            XlValueType::Error => {
-                ExcelErrorValue::from_excel(value, argument).map(|value| Self::Error(value.0))
-            }
+            XlValueType::Error => ExcelError::from_excel(value, argument).map(Self::Error),
             XlValueType::Nil => Ok(Self::Blank),
             _ => Err(value.wrong_type(argument, "worksheet value")),
         }
@@ -1340,7 +1365,7 @@ impl<'call, M: InputMode> ExcelParameter<'call, M> for ExcelCellRef<'call> {
                 Self::String(text)
             }
             XlValueType::Error => {
-                let error = <ExcelErrorValue as FromExcel>::from_excel(value, argument)?.0;
+                let error = <ExcelError as FromExcel>::from_excel(value, argument)?;
                 Self::Error(error)
             }
             XlValueType::Nil => Self::Blank,
@@ -1574,6 +1599,23 @@ impl IntoExcel for i32 {
     }
 }
 
+macro_rules! into_excel_via_f64 {
+    ($($type:ty),+ $(,)?) => {
+        $(impl IntoExcel for $type {
+            fn into_excel(self) -> XllResult<ExcelCellOutput> {
+                IntoExcel::into_excel(f64::from(self))
+            }
+
+            fn write_into<S: output::ExcelCellSink>(self, sink: &mut S) -> XllResult<()> {
+                sink.push_f64(f64::from(self))
+            }
+        })+
+    };
+}
+
+// Each conversion is exact in binary64. f32 retains the finite-number policy.
+into_excel_via_f64!(f32, i8, i16, u8, u16, u32);
+
 impl IntoExcel for i64 {
     fn into_excel(self) -> XllResult<ExcelCellOutput> {
         const EXACT_LIMIT: i64 = 1_i64 << 53;
@@ -1595,6 +1637,48 @@ impl IntoExcel for i64 {
                 code: DomainErrorCode::Overflow,
             })
         }
+    }
+}
+
+impl IntoExcel for u64 {
+    fn into_excel(self) -> XllResult<ExcelCellOutput> {
+        if self <= 1_u64 << 53 {
+            Ok(ExcelCellOutput::Number(self as f64))
+        } else {
+            Err(XllError::Domain {
+                code: DomainErrorCode::Overflow,
+            })
+        }
+    }
+
+    fn write_into<S: output::ExcelCellSink>(self, sink: &mut S) -> XllResult<()> {
+        if self <= 1_u64 << 53 {
+            sink.push_f64(self as f64)
+        } else {
+            Err(XllError::Domain {
+                code: DomainErrorCode::Overflow,
+            })
+        }
+    }
+}
+
+impl IntoExcel for usize {
+    fn into_excel(self) -> XllResult<ExcelCellOutput> {
+        IntoExcel::into_excel(self as u64)
+    }
+
+    fn write_into<S: output::ExcelCellSink>(self, sink: &mut S) -> XllResult<()> {
+        (self as u64).write_into(sink)
+    }
+}
+
+impl IntoExcel for isize {
+    fn into_excel(self) -> XllResult<ExcelCellOutput> {
+        IntoExcel::into_excel(self as i64)
+    }
+
+    fn write_into<S: output::ExcelCellSink>(self, sink: &mut S) -> XllResult<()> {
+        (self as i64).write_into(sink)
     }
 }
 
@@ -1628,13 +1712,13 @@ impl IntoExcel for &str {
     }
 }
 
-impl IntoExcel for ExcelErrorValue {
+impl IntoExcel for ExcelError {
     fn into_excel(self) -> XllResult<ExcelCellOutput> {
-        Ok(ExcelCellOutput::Error(self.0))
+        Ok(ExcelCellOutput::Error(self))
     }
 
     fn write_into<S: output::ExcelCellSink>(self, sink: &mut S) -> XllResult<()> {
-        sink.push_error(self.0)
+        sink.push_error(self)
     }
 }
 
@@ -1656,9 +1740,106 @@ mod tests {
     use xlfn_sys::{XLBIT_XL_FREE, XLOPER12Value, XLTYPE_MULTI, XLTYPE_STR};
 
     assert_impl_all!(ExcelValue: std::panic::UnwindSafe, std::panic::RefUnwindSafe);
+    assert_impl_all!(ExcelError: MainThreadReturn, ThreadSafeReturn, MacroSheetReturn, AsyncReturn, VolatileReturn);
+    assert_impl_all!(f32: MainThreadReturn, ThreadSafeReturn, AsyncReturn);
+    assert_impl_all!(u32: MainThreadReturn, ThreadSafeReturn, AsyncReturn);
+    assert_impl_all!(usize: MainThreadReturn, ThreadSafeReturn, AsyncReturn);
     assert_impl_all!(
         XlArrayBuilder: std::panic::UnwindSafe, std::panic::RefUnwindSafe
     );
+
+    #[test]
+    fn excel_error_is_preserved_without_a_value_wrapper() {
+        for error in [
+            ExcelError::Null,
+            ExcelError::DivisionByZero,
+            ExcelError::Value,
+            ExcelError::Reference,
+            ExcelError::Name,
+            ExcelError::Number,
+            ExcelError::NotAvailable,
+            ExcelError::GettingData,
+        ] {
+            let mut raw = XLOPER12::error(error.code());
+            assert_eq!(convert::<ExcelError>(&mut raw).unwrap(), error);
+            assert_eq!(
+                IntoExcel::into_excel(error).unwrap(),
+                ExcelCellOutput::Error(error)
+            );
+        }
+    }
+
+    #[test]
+    fn unsigned_and_platform_integer_outputs_reject_precision_loss() {
+        let exact_limit = 1_u64 << 53;
+        for value in [0, u64::from(u32::MAX), exact_limit - 1, exact_limit] {
+            assert_eq!(
+                IntoExcel::into_excel(value).unwrap(),
+                ExcelCellOutput::Number(value as f64)
+            );
+            let mut builder = XlArrayBuilder::new(1, 1).unwrap();
+            value.write_into(&mut builder).unwrap();
+            builder.finish().unwrap();
+        }
+        for value in [exact_limit + 1, u64::MAX] {
+            assert!(matches!(
+                IntoExcel::into_excel(value),
+                Err(XllError::Domain {
+                    code: DomainErrorCode::Overflow
+                })
+            ));
+            let mut builder = XlArrayBuilder::new(1, 1).unwrap();
+            assert!(matches!(
+                value.write_into(&mut builder),
+                Err(XllError::Domain {
+                    code: DomainErrorCode::Overflow
+                })
+            ));
+        }
+        assert_eq!(
+            IntoExcel::into_excel(u32::MAX).unwrap(),
+            ExcelCellOutput::Number(u32::MAX as f64)
+        );
+        assert_eq!(
+            IntoExcel::into_excel(42_usize).unwrap(),
+            ExcelCellOutput::Number(42.0)
+        );
+        assert_eq!(
+            IntoExcel::into_excel(-42_isize).unwrap(),
+            ExcelCellOutput::Number(-42.0)
+        );
+        #[cfg(target_pointer_width = "64")]
+        {
+            assert!(IntoExcel::into_excel(usize::MAX).is_err());
+            assert!(IntoExcel::into_excel(isize::MAX).is_err());
+            assert!(IntoExcel::into_excel(isize::MIN).is_err());
+        }
+    }
+
+    #[test]
+    fn f32_outputs_preserve_values_and_reject_non_finite_numbers() {
+        for value in [-0.0_f32, f32::MIN_POSITIVE, f32::MAX] {
+            let ExcelCellOutput::Number(actual) = IntoExcel::into_excel(value).unwrap() else {
+                panic!("f32 did not convert to a number");
+            };
+            assert_eq!(actual.to_bits(), f64::from(value).to_bits());
+        }
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(matches!(
+                IntoExcel::into_excel(value),
+                Err(XllError::Domain {
+                    code: DomainErrorCode::InvalidInput
+                })
+            ));
+            let mut builder = XlArrayBuilder::new(1, 1).unwrap();
+            assert!(matches!(
+                value.write_into(&mut builder),
+                Err(XllError::Domain {
+                    code: DomainErrorCode::InvalidInput
+                })
+            ));
+        }
+    }
 
     #[derive(Default)]
     struct BorrowTrackingSink {
@@ -2264,7 +2445,7 @@ mod tests {
             let value = unsafe { XlValueRef::from_raw(&mut raw) }.unwrap();
             let string = value.as_str_with_argument("currency").unwrap();
             assert!(matches!(
-                string.to_string(),
+                string.try_to_string(),
                 Err(XllError::Input {
                     argument: "currency",
                     reason: InputError::InvalidUtf16,
@@ -2513,7 +2694,13 @@ mod tests {
             // SAFETY: raw and its four cells remain live inside this scope.
             let view: XlArrayRef<'_> =
                 unsafe { argument_from_raw(scope, "values", &mut raw) }.unwrap();
-            assert_eq!(view.shape(), (2, 2));
+            assert_eq!(
+                view.shape(),
+                crate::error::Shape {
+                    rows: 2,
+                    columns: 2
+                }
+            );
             assert_eq!(view.get(0, 0).unwrap().as_f64().unwrap(), 1.5);
             assert_eq!(view.get(0, 1).unwrap().as_f64().unwrap(), 2.0);
             assert!(view.get(1, 0).unwrap().as_bool().unwrap());

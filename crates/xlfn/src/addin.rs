@@ -22,6 +22,7 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+/// Identity, package version, and compilation target of the loaded add-in.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct BuildInfo {
@@ -44,21 +45,28 @@ impl BuildInfo {
     }
 
     #[must_use]
+    /// Returns the stable add-in identity used for diagnostics and installation.
     pub const fn addin_id(&self) -> &AddinId {
         &self.addin_id
     }
 
     #[must_use]
+    /// Returns the package version embedded at build time.
     pub const fn version(&self) -> &str {
         self.version
     }
 
     #[must_use]
+    /// Returns the Rust compilation target embedded at build time.
     pub const fn target(&self) -> &str {
         self.target
     }
 }
 
+/// Installation information and setup capabilities for one [`Addin::open`].
+///
+/// Initialization runs on Excel's lifecycle thread. Read installed sidecars
+/// relative to [`Self::module_directory`] rather than Excel's working directory.
 #[derive(Debug)]
 pub struct OpenContext {
     module_path: PathBuf,
@@ -90,21 +98,25 @@ impl OpenContext {
     }
 
     #[must_use]
+    /// Returns the complete path of the loaded XLL.
     pub fn module_path(&self) -> &Path {
         &self.module_path
     }
 
     #[must_use]
+    /// Returns the directory containing the loaded XLL.
     pub fn module_directory(&self) -> &Path {
         &self.module_directory
     }
 
     #[must_use]
+    /// Returns the identity and version embedded in this XLL.
     pub const fn build_info(&self) -> &BuildInfo {
         &self.build_info
     }
 
     #[must_use]
+    /// Provides diagnostic sink installation during initialization.
     pub fn diagnostics(&self) -> DiagnosticsSetup<'_> {
         DiagnosticsSetup { context: self }
     }
@@ -178,6 +190,7 @@ pub struct HandleBindingLimit(NonZeroU32);
 
 #[cfg(feature = "handles")]
 impl HandleBindingLimit {
+    /// Validates a nonzero limit no greater than [`HandleConfig::MAX_SUPPORTED_BINDINGS`].
     #[must_use]
     pub const fn new(value: u32) -> Option<Self> {
         if value == 0 || value > HandleConfig::MAX_SUPPORTED_BINDINGS {
@@ -189,6 +202,7 @@ impl HandleBindingLimit {
         }
     }
 
+    /// Returns the validated number of simultaneously live bindings.
     pub const fn get(self) -> u32 {
         self.0.get()
     }
@@ -207,12 +221,14 @@ impl TryFrom<u32> for HandleBindingLimit {
 
 #[cfg(feature = "handles")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Capacity policy for formula-owned handle bindings.
 pub struct HandleConfig {
     maximum_bindings: HandleBindingLimit,
 }
 
 #[cfg(feature = "handles")]
 impl HandleConfig {
+    /// Default number of simultaneously live formula bindings.
     pub const DEFAULT_MAX_BINDINGS: u32 = 16_384;
     /// Upper bound for simultaneously live formula bindings.
     ///
@@ -222,6 +238,7 @@ impl HandleConfig {
     pub const MAX_SUPPORTED_BINDINGS: u32 = 1_048_576;
 
     #[must_use]
+    /// Creates the default handle capacity policy.
     pub const fn new() -> Self {
         Self {
             maximum_bindings: HandleBindingLimit::new(Self::DEFAULT_MAX_BINDINGS)
@@ -230,6 +247,7 @@ impl HandleConfig {
     }
 
     #[must_use]
+    /// Sets the maximum number of simultaneously live bindings.
     pub const fn with_binding_limit(mut self, maximum_bindings: HandleBindingLimit) -> Self {
         self.maximum_bindings = maximum_bindings;
         self
@@ -260,6 +278,7 @@ pub struct RuntimeConfig {
 
 impl RuntimeConfig {
     #[must_use]
+    /// Creates the default policy for every enabled runtime service.
     pub const fn new() -> Self {
         Self {
             #[cfg(feature = "rtd")]
@@ -273,6 +292,7 @@ impl RuntimeConfig {
 
     #[cfg(feature = "rtd")]
     #[must_use]
+    /// Sets the RTD service policy for this generation.
     pub const fn with_rtd(mut self, rtd: RtdConfig) -> Self {
         self.rtd = rtd;
         self
@@ -280,6 +300,7 @@ impl RuntimeConfig {
 
     #[cfg(feature = "handles")]
     #[must_use]
+    /// Sets the formula-owned handle policy for this generation.
     pub const fn with_handles(mut self, handles: HandleConfig) -> Self {
         self.handles = handles;
         self
@@ -287,6 +308,7 @@ impl RuntimeConfig {
 
     #[cfg(feature = "async")]
     #[must_use]
+    /// Sets the asynchronous executor policy for this generation.
     pub const fn with_async(mut self, async_runtime: AsyncConfig) -> Self {
         self.async_runtime = async_runtime;
         self
@@ -324,6 +346,7 @@ pub struct RtdConfig {
 #[cfg(feature = "rtd")]
 impl RtdConfig {
     #[must_use]
+    /// Creates the standard RTD capacity and shutdown policy.
     pub const fn new() -> Self {
         Self {
             limits: RtdLimits::standard(),
@@ -331,6 +354,7 @@ impl RtdConfig {
     }
 
     #[must_use]
+    /// Sets RTD topic capacities, producer behavior, and shutdown limits.
     pub const fn with_limits(mut self, limits: RtdLimits) -> Self {
         self.limits = limits;
         self
@@ -355,10 +379,13 @@ pub struct AsyncWorkerCount(NonZeroUsize);
 
 #[cfg(feature = "async")]
 impl AsyncWorkerCount {
+    /// Maximum supported number of executor workers per generation.
     pub const MAX: usize = 32;
+    /// Default executor size of four workers.
     pub const DEFAULT: Self = Self(NonZeroUsize::new(4).expect("default worker count is non-zero"));
 
     #[must_use]
+    /// Validates a worker count in `1..=MAX`.
     pub const fn new(worker_count: usize) -> Option<Self> {
         if worker_count == 0 || worker_count > Self::MAX {
             None
@@ -370,6 +397,7 @@ impl AsyncWorkerCount {
     }
 
     #[must_use]
+    /// Returns the validated worker count.
     pub const fn get(self) -> usize {
         self.0.get()
     }
@@ -396,6 +424,7 @@ pub struct AsyncConfig {
 #[cfg(feature = "async")]
 impl AsyncConfig {
     #[must_use]
+    /// Creates an executor policy using [`AsyncWorkerCount::DEFAULT`].
     pub const fn new() -> Self {
         Self {
             worker_count: AsyncWorkerCount::DEFAULT,
@@ -403,6 +432,7 @@ impl AsyncConfig {
     }
 
     #[must_use]
+    /// Sets the number of workers that poll framework-owned async tasks.
     pub const fn with_worker_count(mut self, worker_count: AsyncWorkerCount) -> Self {
         self.worker_count = worker_count;
         self
@@ -427,6 +457,15 @@ pub struct Opened<S, L = (), U = ()> {
     layers: U,
     runtime: RuntimeConfig,
 }
+
+/// Complete initialization result for an [`Addin`] implementation.
+///
+/// This alias follows the implementation's shared state, lifecycle state,
+/// instrumentation layers, and error type, including when those types change.
+pub type OpenResult<A> = Result<
+    Opened<<A as Addin>::SharedState, <A as Addin>::LifecycleState, <A as Addin>::Layers>,
+    <A as Addin>::Error,
+>;
 
 impl<S> Opened<S, (), ()> {
     /// Creates a new open transaction with default lifecycle state `()` and no layers `()`.
@@ -507,9 +546,13 @@ impl<S, L, U> Opened<S, L, U> {
 /// best-effort lifecycle cleanup begins. The shared state is dropped only
 /// after quiescence; lifecycle cleanup receives the dedicated lifecycle state.
 pub trait Addin: Send + Sync + 'static {
+    /// State shared by worksheet calls in this open generation.
     type SharedState: Send + Sync + 'static;
+    /// State accessed and disposed only on Excel's lifecycle thread.
     type LifecycleState: 'static;
+    /// Initialization and quiescence errors converted at the Excel boundary.
     type Error: IntoXllError;
+    /// No layers (`()`) or a tuple of one to sixteen [`crate::execution::UdfLayer`] values.
     type Layers: crate::execution::UdfLayers;
 
     /// Opens one complete generation on Excel's main lifecycle thread.
@@ -524,13 +567,7 @@ pub trait Addin: Send + Sync + 'static {
     /// enabled. No state is available to call `quiesce`, so the framework
     /// cannot prove that application-created execution sources have stopped.
     /// That runtime cannot be opened again.
-    #[allow(
-        clippy::type_complexity,
-        reason = "the associated state types are the public Addin open contract"
-    )]
-    fn open(
-        context: &OpenContext,
-    ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error>;
+    fn open(context: &OpenContext) -> OpenResult<Self>;
 
     /// Stops every framework-visible Add-in callback, worker, and other
     /// execution source before lifecycle cleanup.
@@ -599,9 +636,7 @@ impl Addin for () {
     type Error = XllError;
     type Layers = ();
 
-    fn open(
-        _context: &OpenContext,
-    ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
+    fn open(_context: &OpenContext) -> OpenResult<Self> {
         Ok(Opened::new(()))
     }
 }
@@ -612,6 +647,11 @@ impl<A: Addin> AsRef<A::SharedState> for ThreadSafeContext<'_, A> {
     }
 }
 
+/// Call-scoped shared state for a worksheet function registered as thread-safe.
+///
+/// This context is `Copy`, `Send`, and `Sync`, but its state borrow cannot
+/// outlive the invocation. Every resource reached through that state must
+/// support the concurrency declared by the worksheet function.
 pub struct ThreadSafeContext<'call, A: Addin> {
     state: &'call A::SharedState,
 }
@@ -649,15 +689,18 @@ impl<'call, A: Addin> AsyncContext<'call, A> {
     }
 
     #[must_use]
+    /// Borrows shared state for the whole asynchronous invocation.
     pub const fn state(&self) -> &'call A::SharedState {
         self.state
     }
 
     #[must_use]
+    /// Returns this invocation's cooperative cancellation token.
     pub const fn cancellation(&self) -> &'call CancellationToken {
         self.cancellation
     }
 
+    /// Returns `#N/A` when this invocation has been cancelled.
     pub fn check_cancelled(&self) -> XllResult<()> {
         if self.cancellation.is_cancelled() {
             Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
@@ -667,6 +710,7 @@ impl<'call, A: Addin> AsyncContext<'call, A> {
     }
 
     #[must_use]
+    /// Describes the cancellation support established for this invocation.
     pub const fn cancellation_guarantee(&self) -> CancellationGuarantee {
         self.cancellation.guarantee()
     }
@@ -693,6 +737,7 @@ impl<'call, A: Addin> ThreadSafeContext<'call, A> {
     }
 
     #[must_use]
+    /// Borrows shared state for the whole worksheet invocation.
     pub const fn state(&self) -> &'call A::SharedState {
         self.state
     }
@@ -769,14 +814,17 @@ impl<A: Addin> MacroSheetContext<'_, A> {
 
 impl<'call, A: Addin> MacroSheetContext<'call, A> {
     #[must_use]
-    pub fn state(&self) -> &A::SharedState {
+    /// Borrows shared state for the whole worksheet invocation.
+    pub const fn state(&self) -> &'call A::SharedState {
         self.state
     }
 
+    /// Resolves a reference through Excel into an owned value.
     pub fn coerce(&self, reference: &ExcelReference<'_>) -> XllResult<ExcelValue> {
         self.host.coerce(reference)
     }
 
+    /// Resolves a reference through Excel and converts every cell into `T`.
     pub fn coerce_matrix<T>(&self, reference: &ExcelReference<'_>) -> XllResult<Matrix<T>>
     where
         T: for<'value> FromExcel<'value>,
@@ -784,6 +832,7 @@ impl<'call, A: Addin> MacroSheetContext<'call, A> {
         self.host.coerce_matrix(reference)
     }
 
+    /// Returns Excel's sheet name for the referenced sheet.
     pub fn sheet_name(&self, reference: &ExcelReference<'_>) -> XllResult<String> {
         self.host.sheet_name(reference)
     }
@@ -818,12 +867,14 @@ impl<A: Addin> MainThreadContext<'_, A> {
 
 impl<'call, A: Addin> MainThreadContext<'call, A> {
     #[must_use]
-    pub fn state(&self) -> &A::SharedState {
+    /// Borrows shared state for the whole worksheet invocation.
+    pub const fn state(&self) -> &'call A::SharedState {
         self.state
     }
 
     #[cfg(feature = "rtd")]
     #[must_use]
+    /// Returns the RTD subscription capability for this invocation.
     pub fn rtd(&self) -> RtdCallContext<'call> {
         self.rtd
     }

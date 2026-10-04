@@ -26,6 +26,28 @@ fn square_root(value: f64) -> XllResult<f64> {
 Return an error for an expected failure. If your application defines its own
 error type, implement `IntoXllError` to convert it to `XllError`.
 
+`ExcelError`, `std::io::Error`, and `DiagnosticInitError` already implement
+`IntoXllError` and convert into `XllError` with `From`, so they work with `?`.
+For an intentional worksheet error, a function can return `Result<f64, ExcelError>`:
+
+```rust
+{{#include ../fixtures/addin.md}}
+use xlfn::prelude::*;
+
+#[excel_function(name = "HELLO.AVAILABLE", thread_safe)]
+fn available(value: f64) -> Result<f64, ExcelError> {
+    if value < 0.0 {
+        Err(ExcelError::NotAvailable)
+    } else {
+        Ok(value)
+    }
+}
+```
+
+When the same cell error needs application diagnostic detail, use
+`XllError::custom(ExcelError::NotAvailable, "market data connection is unavailable")`.
+The cell receives `#N/A`; the message is retained only in the diagnostic stream.
+
 ## Error types
 
 Most add-ins use `XllResult<T>`, an alias for `Result<T, XllError>`.
@@ -35,6 +57,7 @@ Important `XllError` families include:
 - `Input` with an argument name and `InputError`;
 - `ExcelValue`, preserving an input Excel error;
 - `Domain` with a stable `DomainErrorCode`;
+- `Custom` with an application-selected worksheet error and diagnostic text;
 - invalid or stale handles;
 - lifecycle states such as closing or overloaded;
 - external-adapter or Excel-callback failures represented by the relevant application mappings;
@@ -49,7 +72,7 @@ The framework maps errors conservatively:
 | Error family | Typical Excel result |
 |---|---|
 | domain errors and numeric overflow | `#NUM!` |
-| preserved `ExcelErrorValue` | the original Excel error |
+| preserved `ExcelError` and `Custom` | the selected Excel error |
 | invalid/stale handle, closing, overloaded, or reentrant operation | `#N/A` |
 | malformed input, wrong type, callback failure, or internal failure | `#VALUE!` |
 
@@ -75,13 +98,7 @@ impl Addin for AppTools {
     type Layers = ();
 
     fn open(context: &OpenContext) -> XllResult<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>> {
-        let path = context
-            .diagnostics()
-            .install_file_sink()
-            .map_err(|error| XllError::Native {
-                code: -1,
-                message: error.to_string(),
-            })?;
+        let path = context.diagnostics().install_file_sink()?;
         tracing::info!(path = %path.display(), "diagnostic log installed");
         Ok(Opened::new(State::new()))
     }
@@ -134,13 +151,7 @@ impl Addin for AppTools {
     type Layers = ();
 
     fn open(context: &OpenContext) -> XllResult<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>> {
-        context
-            .diagnostics()
-            .set_sink(Telemetry)
-            .map_err(|error| XllError::Native {
-                code: -1,
-                message: error.to_string(),
-            })?;
+        context.diagnostics().set_sink(Telemetry)?;
         Ok(Opened::new(State::new()))
     }
 }

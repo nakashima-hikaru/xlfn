@@ -2,9 +2,13 @@
 use super::*;
 
 #[derive(Clone, Copy, Debug)]
+/// Input representation selected by the internal preparation benchmark.
 pub enum InputKind {
+    /// One binary64 worksheet number.
     Number,
+    /// A rectangular numeric worksheet array.
     Numbers,
+    /// A rectangular UTF-16 worksheet string array.
     Strings,
 }
 

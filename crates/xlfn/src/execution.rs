@@ -6,6 +6,7 @@ use std::panic::AssertUnwindSafe;
 use std::panic::catch_unwind;
 use std::time::{Duration, Instant, SystemTime};
 
+/// Identifier of one worksheet-function invocation within the runtime.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct CallId(u64);
 
@@ -15,11 +16,13 @@ impl CallId {
     }
 
     #[must_use]
+    /// Returns the numeric identifier for logging and correlation.
     pub const fn get(self) -> u64 {
         self.0
     }
 }
 
+/// Identifier of the calculation generation that admitted a call.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct CalculationId(u64);
 
@@ -29,6 +32,7 @@ impl CalculationId {
     }
 
     #[must_use]
+    /// Returns the numeric identifier for logging and correlation.
     pub const fn get(self) -> u64 {
         self.0
     }
@@ -36,12 +40,19 @@ impl CalculationId {
 
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
+/// Invocation metadata supplied to [`UdfLayer::enter`].
 pub struct CallMetadata {
+    /// Stable Rust UDF identity recorded by registration.
     pub udf_id: &'static str,
+    /// Excel-visible registered function name.
     pub excel_name: &'static str,
+    /// Identifier of this invocation.
     pub call_id: CallId,
+    /// Calculation generation that admitted the invocation.
     pub calculation_id: CalculationId,
+    /// Wall-clock time when execution instrumentation began.
     pub started_at: SystemTime,
+    /// Number of admitted calls active when metadata was collected.
     pub concurrent_calls: usize,
 }
 
@@ -114,28 +125,45 @@ impl CallTimer {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 #[non_exhaustive]
+/// Broad classification of a failed worksheet invocation.
 pub enum UdfErrorKind {
+    /// An input could not be converted or validated.
     Input,
+    /// The calculation rejected an application-domain value.
     Domain,
+    /// An application or vendor error supplied a native error code.
     Vendor,
+    /// The application intentionally returned an Excel worksheet error.
+    ExcelValue,
+    /// A panic was caught at the framework boundary.
     Panic,
+    /// The runtime is closing and cannot admit the invocation.
     Closing,
+    /// A framework or unclassified error occurred.
     Internal,
 }
 
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
+/// Completion of the Rust calculation, independently of Excel delivery.
 pub enum UdfCompletionOutcome<'call> {
+    /// The Rust calculation completed successfully.
     Success,
+    /// The calculation returned an error.
     Error {
+        /// Broad classification of the error.
         kind: UdfErrorKind,
+        /// Error retained for this instrumentation callback.
         error: &'call XllError,
+        /// Native application or vendor code, when present.
         vendor_code: Option<i32>,
     },
+    /// The invocation ended because cancellation was requested.
     Cancelled,
 }
 
 impl<'call> UdfCompletionOutcome<'call> {
+    /// Returns the native application or vendor code when the result carries one.
     pub const fn vendor_code(self) -> Option<i32> {
         match self {
             Self::Error { vendor_code, .. } => vendor_code,
@@ -150,6 +178,7 @@ impl<'call> UdfCompletionOutcome<'call> {
                 UdfErrorKind::Input => "input",
                 UdfErrorKind::Domain => "domain",
                 UdfErrorKind::Vendor => "vendor",
+                UdfErrorKind::ExcelValue => "excelValue",
                 UdfErrorKind::Panic => "panic",
                 UdfErrorKind::Closing => "closing",
                 UdfErrorKind::Internal => "internal",
@@ -170,10 +199,18 @@ impl<'call> UdfCompletionOutcome<'call> {
 
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
+/// Result of delivering an asynchronous calculation back to Excel.
 pub enum UdfDeliveryOutcome<'call> {
+    /// The invocation used a synchronous return boundary.
     NotApplicable,
+    /// Excel accepted the asynchronous result.
     Delivered,
-    Failed { error: &'call XllError },
+    /// Delivery failed after the Rust calculation completed.
+    Failed {
+        /// Error reported by the asynchronous delivery boundary.
+        error: &'call XllError,
+    },
+    /// Delivery was unavailable or suppressed, so acceptance was not observed.
     Unobserved,
 }
 
@@ -190,9 +227,13 @@ impl UdfDeliveryOutcome<'_> {
 
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
+/// Completion, delivery, and elapsed time supplied to a layer's exit guard.
 pub struct CallOutcome<'call> {
+    /// Outcome of the Rust calculation itself.
     pub completion: UdfCompletionOutcome<'call>,
+    /// Acceptance of an asynchronous result by Excel, when applicable.
     pub delivery: UdfDeliveryOutcome<'call>,
+    /// Elapsed time measured by the framework for this invocation.
     pub duration: Duration,
 }
 
@@ -214,13 +255,23 @@ impl<'call> CallOutcome<'call> {
     }
 }
 
+/// Per-invocation instrumentation ownership returned by [`UdfLayer::enter`].
+///
+/// Guards are consumed once at completion. Panics in `exit` are contained;
+/// destructors and completion code must still obey the bounded-work contract.
 pub trait UdfLayerGuard: Send + 'static {
     /// Completes instrumentation in bounded time without waiting on an
     /// uninterruptible external operation.
     fn exit(self, outcome: &CallOutcome<'_>);
 }
 
+/// Admission or instrumentation policy shared by worksheet invocations.
+///
+/// Layers run in tuple order on entry and reverse tuple order on exit. A
+/// failed or panicking entry rejects the invocation and completes guards from
+/// earlier layers in reverse order. Layer methods may run concurrently.
 pub trait UdfLayer: Send + Sync + 'static {
+    /// Owned guard retained until this invocation completes.
     type Guard: UdfLayerGuard;
 
     /// Enters instrumentation in bounded time.
@@ -239,7 +290,12 @@ mod private {
     }
 }
 
-#[doc(hidden)]
+/// Sealed composition accepted by [`crate::Addin::Layers`].
+///
+/// Implemented for `()` and tuples of one to sixteen [`UdfLayer`] values.
+/// Use `(layer,)` for a single layer. Implement [`UdfLayer`] for your policy
+/// type and select a tuple; downstream crates cannot implement this trait
+/// directly. Entry follows tuple order and exit follows reverse tuple order.
 #[allow(
     private_bounds,
     reason = "Layer composition is framework-owned; users compose UdfLayer values"
@@ -388,6 +444,7 @@ pub(crate) fn classify_error(error: &XllError) -> (UdfErrorKind, Option<i32>) {
         XllError::Input { .. } => (UdfErrorKind::Input, None),
         XllError::Domain { .. } => (UdfErrorKind::Domain, None),
         XllError::Native { code, .. } => (UdfErrorKind::Vendor, Some(*code)),
+        XllError::ExcelValue(_) | XllError::Custom { .. } => (UdfErrorKind::ExcelValue, None),
         XllError::Panic => (UdfErrorKind::Panic, None),
         XllError::Closing => (UdfErrorKind::Closing, None),
         _ => (UdfErrorKind::Internal, None),
@@ -418,6 +475,24 @@ mod tests {
     use super::*;
     use crate::sync::Mutex;
     use std::sync::Arc;
+
+    #[test]
+    fn intentional_worksheet_errors_are_classified_separately_from_internal_failures() {
+        let errors = [
+            XllError::ExcelValue(crate::ExcelError::NotAvailable),
+            XllError::custom(crate::ExcelError::Number, "value outside application range"),
+        ];
+        for error in &errors {
+            assert_eq!(classify_error(error), (UdfErrorKind::ExcelValue, None));
+            let completion = UdfCompletionOutcome::from_error(error);
+            assert_eq!(completion.trace_label(), "excelValue");
+            assert_eq!(completion.vendor_code(), None);
+        }
+        assert_eq!(
+            classify_error(&XllError::Panic),
+            (UdfErrorKind::Panic, None)
+        );
+    }
 
     #[derive(Clone)]
     struct OrderedLayer {

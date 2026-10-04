@@ -34,6 +34,8 @@ use validation::validate_addin_metadata;
 /// trait implementations. An `async fn` selects asynchronous mode directly;
 /// there is no `#[excel_function(async)]` mode flag. Injected contexts must be
 /// the first parameter and carry an explicit `#[excel_context(...)]` role.
+/// A `thread_safe` or `macro_sheet` flag may repeat a matching context role;
+/// conflicting modes are rejected.
 #[proc_macro_attribute]
 pub fn excel_function(attributes: TokenStream, item: TokenStream) -> TokenStream {
     let function = parse_macro_input!(item as ItemFn);
@@ -662,8 +664,8 @@ mod tests {
     }
 
     #[test]
-    fn execution_mode_flags_cannot_repeat_context_roles() {
-        let error = expand_excel_function(
+    fn execution_mode_flags_can_repeat_matching_context_roles() {
+        let expanded = expand_excel_function(
             quote!(name = "TEST.DUPLICATE.THREAD", thread_safe),
             function(quote!(
                 fn value(
@@ -674,14 +676,12 @@ mod tests {
                 }
             )),
         )
-        .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("must not repeat the `thread_safe`")
-        );
+        .unwrap()
+        .to_string();
+        assert!(expanded.contains("thread_safe_context"));
+        assert!(!expanded.contains("macro_sheet_context"));
 
-        let error = expand_excel_function(
+        let expanded = expand_excel_function(
             quote!(name = "TEST.DUPLICATE.MACRO", macro_sheet),
             function(quote!(
                 fn value(
@@ -692,12 +692,35 @@ mod tests {
                 }
             )),
         )
-        .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("must not repeat the `macro_sheet`")
-        );
+        .unwrap()
+        .to_string();
+        assert!(expanded.contains("macro_sheet_context"));
+        assert!(!expanded.contains("thread_safe_context"));
+    }
+
+    #[test]
+    fn execution_mode_flags_reject_conflicting_context_roles() {
+        for (flag, role) in [
+            (quote!(thread_safe), quote!(main_thread)),
+            (quote!(thread_safe), quote!(macro_sheet)),
+            (quote!(macro_sheet), quote!(main_thread)),
+            (quote!(macro_sheet), quote!(thread_safe)),
+        ] {
+            let error = expand_excel_function(
+                flag,
+                function(quote!(
+                    fn value(#[excel_context(#role)] context: Context<'_, State>) -> i32 {
+                        let _ = context;
+                        1
+                    }
+                )),
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("cannot be marked")
+                    || error.to_string().contains("incompatible")
+            );
+        }
     }
 
     #[test]

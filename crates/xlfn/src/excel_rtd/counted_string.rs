@@ -49,7 +49,7 @@ mod tests {
             // SAFETY: the argument and its retained UTF-16 allocation are live
             // until the decoded string has been copied into Rust ownership.
             let view = unsafe { crate::value::XlValueRef::from_raw(pointer.as_ptr()) }.unwrap();
-            assert_eq!(view.as_str().unwrap().to_string().unwrap(), expected);
+            assert_eq!(view.as_str().unwrap().try_to_string().unwrap(), expected);
         }
     }
 }

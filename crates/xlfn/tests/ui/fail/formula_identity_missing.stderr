@@ -11,7 +11,7 @@ help: the trait `PrepareExcel<'_>` is not implemented for `CustomRate`
    | ^^^^^^^^^^^^^^^^^
    = help: the following other types implement trait `PrepareExcel<'call>`:
              ExcelCellValue
-             ExcelErrorValue
+             ExcelError
              ExcelSerialDate
              XlArrayRef<'call>
              bool
@@ -42,7 +42,7 @@ help: the trait `PrepareExcel<'_>` is not implemented for `CustomRate`
    | ^^^^^^^^^^^^^^^^^
    = help: the following other types implement trait `PrepareExcel<'call>`:
              ExcelCellValue
-             ExcelErrorValue
+             ExcelError
              ExcelSerialDate
              XlArrayRef<'call>
              bool

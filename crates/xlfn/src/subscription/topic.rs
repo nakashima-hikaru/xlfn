@@ -25,17 +25,22 @@ pub enum RtdCapacity {
 
 impl RtdCapacity {
     #[must_use]
+    /// Disables admission for this resource.
     pub const fn disabled() -> Self {
         Self::Disabled
     }
 
     #[must_use]
+    /// Admits at most the given positive number of resources.
     pub const fn bounded(value: NonZeroUsize) -> Self {
         Self::Bounded(value)
     }
 
     #[must_use]
-    pub const fn from_usize(value: usize) -> Self {
+    /// Disables admission when `value` is zero; positive values are finite bounds.
+    ///
+    /// Zero never means unlimited capacity.
+    pub const fn disabled_if_zero(value: usize) -> Self {
         match NonZeroUsize::new(value) {
             Some(value) => Self::Bounded(value),
             None => Self::Disabled,
@@ -43,6 +48,7 @@ impl RtdCapacity {
     }
 
     #[must_use]
+    /// Returns the finite bound, or zero for disabled admission.
     pub const fn get(self) -> usize {
         match self {
             Self::Disabled => 0,
@@ -51,6 +57,7 @@ impl RtdCapacity {
     }
 
     #[must_use]
+    /// Returns whether admission is disabled.
     pub const fn is_disabled(self) -> bool {
         matches!(self, Self::Disabled)
     }
@@ -69,17 +76,19 @@ pub struct RtdLimits {
 
 impl RtdLimits {
     #[must_use]
+    /// Returns the default finite subscription, queue, source, and topic-byte limits.
     pub const fn standard() -> Self {
         Self {
-            max_pending: RtdCapacity::from_usize(DEFAULT_MAX_RTD_PENDING),
-            max_active: RtdCapacity::from_usize(DEFAULT_MAX_RTD_ACTIVE),
-            max_queued_updates: RtdCapacity::from_usize(DEFAULT_MAX_RTD_QUEUED_UPDATES),
-            max_source_ids: RtdCapacity::from_usize(DEFAULT_MAX_RTD_SOURCE_IDS),
-            max_total_topic_bytes: RtdCapacity::from_usize(DEFAULT_MAX_RTD_TOTAL_TOPIC_BYTES),
+            max_pending: RtdCapacity::disabled_if_zero(DEFAULT_MAX_RTD_PENDING),
+            max_active: RtdCapacity::disabled_if_zero(DEFAULT_MAX_RTD_ACTIVE),
+            max_queued_updates: RtdCapacity::disabled_if_zero(DEFAULT_MAX_RTD_QUEUED_UPDATES),
+            max_source_ids: RtdCapacity::disabled_if_zero(DEFAULT_MAX_RTD_SOURCE_IDS),
+            max_total_topic_bytes: RtdCapacity::disabled_if_zero(DEFAULT_MAX_RTD_TOTAL_TOPIC_BYTES),
         }
     }
 
     #[must_use]
+    /// Sets the capacity for subscriptions waiting to connect.
     pub const fn with_max_pending(mut self, value: RtdCapacity) -> Self {
         self.max_pending = value;
         self
@@ -95,24 +104,28 @@ impl RtdLimits {
     }
 
     #[must_use]
+    /// Sets the capacity for queued topic updates.
     pub const fn with_max_queued_updates(mut self, value: RtdCapacity) -> Self {
         self.max_queued_updates = value;
         self
     }
 
     #[must_use]
+    /// Sets the capacity for registered source identities.
     pub const fn with_max_source_ids(mut self, value: RtdCapacity) -> Self {
         self.max_source_ids = value;
         self
     }
 
     #[must_use]
+    /// Sets the aggregate byte budget for retained topic parts.
     pub const fn with_max_total_topic_bytes(mut self, value: RtdCapacity) -> Self {
         self.max_total_topic_bytes = value;
         self
     }
 
     #[must_use]
+    /// Returns the pending-subscription capacity.
     pub const fn max_pending(&self) -> RtdCapacity {
         self.max_pending
     }
@@ -124,16 +137,19 @@ impl RtdLimits {
     }
 
     #[must_use]
+    /// Returns the queued-update capacity.
     pub const fn max_queued_updates(&self) -> RtdCapacity {
         self.max_queued_updates
     }
 
     #[must_use]
+    /// Returns the source-identity capacity.
     pub const fn max_source_ids(&self) -> RtdCapacity {
         self.max_source_ids
     }
 
     #[must_use]
+    /// Returns the aggregate retained topic-byte budget.
     pub const fn max_total_topic_bytes(&self) -> RtdCapacity {
         self.max_total_topic_bytes
     }
@@ -251,6 +267,7 @@ fn parse_fixed_hex(value: &str) -> Option<u64> {
 }
 
 #[derive(Clone, Debug)]
+/// An owned, validated sequence of topic strings used for subscription identity.
 pub struct RtdTopic {
     parts: Box<[SmolStr]>,
     byte_len: usize,
@@ -258,6 +275,7 @@ pub struct RtdTopic {
 }
 
 impl RtdTopic {
+    /// Validates and owns topic parts, rejecting excessive part counts or byte lengths.
     pub fn new(parts: impl IntoIterator<Item = impl AsRef<str>>) -> XllResult<Self> {
         let parts = parts.into_iter();
         // Arrays, slices and mapped collections expose their length. Avoid
@@ -298,6 +316,7 @@ impl RtdTopic {
         })
     }
 
+    /// Creates a validated topic with one part.
     pub fn single(part: impl AsRef<str>) -> XllResult<Self> {
         Self::new([part])
     }

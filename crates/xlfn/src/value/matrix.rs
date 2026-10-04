@@ -1,10 +1,13 @@
 //! Owned rectangular and bounded collection values.
 
 use super::{EXCEL_MAX_COLUMNS, EXCEL_MAX_ROWS, MAX_ARRAY_ELEMENTS};
-use crate::error::{DomainErrorCode, InputError};
+use crate::error::{DomainErrorCode, InputError, Shape};
 use crate::{XllError, XllResult};
 use std::ops::Index;
 
+/// An owned, non-empty rectangular collection in row-major order.
+///
+/// Construction checks dimensions, cell count, and Excel/framework limits.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Matrix<T> {
     pub(super) rows: usize,
@@ -13,6 +16,7 @@ pub struct Matrix<T> {
 }
 
 impl<T> Matrix<T> {
+    /// Validates `rows × columns == data.len()` and the dimension limits.
     pub fn new(rows: usize, columns: usize, data: Vec<T>) -> XllResult<Self> {
         validate_matrix_dimensions(rows, columns, data.len())?;
         Ok(Self {
@@ -22,36 +26,52 @@ impl<T> Matrix<T> {
         })
     }
 
+    /// Returns the number of rows.
     #[must_use]
     pub const fn rows(&self) -> usize {
         self.rows
     }
 
+    /// Returns the number of columns.
     #[must_use]
     pub const fn columns(&self) -> usize {
         self.columns
     }
 
+    /// Returns the rectangular shape used by conversion diagnostics.
+    #[must_use]
+    pub const fn shape(&self) -> Shape {
+        Shape {
+            rows: self.rows,
+            columns: self.columns,
+        }
+    }
+
+    /// Returns all elements in row-major order.
     #[must_use]
     pub fn as_slice(&self) -> &[T] {
         &self.data
     }
 
+    /// Consumes the matrix and returns its row-major elements.
     #[must_use]
     pub fn into_vec(self) -> Vec<T> {
         self.data
     }
 
+    /// Returns a zero-based row, or `None` when it is out of bounds.
     pub fn row(&self, row: usize) -> Option<&[T]> {
         let start = row.checked_mul(self.columns)?;
         let end = start.checked_add(self.columns)?;
         self.data.get(start..end)
     }
 
+    /// Iterates over a zero-based column, or returns `None` out of bounds.
     pub fn column(&self, column: usize) -> Option<impl Iterator<Item = &T>> {
         (column < self.columns).then(|| self.data.iter().skip(column).step_by(self.columns))
     }
 
+    /// Iterates over all elements in row-major order.
     pub fn iter(&self) -> std::slice::Iter<'_, T> {
         self.data.iter()
     }
@@ -84,35 +104,51 @@ impl<'call, T> MatrixRef<'call, T> {
         })
     }
 
+    /// Returns the number of rows.
     #[must_use]
     pub const fn rows(&self) -> usize {
         self.rows
     }
 
+    /// Returns the number of columns.
     #[must_use]
     pub const fn columns(&self) -> usize {
         self.columns
     }
 
+    /// Returns the rectangular shape used by conversion diagnostics.
+    #[must_use]
+    pub const fn shape(&self) -> Shape {
+        Shape {
+            rows: self.rows,
+            columns: self.columns,
+        }
+    }
+
+    /// Returns elements borrowed for the input call lifetime.
     #[must_use]
     pub const fn as_slice(&self) -> &'call [T] {
         self.data
     }
 
+    /// Returns a zero-based borrowed row, or `None` out of bounds.
     pub fn row(&self, row: usize) -> Option<&'call [T]> {
         let start = row.checked_mul(self.columns)?;
         let end = start.checked_add(self.columns)?;
         self.data.get(start..end)
     }
 
+    /// Iterates over a zero-based borrowed column, or returns `None` out of bounds.
     pub fn column(&self, column: usize) -> Option<impl Iterator<Item = &'call T>> {
         (column < self.columns).then(|| self.data.iter().skip(column).step_by(self.columns))
     }
 
+    /// Iterates over borrowed elements in row-major order.
     pub fn iter(&self) -> std::slice::Iter<'call, T> {
         self.data.iter()
     }
 
+    /// Clones the elements into an owned matrix that can outlive the call.
     pub fn to_owned(&self) -> XllResult<Matrix<T>>
     where
         T: Clone,
@@ -187,42 +223,55 @@ pub(crate) fn validate_matrix_dimensions(
     Ok(())
 }
 
+/// An owned, non-empty row with explicit worksheet orientation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row<T>(pub(super) Vec<T>);
 
 impl<T> Row<T> {
+    /// Creates one row, validating non-empty length and Excel limits.
     pub fn new(data: Vec<T>) -> XllResult<Self> {
         let matrix = Matrix::new(1, data.len(), data)?;
         Ok(Self(matrix.into_vec()))
     }
+    /// Returns the elements from left to right.
     pub fn as_slice(&self) -> &[T] {
         &self.0
     }
+    /// Consumes the row and returns its elements.
     pub fn into_vec(self) -> Vec<T> {
         self.0
     }
 }
 
+/// An owned, non-empty column with explicit worksheet orientation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Column<T>(pub(super) Vec<T>);
 
 impl<T> Column<T> {
+    /// Creates one column, validating non-empty length and Excel limits.
     pub fn new(data: Vec<T>) -> XllResult<Self> {
         let matrix = Matrix::new(data.len(), 1, data)?;
         Ok(Self(matrix.into_vec()))
     }
+    /// Returns the elements from top to bottom.
     pub fn as_slice(&self) -> &[T] {
         &self.0
     }
+    /// Consumes the column and returns its elements.
     pub fn into_vec(self) -> Vec<T> {
         self.0
     }
 }
 
+/// Input-only one-dimensional arguments bounded by `MAX` elements.
+///
+/// Unlike a row or column, the container does not preserve orientation and may
+/// be empty. `MAX` must be non-zero.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoundedVarArgs<T, const MAX: usize>(pub(super) Vec<T>);
 
 impl<T, const MAX: usize> BoundedVarArgs<T, MAX> {
+    /// Rejects a zero maximum or a length greater than `MAX`.
     pub fn new(values: Vec<T>) -> XllResult<Self> {
         if MAX == 0 {
             return Err(XllError::input(
@@ -242,11 +291,13 @@ impl<T, const MAX: usize> BoundedVarArgs<T, MAX> {
         Ok(Self(values))
     }
 
+    /// Returns the decoded elements in their input order.
     #[must_use]
     pub fn as_slice(&self) -> &[T] {
         &self.0
     }
 
+    /// Consumes the bounded input and returns its elements.
     #[must_use]
     pub fn into_vec(self) -> Vec<T> {
         self.0

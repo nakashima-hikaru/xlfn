@@ -131,12 +131,14 @@ pub(crate) struct ExecutorControl {
 }
 
 #[cfg(feature = "bench-internals")]
+/// Benchmark fixture holding task controls in production generation shards.
 pub struct AsyncTaskDrainBenchmark {
     state: GenerationState,
 }
 
 #[cfg(feature = "bench-internals")]
 impl AsyncTaskDrainBenchmark {
+    /// Seeds a generation with the requested task-control count.
     pub fn new(count: usize) -> Self {
         let state = GenerationState::new(1);
         for id in 0..count as u64 {
@@ -163,6 +165,7 @@ impl AsyncTaskDrainBenchmark {
         count
     }
 
+    /// Returns the sizes in bytes of one control and an empty drained collection.
     pub fn sizes() -> (usize, usize) {
         let state = GenerationState::new(1);
         let controls = state.drain_tasks();

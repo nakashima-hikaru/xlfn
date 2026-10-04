@@ -14,9 +14,7 @@ impl Addin for ExampleAddin {
     type Error = XllError;
     type Layers = ();
 
-    fn open(
-        _context: &OpenContext,
-    ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
+    fn open(_context: &OpenContext) -> OpenResult<Self> {
         Ok(Opened::new(ExampleState))
     }
 }
@@ -29,7 +27,7 @@ pub fn add(
     Ok(x + y)
 }
 
-#[excel_function(name = "EXAMPLE.GREET")]
+#[excel_function(name = "EXAMPLE.GREET", thread_safe)]
 pub fn greet(
     #[excel_context(thread_safe)] _context: ThreadSafeContext<'_, ExampleAddin>,
     name: String,

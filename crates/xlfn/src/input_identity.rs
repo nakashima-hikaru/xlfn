@@ -55,6 +55,7 @@ enum ArgumentIdentity {
     Hashed,
 }
 
+/// Incremental encoder used by generated input-identity implementations.
 pub struct InputIdentityEncoder {
     sink: ArgumentSink,
     spare: Option<Box<HashedArgument>>,

@@ -20,6 +20,7 @@
 //! enables formula handles. Both features share a private Excel RTD/COM
 //! transport, but neither public capability implies the other.
 
+#![warn(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(unsafe_code)]
 
@@ -43,6 +44,7 @@ pub mod benchmark_support;
 mod boundary;
 #[cfg(feature = "cache")]
 #[allow(unsafe_code, reason = "Cache value arena and lease pointers")]
+/// Concurrent weighted caches and typed cache registry descriptors.
 pub mod cache;
 #[allow(
     unsafe_code,
@@ -64,13 +66,16 @@ mod cancellation;
 mod composition_refinement;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 mod crt;
+/// Bounded diagnostic delivery, events, and add-in diagnostic identities.
 pub mod diagnostics;
+/// Worksheet errors and structured failures from add-ins and the framework.
 pub mod error;
 mod excel_rtd;
 /// Stable execution-layer contracts and per-call metadata.
 pub mod execution;
 mod generation;
 #[cfg(feature = "handles")]
+/// Typed object handles with call-scoped borrowing and generation-scoped leases.
 pub mod handle;
 #[cfg(not(feature = "handles"))]
 mod handle;
@@ -91,6 +96,7 @@ mod module_residency;
 mod module_runtime;
 mod panic_boundary;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
+/// Borrowed worksheet references and range coordinates.
 pub mod reference;
 mod registration;
 mod retirement_queue;
@@ -101,6 +107,7 @@ mod retirement_queue;
 )]
 mod return_abi;
 #[cfg(feature = "rtd")]
+/// Typed real-time subscriptions, producers, and bounded delivery policies.
 pub mod rtd;
 mod runtime;
 mod runtime_components;
@@ -108,13 +115,14 @@ mod shutdown;
 mod shutdown_trace;
 mod subscription;
 mod utf16;
+/// Safe worksheet input views, owned values, and explicit output shapes.
 pub mod value;
 
 pub(crate) use xlfn_kernel::sync;
 
 pub use addin::{
-    Addin, BuildInfo, DiagnosticsSetup, MacroSheetContext, MainThreadContext, OpenContext, Opened,
-    PhysicallyUnloadableAddin, RuntimeConfig, ThreadSafeContext,
+    Addin, BuildInfo, DiagnosticsSetup, MacroSheetContext, MainThreadContext, OpenContext,
+    OpenResult, Opened, PhysicallyUnloadableAddin, RuntimeConfig, ThreadSafeContext,
 };
 #[cfg(feature = "async")]
 pub use addin::{AsyncConfig, AsyncContext, AsyncWorkerCount};
@@ -130,7 +138,6 @@ pub use error::{
 #[cfg(feature = "rtd")]
 pub use rtd::RtdCallContext;
 pub use shutdown::{CleanupIssueKind, CleanupReporter};
-pub use value::XlValueType;
 
 mod ingress;
 
@@ -259,14 +266,14 @@ pub mod prelude {
     #[cfg(feature = "async")]
     pub use crate::addin::AsyncContext;
     pub use crate::addin::{
-        Addin, MacroSheetContext, MainThreadContext, OpenContext, Opened, ThreadSafeContext,
+        Addin, MacroSheetContext, MainThreadContext, OpenContext, OpenResult, Opened,
+        ThreadSafeContext,
     };
     pub use crate::error::{ExcelError, XllError, XllResult};
     #[cfg(feature = "handles")]
     pub use crate::handle::{Handle, HandleAlias, HandleLease};
     pub use crate::value::{
-        Column, ExcelCellRef, ExcelErrorValue, ExcelSerialDate, Matrix, MatrixRef,
-        OptionalExcelValue, Row,
+        Column, ExcelCellRef, ExcelSerialDate, Matrix, MatrixRef, OptionalExcelValue, Row,
     };
     pub use crate::{ExcelEnum, excel_addin, excel_function};
 }

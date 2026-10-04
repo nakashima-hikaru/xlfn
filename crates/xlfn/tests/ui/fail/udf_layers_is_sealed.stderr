@@ -11,7 +11,7 @@ help: the trait `execution::private::UdfLayersImpl` is not implemented for `Cust
   | ^^^^^^^^^^^^^^^^^^^
   = help: the following other types implement trait `execution::private::UdfLayersImpl`:
             (T₁, T₂, …, Tₙ) up to tuples of arity 16
-note: required by a bound in `xlfn::execution::UdfLayers`
+note: required by a bound in `UdfLayers`
  --> src/execution.rs
   |
   | pub trait UdfLayers: private::UdfLayersImpl {}

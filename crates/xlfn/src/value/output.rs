@@ -36,9 +36,12 @@ pub trait ExcelCellSink {
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be converted into an Excel return value",
     label = "`{Self}` does not implement `IntoExcel`",
-    note = "implement `IntoExcel` for `{Self}` or return a supported type (e.g. `f64`, `bool`, `String`, `ExcelErrorValue`, or a custom handle)"
+    note = "implement `IntoExcel` for `{Self}` or return a supported type (e.g. `f64`, `bool`, `String`, `ExcelError`, or a custom handle)"
 )]
 pub trait IntoExcel {
+    /// Converts one value, rejecting invalid numbers and application inputs.
+    ///
+    /// Return storage additionally enforces Excel's UTF-16 string limits.
     fn into_excel(self) -> XllResult<ExcelCellOutput>;
 
     /// Writes directly into a semantic cell sink when the value has a

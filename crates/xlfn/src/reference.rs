@@ -11,11 +11,13 @@ const EXCEL_MAX_ROW: i32 = 1_048_575;
 const EXCEL_MAX_COLUMN: i32 = 16_383;
 const MAX_REFERENCE_AREAS: usize = 1_024;
 
+/// Opaque identity of an Excel sheet supplied by a reference argument.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct SheetId(IDSHEET);
 
 impl SheetId {
     #[must_use]
+    /// Returns the host-provided numeric identity for correlation.
     pub const fn get(self) -> usize {
         self.0
     }
@@ -23,6 +25,7 @@ impl SheetId {
 
 use core::range::RangeInclusive;
 
+/// Validated rectangular reference area with zero-based inclusive coordinates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReferenceArea {
     rows: RangeInclusive<u32>,
@@ -56,26 +59,32 @@ impl ReferenceArea {
     }
 
     #[must_use]
+    /// Returns the first zero-based row in the area.
     pub const fn first_row(self) -> u32 {
         self.rows.start
     }
     #[must_use]
+    /// Returns the last zero-based row in the area.
     pub const fn last_row(self) -> u32 {
         self.rows.last
     }
     #[must_use]
+    /// Returns the first zero-based column in the area.
     pub const fn first_column(self) -> u32 {
         self.columns.start
     }
     #[must_use]
+    /// Returns the last zero-based column in the area.
     pub const fn last_column(self) -> u32 {
         self.columns.last
     }
     #[must_use]
+    /// Returns the zero-based inclusive row range.
     pub const fn rows(self) -> RangeInclusive<u32> {
         self.rows
     }
     #[must_use]
+    /// Returns the zero-based inclusive column range.
     pub const fn columns(self) -> RangeInclusive<u32> {
         self.columns
     }
@@ -98,6 +107,7 @@ pub struct ExcelReference<'call> {
 
 impl ExcelReference<'_> {
     #[must_use]
+    /// Returns an explicit sheet identity, or `None` for a current-sheet reference.
     pub fn sheet_id(&self) -> Option<SheetId> {
         match self.kind {
             ReferenceKind::SameSheet(_) => None,
@@ -106,11 +116,13 @@ impl ExcelReference<'_> {
     }
 
     #[must_use]
+    /// Returns whether the reference contains more than one rectangular area.
     pub fn is_multi_area(&self) -> bool {
         matches!(self.kind, ReferenceKind::Sheet { areas, .. } if areas.len() > 1)
     }
 
     #[must_use]
+    /// Iterates over all validated rectangular areas in host order.
     pub fn areas(&self) -> ReferenceAreas<'_> {
         ReferenceAreas {
             inner: match &self.kind {
@@ -161,6 +173,7 @@ impl Iterator for ReferenceAreas<'_> {
     note = "implement `FromExcelReference` for `{Self}` to accept reference arguments"
 )]
 pub trait FromExcelReference<'call>: Sized {
+    /// Converts and validates a call-scoped reference, naming errors with `argument`.
     fn from_excel_reference(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self>;
 }
 

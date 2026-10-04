@@ -77,21 +77,6 @@ fn uppercase<'a>(state: &'a State, text: String) -> XllResult<CacheLease<'a, Str
 }
 ```
 
-You can also perform operations directly through the endpoint descriptor:
-
-```rust
-# fn example() -> xlfn::XllResult<()> {
-{{#include ../fixtures/cache.md}}
-UPPERCASE.get_or_try_insert(
-    &state.caches,
-    text.clone(),
-    String::len,
-    || Ok(text.to_uppercase()),
-)?;
-# Ok(())
-# }
-```
-
 `CacheEndpoint<K, V, Marker = ()>` is a reusable descriptor. It borrows no
 registry, so it can be a `static` while each add-in state owns a `CacheRegistry`.
 

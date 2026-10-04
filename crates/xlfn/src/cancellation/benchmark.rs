@@ -12,6 +12,7 @@ pub struct CancellationLifecycleBenchmark {
 }
 
 impl CancellationLifecycleBenchmark {
+    /// Creates a cancellation fixture with the requested worker count and dispatch mode.
     pub fn new(workers: usize, dispatch_only: bool) -> Self {
         assert!(workers != 0);
         let registry = Arc::new(CancellationRegistry::new());
@@ -57,6 +58,7 @@ impl CancellationLifecycleBenchmark {
         }
     }
 
+    /// Performs cancellation iterations and returns observed completions.
     pub fn run(&self, iterations: usize) -> usize {
         for worker in &self.starts {
             worker

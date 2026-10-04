@@ -17,7 +17,7 @@ impl super::ExcelReturn for RtdValue {
             RtdValue::Boolean(value) => ExcelCellOutput::Boolean(value),
             RtdValue::Integer(value) => ExcelCellOutput::Number(value as f64),
             RtdValue::String(value) => ExcelCellOutput::String(value),
-            RtdValue::Error(value) => ExcelCellOutput::Error(value.0),
+            RtdValue::Error(value) => ExcelCellOutput::Error(value),
             RtdValue::Empty => ExcelCellOutput::Error(crate::ExcelError::NotAvailable),
         };
         ReturnPayload::scalar(cell)

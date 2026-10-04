@@ -67,9 +67,7 @@ impl Addin for ExampleAddin {
     type Error = XllError;
     type Layers = ();
 
-    fn open(
-        _: &OpenContext,
-    ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
+    fn open(_: &OpenContext) -> OpenResult<Self> {
         Ok(Opened::new(()))
     }
 }

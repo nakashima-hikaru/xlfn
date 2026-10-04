@@ -152,6 +152,7 @@ impl InputMode for FormulaInputMode {
     note = "implement `FromExcel` for this argument type or use a supported argument type"
 )]
 pub trait FromExcel<'call>: Sized {
+    /// Converts a validated input view using `argument` for error context.
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self>;
 
     /// Converts an owned input while recording its semantic identity.
@@ -182,6 +183,7 @@ pub trait FromExcel<'call>: Sized {
     note = "implement `ExcelInputIdentity` for `{Self}` to support formula revision tracking"
 )]
 pub trait ExcelInputIdentity {
+    /// Records exactly the converted semantic value, including shape/presence.
     fn encode_input_identity(&self, encoder: &mut InputIdentityEncoder);
 }
 
@@ -196,17 +198,20 @@ pub trait ExcelInputIdentity {
 /// The supported extension points are `Prepared`, `prepare`, and `materialize`;
 /// hidden dispatch hooks are framework implementation details.
 pub trait PrepareExcel<'call>: FromExcel<'call> + ExcelInputIdentity {
+    /// Validated owned or borrowed state retained until a cache miss.
     type Prepared;
     // Built-ins with borrowed collection state can defer typed scratch copies
     // without retaining a per-cell prepared allocation. Custom preparation
     // keeps its existing eager MatrixRef policy.
     #[doc(hidden)]
     const __BORROWED_ELEMENTS: bool = false;
+    /// Validates the entire input and records its identity before lookup.
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
         identity: &mut InputIdentityEncoder,
     ) -> XllResult<Self::Prepared>;
+    /// Consumes prepared state once on a miss to produce the user argument.
     fn materialize(prepared: Self::Prepared) -> XllResult<Self>;
 
     // Internal dispatch hook: stable Rust cannot specialize the blanket

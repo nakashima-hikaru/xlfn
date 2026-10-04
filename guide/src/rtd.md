@@ -82,7 +82,7 @@ producer starts. Later publications update the topic and notify Excel.
 - Excel error;
 - empty.
 
-`IntoRtdValue` is implemented for common scalar types, including `f64`, `bool`, `i32`, exactly representable `i64`, `ExcelSerialDate`, strings, `ExcelErrorValue`, and `()`.
+`IntoRtdValue` is implemented for common scalar types, including `f64`, `bool`, `i32`, exactly representable `i64`, `ExcelSerialDate`, strings, `ExcelError`, and `()`.
 
 A custom converter returns an owned `RtdValue`. The sender checks finite
 numbers and Excel's string-length limit before queueing it.

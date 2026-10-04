@@ -13,8 +13,8 @@ neither state nor those operations.
 | Mode | How selected | Excel MTR | Can use raw references | Can return a new handle object |
 |---|---|---:|---:|---:|
 | Main thread | default (no context) or `main_thread` context | no | no | yes |
-| Thread-safe | `thread_safe` flag (no context) or `thread_safe` context | yes | no | no |
-| Macro-sheet | `macro_sheet` flag (no context) or `macro_sheet` context | no | yes | no |
+| Thread-safe | `thread_safe` flag or `thread_safe` context | yes | no | no |
+| Macro-sheet | `macro_sheet` flag or `macro_sheet` context | no | yes | no |
 | Asynchronous | `async fn` | native async ABI | no | no |
 
 
@@ -22,8 +22,8 @@ neither state nor those operations.
 
 A context must be the first parameter, passed by value, with exactly one
 `#[excel_context(...)]` role. It is injected by the framework and does not
-appear as a worksheet argument. When a context selects the mode, omit the
-equivalent flag from `#[excel_function]`.
+appear as a worksheet argument. A context selects the mode; an equivalent
+flag in `#[excel_function]` is allowed, while a conflicting flag is rejected.
 
 The examples below assume `use xlfn::prelude::*;` and an add-in named
 `AppTools` whose shared state contains the fields being read. See
@@ -57,7 +57,10 @@ fn version(
 }
 ```
 
-The context parameter acts as the single source of truth for the function's execution mode. When `ThreadSafeContext` is present, it explicitly declares the function as thread-safe; do **not** declare `thread_safe` in `#[excel_function]`, as redundant mode declarations are rejected at compile time. The `#[excel_function(thread_safe)]` attribute flag is reserved for functions that do not take a context argument (i.e. pure computation UDFs that do not require state access).
+The `thread_safe` context role selects thread-safe execution. You may also
+write `#[excel_function(thread_safe)]` on the same function; adding or removing
+state access then does not require changing that flag. Pure functions can use
+the flag alone.
 
 ### What `thread_safe` guarantees
 
@@ -86,7 +89,9 @@ A macro-sheet context permits Excel callback operations that are not allowed in 
 - `coerce_matrix<T>` for an owned matrix;
 - `sheet_name`.
 
-The `macro_sheet` attribute flag on `#[excel_function(macro_sheet)]` selects macro-sheet registration for pure functions without injecting state access. When `MacroSheetContext` is present in the parameters, it defines the execution mode, and adding `macro_sheet` to `#[excel_function]` is a compile error. Macro-sheet mode is incompatible with `thread_safe` and asynchronous functions.
+The `macro_sheet` flag selects macro-sheet registration without injecting state
+access. It may also repeat a `macro_sheet` context role. Macro-sheet mode is
+incompatible with `thread_safe` and asynchronous functions.
 
 ## Asynchronous context
 

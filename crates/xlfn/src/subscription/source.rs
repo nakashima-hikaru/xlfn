@@ -36,7 +36,9 @@ use std::marker::PhantomData;
 /// The framework contains cleanup panics and may reclaim the publish core
 /// afterward. Neither an error nor a panic extends the lifetime of a sink.
 pub unsafe trait RtdSubscription: Send + 'static {
+    /// Requests that subscription work stop without transferring ownership.
     fn request_cancel(&self);
+    /// Consumes the subscription and stops all sink users before returning.
     fn disconnect_and_wait(self: Box<Self>) -> XllResult<()>;
 }
 
@@ -160,9 +162,12 @@ impl std::fmt::Debug for SourceArena {
 /// This contract is required because [`RtdSink`] is a lifetime-less,
 /// non-owning capability into a runtime-owned publish core.
 pub unsafe trait RtdSource: Send + Sync + 'static {
+    /// Owned values accepted by this source's publication capability.
     type Value: IntoRtdValue + Send + 'static;
+    /// The unique owner of every sink user created during subscription.
     type Subscription: RtdSubscription;
 
+    /// Creates a subscription under the sink-transfer safety contract above.
     fn subscribe(
         &self,
         topic: &RtdTopic,
@@ -174,7 +179,7 @@ pub unsafe trait RtdSource: Send + Sync + 'static {
 ///
 /// A handle is valid only for the generation that created it. Copying it does
 /// not extend source lifetime; source storage belongs exclusively to the
-/// generation's [`SourceArena`].
+/// generation's source arena.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct SourceHandleId {
     pub(crate) generation: RuntimeGeneration,
@@ -251,6 +256,12 @@ impl<T> RtdSink<T>
 where
     T: IntoRtdValue,
 {
+    /// Converts, validates, and publishes a value to the active subscription.
+    ///
+    /// Successful publication updates runtime storage; Excel may coalesce
+    /// notifications, so it does not guarantee that a cell displayed every
+    /// intermediate value. The subscription's disconnection barrier governs
+    /// the lifetime of this non-owning capability and all its clones.
     pub fn publish(&self, value: T) -> XllResult<()> {
         let value = value.into_rtd_value()?.into_stored()?;
         self.sink.publish_stored(value)

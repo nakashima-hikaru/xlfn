@@ -1,8 +1,8 @@
 pub(crate) mod catalog;
 /// Stable diagnostic identifier type.
-pub mod id;
+pub(crate) mod id;
 
-use id::DiagnosticId;
+pub use id::DiagnosticId;
 
 use crate::error::IntoXllError;
 use crate::panic_boundary::catch_no_unwind;
@@ -25,7 +25,7 @@ use xlfn_kernel::service_slot::ReplaceableServiceSlot;
 #[cfg(feature = "bench-internals")]
 pub(crate) mod benchmark;
 /// Public diagnostic events, sink configuration, and observable statistics.
-pub mod event;
+pub(crate) mod event;
 /// Private file-sink and startup-log integration.
 pub(crate) mod file;
 mod payload;

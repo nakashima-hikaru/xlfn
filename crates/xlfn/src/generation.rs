@@ -90,6 +90,7 @@ impl<A: crate::Addin> ExecutionLease<A> {
     }
 
     #[must_use]
+    /// Borrows shared state while this execution lease retains the generation.
     pub fn state(&self) -> &A::SharedState {
         // SAFETY: construction couples the pointer to the owned drain permit.
         &unsafe { self.generation.as_ref() }.shared_state

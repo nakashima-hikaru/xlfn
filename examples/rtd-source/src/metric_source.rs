@@ -31,19 +31,20 @@ pub(crate) fn metric_source() -> MetricSource {
         Ok(move |sender: RtdSender<RtdValue>| {
             while !sender.is_closed() {
                 match client.try_next_metric(&symbol) {
-                    Ok(Some(value)) => sender.try_send(RtdValue::Number(value)).map_err(xlfn::rtd::RtdSendError::into_error)?,
+                    Ok(Some(value)) => sender
+                        .try_send(RtdValue::Number(value))
+                        .map_err(xlfn::rtd::RtdSendError::into_error)?,
                     Ok(None) => {
                         sender.wait_closed(Duration::from_millis(50));
                     }
-                    Err(error) => return Err(XllError::Native {
-                        code: error.raw_os_error().unwrap_or(0),
-                        message: error.to_string(),
-                    }),
+                    Err(error) => return Err(error.into()),
                 }
             }
             Ok(())
         })
     })
     .with_max_producers(NonZeroUsize::new(32).unwrap())
-    .with_error_policy(RtdProducerErrorPolicy::PublishError(ExcelError::NotAvailable))
+    .with_error_policy(RtdProducerErrorPolicy::PublishError(
+        ExcelError::NotAvailable,
+    ))
 }

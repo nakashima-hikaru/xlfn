@@ -161,11 +161,17 @@ pub(crate) fn wait_for_return_quiescence(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum CleanupIssueKind {
+    /// Excel registration metadata could not be disposed or reconciled.
     HostMetadata,
+    /// Host-owned memory could not be released and was retained.
     HostMemoryLeak,
+    /// Diagnostic output could not be delivered completely.
     DiagnosticLoss,
+    /// A worker had panicked, but its thread was successfully joined.
     WorkerPanickedAfterJoin,
+    /// A destructor or best-effort disposal hook panicked.
     DisposalPanicked,
+    /// Registry entries could not be disposed completely.
     RegistryCleanup,
 }
 
@@ -201,7 +207,10 @@ impl CloseReport {
 }
 
 /// Records non-fatal disposal problems after [`crate::Addin::quiesce`] has
-/// established that unloading the XLL is safe.
+/// established logical quiescence for the generation.
+///
+/// Physical DLL unloading additionally requires the explicit
+/// [`crate::PhysicallyUnloadableAddin`] contract.
 pub struct CleanupReporter<'a> {
     report: &'a mut CloseReport,
 }
@@ -211,6 +220,10 @@ impl<'a> CleanupReporter<'a> {
         Self { report }
     }
 
+    /// Records a non-fatal cleanup failure after quiescence was established.
+    ///
+    /// `component` identifies the application resource and `kind` classifies
+    /// the cleanup issue. The error is converted into the diagnostic stream.
     pub fn warn(
         &mut self,
         component: &'static str,

@@ -15,6 +15,10 @@ impl Drop for Payload {
     }
 }
 
+/// Measures logical removal and final-drain latency while a reader retains a handle.
+///
+/// `samples` must be nonzero. Returned JSON includes latency percentiles and
+/// object destruction counts; this probe is available only for benchmarks.
 pub fn handle_removal_probe(samples: usize, reader_hold: Duration) -> serde_json::Value {
     assert!(samples > 0);
     let drops = Arc::new(AtomicUsize::new(0));
@@ -76,6 +80,7 @@ pub fn handle_removal_probe(samples: usize, reader_hold: Duration) -> serde_json
     })
 }
 
+/// Exercises the retained-reader retirement bound and reports its debt counters.
 pub fn handle_retirement_debt_probe() -> serde_json::Value {
     let registry = HandleRegistry::from_entropy(8, [7; 40]);
     let drops = Arc::new(AtomicUsize::new(0));

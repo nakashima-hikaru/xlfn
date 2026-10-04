@@ -201,9 +201,9 @@ fn visit_registry_marker<const INDEX: usize, const SETUP: bool>(registry: &Cache
         CacheEndpoint::<u64, u64, RegistryEndpointMarker<INDEX>>::new(REGISTRY_SHARED_ID);
     if SETUP {
         drop(
-            endpoint
+            registry
                 .get_or_try_insert(
-                    registry,
+                    &endpoint,
                     HOT_KEY,
                     |_| ENTRY_WEIGHT as usize,
                     || Ok(INDEX as u64),
@@ -211,8 +211,8 @@ fn visit_registry_marker<const INDEX: usize, const SETUP: bool>(registry: &Cache
                 .expect("registry marker benchmark warm seed failed"),
         );
     }
-    let lease = endpoint
-        .get(registry, &HOT_KEY)
+    let lease = registry
+        .get(&endpoint, &HOT_KEY)
         .expect("registry marker benchmark endpoint resolution failed")
         .expect("registry marker benchmark warm hit failed");
     if SETUP {
@@ -326,9 +326,9 @@ impl RegistryCacheBenchmark {
             ids.iter().map(|id| CacheEndpoint::new(id)).collect();
         for (value, endpoint) in endpoints.iter().enumerate() {
             drop(
-                endpoint
+                registry
                     .get_or_try_insert(
-                        &registry,
+                        endpoint,
                         HOT_KEY,
                         |_| ENTRY_WEIGHT as usize,
                         || Ok(value as u64),
@@ -344,8 +344,8 @@ impl RegistryCacheBenchmark {
             // values before its first batch can be included in a measurement.
             for (offset, endpoint) in endpoints.iter().enumerate() {
                 assert_eq!(
-                    *endpoint
-                        .get(&registry, &HOT_KEY)
+                    *registry
+                        .get(endpoint, &HOT_KEY)
                         .expect("registry cache benchmark endpoint resolution failed")
                         .expect("registry cache benchmark warm hit failed"),
                     (start + offset) as u64,
@@ -353,8 +353,8 @@ impl RegistryCacheBenchmark {
             }
             while receiver.recv().is_ok() {
                 for endpoint in endpoints.iter().cycle().take(iterations_per_worker) {
-                    let lease = endpoint
-                        .get(&registry, &HOT_KEY)
+                    let lease = registry
+                        .get(endpoint, &HOT_KEY)
                         .expect("registry cache benchmark endpoint resolution failed")
                         .expect("registry cache benchmark warm hit failed");
                     std::hint::black_box(&*lease);
