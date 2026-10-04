@@ -175,7 +175,7 @@ def registration_diagnostics(app: Any) -> dict[str, Any]:
     except Exception as error:
         result["registered_functions_error"] = str(error)
     bindings = {}
-    for name in ("BENCH.ALLOC.BYTES", "BENCH.ASYNC", "BENCH.ID", "BENCH.ERRNUM"):
+    for name in ("BENCH.ALLOC.BYTES", "BENCH.ASYNC", "BENCH.ID", "BENCH.ERRNUM", "BENCH.ASYNC.ARM"):
         try:
             # Without parentheses, Evaluate reads the hidden registration ID
             # name. It must not call a UDF on a failed/rolled-back runtime.
@@ -627,10 +627,33 @@ class AsyncControl:
             return None
 
     def arm(self) -> None:
-        self.session.stage("async_arm", expected=self.expected, control_dir=str(self.path))
-        directory = str(self.path).replace('"', '""')
-        if self.session.app.Evaluate(f'BENCH.ASYNC.ARM("{directory}",{self.expected})') != 1:
-            raise AssertionError("async control could not be armed")
+        self.session.stage("async_arm", expected=self.expected, control_dir=str(self.path),
+                           call_method="Application.Run")
+        # ARM mutates the fixture exactly once. Formula evaluation can invoke
+        # a UDF more than once, making a second ARM fail after the first succeeds.
+        # Run also passes the directory as a value without formula parsing.
+        try:
+            result = self.session.app.Run("BENCH.ASYNC.ARM", str(self.path), self.expected)
+        except Exception as error:
+            self.note(arm_error=f"{type(error).__name__}: {error}")
+            self.capture_arm_failure()
+            raise
+        self.note(arm_result={"type": type(result).__name__, "value": describe_value(result)})
+        if type(result) not in (int, float) or result != 1:
+            state = self.capture_arm_failure()
+            raise AssertionError(
+                f"async control could not be armed: BENCH.ASYNC.ARM returned {describe_value(result)} "
+                f"({type(result).__name__}) via Application.Run; fixture state: {state}")
+
+    def capture_arm_failure(self) -> Any:
+        # Read only the existing observation channel. Retrying ARM could reset
+        # or obscure a partially successful initialization.
+        try:
+            state = self.read("state.json")
+        except Exception as error:
+            state = {"observation_error": f"{type(error).__name__}: {error}"}
+        self.note(arm_failure_state=state)
+        return state
 
     def release(self) -> None:
         if self.release_at is None:

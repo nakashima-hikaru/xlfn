@@ -112,6 +112,13 @@ A01/A02 timing starts before formula entry because automatic calculation may
 begin while formulas are being submitted. No extra recalculation is requested
 while async results are pending, including the A03/A04 gated calls. Before
 submission, those cases arm `BENCH.ASYNC.ARM(control_dir, expected_count)`.
+The main COM thread invokes ARM once with `Application.Run`, passing the
+directory and count as separate arguments. ARM must not use formula evaluation:
+`Application.Evaluate` can evaluate a UDF twice, which makes the second call
+reject an already initialized gate. See the [Evaluate behavior investigation](https://fastexcel.wordpress.com/2011/11/02/evaluate-functions-and-formulas-fun-how-to-make-excels-evaluate-method-twice-as-fast/)
+and Microsoft's [XLL invocation support in Application.Run](https://learn.microsoft.com/en-us/office/vba/api/excel.application.run).
+Arming failures retain the return value/type or COM error and any existing
+fixture state in `async_control`; the runner does not retry initialization.
 A fixture worker publishes `ready.json` once all requested calls are active;
 an independent runner thread writes `release`, and the fixture acknowledges
 `released.json`. Pending-state observation and release use files, so they can

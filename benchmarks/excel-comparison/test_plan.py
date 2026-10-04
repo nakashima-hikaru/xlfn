@@ -1,5 +1,4 @@
 import json
-import re
 import struct
 import tempfile
 import threading
@@ -221,6 +220,64 @@ class PlanTest(unittest.TestCase):
             with self.assertRaisesRegex(TimeoutError, r"only 1/3.*row 2: #N/A.*row 3: 99"):
                 ExcelSession.wait_values(session, target, 3, lambda v, i: v == i + 1, 30)
 
+    def test_async_arm_avoids_evaluate_reentering_a_one_shot_initializer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = Mock(control_root=Path(directory))
+            control = AsyncControl(session, 100)
+            calls = []
+
+            def invoke(name, path, count):
+                calls.append((name, path, count))
+                return 1.0 if len(calls) == 1 else -2146826273  # #VALUE! on re-arm
+
+            def evaluate(expression):
+                # Model the host formula-evaluation behavior that would make
+                # the first ARM succeed and its repeated invocation fail.
+                invoke("BENCH.ASYNC.ARM", str(control.path), 100)
+                return invoke("BENCH.ASYNC.ARM", str(control.path), 100)
+
+            session.app.Run.side_effect = invoke
+            session.app.Evaluate.side_effect = evaluate
+            control.arm()
+            self.assertEqual(calls, [("BENCH.ASYNC.ARM", str(control.path), 100)])
+            session.app.Evaluate.assert_not_called()
+            self.assertEqual(control.diagnostics["arm_result"], {"type": "float", "value": "1.0"})
+
+    def test_async_arm_failure_retains_return_value_and_existing_state(self):
+        for value in (-2146826273, -2146826259, True, None, "1"):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as directory:
+                progress = WorkerProgress(Path(directory) / "progress.json", {})
+                session = Mock(control_root=Path(directory), progress=progress)
+                session.app.Run.return_value = value
+                control = AsyncControl(session, 100)
+                state = {"active": 0, "expected": 100, "released": False}
+                (control.path / "state.json").write_text(json.dumps(state), encoding="utf-8")
+                with self.assertRaisesRegex(AssertionError, "via Application.Run; fixture state") as caught:
+                    control.arm()
+                saved = json.loads(progress.path.read_text(encoding="utf-8"))["async_control"]
+                self.assertEqual(saved["arm_result"]["type"], type(value).__name__)
+                self.assertEqual(saved["arm_failure_state"], state)
+                if value == -2146826273:
+                    self.assertIn("#VALUE! (-2146826273)", str(caught.exception))
+                if value == -2146826259:
+                    self.assertIn("#NAME? (-2146826259)", str(caught.exception))
+                session.app.Run.assert_called_once()
+                session.app.Evaluate.assert_not_called()
+
+    def test_async_arm_preserves_com_error_when_state_observation_also_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            session = Mock(control_root=Path(directory))
+            original = RuntimeError("COM invocation failed")
+            session.app.Run.side_effect = original
+            control = AsyncControl(session, 100)
+            (control.path / "control-error.txt").write_text("state write failed", encoding="utf-8")
+            with self.assertRaises(RuntimeError) as caught:
+                control.arm()
+            self.assertIs(caught.exception, original)
+            self.assertEqual(control.diagnostics["arm_error"], "RuntimeError: COM invocation failed")
+            self.assertIn("state write failed", control.diagnostics["arm_failure_state"]["observation_error"])
+            session.app.Run.assert_called_once()
+
     def test_async_gate_releases_existing_calls_without_recalculation(self):
         for id in ("A03", "A04"):
             with self.subTest(id=id), tempfile.TemporaryDirectory() as directory:
@@ -231,15 +288,17 @@ class PlanTest(unittest.TestCase):
                     "recalculation while native async handles are pending")
                 control_path = None
 
-                def evaluate(expression):
+                def invoke(name, directory, expected):
                     nonlocal control_path
                     self.assertIs(threading.current_thread(), threading.main_thread())
-                    match = re.fullmatch(r'BENCH.ASYNC.ARM\("(.+)",3\)', expression)
-                    self.assertIsNotNone(match)
-                    control_path = Path(match[1])
+                    self.assertEqual(name, "BENCH.ASYNC.ARM")
+                    self.assertEqual(expected, 3)
+                    self.assertIsNone(control_path, "ARM must be invoked only once")
+                    control_path = Path(directory)
                     return 1.0
 
-                session.app.Evaluate.side_effect = evaluate
+                session.app.Run.side_effect = invoke
+                session.app.Evaluate.side_effect = AssertionError("ARM must not use formula evaluation")
 
                 def submit(sheet, count, make):
                     (control_path / "ready.json").write_text(json.dumps({"active": 3, "expected": 3}))
@@ -270,7 +329,8 @@ class PlanTest(unittest.TestCase):
                 self.assertEqual(result["active_before_release"], 3)
                 self.assertEqual(result["control_channel"], "fixture-file-v1")
                 session.app.Calculate.assert_not_called()
-                self.assertEqual(session.app.Evaluate.call_count, 1)
+                session.app.Evaluate.assert_not_called()
+                session.app.Run.assert_called_once_with("BENCH.ASYNC.ARM", str(control_path), 3)
                 make = session.add_formulas.call_args.args[2]
                 self.assertEqual([make(row) for row in range(1, 4)],
                                  ["=BENCH.ASYNC(1,-1)", "=BENCH.ASYNC(2,-1)", "=BENCH.ASYNC(3,-1)"])
@@ -361,11 +421,12 @@ class PlanTest(unittest.TestCase):
                 fixture_thread = None
                 acted = threading.Event()
 
-                def evaluate(expression):
+                def invoke(name, directory, expected):
                     nonlocal control_path, fixture_thread
-                    match = re.fullmatch(r'BENCH.ASYNC.ARM\("(.+)",3\)', expression)
-                    self.assertIsNotNone(match)
-                    control_path = Path(match[1])
+                    self.assertEqual(name, "BENCH.ASYNC.ARM")
+                    self.assertEqual(expected, 3)
+                    self.assertIsNone(control_path, "ARM must be invoked only once")
+                    control_path = Path(directory)
                     def fixture():
                         deadline = time.perf_counter() + 2
                         while not (control_path / "release").exists() and time.perf_counter() < deadline:
@@ -396,7 +457,8 @@ class PlanTest(unittest.TestCase):
                     action()
                     target.Value2 = ((None,), (None,), (None,))
 
-                session.app.Evaluate.side_effect = evaluate
+                session.app.Run.side_effect = invoke
+                session.app.Evaluate.side_effect = AssertionError("ARM must not use formula evaluation")
                 session.add_formulas.side_effect = submit
                 target.ClearContents.side_effect = clear
                 session.close_book.side_effect = action
@@ -582,10 +644,11 @@ class PlanTest(unittest.TestCase):
 
     def test_registration_diagnostics_preserves_value_types_without_calling_udfs(self):
         app = SimpleNamespace(RegisteredFunctions=(("fixture.xll", "xll_identity", "QQ$"),),
-                              Evaluate=Mock(side_effect=[-123.0, 456.0, -123.0, -2146826259]))
+                              Evaluate=Mock(side_effect=[-123.0, 456.0, -123.0, -2146826259, 789.0]))
         result = registration_diagnostics(app)
         self.assertEqual(result["name_bindings"]["BENCH.ALLOC.BYTES"], {"type": "float", "value": -123.0})
         self.assertEqual(result["name_bindings"]["BENCH.ERRNUM"]["type"], "int")
+        self.assertEqual(result["name_bindings"]["BENCH.ASYNC.ARM"], {"type": "float", "value": 789.0})
         for call in app.Evaluate.call_args_list:
             self.assertNotIn("(", call.args[0])
         app.Evaluate.side_effect = RuntimeError("probe unavailable")
