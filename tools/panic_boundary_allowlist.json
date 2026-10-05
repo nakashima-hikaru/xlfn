@@ -161,7 +161,7 @@
     "reason": "The sole shared consuming implementation immediately passes the raw result to contain_panic."
   },
   {
-    "path": "crates/xlfn/src/return_abi/mod.rs",
+    "path": "crates/xlfn/src/return_abi.rs",
     "context": "fn destroy_thread_local_return_block",
     "code": "let result = catch_unwind(AssertUnwindSafe(|| {",
     "count": 1,
@@ -169,7 +169,7 @@
     "reason": "destroy_thread_local_return_block poisons partially destroyed TLS storage and resumes the original payload; free_return_boundary consumes it."
   },
   {
-    "path": "crates/xlfn/src/return_abi/mod.rs",
+    "path": "crates/xlfn/src/return_abi.rs",
     "context": "module root",
     "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",
     "count": 1,
