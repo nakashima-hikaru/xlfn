@@ -154,6 +154,18 @@ class PlanTest(unittest.TestCase):
             self.assertEqual(recovered["worker_error"], "gate failed")
             self.assertEqual(recovered["status"], "error")
 
+    def test_partial_record_keeps_rtd_failure_before_diagnostic_com_call_returns(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "progress.json"
+            progress = WorkerProgress(path, {"id": "R03", "variant": "10000-10"})
+            progress.stage("rtd_pulse_failed", error="TimeoutError: RTD delivery stopped",
+                           traceback="original execution traceback")
+            recovered = recover_worker_record(path, Case("R03", "10000-10", {}),
+                                              "xlfn", TimeoutError("worker expired"))
+            self.assertEqual(recovered["worker_error"], "TimeoutError: RTD delivery stopped")
+            self.assertEqual(recovered["traceback"], "original execution traceback")
+            self.assertIn("worker expired", recovered["error"])
+
     def test_calculation_timer_stops_before_process_sampling(self):
         for full in (False, True):
             with self.subTest(full=full):

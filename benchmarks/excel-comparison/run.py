@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -358,26 +359,39 @@ class ExcelSession:
         return elapsed
 
     def wait_values(self, target: Any, count: int, expected: Any, timeout_s: float,
-                    sample_every: int = 1, start_time: float | None = None) -> dict[str, Any]:
+                    sample_every: int = 1, start_time: float | None = None,
+                    require_all: bool = False) -> dict[str, Any]:
         start = start_time if start_time is not None else time.perf_counter()
         seen: dict[int, float] = {}
         indices = list(range(0, count, sample_every))
         if indices[-1] != count - 1:
             indices.append(count - 1)
         values = []
+        pending = indices[:5]
         while time.perf_counter() - start < timeout_s:
             values = flatten(target.Value2)
+            if len(values) != count:
+                raise AssertionError(f"observed {len(values)} cells, expected {count}")
             at = time.perf_counter() - start
             for i in indices:
                 if i not in seen and expected(values[i], i):
                     seen[i] = at
             self.memory()
             if len(seen) == len(indices):
-                return interval(list(seen.values()), at, "COM-observed cell") | {
-                    "sampled_cells": len(indices), "settled_cells": len(seen), "poll_s": at,
-                }
+                # Periodic row sampling can repeatedly hit the same RTD
+                # topics. Qualify delivery against the entire current snapshot.
+                pending = ([i for i, value in enumerate(values) if not expected(value, i)][:5]
+                           if require_all else [])
+                if not pending:
+                    result = interval(list(seen.values()), at, "COM-observed cell") | {
+                        "sampled_cells": len(indices), "settled_cells": len(seen), "poll_s": at,
+                    }
+                    if require_all:
+                        result["validated_cells"] = count
+                    return result
+            else:
+                pending = [i for i in indices if i not in seen][:5]
             time.sleep(0.01)
-        pending = [i for i in indices if i not in seen][:5]
         detail = ", ".join(f"row {i + 1}: {describe_value(values[i])}" for i in pending
                            if i < len(values))
         raise TimeoutError(f"only {len(seen)}/{len(indices)} observed after {timeout_s}s; "
@@ -887,12 +901,39 @@ def wait_count(session: ExcelSession, expected: int, timeout_s: float = 120) -> 
 
 
 def pulse(session: ExcelSession, sequence: int) -> None:
-    # Excel serializes this main-thread UDF after formula entry.
-    cell = session.book.Worksheets(1).Range("ZZ1")
-    cell.Formula = f"=BENCH.RTD.PULSE({sequence})"
-    cell.Calculate()
-    if cell.Value2 != sequence:
-        raise AssertionError("RTD pulse was not accepted")
+    # Invoke the main-thread control once, without creating another formula or
+    # explicitly recalculating while RTD notifications are being delivered.
+    value = session.app.Run("BENCH.RTD.PULSE", float(sequence))
+    if value != sequence:
+        raise AssertionError(f"RTD pulse was not accepted: {describe_value(value)}")
+
+
+def observe_rtd_pulse(session: ExcelSession, target: Any, count: int,
+                      sequence: int, timeout_s: float) -> dict[str, Any]:
+    emitted_before = float(session.app.Evaluate("BENCH.RTD.EMITTED()"))
+    session.stage("rtd_pulse_begin", sequence=sequence, source_emissions_before=emitted_before)
+    begin = time.perf_counter()
+    try:
+        pulse(session, sequence)
+        session.stage("rtd_pulse_accepted", sequence=sequence)
+        observed = session.wait_values(target, count, lambda value, i: value == float(sequence),
+            timeout_s, sample_every=max(1, count // 2_000), start_time=begin, require_all=True)
+        elapsed = time.perf_counter() - begin
+    except Exception as error:
+        # Persist the original failure before another diagnostic COM call can
+        # block. EMITTED counts returned publish calls, not Excel deliveries.
+        session.stage("rtd_pulse_failed", sequence=sequence,
+                      error=f"{type(error).__name__}: {error}", traceback=traceback.format_exc())
+        diagnostics = {"sequence": sequence, "source_emissions_before": emitted_before}
+        try:
+            emitted_after = float(session.app.Evaluate("BENCH.RTD.EMITTED()"))
+            diagnostics.update(source_emissions_after=emitted_after,
+                               source_publish_returns=emitted_after - emitted_before)
+        except Exception as diagnostic_error:
+            diagnostics["observation_error"] = f"{type(diagnostic_error).__name__}: {diagnostic_error}"
+        session.stage("rtd_pulse_diagnostics", **diagnostics)
+        raise
+    return observed | {"pulse_settle_s": elapsed}
 
 
 def run_rtd_rate(session: ExcelSession, target: Any, case: Case, subscription_s: float) -> dict[str, Any]:
@@ -901,7 +942,9 @@ def run_rtd_rate(session: ExcelSession, target: Any, case: Case, subscription_s:
     throttle_s = float(session.app.RTD.ThrottleInterval) / 1000
     period_s = case.params["period_ms"] / 1000
     # The first `topics` rows contain one representative for every topic.
-    sampled = target.Resize(topics, 1)
+    # pywin32 can resolve Resize as a property before the arguments arrive;
+    # calling that returned Range selects one cell through its default Item.
+    sampled = target.Worksheet.Range(f"A1:A{topics}")
 
     def numeric(value: Any) -> bool:
         return (isinstance(value, (float, int)) and not isinstance(value, bool)
@@ -1024,24 +1067,20 @@ def run_rtd(session: ExcelSession, case: Case, repeat: int) -> dict[str, Any]:
             "incremental_rss_bytes": session.memory() - rss_before,
             "incremental_rss_per_topic_bytes": (session.memory() - rss_before) / topics}
         if case.id in ("R02", "R03"):
-            begin = time.perf_counter()
-            pulse(session, 1_000_000)
-            observed = session.wait_values(target, n, lambda value, i: value == 1_000_000.0,
-                120, sample_every=max(1, n // 2_000), start_time=begin)
-            result["update_settle_s"] = time.perf_counter() - begin
+            observed = observe_rtd_pulse(session, target, n, 1_000_000, 120)
+            result["update_settle_s"] = observed["pulse_settle_s"]
             result["update_p95_s"] = observed["p95_s"]
             result["update_cells_per_s"] = n / result["update_settle_s"]
+            result["validated_cells"] = observed["validated_cells"]
         return result
     for iteration in range(repeat):
         seq = 1_000_000 + iteration
-        begin = time.perf_counter()
-        pulse(session, seq)
-        observed = session.wait_values(target, n, lambda value, i: value == float(seq),
-            min(case.timeout_s, 120), sample_every=max(1, n // 2_000), start_time=begin)
-        samples.append(time.perf_counter() - begin)
+        observed = observe_rtd_pulse(session, target, n, seq, min(case.timeout_s, 120))
+        samples.append(observed["pulse_settle_s"])
     return interval(samples, sum(samples), "pulse batch") | {
         "formula_count": n, "topic_count": topics,
         "sampled_cells": observed["sampled_cells"],
+        "validated_cells": observed["validated_cells"],
         "cell_latency_p50_s": observed["p50_s"],
         "cell_latency_p95_s": observed["p95_s"],
         "cell_latency_p99_s": observed["p99_s"],
@@ -1190,8 +1229,13 @@ def recover_worker_record(path: Path, case: Case, implementation: str,
         record = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         record = {"id": case.id, "variant": case.variant, "implementation": implementation}
-    if "error" in record:
-        record["worker_error"] = record["error"]
+    # A diagnostic COM call may block before the worker's outer error handler.
+    # Keep an execution failure already saved in the progress stage in that case.
+    failure = record if "error" in record else record.get("stage_details", {})
+    if "error" in failure:
+        record["worker_error"] = failure["error"]
+        if "traceback" in failure:
+            record["traceback"] = failure["traceback"]
     record["status"] = "error"
     record["error"] = f"worker timeout/failure: {error}"
     record["recovered_partial_record"] = path.is_file()
@@ -1287,6 +1331,7 @@ def worker(args: argparse.Namespace, case: Case) -> int:
     except Exception as error:
         # Persist the cause before diagnostic COM calls or teardown can hang.
         progress.update(status="error", error=f"{type(error).__name__}: {error}",
+                        traceback=traceback.format_exc(),
                         failure_phase=record.get("phase"), failure_stage=record.get("stage"))
         if args.implementation == "xlfn":
             progress.update(startup_log=read_startup_log_delta(startup_log))

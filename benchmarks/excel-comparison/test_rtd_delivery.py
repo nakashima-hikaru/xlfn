@@ -3,7 +3,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from run import UnsupportedCase, run_rtd_rate
+from run import (ComObject, ComRetry, ExcelSession, UnsupportedCase, observe_rtd_pulse,
+                 pulse, run_rtd_rate)
 from workloads import Case
 
 
@@ -16,9 +17,23 @@ class Clock:
 
 
 class SampledCells:
+    _oleobj_ = object()
+
     def __init__(self, clock, values):
         self.clock = clock
         self.values = values
+        self.Worksheet = SimpleNamespace(Range=Mock(return_value=self))
+
+    @property
+    def Resize(self):
+        # Dynamic dispatch gets this optional-argument property immediately.
+        # Calling the returned Range invokes Item, selecting one cell.
+        return self
+
+    def __call__(self, row, column):
+        if column != 1:
+            raise IndexError(column)
+        return SampledCells(self.clock, lambda at: [self.values(at)[row - 1]])
 
     @property
     def Value2(self):
@@ -29,7 +44,7 @@ class RtdDeliveryTest(unittest.TestCase):
     def observation(self, values, *, duration=10, emissions=27, throttle_ms=100):
         clock = Clock()
         sampled = SampledCells(clock, values)
-        target = SimpleNamespace(Resize=Mock(return_value=sampled))
+        target = ComObject(sampled, ComRetry())
         session = SimpleNamespace(
             app=SimpleNamespace(RTD=SimpleNamespace(ThrottleInterval=throttle_ms),
                                 Evaluate=Mock(side_effect=[0, emissions])),
@@ -73,7 +88,7 @@ class RtdDeliveryTest(unittest.TestCase):
         observation = self.observation(lambda at: [math.floor(at), math.floor(at), 0])
         with self.assertRaisesRegex(AssertionError, r"topics \[2\]"):
             self.run_observation(observation)
-        observation[1].Resize.assert_called_once_with(3, 1)
+        observation[1].Worksheet.Range.assert_called_once_with("A1:A3")
         self.assertEqual(observation[2].stage.call_args.kwargs["topics_with_observed_progress"], 2)
 
     def test_regular_numeric_delivery_reports_transitions_without_counting_baseline(self):
@@ -130,6 +145,62 @@ class RtdDeliveryTest(unittest.TestCase):
         observation = self.observation(lambda _: [0, 0])
         with self.assertRaisesRegex(AssertionError, "2 cells, expected 3"):
             self.run_observation(observation)
+
+
+class RtdPulseTest(unittest.TestCase):
+    def session(self):
+        session = object.__new__(ExcelSession)
+        session.app = SimpleNamespace(Run=Mock(return_value=1_000_000.0),
+                                      Evaluate=Mock(side_effect=[11, 12]))
+        session.memory = Mock(return_value=100)
+        session.stage = Mock()
+        return session
+
+    def observe(self, session, values, count=4_000):
+        clock = Clock()
+        target = SampledCells(clock, values)
+        with patch("run.time.perf_counter", side_effect=lambda: clock.now), \
+                patch("run.time.sleep", side_effect=clock.sleep):
+            return observe_rtd_pulse(session, target, count, 1_000_000, 0.03)
+
+    def test_control_runs_once_without_a_formula_or_recalculation(self):
+        session = self.session()
+        pulse(session, 1_000_000)
+        session.app.Run.assert_called_once_with("BENCH.RTD.PULSE", 1_000_000.0)
+        session.app.Evaluate.assert_not_called()
+
+    def test_rejected_control_reports_the_actual_value(self):
+        session = self.session()
+        session.app.Run.return_value = -2146826259
+        with self.assertRaisesRegex(AssertionError, "#NAME"):
+            pulse(session, 1_000_000)
+
+    def test_success_waits_for_a_late_cell_outside_the_latency_sample(self):
+        session = self.session()
+        result = self.observe(session, lambda at:
+            [1_000_000, 0 if at < 0.02 else 1_000_000] + [1_000_000] * 3998)
+        self.assertEqual(result["validated_cells"], 4_000)
+        self.assertEqual(result["sampled_cells"], 2_001)
+        self.assertGreaterEqual(result["pulse_settle_s"], 0.02)
+
+    def test_frozen_unsampled_cell_cannot_qualify_a_pulse(self):
+        session = self.session()
+        with self.assertRaisesRegex(TimeoutError, r"row 2: 0"):
+            self.observe(session, lambda _: [1_000_000, 0] + [1_000_000] * 3998)
+        diagnostics = session.stage.call_args.kwargs
+        self.assertEqual(diagnostics["source_publish_returns"], 1)
+        failure = session.stage.call_args_list[-2].kwargs
+        self.assertIn("TimeoutError", failure["traceback"])
+        self.assertIn("row 2: 0", failure["error"])
+
+    def test_diagnostic_failure_preserves_the_original_timeout(self):
+        session = self.session()
+        session.app.Evaluate.side_effect = [0, RuntimeError("Excel unavailable")]
+        with self.assertRaisesRegex(TimeoutError, "row 1: 0"):
+            self.observe(session, lambda _: [0], count=1)
+        self.assertIn("Excel unavailable", session.stage.call_args.kwargs["observation_error"])
+        failure = session.stage.call_args_list[-2].kwargs
+        self.assertIn("TimeoutError", failure["error"])
 
 
 if __name__ == "__main__":

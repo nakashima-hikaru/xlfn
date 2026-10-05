@@ -1244,12 +1244,14 @@ impl<H: SubscriptionHost> PublishCore<H> {
             self.ensure_open()?;
             let mut refresh = self.refresh.lock();
             let has_updates = self.has_deliverable_updates();
-            // Heartbeat gives a failed notification a fresh, bounded retry
-            // opportunity. Reserve its new ticket under this same lock so
-            // concurrent pulses cannot replace an in-flight or accepted call.
+            // A successful UpdateNotify only acknowledges the COM call, not
+            // delivery: Excel may never pull that batch. Heartbeat retries
+            // both failed and accepted notices while data remains pending.
+            // Keep an in-flight call intact and reserve the replacement ticket
+            // under this lock so concurrent heartbeats cannot overlap it.
             if has_updates
                 && let DeliveryPhase::BetweenRefreshes {
-                    signal: signal @ SignalState::Suppressed { .. },
+                    signal: signal @ (SignalState::Suppressed { .. } | SignalState::Signaled { .. }),
                 } = &mut refresh.phase
             {
                 *signal = SignalState::Dormant;

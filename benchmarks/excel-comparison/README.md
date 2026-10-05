@@ -173,6 +173,18 @@ it closes the Excel process. Async and RTD tails are sampled through COM at
 about 10 ms intervals, so they are **arrival observations**, not precise
 in-process callback latency. `R07` is 30 minutes in the full profile.
 
+R02/R03/R05 issue each pulse once through `Application.Run`, without adding a
+control formula or explicitly recalculating during delivery. Arrival percentiles
+remain sampled, but a pulse succeeds only when the entire cell snapshot matches
+its sequence. This prevents a regular sampling stride from hiding stalled topics.
+On failure, `rtd_pulse_failed` preserves the sequence, error, and traceback before
+diagnostic calls. `rtd_pulse_diagnostics` records the source emission counter before
+and after the pulse and their difference as `source_publish_returns`. That counter
+counts completed publication attempts, including failures; it does not establish
+Excel delivery. A partial count shows that the source has not returned from all
+publication attempts; a full count still requires checking publication errors
+and Excel's notification or refresh path.
+
 R04 samples one representative cell for every topic. `observed_updates_per_s`
 counts numeric changes after the initial snapshot, while
 `observed_distinct_values` retains the distinct-value count. The initial value

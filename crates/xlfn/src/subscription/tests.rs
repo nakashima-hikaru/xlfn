@@ -2824,6 +2824,89 @@ fn server_notification_retry_sequence_eventually_succeeds() {
 }
 
 #[test]
+fn heartbeat_retries_accepted_notification_without_a_refresh() {
+    let (_runtime, server, sink) = connected_sink::<f64>(None, "missed-notification");
+    let state = Arc::new(TestNotifierState::new());
+    server
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state)))
+        .unwrap();
+
+    // A successful UpdateNotify is not an acknowledgement that Excel pulled
+    // the value. Model Excel accepting the call without scheduling RefreshData.
+    sink.publish(1.0).unwrap();
+    sink.publish(2.0).unwrap();
+    assert_eq!(state.calls.load(Ordering::SeqCst), 1);
+    server.pulse_notification().unwrap();
+    assert_eq!(state.calls.load(Ordering::SeqCst), 2);
+
+    let batch = server.begin_refresh().unwrap();
+    assert_eq!(batch.updates.len(), 1);
+    assert_eq!(batch.updates[0].value, StoredRtdValue::Number(2.0));
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+    server.pulse_notification().unwrap();
+    assert_eq!(state.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(server.pending_update_count(), 0);
+}
+
+#[test]
+fn heartbeat_recovers_updates_published_during_an_earlier_refresh() {
+    let fixture = SourceFixture::new();
+    let sources = (0..10)
+        .map(|_| fixture.add::<f64>(None))
+        .collect::<Vec<_>>();
+    let runtime = SubscriptionRuntime::with_sources_for_internal(fixture.finish());
+    let server = runtime.register_test_server(1);
+    let state = Arc::new(TestNotifierState::new());
+    server
+        .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&state)))
+        .unwrap();
+    for (index, (source, _, _)) in sources.iter().enumerate() {
+        let topic = RtdTopic::single(format!("partial-pulse-{index}")).unwrap();
+        let prepared = runtime.prepare(source, topic.borrowed()).unwrap();
+        let id = prepared.id();
+        prepared.commit();
+        runtime
+            .connect_transaction(&server, TopicId(index as i32 + 1), id)
+            .unwrap()
+            .commit()
+            .unwrap();
+    }
+
+    // Excel pulls the first topic while the remaining pulse publications
+    // arrive. Its in-progress RefreshData cannot contain these later values.
+    sources[0]
+        .1
+        .lock()
+        .as_ref()
+        .unwrap()
+        .publish(1_000_000.0)
+        .unwrap();
+    let first = server.begin_refresh().unwrap();
+    assert_eq!(first.updates.len(), 1);
+    for (_, sink, _) in &sources[1..] {
+        sink.lock().as_ref().unwrap().publish(1_000_000.0).unwrap();
+    }
+    first.complete(RefreshOutcome::Delivered).unwrap();
+    assert_eq!(state.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(server.pending_update_count(), 9);
+
+    // The rearm returned success but Excel did not request a second batch.
+    // Heartbeat must notify again even with no further source publications.
+    server.pulse_notification().unwrap();
+    assert_eq!(state.calls.load(Ordering::SeqCst), 3);
+    let remaining = server.begin_refresh().unwrap();
+    assert_eq!(remaining.updates.len(), 9);
+    for update in &remaining.updates {
+        assert!((2..=10).contains(&update.topic_id));
+        assert_eq!(update.value, StoredRtdValue::Number(1_000_000.0));
+    }
+    remaining.complete(RefreshOutcome::Delivered).unwrap();
+    server.pulse_notification().unwrap();
+    assert_eq!(state.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(server.pending_update_count(), 0);
+}
+
+#[test]
 fn server_notification_heartbeat_recovers_after_bounded_retries() {
     let (arena, source, sink, _) = publishing_source(Some(0.0f64));
     let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
@@ -2870,8 +2953,10 @@ fn server_notification_heartbeat_recovers_after_bounded_retries() {
     assert_eq!(state.calls.load(Ordering::SeqCst), 6);
     server.pulse_notification().unwrap();
     assert_eq!(state.calls.load(Ordering::SeqCst), 7);
+    // A later heartbeat with no intervening RefreshData means delivery is
+    // still outstanding, even though the previous callback returned success.
     server.pulse_notification().unwrap();
-    assert_eq!(state.calls.load(Ordering::SeqCst), 7);
+    assert_eq!(state.calls.load(Ordering::SeqCst), 8);
 
     let batch = server.begin_refresh().unwrap();
     assert_eq!(batch.updates.len(), 1);
@@ -2879,7 +2964,7 @@ fn server_notification_heartbeat_recovers_after_bounded_retries() {
     batch.complete(RefreshOutcome::Delivered).unwrap();
     assert_eq!(server.pending_update_count(), 0);
     server.pulse_notification().unwrap();
-    assert_eq!(state.calls.load(Ordering::SeqCst), 7);
+    assert_eq!(state.calls.load(Ordering::SeqCst), 8);
 }
 
 #[test]
@@ -2943,7 +3028,7 @@ fn concurrent_heartbeat_does_not_duplicate_notification_retry() {
     assert_eq!(calls_while_retrying, 4);
     assert_eq!(state.calls.load(Ordering::SeqCst), 4);
     server.pulse_notification().unwrap();
-    assert_eq!(state.calls.load(Ordering::SeqCst), 4);
+    assert_eq!(state.calls.load(Ordering::SeqCst), 5);
 }
 
 #[test]
