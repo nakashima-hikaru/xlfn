@@ -15,8 +15,8 @@ sdk-bindgen = ["dep:bindgen"]
 xlfn-sys = { version = "=0.2.0", path = "../../crates/xlfn-sys", features = ["abi-probe"] }
 
 [build-dependencies]
-bindgen = { version = "0.72.1", optional = true }
-cc = "1.4.4"
+bindgen = { version = "0.73.2", optional = true }
+cc = "1.6.0"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

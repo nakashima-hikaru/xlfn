@@ -9,7 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 xlfn = { path = "../../../crates/xlfn", features = ["async", "rtd"] }
-futures-timer = "3.0.3"
-futures-channel = "0.3.31"
+futures-timer = "3.0.4"
+futures-channel = "0.3.34"
 
 [workspace]
