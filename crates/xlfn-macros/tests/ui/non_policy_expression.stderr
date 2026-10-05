@@ -1,0 +1,5 @@
+error: `missing` requires a policy identifier or string literal
+ --> tests/ui/non_policy_expression.rs:4:48
+  |
+4 | fn non_policy_expression(#[excel_arg(missing = policy())] x: f64) -> f64 {
+  |                                                ^^^^^^^^

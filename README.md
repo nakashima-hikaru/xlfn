@@ -26,6 +26,8 @@ Enable optional capabilities with Cargo features:
 - `rtd` — Stream live updates to worksheet cells through Excel's Real-Time Data API.
 - `handles` — Keep Rust objects between calls and pass references to them through worksheet cells.
 - `cache` — Cache calculation results for reuse across calls.
+- `serde` — Serialize and deserialize owned worksheet values and collections.
+- `chrono` / `time` — Convert serial dates using the corresponding calendar crate.
 
 ## Quick start
 

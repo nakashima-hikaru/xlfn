@@ -46,7 +46,7 @@ pub use source::{RtdSink, RtdSource, RtdSourceHandle, RtdSubscription};
 #[cfg(feature = "rtd")]
 pub use topic::{RtdCapacity, RtdLimits};
 #[cfg(feature = "rtd")]
-pub use topic::{RtdTopic, RtdTopicParts};
+pub use topic::{RtdTopic, RtdTopicInput, RtdTopicParts};
 #[cfg(feature = "rtd")]
 pub use value::IntoRtdValue;
 #[cfg(feature = "rtd")]
@@ -86,7 +86,7 @@ pub(crate) use runtime_services::RuntimeServices;
 pub(crate) use server::{PANIC_AFTER_TERMINATION_GUARD, TerminationAdmission};
 #[cfg(feature = "rtd")]
 pub(crate) use source::{SourceArena, SourceRegistration};
-#[cfg(feature = "rtd")]
+#[cfg(all(feature = "rtd", any(test, feature = "bench-internals")))]
 pub(crate) use topic::BorrowedTopicParts;
 #[cfg(all(test, feature = "rtd"))]
 pub(crate) use topic::SubscriptionId;

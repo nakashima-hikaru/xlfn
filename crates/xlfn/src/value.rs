@@ -17,6 +17,28 @@ pub mod convert;
 /// Excel serial-date policy and value types.
 mod date;
 /// Input conversion traits and presence/default handling.
+#[cfg(feature = "serde")]
+fn serialize_finite_number<S: serde::Serializer>(
+    number: &f64,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    if !number.is_finite() {
+        return Err(serde::ser::Error::custom("Excel numbers must be finite"));
+    }
+    serializer.serialize_f64(*number)
+}
+
+#[cfg(feature = "serde")]
+fn deserialize_finite_number<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<f64, D::Error> {
+    let number = <f64 as serde::Deserialize>::deserialize(deserializer)?;
+    if !number.is_finite() {
+        return Err(serde::de::Error::custom("Excel numbers must be finite"));
+    }
+    Ok(number)
+}
+
 #[allow(
     unsafe_code,
     reason = "Raw XLOPER12 input conversion is isolated in this leaf"
@@ -70,9 +92,19 @@ pub(crate) const MAX_ARRAY_BYTES: usize = core::cfg_select! {
 /// This input representation is not an implicit worksheet output. Construct
 /// an [`ExcelCellOutput`] to choose the meaning of a blank explicitly.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ExcelCellValue {
     /// A finite Excel number.
-    Number(f64),
+    Number(
+        #[cfg_attr(
+            feature = "serde",
+            serde(
+                serialize_with = "serialize_finite_number",
+                deserialize_with = "deserialize_finite_number"
+            )
+        )]
+        f64,
+    ),
     /// An Excel Boolean without coercion.
     Boolean(bool),
     /// An owned UTF-8 string decoded from Excel's UTF-16 representation.
@@ -107,6 +139,7 @@ pub enum ExcelCellRef<'call> {
 /// The array contains cells, not nested arrays or omitted arguments. Convert
 /// this input deliberately into an output representation before returning it.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ExcelValue {
     /// One scalar cell.
     Scalar(ExcelCellValue),
@@ -122,9 +155,19 @@ pub enum ExcelValue {
 /// cell. Use an explicit empty string or [`ExcelError::NotAvailable`] when that
 /// is the intended worksheet result.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ExcelCellOutput {
     /// A finite worksheet number; conversion rejects non-finite values.
-    Number(f64),
+    Number(
+        #[cfg_attr(
+            feature = "serde",
+            serde(
+                serialize_with = "serialize_finite_number",
+                deserialize_with = "deserialize_finite_number"
+            )
+        )]
+        f64,
+    ),
     /// A worksheet Boolean.
     Boolean(bool),
     /// An owned worksheet string, including an explicit empty string.
@@ -139,6 +182,7 @@ pub enum ExcelCellOutput {
 /// displayed as numeric zero. Return an explicit value, empty string, or
 /// [`ExcelError`] instead.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum OptionalExcelValue<T> {
     /// The argument was omitted from the formula.
     Missing,
@@ -1885,7 +1929,7 @@ mod tests {
     fn derived_excel_enum_direct_write_uses_borrowed_sink_path() {
         #[derive(Clone, Copy, crate::ExcelEnum)]
         enum Label {
-            #[excel_value(name = "borrowed-value")]
+            #[excel_enum(name = "borrowed-value")]
             Renamed,
         }
 
@@ -1903,7 +1947,7 @@ mod tests {
         #[derive(Clone, Copy, crate::ExcelEnum)]
         enum Label {
             Ready,
-            #[excel_value(name = "日本語💡")]
+            #[excel_enum(name = "日本語💡")]
             Unicode,
         }
 

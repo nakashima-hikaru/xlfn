@@ -131,8 +131,10 @@ executors, connection pools, and queues remain the application's responsibility.
 Calculation caches are configured separately; see [Calculation caches](caching.md).
 
 Use `type Layers = ();` when no execution layers are needed. Custom layers
-can be provided to wrap UDF executions with cross-cutting logic like metrics
-or tracing.
+receive call metadata and completion status for admission decisions, metrics,
+and tracing. Returning an error from `enter` rejects the invocation before the
+UDF runs. Layers cannot inspect or change arguments or return values, or replace
+the UDF implementation.
 
 ## Plan shutdown alongside initialization
 

@@ -19,9 +19,9 @@ impl Addin for TestAddin {
 #[derive(Clone, Copy, ExcelEnum)]
 #[excel_enum(ascii_case_insensitive)]
 enum Direction {
-    #[excel_value(name = "Forward")]
+    #[excel_enum(name = "Forward")]
     Forward,
-    #[excel_value(name = "Reverse")]
+    #[excel_enum(name = "Reverse")]
     Reverse,
 }
 

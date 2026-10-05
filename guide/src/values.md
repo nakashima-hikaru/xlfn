@@ -164,6 +164,30 @@ than zero.
 workbook uses the 1900 or 1904 date system. Resolve that convention in
 application policy before converting to a civil date.
 
+Use `ExcelSerialDate::from_ymd(year, month, day, system)` to construct a
+midnight serial, and `date.to_ymd()` to read its Gregorian calendar day.
+Calendar conversions support years `1..=9999`. They return an error for an
+unresolved `Workbook` convention or the fictitious 1900-02-29 (serial day
+60 in the 1900 system), instead of mapping it to another date. Reading a
+calendar day uses the serial's floor: `-0.25` belongs to the day before
+serial zero. `fractional_day()` retains its floating-point remainder policy;
+rounding can produce `1.0` for a very small negative serial.
+
+```rust
+use xlfn::value::{ExcelDateSystem, ExcelSerialDate};
+
+let date = ExcelSerialDate::from_ymd(2026, 10, 5, ExcelDateSystem::Windows1900)?;
+assert_eq!(date.serial(), 46300.0);
+assert_eq!(date.to_ymd()?, (2026, 10, 5));
+# Ok::<(), xlfn::XllError>(())
+```
+
+The optional `chrono` feature provides `from_chrono` / `to_chrono` methods
+for `chrono::NaiveDate`; the `time` feature provides `from_time` / `to_time`
+for `time::Date`. Importing a calendar date requires the date system as an
+argument. Exporting a calendar date discards the fractional day and keeps
+the same validation rules as `to_ymd()`.
+
 `ExcelValue` is an owned, intentionally dynamic **input** representation.
 It does not implement the ordinary worksheet output contract. Convert it
 deliberately to an output type instead of returning it directly. Prefer
@@ -190,8 +214,82 @@ fn scale(value: f64, factor: Option<f64>) -> f64 {
 value cannot preserve the distinction between an omitted argument and a blank
 cell, so choose an explicit value, empty string, or `ExcelError` on output.
 
+To supply a default for an omitted argument, write `#[excel_arg(default = expr)]`.
+Blank cells keep the parameter type's normal conversion. Select `blank = default`
+to default them too, or `blank = error` to reject them. An explicit `missing`
+policy overrides the inferred default; string policies such as `"default"` and
+`"error"` are also accepted. Use `missing = convert` to preserve the declared
+type's normal conversion, such as `None` for `Option<T>` or `Missing` for
+`OptionalExcelValue<T>`. `blank = convert` similarly selects normal conversion
+for a blank cell. The expression is evaluated only when its selected
+presence policy uses the default.
+
+```rust
+{{#include ../fixtures/addin.md}}
+# use xlfn::prelude::*;
+#[excel_function(name = "CALC.SCALE.DEFAULT", thread_safe)]
+fn scale_default(value: f64, #[excel_arg(default = 1.0, blank = error)] factor: f64) -> f64 {
+    value * factor
+}
+```
+
+Derive `ExcelEnum` for a fieldless enum used as a string parameter or result.
+The enum and its variants share the `excel_enum` attribute: the enum controls
+matching, and each variant can override its worksheet text.
+
+```rust
+{{#include ../fixtures/addin.md}}
+# use xlfn::prelude::*;
+#[derive(ExcelEnum)]
+#[excel_enum(ascii_case_insensitive)]
+enum Direction {
+    #[excel_enum(name = "Forward")]
+    Forward,
+    Reverse,
+}
+
+#[excel_function(name = "CALC.DIRECTION", thread_safe)]
+fn direction(value: Direction) -> Direction {
+    value
+}
+```
+
+Unknown enum strings return `#VALUE!`. Diagnostics retain the argument name,
+received text, and expected choices. Long input and choice lists are shown as
+bounded prefixes with an explicit truncation marker. Integer codes require an
+application conversion type rather than `ExcelEnum`.
+
 All value types are exposed through `xlfn::value`; their implementation modules
 are private. Borrowed UTF-16 text can be decoded with the fallible
 `XlStrRef::try_to_string` method.
 
 Next, see [Execution modes and contexts](execution-modes.md) to control how Excel runs your functions.
+
+
+## Collection operations and serialization
+
+Owned `Matrix` values iterate in row-major order. `MatrixRef` supports the same
+`[(row, column)]` indexing for reads; an owned `Matrix` also supports element
+updates. `Row`, `Column`, and `BoundedVarArgs` expose ordinary slice operations
+and iteration. Mutating their elements preserves their dimensions and limits.
+
+```rust
+use xlfn::value::Matrix;
+
+let mut matrix = Matrix::from_fn(2, 3, |row, column| row * 10 + column)?;
+matrix[(1, 2)] = 99;
+assert_eq!(matrix.into_iter().collect::<Vec<_>>(), vec![0, 1, 2, 10, 11, 99]);
+let filled = Matrix::fill(2, 2, 7)?;
+assert_eq!(filled.as_slice(), &[7, 7, 7, 7]);
+assert!(Matrix::try_from(vec![vec![1], vec![2, 3]]).is_err());
+# Ok::<(), xlfn::XllError>(())
+```
+
+Enable the `serde` feature for `Serialize` and `Deserialize` on `ExcelError`,
+`ExcelCellValue`, `ExcelCellOutput`, `ExcelValue`, `OptionalExcelValue`, and the
+owned collection types. Cell and presence enums use Serde's externally tagged
+representation; matrices use `{rows, columns, data}` with row-major data, and
+rows, columns, and bounded varargs use sequences. Reading a matrix or bounded
+collection validates its dimensions or length through its constructor. Cell
+numbers must be finite during both serialization and deserialization. Borrowed
+call-scoped views do not acquire an owned serialization contract.

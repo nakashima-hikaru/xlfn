@@ -46,6 +46,7 @@ impl IntoXllError for XllError {
 /// Unknown codes are rejected by [`Self::from_code`]; future supported codes may
 /// be added without making exhaustive matches part of the public contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(i32)]
 pub enum ExcelError {
@@ -188,6 +189,14 @@ pub enum InputError {
     /// An input violates an application or framework structural rule.
     #[error("malformed input: {0}")]
     Malformed(&'static str),
+    /// A string does not match any declared Excel enum value.
+    #[error("expected one of {expected}, got {actual:?}")]
+    UnknownEnum {
+        /// The received value, possibly truncated by the generated decoder.
+        actual: String,
+        /// The declared candidates, possibly truncated for large enums.
+        expected: &'static str,
+    },
     /// An input exceeds a declared element or byte limit.
     #[error("input exceeds limit {limit}: got {actual}")]
     TooLarge {

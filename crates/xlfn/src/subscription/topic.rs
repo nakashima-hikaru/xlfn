@@ -347,7 +347,6 @@ impl RtdTopic {
         }
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn borrowed(&self) -> BorrowedTopicParts<'_, SmolStr> {
         BorrowedTopicParts {
             parts: &self.parts,
@@ -394,6 +393,103 @@ impl<'a> Iterator for RtdTopicParts<'a> {
 impl ExactSizeIterator for RtdTopicParts<'_> {}
 
 impl std::iter::FusedIterator for RtdTopicParts<'_> {}
+
+impl<'a> IntoIterator for &'a RtdTopic {
+    type Item = &'a str;
+    type IntoIter = RtdTopicParts<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.parts()
+    }
+}
+
+/// Borrowed, stable topic storage accepted by [`RtdCallContext::subscribe`](crate::rtd::RtdCallContext::subscribe).
+///
+/// Implemented for [`RtdTopic`], arrays, slices, and `Vec` whose elements are
+/// `String` or references to `str` or `String`. References to these containers
+/// are also supported. This trait is sealed: arbitrary iterators and custom
+/// string conversions must first be validated and owned by [`RtdTopic::new`].
+/// This keeps validation, subscription identity, and retained byte accounting
+/// tied to the same immutable topic parts without allocating for reuse.
+///
+/// ```compile_fail
+/// use std::cell::Cell;
+/// use xlfn::rtd::RtdTopicInput;
+/// fn borrowed_topic(_: &impl RtdTopicInput) {}
+/// let visits = Cell::new(0);
+/// let changing = [()].into_iter().map(|_| {
+///     visits.set(visits.get() + 1);
+///     if visits.get() <= 3 { "valid" } else { "" }
+/// });
+/// borrowed_topic(&changing);
+/// ```
+#[allow(
+    private_bounds,
+    reason = "Topic inputs are sealed to stable borrowed storage"
+)]
+pub trait RtdTopicInput: input::Input {}
+
+impl<Parts: input::Input + ?Sized> RtdTopicInput for Parts {}
+
+mod input {
+    use super::{BorrowedTopicParts, RtdTopic};
+    use crate::XllResult;
+
+    pub(crate) trait Input {
+        type Part: AsRef<str>;
+
+        fn prepare_parts(&self) -> XllResult<BorrowedTopicParts<'_, Self::Part>>;
+    }
+
+    // Only built-in immutable string views may be reread while matching a
+    // subscription under the catalog lock. User-defined AsRef implementations
+    // could return a different string on each visit or reenter the catalog.
+    trait StablePart: AsRef<str> {}
+
+    impl StablePart for str {}
+    impl StablePart for String {}
+    impl<Part: StablePart + ?Sized> StablePart for &Part {}
+
+    impl Input for RtdTopic {
+        type Part = smol_str::SmolStr;
+
+        fn prepare_parts(&self) -> XllResult<BorrowedTopicParts<'_, Self::Part>> {
+            Ok(self.borrowed())
+        }
+    }
+
+    impl<Part: StablePart> Input for [Part] {
+        type Part = Part;
+
+        fn prepare_parts(&self) -> XllResult<BorrowedTopicParts<'_, Part>> {
+            BorrowedTopicParts::new(self)
+        }
+    }
+
+    impl<Part: StablePart, const N: usize> Input for [Part; N] {
+        type Part = Part;
+
+        fn prepare_parts(&self) -> XllResult<BorrowedTopicParts<'_, Part>> {
+            BorrowedTopicParts::new(self)
+        }
+    }
+
+    impl<Part: StablePart> Input for Vec<Part> {
+        type Part = Part;
+
+        fn prepare_parts(&self) -> XllResult<BorrowedTopicParts<'_, Part>> {
+            BorrowedTopicParts::new(self)
+        }
+    }
+
+    impl<Parts: Input + ?Sized> Input for &Parts {
+        type Part = Parts::Part;
+
+        fn prepare_parts(&self) -> XllResult<BorrowedTopicParts<'_, Self::Part>> {
+            (*self).prepare_parts()
+        }
+    }
+}
 
 impl PartialEq for RtdTopic {
     fn eq(&self, other: &Self) -> bool {
@@ -541,7 +637,42 @@ impl<'a, Part: AsRef<str>> BorrowedTopicParts<'a, Part> {
 
 #[cfg(test)]
 mod borrowed_tests {
+    use super::input::Input;
     use super::*;
+
+    #[test]
+    fn topic_input_borrows_validated_storage_and_preserves_cached_metadata() {
+        let topic = RtdTopic::new(["market", "USD\0JPY"])
+            .unwrap()
+            .with_test_identity_hash(42);
+        let borrowed = topic.prepare_parts().unwrap();
+        assert_eq!(borrowed.parts.as_ptr(), topic.parts.as_ptr());
+        assert_eq!(borrowed.metadata.byte_len, topic.byte_len());
+        assert_eq!(borrowed.metadata.hash, 42);
+        assert!(borrowed.matches(&topic));
+    }
+
+    #[test]
+    fn topic_input_collections_preserve_original_storage_and_canonical_identity() {
+        let canonical = RtdTopic::new(["market", "USD\0JPY"]).unwrap();
+        let parts = [String::from("market"), String::from("USD\0JPY")];
+        let borrowed = parts.prepare_parts().unwrap();
+        assert_eq!(borrowed.parts.as_ptr(), parts.as_ptr());
+        assert!(borrowed.matches(&canonical));
+        let parts = parts.to_vec();
+        let borrowed = parts.prepare_parts().unwrap();
+        assert_eq!(borrowed.parts.as_ptr(), parts.as_ptr());
+        assert!(borrowed.matches(&canonical));
+        assert!(
+            parts
+                .as_slice()
+                .prepare_parts()
+                .unwrap()
+                .matches(&canonical)
+        );
+        let references = [&parts[0], &parts[1]];
+        assert!(references.prepare_parts().unwrap().matches(&canonical));
+    }
 
     fn check<const N: usize>(parts: [&str; N]) {
         let owned = RtdTopic::new(parts);

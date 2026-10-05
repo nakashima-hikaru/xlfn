@@ -63,6 +63,13 @@ The source handle is the opaque RTD identity. Clone a handle when multiple
 functions should refer to the same source; registering a new source creates a
 distinct identity even when its value is equivalent. The runtime owns the
 source and subscription identity; handles do not extend its lifetime.
+`context.rtd().subscribe(&source, &topic)` accepts an existing `RtdTopic`
+directly. Arrays, slices, and vectors of `String` or string references are
+also accepted, so `Vec<String>` does not need a temporary `Vec<&str>`. These
+inputs borrow stable storage; an existing subscription reuses its canonical
+topic without allocating a new copy. Convert arbitrary iterators or custom
+string representations with `RtdTopic::new` before subscribing.
+
 Formulas using the same source handle and topic share an active subscription.
 A failed new subscription attempt does not cancel an established subscriber. The complete compile-tested fixture,
 including the add-in state and `Client` placeholder, lives under

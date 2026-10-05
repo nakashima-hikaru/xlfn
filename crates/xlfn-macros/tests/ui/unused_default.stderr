@@ -1,0 +1,5 @@
+error: `default = ...` requires `blank = "default"` or `missing = "default"`
+ --> tests/ui/unused_default.rs:4:79
+  |
+4 | fn unused_default(#[excel_arg(default = 1.0, blank = error, missing = error)] x: f64) -> f64 {
+  |                                                                               ^^^^^^

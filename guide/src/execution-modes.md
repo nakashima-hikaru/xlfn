@@ -116,3 +116,10 @@ A function marked `volatile` must still return a type valid for its mode. Handle
 - See [Errors and diagnostics](errors-diagnostics.md) for returning Excel errors and configuring logs.
 - See [Asynchronous functions](async-functions.md) for non-blocking calculations.
 - Refer to [docs.rs](https://docs.rs/xlfn) for full context and trait definitions.
+
+
+A reference's `areas()` iterator reports its remaining length through `len()`.
+Every area is validated before the reference is exposed. `row_count()` and
+`column_count()` include both endpoints; `cell_count()` returns `u64` so a full
+worksheet fits on 32-bit hosts. Formatting an area produces a sheet-local A1
+address such as `A1:B10`, without a sheet name or absolute-reference markers.

@@ -36,6 +36,12 @@ use validation::validate_addin_metadata;
 /// the first parameter and carry an explicit `#[excel_context(...)]` role.
 /// A `thread_safe` or `macro_sheet` flag may repeat a matching context role;
 /// conflicting modes are rejected.
+/// `#[excel_arg(default = expression)]` defaults omitted arguments; blank cells
+/// keep the parameter type's ordinary conversion unless `blank = default` is
+/// selected. Explicit `missing` policies override this inferred default.
+/// Both identifier policies (`blank = error`) and string policies are accepted.
+/// Use `missing = convert` to keep the declared type's ordinary conversion,
+/// including `None` for an omitted `Option<T>` input.
 #[proc_macro_attribute]
 pub fn excel_function(attributes: TokenStream, item: TokenStream) -> TokenStream {
     let function = parse_macro_input!(item as ItemFn);
@@ -66,7 +72,13 @@ pub fn derive_excel_handle_object(item: TokenStream) -> TokenStream {
     }
 }
 
-#[proc_macro_derive(ExcelEnum, attributes(excel_enum, excel_value))]
+/// Derives string input and output conversion for a fieldless enum.
+///
+/// Use `#[excel_enum(ascii_case_insensitive)]` on the enum to accept ASCII
+/// spelling variations, and `#[excel_enum(name = "...")]` on a variant to
+/// override its worksheet text. Unknown inputs preserve the argument name,
+/// received text, and accepted choices in bounded diagnostic detail.
+#[proc_macro_derive(ExcelEnum, attributes(excel_enum))]
 pub fn derive_excel_enum(item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as DeriveInput);
     match expand_excel_enum(input) {
@@ -486,8 +498,8 @@ mod tests {
     }
 
     #[test]
-    fn default_without_blank_or_missing_policy_is_rejected() {
-        let error = expand_excel_function(
+    fn default_implies_missing_policy_without_changing_blank_conversion() {
+        let parsed = model::parse_udf(
             quote!(),
             function(quote!(
                 fn func(#[excel_arg(default = 1.0)] arg: f64) -> f64 {
@@ -495,13 +507,34 @@ mod tests {
                 }
             )),
         )
-        .unwrap_err();
-        assert!(
-            error.to_string().contains(
-                "`default = ...` requires `blank = \"default\"` or `missing = \"default\"`"
-            ),
-            "got error: {error}"
-        );
+        .unwrap();
+        let analyzed = model::analyze(parsed).unwrap();
+        let model::ArgumentConversion::Value(value) = &analyzed.arguments[0].conversion else {
+            panic!("scalar value conversion expected");
+        };
+        assert!(matches!(value.blank, model::PresenceAction::Convert));
+        assert!(matches!(value.missing, model::PresenceAction::Default(_)));
+    }
+
+    #[test]
+    fn default_respects_explicit_presence_overrides_and_rejects_unused_defaults() {
+        let parsed = model::parse_udf(
+            quote!(),
+            function(quote!(
+                fn func(
+                    #[excel_arg(default = 1.0, blank = default, missing = error)] arg: f64,
+                ) -> f64 {
+                    arg
+                }
+            )),
+        )
+        .unwrap();
+        let analyzed = model::analyze(parsed).unwrap();
+        let model::ArgumentConversion::Value(value) = &analyzed.arguments[0].conversion else {
+            panic!("scalar value conversion expected");
+        };
+        assert!(matches!(value.blank, model::PresenceAction::Default(_)));
+        assert!(matches!(value.missing, model::PresenceAction::Error));
 
         let error = expand_excel_function(
             quote!(),
@@ -520,6 +553,30 @@ mod tests {
             ),
             "got error: {error}"
         );
+    }
+
+    #[test]
+    fn explicit_convert_preserves_typed_presence_conversion_with_a_blank_default() {
+        for policy in [quote!(convert), quote!("convert"), quote!(r#convert)] {
+            let parsed = model::parse_udf(
+                quote!(),
+                function(quote!(
+                    fn func(
+                        #[excel_arg(default = Some(1.0), blank = default, missing = #policy)]
+                        arg: Option<f64>,
+                    ) -> f64 {
+                        arg.unwrap_or(0.0)
+                    }
+                )),
+            )
+            .unwrap();
+            let analyzed = model::analyze(parsed).unwrap();
+            let model::ArgumentConversion::Value(value) = &analyzed.arguments[0].conversion else {
+                panic!("scalar value conversion expected");
+            };
+            assert!(matches!(value.blank, model::PresenceAction::Default(_)));
+            assert!(matches!(value.missing, model::PresenceAction::Convert));
+        }
     }
 
     #[test]
@@ -582,7 +639,7 @@ mod tests {
             #[excel_enum(ascii_case_insensitive)]
             enum Mode {
                 Ascending,
-                #[excel_value(name = "P")]
+                #[excel_enum(name = "P")]
                 Descending,
             }
         })

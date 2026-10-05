@@ -515,15 +515,19 @@ fn analyze_arguments(
             )?;
             let missing = analyze_presence(
                 "missing",
-                argument.options.missing.as_deref(),
+                argument
+                    .options
+                    .missing
+                    .as_deref()
+                    .or_else(|| argument.options.default.as_ref().map(|_| "default")),
                 argument.options.default.as_ref(),
                 &function.sig.inputs,
             )?;
             let quote = char::from(96);
             let double_quote = char::from(34);
             if argument.options.default.is_some()
-                && argument.options.blank.as_deref() != Some("default")
-                && argument.options.missing.as_deref() != Some("default")
+                && !matches!(blank, PresenceAction::Default(_))
+                && !matches!(missing, PresenceAction::Default(_))
             {
                 return Err(syn::Error::new_spanned(
                     &function.sig.inputs,
@@ -637,7 +641,7 @@ fn analyze_presence(
     let double_quote = char::from(34);
     let quoted_default = format!("{double_quote}default{double_quote}");
     match policy {
-        None => Ok(PresenceAction::Convert),
+        None | Some("convert") => Ok(PresenceAction::Convert),
         Some("default") => Ok(PresenceAction::Default(default.cloned().ok_or_else(|| {
             syn::Error::new_spanned(
                 span,
@@ -650,7 +654,7 @@ fn analyze_presence(
         Some(_) => Err(syn::Error::new_spanned(
             span,
             format!(
-                "{quote}{name}{quote} must be {quoted_default} or {quote}error{quote}"
+                "{quote}{name}{quote} must be {quoted_default}, {quote}error{quote}, or {quote}convert{quote}"
             ),
         )),
     }

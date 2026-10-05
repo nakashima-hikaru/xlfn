@@ -1,6 +1,7 @@
 //! Raw attribute parsing for the procedural macro front end.
 
 use proc_macro2::TokenStream;
+use syn::ext::IdentExt;
 use syn::parse::Parser;
 use syn::punctuated::Punctuated;
 use syn::{Attribute, Expr, ExprLit, Lit, Meta, Token};
@@ -134,7 +135,7 @@ pub(super) fn parse_argument_options(
                         "duplicate excel_arg blank policy",
                     ));
                 }
-                options.blank = Some(string_value(&value.value, "blank")?);
+                options.blank = Some(policy_value(&value.value, "blank")?);
             }
             Meta::NameValue(value) if value.path.is_ident("missing") => {
                 if options.missing.is_some() {
@@ -143,7 +144,7 @@ pub(super) fn parse_argument_options(
                         "duplicate excel_arg missing policy",
                     ));
                 }
-                options.missing = Some(string_value(&value.value, "missing")?);
+                options.missing = Some(policy_value(&value.value, "missing")?);
             }
             Meta::Path(path) if path.is_ident("reference") => {
                 if options.reference {
@@ -160,6 +161,25 @@ pub(super) fn parse_argument_options(
         }
     }
     Ok(())
+}
+
+fn policy_value(expr: &Expr, name: &str) -> syn::Result<String> {
+    if let Expr::Path(path) = expr
+        && path.qself.is_none()
+        && let Some(ident) = path.path.get_ident()
+    {
+        return Ok(ident.unraw().to_string());
+    }
+    match expr {
+        Expr::Lit(ExprLit {
+            lit: Lit::Str(value),
+            ..
+        }) => Ok(value.value()),
+        _ => Err(syn::Error::new_spanned(
+            expr,
+            format!("`{name}` requires a policy identifier or string literal"),
+        )),
+    }
 }
 
 pub(super) fn parse_function_options(tokens: TokenStream) -> syn::Result<ParsedFunctionOptions> {

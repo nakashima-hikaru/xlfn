@@ -270,6 +270,11 @@ pub trait UdfLayerGuard: Send + 'static {
 /// Layers run in tuple order on entry and reverse tuple order on exit. A
 /// failed or panicking entry rejects the invocation and completes guards from
 /// earlier layers in reverse order. Layer methods may run concurrently.
+///
+/// Layers receive invocation metadata and completion status for admission,
+/// timing, diagnostics, and metrics. They do not receive argument or return
+/// values, cannot transform them, and cannot replace the UDF implementation.
+/// Return an error from `enter` to reject admission before the UDF executes.
 pub trait UdfLayer: Send + Sync + 'static {
     /// Owned guard retained until this invocation completes.
     type Guard: UdfLayerGuard;

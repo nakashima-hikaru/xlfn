@@ -1,6 +1,7 @@
 #[test]
 fn trait_driven_function_signatures_compile() {
     let tests = trybuild::TestCases::new();
+    tests.pass("tests/ui/pass/argument_defaults.rs");
     tests.pass("tests/ui/pass/borrowed_inputs.rs");
     tests.pass("tests/ui/pass/case_distinct_udfs.rs");
     tests.pass("tests/ui/pass/cfg_gating.rs");
@@ -15,6 +16,7 @@ fn trait_driven_function_signatures_compile() {
     tests.pass("tests/ui/pass/raw_identifiers.rs");
     tests.pass("tests/ui/pass/udf_layers_tuple.rs");
     tests.compile_fail("tests/ui/fail/argument_trait_missing.rs");
+    tests.compile_fail("tests/ui/fail/enum_legacy_variant.rs");
     tests.compile_fail("tests/ui/fail/framework_error_construction.rs");
     tests.compile_fail("tests/ui/fail/context_*.rs");
     tests.compile_fail("tests/ui/fail/callback_*.rs");

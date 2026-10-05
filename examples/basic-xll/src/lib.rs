@@ -45,7 +45,7 @@ pub fn reference_area_count(
     #[excel_context(macro_sheet)] _context: MacroSheetContext<'_, ExampleAddin>,
     #[excel_arg(reference, description = "Cell or range reference.")] reference: ExcelReference<'_>,
 ) -> XllResult<i32> {
-    i32::try_from(reference.areas().count()).map_err(|_| XllError::Domain {
+    i32::try_from(reference.areas().len()).map_err(|_| XllError::Domain {
         code: xlfn::error::DomainErrorCode::Overflow,
     })
 }

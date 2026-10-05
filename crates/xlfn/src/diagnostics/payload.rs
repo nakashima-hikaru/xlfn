@@ -1,6 +1,6 @@
 //! Allocation-free bounds for diagnostic cloning and tracing output.
 
-use crate::XllError;
+use crate::{XllError, error::InputError};
 use std::borrow::Cow;
 use std::fmt;
 
@@ -33,6 +33,10 @@ pub(super) fn clone_bytes(error: &XllError) -> Option<usize> {
                 topic.len().checked_add(size_of::<XllError>())?,
                 Some(&**source),
             ),
+            XllError::Input {
+                reason: InputError::UnknownEnum { actual, .. },
+                ..
+            } => (actual.len(), None),
             XllError::Input { .. }
             | XllError::Shape { .. }
             | XllError::ElementCountMismatch { .. }
@@ -108,7 +112,7 @@ fn trace_format(output: &mut fmt::Formatter<'_>, arguments: fmt::Arguments<'_>) 
 
 impl fmt::Display for TracedError<'_> {
     fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
-        trace_format(output, format_args!("{}", self.0))
+        trace_format(output, format_args!("{}", DisplayError(self.0)))
     }
 }
 
@@ -131,11 +135,73 @@ impl fmt::Debug for DebugText<'_> {
     }
 }
 
+struct DebugUnknownEnum<'a> {
+    actual: &'a str,
+    expected: &'a str,
+}
+
+impl fmt::Debug for DebugUnknownEnum<'_> {
+    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
+        output
+            .debug_struct("UnknownEnum")
+            .field("actual", &DebugText(self.actual))
+            .field("expected", &DebugText(self.expected))
+            .finish()
+    }
+}
+
+struct DisplayError<'a>(&'a XllError);
+
+impl fmt::Display for DisplayError<'_> {
+    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            XllError::Input {
+                argument,
+                reason: InputError::UnknownEnum { actual, expected },
+            } => {
+                write!(
+                    output,
+                    "invalid argument {argument}: expected one of {expected}, got {:?}",
+                    DebugText(actual)
+                )
+            }
+            XllError::RtdProducerFailure { topic, source } => {
+                write!(
+                    output,
+                    "RTD producer failed for topic {topic}: {}",
+                    DisplayError(source)
+                )
+            }
+            XllError::RtdSubscriptionShutdown {
+                server_generation,
+                topic_id,
+                key,
+                source,
+            } => {
+                write!(
+                    output,
+                    "RTD subscription shutdown failed for server generation {server_generation}, topic {topic_id}, key {key}: {}",
+                    DisplayError(source)
+                )
+            }
+            other => fmt::Display::fmt(other, output),
+        }
+    }
+}
+
 struct DebugError<'a>(&'a XllError);
 
 impl fmt::Debug for DebugError<'_> {
     fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
+            XllError::Input {
+                argument,
+                reason: InputError::UnknownEnum { actual, expected },
+            } => output
+                .debug_struct("Input")
+                .field("argument", &DebugText(argument))
+                .field("reason", &DebugUnknownEnum { actual, expected })
+                .finish(),
             XllError::Custom { excel, message } => output
                 .debug_struct("Custom")
                 .field("excel", excel)
@@ -197,6 +263,47 @@ mod tests {
                     <= super::super::DIAGNOSTIC_TEXT_MAX_BYTES
                         + super::super::DIAGNOSTIC_TRUNCATION_SUFFIX.len()
             );
+        }
+    }
+
+    #[test]
+    fn enum_errors_charge_owned_input_and_bound_escaped_tracing() {
+        let small = XllError::input(
+            "mode",
+            InputError::UnknownEnum {
+                actual: "unknown\n\"value".to_owned(),
+                expected: "[\"Fast\", \"Slow\"]",
+            },
+        );
+        assert_eq!(clone_bytes(&small), Some("unknown\n\"value".len()));
+        assert_eq!(format!("{}", TracedError(&small)), small.to_string());
+        assert_eq!(format!("{:?}", TracedError(&small)), format!("{small:?}"));
+        let large = XllError::input(
+            "mode",
+            InputError::UnknownEnum {
+                actual: "\n".repeat(super::super::DIAGNOSTIC_PAYLOAD_MAX_BYTES + 1),
+                expected: "[Fast]",
+            },
+        );
+        assert_eq!(clone_bytes(&large), None);
+        for error in [
+            &large,
+            &XllError::RtdProducerFailure {
+                topic: "test".to_owned(),
+                source: Box::new(large.clone()),
+            },
+        ] {
+            for text in [
+                format!("{}", TracedError(error)),
+                format!("{:?}", TracedError(error)),
+            ] {
+                assert!(text.ends_with(super::super::DIAGNOSTIC_TRUNCATION_SUFFIX));
+                assert!(
+                    text.len()
+                        <= super::super::DIAGNOSTIC_TEXT_MAX_BYTES
+                            + super::super::DIAGNOSTIC_TRUNCATION_SUFFIX.len()
+                );
+            }
         }
     }
 

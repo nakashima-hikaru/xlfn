@@ -90,6 +90,14 @@ aliases are retained for removed wrappers, paths, or method names.
 | `endpoint.get(&registry, key)` | `registry.get(&endpoint, key)` |
 | `endpoint.get_or_try_insert(&registry, key, weight, compute)` | `registry.get_or_try_insert(&endpoint, key, weight, compute)` |
 | `RtdCapacity::from_usize(n)` | `RtdCapacity::disabled_if_zero(n)`; zero disables admission |
+| Variant `#[excel_value(name = "...")]` | Variant `#[excel_enum(name = "...")]` |
+
+`#[excel_arg(default = expr)]` now selects a default for omitted arguments
+unless `missing` is explicitly specified. Code that used a default only for
+blank cells can add `missing = convert` to retain the parameter type's previous
+omitted-argument conversion, or `missing = error` to require the argument.
+Blank cells still use the type's usual conversion unless a `blank` policy is
+selected. Presence policies accept both bare identifiers and strings.
 
 `ExcelError` and `XlValueType` now require a fallback arm in application matches.
 Framework-owned structured `XllError` variants can be inspected with `..`, but

@@ -19,6 +19,9 @@
 //! The `rtd` feature enables the generic RTD subscription API; `handles`
 //! enables formula handles. Both features share a private Excel RTD/COM
 //! transport, but neither public capability implies the other.
+//!
+//! The `serde` feature enables serialization of owned values and collections.
+//! The `chrono` and `time` features provide calendar conversions for serial dates.
 
 #![warn(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]

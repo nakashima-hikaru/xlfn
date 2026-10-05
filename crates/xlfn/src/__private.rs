@@ -140,6 +140,38 @@ pub mod v1 {
     };
     #[doc(hidden)]
     pub use crate::utf16::utf16_eq_ignore_ascii_case;
+    /// Builds an enum input error while bounding decoded diagnostic storage.
+    /// Invalid UTF-16 remains an input encoding error even beyond the prefix.
+    #[doc(hidden)]
+    pub fn unknown_enum_error(
+        text: crate::value::XlStrRef<'_>,
+        argument: &'static str,
+        expected: &'static str,
+    ) -> XllError {
+        const MAX_BYTES: usize = 1024;
+        let mut actual = String::new();
+        let mut truncated = false;
+        for character in text.chars() {
+            let character = match character {
+                Ok(character) => character,
+                Err(_) => {
+                    return XllError::input(argument, crate::error::InputError::InvalidUtf16);
+                }
+            };
+            if !truncated && actual.len() + character.len_utf8() <= MAX_BYTES {
+                actual.push(character);
+            } else {
+                truncated = true;
+            }
+        }
+        if truncated {
+            actual.push_str("…[truncated]");
+        }
+        XllError::input(
+            argument,
+            crate::error::InputError::UnknownEnum { actual, expected },
+        )
+    }
     #[doc(hidden)]
     pub use crate::value::input::CellPresence;
     pub use xlfn_common::{ExecutionKind, FunctionVisibility};
@@ -1088,6 +1120,78 @@ mod tests {
     use crate::panic_boundary::tests::PanickingPayload;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug, PartialEq, crate::ExcelEnum)]
+    #[excel_enum(ascii_case_insensitive)]
+    enum Mode {
+        #[excel_enum(name = "Fast mode")]
+        Fast,
+        Slow,
+    }
+
+    fn decode_mode(mut utf16: Vec<u16>) -> crate::XllResult<Mode> {
+        use crate::value::FromExcel;
+        utf16.insert(0, u16::try_from(utf16.len()).unwrap());
+        let raw = xlfn_sys::XLOPER12 {
+            value: xlfn_sys::XLOPER12Value {
+                string: utf16.as_mut_ptr(),
+            },
+            xltype: xlfn_sys::XLTYPE_STR,
+        };
+        // The raw root and its counted UTF-16 buffer remain live for decoding.
+        let value = crate::value::XlValueRef::from_array_cell(&raw).unwrap();
+        Mode::from_excel(value, "mode")
+    }
+
+    #[test]
+    fn enum_conversion_reports_input_and_choices_and_keeps_matching_semantics() {
+        assert_eq!(
+            decode_mode("fAsT mOdE".encode_utf16().collect()).unwrap(),
+            Mode::Fast
+        );
+        let error = decode_mode("unknown日本語".encode_utf16().collect()).unwrap_err();
+        let crate::XllError::Input { argument, reason } = &error else {
+            panic!("enum failures must retain input classification");
+        };
+        assert_eq!(*argument, "mode");
+        assert!(matches!(
+            reason,
+            crate::error::InputError::UnknownEnum { actual, expected }
+                if actual == "unknown日本語" && *expected == "[\"Fast mode\", \"Slow\"]"
+        ));
+        assert!(error.to_string().contains("unknown日本語"));
+        assert_eq!(error.excel_error(), crate::ExcelError::Value);
+    }
+
+    #[test]
+    fn enum_diagnostics_bound_unicode_prefix_and_still_reject_invalid_utf16() {
+        let error = decode_mode("日".repeat(1000).encode_utf16().collect()).unwrap_err();
+        let crate::XllError::Input {
+            reason: crate::error::InputError::UnknownEnum { actual, .. },
+            ..
+        } = error
+        else {
+            panic!("unknown enum diagnostic expected");
+        };
+        assert!(actual.len() <= 1024 + "…[truncated]".len());
+        assert!(actual.ends_with("…[truncated]"));
+        assert!(
+            actual
+                .trim_end_matches("…[truncated]")
+                .chars()
+                .all(|ch| ch == '日')
+        );
+
+        let mut invalid = vec![u16::from(b'x'); 2000];
+        invalid.push(0xd800);
+        assert!(matches!(
+            decode_mode(invalid),
+            Err(crate::XllError::Input {
+                reason: crate::error::InputError::InvalidUtf16,
+                ..
+            })
+        ));
+    }
 
     #[test]
     fn generated_export_boundaries_contain_guard_drop_panics() {

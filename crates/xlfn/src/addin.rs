@@ -346,7 +346,7 @@ pub struct RtdConfig {
 #[cfg(feature = "rtd")]
 impl RtdConfig {
     #[must_use]
-    /// Creates the standard RTD capacity and shutdown policy.
+    /// Creates the standard finite RTD resource capacities.
     pub const fn new() -> Self {
         Self {
             limits: RtdLimits::standard(),
@@ -354,7 +354,7 @@ impl RtdConfig {
     }
 
     #[must_use]
-    /// Sets RTD topic capacities, producer behavior, and shutdown limits.
+    /// Sets RTD subscription, update-queue, source, and topic-byte capacities.
     pub const fn with_limits(mut self, limits: RtdLimits) -> Self {
         self.limits = limits;
         self
@@ -1151,9 +1151,7 @@ mod tests {
                         ),
                     );
                     assert!(matches!(
-                        context
-                            .rtd()
-                            .subscribe(&source, &topic.parts().collect::<Vec<_>>(),),
+                        context.rtd().subscribe(&source, &topic),
                         Err(crate::XllError::ExcelApi {
                             function: crate::ExcelApiFunction::Rtd,
                             failure: crate::ExcelApiFailure::Status(

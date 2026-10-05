@@ -26,6 +26,9 @@ impl SheetId {
 use core::range::RangeInclusive;
 
 /// Validated rectangular reference area with zero-based inclusive coordinates.
+///
+/// Its [`Display`](std::fmt::Display) representation is a sheet-local A1 address
+/// without a sheet name or absolute-reference markers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReferenceArea {
     rows: RangeInclusive<u32>,
@@ -78,6 +81,26 @@ impl ReferenceArea {
     pub const fn last_column(self) -> u32 {
         self.columns.last
     }
+    /// Returns the number of rows, including both endpoints.
+    #[must_use]
+    pub const fn row_count(self) -> u32 {
+        self.rows.last - self.rows.start + 1
+    }
+
+    /// Returns the number of columns, including both endpoints.
+    #[must_use]
+    pub const fn column_count(self) -> u32 {
+        self.columns.last - self.columns.start + 1
+    }
+
+    /// Returns the number of cells, including both endpoints.
+    ///
+    /// The result is `u64` so a full worksheet also fits on 32-bit hosts.
+    #[must_use]
+    pub const fn cell_count(self) -> u64 {
+        self.row_count() as u64 * self.column_count() as u64
+    }
+
     #[must_use]
     /// Returns the zero-based inclusive row range.
     pub const fn rows(self) -> RangeInclusive<u32> {
@@ -87,6 +110,30 @@ impl ReferenceArea {
     /// Returns the zero-based inclusive column range.
     pub const fn columns(self) -> RangeInclusive<u32> {
         self.columns
+    }
+}
+
+impl std::fmt::Display for ReferenceArea {
+    /// Formats a sheet-local A1 address, for example `A1` or `A1:B10`.
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn cell(output: &mut std::fmt::Formatter<'_>, row: u32, column: u32) -> std::fmt::Result {
+            let mut number = column + 1;
+            let mut label = [0_u8; 3];
+            let mut start = label.len();
+            while number != 0 {
+                start -= 1;
+                label[start] = b'A' + ((number - 1) % 26) as u8;
+                number = (number - 1) / 26;
+            }
+            let label = std::str::from_utf8(&label[start..]).expect("A1 column contains ASCII");
+            write!(output, "{label}{}", row + 1)
+        }
+        cell(output, self.first_row(), self.first_column())?;
+        if self.row_count() != 1 || self.column_count() != 1 {
+            output.write_str(":")?;
+            cell(output, self.last_row(), self.last_column())?;
+        }
+        Ok(())
     }
 }
 
@@ -153,12 +200,31 @@ impl Iterator for ReferenceAreas<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         match &mut self.inner {
             ReferenceAreasInner::One(area) => area.take(),
-            ReferenceAreasInner::Many(areas) => areas
-                .next()
-                .and_then(|area| ReferenceArea::parse(*area, "reference").ok()),
+            ReferenceAreasInner::Many(areas) => areas.next().map(|area| ReferenceArea {
+                // All coordinates were validated before this iterator was exposed.
+                rows: RangeInclusive {
+                    start: area.rw_first as u32,
+                    last: area.rw_last as u32,
+                },
+                columns: RangeInclusive {
+                    start: area.col_first as u32,
+                    last: area.col_last as u32,
+                },
+            }),
         }
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = match &self.inner {
+            ReferenceAreasInner::One(area) => usize::from(area.is_some()),
+            ReferenceAreasInner::Many(areas) => areas.len(),
+        };
+        (remaining, Some(remaining))
+    }
 }
+
+impl ExactSizeIterator for ReferenceAreas<'_> {}
+impl std::iter::FusedIterator for ReferenceAreas<'_> {}
 
 /// Converts a call-scoped reference argument into an application type.
 ///
@@ -296,6 +362,67 @@ mod tests {
     }
 
     #[test]
+    fn area_geometry_and_a1_cover_column_and_sheet_boundaries() {
+        for (row, column, expected) in [
+            (0, 0, "A1"),
+            (9, 25, "Z10"),
+            (0, 26, "AA1"),
+            (0, 701, "ZZ1"),
+            (0, 702, "AAA1"),
+            (1_048_575, 16_383, "XFD1048576"),
+        ] {
+            let area = ReferenceArea::parse(
+                XLREF12 {
+                    rw_first: row,
+                    rw_last: row,
+                    col_first: column,
+                    col_last: column,
+                },
+                "area",
+            )
+            .unwrap();
+            assert_eq!(area.to_string(), expected);
+            assert_eq!(
+                (area.row_count(), area.column_count(), area.cell_count()),
+                (1, 1, 1)
+            );
+        }
+        let area = ReferenceArea::parse(
+            XLREF12 {
+                rw_first: 0,
+                rw_last: EXCEL_MAX_ROW,
+                col_first: 0,
+                col_last: EXCEL_MAX_COLUMN,
+            },
+            "area",
+        )
+        .unwrap();
+        assert_eq!(area.to_string(), "A1:XFD1048576");
+        assert_eq!(area.cell_count(), 17_179_869_184);
+    }
+
+    #[test]
+    fn reference_area_iterator_has_an_exact_remaining_length() {
+        let mut raw = sref(XLREF12 {
+            rw_first: 0,
+            rw_last: 9,
+            col_first: 0,
+            col_last: 1,
+        });
+        // SAFETY: raw remains live and unchanged for the call-scoped reference.
+        let reference: ExcelReference<'_> =
+            unsafe { reference_from_raw("range", &mut raw) }.unwrap();
+        let mut areas = reference.areas();
+        assert_eq!(areas.len(), 1);
+        assert_eq!(areas.size_hint(), (1, Some(1)));
+        assert_eq!(areas.next().unwrap().to_string(), "A1:B10");
+        assert_eq!(areas.len(), 0);
+        assert_eq!(areas.size_hint(), (0, Some(0)));
+        assert_eq!(areas.next(), None);
+        assert_eq!(areas.next(), None);
+    }
+
+    #[test]
     fn malformed_reference_tag_preserves_the_argument_name() {
         let mut raw = sref(XLREF12 {
             rw_first: 0,
@@ -370,10 +497,60 @@ mod tests {
             unsafe { reference_from_raw("areas", &mut raw) }.unwrap();
         assert_eq!(reference.sheet_id().unwrap().get(), 42);
         assert!(reference.is_multi_area());
-        let areas = reference.areas().collect::<Vec<_>>();
+        let mut iter = reference.areas();
+        assert_eq!(iter.len(), 2);
+        let first = iter.next().unwrap();
+        assert_eq!(iter.len(), 1);
+        let second = iter.next().unwrap();
+        assert_eq!(iter.len(), 0);
+        assert_eq!(iter.next(), None);
+        let areas = [first, second];
         assert_eq!(areas.len(), 2);
         assert_eq!((areas[0].first_row(), areas[0].last_row()), (2, 4));
         assert_eq!((areas[1].first_row(), areas[1].last_row()), (8, 9));
         assert_eq!((areas[1].first_column(), areas[1].last_column()), (5, 7));
+    }
+    #[test]
+    fn malformed_later_area_rejects_the_entire_reference() {
+        #[repr(C)]
+        struct ReferenceTable {
+            count: u16,
+            areas: [XLREF12; 2],
+        }
+        let valid = XLREF12 {
+            rw_first: 0,
+            rw_last: 0,
+            col_first: 0,
+            col_last: 0,
+        };
+        let mut table = ReferenceTable {
+            count: 2,
+            areas: [
+                valid,
+                XLREF12 {
+                    rw_first: 1,
+                    rw_last: 0,
+                    ..valid
+                },
+            ],
+        };
+        let mut raw = XLOPER12 {
+            value: XLOPER12Value {
+                mref: xlfn_sys::XLOPER12MRef {
+                    references: (&raw mut table).cast(),
+                    sheet_id: 42,
+                },
+            },
+            xltype: xlfn_sys::XLTYPE_REF,
+        };
+        // SAFETY: the two-entry table is readable; admission must reject its second area.
+        let result = unsafe { reference_from_raw::<ExcelReference<'_>>("range", &mut raw) };
+        assert!(matches!(
+            result,
+            Err(XllError::Input {
+                argument: "range",
+                reason: InputError::Malformed("invalid reference area")
+            })
+        ));
     }
 }

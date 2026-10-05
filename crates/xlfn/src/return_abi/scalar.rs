@@ -204,7 +204,7 @@ mod tests {
 
         #[derive(crate::ExcelEnum)]
         enum Label {
-            #[excel_value(name = "価格💡")]
+            #[excel_enum(name = "価格💡")]
             Unicode,
         }
         let ReturnPayload::Scalar(output) =

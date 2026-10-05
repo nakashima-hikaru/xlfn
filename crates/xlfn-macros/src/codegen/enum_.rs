@@ -52,7 +52,7 @@ pub(crate) fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::
         }
         let mut excel_name = None;
         for attribute in &variant.attrs {
-            if !attribute.path().is_ident("excel_value") {
+            if !attribute.path().is_ident("excel_enum") {
                 continue;
             }
             attribute.parse_nested_meta(|meta| {
@@ -89,6 +89,7 @@ pub(crate) fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::
         variants.push((variant.ident.clone(), excel_name));
     }
     let ident = &input.ident;
+    let expected = expected_names(&variants);
     let (base_impl_generics, type_generics, base_where_clause) = input.generics.split_for_impl();
     let mut from_excel_generics = input.generics.clone();
     from_excel_generics
@@ -137,17 +138,11 @@ pub(crate) fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::
             ) -> #krate::error::XllResult<Self> {
                 let __text = __value.as_str_with_argument(__argument)?;
                 #(#comparisons)*
-                if __text.chars().any(|__decoded| __decoded.is_err()) {
-                    ::core::result::Result::Err(#krate::error::XllError::input(
-                        __argument,
-                        #krate::error::InputError::InvalidUtf16,
-                    ))
-                } else {
-                    ::core::result::Result::Err(#krate::error::XllError::input(
-                        __argument,
-                        #krate::error::InputError::Malformed("unknown enum value"),
-                    ))
-                }
+                ::core::result::Result::Err(#krate::__private::v1::unknown_enum_error(
+                    __text,
+                    __argument,
+                    #expected,
+                ))
             }
         }
 
@@ -203,9 +198,53 @@ pub(crate) fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::
     })
 }
 
+// Candidate names live in generated static storage. Bound even that storage's
+// diagnostic view so a large enum does not produce unbounded failure text.
+fn expected_names(variants: &[(syn::Ident, String)]) -> String {
+    const MAX_BYTES: usize = 4096;
+    const TRUNCATED: &str = "…[truncated]";
+    let mut expected = String::from("[");
+    for (index, (_, name)) in variants.iter().enumerate() {
+        let item = format!("{}{name:?}", if index == 0 { "" } else { ", " });
+        if expected.len() + item.len() + 1 > MAX_BYTES {
+            expected.push_str(&item);
+            expected.truncate(expected.floor_char_boundary(MAX_BYTES - TRUNCATED.len() - 1));
+            expected.push_str(TRUNCATED);
+            break;
+        }
+        expected.push_str(&item);
+    }
+    expected.push(']');
+    expected
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expected_choices_preserve_names_and_bound_utf8_text() {
+        let variants = vec![
+            (syn::parse_quote!(First), "quoted\"value".to_owned()),
+            (syn::parse_quote!(Second), "日本語💡".to_owned()),
+        ];
+        assert_eq!(
+            expected_names(&variants),
+            "[\"quoted\\\"value\", \"日本語💡\"]"
+        );
+        for names in [
+            vec!["日".repeat(4096)],
+            vec!["x".repeat(4079), "following".repeat(100)],
+        ] {
+            let variants = names
+                .into_iter()
+                .map(|name| (syn::parse_quote!(Variant), name))
+                .collect::<Vec<_>>();
+            let summary = expected_names(&variants);
+            assert!(summary.len() <= 4096);
+            assert!(summary.ends_with("…[truncated]]"));
+        }
+    }
 
     #[test]
     fn enum_names_must_fit_the_excel_utf16_string_limit() {
@@ -216,7 +255,7 @@ mod tests {
         ] {
             let input = syn::parse_quote! {
                 enum Value {
-                    #[excel_value(name = #name)]
+                    #[excel_enum(name = #name)]
                     Item,
                 }
             };

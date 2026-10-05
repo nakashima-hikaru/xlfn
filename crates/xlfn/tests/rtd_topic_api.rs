@@ -1,6 +1,24 @@
 #![cfg(feature = "rtd")]
 
-use xlfn::rtd::{RtdTopic, RtdTopicParts};
+use xlfn::rtd::{RtdTopic, RtdTopicInput, RtdTopicParts};
+
+#[test]
+fn borrowed_topic_inputs_accept_owned_topics_and_standard_string_collections() {
+    fn accepted<Parts: RtdTopicInput + ?Sized>(_: &Parts) {}
+
+    let topic = RtdTopic::new(["market", "USD\0JPY"]).unwrap();
+    accepted(&topic);
+    let borrowed = ["market", "USD\0JPY"];
+    accepted(&borrowed);
+    accepted(borrowed.as_slice());
+    accepted(&borrowed.to_vec());
+    let owned = [String::from("market"), String::from("USD\0JPY")];
+    accepted(&owned);
+    accepted(owned.as_slice());
+    accepted(&owned.to_vec());
+    accepted(&[&owned[0], &owned[1]]);
+    accepted(&&borrowed);
+}
 
 #[test]
 fn topic_parts_borrow_text_and_report_remaining_length() {

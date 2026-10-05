@@ -20,7 +20,7 @@ impl Addin for r#gen {
 #[derive(ExcelEnum)]
 enum Keyword {
     r#type,
-    #[excel_value(name = "r#match")]
+    #[excel_enum(name = "r#match")]
     Match,
 }
 

@@ -1,6 +1,6 @@
 #[derive(xlfn_macros::ExcelEnum)]
 enum Value {
-    #[excel_value(name = "invalid\0value")]
+    #[excel_enum(name = "invalid\0value")]
     Item,
 }
 
