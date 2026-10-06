@@ -19,6 +19,12 @@ from summarize import PRIMARY, summarize
 from workloads import IDS, Case, cases
 
 
+def atomic_write_json(path: Path, payload: Any) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload), encoding="utf-8")
+    temporary.replace(path)
+
+
 class PlanTest(unittest.TestCase):
     def test_teardown_failure_survives_successful_fallback_quit(self):
         session = object.__new__(ExcelSession)
@@ -313,15 +319,15 @@ class PlanTest(unittest.TestCase):
                 session.app.Evaluate.side_effect = AssertionError("ARM must not use formula evaluation")
 
                 def submit(sheet, count, make):
-                    (control_path / "ready.json").write_text(json.dumps({"active": 3, "expected": 3}))
+                    atomic_write_json(control_path / "ready.json", {"active": 3, "expected": 3})
                     deadline = time.perf_counter() + 2
                     # Simulate Excel blocking the caller in formula assignment
                     # until the independent controller releases all work.
                     while not (control_path / "release").exists():
                         self.assertLess(time.perf_counter(), deadline, "gate needs blocked COM caller")
                         time.sleep(0.001)
-                    (control_path / "released.json").write_text(json.dumps({"active_before_release": 3}))
-                    (control_path / "state.json").write_text(json.dumps({"active": 0, "expected": 3, "started": 3, "finished": 3, "released": True, "control_error": None}))
+                    atomic_write_json(control_path / "released.json", {"active_before_release": 3})
+                    atomic_write_json(control_path / "state.json", {"active": 0, "expected": 3, "started": 3, "finished": 3, "released": True, "control_error": None})
                     return target
 
                 session.add_formulas.side_effect = submit
@@ -395,6 +401,17 @@ class PlanTest(unittest.TestCase):
                 control.wait_released()
             control.close()
 
+    def test_async_read_ignores_empty_or_partial_transient_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            control = AsyncControl(SimpleNamespace(control_root=Path(directory)), 3)
+            (control.path / "ready.json").write_text("", encoding="utf-8")
+            self.assertIsNone(control.read("ready.json"))
+            (control.path / "ready.json").write_text('{"active":', encoding="utf-8")
+            self.assertIsNone(control.read("ready.json"))
+            (control.path / "ready.json").write_text('{"active": 3}', encoding="utf-8")
+            self.assertEqual(control.read("ready.json"), {"active": 3})
+            control.close()
+
     def test_async_drain_does_not_accept_initial_zero_active_snapshot(self):
         with tempfile.TemporaryDirectory() as directory:
             control = AsyncControl(SimpleNamespace(control_root=Path(directory)), 3)
@@ -443,8 +460,8 @@ class PlanTest(unittest.TestCase):
                         deadline = time.perf_counter() + 2
                         while not (control_path / "release").exists() and time.perf_counter() < deadline:
                             time.sleep(0.001)
-                        (control_path / "released.json").write_text(json.dumps({"active_before_release": 3}))
-                        (control_path / "state.json").write_text(json.dumps({"active": 0, "expected": 3, "started": 3, "finished": 3, "released": True, "control_error": None}))
+                        atomic_write_json(control_path / "released.json", {"active_before_release": 3})
+                        atomic_write_json(control_path / "state.json", {"active": 0, "expected": 3, "started": 3, "finished": 3, "released": True, "control_error": None})
                     fixture_thread = threading.Thread(target=fixture)
                     fixture_thread.start()
                     return 1.0
@@ -457,8 +474,8 @@ class PlanTest(unittest.TestCase):
                 def submit(sheet, count, make):
                     if session.add_formulas.call_count == 1:
                         self.assertEqual(make(1), "=BENCH.ASYNC(1,-1)")
-                        (control_path / "state.json").write_text(json.dumps({"active": 3}))
-                        (control_path / "ready.json").write_text(json.dumps({"active": 3, "expected": 3}))
+                        atomic_write_json(control_path / "state.json", {"active": 3})
+                        atomic_write_json(control_path / "ready.json", {"active": 3, "expected": 3})
                     else:
                         action()
                         self.assertEqual(make(1), "=BENCH.ASYNC(4,0)")

@@ -631,13 +631,27 @@ class AsyncControl:
             raise self.error
         try:
             error = (self.path / "control-error.txt").read_text(encoding="utf-8")
-        except FileNotFoundError:
+        except (FileNotFoundError, PermissionError):
             pass
+        except OSError as err:
+            if getattr(err, "winerror", None) not in (5, 32):
+                raise
         else:
-            raise RuntimeError(f"fixture async control failed: {error}")
+            if error.strip():
+                raise RuntimeError(f"fixture async control failed: {error.strip()}")
         try:
-            return json.loads((self.path / name).read_text(encoding="utf-8"))
-        except FileNotFoundError:
+            text = (self.path / name).read_text(encoding="utf-8")
+        except (FileNotFoundError, PermissionError):
+            return None
+        except OSError as err:
+            if getattr(err, "winerror", None) in (5, 32):
+                return None
+            raise
+        if not text.strip():
+            return None
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
             return None
 
     def arm(self) -> None:
