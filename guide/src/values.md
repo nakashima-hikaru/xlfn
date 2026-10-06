@@ -166,6 +166,8 @@ application policy before converting to a civil date.
 
 Use `ExcelSerialDate::from_ymd(year, month, day, system)` to construct a
 midnight serial, and `date.to_ymd()` to read its Gregorian calendar day.
+Their component types are `year: i16`, `month: i8`, and `day: i8`, matching
+Jiff's civil-date constructor and accessors.
 Calendar conversions support years `1..=9999`. They return an error for an
 unresolved `Workbook` convention or the fictitious 1900-02-29 (serial day
 60 in the 1900 system), instead of mapping it to another date. Reading a
@@ -182,9 +184,10 @@ assert_eq!(date.to_ymd()?, (2026, 10, 5));
 # Ok::<(), xlfn::XllError>(())
 ```
 
-The optional `chrono` feature provides `from_chrono` / `to_chrono` methods
-for `chrono::NaiveDate`; the `time` feature provides `from_time` / `to_time`
-for `time::Date`. Importing a calendar date requires the date system as an
+The optional `jiff` feature provides `from_jiff` / `to_jiff` methods
+for [`jiff::civil::Date`](https://docs.rs/jiff/latest/jiff/civil/struct.Date.html).
+Enable it with `xlfn = { version = "0.2.0", features = ["jiff"] }`.
+Importing a calendar date requires the date system as an
 argument. Exporting a calendar date discards the fractional day and keeps
 the same validation rules as `to_ymd()`.
 

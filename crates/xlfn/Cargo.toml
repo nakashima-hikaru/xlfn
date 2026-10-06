@@ -12,8 +12,7 @@ readme = "README.md"
 [features]
 default = []
 serde = []
-chrono = ["dep:chrono"]
-time = ["dep:time"]
+jiff = ["dep:jiff"]
 async = [
     "dep:async-task",
     "dep:crossbeam-deque",
@@ -166,8 +165,7 @@ inventory.workspace = true
 indexmap.workspace = true
 async-task = { workspace = true, optional = true }
 blake3.workspace = true
-chrono = { version = "0.4", optional = true, default-features = false, features = ["std"] }
-time = { version = "0.3", optional = true, default-features = false }
+jiff = { workspace = true, optional = true }
 bumpalo.workspace = true
 constant_time_eq.workspace = true
 crossbeam-deque = { workspace = true, optional = true }

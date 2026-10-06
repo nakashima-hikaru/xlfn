@@ -43,16 +43,17 @@ impl ExcelSerialDate {
     /// Years must be in `1..=9999`, and the date must exist in the Gregorian
     /// calendar. `Workbook` is rejected because its epoch is unresolved.
     /// Dates preceding the selected epoch produce negative serials.
+    /// Component types match Jiff's civil-date constructor.
     pub fn from_ymd(
-        year: i32,
-        month: u32,
-        day: u32,
+        year: i16,
+        month: i8,
+        day: i8,
         date_system: ExcelDateSystem,
     ) -> XllResult<Self> {
         let epoch = date_epoch(date_system)?;
         if !(1..=9999).contains(&year)
             || !(1..=12).contains(&month)
-            || day == 0
+            || day < 1
             || day > days_in_month(year, month)
         {
             return Err(date_out_of_range());
@@ -60,7 +61,7 @@ impl ExcelSerialDate {
         let ordinal = days_before_year(year)
             + DAYS_BEFORE_MONTH[month as usize - 1]
             + i32::from(month > 2 && is_leap_year(year))
-            + day as i32
+            + i32::from(day)
             - 1;
         let fictitious_day =
             i32::from(date_system == ExcelDateSystem::Windows1900 && ordinal >= MARCH_1900);
@@ -73,7 +74,8 @@ impl ExcelSerialDate {
     /// belongs to the day preceding serial zero. An unresolved `Workbook`
     /// convention, the fictitious 1900 leap day, and dates outside years
     /// `1..=9999` return an error.
-    pub fn to_ymd(self) -> XllResult<(i32, u32, u32)> {
+    /// The returned component types match [`Self::from_ymd`].
+    pub fn to_ymd(self) -> XllResult<(i16, i8, i8)> {
         let epoch = date_epoch(self.date_system)?;
         let serial_day = self.serial.floor();
         if self.is_fictitious_1900_leap_day() {
@@ -91,8 +93,8 @@ impl ExcelSerialDate {
         let ordinal = ordinal as i32;
         // Find the containing year without narrowing an unchecked serial or
         // depending on a platform-sized integer.
-        let mut year = 1;
-        let mut end = 10000;
+        let mut year: i16 = 1;
+        let mut end: i16 = 10000;
         while year + 1 < end {
             let middle = year + (end - year) / 2;
             if days_before_year(middle) <= ordinal {
@@ -101,59 +103,50 @@ impl ExcelSerialDate {
                 end = middle;
             }
         }
-        let mut day = (ordinal - days_before_year(year)) as u32;
+        let mut day = ordinal - days_before_year(year);
         let mut month = 1;
-        while day >= days_in_month(year, month) {
-            day -= days_in_month(year, month);
+        while day >= i32::from(days_in_month(year, month)) {
+            day -= i32::from(days_in_month(year, month));
             month += 1;
         }
-        Ok((year, month, day + 1))
+        // Calendar decomposition bounds the one-based day to 1..=31 before
+        // narrowing the remaining day count to a day-of-month component.
+        Ok((year, month, (day + 1) as i8))
     }
 
-    /// Creates a midnight serial from a `chrono` calendar date.
+    /// Creates a midnight serial from a Jiff civil date.
     ///
-    /// This requires the `chrono` feature. The same explicit date-system and
-    /// year-range rules as [`Self::from_ymd`] apply.
-    #[cfg(feature = "chrono")]
-    pub fn from_chrono(date: chrono::NaiveDate, date_system: ExcelDateSystem) -> XllResult<Self> {
-        use chrono::Datelike;
+    /// This requires the `jiff` feature. The same explicit date-system and
+    /// year-range rules as [`Self::from_ymd`] apply. Jiff dates in year zero or
+    /// before the common era are rejected.
+    #[cfg(feature = "jiff")]
+    pub fn from_jiff(date: jiff::civil::Date, date_system: ExcelDateSystem) -> XllResult<Self> {
         Self::from_ymd(date.year(), date.month(), date.day(), date_system)
     }
 
-    /// Converts the serial's calendar day to a `chrono` date.
+    /// Converts the serial's calendar day to a Jiff civil date.
     ///
-    /// This requires the `chrono` feature. The fractional day is discarded,
-    /// and the same failure rules as [`Self::to_ymd`] apply.
-    #[cfg(feature = "chrono")]
-    pub fn to_chrono(self) -> XllResult<chrono::NaiveDate> {
+    /// This requires the `jiff` feature. The fractional day is discarded using
+    /// floor, and the same failure rules as [`Self::to_ymd`] apply.
+    ///
+    /// ```
+    /// # #[cfg(feature = "jiff")]
+    /// # fn example() -> xlfn::XllResult<()> {
+    /// use xlfn::value::{ExcelDateSystem, ExcelSerialDate};
+    ///
+    /// let calendar = jiff::civil::Date::new(2026, 10, 5).unwrap();
+    /// let serial = ExcelSerialDate::from_jiff(calendar, ExcelDateSystem::Windows1900)?;
+    /// assert_eq!(serial.serial(), 46300.0);
+    /// assert_eq!(serial.to_jiff()?, calendar);
+    /// # Ok(())
+    /// # }
+    /// # #[cfg(feature = "jiff")]
+    /// # example().unwrap();
+    /// ```
+    #[cfg(feature = "jiff")]
+    pub fn to_jiff(self) -> XllResult<jiff::civil::Date> {
         let (year, month, day) = self.to_ymd()?;
-        chrono::NaiveDate::from_ymd_opt(year, month, day).ok_or_else(date_out_of_range)
-    }
-
-    /// Creates a midnight serial from a `time` calendar date.
-    ///
-    /// This requires the `time` feature. The same explicit date-system and
-    /// year-range rules as [`Self::from_ymd`] apply.
-    #[cfg(feature = "time")]
-    pub fn from_time(date: time::Date, date_system: ExcelDateSystem) -> XllResult<Self> {
-        let (year, month, day) = date.to_calendar_date();
-        Self::from_ymd(
-            year,
-            u32::from(u8::from(month)),
-            u32::from(day),
-            date_system,
-        )
-    }
-
-    /// Converts the serial's calendar day to a `time` date.
-    ///
-    /// This requires the `time` feature. The fractional day is discarded,
-    /// and the same failure rules as [`Self::to_ymd`] apply.
-    #[cfg(feature = "time")]
-    pub fn to_time(self) -> XllResult<time::Date> {
-        let (year, month, day) = self.to_ymd()?;
-        let month = time::Month::try_from(month as u8).map_err(|_| date_out_of_range())?;
-        time::Date::from_calendar_date(year, month, day as u8).map_err(|_| date_out_of_range())
+        jiff::civil::Date::new(year, month, day).map_err(|_| date_out_of_range())
     }
 
     /// Returns the original finite serial, including its fractional day.
@@ -194,16 +187,18 @@ impl ExcelSerialDate {
 const DAYS_BEFORE_MONTH: [i32; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
 const MARCH_1900: i32 = days_before_year(1900) + 59;
 
-const fn is_leap_year(year: i32) -> bool {
+const fn is_leap_year(year: i16) -> bool {
     year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
 
-const fn days_before_year(year: i32) -> i32 {
-    let previous = year - 1;
+const fn days_before_year(year: i16) -> i32 {
+    // Years remain i16 throughout calendar handling, but the cumulative day
+    // count through year 9999 exceeds i16. Widen only this arithmetic.
+    let previous = year as i32 - 1;
     365 * previous + previous / 4 - previous / 100 + previous / 400
 }
 
-const fn days_in_month(year: i32, month: u32) -> u32 {
+const fn days_in_month(year: i16, month: i8) -> i8 {
     match month {
         2 if is_leap_year(year) => 29,
         2 => 28,
@@ -296,14 +291,16 @@ mod tests {
     fn calendar_conversion_checks_dates_and_year_bounds_before_arithmetic() {
         for system in [ExcelDateSystem::Windows1900, ExcelDateSystem::Mac1904] {
             for (year, month, day) in [
-                (i32::MIN, 1, 1),
-                (i32::MAX, 1, 1),
+                (i16::MIN, 1, 1),
+                (i16::MAX, 1, 1),
                 (0, 1, 1),
                 (10000, 1, 1),
                 (2026, 0, 1),
-                (2026, u32::MAX, 1),
+                (2026, i8::MIN, 1),
+                (2026, i8::MAX, 1),
                 (2026, 1, 0),
-                (2026, 1, u32::MAX),
+                (2026, 1, i8::MIN),
+                (2026, 1, i8::MAX),
                 (2026, 4, 31),
                 (1900, 2, 29),
                 (2100, 2, 29),
@@ -365,83 +362,91 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "chrono")]
+    #[cfg(feature = "jiff")]
     #[test]
-    fn chrono_conversion_matches_independent_calendar_arithmetic() {
-        use chrono::NaiveDate;
+    fn jiff_conversion_matches_independent_calendar_arithmetic() {
+        use jiff::civil::Date;
 
-        let windows_epoch = NaiveDate::from_ymd_opt(1899, 12, 31).unwrap();
-        let mac_epoch = NaiveDate::from_ymd_opt(1904, 1, 1).unwrap();
-        let march_1900 = NaiveDate::from_ymd_opt(1900, 3, 1).unwrap();
+        let windows_epoch = Date::new(1899, 12, 31).unwrap();
+        let mac_epoch = Date::new(1904, 1, 1).unwrap();
+        let march_1900 = Date::new(1900, 3, 1).unwrap();
         for year in [
             1, 4, 99, 100, 400, 1600, 1700, 1899, 1900, 1904, 2000, 2026, 2100, 9999,
         ] {
             for month in 1..=12 {
                 for day in 1..=31 {
-                    let Some(calendar) = NaiveDate::from_ymd_opt(year, month, day) else {
+                    let Ok(calendar) = Date::new(year, month, day) else {
                         continue;
                     };
                     for (system, epoch) in [
                         (ExcelDateSystem::Windows1900, windows_epoch),
                         (ExcelDateSystem::Mac1904, mac_epoch),
                     ] {
-                        let expected = calendar.signed_duration_since(epoch).num_days()
-                            + i64::from(
+                        let expected = calendar.since(epoch).unwrap().get_days()
+                            + i32::from(
                                 system == ExcelDateSystem::Windows1900 && calendar >= march_1900,
                             );
-                        let date = ExcelSerialDate::from_chrono(calendar, system).unwrap();
-                        assert_eq!(date.serial(), expected as f64);
-                        assert_eq!(date.to_chrono().unwrap(), calendar);
+                        let date = ExcelSerialDate::from_jiff(calendar, system).unwrap();
+                        assert_eq!(date.serial(), f64::from(expected));
+                        assert_eq!(date.to_jiff().unwrap(), calendar);
                     }
                 }
             }
         }
-        for year in [0, -1, 10000] {
-            let calendar = NaiveDate::from_ymd_opt(year, 1, 1).unwrap();
-            assert!(ExcelSerialDate::from_chrono(calendar, ExcelDateSystem::Windows1900).is_err());
+    }
+
+    #[cfg(feature = "jiff")]
+    #[test]
+    fn jiff_conversion_preserves_excel_date_policies() {
+        use jiff::civil::Date;
+
+        for system in [ExcelDateSystem::Windows1900, ExcelDateSystem::Mac1904] {
+            for year in [-9999, -1, 0] {
+                let calendar = Date::new(year, 1, 1).unwrap();
+                assert!(ExcelSerialDate::from_jiff(calendar, system).is_err());
+            }
+            for calendar in [Date::new(1, 1, 1).unwrap(), Date::MAX] {
+                let date = ExcelSerialDate::from_jiff(calendar, system).unwrap();
+                assert_eq!(date.to_jiff().unwrap(), calendar);
+                assert_eq!(
+                    ExcelSerialDate::new(date.serial() + 0.75, system)
+                        .unwrap()
+                        .to_jiff()
+                        .unwrap(),
+                    calendar,
+                );
+            }
         }
-        assert!(ExcelSerialDate::from_chrono(windows_epoch, ExcelDateSystem::Workbook).is_err());
-        for system in [ExcelDateSystem::Windows1900, ExcelDateSystem::Workbook] {
+        let calendar = Date::new(2026, 10, 5).unwrap();
+        assert!(ExcelSerialDate::from_jiff(calendar, ExcelDateSystem::Workbook).is_err());
+        assert!(
+            ExcelSerialDate::new(46300.0, ExcelDateSystem::Workbook)
+                .unwrap()
+                .to_jiff()
+                .is_err()
+        );
+        for serial in [60.0, 60.5, 60.999_999] {
             assert!(
-                ExcelSerialDate::new(60.5, system)
+                ExcelSerialDate::new(serial, ExcelDateSystem::Windows1900)
                     .unwrap()
-                    .to_chrono()
+                    .to_jiff()
                     .is_err()
             );
         }
-    }
-
-    #[cfg(feature = "time")]
-    #[test]
-    fn time_conversion_preserves_dates_and_rejects_unrepresentable_inputs() {
-        use time::{Date, Month};
-
-        for (year, month, day) in [
-            (1, Month::January, 1),
-            (1900, Month::February, 28),
-            (1900, Month::March, 1),
-            (1904, Month::February, 29),
-            (2000, Month::February, 29),
-            (2026, Month::October, 5),
-            (9999, Month::December, 31),
-        ] {
-            let calendar = Date::from_calendar_date(year, month, day).unwrap();
-            for system in [ExcelDateSystem::Windows1900, ExcelDateSystem::Mac1904] {
-                let date = ExcelSerialDate::from_time(calendar, system).unwrap();
-                assert_eq!(date.to_time().unwrap(), calendar);
-            }
-            assert!(ExcelSerialDate::from_time(calendar, ExcelDateSystem::Workbook).is_err());
-        }
-        for year in [-1, 0] {
-            let calendar = Date::from_calendar_date(year, Month::January, 1).unwrap();
-            assert!(ExcelSerialDate::from_time(calendar, ExcelDateSystem::Mac1904).is_err());
-        }
-        for system in [ExcelDateSystem::Windows1900, ExcelDateSystem::Workbook] {
-            assert!(
-                ExcelSerialDate::new(60.5, system)
+        assert_eq!(
+            ExcelSerialDate::new(60.5, ExcelDateSystem::Mac1904)
+                .unwrap()
+                .to_jiff()
+                .unwrap(),
+            Date::new(1904, 3, 1).unwrap()
+        );
+        for serial in [-0.25, -f64::EPSILON / 4.0] {
+            assert_eq!(
+                ExcelSerialDate::new(serial, ExcelDateSystem::Windows1900)
                     .unwrap()
-                    .to_time()
-                    .is_err()
+                    .to_jiff()
+                    .unwrap(),
+                Date::new(1899, 12, 30).unwrap()
             );
         }
     }

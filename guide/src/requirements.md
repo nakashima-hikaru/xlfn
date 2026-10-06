@@ -59,6 +59,7 @@ The basic add-in requires no Cargo features. Enable optional features in your
 | `handles` | Rust objects owned by worksheet formulas                |
 | `rtd`     | Streaming Real-Time Data updates to cells               |
 | `cache`   | Calculation caching across worksheet calls              |
+| `jiff`    | Serial-date conversion with `jiff::civil::Date`           |
 
 For example:
 

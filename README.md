@@ -27,7 +27,7 @@ Enable optional capabilities with Cargo features:
 - `handles` — Keep Rust objects between calls and pass references to them through worksheet cells.
 - `cache` — Cache calculation results for reuse across calls.
 - `serde` — Serialize and deserialize owned worksheet values and collections.
-- `chrono` / `time` — Convert serial dates using the corresponding calendar crate.
+- `jiff` — Convert serial dates to and from `jiff::civil::Date`.
 
 ## Quick start
 

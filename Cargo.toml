@@ -59,6 +59,7 @@ getrandom = "0.4.3"
 home = "0.5.12"
 inventory = "0.3.24"
 indexmap = "2.14.2"
+jiff = { version = "0.2.37", default-features = false, features = ["std"] }
 libc = "0.2.190"
 loom = "0.7.2"
 object = { version = "0.40.0", default-features = false, features = ["pe", "read_core", "std"] }

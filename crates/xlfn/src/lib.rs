@@ -21,7 +21,7 @@
 //! transport, but neither public capability implies the other.
 //!
 //! The `serde` feature enables serialization of owned values and collections.
-//! The `chrono` and `time` features provide calendar conversions for serial dates.
+//! The `jiff` feature provides civil-date conversions for serial dates.
 
 #![warn(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
