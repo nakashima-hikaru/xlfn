@@ -1,5 +1,59 @@
 # Benchmark notes
 
+## 2026-10-06 plain input conversion
+
+The `ExcelParameter<PlainInputMode>::decode` blanket implementation only
+forwards to `T::from_excel`. In the baseline ARM64 release binary, this wrapper
+remained an out-of-line call for every numeric array cell. Inlining the wrapper
+lets the existing `f64::from_excel` implementation join the conversion loop.
+Header validation, array budgets, error ordering, and allocation policy are
+unchanged. The underlying custom converter retains its own inlining policy.
+
+Baseline `3291518b9678a1934007bd7ed422b120ba59b6a5` and the candidate used separate
+target directories, frozen executables, and SHA-256 checks before/after every
+run. The unchanged `argument_ingress` fixture ran in ABBA order on macOS ARM64
+with Rust 1.99.0, 0.5 s warm-up, 3 s measurement, and 30 samples per case. Values
+below are medians of the two Criterion slope estimates on each side, not
+confidence intervals for the A/B difference.
+
+| Input | Baseline | Candidate | Time change |
+| --- | ---: | ---: | ---: |
+| `Matrix<f64>`, 100k cells, plain | 398.40 µs | 350.27 µs | -12.1% |
+| `MatrixRef<f64>`, 100k cells, plain | 410.90 µs | 355.64 µs | -13.4% |
+| `Vec<f64>`, 100k cells, plain | 402.53 µs | 347.53 µs | -13.7% |
+| `MatrixRef<f64>`, 16 cells, plain | 131.18 ns | 114.72 ns | -12.5% |
+| `Matrix<f64>`, 100k cells, with identity | 1063.53 µs | 1067.57 µs | +0.4% |
+| `Matrix<String>`, 10k cells | 381.64 µs | 396.07 µs | +3.8% |
+| Borrowed string matrix, 10k cells | 175.91 µs | 180.43 µs | +2.6% |
+| Scalar `f64` | 22.51 ns | 23.05 ns | +2.4% |
+
+[All 15 cases, individual estimates, source patch, and executable provenance](results/2026-10-06-plain-ingress.json)
+include the small regressions as well as improvements. Do not extrapolate this
+compiler-sensitive result to every input type. Splitting the array budget's
+string branch also improved numeric input, but slowed identity conversion by
+3.7% in screening and was reverted. Numeric-output inlining had no consistent
+large-array benefit and was also reverted.
+
+`just bench-ci` now includes plain owned/borrowed numeric matrix input and
+owned string matrix input, alongside its identity and borrowed-string controls.
+These are Excel-independent production-path measurements. They do not establish
+the cause or size of the full Excel-DNA gap, and do not qualify Windows/Excel
+performance. The event-registration fix made afterwards is outside this paired
+source comparison.
+
+Validation of the combined working tree (including the event-registration
+repair): workspace nextest 1,165 passed / 11 skipped; comparison-runner Python
+tests 67 passed; all-target/all-feature Clippy, strict xlfn rustdoc, formatting,
+and panic-boundary checks passed. `just bench-ci` completed all 17 recipes with
+`XLFN_BENCH_MEASUREMENT_MS=500` (groups with fixed timing retained their default).
+That shortened gate checks execution and allocation assertions; its timings
+are not part of the isolated ABBA comparison above. Registration tests also
+passed without default features (36 tests).
+
+The Windows XLL cross-check was blocked by missing `ml64.exe` on macOS. An
+auxiliary x86_64 MSVC library check with `async,rtd,handles,cache,blake3/pure`
+passed; it does not establish a native XLL build or Excel execution.
+
 ## `async_task_drain`
 
 This production-path benchmark drains 0, 1, 4, 5, 32, or 128 task controls

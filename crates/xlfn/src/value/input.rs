@@ -431,6 +431,9 @@ impl<'call, T: FromExcel<'call>> ExcelParameter<'call, PlainInputMode> for T {
         elements.materialize()
     }
 
+    // Keep this forwarding layer transparent in per-cell conversion loops.
+    // The concrete FromExcel implementation still controls its own inlining.
+    #[inline(always)]
     fn decode(
         value: XlValueRef<'call>,
         argument: &'static str,

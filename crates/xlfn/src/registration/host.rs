@@ -448,11 +448,12 @@ fn decode_event_registration_id(result: &ExcelCallbackValue<'_>) -> XllResult<i3
     let raw = result.raw()?;
     // SAFETY: XLTYPE_INT selects the integer union member.
     let value = unsafe { raw.value.integer };
-    // Microsoft specifies xltypeInt > 0 for success and zero for failure.
-    // Negative integers are outside that contract and cannot certify that
-    // registration/removal succeeded. Event removal is keyed by the event,
-    // rather than by this acknowledgement value.
-    if value <= 0 {
+    // Although the documented success value is positive, live Excel has
+    // returned a high-bit acknowledgement (0x9d380001). Treat registration
+    // acknowledgements as opaque nonzero values, retaining all their bits.
+    // Rejecting the sign aborts xlAutoOpen before any UDF is registered.
+    // This does not qualify the separate, undocumented removal convention.
+    if value == 0 {
         return Err(XllError::ExcelApi {
             function: ExcelApiFunction::EventRegister,
             failure: ExcelApiFailure::InvalidRegistrationId(value),
@@ -462,7 +463,16 @@ fn decode_event_registration_id(result: &ExcelCallbackValue<'_>) -> XllResult<i3
 }
 
 fn validate_event_unregister_result(result: &ExcelCallbackValue<'_>) -> XllResult<()> {
-    let _ = decode_event_registration_id(result)?;
+    let value = decode_event_registration_id(result)?;
+    // A registration observation cannot establish that a handler was removed.
+    // Keep negative removal acknowledgements indeterminate and retain the
+    // pending event (and unload hold) until removal is confirmed.
+    if value < 0 {
+        return Err(XllError::ExcelApi {
+            function: ExcelApiFunction::EventRegister,
+            failure: ExcelApiFailure::InvalidRegistrationId(value),
+        });
+    }
     Ok(())
 }
 
@@ -1050,26 +1060,21 @@ mod tests {
     }
 
     #[test]
-    fn event_registration_and_unregister_accept_only_positive_integer_acknowledgements() {
+    fn event_registration_accepts_signed_tokens_but_removal_requires_positive_acknowledgements() {
         for value in [1, 2, i32::MAX] {
             let result = ExcelCallbackValue::from_raw_for_test(XLOPER12::integer(value));
             assert_eq!(decode_event_registration_id(&result).unwrap(), value);
             assert!(validate_event_unregister_result(&result).is_ok());
         }
 
-        for value in [0, -1, -1_657_274_367, i32::MIN] {
+        for value in [-1, -1_657_274_367, i32::MIN] {
             let result = ExcelCallbackValue::from_raw_for_test(XLOPER12::integer(value));
-            assert!(matches!(
-                decode_event_registration_id(&result),
-                Err(XllError::ExcelApi {
-                    function: ExcelApiFunction::EventRegister,
-                    failure: ExcelApiFailure::InvalidRegistrationId(invalid),
-                }) if invalid == value
-            ));
+            assert_eq!(decode_event_registration_id(&result).unwrap(), value);
             assert!(validate_event_unregister_result(&result).is_err());
         }
 
         for raw in [
+            XLOPER12::integer(0),
             XLOPER12::boolean(true),
             XLOPER12::error(XLERR_NAME),
             XLOPER12::number(1.0),
@@ -1122,13 +1127,56 @@ mod tests {
 
     #[test]
     #[cfg(feature = "async")]
+    fn signed_event_registration_does_not_certify_signed_removal() {
+        use super::test_support::{CallbackScript, Reply};
+
+        // The signed representation of the acknowledgement observed in Excel.
+        const ACKNOWLEDGEMENT: i32 = -1_657_274_367;
+        assert_eq!(ACKNOWLEDGEMENT as u32, 0x9d38_0001);
+        for event in [CALCULATION_CANCELED_EVENT, CALCULATION_ENDED_EVENT] {
+            let script = CallbackScript::install([
+                Reply::success(XL_EVENT_REGISTER, XLOPER12::integer(ACKNOWLEDGEMENT)),
+                Reply::success(XL_EVENT_REGISTER, XLOPER12::integer(ACKNOWLEDGEMENT)),
+                Reply::success(XL_EVENT_REGISTER, XLOPER12::integer(1)),
+            ]);
+            let callbacks = HostCallbackSession::new();
+            let host = RegistrationHost::new(&callbacks);
+            let RegistrationMutation::Applied {
+                value: registered,
+                cleanup: Ok(()),
+            } = host.register_event("test_event_handler", event)
+            else {
+                panic!("a signed acknowledgement must not abort event registration");
+            };
+            assert_eq!(registered.registration_id, ACKNOWLEDGEMENT);
+            assert_eq!(registered.event, event);
+            let first = crate::registration::HostRegistrar::unregister_events_detailed(
+                &host,
+                &[registered],
+            );
+            assert!(first.succeeded.is_empty());
+            assert_eq!(first.failed.len(), 1);
+            let (pending, _) = &first.failed[0];
+            assert_eq!(pending.registration_id, ACKNOWLEDGEMENT);
+            assert!(!pending.unregistered);
+            let retry = crate::registration::HostRegistrar::unregister_events_detailed(
+                &host,
+                std::slice::from_ref(pending),
+            );
+            assert!(retry.failed.is_empty());
+            assert_eq!(retry.succeeded.len(), 1);
+            assert!(retry.succeeded[0].unregistered);
+            script.assert_calls(&[XL_EVENT_REGISTER, XL_EVENT_REGISTER, XL_EVENT_REGISTER]);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "async")]
     fn invalid_event_acknowledgements_leave_host_mutations_indeterminate() {
         use super::test_support::{CallbackScript, Reply};
 
         for result in [
             XLOPER12::integer(0),
-            XLOPER12::integer(-1),
-            XLOPER12::integer(i32::MIN),
             XLOPER12::number(1.0),
             XLOPER12::boolean(true),
             XLOPER12::nil(),

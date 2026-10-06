@@ -1,6 +1,6 @@
 # Async calculation-event qualification
 
-Status on 2026-09-30: **live Excel unverified**. No local macOS test, Windows
+Status on 2026-10-07: **full event lifecycle qualification unverified**. No local macOS test, Windows
 cross-compilation, callback mock, or performance benchmark establishes native
 event registration or removal. The current evidence record is
 [records.json](records.json); its observation list is deliberately empty.
@@ -9,16 +9,28 @@ event registration or removal. The current evidence record is
 
 Microsoft's [xlEventRegister documentation](https://learn.microsoft.com/en-us/office/client-developer/excel/xleventregister)
 specifies a string procedure name, an integer event selector, and an integer
-result greater than zero for success. Zero reports failure. xlfn accepts only
-positive integer acknowledgements. Negative values and other result types do
-not establish success.
+result greater than zero for success. Zero reports failure. Historical Excel
+comparison evidence, recorded in commit `8ba76798ec1bffb8f52eac96b777986a803e93a7`,
+included `0x9d380001` (signed `-1657274367`) for registration. xlfn therefore
+accepts nonzero integer registration acknowledgements and preserves their bits.
+Zero and other result types remain rejected. This is an explicit accommodation
+of observed host behavior, not a claim that Microsoft documents negative values.
+
+The positive-only check reintroduced in `7b747c68` rejected that observation.
+Because calculation events are registered before worksheet functions, that
+rejection aborts `xlAutoOpen` even when the first requested UDF is synchronous
+(`BENCH.ID` in S01). A subsequent formula can then display `#NAME?`. This is a
+known failure path; a new `#NAME?` report without its startup log does not prove
+that the same path caused it. Inspect the runner's `startup_log` and
+`registration_diagnostics` fields to distinguish other load/registration faults.
 
 The current removal operation passes `xltypeNil` as the procedure and the
 event selector as `xltypeInt`. That removal convention is **not specified by
 the public xlEventRegister page**. A positive acknowledgement alone therefore
 does not establish that Excel stopped calling the handler. The convention
 needs observed registration/removal behavior on each deployed configuration.
-No undocumented negative-result compatibility rule is assumed.
+The signed registration accommodation does not apply to removal: a negative
+removal acknowledgement still retains the pending event and unload hold.
 
 Microsoft's [Handling Events documentation](https://learn.microsoft.com/en-us/office/client-developer/excel/handling-events)
 describes CalculationCanceled followed by CalculationEnded for user
@@ -50,7 +62,8 @@ raw event acknowledgements or prove nil-procedure removal.
 1. Capture the actual `xlEventRegister` arguments, callback transport status,
    raw result `xltype`, signed integer value, and raw integer bits for both
    exported handlers: `__xlfn_calculation_canceled` and
-   `__xlfn_calculation_ended`. Require positive integer acknowledgements.
+   `__xlfn_calculation_ended`. Capture signed values and their complete raw bits;
+   distinguish the documented positive result from the signed accommodation.
 2. Observe handler entry with invocation/generation identifiers. Exercise
    normal interactive calculation, user cancellation while async calls are
    pending, and completion after cancellation. Record ordering, outstanding
@@ -95,6 +108,6 @@ earlier runs. Every observation must contain:
 Use `verified` only after all required observations for that exact
 configuration pass. Leave unavailable values absent or null and keep the
 verdict `unverified`; do not turn a planned configuration into an observed run.
-The following test coverage is local mock evidence only: positive integer
-acceptance, nonpositive/wrong-type rejection, indeterminate event mutations,
-and retention of an event after unconfirmed removal.
+The following test coverage is local mock evidence only: signed nonzero
+registration acceptance, zero/wrong-type rejection, indeterminate event
+mutations, and retention/retry after a negative removal acknowledgement.

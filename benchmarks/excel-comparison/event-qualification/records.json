@@ -10,10 +10,20 @@
     "procedure_argument_type": "xltypeNil",
     "event_argument_type": "xltypeInt",
     "public_documentation": "not specified by the referenced xlEventRegister page",
-    "live_excel_status": "unverified"
+    "live_excel_status": "unverified",
+    "acknowledgement_policy": "Require a positive xltypeInt; negative removal results remain indeterminate and retain pending cleanup."
   },
   "qualification_status": "unverified",
   "qualification_scope": "one exact Excel product/version/build/channel and process bitness per real run",
-  "unverified_reason": "Live Windows Excel is unavailable on the local macOS host; no native event-registration/removal observations were collected.",
-  "observations": []
+  "unverified_reason": "Live Windows Excel is unavailable on the local macOS host; no complete build-specific registration/removal traces were collected for this qualification record. Historical registration evidence below does not qualify removal.",
+  "observations": [],
+  "implementation_reviewed_on": "2026-10-07",
+  "registration_acknowledgement_policy": "Accept nonzero xltypeInt, preserving signed bits; zero and other result types are rejected.",
+  "historical_registration_evidence": {
+    "source_commit": "8ba76798ec1bffb8f52eac96b777986a803e93a7",
+    "raw_integer_hex": "0x9d380001",
+    "signed_integer": -1657274367,
+    "scope": "Historical registration acknowledgement recorded in the commit; exact Excel build/channel and removal observations are not supplied by that evidence.",
+    "qualification_status": "incomplete"
+  }
 }
