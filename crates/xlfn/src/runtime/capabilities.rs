@@ -268,7 +268,7 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
     ) -> crate::XllResult<crate::shutdown::SubscriptionsStopped> {
         #[cfg(not(feature = "rtd"))]
         {
-            Ok(crate::excel_rtd::stopped_subscriptions(
+            Ok(crate::excel_rtd_protocol::stopped_subscriptions(
                 self.protocol_generation(),
             ))
         }
@@ -281,7 +281,7 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
             let Some(result) = result else {
                 #[cfg(test)]
                 {
-                    return Ok(crate::excel_rtd::stopped_subscriptions(generation));
+                    return Ok(crate::excel_rtd_protocol::stopped_subscriptions(generation));
                 }
                 #[cfg(not(test))]
                 {

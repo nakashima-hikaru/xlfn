@@ -766,7 +766,7 @@ impl<A: crate::Addin> Runtime<A> {
     pub(crate) fn close_subscriptions(&self) -> XllResult<crate::shutdown::SubscriptionsStopped> {
         #[cfg(not(feature = "rtd"))]
         {
-            Ok(crate::excel_rtd::stopped_subscriptions(
+            Ok(crate::excel_rtd_protocol::stopped_subscriptions(
                 self.protocol_generation(),
             ))
         }
@@ -779,7 +779,7 @@ impl<A: crate::Addin> Runtime<A> {
             else {
                 #[cfg(test)]
                 {
-                    return Ok(crate::excel_rtd::stopped_subscriptions(generation));
+                    return Ok(crate::excel_rtd_protocol::stopped_subscriptions(generation));
                 }
                 #[cfg(not(test))]
                 {
@@ -978,7 +978,8 @@ pub(crate) mod tests {
         // deliberately does not synthesize lifecycle trace milestones; those
         // are exercised by the real lifecycle close path.
         runtime.disable_trace_for_test();
-        let _rtd = crate::excel_rtd::wait_for_module_quiescence().expect("RTD module quiescence");
+        let _rtd =
+            crate::excel_rtd_protocol::wait_for_module_quiescence().expect("RTD module quiescence");
         let last_generation = runtime.lifecycle.access().last_committed_generation();
         let certificate = removal_attempt
             .certify::<FinalRemoval>(
@@ -1074,7 +1075,7 @@ pub(crate) mod tests {
             crate::module_runtime::ingress().phase(),
             crate::ingress::PHASE_CLOSING
         );
-        assert!(!crate::excel_rtd::logical_quiescence_certified());
+        assert!(!crate::excel_rtd_protocol::logical_quiescence_certified());
     }
 
     #[test]
@@ -1473,7 +1474,8 @@ pub(crate) mod tests {
         let (module_quiescent, _exports) = drained.certify();
         let module_epoch = module_quiescent.id();
         runtime.disable_trace_for_test();
-        let _rtd = crate::excel_rtd::wait_for_module_quiescence().expect("RTD module quiescence");
+        let _rtd =
+            crate::excel_rtd_protocol::wait_for_module_quiescence().expect("RTD module quiescence");
         let certificate = removal_attempt
             .certify::<FinalRemoval>(
                 QuiescenceProof::for_test(
@@ -1590,7 +1592,8 @@ pub(crate) mod tests {
             .access()
             .module_epoch_id()
             .expect("open module epoch");
-        let _rtd = crate::excel_rtd::wait_for_module_quiescence().expect("RTD module quiescence");
+        let _rtd =
+            crate::excel_rtd_protocol::wait_for_module_quiescence().expect("RTD module quiescence");
         let removal_attempt = match removal_attempt.certify::<FinalRemoval>(
             QuiescenceProof::for_test(
                 Some(crate::generation::RuntimeGeneration::new(1).unwrap()),

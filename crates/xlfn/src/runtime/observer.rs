@@ -227,7 +227,7 @@ impl RuntimeObserver {
                 let _ = trace.begin(attempt.get(), resources.clone());
                 Ok(())
             });
-            crate::excel_rtd::set_trace_sink(Arc::clone(&trace));
+            crate::excel_rtd_protocol::set_trace_sink(Arc::clone(&trace));
             deps.returns().returns.set_trace_sink(Arc::clone(&trace));
             #[cfg(any(feature = "handles", feature = "rtd"))]
             deps.with_generation_services(|services| {

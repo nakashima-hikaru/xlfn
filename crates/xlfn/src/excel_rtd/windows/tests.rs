@@ -8,7 +8,8 @@ use super::*;
 
 #[cfg(feature = "rtd")]
 use crate::XllResult;
-use crate::handle::FormulaLifetimeBackend;
+#[cfg(feature = "handles")]
+use crate::formula_lifetime::FormulaLifetimeBackend;
 #[cfg(feature = "rtd")]
 use crate::subscription::{RtdSink, RtdSource, RtdSubscription, RtdTopic};
 use crate::subscription::{RtdUpdate, StoredRtdValue};
@@ -26,12 +27,15 @@ use super::com_abi::{
     DISPATCH_METHOD, VT_ARRAY, VT_BOOL, VT_BSTR, VT_BYREF, VT_EMPTY, VT_ERROR, VT_I4, VT_R8,
     VT_VARIANT,
 };
+#[cfg(feature = "handles")]
 use crate::win32::{
-    CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, COINIT_MULTITHREADED, CoInitializeEx,
-    CoUninitialize, DISP_E_BADPARAMCOUNT, DISP_E_MEMBERNOTFOUND, DISP_E_TYPEMISMATCH,
-    DISP_E_UNKNOWNNAME, DISPID_UNKNOWN, RPC_E_CHANGED_MODE, S_FALSE, S_OK, SAFEARRAYBOUND,
-    SafeArrayCreate, SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement, SafeArrayGetLBound,
-    SafeArrayGetUBound, SafeArrayPutElement, SysAllocStringLen, SysStringLen,
+    CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, DISP_E_BADPARAMCOUNT, DISP_E_MEMBERNOTFOUND,
+    DISP_E_TYPEMISMATCH, DISP_E_UNKNOWNNAME, DISPID_UNKNOWN,
+};
+use crate::win32::{
+    COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize, RPC_E_CHANGED_MODE, S_FALSE, S_OK,
+    SAFEARRAYBOUND, SafeArrayCreate, SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement,
+    SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayPutElement, SysAllocStringLen, SysStringLen,
 };
 use static_assertions::assert_not_impl_any;
 
@@ -740,7 +744,7 @@ fn module_quiescence_refuses_debt_claim_in_flight() {
     assert_eq!(claims.len(), 1);
     assert!(module_lifetime().queued_git_revocation_debt().is_empty());
 
-    let error = crate::excel_rtd::wait_for_module_quiescence().unwrap_err();
+    let error = crate::excel_rtd_protocol::wait_for_module_quiescence().unwrap_err();
     assert_eq!(error.outstanding_git_cookies, 0);
     assert_eq!(error.revocation_debt, 1);
     assert!(!module_lifetime().can_unload_now());
@@ -776,6 +780,7 @@ fn server_start_reservation_is_single_use_and_rolls_back_failure() {
     assert!(ServerStartReservation::acquire(&failed_state).is_none());
 }
 
+#[cfg(feature = "handles")]
 #[test]
 fn server_terminate_reentry_is_deferred_and_idempotent() {
     let _guard = TEST_LOCK.lock().unwrap();
@@ -816,6 +821,7 @@ fn server_terminate_reentry_is_deferred_and_idempotent() {
     drop(ensured);
 }
 
+#[cfg(feature = "handles")]
 #[test]
 fn deferred_termination_drains_callbacks_and_rejects_worker_self_close() {
     let _guard = TEST_LOCK.lock().unwrap();
@@ -879,6 +885,7 @@ fn deferred_termination_drains_callbacks_and_rejects_worker_self_close() {
     drop(ensured);
 }
 
+#[cfg(feature = "handles")]
 #[test]
 fn deferred_termination_spawn_failure_rolls_back_atomically() {
     let _guard = TEST_LOCK.lock().unwrap();
@@ -933,6 +940,7 @@ fn termination_worker_can_finish_before_handle_registration() {
     assert_eq!(worker.state.lock().status, TerminationWorkerStatus::Joined);
 }
 
+#[cfg(feature = "handles")]
 #[test]
 fn deferred_cleanup_panic_signals_phase_and_is_detected_by_join() {
     let _guard = TEST_LOCK.lock().unwrap();
@@ -1004,6 +1012,7 @@ fn failed_git_revocation_is_retained_and_retryable() {
     assert!(module_lifetime().queued_git_revocation_debt().is_empty());
 }
 
+#[cfg(feature = "handles")]
 #[test]
 fn retired_callback_drop_can_reenter_terminate_after_quiescence() {
     use std::sync::atomic::AtomicI32;
@@ -1082,6 +1091,7 @@ fn retired_callback_drop_can_reenter_terminate_after_quiescence() {
     handles.seal().map(|_| ()).unwrap();
 }
 
+#[cfg(feature = "handles")]
 #[test]
 fn callback_subscription_attach_handshake_covers_early_empty_snapshot() {
     use std::sync::Barrier;
@@ -1322,6 +1332,7 @@ fn termination_worker_join_retains_panicking_payload_and_completes() {
     assert!(worker.join().is_ok());
 }
 
+#[cfg(feature = "handles")]
 #[test]
 fn notification_worker_is_drained_before_callback_retirement() {
     use crate::excel_rtd::notification::NotificationPump;
@@ -1370,6 +1381,7 @@ fn notification_worker_is_drained_before_callback_retirement() {
     drop(ensured);
 }
 
+#[cfg(feature = "handles")]
 #[test]
 fn successful_refresh_acknowledges_the_notification_worker() {
     use crate::excel_rtd::notification::NotificationPump;
@@ -1898,6 +1910,7 @@ fn topic_key_from_safearray_handles_single_and_rejects_multi_or_invalid_dimensio
     unsafe { SafeArrayDestroy(array_2d) };
 }
 
+#[cfg(feature = "handles")]
 #[test]
 fn standard_com_activation_exposes_unknown_dispatch_and_rtd_server() {
     let _guard = TEST_LOCK.lock().unwrap();
@@ -1953,6 +1966,7 @@ fn standard_com_activation_exposes_unknown_dispatch_and_rtd_server() {
     shutdown(&handles).unwrap();
 }
 
+#[cfg(feature = "handles")]
 #[test]
 fn create_instance_nulls_output_on_every_rejected_request() {
     let _guard = TEST_LOCK.lock().unwrap();
@@ -2034,6 +2048,7 @@ fn create_instance_nulls_output_on_every_rejected_request() {
     shutdown(&handles).unwrap();
 }
 
+#[cfg(feature = "handles")]
 #[test]
 fn com_query_failures_clear_stale_output_pointers() {
     let _guard = TEST_LOCK.lock().unwrap();
@@ -2176,6 +2191,7 @@ fn com_query_failures_clear_stale_output_pointers() {
     shutdown(&handles).unwrap();
 }
 
+#[cfg(feature = "handles")]
 #[test]
 fn idispatch_resolves_names_and_invokes_heartbeat() {
     let _guard = TEST_LOCK.lock().unwrap();
@@ -2350,6 +2366,7 @@ fn idispatch_resolves_names_and_invokes_heartbeat() {
     shutdown(&handles).unwrap();
 }
 
+#[cfg(feature = "handles")]
 #[test]
 fn idispatch_validates_flags_counts_types_and_reversed_arguments() {
     let _guard = TEST_LOCK.lock().unwrap();
@@ -3091,6 +3108,7 @@ fn sta_final_remove_dispatches_com_before_ingress_drain_and_coalesces_reentry() 
     );
 }
 
+#[cfg(feature = "handles")]
 #[test]
 fn wrong_clsid_is_not_served() {
     let _guard = TEST_LOCK.lock().unwrap();
@@ -3119,6 +3137,7 @@ fn wrong_clsid_is_not_served() {
     shutdown(&handles).unwrap();
 }
 
+#[cfg(feature = "handles")]
 #[test]
 fn existing_server_attaches_each_backend_without_replacement() {
     let _guard = TEST_LOCK.lock().unwrap();

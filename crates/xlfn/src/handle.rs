@@ -1,17 +1,7 @@
-#![cfg_attr(
-    not(feature = "handles"),
-    allow(
-        dead_code,
-        unreachable_pub,
-        reason = "The handle implementation is private in core-only builds"
-    )
-)]
-
 mod binding;
 mod connection;
 mod domain;
 mod formula;
-mod lifetime;
 #[allow(unsafe_code, reason = "Stable typed object pointers are audited here")]
 mod object;
 #[cfg(all(feature = "bench-internals", feature = "async"))]
@@ -46,6 +36,7 @@ mod topic;
 mod typed;
 
 pub(crate) use crate::call::HandleDomainWitness;
+pub(crate) use crate::formula_lifetime::FormulaLifetimeGeneration;
 #[cfg(any(target_os = "windows", test))]
 pub(crate) use connection::HandleConnection;
 pub(crate) use connection::{FormulaObserverId, Topic};
@@ -61,11 +52,6 @@ pub(crate) use formula::formula_revision_key;
 pub(crate) use formula::resolve_formula_caller;
 #[cfg(all(test, feature = "handles"))]
 pub(crate) use formula::test_topic_key;
-#[cfg(any(feature = "handles", all(target_os = "windows", feature = "rtd"),))]
-pub(crate) use lifetime::FormulaLifetimeBackend;
-#[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles"),))]
-pub(crate) use lifetime::FormulaLifetimeConnection;
-pub(crate) use lifetime::FormulaLifetimeGeneration;
 pub(crate) use prepare::HandlePrepareState;
 pub(crate) use refinement_hooks::HandleRefinementHooks;
 pub(crate) use refinement_wire::TokenWire;
@@ -93,8 +79,6 @@ pub(crate) use topic::{
 pub(crate) use typed::GenerationLeaseBrand;
 #[cfg(all(feature = "async", feature = "handles"))]
 pub use typed::PendingHandleLease;
-#[cfg(not(feature = "handles"))]
-pub(crate) use typed::{ExcelHandleObject, Handle, HandleAlias};
 #[cfg(feature = "handles")]
 pub use typed::{ExcelHandleObject, Handle, HandleAlias, HandleLease, HandleObjectId};
 

@@ -2,7 +2,7 @@
 //!
 //! This module owns the COM/server adapter.  The generic RTD subscription API
 //! remains in [`crate::rtd`], while formula handles depend only on the
-//! lifetime capability declared by `crate::handle`.
+//! lifetime capability declared by `crate::formula_lifetime`.
 
 #![cfg_attr(
     not(feature = "rtd"),
@@ -14,13 +14,12 @@
 
 use crate::XllResult;
 #[cfg(feature = "handles")]
-use crate::handle::FormulaLifetimeBackend;
+use crate::formula_lifetime::FormulaLifetimeBackend;
 use crate::host_api::ExcelHost;
 #[cfg(feature = "handles")]
 use crate::ingress::ExportIngress;
 #[cfg(all(test, feature = "rtd", not(target_os = "windows")))]
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(any(
     test,
@@ -99,61 +98,6 @@ impl RtdNotifier {
     }
 }
 
-pub(crate) fn logical_quiescence_certified() -> bool {
-    let module_quiescent = match crate::module_runtime::global().rtd() {
-        Some(rtd) => rtd.is_logically_quiescent(),
-        None => true,
-    };
-    module_quiescent && crate::module_runtime::ingress().phase() == crate::ingress::PHASE_CLOSED
-}
-
-#[cfg(any(not(feature = "rtd"), test))]
-pub(crate) const fn stopped_subscriptions(
-    generation: Option<crate::generation::RuntimeGeneration>,
-) -> crate::shutdown::SubscriptionsStopped {
-    crate::shutdown::SubscriptionsStopped::issue(generation)
-}
-
-pub(crate) struct RtdModuleState {
-    logical_quiescence_certified: AtomicBool,
-}
-
-impl RtdModuleState {
-    pub(crate) const fn new() -> Self {
-        Self {
-            logical_quiescence_certified: AtomicBool::new(false),
-        }
-    }
-
-    pub(crate) fn begin_open(&self) {
-        self.logical_quiescence_certified
-            .store(false, Ordering::Release);
-    }
-
-    pub(crate) fn begin_close(&self) {
-        self.logical_quiescence_certified
-            .store(false, Ordering::Release);
-    }
-
-    pub(crate) fn certify_logical_quiescence(&self) {
-        self.logical_quiescence_certified
-            .store(true, Ordering::Release);
-    }
-
-    pub(crate) fn is_logically_quiescent(&self) -> bool {
-        self.logical_quiescence_certified.load(Ordering::Acquire)
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct RtdQuiescent(());
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct RtdQuiescenceError {
-    pub(crate) outstanding_git_cookies: usize,
-    pub(crate) revocation_debt: usize,
-}
-
 #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
 #[cfg(feature = "handles")]
 pub(crate) struct RtdOperationGuard {
@@ -201,12 +145,9 @@ pub(crate) fn begin_operation<H: FormulaLifetimeBackend + ?Sized>(
     })
 }
 
-#[cfg(any(test, feature = "refinement"))]
+#[cfg(all(target_os = "windows", any(test, feature = "refinement")))]
 pub(crate) fn set_trace_sink(trace: crate::shutdown_trace::ShutdownTraceHandle) {
-    #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
     windows::set_trace_sink(trace);
-    #[cfg(not(all(target_os = "windows", any(feature = "rtd", feature = "handles"))))]
-    let _ = trace;
 }
 
 #[cfg(feature = "handles")]
@@ -322,10 +263,8 @@ pub(crate) fn dll_can_unload_now() -> i32 {
     }
 }
 
-pub(crate) fn wait_for_module_quiescence() -> Result<RtdQuiescent, RtdQuiescenceError> {
-    #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
-    {
-        windows::wait_for_module_quiescence()?;
-    }
-    Ok(RtdQuiescent(()))
+#[cfg(target_os = "windows")]
+pub(crate) fn wait_for_transport_quiescence()
+-> Result<(), crate::excel_rtd_protocol::RtdQuiescenceError> {
+    windows::wait_for_module_quiescence()
 }

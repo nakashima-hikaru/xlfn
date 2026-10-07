@@ -1,6 +1,6 @@
 use crate::callback_gate::{ModuleCallbackAdmission, ModuleCallbackLifecycle};
 #[cfg(any(feature = "rtd", feature = "handles"))]
-use crate::excel_rtd::RtdModuleState;
+use crate::excel_rtd_protocol::RtdModuleState;
 use crate::ingress::{ExportIngress, ExportsDrained};
 use std::sync::LazyLock;
 
@@ -321,7 +321,7 @@ impl ModuleRuntime {
         self.callback_admission.reset();
     }
 
-    pub(crate) fn rtd(&'static self) -> Option<&'static crate::excel_rtd::RtdModuleState> {
+    pub(crate) fn rtd(&'static self) -> Option<&'static crate::excel_rtd_protocol::RtdModuleState> {
         #[cfg(any(feature = "rtd", feature = "handles"))]
         {
             Some(&self.rtd)

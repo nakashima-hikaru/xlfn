@@ -103,19 +103,18 @@ impl GenerationServices {
     pub(crate) fn arm_generation(
         generation: RuntimeGeneration,
         _config: crate::addin::RuntimeConfig,
-        subscription_host: Option<crate::excel_rtd::RtdSubscriptionHost>,
+        #[cfg(feature = "rtd")] subscription_host: crate::excel_rtd::RtdSubscriptionHost,
         inputs: GenerationServiceInputs,
     ) -> crate::XllResult<ArmedServices> {
         #[cfg(not(feature = "rtd"))]
-        let _ = (generation, subscription_host, inputs);
+        let _ = (generation, inputs);
         let services = Self {
             #[cfg(feature = "handles")]
             formula_handles: crate::handle::FormulaHandleServiceSlot::new(),
             #[cfg(feature = "rtd")]
             rtd: RtdGenerationServices {
                 subscriptions: crate::excel_rtd::SubscriptionServiceSlot::new(),
-                subscription_host: subscription_host
-                    .expect("RTD generation services require an RTD host capability"),
+                subscription_host,
             },
         };
         #[cfg(feature = "handles")]

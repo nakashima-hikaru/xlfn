@@ -183,6 +183,7 @@ pub(crate) fn checked_utf16_len(
 ///
 /// Longer UTF-8 strings are counted once, including the exact length used
 /// in an error, without materializing encoded units.
+#[cfg(any(test, feature = "rtd", feature = "handles"))]
 pub(crate) fn validate_utf16_limit(
     text: &str,
     argument: &'static str,

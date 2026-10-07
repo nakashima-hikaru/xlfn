@@ -1,5 +1,100 @@
 # Consumer build time
 
+## Optional subsystem isolation (2026-10-07)
+
+The core-only build no longer compiles the private handle, subscription, or
+Excel RTD implementations. Handle permits and formula-caller decoding compile
+only with `handles`. The small formula lifetime contract moved out of the
+handle implementation, allowing RTD-only Windows builds to use the transport
+without compiling handle state, registries, or tokens. RTD module state and
+shutdown certificates live in a small neutral module; their issuance conditions,
+phase checks, and atomic ordering are unchanged. Subscription and COM transport
+code compile only with `rtd` or `handles`.
+
+`constant_time_eq`, `getrandom`, `papaya`, and `blake3` are optional production
+dependencies enabled by `handles`. The public `value::InputIdentityEncoder`
+methods and the `ExcelInputIdentity` / `PrepareExcel` signatures remain available
+in every feature selection. Without handles, the encoder is uninhabited and has
+no constructor; formula dispatch cannot create an encoder or a substitute hash.
+With handles, the original implementation and byte encoding are unchanged in
+`input_identity/backend.rs`. BLAKE3 remains a dev dependency for the existing
+core identity tests.
+
+The baseline is commit `f0381bbb7be677703604afd505928f46696666ca`, which already
+includes the opaque UDF body and serialization changes documented below. The
+candidate is a frozen working-tree snapshot with this isolation change. These
+results measure the combined module and dependency changes, not their separate
+contributions. Both source snapshots and fixtures are hashed in the raw reports.
+
+Measurements used Rust 1.99.0 on macOS arm64, offline dependencies, separate
+target directories, compiler-cache wrappers disabled, and five pairs with
+alternating order. No other build or test was run concurrently with timing.
+Clean samples remove every compiled artifact and keep ordinary incremental
+settings. The handles row uses the identical basic fixture with `handles`
+enabled; it measures that compile graph rather than handle runtime performance.
+The generated fixture contains 100 UDFs with 50 statements each. Its framework
+rebuild mode cleans the consumer, `xlfn`, and `xlfn-macros` while retaining
+third-party artifacts, disables incremental compilation, and excludes warmups.
+It differs from the earlier consumer-only dependency-warm measurement.
+
+| Workload | Baseline median | Candidate median | Change |
+| --- | ---: | ---: | ---: |
+| Basic add-in, clean dev | 7.0108 s | 5.9402 s | -15.3% |
+| Basic add-in, clean release | 7.9019 s | 6.3394 s | -19.8% |
+| RTD add-in, clean dev | 7.2982 s | 6.4678 s | -11.4% |
+| Basic add-in with handles, clean dev | 7.2129 s | 7.2371 s | +0.3% |
+| 100 UDFs, framework rebuild, check | 2.2033 s | 1.8437 s | -16.3% |
+| 100 UDFs, framework rebuild, build | 3.1461 s | 2.7454 s | -12.7% |
+
+Every candidate basic and RTD clean sample omitted all four handle dependencies.
+Basic dev compiled 64 Cargo units instead of 83; release compiled 68 instead of
+87. Handles compiled the same 83 units in both snapshots, and its +0.3% median
+change does not establish a regression or speedup. One candidate handles sample
+was 8.33 s; the others were 7.15–7.32 s, while baseline samples were 7.13–7.25 s.
+
+For basic dev, the `xlfn` library unit median fell from 2.39 to 1.74 s; release
+fell from 2.78 to 1.89 s. Unit durations overlap and must not be summed to infer
+wall time. The `syn` feature set is identical in the two snapshots. Its duration
+also changed, so dependency concurrency and host variation contribute to the
+observed unit timings; this comparison does not attribute the savings to a
+single crate or parser. The candidate basic critical path still includes
+`syn` and `xlfn-macros`, so no crate split was added in this pass.
+
+The macro clone/parser rewrite is deferred. Removing only xlfn-macros' AST
+clones cannot disable `syn/clone-impls` in the basic graph: `thiserror-impl`
+enables `syn/default`. Macro tests also enable cloning through
+`trybuild -> serde_derive`. Removing `syn/full` remains a separate syntax change
+that needs a narrow signature parser, `DeriveInput` struct parsing, opaque
+default-expression tokens, and equivalent diagnostics before measurement.
+
+Raw results: [basic dev](2026-10-07-feature-isolation-basic-dev.json),
+[basic release](2026-10-07-feature-isolation-basic-release.json),
+[RTD dev](2026-10-07-feature-isolation-rtd-dev.json),
+[handles dev](2026-10-07-feature-isolation-handles-dev.json), and
+[generated framework rebuild](2026-10-07-feature-isolation-generated-framework-warm.json).
+Each sample stores complete Cargo unit data plus the 20 longest units.
+
+Validation: core library tests passed (340, 7 ignored), RTD-only library tests
+passed (512, 7 ignored), handles-only passed (489, 8 ignored), async-only passed
+(445, 7 ignored), and all-feature library tests passed (873, 10 ignored), all
+serially. The five timing-tool tests passed, including source hashes ignoring
+nested Cargo build artifacts. Current library sources match the frozen
+candidate hash. Core and all-feature compile-test suites passed, including custom
+input implementations using every public encoder method. Every individual
+feature and the all-feature library checked successfully; workspace all-target,
+all-feature Clippy and core/all-feature rustdoc passed. The basic consumer and
+RTD-only production library checked normally for Windows. Handles-only Rust
+cross-checking passed with command-only
+`blake3/pure`; its normal assembly backend still requires unavailable MSVC tools
+on this host. Windows test compilation stopped in `alloca` because Windows C
+headers were unavailable. Native Windows timing, linking, and Excel execution
+are not covered by these measurements.
+
+To reproduce this comparison, export the baseline commit named above and use the
+commands under Reproduce with the new baseline directory. For the generated
+framework rows, add `--workload generated --cache dependencies --rebuild framework
+--incremental off --modes check build`.
+
 ## Clean builds (2026-10-07)
 
 Normal add-in builds used to compile `serde_derive` for private verification
@@ -66,6 +161,9 @@ on macOS arm64. Each has separate Cargo target directories. Dependencies are
 warmed once; each timed sample cleans only the consumer package, disables
 incremental compilation, and performs a full consumer rebuild. Baseline and
 candidate order alternates across five pairs. Initial warmups are excluded.
+This is the script's `--rebuild consumer` mode. To measure changes in the
+framework itself with third-party dependencies warm, use `--rebuild framework`:
+each sample also cleans `xlfn` and `xlfn-macros` before rebuilding the consumer.
 
 | Operation | Baseline median | Candidate median | Reduction |
 | --- | ---: | ---: | ---: |
@@ -103,18 +201,30 @@ git archive c396e54be1ecb4dd8f3da5ac27c37daf35ae09f3 | tar -x -C /tmp/xlfn-build
 python3 tools/measure_udf_build_time.py --baseline /tmp/xlfn-build-baseline --candidate . --output /tmp/xlfn-build-comparison
 python3 tools/measure_udf_build_time.py --baseline /tmp/xlfn-build-baseline --candidate . --output /tmp/xlfn-build-release --profile release
 python3 tools/measure_udf_build_time.py --baseline /tmp/xlfn-build-baseline --candidate . --output /tmp/xlfn-build-rtd --workload rtd
+python3 tools/measure_udf_build_time.py --baseline /tmp/xlfn-build-baseline --candidate . --output /tmp/xlfn-build-handles --features handles
 ```
 
 These commands compare all changes against the named commit; the recorded clean
 measurements instead isolate serialization changes against the intermediate
 snapshot described above. To exercise the earlier generated UDF workload, pass
 `--workload generated --cache dependencies --incremental off --modes check build`.
+For dependency-warm measurements of framework compilation, also pass
+`--rebuild framework`. With `--cache clean`, all artifacts are removed regardless
+of `--rebuild`. The handles command uses the same basic add-in fixture while
+enabling the handles feature; it measures compilation of that feature graph.
 
 Python 3.11+ and the pinned Rust toolchain are required. Dependencies must already
 be available locally because measurements run offline. The script creates
 isolated caches under `--output` and writes `results.json` there. Basic/RTD modes
 build the standalone examples; generated mode also creates consumers under that
 directory. Standalone lockfiles are resolved before timing.
+Source hashes exclude nested `target` output directories. Every sample saves
+Cargo's complete `all_units` data and the 20 units with the
+longest durations in `slowest_units`, including dependencies and build scripts.
+The existing `critical_units` field is retained for comparisons with earlier
+reports. Unit durations can overlap and their sum is not build wall time;
+`start` and `duration` identify which work overlaps the longest units. Only
+units compiled in that sample appear in its timing report.
 Use a fresh output directory for a new comparison. Set `--functions`,
 `--statements`, and `--repeat` to compare other fixed workloads.
 Keep sources unchanged during a run and avoid concurrent builds or tests.

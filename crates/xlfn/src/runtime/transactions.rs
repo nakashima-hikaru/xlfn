@@ -758,7 +758,7 @@ where
     }
     runtime.observer().diagnostics_drained();
 
-    let rtd_quiescent = match crate::excel_rtd::wait_for_module_quiescence() {
+    let rtd_quiescent = match crate::excel_rtd_protocol::wait_for_module_quiescence() {
         Ok(certificate) => certificate,
         Err(error) => {
             let hazard = if error.revocation_debt != 0 {

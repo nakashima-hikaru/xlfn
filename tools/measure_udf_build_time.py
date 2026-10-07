@@ -24,7 +24,8 @@ def source_digest(source):
     digest = hashlib.sha256()
     files = sorted(
         p for p in (source / "crates").rglob("*")
-        if p.is_file() and (p.suffix == ".rs" or p.name == "Cargo.toml")
+        if p.is_file() and "target" not in p.relative_to(source).parts
+        and (p.suffix == ".rs" or p.name == "Cargo.toml")
     )
     files += [source / "Cargo.toml", source / "Cargo.lock", source / "rust-toolchain.toml"]
     for path in files:
@@ -56,15 +57,35 @@ def make_probe(directory, source, fixture, functions, statements):
     return hashlib.sha256(body.encode()).hexdigest()
 
 
+def timing_units(report):
+    """Read Cargo's embedded JSON without truncating strings containing `];`."""
+    content = report.read_text()
+    assignment = re.search(r"\bconst UNIT_DATA\s*=\s*", content)
+    if assignment is None:
+        raise RuntimeError(f"Cargo timing report has no UNIT_DATA: {report}")
+    units, _ = json.JSONDecoder().raw_decode(content[assignment.end():])
+    if not isinstance(units, list):
+        raise RuntimeError(f"Cargo timing UNIT_DATA is not a list: {report}")
+    return units
+
+
+def clean_command(package, cache, rebuild):
+    command = ["cargo", "clean"]
+    if cache == "dependencies":
+        packages = [package]
+        if rebuild == "framework":
+            packages += ["xlfn", "xlfn-macros"]
+        for selected in packages:
+            command += ["-p", selected]
+    return command
+
+
 def measure(directory, package, target, mode, iteration, label, args):
     env = dict(os.environ, CARGO_TARGET_DIR=str(target),
                RUSTC_WRAPPER="", RUSTC_WORKSPACE_WRAPPER="")
     if args.incremental == "off":
         env["CARGO_INCREMENTAL"] = "0"
-    clean = ["cargo", "clean"]
-    if args.cache == "dependencies":
-        clean += ["-p", package]
-    run(clean, directory, env)
+    run(clean_command(package, args.cache, args.rebuild), directory, env)
     command = ["cargo", mode, "--locked", "--offline", "--timings"]
     if args.profile == "release":
         command += ["--release"]
@@ -74,7 +95,7 @@ def measure(directory, package, target, mode, iteration, label, args):
     run(command, directory, env)
     elapsed = time.perf_counter() - start
     report = max((target / "cargo-timings").glob("cargo-timing-2*.html"), key=lambda p: p.stat().st_mtime_ns)
-    units = json.loads(re.search(r"const UNIT_DATA = (\[.*?\]);", report.read_text(), re.S)[1])
+    units = timing_units(report)
     consumer = next(unit for unit in units if unit["name"] == package)
     critical = [
         {key: unit[key] for key in ["name", "features", "start", "duration", "sections"]}
@@ -84,7 +105,8 @@ def measure(directory, package, target, mode, iteration, label, args):
     return dict(label=label, mode=mode, iteration=iteration, wall_seconds=elapsed,
                 unit_seconds=consumer["duration"], sections=consumer["sections"],
                 serde_derive_compiled=any(u["name"] == "serde_derive" for u in units),
-                critical_units=critical)
+                critical_units=critical, all_units=units,
+                slowest_units=sorted(units, key=lambda u: u["duration"], reverse=True)[:20])
 
 
 def main():
@@ -96,7 +118,9 @@ def main():
     parser.add_argument("--statements", type=int, default=50)
     parser.add_argument("--repeat", type=int, default=5)
     parser.add_argument("--cache", choices=["clean", "dependencies"], default="clean",
-                        help="clean removes all dependency artifacts before every sample")
+                        help="clean removes all artifacts; dependencies warms before timed rebuilds")
+    parser.add_argument("--rebuild", choices=["consumer", "framework"], default="consumer",
+                        help="with --cache dependencies, rebuild only the consumer or also xlfn and xlfn-macros")
     parser.add_argument("--workload", choices=["basic", "rtd", "generated"], default="basic")
     parser.add_argument("--profile", choices=["dev", "release"], default="dev")
     parser.add_argument("--incremental", choices=["auto", "off"], default="auto")
@@ -114,6 +138,7 @@ def main():
                   rustc=run(["rustc", "-vV"], sources["candidate"], os.environ).stdout,
                   functions=args.functions, statements=args.statements, repeat=args.repeat,
                   workload=args.workload, cache=args.cache, profile=args.profile,
+                  rebuild=args.rebuild,
                   features=args.features, incremental=args.incremental,
                   compiler_cache_wrappers=False, sources={}, samples=[], summary={})
     for label, source in sources.items():

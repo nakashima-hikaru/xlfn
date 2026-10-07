@@ -7,17 +7,24 @@
 //! instead of repeating raw status and cleanup handling.
 
 use crate::callback_value::ExcelCallbackValue;
-use crate::error::{ExcelApiFailure, ExcelApiFunction, InputError};
+#[cfg(feature = "handles")]
+use crate::error::InputError;
+use crate::error::{ExcelApiFailure, ExcelApiFunction};
 use crate::host_callback::HostCallbackSession;
 use crate::reference::ExcelReference;
 use crate::return_abi::ExcelCallbackStatus;
-use crate::value::{ExcelValue, FromExcel, Matrix, XlValueType, convert};
+#[cfg(feature = "handles")]
+use crate::value::XlValueType;
+use crate::value::{ExcelValue, FromExcel, Matrix, convert};
 use crate::{XllError, XllResult};
 use std::ptr::NonNull;
-use xlfn_sys::{IDSHEET, XL_COERCE, XL_SHEET_ID, XL_SHEET_NM, XLF_CALLER, XLOPER12};
+#[cfg(feature = "handles")]
+use xlfn_sys::{IDSHEET, XL_SHEET_ID, XLF_CALLER};
+use xlfn_sys::{XL_COERCE, XL_SHEET_NM, XLOPER12};
 
 /// The single-cell caller identity returned by Excel's caller protocol.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[cfg(feature = "handles")]
 pub(crate) struct HostCaller {
     pub(crate) sheet_id: IDSHEET,
     pub(crate) row: i32,
@@ -180,6 +187,7 @@ impl<'call> ExcelHost<'call> {
     /// Resolves and validates the single-cell worksheet caller used by handle
     /// formula identities.  The nested sheet-name/sheet-id protocol remains
     /// inside this host capability rather than leaking into handle code.
+    #[cfg(feature = "handles")]
     pub(crate) fn caller(&self) -> XllResult<HostCaller> {
         self.invoke(XLF_CALLER, ExcelApiFunction::Caller, &[], |caller| {
             let location = {
@@ -283,6 +291,7 @@ impl<'call> ExcelHost<'call> {
     }
 }
 
+#[cfg(feature = "handles")]
 enum CallerLocation {
     Direct {
         sheet_id: IDSHEET,
@@ -295,6 +304,7 @@ enum CallerLocation {
     },
 }
 
+#[cfg(feature = "handles")]
 fn single_cell_caller_error() -> XllError {
     XllError::input(
         "caller",

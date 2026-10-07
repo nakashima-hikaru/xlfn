@@ -5,7 +5,7 @@
 
 #[cfg(test)]
 use crate::XllError;
-#[cfg(test)]
+#[cfg(all(test, feature = "handles"))]
 use crate::handle::FormulaHandleService;
 #[cfg(test)]
 use crate::subscription::RtdValue;
@@ -42,15 +42,20 @@ mod server_gate;
 mod update_event;
 #[cfg(test)]
 use crate::win32::{
-    CoCreateGuid, DISP_E_BADINDEX, DISPPARAMS, E_FAIL, E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL,
-    E_POINTER, EXCEPINFO, VARIANT, VARIANT_FALSE, VARIANT_TRUE, VariantClear,
+    CoCreateGuid, DISPPARAMS, E_FAIL, E_INVALIDARG, E_NOINTERFACE, VARIANT, VARIANT_FALSE,
+    VARIANT_TRUE, VariantClear,
 };
+#[cfg(all(test, feature = "handles"))]
+use crate::win32::{DISP_E_BADINDEX, E_NOTIMPL, E_POINTER, EXCEPINFO};
 #[cfg(test)]
 use crate::win32::{HKEY_CURRENT_USER, RegDeleteTreeW};
+#[cfg(all(test, feature = "handles"))]
+use automation::{
+    DISPID_CONNECT_DATA, DISPID_DISCONNECT_DATA, DISPID_HEARTBEAT, DISPID_SERVER_START,
+};
 #[cfg(test)]
 use automation::{
-    DISPID_CONNECT_DATA, DISPID_DISCONNECT_DATA, DISPID_HEARTBEAT, DISPID_REFRESH_DATA,
-    DISPID_SERVER_START, DISPID_SERVER_TERMINATE, IID_NULL, MAX_RTD_TOPIC_PARTS,
+    DISPID_REFRESH_DATA, DISPID_SERVER_TERMINATE, IID_NULL, MAX_RTD_TOPIC_PARTS,
     checked_topic_part_count, checked_topic_part_length, topic_key_from_safearray,
     unwrap_dispatch_variant, write_bstr_variant, write_refresh_data,
 };
@@ -77,7 +82,9 @@ use registration::{
     RTD_REGISTRATION_OWNER, RTD_REGISTRATION_SCHEMA, guid_braced, guid_compact,
     read_registry_string, scavenge_owned_registrations, set_registry_value, wide_nul,
 };
-#[cfg(any(feature = "handles", test))]
+#[cfg(all(test, feature = "handles"))]
+use server::ensure_server;
+#[cfg(feature = "handles")]
 pub(super) use server::shutdown;
 #[cfg(feature = "rtd")]
 pub(super) use server::shutdown_subscriptions;
@@ -86,13 +93,16 @@ use server::{
     heartbeat, refresh_data, server_add_ref, server_query_interface, server_release, server_start,
     server_terminate,
 };
+#[cfg(all(test, feature = "handles"))]
+use server::{
+    FAIL_DEFERRED_TERMINATION_SPAWN, PANIC_DEFERRED_TERMINATION_CLEANUP,
+    synchronize_callback_notification,
+};
 #[cfg(test)]
 use server::{
-    FAIL_DEFERRED_TERMINATION_SPAWN, IID_IDISPATCH, IID_IRTD_SERVER,
-    PANIC_DEFERRED_TERMINATION_CLEANUP, PANIC_IN_REFRESH_DATA, SERVER_NOT_STARTED,
-    SERVER_START_FAILED, SERVER_STARTED, SERVER_STARTING, ServerStartReservation,
-    discard_unpublished_server, ensure_server, ensure_server_without_handles,
-    synchronize_callback_notification,
+    IID_IDISPATCH, IID_IRTD_SERVER, PANIC_IN_REFRESH_DATA, SERVER_NOT_STARTED, SERVER_START_FAILED,
+    SERVER_STARTED, SERVER_STARTING, ServerStartReservation, discard_unpublished_server,
+    ensure_server_without_handles,
 };
 #[cfg(test)]
 use server_gate::{
@@ -116,17 +126,20 @@ pub(super) fn set_trace_sink(trace: crate::shutdown_trace::ShutdownTraceHandle) 
 }
 
 pub(super) fn dll_can_unload_now() -> i32 {
-    if crate::excel_rtd::logical_quiescence_certified() && module_lifetime().can_unload_now() {
+    if crate::excel_rtd_protocol::logical_quiescence_certified()
+        && module_lifetime().can_unload_now()
+    {
         S_OK
     } else {
         1 // S_FALSE
     }
 }
 
-pub(super) fn wait_for_module_quiescence() -> Result<(), crate::excel_rtd::RtdQuiescenceError> {
+pub(super) fn wait_for_module_quiescence()
+-> Result<(), crate::excel_rtd_protocol::RtdQuiescenceError> {
     module_lifetime()
         .wait_for_quiescence(retry_git_revocation_debt)
-        .map_err(|error| crate::excel_rtd::RtdQuiescenceError {
+        .map_err(|error| crate::excel_rtd_protocol::RtdQuiescenceError {
             outstanding_git_cookies: error.state.outstanding_git_cookies,
             revocation_debt: error.state.revocation_debt,
         })

@@ -9,7 +9,7 @@ use crate::XllError;
 use crate::XllResult;
 use crate::excel_rtd::counted_string::CountedString;
 #[cfg(feature = "handles")]
-use crate::handle::{FormulaLifetimeBackend, FormulaLifetimeGeneration};
+use crate::formula_lifetime::{FormulaLifetimeBackend, FormulaLifetimeGeneration};
 use crate::host_api::ExcelHost;
 #[cfg(feature = "handles")]
 use crate::ingress::ExportIngress;

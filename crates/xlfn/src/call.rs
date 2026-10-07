@@ -52,9 +52,12 @@ impl CallScratch {
     }
 }
 
+#[cfg(feature = "handles")]
 mod permits;
+#[cfg(feature = "handles")]
 type HandlePermits = permits::Retained<crate::handle::HandleDomainPermit>;
 
+#[cfg(feature = "handles")]
 #[derive(Clone, Copy)]
 enum HandleWitnessSource<'scope> {
     Scope {
@@ -68,9 +71,11 @@ enum HandleWitnessSource<'scope> {
 /// A real borrow of the append-only call scope or the owning permit.
 /// Scope construction stays private to the code that retains its permits.
 #[derive(Clone, Copy)]
+#[cfg(feature = "handles")]
 pub(crate) struct HandleDomainWitness<'scope> {
     source: HandleWitnessSource<'scope>,
 }
+#[cfg(feature = "handles")]
 impl<'scope> HandleDomainWitness<'scope> {
     #[cfg(test)]
     pub(crate) fn from_permit(permit: &'scope crate::handle::HandleDomainPermit) -> Self {
@@ -95,6 +100,7 @@ impl<'scope> HandleDomainWitness<'scope> {
 #[doc(hidden)]
 pub struct CallScope<'call> {
     scratch: CallScratch,
+    #[cfg(feature = "handles")]
     handle_permits: std::cell::RefCell<HandlePermits>,
     lifetime: PhantomData<&'call mut &'call ()>,
 }
@@ -103,6 +109,7 @@ impl<'call> CallScope<'call> {
     fn new() -> Self {
         Self {
             scratch: CallScratch::new(),
+            #[cfg(feature = "handles")]
             handle_permits: std::cell::RefCell::new(HandlePermits::Empty),
             lifetime: PhantomData,
         }
@@ -120,6 +127,7 @@ impl<'call> CallScope<'call> {
     /// created inside the closure from being admitted: they could otherwise
     /// be destroyed before the scope releases its retained reader permits.
     #[inline]
+    #[cfg(feature = "handles")]
     pub(crate) fn enter_handle_domain(
         &'call self,
         domain: &'call crate::handle::HandleReadDomain,

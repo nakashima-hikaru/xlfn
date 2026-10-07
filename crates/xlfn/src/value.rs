@@ -2324,6 +2324,7 @@ mod tests {
         assert_modes::<f64>();
         assert_modes::<Result<f64, XllError>>();
         assert_modes::<Matrix<f64>>();
+        #[cfg(feature = "rtd")]
         assert_modes::<crate::subscription::RtdValue>();
     }
 

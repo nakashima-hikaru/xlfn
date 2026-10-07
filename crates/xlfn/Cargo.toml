@@ -22,7 +22,7 @@ async = [
 rtd = []
 # Formula handles use the private Excel RTD transport internally, but do not
 # expose the generic RTD subscription capability.
-handles = []
+handles = ["dep:blake3", "dep:constant_time_eq", "dep:getrandom", "dep:papaya"]
 cache = ["dep:quick_cache"]
 refinement = ["serde/derive"]
 # Internal instrumentation for production-path benchmarks.
@@ -164,15 +164,15 @@ xlfn-sys.workspace = true
 inventory.workspace = true
 indexmap.workspace = true
 async-task = { workspace = true, optional = true }
-blake3.workspace = true
+blake3 = { workspace = true, optional = true }
 jiff = { workspace = true, optional = true }
 bumpalo.workspace = true
-constant_time_eq.workspace = true
+constant_time_eq = { workspace = true, optional = true }
 crossbeam-deque = { workspace = true, optional = true }
 crossbeam-utils.workspace = true
 futures-util = { workspace = true, optional = true }
-getrandom.workspace = true
-papaya.workspace = true
+getrandom = { workspace = true, optional = true }
+papaya = { workspace = true, optional = true }
 parking_lot.workspace = true
 quick_cache = { workspace = true, optional = true }
 scopeguard.workspace = true
@@ -191,6 +191,7 @@ xlfn-kernel.workspace = true
 windows-link.workspace = true
 
 [dev-dependencies]
+blake3.workspace = true
 serde = { workspace = true, features = ["derive"] }
 criterion.workspace = true
 futures-util.workspace = true

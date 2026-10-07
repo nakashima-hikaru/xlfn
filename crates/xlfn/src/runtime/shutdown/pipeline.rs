@@ -271,7 +271,7 @@ pub(crate) struct ServicesQuiescent {
 /// cannot accidentally certify a partially assembled terminal transition.
 pub(crate) struct ResourcesReclaimed {
     services: ServicesQuiescent,
-    rtd: crate::excel_rtd::RtdQuiescent,
+    rtd: crate::excel_rtd_protocol::RtdQuiescent,
     host_callbacks: crate::shutdown::HostCallbacksDetached,
     diagnostics: crate::diagnostics::DiagnosticsStopped,
 }
@@ -508,7 +508,7 @@ impl ServicesQuiescent {
 impl ResourcesReclaimed {
     pub(crate) fn new(
         services: ServicesQuiescent,
-        rtd: crate::excel_rtd::RtdQuiescent,
+        rtd: crate::excel_rtd_protocol::RtdQuiescent,
         host_callbacks: crate::shutdown::HostCallbacksDetached,
         diagnostics: crate::diagnostics::DiagnosticsStopped,
     ) -> Self {
@@ -810,7 +810,7 @@ impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ServicesCleaned> {
 impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ServicesQuiescent> {
     pub(crate) fn reclaim(
         self,
-        rtd: crate::excel_rtd::RtdQuiescent,
+        rtd: crate::excel_rtd_protocol::RtdQuiescent,
         host_callbacks: crate::shutdown::HostCallbacksDetached,
         diagnostics: crate::diagnostics::DiagnosticsStopped,
     ) -> TeardownTxn<'runtime, A, K, ResourcesReclaimed> {

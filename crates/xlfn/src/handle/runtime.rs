@@ -637,7 +637,7 @@ impl FormulaHandleService {
     }
 }
 
-impl super::lifetime::FormulaLifetimeBackend for FormulaHandleService {
+impl crate::formula_lifetime::FormulaLifetimeBackend for FormulaHandleService {
     #[cfg(target_os = "windows")]
     fn identity(&self) -> usize {
         self as *const Self as usize
@@ -674,7 +674,7 @@ impl super::lifetime::FormulaLifetimeBackend for FormulaHandleService {
         lifetime_generation: FormulaLifetimeGeneration,
         topic_id: i32,
         lifetime_key: &str,
-    ) -> XllResult<Box<dyn super::lifetime::FormulaLifetimeConnection + 'a>> {
+    ) -> XllResult<Box<dyn crate::formula_lifetime::FormulaLifetimeConnection + 'a>> {
         Ok(Box::new(FormulaHandleService::connect_transaction(
             self,
             lifetime_generation,

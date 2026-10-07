@@ -60,9 +60,11 @@ pub mod v1 {
     pub use crate::return_abi::metadata::AddinMetadata;
     use crate::return_abi::{free_return_boundary, udf_boundary_named};
     use crate::runtime::Runtime;
+    #[cfg(any(feature = "handles", test))]
+    pub use crate::value::input::FormulaInputMode;
     pub use crate::value::input::{
-        ArgumentContext, ExcelInputIdentity, ExcelParameter, FormulaInputMode, InputMode,
-        PlainInputMode, PreparedArgument, argument_from_raw, argument_from_raw_with_arguments,
+        ArgumentContext, ExcelInputIdentity, ExcelParameter, InputMode, PlainInputMode,
+        PreparedArgument, argument_from_raw, argument_from_raw_with_arguments,
         cell_presence_from_raw,
     };
     #[doc(hidden)]

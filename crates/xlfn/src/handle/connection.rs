@@ -73,7 +73,7 @@ impl Drop for HandleConnection<'_> {
 }
 
 #[cfg(target_os = "windows")]
-impl super::lifetime::FormulaLifetimeConnection for HandleConnection<'_> {
+impl crate::formula_lifetime::FormulaLifetimeConnection for HandleConnection<'_> {
     fn token(&self) -> &str {
         self.token()
     }

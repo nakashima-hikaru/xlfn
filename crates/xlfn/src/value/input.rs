@@ -1,7 +1,9 @@
 //! Worksheet-input conversion and call-boundary state.
 
 use crate::call::CallScope;
-use crate::input_identity::{InputFingerprintBuilder, InputIdentityEncoder};
+#[cfg(any(feature = "handles", test))]
+use crate::input_identity::InputFingerprintBuilder;
+use crate::input_identity::InputIdentityEncoder;
 use crate::{XllError, XllResult};
 use xlfn_sys::XLOPER12;
 
@@ -59,9 +61,11 @@ pub struct PlainInputMode;
 
 /// Formula-revision worksheet conversion with semantic identity recording.
 #[doc(hidden)]
+#[cfg(any(feature = "handles", test))]
 pub struct FormulaInputMode;
 
 impl sealed::InputModeSealed for PlainInputMode {}
+#[cfg(any(feature = "handles", test))]
 impl sealed::InputModeSealed for FormulaInputMode {}
 
 impl InputMode for PlainInputMode {
@@ -93,6 +97,7 @@ impl InputMode for PlainInputMode {
     fn string(_: &mut Self::Identity, _: &str) {}
 }
 
+#[cfg(any(feature = "handles", test))]
 impl InputMode for FormulaInputMode {
     const RECORDS_IDENTITY: bool = true;
     type Identity = InputIdentityEncoder;
@@ -322,6 +327,7 @@ impl<T, P> PreparedExcelSequence<'_, T, P> {
         }
     }
 
+    #[cfg(any(feature = "handles", test))]
     fn materialize_borrowed<'call>(self, scope: &'call CallScope<'call>) -> XllResult<&'call [T]>
     where
         T: Copy,
@@ -446,11 +452,13 @@ impl<'call, T: FromExcel<'call>> ExcelParameter<'call, PlainInputMode> for T {
     fn encode_decoded(&self, _: &mut ()) {}
 }
 
+#[cfg(any(feature = "handles", test))]
 impl<'call, T> sealed::ExcelParameterSealed<'call, FormulaInputMode> for T where
     T: PrepareExcel<'call>
 {
 }
 
+#[cfg(any(feature = "handles", test))]
 impl<'call, T> ExcelParameter<'call, FormulaInputMode> for T
 where
     T: PrepareExcel<'call>,

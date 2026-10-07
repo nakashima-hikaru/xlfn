@@ -1,8 +1,8 @@
 //! Formula-handle lifetime capability exposed to the private Excel transport.
 //!
 //! The handle subsystem owns formula bindings and their lifetime state. This
-//! contract is deliberately defined here rather than in the RTD module so a
-//! handle generation does not depend on the generic RTD subscription API.
+//! small protocol is shared independently of the handle implementation, so
+//! RTD-only builds do not compile formula-handle state or token machinery.
 
 #[cfg(target_os = "windows")]
 use crate::XllResult;
@@ -26,7 +26,7 @@ impl FormulaLifetimeGeneration {
     }
 }
 
-#[cfg(any(test, feature = "refinement"))]
+#[cfg(all(feature = "handles", any(test, feature = "refinement")))]
 impl FormulaLifetimeGeneration {
     pub(crate) const fn get(self) -> u64 {
         self.0.get()
@@ -37,12 +37,17 @@ pub(crate) trait FormulaLifetimeBackend: Send + Sync {
     #[cfg(target_os = "windows")]
     fn identity(&self) -> usize;
 
+    #[cfg(feature = "handles")]
     fn terminate_all_topics(&self);
 
-    #[cfg(all(target_os = "windows", any(test, feature = "refinement")))]
+    #[cfg(all(
+        target_os = "windows",
+        feature = "handles",
+        any(test, feature = "refinement")
+    ))]
     fn lifetime_trace(&self) -> Option<crate::shutdown_trace::ShutdownTraceHandle>;
 
-    #[cfg(target_os = "windows")]
+    #[cfg(all(target_os = "windows", feature = "handles"))]
     fn claim_lifetime(
         &self,
         lifetime_key: &str,

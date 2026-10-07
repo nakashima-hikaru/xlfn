@@ -7,7 +7,7 @@
     allow(
         dead_code,
         unreachable_pub,
-        reason = "The subscription implementation is private in core-only builds"
+        reason = "The private subscription backend shares the formula-handle COM transport"
     )
 )]
 

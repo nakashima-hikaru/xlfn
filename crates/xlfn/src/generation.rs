@@ -175,8 +175,10 @@ impl RemovalAttemptId {
 /// Identity of a binding slot incarnation.  A slot can be reused only with
 /// the next value, so zero is never a valid binding generation.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[cfg(feature = "handles")]
 pub(crate) struct BindingGeneration(NonZeroU64);
 
+#[cfg(feature = "handles")]
 impl BindingGeneration {
     pub(crate) const ONE: Self = Self(NonZeroU64::MIN);
 
@@ -203,8 +205,10 @@ impl BindingGeneration {
 /// the runtime generation because a topic table may reject an initializer
 /// without creating a new runtime.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[cfg(feature = "handles")]
 pub(crate) struct TopicGeneration(NonZeroU64);
 
+#[cfg(feature = "handles")]
 impl TopicGeneration {
     pub(crate) const ONE: Self = Self(NonZeroU64::MIN);
 
@@ -226,6 +230,7 @@ impl TopicGeneration {
 /// Identity of one COM/RTD server instance. The zero sentinel is reserved for
 /// the absence of an active server and never enters subscription maps.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[cfg(any(feature = "rtd", feature = "handles"))]
 pub(crate) struct ServerGeneration(NonZeroU64);
 
 #[cfg(any(
@@ -249,8 +254,10 @@ impl ServerGeneration {
 
 /// Monotonic identity of one subscription connection attempt.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[cfg(any(feature = "rtd", feature = "handles"))]
 pub(crate) struct ConnectionGeneration(NonZeroU64);
 
+#[cfg(any(feature = "rtd", feature = "handles"))]
 impl ConnectionGeneration {
     pub(crate) const fn new(raw: u64) -> Option<Self> {
         match NonZeroU64::new(raw) {

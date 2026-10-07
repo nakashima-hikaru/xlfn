@@ -750,14 +750,16 @@ fn publish_generation<A: crate::Addin>(
         diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
     })?;
     #[cfg(feature = "rtd")]
-    let subscription_host = Some(crate::excel_rtd::RtdSubscriptionHost::production(
-        crate::module_runtime::ingress(),
-    ));
-    #[cfg(not(feature = "rtd"))]
-    let subscription_host = None;
-    let services =
-        GenerationServices::arm_generation(generation, config, subscription_host, service_inputs)?
-            .commit();
+    let subscription_host =
+        crate::excel_rtd::RtdSubscriptionHost::production(crate::module_runtime::ingress());
+    let services = GenerationServices::arm_generation(
+        generation,
+        config,
+        #[cfg(feature = "rtd")]
+        subscription_host,
+        service_inputs,
+    )?
+    .commit();
     let module_epoch = module_opening
         .take()
         .expect("open transaction owns its module opening authority")

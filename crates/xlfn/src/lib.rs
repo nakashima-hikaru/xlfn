@@ -73,15 +73,17 @@ mod crt;
 pub mod diagnostics;
 /// Worksheet errors and structured failures from add-ins and the framework.
 pub mod error;
+#[cfg(any(feature = "rtd", feature = "handles"))]
 mod excel_rtd;
+mod excel_rtd_protocol;
 /// Stable execution-layer contracts and per-call metadata.
 pub mod execution;
+#[cfg(any(feature = "handles", all(target_os = "windows", feature = "rtd")))]
+mod formula_lifetime;
 mod generation;
 #[cfg(feature = "handles")]
 /// Typed object handles with call-scoped borrowing and generation-scoped leases.
 pub mod handle;
-#[cfg(not(feature = "handles"))]
-mod handle;
 #[allow(
     unsafe_code,
     reason = "Typed Excel host operations decode raw ABI values"
@@ -102,6 +104,7 @@ mod panic_boundary;
 /// Borrowed worksheet references and range coordinates.
 pub mod reference;
 mod registration;
+#[cfg(any(feature = "handles", feature = "cache"))]
 mod retirement_queue;
 #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
 #[allow(
@@ -116,6 +119,7 @@ mod runtime;
 mod runtime_components;
 mod shutdown;
 mod shutdown_trace;
+#[cfg(any(feature = "rtd", feature = "handles"))]
 mod subscription;
 mod utf16;
 /// Safe worksheet input views, owned values, and explicit output shapes.

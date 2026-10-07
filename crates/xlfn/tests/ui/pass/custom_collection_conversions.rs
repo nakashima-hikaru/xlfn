@@ -1,7 +1,14 @@
 use xlfn::prelude::*;
-use xlfn::value::{convert, FromExcel, Row, Column, XlStrRef, XlValueRef};
+use xlfn::value::{
+    Column, ExcelInputIdentity, FromExcel, InputIdentityEncoder, PrepareExcel, Row, XlStrRef,
+    XlValueRef, convert,
+};
 
-#[excel_addin(name = "Collection Conversion", id = "collection-conversion", category = "Test")]
+#[excel_addin(
+    name = "Collection Conversion",
+    id = "collection-conversion",
+    category = "Test"
+)]
 struct CollectionConversionAddin;
 
 impl Addin for CollectionConversionAddin {
@@ -23,13 +30,47 @@ impl<'call> FromExcel<'call> for NumericMatrix {
     }
 }
 
+// Custom identity and preparation contracts remain usable in core-only builds.
+// Exercise the complete encoder API without requiring a handle-producing UDF.
+impl ExcelInputIdentity for NumericMatrix {
+    fn encode_input_identity(&self, encoder: &mut InputIdentityEncoder) {
+        encoder.tag(1);
+        encoder.bytes(b"numeric-matrix");
+        encoder.string("row-major");
+        encoder.bool(true);
+        encoder.u32(self.0.rows() as u32);
+        encoder.u64(self.0.columns() as u64);
+        encoder.i64(0);
+        for value in self.0.iter() {
+            encoder.f64(*value);
+        }
+    }
+}
+
+impl<'call> PrepareExcel<'call> for NumericMatrix {
+    type Prepared = Self;
+
+    fn prepare(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        identity: &mut InputIdentityEncoder,
+    ) -> XllResult<Self::Prepared> {
+        Self::from_excel_with_identity(value, argument, identity)
+    }
+
+    fn materialize(prepared: Self::Prepared) -> XllResult<Self> {
+        Ok(prepared)
+    }
+}
+
 struct OptionalMatrix(Option<Matrix<f64>>);
 
 impl<'call> FromExcel<'call> for OptionalMatrix {
     fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         convert::optional(value, argument, |value, argument| {
             convert::matrix(value, argument, f64::from_excel)
-        }).map(Self)
+        })
+        .map(Self)
     }
 }
 
@@ -58,7 +99,12 @@ impl<'call> FromExcel<'call> for TextRow<'call> {
 }
 
 #[excel_function(name = "TEST.CUSTOM.COLLECTIONS", thread_safe)]
-fn collections(matrix: NumericMatrix, optional: OptionalMatrix, vector: NumericVector, column: NumericColumn) -> f64 {
+fn collections(
+    matrix: NumericMatrix,
+    optional: OptionalMatrix,
+    vector: NumericVector,
+    column: NumericColumn,
+) -> f64 {
     matrix.0.iter().sum::<f64>()
         + optional.0.map_or(0.0, |value| value.iter().sum())
         + vector.0.iter().sum::<f64>()
@@ -67,7 +113,15 @@ fn collections(matrix: NumericMatrix, optional: OptionalMatrix, vector: NumericV
 
 #[excel_function(name = "TEST.CUSTOM.TEXT.ROW", thread_safe)]
 fn text_row(value: TextRow<'_>) -> f64 {
-    value.0.as_slice().iter().map(|text| text.as_utf16().len() as f64).sum()
+    value
+        .0
+        .as_slice()
+        .iter()
+        .map(|text| text.as_utf16().len() as f64)
+        .sum()
 }
 
-fn main() {}
+fn main() {
+    fn requires_send_sync<T: Send + Sync>() {}
+    requires_send_sync::<InputIdentityEncoder>();
+}

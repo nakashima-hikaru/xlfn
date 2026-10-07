@@ -17,7 +17,9 @@ use super::update_event::{
 };
 use super::{com_boundary, guid_eq};
 use crate::error::InputError;
-use crate::handle::{FormulaLifetimeBackend, FormulaLifetimeConnection, FormulaLifetimeGeneration};
+use crate::formula_lifetime::{
+    FormulaLifetimeBackend, FormulaLifetimeConnection, FormulaLifetimeGeneration,
+};
 use crate::subscription::ServerGeneration;
 use crate::subscription::SubscriptionRuntime;
 use crate::sync::Mutex;
@@ -402,7 +404,7 @@ pub(super) fn discard_unpublished_server(pointer: usize, newly_created: bool) {
     unsafe { server_release(server) };
 }
 
-#[cfg(any(feature = "handles", test))]
+#[cfg(feature = "handles")]
 pub(crate) fn shutdown<H: FormulaLifetimeBackend + 'static>(handles: &H) -> XllResult<()> {
     let mut shutdown_error = None;
     let retained = {
@@ -601,7 +603,7 @@ pub(crate) fn shutdown_subscriptions(subscriptions: &SubscriptionRuntime) -> Xll
     }
 }
 
-#[cfg(any(feature = "handles", test))]
+#[cfg(feature = "handles")]
 pub(super) fn ensure_server<H: FormulaLifetimeBackend + 'static>(
     handles: Option<&H>,
     subscriptions: Option<&SubscriptionRuntime>,

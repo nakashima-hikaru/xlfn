@@ -5,6 +5,7 @@ mod context;
 #[cfg(feature = "handles")]
 mod handles;
 mod payload;
+#[cfg(feature = "rtd")]
 mod rtd;
 mod traits;
 
