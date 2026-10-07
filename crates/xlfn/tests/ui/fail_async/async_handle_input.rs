@@ -2,7 +2,11 @@ use xlfn::prelude::*;
 
 struct State;
 
-#[excel_addin(name = "Async Compile Test", id = "async-compile-test", category = "Test")]
+#[excel_addin(
+    name = "Async Compile Test",
+    id = "async-compile-test",
+    category = "Test"
+)]
 struct AsyncTestAddin;
 
 impl Addin for AsyncTestAddin {
@@ -11,7 +15,9 @@ impl Addin for AsyncTestAddin {
     type Error = XllError;
     type Layers = ();
 
-    fn open(_: &OpenContext) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
+    fn open(
+        _: &OpenContext,
+    ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
         Ok(Opened::new(State))
     }
 }
@@ -23,7 +29,7 @@ struct Dataset {
 
 #[excel_function(name = "TEST.HANDLE.ASYNC")]
 async fn async_handle_input(
-    #[excel_context(asynchronous)] context: AsyncContext<'_, State>,
+    context: AsyncContext<'_, AsyncTestAddin>,
     dataset: Handle<'_, Dataset>,
 ) -> XllResult<f64> {
     let _ = context.state();

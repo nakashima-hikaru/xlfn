@@ -1,0 +1,62 @@
+error[E0308]: mismatched types
+  --> tests/ui/fail/context_lookalike.rs:32:1
+   |
+32 | #[excel_function]
+   | ^^^^^^^^^^^^^^^^^ expected `MainThreadContext<'_, ()>`, found `MainThreadContext<'_, _>`
+33 | fn main_context(context: custom::MainThreadContext<'_, ()>) -> f64 {
+   |                          --------------------------------- expected due to this
+   |
+   = note: `xlfn::MainThreadContext<'_, _>` and `custom::MainThreadContext<'_, ()>` have similar names, but are actually distinct types
+note: `xlfn::MainThreadContext<'_, _>` is defined in crate `xlfn`
+  --> src/addin.rs
+   |
+   | pub struct MainThreadContext<'call, A: Addin> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: `custom::MainThreadContext<'_, ()>` is defined in the current crate
+  --> tests/ui/fail/context_lookalike.rs:11:5
+   |
+11 |     pub struct MainThreadContext<'call, A>(PhantomData<&'call A>);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0308]: mismatched types
+  --> tests/ui/fail/context_lookalike.rs:38:1
+   |
+38 | #[excel_function]
+   | ^^^^^^^^^^^^^^^^^ expected `ThreadSafeContext<'_, ()>`, found `ThreadSafeContext<'_, _>`
+39 | fn thread_context(context: custom::ThreadSafeContext<'_, ()>) -> f64 {
+   |                            --------------------------------- expected due to this
+   |
+   = note: `xlfn::ThreadSafeContext<'_, _>` and `custom::ThreadSafeContext<'_, ()>` have similar names, but are actually distinct types
+note: `xlfn::ThreadSafeContext<'_, _>` is defined in crate `xlfn`
+  --> src/addin.rs
+   |
+   | pub struct ThreadSafeContext<'call, A: Addin> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: `custom::ThreadSafeContext<'_, ()>` is defined in the current crate
+  --> tests/ui/fail/context_lookalike.rs:12:5
+   |
+12 |     pub struct ThreadSafeContext<'call, A>(PhantomData<&'call A>);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0308]: mismatched types
+  --> tests/ui/fail/context_lookalike.rs:44:1
+   |
+44 | #[excel_function]
+   | ^^^^^^^^^^^^^^^^^ expected `MacroSheetContext<'_, ()>`, found `MacroSheetContext<'_, _>`
+45 | fn macro_context(context: custom::MacroSheetContext<'_, ()>) -> f64 {
+   |                           --------------------------------- expected due to this
+   |
+   = note: `xlfn::MacroSheetContext<'_, _>` and `custom::MacroSheetContext<'_, ()>` have similar names, but are actually distinct types
+note: `xlfn::MacroSheetContext<'_, _>` is defined in crate `xlfn`
+  --> src/addin.rs
+   |
+   | pub struct MacroSheetContext<'call, A: Addin> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: `custom::MacroSheetContext<'_, ()>` is defined in the current crate
+  --> tests/ui/fail/context_lookalike.rs:13:5
+   |
+13 |     pub struct MacroSheetContext<'call, A>(PhantomData<&'call A>);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)

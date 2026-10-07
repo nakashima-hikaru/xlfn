@@ -68,8 +68,9 @@ external library on the call path supports concurrent access. It does not add
 synchronization for you.
 
 Without a mode flag or context, a synchronous function runs on Excel's main
-thread. Functions that read shared state use an injected context as their first
-parameter; that context also selects their execution mode. See
+thread. Functions that read shared state use a standard context type directly
+as their first parameter. A synchronous context selects the execution mode;
+omit mode flags when a context is present. See
 [Execution modes and contexts](execution-modes.md) before adding state or Excel
 callbacks. A function that performs asynchronous work uses `async fn` and the
 `async` Cargo feature; see [Asynchronous functions](async-functions.md).

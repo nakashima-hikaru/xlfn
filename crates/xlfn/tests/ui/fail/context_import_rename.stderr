@@ -1,8 +1,8 @@
-error[E0277]: the trait bound `xlfn::MainThreadContext<'_, ()>: xlfn::__private::v1::ExcelParameter<'_, xlfn::__private::v1::PlainInputMode>` is not satisfied
- --> tests/ui/fail/context_attribute_missing.rs:7:17
+error[E0277]: the trait bound `ThreadSafeContext<'_, ()>: xlfn::__private::v1::ExcelParameter<'_, xlfn::__private::v1::PlainInputMode>` is not satisfied
+ --> tests/ui/fail/context_import_rename.rs:9:17
   |
-7 | fn bad(context: MainThreadContext<'_, ()>) -> f64 {
-  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `FromExcel<'_>` is not implemented for `xlfn::MainThreadContext<'_, ()>`
+9 | fn bad(context: WorkerContext<'_, ()>) -> f64 {
+  |                 ^^^^^^^^^^^^^^^^^^^^^ the trait `FromExcel<'_>` is not implemented for `ThreadSafeContext<'_, ()>`
   |
   = help: the following other types implement trait `FromExcel<'call>`:
             ExcelCellValue
@@ -14,7 +14,7 @@ error[E0277]: the trait bound `xlfn::MainThreadContext<'_, ()>: xlfn::__private:
             i32
             i64
           and $N others
-  = note: required for `xlfn::MainThreadContext<'_, ()>` to implement `xlfn::__private::v1::ExcelParameter<'_, xlfn::__private::v1::PlainInputMode>`
+  = note: required for `ThreadSafeContext<'_, ()>` to implement `xlfn::__private::v1::ExcelParameter<'_, xlfn::__private::v1::PlainInputMode>`
 note: required by a bound in `xlfn::__private::v1::assert_excel_parameter`
  --> src/__private.rs
   |
@@ -24,13 +24,13 @@ note: required by a bound in `xlfn::__private::v1::assert_excel_parameter`
   |         T: ExcelParameter<'call, R::InputMode>,
   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_excel_parameter`
 
-error[E0277]: `xlfn::MainThreadContext<'_, ()>` cannot be converted from an Excel argument
- --> tests/ui/fail/context_attribute_missing.rs:6:1
+error[E0277]: `ThreadSafeContext<'_, ()>` cannot be converted from an Excel argument
+ --> tests/ui/fail/context_import_rename.rs:8:1
   |
-6 | #[excel_function(name = "FAIL.CONTEXT")]
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `xlfn::MainThreadContext<'_, ()>` does not implement `FromExcel`
+8 | #[excel_function]
+  | ^^^^^^^^^^^^^^^^^ `ThreadSafeContext<'_, ()>` does not implement `FromExcel`
   |
-  = help: the trait `FromExcel<'_>` is not implemented for `xlfn::MainThreadContext<'_, ()>`
+  = help: the trait `FromExcel<'_>` is not implemented for `ThreadSafeContext<'_, ()>`
   = note: implement `FromExcel` for this argument type or use a supported argument type
   = help: the following other types implement trait `FromExcel<'call>`:
             ExcelCellValue
@@ -42,5 +42,5 @@ error[E0277]: `xlfn::MainThreadContext<'_, ()>` cannot be converted from an Exce
             i32
             i64
           and $N others
-  = note: required for `xlfn::MainThreadContext<'_, ()>` to implement `xlfn::__private::v1::ExcelParameter<'_, xlfn::__private::v1::PlainInputMode>`
+  = note: required for `ThreadSafeContext<'_, ()>` to implement `xlfn::__private::v1::ExcelParameter<'_, xlfn::__private::v1::PlainInputMode>`
   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)

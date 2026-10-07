@@ -1,5 +1,5 @@
-error: only one #[excel_context(...)] parameter is allowed
- --> tests/ui/fail/context_multiple.rs:6:35
+error: only one injected context parameter is allowed
+ --> tests/ui/fail/context_multiple.rs:7:42
   |
-6 |     #[excel_context(thread_safe)] second: f64,
-  |                                   ^^^^^^^^^^^
+7 | fn bad(first: MainThreadContext<'_, ()>, second: ThreadSafeContext<'_, ()>) -> f64 {
+  |                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

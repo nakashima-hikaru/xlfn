@@ -3,8 +3,10 @@ use xlfn::prelude::*;
 static __XLFN_RUNTIME: xlfn::__private::v1::MacroRuntime<()> =
     xlfn::__private::v1::MacroRuntime::new();
 
-#[excel_function(name = "FAIL.CONTEXT.REFERENCE")]
-fn bad(#[excel_context(main_thread)] context: &MainThreadContext<'_, ()>) -> f64 {
+use xlfn::ThreadSafeContext as WorkerContext;
+
+#[excel_function]
+fn bad(context: WorkerContext<'_, ()>) -> f64 {
     let _ = context;
     0.0
 }

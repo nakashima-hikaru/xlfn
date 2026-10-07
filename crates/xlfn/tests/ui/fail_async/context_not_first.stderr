@@ -1,0 +1,5 @@
+error: an injected context must be the first argument
+  --> tests/ui/fail_async/context_not_first.rs:18:26
+   |
+18 | async fn bad(value: f64, context: AsyncContext<'_, TestAddin>) -> f64 {
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

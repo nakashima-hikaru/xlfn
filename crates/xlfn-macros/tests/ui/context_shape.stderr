@@ -1,0 +1,35 @@
+error: an injected context must be the first argument
+ --> tests/ui/context_shape.rs:4:22
+  |
+4 | fn later(input: f64, context: MainThreadContext<'_, State>) -> f64 {
+  |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: only one injected context parameter is allowed
+ --> tests/ui/context_shape.rs:9:52
+  |
+9 | fn multiple(context: MainThreadContext<'_, State>, other: ThreadSafeContext<'_, State>) -> f64 {
+  |                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: injected contexts must be passed by value
+  --> tests/ui/context_shape.rs:14:22
+   |
+14 | fn borrowed(context: &MainThreadContext<'_, State>) -> f64 {
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: injected contexts cannot use qualified associated type paths
+  --> tests/ui/context_shape.rs:19:24
+   |
+19 | fn associated(context: <Owner as Trait>::MainThreadContext<'_, State>) -> f64 {
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: injected context types must specify an add-in type, optionally preceded by a lifetime
+  --> tests/ui/context_shape.rs:24:27
+   |
+24 | fn missing_addin(context: MainThreadContext<'_>) -> f64 {
+   |                           ^^^^^^^^^^^^^^^^^^^^^
+
+error: injected contexts cannot use #[excel_arg(...)]
+  --> tests/ui/context_shape.rs:29:19
+   |
+29 | fn excel_argument(#[excel_arg(name = "context")] context: MainThreadContext<'_, State>) -> f64 {
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

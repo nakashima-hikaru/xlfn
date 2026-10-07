@@ -1,0 +1,5 @@
+error: injected contexts must be passed by value
+  --> tests/ui/fail_async/context_by_reference.rs:18:23
+   |
+18 | async fn bad(context: &AsyncContext<'_, TestAddin>) -> f64 {
+   |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^

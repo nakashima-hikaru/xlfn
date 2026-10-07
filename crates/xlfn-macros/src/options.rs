@@ -53,48 +53,6 @@ pub(super) struct ParsedAddinOptions {
     pub(super) krate: Option<syn::Path>,
 }
 
-#[derive(Clone, Copy)]
-pub(super) enum ContextKind {
-    ThreadSafe,
-    MainThread,
-    MacroSheet,
-    Async,
-}
-
-pub(super) fn parse_context_attribute(attribute: &syn::Attribute) -> syn::Result<ContextKind> {
-    let entries = attribute.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)?;
-    if entries.is_empty() {
-        return Err(syn::Error::new_spanned(
-            attribute,
-            "#[excel_context(...)] requires one role: main_thread, thread_safe, macro_sheet, or asynchronous",
-        ));
-    }
-    if entries.len() != 1 {
-        return Err(syn::Error::new_spanned(
-            entries,
-            "#[excel_context(...)] accepts exactly one role",
-        ));
-    }
-    let entry = entries.first().expect("one entry was validated");
-    let Meta::Path(path) = entry else {
-        return Err(syn::Error::new_spanned(entry, "expected a context role"));
-    };
-    if path.is_ident("main_thread") {
-        Ok(ContextKind::MainThread)
-    } else if path.is_ident("thread_safe") {
-        Ok(ContextKind::ThreadSafe)
-    } else if path.is_ident("macro_sheet") {
-        Ok(ContextKind::MacroSheet)
-    } else if path.is_ident("asynchronous") {
-        Ok(ContextKind::Async)
-    } else {
-        Err(syn::Error::new_spanned(
-            path,
-            "unknown context role; expected main_thread, thread_safe, macro_sheet, or asynchronous",
-        ))
-    }
-}
-
 /// Parses one `#[excel_arg(...)]` attribute without interpreting its policy
 /// values. The parser only owns syntax concerns such as duplicate keys and
 /// literal kinds; semantic normalization belongs to the UDF analyzer.

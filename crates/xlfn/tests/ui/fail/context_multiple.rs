@@ -1,11 +1,12 @@
 use xlfn::prelude::*;
 
-#[excel_function(name = "FAIL.CONTEXT")]
-fn bad(
-    #[excel_context(main_thread)] first: f64,
-    #[excel_context(thread_safe)] second: f64,
-) -> f64 {
-    first + second
+static __XLFN_RUNTIME: xlfn::__private::v1::MacroRuntime<()> =
+    xlfn::__private::v1::MacroRuntime::new();
+
+#[excel_function]
+fn bad(first: MainThreadContext<'_, ()>, second: ThreadSafeContext<'_, ()>) -> f64 {
+    let _ = (first, second);
+    0.0
 }
 
 fn main() {}

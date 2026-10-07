@@ -37,10 +37,15 @@ use validation::validate_addin_metadata;
 ///
 /// Excel-visible arguments and return values are selected by their conversion
 /// trait implementations. An `async fn` selects asynchronous mode directly;
-/// there is no `#[excel_function(async)]` mode flag. Injected contexts must be
-/// the first parameter and carry an explicit `#[excel_context(...)]` role.
-/// A `thread_safe` or `macro_sheet` flag may repeat a matching context role;
-/// conflicting modes are rejected.
+/// there is no `#[excel_function(async)]` mode flag. A standard context type
+/// (`MainThreadContext`, `ThreadSafeContext`, `MacroSheetContext`, or
+/// `AsyncContext`) is injected when passed by value as the first parameter.
+/// Its final path identifier selects the context; ordinary imports and
+/// qualified paths work, while type aliases and renamed imports do not select
+/// injection. `AsyncContext` is permitted only on an `async fn`.
+/// `thread_safe` and `macro_sheet` select execution only for functions without
+/// an injected context. Either flag combined with a context or an `async fn`
+/// is rejected.
 /// `#[excel_arg(default = expression)]` defaults omitted arguments; blank cells
 /// keep the parameter type's ordinary conversion unless `blank = default` is
 /// selected. Explicit `missing` policies override this inferred default.
@@ -692,9 +697,7 @@ mod tests {
             quote!(name = "TEST.VALUE"),
             function(quote!(
                 /// Function Wizard help.
-                fn value(
-                    #[excel_context(thread_safe)] context: ThreadSafeContext<'_, State>,
-                ) -> i32 {
+                fn value(context: ThreadSafeContext<'_, State>) -> i32 {
                     1
                 }
             )),
@@ -710,78 +713,121 @@ mod tests {
     }
 
     #[test]
-    fn context_role_comes_only_from_the_attribute() {
-        let expanded = expand_excel_function(
-            quote!(name = "TEST.ALIAS"),
-            function(quote!(
-                fn value(#[excel_context(main_thread)] context: MainContext<'_>) -> i32 {
-                    1
-                }
-            )),
-        )
-        .unwrap()
-        .to_string();
-        assert!(expanded.contains("let __context : MainContext"));
-        assert!(expanded.contains("main_thread_context"));
-    }
-
-    #[test]
-    fn execution_mode_flags_can_repeat_matching_context_roles() {
-        let expanded = expand_excel_function(
-            quote!(name = "TEST.DUPLICATE.THREAD", thread_safe),
-            function(quote!(
-                fn value(
-                    #[excel_context(thread_safe)] context: ThreadSafeContext<'_, State>,
-                ) -> i32 {
-                    let _ = context;
-                    1
-                }
-            )),
-        )
-        .unwrap()
-        .to_string();
-        assert!(expanded.contains("thread_safe_context"));
-        assert!(!expanded.contains("macro_sheet_context"));
-
-        let expanded = expand_excel_function(
-            quote!(name = "TEST.DUPLICATE.MACRO", macro_sheet),
-            function(quote!(
-                fn value(
-                    #[excel_context(macro_sheet)] context: MacroSheetContext<'_, State>,
-                ) -> i32 {
-                    let _ = context;
-                    1
-                }
-            )),
-        )
-        .unwrap()
-        .to_string();
-        assert!(expanded.contains("macro_sheet_context"));
-        assert!(!expanded.contains("thread_safe_context"));
-    }
-
-    #[test]
-    fn execution_mode_flags_reject_conflicting_context_roles() {
-        for (flag, role) in [
-            (quote!(thread_safe), quote!(main_thread)),
-            (quote!(thread_safe), quote!(macro_sheet)),
-            (quote!(macro_sheet), quote!(main_thread)),
-            (quote!(macro_sheet), quote!(thread_safe)),
+    fn standard_context_types_select_execution_and_are_not_excel_arguments() {
+        use xlfn_common::ExecutionKind;
+        for (is_async, context, kind) in [
+            (
+                false,
+                quote!(MainThreadContext<'_, State>),
+                ExecutionKind::MainThread,
+            ),
+            (
+                false,
+                quote!(ThreadSafeContext<'_, State>),
+                ExecutionKind::ThreadSafe,
+            ),
+            (
+                false,
+                quote!(MacroSheetContext<'_, State>),
+                ExecutionKind::MacroSheet,
+            ),
+            (true, quote!(AsyncContext<'_, State>), ExecutionKind::Async),
+            (
+                false,
+                quote!(xlfn::MainThreadContext<'_, State>),
+                ExecutionKind::MainThread,
+            ),
+            (
+                false,
+                quote!(::xlfn::ThreadSafeContext<'_, State>),
+                ExecutionKind::ThreadSafe,
+            ),
+            (
+                false,
+                quote!(crate::contexts::MacroSheetContext<'_, State>),
+                ExecutionKind::MacroSheet,
+            ),
+            (
+                true,
+                quote!(::xlfn::AsyncContext<'_, State>),
+                ExecutionKind::Async,
+            ),
+            (
+                false,
+                quote!(MainThreadContext<State>),
+                ExecutionKind::MainThread,
+            ),
+            (
+                false,
+                quote!(ThreadSafeContext<State>),
+                ExecutionKind::ThreadSafe,
+            ),
+            (
+                false,
+                quote!(MacroSheetContext<State>),
+                ExecutionKind::MacroSheet,
+            ),
+            (true, quote!(AsyncContext<State>), ExecutionKind::Async),
         ] {
-            let error = expand_excel_function(
-                flag,
+            let asyncness = is_async.then(|| quote!(async));
+            let parsed = model::parse_udf(
+                quote!(),
                 function(quote!(
-                    fn value(#[excel_context(#role)] context: Context<'_, State>) -> i32 {
-                        let _ = context;
-                        1
-                    }
+                    #asyncness fn value(context: #context, input: f64) -> f64 { input }
                 )),
             )
-            .unwrap_err();
-            assert!(
-                error.to_string().contains("cannot be marked")
-                    || error.to_string().contains("incompatible")
-            );
+            .unwrap();
+            let spec = model::analyze(parsed).unwrap();
+            assert_eq!(spec.execution.kind(), kind);
+            assert!(spec.execution.context_type().is_some());
+            assert_eq!(spec.arguments.len(), 1);
+            assert_eq!(spec.arguments[0].excel_name, "input");
+        }
+    }
+
+    #[test]
+    fn aliases_renamed_imports_and_custom_types_are_excel_arguments() {
+        for context in [
+            quote!(MainContext<'_>),
+            quote!(Context<'_, State>),
+            quote!(CustomContext),
+            quote!(RenamedAsyncContext<'_, State>),
+        ] {
+            let parsed = model::parse_udf(
+                quote!(),
+                function(quote!(fn value(context: #context) -> f64 { 1.0 })),
+            )
+            .unwrap();
+            let spec = model::analyze(parsed).unwrap();
+            assert!(spec.execution.context_type().is_none());
+            assert_eq!(spec.arguments.len(), 1);
+            assert_eq!(spec.arguments[0].excel_name, "context");
+        }
+    }
+
+    #[test]
+    fn execution_mode_flags_reject_every_injected_context() {
+        for (asyncness, context) in [
+            (quote!(), quote!(MainThreadContext<'_, State>)),
+            (quote!(), quote!(ThreadSafeContext<'_, State>)),
+            (quote!(), quote!(MacroSheetContext<'_, State>)),
+            (quote!(async), quote!(AsyncContext<'_, State>)),
+        ] {
+            for flag in [
+                quote!(thread_safe),
+                quote!(macro_sheet),
+                quote!(thread_safe, macro_sheet),
+            ] {
+                let error = expand_excel_function(
+                    flag,
+                    function(quote!(#asyncness fn value(context: #context) -> f64 { 1.0 })),
+                )
+                .unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    "thread_safe and macro_sheet cannot be combined with an injected context"
+                );
+            }
         }
     }
 
@@ -790,10 +836,7 @@ mod tests {
         let expanded = expand_excel_function(
             quote!(name = "TEST.ASYNC"),
             function(quote!(
-                async fn value(
-                    #[excel_context(asynchronous)] context: AsyncContext<'_, State>,
-                    input: f64,
-                ) -> XllResult<f64> {
+                async fn value(context: AsyncContext<'_, State>, input: f64) -> XllResult<f64> {
                     Ok(input)
                 }
             )),
@@ -827,19 +870,158 @@ mod tests {
     }
 
     #[test]
-    fn async_function_rejects_a_non_async_context_role() {
-        let context_error = expand_excel_function(
-            quote!(name = "TEST.ASYNC"),
+    fn asyncness_requires_the_matching_context_type() {
+        for context in [
+            quote!(MainThreadContext<'_, State>),
+            quote!(ThreadSafeContext<'_, State>),
+            quote!(MacroSheetContext<'_, State>),
+        ] {
+            let error = expand_excel_function(
+                quote!(),
+                function(quote!(async fn value(context: #context) -> f64 { 1.0 })),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "an async Excel function can only inject AsyncContext"
+            );
+        }
+        let error = expand_excel_function(
+            quote!(),
             function(quote!(
-                async fn value(
-                    #[excel_context(thread_safe)] context: &ThreadSafeContext<'_, State>,
-                ) -> f64 {
+                fn value(context: AsyncContext<'_, State>) -> f64 {
                     1.0
                 }
             )),
         )
         .unwrap_err();
-        assert!(context_error.to_string().contains("asynchronous"));
+        assert_eq!(
+            error.to_string(),
+            "AsyncContext can only be injected by an async Excel function"
+        );
+    }
+
+    #[test]
+    fn async_functions_reject_synchronous_execution_flags_without_context() {
+        for (flag, expected) in [
+            (
+                quote!(thread_safe),
+                "an async Excel function cannot be marked thread_safe",
+            ),
+            (
+                quote!(macro_sheet),
+                "an async Excel function cannot be a macro-sheet function",
+            ),
+        ] {
+            let error = expand_excel_function(
+                flag,
+                function(quote!(
+                    async fn value(input: f64) -> f64 {
+                        input
+                    }
+                )),
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn contexts_require_one_first_parameter_by_value_with_standard_generics() {
+        for (parameters, expected) in [
+            (
+                quote!(input: f64, context: MainThreadContext<'_, State>),
+                "an injected context must be the first argument",
+            ),
+            (
+                quote!(context: MainThreadContext<'_, State>, another: ThreadSafeContext<'_, State>),
+                "only one injected context parameter is allowed",
+            ),
+            (
+                quote!(context: &MainThreadContext<'_, State>),
+                "injected contexts must be passed by value",
+            ),
+            (
+                quote!(context: &mut MacroSheetContext<'_, State>),
+                "injected contexts must be passed by value",
+            ),
+            (
+                quote!(context: *const ThreadSafeContext<'_, State>),
+                "injected contexts must be passed by value",
+            ),
+            (
+                quote!(context: <Owner as Trait>::MainThreadContext<'_, State>),
+                "injected contexts cannot use qualified associated type paths",
+            ),
+            (
+                quote!(#[excel_arg(name = "context")] context: MainThreadContext<'_, State>),
+                "injected contexts cannot use #[excel_arg(...)]",
+            ),
+        ] {
+            let error = expand_excel_function(
+                quote!(),
+                function(quote!(fn value(#parameters) -> f64 { 1.0 })),
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), expected);
+        }
+        for context in [
+            quote!(MainThreadContext),
+            quote!(ThreadSafeContext<'_, State, Extra>),
+            quote!(MacroSheetContext<'_>),
+            quote!(AsyncContext<State, '_, Extra>),
+        ] {
+            let error = expand_excel_function(
+                quote!(),
+                function(quote!(fn value(context: #context) -> f64 { 1.0 })),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "injected context types must specify an add-in type, optionally preceded by a lifetime"
+            );
+        }
+    }
+
+    #[test]
+    fn excel_context_attributes_are_rejected_without_role_parsing() {
+        for attribute in [
+            quote!(#[excel_context(main_thread)]),
+            quote!(#[excel_context(asynchronous)]),
+            quote!(#[excel_context]),
+            quote!(#[excel_context(unknown, extra)]),
+        ] {
+            let error = expand_excel_function(
+                quote!(),
+                function(quote!(fn value(#attribute context: MainThreadContext<'_, State>) -> f64 { 1.0 })),
+            ).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "#[excel_context(...)] is not supported; use a standard context type as the first parameter"
+            );
+        }
+    }
+
+    #[test]
+    fn scoped_handle_async_builder_constructs_the_standard_context() {
+        let expanded = expand_excel_function(
+            quote!(),
+            function(quote!(
+                async fn value(
+                    context: xlfn::AsyncContext<'_, State>,
+                    object: HandleLease<'_, Dataset>,
+                ) -> f64 {
+                    1.0
+                }
+            )),
+        )
+        .unwrap()
+        .to_string();
+        assert!(expanded.contains("ExecutionLease < State >"));
+        assert!(expanded.contains("async_context :: < State >"));
+        assert!(expanded.contains("let __context : xlfn :: AsyncContext"));
+        assert!(!expanded.contains("AsyncContextFactory"));
+        assert!(!expanded.contains("async_context_for"));
     }
 
     #[test]
@@ -882,15 +1064,16 @@ mod tests {
         let error = expand_excel_function(
             quote!(name = "TEST.REF", thread_safe),
             function(quote!(
-                fn bad(
-                    #[excel_context(macro_sheet)] context: &MacroSheetContext<'_, State>,
-                ) -> XllResult<i32> {
+                fn bad(context: MacroSheetContext<'_, State>) -> XllResult<i32> {
                     Ok(1)
                 }
             )),
         )
         .unwrap_err();
-        assert!(error.to_string().contains("cannot be marked `thread_safe`"));
+        assert_eq!(
+            error.to_string(),
+            "thread_safe and macro_sheet cannot be combined with an injected context"
+        );
 
         let error = expand_excel_function(
             quote!(name = "TEST.REF", macro_sheet, thread_safe),

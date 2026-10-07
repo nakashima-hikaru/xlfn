@@ -295,10 +295,11 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
             };
         builder_struct_fields.push(quote!(#name: #field_type,));
     }
-    let builder_addin_ident = syn::Ident::new("__XlfnHandleAddin", proc_macro2::Span::mixed_site());
-    let builder_lease_field = context_type
-        .is_some()
-        .then(|| quote!(__lease: #krate::__private::v1::ExecutionLease<#builder_addin_ident>,));
+    let context_addin_type = context_type.map(|context| {
+        model::context_addin_type(context).expect("context syntax was validated by the analyzer")
+    });
+    let builder_lease_field = context_addin_type
+        .map(|addin| quote!(__lease: #krate::__private::v1::ExecutionLease<#addin>,));
     if let Some(field) = builder_lease_field {
         builder_struct_fields.push(field);
     }
@@ -334,24 +335,10 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
     if context_type.is_some() {
         builder_initializers.push(quote!(__cancellation: __cancellation,));
     }
-    let context_type_for_bound = context_type.map(|context| {
-        let mut context = context.clone();
-        if let syn::Type::Path(path) = &mut context {
-            for segment in &mut path.path.segments {
-                if let syn::PathArguments::AngleBracketed(arguments) = &mut segment.arguments {
-                    for argument in &mut arguments.args {
-                        if let syn::GenericArgument::Lifetime(lifetime) = argument {
-                            *lifetime = syn::parse_quote!('__xlfn_context);
-                        }
-                    }
-                }
-            }
-        }
-        context
-    });
     let builder_context_setup = context_type.map(|context| {
+        let addin = context_addin_type.expect("an injected context has an add-in type");
         quote! {
-            let __generated_context = #krate::__private::v1::async_context_for(
+            let __generated_context = #krate::__private::v1::async_context::<#addin>(
                 &__lease,
                 &__cancellation,
             );
@@ -359,48 +346,15 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
         }
     });
     let builder_context_setup = builder_context_setup.unwrap_or_else(|| quote!());
-    let (builder_type, builder_struct, builder_impl_generics, builder_where) =
-        if context_type.is_some() {
-            let context_type_for_bound = context_type_for_bound
-                .as_ref()
-                .expect("async context types are path types");
-            (
-                quote!(#builder_ident<#builder_addin_ident>),
-                quote! {
-                    struct #builder_ident<#builder_addin_ident: #krate::Addin> {
-                        #(#builder_struct_fields)*
-                    }
-                },
-                quote!(impl<#builder_addin_ident: #krate::Addin>),
-                quote! {
-                    where
-                        for<'__xlfn_context> #context_type_for_bound:
-                            #krate::__private::v1::AsyncContextFactory<
-                                '__xlfn_context,
-                                #builder_addin_ident,
-                            >
-                },
-            )
-        } else {
-            (
-                quote!(#builder_ident),
-                quote! {
-                    struct #builder_ident {
-                        #(#builder_struct_fields)*
-                    }
-                },
-                quote!(impl),
-                quote!(),
-            )
-        };
     let builder_definition = if has_handle_lease {
         quote! {
-            #builder_struct
+            struct #builder_ident {
+                #(#builder_struct_fields)*
+            }
 
-            #builder_impl_generics
+            impl
                 #krate::__private::v1::HandleScopedBuilder<#return_type>
-                for #builder_type
-            #builder_where
+                for #builder_ident
             {
                 fn build<'generation>(
                     self,

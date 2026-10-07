@@ -6,8 +6,7 @@
 
 use crate::function::UdfFunction;
 use crate::options::{
-    ContextKind, ParsedArgumentOptions, ParsedFunctionOptions, parse_argument_options,
-    parse_context_attribute, parse_function_options,
+    ParsedArgumentOptions, ParsedFunctionOptions, parse_argument_options, parse_function_options,
 };
 use crate::support::{doc_comment, extract_gating_attributes, resolve_crate_path};
 use crate::validation::{validate_export_id, validate_registration_string};
@@ -26,8 +25,73 @@ pub(super) struct ParsedUdf {
 }
 
 pub(super) struct ParsedContext {
-    pub(super) kind: ContextKind,
+    kind: ContextKind,
     pub(super) ty: Type,
+}
+
+#[derive(Clone, Copy)]
+enum ContextKind {
+    MainThread,
+    ThreadSafe,
+    MacroSheet,
+    Async,
+}
+
+/// Context injection is syntax: Rust name resolution and aliases are outside
+/// the proc macro's view. Inspect wrapped paths too, so recognizable borrowed
+/// or associated context types receive a deterministic error below.
+fn context_type_path(ty: &Type) -> Option<&syn::TypePath> {
+    match ty {
+        Type::Path(path) => Some(path),
+        Type::Reference(reference) => context_type_path(&reference.elem),
+        Type::Ptr(pointer) => context_type_path(&pointer.elem),
+        Type::Paren(paren) => context_type_path(&paren.elem),
+        Type::Group(group) => context_type_path(&group.elem),
+        _ => None,
+    }
+}
+
+fn recognize_context_type(ty: &Type) -> Option<ContextKind> {
+    let ident = &context_type_path(ty)?.path.segments.last()?.ident;
+    match ident.unraw().to_string().as_str() {
+        "MainThreadContext" => Some(ContextKind::MainThread),
+        "ThreadSafeContext" => Some(ContextKind::ThreadSafe),
+        "MacroSheetContext" => Some(ContextKind::MacroSheet),
+        "AsyncContext" => Some(ContextKind::Async),
+        _ => None,
+    }
+}
+
+fn is_context_value_path(ty: &Type) -> bool {
+    match ty {
+        Type::Path(_) => true,
+        Type::Paren(paren) => is_context_value_path(&paren.elem),
+        Type::Group(group) => is_context_value_path(&group.elem),
+        _ => false,
+    }
+}
+
+pub(super) fn context_addin_type(ty: &Type) -> syn::Result<&Type> {
+    let arguments = context_type_path(ty)
+        .and_then(|path| path.path.segments.last())
+        .and_then(|segment| match &segment.arguments {
+            PathArguments::AngleBracketed(arguments) => Some(&arguments.args),
+            _ => None,
+        });
+    if let Some(arguments) = arguments {
+        let mut entries = arguments.iter();
+        match (entries.next(), entries.next(), entries.next()) {
+            (Some(GenericArgument::Type(addin)), None, None)
+            | (Some(GenericArgument::Lifetime(_)), Some(GenericArgument::Type(addin)), None) => {
+                return Ok(addin);
+            }
+            _ => {}
+        }
+    }
+    Err(syn::Error::new_spanned(
+        ty,
+        "injected context types must specify an add-in type, optionally preceded by a lifetime",
+    ))
 }
 
 pub(super) struct ParsedArgument {
@@ -210,19 +274,15 @@ pub(super) fn parse_udf(
         };
 
         let mut retained = Vec::new();
-        let mut argument_context = None;
         let mut has_excel_arg = false;
         let mut excel_arg_attribute = None;
         let mut argument_options = ParsedArgumentOptions::default();
         for attribute in std::mem::take(&mut argument.attrs) {
             if attribute.path().is_ident("excel_context") {
-                let kind = parse_context_attribute(&attribute)?;
-                if argument_context.replace(kind).is_some() {
-                    return Err(syn::Error::new_spanned(
-                        attribute,
-                        "an argument can have only one #[excel_context(...)] role",
-                    ));
-                }
+                return Err(syn::Error::new_spanned(
+                    attribute,
+                    "#[excel_context(...)] is not supported; use a standard context type as the first parameter",
+                ));
             } else if attribute.path().is_ident("excel_arg") {
                 has_excel_arg = true;
                 parse_argument_options(&attribute, &mut argument_options)?;
@@ -233,17 +293,30 @@ pub(super) fn parse_udf(
         }
         argument.attrs = retained;
 
-        if let Some(kind) = argument_context {
+        if let Some(kind) = recognize_context_type(&argument.ty) {
+            if !is_context_value_path(&argument.ty) {
+                return Err(syn::Error::new_spanned(
+                    &argument.ty,
+                    "injected contexts must be passed by value",
+                ));
+            }
+            if context_type_path(&argument.ty).is_some_and(|path| path.qself.is_some()) {
+                return Err(syn::Error::new_spanned(
+                    &argument.ty,
+                    "injected contexts cannot use qualified associated type paths",
+                ));
+            }
+            context_addin_type(&argument.ty)?;
             if context.is_some() {
                 return Err(syn::Error::new_spanned(
                     argument,
-                    "only one #[excel_context(...)] parameter is allowed",
+                    "only one injected context parameter is allowed",
                 ));
             }
             if index != 0 {
                 return Err(syn::Error::new_spanned(
                     argument,
-                    "the #[excel_context(...)] parameter must be the first argument",
+                    "an injected context must be the first argument",
                 ));
             }
             if has_excel_arg {
@@ -252,7 +325,7 @@ pub(super) fn parse_udf(
                 }
                 return Err(syn::Error::new_spanned(
                     argument,
-                    "#[excel_context(...)] cannot be combined with #[excel_arg(...)]",
+                    "injected contexts cannot use #[excel_arg(...)]",
                 ));
             }
             context = Some(ParsedContext {
@@ -391,31 +464,25 @@ fn analyze_execution(
 ) -> syn::Result<ExecutionSpec> {
     let is_async = function.sig.asyncness.is_some();
     let context_kind = context.map(|context| context.kind);
+    if context_kind.is_some() && (options.thread_safe || options.macro_sheet) {
+        return Err(syn::Error::new_spanned(
+            &function.sig.inputs,
+            "thread_safe and macro_sheet cannot be combined with an injected context",
+        ));
+    }
     if is_async && context_kind.is_some() && !matches!(context_kind, Some(ContextKind::Async)) {
         return Err(syn::Error::new_spanned(
             &function.sig.inputs,
-            "an async Excel function must use #[excel_context(asynchronous)]",
+            "an async Excel function can only inject AsyncContext",
         ));
     }
     if !is_async && matches!(context_kind, Some(ContextKind::Async)) {
         return Err(syn::Error::new_spanned(
             &function.sig.inputs,
-            "#[excel_context(asynchronous)] can only be used by an async Excel function",
+            "AsyncContext can only be injected by an async Excel function",
         ));
     }
     let quote = char::from(96);
-    if matches!(context_kind, Some(ContextKind::MainThread)) && options.thread_safe {
-        return Err(syn::Error::new_spanned(
-            &function.sig.inputs,
-            format!("a main-thread context function cannot be marked {quote}thread_safe{quote}"),
-        ));
-    }
-    if matches!(context_kind, Some(ContextKind::MacroSheet)) && options.thread_safe {
-        return Err(syn::Error::new_spanned(
-            &function.sig.inputs,
-            format!("a macro-sheet context function cannot be marked {quote}thread_safe{quote}"),
-        ));
-    }
     if options.macro_sheet && options.thread_safe {
         return Err(syn::Error::new_spanned(
             &function.sig,
@@ -428,18 +495,12 @@ fn analyze_execution(
             "an async Excel function cannot be a macro-sheet function",
         ));
     }
-    if options.macro_sheet
-        && matches!(
-            context_kind,
-            Some(ContextKind::MainThread | ContextKind::ThreadSafe | ContextKind::Async)
-        )
-    {
+    if options.thread_safe && is_async {
         return Err(syn::Error::new_spanned(
-            &function.sig.inputs,
-            "`macro_sheet` is incompatible with this context role",
+            &function.sig,
+            "an async Excel function cannot be marked thread_safe",
         ));
     }
-
     let context_ty = context.map(|context| context.ty.clone());
     Ok(if is_async {
         ExecutionSpec::Async { context_ty }

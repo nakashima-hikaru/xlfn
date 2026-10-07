@@ -1,5 +1,5 @@
-error: a macro-sheet context function cannot be marked `thread_safe`
- --> tests/ui/macro_sheet_thread_safe.rs:7:38
+error: thread_safe and macro_sheet cannot be combined with an injected context
+ --> tests/ui/macro_sheet_thread_safe.rs:7:8
   |
-7 | fn bad(#[excel_context(macro_sheet)] context: &MacroSheetContext<'_, State>) -> f64 {
-  |                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+7 | fn bad(context: MacroSheetContext<'_, State>) -> f64 {
+  |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

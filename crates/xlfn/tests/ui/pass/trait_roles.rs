@@ -11,7 +11,9 @@ impl Addin for TestAddin {
     type Error = XllError;
     type Layers = ();
 
-    fn open(_: &OpenContext) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
+    fn open(
+        _: &OpenContext,
+    ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
         Ok(Opened::new(State))
     }
 }
@@ -22,10 +24,8 @@ pub struct Dataset;
 type DatasetHandle<'call> = Handle<'call, Dataset>;
 type DatasetObject = Dataset;
 type FunctionResult<T> = XllResult<T>;
-type MainContext<'call> = MainThreadContext<'call, TestAddin>;
 
 mod reexported {
-    pub use xlfn::ThreadSafeContext as WorkerContext;
     pub use xlfn::handle::{Handle, HandleAlias};
 }
 
@@ -52,9 +52,7 @@ fn aliased_result_handle() -> FunctionResult<DatasetObject> {
 }
 
 #[excel_function(name = "TEST.HANDLE.REEXPORT")]
-fn reexport_handle(
-    value: reexported::Handle<'_, Dataset>,
-) -> reexported::HandleAlias<'_, Dataset> {
+fn reexport_handle(value: reexported::Handle<'_, Dataset>) -> reexported::HandleAlias<'_, Dataset> {
     value.alias()
 }
 
@@ -72,20 +70,6 @@ fn consume_handle(value: DatasetHandle<'_>) -> f64 {
 #[excel_function(name = "TEST.HANDLE.OPTION")]
 fn optional_handle(value: Option<DatasetHandle<'_>>) -> f64 {
     f64::from(u8::from(value.is_some()))
-}
-
-#[excel_function(name = "TEST.CONTEXT.ALIAS")]
-fn alias_context(#[excel_context(main_thread)] context: MainContext<'_>) -> f64 {
-    let _ = context.state();
-    1.0
-}
-
-#[excel_function(name = "TEST.CONTEXT.REEXPORT")]
-fn reexported_context(
-    #[excel_context(thread_safe)] context: reexported::WorkerContext<'_, TestAddin>,
-) -> f64 {
-    let _ = context.state();
-    1.0
 }
 
 #[excel_function(name = "TEST.VALUE", thread_safe)]

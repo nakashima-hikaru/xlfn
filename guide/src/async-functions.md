@@ -19,7 +19,7 @@ The project uses Excel 2010 or later as the operational baseline for this capabi
 {{#include ../fixtures/async-service.md}}
 #[excel_function(name = "SERVICE.FETCH")]
 async fn fetch(
-    #[excel_context(asynchronous)] context: AsyncContext<'_, ServiceAddin>,
+    context: AsyncContext<'_, ServiceAddin>,
     key: String,
 ) -> XllResult<f64> {
     context.check_cancelled()?;
@@ -40,12 +40,18 @@ async fn normalize(value: String) -> String {
 }
 ```
 
-If a context parameter is present on an `async fn`, its role must be `asynchronous`. It is passed by value and must be the first parameter.
+If an `async fn` needs a context, use `AsyncContext<'_, A>` directly as its
+first parameter, passed by value. Ordinary imports and qualified paths are
+supported; type aliases, renamed imports, and custom context types are not.
+Every async function must omit `thread_safe` and `macro_sheet` from
+`#[excel_function]`, whether or not it has a context. Synchronous context types
+cannot be used by an async function.
 
 Async functions are registered as thread-safe by the generated boundary. They cannot accept raw Excel references or return newly constructed handle objects.
 
-The asynchronous meaning comes from the Rust function being written as
-`async fn`; there is no `#[excel_function(async)]` attribute. Borrowed input
+The asynchronous meaning comes from `async fn`; `AsyncContext` only adds
+state and cancellation capabilities. There is no `#[excel_function(async)]`
+attribute. Borrowed input
 types such as `&str`, `MatrixRef<'_, T>`, `ExcelCellRef<'_>`, `XlStrRef<'_>`,
 and `XlArrayRef<'_>` are rejected at compile time because their call scope
 ends before the future may run. Use owned `String`, `Matrix<T>`, or another
@@ -97,7 +103,7 @@ A Rust `async fn` is not automatically non-blocking. This is poor:
 {{#include ../fixtures/async-service.md}}
 #[excel_function(name = "DATA.FETCH")]
 async fn fetch_data(
-    #[excel_context(asynchronous)] context: AsyncContext<'_, ServiceAddin>,
+    context: AsyncContext<'_, ServiceAddin>,
     query: String,
 ) -> XllResult<f64> {
     // Blocks an executor worker for the whole external call.

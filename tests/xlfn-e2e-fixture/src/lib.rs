@@ -187,7 +187,7 @@ unsafe impl RtdSubscription for RtdFixtureSubscription {
 
 #[excel_function(name = "FRAMEWORK.RTD.FIXTURE")]
 pub fn rtd_fixture(
-    #[excel_context(main_thread)] context: MainThreadContext<'_, FixtureAddin>,
+    context: MainThreadContext<'_, FixtureAddin>,
     topic_id: i32,
 ) -> XllResult<RtdValue> {
     if !(1..=3).contains(&topic_id) {
@@ -203,16 +203,14 @@ pub fn rtd_fixture(
 
 #[excel_function(name = "FRAMEWORK.RTD.PUBLISH", volatile)]
 pub fn rtd_publish(
-    #[excel_context(thread_safe)] context: ThreadSafeContext<'_, FixtureAddin>,
+    context: ThreadSafeContext<'_, FixtureAddin>,
     topic_count: i32,
 ) -> XllResult<i32> {
     context.state().core.publish_batch(topic_count)
 }
 
 #[excel_function(name = "FRAMEWORK.RTD.ACTIVE", volatile)]
-pub fn rtd_active(
-    #[excel_context(thread_safe)] context: ThreadSafeContext<'_, FixtureAddin>,
-) -> XllResult<i32> {
+pub fn rtd_active(context: ThreadSafeContext<'_, FixtureAddin>) -> XllResult<i32> {
     context.state().core.active_topics()
 }
 

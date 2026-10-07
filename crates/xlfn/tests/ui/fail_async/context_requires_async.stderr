@@ -1,0 +1,5 @@
+error: AsyncContext can only be injected by an async Excel function
+  --> tests/ui/fail_async/context_requires_async.rs:18:8
+   |
+18 | fn bad(context: AsyncContext<'_, TestAddin>) -> f64 {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

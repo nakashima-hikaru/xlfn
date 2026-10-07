@@ -2,7 +2,11 @@ use xlfn::prelude::*;
 
 struct State;
 
-#[excel_addin(name = "Async Handle Compile Test", id = "async-handle-compile-test", category = "Test")]
+#[excel_addin(
+    name = "Async Handle Compile Test",
+    id = "async-handle-compile-test",
+    category = "Test"
+)]
 struct AsyncHandleAddin;
 
 impl Addin for AsyncHandleAddin {
@@ -11,7 +15,9 @@ impl Addin for AsyncHandleAddin {
     type Error = XllError;
     type Layers = ();
 
-    fn open(_: &OpenContext) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
+    fn open(
+        _: &OpenContext,
+    ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
         Ok(Opened::new(State))
     }
 }
@@ -25,7 +31,7 @@ fn assert_send_sync<T: Send + Sync>() {}
 
 #[excel_function(name = "TEST.HANDLE.ASYNC")]
 async fn async_handle(
-    #[excel_context(asynchronous)] context: AsyncContext<'_, AsyncHandleAddin>,
+    context: AsyncContext<'_, AsyncHandleAddin>,
     dataset: HandleLease<'_, Dataset>,
     time: f64,
 ) -> XllResult<f64> {

@@ -12,18 +12,32 @@ neither state nor those operations.
 
 | Mode | How selected | Excel MTR | Can use raw references | Can return a new handle object |
 |---|---|---:|---:|---:|
-| Main thread | default (no context) or `main_thread` context | no | no | yes |
-| Thread-safe | `thread_safe` flag or `thread_safe` context | yes | no | no |
-| Macro-sheet | `macro_sheet` flag or `macro_sheet` context | no | yes | no |
+| Main thread | default (no context) or `MainThreadContext` | no | no | yes |
+| Thread-safe | synchronous function with `thread_safe` and no context, or `ThreadSafeContext` | yes | no | no |
+| Macro-sheet | synchronous function with `macro_sheet` and no context, or `MacroSheetContext` | no | yes | no |
 | Asynchronous | `async fn` | native async ABI | no | no |
 
 
 ## Add a context when needed
 
-A context must be the first parameter, passed by value, with exactly one
-`#[excel_context(...)]` role. It is injected by the framework and does not
-appear as a worksheet argument. A context selects the mode; an equivalent
-flag in `#[excel_function]` is allowed, while a conflicting flag is rejected.
+A context must be the first parameter and be passed by value. The macro
+recognizes the standard context type in the signature and injects it; the
+context does not appear as a worksheet argument. For a synchronous function,
+`MainThreadContext`, `ThreadSafeContext`, and `MacroSheetContext` select their
+respective modes. `async fn` selects asynchronous execution and may accept
+`AsyncContext` when it needs state or cancellation.
+
+Functions with a context must omit both `thread_safe` and `macro_sheet` from
+`#[excel_function]`, including a flag that matches the context's mode. A
+synchronous function cannot accept `AsyncContext`, and an async function
+cannot accept any synchronous context. Async functions must also omit both
+mode flags, whether or not a context is present.
+
+Use the standard type name directly, such as
+`ThreadSafeContext<'_, AppTools>` after an ordinary import, or a qualified
+path such as `xlfn::ThreadSafeContext<'_, AppTools>`. The macro recognizes the
+path's final identifier. Type aliases, renamed imports, and custom context
+types are not supported for injection.
 
 The examples below assume `use xlfn::prelude::*;` and an add-in named
 `AppTools` whose shared state contains the fields being read. See
@@ -35,7 +49,7 @@ The examples below assume `use xlfn::prelude::*;` and an add-in named
 {{#include ../fixtures/app.md}}
 #[excel_function(name = "APP.ENVIRONMENT")]
 fn environment(
-    #[excel_context(main_thread)] context: MainThreadContext<'_, AppTools>,
+    context: MainThreadContext<'_, AppTools>,
 ) -> String {
     context.state().environment.clone()
 }
@@ -43,24 +57,20 @@ fn environment(
 
 `MainThreadContext` is neither `Send` nor `Sync`. It has one inferred lifetime tied to the current Excel-call scope; the context keeps application state available for the duration of the call. With the `rtd` feature, `context.rtd()` returns the narrower RTD capability that establishes a streaming subscription. Formula-owned object producers use main-thread return semantics, even when they do not explicitly request a context.
 
-Do not combine a main-thread context with `thread_safe`.
-
 ## Thread-safe context
 
 ```rust
 {{#include ../fixtures/app.md}}
 #[excel_function(name = "APP.VERSION")]
 fn version(
-    #[excel_context(thread_safe)] context: ThreadSafeContext<'_, AppTools>,
+    context: ThreadSafeContext<'_, AppTools>,
 ) -> String {
     context.state().version.clone()
 }
 ```
 
-The `thread_safe` context role selects thread-safe execution. You may also
-write `#[excel_function(thread_safe)]` on the same function; adding or removing
-state access then does not require changing that flag. Pure functions can use
-the flag alone.
+`ThreadSafeContext` selects thread-safe execution. A function without a context
+can select that mode with `#[excel_function(thread_safe)]`.
 
 ### What `thread_safe` guarantees
 
@@ -76,7 +86,7 @@ use xlfn::reference::ExcelReference;
 
 #[excel_function(name = "APP.RANGE.NAME")]
 fn range_name(
-    #[excel_context(macro_sheet)] context: MacroSheetContext<'_, AppTools>,
+    context: MacroSheetContext<'_, AppTools>,
     #[excel_arg(reference)] reference: ExcelReference<'_>,
 ) -> XllResult<String> {
     context.sheet_name(&reference)
@@ -89,9 +99,9 @@ A macro-sheet context permits Excel callback operations that are not allowed in 
 - `coerce_matrix<T>` for an owned matrix;
 - `sheet_name`.
 
-The `macro_sheet` flag selects macro-sheet registration without injecting state
-access. It may also repeat a `macro_sheet` context role. Macro-sheet mode is
-incompatible with `thread_safe` and asynchronous functions.
+The `macro_sheet` flag selects macro-sheet registration for a function without
+a context. Macro-sheet mode is incompatible with `thread_safe` and asynchronous
+functions.
 
 ## Asynchronous context
 
@@ -99,7 +109,7 @@ incompatible with `thread_safe` and asynchronous functions.
 {{#include ../fixtures/app.md}}
 #[excel_function(name = "APP.SLOW")]
 async fn slow(
-    #[excel_context(asynchronous)] context: AsyncContext<'_, AppTools>,
+    context: AsyncContext<'_, AppTools>,
     input: String,
 ) -> XllResult<String> {
     context.check_cancelled()?;

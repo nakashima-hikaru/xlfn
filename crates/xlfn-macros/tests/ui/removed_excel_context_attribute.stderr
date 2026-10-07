@@ -1,0 +1,5 @@
+error: #[excel_context(...)] is not supported; use a standard context type as the first parameter
+ --> tests/ui/removed_excel_context_attribute.rs:4:8
+  |
+4 | fn bad(#[excel_context(main_thread)] context: MainThreadContext<'_, State>) -> f64 {
+  |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -652,6 +652,8 @@ impl<A: Addin> AsRef<A::SharedState> for ThreadSafeContext<'_, A> {
 /// This context is `Copy`, `Send`, and `Sync`, but its state borrow cannot
 /// outlive the invocation. Every resource reached through that state must
 /// support the concurrency declared by the worksheet function.
+/// As the first by-value parameter of an [`crate::excel_function`], this type
+/// selects thread-safe execution without a function-level mode option.
 pub struct ThreadSafeContext<'call, A: Addin> {
     state: &'call A::SharedState,
 }
@@ -671,6 +673,9 @@ impl<A: Addin> Copy for ThreadSafeContext<'_, A> {}
 /// Future, so a context cannot be moved into a detached task or thread that
 /// outlives the invocation. Long-lived state must be owned explicitly by the
 /// add-in rather than by escaping this capability.
+/// An [`crate::excel_function`] written as `async fn` may request this context
+/// as its first by-value parameter. `async fn` selects async execution even
+/// when no context is requested.
 #[cfg(feature = "async")]
 pub struct AsyncContext<'call, A: Addin> {
     state: &'call A::SharedState,
@@ -748,6 +753,8 @@ impl<'call, A: Addin> ThreadSafeContext<'call, A> {
 /// The synchronous call guard already pins the published generation for the
 /// duration of this lifetime. Keeping the existing state borrow here avoids a
 /// second generation lease and makes the ownership relationship explicit.
+/// As the first by-value parameter of an [`crate::excel_function`], this type
+/// selects main-thread execution without a function-level mode option.
 pub struct MainThreadContext<'call, A: Addin> {
     state: &'call A::SharedState,
     #[cfg(feature = "rtd")]
@@ -775,6 +782,8 @@ impl<A: Addin> Clone for MainThreadContext<'_, A> {
 /// Only the generated Excel entrypoint can supply this context. Clones share
 /// the same callback session: Abort or Uncalced suppresses all later callbacks
 /// for this invocation, including callbacks made through a clone.
+/// As the first by-value parameter of an [`crate::excel_function`], this type
+/// selects macro-sheet execution without a function-level mode option.
 pub struct MacroSheetContext<'call, A: Addin> {
     state: &'call A::SharedState,
     host: ExcelHost<'call>,

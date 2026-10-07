@@ -261,41 +261,6 @@ pub mod v1 {
         crate::addin::AsyncContext::new(lease.state(), cancellation)
     }
 
-    /// Hidden type-level constructor used by the scoped handle codegen. The
-    /// extra trait indirection lets an add-in use a type alias for
-    /// `AsyncContext` without making the macro resolve that alias itself.
-    #[cfg(all(feature = "async", feature = "handles"))]
-    #[doc(hidden)]
-    pub trait AsyncContextFactory<'call, A: Addin>: Sized {
-        fn from_execution_lease(
-            lease: &'call crate::generation::ExecutionLease<A>,
-            cancellation: &'call CancellationToken,
-        ) -> Self;
-    }
-
-    #[cfg(all(feature = "async", feature = "handles"))]
-    impl<'call, A: Addin> AsyncContextFactory<'call, A> for crate::addin::AsyncContext<'call, A> {
-        fn from_execution_lease(
-            lease: &'call crate::generation::ExecutionLease<A>,
-            cancellation: &'call CancellationToken,
-        ) -> Self {
-            async_context(lease, cancellation)
-        }
-    }
-
-    #[cfg(all(feature = "async", feature = "handles"))]
-    #[doc(hidden)]
-    pub fn async_context_for<'call, A, C>(
-        lease: &'call crate::generation::ExecutionLease<A>,
-        cancellation: &'call CancellationToken,
-    ) -> C
-    where
-        A: Addin,
-        C: AsyncContextFactory<'call, A>,
-    {
-        C::from_execution_lease(lease, cancellation)
-    }
-
     /// Opaque wrapper around the add-in [`Runtime`] for generated code.
     #[doc(hidden)]
     pub struct MacroRuntime<A: Addin> {

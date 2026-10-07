@@ -40,7 +40,7 @@ impl Addin for RtdSourceExample {
 
 #[excel_function(name = "METRIC.LAST")]
 pub fn last_metric(
-    #[excel_context(main_thread)] context: MainThreadContext<'_, RtdSourceExample>,
+    context: MainThreadContext<'_, RtdSourceExample>,
     symbol: String,
 ) -> XllResult<RtdValue> {
     context

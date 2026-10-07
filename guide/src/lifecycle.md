@@ -34,7 +34,7 @@ impl Addin for ServiceAddin {
 
 #[excel_function(name = "SERVICE.SCALE")]
 fn scale(
-    #[excel_context(thread_safe)] context: ThreadSafeContext<'_, ServiceAddin>,
+    context: ThreadSafeContext<'_, ServiceAddin>,
     value: f64,
 ) -> f64 {
     value * context.state().scale

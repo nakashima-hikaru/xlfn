@@ -1,0 +1,20 @@
+error[E0308]: mismatched types
+  --> tests/ui/fail_async/context_lookalike.rs:31:1
+   |
+31 | #[excel_function]
+   | ^^^^^^^^^^^^^^^^^ expected `custom::AsyncContext<'_, TestAddin>`, found `xlfn::AsyncContext<'_, TestAddin>`
+32 | async fn bad(context: custom::AsyncContext<'_, TestAddin>) -> f64 {
+   |                       ----------------------------------- expected due to this
+   |
+   = note: `xlfn::AsyncContext<'_, TestAddin>` and `custom::AsyncContext<'_, TestAddin>` have similar names, but are actually distinct types
+note: `xlfn::AsyncContext<'_, TestAddin>` is defined in crate `xlfn`
+  --> src/addin.rs
+   |
+   | pub struct AsyncContext<'call, A: Addin> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: `custom::AsyncContext<'_, TestAddin>` is defined in the current crate
+  --> tests/ui/fail_async/context_lookalike.rs:22:5
+   |
+22 |     pub struct AsyncContext<'call, A>(PhantomData<&'call A>);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)

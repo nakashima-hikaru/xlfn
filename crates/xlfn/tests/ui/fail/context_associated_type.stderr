@@ -1,0 +1,5 @@
+error: injected contexts cannot use qualified associated type paths
+  --> tests/ui/fail/context_associated_type.rs:15:17
+   |
+15 | fn bad(context: <() as ContextTypes>::MainThreadContext) -> f64 {
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

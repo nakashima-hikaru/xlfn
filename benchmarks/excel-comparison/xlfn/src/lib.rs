@@ -196,18 +196,12 @@ pub fn string_copy(value: String) -> String {
 }
 
 #[excel_function(name = "BENCH.SHARED")]
-pub fn shared_read(
-    #[excel_context(thread_safe)] context: ThreadSafeContext<'_, BenchAddin>,
-    value: f64,
-) -> f64 {
+pub fn shared_read(context: ThreadSafeContext<'_, BenchAddin>, value: f64) -> f64 {
     value + context.state().shared_read.load(Ordering::Relaxed) as f64
 }
 
 #[excel_function(name = "BENCH.CONTENDED")]
-pub fn contended(
-    #[excel_context(thread_safe)] context: ThreadSafeContext<'_, BenchAddin>,
-    value: f64,
-) -> f64 {
+pub fn contended(context: ThreadSafeContext<'_, BenchAddin>, value: f64) -> f64 {
     value + context.state().contended.fetch_add(1, Ordering::AcqRel) as f64
 }
 
@@ -225,7 +219,7 @@ pub fn alloc_track(enabled: bool) -> f64 {
 
 #[excel_function(name = "BENCH.ASYNC")]
 pub async fn async_value(
-    #[excel_context(asynchronous)] context: AsyncContext<'_, BenchAddin>,
+    context: AsyncContext<'_, BenchAddin>,
     value: f64,
     delay_us: i32,
 ) -> XllResult<f64> {
@@ -247,7 +241,7 @@ pub async fn async_value(
 
 #[excel_function(name = "BENCH.ASYNC.ARM")]
 pub fn async_arm(
-    #[excel_context(main_thread)] context: MainThreadContext<'_, BenchAddin>,
+    context: MainThreadContext<'_, BenchAddin>,
     directory: String,
     expected: i32,
 ) -> XllResult<f64> {
@@ -263,31 +257,24 @@ pub fn async_arm(
 }
 
 #[excel_function(name = "BENCH.ASYNC.RELEASE")]
-pub fn async_release(
-    #[excel_context(main_thread)] context: MainThreadContext<'_, BenchAddin>,
-    sequence: f64,
-) -> f64 {
+pub fn async_release(context: MainThreadContext<'_, BenchAddin>, sequence: f64) -> f64 {
     context.state().async_control.release();
     sequence
 }
 
 #[excel_function(name = "BENCH.ASYNC.ACTIVE")]
-pub fn async_active(
-    #[excel_context(thread_safe)] context: ThreadSafeContext<'_, BenchAddin>,
-) -> f64 {
+pub fn async_active(context: ThreadSafeContext<'_, BenchAddin>) -> f64 {
     context.state().async_control.active() as f64
 }
 
 #[excel_function(name = "BENCH.ASYNC.FINISHED")]
-pub fn async_finished(
-    #[excel_context(thread_safe)] context: ThreadSafeContext<'_, BenchAddin>,
-) -> f64 {
+pub fn async_finished(context: ThreadSafeContext<'_, BenchAddin>) -> f64 {
     context.state().async_control.finished() as f64
 }
 
 #[excel_function(name = "BENCH.RTD")]
 pub fn rtd_value(
-    #[excel_context(main_thread)] context: MainThreadContext<'_, BenchAddin>,
+    context: MainThreadContext<'_, BenchAddin>,
     topic: String,
     period_ms: f64,
 ) -> XllResult<RtdValue> {
@@ -298,23 +285,18 @@ pub fn rtd_value(
 }
 
 #[excel_function(name = "BENCH.RTD.EMITTED")]
-pub fn rtd_emitted(
-    #[excel_context(thread_safe)] context: ThreadSafeContext<'_, BenchAddin>,
-) -> f64 {
+pub fn rtd_emitted(context: ThreadSafeContext<'_, BenchAddin>) -> f64 {
     context.state().rtd_shared.emitted.load(Ordering::Relaxed) as f64
 }
 
 #[excel_function(name = "BENCH.RTD.PULSE")]
-pub fn rtd_pulse(
-    #[excel_context(main_thread)] context: MainThreadContext<'_, BenchAddin>,
-    sequence: f64,
-) -> f64 {
+pub fn rtd_pulse(context: MainThreadContext<'_, BenchAddin>, sequence: f64) -> f64 {
     context.state().rtd_shared.set_pulse(sequence as u64);
     sequence
 }
 
 #[excel_function(name = "BENCH.RTD.COUNT")]
-pub fn rtd_count(#[excel_context(thread_safe)] context: ThreadSafeContext<'_, BenchAddin>) -> f64 {
+pub fn rtd_count(context: ThreadSafeContext<'_, BenchAddin>) -> f64 {
     context.state().rtd_shared.count() as f64
 }
 
