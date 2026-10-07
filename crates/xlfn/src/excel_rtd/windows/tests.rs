@@ -33,9 +33,10 @@ use crate::win32::{
     DISP_E_TYPEMISMATCH, DISP_E_UNKNOWNNAME, DISPID_UNKNOWN,
 };
 use crate::win32::{
-    COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize, RPC_E_CHANGED_MODE, S_FALSE, S_OK,
-    SAFEARRAYBOUND, SafeArrayCreate, SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement,
-    SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayPutElement, SysAllocStringLen, SysStringLen,
+    COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize, E_NOINTERFACE, RPC_E_CHANGED_MODE,
+    S_FALSE, S_OK, SAFEARRAYBOUND, SafeArrayCreate, SafeArrayDestroy, SafeArrayGetDim,
+    SafeArrayGetElement, SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayPutElement,
+    SysAllocStringLen, SysStringLen,
 };
 use static_assertions::assert_not_impl_any;
 
@@ -417,6 +418,7 @@ impl TestUnknownReference {
         Self(NonNull::new(pointer).expect("COM returned a null interface"))
     }
 
+    #[cfg(feature = "handles")]
     fn as_ptr(&self) -> *mut c_void {
         self.0.as_ptr()
     }
@@ -425,6 +427,7 @@ impl TestUnknownReference {
         self.0.cast()
     }
 
+    #[cfg(feature = "handles")]
     fn iunknown_vtable(&self) -> &IUnknown_Vtbl {
         // SAFETY: every wrapped value is a live COM interface and the
         // IUnknown-compatible vtable is its first ABI field.
