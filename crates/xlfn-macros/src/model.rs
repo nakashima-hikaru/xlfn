@@ -4,6 +4,7 @@
 //! values are accepted by the parser, normalized into semantic enums by the
 //! analyzer, and only then lowered into names needed by the emitter.
 
+use crate::function::UdfFunction;
 use crate::options::{
     ContextKind, ParsedArgumentOptions, ParsedFunctionOptions, parse_argument_options,
     parse_context_attribute, parse_function_options,
@@ -13,11 +14,11 @@ use crate::validation::{validate_export_id, validate_registration_string};
 use proc_macro2::TokenStream;
 use quote::{ToTokens, format_ident};
 use syn::ext::IdentExt;
-use syn::{Attribute, Expr, FnArg, GenericArgument, Ident, ItemFn, Pat, Path, PathArguments, Type};
+use syn::{Attribute, Expr, FnArg, GenericArgument, Ident, Pat, Path, PathArguments, Type};
 
 /// Syntax extracted from one excel_function item.
 pub(super) struct ParsedUdf {
-    pub(super) function: ItemFn,
+    pub(super) function: UdfFunction,
     pub(super) options: ParsedFunctionOptions,
     pub(super) context: Option<ParsedContext>,
     pub(super) arguments: Vec<ParsedArgument>,
@@ -150,7 +151,7 @@ pub(super) struct UdfMetadata {
 
 /// The semantic meaning of one UDF, before generated identifiers are chosen.
 pub(super) struct UdfSpec {
-    pub(super) function: ItemFn,
+    pub(super) function: UdfFunction,
     pub(super) metadata: UdfMetadata,
     pub(super) execution: ExecutionSpec,
     pub(super) arguments: Vec<ArgumentSpec>,
@@ -181,7 +182,7 @@ pub(super) struct ArgumentPlan {
 /// Code-generation-oriented IR. It contains generated symbols, but still no
 /// emitted tokens or semantic policy interpretation.
 pub(super) struct UdfPlan {
-    pub(super) function: ItemFn,
+    pub(super) function: UdfFunction,
     pub(super) metadata: UdfMetadata,
     pub(super) execution: ExecutionSpec,
     pub(super) arguments: Vec<ArgumentPlan>,
@@ -194,7 +195,10 @@ pub(super) struct UdfPlan {
 }
 
 /// Parse only syntax and remove macro-owned argument attributes from the item.
-pub(super) fn parse_udf(attributes: TokenStream, mut function: ItemFn) -> syn::Result<ParsedUdf> {
+pub(super) fn parse_udf(
+    attributes: TokenStream,
+    mut function: UdfFunction,
+) -> syn::Result<ParsedUdf> {
     let options = parse_function_options(attributes)?;
     let gating = extract_gating_attributes(&function.attrs);
     let mut context = None;
@@ -381,7 +385,7 @@ pub(super) fn analyze(parsed: ParsedUdf) -> syn::Result<UdfSpec> {
 }
 
 fn analyze_execution(
-    function: &ItemFn,
+    function: &UdfFunction,
     options: &ParsedFunctionOptions,
     context: Option<&ParsedContext>,
 ) -> syn::Result<ExecutionSpec> {
@@ -451,7 +455,7 @@ fn analyze_execution(
 fn analyze_arguments(
     arguments: Vec<ParsedArgument>,
     execution: &ExecutionSpec,
-    function: &ItemFn,
+    function: &UdfFunction,
 ) -> syn::Result<Vec<ArgumentSpec>> {
     let maximum_visible = xlfn_common::max_excel_function_arguments(execution.kind());
     if arguments.len() > maximum_visible {

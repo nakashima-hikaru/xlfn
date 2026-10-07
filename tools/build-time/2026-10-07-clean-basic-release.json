@@ -1,0 +1,1252 @@
+{
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: aarch64-apple-darwin\nrelease: 1.99.0\nLLVM version: 23.1.1\n",
+  "functions": 100,
+  "statements": 50,
+  "repeat": 5,
+  "workload": "basic",
+  "cache": "clean",
+  "profile": "release",
+  "features": [],
+  "incremental": "auto",
+  "compiler_cache_wrappers": false,
+  "sources": {
+    "baseline": {
+      "path": "/private/tmp/xlfn-clean-build/baseline",
+      "sha256": "90f9f6424c907eb068eb7602ab5842455239aa9e14992052902f4661852720e7",
+      "fixture_sha256": "7013c0ca6cda7340ce11df2ed440f4d30714b099c92ad1a8a3cb7bc2bb6ee837"
+    },
+    "candidate": {
+      "path": "/Users/nakashimahikaru/forge/repo/xlfn",
+      "sha256": "5dfff478978db36381b5a3fa003e50c78969cd3b286d967fad610cb624bac778",
+      "fixture_sha256": "7013c0ca6cda7340ce11df2ed440f4d30714b099c92ad1a8a3cb7bc2bb6ee837"
+    }
+  },
+  "samples": [
+    {
+      "label": "baseline",
+      "mode": "build",
+      "iteration": 0,
+      "wall_seconds": 8.958897584001534,
+      "unit_seconds": 0.62,
+      "sections": null,
+      "serde_derive_compiled": true,
+      "critical_units": [
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 0.19,
+          "duration": 0.25,
+          "sections": null
+        },
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 0.5,
+          "duration": 0.04,
+          "sections": null
+        },
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 1.13,
+          "duration": 2.44,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 2.3
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 2.3,
+                "end": 2.44
+              }
+            ]
+          ]
+        },
+        {
+          "name": "syn",
+          "features": [
+            "clone-impls",
+            "default",
+            "derive",
+            "full",
+            "parsing",
+            "printing",
+            "proc-macro"
+          ],
+          "start": 1.24,
+          "duration": 2.75,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 1.98
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 1.98,
+                "end": 2.75
+              }
+            ]
+          ]
+        },
+        {
+          "name": "serde_derive",
+          "features": [
+            "default"
+          ],
+          "start": 3.99,
+          "duration": 1.27,
+          "sections": null
+        },
+        {
+          "name": "xlfn-macros",
+          "features": [],
+          "start": 3.99,
+          "duration": 0.8,
+          "sections": null
+        },
+        {
+          "name": "xlfn",
+          "features": [
+            "default"
+          ],
+          "start": 5.52,
+          "duration": 2.78,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 1.77
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 1.77,
+                "end": 2.78
+              }
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "label": "candidate",
+      "mode": "build",
+      "iteration": 0,
+      "wall_seconds": 7.7592832910013385,
+      "unit_seconds": 0.62,
+      "sections": null,
+      "serde_derive_compiled": false,
+      "critical_units": [
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 0.37,
+          "duration": 0.26,
+          "sections": null
+        },
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 0.64,
+          "duration": 0.05,
+          "sections": null
+        },
+        {
+          "name": "syn",
+          "features": [
+            "clone-impls",
+            "default",
+            "derive",
+            "full",
+            "parsing",
+            "printing",
+            "proc-macro"
+          ],
+          "start": 1.1,
+          "duration": 2.66,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 1.88
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 1.88,
+                "end": 2.66
+              }
+            ]
+          ]
+        },
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 1.14,
+          "duration": 2.13,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 2.03
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 2.03,
+                "end": 2.13
+              }
+            ]
+          ]
+        },
+        {
+          "name": "xlfn-macros",
+          "features": [],
+          "start": 3.76,
+          "duration": 0.63,
+          "sections": null
+        },
+        {
+          "name": "xlfn",
+          "features": [
+            "default"
+          ],
+          "start": 4.39,
+          "duration": 2.72,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 1.74
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 1.74,
+                "end": 2.72
+              }
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "label": "candidate",
+      "mode": "build",
+      "iteration": 1,
+      "wall_seconds": 7.826852708007209,
+      "unit_seconds": 0.61,
+      "sections": null,
+      "serde_derive_compiled": false,
+      "critical_units": [
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 0.23,
+          "duration": 0.25,
+          "sections": null
+        },
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 0.49,
+          "duration": 0.04,
+          "sections": null
+        },
+        {
+          "name": "syn",
+          "features": [
+            "clone-impls",
+            "default",
+            "derive",
+            "full",
+            "parsing",
+            "printing",
+            "proc-macro"
+          ],
+          "start": 1.08,
+          "duration": 2.67,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 1.72
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 1.72,
+                "end": 2.67
+              }
+            ]
+          ]
+        },
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 1.09,
+          "duration": 2.04,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 1.94
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 1.94,
+                "end": 2.04
+              }
+            ]
+          ]
+        },
+        {
+          "name": "xlfn-macros",
+          "features": [],
+          "start": 3.75,
+          "duration": 0.64,
+          "sections": null
+        },
+        {
+          "name": "xlfn",
+          "features": [
+            "default"
+          ],
+          "start": 4.41,
+          "duration": 2.77,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 1.77
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 1.77,
+                "end": 2.77
+              }
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "label": "baseline",
+      "mode": "build",
+      "iteration": 1,
+      "wall_seconds": 8.60751174998586,
+      "unit_seconds": 0.62,
+      "sections": null,
+      "serde_derive_compiled": true,
+      "critical_units": [
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 0.19,
+          "duration": 0.23,
+          "sections": null
+        },
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 0.49,
+          "duration": 0.04,
+          "sections": null
+        },
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 1.09,
+          "duration": 2.04,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 1.94
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 1.94,
+                "end": 2.04
+              }
+            ]
+          ]
+        },
+        {
+          "name": "syn",
+          "features": [
+            "clone-impls",
+            "default",
+            "derive",
+            "full",
+            "parsing",
+            "printing",
+            "proc-macro"
+          ],
+          "start": 1.23,
+          "duration": 2.39,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 1.72
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 1.72,
+                "end": 2.39
+              }
+            ]
+          ]
+        },
+        {
+          "name": "xlfn-macros",
+          "features": [],
+          "start": 3.62,
+          "duration": 0.76,
+          "sections": null
+        },
+        {
+          "name": "serde_derive",
+          "features": [
+            "default"
+          ],
+          "start": 3.62,
+          "duration": 1.27,
+          "sections": null
+        },
+        {
+          "name": "xlfn",
+          "features": [
+            "default"
+          ],
+          "start": 5.16,
+          "duration": 2.79,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 1.79
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 1.79,
+                "end": 2.79
+              }
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "label": "baseline",
+      "mode": "build",
+      "iteration": 2,
+      "wall_seconds": 8.62607608299004,
+      "unit_seconds": 0.63,
+      "sections": null,
+      "serde_derive_compiled": true,
+      "critical_units": [
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 0.2,
+          "duration": 0.26,
+          "sections": null
+        },
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 0.46,
+          "duration": 0.04,
+          "sections": null
+        },
+        {
+          "name": "syn",
+          "features": [
+            "clone-impls",
+            "default",
+            "derive",
+            "full",
+            "parsing",
+            "printing",
+            "proc-macro"
+          ],
+          "start": 1.01,
+          "duration": 2.67,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 1.77
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 1.77,
+                "end": 2.67
+              }
+            ]
+          ]
+        },
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 1.07,
+          "duration": 2.04,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 1.93
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 1.93,
+                "end": 2.04
+              }
+            ]
+          ]
+        },
+        {
+          "name": "serde_derive",
+          "features": [
+            "default"
+          ],
+          "start": 3.68,
+          "duration": 1.21,
+          "sections": null
+        },
+        {
+          "name": "xlfn-macros",
+          "features": [],
+          "start": 3.68,
+          "duration": 0.72,
+          "sections": null
+        },
+        {
+          "name": "xlfn",
+          "features": [
+            "default"
+          ],
+          "start": 5.16,
+          "duration": 2.81,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 1.78
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 1.78,
+                "end": 2.81
+              }
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "label": "candidate",
+      "mode": "build",
+      "iteration": 2,
+      "wall_seconds": 7.8826860830013175,
+      "unit_seconds": 0.62,
+      "sections": null,
+      "serde_derive_compiled": false,
+      "critical_units": [
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 0.22,
+          "duration": 0.28,
+          "sections": null
+        },
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 0.5,
+          "duration": 0.05,
+          "sections": null
+        },
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 1.08,
+          "duration": 2.07,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 1.97
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 1.97,
+                "end": 2.07
+              }
+            ]
+          ]
+        },
+        {
+          "name": "syn",
+          "features": [
+            "clone-impls",
+            "default",
+            "derive",
+            "full",
+            "parsing",
+            "printing",
+            "proc-macro"
+          ],
+          "start": 1.14,
+          "duration": 2.68,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 1.79
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 1.79,
+                "end": 2.68
+              }
+            ]
+          ]
+        },
+        {
+          "name": "xlfn-macros",
+          "features": [],
+          "start": 3.82,
+          "duration": 0.62,
+          "sections": null
+        },
+        {
+          "name": "xlfn",
+          "features": [
+            "default"
+          ],
+          "start": 4.45,
+          "duration": 2.78,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 1.77
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 1.77,
+                "end": 2.78
+              }
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "label": "candidate",
+      "mode": "build",
+      "iteration": 3,
+      "wall_seconds": 7.864947916998062,
+      "unit_seconds": 0.63,
+      "sections": null,
+      "serde_derive_compiled": false,
+      "critical_units": [
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 0.38,
+          "duration": 0.24,
+          "sections": null
+        },
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 0.63,
+          "duration": 0.05,
+          "sections": null
+        },
+        {
+          "name": "syn",
+          "features": [
+            "clone-impls",
+            "default",
+            "derive",
+            "full",
+            "parsing",
+            "printing",
+            "proc-macro"
+          ],
+          "start": 1.12,
+          "duration": 2.67,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 1.85
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 1.85,
+                "end": 2.67
+              }
+            ]
+          ]
+        },
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 1.16,
+          "duration": 2.0,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 1.89
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 1.89,
+                "end": 2.0
+              }
+            ]
+          ]
+        },
+        {
+          "name": "xlfn-macros",
+          "features": [],
+          "start": 3.79,
+          "duration": 0.64,
+          "sections": null
+        },
+        {
+          "name": "xlfn",
+          "features": [
+            "default"
+          ],
+          "start": 4.43,
+          "duration": 2.77,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 1.76
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 1.76,
+                "end": 2.77
+              }
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "label": "baseline",
+      "mode": "build",
+      "iteration": 3,
+      "wall_seconds": 8.604242083994905,
+      "unit_seconds": 0.61,
+      "sections": null,
+      "serde_derive_compiled": true,
+      "critical_units": [
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 0.19,
+          "duration": 0.24,
+          "sections": null
+        },
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 0.5,
+          "duration": 0.04,
+          "sections": null
+        },
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 1.12,
+          "duration": 2.03,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 1.94
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 1.94,
+                "end": 2.03
+              }
+            ]
+          ]
+        },
+        {
+          "name": "syn",
+          "features": [
+            "clone-impls",
+            "default",
+            "derive",
+            "full",
+            "parsing",
+            "printing",
+            "proc-macro"
+          ],
+          "start": 1.25,
+          "duration": 2.42,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 1.83
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 1.83,
+                "end": 2.42
+              }
+            ]
+          ]
+        },
+        {
+          "name": "xlfn-macros",
+          "features": [],
+          "start": 3.67,
+          "duration": 0.72,
+          "sections": null
+        },
+        {
+          "name": "serde_derive",
+          "features": [
+            "default"
+          ],
+          "start": 3.67,
+          "duration": 1.24,
+          "sections": null
+        },
+        {
+          "name": "xlfn",
+          "features": [
+            "default"
+          ],
+          "start": 5.18,
+          "duration": 2.78,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 1.78
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 1.78,
+                "end": 2.78
+              }
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "label": "baseline",
+      "mode": "build",
+      "iteration": 4,
+      "wall_seconds": 8.591026082984172,
+      "unit_seconds": 0.64,
+      "sections": null,
+      "serde_derive_compiled": true,
+      "critical_units": [
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 0.34,
+          "duration": 0.25,
+          "sections": null
+        },
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 0.59,
+          "duration": 0.05,
+          "sections": null
+        },
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 1.16,
+          "duration": 2.14,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 2.04
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 2.04,
+                "end": 2.14
+              }
+            ]
+          ]
+        },
+        {
+          "name": "syn",
+          "features": [
+            "clone-impls",
+            "default",
+            "derive",
+            "full",
+            "parsing",
+            "printing",
+            "proc-macro"
+          ],
+          "start": 1.19,
+          "duration": 2.42,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 1.68
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 1.68,
+                "end": 2.42
+              }
+            ]
+          ]
+        },
+        {
+          "name": "xlfn-macros",
+          "features": [],
+          "start": 3.61,
+          "duration": 0.76,
+          "sections": null
+        },
+        {
+          "name": "serde_derive",
+          "features": [
+            "default"
+          ],
+          "start": 3.61,
+          "duration": 1.24,
+          "sections": null
+        },
+        {
+          "name": "xlfn",
+          "features": [
+            "default"
+          ],
+          "start": 5.11,
+          "duration": 2.8,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 1.79
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 1.79,
+                "end": 2.8
+              }
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "label": "candidate",
+      "mode": "build",
+      "iteration": 4,
+      "wall_seconds": 7.7994374580157455,
+      "unit_seconds": 0.62,
+      "sections": null,
+      "serde_derive_compiled": false,
+      "critical_units": [
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 0.21,
+          "duration": 0.26,
+          "sections": null
+        },
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 0.47,
+          "duration": 0.05,
+          "sections": null
+        },
+        {
+          "name": "syn",
+          "features": [
+            "clone-impls",
+            "default",
+            "derive",
+            "full",
+            "parsing",
+            "printing",
+            "proc-macro"
+          ],
+          "start": 1.06,
+          "duration": 2.64,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 1.86
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 1.86,
+                "end": 2.64
+              }
+            ]
+          ]
+        },
+        {
+          "name": "serde_core",
+          "features": [
+            "result",
+            "std"
+          ],
+          "start": 1.07,
+          "duration": 2.08,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 1.98
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 1.98,
+                "end": 2.08
+              }
+            ]
+          ]
+        },
+        {
+          "name": "xlfn-macros",
+          "features": [],
+          "start": 3.7,
+          "duration": 0.66,
+          "sections": null
+        },
+        {
+          "name": "xlfn",
+          "features": [
+            "default"
+          ],
+          "start": 4.38,
+          "duration": 2.77,
+          "sections": [
+            [
+              "frontend",
+              {
+                "start": 0.0,
+                "end": 1.76
+              }
+            ],
+            [
+              "codegen",
+              {
+                "start": 1.76,
+                "end": 2.77
+              }
+            ]
+          ]
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "build": {
+      "median_seconds": {
+        "baseline": 8.60751174998586,
+        "candidate": 7.826852708007209
+      },
+      "change_percent": -9.069508873803557
+    }
+  }
+}

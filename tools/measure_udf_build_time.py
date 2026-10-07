@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""Compare consumer clean builds using separate source trees and Cargo targets."""
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import statistics
+import subprocess
+import time
+
+
+def run(command, cwd, env):
+    result = subprocess.run(command, cwd=cwd, env=env, capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError(result.stdout + result.stderr)
+    return result
+
+
+def source_digest(source):
+    digest = hashlib.sha256()
+    files = sorted(
+        p for p in (source / "crates").rglob("*")
+        if p.is_file() and (p.suffix == ".rs" or p.name == "Cargo.toml")
+    )
+    files += [source / "Cargo.toml", source / "Cargo.lock", source / "rust-toolchain.toml"]
+    for path in files:
+        digest.update(str(path.relative_to(source)).encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def make_probe(directory, source, fixture, functions, statements):
+    (directory / "src").mkdir(parents=True, exist_ok=True)
+    # JSON string quoting is also valid for these TOML strings.
+    dependency = json.dumps(str(source / "crates/xlfn"))
+    (directory / "Cargo.toml").write_text(
+        '[package]\nname="build-time-consumer"\nversion="0.0.0"\nedition="2024"\n'
+        f'[workspace]\n[dependencies]\nxlfn={{path={dependency}}}\n'
+    )
+    (directory / "rust-toolchain.toml").write_bytes((source / "rust-toolchain.toml").read_bytes())
+    body = fixture
+    for n in range(functions):
+        body += f'\n#[excel_function(thread_safe)]\nfn build_probe_{n}(x: f64) -> f64 {{\nlet v0=x;\n'
+        for i in range(1, statements + 1):
+            body += f"let v{i}=v{i-1}+x*{i}.0;\n"
+        body += f"v{statements}\n}}\n"
+    (directory / "src/lib.rs").write_text(body)
+    # Start each probe with its source tree's pinned dependency versions.
+    (directory / "Cargo.lock").write_bytes((source / "Cargo.lock").read_bytes())
+    return hashlib.sha256(body.encode()).hexdigest()
+
+
+def measure(directory, package, target, mode, iteration, label, args):
+    env = dict(os.environ, CARGO_TARGET_DIR=str(target),
+               RUSTC_WRAPPER="", RUSTC_WORKSPACE_WRAPPER="")
+    if args.incremental == "off":
+        env["CARGO_INCREMENTAL"] = "0"
+    clean = ["cargo", "clean"]
+    if args.cache == "dependencies":
+        clean += ["-p", package]
+    run(clean, directory, env)
+    command = ["cargo", mode, "--locked", "--offline", "--timings"]
+    if args.profile == "release":
+        command += ["--release"]
+    if args.features:
+        command += ["--features", ",".join("xlfn/" + f for f in args.features)]
+    start = time.perf_counter()
+    run(command, directory, env)
+    elapsed = time.perf_counter() - start
+    report = max((target / "cargo-timings").glob("cargo-timing-2*.html"), key=lambda p: p.stat().st_mtime_ns)
+    units = json.loads(re.search(r"const UNIT_DATA = (\[.*?\]);", report.read_text(), re.S)[1])
+    consumer = next(unit for unit in units if unit["name"] == package)
+    critical = [
+        {key: unit[key] for key in ["name", "features", "start", "duration", "sections"]}
+        for unit in units
+        if unit["name"] in {"xlfn", "xlfn-macros", "syn", "serde_derive", "serde_core"}
+    ]
+    return dict(label=label, mode=mode, iteration=iteration, wall_seconds=elapsed,
+                unit_seconds=consumer["duration"], sections=consumer["sections"],
+                serde_derive_compiled=any(u["name"] == "serde_derive" for u in units),
+                critical_units=critical)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--baseline", type=Path, required=True)
+    parser.add_argument("--candidate", type=Path, default=Path.cwd())
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--functions", type=int, default=100)
+    parser.add_argument("--statements", type=int, default=50)
+    parser.add_argument("--repeat", type=int, default=5)
+    parser.add_argument("--cache", choices=["clean", "dependencies"], default="clean",
+                        help="clean removes all dependency artifacts before every sample")
+    parser.add_argument("--workload", choices=["basic", "rtd", "generated"], default="basic")
+    parser.add_argument("--profile", choices=["dev", "release"], default="dev")
+    parser.add_argument("--incremental", choices=["auto", "off"], default="auto")
+    parser.add_argument("--features", nargs="*", default=[], help="additional xlfn features")
+    parser.add_argument("--modes", nargs="+", choices=["check", "build"], default=["build"])
+    args = parser.parse_args()
+    if min(args.functions, args.statements, args.repeat) < 1:
+        parser.error("functions, statements, and repeat must be positive")
+    sources = {"baseline": args.baseline.resolve(), "candidate": args.candidate.resolve()}
+    output = args.output.resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    fixture = (sources["candidate"] / "examples/basic-xll/src/lib.rs").read_text()
+    probes = {}
+    report = dict(platform=platform.platform(), machine=platform.machine(),
+                  rustc=run(["rustc", "-vV"], sources["candidate"], os.environ).stdout,
+                  functions=args.functions, statements=args.statements, repeat=args.repeat,
+                  workload=args.workload, cache=args.cache, profile=args.profile,
+                  features=args.features, incremental=args.incremental,
+                  compiler_cache_wrappers=False, sources={}, samples=[], summary={})
+    for label, source in sources.items():
+        if args.workload == "generated":
+            directory = output / (label + "-consumer")
+            fixture_hash = make_probe(directory, source, fixture, args.functions, args.statements)
+            package = "build-time-consumer"
+        else:
+            example = "basic-xll" if args.workload == "basic" else "rtd-source"
+            directory = source / "examples" / example
+            package = "basic-xlfn" if args.workload == "basic" else "rtd-source"
+            digest = hashlib.sha256()
+            for path in sorted((directory / "src").rglob("*.rs")):
+                digest.update(path.relative_to(directory).as_posix().encode())
+                digest.update(path.read_bytes())
+            fixture_hash = digest.hexdigest()
+        probes[label] = (directory, package)
+        metadata = ["cargo", "metadata", "--format-version", "1", "--offline"]
+        if args.features:
+            metadata += ["--features", ",".join("xlfn/" + f for f in args.features)]
+        # Resolve the standalone package before timing; cold samples still
+        # remove all compiled artifacts, including proc macros and build scripts.
+        run(metadata, directory, os.environ)
+        report["sources"][label] = dict(path=str(source), sha256=source_digest(source))
+        report["sources"][label]["fixture_sha256"] = fixture_hash
+    if report["sources"]["baseline"]["fixture_sha256"] != report["sources"]["candidate"]["fixture_sha256"]:
+        raise RuntimeError("baseline and candidate consumer sources differ")
+    for mode in args.modes:
+        first = 0 if args.cache == "clean" else -1
+        for iteration in range(first, args.repeat):
+            order = ["baseline", "candidate"] if iteration % 2 == 0 or iteration == -1 else ["candidate", "baseline"]
+            for label in order:
+                directory, package = probes[label]
+                sample = measure(directory, package,
+                                 output / (label + "-target-" + mode + "-" + args.profile),
+                                 mode, iteration, label, args)
+                report["samples"].append(sample)
+                print(json.dumps({key: sample[key] for key in
+                                  ["label", "mode", "iteration", "wall_seconds", "unit_seconds",
+                                   "serde_derive_compiled"]}), flush=True)
+                (output / "results.json").write_text(json.dumps(report, indent=2) + "\n")
+        medians = {
+            label: statistics.median(s["wall_seconds"] for s in report["samples"]
+                                     if s["label"] == label and s["mode"] == mode and s["iteration"] >= 0)
+            for label in sources
+        }
+        report["summary"][mode] = dict(median_seconds=medians,
+                                       change_percent=100 * (medians["candidate"] / medians["baseline"] - 1))
+    (output / "results.json").write_text(json.dumps(report, indent=2) + "\n")
+    print(json.dumps(report["summary"], indent=2))
+
+
+if __name__ == "__main__":
+    main()

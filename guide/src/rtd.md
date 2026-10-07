@@ -35,7 +35,8 @@ does not publish an error.
 
 Each active subscription uses one producer thread. All channel subscriptions in
 a runtime generation share one publisher and one cleanup worker, for N+2
-threads during streaming. The first connection prepares the cleanup worker,
+threads during streaming, plus one notification worker per started Excel RTD
+server on Windows. The first connection prepares the cleanup worker,
 which remains until close. Each source
 admits at most 64 producer workers by default; configure a lower or higher
 nonzero bound with `.with_max_producers(limit)`. A worker retains its reservation
@@ -166,7 +167,14 @@ as disconnect errors. Disconnect still returns publication or worker-join
 failures; it remains the lifetime barrier for workers and sinks.
 
 Publishing validates and queues a value; xlfn notifies Excel and handles
-`RefreshData`.
+`RefreshData`. On Windows, a dedicated worker coalesces notices so a blocked
+`UpdateNotify` COM call does not block the publisher from updating other topics.
+An outstanding notice is retried 250 ms after the previous call finishes,
+including when Excel accepted the call but has not fetched the data. A successful
+`RefreshData` acknowledges the notice; a failed export keeps it pending. A newer
+notice queued during the refresh is preserved. The worker sleeps while idle and
+is joined before the callback is released at server shutdown. This mechanism
+does not guarantee an Excel recalculation deadline while Excel is busy.
 
 ## Stop a producer
 

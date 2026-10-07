@@ -16,9 +16,14 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
+#[cfg(test)]
+use syn::ItemFn;
 use syn::ext::IdentExt;
-use syn::{DeriveInput, ItemFn, ItemStruct, parse_macro_input};
+use syn::{DeriveInput, ItemStruct, parse_macro_input};
 mod codegen;
+mod function;
+
+use function::UdfFunction;
 mod model;
 mod options;
 mod support;
@@ -44,7 +49,7 @@ use validation::validate_addin_metadata;
 /// including `None` for an omitted `Option<T>` input.
 #[proc_macro_attribute]
 pub fn excel_function(attributes: TokenStream, item: TokenStream) -> TokenStream {
-    let function = parse_macro_input!(item as ItemFn);
+    let function = parse_macro_input!(item as UdfFunction);
     match expand_excel_function(attributes.into(), function) {
         Ok(tokens) => tokens.into(),
         Err(error) => error.into_compile_error().into(),
@@ -97,7 +102,7 @@ fn expand_excel_handle_object(input: DeriveInput) -> syn::Result<proc_macro2::To
 
 fn expand_excel_function(
     attributes: proc_macro2::TokenStream,
-    function: ItemFn,
+    function: UdfFunction,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let parsed = model::parse_udf(attributes, function)?;
     let spec = model::analyze(parsed)?;
@@ -259,7 +264,7 @@ mod tests {
     use super::*;
     use quote::quote;
 
-    fn function(source: proc_macro2::TokenStream) -> ItemFn {
+    fn function(source: proc_macro2::TokenStream) -> UdfFunction {
         syn::parse2(source).unwrap()
     }
 

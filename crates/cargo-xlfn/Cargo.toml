@@ -21,7 +21,7 @@ xlfn-package.workspace = true
 fs-err.workspace = true
 home.workspace = true
 libc.workspace = true
-serde.workspace = true
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 serde_path_to_error.workspace = true
 sha2.workspace = true

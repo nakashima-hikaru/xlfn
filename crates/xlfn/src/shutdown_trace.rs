@@ -14,6 +14,7 @@
 )]
 
 use crate::sync::Mutex;
+#[cfg(any(test, feature = "refinement"))]
 use serde::Serialize;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,8 +22,9 @@ use triomphe::Arc;
 
 static NEXT_ACTIVITY_ID: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize)]
-#[serde(transparent)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[cfg_attr(any(test, feature = "refinement"), derive(Serialize))]
+#[cfg_attr(any(test, feature = "refinement"), serde(transparent))]
 pub(crate) struct ActivityId(u64);
 
 impl ActivityId {
@@ -35,8 +37,9 @@ impl ActivityId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "refinement"), derive(Serialize))]
+#[cfg_attr(any(test, feature = "refinement"), serde(rename_all = "camelCase"))]
 pub(crate) enum ShutdownFailure {
     BoundaryPanic,
     UnregisterFailed,
@@ -50,8 +53,9 @@ pub(crate) enum ShutdownFailure {
     InvariantViolation,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "refinement"), derive(Serialize))]
+#[cfg_attr(any(test, feature = "refinement"), serde(rename_all = "camelCase"))]
 pub(crate) enum Completion {
     Completed,
     Canceled,
@@ -61,8 +65,9 @@ pub(crate) enum Completion {
 /// Resource evidence projected from the operational runtime for the Lean wire
 /// format.  This is a data transfer object: it intentionally has no
 /// predicates or transition logic.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "refinement"), derive(Serialize))]
+#[cfg_attr(any(test, feature = "refinement"), serde(rename_all = "camelCase"))]
 pub(crate) struct ShutdownResources {
     pub(crate) ingress_open: bool,
     pub(crate) external_entries: u64,
@@ -160,8 +165,9 @@ impl ShutdownResources {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "refinement"), derive(Serialize))]
+#[cfg_attr(any(test, feature = "refinement"), serde(rename_all = "camelCase"))]
 pub(crate) enum ShutdownEvent {
     RegisterFunction,
     UnregisterFunction,
@@ -273,8 +279,9 @@ impl ObservationSink {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "refinement"), derive(Serialize))]
+#[cfg_attr(any(test, feature = "refinement"), serde(rename_all = "camelCase"))]
 pub(crate) enum ActivityEvent {
     EnterExternal { id: ActivityId },
     LeaveExternal { id: ActivityId },
@@ -310,8 +317,9 @@ pub(crate) enum ActivityEvent {
     RecordCleanupIssue,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "refinement"), derive(Serialize))]
+#[cfg_attr(any(test, feature = "refinement"), serde(rename_all = "camelCase"))]
 pub(crate) enum CertificateEvent {
     RegisterFunction,
     UnregisterFunction,
@@ -494,8 +502,9 @@ impl TraceOutcome {
 }
 
 #[cfg(any(test, feature = "refinement"))]
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(untagged)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "refinement"), derive(Serialize))]
+#[cfg_attr(any(test, feature = "refinement"), serde(untagged))]
 pub(crate) enum ShutdownTrace {
     Committed {
         generation: u64,

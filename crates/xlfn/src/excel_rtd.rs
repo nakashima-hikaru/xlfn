@@ -29,6 +29,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 mod counted_string;
 
 mod host;
+#[cfg(any(test, all(windows, any(feature = "rtd", feature = "handles"))))]
+mod notification;
 #[cfg(feature = "rtd")]
 mod service;
 

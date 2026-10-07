@@ -11,7 +11,7 @@ readme = "README.md"
 
 [features]
 default = []
-serde = []
+serde = ["serde/derive"]
 jiff = ["dep:jiff"]
 async = [
     "dep:async-task",
@@ -24,7 +24,7 @@ rtd = []
 # expose the generic RTD subscription capability.
 handles = []
 cache = ["dep:quick_cache"]
-refinement = []
+refinement = ["serde/derive"]
 # Internal instrumentation for production-path benchmarks.
 bench-internals = ["handles", "xlfn-sys/abi-probe"]
 
@@ -191,6 +191,7 @@ xlfn-kernel.workspace = true
 windows-link.workspace = true
 
 [dev-dependencies]
+serde = { workspace = true, features = ["derive"] }
 criterion.workspace = true
 futures-util.workspace = true
 proptest.workspace = true

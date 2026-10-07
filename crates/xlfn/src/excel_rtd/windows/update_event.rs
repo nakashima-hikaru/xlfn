@@ -2,6 +2,7 @@ use super::IID_IRTD_UPDATE_EVENT;
 use super::global_interface_table::get_git;
 use super::module_lifetime;
 use super::server_gate::ServerOperationBarrier;
+use crate::excel_rtd::notification::NotificationPump;
 use crate::sync::Mutex;
 use crate::win32::{COINIT_MULTITHREADED, RPC_E_CHANGED_MODE, S_FALSE, S_OK};
 use crate::{XllError, XllResult};
@@ -105,6 +106,7 @@ impl Drop for GitCookieLease {
 
 pub(super) struct RetainedUpdateCallback {
     pub(super) cookie: Option<GitCookieLease>,
+    pub(super) pump: Option<NotificationPump>,
     #[cfg(test)]
     pub(super) drop_hook: Option<Arc<dyn Fn() + Send + Sync>>,
 }
@@ -156,46 +158,79 @@ pub(super) fn retry_git_revocation_debt_with(mut revoke: impl FnMut(u32) -> XllR
 }
 
 impl RetainedUpdateCallback {
-    fn notify(&self) -> XllResult<()> {
-        let Some(cookie) = self.cookie.as_ref() else {
-            return Ok(());
-        };
-        let cookie = cookie.raw();
-        let _apartment = ComApartmentGuard::enter().map_err(|code| XllError::WindowsApi {
-            function: "CoInitializeEx",
-            code,
+    pub(super) fn new(
+        cookie: GitCookieLease,
+        operations: triomphe::Arc<ServerOperationBarrier>,
+    ) -> XllResult<Self> {
+        let raw_cookie = cookie.raw();
+        let pump = NotificationPump::start(move || {
+            let _operation = operations.enter_notification().ok_or(XllError::Closing)?;
+            notify_cookie(raw_cookie)
         })?;
-
-        // SAFETY: this thread has entered a COM apartment. `get_git` returns
-        // one live IGlobalInterfaceTable wrapper on success, and the wrapper
-        // validates the GIT output before returning its owned reference.
-        unsafe {
-            let git = get_git().map_err(|_| XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::GIT_NULL,
-            })?;
-            let proxy = git
-                .get_interface(cookie, &IID_IRTD_UPDATE_EVENT)
-                .map_err(|code| XllError::WindowsApi {
-                    function: "IGlobalInterfaceTable::GetInterfaceFromGlobal",
-                    code,
-                })?;
-            let event = OwnedRtdUpdateEvent::from_raw(proxy.cast());
-            let notify_status = event.notify();
-
-            if notify_status != S_OK {
-                return Err(XllError::WindowsApi {
-                    function: "IRTDUpdateEvent::UpdateNotify",
-                    code: notify_status,
-                });
-            }
-        }
-
-        Ok(())
+        Ok(Self {
+            cookie: Some(cookie),
+            pump: Some(pump),
+            #[cfg(test)]
+            drop_hook: None,
+        })
     }
+
+    fn notify(&self) -> XllResult<()> {
+        self.pump.as_ref().map_or(Ok(()), NotificationPump::request)
+    }
+
+    pub(super) fn pending_notice(&self) -> Option<u64> {
+        self.pump.as_ref().and_then(NotificationPump::pending)
+    }
+
+    pub(super) fn acknowledge(&self, notice: Option<u64>) {
+        if let Some(pump) = &self.pump {
+            pump.acknowledge(notice);
+        }
+    }
+}
+
+fn notify_cookie(cookie: u32) -> XllResult<()> {
+    let _apartment = ComApartmentGuard::enter().map_err(|code| XllError::WindowsApi {
+        function: "CoInitializeEx",
+        code,
+    })?;
+
+    // SAFETY: this thread has entered a COM apartment. `get_git` returns
+    // one live IGlobalInterfaceTable wrapper on success, and the wrapper
+    // validates the GIT output before returning its owned reference.
+    unsafe {
+        let git = get_git().map_err(|_| XllError::Internal {
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::GIT_NULL,
+        })?;
+        let proxy = git
+            .get_interface(cookie, &IID_IRTD_UPDATE_EVENT)
+            .map_err(|code| XllError::WindowsApi {
+                function: "IGlobalInterfaceTable::GetInterfaceFromGlobal",
+                code,
+            })?;
+        let event = OwnedRtdUpdateEvent::from_raw(proxy.cast());
+        let notify_status = event.notify();
+
+        if notify_status != S_OK {
+            return Err(XllError::WindowsApi {
+                function: "IRTDUpdateEvent::UpdateNotify",
+                code: notify_status,
+            });
+        }
+    }
+
+    Ok(())
 }
 
 impl Drop for RetainedUpdateCallback {
     fn drop(&mut self) {
+        // Server retirement seals/drains the notification barrier before
+        // reclaiming callbacks. Join the dormant worker before revoking the
+        // cookie or allowing the server's module lease to be released.
+        if let Some(mut pump) = self.pump.take() {
+            pump.stop();
+        }
         // RevokeInterfaceFromGlobal must run before the test hook, matching
         // the historical callback-drop ordering explicitly.
         drop(self.cookie.take());

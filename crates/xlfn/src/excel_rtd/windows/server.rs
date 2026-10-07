@@ -36,6 +36,7 @@ use std::ptr::{self, NonNull};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::thread::ThreadId;
+use triomphe::Arc;
 
 pub(super) const IID_IDISPATCH: GUID = crate::win32::IID_IDispatch;
 pub(super) const IID_IRTD_SERVER: GUID = GUID {
@@ -110,7 +111,9 @@ pub(super) struct RtdServer {
     pub(super) references: AtomicU32,
     pub(super) start_state: AtomicU8,
     pub(super) generation: ServerGeneration,
-    pub(super) operations: ServerOperationBarrier,
+    // Notification workers own a clone so the barrier stays independently
+    // allocated through their final rejected entry and thread exit.
+    pub(super) operations: Arc<ServerOperationBarrier>,
     pub(super) termination_worker: TerminationWorker,
     pub(super) backends: Mutex<ServerBackends>,
     pub(super) callbacks: Mutex<ServerCallbacks>,
@@ -267,7 +270,7 @@ pub(super) unsafe fn synchronize_callback_notification(
 
     // SAFETY: caller guarantees `server` and its operations barrier outlive
     // the notifier attached to the subscription server.
-    let notifier = unsafe { RtdNotifier::new(callback, NonNull::from(&server.operations)) };
+    let notifier = unsafe { RtdNotifier::new(callback, NonNull::from(server.operations.as_ref())) };
     subscription_server.attach_update_notifier(notifier)?;
     Ok(())
 }
@@ -625,7 +628,7 @@ fn ensure_server_impl(
         // until a host lifecycle path can join its coordinator. Reap a fully
         // terminated entry before constructing or attaching a replacement.
         // SAFETY: ACTIVE_SERVER owns a live server reference while locked.
-        let operations = unsafe { &(*server).operations };
+        let operations = unsafe { (*server).operations.as_ref() };
         let phase = operations.state.lock().phase;
         if phase == ServerPhase::Terminated {
             // SAFETY: create a temporary reference that remains valid after the
@@ -764,7 +767,7 @@ fn ensure_server_impl(
         references: AtomicU32::new(1),
         start_state: AtomicU8::new(SERVER_NOT_STARTED),
         generation,
-        operations,
+        operations: Arc::new(operations),
         termination_worker: TerminationWorker::default(),
         backends: Mutex::new(ServerBackends {
             handles: handles.map(BackendHandles::new),
@@ -987,11 +990,18 @@ unsafe fn server_start_inner(this: *mut RtdServer, callback: *mut c_void, result
     // callback publication or notification work can run.
     let cookie = GitCookieLease::from_registered(cookie);
 
-    let callback = Box::new(RetainedUpdateCallback {
-        cookie: Some(cookie),
-        #[cfg(test)]
-        drop_hook: None,
-    });
+    // SAFETY: the retained COM server owns the independently allocated barrier.
+    let operations = unsafe { Arc::clone(&(*this).operations) };
+    let callback = match RetainedUpdateCallback::new(cookie, operations) {
+        Ok(callback) => Box::new(callback),
+        Err(error) => {
+            crate::diagnostics::report_no_unwind(
+                "IRtdServer::ServerStart notification worker",
+                &error,
+            );
+            return E_FAIL;
+        }
+    };
 
     // SAFETY: `this` was validated as non-null and COM keeps the server alive
     // for the duration of ServerStart.
@@ -1221,9 +1231,25 @@ unsafe fn refresh_data_inner(
     // the duration of RefreshData.
     let subscription_server = unsafe { (*this).backends.lock().subscription_server };
 
+    // Snapshot the notice before fetching data. Completion must not clear a
+    // newer notice queued by publication/refresh rearming in the meantime.
+    // SAFETY: this admitted operation keeps all callback records live.
+    let notice = unsafe { active_callback(&(*this).callbacks) }.map(|callback| {
+        // SAFETY: callback records are retained until COM operations drain.
+        let sequence = unsafe { callback.0.as_ref() }.pending_notice();
+        (callback, sequence)
+    });
+
     let Some(subscription_server) = subscription_server else {
         // SAFETY: `topic_count` and `result` are valid COM output parameters.
-        return unsafe { write_refresh_data(topic_count, result, &[]) };
+        let status = unsafe { write_refresh_data(topic_count, result, &[]) };
+        if status == S_OK
+            && let Some((callback, sequence)) = notice
+        {
+            // SAFETY: the admitted COM operation retains the callback record.
+            unsafe { callback.0.as_ref() }.acknowledge(sequence);
+        }
+        return status;
     };
 
     let batch = match subscription_server.begin_refresh() {
@@ -1243,8 +1269,17 @@ unsafe fn refresh_data_inner(
         crate::subscription::RefreshOutcome::Failed
     };
 
-    if let Err(error) = batch.complete(outcome) {
-        crate::diagnostics::report_no_unwind("IRtdServer::RefreshData rearm", &error);
+    match batch.complete(outcome) {
+        Err(error) => {
+            crate::diagnostics::report_no_unwind("IRtdServer::RefreshData rearm", &error);
+        }
+        Ok(()) if status == S_OK => {
+            if let Some((callback, sequence)) = notice {
+                // SAFETY: the admitted COM operation retains the callback record.
+                unsafe { callback.0.as_ref() }.acknowledge(sequence);
+            }
+        }
+        Ok(()) => {}
     }
 
     status

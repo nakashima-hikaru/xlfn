@@ -845,6 +845,7 @@ fn deferred_termination_drains_callbacks_and_rejects_worker_self_close() {
     };
     let callback = Box::new(RetainedUpdateCallback {
         cookie: None,
+        pump: None,
         drop_hook: Some(drop_hook),
     });
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server.
@@ -1049,6 +1050,7 @@ fn retired_callback_drop_can_reenter_terminate_after_quiescence() {
 
     let previous = Box::new(RetainedUpdateCallback {
         cookie: None,
+        pump: None,
         drop_hook: Some(drop_hook),
     });
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server.
@@ -1060,6 +1062,7 @@ fn retired_callback_drop_can_reenter_terminate_after_quiescence() {
     let operation = unsafe { (*server).operations.enter() }.unwrap();
     let replacement = Box::new(RetainedUpdateCallback {
         cookie: None,
+        pump: None,
         drop_hook: None,
     });
     // SAFETY: the retained server remains live.
@@ -1113,6 +1116,7 @@ fn callback_subscription_attach_handshake_covers_early_empty_snapshot() {
 
         let callback = Box::new(RetainedUpdateCallback {
             cookie: None,
+            pump: None,
             drop_hook: None,
         });
         // SAFETY: the retained server remains live.
@@ -1316,6 +1320,101 @@ fn termination_worker_join_retains_panicking_payload_and_completes() {
     assert_eq!(worker.state.lock().status, TerminationWorkerStatus::Joined);
     assert_eq!(dropped.load(Ordering::Acquire), 0);
     assert!(worker.join().is_ok());
+}
+
+#[test]
+fn notification_worker_is_drained_before_callback_retirement() {
+    use crate::excel_rtd::notification::NotificationPump;
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    let handles = FormulaHandleService::new(4);
+    let ensured = ensure_server(Some(&handles), None).unwrap();
+    let server = ensured.active.pointer as *mut RtdServer;
+    // SAFETY: ACTIVE_SERVER and ensured retain the allocation through cleanup.
+    let server_ref = unsafe { &*server };
+    let operations = triomphe::Arc::clone(&server_ref.operations);
+    let (entered, observed) = mpsc::channel();
+    let (release, wait) = mpsc::channel();
+    let pump = NotificationPump::start(move || {
+        let _operation = operations
+            .enter_notification()
+            .ok_or(crate::XllError::Closing)?;
+        entered.send(()).unwrap();
+        wait.recv_timeout(Duration::from_secs(2)).unwrap();
+        Ok(())
+    })
+    .unwrap();
+    pump.request().unwrap();
+    observed.recv_timeout(Duration::from_secs(2)).unwrap();
+    let dropped = Arc::new(AtomicBool::new(false));
+    let dropped_hook = Arc::clone(&dropped);
+    install_callback(
+        &server_ref.callbacks,
+        Box::new(RetainedUpdateCallback {
+            cookie: None,
+            pump: Some(pump),
+            drop_hook: Some(Arc::new(move || {
+                dropped_hook.store(true, Ordering::Release)
+            })),
+        }),
+    );
+    // SAFETY: the retained server remains live during the admitted notification.
+    assert_eq!(unsafe { server_terminate(server) }, S_OK);
+    assert!(!dropped.load(Ordering::Acquire));
+    release.send(()).unwrap();
+    server_ref.operations.close_and_wait().unwrap();
+    server_ref.termination_worker.join().unwrap();
+    assert!(dropped.load(Ordering::Acquire));
+    assert_eq!(observed.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+    shutdown(&handles).unwrap();
+    drop(ensured);
+}
+
+#[test]
+fn successful_refresh_acknowledges_the_notification_worker() {
+    use crate::excel_rtd::notification::NotificationPump;
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    let _apartment = TestComApartment::enter();
+    let handles = FormulaHandleService::new(4);
+    let ensured = ensure_server(Some(&handles), None).unwrap();
+    let server = ensured.active.pointer as *mut RtdServer;
+    // SAFETY: ACTIVE_SERVER and ensured retain the allocation through cleanup.
+    let server_ref = unsafe { &*server };
+    let pump = NotificationPump::start(|| Ok(())).unwrap();
+    pump.request().unwrap();
+    let callback = install_callback(
+        &server_ref.callbacks,
+        Box::new(RetainedUpdateCallback {
+            cookie: None,
+            pump: Some(pump),
+            drop_hook: None,
+        }),
+    );
+    // SAFETY: callback records remain live until shutdown below.
+    let callback = unsafe { callback.0.as_ref() };
+    assert!(callback.pending_notice().is_some());
+    let mut count = -1;
+    let mut array = ptr::null_mut();
+    assert_eq!(
+        // SAFETY: the server is retained; RefreshData rejects the null output.
+        unsafe { refresh_data(server, ptr::null_mut(), &mut array) },
+        E_POINTER
+    );
+    assert!(callback.pending_notice().is_some());
+    assert_eq!(
+        // SAFETY: the retained server and writable output parameters are valid.
+        unsafe { refresh_data(server, &mut count, &mut array) },
+        S_OK
+    );
+    assert_eq!(count, 0);
+    assert_eq!(callback.pending_notice(), None);
+    if !array.is_null() {
+        // SAFETY: successful RefreshData transfers the SAFEARRAY to its caller.
+        unsafe { SafeArrayDestroy(array) };
+    }
+    shutdown(&handles).unwrap();
+    drop(ensured);
 }
 
 #[test]
@@ -2738,13 +2837,16 @@ fn sta_disconnect_returns_before_notification_dispatch_and_termination_drains_cl
         // SAFETY: `ensured` and ACTIVE_SERVER retain this live COM server.
         assert_eq!(unsafe { disconnect_data(server, 1) }, S_OK);
         assert_eq!(handle.pending_update_count(), 0);
-        // SAFETY: the same retained reference keeps the admission state live.
-        assert_eq!(unsafe { (*server).operations.state.lock().in_flight }, 1);
+        assert_eq!(
+            // SAFETY: the same retained reference keeps the admission state live.
+            unsafe { (*server).operations.as_ref().state.lock().in_flight },
+            1
+        );
         // SAFETY: the retained server is live; cleanup admission makes this
         // termination deferred while the fake STA dispatch is still pending.
         assert_eq!(unsafe { server_terminate(server) }, S_OK);
         // SAFETY: the server remains retained until teardown completes.
-        let phase = unsafe { (*server).operations.state.lock().phase };
+        let phase = unsafe { (*server).operations.as_ref().state.lock().phase };
         assert!(matches!(
             phase,
             ServerPhase::Terminating { deferred: true, .. }
@@ -2752,9 +2854,12 @@ fn sta_disconnect_returns_before_notification_dispatch_and_termination_drains_cl
         returned_tx.send(()).unwrap();
         shutdown_subscriptions(&subscriptions).unwrap();
         assert!(sender.is_closed());
-        // SAFETY: close joined every deferred worker and retained reference;
-        // the original ensured reference still keeps the server alive here.
-        assert_eq!(unsafe { (*server).operations.state.lock().in_flight }, 0);
+        assert_eq!(
+            // SAFETY: close joined every deferred worker and retained reference;
+            // the original ensured reference still keeps the server alive here.
+            unsafe { (*server).operations.as_ref().state.lock().in_flight },
+            0
+        );
         drop(ensured);
     });
     // Recover the old blocking path on timeout, so a regression fails without
@@ -3064,6 +3169,7 @@ fn repeated_ensure_server_calls_do_not_rearm_subscription_notifications() {
 
     let callback = Box::new(RetainedUpdateCallback {
         cookie: None,
+        pump: None,
         drop_hook: None,
     });
     // SAFETY: EnsuredServer keeps server reference alive

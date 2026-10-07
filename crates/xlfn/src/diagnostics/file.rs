@@ -7,7 +7,8 @@ use crate::diagnostics::event::{
     DiagnosticEvent, DiagnosticInitError, DiagnosticSink, FAILED_WRITES,
 };
 use crate::sync::Mutex;
-use serde::Serialize;
+use serde::ser::SerializeStruct;
+use serde::{Serialize, Serializer};
 use std::borrow::Cow;
 use std::fmt;
 use std::io::Write;
@@ -17,13 +18,42 @@ use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 use std::{fs, io};
 
-#[derive(Serialize)]
 struct FileDiagnosticRecord<'a> {
     timestamp_ms: u128,
     diagnostic_id: u64,
     udf: Cow<'a, str>,
     argument: Option<Cow<'a, str>>,
     error: String,
+}
+
+// Keep the production log schema independent of serde_derive. Verification
+// traces and user value serialization enable that proc macro only when needed.
+impl Serialize for FileDiagnosticRecord<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut record = serializer.serialize_struct("FileDiagnosticRecord", 5)?;
+        record.serialize_field("timestamp_ms", &self.timestamp_ms)?;
+        record.serialize_field("diagnostic_id", &self.diagnostic_id)?;
+        record.serialize_field("udf", &self.udf)?;
+        record.serialize_field("argument", &self.argument)?;
+        record.serialize_field("error", &self.error)?;
+        record.end()
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+struct StartupLogRecord<'a> {
+    timestamp_ms: u128,
+    message: Cow<'a, str>,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl Serialize for StartupLogRecord<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut record = serializer.serialize_struct("StartupLogRecord", 2)?;
+        record.serialize_field("timestamp_ms", &self.timestamp_ms)?;
+        record.serialize_field("message", &self.message)?;
+        record.end()
+    }
 }
 
 fn bounded_diagnostic_text(value: &str) -> Cow<'_, str> {
@@ -239,12 +269,6 @@ fn rotate_log_files(path: &Path, generations: usize) -> io::Result<()> {
 
 #[cfg(target_os = "windows")]
 pub(crate) fn append_startup_log(path: &Path, message: &str) -> io::Result<()> {
-    #[derive(Serialize)]
-    struct StartupLogRecord<'a> {
-        timestamp_ms: u128,
-        message: Cow<'a, str>,
-    }
-
     let record = StartupLogRecord {
         timestamp_ms: SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -282,6 +306,36 @@ pub(crate) fn install_file_diagnostic_sink_at(
 #[cfg(test)]
 mod bounded_text_tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_json_preserves_schema_escaping_and_null_arguments() {
+        let mut record = FileDiagnosticRecord {
+            timestamp_ms: u128::MAX,
+            diagnostic_id: u64::MAX,
+            udf: Cow::Borrowed("日本語"),
+            argument: Some(Cow::Owned("\"argument\"".to_owned())),
+            error: "line\n\t\\".to_owned(),
+        };
+        assert_eq!(
+            serde_json::to_string(&record).unwrap(),
+            r#"{"timestamp_ms":340282366920938463463374607431768211455,"diagnostic_id":18446744073709551615,"udf":"日本語","argument":"\"argument\"","error":"line\n\t\\"}"#,
+        );
+        record.argument = None;
+        record.timestamp_ms = 1;
+        assert!(serde_json::to_value(&record).unwrap()["argument"].is_null());
+    }
+
+    #[test]
+    fn startup_json_preserves_schema_and_unicode_text() {
+        let record = StartupLogRecord {
+            timestamp_ms: 123,
+            message: Cow::Borrowed("日本語 \"quote\"\n"),
+        };
+        assert_eq!(
+            serde_json::to_string(&record).unwrap(),
+            r#"{"timestamp_ms":123,"message":"日本語 \"quote\"\n"}"#,
+        );
+    }
 
     #[test]
     fn formatting_matches_existing_truncation_at_unicode_boundaries() {
