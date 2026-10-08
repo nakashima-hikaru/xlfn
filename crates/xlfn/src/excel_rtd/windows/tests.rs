@@ -30,13 +30,12 @@ use super::com_abi::{
 #[cfg(feature = "handles")]
 use crate::win32::{
     CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, DISP_E_BADPARAMCOUNT, DISP_E_MEMBERNOTFOUND,
-    DISP_E_TYPEMISMATCH, DISP_E_UNKNOWNNAME, DISPID_UNKNOWN,
+    DISP_E_TYPEMISMATCH, DISP_E_UNKNOWNNAME, DISPID_UNKNOWN, E_NOINTERFACE,
 };
 use crate::win32::{
-    COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize, E_NOINTERFACE, RPC_E_CHANGED_MODE,
-    S_FALSE, S_OK, SAFEARRAYBOUND, SafeArrayCreate, SafeArrayDestroy, SafeArrayGetDim,
-    SafeArrayGetElement, SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayPutElement,
-    SysAllocStringLen, SysStringLen,
+    COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize, RPC_E_CHANGED_MODE, S_FALSE, S_OK,
+    SAFEARRAYBOUND, SafeArrayCreate, SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetElement,
+    SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayPutElement, SysAllocStringLen, SysStringLen,
 };
 use static_assertions::assert_not_impl_any;
 
