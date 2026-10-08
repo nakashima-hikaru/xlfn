@@ -585,6 +585,68 @@ fn journalless_transaction_with_payload_is_quarantined() {
     );
 }
 
+#[test]
+fn corrupt_or_old_schema_journal_preserves_destination_and_backup() {
+    for old_schema in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("win-x64");
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join("current.xll"), b"current").unwrap();
+        let transaction = directory
+            .path()
+            .join(".win-x64.transaction-invalid-journal");
+        let transaction_directory =
+            xlfn_package::PrivateStagingDirectory::create(&transaction).unwrap();
+        let previous = transaction.join("previous");
+        fs::create_dir(&previous).unwrap();
+        fs::write(previous.join("old.xll"), b"old").unwrap();
+        write_stale_journal(
+            directory.path(),
+            &transaction,
+            "win-x64",
+            Some(directory_identity(&destination).unwrap()),
+            TransactionState::Prepared,
+            Some(directory_identity(&previous).unwrap()),
+            None,
+        );
+        let journal_path = transaction.join(TRANSACTION_JOURNAL);
+        let mut journal = read_transaction_journal(&journal_path).unwrap();
+        if old_schema {
+            journal.schema = 1;
+            journal.refresh_checksum().unwrap();
+        } else {
+            // Still valid JSON, but its state no longer matches the checksum.
+            journal.state = TransactionState::Committed;
+        }
+        fs::write(&journal_path, serde_json::to_vec_pretty(&journal).unwrap()).unwrap();
+        drop(transaction_directory);
+
+        let guard = DistributionCommitGuard::acquire(directory.path(), "win-x64").unwrap();
+        let file_ops = InjectedFileOps::default();
+        let error =
+            recover_stale_transactions(directory.path(), "win-x64", &guard, &file_ops).unwrap_err();
+        let DistributionError::Quarantined(error) = error else {
+            panic!("invalid journal must be quarantined");
+        };
+        let quarantine = error.quarantine.as_ref().unwrap();
+        assert_eq!(
+            fs::read(destination.join("current.xll")).unwrap(),
+            b"current"
+        );
+        assert_eq!(
+            fs::read(quarantine.join("previous/old.xll")).unwrap(),
+            b"old"
+        );
+        assert_eq!(
+            file_ops.operations.borrow().as_slice(),
+            &[FileOperation::Rename {
+                from: transaction,
+                to: quarantine.clone(),
+            }]
+        );
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn distribution_lock_replacement_is_detected() {
@@ -1159,7 +1221,6 @@ fn configure_build_sets_target_dir_and_build_dir() {
         manifest_directory: PathBuf::from("."),
         target_directory: PathBuf::from("target"),
         crt: crt::ResolvedCrtPolicy::resolve(Some(crt::CrtPolicy::Static), None),
-        lockfile_path: PathBuf::from("Cargo.lock"),
         rustc_wrapper: None,
         bundle: None,
     };

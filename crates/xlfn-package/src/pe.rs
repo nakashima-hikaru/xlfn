@@ -255,32 +255,6 @@ pub fn verify_pe_dependency_closure(
     validate_dependency_graph(&images, &BTreeSet::new())
 }
 
-pub fn sha256(path: &Path) -> PackageResult<String> {
-    let mut hash = Sha256::new();
-    let mut file = fs::File::open(path)?;
-    struct DigestWriter<'a>(&'a mut Sha256);
-    impl io::Write for DigestWriter<'_> {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0.update(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-    io::copy(&mut file, &mut DigestWriter(&mut hash))?;
-    let digest = hash.finalize();
-    Ok(digest_hex(&digest))
-}
-
-pub(crate) fn sha256_digest(bytes: &[u8]) -> [u8; 32] {
-    let mut hash = Sha256::new();
-    hash.update(bytes);
-    let digest = hash.finalize();
-    let mut output = [0_u8; 32];
-    output.copy_from_slice(&digest);
-    output
-}
 pub(crate) fn validate_imports(
     files: &[BundleFile],
     architecture: Architecture,

@@ -1772,14 +1772,21 @@ fn verified_artifacts_keep_bytes_and_identity_for_commit_checks() {
     let (package, manifest) = package_with_test_manifest(artifact);
     fs::write(directory.path().join("build-manifest.json"), &manifest).unwrap();
 
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest).unwrap();
+    assert_eq!(manifest["schema"], BUILD_MANIFEST_SCHEMA);
+    assert_eq!(
+        manifest["files"],
+        serde_json::json!([{ "relative_path": "Engine.dll", "size": 12 }])
+    );
+    assert_eq!(
+        manifest["cargo_constraints"],
+        serde_json::json!({ "locked": false, "frozen": false, "offline": false })
+    );
+
     let artifact = &package.artifacts()[0];
     assert_eq!(artifact.relative_path(), Path::new("Engine.dll"));
     assert_eq!(artifact.bytes(), b"stable bytes");
     assert_eq!(artifact.size(), 12);
-    assert_eq!(
-        artifact.sha256_hex(),
-        "3821461753e58afa7abe81ccec8ea5ac178ea27ee92ede53771a95a101928e40"
-    );
     let prepared = package
         .prepare_commit(directory.path(), "x86_64-pc-windows-msvc")
         .unwrap();
@@ -1794,7 +1801,8 @@ fn verified_artifacts_keep_bytes_and_identity_for_commit_checks() {
         b"stable bytes"
     );
 
-    fs::write(&staged, b"changed bytes").unwrap();
+    // Same-size mutations must still be rejected by exact byte comparison.
+    fs::write(&staged, b"altered data").unwrap();
     assert!(
         package
             .prepare_commit(directory.path(), "x86_64-pc-windows-msvc")

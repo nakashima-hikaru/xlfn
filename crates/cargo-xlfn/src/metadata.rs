@@ -10,7 +10,6 @@ pub(crate) struct ProjectMetadata {
     pub(crate) manifest_directory: PathBuf,
     pub(crate) target_directory: PathBuf,
     pub(crate) crt: ResolvedCrtPolicy,
-    pub(crate) lockfile_path: PathBuf,
     pub(crate) rustc_wrapper: Option<PathBuf>,
     pub(crate) bundle: Option<BundleMetadata>,
 }
@@ -133,7 +132,6 @@ pub(crate) fn project_metadata(
             .clone()
             .unwrap_or_else(|| cargo.target_directory.as_std_path().to_path_buf()),
         crt,
-        lockfile_path: settings.lockfile_path(cargo.workspace_root.as_std_path()),
         rustc_wrapper: settings.rustc_wrapper,
         bundle,
     })

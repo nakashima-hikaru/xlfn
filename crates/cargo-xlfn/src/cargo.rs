@@ -8,7 +8,6 @@ use std::process::Stdio;
 pub(crate) struct BuiltLibrary {
     pub(crate) path: PathBuf,
     pub(crate) features: Vec<String>,
-    pub(crate) lockfile_sha256: Option<String>,
 }
 
 pub(crate) fn run_cargo_build(
@@ -30,17 +29,10 @@ pub(crate) fn run_cargo_build(
         let _ = child.kill();
     }
     let status = child.wait().context("could not wait for cargo build")?;
-    let mut built = output?;
+    let built = output?;
     if !status.success() {
         bail!("cargo build failed for {}", metadata.package_name);
     }
-    // Cargo may update the lockfile during this target's build. A metadata
-    // discovery hash is not provenance for the compiler artifact above.
-    built.lockfile_sha256 = metadata
-        .lockfile_path
-        .is_file()
-        .then(|| xlfn_package::sha256(&metadata.lockfile_path))
-        .transpose()?;
     Ok(built)
 }
 
@@ -67,7 +59,6 @@ fn read_build_messages(
                         libraries.push(BuiltLibrary {
                             path: path.into_std_path_buf(),
                             features: artifact.features.clone(),
-                            lockfile_sha256: None,
                         });
                     }
                 }

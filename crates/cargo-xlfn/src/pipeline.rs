@@ -228,7 +228,6 @@ fn build_manifest_input(
             locked: build.locked,
             frozen: build.frozen,
             offline: build.offline,
-            lockfile_sha256: built.lockfile_sha256,
         },
         crt: observation.manifest(metadata.crt),
         bundle_sources: bundle.bundle_sources.clone(),
@@ -266,7 +265,6 @@ mod tests {
             manifest_directory: directory.path().to_owned(),
             target_directory: directory.path().join("target"),
             crt: ResolvedCrtPolicy::resolve(None, None),
-            lockfile_path: directory.path().join("Cargo.lock"),
             rustc_wrapper: None,
             bundle: Some(BundleMetadata {
                 x64: vec!["Alias.dll".to_owned()],

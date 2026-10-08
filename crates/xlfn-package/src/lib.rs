@@ -2,7 +2,7 @@
 //!
 //! The package pipeline is deliberately closed-world: bundle sources are
 //! snapshotted, PE imports and exports are validated, staged artifacts are
-//! hashed, and commit-time identity checks protect the final rename. The
+//! compared against those bytes, and identity checks protect the final rename. The
 //! Windows-specific private-directory checks enforce the same trust boundary
 //! used by the transactional distributor.
 
@@ -20,7 +20,6 @@ use object::read::pe::{
     PeFile32, PeFile64,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
@@ -80,7 +79,7 @@ pub use manifest::{
 };
 pub use names::{validate_directory_path, validate_path_components, validate_windows_basename};
 pub use pe::{
-    ExportSymbol, ForwardedExport, PeInfo, PeSnapshot, inspect_pe, parse_pe_bytes, sha256,
+    ExportSymbol, ForwardedExport, PeInfo, PeSnapshot, inspect_pe, parse_pe_bytes,
     verify_pe_dependency_closure, verify_xll,
 };
 pub use shared_bytes::SharedBytes;

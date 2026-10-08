@@ -21,7 +21,7 @@ Each target directory contains:
 
 - `<artifact-name>.xll`: The compiled native add-in;
 - Any configured companion/sidecar files;
-- `build-manifest.json`: Manifest recording build metadata and artifact hashes.
+- `build-manifest.json`: Manifest recording build metadata and artifact names and sizes.
 
 Keep these files together in the same directory. If your add-in depends on companion
 DLLs, moving the `.xll` without its dependencies can prevent it from loading.

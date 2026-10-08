@@ -5,14 +5,11 @@ pub struct VerifiedArtifact {
     pub(crate) relative_path: PathBuf,
     bytes: SharedBytes,
     size: u64,
-    sha256: [u8; 32],
     pub(crate) permissions: std::fs::Permissions,
 }
 
 impl VerifiedArtifact {
-    /// Binds the size and digest to immutable bytes once. Later verification
-    /// compares every byte against this snapshot; hashing that same content
-    /// again cannot strengthen an exact equality check.
+    /// Retains immutable bytes for exact comparison during later verification.
     pub(crate) fn new(
         relative_path: PathBuf,
         bytes: SharedBytes,
@@ -21,7 +18,6 @@ impl VerifiedArtifact {
         Self {
             relative_path,
             size: bytes.len() as u64,
-            sha256: sha256_digest(&bytes),
             permissions,
             bytes,
         }
@@ -44,11 +40,6 @@ impl VerifiedArtifact {
     #[must_use]
     pub const fn size(&self) -> u64 {
         self.size
-    }
-
-    #[must_use]
-    pub fn sha256_hex(&self) -> String {
-        digest_hex(&self.sha256)
     }
 }
 

@@ -14,7 +14,6 @@ fn metadata() -> ProjectMetadata {
         manifest_directory: PathBuf::from("."),
         target_directory: PathBuf::from("target"),
         crt: ResolvedCrtPolicy::resolve(None, None),
-        lockfile_path: PathBuf::from("Cargo.lock"),
         rustc_wrapper: None,
         bundle: None,
     }
@@ -89,7 +88,7 @@ fn incomplete_failed_missing_and_ambiguous_artifacts_are_rejected() {
 }
 
 #[test]
-fn selected_build_features_and_lockfile_come_from_the_completed_build() {
+fn selected_build_features_come_from_completed_build_when_lockfile_changes() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     for (relative, contents) in [
@@ -136,7 +135,7 @@ fn selected_build_features_and_lockfile_come_from_the_completed_build() {
         .find(|node| node.id == project.package_id)
         .unwrap();
     assert_eq!(resolved.features, ["unrequested"]);
-    let old_digest = xlfn_package::sha256(&project.lockfile_path).unwrap();
+    let previous_lockfile = fs::read(root.join("Cargo.lock")).unwrap();
 
     // Make Cargo legitimately update its lockfile after metadata discovery.
     fs::create_dir_all(root.join("support/src")).unwrap();
@@ -181,8 +180,9 @@ fn selected_build_features_and_lockfile_come_from_the_completed_build() {
             built.features,
             if selected { vec!["selected"] } else { vec![] }
         );
-        let digest = xlfn_package::sha256(&project.lockfile_path).unwrap();
-        assert_ne!(digest, old_digest);
-        assert_eq!(built.lockfile_sha256.as_deref(), Some(digest.as_str()));
+        assert_ne!(
+            fs::read(root.join("Cargo.lock")).unwrap(),
+            previous_lockfile
+        );
     }
 }

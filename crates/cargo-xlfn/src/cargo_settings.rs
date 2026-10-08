@@ -1,4 +1,4 @@
-//! Resolve the Cargo settings that the CRT wrapper and build provenance need.
+//! Resolve the Cargo settings that the CRT wrapper needs.
 //! Cargo discovers configuration from its invocation directory, independently
 //! of `--manifest-path`. Keep source-relative paths while merging these keys.
 
@@ -9,7 +9,6 @@ use std::ffi::{OsStr, OsString};
 #[derive(Default)]
 pub(crate) struct CargoSettings {
     pub(crate) rustc_wrapper: Option<PathBuf>,
-    lockfile: Option<PathBuf>,
 }
 
 impl CargoSettings {
@@ -59,29 +58,12 @@ impl CargoSettings {
             // An explicitly empty RUSTC_WRAPPER disables configured wrappers.
             settings.rustc_wrapper = Some(program_path(&wrapper, cwd));
         }
-        if let Some(lockfile) = unicode_environment("CARGO_RESOLVER_LOCKFILE_PATH") {
-            settings.lockfile = Some(cwd.join(lockfile));
-        }
-        if let Some(lockfile) = &settings.lockfile
-            && lockfile.file_name() != Some(OsStr::new("Cargo.lock"))
-        {
-            bail!("resolver.lockfile-path must end with Cargo.lock, got {lockfile:?}");
-        }
         Ok(settings)
-    }
-
-    pub(crate) fn lockfile_path(&self, workspace_root: &Path) -> PathBuf {
-        self.lockfile
-            .clone()
-            .unwrap_or_else(|| workspace_root.join("Cargo.lock"))
     }
 
     fn merge(&mut self, higher: Self) {
         if higher.rustc_wrapper.is_some() {
             self.rustc_wrapper = higher.rustc_wrapper;
-        }
-        if higher.lockfile.is_some() {
-            self.lockfile = higher.lockfile;
         }
     }
 
@@ -118,7 +100,6 @@ impl CargoSettings {
                 .build
                 .rustc_wrapper
                 .map(|wrapper| program_path(OsStr::new(&wrapper), root)),
-            lockfile: config.resolver.lockfile_path.map(|path| root.join(path)),
         });
         Ok(settings)
     }
@@ -164,7 +145,6 @@ fn program_path(program: &OsStr, root: &Path) -> PathBuf {
 struct ConfigFile {
     include: Vec<ConfigInclude>,
     build: BuildConfig,
-    resolver: ResolverConfig,
 }
 
 #[derive(Deserialize)]
@@ -182,12 +162,6 @@ enum ConfigInclude {
 #[serde(default, rename_all = "kebab-case")]
 struct BuildConfig {
     rustc_wrapper: Option<String>,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default, rename_all = "kebab-case")]
-struct ResolverConfig {
-    lockfile_path: Option<String>,
 }
 
 #[cfg(test)]

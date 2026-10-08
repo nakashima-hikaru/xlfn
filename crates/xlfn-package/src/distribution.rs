@@ -13,8 +13,6 @@
 use crate::{DirectoryIdentity, PackageResult, PrivateStagingDirectory};
 use fs_err as fs;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::fmt::Write as _;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -354,7 +352,8 @@ fn move_file_ex_with_retry(from: &Path, to: &Path, flags: u32) -> io::Result<()>
 }
 
 pub const TRANSACTION_JOURNAL: &str = "journal";
-pub const TRANSACTION_SCHEMA: u32 = 1;
+// Schema 2 uses BLAKE3 over the serialized journal with an empty checksum.
+pub const TRANSACTION_SCHEMA: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -613,12 +612,7 @@ pub fn journal_checksum(journal: &TransactionJournal) -> PackageResult<String> {
     let mut unsigned = journal.clone();
     unsigned.checksum.clear();
     let encoded = serde_json::to_vec(&unsigned)?;
-    let digest = Sha256::digest(encoded);
-    let mut checksum = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        write!(&mut checksum, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    Ok(checksum)
+    Ok(blake3::hash(&encoded).to_hex().to_string())
 }
 
 use crate::directory_identity;

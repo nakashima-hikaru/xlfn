@@ -1,7 +1,7 @@
 use super::*;
 
 /// The schema version written into every build manifest.
-pub const BUILD_MANIFEST_SCHEMA: u32 = 6;
+pub const BUILD_MANIFEST_SCHEMA: u32 = 7;
 
 /// Package-owned input for constructing a build manifest.
 ///
@@ -39,7 +39,6 @@ pub struct CargoConstraints {
     pub locked: bool,
     pub frozen: bool,
     pub offline: bool,
-    pub lockfile_sha256: Option<String>,
 }
 
 /// CRT observation recorded in a build manifest.
@@ -95,7 +94,6 @@ impl Default for IntegrityMetadata {
 struct ManifestFile {
     relative_path: String,
     size: u64,
-    sha256: String,
 }
 
 /// A fully assembled, package-owned build manifest.
@@ -119,7 +117,7 @@ pub struct BuildManifest {
 
 impl BuildManifest {
     /// Builds the manifest from caller-supplied observations and verified
-    /// artifacts. File names, sizes, and hashes are never caller-controlled.
+    /// artifacts. File names and sizes are never caller-controlled.
     pub fn from_input(
         input: BuildManifestInput,
         artifacts: &[VerifiedArtifact],
@@ -141,7 +139,6 @@ impl BuildManifest {
                 Ok(ManifestFile {
                     relative_path: relative_path.to_owned(),
                     size: artifact.size(),
-                    sha256: artifact.sha256_hex(),
                 })
             })
             .collect::<PackageResult<Vec<_>>>()?;
@@ -187,7 +184,7 @@ pub(crate) fn validate_manifest_bytes(artifacts: &[VerifiedArtifact]) -> Package
         let key = windows_name_key("manifest relative_path", &file.relative_path)?;
         if key == "build-manifest.json"
             || described
-                .insert(key, (file.relative_path, file.size, file.sha256))
+                .insert(key, (file.relative_path, file.size))
                 .is_some()
         {
             return Err(PackageError::InvalidBuildManifest(
@@ -212,28 +209,18 @@ pub(crate) fn validate_manifest_bytes(artifacts: &[VerifiedArtifact]) -> Package
             PackageError::InvalidBuildManifest("artifact path is not UTF-8".into())
         })?;
         let key = windows_name_key("artifact relative_path", name)?;
-        let Some((described_name, size, sha256)) = described.get(&key) else {
+        let Some((described_name, size)) = described.get(&key) else {
             return Err(PackageError::InvalidBuildManifest(format!(
                 "manifest does not describe {name:?}"
             )));
         };
-        if *described_name != name || *size != artifact.size() || *sha256 != artifact.sha256_hex() {
+        if *described_name != name || *size != artifact.size() {
             return Err(PackageError::InvalidBuildManifest(format!(
                 "manifest metadata does not match {name:?}"
             )));
         }
     }
     Ok(())
-}
-
-pub(crate) fn digest_hex(digest: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(digest.len() * 2);
-    for &byte in digest {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    output
 }
 
 pub(crate) fn artifact_relative_path(path: &Path, label: &str) -> PackageResult<PathBuf> {
