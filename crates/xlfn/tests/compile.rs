@@ -39,8 +39,11 @@ fn trait_driven_function_signatures_compile() {
         tests.compile_fail("tests/ui/fail/formula_identity_missing.rs");
         tests.compile_fail("tests/ui/fail/handle_return_*.rs");
         tests.compile_fail("tests/ui/fail/nested_handle_storage.rs");
-        tests.compile_fail("tests/ui/fail/handle_cannot_outlive_registry.rs");
-        tests.compile_fail("tests/ui/fail/unscoped_call_scope.rs");
+        #[cfg(feature = "bench-internals")]
+        {
+            tests.compile_fail("tests/ui/fail/handle_cannot_outlive_registry.rs");
+            tests.compile_fail("tests/ui/fail/unscoped_call_scope.rs");
+        }
     }
 
     #[cfg(feature = "rtd")]

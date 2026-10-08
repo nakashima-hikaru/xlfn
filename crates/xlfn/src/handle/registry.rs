@@ -216,6 +216,7 @@ impl HandleRegistry {
             .map(|(token, _binding_id, _object_id, _reused)| token)
     }
 
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn publish_pending<'registry, T>(
         &'registry self,
         pending: PendingObjectBinding<'registry>,

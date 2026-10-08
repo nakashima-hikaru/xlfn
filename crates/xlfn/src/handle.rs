@@ -55,7 +55,7 @@ pub(crate) use formula::test_topic_key;
 pub(crate) use prepare::HandlePrepareState;
 pub(crate) use refinement_hooks::HandleRefinementHooks;
 pub(crate) use refinement_wire::TokenWire;
-#[cfg(feature = "handles")]
+#[cfg(any(test, feature = "bench-internals"))]
 pub(crate) use registry::HandleRegistry;
 #[cfg(any(test, target_os = "windows", feature = "bench-internals"))]
 pub(crate) use runtime::FormulaHandleService;

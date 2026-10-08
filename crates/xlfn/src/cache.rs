@@ -3,6 +3,8 @@ use crate::panic_boundary::catch_no_unwind;
 use crate::{XllError, XllResult};
 mod endpoint_cache;
 #[cfg(test)]
+mod generation_tests;
+#[cfg(test)]
 mod key_reentrancy_tests;
 mod node_layout;
 mod pin_transitions;
@@ -1237,6 +1239,7 @@ pub struct CalculationCache<K, V> {
     clear_lock: Mutex<()>,
     index: ResidentIndex<K, V>,
     clear_fn: Option<fn(*const ())>,
+    #[cfg(test)]
     follower_hook: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
@@ -1274,12 +1277,13 @@ where
                 let retired = cache.domain.drain_all(closed);
                 reclaim_cache_entries::<V>(retired);
             }),
+            #[cfg(test)]
             follower_hook: None,
         }
     }
 
-    #[doc(hidden)]
-    pub fn new_with_follower_hook(
+    #[cfg(test)]
+    fn new_with_follower_hook(
         weight_budget: usize,
         hook: impl Fn() + Send + Sync + 'static,
     ) -> Self {
@@ -1574,6 +1578,7 @@ where
                 };
                 drop(state);
 
+                #[cfg(test)]
                 if let Some(hook) = &self.follower_hook {
                     hook();
                 }

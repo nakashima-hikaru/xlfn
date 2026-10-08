@@ -919,7 +919,8 @@ pub mod v1 {
             .and_then(ExcelOutput::scalar)
     }
 
-    #[cfg(feature = "handles")]
+    // External compile-fail fixtures build their dependency without cfg(test).
+    #[cfg(all(feature = "handles", feature = "bench-internals"))]
     #[doc(hidden)]
     pub mod handle_test {
         use crate::call::CallScope;
@@ -1079,7 +1080,7 @@ pub mod v1 {
     }
 }
 
-#[cfg(feature = "handles")]
+#[cfg(all(feature = "handles", feature = "bench-internals"))]
 #[doc(hidden)]
 pub use v1::handle_test;
 
