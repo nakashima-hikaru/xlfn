@@ -17,7 +17,7 @@ use std::{
 mod async_control;
 use async_control::AsyncControl;
 use xlfn::{
-    AsyncConfig, AsyncWorkerCount, RtdConfig, RuntimeConfig,
+    AsyncPollerCount, BuiltinAsyncExecutor, BuiltinExecutorConfig, RtdConfig, RuntimeConfig,
     error::{DomainErrorCode, InputError},
     prelude::*,
     rtd::{RtdCapacity, RtdLimits, RtdSourceHandle, RtdValue},
@@ -71,20 +71,19 @@ impl Addin for BenchAddin {
     type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
+    type AsyncExecutor = BuiltinAsyncExecutor;
 
-    fn open(context: &OpenContext) -> XllResult<Opened<State>> {
+    fn open(context: &OpenContext) -> OpenResult<Self> {
         let (source, rtd_shared) = BenchRtdSource::new();
         let rtd = context.rtd().register_source(source)?;
         let limits = RtdLimits::standard()
             .with_max_pending(RtdCapacity::disabled_if_zero(120_000))
             .with_max_active(RtdCapacity::disabled_if_zero(120_000))
             .with_max_queued_updates(RtdCapacity::disabled_if_zero(120_000));
-        let config =
-            RuntimeConfig::new()
-                .with_rtd(RtdConfig::new().with_limits(limits))
-                .with_async(AsyncConfig::new().with_worker_count(
-                    AsyncWorkerCount::new(32).expect("32 workers are supported"),
-                ));
+        let config = RuntimeConfig::new().with_rtd(RtdConfig::new().with_limits(limits));
+        let executor = BuiltinAsyncExecutor::new(BuiltinExecutorConfig::new().with_poller_count(
+            AsyncPollerCount::new(32).expect("32 pollers are supported"),
+        ));
         Ok(Opened::new(State {
             shared_read: AtomicU64::new(0),
             contended: AtomicU64::new(0),
@@ -92,7 +91,8 @@ impl Addin for BenchAddin {
             rtd,
             rtd_shared,
         })
-        .with_runtime_config(config))
+        .with_runtime_config(config)
+        .with_async_executor(executor))
     }
 }
 

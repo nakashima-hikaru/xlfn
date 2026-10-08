@@ -4,7 +4,7 @@ use crate::return_abi::XlArrayBuilder;
 /// cleanup through the production synchronous boundary. Fixture text is
 /// allocated before measurement; only the owned control clones it per call.
 pub struct ScalarOutputBenchmark {
-    runtime: &'static crate::runtime::Runtime<()>,
+    runtime: &'static crate::runtime::Runtime<super::BenchmarkAddin>,
     text: String,
 }
 
@@ -63,7 +63,7 @@ impl ScalarOutputBenchmark {
 /// return boundary. Input fixtures are prepared before the measured operation;
 /// both paths include result allocation, publication, and `xlAutoFree12` cleanup.
 pub struct NumericArrayOutputBenchmark {
-    runtime: &'static crate::runtime::Runtime<()>,
+    runtime: &'static crate::runtime::Runtime<super::BenchmarkAddin>,
     values: Vec<f64>,
 }
 

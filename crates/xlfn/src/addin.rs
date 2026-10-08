@@ -308,7 +308,7 @@ impl RuntimeConfig {
 
     #[cfg(feature = "async")]
     #[must_use]
-    /// Sets the asynchronous executor policy for this generation.
+    /// Sets the asynchronous task lifecycle policy for this generation.
     pub const fn with_async(mut self, async_runtime: AsyncConfig) -> Self {
         self.async_runtime = async_runtime;
         self
@@ -325,8 +325,8 @@ impl RuntimeConfig {
     }
 
     #[cfg(feature = "async")]
-    pub(crate) const fn async_worker_count(self) -> usize {
-        self.async_runtime.worker_count()
+    pub(crate) const fn async_task_limit(self) -> AsyncTaskLimit {
+        self.async_runtime.task_limit
     }
 }
 
@@ -372,74 +372,73 @@ impl Default for RtdConfig {
     }
 }
 
-/// Bounded number of asynchronous executor workers.
+/// Maximum number of framework-owned asynchronous tasks at one time.
 #[cfg(feature = "async")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AsyncWorkerCount(NonZeroUsize);
+pub struct AsyncTaskLimit(NonZeroUsize);
 
 #[cfg(feature = "async")]
-impl AsyncWorkerCount {
-    /// Maximum supported number of executor workers per generation.
-    pub const MAX: usize = 32;
-    /// Default executor size of four workers.
-    pub const DEFAULT: Self = Self(NonZeroUsize::new(4).expect("default worker count is non-zero"));
+impl AsyncTaskLimit {
+    /// Default limit of 4096 framework-owned tasks.
+    pub const DEFAULT: Self =
+        Self(NonZeroUsize::new(4096).expect("default task limit is non-zero"));
 
     #[must_use]
-    /// Validates a worker count in `1..=MAX`.
-    pub const fn new(worker_count: usize) -> Option<Self> {
-        if worker_count == 0 || worker_count > Self::MAX {
-            None
-        } else {
-            Some(Self(
-                NonZeroUsize::new(worker_count).expect("worker count is non-zero"),
-            ))
+    /// Creates a task limit from a nonzero capacity.
+    pub const fn new(task_limit: usize) -> Option<Self> {
+        match NonZeroUsize::new(task_limit) {
+            Some(limit) => Some(Self(limit)),
+            None => None,
         }
     }
 
     #[must_use]
-    /// Returns the validated worker count.
+    /// Returns the maximum number of pending tasks.
     pub const fn get(self) -> usize {
         self.0.get()
     }
 }
 
 #[cfg(feature = "async")]
-impl TryFrom<usize> for AsyncWorkerCount {
+impl TryFrom<usize> for AsyncTaskLimit {
     type Error = crate::XllError;
 
-    fn try_from(worker_count: usize) -> Result<Self, Self::Error> {
-        Self::new(worker_count).ok_or(crate::XllError::Domain {
+    fn try_from(task_limit: usize) -> Result<Self, Self::Error> {
+        Self::new(task_limit).ok_or(crate::XllError::Domain {
             code: crate::error::DomainErrorCode::InvalidInput,
         })
     }
 }
 
-/// Async worker portion of [`RuntimeConfig`].
+#[cfg(feature = "async")]
+impl Default for AsyncTaskLimit {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// Asynchronous task lifecycle policy in [`RuntimeConfig`].
 #[cfg(feature = "async")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AsyncConfig {
-    worker_count: AsyncWorkerCount,
+    task_limit: AsyncTaskLimit,
 }
 
 #[cfg(feature = "async")]
 impl AsyncConfig {
     #[must_use]
-    /// Creates an executor policy using [`AsyncWorkerCount::DEFAULT`].
+    /// Creates a policy using [`AsyncTaskLimit::DEFAULT`].
     pub const fn new() -> Self {
         Self {
-            worker_count: AsyncWorkerCount::DEFAULT,
+            task_limit: AsyncTaskLimit::DEFAULT,
         }
     }
 
     #[must_use]
-    /// Sets the number of workers that poll framework-owned async tasks.
-    pub const fn with_worker_count(mut self, worker_count: AsyncWorkerCount) -> Self {
-        self.worker_count = worker_count;
+    /// Sets the maximum number of framework-owned async tasks.
+    pub const fn with_task_limit(mut self, task_limit: AsyncTaskLimit) -> Self {
+        self.task_limit = task_limit;
         self
-    }
-
-    pub(crate) const fn worker_count(self) -> usize {
-        self.worker_count.get()
     }
 }
 
@@ -451,19 +450,40 @@ impl Default for AsyncConfig {
 }
 
 /// The result of a successful [`Addin::open`] transaction.
-pub struct Opened<S, L = (), U = ()> {
+pub struct Opened<S, L = (), U = (), E = NoAsyncExecutor> {
     shared_state: S,
     lifecycle_state: L,
     layers: U,
     runtime: RuntimeConfig,
+    async_executor: E,
 }
+
+/// An add-in that does not submit native asynchronous tasks.
+///
+/// This is the default executor resource in [`Opened`]. With the `async`
+/// feature it implements the executor contract and rejects task admission.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NoAsyncExecutor;
 
 /// Complete initialization result for an [`Addin`] implementation.
 ///
 /// This alias follows the implementation's shared state, lifecycle state,
 /// instrumentation layers, and error type, including when those types change.
+#[cfg(not(feature = "async"))]
 pub type OpenResult<A> = Result<
     Opened<<A as Addin>::SharedState, <A as Addin>::LifecycleState, <A as Addin>::Layers>,
+    <A as Addin>::Error,
+>;
+
+/// Complete initialization result, including ownership of the selected executor.
+#[cfg(feature = "async")]
+pub type OpenResult<A> = Result<
+    Opened<
+        <A as Addin>::SharedState,
+        <A as Addin>::LifecycleState,
+        <A as Addin>::Layers,
+        <A as Addin>::AsyncExecutor,
+    >,
     <A as Addin>::Error,
 >;
 
@@ -476,6 +496,7 @@ impl<S> Opened<S, (), ()> {
             lifecycle_state: (),
             layers: (),
             runtime: RuntimeConfig::new(),
+            async_executor: NoAsyncExecutor,
         }
     }
 }
@@ -489,28 +510,33 @@ impl<S, L, U> Opened<S, L, U> {
             lifecycle_state,
             layers,
             runtime: RuntimeConfig::new(),
+            async_executor: NoAsyncExecutor,
         }
     }
+}
 
+impl<S, L, U, E> Opened<S, L, U, E> {
     /// Attaches dedicated thread-affine lifecycle state.
     #[must_use]
-    pub fn with_lifecycle<NewL>(self, lifecycle_state: NewL) -> Opened<S, NewL, U> {
+    pub fn with_lifecycle<NewL>(self, lifecycle_state: NewL) -> Opened<S, NewL, U, E> {
         Opened {
             shared_state: self.shared_state,
             lifecycle_state,
             layers: self.layers,
             runtime: self.runtime,
+            async_executor: self.async_executor,
         }
     }
 
     /// Attaches UDF invocation layers.
     #[must_use]
-    pub fn with_layers<NewU>(self, layers: NewU) -> Opened<S, L, NewU> {
+    pub fn with_layers<NewU>(self, layers: NewU) -> Opened<S, L, NewU, E> {
         Opened {
             shared_state: self.shared_state,
             lifecycle_state: self.lifecycle_state,
             layers,
             runtime: self.runtime,
+            async_executor: self.async_executor,
         }
     }
 
@@ -521,12 +547,29 @@ impl<S, L, U> Opened<S, L, U> {
         self
     }
 
-    pub(crate) fn into_parts(self) -> (S, L, U, RuntimeConfig) {
+    /// Transfers executor ownership into this open transaction.
+    #[cfg(feature = "async")]
+    #[must_use]
+    pub fn with_async_executor<NewE: crate::AsyncExecutor>(
+        self,
+        async_executor: NewE,
+    ) -> Opened<S, L, U, NewE> {
+        Opened {
+            shared_state: self.shared_state,
+            lifecycle_state: self.lifecycle_state,
+            layers: self.layers,
+            runtime: self.runtime,
+            async_executor,
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (S, L, U, RuntimeConfig, E) {
         (
             self.shared_state,
             self.lifecycle_state,
             self.layers,
             self.runtime,
+            self.async_executor,
         )
     }
 }
@@ -554,6 +597,9 @@ pub trait Addin: Send + Sync + 'static {
     type Error: IntoXllError;
     /// No layers (`()`) or a tuple of one to sixteen [`crate::execution::UdfLayer`] values.
     type Layers: crate::execution::UdfLayers;
+    /// Executor resource owned by each successful open transaction.
+    #[cfg(feature = "async")]
+    type AsyncExecutor: crate::AsyncExecutor;
 
     /// Opens one complete generation on Excel's main lifecycle thread.
     ///
@@ -635,6 +681,8 @@ impl Addin for () {
     type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
+    #[cfg(feature = "async")]
+    type AsyncExecutor = NoAsyncExecutor;
 
     fn open(_context: &OpenContext) -> OpenResult<Self> {
         Ok(Opened::new(()))
@@ -896,7 +944,7 @@ impl<'call, A: Addin> MainThreadContext<'call, A> {
 )]
 mod tests {
     #[cfg(feature = "async")]
-    use super::AsyncContext;
+    use super::{AsyncContext, NoAsyncExecutor};
     use super::{
         DiagnosticsSetup, MacroSheetContext, MainThreadContext, Opened, ThreadSafeContext,
     };
@@ -904,6 +952,22 @@ mod tests {
     use std::rc::Rc;
     #[cfg(any(feature = "async", all(feature = "rtd", not(target_os = "windows"))))]
     use std::sync::Arc;
+
+    #[cfg(feature = "async")]
+    #[test]
+    fn task_capacity_is_nonzero_and_independent_of_executor_configuration() {
+        assert_eq!(super::AsyncTaskLimit::DEFAULT.get(), 4096);
+        assert!(super::AsyncTaskLimit::new(0).is_none());
+        assert!(super::AsyncTaskLimit::try_from(0).is_err());
+        let limit = super::AsyncTaskLimit::new(1).unwrap();
+        let config = super::RuntimeConfig::new()
+            .with_async(super::AsyncConfig::new().with_task_limit(limit));
+        assert_eq!(config.async_task_limit(), limit);
+        assert_eq!(
+            super::AsyncTaskLimit::new(usize::MAX).unwrap().get(),
+            usize::MAX
+        );
+    }
 
     assert_impl_all!(ThreadSafeContext<'static, ()>: Copy, Clone, Send, Sync);
     assert_impl_all!(MainThreadContext<'static, ()>: Clone);
@@ -920,6 +984,8 @@ mod tests {
         type LifecycleState = Rc<()>;
         type Error = crate::XllError;
         type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = NoAsyncExecutor;
 
         fn open(
             _: &crate::OpenContext,
@@ -938,6 +1004,8 @@ mod tests {
         type LifecycleState = ();
         type Error = crate::XllError;
         type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = NoAsyncExecutor;
 
         fn open(
             _: &crate::OpenContext,
@@ -1193,6 +1261,7 @@ mod tests {
         type LifecycleState = ();
         type Error = crate::XllError;
         type Layers = ();
+        type AsyncExecutor = NoAsyncExecutor;
 
         fn open(
             _context: &crate::OpenContext,

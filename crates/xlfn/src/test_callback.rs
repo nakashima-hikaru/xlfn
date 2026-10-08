@@ -1,44 +1,70 @@
-use std::cell::Cell;
-use std::sync::{Mutex, MutexGuard};
-
-// The module gate is shared by all tests, including Windows builds without
-// any optional capability. Installing a mock Excel callback is only needed
-// by portable callback tests and the async/handle suites.
-static CALLBACK_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-thread_local! {
-    static CALLBACK_TEST_LOCK_DEPTH: Cell<usize> = const { Cell::new(0) };
-}
-
+// Callback fixtures and runtime open/close fixtures mutate the same module
+// singleton. Both must hold the same reentrant lease for their entire lifetime:
+// a separate callback mutex allows a runtime to reset a live callback permit.
 pub(crate) struct CallbackTestGuard {
-    guard: Option<MutexGuard<'static, ()>>,
+    _module: crate::ingress::TestModuleLease,
+    // Fixture reentry belongs to the acquiring thread, unlike runtime leases
+    // which may be released by a separate shutdown thread.
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
 pub(crate) fn lock() -> CallbackTestGuard {
-    let reentrant = CALLBACK_TEST_LOCK_DEPTH.get() != 0;
-    let guard = if reentrant {
-        None
-    } else {
-        Some(
-            CALLBACK_TEST_LOCK
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        )
-    };
-    CALLBACK_TEST_LOCK_DEPTH.set(CALLBACK_TEST_LOCK_DEPTH.get() + 1);
-    CallbackTestGuard { guard }
+    CallbackTestGuard {
+        _module: crate::ingress::acquire_test_module_lease(),
+        _thread_bound: std::marker::PhantomData,
+    }
 }
 
-impl Drop for CallbackTestGuard {
-    fn drop(&mut self) {
-        let depth = CALLBACK_TEST_LOCK_DEPTH
-            .get()
-            .checked_sub(1)
-            .expect("callback test lock depth remains balanced");
-        if depth == 0 {
-            drop(self.guard.take());
-        }
-        CALLBACK_TEST_LOCK_DEPTH.set(depth);
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn callback_fixture_excludes_runtime_until_last_reentrant_guard_drops() {
+        let outer = super::lock();
+        let inner = super::lock();
+        drop(outer);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let _runtime = crate::ingress::acquire_test_module_lease();
+            acquired_tx.send(()).unwrap();
+        });
+        started_rx.recv().unwrap();
+        let while_callback_live = acquired_rx.recv_timeout(Duration::from_millis(50));
+        drop(inner);
+        worker.join().unwrap();
+        assert!(matches!(
+            while_callback_live,
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        acquired_rx.recv().unwrap();
+    }
+
+    #[test]
+    fn runtime_fixture_excludes_callback_until_cross_thread_lease_release() {
+        let runtime = crate::ingress::acquire_test_module_lease();
+        // Callback setup may reenter on the runtime's opening thread.
+        drop(super::lock());
+        let (started_tx, started_rx) = mpsc::channel();
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let _callback = super::lock();
+            acquired_tx.send(()).unwrap();
+        });
+        started_rx.recv().unwrap();
+        let while_runtime_live = acquired_rx.recv_timeout(Duration::from_millis(50));
+        // Runtime cleanup is allowed to release its lease on another thread.
+        std::thread::spawn(move || drop(runtime)).join().unwrap();
+        worker.join().unwrap();
+        assert!(matches!(
+            while_runtime_live,
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        acquired_rx.recv().unwrap();
     }
 }
 
@@ -120,7 +146,7 @@ mod mock {
         TERMINAL_USED.store(false, Ordering::Relaxed);
     }
 
-    #[cfg(feature = "async")]
+    #[cfg(feature = "async-builtin")]
     pub(crate) fn set_async_rejected(rejected: bool) {
         ASYNC_REJECTED.store(rejected, Ordering::Relaxed);
     }
@@ -149,7 +175,7 @@ mod mock {
         LAST_ASYNC_VALUE.load(Ordering::Relaxed)
     }
 
-    #[cfg(all(feature = "async", not(target_os = "windows")))]
+    #[cfg(all(feature = "async-builtin", not(target_os = "windows")))]
     pub(crate) fn callback_order() -> Vec<i32> {
         CALLBACK_ORDER
             .lock()

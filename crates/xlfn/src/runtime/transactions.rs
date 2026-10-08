@@ -71,18 +71,13 @@ where
         Err(error) => return Err(transaction.failure(error)),
     };
     let context = OpenContext::new(registrar.module_path().clone(), build_info, generation);
-    let (mut transaction, runtime_config) = initialize_addin::<A>(context, transaction)?;
-    #[cfg(not(feature = "async"))]
-    let _ = runtime_config;
+    let (mut transaction, _runtime_config) = initialize_addin::<A>(context, transaction)?;
     let has_async_functions = prepared_set
         .iter()
         .any(|descriptor| descriptor.signature.execution.is_async());
     if has_async_functions {
         #[cfg(feature = "async")]
         {
-            if let Err(error) = runtime.start_async(runtime_config.async_worker_count()) {
-                return Err(transaction.failure(error));
-            }
             let event_result = {
                 let host = RegistrationHost::new(transaction.callbacks_mut());
                 registrar.register_async_events(&host)
@@ -193,7 +188,8 @@ where
             return Err(transaction.failure(IntoXllError::into_xll_error(error)));
         }
     };
-    let (shared_state, lifecycle_state, layers, runtime_config) = opened.into_parts();
+    let (shared_state, lifecycle_state, layers, runtime_config, async_executor) =
+        opened.into_parts();
     let service_inputs = context.into_service_inputs();
     // Keep the non-Send lifecycle state in the open transaction until the
     // final pre-publication transfer into the thread-affine slot. It must not
@@ -205,6 +201,16 @@ where
         init_config: runtime_config,
     };
     let transaction = transaction.stage_generation(opening)?;
+    #[cfg(feature = "async")]
+    if let Err(error) = transaction
+        .deps()
+        .async_runtime()
+        .start(async_executor, runtime_config.async_task_limit())
+    {
+        return Err(transaction.failure(error));
+    }
+    #[cfg(not(feature = "async"))]
+    let _ = async_executor;
     Ok((transaction, runtime_config))
 }
 
@@ -416,12 +422,12 @@ where
         report.push(issue.component, issue.kind, issue.error.clone());
     }) {
         Ok(stage) => stage,
-        Err(error) => {
+        Err(failure) => {
             return Err(handle_unload_hazard(
                 runtime,
-                crate::shutdown::UnloadHazard::SubscriptionProducerStillRunning,
-                "xlAutoRemove subscription shutdown",
-                &error,
+                failure.hazard(),
+                "xlAutoRemove producer shutdown",
+                &failure.into_error(),
             ));
         }
     };

@@ -96,6 +96,8 @@ impl Addin for AppTools {
     type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
+    #[cfg(feature = "async")]
+    type AsyncExecutor = xlfn::NoAsyncExecutor;
 
     fn open(context: &OpenContext) -> XllResult<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>> {
         let path = context.diagnostics().install_file_sink()?;
@@ -149,6 +151,8 @@ impl Addin for AppTools {
     type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
+    #[cfg(feature = "async")]
+    type AsyncExecutor = xlfn::NoAsyncExecutor;
 
     fn open(context: &OpenContext) -> XllResult<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>> {
         context.diagnostics().set_sink(Telemetry)?;

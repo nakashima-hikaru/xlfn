@@ -47,6 +47,8 @@ impl Addin for HelloXll {
     type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
+    #[cfg(feature = "async")]
+    type AsyncExecutor = xlfn::NoAsyncExecutor;
 
     fn open(_: &OpenContext) -> XllResult<Opened<(), (), ()>> {
         Ok(Opened::new(()))

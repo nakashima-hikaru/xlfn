@@ -35,8 +35,6 @@ mod transactions;
 
 #[cfg(any(feature = "bench-internals", test,))]
 use crate::runtime_components::GenerationServices;
-#[cfg(feature = "async")]
-use crate::runtime_components::RuntimeExecutors;
 #[cfg(test)]
 use crate::runtime_components::SealedGenerationServices;
 use crate::runtime_components::{
@@ -102,7 +100,7 @@ pub struct Runtime<A: crate::Addin> {
     host: HostLedger,
     return_protocol: ReturnProtocol,
     #[cfg(feature = "async")]
-    executors: RuntimeExecutors,
+    async_runtime: crate::async_udf::AsyncRuntime<A::AsyncExecutor>,
     residency: ModuleResidency,
     unload_policy: UnloadPolicy<A>,
     quarantine: QuarantineVault<A>,
@@ -225,7 +223,7 @@ impl<A: crate::Addin> Runtime<A> {
             host: HostLedger::new(),
             return_protocol: ReturnProtocol::new(),
             #[cfg(feature = "async")]
-            executors: RuntimeExecutors::new(),
+            async_runtime: crate::async_udf::AsyncRuntime::new(),
             residency: ModuleResidency::new(),
             unload_policy: UnloadPolicy::Logical,
             quarantine: QuarantineVault::new(),
@@ -247,7 +245,7 @@ impl<A: crate::Addin> Runtime<A> {
             host: HostLedger::new(),
             return_protocol: ReturnProtocol::new(),
             #[cfg(feature = "async")]
-            executors: RuntimeExecutors::new(),
+            async_runtime: crate::async_udf::AsyncRuntime::new(),
             residency: ModuleResidency::new(),
             unload_policy: UnloadPolicy::Physical(physical_quiesce::<A>),
             quarantine: QuarantineVault::new(),
@@ -661,7 +659,7 @@ impl<A: crate::Addin> Runtime<A> {
     pub(crate) fn calculation_id(&self) -> crate::execution::CalculationId {
         #[cfg(feature = "async")]
         {
-            crate::execution::CalculationId::new(self.executors.async_manager.current_generation())
+            self.async_runtime.current_epoch().into()
         }
         #[cfg(not(feature = "async"))]
         {
@@ -673,7 +671,7 @@ impl<A: crate::Addin> Runtime<A> {
 
     #[cfg(feature = "async")]
     pub(crate) fn finish_calculation(&self) {
-        let _ = self.executors.async_manager.advance_generation();
+        let _ = self.async_runtime.advance_calculation();
     }
 
     #[cfg(all(feature = "handles", any(test, feature = "bench-internals")))]
@@ -790,27 +788,34 @@ impl<A: crate::Addin> Runtime<A> {
         }
     }
 
-    #[cfg(feature = "async")]
-    pub(crate) fn start_async(&self, worker_count: usize) -> XllResult<()> {
-        self.executors.async_manager.start(worker_count)
+    #[cfg(all(
+        feature = "async",
+        any(test, all(feature = "bench-internals", feature = "async-builtin"))
+    ))]
+    pub(crate) fn start_async(
+        &self,
+        executor: A::AsyncExecutor,
+        task_limit: crate::AsyncTaskLimit,
+    ) -> XllResult<()> {
+        self.async_runtime.start(executor, task_limit)
     }
 
     #[cfg(feature = "async")]
     pub(crate) fn cancel_async(&self) {
-        self.executors.async_manager.cancel_current_generation();
+        self.async_runtime.cancel_current_calculation();
     }
 
     #[cfg(feature = "async")]
     #[cfg(test)]
     pub(crate) fn close_async(
         &self,
-    ) -> crate::shutdown::StopOutcome<crate::shutdown::AsyncStopped> {
-        self.executors.async_manager.close()
+    ) -> XllResult<crate::shutdown::StopOutcome<crate::shutdown::AsyncStopped>> {
+        self.async_runtime.close()
     }
 
     #[cfg(feature = "async")]
-    pub(crate) fn async_manager(&self) -> &crate::async_udf::AsyncManager {
-        &self.executors.async_manager
+    pub(crate) fn async_runtime(&self) -> &crate::async_udf::AsyncRuntime<A::AsyncExecutor> {
+        &self.async_runtime
     }
 
     #[cfg(test)]
@@ -940,6 +945,8 @@ pub(crate) mod tests {
         type LifecycleState = ();
         type Error = XllError;
         type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
 
         fn open(
             _context: &crate::addin::OpenContext,
@@ -1042,6 +1049,8 @@ pub(crate) mod tests {
         type LifecycleState = RetainedState;
         type Error = XllError;
         type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
 
         fn open(
             _: &crate::addin::OpenContext,
@@ -1755,26 +1764,280 @@ pub(crate) mod tests {
         assert!(runtime.host.metadata_debt_snapshot().is_empty());
     }
 
+    #[cfg(feature = "async-builtin")]
+    struct AsyncCalculationAddin;
+
     #[cfg(feature = "async")]
     #[test]
-    fn calculation_end_advances_the_async_task_generation() {
+    fn opened_executor_is_stopped_before_state_rollback_after_start_or_registration_failure() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+        struct Counts {
+            fail_start: AtomicBool,
+            starts: AtomicUsize,
+            stops: AtomicUsize,
+            executor_drops: AtomicUsize,
+            state_drops: AtomicUsize,
+        }
+        static COUNTS: Counts = Counts {
+            fail_start: AtomicBool::new(false),
+            starts: AtomicUsize::new(0),
+            stops: AtomicUsize::new(0),
+            executor_drops: AtomicUsize::new(0),
+            state_drops: AtomicUsize::new(0),
+        };
+        struct ProbeExecutor;
+        impl crate::AsyncExecutor for ProbeExecutor {
+            type Reservation = std::convert::Infallible;
+            fn start(&self) -> XllResult<()> {
+                COUNTS.starts.fetch_add(1, Ordering::Relaxed);
+                if COUNTS.fail_start.load(Ordering::Relaxed) {
+                    Err(XllError::Overloaded)
+                } else {
+                    Ok(())
+                }
+            }
+            fn reserve(&self) -> XllResult<Self::Reservation> {
+                Err(XllError::Closing)
+            }
+            fn submit<F>(&self, reservation: Self::Reservation, _: crate::AsyncTask<F>)
+            where
+                F: std::future::Future<Output = ()> + Send + 'static,
+            {
+                match reservation {}
+            }
+            fn shutdown(&self) -> XllResult<()> {
+                COUNTS.stops.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+        }
+        impl Drop for ProbeExecutor {
+            fn drop(&mut self) {
+                assert_eq!(COUNTS.stops.load(Ordering::Relaxed), 1);
+                COUNTS.executor_drops.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        struct ProbeState;
+        impl Drop for ProbeState {
+            fn drop(&mut self) {
+                assert_eq!(COUNTS.stops.load(Ordering::Relaxed), 1);
+                assert_eq!(COUNTS.executor_drops.load(Ordering::Relaxed), 1);
+                COUNTS.state_drops.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        struct ProbeAddin;
+        impl crate::Addin for ProbeAddin {
+            type SharedState = ProbeState;
+            type LifecycleState = ProbeState;
+            type Error = XllError;
+            type Layers = ();
+            type AsyncExecutor = ProbeExecutor;
+            fn open(_: &crate::OpenContext) -> crate::OpenResult<Self> {
+                Ok(crate::Opened::new(ProbeState)
+                    .with_lifecycle(ProbeState)
+                    .with_async_executor(ProbeExecutor))
+            }
+        }
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        for fail_start in [true, false] {
+            COUNTS.fail_start.store(fail_start, Ordering::Relaxed);
+            COUNTS.starts.store(0, Ordering::Relaxed);
+            COUNTS.stops.store(0, Ordering::Relaxed);
+            COUNTS.executor_drops.store(0, Ordering::Relaxed);
+            COUNTS.state_drops.store(0, Ordering::Relaxed);
+            let runtime = Runtime::<ProbeAddin>::new();
+            let transaction = runtime
+                .begin_open()
+                .unwrap()
+                .attach_host(crate::host_callback::HostCallbackSession::new());
+            let lifecycle = runtime.bind_addin_lifecycle().unwrap();
+            let context = crate::OpenContext::new(
+                std::path::PathBuf::from("test.xll"),
+                crate::BuildInfo::new(
+                    crate::diagnostics::AddinId::parse("test").unwrap(),
+                    "0",
+                    "test",
+                ),
+                runtime.protocol_generation().unwrap(),
+            );
+            let failure = match test_support::initialize_addin::<ProbeAddin>(context, transaction) {
+                Err(failure) => {
+                    assert!(fail_start);
+                    failure
+                }
+                Ok((transaction, _)) => {
+                    assert!(!fail_start);
+                    assert_eq!(COUNTS.stops.load(Ordering::Relaxed), 0);
+                    // Registration failures enter this same owning rollback path.
+                    transaction.failure(XllError::Overloaded)
+                }
+            };
+            assert!(matches!(
+                failure.recover(&runtime, &lifecycle),
+                XllError::Overloaded
+            ));
+            assert!(runtime.async_runtime().is_stopped());
+            assert_eq!(runtime.phase(), LifecyclePhase::Closed);
+            assert_eq!(COUNTS.starts.load(Ordering::Relaxed), 1);
+            assert_eq!(COUNTS.stops.load(Ordering::Relaxed), 1);
+            assert_eq!(COUNTS.executor_drops.load(Ordering::Relaxed), 1);
+            assert_eq!(COUNTS.state_drops.load(Ordering::Relaxed), 2);
+        }
+    }
+
+    #[cfg(feature = "async")]
+    struct AsyncStopProbe {
+        failing: Arc<std::sync::atomic::AtomicBool>,
+        drops: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[cfg(feature = "async")]
+    impl crate::AsyncExecutor for AsyncStopProbe {
+        type Reservation = std::convert::Infallible;
+
+        fn start(&self) -> XllResult<()> {
+            Ok(())
+        }
+
+        fn reserve(&self) -> XllResult<Self::Reservation> {
+            Err(XllError::Closing)
+        }
+
+        fn submit<F>(&self, permit: Self::Reservation, _: crate::AsyncTask<F>)
+        where
+            F: std::future::Future<Output = ()> + Send + 'static,
+        {
+            match permit {}
+        }
+
+        fn shutdown(&self) -> XllResult<()> {
+            if self.failing.load(Ordering::Acquire) {
+                Err(XllError::Panic)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[cfg(feature = "async")]
+    impl Drop for AsyncStopProbe {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    #[cfg(feature = "async")]
+    struct AsyncStopFailureAddin;
+
+    #[cfg(feature = "async")]
+    impl crate::Addin for AsyncStopFailureAddin {
+        type SharedState = RetainedState;
+        type LifecycleState = RetainedState;
+        type Error = XllError;
+        type Layers = ();
+        type AsyncExecutor = AsyncStopProbe;
+
+        fn open(_: &crate::OpenContext) -> crate::OpenResult<Self> {
+            unreachable!("stop failure tests stage observed resources directly")
+        }
+
+        fn cleanup(state: &mut RetainedState, _: &mut crate::CleanupReporter<'_>) {
+            state.cleanups.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    #[cfg(feature = "async")]
+    #[test]
+    fn failed_external_executor_shutdown_retains_generation_and_services() {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let runtime = Runtime::<()>::new();
-        runtime.start_async(1).unwrap();
-        let first = runtime.calculation_id().get();
+        let fixture = StaticTestRuntime::<AsyncStopFailureAddin>::new();
+        let runtime = fixture.runtime();
+        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cleanups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state = || RetainedState {
+            drops: Arc::clone(&drops),
+            cleanups: Arc::clone(&cleanups),
+        };
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish_with_lifecycle(opening, state(), state(), ());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let failing = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let executor_drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        runtime
+            .start_async(
+                AsyncStopProbe {
+                    failing: Arc::clone(&failing),
+                    drops: Arc::clone(&executor_drops),
+                },
+                crate::AsyncTaskLimit::DEFAULT,
+            )
+            .unwrap();
+
+        assert_eq!(crate::boundary::host::host_auto_remove(runtime), 1);
+        assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
+        assert!(runtime.has_current_generation());
+        assert!(!runtime.async_runtime().is_stopped());
+        assert_eq!(drops.load(Ordering::Acquire), 0);
+        assert_eq!(cleanups.load(Ordering::Acquire), 0);
+        assert_eq!(executor_drops.load(Ordering::Acquire), 0);
+        let trace = runtime.shutdown_trace_json();
+        assert!(trace.contains("asyncShutdownFailed"));
+        assert!(!trace.contains("stopAsyncExecutor"));
+        assert!(!trace.contains("subscriptionsDrained"));
+        assert!(!trace.contains("generationReclaimed"));
+
+        // A direct retry can discharge executor ownership without recovering
+        // the terminally quarantined add-in generation or sealing its services.
+        failing.store(false, Ordering::Release);
+        assert!(runtime.close_async().unwrap().issues.is_empty());
+        assert_eq!(executor_drops.load(Ordering::Acquire), 1);
+        assert_eq!(drops.load(Ordering::Acquire), 0);
+        assert_eq!(cleanups.load(Ordering::Acquire), 0);
+    }
+
+    #[cfg(feature = "async-builtin")]
+    impl crate::Addin for AsyncCalculationAddin {
+        type SharedState = ();
+        type LifecycleState = ();
+        type Error = XllError;
+        type Layers = ();
+        type AsyncExecutor = crate::BuiltinAsyncExecutor;
+
+        fn open(_: &crate::OpenContext) -> crate::OpenResult<Self> {
+            Ok(crate::Opened::new(()).with_async_executor(one_poller()))
+        }
+    }
+
+    #[cfg(feature = "async-builtin")]
+    fn one_poller() -> crate::BuiltinAsyncExecutor {
+        crate::BuiltinAsyncExecutor::new(
+            crate::BuiltinExecutorConfig::new()
+                .with_poller_count(crate::AsyncPollerCount::new(1).unwrap()),
+        )
+    }
+
+    #[cfg(feature = "async-builtin")]
+    #[test]
+    fn calculation_end_advances_the_async_calculation_epoch() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let runtime = Runtime::<AsyncCalculationAddin>::new();
+        runtime
+            .start_async(one_poller(), crate::AsyncTaskLimit::DEFAULT)
+            .unwrap();
+        let first = runtime.async_runtime().current_epoch();
         let (first_source, first_token) = crate::cancellation::CancellationSource::new(
             crate::cancellation::CancellationGuarantee::CalculationScoped,
         );
         runtime
-            .async_manager()
-            .spawn(first, std::future::pending(), first_source)
+            .async_runtime()
+            .submit(first, std::future::pending(), first_source)
             .unwrap();
 
         runtime.finish_calculation();
-        let second = runtime.calculation_id().get();
-        assert_eq!(second, first + 1);
+        let second = runtime.async_runtime().current_epoch();
+        assert_eq!(runtime.calculation_id().get(), first.get() + 1);
         assert!(matches!(
-            runtime.async_manager().spawn(
+            runtime.async_runtime().submit(
                 first,
                 std::future::pending(),
                 crate::cancellation::CancellationSource::new(
@@ -1789,30 +2052,32 @@ pub(crate) mod tests {
             crate::cancellation::CancellationGuarantee::CalculationScoped,
         );
         runtime
-            .async_manager()
-            .spawn(second, std::future::pending(), second_source)
+            .async_runtime()
+            .submit(second, std::future::pending(), second_source)
             .unwrap();
         runtime.cancel_async();
         assert!(second_token.is_cancelled());
         assert!(!first_token.is_cancelled());
 
-        assert!(runtime.close_async().issues.is_empty());
+        assert!(runtime.close_async().unwrap().issues.is_empty());
         assert!(first_token.is_cancelled());
     }
 
-    #[cfg(feature = "async")]
+    #[cfg(feature = "async-builtin")]
     #[test]
-    fn published_async_generation_already_has_a_registry_entry() {
+    fn published_async_calculation_already_has_a_registry_entry() {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let runtime = Arc::new(Runtime::<()>::new());
-        runtime.start_async(1).unwrap();
+        let runtime = Arc::new(Runtime::<AsyncCalculationAddin>::new());
+        runtime
+            .start_async(one_poller(), crate::AsyncTaskLimit::DEFAULT)
+            .unwrap();
         let first = runtime.calculation_id().get();
         let (published_tx, published_rx) = mpsc::sync_channel(1);
         let (release_tx, release_rx) = mpsc::sync_channel(1);
         let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
         runtime
-            .async_manager()
-            .set_after_generation_publish_hook(Some(Arc::new(move || {
+            .async_runtime()
+            .set_after_calculation_publish_hook(Some(Arc::new(move || {
                 published_tx.send(()).unwrap();
                 release_rx
                     .lock()
@@ -1825,8 +2090,8 @@ pub(crate) mod tests {
         let advancing = thread::spawn(move || advancing_runtime.finish_calculation());
         published_rx.recv_timeout(Duration::from_secs(1)).unwrap();
 
-        let published = runtime.calculation_id().get();
-        assert_eq!(published, first + 1);
+        let published = runtime.async_runtime().current_epoch();
+        assert_eq!(published.get(), first + 1);
         let (spawned_tx, spawned_rx) = mpsc::sync_channel(1);
         let spawning_runtime = Arc::clone(&runtime);
         let spawning = thread::spawn(move || {
@@ -1837,23 +2102,23 @@ pub(crate) mod tests {
             spawned_tx
                 .send(
                     spawning_runtime
-                        .async_manager()
-                        .spawn(published, async {}, source),
+                        .async_runtime()
+                        .submit(published, async {}, source),
                 )
                 .unwrap();
         });
 
         let spawn_result = spawned_rx
             .recv_timeout(Duration::from_secs(1))
-            .expect("spawn should not wait for the manager state mutex");
+            .expect("submission should not wait for the calculation transition to return");
         assert!(spawn_result.is_ok());
         release_tx.send(()).unwrap();
         advancing.join().unwrap();
         spawning.join().unwrap();
 
         runtime
-            .async_manager()
-            .set_after_generation_publish_hook(None);
-        assert!(runtime.close_async().issues.is_empty());
+            .async_runtime()
+            .set_after_calculation_publish_hook(None);
+        assert!(runtime.close_async().unwrap().issues.is_empty());
     }
 }

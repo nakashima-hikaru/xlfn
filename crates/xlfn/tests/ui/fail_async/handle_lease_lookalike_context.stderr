@@ -1,10 +1,10 @@
 error[E0308]: mismatched types
-  --> tests/ui/fail_async/handle_lease_lookalike_context.rs:36:1
+  --> tests/ui/fail_async/handle_lease_lookalike_context.rs:38:1
    |
-36 | #[excel_function]
+38 | #[excel_function]
    | ^^^^^^^^^^^^^^^^^ expected `custom::AsyncContext<'_, TestAddin>`, found `xlfn::AsyncContext<'_, TestAddin>`
-37 | async fn bad(
-38 |     context: custom::AsyncContext<'_, TestAddin>,
+39 | async fn bad(
+40 |     context: custom::AsyncContext<'_, TestAddin>,
    |              ----------------------------------- expected due to this
    |
    = note: `xlfn::AsyncContext<'_, TestAddin>` and `custom::AsyncContext<'_, TestAddin>` have similar names, but are actually distinct types
@@ -14,8 +14,8 @@ note: `xlfn::AsyncContext<'_, TestAddin>` is defined in crate `xlfn`
    | pub struct AsyncContext<'call, A: Addin> {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 note: `custom::AsyncContext<'_, TestAddin>` is defined in the current crate
-  --> tests/ui/fail_async/handle_lease_lookalike_context.rs:27:5
+  --> tests/ui/fail_async/handle_lease_lookalike_context.rs:29:5
    |
-27 |     pub struct AsyncContext<'call, A>(PhantomData<&'call A>);
+29 |     pub struct AsyncContext<'call, A>(PhantomData<&'call A>);
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)

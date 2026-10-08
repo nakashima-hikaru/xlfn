@@ -282,7 +282,7 @@ churn.
 `value_boundary_allocations` measures allocation traffic separately from timing:
 
 ```text
-cargo bench -p xlfn --features bench-internals,async --bench value_boundary_allocations
+cargo bench -p xlfn --features bench-internals,async-builtin --bench value_boundary_allocations
 ```
 
 Each case warms up 100 calls and measures 10,000 calls through the system

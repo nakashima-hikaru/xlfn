@@ -32,6 +32,8 @@ impl Addin for ReloadAddin {
     type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
+    #[cfg(feature = "async")]
+    type AsyncExecutor = crate::NoAsyncExecutor;
 
     fn open(_: &OpenContext) -> Result<Opened<()>, XllError> {
         OPENS.set(OPENS.get() + 1);

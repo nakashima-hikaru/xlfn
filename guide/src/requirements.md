@@ -55,7 +55,8 @@ The basic add-in requires no Cargo features. Enable optional features in your
 
 | Feature   | Description                                             |
 | --------- | ------------------------------------------------------- |
-| `async`   | Asynchronous functions returning results when completed |
+| `async` | Native async transport, task lifecycle, and external executor API |
+| `async-builtin` | Async functions using the built-in polling executor |
 | `handles` | Rust objects owned by worksheet formulas                |
 | `rtd`     | Streaming Real-Time Data updates to cells               |
 | `cache`   | Calculation caching across worksheet calls              |
@@ -65,7 +66,7 @@ For example:
 
 ```toml
 [dependencies]
-xlfn = { version = "0.2", features = ["async"] }
+xlfn = { version = "0.2", features = ["async-builtin"] }
 ```
 
 Continue with [Create your first add-in](quick-start.md).

@@ -8,20 +8,31 @@ fn default_runtime_config_is_const_constructible() {
 
 #[cfg(feature = "async")]
 #[test]
-fn async_config_accepts_only_supported_worker_counts() {
-    use xlfn::{AsyncConfig, AsyncWorkerCount};
+fn async_config_accepts_nonzero_task_limits() {
+    use xlfn::{AsyncConfig, AsyncTaskLimit};
 
     const CONFIG: RuntimeConfig = RuntimeConfig::new()
-        .with_async(AsyncConfig::new().with_worker_count(AsyncWorkerCount::new(1).unwrap()));
+        .with_async(AsyncConfig::new().with_task_limit(AsyncTaskLimit::new(1).unwrap()));
     assert_ne!(CONFIG, RuntimeConfig::default());
-    assert!(AsyncWorkerCount::try_from(0).is_err());
+    assert!(AsyncTaskLimit::try_from(0).is_err());
+    assert_eq!(AsyncTaskLimit::DEFAULT.get(), 4096);
     assert_eq!(
-        AsyncWorkerCount::try_from(AsyncWorkerCount::MAX)
-            .unwrap()
-            .get(),
-        AsyncWorkerCount::MAX,
+        AsyncTaskLimit::try_from(usize::MAX).unwrap().get(),
+        usize::MAX
     );
-    assert!(AsyncWorkerCount::try_from(AsyncWorkerCount::MAX + 1).is_err());
+}
+
+#[cfg(feature = "async-builtin")]
+#[test]
+fn builtin_executor_config_bounds_poller_count_separately_from_task_limit() {
+    use xlfn::{AsyncPollerCount, BuiltinAsyncExecutor, BuiltinExecutorConfig};
+
+    assert!(AsyncPollerCount::new(0).is_none());
+    assert!(AsyncPollerCount::new(33).is_none());
+    assert_eq!(AsyncPollerCount::new(32).unwrap().get(), 32);
+    let _executor = BuiltinAsyncExecutor::new(
+        BuiltinExecutorConfig::new().with_poller_count(AsyncPollerCount::new(2).unwrap()),
+    );
 }
 
 #[cfg(feature = "handles")]
@@ -63,10 +74,9 @@ fn rtd_config_distinguishes_disabled_and_bounded_admission() {
 #[test]
 fn configuring_one_feature_preserves_the_other_feature_settings() {
     use xlfn::rtd::{RtdCapacity, RtdLimits};
-    use xlfn::{AsyncConfig, AsyncWorkerCount, HandleBindingLimit, HandleConfig, RtdConfig};
+    use xlfn::{AsyncConfig, AsyncTaskLimit, HandleBindingLimit, HandleConfig, RtdConfig};
 
-    const ASYNC: AsyncConfig =
-        AsyncConfig::new().with_worker_count(AsyncWorkerCount::new(1).unwrap());
+    const ASYNC: AsyncConfig = AsyncConfig::new().with_task_limit(AsyncTaskLimit::new(1).unwrap());
     const HANDLES: HandleConfig =
         HandleConfig::new().with_binding_limit(HandleBindingLimit::new(1).unwrap());
     const RTD: RtdConfig = RtdConfig::new()

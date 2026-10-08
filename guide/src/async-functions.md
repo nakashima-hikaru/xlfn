@@ -1,15 +1,19 @@
 # Asynchronous functions
 
 Use an async UDF when one formula should receive one eventual result without
-blocking Excel. Enable `async` and use owned Rust inputs. For repeated updates
+blocking Excel. Enable `async-builtin` for the built-in executor and use owned Rust inputs. For repeated updates
 or formula-owned objects, see [Choosing a pattern](choosing-pattern.md).
 
 ## Enable the feature
 
 ```toml
 [dependencies]
-xlfn = { version = "0.2", features = ["async"] }
+xlfn = { version = "0.2", features = ["async-builtin"] }
 ```
+
+`async` provides native Excel transport, task lifecycle, cancellation, and the
+executor extension API. `async-builtin` additionally provides the polling pool.
+Choose only `async` when supplying an external executor.
 
 The project uses Excel 2010 or later as the operational baseline for this capability. Qualify the exact Excel versions and channels that you distribute to.
 
@@ -32,8 +36,7 @@ async fn fetch(
 An async function may omit the context when it needs neither state nor cancellation:
 
 ```rust
-{{#include ../fixtures/addin.md}}
-# use xlfn::prelude::*;
+{{#include ../fixtures/async-service.md}}
 #[excel_function(name = "TEXT.NORMALIZE")]
 async fn normalize(value: String) -> String {
     value.trim().to_owned()
@@ -106,7 +109,7 @@ async fn fetch_data(
     context: AsyncContext<'_, ServiceAddin>,
     query: String,
 ) -> XllResult<f64> {
-    // Blocks an executor worker for the whole external call.
+    // Blocks an executor poller for the whole external call.
     context.state().adapter.fetch_blocking(&query)
 }
 ```
@@ -115,34 +118,97 @@ Submit blocking or thread-affine work through an application-owned bounded execu
 
 ## Executor capacity
 
-Configure the pool in `Addin::open` with a runtime policy:
+Select an executor with `Addin::AsyncExecutor` and transfer it to `Opened` during
+`Addin::open`. Task admission belongs to `AsyncConfig`; polling capacity belongs
+to the executor:
 
 ```rust
-# use xlfn::{prelude::*, AsyncConfig, AsyncWorkerCount, RuntimeConfig};
-# fn example() -> XllResult<Opened<()>> {
+# use xlfn::{prelude::*, AsyncConfig, AsyncPollerCount, AsyncTaskLimit,
+#     BuiltinAsyncExecutor, BuiltinExecutorConfig, RuntimeConfig};
+# fn example() -> XllResult<Opened<(), (), (), BuiltinAsyncExecutor>> {
 # let state = ();
 let runtime = RuntimeConfig::new().with_async(
-    AsyncConfig::new().with_worker_count(
-        AsyncWorkerCount::new(4).expect("4 is within the supported range"),
+    AsyncConfig::new().with_task_limit(AsyncTaskLimit::new(4096).unwrap()),
+);
+let executor = BuiltinAsyncExecutor::new(
+    BuiltinExecutorConfig::new().with_poller_count(
+        AsyncPollerCount::new(2).expect("2 is within the supported range"),
     ),
 );
-Ok(Opened::new(state).with_runtime_config(runtime))
+Ok(Opened::new(state)
+    .with_runtime_config(runtime)
+    .with_async_executor(executor))
 # }
 ```
 
-Import `AsyncConfig`, `AsyncWorkerCount`, and `RuntimeConfig` from `xlfn`.
-The worker count defaults to four and accepts `1..=32`. Choose it from
-measured workload characteristics. This setting does not configure any
-application-owned connection pool, foreign runtime, or blocking executor.
-The framework admits at most 4,096 active tasks. When that capacity is already
-exhausted, it rejects the call before converting owned inputs; this admission
-error takes precedence over input errors in the rejected call. A capacity
-check does not reserve a task while a custom input converter runs. The runtime
-checks admission again after conversion to cover concurrent submissions,
-cancellation, and calculation-generation changes.
+The built-in executor defaults to four pollers and accepts `1..=32`. Choose
+polling capacity from measured workload characteristics. It does not configure
+application connection pools, foreign runtimes, or blocking executors.
+
+The task limit defaults to 4,096 and accepts any nonzero capacity. When that
+capacity is exhausted, the framework rejects the call before converting owned
+inputs; this admission error takes precedence over input errors. The early
+check does not reserve capacity while custom conversion runs. After conversion,
+the framework reserves executor capacity and registry admission, accounting for
+concurrent submissions, cancellation, and calculation changes. Committing a
+reservation transfers the opaque task to the executor without a fallible
+publication step.
+
 CPU-heavy work should usually use a separate bounded pool so it does not
-occupy every async executor worker. See [Add-in state](lifecycle.md) for the
-complete `open` pattern.
+occupy every async poller. See [Add-in state](lifecycle.md) for the complete
+`open` pattern.
+
+## External executors
+
+With `async` enabled, implement `AsyncExecutor` and set
+`type AsyncExecutor = YourExecutor` on the add-in. Pass its owned instance to
+`Opened::with_async_executor`. An executor receives only opaque `AsyncTask<F>`
+futures; Excel delivery, calculation epochs, cancellation, and handle lifetime
+remain framework responsibilities.
+
+`AsyncExecutor::reserve` may reject work before task registration. Its owned
+reservation must provide everything needed by `submit`, which transfers the
+task without returning an error. `start` initializes the executor during open.
+`shutdown` releases its resources after all framework-owned tasks have been
+destroyed. Adapters for existing runtimes can live in the application or a
+separate crate; xlfn does not require Tokio.
+
+`submit` is generic over the concrete task future:
+
+```rust
+# use xlfn::{AsyncExecutor, AsyncTask, XllResult};
+# struct RuntimeHandle;
+# impl RuntimeHandle {
+#     fn spawn<F>(&self, task: F)
+#     where
+#         F: std::future::Future<Output = ()> + Send + 'static,
+#     {
+#         drop(task);
+#     }
+# }
+# struct ApplicationExecutor { handle: RuntimeHandle }
+# impl AsyncExecutor for ApplicationExecutor {
+#     type Reservation = ();
+#     fn start(&self) -> XllResult<()> { Ok(()) }
+#     fn reserve(&self) -> XllResult<Self::Reservation> { Ok(()) }
+fn submit<F>(&self, (): Self::Reservation, task: AsyncTask<F>)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    self.handle.spawn(task);
+}
+#     fn shutdown(&self) -> XllResult<()> { Ok(()) }
+# }
+```
+
+The task stores its future inline so an executor can move it directly into its
+own task allocation. An executor that needs a queue of different future types
+can erase the type at that storage boundary with
+`Pin<Box<dyn Future<Output = ()> + Send + 'static>>`. Framework task state remains
+private in either case.
+
+`NoAsyncExecutor` is available for add-ins that enable `async` for shared APIs
+but do not schedule async functions. Its admission method rejects tasks.
 
 ## Async handle inputs
 
@@ -158,7 +224,7 @@ async fn async_evaluate(dataset: HandleLease<'_, Dataset>, time: f64) -> XllResu
 }
 ```
 
-Enable both `handles` and `async`. The lease keeps the object readable across
+Enable `handles` and either `async-builtin` or `async` with an external executor. The lease keeps the object readable across
 `.await` for this framework-managed task. It is released when the task
 completes, is cancelled, panics, or is dropped during shutdown. It cannot be
 returned, stored in `'static` state, or moved into an independently spawned
@@ -176,6 +242,14 @@ as internal diagnostic errors.
 
 ## Shutdown
 
-During add-in shutdown, xlfn stops accepting new async tasks, cancels in-flight
-work, and drains active tasks before `Addin::quiesce` runs. Application-owned
-background tasks should be joined in `Addin::quiesce`.
+During add-in shutdown, xlfn closes task admission and withdraws executor
+publication, drains submission readers, closes calculation admission, and
+cancels in-flight tasks. The executor stays alive to drive cancellation until
+the task registry reaches zero active tasks. Only then does xlfn call
+`AsyncExecutor::shutdown` and certify async quiescence. RTD and handle services
+cannot be sealed or reclaimed before that certificate.
+
+An executor that retains a task without polling or dropping it can stall close;
+the framework retains the generation rather than reclaiming state still owned
+by that task. Application-owned background tasks should be joined in
+`Addin::quiesce`.

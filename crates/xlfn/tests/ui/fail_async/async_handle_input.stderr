@@ -1,7 +1,7 @@
 error[E0277]: the trait bound `for<'call> xlfn::handle::Handle<'_, Dataset>: xlfn::__private::v1::ExcelParameter<'call, xlfn::__private::v1::PlainInputMode>` is not satisfied
-  --> tests/ui/fail_async/async_handle_input.rs:33:14
+  --> tests/ui/fail_async/async_handle_input.rs:35:14
    |
-33 |     dataset: Handle<'_, Dataset>,
+35 |     dataset: Handle<'_, Dataset>,
    |              ^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
    |
 help: the trait `ExcelParameter<'call, PlainInputMode>` is not implemented for `xlfn::handle::Handle<'_, Dataset>`
@@ -23,9 +23,9 @@ note: required by a bound in `xlfn::__private::v1::assert_async_parameter`
    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_async_parameter`
 
 error[E0277]: `NonNull<Dataset>` cannot be sent between threads safely
-  --> tests/ui/fail_async/async_handle_input.rs:33:14
+  --> tests/ui/fail_async/async_handle_input.rs:35:14
    |
-33 |     dataset: Handle<'_, Dataset>,
+35 |     dataset: Handle<'_, Dataset>,
    |              ^^^^^^^^^^^^^^^^^^^ `NonNull<Dataset>` cannot be sent between threads safely
    |
    = help: within `xlfn::handle::Handle<'_, Dataset>`, the trait `Send` is not implemented for `NonNull<Dataset>`
@@ -49,9 +49,9 @@ note: required by a bound in `xlfn::__private::v1::assert_async_parameter`
    |                                                         ^^^^ required by this bound in `assert_async_parameter`
 
 error[E0277]: `RefCell<xlfn::call::permits::Retained<handle::domain::HandleDomainPermit>>` cannot be shared between threads safely
-  --> tests/ui/fail_async/async_handle_input.rs:33:14
+  --> tests/ui/fail_async/async_handle_input.rs:35:14
    |
-33 |     dataset: Handle<'_, Dataset>,
+35 |     dataset: Handle<'_, Dataset>,
    |              ^^^^^^^^^^^^^^^^^^^ `RefCell<xlfn::call::permits::Retained<handle::domain::HandleDomainPermit>>` cannot be shared between threads safely
    |
    = help: within `xlfn::__private::v1::CallScope<'_>`, the trait `Sync` is not implemented for `RefCell<xlfn::call::permits::Retained<handle::domain::HandleDomainPermit>>`
@@ -82,9 +82,9 @@ note: required by a bound in `xlfn::__private::v1::assert_async_parameter`
    |                                                         ^^^^ required by this bound in `assert_async_parameter`
 
 error[E0277]: `NonNull<handle::domain::HandleReadDomain>` cannot be sent between threads safely
-  --> tests/ui/fail_async/async_handle_input.rs:33:14
+  --> tests/ui/fail_async/async_handle_input.rs:35:14
    |
-33 |     dataset: Handle<'_, Dataset>,
+35 |     dataset: Handle<'_, Dataset>,
    |              ^^^^^^^^^^^^^^^^^^^ `NonNull<handle::domain::HandleReadDomain>` cannot be sent between threads safely
    |
    = help: within `xlfn::handle::Handle<'_, Dataset>`, the trait `Send` is not implemented for `NonNull<handle::domain::HandleReadDomain>`
@@ -123,9 +123,9 @@ note: required by a bound in `xlfn::__private::v1::assert_async_parameter`
    |                                                         ^^^^ required by this bound in `assert_async_parameter`
 
 error[E0277]: `Cell<NonNull<bumpalo::ChunkFooter>>` cannot be shared between threads safely
-  --> tests/ui/fail_async/async_handle_input.rs:33:14
+  --> tests/ui/fail_async/async_handle_input.rs:35:14
    |
-33 |     dataset: Handle<'_, Dataset>,
+35 |     dataset: Handle<'_, Dataset>,
    |              ^^^^^^^^^^^^^^^^^^^ `Cell<NonNull<bumpalo::ChunkFooter>>` cannot be shared between threads safely
    |
    = help: within `xlfn::__private::v1::CallScope<'_>`, the trait `Sync` is not implemented for `Cell<NonNull<bumpalo::ChunkFooter>>`
@@ -171,9 +171,9 @@ note: required by a bound in `xlfn::__private::v1::assert_async_parameter`
    |                                                         ^^^^ required by this bound in `assert_async_parameter`
 
 error[E0277]: `Cell<Option<usize>>` cannot be shared between threads safely
-  --> tests/ui/fail_async/async_handle_input.rs:33:14
+  --> tests/ui/fail_async/async_handle_input.rs:35:14
    |
-33 |     dataset: Handle<'_, Dataset>,
+35 |     dataset: Handle<'_, Dataset>,
    |              ^^^^^^^^^^^^^^^^^^^ `Cell<Option<usize>>` cannot be shared between threads safely
    |
    = help: within `xlfn::__private::v1::CallScope<'_>`, the trait `Sync` is not implemented for `Cell<Option<usize>>`

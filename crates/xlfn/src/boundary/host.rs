@@ -245,6 +245,8 @@ mod tests {
         type LifecycleState = CloseState;
         type Error = XllError;
         type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
 
         fn open(_: &OpenContext) -> Result<Opened<(), CloseState>, XllError> {
             unreachable!("test publishes lifecycle state directly")
@@ -335,6 +337,8 @@ mod tests {
             type LifecycleState = ();
             type Error = XllError;
             type Layers = ();
+            #[cfg(feature = "async")]
+            type AsyncExecutor = crate::NoAsyncExecutor;
 
             fn open(_: &OpenContext) -> Result<Opened<()>, XllError> {
                 SCRIPT.with_borrow_mut(|script| script.opens += 1);

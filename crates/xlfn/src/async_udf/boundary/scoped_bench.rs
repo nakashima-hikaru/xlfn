@@ -3,9 +3,16 @@
 
 use super::{InstrumentedHandleTask, UninstrumentedHandleTask};
 use crate::XllResult;
-use crate::async_udf::executor::{AsyncTaskScope, HandleScopedBuilder};
 use crate::async_udf::instrumentation::AsyncObservation;
-use crate::async_udf::manager::AsyncManager;
+use crate::async_udf::task_scope::{AsyncTaskScope, HandleScopedBuilder};
+use crate::async_udf::{AsyncRuntime, CalculationEpoch};
+use crate::{AsyncPollerCount, AsyncTaskLimit, BuiltinAsyncExecutor, BuiltinExecutorConfig};
+type ScopedRuntime = AsyncRuntime<BuiltinAsyncExecutor>;
+fn builtin() -> BuiltinAsyncExecutor {
+    BuiltinAsyncExecutor::new(
+        BuiltinExecutorConfig::new().with_poller_count(AsyncPollerCount::new(1).unwrap()),
+    )
+}
 use crate::cancellation::{CancellationGuarantee, CancellationSource};
 use crate::execution::{CalculationId, CallId, CallMetadata, CallTimer};
 use crate::generation::RuntimeGeneration;
@@ -72,7 +79,7 @@ unsafe extern "system" fn callback(
 /// Benchmark fixture for generation-scoped handle delivery through the async boundary.
 pub struct HandleScopedDeliveryBenchmark {
     // Drop drains async task pins before the handle arena is sealed.
-    manager: AsyncManager,
+    lifecycle: ScopedRuntime,
     handles: FormulaHandleService,
     token: String,
     generation: RuntimeGeneration,
@@ -106,11 +113,13 @@ impl HandleScopedDeliveryBenchmark {
             )
             .expect("seed handle publication")
             .into_token();
-        let manager = AsyncManager::new();
-        manager.start(1).expect("scoped benchmark worker startup");
+        let lifecycle = ScopedRuntime::new();
+        lifecycle
+            .start(builtin(), AsyncTaskLimit::DEFAULT)
+            .expect("scoped benchmark worker startup");
         let generation = RuntimeGeneration::new(1).unwrap();
         Self {
-            manager,
+            lifecycle,
             handles,
             token,
             generation,
@@ -146,7 +155,10 @@ impl HandleScopedDeliveryBenchmark {
             // SAFETY: raw is a live, aligned, well-formed opaque async token.
             let responder = unsafe { super::ExcelAsyncResponder::from_raw(UDF_ID, &mut raw) }
                 .expect("copy async responder");
-            let reservation = self.manager.reserve_spawn(1).expect("task admission");
+            let reservation = self
+                .lifecycle
+                .reserve(CalculationEpoch::INITIAL)
+                .expect("task admission");
             if self.instrumented {
                 let metadata = CallMetadata {
                     udf_id: UDF_ID,
@@ -184,14 +196,14 @@ impl HandleScopedDeliveryBenchmark {
                 );
             }
         }
-        assert!(self.manager.wait_idle(), "scoped tasks drain");
+        assert!(self.lifecycle.wait_idle(), "scoped tasks drain");
         assert_eq!(DELIVERIES.load(Ordering::Relaxed) - before, iterations);
     }
 }
 
 impl Drop for HandleScopedDeliveryBenchmark {
     fn drop(&mut self) {
-        assert!(self.manager.close().issues.is_empty());
+        assert!(self.lifecycle.close().unwrap().issues.is_empty());
         self.handles.terminate_all_topics();
         self.handles
             .seal()

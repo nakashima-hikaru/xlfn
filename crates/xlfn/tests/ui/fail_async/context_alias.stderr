@@ -1,7 +1,7 @@
 error[E0277]: the trait bound `for<'call> xlfn::AsyncContext<'_, TestAddin>: xlfn::__private::v1::ExcelParameter<'call, xlfn::__private::v1::PlainInputMode>` is not satisfied
-  --> tests/ui/fail_async/context_alias.rs:20:23
+  --> tests/ui/fail_async/context_alias.rs:22:23
    |
-20 | async fn bad(context: WorkerContext<'_>) -> f64 {
+22 | async fn bad(context: WorkerContext<'_>) -> f64 {
    |                       ^^^^^^^^^^^^^^^^^ the trait `FromExcel<'_>` is not implemented for `xlfn::AsyncContext<'_, TestAddin>`
    |
    = help: the following other types implement trait `FromExcel<'call>`:

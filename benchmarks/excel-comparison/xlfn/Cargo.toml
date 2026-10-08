@@ -8,7 +8,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-xlfn = { path = "../../../crates/xlfn", features = ["async", "rtd"] }
+xlfn = { path = "../../../crates/xlfn", features = ["async-builtin", "rtd"] }
 futures-timer = "3.0.4"
 futures-channel = "0.3.34"
 

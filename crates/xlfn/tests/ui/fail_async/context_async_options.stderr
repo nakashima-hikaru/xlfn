@@ -1,23 +1,23 @@
 error: thread_safe and macro_sheet cannot be combined with an injected context
-  --> tests/ui/fail_async/context_async_options.rs:18:28
+  --> tests/ui/fail_async/context_async_options.rs:20:28
    |
-18 | async fn context_as_thread(context: AsyncContext<'_, TestAddin>) -> f64 {
+20 | async fn context_as_thread(context: AsyncContext<'_, TestAddin>) -> f64 {
    |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 error: thread_safe and macro_sheet cannot be combined with an injected context
-  --> tests/ui/fail_async/context_async_options.rs:24:27
+  --> tests/ui/fail_async/context_async_options.rs:26:27
    |
-24 | async fn context_as_macro(context: AsyncContext<'_, TestAddin>) -> f64 {
+26 | async fn context_as_macro(context: AsyncContext<'_, TestAddin>) -> f64 {
    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 error: an async Excel function cannot be marked thread_safe
-  --> tests/ui/fail_async/context_async_options.rs:30:1
+  --> tests/ui/fail_async/context_async_options.rs:32:1
    |
-30 | async fn no_context_thread(value: f64) -> f64 {
+32 | async fn no_context_thread(value: f64) -> f64 {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 error: an async Excel function cannot be a macro-sheet function
-  --> tests/ui/fail_async/context_async_options.rs:35:1
+  --> tests/ui/fail_async/context_async_options.rs:37:1
    |
-35 | async fn no_context_macro(value: f64) -> f64 {
+37 | async fn no_context_macro(value: f64) -> f64 {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

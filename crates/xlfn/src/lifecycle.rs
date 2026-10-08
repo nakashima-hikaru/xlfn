@@ -145,6 +145,8 @@ mod tests {
         type LifecycleState = ();
         type Error = XllError;
         type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
 
         fn open(
             _: &OpenContext,
@@ -260,6 +262,8 @@ mod tests {
         type LifecycleState = ();
         type Error = XllError;
         type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
 
         fn open(
             _: &OpenContext,
@@ -301,12 +305,12 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "async")]
+    #[cfg(feature = "async-builtin")]
     #[test]
-    fn async_worker_policy_is_bounded_before_open() {
-        assert!(crate::addin::AsyncWorkerCount::new(0).is_none());
-        assert!(crate::addin::AsyncWorkerCount::new(33).is_none());
-        assert_eq!(crate::addin::AsyncWorkerCount::new(32).unwrap().get(), 32);
+    fn async_poller_policy_is_bounded_before_open() {
+        assert!(crate::AsyncPollerCount::new(0).is_none());
+        assert!(crate::AsyncPollerCount::new(33).is_none());
+        assert_eq!(crate::AsyncPollerCount::new(32).unwrap().get(), 32);
     }
 
     impl Addin for RetryClose {
@@ -314,6 +318,8 @@ mod tests {
         type LifecycleState = RetryState;
         type Error = XllError;
         type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
 
         fn open(
             _context: &OpenContext,
@@ -378,6 +384,8 @@ mod tests {
         type LifecycleState = DropObserved;
         type Error = XllError;
         type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
 
         fn open(
             _: &OpenContext,
@@ -433,6 +441,8 @@ mod tests {
         type LifecycleState = DropObserved;
         type Error = XllError;
         type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
 
         fn open(
             _: &OpenContext,
@@ -504,6 +514,8 @@ mod tests {
         type LifecycleState = DropObserved;
         type Error = XllError;
         type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
 
         fn open(
             _: &OpenContext,
@@ -608,6 +620,8 @@ mod tests {
         type LifecycleState = ();
         type Error = XllError;
         type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
 
         fn open(
             _context: &OpenContext,
@@ -629,6 +643,8 @@ mod tests {
         type LifecycleState = ();
         type Error = XllError;
         type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
 
         fn open(_: &OpenContext) -> Result<crate::addin::Opened<(), ()>, XllError> {
             if PANIC {
@@ -643,8 +659,10 @@ mod tests {
     ) -> (String, String) {
         let runtime = Runtime::<InitializationFailure<PANIC>>::new();
         if previously_removed {
-            crate::diagnostics::reset_diagnostic_router().unwrap();
             let opening = runtime.begin_open().unwrap();
+            // begin_open holds the shared module test lease, including the
+            // diagnostic router, until this runtime finishes removal.
+            crate::diagnostics::reset_diagnostic_router().unwrap();
             let mut opening = runtime.publish(opening, (), ());
             runtime.finish_open(&mut opening, Vec::new()).unwrap();
             assert_eq!(host_auto_remove(&runtime), 1);
@@ -838,13 +856,12 @@ mod tests {
             type LifecycleState = ();
             type Error = XllError;
             type Layers = ();
+            #[cfg(feature = "async-builtin")]
+            type AsyncExecutor = crate::BuiltinAsyncExecutor;
+            #[cfg(all(feature = "async", not(feature = "async-builtin")))]
+            type AsyncExecutor = crate::NoAsyncExecutor;
 
-            fn open(
-                _context: &OpenContext,
-            ) -> Result<
-                crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
-                Self::Error,
-            > {
+            fn open(_context: &OpenContext) -> crate::OpenResult<Self> {
                 unreachable!()
             }
 
@@ -1010,13 +1027,18 @@ mod tests {
                 })
                 .unwrap();
 
-            #[cfg(feature = "async")]
+            #[cfg(feature = "async-builtin")]
             {
                 let (done_tx, done_rx) = std::sync::mpsc::channel();
                 let (cancellation, _token) = crate::cancellation::CancellationSource::new(
                     crate::cancellation::CancellationGuarantee::BestEffort,
                 );
-                runtime.start_async(1).unwrap();
+                runtime
+                    .start_async(
+                        crate::BuiltinAsyncExecutor::new(crate::BuiltinExecutorConfig::new()),
+                        crate::AsyncTaskLimit::DEFAULT,
+                    )
+                    .unwrap();
                 let ingress = crate::module_runtime::ingress()
                     .enter_with(|| {})
                     .into_admitted()
@@ -1025,12 +1047,9 @@ mod tests {
                     .enter(&ingress)
                     .expect("async trace task must be spawned from an admitted call");
                 runtime
-                    .async_manager()
-                    .spawn(
-                        runtime
-                            .last_committed_generation()
-                            .expect("an open runtime has a published generation")
-                            .get(),
+                    .async_runtime()
+                    .submit(
+                        runtime.async_runtime().current_epoch(),
                         async move {
                             done_tx.send(()).unwrap();
                         },
@@ -1072,7 +1091,7 @@ mod tests {
                     "resource trace is missing {event}: {trace}"
                 );
             }
-            #[cfg(feature = "async")]
+            #[cfg(feature = "async-builtin")]
             for event in [
                 "startAsyncExecutor",
                 "startAsyncTask",
@@ -1086,9 +1105,9 @@ mod tests {
             }
             check("resourceful", trace);
 
-            crate::diagnostics::reset_diagnostic_router().unwrap();
             let clean_runtime = Runtime::<CleanClose>::new();
             let opening = clean_runtime.begin_open().unwrap();
+            crate::diagnostics::reset_diagnostic_router().unwrap();
             let mut opening = clean_runtime.publish(opening, (), ());
             clean_runtime.finish_open(&mut opening, Vec::new()).unwrap();
             assert_eq!(host_auto_remove::<CleanClose>(&clean_runtime), 1);
@@ -1213,8 +1232,8 @@ mod tests {
         let runtime = Runtime::<CleanClose>::new();
 
         for label in ["first", "second"] {
-            crate::diagnostics::reset_diagnostic_router().unwrap();
             let opening = runtime.begin_open().unwrap();
+            crate::diagnostics::reset_diagnostic_router().unwrap();
             let mut opening = runtime.publish(opening, (), ());
             runtime.finish_open(&mut opening, Vec::new()).unwrap();
             crate::diagnostics::set_diagnostic_sink(TraceDiagnosticSink).unwrap();
@@ -1463,6 +1482,8 @@ mod tests {
         type LifecycleState = ();
         type Error = XllError;
         type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
 
         fn open(
             _context: &OpenContext,
@@ -1660,7 +1681,7 @@ mod tests {
         assert!(!runtime.module_residency_held());
     }
 
-    #[cfg(all(feature = "async", not(target_os = "windows")))]
+    #[cfg(all(feature = "async-builtin", not(target_os = "windows")))]
     #[test]
     fn close_stops_async_before_terminal_unregister_and_never_calls_excel_afterwards() {
         use xlfn_sys::{
@@ -1668,11 +1689,30 @@ mod tests {
             XLOPER12BigDataHandle, XLOPER12Value, XLRET_ABORT, XLTYPE_BIG_DATA,
         };
 
-        let runtime = Box::leak(Box::new(Runtime::<CleanClose>::new()));
+        struct AsyncCloseAddin;
+
+        impl Addin for AsyncCloseAddin {
+            type SharedState = ();
+            type LifecycleState = ();
+            type Error = XllError;
+            type Layers = ();
+            type AsyncExecutor = crate::BuiltinAsyncExecutor;
+
+            fn open(_: &OpenContext) -> crate::OpenResult<Self> {
+                unreachable!("the test publishes its isolated runtime directly")
+            }
+        }
+
+        let runtime = Box::leak(Box::new(Runtime::<AsyncCloseAddin>::new()));
         let open_attempt = runtime.begin_open().unwrap();
         let mut open_attempt = runtime.publish(open_attempt, (), ());
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
-        runtime.start_async(1).unwrap();
+        runtime
+            .start_async(
+                crate::BuiltinAsyncExecutor::new(crate::BuiltinExecutorConfig::new()),
+                crate::AsyncTaskLimit::DEFAULT,
+            )
+            .unwrap();
         let mut journal = crate::registration::HostMutationJournal::default();
         journal.pending_registrations.push(
             crate::registration::RegistrationId {
@@ -1721,7 +1761,7 @@ mod tests {
             .expect("async close-order task did not start");
 
         crate::test_callback::set_terminal(XLF_UNREGISTER, XLRET_ABORT);
-        assert_eq!(host_auto_close::<CleanClose>(runtime), 1);
+        assert_eq!(host_auto_close::<AsyncCloseAddin>(runtime), 1);
         assert_eq!(
             runtime.phase(),
             crate::lifecycle::LifecyclePhase::Quarantined
@@ -1805,6 +1845,8 @@ mod tests {
             type LifecycleState = OrderedState;
             type Error = XllError;
             type Layers = ();
+            #[cfg(feature = "async")]
+            type AsyncExecutor = crate::NoAsyncExecutor;
 
             fn open(
                 _context: &OpenContext,
@@ -1911,6 +1953,8 @@ mod tests {
         type LifecycleState = StagedRaceState;
         type Error = XllError;
         type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
 
         fn open(
             _context: &OpenContext,
@@ -2017,6 +2061,8 @@ mod tests {
         type LifecycleState = PanicLayersState;
         type Error = XllError;
         type Layers = ();
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
 
         fn open(
             _context: &OpenContext,

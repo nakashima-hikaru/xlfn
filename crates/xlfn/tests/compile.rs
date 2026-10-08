@@ -59,6 +59,7 @@ fn trait_driven_function_signatures_compile() {
         tests.pass("tests/ui/pass_async/owned_matrix.rs");
         tests.pass("tests/ui/pass_async/context_modes.rs");
         tests.compile_fail("tests/ui/fail_async/context_*.rs");
+        tests.compile_fail("tests/ui/fail_async/executor_*.rs");
         tests.compile_fail("tests/ui/fail_async/borrowed_array_alias.rs");
         tests.compile_fail("tests/ui/fail_async/borrowed_array_async.rs");
         tests.compile_fail("tests/ui/fail_async/borrowed_inputs.rs");

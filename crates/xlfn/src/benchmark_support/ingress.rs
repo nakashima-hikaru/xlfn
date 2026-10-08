@@ -4,7 +4,7 @@ use super::*;
 /// Benchmark harness for measuring raw Excel argument ingress conversion costs
 /// with and without semantic identity fingerprinting.
 pub struct RawArgumentIngressBenchmark {
-    runtime: &'static crate::runtime::Runtime<()>,
+    runtime: &'static crate::runtime::Runtime<super::BenchmarkAddin>,
     raw: xlfn_sys::XLOPER12,
     // Cell arrays stay Vec-backed: moving a Box<[XLOPER12]> into this owner
     // would retag its allocation after raw pointers had already been derived.

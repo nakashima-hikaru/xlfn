@@ -978,6 +978,8 @@ pub mod v1 {
             type SharedState = ();
             type LifecycleState = ();
             type Layers = ();
+            #[cfg(feature = "async")]
+            type AsyncExecutor = crate::NoAsyncExecutor;
             type Error = XllError;
 
             fn open(_: &OpenContext) -> Result<Opened<()>, XllError> {

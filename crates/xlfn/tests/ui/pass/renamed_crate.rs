@@ -22,6 +22,8 @@ impl Addin for RenamedAddin {
     type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
+    #[cfg(feature = "async")]
+    type AsyncExecutor = xlfn::NoAsyncExecutor;
 
     fn open(_context: &OpenContext) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
         Ok(Opened::new(()))

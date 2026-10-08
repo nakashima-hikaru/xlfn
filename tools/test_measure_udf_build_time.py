@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from measure_udf_build_time import measure, source_digest, timing_units
+from measure_udf_build_time import feature_arguments, make_probe, measure, source_digest, timing_units
 
 
 class BuildTimeMeasurementTests(unittest.TestCase):
@@ -37,9 +37,25 @@ class BuildTimeMeasurementTests(unittest.TestCase):
         (self.root / "crates/example/src/lib.rs").write_text("changed")
         self.assertNotEqual(source_digest(self.root), before)
 
+    def test_generated_consumer_forwards_async_features(self):
+        (self.root / "rust-toolchain.toml").write_text("[toolchain]\nchannel=\"1.99.0\"\n")
+        (self.root / "Cargo.lock").write_text("version = 4\n")
+        make_probe(self.root / "probe", self.root, "// fixture\n", 1, 1)
+        manifest = (self.root / "probe/Cargo.toml").read_text()
+        self.assertIn('async=["xlfn/async"]', manifest)
+        self.assertIn('async-builtin=["async","xlfn/async-builtin"]', manifest)
+
     def test_embedded_json_retains_strings_and_unknown_fields(self):
         units = [{"name": "build-script", "features": "a];b", "custom": {"value": 42}}]
         self.assertEqual(timing_units(self.write_report(units)), units)
+
+    def test_async_feature_forwarding_uses_consumer_feature_when_available(self):
+        (self.root / "Cargo.toml").write_text('[features]\nasync=["xlfn/async"]\n')
+        self.assertEqual(feature_arguments(self.root, ["async", "handles"]),
+                         ["--features", "async,xlfn/handles"])
+        (self.root / "Cargo.toml").write_text('[package]\nname="old-consumer"\n')
+        self.assertEqual(feature_arguments(self.root, ["async"]),
+                         ["--features", "xlfn/async"])
 
     def test_missing_assignment_has_useful_error(self):
         report = self.root / "missing.html"
@@ -59,7 +75,7 @@ class BuildTimeMeasurementTests(unittest.TestCase):
                   for name in ["consumer", "xlfn", "syn", "serde_derive"]]
         self.write_report(units)
         args = SimpleNamespace(incremental="off", cache="dependencies",
-                               rebuild="framework", profile="dev", features=[])
+                               rebuild="framework", profile="dev", features=[], baseline_features=None)
         with patch("measure_udf_build_time.run") as run:
             sample = measure(self.root, "consumer", self.root, "build", 0, "candidate", args)
         self.assertEqual(run.call_args_list[0].args[0],
@@ -71,6 +87,28 @@ class BuildTimeMeasurementTests(unittest.TestCase):
                          ["xlfn", "syn", "serde_derive"])
         self.assertTrue(sample["serde_derive_compiled"])
         self.assertEqual(sample["unit_seconds"], 0.5)
+
+    def test_release_sample_invalidates_release_artifacts(self):
+        self.write_report([dict(name="consumer", features=[], start=0,
+                                duration=0.5, sections=[])])
+        args = SimpleNamespace(incremental="off", cache="dependencies",
+                               rebuild="consumer", profile="release", features=[],
+                               baseline_features=None)
+        with patch("measure_udf_build_time.run") as run:
+            measure(self.root, "consumer", self.root, "build", 0, "candidate", args)
+        self.assertEqual(run.call_args_list[0].args[0],
+                         ["cargo", "clean", "-p", "consumer", "--release"])
+        self.assertIn("--release", run.call_args_list[1].args[0])
+
+    def test_cached_consumer_is_not_accepted_as_a_build_measurement(self):
+        self.write_report([dict(name="dependency", features=[], start=0,
+                                duration=0.5, sections=[])])
+        args = SimpleNamespace(incremental="off", cache="dependencies",
+                               rebuild="consumer", profile="release", features=[],
+                               baseline_features=None)
+        with patch("measure_udf_build_time.run"):
+            with self.assertRaisesRegex(RuntimeError, "no rebuilt consumer unit consumer"):
+                measure(self.root, "consumer", self.root, "build", 0, "candidate", args)
 
 
 if __name__ == "__main__":

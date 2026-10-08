@@ -7,6 +7,8 @@ impl Addin for CallbackAddin {
     type SharedState = ();
     type LifecycleState = ();
     type Layers = ();
+    #[cfg(feature = "async")]
+    type AsyncExecutor = xlfn::NoAsyncExecutor;
     type Error = XllError;
 
     fn open(_: &OpenContext) -> Result<Opened<()>, XllError> {

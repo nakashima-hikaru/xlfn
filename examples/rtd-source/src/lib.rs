@@ -28,6 +28,8 @@ impl Addin for RtdSourceExample {
     type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
+    #[cfg(feature = "async")]
+    type AsyncExecutor = xlfn::NoAsyncExecutor;
 
     fn open(
         context: &OpenContext,

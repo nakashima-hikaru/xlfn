@@ -1788,7 +1788,7 @@ fn handle_lease_keeps_payload_alive_after_binding_retirement() {
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
 
-#[cfg(all(feature = "async", feature = "handles"))]
+#[cfg(all(feature = "async-builtin", feature = "handles"))]
 #[test]
 fn scoped_handle_task_drain_releases_pin_before_handle_quiescence() {
     use crate::async_udf::{HandleScopedTaskBuilder, ScopedTaskFuture};
@@ -1846,9 +1846,15 @@ fn scoped_handle_task_drain_releases_pin_before_handle_quiescence() {
         .remove_and_drop(&token, "test remove before scoped task");
     assert_eq!(drops.load(Ordering::Acquire), 0);
 
-    let manager = crate::async_udf::AsyncManager::new();
-    manager.start(1).unwrap();
-    let reservation = manager.reserve_spawn(1).unwrap();
+    let runtime = crate::async_udf::AsyncRuntime::new();
+    runtime
+        .start(
+            crate::BuiltinAsyncExecutor::new(crate::BuiltinExecutorConfig::new()),
+            crate::AsyncTaskLimit::DEFAULT,
+        )
+        .unwrap();
+    let calculation = runtime.current_epoch();
+    let reservation = runtime.reserve(calculation).unwrap();
     let (started_tx, started_rx) = mpsc::channel();
     reservation.commit_handle_scoped(
         crate::generation::RuntimeGeneration::new(1).unwrap(),
@@ -1862,8 +1868,8 @@ fn scoped_handle_task_drain_releases_pin_before_handle_quiescence() {
         .recv_timeout(Duration::from_secs(1))
         .expect("scoped handle task should start");
 
-    manager.cancel_generation(1);
-    assert!(manager.close().issues.is_empty());
+    runtime.cancel_calculation(calculation);
+    assert!(runtime.close().unwrap().issues.is_empty());
     handles
         .store
         .registry

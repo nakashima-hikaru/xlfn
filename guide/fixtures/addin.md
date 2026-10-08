@@ -5,6 +5,8 @@
 #     type LifecycleState = ();
 #     type Error = xlfn::XllError;
 #     type Layers = ();
+#     #[cfg(feature = "async")]
+#     type AsyncExecutor = xlfn::NoAsyncExecutor;
 #     fn open(_: &xlfn::OpenContext) -> xlfn::XllResult<xlfn::Opened<()>> {
 #         Ok(xlfn::Opened::new(()))
 #     }

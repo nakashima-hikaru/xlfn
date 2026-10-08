@@ -7,8 +7,17 @@
 #     type LifecycleState = ();
 #     type Error = XllError;
 #     type Layers = ();
-#     fn open(_: &OpenContext) -> XllResult<Opened<State>> {
-#         Ok(Opened::new(State { environment: "test".into(), version: "test".into() }))
+#     #[cfg(feature = "async-builtin")]
+#     type AsyncExecutor = xlfn::BuiltinAsyncExecutor;
+#     #[cfg(all(feature = "async", not(feature = "async-builtin")))]
+#     type AsyncExecutor = xlfn::NoAsyncExecutor;
+#     fn open(_: &OpenContext) -> xlfn::OpenResult<Self> {
+#         let opened = Opened::new(State { environment: "test".into(), version: "test".into() });
+#         #[cfg(feature = "async-builtin")]
+#         let opened = opened.with_async_executor(xlfn::BuiltinAsyncExecutor::new(
+#             xlfn::BuiltinExecutorConfig::new(),
+#         ));
+#         Ok(opened)
 #     }
 # }
 # fn main() {}

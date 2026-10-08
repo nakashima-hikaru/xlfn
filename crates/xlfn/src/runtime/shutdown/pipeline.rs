@@ -207,6 +207,21 @@ pub(crate) enum ExecutionDrainError {
     ReturnQuiescence(crate::XllError),
 }
 
+pub(crate) struct ProducerStopFailure {
+    hazard: crate::shutdown::UnloadHazard,
+    error: crate::XllError,
+}
+
+impl ProducerStopFailure {
+    pub(crate) fn hazard(&self) -> crate::shutdown::UnloadHazard {
+        self.hazard
+    }
+
+    pub(crate) fn into_error(self) -> crate::XllError {
+        self.error
+    }
+}
+
 impl ExecutionDrainError {
     pub(crate) fn hazard(&self) -> crate::shutdown::UnloadHazard {
         match self {
@@ -362,15 +377,20 @@ impl ExecutionDrained {
         self,
         deps: ShutdownDeps<'_, A>,
         report_issue: impl FnMut(&crate::shutdown::CleanupIssue),
-    ) -> Result<ProducersStopped, (crate::XllError, crate::module_runtime::ModuleExportsDrained)>
-    {
+    ) -> Result<
+        ProducersStopped,
+        (
+            ProducerStopFailure,
+            crate::module_runtime::ModuleExportsDrained,
+        ),
+    > {
         #[cfg(feature = "async")]
         let mut report_issue = report_issue;
         #[cfg(not(feature = "async"))]
         let _ = report_issue;
 
         #[cfg(feature = "async")]
-        let async_was_running = deps.async_manager().is_running();
+        let async_was_running = !deps.async_runtime().is_stopped();
         #[cfg(not(feature = "async"))]
         let async_was_running = false;
         #[cfg(feature = "async")]
@@ -378,8 +398,18 @@ impl ExecutionDrained {
             // Scoped async handle tasks are drained before generation
             // services (including FormulaHandleService/ObjectArena) are
             // sealed and consumed below.
-            deps.async_manager().cancel_current_generation();
-            let outcome = deps.async_manager().close();
+            let outcome = match deps.async_runtime().close() {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    return Err((
+                        ProducerStopFailure {
+                            hazard: crate::shutdown::UnloadHazard::AsyncExecutorStillRunning,
+                            error,
+                        },
+                        self.module,
+                    ));
+                }
+            };
             for issue in &outcome.issues {
                 report_issue(issue);
             }
@@ -393,7 +423,15 @@ impl ExecutionDrained {
 
         let subscriptions_stopped = match deps.close_subscriptions() {
             Ok(subscriptions_stopped) => subscriptions_stopped,
-            Err(error) => return Err((error, self.module)),
+            Err(error) => {
+                return Err((
+                    ProducerStopFailure {
+                        hazard: crate::shutdown::UnloadHazard::SubscriptionProducerStillRunning,
+                        error,
+                    },
+                    self.module,
+                ));
+            }
         };
 
         Ok(ProducersStopped {
@@ -733,7 +771,7 @@ impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ExecutionDrained> {
     pub(crate) fn stop_producers(
         self,
         report_issue: impl FnMut(&crate::shutdown::CleanupIssue),
-    ) -> crate::XllResult<TeardownTxn<'runtime, A, K, ProducersStopped>> {
+    ) -> Result<TeardownTxn<'runtime, A, K, ProducersStopped>, ProducerStopFailure> {
         let (mut owner, stage) = self.split();
         let deps = owner.deps();
         match stage.stop_producers(deps, report_issue) {

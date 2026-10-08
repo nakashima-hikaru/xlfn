@@ -11,6 +11,7 @@ import re
 import statistics
 import subprocess
 import time
+import tomllib
 
 
 def run(command, cwd, env):
@@ -42,7 +43,9 @@ def make_probe(directory, source, fixture, functions, statements):
     dependency = json.dumps(str(source / "crates/xlfn"))
     (directory / "Cargo.toml").write_text(
         '[package]\nname="build-time-consumer"\nversion="0.0.0"\nedition="2024"\n'
-        f'[workspace]\n[dependencies]\nxlfn={{path={dependency}}}\n'
+        f'[workspace]\n[features]\nasync=["xlfn/async"]\n'
+        'async-builtin=["async","xlfn/async-builtin"]\n'
+        f'[dependencies]\nxlfn={{path={dependency}}}\n'
     )
     (directory / "rust-toolchain.toml").write_bytes((source / "rust-toolchain.toml").read_bytes())
     body = fixture
@@ -69,7 +72,7 @@ def timing_units(report):
     return units
 
 
-def clean_command(package, cache, rebuild):
+def clean_command(package, cache, rebuild, profile):
     command = ["cargo", "clean"]
     if cache == "dependencies":
         packages = [package]
@@ -77,7 +80,19 @@ def clean_command(package, cache, rebuild):
             packages += ["xlfn", "xlfn-macros"]
         for selected in packages:
             command += ["-p", selected]
+        if profile == "release":
+            command += ["--release"]
     return command
+
+
+def feature_arguments(directory, features):
+    if not features:
+        return []
+    manifest = tomllib.loads((directory / "Cargo.toml").read_text())
+    local = manifest.get("features", {})
+    return ["--features", ",".join(
+        feature if feature in local else "xlfn/" + feature for feature in features
+    )]
 
 
 def measure(directory, package, target, mode, iteration, label, args):
@@ -85,18 +100,23 @@ def measure(directory, package, target, mode, iteration, label, args):
                RUSTC_WRAPPER="", RUSTC_WORKSPACE_WRAPPER="")
     if args.incremental == "off":
         env["CARGO_INCREMENTAL"] = "0"
-    run(clean_command(package, args.cache, args.rebuild), directory, env)
+    run(clean_command(package, args.cache, args.rebuild, args.profile), directory, env)
     command = ["cargo", mode, "--locked", "--offline", "--timings"]
     if args.profile == "release":
         command += ["--release"]
-    if args.features:
-        command += ["--features", ",".join("xlfn/" + f for f in args.features)]
+    features = args.baseline_features if label == "baseline" and args.baseline_features is not None else args.features
+    command += feature_arguments(directory, features)
     start = time.perf_counter()
     run(command, directory, env)
     elapsed = time.perf_counter() - start
     report = max((target / "cargo-timings").glob("cargo-timing-2*.html"), key=lambda p: p.stat().st_mtime_ns)
     units = timing_units(report)
-    consumer = next(unit for unit in units if unit["name"] == package)
+    consumer = next((unit for unit in units if unit["name"] == package), None)
+    if consumer is None:
+        raise RuntimeError(
+            f"Cargo timing report has no rebuilt consumer unit {package}; "
+            "check profile-specific cache invalidation"
+        )
     critical = [
         {key: unit[key] for key in ["name", "features", "start", "duration", "sections"]}
         for unit in units
@@ -125,6 +145,10 @@ def main():
     parser.add_argument("--profile", choices=["dev", "release"], default="dev")
     parser.add_argument("--incremental", choices=["auto", "off"], default="auto")
     parser.add_argument("--features", nargs="*", default=[], help="additional xlfn features")
+    parser.add_argument("--baseline-features", nargs="*", default=None,
+                        help="baseline feature set when names changed; defaults to --features")
+    parser.add_argument("--allow-fixture-differences", action="store_true",
+                        help="compare API-migrated fixtures while recording their distinct hashes")
     parser.add_argument("--modes", nargs="+", choices=["check", "build"], default=["build"])
     args = parser.parse_args()
     if min(args.functions, args.statements, args.repeat) < 1:
@@ -132,18 +156,20 @@ def main():
     sources = {"baseline": args.baseline.resolve(), "candidate": args.candidate.resolve()}
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
-    fixture = (sources["candidate"] / "examples/basic-xll/src/lib.rs").read_text()
     probes = {}
     report = dict(platform=platform.platform(), machine=platform.machine(),
                   rustc=run(["rustc", "-vV"], sources["candidate"], os.environ).stdout,
                   functions=args.functions, statements=args.statements, repeat=args.repeat,
                   workload=args.workload, cache=args.cache, profile=args.profile,
                   rebuild=args.rebuild,
-                  features=args.features, incremental=args.incremental,
+                  features=args.features, baseline_features=args.baseline_features,
+                  allow_fixture_differences=args.allow_fixture_differences,
+                  incremental=args.incremental,
                   compiler_cache_wrappers=False, sources={}, samples=[], summary={})
     for label, source in sources.items():
         if args.workload == "generated":
             directory = output / (label + "-consumer")
+            fixture = (source / "examples/basic-xll/src/lib.rs").read_text()
             fixture_hash = make_probe(directory, source, fixture, args.functions, args.statements)
             package = "build-time-consumer"
         else:
@@ -157,14 +183,15 @@ def main():
             fixture_hash = digest.hexdigest()
         probes[label] = (directory, package)
         metadata = ["cargo", "metadata", "--format-version", "1", "--offline"]
-        if args.features:
-            metadata += ["--features", ",".join("xlfn/" + f for f in args.features)]
+        features = args.baseline_features if label == "baseline" and args.baseline_features is not None else args.features
+        metadata += feature_arguments(directory, features)
         # Resolve the standalone package before timing; cold samples still
         # remove all compiled artifacts, including proc macros and build scripts.
         run(metadata, directory, os.environ)
         report["sources"][label] = dict(path=str(source), sha256=source_digest(source))
         report["sources"][label]["fixture_sha256"] = fixture_hash
-    if report["sources"]["baseline"]["fixture_sha256"] != report["sources"]["candidate"]["fixture_sha256"]:
+    if (not args.allow_fixture_differences
+            and report["sources"]["baseline"]["fixture_sha256"] != report["sources"]["candidate"]["fixture_sha256"]):
         raise RuntimeError("baseline and candidate consumer sources differ")
     for mode in args.modes:
         first = 0 if args.cache == "clean" else -1
@@ -172,9 +199,14 @@ def main():
             order = ["baseline", "candidate"] if iteration % 2 == 0 or iteration == -1 else ["candidate", "baseline"]
             for label in order:
                 directory, package = probes[label]
+                expected_digest = report["sources"][label]["sha256"]
+                if source_digest(sources[label]) != expected_digest:
+                    raise RuntimeError(f"{label} source changed after provenance was recorded")
                 sample = measure(directory, package,
                                  output / (label + "-target-" + mode + "-" + args.profile),
                                  mode, iteration, label, args)
+                if source_digest(sources[label]) != expected_digest:
+                    raise RuntimeError(f"{label} source changed during the measured build")
                 report["samples"].append(sample)
                 print(json.dumps({key: sample[key] for key in
                                   ["label", "mode", "iteration", "wall_seconds", "unit_seconds",

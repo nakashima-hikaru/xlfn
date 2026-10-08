@@ -29,7 +29,7 @@ Omit `--target` to validate both architectures. Add the same feature and lock
 options that you intend to distribute:
 
 ```powershell
-cargo xlfn check --target x86_64-pc-windows-msvc --features async --locked
+cargo xlfn check --target x86_64-pc-windows-msvc --features async-builtin --locked
 ```
 
 The default profile is `dev` and the default CRT policy is `static`.

@@ -13,6 +13,8 @@ impl Addin for ExampleAddin {
     type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
+    #[cfg(feature = "async")]
+    type AsyncExecutor = xlfn::NoAsyncExecutor;
 
     fn open(_context: &OpenContext) -> OpenResult<Self> {
         Ok(Opened::new(ExampleState))

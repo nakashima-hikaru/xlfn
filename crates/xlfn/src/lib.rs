@@ -128,15 +128,19 @@ pub mod value;
 pub(crate) use xlfn_kernel::sync;
 
 pub use addin::{
-    Addin, BuildInfo, DiagnosticsSetup, MacroSheetContext, MainThreadContext, OpenContext,
-    OpenResult, Opened, PhysicallyUnloadableAddin, RuntimeConfig, ThreadSafeContext,
+    Addin, BuildInfo, DiagnosticsSetup, MacroSheetContext, MainThreadContext, NoAsyncExecutor,
+    OpenContext, OpenResult, Opened, PhysicallyUnloadableAddin, RuntimeConfig, ThreadSafeContext,
 };
 #[cfg(feature = "async")]
-pub use addin::{AsyncConfig, AsyncContext, AsyncWorkerCount};
+pub use addin::{AsyncConfig, AsyncContext, AsyncTaskLimit};
 #[cfg(feature = "handles")]
 pub use addin::{HandleBindingLimit, HandleConfig};
 #[cfg(feature = "rtd")]
 pub use addin::{RtdConfig, RtdOpenContext};
+#[cfg(feature = "async")]
+pub use async_udf::{AsyncExecutor, AsyncTask};
+#[cfg(feature = "async-builtin")]
+pub use async_udf::{AsyncPollerCount, BuiltinAsyncExecutor, BuiltinExecutorConfig};
 #[cfg(feature = "async")]
 pub use cancellation::{CancellationGuarantee, CancellationToken, Cancelled};
 pub use error::{
@@ -270,17 +274,21 @@ pub use xlfn_macros::{ExcelEnum, excel_addin, excel_function};
 pub mod prelude {
     #[cfg(feature = "handles")]
     pub use crate::ExcelHandleObject;
-    #[cfg(feature = "async")]
-    pub use crate::addin::AsyncContext;
     pub use crate::addin::{
-        Addin, MacroSheetContext, MainThreadContext, OpenContext, OpenResult, Opened,
-        ThreadSafeContext,
+        Addin, MacroSheetContext, MainThreadContext, NoAsyncExecutor, OpenContext, OpenResult,
+        Opened, ThreadSafeContext,
     };
+    #[cfg(feature = "async")]
+    pub use crate::addin::{AsyncConfig, AsyncContext, AsyncTaskLimit};
     pub use crate::error::{ExcelError, XllError, XllResult};
     #[cfg(feature = "handles")]
     pub use crate::handle::{Handle, HandleAlias, HandleLease};
     pub use crate::value::{
         Column, ExcelCellRef, ExcelSerialDate, Matrix, MatrixRef, OptionalExcelValue, Row,
     };
+    #[cfg(feature = "async")]
+    pub use crate::{AsyncExecutor, AsyncTask};
+    #[cfg(feature = "async-builtin")]
+    pub use crate::{AsyncPollerCount, BuiltinAsyncExecutor, BuiltinExecutorConfig};
     pub use crate::{ExcelEnum, excel_addin, excel_function};
 }

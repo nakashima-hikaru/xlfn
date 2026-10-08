@@ -114,8 +114,10 @@ where
         report_cleanup_issue(issue);
     }) {
         Ok(stage) => stage,
-        Err(error) => {
-            report_boundary_error("xlAutoOpen subscription rollback", &error);
+        Err(failure) => {
+            let hazard = failure.hazard();
+            report_boundary_error("xlAutoOpen producer rollback", &failure.into_error());
+            super::recovery::quarantine_for_hazard(runtime, hazard);
             return incomplete(runtime);
         }
     };

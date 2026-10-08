@@ -26,6 +26,8 @@ impl Addin for ServiceAddin {
     type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
+    #[cfg(feature = "async")]
+    type AsyncExecutor = xlfn::NoAsyncExecutor;
 
     fn open(_: &OpenContext) -> OpenResult<Self> {
         Ok(Opened::new(State { scale: 2.0 }))
@@ -123,11 +125,14 @@ Each service has one configuration entry point:
 | Feature | Runtime builder | Details |
 | --- | --- | --- |
 | `handles` | `with_handles(HandleConfig)` | [Handle capacity and lifetime](handles.md#lifetime) |
-| `async` | `with_async(AsyncConfig)` | [Async worker count](async-functions.md#executor-capacity) |
+| `async` | `with_async(AsyncConfig)` | [Async task limit](async-functions.md#executor-capacity) |
 | `rtd` | `with_rtd(RtdConfig)` | [RTD limits](rtd.md#topic-and-capacity-limits) |
 
-Services not configured explicitly use their defaults. Application-created
-executors, connection pools, and queues remain the application's responsibility.
+Services not configured explicitly use their defaults. With `async` enabled,
+set `Addin::AsyncExecutor` and pass its owned instance to
+`Opened::with_async_executor`; it is started and stopped as part of the open
+transaction. Use `NoAsyncExecutor` when the add-in has no async tasks.
+Application connection pools and queues remain the application's responsibility.
 Calculation caches are configured separately; see [Calculation caches](caching.md).
 
 Use `type Layers = ();` when no execution layers are needed. Custom layers

@@ -56,7 +56,7 @@ def prepare_chapter(path: Path) -> tuple[str, set[Path]]:
 
 def build_libraries() -> tuple[dict[str, str], set[str]]:
     command = ["cargo", "build", "-p", "xlfn", "--lib", "--no-default-features",
-               "--features", "async,cache,handles,rtd", "--locked",
+               "--features", "async-builtin,cache,handles,rtd", "--locked",
                "--message-format=json-render-diagnostics"]
     result = subprocess.run(command, cwd=ROOT, text=True, stdout=subprocess.PIPE)
     libraries: dict[str, str] = {}
@@ -95,6 +95,7 @@ def main() -> None:
         chapters = [path for path in chapters if path.name in selected]
     libraries, directories = build_libraries()
     flags = [flag for name, path in sorted(libraries.items()) for flag in ["--extern", f"{name}={path}"]]
+    flags += ["--cfg", 'feature="async"', "--cfg", 'feature="async-builtin"']
     flags += [flag for path in sorted(directories) for flag in ["-L", f"dependency={path}"]]
     environment = dict(os.environ, CARGO_PKG_VERSION="0.0.0")
     projects: set[Path] = set()

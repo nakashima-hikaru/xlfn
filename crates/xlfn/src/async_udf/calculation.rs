@@ -7,10 +7,44 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use xlfn_kernel::published_owner::PublishedOwner;
 
+/// Identity of one calculation admission domain. Zero is never published.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) struct CalculationEpoch(std::num::NonZeroU64);
+
+impl CalculationEpoch {
+    pub(crate) const INITIAL: Self = Self(std::num::NonZeroU64::new(1).unwrap());
+
+    pub(crate) const fn new(value: u64) -> Option<Self> {
+        match std::num::NonZeroU64::new(value) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
+    }
+
+    pub(crate) const fn get(self) -> u64 {
+        self.0.get()
+    }
+
+    pub(crate) fn checked_next(self) -> Option<Self> {
+        Self::new(self.get().checked_add(1)?)
+    }
+}
+
+impl From<CalculationEpoch> for crate::execution::CalculationId {
+    fn from(epoch: CalculationEpoch) -> Self {
+        Self::new(epoch.get())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ControlPhase {
+    Stopped,
     Running,
-    Advancing { from: u64, to: u64 },
+    Advancing {
+        from: CalculationEpoch,
+        to: CalculationEpoch,
+    },
     Closing,
 }
 
@@ -24,17 +58,18 @@ pub(crate) struct TaskShard {
     pub(crate) tasks: Mutex<FxHashMap<u64, TaskControl>>,
 }
 
-pub(crate) struct GenerationState {
-    pub(crate) id: u64,
+pub(crate) struct CalculationState {
+    pub(crate) epoch: CalculationEpoch,
     pub(crate) admission: xlfn_kernel::operation_gate::OperationGate,
-    /// Reservations and completion guards, including canceled tasks whose
-    /// controls have already been drained. This is the reclamation authority.
+    /// Preparation snapshots, reservations, and completion guards, including
+    /// canceled tasks whose controls have already been drained. This is the
+    /// calculation allocation's reclamation authority.
     pub(crate) pins: AtomicUsize,
     pub(crate) shards: Box<[CachePadded<TaskShard>]>,
 }
 
-impl GenerationState {
-    pub(crate) fn new(id: u64) -> Self {
+impl CalculationState {
+    pub(crate) fn new(epoch: CalculationEpoch) -> Self {
         let shards = (0..TASK_SHARDS)
             .map(|_| {
                 CachePadded::new(TaskShard {
@@ -44,7 +79,7 @@ impl GenerationState {
             .collect::<Vec<_>>()
             .into_boxed_slice();
         Self {
-            id,
+            epoch,
             admission: xlfn_kernel::operation_gate::OperationGate::new(),
             pins: AtomicUsize::new(0),
             shards,
@@ -70,7 +105,7 @@ impl GenerationState {
             .iter()
             .map(|shard| shard.tasks.lock().len())
             .sum();
-        // Callers drop/wake the controls after releasing the executor control
+        // Callers drop/wake the controls after releasing the registry control
         // lock. No TaskControl destructor runs while a shard lock is held.
         let mut result = TaskControlBatch::with_capacity(capacity);
         for shard in self.shards.iter() {
@@ -81,15 +116,15 @@ impl GenerationState {
     }
 }
 
-/// Non-owning generation capability. The executor owns the Box and only
-/// retires non-current generations with no pins under its publication lock.
-pub(crate) struct GenerationPin(NonNull<GenerationState>);
+/// Non-owning calculation capability. The registry owns the Box and only
+/// retires non-current calculations with no pins under its publication lock.
+pub(crate) struct CalculationPin(NonNull<CalculationState>);
 
-impl GenerationPin {
+impl CalculationPin {
     /// # Safety
-    /// The caller must hold the executor's generation-publication lock and
-    /// keep the executor alive until this pin is released.
-    pub(crate) unsafe fn acquire(state: &GenerationState) -> Self {
+    /// The caller must hold the registry's calculation-publication lock and
+    /// keep the registry alive until this pin is released.
+    pub(crate) unsafe fn acquire(state: &CalculationState) -> Self {
         // The publication lock already acquires initialization and excludes
         // reclamation while this lifetime reservation is added.
         state
@@ -101,46 +136,46 @@ impl GenerationPin {
         Self(NonNull::from(state))
     }
 
-    pub(crate) fn pointer(&self) -> NonNull<GenerationState> {
+    pub(crate) fn pointer(&self) -> NonNull<CalculationState> {
         self.0
     }
 
-    pub(crate) fn get(&self) -> &GenerationState {
+    pub(crate) fn get(&self) -> &CalculationState {
         // SAFETY: the pin prevents this allocation from being reclaimed.
         unsafe { self.0.as_ref() }
     }
 }
 
-impl Drop for GenerationPin {
+impl Drop for CalculationPin {
     fn drop(&mut self) {
-        // No generation access may follow the release: a concurrent advance
+        // No calculation access may follow the release: a concurrent advance
         // can immediately reclaim the Box when this was its final pin. Its
         // Acquire zero observation must see every pin holder's prior accesses.
         let _ = xlfn_kernel::invariant::checked_atomic_dec_release(&self.get().pins);
     }
 }
 
-// SAFETY: GenerationState is Sync, and the pin follows its user across threads.
-unsafe impl Send for GenerationPin {}
+// SAFETY: CalculationState is Sync, and the pin follows its user across threads.
+unsafe impl Send for CalculationPin {}
 
-pub(crate) struct ExecutorControl {
+pub(crate) struct RegistryControl {
     pub(crate) phase: ControlPhase,
-    /// Unique generation owners. Moving hash-table entries never retags the
+    /// Unique calculation owners. Moving hash-table entries never retags the
     /// published allocations while reservations and task completions use them.
-    pub(crate) generations: FxHashMap<u64, PublishedOwner<GenerationState>>,
+    pub(crate) calculations: FxHashMap<CalculationEpoch, PublishedOwner<CalculationState>>,
 }
 
 #[cfg(feature = "bench-internals")]
-/// Benchmark fixture holding task controls in production generation shards.
+/// Benchmark fixture holding task controls in production calculation shards.
 pub struct AsyncTaskDrainBenchmark {
-    state: GenerationState,
+    state: CalculationState,
 }
 
 #[cfg(feature = "bench-internals")]
 impl AsyncTaskDrainBenchmark {
-    /// Seeds a generation with the requested task-control count.
+    /// Seeds a calculation with the requested task-control count.
     pub fn new(count: usize) -> Self {
-        let state = GenerationState::new(1);
+        let state = CalculationState::new(CalculationEpoch::INITIAL);
         for id in 0..count as u64 {
             let (abort, _) = futures_util::future::AbortHandle::new_pair();
             let (cancellation, _) = crate::cancellation::CancellationSource::new(
@@ -167,7 +202,7 @@ impl AsyncTaskDrainBenchmark {
 
     /// Returns the sizes in bytes of one control and an empty drained collection.
     pub fn sizes() -> (usize, usize) {
-        let state = GenerationState::new(1);
+        let state = CalculationState::new(CalculationEpoch::INITIAL);
         let controls = state.drain_tasks();
         (
             std::mem::size_of::<TaskControl>(),
@@ -181,14 +216,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn miri_generation_final_pin_release_can_race_owner_reclamation() {
+    fn miri_calculation_final_pin_release_can_race_owner_reclamation() {
         for id in 0..16 {
-            let owner = PublishedOwner::new(GenerationState::new(id));
+            let owner = PublishedOwner::new(CalculationState::new(
+                CalculationEpoch::new(id + 1).unwrap(),
+            ));
             // SAFETY: the owner is private until both pins are acquired;
             // reclamation below waits for their terminal publication.
-            let first = unsafe { GenerationPin::acquire(&owner) };
+            let first = unsafe { CalculationPin::acquire(&owner) };
             // SAFETY: the owner is still private and both pins are drained below.
-            let second = unsafe { GenerationPin::acquire(&owner) };
+            let second = unsafe { CalculationPin::acquire(&owner) };
             let values = [AtomicUsize::new(0), AtomicUsize::new(0)];
             std::thread::scope(|scope| {
                 let first_value = &values[0];

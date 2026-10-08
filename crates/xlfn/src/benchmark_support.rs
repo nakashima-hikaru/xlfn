@@ -7,13 +7,13 @@
 #![doc(hidden)]
 #![allow(unsafe_code, reason = "Benchmark-only XLOPER12 pointer construction")]
 
-#[cfg(feature = "async")]
+#[cfg(feature = "async-builtin")]
 use crate::XllError;
-#[cfg(feature = "async")]
-use crate::async_udf::AsyncManager;
-#[cfg(feature = "async")]
+#[cfg(feature = "async-builtin")]
+use crate::async_udf::AsyncRuntime;
+#[cfg(feature = "async-builtin")]
 use crate::cancellation::CancellationGuarantee;
-#[cfg(feature = "async")]
+#[cfg(feature = "async-builtin")]
 use crate::cancellation::CancellationSource;
 use crate::value::{ExcelParameter, Matrix};
 use std::sync::Arc;
@@ -41,9 +41,9 @@ use crate::handle::{
 use crate::host_callback::HostCallbackSession;
 use crate::input_identity::InputFingerprint;
 
-#[cfg(feature = "async")]
+#[cfg(feature = "async-builtin")]
 mod async_admission;
-#[cfg(feature = "async")]
+#[cfg(feature = "async-builtin")]
 mod async_admission_concurrent;
 mod async_spawn;
 #[cfg(feature = "cache")]
@@ -74,16 +74,16 @@ pub use crate::handle::{ObjectFinalPinRelease, ObjectLeaseBenchCase, ObjectLease
 
 #[cfg(feature = "async")]
 pub use crate::async_udf::AsyncTaskDrainBenchmark;
-#[cfg(all(feature = "async", feature = "handles"))]
+#[cfg(all(feature = "async-builtin", feature = "handles"))]
 pub use crate::async_udf::HandleScopedDeliveryBenchmark;
 #[cfg(feature = "async")]
 pub use crate::cancellation::benchmark::CancellationLifecycleBenchmark;
 pub use crate::value::prepared_probe::InputKind as TwoPhaseInputKind;
-#[cfg(feature = "async")]
+#[cfg(feature = "async-builtin")]
 pub use async_admission::AsyncAdmissionBenchmark;
-#[cfg(feature = "async")]
+#[cfg(feature = "async-builtin")]
 pub use async_admission_concurrent::ConcurrentAsyncAdmissionBenchmark;
-#[cfg(feature = "async")]
+#[cfg(feature = "async-builtin")]
 pub use async_spawn::{AsyncSpawnBenchmark, AsyncSpawnKind, RescheduleFuture, SpawnBatchResult};
 #[cfg(feature = "cache")]
 pub use cache::{
@@ -113,8 +113,26 @@ pub use rtd::{
 };
 pub use sync_boundary::{SyncBenchKind, SyncBoundaryWorkerPool};
 
-pub(super) fn get_benchmark_runtime() -> &'static crate::runtime::Runtime<()> {
-    static RUNTIME: std::sync::OnceLock<crate::runtime::Runtime<()>> = std::sync::OnceLock::new();
+pub(super) struct BenchmarkAddin;
+
+impl crate::Addin for BenchmarkAddin {
+    type SharedState = ();
+    type LifecycleState = ();
+    type Error = crate::XllError;
+    type Layers = ();
+    #[cfg(feature = "async-builtin")]
+    type AsyncExecutor = crate::BuiltinAsyncExecutor;
+    #[cfg(all(feature = "async", not(feature = "async-builtin")))]
+    type AsyncExecutor = crate::NoAsyncExecutor;
+
+    fn open(_: &crate::OpenContext) -> crate::OpenResult<Self> {
+        unreachable!("benchmark fixtures publish their isolated runtime directly")
+    }
+}
+
+pub(super) fn get_benchmark_runtime() -> &'static crate::runtime::Runtime<BenchmarkAddin> {
+    static RUNTIME: std::sync::OnceLock<crate::runtime::Runtime<BenchmarkAddin>> =
+        std::sync::OnceLock::new();
     RUNTIME.get_or_init(|| {
         let runtime = crate::runtime::Runtime::new();
         let removal_epoch = runtime.removal_epoch();

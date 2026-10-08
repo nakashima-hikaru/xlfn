@@ -24,10 +24,9 @@ impl Addin for FixtureAddin {
     type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
+    type AsyncExecutor = xlfn::BuiltinAsyncExecutor;
 
-    fn open(
-        context: &OpenContext,
-    ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
+    fn open(context: &OpenContext) -> OpenResult<Self> {
         let core = Box::new(FixtureCore {
             sinks: Mutex::new(HashMap::new()),
             sequence: AtomicI32::new(0),
@@ -36,7 +35,9 @@ impl Addin for FixtureAddin {
         let rtd = context
             .rtd()
             .register_source(RtdFixtureSource { core: core_ptr })?;
-        Ok(Opened::new(State { rtd, core }))
+        Ok(Opened::new(State { rtd, core }).with_async_executor(xlfn::BuiltinAsyncExecutor::new(
+            xlfn::BuiltinExecutorConfig::new(),
+        )))
     }
 }
 

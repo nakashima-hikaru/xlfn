@@ -57,6 +57,21 @@ This checks:
 For more details on building and checking artifacts, see
 [Build, validate, and load](build-validation.md).
 
+## Validate an async executor adapter
+
+Test executor reservation rejection, task destruction without a first poll,
+cancellation, and shutdown after tasks finish. Task registry accounting must
+reach zero before executor shutdown releases its resources. Test failed open
+and registration rollback as well as normal close.
+
+For xlfn development, `just test-async` checks the executor-independent API and
+`just test-async-builtin` additionally checks the polling pool. `just miri-async`
+checks registry ownership with the ordinary and Tree Borrows models;
+`just miri-async-handles` checks scoped handle futures. Strict provenance checks
+cover calculation-pin reclamation separately. They do not qualify the full
+blocking shutdown path, because the current `parking_lot` dependency reconstructs
+pointers from integers in its lock wait implementation.
+
 ## Test in Excel
 
 Artifact checks verify binary structure, but end-to-end worksheet behavior

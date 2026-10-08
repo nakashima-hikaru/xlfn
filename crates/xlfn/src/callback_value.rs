@@ -474,6 +474,7 @@ mod tests {
 
     #[test]
     fn callback_value_holding_module_permit_keeps_gate_closing_until_released() {
+        let _callback_guard = crate::test_callback::lock();
         let _test_guard = TEST_LOCK.lock().unwrap();
         crate::module_runtime::reset_callbacks_for_test();
         let permit = crate::callback_gate::enter_callback().expect("open gate admits");

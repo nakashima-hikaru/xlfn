@@ -8,6 +8,10 @@ publish = false
 
 [workspace]
 
+[features]
+async = ["xlfn/async"]
+async-builtin = ["async", "xlfn/async-builtin"]
+
 [lib]
 crate-type = ["cdylib"]
 

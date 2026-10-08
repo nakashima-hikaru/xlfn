@@ -11,9 +11,6 @@ use crate::runtime::observer::RuntimeObserver;
 use crate::runtime_components::{GenerationServices, HostLedger, QuarantineVault, ReturnProtocol};
 use xlfn_kernel::thread_affine::{ThreadAffineInstallError, ThreadAffineSlot};
 
-#[cfg(feature = "async")]
-use crate::runtime_components::RuntimeExecutors;
-
 /// Facilities needed by one open transaction.
 ///
 /// The fields remain private so callers can only use the operation-specific
@@ -24,8 +21,8 @@ pub(crate) struct OpenDeps<'a, A: Addin> {
     addin_lifecycle: &'a ThreadAffineSlot<A::LifecycleState>,
     host: &'a HostLedger,
     returns: &'a ReturnProtocol,
-    #[cfg(all(feature = "async", any(test, feature = "refinement")))]
-    executors: &'a RuntimeExecutors,
+    #[cfg(feature = "async")]
+    async_runtime: &'a crate::async_udf::AsyncRuntime<A::AsyncExecutor>,
     quarantine: &'a QuarantineVault<A>,
     observer: &'a RuntimeObserver,
 }
@@ -45,8 +42,8 @@ impl<'a, A: Addin> OpenDeps<'a, A> {
             addin_lifecycle: &runtime.addin_lifecycle,
             host: &runtime.host,
             returns: &runtime.return_protocol,
-            #[cfg(all(feature = "async", any(test, feature = "refinement")))]
-            executors: &runtime.executors,
+            #[cfg(feature = "async")]
+            async_runtime: &runtime.async_runtime,
             quarantine: &runtime.quarantine,
             observer: &runtime.observer,
         }
@@ -84,9 +81,11 @@ impl<'a, A: Addin> OpenDeps<'a, A> {
         self.lifecycle.with_generation_services(operation)
     }
 
-    #[cfg(all(feature = "async", any(test, feature = "refinement")))]
-    pub(in crate::runtime) fn executors(&self) -> &'a RuntimeExecutors {
-        self.executors
+    #[cfg(feature = "async")]
+    pub(in crate::runtime) fn async_runtime(
+        &self,
+    ) -> &'a crate::async_udf::AsyncRuntime<A::AsyncExecutor> {
+        self.async_runtime
     }
 
     pub(in crate::runtime) fn quarantine(&self) -> &'a QuarantineVault<A> {
@@ -164,7 +163,7 @@ pub(crate) struct ShutdownDeps<'a, A: Addin> {
     host: &'a HostLedger,
     returns: &'a ReturnProtocol,
     #[cfg(feature = "async")]
-    executors: &'a RuntimeExecutors,
+    async_runtime: &'a crate::async_udf::AsyncRuntime<A::AsyncExecutor>,
     quarantine: &'a QuarantineVault<A>,
     observer: &'a RuntimeObserver,
 }
@@ -185,7 +184,7 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
             host: &runtime.host,
             returns: &runtime.return_protocol,
             #[cfg(feature = "async")]
-            executors: &runtime.executors,
+            async_runtime: &runtime.async_runtime,
             quarantine: &runtime.quarantine,
             observer: &runtime.observer,
         }
@@ -204,8 +203,10 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
     }
 
     #[cfg(feature = "async")]
-    pub(in crate::runtime) fn async_manager(&self) -> &'a crate::async_udf::AsyncManager {
-        &self.executors.async_manager
+    pub(in crate::runtime) fn async_runtime(
+        &self,
+    ) -> &'a crate::async_udf::AsyncRuntime<A::AsyncExecutor> {
+        self.async_runtime
     }
 
     pub(in crate::runtime) fn quarantine(&self) -> &'a QuarantineVault<A> {

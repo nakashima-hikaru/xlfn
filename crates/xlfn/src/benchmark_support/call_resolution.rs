@@ -2,7 +2,7 @@ use super::handle::benchmark_revision_key;
 use super::*;
 
 pub struct MultiHandleCallBenchmark {
-    runtime: &'static crate::runtime::Runtime<()>,
+    runtime: &'static crate::runtime::Runtime<super::BenchmarkAddin>,
     raw_tokens: Vec<xlfn_sys::XLOPER12>,
     _storage: Vec<Vec<u16>>,
 }
@@ -86,7 +86,7 @@ impl MultiHandleCallBenchmark {
 }
 
 pub struct ConcurrentHandleResolutionBenchmark {
-    _runtime: &'static crate::runtime::Runtime<()>,
+    _runtime: &'static crate::runtime::Runtime<super::BenchmarkAddin>,
     threads: usize,
     start_tx: Vec<std::sync::mpsc::SyncSender<()>>,
     done_rx: std::sync::mpsc::Receiver<()>,

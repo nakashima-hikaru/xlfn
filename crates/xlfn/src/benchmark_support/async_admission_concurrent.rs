@@ -55,7 +55,7 @@ unsafe extern "system" fn callback(
 /// process-wide callback or use the shared benchmark runtime concurrently.
 /// Construction completes every caller's input setup before timing begins.
 pub struct ConcurrentAsyncAdmissionBenchmark {
-    runtime: &'static crate::runtime::Runtime<()>,
+    runtime: &'static crate::runtime::Runtime<super::BenchmarkAddin>,
     start_tx: Vec<SyncSender<usize>>,
     done_rx: Receiver<usize>,
     batch_start: Arc<Barrier>,
@@ -74,8 +74,13 @@ impl ConcurrentAsyncAdmissionBenchmark {
         }
         CALLBACK_FAILED.store(false, Ordering::Release);
         let runtime = get_benchmark_runtime();
-        runtime.start_async(4).expect("benchmark workers start");
-        assert!(runtime.async_manager().wait_idle());
+        runtime
+            .start_async(
+                crate::BuiltinAsyncExecutor::new(crate::BuiltinExecutorConfig::new()),
+                crate::AsyncTaskLimit::default(),
+            )
+            .expect("benchmark workers start");
+        assert!(runtime.async_runtime().wait_idle());
         let batch_start = Arc::new(Barrier::new(caller_count + 1));
         let (ready_tx, ready_rx) = sync_channel(caller_count);
         let (done_tx, done_rx) = sync_channel(caller_count);
@@ -139,7 +144,7 @@ impl ConcurrentAsyncAdmissionBenchmark {
                 .recv()
                 .expect("every caller finishes boundary launches");
         }
-        assert!(self.runtime.async_manager().wait_idle());
+        assert!(self.runtime.async_runtime().wait_idle());
         assert_eq!(preparations, total_calls);
         assert!(
             !CALLBACK_FAILED.load(Ordering::Acquire),
@@ -150,7 +155,7 @@ impl ConcurrentAsyncAdmissionBenchmark {
 }
 
 fn run_scalar_launches(
-    runtime: &'static crate::runtime::Runtime<()>,
+    runtime: &'static crate::runtime::Runtime<super::BenchmarkAddin>,
     input: &mut RawArgumentIngressBenchmark,
     calls: usize,
 ) -> usize {
@@ -194,6 +199,13 @@ impl Drop for ConcurrentAsyncAdmissionBenchmark {
         for caller in self.callers.drain(..) {
             crate::panic_boundary::contain_panic(caller.join()).expect("benchmark caller panicked");
         }
-        assert!(self.runtime.async_manager().close().issues.is_empty());
+        assert!(
+            self.runtime
+                .async_runtime()
+                .close()
+                .expect("benchmark async shutdown")
+                .issues
+                .is_empty()
+        );
     }
 }

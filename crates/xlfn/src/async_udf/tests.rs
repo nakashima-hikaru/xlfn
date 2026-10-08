@@ -1,13 +1,18 @@
 use super::*;
 
 use super::boundary::AFTER_ASYNC_EVALUATION_HOOK;
-use super::excel_handle::ExcelAsyncResponder;
-use super::executor::{Executor, ExecutorPtr};
-use super::generation::{GenerationState, task_shard};
-use super::manager::{ExecutorState, MAX_PENDING};
-use super::queue::RunnableQueue;
+use super::calculation::{CalculationState, task_shard};
+use super::runtime::ExecutorSlot;
+use super::transport::ExcelAsyncResponder;
+use crate::{AsyncPollerCount, AsyncTaskLimit, BuiltinExecutorConfig};
+type TestRuntime = AsyncRuntime<BuiltinAsyncExecutor>;
+const TASK_LIMIT: usize = AsyncTaskLimit::DEFAULT.get();
+fn builtin(count: usize) -> BuiltinAsyncExecutor {
+    BuiltinAsyncExecutor::new(
+        BuiltinExecutorConfig::new().with_poller_count(AsyncPollerCount::new(count).unwrap()),
+    )
+}
 use super::task::TaskControl;
-use super::worker::WorkerExitGuard;
 use crate::cancellation::{CancellationGuarantee, CancellationSource};
 use crate::execution::{
     CallMetadata, CallOutcome, UdfCompletionOutcome, UdfDeliveryOutcome, UdfErrorKind,
@@ -16,7 +21,6 @@ use crate::return_abi::AsyncReturnValue;
 use crate::runtime::Runtime;
 use crate::sync::Mutex;
 use crate::{Addin, OpenContext, XllError, XllResult};
-use async_task::Runnable;
 use futures_util::future::AbortHandle;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -25,7 +29,7 @@ use std::time::{Duration, Instant};
 use xlfn_sys::{XLOPER12, XLOPER12BigData, XLOPER12BigDataHandle, XLOPER12Value, XLTYPE_BIG_DATA};
 
 use crate::runtime::tests::TEST_LOCK;
-const TEST_GENERATION: u64 = 1;
+const TEST_CALCULATION: CalculationEpoch = CalculationEpoch::INITIAL;
 static EVALUATION_BARRIER: Mutex<
     Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
 > = Mutex::new(None);
@@ -69,11 +73,17 @@ impl Addin for TestU32Addin {
     type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
+    type AsyncExecutor = BuiltinAsyncExecutor;
 
     fn open(
         _: &OpenContext,
     ) -> Result<
-        crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+        crate::addin::Opened<
+            Self::SharedState,
+            Self::LifecycleState,
+            Self::Layers,
+            Self::AsyncExecutor,
+        >,
         Self::Error,
     > {
         unreachable!()
@@ -111,10 +121,10 @@ fn wait_for_async_callback_count(expected: usize) {
     }
 }
 
-fn wait_for_executor_idle(manager: &AsyncManager) {
-    let executor = manager.snapshot_spawn_executor().unwrap();
+fn wait_for_executor_idle(lifecycle: &TestRuntime) {
+    let executor = lifecycle.registry();
     let deadline = Instant::now() + Duration::from_secs(2);
-    while executor.active.load(Ordering::Acquire) != 0 {
+    while executor.active_tasks.load(Ordering::Acquire) != 0 {
         assert!(Instant::now() < deadline, "executor did not become idle");
         std::thread::yield_now();
     }
@@ -122,14 +132,16 @@ fn wait_for_executor_idle(manager: &AsyncManager) {
 
 #[test]
 fn executor_runs_tasks_and_joins_on_close() {
-    let manager = AsyncManager::new();
-    manager.start(2).unwrap();
+    let lifecycle = TestRuntime::new();
+    lifecycle
+        .start(builtin(2), AsyncTaskLimit::DEFAULT)
+        .unwrap();
     let completed = Arc::new(AtomicBool::new(false));
     let task_completed = Arc::clone(&completed);
     let (done_tx, done_rx) = std::sync::mpsc::channel();
-    manager
-        .spawn(
-            TEST_GENERATION,
+    lifecycle
+        .submit(
+            TEST_CALCULATION,
             async move {
                 task_completed.store(true, Ordering::Release);
                 done_tx.send(()).unwrap();
@@ -138,7 +150,7 @@ fn executor_runs_tasks_and_joins_on_close() {
         )
         .unwrap();
     done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-    assert!(manager.close().issues.is_empty());
+    assert!(lifecycle.close().unwrap().issues.is_empty());
     assert!(completed.load(Ordering::Acquire));
 }
 
@@ -151,13 +163,15 @@ fn cancellation_drops_pending_future_without_running_its_tail() {
         }
     }
 
-    let manager = AsyncManager::new();
-    manager.start(2).unwrap();
+    let lifecycle = TestRuntime::new();
+    lifecycle
+        .start(builtin(2), AsyncTaskLimit::DEFAULT)
+        .unwrap();
     let dropped = Arc::new(AtomicBool::new(false));
     let signal = DropSignal(Arc::clone(&dropped));
-    manager
-        .spawn(
-            TEST_GENERATION,
+    lifecycle
+        .submit(
+            TEST_CALCULATION,
             async move {
                 let _signal = signal;
                 std::future::pending::<()>().await;
@@ -165,15 +179,15 @@ fn cancellation_drops_pending_future_without_running_its_tail() {
             test_cancellation_source(),
         )
         .unwrap();
-    manager.cancel_generation(TEST_GENERATION);
-    assert!(manager.close().issues.is_empty());
+    lifecycle.cancel_calculation(TEST_CALCULATION);
+    assert!(lifecycle.close().unwrap().issues.is_empty());
     assert!(dropped.load(Ordering::Acquire));
 }
 
 #[test]
-fn rejected_spawn_drops_future_after_releasing_manager_state() {
+fn rejected_spawn_drops_future_after_releasing_lifecycle_state() {
     struct ReentrantRejectedFuture {
-        manager: Arc<AsyncManager>,
+        lifecycle: Arc<TestRuntime>,
         dropped: std::sync::mpsc::Sender<()>,
     }
 
@@ -190,24 +204,26 @@ fn rejected_spawn_drops_future_after_releasing_manager_state() {
 
     impl Drop for ReentrantRejectedFuture {
         fn drop(&mut self) {
-            self.manager.cancel_generation(TEST_GENERATION);
+            self.lifecycle.cancel_calculation(TEST_CALCULATION);
             self.dropped.send(()).unwrap();
         }
     }
 
-    let manager = Arc::new(AsyncManager::new());
-    manager.start(1).unwrap();
-    manager.cancel_generation(TEST_GENERATION);
+    let lifecycle = Arc::new(TestRuntime::new());
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
+    lifecycle.cancel_calculation(TEST_CALCULATION);
     let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
     let future = ReentrantRejectedFuture {
-        manager: Arc::clone(&manager),
+        lifecycle: Arc::clone(&lifecycle),
         dropped: dropped_tx,
     };
-    let spawning_manager = Arc::clone(&manager);
+    let spawning_lifecycle = Arc::clone(&lifecycle);
     let (result_tx, result_rx) = std::sync::mpsc::channel();
     let spawning = std::thread::spawn(move || {
         result_tx
-            .send(spawning_manager.spawn(TEST_GENERATION, future, test_cancellation_source()))
+            .send(spawning_lifecycle.submit(TEST_CALCULATION, future, test_cancellation_source()))
             .unwrap();
     });
 
@@ -217,17 +233,19 @@ fn rejected_spawn_drops_future_after_releasing_manager_state() {
     ));
     dropped_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     spawning.join().unwrap();
-    assert!(manager.close().issues.is_empty());
+    assert!(lifecycle.close().unwrap().issues.is_empty());
 }
 
 #[test]
 fn spawn_handle_snapshot_is_revalidated_after_generation_advance() {
-    let manager = Arc::new(AsyncManager::new());
-    manager.start(1).unwrap();
+    let lifecycle = Arc::new(TestRuntime::new());
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
     let (snapshot_tx, snapshot_rx) = std::sync::mpsc::sync_channel(1);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
     let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
-    manager.set_after_spawn_handle_snapshot_hook(Some(Arc::new(move || {
+    lifecycle.set_after_executor_snapshot_hook(Some(Arc::new(move || {
         snapshot_tx.send(()).unwrap();
         release_rx
             .lock()
@@ -237,18 +255,18 @@ fn spawn_handle_snapshot_is_revalidated_after_generation_advance() {
     })));
 
     let (source, token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
-    let spawning_manager = Arc::clone(&manager);
+    let spawning_lifecycle = Arc::clone(&lifecycle);
     let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
     let spawning = std::thread::spawn(move || {
         result_tx
-            .send(spawning_manager.spawn(TEST_GENERATION, std::future::pending(), source))
+            .send(spawning_lifecycle.submit(TEST_CALCULATION, std::future::pending(), source))
             .unwrap();
     });
 
     snapshot_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("spawn should snapshot the executor handle");
-    assert!(manager.advance_generation());
+    assert!(lifecycle.advance_calculation());
     release_tx.send(()).unwrap();
 
     assert!(matches!(
@@ -257,44 +275,52 @@ fn spawn_handle_snapshot_is_revalidated_after_generation_advance() {
     ));
     assert!(token.is_cancelled());
     spawning.join().unwrap();
-    manager.set_after_spawn_handle_snapshot_hook(None);
-    assert!(manager.close().issues.is_empty());
+    lifecycle.set_after_executor_snapshot_hook(None);
+    assert!(lifecycle.close().unwrap().issues.is_empty());
 }
 
 #[test]
-fn concurrent_generation_advances_are_serialized() {
-    let manager = Arc::new(AsyncManager::new());
-    manager.start(1).unwrap();
+fn concurrent_calculation_advances_are_serialized() {
+    let lifecycle = Arc::new(TestRuntime::new());
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
     let barrier = Arc::new(std::sync::Barrier::new(2));
     let hook_barrier = Arc::clone(&barrier);
-    manager.set_before_generation_transition_hook(Some(Arc::new(move || {
+    lifecycle.set_before_calculation_transition_hook(Some(Arc::new(move || {
         hook_barrier.wait();
     })));
 
-    let first_manager = Arc::clone(&manager);
-    let first = std::thread::spawn(move || first_manager.advance_generation());
-    let second_manager = Arc::clone(&manager);
-    let second = std::thread::spawn(move || second_manager.advance_generation());
+    let first_lifecycle = Arc::clone(&lifecycle);
+    let first = std::thread::spawn(move || first_lifecycle.advance_calculation());
+    let second_lifecycle = Arc::clone(&lifecycle);
+    let second = std::thread::spawn(move || second_lifecycle.advance_calculation());
 
     assert!(first.join().unwrap());
     assert!(second.join().unwrap());
-    assert_eq!(manager.current_generation(), TEST_GENERATION + 2);
-    manager
-        .spawn(TEST_GENERATION + 2, async {}, test_cancellation_source())
+    assert_eq!(lifecycle.current_epoch(), CalculationEpoch::new(3).unwrap());
+    lifecycle
+        .submit(
+            CalculationEpoch::new(3).unwrap(),
+            async {},
+            test_cancellation_source(),
+        )
         .unwrap();
 
-    manager.set_before_generation_transition_hook(None);
-    assert!(manager.close().issues.is_empty());
+    lifecycle.set_before_calculation_transition_hook(None);
+    assert!(lifecycle.close().unwrap().issues.is_empty());
 }
 
 #[test]
-fn task_scheduling_does_not_hold_manager_state() {
-    let manager = Arc::new(AsyncManager::new());
-    manager.start(1).unwrap();
+fn task_scheduling_does_not_hold_lifecycle_state() {
+    let lifecycle = Arc::new(TestRuntime::new());
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
     let (admitted_tx, admitted_rx) = std::sync::mpsc::sync_channel(1);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
     let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
-    manager.set_before_task_schedule_hook(Some(Arc::new(move || {
+    lifecycle.set_before_submit_hook(Some(Arc::new(move || {
         admitted_tx.send(()).unwrap();
         release_rx
             .lock()
@@ -304,21 +330,21 @@ fn task_scheduling_does_not_hold_manager_state() {
     })));
 
     let (source, token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
-    let spawning_manager = Arc::clone(&manager);
+    let spawning_lifecycle = Arc::clone(&lifecycle);
     let (spawn_result_tx, spawn_result_rx) = std::sync::mpsc::sync_channel(1);
     let spawning = std::thread::spawn(move || {
         spawn_result_tx
-            .send(spawning_manager.spawn(TEST_GENERATION, std::future::pending(), source))
+            .send(spawning_lifecycle.submit(TEST_CALCULATION, std::future::pending(), source))
             .unwrap();
     });
     admitted_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("task should be admitted before scheduling");
 
-    let cancelling_manager = Arc::clone(&manager);
+    let cancelling_lifecycle = Arc::clone(&lifecycle);
     let (cancel_done_tx, cancel_done_rx) = std::sync::mpsc::sync_channel(1);
     let cancelling = std::thread::spawn(move || {
-        cancelling_manager.cancel_generation(TEST_GENERATION);
+        cancelling_lifecycle.cancel_calculation(TEST_CALCULATION);
         cancel_done_tx.send(()).unwrap();
     });
     cancel_done_rx
@@ -335,18 +361,20 @@ fn task_scheduling_does_not_hold_manager_state() {
     );
     spawning.join().unwrap();
     cancelling.join().unwrap();
-    manager.set_before_task_schedule_hook(None);
-    assert!(manager.close().issues.is_empty());
+    lifecycle.set_before_submit_hook(None);
+    assert!(lifecycle.close().unwrap().issues.is_empty());
 }
 
 #[test]
 fn close_rejects_a_spawn_using_a_snapshot_handle() {
-    let manager = Arc::new(AsyncManager::new());
-    manager.start(1).unwrap();
+    let lifecycle = Arc::new(TestRuntime::new());
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
     let (snapshot_tx, snapshot_rx) = std::sync::mpsc::sync_channel(1);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
     let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
-    manager.set_after_spawn_handle_snapshot_hook(Some(Arc::new(move || {
+    lifecycle.set_after_executor_snapshot_hook(Some(Arc::new(move || {
         snapshot_tx.send(()).unwrap();
         release_rx
             .lock()
@@ -356,22 +384,22 @@ fn close_rejects_a_spawn_using_a_snapshot_handle() {
     })));
 
     let (source, token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
-    let spawning_manager = Arc::clone(&manager);
+    let spawning_lifecycle = Arc::clone(&lifecycle);
     let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
     let spawning = std::thread::spawn(move || {
         result_tx
-            .send(spawning_manager.spawn(TEST_GENERATION, std::future::pending(), source))
+            .send(spawning_lifecycle.submit(TEST_CALCULATION, std::future::pending(), source))
             .unwrap();
     });
     snapshot_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("spawn should snapshot the executor handle");
 
-    let closing_manager = Arc::clone(&manager);
+    let closing_lifecycle = Arc::clone(&lifecycle);
     let (close_tx, close_rx) = std::sync::mpsc::sync_channel(1);
     let closing = std::thread::spawn(move || {
         close_tx
-            .send(closing_manager.close_with_timeout(Duration::from_secs(1)))
+            .send(closing_lifecycle.close_with_timeout(Duration::from_secs(1)))
             .unwrap();
     });
     assert!(close_rx.recv_timeout(Duration::from_millis(50)).is_err());
@@ -389,8 +417,8 @@ fn close_rejects_a_spawn_using_a_snapshot_handle() {
             .is_ok()
     );
     closing.join().unwrap();
-    manager.set_after_spawn_handle_snapshot_hook(None);
-    assert!(manager.is_stopped());
+    lifecycle.set_after_executor_snapshot_hook(None);
+    assert!(lifecycle.is_stopped());
 }
 
 #[test]
@@ -415,8 +443,10 @@ fn close_isolates_panicking_cancellation_waker_and_completes_shutdown() {
         }
     }
 
-    let manager = AsyncManager::new();
-    manager.start(1).unwrap();
+    let lifecycle = TestRuntime::new();
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
     let (source, token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
     let panic_waker = std::task::Waker::from(Arc::new(PanicWake));
     let mut waiter = Box::pin(token.cancelled());
@@ -428,9 +458,9 @@ fn close_isolates_panicking_cancellation_waker_and_completes_shutdown() {
     );
     let dropped = Arc::new(AtomicBool::new(false));
     let drop_signal = DropSignal(Arc::clone(&dropped));
-    manager
-        .spawn(
-            TEST_GENERATION,
+    lifecycle
+        .submit(
+            TEST_CALCULATION,
             async move {
                 let _drop_signal = drop_signal;
                 std::future::pending::<()>().await;
@@ -439,21 +469,23 @@ fn close_isolates_panicking_cancellation_waker_and_completes_shutdown() {
         )
         .unwrap();
 
-    assert!(manager.close().issues.is_empty());
+    assert!(lifecycle.close().unwrap().issues.is_empty());
     assert!(token.is_cancelled());
     assert!(dropped.load(Ordering::Acquire));
 
     // A completed close must leave no orphaned Closing(None) owner.
-    assert!(manager.advance_generation());
-    manager.start(1).unwrap();
-    assert!(manager.close().issues.is_empty());
+    assert!(lifecycle.advance_calculation());
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
+    assert!(lifecycle.close().unwrap().issues.is_empty());
 }
 
 #[test]
 fn close_allows_aborted_future_drop_to_reenter_runtime() {
     let _guard = test_lock();
     struct ReentrantDrop {
-        runtime: &'static Runtime<()>,
+        runtime: &'static Runtime<TestU32Addin>,
         dropped: std::sync::mpsc::Sender<()>,
     }
 
@@ -465,8 +497,10 @@ fn close_allows_aborted_future_drop_to_reenter_runtime() {
         }
     }
 
-    let runtime: &'static Runtime<()> = Box::leak(Box::new(Runtime::new()));
-    runtime.start_async(1).unwrap();
+    let runtime: &'static Runtime<TestU32Addin> = Box::leak(Box::new(Runtime::new()));
+    runtime
+        .start_async(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
     let (started_tx, started_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
@@ -475,9 +509,9 @@ fn close_allows_aborted_future_drop_to_reenter_runtime() {
         dropped: dropped_tx,
     };
     runtime
-        .async_manager()
-        .spawn(
-            runtime.calculation_id().get(),
+        .async_runtime()
+        .submit(
+            runtime.async_runtime().current_epoch(),
             async move {
                 let _reentrant = reentrant;
                 started_tx.send(()).unwrap();
@@ -494,17 +528,20 @@ fn close_allows_aborted_future_drop_to_reenter_runtime() {
         closed_tx
             .send(
                 runtime
-                    .async_manager()
+                    .async_runtime()
                     .close_with_timeout(Duration::from_secs(2)),
             )
             .unwrap();
     });
     assert!(
         runtime
-            .async_manager()
+            .async_runtime()
             .wait_for_closing(Duration::from_secs(1))
     );
-    assert!(matches!(runtime.start_async(1), Err(XllError::Closing)));
+    assert!(matches!(
+        runtime.start_async(builtin(1), AsyncTaskLimit::DEFAULT),
+        Err(XllError::Closing)
+    ));
     release_tx.send(()).unwrap();
 
     dropped_rx.recv_timeout(Duration::from_secs(1)).unwrap();
@@ -523,10 +560,16 @@ fn close_allows_aborted_layer_cleanup_to_reenter_runtime() {
         type LifecycleState = ();
         type Error = XllError;
         type Layers = (ReentrantLayer,);
+        type AsyncExecutor = BuiltinAsyncExecutor;
         fn open(
             _: &OpenContext,
         ) -> Result<
-            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            crate::addin::Opened<
+                Self::SharedState,
+                Self::LifecycleState,
+                Self::Layers,
+                Self::AsyncExecutor,
+            >,
             Self::Error,
         > {
             unreachable!()
@@ -566,7 +609,9 @@ fn close_allows_aborted_layer_cleanup_to_reenter_runtime() {
     let open_attempt = runtime.begin_open().unwrap();
     let mut open_attempt = runtime.publish(open_attempt, 7_u32, (ReentrantLayer { on_exit },));
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
-    runtime.start_async(1).unwrap();
+    runtime
+        .start_async(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
     let _callback_guard = reset_test_callback();
 
     let (started_tx, started_rx) = std::sync::mpsc::channel();
@@ -607,14 +652,14 @@ fn close_allows_aborted_layer_cleanup_to_reenter_runtime() {
         closed_tx
             .send(
                 runtime
-                    .async_manager()
+                    .async_runtime()
                     .close_with_timeout(Duration::from_secs(2)),
             )
             .unwrap();
     });
     assert!(
         runtime
-            .async_manager()
+            .async_runtime()
             .wait_for_closing(Duration::from_secs(1))
     );
     release_tx.send(()).unwrap();
@@ -629,13 +674,15 @@ fn close_allows_aborted_layer_cleanup_to_reenter_runtime() {
 
 #[test]
 fn cancellation_token_is_signaled_before_task_abort() {
-    let manager = AsyncManager::new();
-    manager.start(1).unwrap();
+    let lifecycle = TestRuntime::new();
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
     let (source, token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
     let observed = token;
-    manager
-        .spawn(
-            TEST_GENERATION,
+    lifecycle
+        .submit(
+            TEST_CALCULATION,
             async move {
                 let _token = token;
                 std::future::pending::<()>().await;
@@ -643,85 +690,91 @@ fn cancellation_token_is_signaled_before_task_abort() {
             source,
         )
         .unwrap();
-    manager.cancel_generation(TEST_GENERATION);
+    lifecycle.cancel_calculation(TEST_CALCULATION);
     assert!(observed.is_cancelled());
-    assert!(manager.close().issues.is_empty());
+    assert!(lifecycle.close().unwrap().issues.is_empty());
 }
 
 #[test]
-fn cancelled_generation_rejects_late_spawn_and_next_generation_accepts_work() {
-    let manager = AsyncManager::new();
-    manager.start(1).unwrap();
-    manager.cancel_generation(TEST_GENERATION);
-
-    assert!(matches!(
-        manager.spawn(
-            TEST_GENERATION,
-            std::future::pending(),
-            test_cancellation_source(),
-        ),
-        Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
-    ));
-
-    let next = TEST_GENERATION + 1;
-    assert!(manager.advance_generation());
-    assert!(matches!(
-        manager.spawn(
-            TEST_GENERATION,
-            std::future::pending(),
-            test_cancellation_source(),
-        ),
-        Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
-    ));
-    manager
-        .spawn(next, async {}, test_cancellation_source())
+fn cancelled_calculation_rejects_late_spawn_and_next_generation_accepts_work() {
+    let lifecycle = TestRuntime::new();
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
         .unwrap();
-    assert!(manager.close().issues.is_empty());
+    lifecycle.cancel_calculation(TEST_CALCULATION);
+
+    assert!(matches!(
+        lifecycle.submit(
+            TEST_CALCULATION,
+            std::future::pending(),
+            test_cancellation_source(),
+        ),
+        Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
+    ));
+
+    let next = CalculationEpoch::new(2).unwrap();
+    assert!(lifecycle.advance_calculation());
+    assert!(matches!(
+        lifecycle.submit(
+            TEST_CALCULATION,
+            std::future::pending(),
+            test_cancellation_source(),
+        ),
+        Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
+    ));
+    lifecycle
+        .submit(next, async {}, test_cancellation_source())
+        .unwrap();
+    assert!(lifecycle.close().unwrap().issues.is_empty());
 }
 
 #[test]
-fn cancelling_new_generation_does_not_cancel_live_work_from_previous_generation() {
-    let manager = AsyncManager::new();
-    manager.start(1).unwrap();
+fn cancelling_new_calculation_does_not_cancel_live_work_from_previous_calculation() {
+    let lifecycle = TestRuntime::new();
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
     let (old_source, old_token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
-    manager
-        .spawn(TEST_GENERATION, std::future::pending(), old_source)
+    lifecycle
+        .submit(TEST_CALCULATION, std::future::pending(), old_source)
         .unwrap();
 
-    let next = TEST_GENERATION + 1;
-    assert!(manager.advance_generation());
+    let next = CalculationEpoch::new(2).unwrap();
+    assert!(lifecycle.advance_calculation());
     let (new_source, new_token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
-    manager
-        .spawn(next, std::future::pending(), new_source)
+    lifecycle
+        .submit(next, std::future::pending(), new_source)
         .unwrap();
 
-    manager.cancel_generation(next);
+    lifecycle.cancel_calculation(next);
     assert!(new_token.is_cancelled());
     assert!(!old_token.is_cancelled());
 
-    assert!(manager.close().issues.is_empty());
+    assert!(lifecycle.close().unwrap().issues.is_empty());
     assert!(old_token.is_cancelled());
 }
 
 #[test]
 fn spawn_and_cancel_are_linearized_by_generation_admission() {
-    let manager = Arc::new(AsyncManager::new());
-    manager.start(1).unwrap();
+    let lifecycle = Arc::new(TestRuntime::new());
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
     let barrier = Arc::new(std::sync::Barrier::new(3));
     let (source, token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
 
-    let spawning_manager = Arc::clone(&manager);
+    let spawning_lifecycle = Arc::clone(&lifecycle);
     let spawning_barrier = Arc::clone(&barrier);
     let spawning = std::thread::spawn(move || {
         spawning_barrier.wait();
-        spawning_manager.spawn(TEST_GENERATION, std::future::pending(), source)
+        spawning_lifecycle.submit(TEST_CALCULATION, std::future::pending(), source)
     });
 
-    let cancelling_manager = Arc::clone(&manager);
+    let cancelling_lifecycle = Arc::clone(&lifecycle);
     let cancelling_barrier = Arc::clone(&barrier);
     let cancelling = std::thread::spawn(move || {
         cancelling_barrier.wait();
-        cancelling_manager.cancel_generation(TEST_GENERATION);
+        cancelling_lifecycle.cancel_calculation(TEST_CALCULATION);
     });
 
     barrier.wait();
@@ -736,307 +789,14 @@ fn spawn_and_cancel_are_linearized_by_generation_admission() {
         Err(error) => panic!("unexpected spawn result: {error}"),
     }
     assert!(matches!(
-        manager.spawn(
-            TEST_GENERATION,
+        lifecycle.submit(
+            TEST_CALCULATION,
             std::future::pending(),
             test_cancellation_source(),
         ),
         Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
     ));
-    assert!(manager.close().issues.is_empty());
-}
-
-#[test]
-fn joined_worker_panic_is_a_cleanup_issue_with_a_stop_certificate() {
-    let manager = AsyncManager::new();
-    manager.start(1).unwrap();
-    let payload_dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let payload = crate::panic_boundary::tests::PanickingPayload(Arc::clone(&payload_dropped));
-    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
-    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
-    manager
-        .spawn(
-            TEST_GENERATION,
-            async move {
-                started_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-                std::panic::panic_any(payload);
-            },
-            test_cancellation_source(),
-        )
-        .unwrap();
-    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-    release_tx.send(()).unwrap();
-    let outcome = manager.close();
-    assert_eq!(outcome.issues.len(), 1);
-    assert_eq!(
-        outcome.issues[0].kind,
-        crate::shutdown::CleanupIssueKind::WorkerPanickedAfterJoin
-    );
-    let _stopped = outcome.certificate;
-    assert!(manager.is_stopped());
-    assert_eq!(payload_dropped.load(Ordering::Acquire), 0);
-}
-
-#[test]
-fn lone_worker_panic_drops_tasks_left_on_the_queue() {
-    let manager = Arc::new(AsyncManager::new());
-    manager.start(1).unwrap();
-    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
-    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
-    manager
-        .spawn(
-            TEST_GENERATION,
-            async move {
-                started_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-                panic!("injected worker-fatal panic");
-            },
-            test_cancellation_source(),
-        )
-        .unwrap();
-    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-    manager
-        .spawn(
-            TEST_GENERATION,
-            std::future::pending(),
-            test_cancellation_source(),
-        )
-        .unwrap();
-
-    let closing = Arc::clone(&manager);
-    let closer = std::thread::spawn(move || closing.close());
-    release_tx.send(()).unwrap();
-    let outcome = closer.join().unwrap();
-
-    assert_eq!(outcome.issues.len(), 1);
-    assert_eq!(
-        outcome.issues[0].kind,
-        crate::shutdown::CleanupIssueKind::WorkerPanickedAfterJoin
-    );
-    assert!(manager.is_stopped());
-}
-
-#[test]
-fn failed_executor_cancels_pending_tasks_and_rejects_new_admission_without_close() {
-    struct DropSignal(Arc<AtomicBool>);
-    impl Drop for DropSignal {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::Release);
-        }
-    }
-
-    let manager = AsyncManager::new();
-    manager.start(1).unwrap();
-    let (started_tx, started_rx) = std::sync::mpsc::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel();
-    manager
-        .spawn(
-            TEST_GENERATION,
-            async move {
-                started_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-                panic!("injected worker failure before removal");
-            },
-            test_cancellation_source(),
-        )
-        .unwrap();
-    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-    let dropped = Arc::new(AtomicBool::new(false));
-    let pending = DropSignal(Arc::clone(&dropped));
-    manager
-        .spawn(
-            TEST_GENERATION,
-            async move {
-                let _pending = pending;
-                std::future::pending::<()>().await;
-            },
-            test_cancellation_source(),
-        )
-        .unwrap();
-    release_tx.send(()).unwrap();
-
-    let executor = manager.snapshot_spawn_executor().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while executor.live_workers.load(Ordering::Acquire) != 0
-        || executor.active.load(Ordering::Acquire) != 0
-    {
-        assert!(
-            Instant::now() < deadline,
-            "failed worker must drain abandoned tasks"
-        );
-        std::thread::yield_now();
-    }
-    assert!(dropped.load(Ordering::Acquire));
-    assert!(executor.fatal_worker_failure.load(Ordering::Acquire));
-    assert!(manager.reserve_spawn(TEST_GENERATION).is_err());
-    drop(executor);
-    assert_eq!(manager.close().issues.len(), 1);
-}
-
-#[test]
-fn failed_last_worker_reclaims_a_reservation_that_schedules_after_recovery() {
-    let manager = Arc::new(AsyncManager::new());
-    manager.start(1).unwrap();
-    let (started_tx, started_rx) = std::sync::mpsc::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel();
-    manager
-        .spawn(
-            TEST_GENERATION,
-            async move {
-                started_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-                panic!("injected last worker failure during commit");
-            },
-            test_cancellation_source(),
-        )
-        .unwrap();
-    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-
-    let entered = Arc::new(std::sync::Barrier::new(2));
-    let resume = Arc::new(std::sync::Barrier::new(2));
-    let hook_entered = Arc::clone(&entered);
-    let hook_resume = Arc::clone(&resume);
-    manager.set_before_task_schedule_hook(Some(Arc::new(move || {
-        hook_entered.wait();
-        hook_resume.wait();
-    })));
-    let spawning_manager = Arc::clone(&manager);
-    let spawning = std::thread::spawn(move || {
-        spawning_manager.spawn(
-            TEST_GENERATION,
-            std::future::pending(),
-            test_cancellation_source(),
-        )
-    });
-    entered.wait();
-    release_tx.send(()).unwrap();
-    let executor = manager.snapshot_spawn_executor().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while executor.live_workers.load(Ordering::Acquire) != 0 {
-        assert!(Instant::now() < deadline);
-        std::thread::yield_now();
-    }
-    assert_eq!(executor.active.load(Ordering::Acquire), 1);
-    resume.wait();
-    spawning.join().unwrap().unwrap();
-    assert_eq!(executor.active.load(Ordering::Acquire), 0);
-    drop(executor);
-    assert_eq!(manager.close().issues.len(), 1);
-}
-
-#[test]
-fn failed_executor_close_waits_for_external_scheduler_and_its_final_release() {
-    struct PendingFuture {
-        waker: Option<std::sync::mpsc::Sender<std::task::Waker>>,
-        dropped: Arc<AtomicBool>,
-    }
-    impl std::future::Future for PendingFuture {
-        type Output = ();
-        fn poll(
-            mut self: std::pin::Pin<&mut Self>,
-            context: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<()> {
-            if let Some(waker) = self.waker.take() {
-                waker.send(context.waker().clone()).unwrap();
-            }
-            std::task::Poll::Pending
-        }
-    }
-    impl Drop for PendingFuture {
-        fn drop(&mut self) {
-            self.dropped.store(true, Ordering::Release);
-        }
-    }
-
-    let manager = Arc::new(AsyncManager::new());
-    manager.start(1).unwrap();
-    let (waker_tx, waker_rx) = std::sync::mpsc::channel();
-    let dropped = Arc::new(AtomicBool::new(false));
-    manager
-        .spawn(
-            TEST_GENERATION,
-            PendingFuture {
-                waker: Some(waker_tx),
-                dropped: Arc::clone(&dropped),
-            },
-            test_cancellation_source(),
-        )
-        .unwrap();
-    let waker = waker_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-    let (started_tx, started_rx) = std::sync::mpsc::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel();
-    manager
-        .spawn(
-            TEST_GENERATION,
-            async move {
-                started_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-                panic!("injected worker failure with an external scheduler");
-            },
-            test_cancellation_source(),
-        )
-        .unwrap();
-    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-
-    let before_entered = Arc::new(std::sync::Barrier::new(2));
-    let before_resume = Arc::new(std::sync::Barrier::new(2));
-    let after_entered = Arc::new(std::sync::Barrier::new(2));
-    let after_resume = Arc::new(std::sync::Barrier::new(2));
-    {
-        let executor = manager.snapshot_spawn_executor().unwrap();
-        let entered = Arc::clone(&before_entered);
-        let resume = Arc::clone(&before_resume);
-        *executor.before_scheduler_admission_hook.lock() = Some(Arc::new(move || {
-            entered.wait();
-            resume.wait();
-        }));
-        let entered = Arc::clone(&after_entered);
-        let resume = Arc::clone(&after_resume);
-        *executor.after_scheduler_drop_hook.lock() = Some(Arc::new(move || {
-            entered.wait();
-            resume.wait();
-        }));
-    }
-    let waking = std::thread::spawn(move || waker.wake());
-    // async-task has marked the task scheduled, but has not entered our
-    // callback gate. Cancellation cannot enqueue a second runnable for it.
-    before_entered.wait();
-    release_tx.send(()).unwrap();
-    {
-        let executor = manager.snapshot_spawn_executor().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while executor.live_workers.load(Ordering::Acquire) != 0 {
-            assert!(Instant::now() < deadline);
-            std::thread::yield_now();
-        }
-        assert_eq!(executor.active.load(Ordering::Acquire), 1);
-    }
-
-    let (closed_tx, closed_rx) = std::sync::mpsc::channel();
-    let closing_manager = Arc::clone(&manager);
-    let closing = std::thread::spawn(move || {
-        closed_tx
-            .send(closing_manager.close().issues.len())
-            .unwrap();
-    });
-    assert!(matches!(
-        closed_rx.recv_timeout(Duration::from_millis(25)),
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-    ));
-    before_resume.wait();
-    // The future and final active guard have now been released. The callback
-    // gate still protects the shared state until the external callback exits.
-    after_entered.wait();
-    assert!(dropped.load(Ordering::Acquire));
-    assert!(matches!(
-        closed_rx.recv_timeout(Duration::from_millis(25)),
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-    ));
-    after_resume.wait();
-    waking.join().unwrap();
-    assert_eq!(closed_rx.recv_timeout(Duration::from_secs(2)).unwrap(), 1);
-    closing.join().unwrap();
+    assert!(lifecycle.close().unwrap().issues.is_empty());
 }
 
 #[test]
@@ -1063,14 +823,16 @@ fn cancellation_contains_user_future_destruction_before_and_after_first_poll() {
     }
 
     for before_poll in [false, true] {
-        let manager = AsyncManager::new();
-        manager.start(1).unwrap();
+        let lifecycle = TestRuntime::new();
+        lifecycle
+            .start(builtin(1), AsyncTaskLimit::DEFAULT)
+            .unwrap();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         if before_poll {
             let (started_tx, started_rx) = std::sync::mpsc::channel();
-            manager
-                .spawn(
-                    TEST_GENERATION,
+            lifecycle
+                .submit(
+                    TEST_CALCULATION,
                     async move {
                         started_tx.send(()).unwrap();
                         release_rx.recv().unwrap();
@@ -1082,9 +844,9 @@ fn cancellation_contains_user_future_destruction_before_and_after_first_poll() {
         }
         let polled = Arc::new(AtomicBool::new(false));
         let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        manager
-            .spawn(
-                TEST_GENERATION,
+        lifecycle
+            .submit(
+                TEST_CALCULATION,
                 PanickingFuture {
                     polled: Arc::clone(&polled),
                     dropped: Arc::clone(&dropped),
@@ -1099,65 +861,69 @@ fn cancellation_contains_user_future_destruction_before_and_after_first_poll() {
                 std::thread::yield_now();
             }
         }
-        manager.cancel_current_generation();
+        lifecycle.cancel_current_calculation();
         if before_poll {
             release_tx.send(()).unwrap();
         }
-        wait_for_executor_idle(&manager);
+        wait_for_executor_idle(&lifecycle);
         assert_eq!(dropped.load(Ordering::Acquire), 1);
         assert_eq!(polled.load(Ordering::Acquire), !before_poll);
-        let executor = manager.snapshot_spawn_executor().unwrap();
-        assert_eq!(executor.live_workers.load(Ordering::Acquire), 1);
-        assert!(!executor.fatal_worker_failure.load(Ordering::Acquire));
-        drop(executor);
-        assert!(manager.advance_generation());
+        let executor = lifecycle.registry();
+        assert_eq!(executor.active_tasks.load(Ordering::Acquire), 0);
+        assert!(lifecycle.advance_calculation());
         let (completed_tx, completed_rx) = std::sync::mpsc::channel();
-        manager
-            .spawn(
-                manager.current_generation(),
+        lifecycle
+            .submit(
+                lifecycle.current_epoch(),
                 async move { completed_tx.send(()).unwrap() },
                 test_cancellation_source(),
             )
             .unwrap();
         completed_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(manager.close().issues.is_empty());
+        assert!(lifecycle.close().unwrap().issues.is_empty());
     }
 }
 
 #[test]
 fn pending_task_limit_is_reserved_atomically() {
-    let manager = AsyncManager::new();
-    manager.start(2).unwrap();
-    for _ in 0..MAX_PENDING {
-        manager
-            .spawn(
-                TEST_GENERATION,
+    let lifecycle = TestRuntime::new();
+    lifecycle
+        .start(builtin(2), AsyncTaskLimit::DEFAULT)
+        .unwrap();
+    for _ in 0..TASK_LIMIT {
+        lifecycle
+            .submit(
+                TEST_CALCULATION,
                 std::future::pending(),
                 test_cancellation_source(),
             )
             .unwrap();
     }
     assert!(matches!(
-        manager.spawn(
-            TEST_GENERATION,
+        lifecycle.submit(
+            TEST_CALCULATION,
             std::future::pending(),
             test_cancellation_source(),
         ),
         Err(XllError::Overloaded)
     ));
-    manager.cancel_generation(TEST_GENERATION);
-    manager.close_with_timeout(Duration::from_secs(2)).unwrap();
+    lifecycle.cancel_calculation(TEST_CALCULATION);
+    lifecycle
+        .close_with_timeout(Duration::from_secs(2))
+        .unwrap();
 }
 
 #[test]
 fn shutdown_timeout_refuses_close_until_blocking_poll_returns() {
-    let manager = AsyncManager::new();
-    manager.start(1).unwrap();
+    let lifecycle = TestRuntime::new();
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
     let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
-    manager
-        .spawn(
-            TEST_GENERATION,
+    lifecycle
+        .submit(
+            TEST_CALCULATION,
             async move {
                 started_tx.send(()).unwrap();
                 release_rx.recv().unwrap();
@@ -1167,23 +933,27 @@ fn shutdown_timeout_refuses_close_until_blocking_poll_returns() {
         .unwrap();
     started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     assert!(
-        manager
+        lifecycle
             .close_with_timeout(Duration::from_millis(10))
             .is_err()
     );
     release_tx.send(()).unwrap();
-    manager.close_with_timeout(Duration::from_secs(1)).unwrap();
+    lifecycle
+        .close_with_timeout(Duration::from_secs(1))
+        .unwrap();
 }
 
 #[test]
 fn production_close_waits_until_blocking_poll_returns() {
-    let manager = Arc::new(AsyncManager::new());
-    manager.start(1).unwrap();
+    let lifecycle = Arc::new(TestRuntime::new());
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
     let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
-    manager
-        .spawn(
-            TEST_GENERATION,
+    lifecycle
+        .submit(
+            TEST_CALCULATION,
             async move {
                 started_tx.send(()).unwrap();
                 release_rx.recv().unwrap();
@@ -1193,10 +963,10 @@ fn production_close_waits_until_blocking_poll_returns() {
         .unwrap();
     started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
 
-    let closer_manager = Arc::clone(&manager);
+    let closer_lifecycle = Arc::clone(&lifecycle);
     let (closed_tx, closed_rx) = std::sync::mpsc::channel();
     let closer = std::thread::spawn(move || {
-        assert!(closer_manager.close().issues.is_empty());
+        assert!(closer_lifecycle.close().unwrap().issues.is_empty());
         closed_tx.send(()).unwrap();
     });
     assert!(closed_rx.recv_timeout(Duration::from_millis(20)).is_err());
@@ -1250,7 +1020,9 @@ fn async_boundary_returns_completed_value_through_callback() {
     let open_attempt = runtime.begin_open().unwrap();
     let mut open_attempt = runtime.publish(open_attempt, 7_u32, ());
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
-    runtime.start_async(2).unwrap();
+    runtime
+        .start_async(builtin(2), AsyncTaskLimit::DEFAULT)
+        .unwrap();
 
     let _callback_guard = reset_test_callback();
     let mut bytes = vec![1_u8, 2, 3, 4];
@@ -1280,7 +1052,7 @@ fn async_boundary_returns_completed_value_through_callback() {
     }
     assert_eq!(wait_for_async_callback(), 42);
     assert_eq!(crate::test_callback::free_calls(), 0);
-    assert!(runtime.close_async().issues.is_empty());
+    assert!(runtime.close_async().unwrap().issues.is_empty());
 }
 
 #[test]
@@ -1304,13 +1076,15 @@ fn saturated_async_boundary_skips_owned_input_preparation_and_recovers() {
     let opening = runtime.begin_open().unwrap();
     let mut opening = runtime.publish(opening, 7_u32, ());
     runtime.finish_open(&mut opening, Vec::new()).unwrap();
-    runtime.start_async(2).unwrap();
+    runtime
+        .start_async(builtin(2), AsyncTaskLimit::DEFAULT)
+        .unwrap();
     let _callback_guard = reset_test_callback();
-    let generation = runtime.async_manager().current_generation();
-    for _ in 0..MAX_PENDING {
+    let generation = runtime.async_runtime().current_epoch();
+    for _ in 0..TASK_LIMIT {
         runtime
-            .async_manager()
-            .spawn(
+            .async_runtime()
+            .submit(
                 generation,
                 std::future::pending(),
                 test_cancellation_source(),
@@ -1359,18 +1133,17 @@ fn saturated_async_boundary_skips_owned_input_preparation_and_recovers() {
     assert_eq!(crate::test_callback::async_return_calls(), 2);
     assert_eq!(
         runtime
-            .async_manager()
-            .snapshot_spawn_executor()
-            .unwrap()
-            .active
+            .async_runtime()
+            .registry()
+            .active_tasks
             .load(Ordering::Acquire),
-        MAX_PENDING
+        TASK_LIMIT
     );
-    runtime.async_manager().cancel_current_generation();
-    wait_for_executor_idle(runtime.async_manager());
+    runtime.async_runtime().cancel_current_calculation();
+    wait_for_executor_idle(runtime.async_runtime());
     // Cancellation seals that calculation. Rotation opens the next one;
     // rotation alone deliberately preserves pending work in older generations.
-    assert!(runtime.async_manager().advance_generation());
+    assert!(runtime.async_runtime().advance_calculation());
     let prepared = AtomicBool::new(false);
     // SAFETY: the valid opaque handle is live throughout the call.
     unsafe {
@@ -1382,7 +1155,7 @@ fn saturated_async_boundary_skips_owned_input_preparation_and_recovers() {
     wait_for_async_callback_count(3);
     assert!(prepared.load(Ordering::Relaxed));
     assert_eq!(crate::test_callback::last_async_value(), 42);
-    assert!(runtime.close_async().issues.is_empty());
+    assert!(runtime.close_async().unwrap().issues.is_empty());
 }
 
 #[test]
@@ -1392,9 +1165,11 @@ fn async_preparation_can_reenter_generation_transition() {
     let opening = runtime.begin_open().unwrap();
     let mut opening = runtime.publish(opening, 7_u32, ());
     runtime.finish_open(&mut opening, Vec::new()).unwrap();
-    runtime.start_async(1).unwrap();
+    runtime
+        .start_async(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
     let _callback_guard = reset_test_callback();
-    let generation = runtime.async_manager().current_generation();
+    let generation = runtime.async_runtime().current_epoch();
     let mut handle = XLOPER12 {
         value: XLOPER12Value {
             big_data: XLOPER12BigData {
@@ -1409,23 +1184,25 @@ fn async_preparation_can_reenter_generation_transition() {
     // SAFETY: the valid opaque handle is live throughout the call.
     unsafe {
         async_udf_boundary_named(runtime, "reentrant", "REENTRANT", &mut handle, |_, _, _| {
-            assert!(runtime.async_manager().advance_generation());
+            assert!(runtime.async_runtime().advance_calculation());
             Ok(async { Ok::<_, XllError>(42.0) })
         });
     }
-    assert_eq!(runtime.async_manager().current_generation(), generation + 1);
+    assert_eq!(
+        runtime.async_runtime().current_epoch(),
+        generation.checked_next().unwrap()
+    );
     assert_eq!(crate::test_callback::async_return_calls(), 1);
     assert_eq!(crate::test_callback::last_async_value(), -1);
     assert_eq!(
         runtime
-            .async_manager()
-            .snapshot_spawn_executor()
-            .unwrap()
-            .active
+            .async_runtime()
+            .registry()
+            .active_tasks
             .load(Ordering::Acquire),
         0
     );
-    assert!(runtime.close_async().issues.is_empty());
+    assert!(runtime.close_async().unwrap().issues.is_empty());
 }
 
 #[test]
@@ -1451,7 +1228,9 @@ fn async_boundary_future_destructor_panic_reports_error_and_preserves_worker() {
     let open_attempt = runtime.begin_open().unwrap();
     let mut open_attempt = runtime.publish(open_attempt, 7_u32, ());
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
-    runtime.start_async(1).unwrap();
+    runtime
+        .start_async(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
     let _callback_guard = reset_test_callback();
     let mut handle = XLOPER12 {
         value: XLOPER12Value {
@@ -1475,11 +1254,10 @@ fn async_boundary_future_destructor_panic_reports_error_and_preserves_worker() {
         );
     }
     assert_eq!(wait_for_async_callback(), -1);
-    wait_for_executor_idle(runtime.async_manager());
-    let executor = runtime.async_manager().snapshot_spawn_executor().unwrap();
-    assert_eq!(executor.live_workers.load(Ordering::Acquire), 1);
-    assert!(!executor.fatal_worker_failure.load(Ordering::Acquire));
-    drop(executor);
+    wait_for_executor_idle(runtime.async_runtime());
+    let executor = runtime.async_runtime().registry();
+    assert_eq!(executor.active_tasks.load(Ordering::Acquire), 0);
+
     // SAFETY: the same opaque token is live for this second test call.
     unsafe {
         async_udf_boundary_named(runtime, "next_udf", "NEXT.UDF", &mut handle, |_, _, _| {
@@ -1488,7 +1266,7 @@ fn async_boundary_future_destructor_panic_reports_error_and_preserves_worker() {
     }
     wait_for_async_callback_count(2);
     assert_eq!(crate::test_callback::last_async_value(), 42);
-    assert!(runtime.close_async().issues.is_empty());
+    assert!(runtime.close_async().unwrap().issues.is_empty());
 }
 
 #[test]
@@ -1530,10 +1308,16 @@ fn async_boundary_reports_handler_failures_to_layers() {
         type LifecycleState = ();
         type Error = XllError;
         type Layers = (Recorder,);
+        type AsyncExecutor = BuiltinAsyncExecutor;
         fn open(
             _: &OpenContext,
         ) -> Result<
-            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            crate::addin::Opened<
+                Self::SharedState,
+                Self::LifecycleState,
+                Self::Layers,
+                Self::AsyncExecutor,
+            >,
             Self::Error,
         > {
             unreachable!()
@@ -1546,7 +1330,9 @@ fn async_boundary_reports_handler_failures_to_layers() {
     let open_attempt = runtime.begin_open().unwrap();
     let mut open_attempt = runtime.publish(open_attempt, 7_u32, (Recorder(event_sender),));
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
-    runtime.start_async(2).unwrap();
+    runtime
+        .start_async(builtin(2), AsyncTaskLimit::DEFAULT)
+        .unwrap();
 
     let _callback_guard = reset_test_callback();
     let mut bytes = vec![1_u8, 2, 3, 4];
@@ -1584,7 +1370,7 @@ fn async_boundary_reports_handler_failures_to_layers() {
     assert_eq!(event.1, Some(73));
     assert_eq!(event.2, 1);
 
-    assert!(runtime.close_async().issues.is_empty());
+    assert!(runtime.close_async().unwrap().issues.is_empty());
 }
 
 #[test]
@@ -1626,10 +1412,16 @@ fn async_boundary_records_delivery_rejection_as_failure() {
         type LifecycleState = ();
         type Error = XllError;
         type Layers = (Recorder,);
+        type AsyncExecutor = BuiltinAsyncExecutor;
         fn open(
             _: &OpenContext,
         ) -> Result<
-            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            crate::addin::Opened<
+                Self::SharedState,
+                Self::LifecycleState,
+                Self::Layers,
+                Self::AsyncExecutor,
+            >,
             Self::Error,
         > {
             unreachable!()
@@ -1642,7 +1434,9 @@ fn async_boundary_records_delivery_rejection_as_failure() {
     let open_attempt = runtime.begin_open().unwrap();
     let mut open_attempt = runtime.publish(open_attempt, 7_u32, (Recorder(event_sender),));
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
-    runtime.start_async(1).unwrap();
+    runtime
+        .start_async(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
     let _callback_guard = reset_test_callback();
     crate::test_callback::set_async_rejected(true);
 
@@ -1710,7 +1504,7 @@ fn async_boundary_records_delivery_rejection_as_failure() {
         (Some(UdfErrorKind::Vendor), Some(73), true)
     );
     assert_eq!(crate::test_callback::async_return_calls(), 2);
-    assert!(runtime.close_async().issues.is_empty());
+    assert!(runtime.close_async().unwrap().issues.is_empty());
 }
 
 #[test]
@@ -1720,7 +1514,9 @@ fn async_boundary_returns_error_on_cancellation() {
     let open_attempt = runtime.begin_open().unwrap();
     let mut open_attempt = runtime.publish(open_attempt, 7_u32, ());
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
-    runtime.start_async(2).unwrap();
+    runtime
+        .start_async(builtin(2), AsyncTaskLimit::DEFAULT)
+        .unwrap();
 
     let _callback_guard = reset_test_callback();
     let mut bytes = vec![1_u8, 2, 3, 4];
@@ -1759,7 +1555,7 @@ fn async_boundary_returns_error_on_cancellation() {
     drop(release_tx);
     assert_eq!(wait_for_async_callback(), -1);
 
-    assert!(runtime.close_async().issues.is_empty());
+    assert!(runtime.close_async().unwrap().issues.is_empty());
 }
 
 #[test]
@@ -1769,7 +1565,9 @@ fn pending_async_cancellation_is_not_suppressed_by_another_callback_status() {
     let open_attempt = runtime.begin_open().unwrap();
     let mut open_attempt = runtime.publish(open_attempt, 7_u32, ());
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
-    runtime.start_async(1).unwrap();
+    runtime
+        .start_async(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
 
     let _callback_guard = reset_test_callback();
     let mut bytes = vec![1_u8, 2, 3, 4];
@@ -1810,7 +1608,7 @@ fn pending_async_cancellation_is_not_suppressed_by_another_callback_status() {
 
     let callbacks_before_cancel = crate::test_callback::async_return_calls();
     cancel_async_calculation(runtime);
-    assert!(runtime.close_async().issues.is_empty());
+    assert!(runtime.close_async().unwrap().issues.is_empty());
     assert!(
         crate::test_callback::async_return_calls() > callbacks_before_cancel,
         "async cancellation fallback must retain its independent module admission"
@@ -1824,7 +1622,9 @@ fn cancellation_after_evaluation_does_not_leak_the_return_block() {
     let open_attempt = runtime.begin_open().unwrap();
     let mut open_attempt = runtime.publish(open_attempt, 7_u32, ());
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
-    runtime.start_async(1).unwrap();
+    runtime
+        .start_async(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
 
     let _callback_guard = reset_test_callback();
     // Record the process-global allocation count only after this runtime
@@ -1864,7 +1664,7 @@ fn cancellation_after_evaluation_does_not_leak_the_return_block() {
     cancel_async_calculation(runtime);
     release_tx.send(()).unwrap();
     assert_eq!(wait_for_async_callback(), -1);
-    assert!(runtime.close_async().issues.is_empty());
+    assert!(runtime.close_async().unwrap().issues.is_empty());
 
     assert_eq!(crate::return_abi::live_return_blocks(), before);
     *AFTER_ASYNC_EVALUATION_HOOK.lock() = None;
@@ -1872,13 +1672,15 @@ fn cancellation_after_evaluation_does_not_leak_the_return_block() {
 }
 
 #[test]
-fn advance_generation_does_not_block_on_task_schedule_hook() {
-    let manager = Arc::new(AsyncManager::new());
-    manager.start(1).unwrap();
+fn advance_calculation_does_not_block_on_task_schedule_hook() {
+    let lifecycle = Arc::new(TestRuntime::new());
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
     let (admitted_tx, admitted_rx) = std::sync::mpsc::sync_channel(1);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
     let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
-    manager.set_before_task_schedule_hook(Some(Arc::new(move || {
+    lifecycle.set_before_submit_hook(Some(Arc::new(move || {
         admitted_tx.send(()).unwrap();
         release_rx
             .lock()
@@ -1888,28 +1690,28 @@ fn advance_generation_does_not_block_on_task_schedule_hook() {
     })));
 
     let (source, _token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
-    let spawning_manager = Arc::clone(&manager);
+    let spawning_lifecycle = Arc::clone(&lifecycle);
     let (spawn_result_tx, spawn_result_rx) = std::sync::mpsc::sync_channel(1);
     let spawning = std::thread::spawn(move || {
         spawn_result_tx
-            .send(spawning_manager.spawn(TEST_GENERATION, std::future::pending(), source))
+            .send(spawning_lifecycle.submit(TEST_CALCULATION, std::future::pending(), source))
             .unwrap();
     });
     admitted_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("task should be admitted before scheduling");
 
-    let advancing_manager = Arc::clone(&manager);
+    let advancing_lifecycle = Arc::clone(&lifecycle);
     let (advance_done_tx, advance_done_rx) = std::sync::mpsc::sync_channel(1);
     let advancing = std::thread::spawn(move || {
         advance_done_tx
-            .send(advancing_manager.advance_generation())
+            .send(advancing_lifecycle.advance_calculation())
             .unwrap();
     });
     assert!(
         advance_done_rx
             .recv_timeout(Duration::from_secs(1))
-            .expect("advance_generation should not block while task schedule hook is held")
+            .expect("advance_calculation should not block while task schedule hook is held")
     );
 
     release_tx.send(()).unwrap();
@@ -1919,18 +1721,20 @@ fn advance_generation_does_not_block_on_task_schedule_hook() {
         .unwrap();
     spawning.join().unwrap();
     advancing.join().unwrap();
-    manager.set_before_task_schedule_hook(None);
-    assert!(manager.close().issues.is_empty());
+    lifecycle.set_before_submit_hook(None);
+    assert!(lifecycle.close().unwrap().issues.is_empty());
 }
 
 #[test]
 fn spawn_registered_before_close_is_drained_safely() {
-    let manager = Arc::new(AsyncManager::new());
-    manager.start(1).unwrap();
+    let lifecycle = Arc::new(TestRuntime::new());
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
     let (registered_tx, registered_rx) = std::sync::mpsc::sync_channel(1);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
     let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
-    manager.set_before_task_schedule_hook(Some(Arc::new(move || {
+    lifecycle.set_before_submit_hook(Some(Arc::new(move || {
         registered_tx.send(()).unwrap();
         release_rx
             .lock()
@@ -1940,22 +1744,22 @@ fn spawn_registered_before_close_is_drained_safely() {
     })));
 
     let (source, token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
-    let spawning_manager = Arc::clone(&manager);
+    let spawning_lifecycle = Arc::clone(&lifecycle);
     let (spawn_result_tx, spawn_result_rx) = std::sync::mpsc::sync_channel(1);
     let spawning = std::thread::spawn(move || {
         spawn_result_tx
-            .send(spawning_manager.spawn(TEST_GENERATION, std::future::pending(), source))
+            .send(spawning_lifecycle.submit(TEST_CALCULATION, std::future::pending(), source))
             .unwrap();
     });
     registered_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("task should be registered");
 
-    let closing_manager = Arc::clone(&manager);
+    let closing_lifecycle = Arc::clone(&lifecycle);
     let (close_result_tx, close_result_rx) = std::sync::mpsc::sync_channel(1);
     let closing = std::thread::spawn(move || {
         close_result_tx
-            .send(closing_manager.close_with_timeout(Duration::from_secs(1)))
+            .send(closing_lifecycle.close_with_timeout(Duration::from_secs(1)))
             .unwrap();
     });
 
@@ -1971,75 +1775,79 @@ fn spawn_registered_before_close_is_drained_safely() {
     );
     closing.join().unwrap();
     assert!(token.is_cancelled());
-    manager.set_before_task_schedule_hook(None);
-    assert!(manager.is_stopped());
+    lifecycle.set_before_submit_hook(None);
+    assert!(lifecycle.is_stopped());
 }
 
 #[test]
-fn old_generation_retained_entry_rejected_on_spawn() {
-    let manager = AsyncManager::new();
-    manager.start(1).unwrap();
-    let (source1, _token1) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
-    manager
-        .spawn(TEST_GENERATION, std::future::pending::<()>(), source1)
+fn old_calculation_retained_entry_rejected_on_spawn() {
+    let lifecycle = TestRuntime::new();
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
         .unwrap();
-    assert!(manager.advance_generation());
-    assert_eq!(manager.current_generation(), TEST_GENERATION + 1);
+    let (source1, _token1) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
+    lifecycle
+        .submit(TEST_CALCULATION, std::future::pending::<()>(), source1)
+        .unwrap();
+    assert!(lifecycle.advance_calculation());
+    assert_eq!(lifecycle.current_epoch(), CalculationEpoch::new(2).unwrap());
 
     let (source2, token2) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
-    let res = manager.spawn(TEST_GENERATION, std::future::pending::<()>(), source2);
+    let res = lifecycle.submit(TEST_CALCULATION, std::future::pending::<()>(), source2);
     assert!(matches!(
         res,
         Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
     ));
     assert!(token2.is_cancelled());
-    assert!(manager.close().issues.is_empty());
+    assert!(lifecycle.close().unwrap().issues.is_empty());
 }
 
 #[test]
-fn rejection_priority_old_generation_over_max_pending() {
-    let manager = AsyncManager::new();
-    manager.start(1).unwrap();
-    for _ in 0..MAX_PENDING {
+fn rejection_priority_old_calculation_over_max_pending() {
+    let lifecycle = TestRuntime::new();
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
+    for _ in 0..TASK_LIMIT {
         let (source, _token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
-        let _ = manager.spawn(TEST_GENERATION, std::future::pending::<()>(), source);
+        let _ = lifecycle.submit(TEST_CALCULATION, std::future::pending::<()>(), source);
     }
     // Inspect admission directly rather than retaining a test-helper token
     // whose canceled source slot may be reused by another parallel test.
     assert!(matches!(
-        manager.preflight_spawn(TEST_GENERATION),
+        lifecycle.preflight_submit(TEST_CALCULATION),
         Err(XllError::Overloaded)
     ));
-    let res_curr = manager.reserve_spawn(TEST_GENERATION).map(drop);
+    let res_curr = lifecycle.reserve(TEST_CALCULATION).map(drop);
     assert!(matches!(res_curr, Err(XllError::Overloaded)));
 
-    assert!(manager.advance_generation());
-    let gen2 = TEST_GENERATION + 1;
+    assert!(lifecycle.advance_calculation());
+    let gen2 = CalculationEpoch::new(2).unwrap();
 
-    for _ in 0..MAX_PENDING {
+    for _ in 0..TASK_LIMIT {
         let (source, _token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
-        let _ = manager.spawn(gen2, std::future::pending::<()>(), source);
+        let _ = lifecycle.submit(gen2, std::future::pending::<()>(), source);
     }
 
     assert!(matches!(
-        manager.preflight_spawn(TEST_GENERATION),
+        lifecycle.preflight_submit(TEST_CALCULATION),
         Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
     ));
 
     let (source_old, token_old) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
-    let res_old = manager.spawn(TEST_GENERATION, std::future::pending::<()>(), source_old);
+    let res_old = lifecycle.submit(TEST_CALCULATION, std::future::pending::<()>(), source_old);
     assert!(matches!(
         res_old,
         Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
     ));
     assert!(token_old.is_cancelled());
 
-    assert!(manager.close().issues.is_empty());
+    assert!(lifecycle.close().unwrap().issues.is_empty());
 }
 
 #[test]
-fn test_generation_state_sharded_removal_and_drain() {
-    let state = GenerationState::new(1);
+fn test_calculation_state_sharded_removal_and_drain() {
+    let state = CalculationState::new(TEST_CALCULATION);
     let (abort, _) = AbortHandle::new_pair();
     for id in 1..=100 {
         let index = task_shard(id);
@@ -2071,7 +1879,7 @@ fn test_generation_state_sharded_removal_and_drain() {
 #[test]
 fn drained_batches_retain_cancellation_until_consumed_outside_locks() {
     for count in [0, 1, 4, 5, 33] {
-        let state = GenerationState::new(TEST_GENERATION);
+        let state = CalculationState::new(TEST_CALCULATION);
         let mut observers = Vec::new();
         for id in 0..count {
             let (abort, _) = AbortHandle::new_pair();
@@ -2098,7 +1906,7 @@ fn drained_batches_retain_cancellation_until_consumed_outside_locks() {
                 .all(|(abort, token)| { !abort.is_aborted() && !token.is_cancelled() })
         );
 
-        super::worker::cancel_tasks(controls);
+        super::registry::cancel_tasks(controls);
         assert!(
             observers
                 .iter()
@@ -2108,9 +1916,9 @@ fn drained_batches_retain_cancellation_until_consumed_outside_locks() {
 }
 
 #[test]
-fn generation_drain_racing_completions_claims_every_task_once() {
+fn calculation_drain_racing_completions_claims_every_task_once() {
     for _ in 0..8 {
-        let state = GenerationState::new(TEST_GENERATION);
+        let state = CalculationState::new(TEST_CALCULATION);
         let (abort, _) = AbortHandle::new_pair();
         for id in 0..128 {
             state.shards[task_shard(id)].tasks.lock().insert(
@@ -2157,13 +1965,15 @@ fn generation_drain_racing_completions_claims_every_task_once() {
 
 #[test]
 fn miri_spawn_and_advance_linearization_case_a_advance_closes_before_admission() {
-    let manager = Arc::new(AsyncManager::new());
-    manager.start(1).unwrap();
+    let lifecycle = Arc::new(TestRuntime::new());
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
     let (snapshot_tx, snapshot_rx) = std::sync::mpsc::sync_channel(1);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
     let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
 
-    manager.set_after_generation_snapshot_hook(Some(Arc::new(move || {
+    lifecycle.set_after_calculation_snapshot_hook(Some(Arc::new(move || {
         snapshot_tx.send(()).unwrap();
         release_rx
             .lock()
@@ -2173,11 +1983,11 @@ fn miri_spawn_and_advance_linearization_case_a_advance_closes_before_admission()
     })));
 
     let (source, token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
-    let spawning_manager = Arc::clone(&manager);
+    let spawning_lifecycle = Arc::clone(&lifecycle);
     let (spawn_result_tx, spawn_result_rx) = std::sync::mpsc::sync_channel(1);
     let spawning = std::thread::spawn(move || {
         spawn_result_tx
-            .send(spawning_manager.spawn(TEST_GENERATION, std::future::pending::<()>(), source))
+            .send(spawning_lifecycle.submit(TEST_CALCULATION, std::future::pending::<()>(), source))
             .unwrap();
     });
 
@@ -2185,11 +1995,11 @@ fn miri_spawn_and_advance_linearization_case_a_advance_closes_before_admission()
         .recv_timeout(Duration::from_secs(1))
         .expect("spawn should snapshot current generation");
 
-    let advancing_manager = Arc::clone(&manager);
+    let advancing_lifecycle = Arc::clone(&lifecycle);
     let (advance_result_tx, advance_result_rx) = std::sync::mpsc::sync_channel(1);
     let advancing = std::thread::spawn(move || {
         advance_result_tx
-            .send(advancing_manager.advance_generation())
+            .send(advancing_lifecycle.advance_calculation())
             .unwrap();
     });
 
@@ -2199,10 +2009,10 @@ fn miri_spawn_and_advance_linearization_case_a_advance_closes_before_admission()
             .unwrap()
     );
     {
-        let reader = manager.snapshot_spawn_executor().unwrap();
+        let reader = lifecycle.registry();
         let control = reader.control.lock();
         assert!(
-            control.generations.contains_key(&TEST_GENERATION),
+            control.calculations.contains_key(&TEST_CALCULATION),
             "a pre-admission snapshot must keep its generation alive"
         );
     }
@@ -2219,29 +2029,31 @@ fn miri_spawn_and_advance_linearization_case_a_advance_closes_before_admission()
 
     spawning.join().unwrap();
     advancing.join().unwrap();
-    manager.set_after_generation_snapshot_hook(None);
-    assert!(manager.advance_generation());
+    lifecycle.set_after_calculation_snapshot_hook(None);
+    assert!(lifecycle.advance_calculation());
     {
-        let reader = manager.snapshot_spawn_executor().unwrap();
+        let reader = lifecycle.registry();
         let control = reader.control.lock();
         assert_eq!(
-            control.generations.len(),
+            control.calculations.len(),
             1,
             "retired snapshots must be reclaimed on the next transition"
         );
     }
-    assert!(manager.close().issues.is_empty());
+    assert!(lifecycle.close().unwrap().issues.is_empty());
 }
 
 #[test]
-fn miri_canceled_running_task_keeps_its_generation_until_completion() {
-    let manager = AsyncManager::new();
-    manager.start(1).unwrap();
+fn miri_canceled_running_task_keeps_its_calculation_until_completion() {
+    let lifecycle = TestRuntime::new();
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
-    manager
-        .spawn(
-            TEST_GENERATION,
+    lifecycle
+        .submit(
+            TEST_CALCULATION,
             async move {
                 entered_tx.send(()).unwrap();
                 release_rx.recv().unwrap();
@@ -2250,52 +2062,54 @@ fn miri_canceled_running_task_keeps_its_generation_until_completion() {
         )
         .unwrap();
     entered_rx.recv().unwrap();
-    manager.cancel_current_generation();
-    assert!(manager.advance_generation());
+    lifecycle.cancel_current_calculation();
+    assert!(lifecycle.advance_calculation());
     {
-        let reader = manager.snapshot_spawn_executor().unwrap();
+        let reader = lifecycle.registry();
         let control = reader.control.lock();
         let old = control
-            .generations
-            .get(&TEST_GENERATION)
+            .calculations
+            .get(&TEST_CALCULATION)
             .expect("canceling controls must not free a running task's generation");
         assert!(old.shards.iter().all(|shard| shard.tasks.lock().is_empty()));
         assert_eq!(old.pins.load(Ordering::Acquire), 1);
     }
     release_tx.send(()).unwrap();
     {
-        let state = manager.state.lock();
-        let ExecutorState::Running(executor) = &*state else {
+        let state = lifecycle.state.lock();
+        let ExecutorSlot::Running(_executor) = &*state else {
             unreachable!()
         };
-        executor.wait_for_idle();
+        lifecycle.wait_idle();
     }
-    assert!(manager.advance_generation());
+    assert!(lifecycle.advance_calculation());
     {
-        let reader = manager.snapshot_spawn_executor().unwrap();
-        assert_eq!(reader.control.lock().generations.len(), 1);
+        let reader = lifecycle.registry();
+        assert_eq!(reader.control.lock().calculations.len(), 1);
     }
-    assert!(manager.close().issues.is_empty());
+    assert!(lifecycle.close().unwrap().issues.is_empty());
 }
 
 #[test]
 fn task_id_exhaustion_releases_reservation_without_reusing_identity() {
-    let manager = AsyncManager::new();
-    manager.start(1).unwrap();
+    let lifecycle = TestRuntime::new();
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
     {
-        let reader = manager.snapshot_spawn_executor().unwrap();
+        let reader = lifecycle.registry();
         reader.next_id.store(u64::MAX, Ordering::Relaxed);
         assert!(matches!(
-            reader.reserve_spawn(TEST_GENERATION),
-            Err((XllError::Overloaded, false))
+            reader.reserve(TEST_CALCULATION),
+            Err(XllError::Overloaded)
         ));
-        assert_eq!(reader.active.load(Ordering::Acquire), 0);
+        assert_eq!(reader.active_tasks.load(Ordering::Acquire), 0);
         let control = reader.control.lock();
-        let generation = control.generations.get(&TEST_GENERATION).unwrap();
+        let generation = control.calculations.get(&TEST_CALCULATION).unwrap();
         assert_eq!(generation.pins.load(Ordering::Acquire), 0);
         assert_eq!(generation.admission.active(), 0);
     }
-    assert!(manager.close().issues.is_empty());
+    assert!(lifecycle.close().unwrap().issues.is_empty());
 }
 
 #[test]
@@ -2307,12 +2121,14 @@ fn miri_executor_drop_cancels_tasks_and_joins_workers() {
         }
     }
     let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let manager = AsyncManager::new();
-    manager.start(1).unwrap();
+    let lifecycle = TestRuntime::new();
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
     let guard = CountDrop(Arc::clone(&drops));
-    manager
-        .spawn(
-            TEST_GENERATION,
+    lifecycle
+        .submit(
+            TEST_CALCULATION,
             async move {
                 let _guard = guard;
                 std::future::pending::<()>().await;
@@ -2320,26 +2136,28 @@ fn miri_executor_drop_cancels_tasks_and_joins_workers() {
             test_cancellation_source(),
         )
         .unwrap();
-    drop(manager);
+    drop(lifecycle);
     assert_eq!(drops.load(Ordering::Relaxed), 1);
 }
 
 #[test]
-fn generation_exhaustion_does_not_republish_an_old_identity() {
-    let manager = AsyncManager::new();
-    manager
-        .current_generation
-        .store(u64::MAX, Ordering::Release);
-    assert!(!manager.advance_generation());
-    manager.start(1).unwrap();
-    assert!(!manager.advance_generation());
-    assert_eq!(manager.current_generation(), u64::MAX);
-    assert!(manager.close().issues.is_empty());
+fn calculation_exhaustion_does_not_republish_an_old_identity() {
+    let lifecycle = TestRuntime::new();
+    lifecycle
+        .registry()
+        .set_stopped_epoch(CalculationEpoch::new(u64::MAX).unwrap());
+    assert!(!lifecycle.advance_calculation());
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
+    assert!(!lifecycle.advance_calculation());
+    assert_eq!(lifecycle.current_epoch().get(), u64::MAX);
+    assert!(lifecycle.close().unwrap().issues.is_empty());
 }
 
 #[test]
 fn removing_task_releases_cancellation_wakers_outside_task_lock() {
-    struct ReentrantWake(Arc<GenerationState>, Arc<AtomicBool>);
+    struct ReentrantWake(Arc<CalculationState>, Arc<AtomicBool>);
     impl futures_util::task::ArcWake for ReentrantWake {
         fn wake_by_ref(this: &Arc<Self>) {
             let unlocked = this.0.shards[0].tasks.try_lock().is_some();
@@ -2349,7 +2167,7 @@ fn removing_task_releases_cancellation_wakers_outside_task_lock() {
             }
         }
     }
-    let generation = Arc::new(GenerationState::new(TEST_GENERATION));
+    let generation = Arc::new(CalculationState::new(TEST_CALCULATION));
     let observed = Arc::new(AtomicBool::new(false));
     let waker = futures_util::task::waker(Arc::new(ReentrantWake(
         Arc::clone(&generation),
@@ -2383,13 +2201,15 @@ fn removing_task_releases_cancellation_wakers_outside_task_lock() {
 
 #[test]
 fn spawn_and_advance_linearization_case_b_admission_holds_advance() {
-    let manager = Arc::new(AsyncManager::new());
-    manager.start(1).unwrap();
+    let lifecycle = Arc::new(TestRuntime::new());
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
     let (admitted_tx, admitted_rx) = std::sync::mpsc::sync_channel(1);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
     let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
 
-    manager.set_after_generation_admission_hook(Some(Arc::new(move || {
+    lifecycle.set_after_calculation_admission_hook(Some(Arc::new(move || {
         admitted_tx.send(()).unwrap();
         release_rx
             .lock()
@@ -2399,11 +2219,11 @@ fn spawn_and_advance_linearization_case_b_admission_holds_advance() {
     })));
 
     let (source, _token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
-    let spawning_manager = Arc::clone(&manager);
+    let spawning_lifecycle = Arc::clone(&lifecycle);
     let (spawn_result_tx, spawn_result_rx) = std::sync::mpsc::sync_channel(1);
     let spawning = std::thread::spawn(move || {
         spawn_result_tx
-            .send(spawning_manager.spawn(TEST_GENERATION, std::future::pending::<()>(), source))
+            .send(spawning_lifecycle.submit(TEST_CALCULATION, std::future::pending::<()>(), source))
             .unwrap();
     });
 
@@ -2411,15 +2231,15 @@ fn spawn_and_advance_linearization_case_b_admission_holds_advance() {
         .recv_timeout(Duration::from_secs(1))
         .expect("spawn should enter admission");
 
-    let advancing_manager = Arc::clone(&manager);
+    let advancing_lifecycle = Arc::clone(&lifecycle);
     let (advance_result_tx, advance_result_rx) = std::sync::mpsc::sync_channel(1);
     let advancing = std::thread::spawn(move || {
         advance_result_tx
-            .send(advancing_manager.advance_generation())
+            .send(advancing_lifecycle.advance_calculation())
             .unwrap();
     });
 
-    // advance_generation should block on wait_for_idle while admission is held
+    // advance_calculation should block on wait_for_idle while admission is held
     assert!(
         advance_result_rx
             .recv_timeout(Duration::from_millis(50))
@@ -2441,19 +2261,21 @@ fn spawn_and_advance_linearization_case_b_admission_holds_advance() {
 
     spawning.join().unwrap();
     advancing.join().unwrap();
-    manager.set_after_generation_admission_hook(None);
-    assert!(manager.close().issues.is_empty());
+    lifecycle.set_after_calculation_admission_hook(None);
+    assert!(lifecycle.close().unwrap().issues.is_empty());
 }
 
 #[test]
 fn spawn_and_cancel_linearization_case_a_spawn_admitted_first() {
-    let manager = Arc::new(AsyncManager::new());
-    manager.start(1).unwrap();
+    let lifecycle = Arc::new(TestRuntime::new());
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
     let (admitted_tx, admitted_rx) = std::sync::mpsc::sync_channel(1);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
     let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
 
-    manager.set_after_generation_admission_hook(Some(Arc::new(move || {
+    lifecycle.set_after_calculation_admission_hook(Some(Arc::new(move || {
         admitted_tx.send(()).unwrap();
         release_rx
             .lock()
@@ -2463,11 +2285,11 @@ fn spawn_and_cancel_linearization_case_a_spawn_admitted_first() {
     })));
 
     let (source, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
-    let spawning_manager = Arc::clone(&manager);
+    let spawning_lifecycle = Arc::clone(&lifecycle);
     let (spawn_result_tx, spawn_result_rx) = std::sync::mpsc::sync_channel(1);
     let spawning = std::thread::spawn(move || {
         spawn_result_tx
-            .send(spawning_manager.spawn(TEST_GENERATION, std::future::pending::<()>(), source))
+            .send(spawning_lifecycle.submit(TEST_CALCULATION, std::future::pending::<()>(), source))
             .unwrap();
     });
 
@@ -2475,14 +2297,14 @@ fn spawn_and_cancel_linearization_case_a_spawn_admitted_first() {
         .recv_timeout(Duration::from_secs(1))
         .expect("spawn should enter admission");
 
-    let cancelling_manager = Arc::clone(&manager);
+    let cancelling_lifecycle = Arc::clone(&lifecycle);
     let (cancel_result_tx, cancel_result_rx) = std::sync::mpsc::sync_channel(1);
     let cancelling = std::thread::spawn(move || {
-        cancelling_manager.cancel_generation(TEST_GENERATION);
+        cancelling_lifecycle.cancel_calculation(TEST_CALCULATION);
         cancel_result_tx.send(()).unwrap();
     });
 
-    // cancel_generation should block waiting for admission idle
+    // cancel_calculation should block waiting for admission idle
     assert!(
         cancel_result_rx
             .recv_timeout(Duration::from_millis(50))
@@ -2503,36 +2325,40 @@ fn spawn_and_cancel_linearization_case_a_spawn_admitted_first() {
     spawning.join().unwrap();
     cancelling.join().unwrap();
     assert!(token.is_cancelled());
-    manager.set_after_generation_admission_hook(None);
-    assert!(manager.close().issues.is_empty());
+    lifecycle.set_after_calculation_admission_hook(None);
+    assert!(lifecycle.close().unwrap().issues.is_empty());
 }
 
 #[test]
 fn spawn_and_cancel_linearization_case_b_cancel_closed_first() {
-    let manager = Arc::new(AsyncManager::new());
-    manager.start(1).unwrap();
-    manager.cancel_generation(TEST_GENERATION);
+    let lifecycle = Arc::new(TestRuntime::new());
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
+    lifecycle.cancel_calculation(TEST_CALCULATION);
 
     let (source, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
-    let res = manager.spawn(TEST_GENERATION, std::future::pending::<()>(), source);
+    let res = lifecycle.submit(TEST_CALCULATION, std::future::pending::<()>(), source);
     assert!(matches!(
         res,
         Err(XllError::ExcelValue(crate::ExcelError::NotAvailable))
     ));
     assert!(token.is_cancelled());
-    assert!(manager.close().issues.is_empty());
+    assert!(lifecycle.close().unwrap().issues.is_empty());
 }
 
 #[test]
 fn advance_does_not_hold_control_mutex_while_waiting_for_idle() {
-    let manager = Arc::new(AsyncManager::new());
-    manager.start(1).unwrap();
+    let lifecycle = Arc::new(TestRuntime::new());
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
 
     let (admitted_tx, admitted_rx) = std::sync::mpsc::sync_channel(1);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
     let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
 
-    manager.set_after_generation_admission_hook(Some(Arc::new(move || {
+    lifecycle.set_after_calculation_admission_hook(Some(Arc::new(move || {
         admitted_tx.send(()).unwrap();
         release_rx
             .lock()
@@ -2542,33 +2368,33 @@ fn advance_does_not_hold_control_mutex_while_waiting_for_idle() {
     })));
 
     let (source, _token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
-    let spawning_manager = Arc::clone(&manager);
+    let spawning_lifecycle = Arc::clone(&lifecycle);
     let spawning = std::thread::spawn(move || {
-        spawning_manager.spawn(TEST_GENERATION, std::future::pending::<()>(), source)
+        spawning_lifecycle.submit(TEST_CALCULATION, std::future::pending::<()>(), source)
     });
 
     admitted_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("task should be admitted");
 
-    let advancing_manager = Arc::clone(&manager);
+    let advancing_lifecycle = Arc::clone(&lifecycle);
     let (advance_done_tx, advance_done_rx) = std::sync::mpsc::sync_channel(1);
     let advancing = std::thread::spawn(move || {
         advance_done_tx
-            .send(advancing_manager.advance_generation())
+            .send(advancing_lifecycle.advance_calculation())
             .unwrap();
     });
 
     std::thread::sleep(Duration::from_millis(50));
 
     {
-        let state = manager.state.lock();
-        let ExecutorState::Running(executor) = &*state else {
+        let state = lifecycle.state.lock();
+        let ExecutorSlot::Running(_executor) = &*state else {
             panic!("executor should be running");
         };
         assert!(
-            executor.shared.control.try_lock().is_some(),
-            "advance_generation must release control mutex while waiting for admission idle"
+            lifecycle.registry().control.try_lock().is_some(),
+            "advance_calculation must release control mutex while waiting for admission idle"
         );
     }
 
@@ -2581,20 +2407,22 @@ fn advance_does_not_hold_control_mutex_while_waiting_for_idle() {
 
     spawning.join().unwrap().unwrap();
     advancing.join().unwrap();
-    manager.set_after_generation_admission_hook(None);
-    assert!(manager.close().issues.is_empty());
+    lifecycle.set_after_calculation_admission_hook(None);
+    assert!(lifecycle.close().unwrap().issues.is_empty());
 }
 
 #[test]
-fn close_preempts_in_progress_advance_generation() {
-    let manager = Arc::new(AsyncManager::new());
-    manager.start(1).unwrap();
+fn close_preempts_in_progress_advance_calculation() {
+    let lifecycle = Arc::new(TestRuntime::new());
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
 
     let (admitted_tx, admitted_rx) = std::sync::mpsc::sync_channel(1);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
     let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
 
-    manager.set_after_generation_admission_hook(Some(Arc::new(move || {
+    lifecycle.set_after_calculation_admission_hook(Some(Arc::new(move || {
         admitted_tx.send(()).unwrap();
         release_rx
             .lock()
@@ -2604,38 +2432,38 @@ fn close_preempts_in_progress_advance_generation() {
     })));
 
     let (source, token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
-    let spawning_manager = Arc::clone(&manager);
+    let spawning_lifecycle = Arc::clone(&lifecycle);
     let spawning = std::thread::spawn(move || {
-        spawning_manager.spawn(TEST_GENERATION, std::future::pending::<()>(), source)
+        spawning_lifecycle.submit(TEST_CALCULATION, std::future::pending::<()>(), source)
     });
 
     admitted_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("task should be admitted");
 
-    let advancing_manager = Arc::clone(&manager);
+    let advancing_lifecycle = Arc::clone(&lifecycle);
     let (advance_done_tx, advance_done_rx) = std::sync::mpsc::sync_channel(1);
     let advancing = std::thread::spawn(move || {
         advance_done_tx
-            .send(advancing_manager.advance_generation())
+            .send(advancing_lifecycle.advance_calculation())
             .unwrap();
     });
 
     std::thread::sleep(Duration::from_millis(50));
 
-    let closing_manager = Arc::clone(&manager);
+    let closing_lifecycle = Arc::clone(&lifecycle);
     let (close_done_tx, close_done_rx) = std::sync::mpsc::sync_channel(1);
     let closing = std::thread::spawn(move || {
-        close_done_tx.send(closing_manager.close()).unwrap();
+        close_done_tx.send(closing_lifecycle.close()).unwrap();
     });
 
     std::thread::sleep(Duration::from_millis(50));
 
     {
-        let state = manager.state.lock();
-        if let ExecutorState::Closing(Some(executor)) = &*state {
+        let state = lifecycle.state.lock();
+        if let ExecutorSlot::Closing(Some(_executor)) = &*state {
             assert!(
-                executor.shared.closing.load(Ordering::Acquire),
+                lifecycle.registry().is_closing(),
                 "close must set closing atomic mirror even while advance is waiting"
             );
         }
@@ -2649,14 +2477,17 @@ fn close_preempts_in_progress_advance_generation() {
             .unwrap()
     );
 
-    let close_report = close_done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    let close_report = close_done_rx
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
     assert!(close_report.issues.is_empty());
     assert!(token.is_cancelled());
 
     spawning.join().unwrap().unwrap();
     advancing.join().unwrap();
     closing.join().unwrap();
-    manager.set_after_generation_admission_hook(None);
+    lifecycle.set_after_calculation_admission_hook(None);
 }
 
 #[test]
@@ -2683,10 +2514,16 @@ fn async_udf_boundary_catches_unhandled_panics_at_ffi_boundary() {
         type LifecycleState = ();
         type Error = XllError;
         type Layers = (PanickingLayer,);
+        type AsyncExecutor = BuiltinAsyncExecutor;
         fn open(
             _: &OpenContext,
         ) -> Result<
-            crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
+            crate::addin::Opened<
+                Self::SharedState,
+                Self::LifecycleState,
+                Self::Layers,
+                Self::AsyncExecutor,
+            >,
             Self::Error,
         > {
             unreachable!()
@@ -2703,7 +2540,9 @@ fn async_udf_boundary_catches_unhandled_panics_at_ffi_boundary() {
         (PanickingLayer(Arc::clone(&payload_dropped)),),
     );
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
-    runtime.start_async(1).unwrap();
+    runtime
+        .start_async(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
 
     let mut bytes = vec![1_u8, 2, 3, 4];
     let mut handle = XLOPER12 {
@@ -2733,7 +2572,7 @@ fn async_udf_boundary_catches_unhandled_panics_at_ffi_boundary() {
         result.is_ok(),
         "async_udf_boundary_named must catch panics at the FFI boundary"
     );
-    assert!(runtime.close_async().issues.is_empty());
+    assert!(runtime.close_async().unwrap().issues.is_empty());
     assert_eq!(payload_dropped.load(Ordering::Acquire), 0);
 }
 
@@ -2751,7 +2590,9 @@ fn async_constructor_and_future_retain_panicking_payloads() {
     let open_attempt = runtime.begin_open().unwrap();
     let mut open_attempt = runtime.publish(open_attempt, 7_u32, ());
     runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
-    runtime.start_async(1).unwrap();
+    runtime
+        .start_async(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
     let _callback_guard = reset_test_callback();
     let dropped = Arc::new(AtomicUsize::new(0));
 
@@ -2788,49 +2629,54 @@ fn async_constructor_and_future_retain_panicking_payloads() {
         assert_eq!(crate::test_callback::last_async_value(), -1);
         assert_eq!(dropped.load(Ordering::Acquire), 0);
     }
-    assert!(runtime.close_async().issues.is_empty());
+    assert!(runtime.close_async().unwrap().issues.is_empty());
     assert_eq!(crate::test_callback::async_return_calls(), 2);
     assert_eq!(dropped.load(Ordering::Acquire), 0);
 }
 
 #[test]
-fn spawn_fast_path_does_not_wait_for_manager_state() {
-    let manager = Arc::new(AsyncManager::new());
-    manager.start(1).unwrap();
+fn spawn_fast_path_does_not_wait_for_lifecycle_state() {
+    let lifecycle = Arc::new(TestRuntime::new());
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
 
     // Deliberately hold the cold lifecycle mutex.
-    let state_guard = manager.state.lock();
+    let state_guard = lifecycle.state.lock();
 
-    let spawning_manager = Arc::clone(&manager);
+    let spawning_lifecycle = Arc::clone(&lifecycle);
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
 
     let thread = std::thread::spawn(move || {
         let (source, _token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
-        let result = spawning_manager.spawn(TEST_GENERATION, std::future::pending::<()>(), source);
+        let result =
+            spawning_lifecycle.submit(TEST_CALCULATION, std::future::pending::<()>(), source);
         tx.send(result).unwrap();
     });
 
     // spawn must complete while `state` remains locked.
     assert!(
         rx.recv_timeout(Duration::from_secs(1))
-            .expect("spawn must not wait for manager state")
+            .expect("spawn must not wait for lifecycle state")
             .is_ok()
     );
 
     drop(state_guard);
     thread.join().unwrap();
-    assert!(manager.close().issues.is_empty());
+    assert!(lifecycle.close().unwrap().issues.is_empty());
 }
 
 #[test]
 fn close_waits_for_a_published_executor_reader() {
-    let manager = Arc::new(AsyncManager::new());
-    manager.start(1).unwrap();
-    let closing_manager = Arc::clone(&manager);
-    let snapshot = manager.snapshot_spawn_executor().unwrap();
+    let lifecycle = Arc::new(TestRuntime::new());
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
+    let closing_lifecycle = Arc::clone(&lifecycle);
+    let snapshot = lifecycle.snapshot_executor().unwrap();
     let (closed_tx, closed_rx) = std::sync::mpsc::sync_channel(1);
     let closer = std::thread::spawn(move || {
-        closed_tx.send(closing_manager.close()).unwrap();
+        closed_tx.send(closing_lifecycle.close()).unwrap();
     });
 
     assert!(closed_rx.recv_timeout(Duration::from_millis(50)).is_err());
@@ -2838,6 +2684,7 @@ fn close_waits_for_a_published_executor_reader() {
     assert!(
         closed_rx
             .recv_timeout(Duration::from_secs(1))
+            .unwrap()
             .unwrap()
             .issues
             .is_empty()
@@ -2847,293 +2694,38 @@ fn close_waits_for_a_published_executor_reader() {
 
 #[test]
 fn executor_can_restart_after_publication_is_drained() {
-    let manager = Arc::new(AsyncManager::new());
-    manager.start(1).unwrap();
-    let old_snapshot = manager.snapshot_spawn_executor().unwrap();
-    assert!(!old_snapshot.current.load(Ordering::Acquire).is_null());
+    let lifecycle = Arc::new(TestRuntime::new());
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
+    let old_snapshot = lifecycle.snapshot_executor().unwrap();
+    assert!(lifecycle.is_running());
     drop(old_snapshot);
 
-    assert!(manager.close().issues.is_empty());
-    manager.start(1).unwrap();
-    let new_snapshot = manager.snapshot_spawn_executor().unwrap();
-    assert!(!new_snapshot.closing.load(Ordering::Acquire));
+    assert!(lifecycle.close().unwrap().issues.is_empty());
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
+    let new_snapshot = lifecycle.snapshot_executor().unwrap();
+    assert!(lifecycle.is_running());
     drop(new_snapshot);
 
-    assert!(manager.close().issues.is_empty());
-}
-
-#[test]
-fn startup_partial_worker_creation_failure_rolls_back_cleanly() {
-    // Inject failure at worker index 2 of 4
-    let result = Executor::start_with_failure_at(4, 1, Some(2));
-    assert!(matches!(
-        result,
-        Err(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::ASYNC_SPAWN
-        })
-    ));
-}
-
-#[test]
-fn test_lost_wakeup_interleaving_unpark_before_park() {
-    let parker = crossbeam_utils::sync::Parker::new();
-    let unparker = parker.unparker().clone();
-    let local = crossbeam_deque::Worker::<Runnable>::new_fifo();
-    let stealer = local.stealer();
-    let queue = Arc::new(RunnableQueue::new(
-        vec![stealer].into_boxed_slice(),
-        vec![unparker].into_boxed_slice(),
-    ));
-
-    // 1. Worker marks idle bit
-    queue.idle_workers.store(1 << 0, Ordering::Release);
-
-    // 2. Producer schedules a task
-    let ran = Arc::new(AtomicBool::new(false));
-    let ran_clone = Arc::clone(&ran);
-    let (runnable, task) = async_task::spawn(
-        async move {
-            ran_clone.store(true, Ordering::Release);
-        },
-        {
-            let queue = Arc::downgrade(&queue);
-            move |r| {
-                if let Some(q) = queue.upgrade() {
-                    q.schedule(r);
-                }
-            }
-        },
-    );
-    task.detach();
-    queue.schedule(runnable);
-
-    // 3. wake_one() cleared idle bit and unparked
-    assert_eq!(queue.idle_workers.load(Ordering::Acquire), 0);
-
-    // 4. Worker calls park(). Parker's token ensures it returns immediately
-    let park_start = Instant::now();
-    parker.park();
-    assert!(park_start.elapsed() < Duration::from_millis(100));
-
-    // 5. Worker steals and executes task
-    let stolen = queue
-        .steal_injector_batch_and_pop(&local)
-        .expect("task must be in injector");
-    stolen.run();
-    assert!(ran.load(Ordering::Acquire));
-}
-
-#[test]
-fn test_lost_wakeup_interleaving_push_before_idle_mark() {
-    let parker = crossbeam_utils::sync::Parker::new();
-    let unparker = parker.unparker().clone();
-    let local = crossbeam_deque::Worker::<Runnable>::new_fifo();
-    let stealer = local.stealer();
-    let queue = Arc::new(RunnableQueue::new(
-        vec![stealer].into_boxed_slice(),
-        vec![unparker].into_boxed_slice(),
-    ));
-
-    // 1. Worker checked queue (empty) but has NOT set idle bit yet
-    assert_eq!(queue.idle_workers.load(Ordering::Acquire), 0);
-
-    // 2. Producer schedules task and calls wake_one() (which sees 0 idle workers)
-    let ran = Arc::new(AtomicBool::new(false));
-    let ran_clone = Arc::clone(&ran);
-    let (runnable, task) = async_task::spawn(
-        async move {
-            ran_clone.store(true, Ordering::Release);
-        },
-        {
-            let queue = Arc::downgrade(&queue);
-            move |r| {
-                if let Some(q) = queue.upgrade() {
-                    q.schedule(r);
-                }
-            }
-        },
-    );
-    task.detach();
-    queue.schedule(runnable);
-
-    // 3. Worker now marks idle bit
-    queue.idle_workers.store(1 << 0, Ordering::Release);
-
-    // 4. Worker performs recheck before park and discovers the task
-    let discovered = queue
-        .steal_injector_batch_and_pop(&local)
-        .expect("task must be discovered");
-    queue.idle_workers.fetch_and(!(1 << 0), Ordering::Relaxed);
-    discovered.run();
-    assert!(ran.load(Ordering::Acquire));
-}
-
-#[test]
-fn test_scheduler_seal_linearization_and_rejection() {
-    let parker = crossbeam_utils::sync::Parker::new();
-    let unparker = parker.unparker().clone();
-    let local = crossbeam_deque::Worker::<Runnable>::new_fifo();
-    let stealer = local.stealer();
-    let queue = Arc::new(RunnableQueue::new(
-        vec![stealer].into_boxed_slice(),
-        vec![unparker].into_boxed_slice(),
-    ));
-
-    let ran1 = Arc::new(AtomicBool::new(false));
-    let ran1_clone = Arc::clone(&ran1);
-    let (runnable1, task1) = async_task::spawn(
-        async move {
-            ran1_clone.store(true, Ordering::Release);
-        },
-        {
-            let queue = Arc::downgrade(&queue);
-            move |r| {
-                if let Some(q) = queue.upgrade() {
-                    q.schedule(r);
-                }
-            }
-        },
-    );
-    task1.detach();
-    queue.schedule(runnable1);
-
-    // Seal the queue
-    queue.seal_and_wake_all();
-    assert!(queue.is_sealed());
-
-    // Schedule another task after seal - must be rejected
-    let ran2 = Arc::new(AtomicBool::new(false));
-    let ran2_clone = Arc::clone(&ran2);
-    let (runnable2, task2) = async_task::spawn(
-        async move {
-            ran2_clone.store(true, Ordering::Release);
-        },
-        {
-            let queue = Arc::downgrade(&queue);
-            move |r| {
-                if let Some(q) = queue.upgrade() {
-                    q.schedule(r);
-                }
-            }
-        },
-    );
-    task2.detach();
-    queue.schedule(runnable2);
-
-    // runnable1 is present in injector
-    let drained1 = queue
-        .steal_injector_batch_and_pop(&local)
-        .expect("task1 was scheduled before seal");
-    drained1.run();
-    assert!(ran1.load(Ordering::Acquire));
-
-    // runnable2 was never admitted to the injector
-    assert!(queue.steal_injector_batch_and_pop(&local).is_none());
-    assert!(!ran2.load(Ordering::Acquire));
-}
-
-#[test]
-fn test_worker_panic_recovers_local_queue_tasks_to_injector() {
-    let manager = Arc::new(AsyncManager::new());
-    manager.start(2).unwrap();
-
-    let task1_ran = Arc::new(AtomicBool::new(false));
-    let task1_ran_clone = Arc::clone(&task1_ran);
-    let task2_ran = Arc::new(AtomicBool::new(false));
-    let task2_ran_clone = Arc::clone(&task2_ran);
-    let task3_ran = Arc::new(AtomicBool::new(false));
-    let task3_ran_clone = Arc::clone(&task3_ran);
-
-    let executor = manager.snapshot_spawn_executor().unwrap();
-    let local = crossbeam_deque::Worker::<Runnable>::new_fifo();
-
-    // Enqueue 3 tasks directly into worker's local queue
-    let (r1, t1) = async_task::spawn(
-        async move {
-            task1_ran_clone.store(true, Ordering::Release);
-        },
-        {
-            let shared = ExecutorPtr::from_ref(&executor);
-            // SAFETY: test executor outlives this schedule closure.
-            move |r| unsafe { shared.get() }.queue.schedule(r)
-        },
-    );
-    t1.detach();
-    local.push(r1);
-
-    let (r2, t2) = async_task::spawn(
-        async move {
-            task2_ran_clone.store(true, Ordering::Release);
-        },
-        {
-            let shared = ExecutorPtr::from_ref(&executor);
-            // SAFETY: test executor outlives this schedule closure.
-            move |r| unsafe { shared.get() }.queue.schedule(r)
-        },
-    );
-    t2.detach();
-    local.push(r2);
-
-    let (r3, t3) = async_task::spawn(
-        async move {
-            task3_ran_clone.store(true, Ordering::Release);
-        },
-        {
-            let shared = ExecutorPtr::from_ref(&executor);
-            // SAFETY: test executor outlives this schedule closure.
-            move |r| unsafe { shared.get() }.queue.schedule(r)
-        },
-    );
-    t3.detach();
-    local.push(r3);
-
-    // Simulate worker panic with WorkerExitGuard
-    executor.live_workers.fetch_add(1, Ordering::Release);
-    let shared = ExecutorPtr::from_ref(&executor);
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        let _guard = WorkerExitGuard {
-            shared,
-            local: Some(local),
-        };
-        panic!("simulated infrastructure worker panic");
-    }));
-
-    // Verify fatal_worker_failure was recorded
-    assert!(executor.fatal_worker_failure.load(Ordering::Acquire));
-
-    // The remaining worker(s) in executor or drain_abandoned pick up all 3 tasks from injector
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while !(task1_ran.load(Ordering::Acquire)
-        && task2_ran.load(Ordering::Acquire)
-        && task3_ran.load(Ordering::Acquire))
-    {
-        if Instant::now() >= deadline {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-
-    // Even if one worker panicked, all tasks left in its local queue were recovered and executed
-    assert!(task1_ran.load(Ordering::Acquire));
-    assert!(task2_ran.load(Ordering::Acquire));
-    assert!(task3_ran.load(Ordering::Acquire));
-
-    // Clean up
-    drop(executor);
-    let _ = manager.close();
+    assert!(lifecycle.close().unwrap().issues.is_empty());
 }
 
 #[test]
 fn test_close_with_timeout_preserves_open_queue_and_resumes() {
-    let manager = Arc::new(AsyncManager::new());
-    manager.start(1).unwrap();
+    let lifecycle = Arc::new(TestRuntime::new());
+    lifecycle
+        .start(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
 
     let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
 
-    manager
-        .spawn(
-            TEST_GENERATION,
+    lifecycle
+        .submit(
+            TEST_CALCULATION,
             async move {
                 started_tx.send(()).unwrap();
                 release_rx.recv().unwrap();
@@ -3146,18 +2738,18 @@ fn test_close_with_timeout_preserves_open_queue_and_resumes() {
 
     // Timeout while task is still active
     assert!(
-        manager
+        lifecycle
             .close_with_timeout(Duration::from_millis(20))
             .is_err()
     );
 
     // Invariant check: queue is NOT sealed during intermediate timeout
-    let executor = manager.snapshot_spawn_executor();
-    assert!(executor.is_err() || !executor.unwrap().queue.is_sealed());
+    let executor = lifecycle.snapshot_executor();
+    assert!(executor.is_none());
 
     // Release task so it completes
     release_tx.send(()).unwrap();
 
     // Second close succeeds cleanly
-    assert!(manager.close_with_timeout(Duration::from_secs(1)).is_ok());
+    assert!(lifecycle.close_with_timeout(Duration::from_secs(1)).is_ok());
 }

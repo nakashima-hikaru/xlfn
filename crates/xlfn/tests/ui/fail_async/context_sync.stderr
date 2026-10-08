@@ -1,17 +1,17 @@
 error: an async Excel function can only inject AsyncContext
-  --> tests/ui/fail_async/context_sync.rs:18:23
+  --> tests/ui/fail_async/context_sync.rs:20:23
    |
-18 | async fn main_context(context: MainThreadContext<'_, TestAddin>) -> f64 {
+20 | async fn main_context(context: MainThreadContext<'_, TestAddin>) -> f64 {
    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 error: an async Excel function can only inject AsyncContext
-  --> tests/ui/fail_async/context_sync.rs:24:25
+  --> tests/ui/fail_async/context_sync.rs:26:25
    |
-24 | async fn thread_context(context: ThreadSafeContext<'_, TestAddin>) -> f64 {
+26 | async fn thread_context(context: ThreadSafeContext<'_, TestAddin>) -> f64 {
    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 error: an async Excel function can only inject AsyncContext
-  --> tests/ui/fail_async/context_sync.rs:30:24
+  --> tests/ui/fail_async/context_sync.rs:32:24
    |
-30 | async fn macro_context(context: MacroSheetContext<'_, TestAddin>) -> f64 {
+32 | async fn macro_context(context: MacroSheetContext<'_, TestAddin>) -> f64 {
    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

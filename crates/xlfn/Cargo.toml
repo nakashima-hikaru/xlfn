@@ -13,11 +13,8 @@ readme = "README.md"
 default = []
 serde = ["serde/derive"]
 jiff = ["dep:jiff"]
-async = [
-    "dep:async-task",
-    "dep:crossbeam-deque",
-    "dep:futures-util",
-]
+async = ["dep:futures-util"]
+async-builtin = ["async", "dep:async-task", "dep:crossbeam-deque"]
 # Enables the RTD/COM subsystem and its add-in capability surface.
 rtd = []
 # Formula handles use the private Excel RTD transport internally, but do not
@@ -41,32 +38,32 @@ required-features = ["bench-internals", "async"]
 [[bench]]
 name = "async_spawn"
 harness = false
-required-features = ["bench-internals", "async"]
+required-features = ["bench-internals", "async-builtin"]
 
 [[bench]]
 name = "async_handle_scoped"
 harness = false
-required-features = ["bench-internals", "async"]
+required-features = ["bench-internals", "async-builtin"]
 
 [[bench]]
 name = "async_handle_scoped_allocations"
 harness = false
-required-features = ["bench-internals", "async"]
+required-features = ["bench-internals", "async-builtin"]
 
 [[bench]]
 name = "async_admission"
 harness = false
-required-features = ["bench-internals", "async"]
+required-features = ["bench-internals", "async-builtin"]
 
 [[bench]]
 name = "async_admission_concurrent"
 harness = false
-required-features = ["bench-internals", "async"]
+required-features = ["bench-internals", "async-builtin"]
 
 [[bench]]
 name = "async_admission_allocations"
 harness = false
-required-features = ["bench-internals", "async"]
+required-features = ["bench-internals", "async-builtin"]
 
 [[bench]]
 name = "sync_boundary"

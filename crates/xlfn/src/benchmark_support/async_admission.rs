@@ -21,7 +21,7 @@ unsafe extern "system" fn callback(
 }
 
 pub struct AsyncAdmissionBenchmark {
-    runtime: &'static crate::runtime::Runtime<()>,
+    runtime: &'static crate::runtime::Runtime<super::BenchmarkAddin>,
     input: RawArgumentIngressBenchmark,
     matrix: bool,
     saturated: bool,
@@ -38,14 +38,19 @@ impl AsyncAdmissionBenchmark {
             );
         }
         let runtime = get_benchmark_runtime();
-        runtime.start_async(4).expect("benchmark workers start");
+        runtime
+            .start_async(
+                crate::BuiltinAsyncExecutor::new(crate::BuiltinExecutorConfig::new()),
+                crate::AsyncTaskLimit::default(),
+            )
+            .expect("benchmark workers start");
         if saturated {
-            let generation = runtime.async_manager().current_generation();
+            let calculation = runtime.async_runtime().current_epoch();
             for _ in 0..4096 {
                 let (source, _) = CancellationSource::new(CancellationGuarantee::BestEffort);
                 runtime
-                    .async_manager()
-                    .spawn(generation, std::future::pending(), source)
+                    .async_runtime()
+                    .submit(calculation, std::future::pending(), source)
                     .expect("fill active task capacity");
             }
         }
@@ -97,7 +102,7 @@ impl AsyncAdmissionBenchmark {
         }
         if !self.saturated {
             assert!(
-                self.runtime.async_manager().wait_idle(),
+                self.runtime.async_runtime().wait_idle(),
                 "submitted tasks drain"
             );
             assert_eq!(self.preparations - before, calls);
@@ -108,6 +113,13 @@ impl AsyncAdmissionBenchmark {
 
 impl Drop for AsyncAdmissionBenchmark {
     fn drop(&mut self) {
-        assert!(self.runtime.async_manager().close().issues.is_empty());
+        assert!(
+            self.runtime
+                .async_runtime()
+                .close()
+                .expect("benchmark async shutdown")
+                .issues
+                .is_empty()
+        );
     }
 }

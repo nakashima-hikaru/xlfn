@@ -61,12 +61,28 @@ miri-setup:
 miri:
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn-kernel --lib --locked -- miri_
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features handles --lib --locked -- miri_
-    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features async --lib --locked -- miri_
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-disable-isolation" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features async-builtin --lib --locked -- miri_ --test-threads=1
+    just miri-async
+    just miri-async-handles
     CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features rtd --lib --locked -- miri_
     just miri-cache-ownership
     just miri-cache-endpoints
     just miri-cache-resident-entry
     just miri-cache-residency
+
+# Executor-independent registry accounting under both aliasing models.
+# Strict provenance is limited to calculation pins: parking_lot's blocking
+# paths currently perform integer-to-pointer reconstruction.
+miri-async:
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-disable-isolation" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features async --lib --locked -- async_udf:: --test-threads=1
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-disable-isolation" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features async --lib --locked -- async_udf:: --test-threads=1
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-strict-provenance" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features async --lib --locked -- async_udf::calculation::tests::miri_
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-tree-borrows" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features async --lib --locked -- async_udf::calculation::tests::miri_
+
+# Scoped futures must dispose user captures before releasing registry authority.
+miri-async-handles:
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-disable-isolation" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features "async-builtin handles" --lib --locked -- async_udf::boundary::scoped_tests::miri_ --test-threads=1
+    CARGO_BUILD_WARNINGS=allow RUSTFLAGS="-A deprecated" MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-disable-isolation" cargo +{{miri-toolchain}} miri test -p xlfn --no-default-features --features "async-builtin handles" --lib --locked -- async_udf::boundary::scoped_tests::miri_ --test-threads=1
 
 # Creator rollback, final-pin ordering and zero-budget Box recovery.
 miri-cache-ownership:
@@ -139,6 +155,15 @@ test-async:
         -- \
         --test-threads=1
 
+test-async-builtin:
+    cargo test \
+        --package xlfn \
+        --no-default-features \
+        --features async-builtin \
+        --locked \
+        -- \
+        --test-threads=1
+
 # Exercise production feature selections without benchmark/refinement helpers.
 test-features:
     cargo hack test \
@@ -204,7 +229,7 @@ bench: bench-ci
 
 # Canonical CI regression suite.
 bench-ci:
-    just bench-one-filter async_spawn "^(async_spawn/per_iteration/(1|32)|async_spawn/matrix_reschedule/workers_4/16|async_spawn/spawn_and_drain/workers_4/16|cancellation_lifecycle/allocate_release/(1|8))\z" "bench-internals async"
+    just bench-one-filter async_spawn "^(async_spawn/per_iteration/(1|32)|async_spawn/matrix_reschedule/workers_4/16|async_spawn/spawn_and_drain/workers_4/16|cancellation_lifecycle/allocate_release/(1|8))\z" "bench-internals async-builtin"
     just bench-one-filter sync_boundary "^sync_boundary/(admission|scalar_return/no_subscriber)/(1|32)\z"
     just bench-one-filter handle_prepare "^handle_prepare/(cold_miss_batch_100|warm_hit_batch_100|distinct_key/(1|32))\z"
     just bench-one-filter formula_revision "^formula_revision/warm_hit/(f64|matrix_f64_100k)\z"
@@ -231,7 +256,7 @@ bench-scaling:
     just bench-one-filter formula_caller "^resolve_formula_caller/concurrent/"
     just bench-one object_lease "bench-internals async"
     just bench-one cache_miss_concurrency "bench-internals cache"
-    just bench-one-filter async_spawn "^(async_spawn/(matrix_spawn|matrix_reschedule|spawn_and_drain)|cancellation_lifecycle/)" "bench-internals async"
+    just bench-one-filter async_spawn "^(async_spawn/(matrix_spawn|matrix_reschedule|spawn_and_drain)|cancellation_lifecycle/)" "bench-internals async-builtin"
     just bench-one-filter sync_boundary "^sync_boundary/(admission|scalar_return/no_subscriber)/(4|16)\z"
     just bench-one-filter handle_prepare "^handle_prepare/(distinct_key/(4|16)|cold_grow|revision_churn)"
     just bench-one-filter handle_lookup "^handle_lookup/(warm_same_token|distinct_tokens)/(4|16)\z"
@@ -246,7 +271,7 @@ bench-full:
     just bench-one array_numeric_output
     just bench-one object_lease "bench-internals async"
     just bench-one cache_miss_concurrency "bench-internals cache"
-    just bench-one async_spawn "bench-internals async"
+    just bench-one async_spawn "bench-internals async-builtin"
     just bench-one sync_boundary
     just bench-one handle_prepare
     just bench-one formula_revision

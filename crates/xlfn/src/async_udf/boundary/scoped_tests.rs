@@ -1,5 +1,12 @@
 use super::*;
-use crate::async_udf::{AsyncManager, AsyncTaskScope, HandleScopedBuilder};
+use crate::async_udf::{AsyncRuntime, AsyncTaskScope, CalculationEpoch, HandleScopedBuilder};
+use crate::{AsyncPollerCount, AsyncTaskLimit, BuiltinAsyncExecutor, BuiltinExecutorConfig};
+type ScopedRuntime = AsyncRuntime<BuiltinAsyncExecutor>;
+fn builtin() -> BuiltinAsyncExecutor {
+    BuiltinAsyncExecutor::new(
+        BuiltinExecutorConfig::new().with_poller_count(AsyncPollerCount::new(1).unwrap()),
+    )
+}
 use crate::execution::{
     CalculationId, CallTimer, UdfCompletionOutcome, UdfDeliveryOutcome, UdfErrorKind,
 };
@@ -39,7 +46,7 @@ struct Builder {
     polls: Arc<AtomicUsize>,
     drops: Arc<AtomicUsize>,
     started: std::sync::mpsc::Sender<()>,
-    reenter: Option<std::sync::Weak<AsyncManager>>,
+    reenter: Option<std::sync::Weak<ScopedRuntime>>,
 }
 
 struct Inner<'generation> {
@@ -48,7 +55,7 @@ struct Inner<'generation> {
     polls: Arc<AtomicUsize>,
     drops: Arc<AtomicUsize>,
     started: Option<std::sync::mpsc::Sender<()>>,
-    reenter: Option<std::sync::Weak<AsyncManager>>,
+    reenter: Option<std::sync::Weak<ScopedRuntime>>,
 }
 
 impl HandleScopedBuilder<f64> for Builder {
@@ -95,9 +102,9 @@ impl Drop for Inner<'_> {
     fn drop(&mut self) {
         drop(self.lease.take());
         self.drops.fetch_add(1, Ordering::Relaxed);
-        if let Some(manager) = self.reenter.take().and_then(|weak| weak.upgrade()) {
+        if let Some(lifecycle) = self.reenter.take().and_then(|weak| weak.upgrade()) {
             assert!(
-                manager.advance_generation(),
+                lifecycle.advance_calculation(),
                 "inner destruction may reenter the executor"
             );
         }
@@ -230,8 +237,8 @@ fn run(mode: Mode, instrumented: bool, cancel_before_poll: bool, reenter: bool) 
     let payload_drops = Arc::new(AtomicUsize::new(0));
     let polls = Arc::new(AtomicUsize::new(0));
     let drops = Arc::new(AtomicUsize::new(0));
-    let manager = Arc::new(AsyncManager::new());
-    manager.start(1).unwrap();
+    let lifecycle = Arc::new(ScopedRuntime::new());
+    lifecycle.start(builtin(), AsyncTaskLimit::DEFAULT).unwrap();
     let events = Arc::new(Mutex::new(Vec::new()));
     let (started, started_rx) = std::sync::mpsc::channel();
     let build = Builder {
@@ -240,14 +247,16 @@ fn run(mode: Mode, instrumented: bool, cancel_before_poll: bool, reenter: bool) 
         polls: Arc::clone(&polls),
         drops: Arc::clone(&drops),
         started,
-        reenter: reenter.then(|| Arc::downgrade(&manager)),
+        reenter: reenter.then(|| Arc::downgrade(&lifecycle)),
     };
     let (cancellation, token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
     if cancel_before_poll {
-        let cancel = Arc::clone(&manager);
-        manager.set_before_task_schedule_hook(Some(Arc::new(move || cancel.cancel_generation(1))));
+        let cancel = Arc::clone(&lifecycle);
+        lifecycle.set_before_submit_hook(Some(Arc::new(move || {
+            cancel.cancel_calculation(CalculationEpoch::INITIAL)
+        })));
     }
-    let reservation = manager.reserve_spawn(1).unwrap();
+    let reservation = lifecycle.reserve(CalculationEpoch::INITIAL).unwrap();
     let commit = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
         if instrumented {
             reservation.commit_handle_scoped(
@@ -281,21 +290,21 @@ fn run(mode: Mode, instrumented: bool, cancel_before_poll: bool, reenter: bool) 
             );
         }
     }));
-    manager.set_before_task_schedule_hook(None);
+    lifecycle.set_before_submit_hook(None);
     assert_eq!(commit.is_err(), mode == Mode::BuildPanic);
     if mode == Mode::Pending && !cancel_before_poll {
         started_rx.recv().unwrap();
         assert_eq!(payload_drops.load(Ordering::Relaxed), 0);
-        manager.cancel_generation(1);
+        lifecycle.cancel_calculation(CalculationEpoch::INITIAL);
     }
     {
-        let shared = manager.snapshot_spawn_executor().unwrap();
-        let mut wait = shared.wait_lock.lock();
-        while shared.active.load(Ordering::Acquire) != 0 {
+        let shared = lifecycle.registry();
+        let mut wait = shared.idle_lock.lock();
+        while shared.active_tasks.load(Ordering::Acquire) != 0 {
             shared.idle.wait(&mut wait);
         }
     }
-    assert!(manager.close().issues.is_empty());
+    assert!(lifecycle.close().unwrap().issues.is_empty());
     assert_eq!(payload_drops.load(Ordering::Relaxed), 1);
     assert_eq!(
         drops.load(Ordering::Relaxed),
@@ -362,4 +371,94 @@ fn miri_scoped_delivery_inner_destruction_reenters_generation_rotation() {
     for instrumented in [false, true] {
         run(Mode::Ready, instrumented, false, true);
     }
+}
+
+#[test]
+fn miri_external_executor_retains_scoped_handle_until_opaque_task_destruction() {
+    type StoredTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+    struct ExternalExecutor(Arc<Mutex<Option<StoredTask>>>);
+    impl crate::AsyncExecutor for ExternalExecutor {
+        type Reservation = ();
+        fn start(&self) -> XllResult<()> {
+            Ok(())
+        }
+        fn reserve(&self) -> XllResult<()> {
+            Ok(())
+        }
+        fn submit<F>(&self, (): (), task: crate::AsyncTask<F>)
+        where
+            F: Future<Output = ()> + Send + 'static,
+        {
+            *self.0.lock() = Some(Box::pin(task));
+        }
+        fn shutdown(&self) -> XllResult<()> {
+            assert!(self.0.lock().is_none());
+            Ok(())
+        }
+    }
+    let _test = crate::runtime::tests::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let _callback = crate::test_callback::lock();
+    crate::test_callback::install();
+    crate::test_callback::reset();
+    let handles = FormulaHandleService::new(1);
+    let payload_drops = Arc::new(AtomicUsize::new(0));
+    let polls = Arc::new(AtomicUsize::new(0));
+    let drops = Arc::new(AtomicUsize::new(0));
+    let held = Arc::new(Mutex::new(None));
+    let lifecycle = Arc::new(AsyncRuntime::new());
+    lifecycle
+        .start(ExternalExecutor(Arc::clone(&held)), AsyncTaskLimit::DEFAULT)
+        .unwrap();
+    let (started, _) = std::sync::mpsc::channel();
+    let build = Builder {
+        pending: pending(&handles, &payload_drops),
+        mode: Mode::Pending,
+        polls: Arc::clone(&polls),
+        drops: Arc::clone(&drops),
+        started,
+        reenter: None,
+    };
+    let (cancellation, token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
+    lifecycle
+        .reserve(CalculationEpoch::INITIAL)
+        .unwrap()
+        .commit_handle_scoped(
+            RuntimeGeneration::new(1).unwrap(),
+            UninstrumentedHandleTask {
+                build,
+                responder: responder(),
+                token,
+                udf_id: "EXTERNAL.SCOPED",
+                _result: std::marker::PhantomData,
+            },
+            cancellation,
+        );
+    assert_eq!(polls.load(Ordering::Relaxed), 0);
+    assert_eq!(payload_drops.load(Ordering::Relaxed), 0);
+    let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+    let closing = Arc::clone(&lifecycle);
+    let closer = std::thread::spawn(move || {
+        closed_tx.send(closing.close().is_ok()).unwrap();
+    });
+    assert!(lifecycle.wait_for_closing(std::time::Duration::from_secs(1)));
+    assert!(
+        closed_rx
+            .recv_timeout(std::time::Duration::from_millis(10))
+            .is_err()
+    );
+    assert_eq!(lifecycle.registry().active_tasks.load(Ordering::Acquire), 1);
+    let task = held.lock().take();
+    drop(task);
+    assert!(
+        closed_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap()
+    );
+    closer.join().unwrap();
+    assert_eq!(polls.load(Ordering::Relaxed), 0);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+    assert_eq!(payload_drops.load(Ordering::Relaxed), 1);
+    assert_eq!(crate::test_callback::async_return_calls(), 1);
 }

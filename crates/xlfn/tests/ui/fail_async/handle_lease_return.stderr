@@ -1,10 +1,10 @@
 error: `impl` item signature doesn't match `trait` item signature
-  --> tests/ui/fail_async/handle_lease_return.rs:22:1
+  --> tests/ui/fail_async/handle_lease_return.rs:24:1
    |
-22 |   #[excel_function(name = "TEST.RETURNED.HANDLE.LEASE")]
+24 |   #[excel_function(name = "TEST.RETURNED.HANDLE.LEASE")]
    |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ found `fn(__XlfnHandleTaskBuilder, xlfn::__private::v1::AsyncTaskScope<'1>) -> Pin<Box<(dyn Future<Output = Result<xlfn::handle::HandleLease<'1, Dataset>, xlfn::XllError>> + Send + '1)>>`
    |
-  ::: src/async_udf/executor.rs
+  ::: src/async_udf/task_scope.rs
    |
    | /     fn build<'generation>(
    | |         self,
@@ -19,9 +19,9 @@ error: `impl` item signature doesn't match `trait` item signature
    = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: `xlfn::handle::HandleLease<'_, Dataset>` cannot be converted into an Excel return value
-  --> tests/ui/fail_async/handle_lease_return.rs:22:1
+  --> tests/ui/fail_async/handle_lease_return.rs:24:1
    |
-22 | #[excel_function(name = "TEST.RETURNED.HANDLE.LEASE")]
+24 | #[excel_function(name = "TEST.RETURNED.HANDLE.LEASE")]
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `xlfn::handle::HandleLease<'_, Dataset>` does not implement `IntoExcel`
    |
    = help: the trait `IntoExcel` is not implemented for `xlfn::handle::HandleLease<'_, Dataset>`
@@ -40,9 +40,9 @@ error[E0277]: `xlfn::handle::HandleLease<'_, Dataset>` cannot be converted into 
    = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: `xlfn::handle::HandleLease<'_, Dataset>` cannot be returned from an asynchronous Excel function
-  --> tests/ui/fail_async/handle_lease_return.rs:23:70
+  --> tests/ui/fail_async/handle_lease_return.rs:25:70
    |
-23 | async fn returned_handle_lease(dataset: HandleLease<'_, Dataset>) -> HandleLease<'_, Dataset> {
+25 | async fn returned_handle_lease(dataset: HandleLease<'_, Dataset>) -> HandleLease<'_, Dataset> {
    |                                                                      ^^^^^^^^^^^^^^^^^^^^^^^^ `xlfn::handle::HandleLease<'_, Dataset>` is not a valid return type for an async UDF
    |
    = help: the trait `IntoExcel` is not implemented for `xlfn::handle::HandleLease<'_, Dataset>`

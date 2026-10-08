@@ -1,8 +1,7 @@
-use super::executor::{ExecutorPtr, ExecutorShared};
+use super::calculation::CalculationPin;
 use super::future::NoUnwindFuture;
-use super::generation::GenerationPin;
-use super::manager::MAX_PENDING;
-use super::worker::release_active;
+use super::registry::{RegistryPtr, TaskRegistry};
+
 use crate::cancellation::CancellationSource;
 use futures_util::future::{AbortHandle, AbortRegistration, Abortable};
 use smallvec::SmallVec;
@@ -10,6 +9,32 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::Ordering;
 use std::task::{Context, Poll};
+
+/// Opaque framework task transferred to an application-selected executor.
+///
+/// Only xlfn constructs these tasks. Polling and destroying them completes
+/// framework accounting; executors never receive calculation or Excel state.
+/// The future stays inline so an executor can place it directly in its task
+/// allocation without an intermediate framework allocation.
+#[must_use = "async tasks must be polled or dropped to release framework ownership"]
+pub struct AsyncTask<F> {
+    inner: F,
+}
+
+impl<F: Future<Output = ()> + Send + 'static> AsyncTask<F> {
+    pub(crate) fn new(future: F) -> Self {
+        Self { inner: future }
+    }
+}
+
+impl<F: Future<Output = ()>> Future for AsyncTask<F> {
+    type Output = ();
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        // SAFETY: pinning this wrapper pins its inline future. No method exposes
+        // or moves that field, and field destruction drops it in place.
+        unsafe { self.map_unchecked_mut(|task| &mut task.inner) }.poll(cx)
+    }
+}
 
 /// Owns task destruction order independently of compiler-generated async
 /// captures. Even before the first poll, user cleanup precedes the release
@@ -64,76 +89,103 @@ pub(crate) struct TaskControl {
 pub(crate) type TaskControlBatch = SmallVec<[TaskControl; 4]>;
 
 pub(crate) struct ActiveReservation<'a> {
-    shared: Option<&'a ExecutorShared>,
+    registry: Option<&'a TaskRegistry>,
 }
 
 impl<'a> ActiveReservation<'a> {
-    pub(crate) fn try_acquire(shared: &'a ExecutorShared) -> Option<Self> {
-        // Generation admission protects lifecycle entry. This RMW only
-        // reserves capacity; completion releases publish work to the drainer.
-        shared
-            .active
+    pub(crate) fn try_acquire(registry: &'a TaskRegistry) -> Option<Self> {
+        // This tail permit protects notification after the authority reaches
+        // zero. It never substitutes for active_tasks in the shutdown proof.
+        registry.activity.try_acquire().ok()?;
+        if registry
+            .active_tasks
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |active| {
-                (active < MAX_PENDING).then_some(active + 1)
+                (active < registry.capacity()).then(|| active + 1)
             })
-            .ok()?;
-
+            .is_err()
+        {
+            registry.activity.release();
+            return None;
+        }
         Some(Self {
-            shared: Some(shared),
+            registry: Some(registry),
         })
     }
 
-    pub(crate) fn commit(mut self, generation: GenerationPin, id: u64) -> CompletionGuard {
-        let shared = self.shared.take().expect("reservation owns active count");
-
+    pub(crate) fn commit(mut self, calculation: CalculationPin, id: u64) -> CompletionGuard {
+        let registry = self.registry.take().expect("reservation owns active count");
         CompletionGuard {
-            shared: ExecutorPtr::from_ref(shared),
-            generation: Some(generation),
+            registry: RegistryPtr::from_ref(registry),
+            calculation: Some(calculation),
             id,
             observation: CompletionObservation::new(),
         }
     }
 }
 
-impl<'a> Drop for ActiveReservation<'a> {
+impl Drop for ActiveReservation<'_> {
     fn drop(&mut self) {
-        if let Some(shared) = self.shared.take() {
-            release_active(shared);
+        if let Some(registry) = self.registry.take() {
+            release_active(registry);
         }
     }
 }
 
+// The production and Loom release protocol share this ordering. The extra
+// tail lease protects notification after active_tasks publishes zero; it is
+// never an alternative task-lifetime certificate.
+macro_rules! release_task_activity {
+    ($decrement:expr, $notify:expr, $release_tail:expr) => {{
+        let previous = $decrement;
+        if previous == 1 {
+            $notify;
+        }
+        $release_tail;
+    }};
+}
+
+fn release_active(registry: &TaskRegistry) {
+    release_task_activity!(
+        xlfn_kernel::invariant::checked_atomic_dec_release(&registry.active_tasks),
+        {
+            let _lock = registry.idle_lock.lock();
+            registry.idle.notify_all();
+        },
+        // Final registry access. Its owner waits the authority count and this
+        // notification tail before reclaiming the stable allocation.
+        registry.activity.release()
+    );
+}
+
 pub(crate) struct CompletionGuard {
-    pub(crate) shared: ExecutorPtr,
-    pub(crate) generation: Option<GenerationPin>,
-    pub(crate) id: u64,
-    pub(crate) observation: CompletionObservation,
+    registry: RegistryPtr,
+    calculation: Option<CalculationPin>,
+    id: u64,
+    observation: CompletionObservation,
 }
 
 impl Drop for CompletionGuard {
     fn drop(&mut self) {
-        let generation = self
-            .generation
+        let calculation = self
+            .calculation
             .take()
-            .expect("completion owns its generation pin");
-        // SAFETY: task destruction runs under a scheduler callback permit,
-        // a joined worker, or the caller's executor publication admission.
-        let shared = unsafe { self.shared.get() };
-        generation.get().remove_task(self.id);
-        shared
+            .expect("completion owns calculation pin");
+        // SAFETY: active_tasks retains the registry, with activity protecting
+        // the terminal notification tail after the last authority release.
+        let registry = unsafe { self.registry.get() };
+        calculation.get().remove_task(self.id);
+        registry
             .observer
             .record(crate::shutdown_trace::ShutdownEvent::EndAsyncTask(
                 self.observation.completion(),
             ));
-        // Release the generation before active. Final shutdown additionally
-        // drains scheduler callbacks and joins workers before reclamation.
-        drop(generation);
-        release_active(shared);
+        drop(calculation);
+        release_active(registry);
     }
 }
 
-// SAFETY: the pointed-to states are Sync; task counts, scheduler callback
-// admission, and worker joins collectively retain their unique owners.
+// SAFETY: synchronized states are retained by task accounting and calculation
+// pins. No property of any executor participates in this lifetime proof.
 unsafe impl Send for CompletionGuard {}
 
 pub(crate) struct CompletionObservation {
@@ -172,35 +224,66 @@ impl CompletionObservation {
     }
 }
 
-#[cfg(test)]
-mod reservation_tests {
-    use super::*;
-    use crate::async_udf::executor::{Executor, SpawnReservation};
+#[cfg(all(test, not(all(target_os = "windows", target_arch = "x86"))))]
+mod loom_tests {
+    use loom::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use loom::sync::{Arc, Condvar, Mutex};
+    use loom::thread;
+
+    struct Registry {
+        active_tasks: AtomicUsize,
+        release_tail: AtomicUsize,
+        idle: (Mutex<()>, Condvar),
+        tail_idle: (Mutex<()>, Condvar),
+        cleanup: AtomicUsize,
+        reclaimed: AtomicBool,
+    }
 
     #[test]
-    fn miri_reservation_transfers_or_releases_exactly_one_active_count() {
-        assert_eq!(
-            size_of::<ActiveReservation<'_>>(),
-            size_of::<&ExecutorShared>()
-        );
-        let executor = Executor::start(1, 1).unwrap();
-        let shared = &*executor.shared;
-        let reservation = shared.reserve_spawn(1).unwrap();
-        assert_eq!(shared.active.load(Ordering::Relaxed), 1);
-        drop(reservation);
-        assert_eq!(shared.active.load(Ordering::Relaxed), 0);
-
-        let SpawnReservation {
-            admission,
-            generation,
-            task_id,
-            reservation,
-            ..
-        } = shared.reserve_spawn(1).unwrap();
-        let completion = reservation.commit(generation, task_id);
-        drop(admission);
-        assert_eq!(shared.active.load(Ordering::Relaxed), 1);
-        drop(completion);
-        assert_eq!(shared.active.load(Ordering::Relaxed), 0);
+    #[cfg_attr(miri, ignore)]
+    fn loom_registry_authority_and_notification_tail_precede_reclamation() {
+        loom::model(|| {
+            let registry = Arc::new(Registry {
+                active_tasks: AtomicUsize::new(1),
+                release_tail: AtomicUsize::new(1),
+                idle: (Mutex::new(()), Condvar::new()),
+                tail_idle: (Mutex::new(()), Condvar::new()),
+                cleanup: AtomicUsize::new(0),
+                reclaimed: AtomicBool::new(false),
+            });
+            let finishing = Arc::clone(&registry);
+            let task = thread::spawn(move || {
+                finishing.cleanup.store(7, Ordering::Relaxed);
+                release_task_activity!(
+                    finishing.active_tasks.fetch_sub(1, Ordering::Release),
+                    {
+                        let _guard = finishing.idle.0.lock().unwrap();
+                        assert!(!finishing.reclaimed.load(Ordering::Acquire));
+                        finishing.idle.1.notify_all();
+                    },
+                    {
+                        // Model the kernel DrainGate release-tail grace period:
+                        // it retains its final count through notification.
+                        let _guard = finishing.tail_idle.0.lock().unwrap();
+                        assert!(!finishing.reclaimed.load(Ordering::Acquire));
+                        finishing.release_tail.store(0, Ordering::Release);
+                        finishing.tail_idle.1.notify_all();
+                    }
+                );
+            });
+            let mut idle = registry.idle.0.lock().unwrap();
+            while registry.active_tasks.load(Ordering::Acquire) != 0 {
+                idle = registry.idle.1.wait(idle).unwrap();
+            }
+            drop(idle);
+            assert_eq!(registry.cleanup.load(Ordering::Relaxed), 7);
+            let mut tail = registry.tail_idle.0.lock().unwrap();
+            while registry.release_tail.load(Ordering::Acquire) != 0 {
+                tail = registry.tail_idle.1.wait(tail).unwrap();
+            }
+            registry.reclaimed.store(true, Ordering::Release);
+            drop(tail);
+            task.join().unwrap();
+        });
     }
 }

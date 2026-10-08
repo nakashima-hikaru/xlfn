@@ -1,32 +1,32 @@
-#[cfg(feature = "async")]
+#[cfg(feature = "async-builtin")]
 use super::*;
-#[cfg(feature = "async")]
+#[cfg(feature = "async-builtin")]
 use std::future::Future;
-#[cfg(feature = "async")]
+#[cfg(feature = "async-builtin")]
 use std::pin::Pin;
-#[cfg(feature = "async")]
+#[cfg(feature = "async-builtin")]
 use std::task::{Context, Poll};
 
-#[cfg(feature = "async")]
+#[cfg(feature = "async-builtin")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AsyncSpawnKind {
     Noop,
     Reschedule(usize),
 }
 
-#[cfg(feature = "async")]
+#[cfg(feature = "async-builtin")]
 pub struct RescheduleFuture {
     remaining: usize,
 }
 
-#[cfg(feature = "async")]
+#[cfg(feature = "async-builtin")]
 impl RescheduleFuture {
     pub const fn new(yields: usize) -> Self {
         Self { remaining: yields }
     }
 }
 
-#[cfg(feature = "async")]
+#[cfg(feature = "async-builtin")]
 impl Future for RescheduleFuture {
     type Output = ();
 
@@ -41,15 +41,15 @@ impl Future for RescheduleFuture {
     }
 }
 
-#[cfg(feature = "async")]
+#[cfg(feature = "async-builtin")]
 pub struct AsyncSpawnBenchmark {
-    manager: Arc<AsyncManager>,
+    runtime: Arc<AsyncRuntime<crate::BuiltinAsyncExecutor>>,
     start_tx: Vec<std::sync::mpsc::SyncSender<usize>>,
     done_rx: std::sync::mpsc::Receiver<SpawnBatchResult>,
     producers: Vec<std::thread::JoinHandle<()>>,
 }
 
-#[cfg(feature = "async")]
+#[cfg(feature = "async-builtin")]
 #[derive(Default, Debug)]
 pub struct SpawnBatchResult {
     pub accepted: usize,
@@ -57,7 +57,7 @@ pub struct SpawnBatchResult {
     pub other_errors: usize,
 }
 
-#[cfg(feature = "async")]
+#[cfg(feature = "async-builtin")]
 impl AsyncSpawnBenchmark {
     pub fn encode_scalar_return() {
         let value = crate::return_abi::AsyncReturnValue::from_value(
@@ -68,18 +68,26 @@ impl AsyncSpawnBenchmark {
         std::hint::black_box(&value);
     }
 
-    pub fn new(worker_count: usize, producer_count: usize) -> Self {
-        Self::new_with_kind(worker_count, producer_count, AsyncSpawnKind::Noop)
+    pub fn new(poller_count: usize, producer_count: usize) -> Self {
+        Self::new_with_kind(poller_count, producer_count, AsyncSpawnKind::Noop)
     }
 
-    pub fn new_with_kind(worker_count: usize, producer_count: usize, kind: AsyncSpawnKind) -> Self {
+    pub fn new_with_kind(poller_count: usize, producer_count: usize, kind: AsyncSpawnKind) -> Self {
         assert!(producer_count != 0);
 
-        let manager = Arc::new(AsyncManager::new());
-        manager
-            .start(worker_count)
-            .expect("AsyncManager failed to start for benchmark");
-        let generation = manager.current_generation();
+        let runtime = Arc::new(AsyncRuntime::new());
+        runtime
+            .start(
+                crate::BuiltinAsyncExecutor::new(
+                    crate::BuiltinExecutorConfig::new().with_poller_count(
+                        crate::AsyncPollerCount::new(poller_count)
+                            .expect("supported benchmark poller count"),
+                    ),
+                ),
+                crate::AsyncTaskLimit::default(),
+            )
+            .expect("AsyncRuntime failed to start for benchmark");
+        let calculation = runtime.current_epoch();
 
         let (done_tx, done_rx) = std::sync::mpsc::sync_channel(producer_count);
         let mut start_tx = Vec::with_capacity(producer_count);
@@ -87,7 +95,7 @@ impl AsyncSpawnBenchmark {
 
         for _ in 0..producer_count {
             let (producer_tx, producer_rx) = std::sync::mpsc::sync_channel::<usize>(1);
-            let manager = Arc::clone(&manager);
+            let runtime = Arc::clone(&runtime);
             let done_tx = done_tx.clone();
 
             start_tx.push(producer_tx);
@@ -100,9 +108,9 @@ impl AsyncSpawnBenchmark {
                             CancellationSource::new(CancellationGuarantee::BestEffort);
 
                         let res = match kind {
-                            AsyncSpawnKind::Noop => manager.spawn(generation, async {}, source),
+                            AsyncSpawnKind::Noop => runtime.submit(calculation, async {}, source),
                             AsyncSpawnKind::Reschedule(yields) => {
-                                manager.spawn(generation, RescheduleFuture::new(yields), source)
+                                runtime.submit(calculation, RescheduleFuture::new(yields), source)
                             }
                         };
 
@@ -121,7 +129,7 @@ impl AsyncSpawnBenchmark {
         }
 
         Self {
-            manager,
+            runtime,
             start_tx,
             done_rx,
             producers,
@@ -152,14 +160,14 @@ impl AsyncSpawnBenchmark {
     pub fn run_and_drain(&self, iterations_per_thread: usize) -> SpawnBatchResult {
         let result = self.run(iterations_per_thread);
         assert!(
-            self.manager.wait_idle(),
-            "executor suffered fatal worker failure during benchmark"
+            self.runtime.wait_idle(),
+            "executor suffered fatal poller failure during benchmark"
         );
         result
     }
 }
 
-#[cfg(feature = "async")]
+#[cfg(feature = "async-builtin")]
 impl Drop for AsyncSpawnBenchmark {
     fn drop(&mut self) {
         self.start_tx.clear();
@@ -167,6 +175,6 @@ impl Drop for AsyncSpawnBenchmark {
             crate::panic_boundary::contain_panic(producer.join())
                 .expect("benchmark producer panicked");
         }
-        let _ = self.manager.close();
+        let _ = self.runtime.close();
     }
 }

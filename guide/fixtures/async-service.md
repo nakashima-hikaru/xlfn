@@ -13,7 +13,10 @@
 #     type LifecycleState = ();
 #     type Error = XllError;
 #     type Layers = ();
-#     fn open(_: &OpenContext) -> XllResult<Opened<State>> {
-#         Ok(Opened::new(State { client: Client, adapter: Client }))
+#     #[cfg(feature = "async")]
+#     type AsyncExecutor = xlfn::BuiltinAsyncExecutor;
+#     fn open(_: &OpenContext) -> xlfn::OpenResult<Self> {
+#         Ok(Opened::new(State { client: Client, adapter: Client })
+#             .with_async_executor(xlfn::BuiltinAsyncExecutor::new(xlfn::BuiltinExecutorConfig::new())))
 #     }
 # }

@@ -37,7 +37,7 @@ fn install_benchmark_subscriber() -> tracing::dispatcher::DefaultGuard {
 }
 
 pub struct SyncBoundaryWorkerPool {
-    _runtime: &'static crate::runtime::Runtime<()>,
+    _runtime: &'static crate::runtime::Runtime<super::BenchmarkAddin>,
     threads: usize,
     start_tx: Vec<std::sync::mpsc::SyncSender<()>>,
     done_rx: std::sync::mpsc::Receiver<()>,
@@ -51,8 +51,9 @@ impl SyncBoundaryWorkerPool {
             ingress.begin_close_with(|| {});
             let _ = ingress.seal_and_drain();
         }
-        let runtime: &'static crate::runtime::Runtime<()> =
-            Box::leak(Box::new(crate::runtime::Runtime::<()>::new()));
+        let runtime: &'static crate::runtime::Runtime<super::BenchmarkAddin> = Box::leak(Box::new(
+            crate::runtime::Runtime::<super::BenchmarkAddin>::new(),
+        ));
         let removal_epoch = runtime.removal_epoch();
         let open_attempt = runtime
             .begin_open_if_epoch(removal_epoch)

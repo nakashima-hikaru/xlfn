@@ -7,13 +7,13 @@ use xlfn_kernel::drain_gate::DrainGate;
 
 // Keep the memory-order handshake shared with the Loom model. Every work
 // publication and idle announcement must participate in the same RMW order.
-trait IdleWorkerMask {
+trait IdlePollerMask {
     fn publish_work(&self) -> u64;
     fn announce_idle(&self, bits: u64);
     fn try_claim(&self, current: u64, next: u64) -> Result<u64, u64>;
 }
 
-impl IdleWorkerMask for AtomicU64 {
+impl IdlePollerMask for AtomicU64 {
     fn publish_work(&self) -> u64 {
         self.fetch_or(0, Ordering::Release)
     }
@@ -27,7 +27,7 @@ impl IdleWorkerMask for AtomicU64 {
     }
 }
 
-fn claim_idle_worker(mask: &impl IdleWorkerMask) -> Option<usize> {
+fn claim_idle_poller(mask: &impl IdlePollerMask) -> Option<usize> {
     // A load can miss a worker's concurrent idle announcement while its
     // queue recheck misses our push (store buffering). An unconditional
     // RMW joins the announcement's modification order: either we observe
@@ -45,31 +45,17 @@ fn claim_idle_worker(mask: &impl IdleWorkerMask) -> Option<usize> {
     None
 }
 
-/// Concurrency invariants for `RunnableQueue`:
+/// Runnable publication and poller wake protocol.
 ///
-/// - **Q1 (Schedule Gate Admission)**: New `Runnable` instances can only be enqueued while
-///   `schedule_admission` is OPEN. Callers must acquire a drain gate permit before pushing
-///   to the global `injector`.
-/// - **Q2 (Seal Linearization)**: Once `seal_and_wake_all()` (or `schedule_admission.seal_and_wait()`)
-///   completes, no subsequent `Runnable` can ever be admitted or pushed into the `injector`
-///   or any worker local queue.
-/// - **Q3 (Two-Stage Shutdown Separation)**: `closing == true` (in `ExecutorShared`) disables
-///   *spawn admission* for new tasks, but does *NOT* seal `schedule_admission`. In-flight tasks
-///   and abort/cancellation wakers can continue scheduling `Runnable`s until all active tasks
-///   drain (`active == 0`). Only then is `schedule_admission` sealed during final close.
-///   After the last worker fails it is sealed earlier: further scheduling drops
-///   runnables, with the executor's separate callback gate retaining destruction.
-/// - **Q4 (Liveness / No Lost Wakeups)**: Whenever work is enqueued or batch-stolen into a local
-///   queue with extra tasks, if sleeping workers exist in `idle_workers`, at least one worker
-///   is unparked and guaranteed to observe the work.
-/// - **Q5 (Worker Panic Task Preservation)**: If a worker thread panics during task execution,
-///   its `WorkerExitGuard` returns all remaining `Runnable`s in its local queue back to the
-///   `injector` and wakes remaining workers so no queued tasks are permanently stranded.
+/// Schedule admission drains before a queue is sealed. The runtime drains
+/// its task registry before asking this executor to stop; this queue knows
+/// only runnable ownership and poller wakeups. A failed final poller seals
+/// publication early and destroys any abandoned runnables.
 pub(crate) struct RunnableQueue {
     pub(crate) injector: Injector<Runnable>,
     stealers: Box<[Stealer<Runnable>]>,
     schedule_admission: DrainGate,
-    pub(crate) idle_workers: AtomicU64,
+    pub(crate) idle_pollers: AtomicU64,
     unparkers: Box<[Unparker]>,
 }
 
@@ -79,14 +65,14 @@ impl RunnableQueue {
             injector: Injector::new(),
             stealers,
             schedule_admission: DrainGate::new_open(),
-            idle_workers: AtomicU64::new(0),
+            idle_pollers: AtomicU64::new(0),
             unparkers,
         }
     }
 
     pub(crate) fn schedule(&self, runnable: Runnable) {
         let Ok(_permit) = self.schedule_admission.try_enter() else {
-            drop(runnable);
+            super::drop_runnable(runnable);
             return;
         };
         self.injector.push(runnable);
@@ -94,7 +80,7 @@ impl RunnableQueue {
     }
 
     pub(crate) fn wake_one(&self) {
-        if let Some(worker_index) = claim_idle_worker(&self.idle_workers)
+        if let Some(worker_index) = claim_idle_poller(&self.idle_pollers)
             && let Some(unparker) = self.unparkers.get(worker_index)
         {
             unparker.unpark();
@@ -102,11 +88,11 @@ impl RunnableQueue {
     }
 
     pub(crate) fn announce_idle(&self, worker_bit: u64) {
-        self.idle_workers.announce_idle(worker_bit);
+        self.idle_pollers.announce_idle(worker_bit);
     }
 
     pub(crate) fn wake_all(&self) {
-        self.idle_workers.store(0, Ordering::Release);
+        self.idle_pollers.store(0, Ordering::Release);
         for unparker in self.unparkers.iter() {
             unparker.unpark();
         }
@@ -157,12 +143,11 @@ impl RunnableQueue {
         None
     }
 
-    /// Drains any abandoned `Runnable`s left in the global injector and worker stealers.
+    /// Drains abandoned runnables from the injector and poller stealers.
     ///
     /// # Safety / Preconditions
-    /// This method is intended solely for failure recovery (`fatal_worker_failure == true`)
-    /// and requires that all workers have already exited (`live_workers == 0`) so that no
-    /// concurrent access to local queues occurs.
+    /// All pollers must already have exited, and scheduling must be sealed.
+    /// This prevents concurrent ownership of a local queue during recovery.
     pub(crate) fn drain_abandoned(&self) -> Option<Runnable> {
         loop {
             match self.injector.steal() {
@@ -186,11 +171,11 @@ impl RunnableQueue {
 
 #[cfg(all(test, not(all(target_os = "windows", target_arch = "x86"))))]
 mod tests {
-    use super::{IdleWorkerMask, claim_idle_worker};
+    use super::{IdlePollerMask, claim_idle_poller};
     use loom::sync::Arc;
     use loom::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-    impl IdleWorkerMask for AtomicU64 {
+    impl IdlePollerMask for AtomicU64 {
         fn publish_work(&self) -> u64 {
             self.fetch_or(0, Ordering::Release)
         }
@@ -222,7 +207,7 @@ mod tests {
             // Model queue contents without their own synchronization so the
             // test specifically requires the idle-mask publication handshake.
             queued.store(true, Ordering::Relaxed);
-            let notified = claim_idle_worker(&*idle).is_some();
+            let notified = claim_idle_poller(&*idle).is_some();
             let found_work = worker.join().unwrap();
             assert!(
                 found_work || notified,
@@ -250,7 +235,7 @@ mod tests {
                 clearing_idle.fetch_and(!2, Ordering::Relaxed);
             });
             queued.store(true, Ordering::Relaxed);
-            let notified = claim_idle_worker(&*idle);
+            let notified = claim_idle_poller(&*idle);
             let found_work = worker.join().unwrap();
             assert!(found_work || notified == Some(0));
             clearing_worker.join().unwrap();

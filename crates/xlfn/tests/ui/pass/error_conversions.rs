@@ -12,6 +12,8 @@ impl Addin for ErrorConversions {
     type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
+    #[cfg(feature = "async")]
+    type AsyncExecutor = xlfn::NoAsyncExecutor;
 
     fn open(context: &OpenContext) -> xlfn::OpenResult<Self> {
         context.diagnostics().set_sink(Discard)?;
