@@ -29,8 +29,25 @@ fn argument_ingress_benchmarks(c: &mut Criterion) {
     group.bench_function("string_short/borrowed", |b| {
         b.iter(|| str_short.run_borrowed_str());
     });
+    for (label, text) in [
+        ("empty", String::new()),
+        ("ascii_23", "a".repeat(23)),
+        ("ascii_24", "a".repeat(24)),
+        ("unicode_23", format!("{}x", "é".repeat(11))),
+        ("unicode_24", "日".repeat(8)),
+    ] {
+        let mut input = RawArgumentIngressBenchmark::string(&text);
+        group.bench_function(format!("string_inline_{label}/borrowed"), |b| {
+            b.iter(|| input.run_borrowed_str());
+        });
+    }
 
     // 3. Unicode string
+    let mut pair_first = RawArgumentIngressBenchmark::string("short_str");
+    let mut pair_second = RawArgumentIngressBenchmark::string("日本語💡");
+    group.bench_function("string_pair/borrowed", |b| {
+        b.iter(|| pair_first.run_borrowed_str_pair(&mut pair_second));
+    });
     let mut str_unicode = RawArgumentIngressBenchmark::string("日本語💡");
     group.bench_function("string_unicode/owned", |b| {
         b.iter(|| str_unicode.run_plain::<String>());

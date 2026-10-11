@@ -10,15 +10,20 @@
 use crate::XllResult;
 use std::cell::{Cell, OnceCell};
 use std::marker::PhantomData;
+use std::mem::ManuallyDrop;
 use std::panic::AssertUnwindSafe;
 
 const LARGE_TYPED_COLLECTION_BYTES: usize = 64 * 1024;
 const LARGE_COLLECTION_TEXT_CAPACITY: usize = 64 * 1024;
+const INLINE_TEXT_CAPACITY: usize = 23;
 
 pub(crate) struct CallScratch {
     arena: AssertUnwindSafe<bumpalo::Bump>,
     strings: AssertUnwindSafe<OnceCell<Box<bumpalo::Bump>>>,
     large_collection: AssertUnwindSafe<Cell<bool>>,
+    // Only new_inline initializes this slot: it never owns a heap allocation.
+    // ManuallyDrop avoids adding a destructor to every call, including numbers.
+    inline_text: AssertUnwindSafe<OnceCell<ManuallyDrop<smol_str::SmolStr>>>,
 }
 
 impl CallScratch {
@@ -27,6 +32,7 @@ impl CallScratch {
             arena: AssertUnwindSafe(bumpalo::Bump::new()),
             strings: AssertUnwindSafe(OnceCell::new()),
             large_collection: AssertUnwindSafe(Cell::new(false)),
+            inline_text: AssertUnwindSafe(OnceCell::new()),
         }
     }
 
@@ -44,6 +50,9 @@ impl CallScratch {
         units: &[u16],
         argument: &'static str,
     ) -> XllResult<&'call str> {
+        if units.is_empty() {
+            return Ok("");
+        }
         let decoder = crate::utf16::Utf16Decoder::new(units);
         // Scalar and small collection text share the primary arena. A large
         // typed collection can fill a matrix-sized chunk before its first
@@ -57,6 +66,14 @@ impl CallScratch {
                 })
                 .as_ref()
         } else {
+            if decoder.utf8_len() <= INLINE_TEXT_CAPACITY && self.inline_text.get().is_none() {
+                let mut buffer = [std::mem::MaybeUninit::uninit(); INLINE_TEXT_CAPACITY];
+                let text = decoder.decode_into(&mut buffer, argument)?;
+                self.inline_text
+                    .set(ManuallyDrop::new(smol_str::SmolStr::new_inline(text)))
+                    .expect("the first inline text slot is empty");
+                return Ok(self.inline_text.get().unwrap().as_str());
+            }
             &self.arena.0
         };
         let output =
@@ -256,6 +273,46 @@ pub(crate) fn with_excel_callback_scope_and_call<A: crate::Addin, R>(
 #[cfg(test)]
 mod scratch_tests {
     use super::{CallScratch, LARGE_TYPED_COLLECTION_BYTES};
+
+    #[test]
+    fn miri_inline_text_preserves_earlier_borrows_across_later_decodes() {
+        let scratch = CallScratch::new();
+        let first = scratch
+            .decode_utf16(&[0x65e5, 0xd83d, 0xdca1], "first")
+            .unwrap();
+        assert!(!scratch.inline_text.get().unwrap().is_heap_allocated());
+        assert_eq!(scratch.arena.allocated_bytes(), 0);
+        let second = scratch.decode_utf16(&[b'x' as u16; 23], "second").unwrap();
+        let long = scratch.decode_utf16(&[b'y' as u16; 24], "long").unwrap();
+        let length = LARGE_TYPED_COLLECTION_BYTES / std::mem::size_of::<u64>();
+        scratch
+            .collect_copy(length, |index| Ok(index as u64))
+            .unwrap();
+        let later = scratch.decode_utf16(&[b'z' as u16; 23], "later").unwrap();
+        assert_eq!(first, "日💡");
+        assert_eq!(second, "x".repeat(23));
+        assert_eq!(long, "y".repeat(24));
+        assert_eq!(later, "z".repeat(23));
+    }
+
+    #[test]
+    fn inline_text_uses_utf8_bytes_and_does_not_publish_invalid_utf16() {
+        for text in ["", "a", "aé日💡", "éééééééééééx", "日".repeat(8).as_str()] {
+            let scratch = CallScratch::new();
+            let units = text.encode_utf16().collect::<Vec<_>>();
+            assert_eq!(scratch.decode_utf16(&units, "text").unwrap(), text);
+            assert_eq!(
+                scratch.inline_text.get().is_some(),
+                !text.is_empty() && text.len() <= 23
+            );
+        }
+        let scratch = CallScratch::new();
+        assert_eq!(scratch.decode_utf16(&[], "empty").unwrap(), "");
+        assert!(scratch.inline_text.get().is_none());
+        assert!(scratch.decode_utf16(&[0xd800], "bad").is_err());
+        assert!(scratch.inline_text.get().is_none());
+        assert_eq!(scratch.decode_utf16(&[0x41], "valid").unwrap(), "A");
+    }
 
     #[test]
     fn large_numeric_collection_does_not_allocate_text_storage() {

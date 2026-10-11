@@ -306,6 +306,39 @@ impl RawArgumentIngressBenchmark {
         })
     }
 
+    /// Decodes two borrowed strings in one call, retaining both borrows.
+    pub fn run_borrowed_str_pair(&mut self, other: &mut Self) {
+        let ingress = benchmark_ingress();
+        let call = self
+            .runtime
+            .enter(&ingress)
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
+            let mut arguments =
+                crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(call, scope, 2);
+            // SAFETY: both fixtures own live, distinct raw string arguments.
+            let first =
+                unsafe {
+                    crate::value::argument_from_raw_with_arguments::<
+                        crate::value::PlainInputMode,
+                        &str,
+                    >(&mut arguments, 0, "first", &mut self.raw)
+                }
+                .expect("first string is valid");
+            // SAFETY: the other fixture remains live during the same call.
+            let second =
+                unsafe {
+                    crate::value::argument_from_raw_with_arguments::<
+                        crate::value::PlainInputMode,
+                        &str,
+                    >(&mut arguments, 1, "second", &mut other.raw)
+                }
+                .expect("second string is valid");
+            std::hint::black_box((first, second));
+            let _ = arguments.finish();
+        });
+    }
+
     /// Numeric typed borrowed-matrix preparation, with materialization only
     /// when requested. Dropping prepared state models the warm lookup path;
     /// materializing models the additional input work on a cold lookup.

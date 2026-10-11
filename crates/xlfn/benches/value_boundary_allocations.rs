@@ -102,6 +102,18 @@ enum Status {
 }
 
 fn main() {
+    for (label, text) in [
+        ("short", "short_str"),
+        ("unicode", "日本語💡"),
+        ("over_inline", "abcdefghijklmnopqrstuvwx"),
+    ] {
+        let mut input = RawArgumentIngressBenchmark::string(text);
+        let case = format!("argument_ingress/string_{label}/borrowed");
+        let counts = measure(&case, || input.run_borrowed_str());
+        if text.len() <= 23 {
+            assert_runtime_allocation_free(&case, counts);
+        }
+    }
     for (label, payload) in [
         ("ascii_short", "Ready".to_owned()),
         ("ascii_limit", "x".repeat(32_767)),

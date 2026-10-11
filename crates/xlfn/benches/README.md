@@ -1,5 +1,66 @@
 # Benchmark notes
 
+## 2026-10-11 short borrowed strings
+
+The first nonempty borrowed string in a call now uses an inline `SmolStr`
+when its decoded UTF-8 length is at most 23 bytes. The slot stays unchanged
+until call teardown, so later arguments cannot invalidate earlier borrows.
+Further strings and large typed collections retain arena storage. Empty
+strings return a static empty slice; public owned `String` input is unchanged.
+
+Baseline `3cb4ed15df314e6cb409dfdef39134e6bb499b2d` and the candidate used
+separate source/target directories, identical shared fixtures, frozen executable
+hashes, and ABBA order on macOS ARM64 with Rust 1.99.0. Each run used 20 samples,
+0.5 s warm-up, and 2 s measurement. Values are geometric means of two estimates
+per side; individual confidence intervals are not intervals for the A/B
+difference.
+
+| Borrowed input | Baseline | Candidate | Time change |
+| --- | ---: | ---: | ---: |
+| Short ASCII | 72.4 ns | 44.5 ns | -38.5% |
+| Short Unicode | 69.6 ns | 46.5 ns | -33.1% |
+| ASCII, 23 UTF-8 bytes | 82.1 ns | 63.7 ns | -22.3% |
+| Unicode, 23 UTF-8 bytes | 75.8 ns | 57.2 ns | -24.5% |
+| Empty | 26.9 ns | 26.3 ns | -2.4% |
+| Two strings in one call | 79.5 ns | 79.6 ns | +0.1% |
+
+Short ASCII and Unicode now request zero allocations, compared with one
+496-byte allocation per call. Strings above the inline limit retain one
+allocation. Counts cover 10,000 warmed calls and describe allocator requests,
+not RSS or peak live memory. The allocation gate asserts that the short
+borrowed inputs remain allocation-free.
+
+The 23 shared cases include 24-byte boundary controls, long text, 100/10k
+string matrices, 100k mixed/numeric matrices, and eight-argument calls with
+1/4/16/32 workers. Scalar numeric ingress rose 1.2% (23.1 to 23.4 ns), and
+eight-argument batches with one worker rose 1.4%. The other long/bulk/concurrent
+controls ranged from -1.3% to +0.7%; these small differences are not claimed
+as statistically significant. An unchanged owned short-string control measured
+9.9% faster; this is not attributed to the borrowed-string optimization.
+
+The initial candidate slowed empty strings by 52.5%. It was revised to bypass
+storage for empty strings, and the full ABBA comparison above was rerun.
+[Results, both experiments, source patches, allocation logs, and provenance](results/2026-10-11-smol-input.json)
+preserve all measured cases.
+An additional ABBA run of the three-cell mixed borrowed fixture measured
+-3.1% with overlapping per-run confidence intervals. Its 100-cell mixed
+controls had wide baseline intervals and much larger gains, which are
+retained in the record without claiming a general matrix improvement.
+
+Validation: workspace nextest 1,232 passed / 11 skipped; all-target/all-feature
+Clippy, strict workspace rustdoc, formatting, and panic-boundary checks passed.
+The borrow-retention test passed Miri with strict provenance and with strict
+provenance plus Tree Borrows. Compile-fail snapshots retain the original
+thread/escape errors and now include the private inline slot's `Sync` note.
+All 17 `just bench-ci` recipes passed, including the new boundary controls
+and zero-allocation assertions. That gate ran alongside validation checks;
+its timings are excluded from the isolated comparisons. Windows x86_64/i686
+library checks passed with `blake3/pure`; the default backend required an
+unavailable MSVC assembler (`ml64.exe`).
+
+These local measurements do not establish native Windows/live Excel speed
+or the remaining Excel-DNA performance gap.
+
 ## 2026-10-09 value boundaries
 
 This change removes repeated scalar-return ownership work, adds an explicit
