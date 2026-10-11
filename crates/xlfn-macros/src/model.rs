@@ -157,6 +157,7 @@ impl PresenceAction {
 pub(super) enum ArgumentConversion {
     Value(Box<ValueConversion>),
     Reference,
+    NumericMatrix,
     HandleLease { object: Box<Type> },
 }
 
@@ -176,7 +177,7 @@ impl ArgumentConversion {
 
     pub(super) const fn requires_presence_check(&self) -> bool {
         match self {
-            Self::Reference | Self::HandleLease { .. } => false,
+            Self::Reference | Self::NumericMatrix | Self::HandleLease { .. } => false,
             Self::Value(value) => {
                 value.blank.requires_presence_check() || value.missing.requires_presence_check()
             }
@@ -540,7 +541,34 @@ fn analyze_arguments(
             ));
         }
 
-        let conversion = if let Some(object) = parse_handle_lease_type(&argument.ty)? {
+        let conversion = if context_type_path(&argument.ty)
+            .and_then(|path| path.path.segments.last())
+            .is_some_and(|segment| segment.ident == "NumericMatrixRef")
+        {
+            if !is_context_value_path(&argument.ty) {
+                return Err(syn::Error::new_spanned(
+                    &argument.ty,
+                    "NumericMatrixRef must be passed by value",
+                ));
+            }
+            if execution.is_async() {
+                return Err(syn::Error::new_spanned(
+                    &argument.ty,
+                    "NumericMatrixRef borrows Excel's numeric array and is only supported by synchronous functions",
+                ));
+            }
+            if argument.options.reference
+                || argument.options.default.is_some()
+                || argument.options.blank.is_some()
+                || argument.options.missing.is_some()
+            {
+                return Err(syn::Error::new_spanned(
+                    &function.sig.inputs,
+                    "NumericMatrixRef uses Excel's numeric coercion and cannot use reference, blank, missing, or default policies",
+                ));
+            }
+            ArgumentConversion::NumericMatrix
+        } else if let Some(object) = parse_handle_lease_type(&argument.ty)? {
             if !execution.is_async() {
                 return Err(syn::Error::new_spanned(
                     &argument.ty,

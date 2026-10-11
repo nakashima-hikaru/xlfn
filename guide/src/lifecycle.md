@@ -153,6 +153,16 @@ For every resource created in `open`, decide how it stops. The key hooks are:
 Framework-managed async tasks drain before `quiesce`; remaining handle objects
 are dropped after it. Destructors should avoid blocking or calling into Excel.
 
+Numeric, Boolean, and error worksheet results use one reusable process-owned
+32-byte root per calling thread. Excel consumes that root before the next
+worksheet evaluation on the same thread, so these results need no
+`xlAutoFree12` callback. On Windows the root uses the process heap rather than
+the add-in's Rust allocator and stays allocated until Excel exits, including
+after a calling thread exits or the XLL is physically unloaded. The retained
+memory is 32 bytes per thread that publishes such a result, per loaded module
+instance. Strings and arrays retain their owned return blocks and shutdown
+waits for their cleanup callbacks.
+
 If shutdown cannot establish safety, the framework quarantines the runtime.
 It rejects new worksheet work and reopening, and retains the resources needed
 by outstanding work and any held DLL residency lease. A close or remove

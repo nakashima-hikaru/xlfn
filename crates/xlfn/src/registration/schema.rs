@@ -24,6 +24,8 @@ pub enum ArgumentAbi {
     CoercedValue,
     /// Excel supplies a reference operand for an eligible execution mode.
     RawReference,
+    /// Excel supplies a contiguous, coerced numeric FP12 array (`K%`).
+    NumericArray,
 }
 
 pub(crate) use xlfn_common::{ExecutionKind, FunctionVisibility};
@@ -52,9 +54,10 @@ impl RegistrationSignature {
             }
         });
         for argument in self.arguments {
-            text.push(match argument {
-                ArgumentAbi::CoercedValue => 'Q',
-                ArgumentAbi::RawReference => 'U',
+            text.push_str(match argument {
+                ArgumentAbi::CoercedValue => "Q",
+                ArgumentAbi::RawReference => "U",
+                ArgumentAbi::NumericArray => "K%",
             });
         }
         if self.execution.is_async() {
@@ -70,6 +73,35 @@ impl RegistrationSignature {
             text.push('!');
         }
         Ok(text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn numeric_arrays_use_one_fp12_argument_with_two_registration_characters() {
+        let signature = RegistrationSignature {
+            execution: ExecutionKind::ThreadSafe,
+            arguments: &[
+                ArgumentAbi::NumericArray,
+                ArgumentAbi::CoercedValue,
+                ArgumentAbi::NumericArray,
+            ],
+            volatile: false,
+        };
+        assert_eq!(signature.encode().unwrap(), "QK%QK%$");
+    }
+
+    #[test]
+    fn fp12_keeps_macro_sheet_and_volatile_registration_flags() {
+        let signature = RegistrationSignature {
+            execution: ExecutionKind::MacroSheet,
+            arguments: &[ArgumentAbi::NumericArray],
+            volatile: true,
+        };
+        assert_eq!(signature.encode().unwrap(), "QK%#!");
     }
 }
 

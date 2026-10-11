@@ -78,15 +78,45 @@ the ordinary fixture functions remain registered too. Async measurements compare
 xlfn native async delivery with Excel-DNA RTD-backed Task delivery, including
 Excel's RTD throttle; they do not isolate native async framework overhead.
 
-The synchronous paths have different representation costs. xlfn uses
-XLOPER12 arguments and returns with strict cell validation and an
-`xlAutoFree12` cleanup obligation. Excel-DNA uses typed numeric and string
-marshaling; its numeric-array path can use dense FP12 storage. Rust strings
-also require UTF-16 to UTF-8 conversion on input and conversion back on output.
+The synchronous paths have different representation costs. xlfn's ordinary
+arguments use XLOPER12 with strict cell validation. The numeric-range fixture
+uses `NumericMatrixRef` for M01/M03/M04: Excel supplies a dense FP12 buffer
+through the `K%` argument ABI, and xlfn borrows its validated doubles. This is
+an explicit numeric-coercion API: Excel converts blanks to zero and rejects
+incompatible input before invoking Rust. It does not change the strict
+`Matrix<f64>` API. These cases contain only numeric cells, so their values and
+function bodies retain the same workload.
+
+M02 builds numeric output directly with `XlArrayBuilder`; M03 encodes the
+borrowed numeric slice with `XlArrayBuilder::from_f64`. Both avoid an
+intermediate owned matrix. Outputs still use the ordinary `Q` value ABI and
+XLOPER12 cells, preserving worksheet errors, panic handling, and closing-state
+results; they are not dense FP12 outputs. M05 uses
+`MatrixRef<ExcelCellRef>` to classify the same five cell types without owning
+each string. Strings still require validated UTF-16 to UTF-8 decoding into
+call-local scratch.
+
+Primitive numeric, Boolean, and Excel-error returns reuse one process-owned
+32-byte root per producing thread and loaded module instance, without an
+`xlAutoFree12` obligation. Those roots remain allocated until process exit.
+Strings and arrays retain their owned return storage and cleanup callback.
+S04 returns intentional `Result<f64, ExcelError>` errors, like Excel-DNA's
+worksheet error values, instead of framework failures that produce a failure
+diagnostic. The periodic positions and `#NUM!` validation remain the same.
+
+Excel-DNA uses typed numeric and string marshaling; its numeric-array path can
+use dense FP12 storage. Rust strings require conversion back to UTF-16 on output.
 T01 counts Unicode scalar values in Rust but reads the UTF-16 length in C#;
 the current ASCII and Japanese BMP inputs have the same expected count.
 These cases compare the exposed APIs, including those costs. They do not
 isolate equivalent host ABI paths or the function body alone.
+
+These fixture changes preserve formulas, range shapes, operation counts,
+timing boundaries, polling, and expected results. Local tests and benchmarks
+validate the Rust paths; their effect on the Excel-DNA comparison remains
+unverified until newly built XLLs are run in live Excel. Keep earlier records
+with their original artifact digests rather than treating them as results for
+the updated fixtures.
 
 ## Workloads and measurement
 
@@ -210,6 +240,15 @@ in the add-in and Excel-DNA counts managed allocations. Use timing and
 RSS for cross-framework comparison; inspect raw allocations only within an
 implementation. `R07` RSS growth is observational and affected by Excel's
 own caching and garbage collection.
+
+Teardown closes both benchmark and bootstrap workbooks, requests Excel quit,
+then drops the runner's workbook/Application references and collects Python
+wrapper cycles before reporting completion. Failed cleanup steps are retained
+as errors while subsequent steps still run. This applies to both implementations;
+it changes no workload, polling interval, or process-exit acceptance criterion.
+The parent still requires the dedicated Excel process to exit and treats forced
+termination as failure. COM-reference cleanup tests do not establish that a
+particular live Excel shutdown failure has been resolved.
 
 Workers save metadata, execution stages, and the completed/error record before
 teardown. An outer timeout preserves the last saved stage and original error,

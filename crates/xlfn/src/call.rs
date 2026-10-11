@@ -8,23 +8,35 @@
 //! not belong in this call-local storage.
 
 use crate::XllResult;
+use std::cell::{Cell, OnceCell};
 use std::marker::PhantomData;
 use std::panic::AssertUnwindSafe;
 
+const LARGE_TYPED_COLLECTION_BYTES: usize = 64 * 1024;
+const LARGE_COLLECTION_TEXT_CAPACITY: usize = 64 * 1024;
+
 pub(crate) struct CallScratch {
     arena: AssertUnwindSafe<bumpalo::Bump>,
+    strings: AssertUnwindSafe<OnceCell<Box<bumpalo::Bump>>>,
+    large_collection: AssertUnwindSafe<Cell<bool>>,
 }
 
 impl CallScratch {
     fn new() -> Self {
         Self {
             arena: AssertUnwindSafe(bumpalo::Bump::new()),
+            strings: AssertUnwindSafe(OnceCell::new()),
+            large_collection: AssertUnwindSafe(Cell::new(false)),
         }
     }
 
     #[cfg(all(test, feature = "bench-internals"))]
     pub(crate) fn allocated_bytes(&self) -> usize {
         self.arena.allocated_bytes()
+            + self
+                .strings
+                .get()
+                .map_or(0, |strings| strings.allocated_bytes())
     }
 
     pub(crate) fn decode_utf16<'call>(
@@ -33,9 +45,22 @@ impl CallScratch {
         argument: &'static str,
     ) -> XllResult<&'call str> {
         let decoder = crate::utf16::Utf16Decoder::new(units);
-        let output = self
-            .arena
-            .alloc_slice_fill_with(decoder.utf8_len(), |_| std::mem::MaybeUninit::uninit());
+        // Scalar and small collection text share the primary arena. A large
+        // typed collection can fill a matrix-sized chunk before its first
+        // string, so only that case creates a separate text arena. Its bounded
+        // initial capacity avoids a chain of tiny growing chunks; numeric-only
+        // collections never create it. Both arenas live until scope teardown.
+        let strings = if self.large_collection.get() {
+            self.strings
+                .get_or_init(|| {
+                    Box::new(bumpalo::Bump::with_capacity(LARGE_COLLECTION_TEXT_CAPACITY))
+                })
+                .as_ref()
+        } else {
+            &self.arena.0
+        };
+        let output =
+            strings.alloc_slice_fill_with(decoder.utf8_len(), |_| std::mem::MaybeUninit::uninit());
         decoder.decode_into(output, argument)
     }
 
@@ -44,6 +69,9 @@ impl CallScratch {
         len: usize,
         mut build: impl FnMut(usize) -> XllResult<T>,
     ) -> XllResult<&[T]> {
+        if len.saturating_mul(std::mem::size_of::<T>()) >= LARGE_TYPED_COLLECTION_BYTES {
+            self.large_collection.set(true);
+        }
         let mut values = bumpalo::collections::Vec::with_capacity_in(len, &self.arena.0);
         for index in 0..len {
             values.push(build(index)?);
@@ -227,7 +255,38 @@ pub(crate) fn with_excel_callback_scope_and_call<A: crate::Addin, R>(
 
 #[cfg(test)]
 mod scratch_tests {
-    use super::CallScratch;
+    use super::{CallScratch, LARGE_TYPED_COLLECTION_BYTES};
+
+    #[test]
+    fn large_numeric_collection_does_not_allocate_text_storage() {
+        let scratch = CallScratch::new();
+        let length = LARGE_TYPED_COLLECTION_BYTES / std::mem::size_of::<u64>();
+        let values = scratch
+            .collect_copy(length, |index| Ok(index as u64))
+            .unwrap();
+        assert_eq!(values.last(), Some(&((length - 1) as u64)));
+        assert!(scratch.strings.get().is_none());
+    }
+
+    #[test]
+    fn strings_stay_borrowable_when_large_collection_changes_text_storage() {
+        let scratch = CallScratch::new();
+        let small = scratch
+            .decode_utf16(&[b'o' as u16, b'k' as u16], "small")
+            .unwrap();
+        assert!(scratch.strings.get().is_none());
+        let length = LARGE_TYPED_COLLECTION_BYTES / std::mem::size_of::<u64>();
+        let values = scratch
+            .collect_copy(length, |index| Ok(index as u64))
+            .unwrap();
+        let large = scratch
+            .decode_utf16(&[0x65e5, 0xd83d, 0xdca1], "large")
+            .unwrap();
+        assert!(scratch.strings.get().is_some());
+        assert_eq!(small, "ok");
+        assert_eq!(large, "日💡");
+        assert_eq!(values[length - 1], (length - 1) as u64);
+    }
 
     proptest::proptest! {
         #[test]

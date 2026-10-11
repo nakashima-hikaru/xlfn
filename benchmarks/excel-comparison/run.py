@@ -6,6 +6,7 @@ Run each case in its own process and Excel instance. `--plan` needs no Excel.
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import json
 import math
@@ -402,26 +403,42 @@ class ExcelSession:
         self._stop_sampler.set()
         self._sampler.join(timeout=1)
         failures = []
-        try:
-            self.stage("close_workbook")
-            self.close_book()
-            self.stage("restore_excel_settings")
+
+        def attempt(stage, action):
+            self.stage(stage)
+            try:
+                action()
+                return True
+            except Exception as error:
+                failures.append({"stage": stage, "error": f"{type(error).__name__}: {error}"})
+                return False
+
+        def restore_settings():
             self.app.RTD.ThrottleInterval = self.original_throttle
             self.app.MultiThreadedCalculation.ThreadCount = self.original_threads
             self.app.MultiThreadedCalculation.ThreadMode = self.original_thread_mode
             self.app.MultiThreadedCalculation.Enabled = self.original_mtr_enabled
             self.app.Calculation = self.original_calculation
-            self.bootstrap_book.Close(SaveChanges=False)
+
+        try:
+            # A failed step must not skip closing the remaining workbook or
+            # requesting Quit. Keep every failure even if later steps succeed.
+            attempt("close_workbook", self.close_book)
+            attempt("restore_excel_settings", restore_settings)
+            attempt("close_bootstrap_workbook", lambda: self.bootstrap_book.Close(SaveChanges=False))
             # This dedicated Excel process owns the RegisterXLL load.
-            self.stage("excel_quit")
-            self.app.Quit()
-        except Exception as error:
-            failures.append({"stage": self.last_stage, "error": f"{type(error).__name__}: {error}"})
-            try:
-                self.stage("excel_quit_after_cleanup_error")
-                self.app.Quit()
-            except Exception as error:
-                failures.append({"stage": self.last_stage, "error": f"{type(error).__name__}: {error}"})
+            if not attempt("excel_quit", lambda: self.app.Quit()):
+                attempt("excel_quit_after_cleanup_error", lambda: self.app.Quit())
+        finally:
+            # Quit requests shutdown but does not release our COM references.
+            # Release children before Application, while Python/COM are still
+            # operational. pywin32 wrappers can form cycles; do not defer those
+            # releases to interpreter shutdown after the worker has reported ok.
+            self.stage("release_excel_references")
+            self.book = None
+            self.bootstrap_book = None
+            self.app = None
+            gc.collect()
         if failures:
             self.stage("close_failed", failures=failures)
             raise RuntimeError(f"Excel teardown failed: {json.dumps(failures)}")

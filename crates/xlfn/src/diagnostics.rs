@@ -487,6 +487,15 @@ pub(crate) fn failed_diagnostic_writes() -> u64 {
 
 /// Reports a failure without allowing tracing subscribers or user-provided sink code
 /// to unwind into an Excel ABI entry point.
+pub(crate) fn report_udf_failure_no_unwind(udf_id: &'static str, error: &XllError) {
+    // A preserved worksheet error has no diagnostic detail. Instrumentation
+    // still receives its ExcelValue completion; Custom carries reportable text.
+    if !matches!(error, XllError::ExcelValue(_)) {
+        report_no_unwind(udf_id, error);
+    }
+}
+
+/// Reports framework and application failures, including diagnostic identity.
 pub(crate) fn report_no_unwind(udf_id: &'static str, error: &XllError) -> DiagnosticId {
     let diagnostic_id = DiagnosticId::from_u64(NEXT_ID.fetch_add(1, Ordering::Relaxed));
     let argument = match error {
@@ -876,6 +885,26 @@ mod tests {
         fn report(&self, _: &DiagnosticEvent<'_>) {
             self.0.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    #[test]
+    fn intentional_worksheet_errors_do_not_emit_failure_diagnostics() {
+        let reports = Arc::new(AtomicUsize::new(0));
+        reset_diagnostic_router().unwrap();
+        set_diagnostic_sink(CountingSink(Arc::clone(&reports))).unwrap();
+        let next_id = NEXT_ID.load(Ordering::Relaxed);
+        report_udf_failure_no_unwind(
+            "worksheet_error",
+            &XllError::ExcelValue(crate::ExcelError::Number),
+        );
+        assert_eq!(NEXT_ID.load(Ordering::Relaxed), next_id);
+        report_udf_failure_no_unwind(
+            "custom_error",
+            &XllError::custom(crate::ExcelError::Number, "calculation rejected"),
+        );
+        report_udf_failure_no_unwind("panic_error", &XllError::Panic);
+        clear_diagnostic_sink().unwrap();
+        assert_eq!(reports.load(Ordering::Relaxed), 2);
     }
 
     #[test]

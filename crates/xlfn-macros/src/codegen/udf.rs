@@ -27,9 +27,19 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
     let has_handle_lease = arguments
         .iter()
         .any(|argument| argument.conversion.is_handle_lease());
-    let raw_names = arguments
+    let raw_parameters = arguments
         .iter()
-        .map(|argument| argument.raw_ident.clone())
+        .map(|argument| {
+            let raw = &argument.raw_ident;
+            if matches!(
+                argument.conversion,
+                model::ArgumentConversion::NumericMatrix
+            ) {
+                quote!(#raw: *const #krate::__private::v1::FP12)
+            } else {
+                quote!(#raw: *mut #krate::__private::v1::XLOPER12)
+            }
+        })
         .collect::<Vec<_>>();
     let converted_names = arguments
         .iter()
@@ -135,7 +145,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
             let converted = &argument.local_ident;
             let raw = &argument.raw_ident;
             let argument_name = &argument.excel_name;
-            let binding_type = if !is_async && matches!(argument.conversion, model::ArgumentConversion::Reference) { quote!(#krate::__private::v1::PreparedArgument<#ty, ()>) } else if is_async { quote!(#ty) } else {
+            let binding_type = if !is_async && matches!(argument.conversion, model::ArgumentConversion::Reference | model::ArgumentConversion::NumericMatrix) { quote!(#krate::__private::v1::PreparedArgument<#ty, ()>) } else if is_async { quote!(#ty) } else {
                 quote!(#krate::__private::v1::PreparedArgument<#ty, _>)
             };
             let default_method = if is_async { quote!(default_argument) } else { quote!(prepare_default) };
@@ -149,6 +159,10 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                     unsafe {
                         #krate::__private::v1::convert_reference(__frame, #argument_name, #raw)
                     }
+                },
+                model::ArgumentConversion::NumericMatrix => quote! {
+                    // SAFETY: Excel supplies a live FP12 numeric-array argument.
+                    unsafe { __frame.prepare_numeric_matrix(#index, #argument_name, #raw) }
                 },
                 model::ArgumentConversion::Value(_) => {
                     let convert = if is_async {
@@ -469,7 +483,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
             #[doc = "Excel must invoke this entrypoint in its registered execution mode on the permitted thread. Every argument pointer and the async handle must be a live XLOPER12 supplied by Excel for this call. Never call this wrapper to restart an active invocation after Abort or Uncalced."]
             #[unsafe(no_mangle)]
             pub unsafe extern "system" fn #export_ident(
-                #(#raw_names: *mut #krate::__private::v1::XLOPER12,)*
+                #(#raw_parameters,)*
                 __async_handle: *mut #krate::__private::v1::XLOPER12,
             ) {
                 #krate::__private::v1::export_void_boundary(|| { #boundary });
@@ -481,10 +495,10 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
             #[doc = concat!("Excel ABI wrapper for `", #excel_name, "`.")]
             #[doc = ""]
             #[doc = "# Safety"]
-            #[doc = "Excel must invoke this entrypoint in its registered execution mode on the permitted thread. Every argument pointer must be a live XLOPER12 supplied by Excel for this call. Never call this wrapper to restart an active invocation after Abort or Uncalced."]
+            #[doc = "Excel must invoke this entrypoint in its registered execution mode on the permitted thread. Every argument pointer must be live storage of its registered XLOPER12 or FP12 type supplied by Excel for this call. Never call this wrapper to restart an active invocation after Abort or Uncalced."]
             #[unsafe(no_mangle)]
             pub unsafe extern "system" fn #export_ident(
-                #(#raw_names: *mut #krate::__private::v1::XLOPER12),*
+                #(#raw_parameters),*
             ) -> *mut #krate::__private::v1::XLOPER12 {
                 #krate::__private::v1::export_value_boundary(|| { #boundary })
             }
@@ -492,7 +506,12 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
     };
 
     let argument_abi_tokens = arguments.iter().map(|argument| {
-        if argument.conversion.is_reference() {
+        if matches!(
+            argument.conversion,
+            model::ArgumentConversion::NumericMatrix
+        ) {
+            quote!(#krate::__private::v1::ArgumentAbi::NumericArray)
+        } else if argument.conversion.is_reference() {
             quote!(#krate::__private::v1::ArgumentAbi::RawReference)
         } else {
             quote!(#krate::__private::v1::ArgumentAbi::CoercedValue)

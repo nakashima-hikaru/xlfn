@@ -46,6 +46,11 @@ fn deserialize_finite_number<'de, D: serde::Deserializer<'de>>(
 pub(crate) mod input;
 /// Owned rectangular and bounded collection values.
 mod matrix;
+#[allow(
+    unsafe_code,
+    reason = "FP12 argument borrowing is isolated in this leaf"
+)]
+mod numeric;
 /// Output conversion traits and return-cell representations.
 pub(crate) mod output;
 #[cfg(feature = "bench-internals")]
@@ -73,6 +78,7 @@ pub use output::IntoExcel;
 pub use date::{ExcelDateSystem, ExcelSerialDate};
 pub(crate) use matrix::validate_matrix_dimensions;
 pub use matrix::{BoundedVarArgs, Column, Matrix, MatrixRef, Row};
+pub use numeric::NumericMatrixRef;
 pub(crate) use raw::{GridView, encode_raw_value};
 pub use raw::{XlArrayRef, XlStrRef, XlValueRef, XlValueType};
 
@@ -2497,6 +2503,113 @@ mod tests {
                 })
             ));
         });
+    }
+
+    #[test]
+    fn borrowed_mixed_matrix_preserves_large_input_values_and_unicode() {
+        for text in ["text", "日本語💡"] {
+            let mut encoded = std::iter::once(text.encode_utf16().count() as u16)
+                .chain(text.encode_utf16())
+                .collect::<Vec<_>>();
+            let mut cells = (0..100_000)
+                .map(|index| match index % 5 {
+                    0 => XLOPER12::number(1.0),
+                    1 => XLOPER12 {
+                        value: XLOPER12Value {
+                            string: encoded.as_mut_ptr(),
+                        },
+                        xltype: XLTYPE_STR,
+                    },
+                    2 => XLOPER12::boolean(true),
+                    3 => XLOPER12::nil(),
+                    _ => XLOPER12::error(ExcelError::NotAvailable.code()),
+                })
+                .collect::<Vec<_>>();
+            let mut raw = XLOPER12 {
+                value: XLOPER12Value {
+                    array: XLOPER12Array {
+                        values: cells.as_mut_ptr(),
+                        rows: 10,
+                        columns: 10_000,
+                    },
+                },
+                xltype: XLTYPE_MULTI,
+            };
+
+            with_excel_call_scope(|scope| {
+                // SAFETY: the root, cells, and UTF-16 payload remain live for this scope.
+                let borrowed: MatrixRef<'_, ExcelCellRef<'_>> =
+                    unsafe { argument_from_raw(scope, "values", &mut raw) }.unwrap();
+                assert_eq!((borrowed.rows(), borrowed.columns()), (10, 10_000));
+                for (index, cell) in borrowed.iter().enumerate() {
+                    assert_eq!(
+                        *cell,
+                        match index % 5 {
+                            0 => ExcelCellRef::Number(1.0),
+                            1 => ExcelCellRef::String(text),
+                            2 => ExcelCellRef::Boolean(true),
+                            3 => ExcelCellRef::Blank,
+                            _ => ExcelCellRef::Error(ExcelError::NotAvailable),
+                        }
+                    );
+                }
+                #[cfg(feature = "bench-internals")]
+                assert!(
+                    scope.scratch().allocated_bytes()
+                        < 2 * cells.len() * std::mem::size_of::<ExcelCellRef<'_>>(),
+                    "short mixed-cell strings must not allocate another matrix-sized arena chunk",
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn borrowed_mixed_matrix_keeps_owned_payload_validation_and_error_order() {
+        let mut text = [1_u16, 0xd800];
+        let malformed_text = XLOPER12 {
+            value: XLOPER12Value {
+                string: text.as_mut_ptr(),
+            },
+            xltype: XLTYPE_STR,
+        };
+        for (mut cells, expected) in [
+            (
+                [malformed_text, XLOPER12::number(f64::NAN)],
+                InputError::InvalidUtf16,
+            ),
+            (
+                [XLOPER12::number(f64::INFINITY), malformed_text],
+                InputError::NonFinite,
+            ),
+            (
+                [XLOPER12::error(i32::MAX), malformed_text],
+                InputError::Malformed("unknown error code"),
+            ),
+        ] {
+            let mut raw = XLOPER12 {
+                value: XLOPER12Value {
+                    array: XLOPER12Array {
+                        values: cells.as_mut_ptr(),
+                        rows: 1,
+                        columns: 2,
+                    },
+                },
+                xltype: XLTYPE_MULTI,
+            };
+            let owned = convert::<Matrix<ExcelCellValue>>(&mut raw).unwrap_err();
+            with_excel_call_scope(|scope| {
+                // SAFETY: the root, cells, and UTF-16 payload remain live for this scope.
+                let borrowed = unsafe {
+                    argument_from_raw::<MatrixRef<'_, ExcelCellRef<'_>>>(scope, "arg", &mut raw)
+                }
+                .unwrap_err();
+                assert!(matches!(
+                    &borrowed,
+                    XllError::Input { argument: "arg", reason } if *reason == expected
+                ));
+                assert_eq!(borrowed.to_string(), owned.to_string());
+            });
+        }
     }
 
     #[test]

@@ -728,9 +728,13 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
         argument: &'static str,
         value: XlValueRef<'call>,
     ) -> XllResult<PreparedArgument<T, T::Prepared>> {
-        let fingerprint = self.inputs.as_mut().ok_or(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::INPUT_FINGERPRINT,
-        })?;
+        // Construct the drop-bearing error only on failure. An eager `ok_or`
+        // leaves an unnecessary XllError destructor call on each valid input.
+        let Some(fingerprint) = self.inputs.as_mut() else {
+            return Err(XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::INPUT_FINGERPRINT,
+            });
+        };
         M::with_argument(fingerprint, index, argument, |identity| {
             T::prepare(value, argument, &self.call, identity)
         })
@@ -745,9 +749,11 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
     where
         T: ExcelParameter<'call, M>,
     {
-        let fingerprint = self.inputs.as_mut().ok_or(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::INPUT_FINGERPRINT,
-        })?;
+        let Some(fingerprint) = self.inputs.as_mut() else {
+            return Err(XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::INPUT_FINGERPRINT,
+            });
+        };
         let call = &self.call;
         M::with_argument(fingerprint, index, argument, |identity| {
             T::decode(value, argument, call, identity)
@@ -762,9 +768,11 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
         value: XlValueRef<'call>,
         generation: crate::generation::RuntimeGeneration,
     ) -> XllResult<crate::handle::PendingHandleLease<T>> {
-        let fingerprint = self.inputs.as_mut().ok_or(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::INPUT_FINGERPRINT,
-        })?;
+        let Some(fingerprint) = self.inputs.as_mut() else {
+            return Err(XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::INPUT_FINGERPRINT,
+            });
+        };
         let call = &self.call;
         M::with_argument(fingerprint, index, argument, |identity| {
             let pending = crate::handle::with_utf16_handle_token(
@@ -787,11 +795,36 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
     where
         T: ExcelParameter<'call, M>,
     {
-        let fingerprint = self.inputs.as_mut().ok_or(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::INPUT_FINGERPRINT,
-        })?;
+        let Some(fingerprint) = self.inputs.as_mut() else {
+            return Err(XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::INPUT_FINGERPRINT,
+            });
+        };
         M::with_argument(fingerprint, index, argument, |identity| {
             T::encode_decoded(value, identity);
+            Ok(())
+        })
+    }
+
+    pub(crate) fn record_numeric_matrix(
+        &mut self,
+        index: usize,
+        argument: &'static str,
+        value: super::NumericMatrixRef<'call>,
+    ) -> XllResult<()> {
+        let Some(fingerprint) = self.inputs.as_mut() else {
+            return Err(XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::INPUT_FINGERPRINT,
+            });
+        };
+        M::with_argument(fingerprint, index, argument, |identity| {
+            M::u64(identity, value.rows() as u64);
+            M::u64(identity, value.columns() as u64);
+            if M::RECORDS_IDENTITY {
+                for number in value.as_slice() {
+                    M::f64(identity, *number);
+                }
+            }
             Ok(())
         })
     }

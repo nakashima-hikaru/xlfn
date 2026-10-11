@@ -85,10 +85,60 @@ fn sum_borrowed(values: XlArrayRef<'_>) -> XllResult<f64> {
 example, `MatrixRef<'_, &str>` avoids a separate owned string for each cell.
 Neither borrowed view can escape the call or be an async argument.
 
+Use `MatrixRef<'_, ExcelCellRef<'_>>` to retain the distinctions between
+numbers, strings, Booleans, blanks, and errors without owning each string:
+
+```rust
+{{#include ../fixtures/addin.md}}
+use xlfn::prelude::*;
+
+#[excel_function(name = "ARRAY.COUNT.STRINGS", thread_safe)]
+fn count_strings(values: MatrixRef<'_, ExcelCellRef<'_>>) -> f64 {
+    values.iter().filter(|cell| matches!(cell, ExcelCellRef::String(_))).count() as f64
+}
+```
+
+This view still validates every cell and decodes UTF-16 text into call-local
+UTF-8 scratch. It avoids per-cell owned strings, rather than borrowing Excel's
+text buffer as UTF-8.
+
 A synchronous handle producer accepting `MatrixRef<'_, f64>` validates and
 identifies the input on every recalculation, but creates the scratch slice only
 when it needs to run the function. Reusing its cached object avoids copying the
 numeric cells into scratch.
+
+### Borrow a numeric range directly
+
+Use `NumericMatrixRef<'_>` when Excel's numeric coercion is appropriate. Its
+argument uses Excel's `K%` registration type and borrows the contiguous FP12
+double buffer. xlfn validates dimensions, size limits, and finite numbers, then
+passes the borrowed slice to your function without allocating or copying a
+typed matrix.
+
+```rust
+{{#include ../fixtures/addin.md}}
+use xlfn::prelude::*;
+
+#[excel_function(name = "ARRAY.SUM.NUMERIC", thread_safe)]
+fn sum_numeric(values: NumericMatrixRef<'_>) -> f64 {
+    values.iter().copied().sum()
+}
+```
+
+Excel coerces this argument before invoking Rust. Blank cells become zero;
+inputs that Excel cannot coerce into a numeric array return a worksheet error
+without calling the function. The function cannot inspect original text,
+Boolean, blank, missing, or error cell types. `NumericMatrixRef` therefore
+cannot use `excel_arg` presence/default/reference policies. Keep `Matrix<f64>`
+or `MatrixRef<'_, f64>` when strict xlfn conversion is required, and use mixed
+cell views when the original cell distinctions matter.
+
+Read dimensions with `shape()`, `rows()`, and `columns()`, and access elements
+with `as_slice()`, `iter()`, `row()`, or checked `get(row, column)`. The buffer
+exists only during the synchronous call and cannot be an async argument.
+Returns continue to use xlfn's ordinary value ABI, which preserves error and
+panic handling for functions accepting numeric arrays. Opting into the FP12
+input ABI does not opt into FP12 output or change scalar parameter conversion.
 
 ### Build a large result incrementally
 
@@ -117,6 +167,26 @@ fn doubled(values: XlArrayRef<'_>) -> XllResult<XlArrayOutput> {
 
 The builder rejects non-finite output as `#NUM!` and checks dimensions and
 return-storage limits.
+
+For an existing row-major numeric slice,
+`XlArrayBuilder::from_f64(rows, columns, values)?.finish()` validates and
+encodes it directly without an intermediate owned `Matrix`.
+
+```rust
+{{#include ../fixtures/addin.md}}
+use xlfn::prelude::*;
+use xlfn::output::{XlArrayBuilder, XlArrayOutput};
+
+#[excel_function(name = "ARRAY.COPY.NUMERIC", thread_safe)]
+fn copy_numeric(values: NumericMatrixRef<'_>) -> XllResult<XlArrayOutput> {
+    XlArrayBuilder::from_f64(values.rows(), values.columns(), values.as_slice())?.finish()
+}
+```
+
+The bulk constructor requires the slice length to match the requested shape
+and rejects non-finite numbers. It writes ordinary Excel value cells into owned
+return storage, preserving the same error handling and `xlAutoFree12` cleanup
+as other array results.
 
 ### Reuse a large dataset across formulas
 

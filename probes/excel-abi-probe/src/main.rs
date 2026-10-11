@@ -5,9 +5,9 @@ use std::mem::{align_of, offset_of, size_of};
 
 #[cfg(feature = "sdk-bindgen")]
 use xlfn_sys::{
-    IDSHEET, XL_ASYNC_RETURN, XL_EVENT_REGISTER, XLBIT_DLL_FREE, XLEVENT_CALCULATION_CANCELED,
-    XLEVENT_CALCULATION_ENDED, XLF_REGISTER, XLF_UNREGISTER, XLOPER12, XLOPER12Array, XLOPER12Flow,
-    XLOPER12FlowValue, XLOPER12MRef, XLOPER12SRef, XLREF12,
+    FP12, IDSHEET, XL_ASYNC_RETURN, XL_EVENT_REGISTER, XLBIT_DLL_FREE,
+    XLEVENT_CALCULATION_CANCELED, XLEVENT_CALCULATION_ENDED, XLF_REGISTER, XLF_UNREGISTER,
+    XLOPER12, XLOPER12Array, XLOPER12Flow, XLOPER12FlowValue, XLOPER12MRef, XLOPER12SRef, XLREF12,
 };
 
 #[cfg(feature = "sdk-bindgen")]
@@ -24,6 +24,9 @@ mod sdk {
 
 #[cfg(feature = "sdk-bindgen")]
 unsafe extern "C" {
+    fn xlfn_probe_fp12_size() -> usize;
+    fn xlfn_probe_fp12_align() -> usize;
+    fn xlfn_probe_fp12_array_offset() -> usize;
     fn xlfn_probe_xloper12_size() -> usize;
     fn xlfn_probe_xloper12_align() -> usize;
     fn xlfn_probe_xloper12_xltype_offset() -> usize;
@@ -52,6 +55,12 @@ unsafe extern "C" {
 #[cfg(feature = "sdk-bindgen")]
 fn get_rust_probe_values() -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
+    map.insert("FP12.size".into(), size_of::<FP12>().to_string());
+    map.insert("FP12.align".into(), align_of::<FP12>().to_string());
+    map.insert(
+        "FP12.array.offset".into(),
+        offset_of!(FP12, array).to_string(),
+    );
     map.insert("XLOPER12.size".into(), size_of::<XLOPER12>().to_string());
     map.insert("XLOPER12.align".into(), align_of::<XLOPER12>().to_string());
     map.insert(
@@ -126,6 +135,12 @@ fn get_native_probe_values() -> BTreeMap<String, String> {
     // SAFETY: build.rs links these functions from native/probe.cpp, compiled
     // against the exact XLCALL.H selected by XLFN_SDK_INCLUDE.
     unsafe {
+        map.insert("FP12.size".into(), xlfn_probe_fp12_size().to_string());
+        map.insert("FP12.align".into(), xlfn_probe_fp12_align().to_string());
+        map.insert(
+            "FP12.array.offset".into(),
+            xlfn_probe_fp12_array_offset().to_string(),
+        );
         map.insert(
             "XLOPER12.size".into(),
             xlfn_probe_xloper12_size().to_string(),
@@ -216,6 +231,12 @@ fn get_native_probe_values() -> BTreeMap<String, String> {
 #[cfg(feature = "sdk-bindgen")]
 fn get_bindgen_probe_values() -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
+    map.insert("FP12.size".into(), size_of::<sdk::FP12>().to_string());
+    map.insert("FP12.align".into(), align_of::<sdk::FP12>().to_string());
+    map.insert(
+        "FP12.array.offset".into(),
+        offset_of!(sdk::FP12, array).to_string(),
+    );
     map.insert(
         "XLOPER12.size".into(),
         size_of::<sdk::XLOPER12>().to_string(),

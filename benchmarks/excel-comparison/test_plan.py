@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import gc
 import struct
 import tempfile
 import threading
 import time
 from typing import Any
 import unittest
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -29,20 +31,82 @@ def atomic_write_json(path: Path, payload: Any) -> None:
 
 
 class PlanTest(unittest.TestCase):
-    def test_teardown_failure_survives_successful_fallback_quit(self):
+    def test_close_releases_excel_references_including_cycles_before_worker_exit(self):
+        calls = []
+
+        class App:
+            def __init__(self):
+                self.RTD = SimpleNamespace(ThrottleInterval=100)
+                self.MultiThreadedCalculation = SimpleNamespace()
+                self.cycle = self
+
+            def Quit(self):
+                calls.append("quit")
+
+        class Book:
+            def __init__(self, app, name):
+                self.app, self.name = app, name
+                self.cycle = self
+
+            def Close(self, **kwargs):
+                calls.append(self.name)
+
         session = object.__new__(ExcelSession)
         session.progress = None
         session._stop_sampler = Mock()
         session._sampler = Mock()
-        session.close_book = Mock(side_effect=RuntimeError("workbook close failed"))
-        session.app = Mock()
-        with self.assertRaisesRegex(RuntimeError, "workbook close failed"):
+        session.app = App()
+        session.book = Book(session.app, "book")
+        session.bootstrap_book = Book(session.app, "bootstrap")
+        session.original_throttle = 2000
+        session.original_threads = 1
+        session.original_thread_mode = 0
+        session.original_mtr_enabled = True
+        session.original_calculation = XL_AUTOMATIC
+        references = [weakref.ref(value) for value in
+                      (session.app, session.book, session.bootstrap_book)]
+        # Require close itself to collect wrapper cycles, independently of
+        # Python's automatic collection or interpreter shutdown.
+        enabled = gc.isenabled()
+        gc.disable()
+        try:
             session.close()
-        session.app.Quit.assert_called_once_with()
-        self.assertEqual(session.last_stage, "close_failed")
-        session.app.Quit.side_effect = RuntimeError("quit also failed")
-        with self.assertRaisesRegex(RuntimeError, "workbook close failed.*quit also failed"):
-            session.close()
+            self.assertEqual(calls, ["book", "bootstrap", "quit"])
+            self.assertTrue(all(reference() is None for reference in references))
+            self.assertIsNone(session.app)
+            self.assertIsNone(session.bootstrap_book)
+            self.assertIsNone(session.book)
+            self.assertEqual(session.last_stage, "closed")
+        finally:
+            if enabled:
+                gc.enable()
+
+    def test_teardown_failure_survives_successful_fallback_quit(self):
+        for quit_error in (None, RuntimeError("quit also failed")):
+            with self.subTest(quit_error=quit_error):
+                session = object.__new__(ExcelSession)
+                session.progress = None
+                session._stop_sampler = Mock()
+                session._sampler = Mock()
+                session.close_book = Mock(side_effect=RuntimeError("workbook close failed"))
+                session.app = app = Mock()
+                session.bootstrap_book = bootstrap = Mock()
+                session.book = Mock()
+                session.original_throttle = 2000
+                session.original_threads = 1
+                session.original_thread_mode = 0
+                session.original_mtr_enabled = True
+                session.original_calculation = XL_AUTOMATIC
+                app.Quit.side_effect = quit_error
+                detail = "workbook close failed" + (".*quit also failed" if quit_error else "")
+                with self.assertRaisesRegex(RuntimeError, detail):
+                    session.close()
+                self.assertEqual(app.Quit.call_count, 2 if quit_error else 1)
+                bootstrap.Close.assert_called_once_with(SaveChanges=False)
+                self.assertEqual(session.last_stage, "close_failed")
+                self.assertIsNone(session.app)
+                self.assertIsNone(session.book)
+                self.assertIsNone(session.bootstrap_book)
 
     def test_worker_close_cannot_preserve_ok_or_hide_execution_failure(self):
         for original_error in (None, "original execution failed"):

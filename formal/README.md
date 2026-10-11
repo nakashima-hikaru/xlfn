@@ -115,6 +115,16 @@ follows both `ExportIngress::seal_and_drain` and
 `Runtime::wait_for_returns`. Subscription teardown is separate from host
 registration detachment, and RTD module quiescence is separate from both.
 
+The return resource projection counts DLL-owned result blocks and their free
+callbacks. Primitive numeric, Boolean, and error results instead use
+process-owned roots with no payload, destructor, or callback into the XLL.
+They create no `CreateReturnBlock` event or return obligation. Windows keeps
+one process-heap root per publishing thread and loaded module instance; it
+survives thread exit and physical unload. This retained memory is outside
+generation reclamation and the Shutdown resource counters. The TLS publication
+contract relies on Excel consuming a root before its next worksheet evaluation
+on that thread; the model does not prove that external Excel contract.
+
 `Resources` contains only evidence available to the framework or supplied by
 an explicit Add-in contract:
 

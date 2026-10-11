@@ -23,6 +23,7 @@ use xlfn_sys::{XLBIT_DLL_FREE, XLOPER12, XLOPER12Array, XLOPER12Value, XLTYPE_MU
 
 pub(crate) mod array;
 pub(crate) mod conversion;
+mod detached_scalar;
 pub(crate) mod metadata;
 pub(crate) mod ownership;
 pub(crate) mod scalar;
@@ -191,7 +192,23 @@ impl PreparedReturn {
         }
     }
 
-    fn publish_excel(mut self, producer: &mut ReturnProducerGuard<'static>) -> *mut XLOPER12 {
+    fn publish_excel(self, producer: &mut ReturnProducerGuard<'static>) -> *mut XLOPER12 {
+        if self.storage.is_none()
+            && self.array.is_none()
+            && matches!(
+                self.oper.base_type(),
+                xlfn_sys::XLTYPE_NUM | xlfn_sys::XLTYPE_BOOL | xlfn_sys::XLTYPE_ERR
+            )
+        {
+            // Excel consumes a thread-local primitive before evaluating the
+            // next cell on that thread. Its process-owned root has no payload
+            // or destructor and remains valid across physical XLL unload.
+            return detached_scalar::publish(self.oper);
+        }
+        self.publish_owned_excel(producer)
+    }
+
+    fn publish_owned_excel(mut self, producer: &mut ReturnProducerGuard<'static>) -> *mut XLOPER12 {
         let obligation = producer.transfer_to_block();
         self.oper.xltype |= XLBIT_DLL_FREE;
 
@@ -278,22 +295,25 @@ fn enforce_return_limit(bytes: usize) -> XllResult<()> {
     }
 }
 
+#[cfg(test)]
 fn allocate_excel_owned(
     value: ReturnPayload,
     producer: &mut ReturnProducerGuard<'static>,
 ) -> XllResult<*mut XLOPER12> {
     let prepared = PreparedReturn::encode(value)?;
-    Ok(prepared.publish_excel(producer))
+    Ok(prepared.publish_owned_excel(producer))
 }
 
+#[cfg(test)]
 fn allocate_excel_error(
     error: &XllError,
     producer: &mut ReturnProducerGuard<'static>,
 ) -> *mut XLOPER12 {
-    PreparedReturn::error(error).publish_excel(producer)
+    PreparedReturn::error(error).publish_owned_excel(producer)
 }
 
-static CLOSING_ERROR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+static CLOSING_ERROR: std::sync::OnceLock<detached_scalar::PermanentRoot> =
+    std::sync::OnceLock::new();
 
 pub(crate) fn closing_error_pointer() -> *mut XLOPER12 {
     // Return admission is already closed, so publishing another DLL-free block
@@ -301,12 +321,11 @@ pub(crate) fn closing_error_pointer() -> *mut XLOPER12 {
     // xlAutoFree12 callback and remains valid even if Excel keeps the pointer
     // until after the XLL has been unmapped.
     // Use a process-wide static singleton to prevent memory leaks on repeated late calls.
-    let ptr = *CLOSING_ERROR.get_or_init(|| {
-        Box::into_raw(Box::new(XLOPER12::error(
-            XllError::Closing.excel_error().code(),
-        ))) as usize
-    });
-    ptr as *mut XLOPER12
+    CLOSING_ERROR
+        .get_or_init(|| {
+            detached_scalar::permanent(XLOPER12::error(XllError::Closing.excel_error().code()))
+        })
+        .pointer()
 }
 
 /// Owns a value only for the synchronous `xlAsyncReturn` callback.
@@ -437,7 +456,7 @@ where
             if !producer.is_armed() {
                 std::process::abort();
             }
-            allocate_excel_error(&XllError::Panic, &mut producer)
+            PreparedReturn::error(&XllError::Panic).publish_excel(&mut producer)
         }
     };
     drop(producer);
@@ -504,7 +523,7 @@ where
     match prepared {
         Ok(prepared) => prepared.publish_excel(producer),
         Err(error) => {
-            crate::diagnostics::report_no_unwind(udf_id, &error);
+            crate::diagnostics::report_udf_failure_no_unwind(udf_id, &error);
             PreparedReturn::error(&error).publish_excel(producer)
         }
     }
@@ -559,12 +578,12 @@ where
         match crate::execution::enter_layers(guard.layers(), &layer_metadata) {
             Ok(layers) => Some(layers),
             Err(error) => {
-                crate::diagnostics::report_no_unwind(udf_id, &error);
+                crate::diagnostics::report_udf_failure_no_unwind(udf_id, &error);
                 let outcome = CallOutcome::from_error(&error, timer.elapsed());
                 if instrumentation.trace_enabled() {
                     crate::execution::trace(&trace_metadata, &outcome);
                 }
-                return allocate_excel_error(&error, producer);
+                return PreparedReturn::error(&error).publish_excel(producer);
             }
         }
     } else {
@@ -588,7 +607,7 @@ where
             prepared.publish_excel(producer)
         }
         Err(error) => {
-            crate::diagnostics::report_no_unwind(udf_id, &error);
+            crate::diagnostics::report_udf_failure_no_unwind(udf_id, &error);
             let outcome = CallOutcome::from_error(&error, timer.elapsed());
             if let Some(layers) = layers {
                 crate::execution::exit_layers(layers, &outcome);
@@ -605,8 +624,9 @@ where
 ///
 /// # Safety
 ///
-/// `pointer` must be null or the exact live pointer returned by this crate.
-/// It must be freed exactly once.
+/// `pointer` must be null or the exact live root returned by this crate.
+/// A root with `XLBIT_DLL_FREE` must be freed exactly once. A primitive root
+/// without that bit has no cleanup obligation and this function is a no-op.
 pub(crate) unsafe fn free_return(pointer: *mut XLOPER12) {
     // SAFETY: caller contract guarantees pointer is a live return pointer or null.
     let operation = unsafe { enter_return_free_operation(pointer) };
@@ -632,14 +652,17 @@ pub(crate) unsafe fn free_return_boundary(pointer: *mut XLOPER12) -> ReturnFreeB
     }
 }
 
+#[cfg(test)]
 fn is_detached_error_pointer(pointer: *mut XLOPER12) -> bool {
     CLOSING_ERROR
         .get()
-        .is_some_and(|static_ptr| pointer.addr() == *static_ptr)
+        .is_some_and(|root| pointer == root.pointer())
 }
 
 unsafe fn enter_return_free_operation(pointer: *mut XLOPER12) -> Option<ReturnFreeGuard> {
-    if pointer.is_null() || is_detached_error_pointer(pointer) {
+    // SAFETY: The caller supplies a live root or null. Primitive roots carry
+    // no free bit, and must never be interpreted as an owning ReturnBlock.
+    if pointer.is_null() || unsafe { (*pointer).xltype & XLBIT_DLL_FREE == 0 } {
         return None;
     }
     let block = pointer.cast::<ReturnBlock>();
@@ -657,12 +680,12 @@ unsafe fn enter_return_free_operation(pointer: *mut XLOPER12) -> Option<ReturnFr
 }
 
 unsafe fn free_return_block(pointer: *mut XLOPER12, operation: Option<&ReturnFreeGuard>) {
+    let Some(operation) = operation else {
+        return;
+    };
     let Some(pointer) = NonNull::new(pointer) else {
         return;
     };
-    if is_detached_error_pointer(pointer.as_ptr()) {
-        return;
-    }
     let mut block_pointer = pointer.cast::<ReturnBlock>();
     // SAFETY: caller contract guarantees pointer refers to a live
     // ReturnBlock produced by publish_excel or its heap fallback.
@@ -670,7 +693,6 @@ unsafe fn free_return_block(pointer: *mut XLOPER12, operation: Option<&ReturnFre
     debug_assert_eq!(block.magic, RETURN_MAGIC);
 
     debug_assert!(block.obligation.is_none());
-    let operation = operation.expect("Excel return destruction owns a free guard");
     operation.obligation.observe_release_block();
 
     let backing = block.backing;
@@ -840,6 +862,178 @@ mod tests {
         runtime.finish_open(&mut open_attempt, Vec::new()).unwrap();
         drop(open_attempt);
         fixture
+    }
+
+    #[test]
+    fn miri_generated_primitive_returns_reuse_a_root_without_free_callbacks() {
+        let _test = test_lock();
+        let fixture = open_static_test_runtime();
+        let runtime = fixture.runtime();
+        let number = udf_boundary_named(runtime, "scalar", "SCALAR", |_, _| {
+            ReturnPayload::scalar(-0.0)
+        });
+        // SAFETY: The root is the initialized result of this boundary, and
+        // Excel consumes it before the next same-thread publication below.
+        let value = unsafe { &*number };
+        assert_eq!(value.xltype, XLTYPE_NUM);
+        // SAFETY: The checked tag selects the initialized numeric field.
+        let number_bits = unsafe { value.value.number }.to_bits();
+        assert_eq!(number_bits, (-0.0_f64).to_bits());
+        assert!(runtime.returns_are_quiescent());
+
+        let boolean = udf_boundary_named(runtime, "scalar", "SCALAR", |_, _| {
+            ReturnPayload::scalar(true)
+        });
+        assert_eq!(boolean, number);
+        // SAFETY: This root now contains the latest boolean publication.
+        let value = unsafe { &*boolean };
+        assert_eq!(value.xltype, xlfn_sys::XLTYPE_BOOL);
+        // SAFETY: The checked tag selects the initialized Boolean field.
+        assert_eq!(unsafe { value.value.boolean }, 1);
+        let error = udf_boundary_named(runtime, "scalar", "SCALAR", |_, _| {
+            ReturnPayload::scalar(ExcelError::NotAvailable)
+        });
+        assert_eq!(error, number);
+        // SAFETY: The latest publication initialized the error union member.
+        let value = unsafe { &*error };
+        assert_eq!(value.xltype, XLTYPE_ERR);
+        // SAFETY: The checked tag selects the initialized error field.
+        let error_code = unsafe { value.value.error };
+        assert_eq!(error_code, ExcelError::NotAvailable.code());
+        // SAFETY: This is a live scalar root. Defensive cleanup must not cast
+        // the detached scalar to ReturnBlock.
+        assert!(unsafe { enter_return_free_operation(error) }.is_none());
+        // SAFETY: This live root carries no free bit, so cleanup is a no-op.
+        unsafe { free_return(error) };
+        assert!(runtime.returns_are_quiescent());
+    }
+
+    #[test]
+    fn miri_nested_udf_consumes_inner_scalar_before_outer_publication() {
+        let _test = test_lock();
+        let fixture = open_static_test_runtime();
+        let runtime = fixture.runtime();
+        let inner_address = Cell::new(0);
+        let outer = udf_boundary_named(runtime, "outer", "OUTER", |_, _| {
+            let inner = udf_boundary_named(runtime, "inner", "INNER", |_, _| {
+                ReturnPayload::scalar(17.0)
+            });
+            inner_address.set(inner.addr());
+            // SAFETY: The inner result is consumed while the outer operation
+            // is still running, before that outer result is published.
+            let inner_root = unsafe { &*inner };
+            // SAFETY: The inner boundary encoded a numeric scalar.
+            let inner_value = unsafe { inner_root.value.number };
+            assert_eq!(inner_value, 17.0);
+            ReturnPayload::scalar(inner_value + 25.0)
+        });
+        assert_eq!(outer.addr(), inner_address.get());
+        // SAFETY: The outer result is now the latest initialized publication.
+        let value = unsafe { &*outer };
+        // SAFETY: The outer boundary encoded a numeric scalar.
+        assert_eq!(unsafe { value.value.number }, 42.0);
+        assert!(runtime.returns_are_quiescent());
+    }
+
+    #[test]
+    fn miri_primitive_roots_remain_readable_after_thread_exit_and_terminal_close() {
+        struct JoinedRoot(*mut XLOPER12);
+        // SAFETY: This test never reads a transferred root until the producing
+        // thread has joined, and that thread can no longer rewrite it. The
+        // pointee remains allocated independently of the terminated thread.
+        unsafe impl Send for JoinedRoot {}
+
+        let _test = test_lock();
+        let fixture = open_static_test_runtime();
+        let runtime = fixture.runtime();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::scope(|scope| {
+            for value in [11.0, 22.0] {
+                let sender = sender.clone();
+                scope.spawn(move || {
+                    let root = udf_boundary_named(runtime, "thread", "THREAD", |_, _| {
+                        ReturnPayload::scalar(value)
+                    });
+                    sender.send((JoinedRoot(root), value)).unwrap();
+                });
+            }
+        });
+        drop(sender);
+        let roots: Vec<_> = receiver.into_iter().collect();
+        assert_ne!(roots[0].0.0, roots[1].0.0);
+        assert!(runtime.returns_are_quiescent());
+        assert_eq!(crate::boundary::host::host_auto_remove(runtime), 1);
+        for (pointer, expected) in roots {
+            // SAFETY: These roots own process-lifetime memory independent of
+            // both the terminated threads and the removed runtime generation.
+            let root = unsafe { &*pointer.0 };
+            assert_eq!(root.xltype, XLTYPE_NUM);
+            // SAFETY: The checked tag selects the initialized number field.
+            assert_eq!(unsafe { root.value.number }, expected);
+        }
+    }
+
+    #[test]
+    fn generated_owned_returns_still_hold_cleanup_obligations() {
+        let _test = test_lock();
+        let fixture = open_static_test_runtime();
+        let runtime = fixture.runtime();
+        let root = udf_boundary_named(runtime, "text", "TEXT", |_, _| {
+            ReturnPayload::scalar("owned text")
+        });
+        // SAFETY: This returned root owns counted UTF-16 storage.
+        assert_ne!(unsafe { (*root).xltype } & XLBIT_DLL_FREE, 0);
+        assert!(!runtime.returns_are_quiescent());
+        // SAFETY: Excel would return this live owned root exactly once.
+        unsafe { free_return(root) };
+        assert!(runtime.returns_are_quiescent());
+    }
+
+    #[test]
+    fn miri_primitive_root_survives_the_physical_unload_release_path() {
+        struct EmptyPhysicalAddin;
+        impl Addin for EmptyPhysicalAddin {
+            type SharedState = ();
+            type LifecycleState = ();
+            type Error = XllError;
+            type Layers = ();
+            #[cfg(feature = "async")]
+            type AsyncExecutor = crate::NoAsyncExecutor;
+
+            fn open(_: &OpenContext) -> crate::OpenResult<Self> {
+                Ok(crate::Opened::new(()))
+            }
+        }
+        // SAFETY: This fixture has no application state or executable sources.
+        unsafe impl crate::PhysicallyUnloadableAddin for EmptyPhysicalAddin {}
+
+        let _test = test_lock();
+        let runtime = Box::leak(Box::new(
+            Runtime::<EmptyPhysicalAddin>::new_with_physical_unload(),
+        ));
+        runtime
+            .ensure_module_residency(
+                crate::boundary::host::host_auto_close::<EmptyPhysicalAddin> as *const (),
+            )
+            .unwrap();
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish(opening, (), ());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        drop(opening);
+        let root = udf_boundary_named(runtime, "physical", "PHYSICAL", |_, _| {
+            ReturnPayload::scalar(42.0)
+        });
+        assert!(runtime.module_residency_held());
+        assert!(runtime.returns_are_quiescent());
+        assert_eq!(crate::boundary::host::host_auto_remove(runtime), 1);
+        assert_eq!(crate::boundary::host::host_auto_close(runtime), 1);
+        assert!(!runtime.module_residency_held());
+        // SAFETY: The primitive lives in process-owned memory. This test
+        // exercises residency release, not actual test-binary unmapping.
+        let value = unsafe { &*root };
+        assert_eq!(value.xltype, XLTYPE_NUM);
+        // SAFETY: The checked tag selects the initialized numeric field.
+        assert_eq!(unsafe { value.value.number }, 42.0);
     }
 
     fn allocate_excel_for_test(
@@ -1684,7 +1878,7 @@ mod tests {
 
         let ptr = PreparedReturn::encode(ReturnPayload::scalar(42.0).unwrap())
             .unwrap()
-            .publish_excel(&mut producer);
+            .publish_owned_excel(&mut producer);
         assert_eq!(tracker.outstanding_obligations(), 1);
         drop(producer);
         assert_eq!(tracker.outstanding_obligations(), 1);
@@ -1745,7 +1939,7 @@ mod tests {
     }
 
     #[test]
-    fn panic_error_uses_same_obligation() {
+    fn generated_panic_error_releases_producer_without_cleanup_obligation() {
         let _test = test_lock();
         let fixture = open_static_test_runtime();
         let runtime = fixture.runtime();
@@ -1758,11 +1952,12 @@ mod tests {
         );
 
         let tracker = runtime.return_tracker();
-        assert_eq!(tracker.outstanding_obligations(), 1);
+        assert_eq!(tracker.outstanding_obligations(), 0);
 
-        // SAFETY: ptr is a live panic error ReturnBlock produced by udf_boundary_named above.
+        // SAFETY: ptr is a live process-owned panic error scalar; defensive
+        // cleanup is a no-op and must not create a ReturnFree obligation.
         let free_guard = unsafe { free_return_boundary(ptr) };
-        assert_eq!(tracker.outstanding_obligations(), 1);
+        assert_eq!(tracker.outstanding_obligations(), 0);
         drop(free_guard);
         assert_eq!(tracker.outstanding_obligations(), 0);
     }

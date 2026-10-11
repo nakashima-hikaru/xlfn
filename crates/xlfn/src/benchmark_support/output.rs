@@ -54,8 +54,13 @@ impl ScalarOutputBenchmark {
             "scalar benchmark must encode successfully"
         );
         std::hint::black_box(pointer);
-        // SAFETY: return this framework-owned allocation exactly once.
-        let _ = unsafe { crate::return_abi::free_return_boundary(pointer) };
+        // SAFETY: Excel asks for cleanup only when the live root carries the
+        // DLL-free bit. Primitive roots require no callback.
+        let needs_free = unsafe { (*pointer).xltype & xlfn_sys::XLBIT_DLL_FREE != 0 };
+        if needs_free {
+            // SAFETY: This live root requests exactly one owning cleanup.
+            let _ = unsafe { crate::return_abi::free_return_boundary(pointer) };
+        }
     }
 }
 
@@ -109,6 +114,11 @@ impl NumericArrayOutputBenchmark {
 
     pub fn run_direct(&self) {
         self.run(|| self.build_direct());
+    }
+
+    /// Converts an existing borrowed numeric result without an intermediate matrix.
+    pub fn run_numeric_slice(&self, values: &[f64]) {
+        self.run(|| XlArrayBuilder::from_f64(values.len(), 1, values)?.finish());
     }
 
     pub fn run_prepared_matrix(&self, matrix: crate::value::Matrix<f64>) {

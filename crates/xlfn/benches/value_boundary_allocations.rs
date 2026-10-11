@@ -225,6 +225,27 @@ fn main() {
     assert_runtime_allocation_free("f64/plain", numbers);
 
     for cells in [1_000, 100_000] {
+        let mut mixed = RawArgumentIngressBenchmark::mixed_matrix(cells, 1, "text");
+        let owned = measure_calls(
+            &format!("mixed_matrix/{cells}/owned"),
+            ARRAY_OUTPUT_CALLS,
+            || mixed.run_plain::<xlfn::value::Matrix<xlfn::value::ExcelCellValue>>(),
+        );
+        let borrowed = measure_calls(
+            &format!("mixed_matrix/{cells}/borrowed"),
+            ARRAY_OUTPUT_CALLS,
+            || mixed.run_borrowed_mixed_cells(),
+        );
+        if !cfg!(feature = "refinement") {
+            assert!(
+                borrowed.allocations + borrowed.reallocations
+                    < owned.allocations + owned.reallocations,
+                "borrowed mixed cells must pool string storage rather than allocate per cell",
+            );
+        }
+    }
+
+    for cells in [1_000, 100_000] {
         let mut numeric = RawArgumentIngressBenchmark::number_matrix(cells, 1);
         let prepared = measure_calls(
             &format!("matrix_ref_f64_{cells}/prepare_identity"),

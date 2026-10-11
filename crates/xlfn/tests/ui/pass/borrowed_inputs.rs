@@ -28,6 +28,11 @@ fn borrowed_matrix(value: MatrixRef<'_, f64>) -> f64 {
     value.iter().copied().sum()
 }
 
+#[excel_function(name = "TEST.BORROWED.NUMERIC", thread_safe)]
+fn borrowed_numeric(value: NumericMatrixRef<'_>, factor: f64) -> f64 {
+    value.iter().copied().sum::<f64>() * factor
+}
+
 #[excel_function(name = "TEST.BORROWED.CELL", thread_safe)]
 fn borrowed_cell(value: ExcelCellRef<'_>) -> f64 {
     match value {

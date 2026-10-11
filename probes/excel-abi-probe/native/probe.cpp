@@ -11,6 +11,18 @@
 
 #include <cstddef>
 
+extern "C" std::size_t xlfn_probe_fp12_size() {
+    return sizeof(FP12);
+}
+
+extern "C" std::size_t xlfn_probe_fp12_align() {
+    return alignof(FP12);
+}
+
+extern "C" std::size_t xlfn_probe_fp12_array_offset() {
+    return offsetof(FP12, array);
+}
+
 extern "C" std::size_t xlfn_probe_xloper12_size() {
     return sizeof(XLOPER12);
 }

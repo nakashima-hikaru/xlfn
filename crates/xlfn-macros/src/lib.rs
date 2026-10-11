@@ -407,6 +407,47 @@ mod tests {
     }
 
     #[test]
+    fn numeric_matrix_registers_and_receives_fp12() {
+        let expanded = expand_excel_function(
+            quote!(name = "TEST.NUMERIC.MATRIX", thread_safe),
+            function(quote!(
+                fn numeric_matrix(values: xlfn::value::NumericMatrixRef<'_>, factor: f64) -> f64 {
+                    values.iter().copied().sum::<f64>() * factor
+                }
+            )),
+        )
+        .unwrap()
+        .to_string();
+        assert!(expanded.contains("ArgumentAbi :: NumericArray"));
+        assert!(expanded.contains("* const :: xlfn :: __private :: v1 :: FP12"));
+        assert!(expanded.contains("prepare_numeric_matrix"));
+        assert!(expanded.contains("prepare_argument :: < f64 >"));
+    }
+
+    #[test]
+    fn numeric_matrix_rejects_async_and_presence_policies() {
+        for source in [
+            quote!(
+                async fn numeric_matrix(values: NumericMatrixRef<'_>) -> f64 {
+                    0.0
+                }
+            ),
+            quote!(
+                fn numeric_matrix(#[excel_arg(blank = error)] values: NumericMatrixRef<'_>) -> f64 {
+                    0.0
+                }
+            ),
+            quote!(
+                fn numeric_matrix(values: &NumericMatrixRef<'_>) -> f64 {
+                    0.0
+                }
+            ),
+        ] {
+            assert!(expand_excel_function(quote!(), function(source)).is_err());
+        }
+    }
+
+    #[test]
     fn registration_and_argument_policies_expand_into_the_existing_descriptor() {
         let expanded = expand_excel_function(
             quote!(

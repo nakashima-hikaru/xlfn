@@ -27,7 +27,7 @@ fn main() {
         .clang_arg(format!("-I{}", sdk_include.display()))
         .clang_arg(format!("--target={target}"))
         .allowlist_type(
-            "^(IDSHEET|XLOPER12|XLOPER12Array|XLOPER12Flow|XLOPER12FlowValue|XLOPER12MRef|XLOPER12SRef|XLREF12|XLMREF12)$",
+            "^(FP12|IDSHEET|XLOPER12|XLOPER12Array|XLOPER12Flow|XLOPER12FlowValue|XLOPER12MRef|XLOPER12SRef|XLREF12|XLMREF12)$",
         )
         .allowlist_var("^(xl|xlf|xlerr|xlbit|xlevent).*")
         .derive_default(false)

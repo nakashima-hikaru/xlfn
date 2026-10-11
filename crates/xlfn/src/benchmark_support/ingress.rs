@@ -102,6 +102,43 @@ impl RawArgumentIngressBenchmark {
         }
     }
 
+    /// Mirrors the five-cell pattern used by the live Excel M05 workload.
+    /// The fixture retains counted UTF-16 source storage for every call.
+    pub fn mixed_matrix(rows: usize, columns: usize, text: &str) -> Self {
+        let mut encoded = std::iter::once(text.encode_utf16().count() as u16)
+            .chain(text.encode_utf16())
+            .collect::<Vec<_>>();
+        let mut cells = (0..rows * columns)
+            .map(|index| match index % 5 {
+                0 => xlfn_sys::XLOPER12::number(1.0),
+                1 => xlfn_sys::XLOPER12 {
+                    value: xlfn_sys::XLOPER12Value {
+                        string: encoded.as_mut_ptr(),
+                    },
+                    xltype: xlfn_sys::XLTYPE_STR,
+                },
+                2 => xlfn_sys::XLOPER12::boolean(true),
+                3 => xlfn_sys::XLOPER12::nil(),
+                _ => xlfn_sys::XLOPER12::error(crate::ExcelError::NotAvailable.code()),
+            })
+            .collect::<Vec<_>>();
+        let raw = xlfn_sys::XLOPER12 {
+            value: xlfn_sys::XLOPER12Value {
+                array: xlfn_sys::XLOPER12Array {
+                    rows: rows as i32,
+                    columns: columns as i32,
+                    values: cells.as_mut_ptr(),
+                },
+            },
+            xltype: xlfn_sys::XLTYPE_MULTI,
+        };
+        Self {
+            runtime: get_benchmark_runtime(),
+            raw,
+            _storage: Some(Box::new((cells, encoded))),
+        }
+    }
+
     pub fn number_matrix(rows: usize, columns: usize) -> Self {
         let len = rows * columns;
         let mut cells = (0..len)

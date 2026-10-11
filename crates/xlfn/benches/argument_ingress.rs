@@ -1,6 +1,7 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use xlfn::benchmark_support::{
-    BenchHandleObject, RawArgumentIngressBenchmark, benchmark_measurement_time,
+    BenchHandleObject, NumericMatrixIngressBenchmark, RawArgumentIngressBenchmark,
+    benchmark_measurement_time,
 };
 use xlfn::value::{ExcelCellValue, ExcelValue, Matrix};
 
@@ -98,6 +99,10 @@ fn argument_ingress_benchmarks(c: &mut Criterion) {
     group.bench_function("matrix_f64_100k/plain", |b| {
         b.iter(|| mat_100k.run_plain::<Matrix<f64>>());
     });
+    let mut numeric_100k = NumericMatrixIngressBenchmark::new(10, 10_000);
+    group.bench_function("numeric_matrix_ref_100k/plain", |b| {
+        b.iter(|| numeric_100k.run_plain());
+    });
     group.bench_function("matrix_f64_100k/with_identity", |b| {
         b.iter(|| mat_100k.run_with_identity::<Matrix<f64>>());
     });
@@ -162,6 +167,20 @@ fn argument_ingress_benchmarks(c: &mut Criterion) {
     group.bench_function("matrix_cells/matrix_borrowed", |b| {
         b.iter(|| mixed_borrowed.run_borrowed_mixed_cells());
     });
+    for (cells, size) in [(100, "100"), (10_000, "10k"), (100_000, "100k")] {
+        let columns = cells.min(10_000);
+        let rows = cells / columns;
+        for (text, label) in [("text", "ascii"), ("日本語💡", "unicode")] {
+            let mut owned = RawArgumentIngressBenchmark::mixed_matrix(rows, columns, text);
+            group.bench_function(format!("matrix_cells_{size}/{label}/owned"), |b| {
+                b.iter(|| owned.run_plain::<Matrix<ExcelCellValue>>());
+            });
+            let mut borrowed = RawArgumentIngressBenchmark::mixed_matrix(rows, columns, text);
+            group.bench_function(format!("matrix_cells_{size}/{label}/borrowed"), |b| {
+                b.iter(|| borrowed.run_borrowed_mixed_cells());
+            });
+        }
+    }
 
     // 11. Handle
     let mut handle_bench = RawArgumentIngressBenchmark::handle();

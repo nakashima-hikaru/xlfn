@@ -88,7 +88,7 @@ pub mod v1 {
     };
 
     #[doc(hidden)]
-    pub use xlfn_sys::XLOPER12;
+    pub use xlfn_sys::{FP12, XLOPER12};
 
     #[doc(hidden)]
     pub use inventory::submit as submit_registration;
@@ -586,6 +586,28 @@ pub mod v1 {
                     },
                 )?;
             self.arguments.prepare(index, name, borrowed)
+        }
+
+        /// Borrows Excel's FP12 argument while retaining input identity when required.
+        ///
+        /// # Safety
+        ///
+        /// `raw` is a live, immutable FP12 argument for this Excel invocation.
+        #[doc(hidden)]
+        #[allow(
+            unsafe_code,
+            reason = "FP12 input is borrowed at the generated ABI boundary"
+        )]
+        pub unsafe fn prepare_numeric_matrix(
+            &mut self,
+            index: usize,
+            name: &'static str,
+            raw: *const xlfn_sys::FP12,
+        ) -> XllResult<PreparedArgument<crate::value::NumericMatrixRef<'call>, ()>> {
+            // SAFETY: the generated wrapper forwards Excel's live FP12 argument.
+            let value = unsafe { crate::value::NumericMatrixRef::from_raw(raw, name) }?;
+            self.arguments.record_numeric_matrix(index, name, value)?;
+            Ok(PreparedArgument::Ready(value))
         }
 
         #[doc(hidden)]

@@ -75,6 +75,22 @@ impl XlArrayBuilder {
         })
     }
 
+    /// Encodes a complete row-major numeric slice into an array builder.
+    ///
+    /// Dimensions, the element count, and every number are validated. Cells
+    /// are written directly into the return buffer without an intermediate
+    /// [`Matrix<f64>`](crate::value::Matrix) or a capacity check per element.
+    pub fn from_f64(rows: usize, columns: usize, values: &[f64]) -> XllResult<Self> {
+        validate_matrix_dimensions(rows, columns, values.len())?;
+        let mut builder = Self::new(rows, columns)?;
+        for (cell, &value) in builder.cells.iter_mut().zip(values) {
+            let value = crate::value::output::validate_number(value)?;
+            cell.write(XLOPER12::number(value));
+        }
+        builder.initialized = values.len();
+        Ok(builder)
+    }
+
     fn ensure_capacity(&self) -> XllResult<()> {
         if self.initialized == self.cells.len() {
             return Err(XllError::input(
@@ -234,6 +250,41 @@ impl crate::value::output::ExcelCellSink for XlArrayBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numeric_slice_encoding_preserves_shape_and_values_without_string_storage() {
+        let values = [-0.0, 0.0, 1.5, -2.5, f64::MAX, f64::MIN];
+        let output = XlArrayBuilder::from_f64(2, 3, &values)
+            .unwrap()
+            .finish()
+            .unwrap();
+        assert_eq!((output.rows, output.columns), (2, 3));
+        assert!(output.storage.is_none());
+        for (cell, expected) in output.cells.iter().zip(values) {
+            assert_eq!(cell.xltype, xlfn_sys::XLTYPE_NUM);
+            // SAFETY: The checked tag selects the initialized numeric value.
+            assert_eq!(unsafe { cell.value.number }.to_bits(), expected.to_bits());
+        }
+    }
+
+    #[test]
+    fn numeric_slice_encoding_rejects_shape_and_non_finite_values() {
+        assert!(matches!(
+            XlArrayBuilder::from_f64(1, 2, &[1.0]),
+            Err(XllError::ElementCountMismatch { .. })
+        ));
+        assert!(XlArrayBuilder::from_f64(0, 1, &[]).is_err());
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(matches!(
+                XlArrayBuilder::from_f64(1, 2, &[1.0, value]),
+                Err(XllError::Domain {
+                    code: DomainErrorCode::InvalidInput
+                })
+            ));
+        }
+        let valid = XlArrayBuilder::from_f64(1, 2, &[1.0, 2.0]).unwrap();
+        assert!(valid.finish().is_ok());
+    }
 
     #[test]
     fn miri_mixed_array_text_survives_arena_growth_and_owner_moves() {

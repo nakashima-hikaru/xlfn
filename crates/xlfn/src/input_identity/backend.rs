@@ -217,6 +217,14 @@ impl InputIdentityEncoder {
     /// Adds a little-endian `u64`.
     #[inline]
     pub fn u64(&mut self, value: u64) {
+        self.write_u64(value);
+    }
+
+    // Preserve a fixed-width numeric body even when strings share the byte
+    // writer. This boundary also keeps buffer-management code out of each
+    // numeric caller while write itself specializes the eight-byte copy.
+    #[inline(never)]
+    fn write_u64(&mut self, value: u64) {
         self.write(&value.to_le_bytes());
     }
 
@@ -225,7 +233,10 @@ impl InputIdentityEncoder {
         self.write(&value.to_le_bytes());
     }
 
-    #[inline]
+    // Keep fixed-width scalar copies visible to each caller. Sharing an
+    // outlined slice writer with variable-width strings otherwise introduces
+    // a copy call for every numeric cell, depending on codegen-unit placement.
+    #[inline(always)]
     fn write(&mut self, bytes: &[u8]) {
         if self.error.is_some() {
             return;

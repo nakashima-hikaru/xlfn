@@ -1,5 +1,131 @@
 # Benchmark notes
 
+## 2026-10-09 value boundaries
+
+This change removes repeated scalar-return ownership work, adds an explicit
+contiguous numeric input path, and avoids intermediate collection copies in
+the Excel-comparison functions. The comparison's cells, formulas, polling,
+and acceptance criteria are unchanged.
+
+Primitive number, Boolean, and Excel-error returns reuse a process-lifetime
+`XLOPER12` root per producing thread and loaded module. Each root requests
+32 bytes, plus allocator overhead, and remains allocated after thread exit.
+Windows uses the process heap so the root does not depend on a physically
+unloaded DLL's allocator. These roots have no `xlbitDLLFree` ownership transfer;
+strings and arrays retain their tracked ownership and cleanup. The producer
+guard still protects code execution during publication. This relies on Excel
+consuming the scalar before another call on the same thread replaces it.
+
+`NumericMatrixRef` accepts Excel's `K%`/FP12 input as a borrowed contiguous
+double slice. M01, M03, and M04 explicitly select that path; existing
+`Matrix<f64>` inputs retain their strict conversion contract. FP12 coercion
+can turn blank cells into zero and reject incompatible cells before Rust runs,
+so it cannot preserve every raw cell distinction. Output arrays remain ordinary
+`Q`/`XLOPER12` values, preserving error, panic, and closing-result behavior.
+M02 fills `XlArrayBuilder` directly, and M03 uses `XlArrayBuilder::from_f64`
+instead of constructing an intermediate owned matrix.
+
+M05 borrows mixed cells through `MatrixRef<ExcelCellRef>`. After a collection
+of at least 64 KiB, scratch storage allocates a separate text arena only if
+text is actually decoded. Small collections and large numeric-only collections
+keep their previous allocation strategy. Deliberately returned Excel errors
+remain error outcomes for instrumentation but do not enter the framework's
+failure-diagnostic stream. Other failures still do. Input-fingerprint errors
+are now constructed only on the failing branch, avoiding normal-path error
+construction and destruction for scalar arguments.
+
+Baseline `dd621818ee5266f049314d08d3fef1b29ac3df2b` and the candidate used separate
+source and target directories, common fixtures for shared cases, frozen
+executables, and SHA-256 checks before/after each invocation. The ABBA run used
+macOS ARM64, Rust 1.99.0, 20 samples, 0.3 s warm-up, and 1.5 s measurement.
+The values below are geometric means of two Criterion estimates per side;
+individual confidence intervals are not intervals for the A/B difference.
+
+The following comparisons select the API paths adopted by the Excel fixture.
+They compare different supported input/output paths rather than claiming that
+every call using the previous type became faster.
+
+| Path, 100k cells | Previous path | Adopted path | Time change |
+| --- | ---: | ---: | ---: |
+| Owned strict numeric input → borrowed FP12 input | 349.62 µs | 41.63 µs | -88.1% |
+| Owned matrix construction/return → direct builder | 83.12 µs | 69.61 µs | -16.3% |
+| Owned matrix conversion/return → numeric slice conversion | 65.40 µs | 60.18 µs | -8.0% |
+| Mixed ASCII cells, owned → borrowed | 1186.60 µs | 806.42 µs | -32.0% |
+| Mixed Unicode cells, owned → borrowed | 1283.11 µs | 903.67 µs | -29.6% |
+
+Common scalar cases include admission, execution, return publication, and
+cleanup. Each measured batch performs 1,000 calls per persistent worker;
+worker dispatch/completion is included and worker startup is excluded.
+
+| Common path | Workers | Baseline batch | Candidate batch | Time change |
+| --- | ---: | ---: | ---: | ---: |
+| Scalar return | 1 | 51.15 µs | 42.33 µs | -17.2% |
+| Scalar return | 32 | 3317.72 µs | 2550.31 µs | -23.1% |
+| Eight scalar arguments | 1 | 101.63 µs | 85.65 µs | -15.7% |
+| Eight scalar arguments | 16 | 1413.13 µs | 1304.79 µs | -7.7% |
+| Eight scalar arguments | 32 | 3827.98 µs | 3175.73 µs | -17.0% |
+| One scalar argument | 16 | 1250.35 µs | 1368.49 µs | +9.4% |
+| One scalar argument | 32 | 3086.97 µs | 3180.52 µs | +3.0% |
+| Deliberate Excel error, no subscriber | 1 | 57.55 µs | 40.29 µs | -30.0% |
+| Deliberate Excel error, no subscriber | 32 | 4093.83 µs | 2741.28 µs | -33.0% |
+| Domain failure, no subscriber | 1 | 55.10 µs | 45.93 µs | -16.7% |
+| Domain failure, no subscriber | 32 | 3508.11 µs | 3204.42 µs | -8.7% |
+
+These common costs affect S01, P02, and W03, which use the same scalar UDF.
+S02 retains strict scalar conversion. P04 retains its intentional shared
+atomic contention, so removing scalar-return overhead does not remove that
+workload's contention. Improvements vary with worker count and argument count:
+the one-argument 16- and 32-worker regressions above remain in the result.
+These short batches include coordination and do not establish a universal
+multithreaded throughput improvement.
+
+The 100k mixed borrowed fixture's requested allocation bytes per call fall
+from 7,200,736 to 2,609,128, while allocations rise from two to four. Its owned
+control requests 2,480,000 bytes in 20,001 allocations. The 1k borrowed case
+remains at 73,696 bytes in two allocations. These are allocator-request counts
+and cumulative requested bytes, not process RSS or live-memory measurements.
+An eagerly separated text arena was rejected: it reduced large-input bytes
+but slowed three-cell, 100-cell, and 100k-cell borrowed conversion substantially.
+
+Other regressions remain visible. Short borrowed-string conversion rose 10.1%
+(69.24 ns to 76.26 ns), 1k-string identity rose 5.6%, strict numeric matrix
+conversion with identity rose 4.1%, and raw string-matrix identity rose 4.7%.
+Borrowed 10k-string conversion rose 2.8%, and 100-cell mixed borrowed conversion
+rose about 2.1%. Plain owned numeric matrix conversion rose 0.7%; its earlier
+11.0% result is retained in the experiment record rather than discarded.
+
+The initial candidate introduced an outlined generic byte copy for each
+numeric identity value. Inlining the byte writer restored direct numeric
+stores, but a longer 40-sample/5 s ABBA confirmation still found the warm
+100k owned-matrix formula control 10.4% slower. A private `write_u64` function
+boundary now keeps numeric writes fixed-width while separating buffer
+management from their callers. That control improved 3.6% in a separate
+30-sample/3 s experiment and 3.5% in the final paired run (733.16 µs to
+707.27 µs). This does not establish an improvement for every identity path;
+the strict numeric-conversion and string-identity regressions remain above.
+
+[All shared/new cases, per-run estimates, allocation logs, source patches,
+rejected experiment, and executable provenance](results/2026-10-09-value-boundary.json)
+include the regressions as well as the adopted-path gains.
+
+Validation: final-source workspace nextest 1,230 passed / 11 skipped.
+All-target/all-feature Clippy, formatting, and panic-boundary checks passed
+on the final source. Strict xlfn rustdoc and guide checks also passed.
+Detached scalar roots passed strict provenance and Tree Borrows with their
+intentional process-lifetime allocations; FP12 borrowing passed both modes,
+and the lazy text-storage lifetime passed strict provenance. These Miri and
+Windows x86_64/i686 library cross-checks preceded the final private writer
+boundary; that change preserves the same little-endian bytes and ownership.
+`just bench-ci` completed all 17 recipes with
+`XLFN_BENCH_MEASUREMENT_MS=500`; fixed-timing groups retained their defaults.
+This execution/allocation gate ran alongside the final workspace checks; its
+timings are excluded from the isolated ABBA performance comparison.
+
+These are local production-path measurements. They do not measure Excel's
+FP12 coercion cost, the complete Excel-DNA gap, or native Windows/live Excel
+performance. The Excel fixture still needs native qualification, including
+the registered `K%` input path and process-lifetime scalar roots.
+
 ## 2026-10-06 plain input conversion
 
 The `ExcelParameter<PlainInputMode>::decode` blanket implementation only

@@ -4,6 +4,9 @@ pub enum SyncBenchKind {
     FullAdmission,
     ScalarReturnNoSubscriber,
     ScalarReturnUdfTraceEnabled,
+    WorksheetErrorNoSubscriber,
+    DomainErrorNoSubscriber,
+    ScalarArguments(usize),
     ReturnTrackerOnly,
 }
 
@@ -75,6 +78,8 @@ impl SyncBoundaryWorkerPool {
 
             let r = runtime;
             let handle = std::thread::spawn(move || {
+                let arguments: [xlfn_sys::XLOPER12; 8] =
+                    std::array::from_fn(|index| xlfn_sys::XLOPER12::number(index as f64 + 0.5));
                 let _subscriber_guard = matches!(kind, SyncBenchKind::ScalarReturnUdfTraceEnabled)
                     .then(install_benchmark_subscriber);
 
@@ -101,21 +106,38 @@ impl SyncBoundaryWorkerPool {
                             }
                         }
                         SyncBenchKind::ScalarReturnNoSubscriber
-                        | SyncBenchKind::ScalarReturnUdfTraceEnabled => {
+                        | SyncBenchKind::ScalarReturnUdfTraceEnabled
+                        | SyncBenchKind::WorksheetErrorNoSubscriber
+                        | SyncBenchKind::DomainErrorNoSubscriber => {
                             for _ in 0..iterations_per_thread {
                                 let ptr = crate::return_abi::udf_boundary_named(
                                     r,
                                     "bench_udf",
                                     "BENCH.UDF",
-                                    |_, _| crate::call_return::ReturnPayload::scalar(42.0),
+                                    |_, _| match kind {
+                                        SyncBenchKind::WorksheetErrorNoSubscriber => Err(
+                                            crate::XllError::ExcelValue(crate::ExcelError::Number),
+                                        ),
+                                        SyncBenchKind::DomainErrorNoSubscriber => {
+                                            Err(crate::XllError::Domain {
+                                                code: crate::error::DomainErrorCode::InvalidInput,
+                                            })
+                                        }
+                                        _ => crate::call_return::ReturnPayload::scalar(42.0),
+                                    },
                                 );
                                 #[allow(
                                     unsafe_code,
                                     reason = "Internal benchmark resource cleanup"
                                 )]
-                                // SAFETY: ptr is a valid return block pointer produced by udf_boundary_named for this benchmark.
-                                unsafe {
-                                    let _ = crate::return_abi::free_return_boundary(ptr);
+                                // SAFETY: ptr is the live root produced by this
+                                // boundary. Excel calls xlAutoFree12 only for
+                                // roots whose DLL-free bit is set.
+                                let value = unsafe { &*ptr };
+                                std::hint::black_box(value.xltype);
+                                if value.xltype & xlfn_sys::XLBIT_DLL_FREE != 0 {
+                                    // SAFETY: The live root requests one owning cleanup.
+                                    let _ = unsafe { crate::return_abi::free_return_boundary(ptr) };
                                 }
                             }
                         }
@@ -126,6 +148,65 @@ impl SyncBoundaryWorkerPool {
                                     .expect("return admission must be open for benchmark");
                                 std::hint::black_box(&producer);
                                 drop(producer);
+                            }
+                        }
+                        SyncBenchKind::ScalarArguments(argument_count) => {
+                            assert!((1..=arguments.len()).contains(&argument_count));
+                            for _ in 0..iterations_per_thread {
+                                let pointer = crate::return_abi::udf_boundary_named(
+                                    r,
+                                    "bench_arguments",
+                                    "BENCH.ARGUMENTS",
+                                    |_, call| {
+                                        let callbacks =
+                                            crate::host_callback::HostCallbackSession::new();
+                                        crate::call::with_excel_callback_scope_and_call(
+                                            call,
+                                            &callbacks,
+                                            |call, scope, callbacks| {
+                                                let mut frame =
+                                                    crate::__private::v1::CallFrame::<
+                                                        crate::value::input::PlainInputMode,
+                                                    >::new(
+                                                        call, scope, callbacks, argument_count
+                                                    );
+                                                let mut sum = 0.0;
+                                                for (index, raw) in arguments
+                                                    .iter()
+                                                    .take(argument_count)
+                                                    .enumerate()
+                                                {
+                                                    // SAFETY: The worker's immutable argument
+                                                    // fixtures outlive this synchronous call.
+                                                    let value = unsafe {
+                                                        frame.prepare_argument::<f64>(
+                                                            index,
+                                                            "arg",
+                                                            std::ptr::from_ref(raw).cast_mut(),
+                                                        )
+                                                    }?
+                                                    .materialize()?;
+                                                    sum += value;
+                                                }
+                                                let mut context =
+                                                    frame.return_context("bench_arguments")?;
+                                                crate::call_return::ExcelReturn::into_excel(
+                                                    sum,
+                                                    &mut context,
+                                                )
+                                            },
+                                        )
+                                    },
+                                );
+                                // SAFETY: Consume the live scalar before the next
+                                // call, and follow Excel's ownership flag for cleanup.
+                                let value = unsafe { &*pointer };
+                                std::hint::black_box(value.xltype);
+                                if value.xltype & xlfn_sys::XLBIT_DLL_FREE != 0 {
+                                    // SAFETY: The live root requests one owning cleanup.
+                                    let _ =
+                                        unsafe { crate::return_abi::free_return_boundary(pointer) };
+                                }
                             }
                         }
                     }

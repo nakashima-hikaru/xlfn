@@ -1,5 +1,5 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use xlfn::benchmark_support::{BENCHMARK_MEASUREMENT_TIME, SyncBenchKind, SyncBoundaryWorkerPool};
+use xlfn::benchmark_support::{SyncBenchKind, SyncBoundaryWorkerPool, benchmark_measurement_time};
 
 const ITERATIONS_PER_THREAD: usize = 1000;
 const THREAD_COUNTS: [usize; 4] = [1, 4, 16, 32];
@@ -13,7 +13,7 @@ fn sync_boundary_benchmarks(c: &mut Criterion) {
         (SyncBenchKind::FullAdmission, "sync_boundary/admission"),
     ] {
         let mut group_admission = c.benchmark_group(name);
-        group_admission.measurement_time(BENCHMARK_MEASUREMENT_TIME);
+        group_admission.measurement_time(benchmark_measurement_time());
         for threads in THREAD_COUNTS {
             let attempts = threads * ITERATIONS_PER_THREAD;
             group_admission.throughput(Throughput::Elements(attempts as u64));
@@ -30,7 +30,7 @@ fn sync_boundary_benchmarks(c: &mut Criterion) {
     }
 
     let mut group_no_sub = c.benchmark_group("sync_boundary/scalar_return/no_subscriber");
-    group_no_sub.measurement_time(BENCHMARK_MEASUREMENT_TIME);
+    group_no_sub.measurement_time(benchmark_measurement_time());
     for threads in THREAD_COUNTS {
         let attempts = threads * ITERATIONS_PER_THREAD;
         group_no_sub.throughput(Throughput::Elements(attempts as u64));
@@ -49,8 +49,59 @@ fn sync_boundary_benchmarks(c: &mut Criterion) {
     }
     group_no_sub.finish();
 
+    for arguments in [1, 2, 4, 8] {
+        let mut group = c.benchmark_group(format!("sync_boundary/scalar_arguments/{arguments}"));
+        group.measurement_time(benchmark_measurement_time());
+        for threads in THREAD_COUNTS {
+            group.throughput(Throughput::Elements(
+                (threads * ITERATIONS_PER_THREAD) as u64,
+            ));
+            group.bench_with_input(
+                BenchmarkId::from_parameter(threads),
+                &threads,
+                |b, &threads| {
+                    let pool = SyncBoundaryWorkerPool::new(
+                        threads,
+                        ITERATIONS_PER_THREAD,
+                        SyncBenchKind::ScalarArguments(arguments),
+                    );
+                    b.iter(|| pool.run_batch());
+                },
+            );
+        }
+        group.finish();
+    }
+
+    for (kind, name) in [
+        (
+            SyncBenchKind::WorksheetErrorNoSubscriber,
+            "sync_boundary/worksheet_error/no_subscriber",
+        ),
+        (
+            SyncBenchKind::DomainErrorNoSubscriber,
+            "sync_boundary/domain_error/no_subscriber",
+        ),
+    ] {
+        let mut group = c.benchmark_group(name);
+        group.measurement_time(benchmark_measurement_time());
+        for threads in THREAD_COUNTS {
+            group.throughput(Throughput::Elements(
+                (threads * ITERATIONS_PER_THREAD) as u64,
+            ));
+            group.bench_with_input(
+                BenchmarkId::from_parameter(threads),
+                &threads,
+                |b, &threads| {
+                    let pool = SyncBoundaryWorkerPool::new(threads, ITERATIONS_PER_THREAD, kind);
+                    b.iter(|| pool.run_batch());
+                },
+            );
+        }
+        group.finish();
+    }
+
     let mut group_return_tracker = c.benchmark_group("sync_boundary/return_tracker_only");
-    group_return_tracker.measurement_time(BENCHMARK_MEASUREMENT_TIME);
+    group_return_tracker.measurement_time(benchmark_measurement_time());
     for threads in THREAD_COUNTS {
         let attempts = threads * ITERATIONS_PER_THREAD;
         group_return_tracker.throughput(Throughput::Elements(attempts as u64));
@@ -70,7 +121,7 @@ fn sync_boundary_benchmarks(c: &mut Criterion) {
     group_return_tracker.finish();
 
     let mut group_trace = c.benchmark_group("sync_boundary/scalar_return/udf_trace_enabled");
-    group_trace.measurement_time(BENCHMARK_MEASUREMENT_TIME);
+    group_trace.measurement_time(benchmark_measurement_time());
     let threads = 1_usize;
     let attempts = threads * ITERATIONS_PER_THREAD;
     group_trace.throughput(Throughput::Elements(attempts as u64));

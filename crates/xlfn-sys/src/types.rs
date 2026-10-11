@@ -17,6 +17,23 @@ pub type IDSHEET = usize;
 /// Excel UTF-16 code unit.
 pub type XCHAR = u16;
 
+/// Excel's contiguous numeric-array argument carrier (`K%`).
+///
+/// The single declared element is the first element of a variable-length,
+/// row-major array containing `rows * columns` doubles. The host owns argument
+/// storage for the duration of the call.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FP12 {
+    pub rows: RW,
+    pub columns: COL,
+    pub array: [f64; 1],
+}
+
+static_assertions::const_assert_eq!(core::mem::size_of::<FP12>(), 16);
+static_assertions::const_assert_eq!(core::mem::align_of::<FP12>(), 8);
+static_assertions::const_assert_eq!(core::mem::offset_of!(FP12, array), 8);
+
 pub const XLTYPE_NUM: u32 = 0x0001;
 pub const XLTYPE_STR: u32 = 0x0002;
 pub const XLTYPE_BOOL: u32 = 0x0004;

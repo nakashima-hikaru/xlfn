@@ -28,7 +28,9 @@ error type, implement `IntoXllError` to convert it to `XllError`.
 
 `ExcelError`, `std::io::Error`, and `DiagnosticInitError` already implement
 `IntoXllError` and convert into `XllError` with `From`, so they work with `?`.
-For an intentional worksheet error, a function can return `Result<f64, ExcelError>`:
+For an intentional worksheet error, a function can return `Result<f64, ExcelError>`.
+These values preserve the selected cell error without emitting a failure diagnostic.
+Execution layers and UDF tracing still observe the `ExcelValue` completion:
 
 ```rust
 {{#include ../fixtures/addin.md}}

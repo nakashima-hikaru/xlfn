@@ -18,10 +18,10 @@ mod async_control;
 use async_control::AsyncControl;
 use xlfn::{
     AsyncPollerCount, BuiltinAsyncExecutor, BuiltinExecutorConfig, RtdConfig, RuntimeConfig,
-    error::{DomainErrorCode, InputError},
+    error::InputError,
+    output::{XlArrayBuilder, XlArrayOutput},
     prelude::*,
     rtd::{RtdCapacity, RtdLimits, RtdSourceHandle, RtdValue},
-    value::ExcelCellValue,
 };
 
 struct CountingAllocator;
@@ -133,23 +133,21 @@ pub fn cpu(value: f64, micros: i32) -> f64 {
 }
 
 #[excel_function(name = "BENCH.ERRNUM", thread_safe)]
-pub fn error(value: f64, period: i32) -> XllResult<f64> {
+pub fn error(value: f64, period: i32) -> Result<f64, ExcelError> {
     if period > 0 && (value as i64) % period as i64 == 0 {
-        Err(XllError::Domain {
-            code: DomainErrorCode::InvalidInput,
-        })
+        Err(ExcelError::Number)
     } else {
         Ok(value)
     }
 }
 
 #[excel_function(name = "BENCH.MAT.SUM", thread_safe)]
-pub fn matrix_sum(values: Matrix<f64>) -> f64 {
+pub fn matrix_sum(values: NumericMatrixRef<'_>) -> f64 {
     values.iter().copied().sum()
 }
 
 #[excel_function(name = "BENCH.MAT.MAKE", thread_safe)]
-pub fn matrix_make(rows: i32, columns: i32, seed: f64) -> XllResult<Matrix<f64>> {
+pub fn matrix_make(rows: i32, columns: i32, seed: f64) -> XllResult<XlArrayOutput> {
     let rows =
         usize::try_from(rows).map_err(|_| XllError::input("rows", InputError::OutOfRange))?;
     let columns =
@@ -157,24 +155,28 @@ pub fn matrix_make(rows: i32, columns: i32, seed: f64) -> XllResult<Matrix<f64>>
     let count = rows
         .checked_mul(columns)
         .ok_or_else(|| XllError::input("rows", InputError::OutOfRange))?;
-    Matrix::new(rows, columns, (0..count).map(|i| seed + i as f64).collect())
+    let mut output = XlArrayBuilder::new(rows, columns)?;
+    for i in 0..count {
+        output.push_f64(seed + i as f64)?;
+    }
+    output.finish()
 }
 
 #[excel_function(name = "BENCH.MAT.COPY", thread_safe)]
-pub fn matrix_copy(values: Matrix<f64>) -> Matrix<f64> {
-    values
+pub fn matrix_copy(values: NumericMatrixRef<'_>) -> XllResult<XlArrayOutput> {
+    XlArrayBuilder::from_f64(values.rows(), values.columns(), values.as_slice())?.finish()
 }
 
 #[excel_function(name = "BENCH.MAT.MIXED", thread_safe)]
-pub fn matrix_mixed(values: Matrix<ExcelCellValue>) -> f64 {
+pub fn matrix_mixed(values: MatrixRef<'_, ExcelCellRef<'_>>) -> f64 {
     values
         .iter()
         .map(|cell| match cell {
-            ExcelCellValue::Number(_) => 1.0,
-            ExcelCellValue::String(_) => 2.0,
-            ExcelCellValue::Boolean(_) => 3.0,
-            ExcelCellValue::Blank => 4.0,
-            ExcelCellValue::Error(_) => 5.0,
+            ExcelCellRef::Number(_) => 1.0,
+            ExcelCellRef::String(_) => 2.0,
+            ExcelCellRef::Boolean(_) => 3.0,
+            ExcelCellRef::Blank => 4.0,
+            ExcelCellRef::Error(_) => 5.0,
         })
         .sum()
 }

@@ -689,7 +689,7 @@ unsafe fn async_udf_boundary_uninstrumented_handle<A, Start, Build, T>(
 
 fn report_completion(udf_id: &'static str, completion: &AsyncCompletion) {
     if let OwnedCompletionOutcome::Error(error) = &completion.completion {
-        crate::diagnostics::report_no_unwind(udf_id, error);
+        crate::diagnostics::report_udf_failure_no_unwind(udf_id, error);
     }
     if let OwnedDeliveryOutcome::Failed(error) = &completion.delivery {
         crate::diagnostics::report_no_unwind(udf_id, error);

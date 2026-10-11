@@ -54,6 +54,7 @@ mod formula_caller;
 mod handle;
 mod ingress;
 mod lookup;
+mod numeric_ingress;
 mod output;
 #[cfg(feature = "rtd")]
 mod rtd;
@@ -102,6 +103,7 @@ pub use handle::{
 };
 pub use ingress::{RawArgumentIngressBenchmark, TwoPhaseBenchmark};
 pub use lookup::{HandleDistinctKeyBenchmark, HandleLookupBenchCase, HandleLookupBenchmark};
+pub use numeric_ingress::NumericMatrixIngressBenchmark;
 pub use output::{
     BorrowedStringArrayOutputBenchmark, NumericArrayOutputBenchmark, ScalarOutputBenchmark,
 };

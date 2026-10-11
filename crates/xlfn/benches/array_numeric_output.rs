@@ -25,6 +25,13 @@ fn array_numeric_output_benchmarks(c: &mut Criterion) {
                 BatchSize::PerIteration,
             );
         });
+        let values = benchmark.prepared_matrix().into_vec();
+        group.bench_function(
+            BenchmarkId::new("numeric_slice_convert_return", cells),
+            |b| {
+                b.iter(|| benchmark.run_numeric_slice(&values));
+            },
+        );
     }
     group.finish();
 }
