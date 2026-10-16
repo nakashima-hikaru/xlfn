@@ -1,5 +1,77 @@
 # Benchmark notes
 
+## 2026-10-16 performance review experiments
+
+Object payload ownership remains in the arena. Its mutex/map is split into 32
+cache-padded shards selected by object sequence; seal and quiescence acquire all
+shards in a fixed order. Final capability removal still registers its release
+tail under the same shard lock, and application destructors/trace run outside
+the locks. Insertion uses one map entry lookup. Same-object contention remains.
+
+Production builds omit the diagnostic observation mutex; test/refinement builds
+retain it. The tracing probe returns early before any global or scoped dispatcher
+has been installed; its standalone speed effect is not established.
+
+An initial zero-filled ASCII buffer regressed short arrays and long scalars.
+A MaybeUninit revision restored short arrays but still slowed the 32,767-byte
+ASCII scalar by 10.67%. Incremental array capacity changes had inconsistent
+results between experiments. Both return-path changes were restored to baseline.
+The complete evidence preserves both rejected experiments and every control.
+
+Baseline `0432f8b07382d52b6b7be0b498280d5bb66d8232` and the candidate used separate
+source/target directories, identical fixtures, frozen executable SHA-256 checks
+before/after every invocation, and ABBA order on macOS ARM64 / Rust 1.99.0.
+Each run uses 20 samples, 0.3 s warm-up, and 1.5 s measurement. Values are geometric
+means of two estimates per side; individual confidence intervals are not
+intervals for the A/B difference. Concurrent values include batch coordination.
+
+| Case | Baseline | Candidate | Time change |
+| --- | ---: | ---: | ---: |
+| `object_lease/distinct_objects/4` | 170.103 µs | 88.431 µs | -48.01% |
+| `object_lease/distinct_objects/16` | 1.008 ms | 165.180 µs | -83.61% |
+| `object_lease/distinct_objects/1` | 24.328 µs | 26.320 µs | +8.19% |
+| `object_lease/same_object/1` | 25.026 µs | 23.532 µs | -5.97% |
+| `object_lease/same_object/16` | 943.635 µs | 949.733 µs | +0.65% |
+| `object_lease/dispatch_only_control/1` | 3.387 µs | 3.444 µs | +1.68% |
+| `object_lease/dispatch_only_control/16` | 69.624 µs | 75.972 µs | +9.12% |
+| `object_lease/pin_acquire_release_serial` | 19.87 ns | 18.85 ns | -5.18% |
+| `object_lease/final_pin_release` | 27.59 ns | 31.50 ns | +14.17% |
+| `handle_prepare/cold_miss_batch_100` | 76.738 µs | 77.171 µs | +0.56% |
+| `handle_prepare/warm_hit_batch_100` | 5.583 µs | 5.567 µs | -0.29% |
+| `array_string_output/borrowed_str/16384` | 245.100 µs | 239.602 µs | -2.24% |
+| `scalar_output/ascii_1k/borrowed` | 119.22 ns | 118.22 ns | -0.83% |
+| `scalar_output/ascii_limit/borrowed` | 1.640 µs | 1.612 µs | -1.73% |
+| `scalar_output/enum` | 92.60 ns | 73.47 ns | -20.66% |
+| `scalar_output/number` | 37.91 ns | 38.01 ns | +0.25% |
+| `array_numeric_output/builder_build_return/100000` | 62.904 µs | 62.976 µs | +0.11% |
+| `diagnostics_report/small_error` | 6.912 µs | 6.812 µs | -1.45% |
+| `diagnostics_report/large_burst` | 321.429 µs | 325.960 µs | +1.41% |
+| `sync_boundary/scalar_return/no_subscriber/1` | 39.177 µs | 38.599 µs | -1.47% |
+
+The arena's fixed requested live bytes rise by 4,096; the 10k-object fixture rises
+by 4,344 bytes (about 0.04%). Empty map shards allocate no backing tables.
+Republishing 10k objects retains 140,631 allocator calls on each side. The value
+boundary and diagnostic allocation probes pass on both sides. These counters
+measure allocator requests, not RSS. Diagnostic burst acceptance/drop counts
+are unchanged. Small timing changes and control movement are not attributed to
+the optimization; all regressions remain in the evidence.
+
+Validation: final-source workspace nextest 1,279 passed / 11 skipped; independent no-default,
+handles, async-builtin, cache, and rtd lib suites passed. All-target/all-feature
+Clippy, strict workspace rustdoc, formatting and panic-boundary checks passed.
+Object lifetime/race tests pass Miri in both aliasing models (5 each); the ASCII
+boundary test passes strict-provenance Miri in both models. Object Miri retains
+parking_lot_core's exposed-provenance warning. x86_64/i686 MSVC library checks
+pass with `blake3/pure`. All 17 `just bench-ci` recipes passed with the 100 ms
+measurement override before restoring the experimental return encoders; the
+final output fixtures and allocation assertions were rechecked. Gate timings
+are excluded from the isolated comparison. Storage Miri tests apply to the
+rejected MaybeUninit variant; the adopted encoder is unchanged from baseline.
+
+[All cases, confidence intervals, patches, allocation logs and provenance](results/2026-10-16-review.json)
+include limitations and the rejected experiment. No native Windows/live Excel
+performance qualification is claimed, including RTD observation callbacks.
+
 ## 2026-10-11 short borrowed strings
 
 The first nonempty borrowed string in a call now uses an inline `SmolStr`

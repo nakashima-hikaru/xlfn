@@ -8,10 +8,12 @@
 
 use super::token::ObjectId;
 use crate::panic_boundary::catch_no_unwind;
-use crate::sync::Mutex;
+use crate::sync::{Mutex, MutexGuard};
 use crate::{XllError, XllResult};
+use crossbeam_utils::CachePadded;
 use rustc_hash::FxHashMap;
 use std::any::{Any, TypeId, type_name};
+use std::collections::hash_map::Entry;
 use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 use xlfn_kernel::published_owner::PublishedOwner;
@@ -81,6 +83,8 @@ impl HandleCleanupState {
 type ObjectBindingCount = u32;
 type ObjectPinCount = u32;
 
+const OBJECT_SHARD_COUNT: usize = 32;
+
 struct ObjectEntry {
     cell: PublishedOwner<ObjectCell>,
     bindings: ObjectBindingCount,
@@ -96,7 +100,7 @@ struct ObjectArenaState {
 
 /// Unique owner and reclamation authority for handle payloads.
 pub(crate) struct ObjectArena {
-    state: Mutex<ObjectArenaState>,
+    states: [CachePadded<Mutex<ObjectArenaState>>; OBJECT_SHARD_COUNT],
     cleanup: HandleCleanupState,
     #[cfg(any(test, feature = "refinement"))]
     trace: std::sync::OnceLock<crate::shutdown_trace::ShutdownTraceHandle>,
@@ -107,11 +111,13 @@ pub(crate) struct ObjectArena {
 impl ObjectArena {
     pub(crate) fn new() -> Self {
         Self {
-            state: Mutex::new(ObjectArenaState {
-                objects: FxHashMap::default(),
-                active_pins: 0,
-                active_releases: 0,
-                sealed: false,
+            states: std::array::from_fn(|_| {
+                CachePadded::new(Mutex::new(ObjectArenaState {
+                    objects: FxHashMap::default(),
+                    active_pins: 0,
+                    active_releases: 0,
+                    sealed: false,
+                }))
             }),
             cleanup: HandleCleanupState::new(),
             #[cfg(any(test, feature = "refinement"))]
@@ -119,6 +125,21 @@ impl ObjectArena {
             #[cfg(test)]
             before_pin_observation: Mutex::new(None),
         }
+    }
+
+    #[inline]
+    fn state(&self, id: ObjectId) -> &Mutex<ObjectArenaState> {
+        // Object sequences are monotonic within their owning registry. Keep
+        // unrelated objects off the same mutex and its cache line without
+        // adding a second shared counter to every lease transition.
+        &self.states[(id.sequence() as usize) & (OBJECT_SHARD_COUNT - 1)]
+    }
+
+    fn lock_states(&self) -> [MutexGuard<'_, ObjectArenaState>; OBJECT_SHARD_COUNT] {
+        // Only cold seal/quiescence paths take multiple locks. A fixed order
+        // gives them the same consistent global snapshot as the former
+        // single mutex; hot transitions acquire exactly one shard.
+        std::array::from_fn(|index| self.states[index].lock())
     }
 
     /// Inserts an object under the registry's unique arena owner. Pending
@@ -149,29 +170,26 @@ impl ObjectArena {
         cell.pointer = NonNull::from_ref(cell.owner.as_ref().unwrap().as_ref()).cast::<()>();
         let cell = PublishedOwner::from_box(cell);
 
-        let mut state = arena.state.lock();
+        let mut state = arena.state(id).lock();
         if state.sealed {
             return Err(XllError::Closing);
         }
-        if state.objects.contains_key(&id) {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        state.objects.insert(
-            id,
-            ObjectEntry {
+        let entry = match state.objects.entry(id) {
+            Entry::Vacant(entry) => entry.insert(ObjectEntry {
                 cell,
                 bindings: 1,
                 pins: 0,
-            },
-        );
-        let cell_pointer = NonNull::from(state.objects.get(&id).unwrap().cell.as_ref());
+            }),
+            Entry::Occupied(_) => xlfn_kernel::invariant::fail_stop(),
+        };
+        let cell_pointer = NonNull::from(entry.cell.as_ref());
         drop(state);
         arena.record(crate::shutdown_trace::ShutdownEvent::AddHandleObject);
         Ok(ObjectBinding { cell: cell_pointer })
     }
 
     fn duplicate_binding(&self, id: ObjectId, cell: NonNull<ObjectCell>) -> XllResult<()> {
-        let mut state = self.state.lock();
+        let mut state = self.state(id).lock();
         if state.sealed {
             return Err(XllError::Closing);
         }
@@ -191,7 +209,7 @@ impl ObjectArena {
         id: ObjectId,
         cell: NonNull<ObjectCell>,
     ) -> XllResult<RawObjectLeaseGuard> {
-        let mut state = self.state.lock();
+        let mut state = self.state(id).lock();
         if state.sealed {
             return Err(XllError::Closing);
         }
@@ -216,7 +234,7 @@ impl ObjectArena {
         // unwinding transition unlocks before the guard takes this mutex.
         let _release;
         let retired = {
-            let mut state = self.state.lock();
+            let mut state = self.state(id).lock();
             let entry = state
                 .objects
                 .get_mut(&id)
@@ -231,7 +249,7 @@ impl ObjectArena {
                 // release finishes without a separate completion tail.
                 return;
             }
-            _release = self.begin_release(&mut state);
+            _release = self.begin_release(id, &mut state);
             state
                 .objects
                 .remove(&id)
@@ -252,7 +270,7 @@ impl ObjectArena {
     fn release_pin_observed<const OBSERVED: bool>(&self, id: ObjectId) {
         let _release;
         let retired = {
-            let mut state = self.state.lock();
+            let mut state = self.state(id).lock();
             let reclaim = {
                 let entry = state
                     .objects
@@ -273,7 +291,7 @@ impl ObjectArena {
                 // A concurrent final release may reclaim them immediately.
                 return;
             }
-            _release = self.begin_release(&mut state);
+            _release = self.begin_release(id, &mut state);
             reclaim.then(|| {
                 state
                     .objects
@@ -315,14 +333,15 @@ impl ObjectArena {
     /// without acquiring the arena mutex a separate time.
     fn begin_release<'arena>(
         &'arena self,
+        id: ObjectId,
         state: &mut ObjectArenaState,
     ) -> impl Drop + 'arena + use<'arena> {
         state.active_releases = state
             .active_releases
             .checked_add(1)
             .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
-        scopeguard::guard(self, |arena| {
-            let mut state = arena.state.lock();
+        scopeguard::guard(self.state(id), |shard| {
+            let mut state = shard.lock();
             state.active_releases = state
                 .active_releases
                 .checked_sub(1)
@@ -331,7 +350,10 @@ impl ObjectArena {
     }
 
     pub(crate) fn seal(&self) {
-        self.state.lock().sealed = true;
+        let mut states = self.lock_states();
+        for state in &mut states {
+            state.sealed = true;
+        }
     }
 
     pub(crate) fn cleanup_result(&self) -> XllResult<()> {
@@ -339,8 +361,8 @@ impl ObjectArena {
     }
 
     pub(crate) fn finish_quiescence(&self) -> XllResult<()> {
-        let state = self.state.lock();
-        if state.active_pins != 0 {
+        let states = self.lock_states();
+        if states.iter().any(|state| state.active_pins != 0) {
             // A public `HandleLease` cannot outlive its generated async task.
             // Reaching this branch after async shutdown is therefore a
             // framework ordering violation, retained as a diagnostic so the
@@ -349,12 +371,15 @@ impl ObjectArena {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_PINS,
             });
         }
-        if !state.objects.is_empty() || state.active_releases != 0 {
+        if states
+            .iter()
+            .any(|state| !state.objects.is_empty() || state.active_releases != 0)
+        {
             return Err(XllError::Internal {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_OBJECTS,
             });
         }
-        drop(state);
+        drop(states);
         self.cleanup.result()
     }
 
@@ -362,8 +387,10 @@ impl ObjectArena {
     /// owner recovers a Box or starts destruction. Checking only inside Drop
     /// would happen after Box reconstruction has already claimed exclusivity.
     pub(crate) fn assert_reclaimable(&self) {
-        let state = self.state.lock();
-        if !state.objects.is_empty() || state.active_pins != 0 || state.active_releases != 0 {
+        let states = self.lock_states();
+        if states.iter().any(|state| {
+            !state.objects.is_empty() || state.active_pins != 0 || state.active_releases != 0
+        }) {
             xlfn_kernel::invariant::fail_stop();
         }
     }
@@ -394,10 +421,7 @@ impl ObjectArena {
 
 impl Drop for ObjectArena {
     fn drop(&mut self) {
-        let state = self.state.lock();
-        if !state.objects.is_empty() || state.active_pins != 0 || state.active_releases != 0 {
-            xlfn_kernel::invariant::fail_stop();
-        }
+        self.assert_reclaimable();
     }
 }
 
@@ -786,6 +810,63 @@ mod benchmark {
 mod tests {
     use super::*;
 
+    #[test]
+    fn distinct_object_pins_do_not_wait_for_an_unrelated_shard() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let arena = PublishedOwner::new(ObjectArena::new());
+        let first_id = ObjectId::new(1, 1);
+        let second_id = ObjectId::new(1, 2);
+        // SAFETY: the fixture joins the worker and drains both objects before
+        // recovering the arena's published owner.
+        let first = unsafe { ObjectArena::insert(&arena, first_id, 1_u32) }.unwrap();
+        // SAFETY: the same arena lifetime guarantee covers the second object.
+        let second = unsafe { ObjectArena::insert(&arena, second_id, 2_u32) }.unwrap();
+        let locked = arena.state(first_id).lock();
+        let (completed, received) = mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            let pin = second.acquire_lease().unwrap();
+            release_unobserved(pin);
+            drop(second);
+            completed.send(()).unwrap();
+        });
+        let outcome = received.recv_timeout(Duration::from_secs(5));
+        drop(locked);
+        worker.join().unwrap();
+        outcome.expect("a different object shard must remain independently usable");
+        drop(first);
+        arena.finish_quiescence().unwrap();
+    }
+
+    #[test]
+    fn seal_rejects_new_capabilities_in_every_object_shard() {
+        let arena = PublishedOwner::new(ObjectArena::new());
+        let bindings: Vec<_> = (0..OBJECT_SHARD_COUNT)
+            .map(|sequence| {
+                let id = ObjectId::new(1, sequence as u64);
+                // SAFETY: all returned bindings are dropped before the arena.
+                unsafe { ObjectArena::insert(&arena, id, sequence) }.unwrap()
+            })
+            .collect();
+        let pin = bindings[OBJECT_SHARD_COUNT - 1].acquire_lease().unwrap();
+        arena.seal();
+        for binding in &bindings {
+            assert!(matches!(binding.duplicate(), Err(XllError::Closing)));
+            assert!(matches!(binding.acquire_lease(), Err(XllError::Closing)));
+        }
+        drop(bindings);
+        assert!(matches!(
+            arena.finish_quiescence(),
+            Err(XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_PINS,
+            })
+        ));
+        release_unobserved(pin);
+        arena.finish_quiescence().unwrap();
+        arena.assert_reclaimable();
+    }
+
     /// Transfer this guard's counted release to the unobserved instantiation
     /// used by production builds without refinement. ManuallyDrop suppresses
     /// only the now-transferred release; no capability or allocation is leaked.
@@ -824,7 +905,7 @@ mod tests {
         drop(duplicate);
         drop(binding);
         {
-            let state = arena.state.lock();
+            let state = arena.state(ObjectId::new(1, 1)).lock();
             let entry = &state.objects[&ObjectId::new(1, 1)];
             assert_eq!((entry.bindings, entry.pins), (0, 1));
             assert_eq!((state.active_pins, state.active_releases), (1, 0));
@@ -925,7 +1006,7 @@ mod tests {
             // Lock reentry witnesses that observation is outside the arena
             // transition mutex, with its independent tail already registered.
             {
-                let state = pointer.get().state.lock();
+                let state = pointer.get().state(ObjectId::new(1, 1)).lock();
                 assert_eq!((state.active_pins, state.active_releases), (1, 1));
             }
             hook_entered.wait();
@@ -936,7 +1017,7 @@ mod tests {
         *arena.before_pin_observation.lock() = None;
         drop(last);
         {
-            let state = arena.state.lock();
+            let state = arena.state(ObjectId::new(1, 1)).lock();
             assert!(state.objects.is_empty());
             assert_eq!((state.active_pins, state.active_releases), (0, 1));
         }
@@ -983,12 +1064,14 @@ mod tests {
         #[cfg(target_pointer_width = "64")]
         assert_eq!(size_of::<super::super::binding::BindingRecord>(), 32);
         eprintln!(
-            "ObjectBinding={} RawObjectLeaseGuard={} BindingRecord={} ObjectCell={} ObjectEntry={}",
+            "ObjectBinding={} RawObjectLeaseGuard={} BindingRecord={} ObjectCell={} ObjectEntry={} ObjectArena={} ObjectArenaShard={}",
             size_of::<ObjectBinding>(),
             size_of::<RawObjectLeaseGuard>(),
             size_of::<super::super::binding::BindingRecord>(),
             size_of::<ObjectCell>(),
             size_of::<ObjectEntry>(),
+            size_of::<ObjectArena>(),
+            size_of::<CachePadded<Mutex<ObjectArenaState>>>(),
         );
     }
 
@@ -1015,7 +1098,7 @@ mod tests {
             let pin = binding.acquire_lease().unwrap();
             let other_pin = duplicate.acquire_lease().unwrap();
             {
-                let state = arena.state.lock();
+                let state = arena.state(ObjectId::new(1, 1)).lock();
                 let entry = &state.objects[&id];
                 assert_eq!(
                     (
@@ -1033,7 +1116,7 @@ mod tests {
             drop(binding.take());
             drop(other_pin);
             {
-                let state = arena.state.lock();
+                let state = arena.state(ObjectId::new(1, 1)).lock();
                 let entry = &state.objects[&id];
                 assert_eq!(
                     (
@@ -1055,7 +1138,7 @@ mod tests {
                 drop(duplicate);
             }
             assert_eq!(drops.load(Ordering::SeqCst), 1);
-            let state = arena.state.lock();
+            let state = arena.state(ObjectId::new(1, 1)).lock();
             assert!(state.objects.is_empty());
             assert_eq!((state.active_pins, state.active_releases), (0, 0));
         }
@@ -1088,10 +1171,20 @@ mod tests {
                 {
                     // Lock reentry proves application destruction happens
                     // after the capability-transition lock was released.
-                    let state = arena.state.lock();
-                    assert!(!state.objects.contains_key(&self.id));
-                    assert_eq!(state.active_pins, 0);
-                    assert_eq!(state.active_releases, self.release_depth);
+                    let states = arena.lock_states();
+                    assert!(
+                        states
+                            .iter()
+                            .all(|state| !state.objects.contains_key(&self.id))
+                    );
+                    assert!(states.iter().all(|state| state.active_pins == 0));
+                    assert_eq!(
+                        states
+                            .iter()
+                            .map(|state| state.active_releases)
+                            .sum::<usize>(),
+                        self.release_depth,
+                    );
                 }
                 assert!(matches!(
                     arena.finish_quiescence(),
@@ -1102,9 +1195,15 @@ mod tests {
                 arena.seal();
                 drop(self.nested.take());
                 {
-                    let state = arena.state.lock();
-                    assert_eq!(state.active_releases, self.release_depth);
-                    assert!(state.objects.is_empty());
+                    let states = arena.lock_states();
+                    assert_eq!(
+                        states
+                            .iter()
+                            .map(|state| state.active_releases)
+                            .sum::<usize>(),
+                        self.release_depth,
+                    );
+                    assert!(states.iter().all(|state| state.objects.is_empty()));
                 }
                 assert_eq!(self.drops.fetch_add(1, Ordering::SeqCst), 0);
                 if self.panic {
@@ -1178,7 +1277,7 @@ mod tests {
             assert_eq!(outer_drops.load(Ordering::SeqCst), 1);
             assert_eq!(nested_drops.load(Ordering::SeqCst), 1);
             {
-                let state = arena.state.lock();
+                let state = arena.state(ObjectId::new(1, 1)).lock();
                 assert!(state.objects.is_empty());
                 assert_eq!((state.active_pins, state.active_releases), (0, 0));
             }
@@ -1198,7 +1297,7 @@ mod tests {
         let binding = unsafe { ObjectArena::insert(&arena, ObjectId::new(1, 1), 42_u32) }.unwrap();
         for entry_overflow in [false, true] {
             {
-                let mut state = arena.state.lock();
+                let mut state = arena.state(ObjectId::new(1, 1)).lock();
                 state.active_pins = if entry_overflow { 0 } else { usize::MAX };
                 state.objects.get_mut(&binding.id()).unwrap().pins = if entry_overflow {
                     ObjectPinCount::MAX
@@ -1207,7 +1306,7 @@ mod tests {
                 };
             }
             let result = arena.acquire_pin(binding.id(), binding.cell);
-            let mut state = arena.state.lock();
+            let mut state = arena.state(ObjectId::new(1, 1)).lock();
             let total = state.active_pins;
             let entry = state.objects.get_mut(&binding.id()).unwrap();
             let pins = entry.pins;
@@ -1240,10 +1339,16 @@ mod tests {
         let id = ObjectId::new(1, 1);
         // SAFETY: the arena remains alive until its sole real binding is dropped.
         let binding = unsafe { ObjectArena::insert(&arena, id, 42_u32) }.unwrap();
-        arena.state.lock().objects.get_mut(&id).unwrap().bindings = ObjectBindingCount::MAX;
+        arena
+            .state(ObjectId::new(1, 1))
+            .lock()
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .bindings = ObjectBindingCount::MAX;
         let result = binding.duplicate();
         let previous = {
-            let mut state = arena.state.lock();
+            let mut state = arena.state(ObjectId::new(1, 1)).lock();
             let count = &mut state.objects.get_mut(&id).unwrap().bindings;
             std::mem::replace(count, 1)
         };
@@ -1255,6 +1360,6 @@ mod tests {
             })
         ));
         drop(binding);
-        assert!(arena.state.lock().objects.is_empty());
+        assert!(arena.state(ObjectId::new(1, 1)).lock().objects.is_empty());
     }
 }

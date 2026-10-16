@@ -59,11 +59,10 @@ pub struct CallMetadata {
 pub(crate) const UDF_TRACE_TARGET: &str = "xlfn::udf";
 
 pub(crate) fn udf_trace_enabled() -> bool {
-    // The common no-global-subscriber path does not need an unwind guard.
-    // `enabled!` still observes a thread-scoped dispatcher, so this shortcut
-    // does not change scoped instrumentation semantics.
+    // Both global and thread-scoped dispatchers set this flag. Before either
+    // has been installed there is no subscriber to query, including via TLS.
     if !tracing::dispatcher::has_been_set() {
-        return tracing::enabled!(target: UDF_TRACE_TARGET, tracing::Level::INFO);
+        return false;
     }
     catch_no_unwind(AssertUnwindSafe(
         || tracing::enabled!(target: UDF_TRACE_TARGET, tracing::Level::INFO),
@@ -480,6 +479,58 @@ mod tests {
     use super::*;
     use crate::sync::Mutex;
     use std::sync::Arc;
+
+    struct TraceProbeSubscriber {
+        panic_on_enabled: bool,
+    }
+
+    impl tracing::Subscriber for TraceProbeSubscriber {
+        fn register_callsite(
+            &self,
+            _: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            tracing::subscriber::Interest::sometimes()
+        }
+
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            assert!(!self.panic_on_enabled, "injected subscriber panic");
+            metadata.target() == UDF_TRACE_TARGET
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, _: &tracing::Event<'_>) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[test]
+    fn trace_probe_observes_thread_scoped_dispatchers() {
+        tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
+            assert!(!udf_trace_enabled());
+            tracing::subscriber::with_default(
+                TraceProbeSubscriber {
+                    panic_on_enabled: false,
+                },
+                || assert!(udf_trace_enabled()),
+            );
+            assert!(!udf_trace_enabled());
+        });
+    }
+
+    #[test]
+    fn trace_probe_contains_subscriber_panics() {
+        tracing::subscriber::with_default(
+            TraceProbeSubscriber {
+                panic_on_enabled: true,
+            },
+            || assert!(!udf_trace_enabled()),
+        );
+    }
 
     #[test]
     fn intentional_worksheet_errors_are_classified_separately_from_internal_failures() {

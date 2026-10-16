@@ -236,12 +236,16 @@ impl AdmittedExport<'_> {
     }
 }
 
+#[cfg(any(test, feature = "refinement"))]
 static DIAGNOSTIC_LINEARIZATION: Mutex<()> = Mutex::new(());
 
 pub(crate) fn with_diagnostic_linearization<F, R>(operation: F) -> R
 where
     F: FnOnce() -> R,
 {
+    // Only refinement observations need to order enqueue/flush with close.
+    // Production queue ownership and shutdown are synchronized independently.
+    #[cfg(any(test, feature = "refinement"))]
     let _guard = DIAGNOSTIC_LINEARIZATION
         .lock()
         .unwrap_or_else(|error| error.into_inner());
