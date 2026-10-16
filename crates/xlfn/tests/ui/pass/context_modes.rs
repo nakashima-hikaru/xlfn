@@ -75,6 +75,16 @@ fn elided_thread(context: ThreadSafeContext<TestAddin>, value: f64) -> f64 {
     value + f64::from(*context.state())
 }
 
+#[excel_function(name = "TEST.ELIDED.MAIN")]
+fn elided_main(context: MainThreadContext<TestAddin>) -> i32 {
+    *context.state()
+}
+
+#[excel_function(name = "TEST.ELIDED.MACRO")]
+fn elided_macro(context: MacroSheetContext<TestAddin>) -> i32 {
+    *context.state()
+}
+
 fn main() {
     type ValueExport = unsafe extern "system" fn() -> *mut xlfn::__private::v1::XLOPER12;
     type OneArgumentExport = unsafe extern "system" fn(
@@ -87,4 +97,6 @@ fn main() {
     let _: ValueExport = xll_macro_sheet;
     let _: OneArgumentExport = xll_qualified_main;
     let _: OneArgumentExport = xll_elided_thread;
+    let _: ValueExport = xll_elided_main;
+    let _: ValueExport = xll_elided_macro;
 }

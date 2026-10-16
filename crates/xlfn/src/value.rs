@@ -904,7 +904,7 @@ where
         if !M::RECORDS_IDENTITY {
             return Self::decode(value, argument, context, identity).map(PreparedArgument::Ready);
         }
-        let grid = GridView::from_value(value, argument)?;
+        let grid = convert::grid(value, argument, convert::GridShape::Matrix)?;
         let (rows, columns) = grid.shape();
         M::u64(identity, rows as u64);
         M::u64(identity, columns as u64);
@@ -941,7 +941,7 @@ where
         context: &CallContext<'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
-        let grid = GridView::from_value(value, argument)?;
+        let grid = convert::grid(value, argument, convert::GridShape::Matrix)?;
         let (rows, columns) = grid.shape();
         M::u64(identity, rows as u64);
         M::u64(identity, columns as u64);
@@ -985,7 +985,7 @@ where
         if !M::RECORDS_IDENTITY || !T::DEFER_BORROWED_MATRIX {
             return Self::decode(value, argument, context, identity).map(PreparedArgument::Ready);
         }
-        let grid = GridView::from_value(value, argument)?;
+        let grid = convert::grid(value, argument, convert::GridShape::Matrix)?;
         let (rows, columns) = grid.shape();
         M::u64(identity, rows as u64);
         M::u64(identity, columns as u64);
@@ -1021,7 +1021,7 @@ where
         context: &CallContext<'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
-        let grid = GridView::from_value(value, argument)?;
+        let grid = convert::grid(value, argument, convert::GridShape::Matrix)?;
         let (rows, columns) = grid.shape();
         M::u64(identity, rows as u64);
         M::u64(identity, columns as u64);
@@ -1220,7 +1220,7 @@ where
             materialize: |(rows, columns, argument, elements)| {
                 let _ = (rows, columns, argument);
                 let values = T::materialize_elements(elements)?;
-                Ok(Self(values))
+                Self::new(values)
             },
         })
     }
@@ -1249,7 +1249,7 @@ where
     ) -> XllResult<Self> {
         let grid = convert::grid(value, argument, convert::GridShape::Row)?;
         M::u64(identity, grid.cells().len() as u64);
-        convert_grid_elements::<T, M>(&grid, argument, context, identity).map(Self)
+        convert_grid_elements::<T, M>(&grid, argument, context, identity).and_then(Self::new)
     }
 
     fn encode_decoded(&self, identity: &mut M::Identity) {
@@ -1291,7 +1291,7 @@ where
             materialize: |(rows, columns, argument, elements)| {
                 let _ = (rows, columns, argument);
                 let values = T::materialize_elements(elements)?;
-                Ok(Self(values))
+                Self::new(values)
             },
         })
     }
@@ -1320,7 +1320,7 @@ where
     ) -> XllResult<Self> {
         let grid = convert::grid(value, argument, convert::GridShape::Column)?;
         M::u64(identity, grid.cells().len() as u64);
-        convert_grid_elements::<T, M>(&grid, argument, context, identity).map(Self)
+        convert_grid_elements::<T, M>(&grid, argument, context, identity).and_then(Self::new)
     }
 
     fn encode_decoded(&self, identity: &mut M::Identity) {
@@ -1509,7 +1509,7 @@ impl<'call> FromExcel<'call> for ExcelValue {
             converted.encode_input_identity(identity);
             return Ok(converted);
         }
-        let grid = GridView::from_value(value, argument)?;
+        let grid = convert::grid(value, argument, convert::GridShape::Matrix)?;
         let (rows, columns) = grid.shape();
         identity.tag(3);
         identity.u64(rows as u64);
@@ -3043,6 +3043,135 @@ mod tests {
     }
 
     #[test]
+    fn empty_collection_inputs_keep_argument_names_in_decode_and_prepare() {
+        for (rows, columns) in [(0, 0), (1, 0), (0, 1), (0, 2)] {
+            let raw = XLOPER12 {
+                value: XLOPER12Value {
+                    array: XLOPER12Array {
+                        values: std::ptr::null_mut(),
+                        rows,
+                        columns,
+                    },
+                },
+                xltype: XLTYPE_MULTI,
+            };
+            crate::call::with_excel_call_scope_and_state(&raw, |raw, scope| {
+                let value = XlValueRef::from_array_cell(raw).unwrap();
+                let mut plain = ArgumentContext::<PlainInputMode>::from_scope(scope, 1);
+                let mut formula = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                let errors = [
+                    plain.decode::<Matrix<f64>>(0, "observations", value).err(),
+                    plain.decode::<ExcelValue>(0, "observations", value).err(),
+                    plain
+                        .decode::<MatrixRef<'_, f64>>(0, "observations", value)
+                        .err(),
+                    formula
+                        .prepare::<Matrix<f64>>(0, "observations", value)
+                        .err(),
+                    formula
+                        .prepare::<ExcelValue>(0, "observations", value)
+                        .err(),
+                    formula
+                        .prepare::<MatrixRef<'_, f64>>(0, "observations", value)
+                        .err(),
+                    plain.decode::<Row<f64>>(0, "observations", value).err(),
+                    plain.decode::<Column<f64>>(0, "observations", value).err(),
+                    formula.prepare::<Row<f64>>(0, "observations", value).err(),
+                    formula
+                        .prepare::<Column<f64>>(0, "observations", value)
+                        .err(),
+                ];
+                for error in errors {
+                    assert!(matches!(
+                        error,
+                        Some(XllError::Input {
+                            argument: "observations",
+                            reason: InputError::Malformed("matrix dimensions must be non-zero"),
+                        })
+                    ));
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn invalid_excel_value_shape_does_not_encode_an_identity_prefix() {
+        use crate::input_identity::InputFingerprintBuilder;
+        let raw = XLOPER12 {
+            value: XLOPER12Value {
+                array: XLOPER12Array {
+                    values: std::ptr::null_mut(),
+                    rows: 0,
+                    columns: 0,
+                },
+            },
+            xltype: XLTYPE_MULTI,
+        };
+        let value = XlValueRef::from_array_cell(&raw).unwrap();
+        let mut rejected = InputFingerprintBuilder::new(1);
+        rejected
+            .with_argument(0, "observations", |identity| {
+                assert!(
+                    ExcelValue::from_excel_with_identity(value, "observations", identity).is_err()
+                );
+                identity.u64(42);
+                Ok(())
+            })
+            .unwrap();
+        let mut expected = InputFingerprintBuilder::new(1);
+        expected
+            .with_argument(0, "observations", |identity| {
+                identity.u64(42);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(rejected.finish().unwrap(), expected.finish().unwrap());
+    }
+
+    #[test]
+    fn matrix_constructors_validate_dimensions_before_count_arithmetic() {
+        for (rows, columns, reason) in [
+            (
+                0,
+                usize::MAX,
+                InputError::Malformed("matrix dimensions must be non-zero"),
+            ),
+            (
+                usize::MAX,
+                0,
+                InputError::Malformed("matrix dimensions must be non-zero"),
+            ),
+            (
+                EXCEL_MAX_ROWS + 1,
+                usize::MAX,
+                InputError::TooLarge {
+                    limit: EXCEL_MAX_ROWS,
+                    actual: EXCEL_MAX_ROWS + 1,
+                },
+            ),
+            (
+                EXCEL_MAX_ROWS,
+                4096,
+                InputError::TooLarge {
+                    limit: MAX_ARRAY_ELEMENTS,
+                    actual: usize::try_from(1_u64 << 32).unwrap_or(usize::MAX),
+                },
+            ),
+        ] {
+            let errors = [
+                Matrix::<()>::new(rows, columns, Vec::new()).unwrap_err(),
+                Matrix::<()>::fill(rows, columns, ()).unwrap_err(),
+                Matrix::<()>::from_fn(rows, columns, |_, _| panic!("invalid shape")).unwrap_err(),
+            ];
+            for error in errors {
+                assert!(matches!(error, XllError::Input {
+                    argument: "<matrix>", reason: actual,
+                } if actual == reason));
+            }
+        }
+    }
+
+    #[test]
     fn oversized_excel_dimensions_are_rejected_before_element_access() {
         for (rows, columns, limit, actual) in [
             (
@@ -3056,6 +3185,12 @@ mod tests {
                 i32::try_from(EXCEL_MAX_COLUMNS + 1).unwrap(),
                 EXCEL_MAX_COLUMNS,
                 EXCEL_MAX_COLUMNS + 1,
+            ),
+            (
+                EXCEL_MAX_ROWS as i32,
+                4096,
+                MAX_ARRAY_ELEMENTS,
+                usize::try_from(1_u64 << 32).unwrap_or(usize::MAX),
             ),
         ] {
             let mut raw = XLOPER12 {

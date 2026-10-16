@@ -209,9 +209,7 @@ where
 
     /// Runs key destructors only after the caller has left all cache locks.
     pub(super) fn maintenance(&self) {
-        if super::ACTIVE_CACHE_INITIALIZATION_DEPTH.get() == 0
-            && let Some(retired) = &self.retired_keys
-        {
+        if let Some(retired) = &self.retired_keys {
             retired.reclaim();
         }
     }

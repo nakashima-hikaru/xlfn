@@ -1,5 +1,5 @@
 use super::completion::{
-    AsyncCompletion, OwnedCompletionOutcome, OwnedDeliveryOutcome, execute_async_udf, return_error,
+    AsyncCompletion, AsyncDelivery, OwnedCompletionOutcome, OwnedDeliveryOutcome, return_error,
 };
 use super::instrumentation::AsyncObservation;
 #[cfg(feature = "handles")]
@@ -19,10 +19,10 @@ use xlfn_sys::XLOPER12;
 
 #[cfg(feature = "handles")]
 struct InstrumentedHandleTask<Build, G: crate::execution::UdfLayerGuard, T> {
-    build: Build,
-    responder: ExcelAsyncResponder,
+    build: Option<Build>,
+    responder: Option<ExcelAsyncResponder>,
     token: CancellationToken,
-    observation: AsyncObservation<G>,
+    observation: Option<AsyncObservation<G>>,
     udf_id: &'static str,
     _result: std::marker::PhantomData<fn() -> T>,
 }
@@ -58,13 +58,20 @@ where
     );
 
     fn build_task<'generation>(
-        self,
+        mut self,
         scope: super::task_scope::AsyncTaskScope<'generation>,
     ) -> (ScopedTaskFuture<'generation, Self::Output>, Self::Delivery) {
-        let future = self.build.build(scope);
+        let build = self.build.take().expect("task owns builder");
+        let future = catch_no_unwind(AssertUnwindSafe(|| build.build(scope)))
+            .unwrap_or_else(|_| Box::pin(std::future::ready(Err(XllError::Panic))));
         (
             future,
-            (self.responder, self.token, self.observation, self.udf_id),
+            (
+                self.responder.take().unwrap(),
+                self.token,
+                self.observation.take().unwrap(),
+                self.udf_id,
+            ),
         )
     }
 
@@ -72,19 +79,15 @@ where
         delivery: Self::Delivery,
         future: ScopedTaskFuture<'static, Self::Output>,
     ) -> impl Future<Output = ()> + Send + 'static {
-        let (responder, token, observation, udf_id) = delivery;
-        async move {
-            let completion = execute_async_udf(responder, token, future).await;
-            report_completion(udf_id, &completion);
-            observation.finish(&completion);
-        }
+        let (responder, token, observation, _) = delivery;
+        AsyncDelivery::new(responder, token, Some(observation)).task(future)
     }
 }
 
 #[cfg(feature = "handles")]
 struct UninstrumentedHandleTask<Build, T> {
-    build: Build,
-    responder: ExcelAsyncResponder,
+    build: Option<Build>,
+    responder: Option<ExcelAsyncResponder>,
     token: CancellationToken,
     udf_id: &'static str,
     _result: std::marker::PhantomData<fn() -> T>,
@@ -100,21 +103,43 @@ where
     type Delivery = (ExcelAsyncResponder, CancellationToken, &'static str);
 
     fn build_task<'generation>(
-        self,
+        mut self,
         scope: super::task_scope::AsyncTaskScope<'generation>,
     ) -> (ScopedTaskFuture<'generation, Self::Output>, Self::Delivery) {
-        let future = self.build.build(scope);
-        (future, (self.responder, self.token, self.udf_id))
+        let build = self.build.take().expect("task owns builder");
+        let future = catch_no_unwind(AssertUnwindSafe(|| build.build(scope)))
+            .unwrap_or_else(|_| Box::pin(std::future::ready(Err(XllError::Panic))));
+        (
+            future,
+            (self.responder.take().unwrap(), self.token, self.udf_id),
+        )
     }
 
     fn deliver(
         delivery: Self::Delivery,
         future: ScopedTaskFuture<'static, Self::Output>,
     ) -> impl Future<Output = ()> + Send + 'static {
-        let (responder, token, udf_id) = delivery;
-        async move {
-            let completion = execute_async_udf(responder, token, future).await;
-            report_completion(udf_id, &completion);
+        let (responder, token, _) = delivery;
+        AsyncDelivery::<()>::new(responder, token, None).task(future)
+    }
+}
+
+#[cfg(feature = "handles")]
+impl<Build, G: crate::execution::UdfLayerGuard, T> Drop for InstrumentedHandleTask<Build, G, T> {
+    fn drop(&mut self) {
+        let panicked = catch_no_unwind(AssertUnwindSafe(|| drop(self.build.take()))).is_err();
+        if let Some(responder) = self.responder.take() {
+            AsyncDelivery::new(responder, self.token, self.observation.take()).fallback(panicked);
+        }
+    }
+}
+
+#[cfg(feature = "handles")]
+impl<Build, T> Drop for UninstrumentedHandleTask<Build, T> {
+    fn drop(&mut self) {
+        let panicked = catch_no_unwind(AssertUnwindSafe(|| drop(self.build.take()))).is_err();
+        if let Some(responder) = self.responder.take() {
+            AsyncDelivery::<()>::new(responder, self.token, None).fallback(panicked);
         }
     }
 }
@@ -272,8 +297,7 @@ unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
     let mut responder = match unsafe { ExcelAsyncResponder::from_raw(udf_id, raw_handle) } {
         Ok(responder) => responder,
         Err(error) => {
-            // SAFETY: forwarded from this function's raw-handle contract.
-            let delivery = unsafe { return_error(raw_handle, &error) };
+            let delivery = OwnedDeliveryOutcome::Unobserved;
             let completion = AsyncCompletion {
                 completion: OwnedCompletionOutcome::Error(error),
                 delivery,
@@ -293,30 +317,33 @@ unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
             let reservation = match runtime.async_runtime().reserve_snapshot(calculation) {
                 Ok(reservation) => reservation,
                 Err(error) => {
-                    responder.set_fallback_error(error.clone());
-                    drop(responder);
+                    let _ = catch_no_unwind(AssertUnwindSafe(|| drop(future)));
+                    // SAFETY: the responder owns a copied handle valid for this call.
+                    let delivery = match unsafe { responder.deliver_error(&error) } {
+                        Ok(()) => OwnedDeliveryOutcome::Delivered,
+                        Err(error) => OwnedDeliveryOutcome::Failed(error),
+                    };
                     let completion = AsyncCompletion {
                         completion: OwnedCompletionOutcome::Error(error),
-                        delivery: OwnedDeliveryOutcome::Unobserved,
+                        delivery,
                     };
                     report_completion(udf_id, &completion);
                     observation.finish(&completion);
                     return;
                 }
             };
-            let task = async move {
-                let completion = execute_async_udf(responder, token, future).await;
-                report_completion(udf_id, &completion);
-                observation.finish(&completion);
-            };
+            let task = AsyncDelivery::new(responder, token, Some(observation)).task(future);
             reservation.commit(task, cancellation);
         }
         Err(error) => {
-            responder.set_fallback_error(error.clone());
-            drop(responder);
+            // SAFETY: the responder owns a copied handle valid for this call.
+            let delivery = match unsafe { responder.deliver_error(&error) } {
+                Ok(()) => OwnedDeliveryOutcome::Delivered,
+                Err(error) => OwnedDeliveryOutcome::Failed(error),
+            };
             let completion = AsyncCompletion {
                 completion: OwnedCompletionOutcome::Error(error),
-                delivery: OwnedDeliveryOutcome::Unobserved,
+                delivery,
             };
             report_completion(udf_id, &completion);
             observation.finish(&completion);
@@ -346,8 +373,7 @@ unsafe fn async_udf_boundary_uninstrumented<A, Start, Fut, T>(
     let mut responder = match unsafe { ExcelAsyncResponder::from_raw(udf_id, raw_handle) } {
         Ok(responder) => responder,
         Err(error) => {
-            // SAFETY: forwarded from this function's raw-handle contract.
-            let delivery = unsafe { return_error(raw_handle, &error) };
+            let delivery = OwnedDeliveryOutcome::Unobserved;
             let completion = AsyncCompletion {
                 completion: OwnedCompletionOutcome::Error(error),
                 delivery,
@@ -366,28 +392,32 @@ unsafe fn async_udf_boundary_uninstrumented<A, Start, Fut, T>(
             let reservation = match runtime.async_runtime().reserve_snapshot(calculation) {
                 Ok(reservation) => reservation,
                 Err(error) => {
-                    responder.set_fallback_error(error.clone());
-                    drop(responder);
+                    let _ = catch_no_unwind(AssertUnwindSafe(|| drop(future)));
+                    // SAFETY: the responder owns a copied handle valid for this call.
+                    let delivery = match unsafe { responder.deliver_error(&error) } {
+                        Ok(()) => OwnedDeliveryOutcome::Delivered,
+                        Err(error) => OwnedDeliveryOutcome::Failed(error),
+                    };
                     let completion = AsyncCompletion {
                         completion: OwnedCompletionOutcome::Error(error),
-                        delivery: OwnedDeliveryOutcome::Unobserved,
+                        delivery,
                     };
                     report_completion(udf_id, &completion);
                     return;
                 }
             };
-            let task = async move {
-                let completion = execute_async_udf(responder, token, future).await;
-                report_completion(udf_id, &completion);
-            };
+            let task = AsyncDelivery::<()>::new(responder, token, None).task(future);
             reservation.commit(task, cancellation);
         }
         Err(error) => {
-            responder.set_fallback_error(error.clone());
-            drop(responder);
+            // SAFETY: the responder owns a copied handle valid for this call.
+            let delivery = match unsafe { responder.deliver_error(&error) } {
+                Ok(()) => OwnedDeliveryOutcome::Delivered,
+                Err(error) => OwnedDeliveryOutcome::Failed(error),
+            };
             let completion = AsyncCompletion {
                 completion: OwnedCompletionOutcome::Error(error),
-                delivery: OwnedDeliveryOutcome::Unobserved,
+                delivery,
             };
             report_completion(udf_id, &completion);
         }
@@ -548,8 +578,7 @@ unsafe fn async_udf_boundary_instrumented_handle<A, Start, Build, T>(
     let mut responder = match unsafe { ExcelAsyncResponder::from_raw(udf_id, raw_handle) } {
         Ok(responder) => responder,
         Err(error) => {
-            // SAFETY: forwarded from this function's raw-handle contract.
-            let delivery = unsafe { return_error(raw_handle, &error) };
+            let delivery = OwnedDeliveryOutcome::Unobserved;
             let completion = AsyncCompletion {
                 completion: OwnedCompletionOutcome::Error(error),
                 delivery,
@@ -571,11 +600,15 @@ unsafe fn async_udf_boundary_instrumented_handle<A, Start, Build, T>(
             let reservation = match runtime.async_runtime().reserve_snapshot(calculation) {
                 Ok(reservation) => reservation,
                 Err(error) => {
-                    responder.set_fallback_error(error.clone());
-                    drop(responder);
+                    let _ = catch_no_unwind(AssertUnwindSafe(|| drop(build)));
+                    // SAFETY: the responder owns a copied handle valid for this call.
+                    let delivery = match unsafe { responder.deliver_error(&error) } {
+                        Ok(()) => OwnedDeliveryOutcome::Delivered,
+                        Err(error) => OwnedDeliveryOutcome::Failed(error),
+                    };
                     let completion = AsyncCompletion {
                         completion: OwnedCompletionOutcome::Error(error),
-                        delivery: OwnedDeliveryOutcome::Unobserved,
+                        delivery,
                     };
                     report_completion(udf_id, &completion);
                     observation.finish(&completion);
@@ -585,10 +618,10 @@ unsafe fn async_udf_boundary_instrumented_handle<A, Start, Build, T>(
             reservation.commit_handle_scoped(
                 generation,
                 InstrumentedHandleTask {
-                    build,
-                    responder,
+                    build: Some(build),
+                    responder: Some(responder),
                     token,
-                    observation,
+                    observation: Some(observation),
                     udf_id,
                     _result: std::marker::PhantomData,
                 },
@@ -596,11 +629,14 @@ unsafe fn async_udf_boundary_instrumented_handle<A, Start, Build, T>(
             );
         }
         Err(error) => {
-            responder.set_fallback_error(error.clone());
-            drop(responder);
+            // SAFETY: the responder owns a copied handle valid for this call.
+            let delivery = match unsafe { responder.deliver_error(&error) } {
+                Ok(()) => OwnedDeliveryOutcome::Delivered,
+                Err(error) => OwnedDeliveryOutcome::Failed(error),
+            };
             let completion = AsyncCompletion {
                 completion: OwnedCompletionOutcome::Error(error),
-                delivery: OwnedDeliveryOutcome::Unobserved,
+                delivery,
             };
             report_completion(udf_id, &completion);
             observation.finish(&completion);
@@ -631,8 +667,7 @@ unsafe fn async_udf_boundary_uninstrumented_handle<A, Start, Build, T>(
     let mut responder = match unsafe { ExcelAsyncResponder::from_raw(udf_id, raw_handle) } {
         Ok(responder) => responder,
         Err(error) => {
-            // SAFETY: forwarded from this function's raw-handle contract.
-            let delivery = unsafe { return_error(raw_handle, &error) };
+            let delivery = OwnedDeliveryOutcome::Unobserved;
             let completion = AsyncCompletion {
                 completion: OwnedCompletionOutcome::Error(error),
                 delivery,
@@ -653,11 +688,15 @@ unsafe fn async_udf_boundary_uninstrumented_handle<A, Start, Build, T>(
             let reservation = match runtime.async_runtime().reserve_snapshot(calculation) {
                 Ok(reservation) => reservation,
                 Err(error) => {
-                    responder.set_fallback_error(error.clone());
-                    drop(responder);
+                    let _ = catch_no_unwind(AssertUnwindSafe(|| drop(build)));
+                    // SAFETY: the responder owns a copied handle valid for this call.
+                    let delivery = match unsafe { responder.deliver_error(&error) } {
+                        Ok(()) => OwnedDeliveryOutcome::Delivered,
+                        Err(error) => OwnedDeliveryOutcome::Failed(error),
+                    };
                     let completion = AsyncCompletion {
                         completion: OwnedCompletionOutcome::Error(error),
-                        delivery: OwnedDeliveryOutcome::Unobserved,
+                        delivery,
                     };
                     report_completion(udf_id, &completion);
                     return;
@@ -666,8 +705,8 @@ unsafe fn async_udf_boundary_uninstrumented_handle<A, Start, Build, T>(
             reservation.commit_handle_scoped(
                 generation,
                 UninstrumentedHandleTask {
-                    build,
-                    responder,
+                    build: Some(build),
+                    responder: Some(responder),
                     token,
                     udf_id,
                     _result: std::marker::PhantomData,
@@ -676,18 +715,21 @@ unsafe fn async_udf_boundary_uninstrumented_handle<A, Start, Build, T>(
             );
         }
         Err(error) => {
-            responder.set_fallback_error(error.clone());
-            drop(responder);
+            // SAFETY: the responder owns a copied handle valid for this call.
+            let delivery = match unsafe { responder.deliver_error(&error) } {
+                Ok(()) => OwnedDeliveryOutcome::Delivered,
+                Err(error) => OwnedDeliveryOutcome::Failed(error),
+            };
             let completion = AsyncCompletion {
                 completion: OwnedCompletionOutcome::Error(error),
-                delivery: OwnedDeliveryOutcome::Unobserved,
+                delivery,
             };
             report_completion(udf_id, &completion);
         }
     }
 }
 
-fn report_completion(udf_id: &'static str, completion: &AsyncCompletion) {
+pub(super) fn report_completion(udf_id: &'static str, completion: &AsyncCompletion) {
     if let OwnedCompletionOutcome::Error(error) = &completion.completion {
         crate::diagnostics::report_udf_failure_no_unwind(udf_id, error);
     }

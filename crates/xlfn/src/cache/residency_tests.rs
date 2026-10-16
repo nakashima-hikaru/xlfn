@@ -20,6 +20,44 @@ fn counters(count: usize) -> Arc<Vec<AtomicUsize>> {
 }
 
 #[test]
+fn clear_and_final_lease_release_defer_reclamation_while_reading() {
+    for release_while_reading in [false, true] {
+        let drops = counters(1);
+        let cache = CalculationCache::new(1);
+        let lease = cache
+            .get_or_try_insert_with(
+                0,
+                |_| 1,
+                || {
+                    Ok(DropProbe {
+                        id: 0,
+                        drops: Arc::clone(&drops),
+                    })
+                },
+            )
+            .unwrap();
+        if !release_while_reading {
+            drop(lease);
+            let permit = cache.domain.enter().unwrap();
+            cache.clear();
+            assert_eq!(drops[0].load(Ordering::SeqCst), 0);
+            assert_eq!(cache.reclamation_stats().pending_nodes, 1);
+            drop(permit);
+        } else {
+            cache.clear();
+            let permit = cache.domain.enter().unwrap();
+            drop(lease);
+            assert_eq!(drops[0].load(Ordering::SeqCst), 0);
+            assert_eq!(cache.reclamation_stats().pending_nodes, 1);
+            drop(permit);
+        }
+        cache.maintenance();
+        assert_eq!(drops[0].load(Ordering::SeqCst), 1);
+        assert_eq!(cache.reclamation_stats().pending_nodes, 0);
+    }
+}
+
+#[test]
 fn eviction_preserves_live_leases_and_drops_every_value_once() {
     let count = if cfg!(miri) { 8 } else { 128 };
     let drops = counters(count);

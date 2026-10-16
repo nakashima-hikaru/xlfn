@@ -222,16 +222,24 @@ impl<'runtime, A: crate::Addin> OpenRollbackCertificate<'runtime, A> {
         let attempt = self.owner.attempt();
         let result = {
             let mut control = lifecycle.access();
-            lifecycle.finish_open_rollback(&mut control, attempt)
+            lifecycle
+                .finish_open_rollback(&mut control, attempt)
+                .inspect(|()| {
+                    #[cfg(any(test, feature = "refinement"))]
+                    self.deps.observer().finish_open_rollback(
+                        &control,
+                        self.deps.terminal_resources(&control, &self.proof),
+                    );
+                })
         };
         if let Err(error) = result {
             return Err((error, Box::new(self)));
         }
 
+        #[cfg(test)]
         let deps = self.deps;
         let OpenRollbackCertificate { proof, owner, .. } = self;
         let _quiescence = proof;
-        deps.observer().finish_open_rollback();
         lifecycle.notify_all();
         #[cfg(test)]
         deps.release_test_module_lease();
@@ -265,7 +273,27 @@ impl<'runtime, A: crate::Addin> FinalRemovalCertificate<'runtime, A> {
         let lifecycle = deps.lifecycle_control();
         let result = {
             let mut control = lifecycle.access();
-            lifecycle.finish_final_removal(&mut control, removal_attempt)
+            lifecycle
+                .finish_final_removal(&mut control, removal_attempt)
+                .inspect(|()| {
+                    if committed {
+                        deps.observer().finish_close(&control);
+                        deps.observer().publish_committed_closed(&control);
+                    } else {
+                        #[cfg(any(test, feature = "refinement"))]
+                        {
+                            let proof = match &self {
+                                Self::Committed { proof, .. } | Self::Uncommitted { proof, .. } => {
+                                    proof
+                                }
+                            };
+                            deps.observer().finish_uncommitted_final_close(
+                                &control,
+                                deps.terminal_resources(&control, proof),
+                            );
+                        }
+                    }
+                })
         };
         if let Err(error) = result {
             return Err((error, Box::new(self)));
@@ -277,11 +305,8 @@ impl<'runtime, A: crate::Addin> FinalRemovalCertificate<'runtime, A> {
             }
         };
         let witness = if committed {
-            deps.observer().finish_close();
-            deps.observer().publish_committed_closed();
             ClosedWitness::committed()
         } else {
-            deps.observer().finish_uncommitted_final_close();
             ClosedWitness::uncommitted()
         };
         lifecycle.notify_all();

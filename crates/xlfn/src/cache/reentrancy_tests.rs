@@ -184,9 +184,14 @@ fn double_checked_hit_reclaims_after_singleflight_unlock() {
     );
     // Queue the old value for the caller's maintenance, without reclaiming
     // it on this setup thread.
+    // Keep an old-generation reader to model debt left for the next caller.
+    // Use the kernel permit so releasing this setup reader does not itself
+    // perform the cache maintenance that the test is exercising.
+    let reader = cache.domain.domain.enter_current_thread().unwrap();
     let initialization = ActiveCacheGuard::enter().unwrap();
     drop(previous);
     drop(initialization);
+    drop(reader);
     assert_eq!(cache.reclamation_stats().pending_nodes, 1);
     drop(flights);
 
@@ -223,9 +228,14 @@ fn failed_follower_reclaims_after_flight_state_unlock() {
         .shard(hash)
         .lock()
         .insert_unique(Arc::clone(&flight));
+    // Keep an old-generation reader to model debt left for the next caller.
+    // Use the kernel permit so releasing this setup reader does not itself
+    // perform the cache maintenance that the test is exercising.
+    let reader = cache.domain.domain.enter_current_thread().unwrap();
     let initialization = ActiveCacheGuard::enter().unwrap();
     drop(previous);
     drop(initialization);
+    drop(reader);
     assert_eq!(cache.reclamation_stats().pending_nodes, 1);
 
     let result =

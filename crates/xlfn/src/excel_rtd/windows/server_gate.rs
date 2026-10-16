@@ -25,12 +25,14 @@ pub(super) struct ServerOperationState {
     notifications_in_flight: usize,
     in_flight_by_thread: FxHashMap<ThreadId, usize>,
     notifications_in_flight_by_thread: FxHashMap<ThreadId, usize>,
+    resource_teardown_owner: Option<ThreadId>,
 }
 
 pub(super) struct ServerOperationBarrier {
     pub(super) state: Mutex<ServerOperationState>,
     quiescent: ManualResetEvent,
     termination_finished: ManualResetEvent,
+    resources_finished: ManualResetEvent,
 }
 
 pub(super) struct ServerOperation<'a> {
@@ -62,6 +64,14 @@ pub(super) struct ServerTermination<'a> {
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
+/// Exclusive backend/callback disposal, including retries after the terminal
+/// phase was published by a deferred worker. The operation phase alone cannot
+/// serialize those retries because close_and_wait then returns no owner.
+pub(super) struct ServerResourceTeardown<'a> {
+    barrier: &'a ServerOperationBarrier,
+    _not_send_or_sync: PhantomData<Rc<()>>,
+}
+
 pub(super) enum ServerTerminationRequest<'a> {
     Complete,
     InProgress,
@@ -82,7 +92,37 @@ impl ServerOperationBarrier {
             state: Mutex::new(ServerOperationState::default()),
             quiescent: ManualResetEvent::new(false)?,
             termination_finished: ManualResetEvent::new(false)?,
+            resources_finished: ManualResetEvent::new(true)?,
         })
+    }
+
+    pub(super) fn teardown_resources(
+        &self,
+    ) -> Result<ServerResourceTeardown<'_>, ServerCloseError> {
+        let current = std::thread::current().id();
+        loop {
+            {
+                let mut state = self.state.lock();
+                debug_assert_ne!(state.phase, ServerPhase::Open);
+                match state.resource_teardown_owner {
+                    Some(owner) if owner == current => return Err(ServerCloseError::Reentrant),
+                    Some(_) => {}
+                    None => {
+                        self.resources_finished
+                            .reset()
+                            .map_err(ServerCloseError::Event)?;
+                        state.resource_teardown_owner = Some(current);
+                        return Ok(ServerResourceTeardown {
+                            barrier: self,
+                            _not_send_or_sync: PhantomData,
+                        });
+                    }
+                }
+            }
+            self.resources_finished
+                .wait_with_com_pumping()
+                .map_err(ServerCloseError::WaitFailed)?;
+        }
     }
 
     pub(super) fn enter(&self) -> Option<ServerOperation<'_>> {
@@ -490,6 +530,21 @@ impl Drop for ServerTermination<'_> {
         state.termination_coordinator = None;
         self.barrier
             .termination_finished
+            .set()
+            .unwrap_or_else(|_| std::process::abort());
+    }
+}
+
+impl Drop for ServerResourceTeardown<'_> {
+    fn drop(&mut self) {
+        let mut state = self.barrier.state.lock();
+        debug_assert_eq!(
+            state.resource_teardown_owner,
+            Some(std::thread::current().id())
+        );
+        state.resource_teardown_owner = None;
+        self.barrier
+            .resources_finished
             .set()
             .unwrap_or_else(|_| std::process::abort());
     }

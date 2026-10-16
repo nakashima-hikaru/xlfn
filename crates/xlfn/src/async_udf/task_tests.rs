@@ -151,3 +151,43 @@ fn miri_inline_async_task_drops_unpolled_future_before_registry_release() {
         assert_released(&registry, &observation);
     }
 }
+
+#[test]
+fn abort_waker_destructor_panic_cannot_skip_task_accounting_release() {
+    struct PanicDrop(Arc<AtomicUsize>);
+    impl std::task::Wake for PanicDrop {
+        fn wake(self: Arc<Self>) {
+            // This fixture exercises destruction without cancellation. Record
+            // an unexpected wake separately from its single destructor count.
+            self.0.fetch_add(100, Ordering::Relaxed);
+        }
+    }
+    impl Drop for PanicDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            panic!("injected abort waker destructor panic");
+        }
+    }
+    let registry = registry();
+    let drops = Arc::new(AtomicUsize::new(0));
+    let task = registry
+        .reserve(CalculationEpoch::INITIAL)
+        .unwrap()
+        .commit(std::future::pending::<()>(), source());
+    let mut task = Box::pin(task);
+    let waker = std::task::Waker::from(Arc::new(PanicDrop(Arc::clone(&drops))));
+    assert!(
+        task.as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
+    drop(waker);
+    // The task first releases its AbortRegistration, making TaskControl the
+    // final owner of the registered waker. Its Drop must remain contained.
+    drop(task);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+    assert_eq!(registry.active_tasks.load(Ordering::Acquire), 0);
+    cancel_tasks(registry.request_close());
+    registry.wait_idle();
+    registry.finish_close();
+}

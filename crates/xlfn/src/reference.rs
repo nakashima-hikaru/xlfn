@@ -262,7 +262,14 @@ impl<'call> FromExcelReference<'call> for ExcelReference<'call> {
                 let mref = unsafe { value.raw().value.mref };
                 let table = NonNull::new(mref.references)
                     .ok_or_else(|| XllError::input(argument, InputError::NullPointer))?;
-                // SAFETY: a valid xltypeRef contains a readable XLMREF12 header.
+                if !table.as_ptr().is_aligned() {
+                    return Err(XllError::input(
+                        argument,
+                        InputError::Malformed("misaligned reference table pointer"),
+                    ));
+                }
+                // SAFETY: alignment was checked and a valid xltypeRef contains
+                // a readable XLMREF12 header.
                 let count = usize::from(unsafe { (*table.as_ptr()).count });
                 if count == 0 || count > MAX_REFERENCE_AREAS {
                     return Err(XllError::input(
@@ -438,6 +445,32 @@ mod tests {
             Err(XllError::Input {
                 argument: "source_range",
                 reason: InputError::Malformed("unknown xltype flag")
+            })
+        ));
+    }
+
+    #[test]
+    fn miri_misaligned_reference_table_is_rejected_before_reading() {
+        #[repr(align(8))]
+        struct Buffer([u8; 32]);
+        let mut buffer = Buffer([0; 32]);
+        let mut raw = XLOPER12 {
+            value: XLOPER12Value {
+                mref: xlfn_sys::XLOPER12MRef {
+                    references: buffer.0.as_mut_ptr().wrapping_add(1).cast(),
+                    sheet_id: 42,
+                },
+            },
+            xltype: xlfn_sys::XLTYPE_REF,
+        };
+        // SAFETY: the root is live; the misaligned nested pointer is rejected
+        // before any reference table storage is accessed.
+        let result = unsafe { reference_from_raw::<ExcelReference<'_>>("range", &mut raw) };
+        assert!(matches!(
+            result,
+            Err(XllError::Input {
+                argument: "range",
+                reason: InputError::Malformed("misaligned reference table pointer"),
             })
         ));
     }

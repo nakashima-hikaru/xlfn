@@ -90,8 +90,10 @@ impl CalculationState {
         let index = task_shard(id);
         let removed = self.shards[index].tasks.lock().remove(&id);
         let existed = removed.is_some();
-        // CancellationSource destruction can drop or wake user wakers.
-        drop(removed);
+        // Both controls can destroy executor/user wakers. Contain their
+        // destructors after releasing the shard lock.
+        let _ =
+            crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| drop(removed)));
         existed
     }
 

@@ -41,6 +41,12 @@ pub(crate) fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::
             "ExcelEnum can only be derived for an enum",
         ));
     };
+    if data.variants.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &input.ident,
+            "ExcelEnum requires at least one variant",
+        ));
+    }
     let mut names = BTreeSet::new();
     let mut variants = Vec::with_capacity(data.variants.len());
     for variant in &data.variants {

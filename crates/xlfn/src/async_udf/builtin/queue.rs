@@ -134,7 +134,12 @@ impl RunnableQueue {
             let peer_index = (worker_index + offset) % count;
             loop {
                 match self.stealers[peer_index].steal() {
-                    crossbeam_deque::Steal::Success(runnable) => return Some(runnable),
+                    crossbeam_deque::Steal::Success(runnable) => {
+                        if !self.stealers[peer_index].is_empty() {
+                            self.wake_one();
+                        }
+                        return Some(runnable);
+                    }
                     crossbeam_deque::Steal::Empty => break,
                     crossbeam_deque::Steal::Retry => {}
                 }

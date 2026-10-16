@@ -466,3 +466,37 @@ fn poller_can_steal_opaque_runnable_from_peer_queue() {
     assert!(peer.is_empty());
     assert_eq!(drops.load(Ordering::Acquire), 1);
 }
+
+#[test]
+fn peer_steal_continues_waking_pollers_while_local_work_remains() {
+    let workers: Vec<_> = (0..3)
+        .map(|_| crossbeam_deque::Worker::new_fifo())
+        .collect();
+    let parkers: Vec<_> = (0..3).map(|_| Parker::new()).collect();
+    let queue = Arc::new(RunnableQueue::new(
+        workers.iter().map(|worker| worker.stealer()).collect(),
+        parkers
+            .iter()
+            .map(|parker| parker.unparker().clone())
+            .collect(),
+    ));
+    let ran = Arc::new(AtomicBool::new(false));
+    let drops = Arc::new(AtomicUsize::new(0));
+    for _ in 0..3 {
+        workers[0].push(runnable(&queue, &ran, &drops));
+    }
+    // Poller 1 has just been woken by the batch thief. Poller 2 is still idle.
+    queue.announce_idle(1 << 2);
+    queue.steal_peer(1).unwrap().run();
+    assert_eq!(
+        queue.idle_pollers.load(Ordering::Acquire),
+        0,
+        "a successful peer steal must wake the next idle poller"
+    );
+    let started = Instant::now();
+    parkers[2].park_timeout(TIMEOUT);
+    assert!(started.elapsed() < TIMEOUT / 2);
+    queue.steal_peer(2).unwrap().run();
+    workers[0].pop().unwrap().run();
+    assert_eq!(drops.load(Ordering::Acquire), 3);
+}

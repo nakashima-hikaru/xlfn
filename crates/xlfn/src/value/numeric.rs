@@ -71,7 +71,8 @@ impl<'call> NumericMatrixRef<'call> {
     ///
     /// # Safety
     ///
-    /// A non-null `raw` must be aligned and point to a readable FP12 header.
+    /// A non-null, aligned `raw` must point to a readable FP12 header. Null or
+    /// misaligned pointers are rejected without accessing their storage.
     /// If its dimensions pass validation, the header must be followed by
     /// `rows * columns` initialized doubles, all readable for `'call`. Excel
     /// must not mutate this storage during the borrow.
@@ -85,7 +86,13 @@ impl<'call> NumericMatrixRef<'call> {
                 InputError::Malformed("null numeric matrix argument"),
             ));
         }
-        // SAFETY: the caller guarantees a live, aligned FP12 header.
+        if !raw.is_aligned() {
+            return Err(XllError::input(
+                argument,
+                InputError::Malformed("misaligned numeric matrix pointer"),
+            ));
+        }
+        // SAFETY: alignment was checked and the caller guarantees a live header.
         let rows = unsafe { (*raw).rows };
         // SAFETY: The second dimension is in the same live FP12 header.
         let columns = unsafe { (*raw).columns };
@@ -101,13 +108,7 @@ impl<'call> NumericMatrixRef<'call> {
                 InputError::Malformed("invalid numeric matrix dimensions"),
             )
         })?;
-        let length = rows.checked_mul(columns).ok_or_else(|| {
-            XllError::input(
-                argument,
-                InputError::Malformed("invalid numeric matrix dimensions"),
-            )
-        })?;
-        super::validate_matrix_dimensions(rows, columns, length)?;
+        let length = super::matrix::matrix_element_count(rows, columns, argument)?;
         let bytes = length
             .checked_mul(std::mem::size_of::<f64>())
             .ok_or_else(|| {
@@ -215,10 +216,55 @@ mod tests {
             };
             // SAFETY: the header is live. Invalid dimensions must be rejected
             // before the declared one-element payload is traversed.
-            assert!(unsafe { NumericMatrixRef::from_raw(&raw, "matrix") }.is_err());
+            let result = unsafe { NumericMatrixRef::from_raw(&raw, "observations") };
+            assert!(matches!(
+                result,
+                Err(XllError::Input {
+                    argument: "observations",
+                    ..
+                })
+            ));
         }
         // SAFETY: null is detected before any pointer dereference.
         assert!(unsafe { NumericMatrixRef::from_raw(std::ptr::null(), "matrix") }.is_err());
+    }
+
+    #[test]
+    fn miri_numeric_cell_limit_is_an_input_error_even_when_count_exceeds_u32() {
+        let raw = xlfn_sys::FP12 {
+            rows: 1_048_576,
+            columns: 4096,
+            array: [0.0],
+        };
+        // SAFETY: the live header is rejected before its payload is read.
+        let error = unsafe { NumericMatrixRef::from_raw(&raw, "observations") }.unwrap_err();
+        assert!(matches!(error, XllError::Input {
+            argument: "observations",
+            reason: InputError::TooLarge {
+                limit: super::super::MAX_ARRAY_ELEMENTS,
+                actual,
+            },
+        } if actual == usize::try_from(1_u64 << 32).unwrap_or(usize::MAX)));
+    }
+
+    #[test]
+    fn miri_rejects_misaligned_numeric_headers_without_reading_them() {
+        let raw = xlfn_sys::FP12 {
+            rows: 1,
+            columns: 1,
+            array: [42.0],
+        };
+        let pointer = std::ptr::from_ref(&raw).cast::<u8>().wrapping_add(1).cast();
+        // SAFETY: the deliberately misaligned pointer must be rejected before
+        // the header or payload is accessed.
+        let error = unsafe { NumericMatrixRef::from_raw(pointer, "observations") }.unwrap_err();
+        assert!(matches!(
+            error,
+            XllError::Input {
+                argument: "observations",
+                reason: InputError::Malformed("misaligned numeric matrix pointer"),
+            }
+        ));
     }
 
     #[test]

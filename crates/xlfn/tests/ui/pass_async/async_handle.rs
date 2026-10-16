@@ -48,6 +48,18 @@ async fn async_handle_without_context(dataset: HandleLease<'_, Dataset>, time: f
     dataset.size + time
 }
 
+macro_rules! forwarded_handle {
+    ($ty:ty) => {
+        #[excel_function(name = "TEST.HANDLE.ASYNC.FORWARDED")]
+        async fn forwarded_handle(dataset: $ty) -> f64 {
+            std::future::ready(()).await;
+            dataset.size
+        }
+    };
+}
+
+forwarded_handle!(HandleLease<'_, Dataset>);
+
 fn main() {
     assert_send_sync::<HandleLease<'_, Dataset>>();
 }

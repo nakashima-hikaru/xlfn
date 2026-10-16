@@ -139,12 +139,17 @@ where
                 &mut callbacks,
                 active_runtime_generation(runtime),
             );
+            if outcome.cleanup_owned_elsewhere() {
+                return Err(XllError::Closing);
+            }
             if !outcome.unload_safe() {
                 let error = XllError::Internal {
                     diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_ROLLBACK_PENDING,
                 };
                 report_boundary_error("xlAutoOpen pending rollback", &error);
-                crate::runtime::recovery::quarantine_runtime(runtime);
+                if let Some(hazard) = outcome.failure_hazard() {
+                    crate::runtime::recovery::quarantine_for_hazard(runtime, hazard);
+                }
                 return Err(error);
             }
         }

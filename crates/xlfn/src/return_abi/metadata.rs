@@ -5,6 +5,7 @@
 //! callback, and no data may be retained past physical module unload.
 
 use crate::ingress::ExportIngress;
+use crate::value::XlValueRef;
 use xlfn_sys::{XLOPER12, XLOPER12Value, XLTYPE_INT, XLTYPE_NUM, XLTYPE_STR};
 
 struct StaticReturn(XLOPER12);
@@ -61,12 +62,14 @@ impl AddinMetadata {
     /// Reads the action without runtime state or Excel callbacks.
     ///
     /// # Safety
-    /// `action` is null or points to the live XLOPER12 supplied by Excel.
+    /// A non-null, aligned `action` points to the live XLOPER12 supplied by
+    /// Excel. Null or misaligned pointers are rejected without accessing storage.
     pub(crate) unsafe fn query(&'static self, action: *mut XLOPER12) -> *mut XLOPER12 {
         // SAFETY: Excel supplies a live action for the duration of this call.
-        let Some(action) = (unsafe { action.as_ref() }) else {
+        let Ok(action) = (unsafe { XlValueRef::from_raw(action) }) else {
             return invalid_action_pointer();
         };
+        let action = action.raw();
         let asks_for_name = match action.base_type() {
             // SAFETY: These numeric tags select the corresponding union member.
             XLTYPE_INT => unsafe { action.value.integer == 1 },
@@ -160,6 +163,22 @@ mod tests {
             }
         });
         assert_name(name);
+    }
+
+    #[test]
+    fn miri_metadata_rejects_misaligned_actions_and_unknown_flags() {
+        #[repr(align(8))]
+        struct Buffer([u8; 64]);
+        let mut buffer = Buffer([0; 64]);
+        let misaligned = buffer.0.as_mut_ptr().wrapping_add(1).cast();
+        // SAFETY: query rejects the misaligned pointer before accessing it.
+        assert_eq!(unsafe { NAME.query(misaligned) }, invalid_action_pointer());
+
+        let mut action = XLOPER12::integer(1);
+        action.xltype |= 0x2000;
+        assert_eq!(query(&mut action), invalid_action_pointer());
+        action.xltype = XLTYPE_INT | xlfn_sys::XLBIT_XL_FREE;
+        assert_name(query(&mut action));
     }
 
     #[test]

@@ -22,9 +22,12 @@ pub(crate) enum OpenRollbackStatus {
     /// Every terminal certificate was issued and the lifecycle binding was
     /// released. A later open may safely reuse the runtime.
     Finalized,
-    /// Rollback did not produce the complete terminal certificate. The
-    /// caller must retain the fail-safe pending state and quarantine policy.
-    Incomplete,
+    /// A final removal owner took over between failed-open publication and
+    /// rollback acquisition. That owner alone decides cleanup failure policy.
+    ClosingOwnsCleanup,
+    /// Rollback entered terminal quarantine. The boundary applies this hazard
+    /// after the teardown transaction has returned its cleanup authority.
+    Incomplete(crate::shutdown::UnloadHazard),
 }
 
 pub(crate) struct OpenRollbackOutcome {
@@ -42,16 +45,33 @@ impl OpenRollbackOutcome {
         matches!(self.status, OpenRollbackStatus::Finalized)
     }
 
+    pub(crate) fn cleanup_owned_elsewhere(&self) -> bool {
+        matches!(self.status, OpenRollbackStatus::ClosingOwnsCleanup)
+    }
+
+    pub(crate) fn failure_hazard(&self) -> Option<crate::shutdown::UnloadHazard> {
+        match self.status {
+            OpenRollbackStatus::Incomplete(hazard) => Some(hazard),
+            OpenRollbackStatus::Finalized | OpenRollbackStatus::ClosingOwnsCleanup => None,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn is_finalized(&self) -> bool {
         self.unload_safe()
     }
 }
 
-fn incomplete<A: Addin>(runtime: &Runtime<A>) -> OpenRollbackOutcome {
+fn incomplete<A: Addin>(
+    runtime: &Runtime<A>,
+    hazard: crate::shutdown::UnloadHazard,
+) -> OpenRollbackOutcome {
+    // The transaction's affine cleanup authority is still held by stack
+    // locals here. Publish terminal quarantine now; the boundary applies the
+    // recorded hazard after those locals have returned their authority.
     runtime.lifecycle_orchestrator().quarantine();
     OpenRollbackOutcome {
-        status: OpenRollbackStatus::Incomplete,
+        status: OpenRollbackStatus::Incomplete(hazard),
     }
 }
 
@@ -66,18 +86,27 @@ where
 {
     #[cfg(test)]
     let _diagnostic_test_guard = crate::diagnostics::DIAGNOSTIC_TEST_MUTEX.lock();
-    let Some(rollback_attempt) = runtime.acquire_open_rollback() else {
-        let finalized = runtime.phase() == crate::lifecycle::LifecyclePhase::Closed
-            && runtime.host.callbacks_detached()
-            && !runtime.host.registration_state_unknown()
-            && crate::excel_rtd_protocol::logical_quiescence_certified();
-        return OpenRollbackOutcome {
-            status: if finalized {
-                OpenRollbackStatus::Finalized
-            } else {
-                OpenRollbackStatus::Incomplete
-            },
-        };
+    let rollback_attempt = match runtime.acquire_open_rollback() {
+        crate::runtime::orchestration::OpenRollbackAcquisition::Acquired(attempt) => attempt,
+        crate::runtime::orchestration::OpenRollbackAcquisition::ClosingOwnsCleanup => {
+            let finalized = runtime.phase() == crate::lifecycle::LifecyclePhase::Closed
+                && runtime.host.callbacks_detached()
+                && !runtime.host.registration_state_unknown()
+                && crate::excel_rtd_protocol::logical_quiescence_certified();
+            return OpenRollbackOutcome {
+                status: if finalized {
+                    OpenRollbackStatus::Finalized
+                } else {
+                    OpenRollbackStatus::ClosingOwnsCleanup
+                },
+            };
+        }
+        crate::runtime::orchestration::OpenRollbackAcquisition::Unavailable => {
+            return incomplete(
+                runtime,
+                crate::shutdown::UnloadHazard::CloseInvariantViolation,
+            );
+        }
     };
     runtime.observer().begin_close();
     let shutdown_deps = runtime.shutdown_deps();
@@ -86,7 +115,10 @@ where
         Ok(present) => present,
         Err(error) => {
             report_boundary_error("xlAutoOpen lifecycle slot", &lifecycle_access_error(error));
-            return incomplete(runtime);
+            return incomplete(
+                runtime,
+                crate::shutdown::UnloadHazard::CloseInvariantViolation,
+            );
         }
     };
     // An opening transaction normally owns the lifecycle payload. It is only
@@ -103,9 +135,8 @@ where
                 // owner is released. Return its retained capability before
                 // recovery inspects canonical cleanup ownership.
                 drop(rollback_attempt);
-                super::recovery::quarantine_for_hazard(runtime, hazard);
             }
-            return incomplete(runtime);
+            return incomplete(runtime, hazard);
         }
     };
     let teardown: teardown::TeardownTxn<'_, A, OpenRollback, teardown::ExecutionDrained> =
@@ -117,8 +148,7 @@ where
         Err(failure) => {
             let hazard = failure.hazard();
             report_boundary_error("xlAutoOpen producer rollback", &failure.into_error());
-            super::recovery::quarantine_for_hazard(runtime, hazard);
-            return incomplete(runtime);
+            return incomplete(runtime, hazard);
         }
     };
 
@@ -193,14 +223,20 @@ where
             diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRATION_UNKNOWN,
         };
         report_boundary_error("xlAutoOpen registration state unknown", &error);
-        return incomplete(runtime);
+        return incomplete(
+            runtime,
+            crate::shutdown::UnloadHazard::RegistrationStateUnknown,
+        );
     }
     if !runtime.host.callbacks_detached() {
         let error = XllError::Internal {
             diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRATION_UNKNOWN,
         };
         report_boundary_error("xlAutoOpen callbacks remain registered", &error);
-        return incomplete(runtime);
+        return incomplete(
+            runtime,
+            crate::shutdown::UnloadHazard::HostCallbackStillRegistered,
+        );
     }
     let host_callbacks = crate::shutdown::HostCallbacksDetached::issue();
 
@@ -233,7 +269,7 @@ where
                 shared_state,
                 crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
             );
-            return incomplete(runtime);
+            return incomplete(runtime, crate::shutdown::UnloadHazard::AddinQuiesceFailed);
         }
         drop(layers);
         teardown::QuiescedAddin::shared(shutdown_deps, generation, shared_state)
@@ -243,27 +279,33 @@ where
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::LIFECYCLE_SLOT,
             };
             report_boundary_error("xlAutoOpen lifecycle rollback state", &error);
-            return incomplete(runtime);
+            return incomplete(
+                runtime,
+                crate::shutdown::UnloadHazard::CloseInvariantViolation,
+            );
         }
         teardown::QuiescedAddin::empty(shutdown_deps, generation)
     };
+
+    // The topic transport must release its backend while the handle slot is
+    // still published. Sealing first would make the ready-only shutdown probe
+    // skip the server and leave its non-owning backend pointer attached.
+    if let Err(error) = shutdown_deps.shutdown_handle_topics() {
+        report_boundary_error("xlAutoOpen RTD rollback", &error);
+        return incomplete(
+            runtime,
+            crate::shutdown::UnloadHazard::RtdGitCallbackStillRegistered,
+        );
+    }
 
     let teardown = match teardown.seal_services(addin) {
         Ok(stage) => stage,
         Err(error) => {
             report_boundary_error("xlAutoOpen handle rollback", &error);
-            return incomplete(runtime);
-        }
-    };
-
-    let rtd_quiescent = match crate::excel_rtd_protocol::wait_for_module_quiescence() {
-        Ok(certificate) => certificate,
-        Err(_) => {
-            let error = XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_GIT_QUIESCENCE,
-            };
-            report_boundary_error("xlAutoOpen RTD quiescence rollback", &error);
-            return incomplete(runtime);
+            return incomplete(
+                runtime,
+                crate::shutdown::UnloadHazard::HandleStoreNotQuiescent,
+            );
         }
     };
 
@@ -275,23 +317,21 @@ where
                 report_cleanup_issue(issue);
             }
             report_boundary_error("xlAutoOpen rollback cleanup", &error);
-            return incomplete(runtime);
+            return incomplete(runtime, crate::shutdown::UnloadHazard::AddinCleanupFailed);
         }
     };
     for issue in cleanup_report.issues() {
         report_cleanup_issue(issue);
     }
 
-    if let Err(error) = shutdown_deps.shutdown_handle_topics() {
-        report_boundary_error("xlAutoOpen RTD rollback", &error);
-        return incomplete(runtime);
-    }
-
     let teardown = match teardown.finish_services() {
         Ok(stage) => stage,
         Err(error) => {
             report_boundary_error("xlAutoOpen handle pin rollback", &error);
-            return incomplete(runtime);
+            return incomplete(
+                runtime,
+                crate::shutdown::UnloadHazard::HandleStoreNotQuiescent,
+            );
         }
     };
 
@@ -305,7 +345,26 @@ where
         Err(error) => {
             let error = error.into_xll_error();
             report_boundary_error("xlAutoOpen diagnostic rollback", &error);
-            return incomplete(runtime);
+            return incomplete(
+                runtime,
+                crate::shutdown::UnloadHazard::DiagnosticWorkerStillRunning,
+            );
+        }
+    };
+
+    let rtd_quiescent = match crate::excel_rtd_protocol::wait_for_module_quiescence() {
+        Ok(certificate) => certificate,
+        Err(failure) => {
+            let error = XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_GIT_QUIESCENCE,
+            };
+            report_boundary_error("xlAutoOpen RTD quiescence rollback", &error);
+            let hazard = if failure.revocation_debt != 0 {
+                crate::shutdown::UnloadHazard::RtdGitRevocationDebt
+            } else {
+                crate::shutdown::UnloadHazard::RtdGitCallbackStillRegistered
+            };
+            return incomplete(runtime, hazard);
         }
     };
 
@@ -314,14 +373,20 @@ where
         Ok(certificate) => certificate,
         Err(error) => {
             report_boundary_error("xlAutoOpen rollback certification", &error);
-            return incomplete(runtime);
+            return incomplete(
+                runtime,
+                crate::shutdown::UnloadHazard::CloseInvariantViolation,
+            );
         }
     };
     let rollback_attempt = match certificate.finish() {
         Ok(attempt) => attempt,
         Err((error, _certificate)) => {
             report_boundary_error("xlAutoOpen rollback completion", &error);
-            return incomplete(runtime);
+            return incomplete(
+                runtime,
+                crate::shutdown::UnloadHazard::CloseInvariantViolation,
+            );
         }
     };
     if let Err(error) = shutdown_deps.release_empty_addin_lifecycle(lifecycle) {
@@ -330,7 +395,10 @@ where
             &lifecycle_access_error(error),
         );
         drop(rollback_attempt);
-        return incomplete(runtime);
+        return incomplete(
+            runtime,
+            crate::shutdown::UnloadHazard::CloseInvariantViolation,
+        );
     }
     drop(rollback_attempt);
     OpenRollbackOutcome {

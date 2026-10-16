@@ -1,6 +1,6 @@
 //! Raw and borrowed ABI views over Excel's `XLOPER12` representation.
 
-use super::{FromExcel, MAX_ARRAY_BYTES, MAX_ARRAY_ELEMENTS};
+use super::{FromExcel, MAX_ARRAY_BYTES};
 use crate::error::{InputError, Shape};
 use crate::input_identity::InputIdentityEncoder;
 use crate::{ExcelError, XllError, XllResult};
@@ -8,9 +8,6 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 use std::slice;
 use xlfn_sys::{XLBIT_DLL_FREE, XLBIT_XL_FREE, XLOPER12, XLOPER12Array, XLTYPE_MASK};
-
-const EXCEL_MAX_ROWS: usize = 1_048_576;
-const EXCEL_MAX_COLUMNS: usize = 16_384;
 
 /// The validated semantic value type of an Excel `XLOPER12`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -154,11 +151,18 @@ impl<'call> XlValueRef<'call> {
     ///
     /// # Safety
     ///
-    /// `raw` must be non-null, aligned, and point to a live XLOPER12 for
-    /// `'call`. Any nested pointers selected by `xltype` must satisfy the
+    /// A non-null, aligned `raw` must point to a live XLOPER12 for `'call`.
+    /// Null or misaligned pointers are rejected without accessing storage.
+    /// Any nested pointers selected by `xltype` must satisfy the
     /// corresponding Excel SDK contract.
     pub(crate) unsafe fn from_raw(raw: *mut XLOPER12) -> XllResult<Self> {
-        // SAFETY: The caller guarantees a live, aligned XLOPER12 for 'call.
+        if !raw.is_null() && !raw.is_aligned() {
+            return Err(XllError::input(
+                "<raw>",
+                InputError::Malformed("misaligned value pointer"),
+            ));
+        }
+        // SAFETY: Alignment is checked; the caller guarantees a live value for 'call.
         let raw = unsafe { raw.as_ref() }
             .ok_or_else(|| XllError::input("<raw>", InputError::NullPointer))?;
         Self::from_array_cell(raw)
@@ -261,6 +265,12 @@ impl<'call> XlValueRef<'call> {
         if pointer.is_null() {
             return Err(XllError::input(argument, InputError::NullPointer));
         }
+        if !pointer.is_aligned() {
+            return Err(XllError::input(
+                argument,
+                InputError::Malformed("misaligned string pointer"),
+            ));
+        }
         // SAFETY: Excel strings begin with one readable length code unit.
         let length = unsafe { *pointer } as usize;
         if length > crate::utf16::EXCEL_STRING_LIMIT {
@@ -292,36 +302,7 @@ impl<'call> XlValueRef<'call> {
         }
         let rows = array.rows as usize;
         let columns = array.columns as usize;
-        if rows > EXCEL_MAX_ROWS {
-            return Err(XllError::input(
-                argument,
-                InputError::TooLarge {
-                    limit: EXCEL_MAX_ROWS,
-                    actual: rows,
-                },
-            ));
-        }
-        if columns > EXCEL_MAX_COLUMNS {
-            return Err(XllError::input(
-                argument,
-                InputError::TooLarge {
-                    limit: EXCEL_MAX_COLUMNS,
-                    actual: columns,
-                },
-            ));
-        }
-        let elements = rows.checked_mul(columns).ok_or_else(|| {
-            XllError::input(argument, InputError::Malformed("array dimension overflow"))
-        })?;
-        if elements > MAX_ARRAY_ELEMENTS {
-            return Err(XllError::input(
-                argument,
-                InputError::TooLarge {
-                    limit: MAX_ARRAY_ELEMENTS,
-                    actual: elements,
-                },
-            ));
-        }
+        let elements = super::matrix::array_element_count(rows, columns, argument)?;
         let bytes = elements
             .checked_mul(std::mem::size_of::<XLOPER12>())
             .ok_or_else(|| {
@@ -710,6 +691,40 @@ mod tests {
         let nil_ref = XlValueRef::from_array_cell(&nil_oper).unwrap();
         assert_eq!(nil_ref.value_type(), XlValueType::Nil);
         assert!(nil_ref.is_blank());
+    }
+
+    #[test]
+    fn miri_rejects_misaligned_value_and_string_pointers_before_reading() {
+        let mut raw = XLOPER12::number(42.0);
+        let pointer = std::ptr::from_mut(&mut raw)
+            .cast::<u8>()
+            .wrapping_add(1)
+            .cast();
+        // SAFETY: the misaligned root must be rejected without accessing it.
+        let error = unsafe { XlValueRef::from_raw(pointer) }.unwrap_err();
+        assert!(matches!(
+            error,
+            XllError::Input {
+                reason: InputError::Malformed("misaligned value pointer"),
+                ..
+            }
+        ));
+
+        let mut text = [1_u16, b'A' as u16];
+        let raw = XLOPER12 {
+            value: XLOPER12Value {
+                string: text.as_mut_ptr().cast::<u8>().wrapping_add(1).cast(),
+            },
+            xltype: XLTYPE_STR,
+        };
+        let value = XlValueRef::from_array_cell(&raw).unwrap();
+        assert!(matches!(
+            value.utf16("label"),
+            Err(XllError::Input {
+                argument: "label",
+                reason: InputError::Malformed("misaligned string pointer"),
+            })
+        ));
     }
 
     #[test]

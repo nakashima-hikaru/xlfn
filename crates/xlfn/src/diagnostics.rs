@@ -324,10 +324,12 @@ impl DiagnosticRouter {
             if let Some(id) = retiring_worker {
                 self.unmark_retiring(id);
             }
+            // Closing is an in-progress transition, not a terminal failure
+            // state. The retired sink has been consumed even when join fails.
+            *phase = DiagnosticPhase::Closed;
             match res {
                 Ok(()) => {}
                 Err(DiagnosticShutdownError::WorkerPanicked) => {
-                    *phase = DiagnosticPhase::Closed;
                     return Err(DiagnosticTerminalCloseError::WorkerPanicked);
                 }
                 Err(DiagnosticShutdownError::ReentrantShutdown) => {
@@ -340,10 +342,10 @@ impl DiagnosticRouter {
         } else if let Some(id) = retiring_worker {
             self.unmark_retiring(id);
         }
+        *phase = DiagnosticPhase::Closed;
         if self.sink.is_active() || !self.retiring_workers.lock().is_empty() {
             return Err(DiagnosticTerminalCloseError::InvariantViolation);
         }
-        *phase = DiagnosticPhase::Closed;
         Ok(crate::shutdown::StopOutcome {
             certificate: DiagnosticsStopped::new(),
             issues,
@@ -453,6 +455,11 @@ pub(crate) fn diagnostic_sink_running() -> bool {
 pub(crate) struct DiagnosticSnapshot {
     pub(crate) running: bool,
     pub(crate) pending: u64,
+}
+
+#[cfg(any(test, feature = "refinement"))]
+pub(crate) fn trace_snapshot() -> DiagnosticSnapshot {
+    router().trace_snapshot()
 }
 
 #[cfg(any(test, feature = "refinement"))]
@@ -889,8 +896,8 @@ mod tests {
 
     #[test]
     fn intentional_worksheet_errors_do_not_emit_failure_diagnostics() {
+        let _router_guard = prepare_global_router();
         let reports = Arc::new(AtomicUsize::new(0));
-        reset_diagnostic_router().unwrap();
         set_diagnostic_sink(CountingSink(Arc::clone(&reports))).unwrap();
         let next_id = NEXT_ID.load(Ordering::Relaxed);
         report_udf_failure_no_unwind(
@@ -1352,6 +1359,31 @@ mod tests {
         assert!(!router.sink.is_active());
         assert_eq!(router.phase(), DiagnosticPhase::Closed);
         assert!(router.retiring_workers.lock().is_empty());
+        router.reset().unwrap();
+        assert_eq!(router.phase(), DiagnosticPhase::Open);
+        assert!(router.close_terminal().is_ok());
+    }
+
+    #[test]
+    fn failed_terminal_invariant_check_does_not_leave_closing_phase() {
+        let stale_worker_id = std::thread::spawn(|| std::thread::current().id())
+            .join()
+            .unwrap();
+        let router = DiagnosticRouter {
+            sink: ReplaceableServiceSlot::new(),
+            transition: Mutex::new(DiagnosticPhase::Open),
+            retiring_workers: Mutex::new(vec![stale_worker_id]),
+            observer: DiagnosticObserver::new(),
+        };
+        assert!(matches!(
+            router.close_terminal(),
+            Err(DiagnosticTerminalCloseError::InvariantViolation)
+        ));
+        assert_eq!(router.phase(), DiagnosticPhase::Closed);
+        assert!(router.reset().is_err());
+        router.unmark_retiring(stale_worker_id);
+        router.reset().unwrap();
+        assert!(router.close_terminal().is_ok());
     }
 
     #[test]

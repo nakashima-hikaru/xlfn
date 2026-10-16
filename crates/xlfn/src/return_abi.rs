@@ -641,9 +641,10 @@ pub(crate) unsafe fn free_return(pointer: *mut XLOPER12) {
 /// The pointer must satisfy `free_return`'s ownership contract.
 #[must_use = "the guard must remain live until the generated xlAutoFree12 callback returns"]
 pub(crate) unsafe fn free_return_boundary(pointer: *mut XLOPER12) -> ReturnFreeBoundaryGuard {
-    // SAFETY: caller contract guarantees pointer is a live return pointer or null.
-    let operation = unsafe { enter_return_free_operation(pointer) };
+    let mut operation = None;
     let _ = catch_no_unwind(AssertUnwindSafe(|| {
+        // SAFETY: caller contract guarantees pointer is a live return pointer or null.
+        operation = unsafe { enter_return_free_operation(pointer) };
         // SAFETY: caller contract guarantees pointer is a live return pointer or null.
         unsafe { free_return_block(pointer, operation.as_ref()) };
     }));

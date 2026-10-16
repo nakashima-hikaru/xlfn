@@ -1,10 +1,10 @@
 //! Shared teardown stages for rollback and terminal removal.
 //!
-//! The two boundary pipelines intentionally keep different failure policy and
-//! proof certificates. They do, however, share one ordering-sensitive stage:
-//! close export admission, drain active calls, and wait for return producers.
-//! Keeping that stage in the runtime shutdown domain prevents either pipeline
-//! from silently changing the unload-safety ordering.
+//! The two boundaries keep distinct failure policies and terminal certificates,
+//! while consuming the same ordered execution, producer, service, add-in, and
+//! resource-reclamation stages. Both close export admission and drain returns
+//! before stopping producers, then finish add-in/service cleanup and diagnostics
+//! before waiting for RTD module quiescence.
 
 use super::certificate::TerminalCertificateKind;
 use super::owner::RemovalOwner;

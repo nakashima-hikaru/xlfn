@@ -1,6 +1,7 @@
 use crate::error::InputError;
 use crate::panic_boundary::catch_no_unwind;
 use crate::{XllError, XllResult};
+mod deferred_drop;
 mod endpoint_cache;
 #[cfg(test)]
 mod generation_tests;
@@ -12,6 +13,8 @@ mod pin_transitions;
 mod reentrancy_tests;
 #[cfg(test)]
 mod residency_tests;
+#[cfg(test)]
+mod review_regression_tests;
 use node_layout::verus;
 mod resident_index;
 #[cfg(test)]
@@ -23,7 +26,7 @@ use resident_index::{ResidentEntry, ResidentIndex};
 use rustc_hash::{FxHashMap, FxHasher};
 use smallvec::SmallVec;
 use std::any::{Any, TypeId};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::panic::AssertUnwindSafe;
@@ -85,6 +88,7 @@ impl<A: EpochAtomic> CacheGeneration<A> {
 
 thread_local! {
     static ACTIVE_CACHE_INITIALIZATION_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static CACHE_OPERATION_DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
 struct ActiveCacheGuard;
@@ -105,7 +109,42 @@ impl Drop for ActiveCacheGuard {
     fn drop(&mut self) {
         debug_assert_eq!(ACTIVE_CACHE_INITIALIZATION_DEPTH.get(), 1);
         ACTIVE_CACHE_INITIALIZATION_DEPTH.set(0);
+        if CACHE_OPERATION_DEPTH.get() == 0 {
+            deferred_drop::flush();
+        }
     }
+}
+
+// A lookup's final reader can complete a grace period while its caller still
+// owns the singleflight lock. Carry owned destruction batches to the outermost
+// operation boundary, after every nested lookup/initializer lock has left.
+struct CacheOperationGuard;
+impl CacheOperationGuard {
+    fn enter() -> Self {
+        CACHE_OPERATION_DEPTH.set(
+            CACHE_OPERATION_DEPTH
+                .get()
+                .checked_add(1)
+                .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop()),
+        );
+        Self
+    }
+}
+impl Drop for CacheOperationGuard {
+    fn drop(&mut self) {
+        let depth = CACHE_OPERATION_DEPTH
+            .get()
+            .checked_sub(1)
+            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+        CACHE_OPERATION_DEPTH.set(depth);
+        if depth == 0 && ACTIVE_CACHE_INITIALIZATION_DEPTH.get() == 0 {
+            deferred_drop::flush();
+        }
+    }
+}
+
+fn destruction_deferred() -> bool {
+    ACTIVE_CACHE_INITIALIZATION_DEPTH.get() != 0 || CACHE_OPERATION_DEPTH.get() != 0
 }
 
 /// A reusable typed descriptor for one cache in a [`CacheRegistry`].
@@ -181,6 +220,19 @@ unsafe fn reclaim_cache_node<V>(entry: ReclaimEntry<V>) {
 }
 
 fn reclaim_cache_entries<V>(entries: ReclaimEntries<'_, V>) {
+    fn reclaim<V>(entries: PendingEntries<V>) {
+        for entry in entries {
+            // SAFETY: detached entries have completed their domain grace period.
+            unsafe { reclaim_cache_node::<V>(entry) };
+        }
+    }
+    if destruction_deferred() && !entries.is_empty() {
+        // SAFETY: cache nodes are created only by CalculationCache with V: 'static.
+        // Detached entries own the allocations independently of the cache/domain;
+        // reclaim only consumes their pointers, never the old domain pointer.
+        unsafe { deferred_drop::defer(entries.entries, reclaim::<V>) };
+        return;
+    }
     for entry in entries.entries {
         // SAFETY: [TR-RECLAIM-1] entry.pointer points to an allocated CacheNode<V> whose grace period has ended.
         unsafe {
@@ -195,6 +247,7 @@ fn reclaim_cache_entries<V>(entries: ReclaimEntries<'_, V>) {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CacheReclamationStats {
     /// Evicted nodes without lease pins, awaiting their grace period.
+    /// Excludes detached destruction batches deferred to the outer operation.
     pub pending_nodes: usize,
     /// Sum of their caller-supplied weights. Saturates at `u64::MAX` until
     /// both retirement queues are observed empty under their locks.
@@ -947,7 +1000,40 @@ fn merge_reclaims<'domain, V>(
     )
 }
 
-type CacheDomainPermit<'domain> = RotatingReadPermit<'domain, DEFAULT_STRIPE_COUNT>;
+thread_local! {
+    // No TLS destructor: user TLS cache destructors may still need this tracker.
+    // The last permit releases any spilled allocation instead.
+    static CACHE_READERS: std::mem::ManuallyDrop<RefCell<SmallVec<[usize; 4]>>> =
+        std::mem::ManuallyDrop::new(RefCell::new(SmallVec::new()));
+}
+
+struct CacheDomainPermit<'domain, V> {
+    domain: &'domain CacheLookupDomain<V>,
+    permit: Option<RotatingReadPermit<'domain, DEFAULT_STRIPE_COUNT>>,
+    // TLS ownership bookkeeping must be discharged on the acquiring thread.
+    _thread: PhantomData<std::rc::Rc<()>>,
+}
+
+impl<V> Drop for CacheDomainPermit<'_, V> {
+    fn drop(&mut self) {
+        let address = std::ptr::from_ref(self.domain).addr();
+        CACHE_READERS.with(|readers| {
+            let mut readers = readers.borrow_mut();
+            let index = readers
+                .iter()
+                .rposition(|reader| *reader == address)
+                .expect("cache reader owns a TLS entry");
+            readers.remove(index);
+            if readers.is_empty() {
+                *readers = SmallVec::new();
+            }
+        });
+        drop(self.permit.take());
+        // Pair the release with a writer's seal/enqueue before testing debt.
+        std::sync::atomic::fence(Ordering::Acquire);
+        self.domain.maintain_after_reader();
+    }
+}
 
 struct CacheLookupDomain<V> {
     // D1-D5 are provided by RotatingReadDomain. A cache node must be freed
@@ -955,6 +1041,7 @@ struct CacheLookupDomain<V> {
     // have observed its pointer has ended.
     domain: RotatingRetirementDomain<DEFAULT_STRIPE_COUNT, PendingEntries<V>>,
     pending_nodes: AtomicUsize,
+    maintenance_requests: AtomicUsize,
     pending_weight: AtomicU64,
     // Once the sum exceeds u64, keep a conservative backpressure signal
     // until both retirement queues are observed empty under their locks.
@@ -971,6 +1058,7 @@ impl<V> CacheLookupDomain<V> {
         Self {
             domain: RotatingRetirementDomain::new(),
             pending_nodes: AtomicUsize::new(0),
+            maintenance_requests: AtomicUsize::new(0),
             pending_weight: AtomicU64::new(0),
             pending_weight_saturated: AtomicBool::new(false),
             peak_pending_nodes: AtomicUsize::new(0),
@@ -982,10 +1070,27 @@ impl<V> CacheLookupDomain<V> {
     }
 
     #[inline]
-    fn enter(&self) -> XllResult<CacheDomainPermit<'_>> {
-        self.domain
+    fn enter(&self) -> XllResult<CacheDomainPermit<'_, V>> {
+        let permit = self
+            .domain
             .enter_current_thread()
-            .map_err(|_| XllError::Closing)
+            .map_err(|_| XllError::Closing)?;
+        CACHE_READERS.with(|readers| readers.borrow_mut().push(std::ptr::from_ref(self).addr()));
+        Ok(CacheDomainPermit {
+            domain: self,
+            permit: Some(permit),
+            _thread: PhantomData,
+        })
+    }
+
+    fn current_thread_is_reading(&self) -> bool {
+        CACHE_READERS.with(|readers| readers.borrow().contains(&std::ptr::from_ref(self).addr()))
+    }
+
+    fn maintain_after_reader(&self) {
+        if self.pending_nodes.load(Ordering::Relaxed) != 0 {
+            reclaim_cache_entries(self.try_quiesce_and_drain());
+        }
     }
 
     fn pending_weight(&self) -> u64 {
@@ -1085,10 +1190,13 @@ impl<V> CacheLookupDomain<V> {
     }
 
     fn quiesce_and_drain(&self) -> ReclaimEntries<'_, V> {
-        // A caller may release a lease or clear/read cache metrics from a
-        // compute/weight callback. Defer value destruction until that outer
-        // singleflight has returned, just as ordinary maintenance does.
-        if ACTIVE_CACHE_INITIALIZATION_DEPTH.get() != 0 {
+        // Initializers/unwind cleanup must not wait for a caller blocked on
+        // this operation. Advance nonblocking quiescence in those cases. A
+        // synchronous writer also must not await its own lookup admission.
+        if ACTIVE_CACHE_INITIALIZATION_DEPTH.get() != 0 || std::thread::panicking() {
+            return self.try_quiesce_and_drain();
+        }
+        if self.current_thread_is_reading() {
             return ReclaimEntries::new(self);
         }
         let start = Instant::now();
@@ -1106,19 +1214,44 @@ impl<V> CacheLookupDomain<V> {
     }
 
     fn try_quiesce_and_drain(&self) -> ReclaimEntries<'_, V> {
-        if ACTIVE_CACHE_INITIALIZATION_DEPTH.get() != 0
-            || self.pending_nodes.load(Ordering::Relaxed) == 0
-        {
+        if self.pending_nodes.load(Ordering::Relaxed) == 0 {
+            return ReclaimEntries::new(self);
+        }
+        // Every poll participates in one request handoff. A departing reader
+        // racing a driver's failed idle check forces that driver to poll again.
+        let previous = self
+            .maintenance_requests
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |requests| {
+                requests.checked_add(1)
+            })
+            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+        if previous != 0 {
             return ReclaimEntries::new(self);
         }
         let start = Instant::now();
-        let Some(result) = self
-            .domain
-            .try_quiesce_if_idle(|generation| self.drain_generation(generation))
-        else {
-            return ReclaimEntries::new(self);
-        };
-        let entries = result.unwrap_or_else(|_| ReclaimEntries::new(self));
+        let mut entries = ReclaimEntries::new(self);
+        let mut consumed = 1;
+        loop {
+            while self.pending_nodes.load(Ordering::Relaxed) != 0 {
+                let Some(Ok(batch)) = self
+                    .domain
+                    .poll_quiesce(|generation| self.drain_generation(generation))
+                else {
+                    break;
+                };
+                entries.extend(batch);
+            }
+            let requested = self
+                .maintenance_requests
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |requests| {
+                    requests.checked_sub(consumed)
+                })
+                .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+            if requested == consumed {
+                break;
+            }
+            consumed = requested - consumed;
+        }
         self.record_batch(&entries, start);
         entries
     }
@@ -1339,8 +1472,7 @@ where
         // for that very reader, so defer it until the outer lookup returns.
         if std::mem::needs_drop::<K>()
             && self.index.has_retired_keys()
-            && ACTIVE_CACHE_INITIALIZATION_DEPTH.get() == 0
-            && !self.domain.domain.current_thread_may_be_reading()
+            && !self.domain.current_thread_is_reading()
         {
             self.index.maintenance();
         }
@@ -1349,9 +1481,6 @@ where
     fn maintain(&self, mutation: bool) {
         // A read inside an initializer must not run another value's Drop
         // while the index is still coordinating that initializer.
-        if ACTIVE_CACHE_INITIALIZATION_DEPTH.get() != 0 {
-            return;
-        }
         // Keys can be retired while a value remains pinned by a lease. Their
         // queue is independent of the value-domain debt and also needs reads
         // to make progress after a deferred or unwinding mutation.
@@ -1361,11 +1490,13 @@ where
             return;
         }
         // Under sustained contention, stop admitting more mutation debt until
-        // the old readers drain. Hot reads only attempt an idle reclamation.
+        // the old readers drain. Hot reads advance a nonblocking grace period.
         let retired = if mutation
+            && ACTIVE_CACHE_INITIALIZATION_DEPTH.get() == 0
+            && !std::thread::panicking()
             && (nodes >= RECLAIM_BACKPRESSURE_NODES
                 || self.domain.pending_weight() >= self.weight_budget.max(1) as u64)
-            && !self.domain.domain.current_thread_may_be_reading()
+            && !self.domain.current_thread_is_reading()
         {
             self.domain.quiesce_and_drain()
         } else {
@@ -1427,6 +1558,7 @@ where
 
     /// Returns a pinned resident value from the current cache generation.
     pub fn get<'a>(&'a self, key: &K) -> Option<CacheLease<'a, V>> {
+        let _operation = CacheOperationGuard::enter();
         let epoch = self.generation.snapshot();
         let lease = self.get_at_epoch(key, epoch);
         self.maintain(false);
@@ -1517,6 +1649,7 @@ where
             }));
         });
 
+        let _operation = CacheOperationGuard::enter();
         let mut compute_opt = Some(compute);
         let mut weight_opt = Some(weight);
         let mut vkey_opt = Some(VersionedKey { epoch, key });
@@ -3417,7 +3550,7 @@ mod tests {
                 || {
                     drop(previous);
                     assert_eq!(drops.load(Ordering::Relaxed), 0);
-                    assert_eq!(cache.reclamation_stats().pending_nodes, 1);
+                    assert_eq!(cache.reclamation_stats().pending_nodes, 0);
                     if succeeds {
                         Ok(DropProbe(Arc::clone(&drops)))
                     } else {
@@ -3475,7 +3608,7 @@ mod tests {
                     || {
                         drop(previous);
                         assert_eq!(drops.load(Ordering::Relaxed), 0);
-                        assert_eq!(cache.reclamation_stats().pending_nodes, 1);
+                        assert_eq!(cache.reclamation_stats().pending_nodes, 0);
                         panic!("original initializer panic");
                     },
                 );
@@ -3610,7 +3743,7 @@ mod tests {
                         .is_err()
                     );
                     assert_eq!(drops.load(Ordering::Relaxed), 0);
-                    assert_eq!(cache.reclamation_stats().pending_nodes, 1);
+                    assert_eq!(cache.reclamation_stats().pending_nodes, 0);
                     Ok(DropProbe(Arc::clone(&drops)))
                 },
             )
@@ -3711,7 +3844,7 @@ mod tests {
                     drop(final_lease);
                     let _ = (cache.len(), cache.used_weight());
                     assert_eq!(drops.load(Ordering::Relaxed), 0);
-                    assert_eq!(cache.reclamation_stats().pending_nodes, 2);
+                    assert_eq!(cache.reclamation_stats().pending_nodes, 0);
                     Err(XllError::Closing)
                 },
             )

@@ -21,7 +21,11 @@ pub(super) fn extract_gating_attributes(attributes: &[Attribute]) -> Vec<Attribu
     let mut gating = Vec::new();
     for attribute in attributes {
         if attribute.path().is_ident("cfg") {
-            gating.push(attribute.clone());
+            let mut attribute = attribute.clone();
+            // Gating copied from inside a function body is attached to new
+            // sibling items, where only outer attributes are valid.
+            attribute.style = syn::AttrStyle::Outer;
+            gating.push(attribute);
             continue;
         }
         if !attribute.path().is_ident("cfg_attr") {

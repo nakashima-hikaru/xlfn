@@ -380,6 +380,10 @@ impl TaskRegistry {
             return false;
         };
         if self.closing.load(Ordering::Acquire) {
+            // Admission was sealed while the old calculation drained. No
+            // replacement was published; leave a stable control state so the
+            // subsequent close can drain the existing calculations.
+            control.phase = ControlPhase::Running;
             return false;
         }
         if from != old.get().epoch {
@@ -505,6 +509,9 @@ pub(crate) fn cancel_tasks(tasks: TaskControlBatch) {
         cancel_source_no_unwind(&cancellation);
         let _ =
             crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| abort.abort()));
+        let _ = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+            drop((abort, cancellation));
+        }));
     }
 }
 

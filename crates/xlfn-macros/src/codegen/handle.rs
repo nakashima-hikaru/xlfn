@@ -27,7 +27,12 @@ pub(crate) fn expand_excel_handle_object(
     }
     let krate = resolve_crate_path(krate_opt.as_ref());
     let ident = input.ident;
-    let (impl_generics, type_generics, where_clause) = input.generics.split_for_impl();
+    let mut generics = input.generics;
+    generics
+        .make_where_clause()
+        .predicates
+        .push(syn::parse_quote!(Self: ::core::marker::Send + ::core::marker::Sync + 'static));
+    let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
     Ok(quote! {
         impl #impl_generics #krate::handle::ExcelHandleObject
             for #ident #type_generics #where_clause

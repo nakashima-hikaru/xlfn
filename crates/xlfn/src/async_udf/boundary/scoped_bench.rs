@@ -173,10 +173,10 @@ impl HandleScopedDeliveryBenchmark {
                 reservation.commit_handle_scoped(
                     self.generation,
                     InstrumentedHandleTask {
-                        build,
-                        responder,
+                        build: Some(build),
+                        responder: Some(responder),
                         token,
-                        observation,
+                        observation: Some(observation),
                         udf_id: UDF_ID,
                         _result: std::marker::PhantomData,
                     },
@@ -186,8 +186,8 @@ impl HandleScopedDeliveryBenchmark {
                 reservation.commit_handle_scoped(
                     self.generation,
                     UninstrumentedHandleTask {
-                        build,
-                        responder,
+                        build: Some(build),
+                        responder: Some(responder),
                         token,
                         udf_id: UDF_ID,
                         _result: std::marker::PhantomData,

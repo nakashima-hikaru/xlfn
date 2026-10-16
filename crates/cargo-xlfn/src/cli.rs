@@ -213,6 +213,7 @@ pub(crate) struct PackageArgs {
     pub(crate) target: Option<WindowsTarget>,
     #[usage(long, conflicts = ["target"])]
     pub(crate) all: bool,
+    /// Distribution output directory; must not overlap the Cargo target directory.
     #[usage(long, default = "package")]
     pub(crate) out: PathBuf,
     #[usage(long)]

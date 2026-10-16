@@ -194,12 +194,17 @@ impl<A: crate::Addin> Runtime<A> {
 
     pub(crate) fn acquire_open_rollback(
         &self,
-    ) -> Option<crate::runtime::shutdown::RemovalOwner<'_, A>> {
-        let claim = self.lifecycle_orchestrator().acquire_open_rollback()?;
-        Some(crate::runtime::shutdown::RemovalOwner::new(
-            self.shutdown_deps(),
-            claim,
-        ))
+    ) -> orchestration::OpenRollbackAcquisition<shutdown::RemovalOwner<'_, A>> {
+        use orchestration::OpenRollbackAcquisition;
+        match self.lifecycle_orchestrator().acquire_open_rollback() {
+            OpenRollbackAcquisition::Acquired(claim) => OpenRollbackAcquisition::Acquired(
+                shutdown::RemovalOwner::new(self.shutdown_deps(), claim),
+            ),
+            OpenRollbackAcquisition::ClosingOwnsCleanup => {
+                OpenRollbackAcquisition::ClosingOwnsCleanup
+            }
+            OpenRollbackAcquisition::Unavailable => OpenRollbackAcquisition::Unavailable,
+        }
     }
 
     #[cfg(test)]
@@ -1391,7 +1396,10 @@ pub(crate) mod tests {
         assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
         let trace = runtime.composition_trace_json();
         assert!(!trace.contains("\"failOpen\""));
-        assert!(runtime.acquire_open_rollback().is_none());
+        assert!(matches!(
+            runtime.acquire_open_rollback(),
+            orchestration::OpenRollbackAcquisition::Unavailable
+        ));
     }
 
     #[test]
@@ -1528,7 +1536,11 @@ pub(crate) mod tests {
         let runtime = Arc::new(Runtime::<()>::new());
         let opening = runtime.begin_open().unwrap();
         assert!(opening.fail_for_test().requires_rollback());
-        let rollback = runtime.acquire_open_rollback().unwrap();
+        let orchestration::OpenRollbackAcquisition::Acquired(rollback) =
+            runtime.acquire_open_rollback()
+        else {
+            panic!("rollback owner available");
+        };
 
         let closing_runtime = Arc::clone(&runtime);
         let (closed_tx, closed_rx) = mpsc::sync_channel(1);

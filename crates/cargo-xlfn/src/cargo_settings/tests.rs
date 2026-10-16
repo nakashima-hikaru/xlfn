@@ -91,6 +91,39 @@ fn include_cycles_and_missing_required_files_fail() {
 }
 
 #[test]
+fn shared_include_dag_is_rejected_like_cargo() {
+    // Cargo's include-cycle detector retains every lexical path loaded from
+    // one top-level file, so shared descendants are rejected as well.
+    let directory = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(directory.path()).unwrap();
+    write(
+        &root,
+        ".cargo/config.toml",
+        "include = ['a.toml', 'b.toml']\n",
+    );
+    write(&root, ".cargo/a.toml", "include = ['shared.toml']\n");
+    write(&root, ".cargo/b.toml", "include = ['shared.toml']\n");
+    write(&root, ".cargo/shared.toml", "[build]\nrustc-wrapper = ''\n");
+    let error = CargoSettings::load_with(&root, None, |_| None)
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("include cycle"));
+}
+
+#[test]
+fn initial_include_path_is_normalized_before_cycle_detection() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(directory.path()).unwrap();
+    write(&root, ".cargo/config.toml", "include = ['./config.toml']\n");
+    let mut seen = Vec::new();
+    let error = CargoSettings::read_file(&root.join(".cargo/./config.toml"), &mut seen)
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("include cycle"));
+    assert_eq!(seen, vec![root.join(".cargo/config.toml")]);
+}
+
+#[test]
 fn environment_paths_and_empty_wrapper_follow_cargo_precedence() {
     let directory = tempfile::tempdir().unwrap();
     let root = fs::canonicalize(directory.path()).unwrap();

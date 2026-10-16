@@ -5,7 +5,7 @@
 //! Deserialization applies the same shape and length checks as construction.
 
 use super::{EXCEL_MAX_COLUMNS, EXCEL_MAX_ROWS, MAX_ARRAY_ELEMENTS};
-use crate::error::{DomainErrorCode, InputError, Shape};
+use crate::error::{InputError, Shape};
 use crate::{XllError, XllResult};
 use std::ops::{Deref, DerefMut, Index, IndexMut};
 
@@ -336,11 +336,7 @@ impl<'call, T> IntoIterator for &MatrixRef<'call, T> {
 }
 
 fn validated_element_count(rows: usize, columns: usize) -> XllResult<usize> {
-    let count = rows.checked_mul(columns).ok_or(XllError::Domain {
-        code: DomainErrorCode::Overflow,
-    })?;
-    validate_matrix_dimensions(rows, columns, count)?;
-    Ok(count)
+    matrix_element_count(rows, columns, "<matrix>")
 }
 
 pub(crate) fn validate_matrix_dimensions(
@@ -348,33 +344,16 @@ pub(crate) fn validate_matrix_dimensions(
     columns: usize,
     actual: usize,
 ) -> XllResult<()> {
-    if rows == 0 || columns == 0 {
-        return Err(XllError::input(
-            "<matrix>",
-            InputError::Malformed("matrix dimensions must be non-zero"),
-        ));
-    }
-    if rows > EXCEL_MAX_ROWS {
-        return Err(XllError::input(
-            "<matrix>",
-            InputError::TooLarge {
-                limit: EXCEL_MAX_ROWS,
-                actual: rows,
-            },
-        ));
-    }
-    if columns > EXCEL_MAX_COLUMNS {
-        return Err(XllError::input(
-            "<matrix>",
-            InputError::TooLarge {
-                limit: EXCEL_MAX_COLUMNS,
-                actual: columns,
-            },
-        ));
-    }
-    let expected = rows.checked_mul(columns).ok_or(XllError::Domain {
-        code: DomainErrorCode::Overflow,
-    })?;
+    validate_matrix_dimensions_for_argument(rows, columns, actual, "<matrix>")
+}
+
+pub(super) fn validate_matrix_dimensions_for_argument(
+    rows: usize,
+    columns: usize,
+    actual: usize,
+    argument: &'static str,
+) -> XllResult<()> {
+    let expected = matrix_element_count(rows, columns, argument)?;
     if expected != actual {
         return Err(XllError::ElementCountMismatch {
             rows,
@@ -383,16 +362,62 @@ pub(crate) fn validate_matrix_dimensions(
             actual,
         });
     }
-    if expected > MAX_ARRAY_ELEMENTS {
+    Ok(())
+}
+
+pub(super) fn matrix_element_count(
+    rows: usize,
+    columns: usize,
+    argument: &'static str,
+) -> XllResult<usize> {
+    if rows == 0 || columns == 0 {
         return Err(XllError::input(
-            "<matrix>",
+            argument,
+            InputError::Malformed("matrix dimensions must be non-zero"),
+        ));
+    }
+    array_element_count(rows, columns, argument)
+}
+
+/// Validates worksheet axes and the framework cell limit before narrowing
+/// the element count. Empty arrays remain available to vectors and raw views.
+pub(super) fn array_element_count(
+    rows: usize,
+    columns: usize,
+    argument: &'static str,
+) -> XllResult<usize> {
+    if rows > EXCEL_MAX_ROWS {
+        return Err(XllError::input(
+            argument,
             InputError::TooLarge {
-                limit: MAX_ARRAY_ELEMENTS,
-                actual: expected,
+                limit: EXCEL_MAX_ROWS,
+                actual: rows,
             },
         ));
     }
-    Ok(())
+    if columns > EXCEL_MAX_COLUMNS {
+        return Err(XllError::input(
+            argument,
+            InputError::TooLarge {
+                limit: EXCEL_MAX_COLUMNS,
+                actual: columns,
+            },
+        ));
+    }
+    // Both axes fit Excel's limits, so their product fits u64 even on x86.
+    let elements = rows as u64 * columns as u64;
+    if elements > MAX_ARRAY_ELEMENTS as u64 {
+        return Err(XllError::input(
+            argument,
+            InputError::TooLarge {
+                limit: MAX_ARRAY_ELEMENTS,
+                // InputError reports platform-sized counts; values too large
+                // to represent saturate while retaining the input error kind.
+                actual: usize::try_from(elements).unwrap_or(usize::MAX),
+            },
+        ));
+    }
+    Ok(elements as usize)
 }
 
 /// An owned, non-empty row with explicit worksheet orientation.

@@ -255,6 +255,12 @@ pub(super) struct ServerBackends {
     pub(super) subscription_server: Option<crate::subscription::SubscriptionServerHandle>,
 }
 
+impl ServerBackends {
+    fn is_detached(&self) -> bool {
+        self.handles.is_none() && self.subscriptions.is_none() && self.subscription_server.is_none()
+    }
+}
+
 /// Attaches a new update notifier to the subscription server backend.
 ///
 /// # Safety
@@ -398,7 +404,16 @@ pub(super) fn discard_unpublished_server(pointer: usize, newly_created: bool) {
     }
 
     // SAFETY: the server is quiescent and its worker has exited.
-    let _ = unsafe { teardown_server_resources(server, true) };
+    let status = unsafe { teardown_server_resources(server, true) };
+    if status != S_OK {
+        crate::diagnostics::report_no_unwind(
+            "IRtdServer::unpublished server teardown",
+            &XllError::WindowsApi {
+                function: "IRtdServer::ServerTerminate",
+                code: status,
+            },
+        );
+    }
     drop(termination);
     // SAFETY: balance the temporary retained reference.
     unsafe { server_release(server) };
@@ -417,12 +432,15 @@ pub(crate) fn shutdown<H: FormulaLifetimeBackend + 'static>(handles: &H) -> XllR
                 // SAFETY: ACTIVE_SERVER owns a live reference to this RtdServer
                 // while its mutex remains held, and handles backend is alive while attached.
                 unsafe {
-                    (*server)
-                        .backends
-                        .lock()
-                        .handles
-                        .as_ref()
-                        .is_some_and(|active| active.as_ref().identity() == handles.identity())
+                    let backends = (*server).backends.lock();
+                    // Deferred termination withdraws both backends before its
+                    // worker exits. Lifecycle shutdown must still find and
+                    // join that retained, detached ACTIVE_SERVER.
+                    backends.is_detached()
+                        || backends
+                            .handles
+                            .as_ref()
+                            .is_some_and(|active| active.as_ref().identity() == handles.identity())
                 }
             })
             .cloned()
@@ -464,27 +482,17 @@ pub(crate) fn shutdown<H: FormulaLifetimeBackend + 'static>(handles: &H) -> XllR
             }
             Err(_) => std::process::abort(),
         }
-        handles.terminate_topics(lifetime_generation(retained.generation));
-        // No operation can retain or invoke the callback after the server gate
-        // and handle topics are quiescent. Revoke the GIT cookie while the XLL
-        // is still loaded, without holding the callback or global server lock.
-        // SAFETY: the temporary reference acquired above keeps `server` alive.
-        unsafe { drain_callbacks(&(*server).callbacks) };
-
-        let removed = {
-            let mut active = ACTIVE_SERVER.lock();
-            active
-                .as_ref()
-                .is_some_and(|entry| entry.pointer == retained.pointer)
-                .then(|| active.take())
-                .flatten()
-                .is_some()
-        };
-
-        if removed {
-            // SAFETY: removing the ACTIVE_SERVER entry transferred its owned
-            // reference to this branch, which releases it exactly once.
-            unsafe { server_release(server) };
+        // A server can be shared with subscriptions. Stop both attached
+        // backends and withdraw their non-owning pointers before releasing
+        // ACTIVE_SERVER or the callback they may still reference.
+        // SAFETY: the temporary reference and termination guard keep the
+        // server live and exclude operations throughout teardown.
+        let status = unsafe { teardown_server_resources(server, true) };
+        if status != S_OK && shutdown_error.is_none() {
+            shutdown_error = Some(XllError::WindowsApi {
+                function: "IRtdServer::ServerTerminate",
+                code: status,
+            });
         }
 
         // Finish the phase transition while the temporary server reference
@@ -494,9 +502,11 @@ pub(crate) fn shutdown<H: FormulaLifetimeBackend + 'static>(handles: &H) -> XllR
         // SAFETY: balance the temporary reference acquired while locating the
         // active server.
         unsafe { server_release(server) };
-    } else {
-        handles.terminate_all_topics();
     }
+    // Transport generations cover only observed topics. Prepared topics that
+    // never reached claim_lifetime, and topics from a replaced server, are
+    // still owned by this runtime and must be retired at this boundary.
+    handles.terminate_all_topics();
     retry_git_revocation_debt();
     match shutdown_error {
         Some(error) => Err(error),
@@ -516,12 +526,12 @@ pub(crate) fn shutdown_subscriptions(subscriptions: &SubscriptionRuntime) -> Xll
                 // SAFETY: ACTIVE_SERVER owns a live reference to this RtdServer
                 // while its mutex remains held.
                 unsafe {
-                    (*server)
-                        .backends
-                        .lock()
-                        .subscriptions
-                        .as_ref()
-                        .is_some_and(|active| std::ptr::eq(active.0.as_ptr(), subscriptions))
+                    let backends = (*server).backends.lock();
+                    backends.is_detached()
+                        || backends
+                            .subscriptions
+                            .as_ref()
+                            .is_some_and(|active| std::ptr::eq(active.0.as_ptr(), subscriptions))
                 }
             })
             .cloned()
@@ -562,26 +572,17 @@ pub(crate) fn shutdown_subscriptions(subscriptions: &SubscriptionRuntime) -> Xll
             Err(_) => std::process::abort(),
         }
         let close_result = subscriptions.close();
-        // `subscriptions.close` revoked notification closures and waited for
-        // cloned callbacks. Revoke the server's final GIT reference before
-        // returning from XLL shutdown, outside all server/runtime locks.
-        // SAFETY: the temporary reference acquired above keeps `server` alive.
-        unsafe { drain_callbacks(&(*server).callbacks) };
-
-        let removed = {
-            let mut active = ACTIVE_SERVER.lock();
-            active
-                .as_ref()
-                .is_some_and(|entry| entry.pointer == retained.pointer)
-                .then(|| active.take())
-                .flatten()
-                .is_some()
-        };
-
-        if removed {
-            // SAFETY: removing the ACTIVE_SERVER entry transferred its owned
-            // reference to this branch, which releases it exactly once.
-            unsafe { server_release(server) };
+        // Subscription producers stop before Addin::quiesce. Keep the handle
+        // roots and their backend attached until shutdown(handles), which runs
+        // after quiesce and layer disposal.
+        // SAFETY: the temporary reference and termination guard keep the
+        // server live and exclude operations throughout teardown.
+        let status = unsafe { teardown_server_resources_inner(server, true, true) };
+        if status != S_OK && shutdown_error.is_none() {
+            shutdown_error = Some(XllError::WindowsApi {
+                function: "IRtdServer::ServerTerminate",
+                code: status,
+            });
         }
 
         // Finish the phase transition while the temporary server reference
@@ -622,73 +623,110 @@ fn ensure_server_impl(
     handles: Option<&(dyn FormulaLifetimeBackend + 'static)>,
     subscriptions: Option<&SubscriptionRuntime>,
 ) -> XllResult<EnsuredServer> {
-    let mut active = ACTIVE_SERVER.lock();
+    loop {
+        let mut active = ACTIVE_SERVER.lock();
 
-    if let Some(existing) = active.as_ref() {
-        let server = existing.pointer as *mut RtdServer;
-        // Deferred ServerTerminate intentionally leaves ACTIVE_SERVER in place
-        // until a host lifecycle path can join its coordinator. Reap a fully
-        // terminated entry before constructing or attaching a replacement.
-        // SAFETY: ACTIVE_SERVER owns a live server reference while locked.
-        let operations = unsafe { (*server).operations.as_ref() };
-        let phase = operations.state.lock().phase;
-        if phase == ServerPhase::Terminated {
-            // SAFETY: create a temporary reference that remains valid after the
-            // global mutex is released for the potentially blocking join.
-            unsafe { server_add_ref(server) };
-            drop(active);
+        if let Some(existing) = active.as_ref() {
+            let server = existing.pointer as *mut RtdServer;
+            // Deferred ServerTerminate intentionally leaves ACTIVE_SERVER in place
+            // until a host lifecycle path can join its coordinator. A ServerStart
+            // failure after callback publication is also terminal for that
+            // instance: Excel need not issue ServerTerminate after a failed start.
+            // SAFETY: ACTIVE_SERVER owns a live server reference while locked.
+            let operations = unsafe { (*server).operations.as_ref() };
+            let phase = operations.state.lock().phase;
+            // SAFETY: the same global reference keeps the start-state atomic live.
+            let failed_start =
+                unsafe { (*server).start_state.load(Ordering::Acquire) } == SERVER_START_FAILED;
+            if phase != ServerPhase::Open || failed_start {
+                // SAFETY: create a temporary reference that remains valid after the
+                // global mutex is released for the potentially blocking join.
+                unsafe { server_add_ref(server) };
+                drop(active);
 
-            // SAFETY: the temporary reference above keeps `server` live.
-            let join_result = unsafe { (*server).termination_worker.join() };
-            if matches!(join_result, Err(ServerCloseError::Reentrant)) {
-                // SAFETY: balance the temporary reference above. A coordinator
-                // re-entering ensure_server must let an external thread reap it.
+                // A failed ServerStart can still be leaving its admitted method.
+                // Close and drain it before retiring the callback/backend state.
+                // SAFETY: the temporary reference above keeps the barrier live.
+                let termination = match unsafe { (*server).operations.close_and_wait() } {
+                    Ok(termination) => termination,
+                    Err(_) => {
+                        // SAFETY: balance the temporary reference above.
+                        unsafe { server_release(server) };
+                        return Err(XllError::Closing);
+                    }
+                };
+
+                // SAFETY: the temporary reference above keeps `server` live.
+                let join_result = unsafe { (*server).termination_worker.join() };
+                if matches!(join_result, Err(ServerCloseError::Reentrant)) {
+                    drop(termination);
+                    // SAFETY: balance the temporary reference above. A coordinator
+                    // re-entering ensure_server must let an external thread reap it.
+                    unsafe { server_release(server) };
+                    return Err(XllError::Closing);
+                }
+                let worker_panicked = matches!(join_result, Err(ServerCloseError::WorkerPanicked));
+                if worker_panicked {
+                    crate::diagnostics::report_no_unwind(
+                        "IRtdServer::deferred termination join",
+                        &XllError::Panic,
+                    );
+                }
+
+                // The resource-teardown guard serializes cleanup skipped by a
+                // panicking worker, including secondary reapers whose
+                // close_and_wait returned no termination owner.
+                // SAFETY: the temporary reference keeps `server` live.
+                let status = unsafe { teardown_server_resources(server, true) };
+                drop(termination);
+                // SAFETY: balance the temporary reference acquired above.
                 unsafe { server_release(server) };
-                return Err(XllError::Closing);
+                if status != S_OK {
+                    return Err(XllError::WindowsApi {
+                        function: "IRtdServer::ServerTerminate",
+                        code: status,
+                    });
+                }
+                if worker_panicked {
+                    return Err(XllError::Panic);
+                }
+                continue;
             }
-            if matches!(join_result, Err(ServerCloseError::WorkerPanicked)) {
-                crate::diagnostics::report_no_unwind(
-                    "IRtdServer::deferred termination join",
-                    &XllError::Panic,
-                );
-            }
 
-            // Idempotently finish any cleanup skipped by a panicking worker and
-            // transfer/release the ACTIVE_SERVER reference.
-            // SAFETY: the temporary reference keeps `server` live.
-            let _ = unsafe { teardown_server_resources(server, true) };
-            // SAFETY: balance the temporary reference acquired above.
-            unsafe { server_release(server) };
-            return ensure_server_impl(handles, subscriptions);
-        }
+            // SAFETY: ACTIVE_SERVER owns a live server reference while its mutex is
+            // held. A closing server cannot accept a newly attached backend.
+            let Some(_server_operation) = (unsafe { (*server).operations.enter() }) else {
+                // ServerTerminate can close admission after the phase snapshot.
+                // Retry retirement rather than exposing a transient transport
+                // close as a runtime lifecycle failure.
+                drop(active);
+                continue;
+            };
 
-        // SAFETY: ACTIVE_SERVER owns a live server reference while its mutex is
-        // held. A closing server cannot accept a newly attached backend.
-        let _server_operation = unsafe { (*server).operations.enter() }.ok_or(XllError::Closing)?;
+            // SAFETY: ACTIVE_SERVER owns a live server reference while its mutex is
+            // held, so the RtdServer and its `backends` mutex are valid.
+            let mut backends = unsafe { (*server).backends.lock() };
 
-        // SAFETY: ACTIVE_SERVER owns a live server reference while its mutex is
-        // held, so the RtdServer and its `backends` mutex are valid.
-        let mut backends = unsafe { (*server).backends.lock() };
-
-        if let Some(handles) = handles {
-            match backends.handles.as_ref() {
-                Some(active) => {
-                    // SAFETY: active is attached to the server whose lock is held.
-                    let active_ref = unsafe { active.as_ref() };
-                    if active_ref.identity() != handles.identity() {
-                        return Err(XllError::Internal {
-                            diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_MULTI,
-                        });
+            if let Some(handles) = handles {
+                match backends.handles.as_ref() {
+                    Some(active) => {
+                        // SAFETY: active is attached to the server whose lock is held.
+                        let active_ref = unsafe { active.as_ref() };
+                        if active_ref.identity() != handles.identity() {
+                            return Err(XllError::Internal {
+                                diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_MULTI,
+                            });
+                        }
+                    }
+                    None => {
+                        backends.handles = Some(BackendHandles::new(handles));
                     }
                 }
-                None => {
-                    backends.handles = Some(BackendHandles::new(handles));
-                }
             }
-        }
 
-        let (newly_attached_subscriptions, subscription_handle) =
-            if let Some(subscriptions) = subscriptions {
+            let (newly_attached_subscriptions, subscription_handle) = if let Some(subscriptions) =
+                subscriptions
+            {
                 match backends.subscriptions.as_ref() {
                     Some(active) if std::ptr::eq(active.0.as_ptr(), subscriptions) => {
                         (None, backends.subscription_server)
@@ -711,94 +749,96 @@ fn ensure_server_impl(
                 (None, backends.subscription_server)
             };
 
-        drop(backends);
+            drop(backends);
 
-        if let Some(handle) = newly_attached_subscriptions {
-            // SAFETY: `server` was validated as non-null and COM keeps the server alive.
-            let callback = unsafe { active_callback(&(*server).callbacks) };
-            if let Some(callback) = callback {
-                // SAFETY: `callback` is pinned in `callbacks` and `operations`
-                // remains valid for the server lifetime.
-                let notifier = unsafe { RtdNotifier::new(callback, NonNull::from(operations)) };
-                handle.attach_update_notifier(notifier)?;
+            if let Some(handle) = newly_attached_subscriptions {
+                // SAFETY: `server` was validated as non-null and COM keeps the server alive.
+                let callback = unsafe { active_callback(&(*server).callbacks) };
+                if let Some(callback) = callback {
+                    // SAFETY: `callback` is pinned in `callbacks` and `operations`
+                    // remains valid for the server lifetime.
+                    let notifier = unsafe { RtdNotifier::new(callback, NonNull::from(operations)) };
+                    handle.attach_update_notifier(notifier)?;
+                }
             }
+
+            // SAFETY: ACTIVE_SERVER owns a live server reference. This increments
+            // the count to create the separate temporary reference held by the guard.
+            unsafe { server_add_ref(server) };
+
+            return Ok(EnsuredServer {
+                active: existing.clone(),
+                newly_created: false,
+                subscription_server: subscription_handle,
+            });
         }
 
-        // SAFETY: ACTIVE_SERVER owns a live server reference. This increments
-        // the count to create the separate temporary reference held by the guard.
-        unsafe { server_add_ref(server) };
+        let mut class_id = GUID::default();
+
+        // SAFETY: `class_id` points to writable GUID storage.
+        let status = unsafe { CoCreateGuid(&mut class_id) };
+
+        if status < 0 {
+            return Err(XllError::WindowsApi {
+                function: "CoCreateGuid",
+                code: status,
+            });
+        }
+
+        let generation =
+            allocate_server_generation(&LAST_SERVER_GENERATION).ok_or(XllError::Internal {
+                diagnostic_id:
+                    crate::diagnostics::id::DiagnosticId::RTD_SERVER_GENERATION_EXHAUSTED,
+            })?;
+        let operations = ServerOperationBarrier::new().map_err(|error| XllError::WindowsApi {
+            function: error.operation,
+            code: error.code as i32,
+        })?;
+
+        let subscription_handle = if let Some(subscriptions) = subscriptions {
+            // SAFETY: `subscriptions` is the active generation's subscription runtime which
+            // outlives the RTD server lifecycle (protected by COM refcounting and shutdown barriers).
+            Some(unsafe { subscriptions.register_server(generation)? })
+        } else {
+            None
+        };
+
+        let server = Box::new(RtdServer {
+            vtable: &RTD_SERVER_VTABLE,
+            references: AtomicU32::new(1),
+            start_state: AtomicU8::new(SERVER_NOT_STARTED),
+            generation,
+            operations: Arc::new(operations),
+            termination_worker: TerminationWorker::default(),
+            backends: Mutex::new(ServerBackends {
+                handles: handles.map(BackendHandles::new),
+                subscriptions: subscriptions.map(BackendSubscriptions::new),
+                subscription_server: subscription_handle,
+            }),
+            callbacks: Mutex::new(ServerCallbacks::default()),
+            _module_lease: ComObjectLease::new(ComObjectKind::Server),
+        });
+
+        let pointer = Box::into_non_null(server).as_ptr() as usize;
+        let entry = ActiveServer {
+            class_id,
+            prog_id: format!("XlFnRtd_{}", guid_compact(class_id)),
+            pointer,
+            generation,
+        };
+
+        *active = Some(entry.clone());
+
+        // SAFETY: the construction reference is now owned by ACTIVE_SERVER.
+        // Incrementing here creates a separate temporary reference for EnsuredServer.
+        unsafe { server_add_ref(pointer as *mut RtdServer) };
 
         return Ok(EnsuredServer {
-            active: existing.clone(),
-            newly_created: false,
+            active: entry,
+            newly_created: true,
             subscription_server: subscription_handle,
         });
     }
-
-    let mut class_id = GUID::default();
-
-    // SAFETY: `class_id` points to writable GUID storage.
-    let status = unsafe { CoCreateGuid(&mut class_id) };
-
-    if status < 0 {
-        return Err(XllError::WindowsApi {
-            function: "CoCreateGuid",
-            code: status,
-        });
-    }
-
-    let generation =
-        allocate_server_generation(&LAST_SERVER_GENERATION).ok_or(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_SERVER_GENERATION_EXHAUSTED,
-        })?;
-    let operations = ServerOperationBarrier::new().map_err(|error| XllError::WindowsApi {
-        function: error.operation,
-        code: error.code as i32,
-    })?;
-
-    let subscription_handle = if let Some(subscriptions) = subscriptions {
-        // SAFETY: `subscriptions` is the active generation's subscription runtime which
-        // outlives the RTD server lifecycle (protected by COM refcounting and shutdown barriers).
-        Some(unsafe { subscriptions.register_server(generation)? })
-    } else {
-        None
-    };
-
-    let server = Box::new(RtdServer {
-        vtable: &RTD_SERVER_VTABLE,
-        references: AtomicU32::new(1),
-        start_state: AtomicU8::new(SERVER_NOT_STARTED),
-        generation,
-        operations: Arc::new(operations),
-        termination_worker: TerminationWorker::default(),
-        backends: Mutex::new(ServerBackends {
-            handles: handles.map(BackendHandles::new),
-            subscriptions: subscriptions.map(BackendSubscriptions::new),
-            subscription_server: subscription_handle,
-        }),
-        callbacks: Mutex::new(ServerCallbacks::default()),
-        _module_lease: ComObjectLease::new(ComObjectKind::Server),
-    });
-
-    let pointer = Box::into_non_null(server).as_ptr() as usize;
-    let entry = ActiveServer {
-        class_id,
-        prog_id: format!("XlFnRtd_{}", guid_compact(class_id)),
-        pointer,
-        generation,
-    };
-
-    *active = Some(entry.clone());
-
-    // SAFETY: the construction reference is now owned by ACTIVE_SERVER.
-    // Incrementing here creates a separate temporary reference for EnsuredServer.
-    unsafe { server_add_ref(pointer as *mut RtdServer) };
-
-    Ok(EnsuredServer {
-        active: entry,
-        newly_created: true,
-        subscription_server: subscription_handle,
-    })
 }
 pub(super) unsafe extern "system" fn server_query_interface(
     this: *mut RtdServer,
@@ -1515,10 +1555,48 @@ fn deferred_termination_worker(reference: OwnedServerReference, owner: ThreadId)
 }
 
 pub(super) unsafe fn teardown_server_resources(this: *mut RtdServer, remove_active: bool) -> i32 {
+    // SAFETY: forwarded from the caller's live, terminal server reference.
+    unsafe { teardown_server_resources_inner(this, remove_active, false) }
+}
+
+unsafe fn teardown_server_resources_inner(
+    this: *mut RtdServer,
+    remove_active: bool,
+    retain_handle_topics: bool,
+) -> i32 {
+    // A deferred worker may already have published Terminated, leaving this
+    // caller without a ServerTermination guard. Serialize resource disposal
+    // separately, pumping COM while another reaper owns it.
+    // SAFETY: the caller retains a live server throughout teardown.
+    let _resources = match unsafe { (*this).operations.teardown_resources() } {
+        Ok(resources) => resources,
+        Err(_) => return E_FAIL,
+    };
+    // Lifecycle subscription shutdown may retire COM admission while retaining
+    // handle roots until the add-in has quiesced. All callers have drained COM
+    // admission, so no new backend can attach while this decision is made.
+    // SAFETY: the caller retains a live server through terminal cleanup.
+    let keep_active = retain_handle_topics && unsafe { (*this).backends.lock().handles.is_some() };
+    if remove_active && !keep_active {
+        let active = ACTIVE_SERVER.lock();
+        if !active
+            .as_ref()
+            .is_some_and(|entry| entry.pointer == this as usize)
+        {
+            // A previous reaper already completed all remaining cleanup.
+            return S_OK;
+        }
+    }
+
     let (handles, subscription_server) = {
         // SAFETY: `this` is non-null when entering server teardown.
         let backends = unsafe { (*this).backends.lock() };
-        (backends.handles, backends.subscription_server)
+        let handles = if retain_handle_topics {
+            None
+        } else {
+            backends.handles
+        };
+        (handles, backends.subscription_server)
     };
 
     // SAFETY: `this` is non-null when entering server teardown.
@@ -1538,24 +1616,36 @@ pub(super) unsafe fn teardown_server_resources(this: *mut RtdServer, remove_acti
         unsafe { handles.as_ref() }.terminate_topics(lifetime_generation(generation));
     }
 
+    // Keep backend identities published until their last use above, so a
+    // concurrent lifecycle shutdown retains this server and waits for the
+    // resource guard before releasing its runtime. Callback revocation below
+    // no longer needs either non-owning runtime capability.
+    {
+        // SAFETY: the exclusive resource guard covers backend withdrawal.
+        let mut backends = unsafe { (*this).backends.lock() };
+        if !retain_handle_topics {
+            backends.handles = None;
+        }
+        backends.subscriptions = None;
+        backends.subscription_server = None;
+    }
+
     // SAFETY: the caller retains the server through callback revocation.
     unsafe { drain_callbacks(&(*this).callbacks) };
 
-    if remove_active {
-        let pointer = this as usize;
+    if remove_active && !keep_active {
         let owned = {
             let mut active = ACTIVE_SERVER.lock();
             active
                 .as_ref()
-                .is_some_and(|entry| entry.pointer == pointer)
+                .is_some_and(|entry| entry.pointer == this as usize)
                 .then(|| active.take())
                 .flatten()
                 .is_some()
         };
-
         if owned {
-            // SAFETY: removing the server from ACTIVE_SERVER transfers its
-            // owned reference to this branch, released exactly once.
+            // SAFETY: the caller's retained reference keeps both the server and
+            // its resource-teardown guard alive after this global release.
             unsafe { server_release(this) };
         }
     }

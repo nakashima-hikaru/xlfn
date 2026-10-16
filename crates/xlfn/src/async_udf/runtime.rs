@@ -92,14 +92,21 @@ impl<E: AsyncExecutor> RuntimeReservation<'_, E> {
     ) where
         B: super::task_scope::HandleScopedTaskBuilder + Send + 'static,
     {
-        let brand = crate::handle::GenerationLeaseBrand;
-        let scope = super::task_scope::AsyncTaskScope::new(generation, &brand);
-        let (future, delivery) = build.build_task(scope);
-        // SAFETY: late-bound builders cannot borrow caller stack through the
-        // private brand. This reservation already owns calculation pin and
-        // active_tasks; commit moves them into the opaque task's completion.
-        let future = unsafe { super::task_scope::erase_scoped_task_future(future) };
-        self.commit(B::deliver(delivery, future), cancellation);
+        // Build only when the executor first polls the committed task. All
+        // admission guards have been released before user code or cleanup can
+        // reenter cancellation/calculation rotation.
+        self.commit(
+            async move {
+                let brand = crate::handle::GenerationLeaseBrand;
+                let scope = super::task_scope::AsyncTaskScope::new(generation, &brand);
+                let (future, delivery) = build.build_task(scope);
+                // SAFETY: late-bound builders cannot borrow the caller stack. The
+                // committed task already owns its calculation pin and activity.
+                let future = unsafe { super::task_scope::erase_scoped_task_future(future) };
+                B::deliver(delivery, future).await;
+            },
+            cancellation,
+        );
     }
 }
 

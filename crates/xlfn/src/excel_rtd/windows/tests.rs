@@ -42,6 +42,7 @@ use static_assertions::assert_not_impl_any;
 assert_not_impl_any!(ServerOperation<'static>: Send, Sync);
 assert_not_impl_any!(ServerNotificationOperation<'static>: Send, Sync);
 assert_not_impl_any!(ServerTermination<'static>: Send, Sync);
+assert_not_impl_any!(super::server_gate::ServerResourceTeardown<'static>: Send, Sync);
 
 struct TestComApartment {
     should_uninitialize: bool,
@@ -159,6 +160,33 @@ fn server_operation_barrier_rejects_same_thread_close_without_closing() {
     drop(termination);
     assert_eq!(barrier.state.lock().phase, ServerPhase::Terminated);
     assert!(barrier.close_and_wait().unwrap().is_none());
+}
+
+#[test]
+fn resource_teardown_remains_exclusive_after_the_terminal_phase() {
+    let barrier = Arc::new(ServerOperationBarrier::default());
+    drop(barrier.close_and_wait().unwrap().unwrap());
+    let first = barrier.teardown_resources().unwrap();
+    assert!(matches!(
+        barrier.teardown_resources(),
+        Err(ServerCloseError::Reentrant)
+    ));
+
+    let other = Arc::clone(&barrier);
+    let (started_tx, started_rx) = mpsc::sync_channel(1);
+    let (acquired_tx, acquired_rx) = mpsc::sync_channel(1);
+    let waiter = thread::spawn(move || {
+        let _apartment = TestComApartment::enter();
+        assert!(other.close_and_wait().unwrap().is_none());
+        started_tx.send(()).unwrap();
+        let _resources = other.teardown_resources().unwrap();
+        acquired_tx.send(()).unwrap();
+    });
+    started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(acquired_rx.try_recv(), Err(mpsc::TryRecvError::Empty));
+    drop(first);
+    acquired_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    waiter.join().unwrap();
 }
 
 #[test]
@@ -782,6 +810,281 @@ fn server_start_reservation_is_single_use_and_rolls_back_failure() {
     assert!(ServerStartReservation::acquire(&failed_state).is_none());
 }
 
+#[test]
+fn failed_server_start_is_retired_without_server_terminate_before_retry() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let subscriptions = SubscriptionRuntime::new();
+    let failed = ensure_server_without_handles(Some(&subscriptions)).unwrap();
+    let server = failed.active.pointer as *mut RtdServer;
+    // SAFETY: ACTIVE_SERVER and `failed` retain this allocation throughout the test.
+    let server_ref = unsafe { &*server };
+    let callback_drops = Arc::new(AtomicUsize::new(0));
+
+    // Exercise the post-publication failure: the subscription server closes
+    // after ServerStart is admitted, so notification attachment must fail.
+    let operation = server_ref.operations.enter().unwrap();
+    let mut start = ServerStartReservation::acquire(&server_ref.start_state).unwrap();
+    let drops = Arc::clone(&callback_drops);
+    let callback = install_callback(
+        &server_ref.callbacks,
+        Box::new(RetainedUpdateCallback {
+            cookie: None,
+            pump: None,
+            drop_hook: Some(Arc::new(move || {
+                drops.fetch_add(1, Ordering::AcqRel);
+            })),
+        }),
+    );
+    start.callback_published();
+    failed.subscription_server.unwrap().terminate().unwrap();
+    // SAFETY: `failed` retains the server and the callback is server-owned.
+    let attach_result =
+        unsafe { super::server::synchronize_callback_notification(server_ref, callback) };
+    assert!(attach_result.is_err());
+    drop(start);
+    // Reentrant recovery must leave the retained callback/backend intact
+    // until the failed COM method has left its server admission.
+    assert!(matches!(
+        ensure_server_without_handles(Some(&subscriptions)),
+        Err(XllError::Closing)
+    ));
+    assert_eq!(callback_drops.load(Ordering::Acquire), 0);
+    drop(operation);
+
+    // Excel may release a failed activation without ever issuing
+    // ServerTerminate. A new observation must retire it and create a server.
+    let replacement = ensure_server_without_handles(Some(&subscriptions)).unwrap();
+    assert!(replacement.newly_created);
+    assert_ne!(replacement.active.pointer, failed.active.pointer);
+    assert_ne!(replacement.active.generation, failed.active.generation);
+    assert_eq!(
+        server_ref.operations.state.lock().phase,
+        ServerPhase::Terminated
+    );
+    assert_eq!(callback_drops.load(Ordering::Acquire), 1);
+    let backends = server_ref.backends.lock();
+    assert!(backends.handles.is_none());
+    assert!(backends.subscriptions.is_none());
+    assert!(backends.subscription_server.is_none());
+    drop(backends);
+
+    // SAFETY: the replacement guard retains its independently allocated server.
+    let replacement_ref = unsafe { &*(replacement.active.pointer as *mut RtdServer) };
+    let start = ServerStartReservation::acquire(&replacement_ref.start_state)
+        .expect("replacement must accept a fresh ServerStart");
+    start.commit();
+    shutdown_subscriptions(&subscriptions).unwrap();
+    drop(subscriptions);
+    // A delayed Excel release must not touch the now-reclaimed runtime.
+    drop(failed);
+    drop(replacement);
+}
+
+#[test]
+fn ensure_server_waits_for_terminating_server_and_concurrent_reapers_share_replacement() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let subscriptions = SubscriptionRuntime::new();
+    let ensured = ensure_server_without_handles(Some(&subscriptions)).unwrap();
+    let server = ensured.active.pointer as *mut RtdServer;
+    // SAFETY: `ensured` retains this allocation throughout the race.
+    let server_ref = unsafe { &*server };
+    let operation = server_ref.operations.enter().unwrap();
+    // SAFETY: the retained COM server is live.
+    let status = unsafe { server_terminate(server) };
+    assert_eq!(status, S_OK);
+    assert!(matches!(
+        server_ref.operations.state.lock().phase,
+        ServerPhase::Terminating { .. }
+    ));
+
+    let rendezvous = std::sync::Barrier::new(3);
+    thread::scope(|scope| {
+        let (result_tx, result_rx) = mpsc::channel();
+        for _ in 0..2 {
+            let rendezvous = &rendezvous;
+            let subscriptions = &subscriptions;
+            let result_tx = result_tx.clone();
+            scope.spawn(move || {
+                let _apartment = TestComApartment::enter();
+                rendezvous.wait();
+                let result = ensure_server_without_handles(Some(subscriptions))
+                    .map(|replacement| (replacement.active.pointer, replacement.active.generation));
+                result_tx.send(result).unwrap();
+            });
+        }
+        rendezvous.wait();
+        assert!(matches!(
+            result_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        drop(operation);
+        let first = result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        let second = result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(first, second);
+        assert_ne!(first.0, ensured.active.pointer);
+        assert_ne!(first.1, ensured.active.generation);
+    });
+    shutdown_subscriptions(&subscriptions).unwrap();
+    drop(ensured);
+}
+
+#[cfg(feature = "handles")]
+#[test]
+fn shared_server_subscription_shutdown_preserves_handle_roots_until_handle_shutdown() {
+    struct Payload;
+    impl crate::handle::ExcelHandleObject for Payload {}
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    for subscriptions_first in [false, true] {
+        let handles = FormulaHandleService::new(4);
+        let subscriptions = SubscriptionRuntime::new();
+        let ensured = ensure_server(Some(&handles), Some(&subscriptions)).unwrap();
+        let server = ensured.active.pointer as *mut RtdServer;
+        // SAFETY: ACTIVE_SERVER and `ensured` retain the server until cleanup.
+        let server_ref = unsafe { &*server };
+        let key = crate::handle::test_topic_key("shared-server-shutdown");
+        let lifetime_key = key.format_lifetime_key();
+        handles.prepare(key, || Ok(Payload)).unwrap();
+        handles
+            .connect(
+                crate::formula_lifetime::FormulaLifetimeGeneration::new(
+                    ensured.active.generation.get(),
+                )
+                .unwrap(),
+                1,
+                &lifetime_key,
+            )
+            .unwrap();
+        assert_eq!(handles.len(), 1);
+
+        let callback_drops = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::clone(&callback_drops);
+        let callback = install_callback(
+            &server_ref.callbacks,
+            Box::new(RetainedUpdateCallback {
+                cookie: None,
+                pump: None,
+                drop_hook: Some(Arc::new(move || {
+                    drops.fetch_add(1, Ordering::AcqRel);
+                })),
+            }),
+        );
+        // SAFETY: `ensured` keeps the server, callback and barrier alive.
+        unsafe { synchronize_callback_notification(server_ref, callback) }.unwrap();
+
+        if subscriptions_first {
+            shutdown_subscriptions(&subscriptions).unwrap();
+        } else {
+            shutdown(&handles).unwrap();
+        }
+        assert_eq!(
+            handles.len(),
+            usize::from(subscriptions_first),
+            "subscription shutdown must retain handles until add-in quiescence"
+        );
+        assert_eq!(ACTIVE_SERVER.lock().is_some(), subscriptions_first);
+        assert_eq!(callback_drops.load(Ordering::Acquire), 1);
+        let backends = server_ref.backends.lock();
+        assert_eq!(backends.handles.is_some(), subscriptions_first);
+        assert!(backends.subscriptions.is_none());
+        assert!(backends.subscription_server.is_none());
+        drop(backends);
+        // The subscription server must reject any fresh notifier before its
+        // COM callback owner can be destroyed.
+        assert!(
+            ensured
+                .subscription_server
+                .unwrap()
+                .begin_refresh()
+                .is_err()
+        );
+
+        if subscriptions_first {
+            shutdown(&handles).unwrap();
+        } else {
+            shutdown_subscriptions(&subscriptions).unwrap();
+        }
+        assert_eq!(handles.len(), 0);
+        assert!(ACTIVE_SERVER.lock().is_none());
+        let backends = server_ref.backends.lock();
+        assert!(backends.handles.is_none());
+        assert!(backends.subscriptions.is_none());
+        assert!(backends.subscription_server.is_none());
+        drop(backends);
+        handles.seal().map(|_| ()).unwrap();
+        drop(handles);
+        drop(subscriptions);
+        // SAFETY: `ensured` is a delayed Excel-owned reference. With both
+        // runtimes gone, repeated termination must use no backend pointers.
+        let termination_status = unsafe { server_terminate(server) };
+        assert_eq!(termination_status, S_OK);
+        drop(ensured);
+        assert_eq!(callback_drops.load(Ordering::Acquire), 1);
+    }
+}
+
+#[cfg(feature = "handles")]
+#[test]
+fn handle_shutdown_retires_unobserved_and_other_generation_topics() {
+    struct Payload;
+    impl crate::handle::ExcelHandleObject for Payload {}
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    for detached_server in [false, true] {
+        let handles = FormulaHandleService::new(4);
+        let subscriptions = SubscriptionRuntime::new();
+        let ensured = if detached_server {
+            ensure_server_without_handles(Some(&subscriptions)).unwrap()
+        } else {
+            ensure_server(Some(&handles), Some(&subscriptions)).unwrap()
+        };
+        let unobserved = crate::handle::test_topic_key("shutdown-unobserved");
+        handles.prepare(unobserved, || Ok(Payload)).unwrap();
+        let old = crate::handle::test_topic_key("shutdown-other-generation");
+        let old_lifetime_key = old.format_lifetime_key();
+        handles.prepare(old, || Ok(Payload)).unwrap();
+        handles
+            .claim_lifetime(
+                &old_lifetime_key,
+                crate::formula_lifetime::FormulaLifetimeGeneration::new(
+                    ensured.active.generation.get() + 1,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        if detached_server {
+            let server = ensured.active.pointer as *mut RtdServer;
+            // SAFETY: `ensured` retains the server through worker completion.
+            let server_ref = unsafe { &*server };
+            let operation = server_ref.operations.enter().unwrap();
+            // SAFETY: the retained COM server is live.
+            let status = unsafe { server_terminate(server) };
+            assert_eq!(status, S_OK);
+            drop(operation);
+            assert!(server_ref.operations.close_and_wait().unwrap().is_none());
+            server_ref.termination_worker.join().unwrap();
+            let backends = server_ref.backends.lock();
+            assert!(backends.handles.is_none());
+            assert!(backends.subscriptions.is_none());
+            assert!(backends.subscription_server.is_none());
+        }
+
+        assert_eq!(handles.len(), 2);
+        shutdown(&handles).unwrap();
+        assert_eq!(handles.len(), 0);
+        assert!(ACTIVE_SERVER.lock().is_none());
+        shutdown_subscriptions(&subscriptions).unwrap();
+        drop(ensured);
+    }
+}
+
 #[cfg(feature = "handles")]
 #[test]
 fn server_terminate_reentry_is_deferred_and_idempotent() {
@@ -819,7 +1122,13 @@ fn server_terminate_reentry_is_deferred_and_idempotent() {
         ServerPhase::Terminated
     );
 
+    assert!(server_ref.backends.lock().handles.is_none());
+    assert_eq!(
+        ACTIVE_SERVER.lock().as_ref().unwrap().pointer,
+        server as usize
+    );
     shutdown(&handles).unwrap();
+    assert!(ACTIVE_SERVER.lock().is_none());
     drop(ensured);
 }
 

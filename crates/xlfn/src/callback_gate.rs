@@ -98,8 +98,8 @@ impl ModuleCallbackAdmission {
         Ok(ModuleCallbackPermit { _permit: permit })
     }
 
-    #[cfg(test)]
-    fn lifecycle(&self) -> ModuleCallbackLifecycle {
+    #[cfg(any(test, feature = "refinement"))]
+    pub(crate) fn lifecycle(&self) -> ModuleCallbackLifecycle {
         if self.phase.load(Ordering::Acquire) == ModuleCallbackLifecycle::Open as u8 {
             ModuleCallbackLifecycle::Open
         } else if self.callbacks.active() == 0 {
@@ -115,8 +115,8 @@ impl ModuleCallbackAdmission {
             .then_some(ExcelCallbackStatus::Failed(XLRET_FAILED))
     }
 
-    #[cfg(test)]
-    fn active(&self) -> usize {
+    #[cfg(any(test, feature = "refinement"))]
+    pub(crate) fn active(&self) -> usize {
         self.callbacks.active()
     }
 }

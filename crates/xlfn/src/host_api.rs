@@ -12,10 +12,12 @@ use crate::error::InputError;
 use crate::error::{ExcelApiFailure, ExcelApiFunction};
 use crate::host_callback::HostCallbackSession;
 use crate::reference::ExcelReference;
-use crate::return_abi::ExcelCallbackStatus;
 #[cfg(feature = "handles")]
-use crate::value::XlValueType;
+use crate::reference::FromExcelReference;
+use crate::return_abi::ExcelCallbackStatus;
 use crate::value::{ExcelValue, FromExcel, Matrix, convert};
+#[cfg(feature = "handles")]
+use crate::value::{XlValueRef, XlValueType};
 use crate::{XllError, XllResult};
 use std::ptr::NonNull;
 #[cfg(feature = "handles")]
@@ -190,53 +192,7 @@ impl<'call> ExcelHost<'call> {
     #[cfg(feature = "handles")]
     pub(crate) fn caller(&self) -> XllResult<HostCaller> {
         self.invoke(XLF_CALLER, ExcelApiFunction::Caller, &[], |caller| {
-            let location = {
-                let value = caller.borrow()?;
-                match value.value_type() {
-                    XlValueType::SimpleReference => {
-                        // SAFETY: the type selects the SRef member.
-                        let reference = unsafe { value.raw().value.sref };
-                        if reference.count != 1
-                            || reference.reference.rw_first != reference.reference.rw_last
-                            || reference.reference.col_first != reference.reference.col_last
-                        {
-                            return Err(single_cell_caller_error());
-                        }
-                        CallerLocation::External {
-                            row: reference.reference.rw_first,
-                            column: reference.reference.col_first,
-                        }
-                    }
-                    XlValueType::Reference => {
-                        // SAFETY: the type selects the MRef member.
-                        let reference = unsafe { value.raw().value.mref };
-                        // SAFETY: Excel supplies a readable reference table
-                        // for a well-formed XLTYPE_REF caller value.
-                        let table = unsafe { reference.references.as_ref() }
-                            .ok_or_else(|| XllError::input("caller", InputError::NullPointer))?;
-                        if table.count != 1 {
-                            return Err(single_cell_caller_error());
-                        }
-                        let area = table.reftbl[0];
-                        if area.rw_first != area.rw_last || area.col_first != area.col_last {
-                            return Err(single_cell_caller_error());
-                        }
-                        CallerLocation::Direct {
-                            sheet_id: reference.sheet_id,
-                            row: area.rw_first,
-                            column: area.col_first,
-                        }
-                    }
-                    _ => {
-                        return Err(XllError::input(
-                            "caller",
-                            InputError::Malformed(
-                                "handle-producing functions require a worksheet caller",
-                            ),
-                        ));
-                    }
-                }
-            };
+            let location = caller_location(caller.borrow()?)?;
 
             match location {
                 CallerLocation::Direct {
@@ -292,6 +248,7 @@ impl<'call> ExcelHost<'call> {
 }
 
 #[cfg(feature = "handles")]
+#[derive(Debug, PartialEq)]
 enum CallerLocation {
     Direct {
         sheet_id: IDSHEET,
@@ -305,9 +262,115 @@ enum CallerLocation {
 }
 
 #[cfg(feature = "handles")]
+fn caller_location(value: XlValueRef<'_>) -> XllResult<CallerLocation> {
+    if !matches!(
+        value.value_type(),
+        XlValueType::SimpleReference | XlValueType::Reference
+    ) {
+        return Err(XllError::input(
+            "caller",
+            InputError::Malformed("handle-producing functions require a worksheet caller"),
+        ));
+    }
+    let reference = ExcelReference::from_excel_reference(value, "caller")?;
+    let mut areas = reference.areas();
+    let area = areas.next().ok_or_else(single_cell_caller_error)?;
+    if areas.next().is_some() || area.row_count() != 1 || area.column_count() != 1 {
+        return Err(single_cell_caller_error());
+    }
+    // Validated worksheet coordinates fit i32 on every supported target.
+    let row = area.first_row() as i32;
+    let column = area.first_column() as i32;
+    Ok(match reference.sheet_id() {
+        Some(sheet_id) => CallerLocation::Direct {
+            sheet_id: sheet_id.get(),
+            row,
+            column,
+        },
+        None => CallerLocation::External { row, column },
+    })
+}
+
+#[cfg(feature = "handles")]
 fn single_cell_caller_error() -> XllError {
     XllError::input(
         "caller",
         InputError::Malformed("handle-producing functions require a single-cell caller"),
     )
+}
+
+#[cfg(all(test, feature = "handles"))]
+mod tests {
+    use super::*;
+    use xlfn_sys::{XLMREF12, XLOPER12MRef, XLOPER12SRef, XLOPER12Value, XLREF12};
+
+    #[test]
+    fn caller_reference_validation_checks_sheet_bounds_for_both_reference_kinds() {
+        for (row, column) in [(-1, 0), (0, -1), (1_048_576, 0), (0, 16_384)] {
+            let area = XLREF12 {
+                rw_first: row,
+                rw_last: row,
+                col_first: column,
+                col_last: column,
+            };
+            let mut table = XLMREF12 {
+                count: 1,
+                reftbl: [area],
+            };
+            let roots = [
+                XLOPER12 {
+                    value: XLOPER12Value {
+                        sref: XLOPER12SRef {
+                            count: 1,
+                            reference: area,
+                        },
+                    },
+                    xltype: xlfn_sys::XLTYPE_SREF,
+                },
+                XLOPER12 {
+                    value: XLOPER12Value {
+                        mref: XLOPER12MRef {
+                            references: &mut table,
+                            sheet_id: 42,
+                        },
+                    },
+                    xltype: xlfn_sys::XLTYPE_REF,
+                },
+            ];
+            for raw in &roots {
+                let value = XlValueRef::from_array_cell(raw).unwrap();
+                assert!(matches!(
+                    caller_location(value),
+                    Err(XllError::Input {
+                        argument: "caller",
+                        reason: InputError::Malformed("invalid reference area"),
+                    })
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn miri_caller_rejects_misaligned_reference_tables_before_reading() {
+        #[repr(align(8))]
+        struct Buffer([u8; 32]);
+        let mut buffer = Buffer([0; 32]);
+        let raw = XLOPER12 {
+            value: XLOPER12Value {
+                mref: XLOPER12MRef {
+                    references: buffer.0.as_mut_ptr().wrapping_add(1).cast(),
+                    sheet_id: 42,
+                },
+            },
+            xltype: xlfn_sys::XLTYPE_REF,
+        };
+        let value = XlValueRef::from_array_cell(&raw).unwrap();
+        assert!(matches!(
+            caller_location(value),
+            Err(XllError::Input {
+                argument: "caller",
+                reason: InputError::Malformed("misaligned reference table pointer"),
+            })
+        ));
+    }
 }

@@ -6,8 +6,11 @@
 //! from carrying separate state-transition implementations.
 
 use crate::generation::{OpenAttemptId, RuntimeGeneration};
+use crate::lifecycle::LifecycleAccess;
 use crate::runtime::capabilities::OpenDeps;
 use crate::runtime_components::ReturnProtocol;
+#[cfg(test)]
+mod tests;
 #[cfg(not(any(test, feature = "refinement")))]
 use std::marker::PhantomData;
 #[cfg(any(test, feature = "refinement"))]
@@ -68,7 +71,7 @@ impl RuntimeObserver {
         self.trace_handle().disable_for_test();
     }
 
-    pub(crate) fn finish_close(&self) {
+    pub(crate) fn finish_close<A: crate::Addin>(&self, _control: &LifecycleAccess<'_, A>) {
         self.event(crate::shutdown_trace::ShutdownEvent::FinishClose);
         #[cfg(any(test, feature = "refinement"))]
         self.record_composition_event(
@@ -76,31 +79,36 @@ impl RuntimeObserver {
         );
     }
 
-    pub(crate) fn finish_open_rollback(&self) {
-        #[cfg(any(test, feature = "refinement"))]
-        {
-            self.record_composition_event(
-                crate::composition_refinement::CompositionEvent::FinishOpenRollback(
-                    crate::shutdown_trace::ShutdownResources::quiescent_snapshot(),
-                ),
-            );
-            self.mark_composition_terminal_pending();
-        }
+    #[cfg(any(test, feature = "refinement"))]
+    pub(crate) fn finish_open_rollback<A: crate::Addin>(
+        &self,
+        _control: &LifecycleAccess<'_, A>,
+        resources: crate::shutdown_trace::ShutdownResources,
+    ) {
+        self.record_composition_event(
+            crate::composition_refinement::CompositionEvent::FinishOpenRollback(resources),
+        );
+        self.mark_composition_terminal_pending();
     }
 
-    pub(crate) fn publish_committed_closed(&self) {
+    pub(crate) fn publish_committed_closed<A: crate::Addin>(
+        &self,
+        _control: &LifecycleAccess<'_, A>,
+    ) {
         #[cfg(any(test, feature = "refinement"))]
         self.record_composition_event(
             crate::composition_refinement::CompositionEvent::PublishCommittedClosed,
         );
     }
 
-    pub(crate) fn finish_uncommitted_final_close(&self) {
-        #[cfg(any(test, feature = "refinement"))]
+    #[cfg(any(test, feature = "refinement"))]
+    pub(crate) fn finish_uncommitted_final_close<A: crate::Addin>(
+        &self,
+        _control: &LifecycleAccess<'_, A>,
+        resources: crate::shutdown_trace::ShutdownResources,
+    ) {
         self.record_composition_event(
-            crate::composition_refinement::CompositionEvent::FinishUncommittedFinalClose(
-                crate::shutdown_trace::ShutdownResources::quiescent_snapshot(),
-            ),
+            crate::composition_refinement::CompositionEvent::FinishUncommittedFinalClose(resources),
         );
     }
 
@@ -181,8 +189,9 @@ impl RuntimeObserver {
         self.composition_trace().mark_terminal_pending();
     }
 
-    pub(crate) fn begin_open(
+    pub(crate) fn begin_open<A: crate::Addin>(
         &self,
+        _control: &LifecycleAccess<'_, A>,
         returns: &ReturnProtocol,
         sampled_epoch: u64,
         attempt: OpenAttemptId,
@@ -207,6 +216,7 @@ impl RuntimeObserver {
     pub(crate) fn commit_open<A: crate::Addin>(
         &self,
         deps: &OpenDeps<'_, A>,
+        _control: &crate::lifecycle::LifecycleAccess<'_, A>,
         attempt: OpenAttemptId,
         _generation: RuntimeGeneration,
     ) {
@@ -221,22 +231,27 @@ impl RuntimeObserver {
             {
                 resources.async_executor_running = !deps.async_runtime().is_stopped();
             }
-            let _ = crate::diagnostics::connect_trace(Arc::clone(&trace), |snapshot| {
+            crate::diagnostics::connect_trace(Arc::clone(&trace), |snapshot| {
                 resources.diagnostics_running = snapshot.running;
                 resources.diagnostics_pending = snapshot.pending;
-                let _ = trace.begin(attempt.get(), resources.clone());
+                trace
+                    .begin(attempt.get(), resources.clone())
+                    .expect("open trace begins before ingress publication");
                 Ok(())
-            });
+            })
+            .expect("diagnostic trace initialization succeeds");
             crate::excel_rtd_protocol::set_trace_sink(Arc::clone(&trace));
             deps.returns().returns.set_trace_sink(Arc::clone(&trace));
             #[cfg(any(feature = "handles", feature = "rtd"))]
-            deps.with_generation_services(|services| {
-                #[cfg(feature = "handles")]
-                services.set_handle_trace_sink(Arc::clone(&trace));
-                #[cfg(feature = "rtd")]
-                services.set_subscription_trace_sink(Arc::clone(&trace));
-            })
-            .expect("committed open generation publishes its services");
+            _control
+                .generation_services()
+                .map(|services| {
+                    #[cfg(feature = "handles")]
+                    services.set_handle_trace_sink(Arc::clone(&trace));
+                    #[cfg(feature = "rtd")]
+                    services.set_subscription_trace_sink(Arc::clone(&trace));
+                })
+                .expect("committed open generation publishes its services");
             #[cfg(feature = "async")]
             deps.async_runtime().set_trace_sink(Arc::clone(&trace));
             self.record_composition_event(
@@ -293,7 +308,11 @@ impl RuntimeObserver {
         let _ = (attempt, reason);
     }
 
-    pub(crate) fn fail_open(&self, attempt: OpenAttemptId) {
+    pub(crate) fn fail_open<A: crate::Addin>(
+        &self,
+        _control: &LifecycleAccess<'_, A>,
+        attempt: OpenAttemptId,
+    ) {
         #[cfg(any(test, feature = "refinement"))]
         {
             self.record_composition_event(

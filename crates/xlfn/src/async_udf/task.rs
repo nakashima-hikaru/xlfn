@@ -173,14 +173,16 @@ impl Drop for CompletionGuard {
         // SAFETY: active_tasks retains the registry, with activity protecting
         // the terminal notification tail after the last authority release.
         let registry = unsafe { self.registry.get() };
+        let calculation = scopeguard::guard(calculation, |calculation| {
+            drop(calculation);
+            release_active(registry);
+        });
         calculation.get().remove_task(self.id);
         registry
             .observer
             .record(crate::shutdown_trace::ShutdownEvent::EndAsyncTask(
                 self.observation.completion(),
             ));
-        drop(calculation);
-        release_active(registry);
     }
 }
 

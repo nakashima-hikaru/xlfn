@@ -1160,6 +1160,30 @@ fn saturated_async_boundary_skips_owned_input_preparation_and_recovers() {
 
 #[test]
 fn async_preparation_can_reenter_generation_transition() {
+    struct RejectedFuture {
+        runtime: &'static Runtime<TestU32Addin>,
+        callbacks_at_drop: Arc<std::sync::atomic::AtomicUsize>,
+        _lease: crate::generation::ExecutionLease<TestU32Addin>,
+    }
+    impl std::future::Future for RejectedFuture {
+        type Output = XllResult<f64>;
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            panic!("a rejected preparation must never be polled");
+        }
+    }
+    impl Drop for RejectedFuture {
+        fn drop(&mut self) {
+            self.runtime.async_runtime().cancel_current_calculation();
+            self.callbacks_at_drop.store(
+                crate::test_callback::async_return_calls(),
+                Ordering::Relaxed,
+            );
+            panic!("injected rejected preparation destructor panic");
+        }
+    }
     let runtime = Box::leak(Box::new(Runtime::<TestU32Addin>::new()));
     let _guard = test_lock_for_runtime(runtime);
     let opening = runtime.begin_open().unwrap();
@@ -1181,16 +1205,32 @@ fn async_preparation_can_reenter_generation_transition() {
         },
         xltype: XLTYPE_BIG_DATA,
     };
+    let callbacks_at_drop = Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
     // SAFETY: the valid opaque handle is live throughout the call.
     unsafe {
-        async_udf_boundary_named(runtime, "reentrant", "REENTRANT", &mut handle, |_, _, _| {
-            assert!(runtime.async_runtime().advance_calculation());
-            Ok(async { Ok::<_, XllError>(42.0) })
-        });
+        async_udf_boundary_named(
+            runtime,
+            "reentrant",
+            "REENTRANT",
+            &mut handle,
+            |_, lease, _| {
+                assert!(runtime.async_runtime().advance_calculation());
+                Ok(RejectedFuture {
+                    runtime,
+                    callbacks_at_drop: Arc::clone(&callbacks_at_drop),
+                    _lease: lease,
+                })
+            },
+        );
     }
     assert_eq!(
         runtime.async_runtime().current_epoch(),
         generation.checked_next().unwrap()
+    );
+    assert_eq!(
+        callbacks_at_drop.load(Ordering::Relaxed),
+        0,
+        "rejected user state must be disposed before Excel receives its error"
     );
     assert_eq!(crate::test_callback::async_return_calls(), 1);
     assert_eq!(crate::test_callback::last_async_value(), -1);
@@ -1387,6 +1427,10 @@ fn async_boundary_records_delivery_rejection_as_failure() {
 
     impl crate::execution::UdfLayerGuard for RecorderGuard {
         fn exit(self, outcome: &crate::execution::CallOutcome<'_>) {
+            assert!(matches!(
+                outcome.delivery,
+                UdfDeliveryOutcome::Delivered | UdfDeliveryOutcome::Failed { .. }
+            ));
             let (kind, vendor_code) = match outcome.completion {
                 UdfCompletionOutcome::Success => (None, None),
                 UdfCompletionOutcome::Error {
@@ -1504,6 +1548,47 @@ fn async_boundary_records_delivery_rejection_as_failure() {
         (Some(UdfErrorKind::Vendor), Some(73), true)
     );
     assert_eq!(crate::test_callback::async_return_calls(), 2);
+    wait_for_executor_idle(runtime.async_runtime());
+    for rejected in [false, true] {
+        crate::test_callback::set_async_rejected(rejected);
+        for cancel_before_reserve in [false, true] {
+            let callbacks_before = crate::test_callback::async_return_calls();
+            // SAFETY: handle is still a live, stack-local Excel async handle.
+            unsafe {
+                async_udf_boundary_named(
+                    runtime,
+                    "synchronous_async_error",
+                    "SYNCHRONOUS.ASYNC.ERROR",
+                    &mut handle,
+                    |_, _, _| {
+                        if cancel_before_reserve {
+                            runtime.async_runtime().cancel_current_calculation();
+                            Ok(std::future::ready(Ok::<_, XllError>(42.0)))
+                        } else {
+                            Err(XllError::Native {
+                                code: 74,
+                                message: "injected synchronous preparation failure".to_owned(),
+                            })
+                        }
+                    },
+                );
+            }
+            let (kind, code) = if cancel_before_reserve {
+                (UdfErrorKind::ExcelValue, None)
+            } else {
+                (UdfErrorKind::Vendor, Some(74))
+            };
+            assert_eq!(
+                event_receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
+                (Some(kind), code, rejected)
+            );
+            assert_eq!(
+                crate::test_callback::async_return_calls(),
+                callbacks_before + 1
+            );
+            assert!(runtime.async_runtime().advance_calculation());
+        }
+    }
     assert!(runtime.close_async().unwrap().issues.is_empty());
 }
 

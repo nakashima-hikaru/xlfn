@@ -448,6 +448,101 @@ mod tests {
     }
 
     #[test]
+    fn scoped_argument_types_reject_invalid_shapes_and_static_lifetimes() {
+        for (ty, asynchronous, expected) in [
+            (
+                quote!(NumericMatrixRef<'static>),
+                false,
+                "NumericMatrixRef cannot use the 'static lifetime",
+            ),
+            (
+                quote!(NumericMatrixRef<f64>),
+                false,
+                "NumericMatrixRef accepts only its call lifetime",
+            ),
+            (
+                quote!(NumericMatrixRef<'_, f64>),
+                false,
+                "NumericMatrixRef accepts only its call lifetime",
+            ),
+            (
+                quote!(<Owner as Trait>::NumericMatrixRef<'_>),
+                false,
+                "NumericMatrixRef cannot use qualified associated type paths",
+            ),
+            (
+                quote!(&HandleLease<'_, Dataset>),
+                true,
+                "HandleLease must be passed by value",
+            ),
+            (
+                quote!(*const HandleLease<'_, Dataset>),
+                true,
+                "HandleLease must be passed by value",
+            ),
+            (
+                quote!(HandleLease<'static, Dataset>),
+                true,
+                "HandleLease cannot use the 'static lifetime",
+            ),
+            (
+                quote!(<Owner as Trait>::HandleLease<'_, Dataset>),
+                true,
+                "HandleLease cannot use qualified associated type paths",
+            ),
+            (
+                quote!(MainThreadContext<'static, State>),
+                false,
+                "injected contexts cannot use the 'static lifetime",
+            ),
+            (
+                quote!(AsyncContext<'static, State>),
+                true,
+                "injected contexts cannot use the 'static lifetime",
+            ),
+        ] {
+            let asynchronous = asynchronous.then(|| quote!(async));
+            let error = expand_excel_function(
+                quote!(),
+                function(quote!(#asynchronous fn value(input: #ty) -> f64 { 1.0 })),
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn grouped_scoped_arguments_keep_their_special_conversion() {
+        for (ty, asynchronous, expected) in [
+            (
+                quote!(NumericMatrixRef<'_>),
+                false,
+                "ArgumentAbi :: NumericArray",
+            ),
+            (
+                quote!(NumericMatrixRef),
+                false,
+                "ArgumentAbi :: NumericArray",
+            ),
+            (
+                quote!(HandleLease<'_, Dataset>),
+                true,
+                "PendingHandleLease < Dataset >",
+            ),
+        ] {
+            let ty = proc_macro2::Group::new(proc_macro2::Delimiter::None, ty);
+            let asynchronous = asynchronous.then(|| quote!(async));
+            let expanded = expand_excel_function(
+                quote!(),
+                function(quote!(#asynchronous fn value(input: #ty) -> f64 { 1.0 })),
+            )
+            .unwrap()
+            .to_string();
+            assert!(expanded.contains(expected), "{expanded}");
+        }
+    }
+
+    #[test]
     fn registration_and_argument_policies_expand_into_the_existing_descriptor() {
         let expanded = expand_excel_function(
             quote!(
@@ -730,6 +825,20 @@ mod tests {
         assert!(!expanded.contains("VolatileReturn"));
         assert!(!expanded.contains("ExcelHandleType"));
         assert!(!expanded.contains("NAME"));
+        assert!(
+            expanded
+                .contains("Self : :: core :: marker :: Send + :: core :: marker :: Sync + 'static")
+        );
+    }
+
+    #[test]
+    fn excel_enum_rejects_empty_enums_before_codegen() {
+        let input: DeriveInput = syn::parse2(quote!(
+            enum Empty {}
+        ))
+        .unwrap();
+        let error = expand_excel_enum(input).unwrap_err();
+        assert_eq!(error.to_string(), "ExcelEnum requires at least one variant");
     }
 
     #[test]

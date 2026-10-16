@@ -365,6 +365,9 @@ impl<const N: usize> StripedDrainGate<N> {
     }
 
     pub fn seal(&self) {
+        // Serialize whole-gate administrative changes with reopen. Otherwise
+        // a concurrent seal could reseal an early stripe during partial reopen.
+        let _guard = self.idle.lock();
         protocol::seal_all_stripes!(index; self.counters.len(), self.counters[index].seal(););
     }
 
@@ -683,6 +686,7 @@ mod loom_tests {
         }
 
         fn seal(&self) {
+            let _guard = self.idle.lock();
             super::protocol::seal_all_stripes!(index; N, self.counters[index].seal(););
         }
 
@@ -693,6 +697,22 @@ mod loom_tests {
             );
             assert_eq!(opened, N);
         }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn loom_striped_seal_racing_reopen_does_not_leave_partial_admission() {
+        loom::model(|| {
+            let gate = Arc::new(ModelGate::<2>::new());
+            gate.seal();
+            let sealing = Arc::clone(&gate);
+            let seal = thread::spawn(move || sealing.seal());
+            let reopening = Arc::clone(&gate);
+            let reopen = thread::spawn(move || reopening.reopen());
+            seal.join().unwrap();
+            reopen.join().unwrap();
+            assert_eq!(gate.counters[0].is_sealed(), gate.counters[1].is_sealed());
+        });
     }
 
     #[test]

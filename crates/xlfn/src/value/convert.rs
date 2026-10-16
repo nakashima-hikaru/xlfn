@@ -26,6 +26,17 @@ pub(super) fn grid<'call>(
 ) -> XllResult<GridView<'call>> {
     let grid = GridView::from_value(value, argument)?;
     let (rows, columns) = grid.shape();
+    if matches!(
+        shape,
+        GridShape::Matrix | GridShape::Row | GridShape::Column
+    ) {
+        super::matrix::validate_matrix_dimensions_for_argument(
+            rows,
+            columns,
+            grid.cells().len(),
+            argument,
+        )?;
+    }
     let expected = match shape {
         GridShape::Matrix => None,
         GridShape::Vector if rows != 1 && columns != 1 => Some(Shape {
@@ -87,7 +98,7 @@ pub fn row<'call, T>(
     mut convert: impl FnMut(XlValueRef<'call>, &'static str) -> XllResult<T>,
 ) -> XllResult<Row<T>> {
     let grid = grid(value, argument, GridShape::Row)?;
-    convert_owned_grid_elements(&grid, argument, |cell| convert(cell, argument)).map(Row)
+    convert_owned_grid_elements(&grid, argument, |cell| convert(cell, argument)).and_then(Row::new)
 }
 
 /// Converts a scalar or one column into an owned column, rejecting multiple columns.
@@ -97,7 +108,8 @@ pub fn column<'call, T>(
     mut convert: impl FnMut(XlValueRef<'call>, &'static str) -> XllResult<T>,
 ) -> XllResult<Column<T>> {
     let grid = grid(value, argument, GridShape::Column)?;
-    convert_owned_grid_elements(&grid, argument, |cell| convert(cell, argument)).map(Column)
+    convert_owned_grid_elements(&grid, argument, |cell| convert(cell, argument))
+        .and_then(Column::new)
 }
 
 /// Converts a scalar or vector after checking its maximum element count.
@@ -223,7 +235,7 @@ mod tests {
             XLOPER12::number(3.0),
             XLOPER12::number(4.0),
         ];
-        for (rows, columns) in [(1, 4), (4, 1), (2, 2), (1, 2)] {
+        for (rows, columns) in [(1, 4), (4, 1), (2, 2), (1, 2), (1, 0), (0, 1), (0, 0)] {
             let raw = XLOPER12 {
                 value: XLOPER12Value {
                     array: XLOPER12Array {
@@ -235,6 +247,47 @@ mod tests {
                 xltype: XLTYPE_MULTI,
             };
             compare_collections(&raw);
+        }
+    }
+
+    #[test]
+    fn empty_oriented_inputs_are_rejected_before_element_conversion() {
+        for (rows, columns) in [(1, 0), (0, 1)] {
+            let raw = XLOPER12 {
+                value: XLOPER12Value {
+                    array: XLOPER12Array {
+                        rows,
+                        columns,
+                        values: std::ptr::null_mut(),
+                    },
+                },
+                xltype: XLTYPE_MULTI,
+            };
+            let value = XlValueRef::from_array_cell(&raw).unwrap();
+            let error = if rows == 1 {
+                row::<()>(value, "values", |_, _| panic!("empty row cell")).unwrap_err()
+            } else {
+                column::<()>(value, "values", |_, _| panic!("empty column cell")).unwrap_err()
+            };
+            assert!(matches!(
+                error,
+                XllError::Input {
+                    argument: "values",
+                    reason: InputError::Malformed("matrix dimensions must be non-zero"),
+                }
+            ));
+            // General vectors and varargs intentionally permit empty inputs.
+            assert!(
+                vector::<()>(value, "values", |_, _| panic!("empty vector cell"))
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                bounded_var_args::<(), 2>(value, "values", |_, _| panic!("empty vararg cell"))
+                    .unwrap()
+                    .as_slice()
+                    .is_empty()
+            );
         }
     }
 

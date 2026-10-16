@@ -158,13 +158,15 @@ pub(crate) fn rollback_active_open<'runtime, A, S>(
         match catch_no_unwind(AssertUnwindSafe(|| {
             rollback_open::<A>(runtime, lifecycle, &mut callbacks, generation)
         })) {
-            Ok(outcome) if outcome.unload_safe() => {}
-            Ok(_) => {
+            Ok(outcome) if outcome.unload_safe() || outcome.cleanup_owned_elsewhere() => {}
+            Ok(outcome) => {
                 let error = XllError::Internal {
                     diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_ROLLBACK_FAILURE,
                 };
                 report_boundary_error("xlAutoOpen rollback", &error);
-                quarantine_runtime(runtime);
+                if let Some(hazard) = outcome.failure_hazard() {
+                    super::recovery::quarantine_for_hazard(runtime, hazard);
+                }
             }
             Err(_) => {
                 report_boundary_error("xlAutoOpen rollback", &XllError::Panic);
@@ -679,7 +681,6 @@ where
 
     runtime.observer().generation_unique();
     runtime.observer().addin_quiesced();
-    runtime.observer().generation_reclaimed();
 
     if let Err(error) = shutdown_deps.shutdown_handle_topics() {
         return Err(handle_unload_hazard(
@@ -717,6 +718,7 @@ where
             ));
         }
     };
+    runtime.observer().generation_reclaimed();
     for issue in report.issues() {
         runtime.observer().cleanup_issue();
         report_cleanup_issue(issue);

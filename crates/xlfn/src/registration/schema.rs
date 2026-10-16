@@ -39,8 +39,10 @@ pub(crate) struct RegistrationSignature {
 
 impl RegistrationSignature {
     pub(crate) fn encode(self) -> XllResult<String> {
-        if self.arguments.contains(&ArgumentAbi::RawReference)
-            && !self.execution.allows_reference_arguments()
+        if self.arguments.len() > xlfn_common::max_excel_function_arguments(self.execution)
+            || (self.arguments.contains(&ArgumentAbi::RawReference)
+                && !self.execution.allows_reference_arguments())
+            || (self.arguments.contains(&ArgumentAbi::NumericArray) && self.execution.is_async())
         {
             return Err(XllError::Internal {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRATION_SIGNATURE,
@@ -102,6 +104,63 @@ mod tests {
             volatile: true,
         };
         assert_eq!(signature.encode().unwrap(), "QK%#!");
+    }
+
+    #[test]
+    fn signatures_reject_unsupported_async_inputs_and_argument_counts() {
+        for signature in [
+            RegistrationSignature {
+                execution: ExecutionKind::Async,
+                arguments: &[ArgumentAbi::NumericArray],
+                volatile: false,
+            },
+            RegistrationSignature {
+                execution: ExecutionKind::ThreadSafe,
+                arguments: &[ArgumentAbi::RawReference],
+                volatile: false,
+            },
+            RegistrationSignature {
+                execution: ExecutionKind::MainThread,
+                arguments: &[ArgumentAbi::CoercedValue; 256],
+                volatile: false,
+            },
+            RegistrationSignature {
+                execution: ExecutionKind::Async,
+                arguments: &[ArgumentAbi::CoercedValue; 255],
+                volatile: false,
+            },
+        ] {
+            assert!(matches!(
+                signature.encode(),
+                Err(XllError::Internal {
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRATION_SIGNATURE,
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn argument_limit_counts_fp12_arguments_instead_of_type_code_characters() {
+        // Excel12 counted Unicode strings support 32,767 code units. K% is
+        // one worksheet argument even though its type code uses two units.
+        let signature = RegistrationSignature {
+            execution: ExecutionKind::ThreadSafe,
+            arguments: &[ArgumentAbi::NumericArray; 255],
+            volatile: true,
+        };
+        let encoded = signature.encode().unwrap();
+        assert_eq!(encoded, format!("Q{}$!", "K%".repeat(255)));
+        assert!(xlfn_common::validate_excel_string(&encoded).is_ok());
+
+        let asynchronous = RegistrationSignature {
+            execution: ExecutionKind::Async,
+            arguments: &[ArgumentAbi::CoercedValue; 254],
+            volatile: true,
+        };
+        assert_eq!(
+            asynchronous.encode().unwrap(),
+            format!(">{}X$!", "Q".repeat(254))
+        );
     }
 }
 

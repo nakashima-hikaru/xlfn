@@ -1,118 +1,27 @@
-use crate::sync::{Condvar, Mutex};
-use crossbeam_utils::CachePadded;
-use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::Duration;
-
-const HANDLE_PREPARE_STRIPE_COUNT: usize = 32;
-const HANDLE_PREPARE_STRIPE_MASK: usize = HANDLE_PREPARE_STRIPE_COUNT - 1;
-const HANDLE_PREPARE_QUIESCENCE_RECHECK_INTERVAL: Duration = Duration::from_millis(1);
-
-thread_local! {
-    static HANDLE_PREPARE_STRIPE: Cell<usize> = const { Cell::new(usize::MAX) };
-}
-
-static NEXT_HANDLE_PREPARE_STRIPE: AtomicUsize = AtomicUsize::new(0);
-
-fn current_handle_prepare_stripe() -> usize {
-    let current = HANDLE_PREPARE_STRIPE.get();
-    if current != usize::MAX {
-        return current;
-    }
-    let assigned =
-        NEXT_HANDLE_PREPARE_STRIPE.fetch_add(1, Ordering::Relaxed) & HANDLE_PREPARE_STRIPE_MASK;
-    HANDLE_PREPARE_STRIPE.set(assigned);
-    assigned
-}
+use xlfn_kernel::drain_gate::{DEFAULT_STRIPE_COUNT, StripedDrainGate, StripedDrainPermit};
 
 pub(crate) struct HandlePrepareState {
-    accepting: AtomicBool,
-    stripes: [CachePadded<AtomicUsize>; HANDLE_PREPARE_STRIPE_COUNT],
-    pub(crate) waiters: AtomicUsize,
-    pub(crate) wait_lock: Mutex<()>,
-    pub(crate) idle: Condvar,
+    admission: StripedDrainGate<DEFAULT_STRIPE_COUNT>,
 }
 
 impl HandlePrepareState {
     pub(crate) const fn new() -> Self {
         Self {
-            accepting: AtomicBool::new(true),
-            stripes: [const { CachePadded::new(AtomicUsize::new(0)) }; HANDLE_PREPARE_STRIPE_COUNT],
-            waiters: AtomicUsize::new(0),
-            wait_lock: Mutex::new(()),
-            idle: Condvar::new(),
+            admission: StripedDrainGate::new_open(),
         }
     }
 
-    pub(crate) fn try_enter(&self) -> Option<HandlePrepareGuard<'_>> {
-        if !self.accepting.load(Ordering::Acquire) {
-            return None;
-        }
-        let stripe_index = current_handle_prepare_stripe();
-        self.stripes[stripe_index]
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-                active.checked_add(1)
-            })
-            .expect("handle prepare count cannot overflow");
-
-        let guard = HandlePrepareGuard {
-            state: self,
-            stripe_index,
-        };
-        if self.accepting.load(Ordering::Acquire) {
-            Some(guard)
-        } else {
-            drop(guard);
-            None
-        }
+    pub(crate) fn try_enter(&self) -> Option<StripedDrainPermit<'_, DEFAULT_STRIPE_COUNT>> {
+        self.admission.try_enter_current().ok()
     }
 
     pub(crate) fn close_admission(&self) {
-        self.accepting.store(false, Ordering::Release);
+        self.admission.seal();
     }
 
     pub(crate) fn wait_for_idle(&self) {
-        let mut guard = self.wait_lock.lock();
-        self.waiters.fetch_add(1, Ordering::AcqRel);
-
-        while self.active() != 0 {
-            self.idle
-                .wait_for(&mut guard, HANDLE_PREPARE_QUIESCENCE_RECHECK_INTERVAL);
-        }
-
-        let _ = xlfn_kernel::invariant::checked_atomic_dec(&self.waiters);
-    }
-
-    fn active(&self) -> usize {
-        self.stripes
-            .iter()
-            .map(|stripe| stripe.load(Ordering::Acquire))
-            .sum()
-    }
-}
-
-pub(crate) struct HandlePrepareGuard<'a> {
-    pub(crate) state: &'a HandlePrepareState,
-    stripe_index: usize,
-}
-
-impl Drop for HandlePrepareGuard<'_> {
-    fn drop(&mut self) {
-        self.state.stripes[self.stripe_index]
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-                active.checked_sub(1)
-            })
-            .expect("handle prepare count remains balanced");
-
-        if self.state.waiters.load(Ordering::Acquire) == 0 || self.state.active() != 0 {
-            return;
-        }
-
-        let _guard = self.state.wait_lock.lock();
-
-        if self.state.active() == 0 {
-            self.state.idle.notify_all();
-        }
+        // Counter registration synchronizes the final release with parking.
+        self.admission.wait_until_idle();
     }
 }
 
@@ -130,5 +39,36 @@ mod tests {
 
         drop(active);
         state.wait_for_idle();
+    }
+
+    #[test]
+    fn concurrent_final_release_wakes_all_prepare_waiters() {
+        for _ in 0..if cfg!(miri) { 2 } else { 32 } {
+            let state = HandlePrepareState::new();
+            let active = state.try_enter().unwrap();
+            state.close_admission();
+            let ready = std::sync::Barrier::new(3);
+            std::thread::scope(|scope| {
+                let (sent, received) = std::sync::mpsc::channel();
+                for _ in 0..2 {
+                    let ready = &ready;
+                    let state = &state;
+                    let sent = sent.clone();
+                    scope.spawn(move || {
+                        ready.wait();
+                        state.wait_for_idle();
+                        sent.send(()).unwrap();
+                    });
+                }
+                ready.wait();
+                assert!(received.try_recv().is_err());
+                drop(active);
+                for _ in 0..2 {
+                    received
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                }
+            });
+        }
     }
 }

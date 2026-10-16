@@ -23,6 +23,14 @@ impl Addin for TestAddin {
 #[derive(ExcelHandleObject)]
 pub struct Dataset;
 
+#[derive(ExcelHandleObject)]
+pub struct GenericDataset<T>
+where
+    T: std::fmt::Debug,
+{
+    value: T,
+}
+
 type DatasetHandle<'call> = Handle<'call, Dataset>;
 type DatasetObject = Dataset;
 type FunctionResult<T> = XllResult<T>;
@@ -36,6 +44,11 @@ use xlfn::handle::{Handle as ObjectHandle, HandleAlias as ObjectHandleAlias};
 #[excel_function(name = "TEST.HANDLE.DIRECT")]
 fn direct_handle() -> Dataset {
     Dataset
+}
+
+#[excel_function(name = "TEST.HANDLE.GENERIC")]
+fn generic_handle() -> GenericDataset<i32> {
+    GenericDataset { value: 42 }
 }
 
 #[excel_function(name = "TEST.HANDLE.OBJECT.ALIAS")]

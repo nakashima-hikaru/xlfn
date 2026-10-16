@@ -50,6 +50,12 @@ impl<K> Drop for RetiredKeys<K> {
 }
 
 fn reclaim<K>(keys: Vec<VersionedKey<K>>) {
+    if super::super::destruction_deferred() && !keys.is_empty() {
+        // SAFETY: resident keys originate only from CalculationCache with K: 'static.
+        // This detached owned batch does not borrow the index or its queue.
+        unsafe { super::super::deferred_drop::defer(keys, reclaim::<K>) };
+        return;
+    }
     for key in keys {
         if catch_no_unwind(AssertUnwindSafe(|| drop(key))).is_err() {
             crate::diagnostics::report_no_unwind(

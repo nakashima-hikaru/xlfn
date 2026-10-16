@@ -271,7 +271,7 @@ impl<A: crate::Addin> ClosePayload<A> {
         matches!(self, Self::Published(_))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "refinement"))]
     fn has_opening_generation(&self) -> bool {
         matches!(self, Self::Staged(_))
     }
@@ -339,7 +339,7 @@ impl<A: crate::Addin> OpenAbortPayload<A> {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "refinement"))]
     fn has_opening_generation(&self) -> bool {
         matches!(self, Self::Staged(_))
     }
@@ -427,7 +427,7 @@ impl<A: crate::Addin> CloseResources<A> {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "refinement"))]
     fn has_opening_generation(&self) -> bool {
         match self {
             Self::AwaitingOpenAbort { payload, .. } => payload.has_opening_generation(),
@@ -876,7 +876,7 @@ impl<A: crate::Addin> ClosingState<A> {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "refinement"))]
     fn has_opening_generation(&self) -> bool {
         match self {
             Self::OpeningActive {
@@ -1135,7 +1135,7 @@ impl<A: crate::Addin> LifecycleState<A> {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "refinement"))]
     fn has_opening_generation(&self) -> bool {
         match self {
             Self::Opening {
@@ -1470,12 +1470,12 @@ impl<A: crate::Addin> LifecycleAccess<'_, A> {
         self.core.opening_config()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn has_current_generation(&self) -> bool {
         self.core.has_current_generation()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn has_opening_generation(&self) -> bool {
         self.core.state.has_opening_generation()
     }

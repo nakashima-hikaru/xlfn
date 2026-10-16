@@ -138,7 +138,7 @@ impl ReturnTracker {
         self.gate.wait_until_idle();
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn outstanding_obligations(&self) -> usize {
         self.gate.active()
     }

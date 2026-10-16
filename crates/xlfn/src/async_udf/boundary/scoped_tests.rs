@@ -63,6 +63,14 @@ impl HandleScopedBuilder<f64> for Builder {
         self,
         scope: AsyncTaskScope<'generation>,
     ) -> Pin<Box<dyn Future<Output = XllResult<f64>> + Send + 'generation>> {
+        if self.mode == Mode::BuildPanic
+            && let Some(runtime) = self.reenter.as_ref().and_then(|weak| weak.upgrade())
+        {
+            assert!(
+                runtime.advance_calculation(),
+                "builder may reenter calculation rotation"
+            );
+        }
         assert_ne!(self.mode, Mode::BuildPanic, "injected scoped builder panic");
         Box::pin(Inner {
             lease: Some(self.pending.bind(scope)),
@@ -128,9 +136,17 @@ struct Observer {
     events: Arc<Mutex<Vec<(Completion, Delivery)>>>,
     payload_drops: Arc<AtomicUsize>,
     require_release: bool,
+    reenter: Option<std::sync::Weak<ScopedRuntime>>,
 }
 impl crate::execution::UdfLayerGuard for Observer {
     fn exit(self, outcome: &crate::execution::CallOutcome<'_>) {
+        if let Some(runtime) = self.reenter.and_then(|weak| weak.upgrade()) {
+            runtime.cancel_current_calculation();
+            assert!(
+                runtime.advance_calculation(),
+                "layer exit may reenter calculation rotation"
+            );
+        }
         if self.require_release {
             assert_eq!(
                 self.payload_drops.load(Ordering::Relaxed),
@@ -204,6 +220,7 @@ fn observation(
     events: Arc<Mutex<Vec<(Completion, Delivery)>>>,
     payload_drops: Arc<AtomicUsize>,
     require_release: bool,
+    reenter: Option<std::sync::Weak<ScopedRuntime>>,
 ) -> AsyncObservation<Observer> {
     let metadata = CallMetadata {
         udf_id: "SCOPED.TEST",
@@ -220,6 +237,7 @@ fn observation(
             events,
             payload_drops,
             require_release,
+            reenter,
         }),
         false,
         token,
@@ -262,15 +280,16 @@ fn run(mode: Mode, instrumented: bool, cancel_before_poll: bool, reenter: bool) 
             reservation.commit_handle_scoped(
                 RuntimeGeneration::new(1).unwrap(),
                 InstrumentedHandleTask {
-                    build,
-                    responder: responder(),
+                    build: Some(build),
+                    responder: Some(responder()),
                     token,
-                    observation: observation(
+                    observation: Some(observation(
                         token,
                         Arc::clone(&events),
                         Arc::clone(&payload_drops),
-                        !cancel_before_poll && mode != Mode::Pending && mode != Mode::BuildPanic,
-                    ),
+                        true,
+                        reenter.then(|| Arc::downgrade(&lifecycle)),
+                    )),
                     udf_id: "SCOPED.TEST",
                     _result: std::marker::PhantomData,
                 },
@@ -280,8 +299,8 @@ fn run(mode: Mode, instrumented: bool, cancel_before_poll: bool, reenter: bool) 
             reservation.commit_handle_scoped(
                 RuntimeGeneration::new(1).unwrap(),
                 UninstrumentedHandleTask {
-                    build,
-                    responder: responder(),
+                    build: Some(build),
+                    responder: Some(responder()),
                     token,
                     udf_id: "SCOPED.TEST",
                     _result: std::marker::PhantomData,
@@ -291,7 +310,10 @@ fn run(mode: Mode, instrumented: bool, cancel_before_poll: bool, reenter: bool) 
         }
     }));
     lifecycle.set_before_submit_hook(None);
-    assert_eq!(commit.is_err(), mode == Mode::BuildPanic);
+    assert!(
+        commit.is_ok(),
+        "construction is contained after admission is released"
+    );
     if mode == Mode::Pending && !cancel_before_poll {
         started_rx.recv().unwrap();
         assert_eq!(payload_drops.load(Ordering::Relaxed), 0);
@@ -308,7 +330,7 @@ fn run(mode: Mode, instrumented: bool, cancel_before_poll: bool, reenter: bool) 
     assert_eq!(payload_drops.load(Ordering::Relaxed), 1);
     assert_eq!(
         drops.load(Ordering::Relaxed),
-        usize::from(mode != Mode::BuildPanic)
+        usize::from(mode != Mode::BuildPanic && !cancel_before_poll)
     );
     assert_eq!(
         crate::test_callback::async_return_calls(),
@@ -320,7 +342,7 @@ fn run(mode: Mode, instrumented: bool, cancel_before_poll: bool, reenter: bool) 
     }
     if instrumented {
         let expected = if cancel_before_poll {
-            (Completion::Cancelled, Delivery::Unobserved)
+            (Completion::Cancelled, Delivery::Delivered)
         } else {
             match mode {
                 Mode::Ready => (Completion::Success, Delivery::Delivered),
@@ -331,11 +353,8 @@ fn run(mode: Mode, instrumented: bool, cancel_before_poll: bool, reenter: bool) 
                 Mode::PollPanic | Mode::DropPanic => {
                     (Completion::Error(UdfErrorKind::Panic), Delivery::Delivered)
                 }
-                Mode::Pending => (Completion::Cancelled, Delivery::Unobserved),
-                Mode::BuildPanic => (
-                    Completion::Error(UdfErrorKind::Internal),
-                    Delivery::Unobserved,
-                ),
+                Mode::Pending => (Completion::Cancelled, Delivery::Delivered),
+                Mode::BuildPanic => (Completion::Error(UdfErrorKind::Panic), Delivery::Delivered),
             }
         };
         assert_eq!(events.lock().as_slice(), &[expected]);
@@ -354,7 +373,7 @@ fn miri_scoped_delivery_completion_disposes_inner_before_reporting() {
 #[test]
 fn miri_scoped_delivery_builder_panic_releases_reservation_and_raw_pin() {
     for instrumented in [false, true] {
-        run(Mode::BuildPanic, instrumented, false, false);
+        run(Mode::BuildPanic, instrumented, false, true);
     }
 }
 #[test]
@@ -427,8 +446,8 @@ fn miri_external_executor_retains_scoped_handle_until_opaque_task_destruction() 
         .commit_handle_scoped(
             RuntimeGeneration::new(1).unwrap(),
             UninstrumentedHandleTask {
-                build,
-                responder: responder(),
+                build: Some(build),
+                responder: Some(responder()),
                 token,
                 udf_id: "EXTERNAL.SCOPED",
                 _result: std::marker::PhantomData,
@@ -458,7 +477,11 @@ fn miri_external_executor_retains_scoped_handle_until_opaque_task_destruction() 
     );
     closer.join().unwrap();
     assert_eq!(polls.load(Ordering::Relaxed), 0);
-    assert_eq!(drops.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        drops.load(Ordering::Relaxed),
+        0,
+        "unpolled tasks retain only their builder"
+    );
     assert_eq!(payload_drops.load(Ordering::Relaxed), 1);
     assert_eq!(crate::test_callback::async_return_calls(), 1);
 }

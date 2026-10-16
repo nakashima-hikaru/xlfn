@@ -70,11 +70,12 @@ impl CargoSettings {
     fn read_file(path: &Path, seen: &mut Vec<PathBuf>) -> Result<Self> {
         // Cargo tracks every included lexical path for this top-level file,
         // including repeated siblings. Symlink targets keep distinct origins.
-        if seen.iter().any(|previous| previous == path) {
+        let path = normalize_path(path);
+        if seen.iter().any(|previous| previous == &path) {
             bail!("Cargo configuration include cycle at {path:?}");
         }
-        seen.push(path.to_path_buf());
-        let config: ConfigFile = toml::from_str(&fs::read_to_string(path)?)
+        seen.push(path.clone());
+        let config: ConfigFile = toml::from_str(&fs::read_to_string(&path)?)
             .with_context(|| format!("could not parse Cargo configuration {path:?}"))?;
         let directory = path.parent().context("Cargo configuration has no parent")?;
         let root = directory

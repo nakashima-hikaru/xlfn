@@ -81,8 +81,20 @@ pub(super) fn context_addin_type(ty: &Type) -> syn::Result<&Type> {
     if let Some(arguments) = arguments {
         let mut entries = arguments.iter();
         match (entries.next(), entries.next(), entries.next()) {
-            (Some(GenericArgument::Type(addin)), None, None)
-            | (Some(GenericArgument::Lifetime(_)), Some(GenericArgument::Type(addin)), None) => {
+            (Some(GenericArgument::Type(addin)), None, None) => {
+                return Ok(addin);
+            }
+            (
+                Some(GenericArgument::Lifetime(lifetime)),
+                Some(GenericArgument::Type(addin)),
+                None,
+            ) => {
+                if lifetime.ident == "static" {
+                    return Err(syn::Error::new_spanned(
+                        lifetime,
+                        "injected contexts cannot use the 'static lifetime",
+                    ));
+                }
                 return Ok(addin);
             }
             _ => {}
@@ -92,6 +104,28 @@ pub(super) fn context_addin_type(ty: &Type) -> syn::Result<&Type> {
         ty,
         "injected context types must specify an add-in type, optionally preceded by a lifetime",
     ))
+}
+
+// Unlike synchronous signatures, Rust async signatures cannot implicitly
+// elide a lifetime in a type path (E0726). The recognized context syntax
+// permits omission, so make the call lifetime explicit before emitting it.
+fn normalize_async_context_lifetime(ty: &mut Type) {
+    match ty {
+        Type::Paren(paren) => normalize_async_context_lifetime(&mut paren.elem),
+        Type::Group(group) => normalize_async_context_lifetime(&mut group.elem),
+        Type::Path(path) => {
+            let Some(segment) = path.path.segments.last_mut() else {
+                return;
+            };
+            if let PathArguments::AngleBracketed(arguments) = &mut segment.arguments
+                && arguments.args.len() == 1
+                && matches!(arguments.args.first(), Some(GenericArgument::Type(_)))
+            {
+                arguments.args.insert(0, syn::parse_quote!('_));
+            }
+        }
+        _ => {}
+    }
 }
 
 pub(super) struct ParsedArgument {
@@ -308,6 +342,9 @@ pub(super) fn parse_udf(
                 ));
             }
             context_addin_type(&argument.ty)?;
+            if matches!(kind, ContextKind::Async) {
+                normalize_async_context_lifetime(&mut argument.ty);
+            }
             if context.is_some() {
                 return Err(syn::Error::new_spanned(
                     argument,
@@ -541,16 +578,7 @@ fn analyze_arguments(
             ));
         }
 
-        let conversion = if context_type_path(&argument.ty)
-            .and_then(|path| path.path.segments.last())
-            .is_some_and(|segment| segment.ident == "NumericMatrixRef")
-        {
-            if !is_context_value_path(&argument.ty) {
-                return Err(syn::Error::new_spanned(
-                    &argument.ty,
-                    "NumericMatrixRef must be passed by value",
-                ));
-            }
+        let conversion = if parse_numeric_matrix_type(&argument.ty)? {
             if execution.is_async() {
                 return Err(syn::Error::new_spanned(
                     &argument.ty,
@@ -680,7 +708,7 @@ fn analyze_arguments(
 /// Recognizes the framework's two-parameter generation-scoped handle lease
 /// syntax without making the proc macro depend on the user's import path.
 fn parse_handle_lease_type(ty: &Type) -> syn::Result<Option<Type>> {
-    let Type::Path(path) = ty else {
+    let Some(path) = context_type_path(ty) else {
         return Ok(None);
     };
     let Some(segment) = path.path.segments.last() else {
@@ -688,6 +716,18 @@ fn parse_handle_lease_type(ty: &Type) -> syn::Result<Option<Type>> {
     };
     if segment.ident != "HandleLease" {
         return Ok(None);
+    }
+    if !is_context_value_path(ty) {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "HandleLease must be passed by value",
+        ));
+    }
+    if path.qself.is_some() {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "HandleLease cannot use qualified associated type paths",
+        ));
     }
 
     let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
@@ -722,6 +762,54 @@ fn parse_handle_lease_type(ty: &Type) -> syn::Result<Option<Type>> {
         ));
     };
     Ok(Some(object.clone()))
+}
+
+/// Numeric arrays borrow the current Excel call. Rust permits the lifetime
+/// to be elided, but no other generic arguments or owning wrappers apply.
+fn parse_numeric_matrix_type(ty: &Type) -> syn::Result<bool> {
+    let Some(path) = context_type_path(ty) else {
+        return Ok(false);
+    };
+    let Some(segment) = path.path.segments.last() else {
+        return Ok(false);
+    };
+    if segment.ident != "NumericMatrixRef" {
+        return Ok(false);
+    }
+    if !is_context_value_path(ty) {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "NumericMatrixRef must be passed by value",
+        ));
+    }
+    if path.qself.is_some() {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "NumericMatrixRef cannot use qualified associated type paths",
+        ));
+    }
+    match &segment.arguments {
+        PathArguments::None => Ok(true),
+        PathArguments::AngleBracketed(arguments) if arguments.args.len() == 1 => {
+            if let Some(GenericArgument::Lifetime(lifetime)) = arguments.args.first() {
+                if lifetime.ident == "static" {
+                    return Err(syn::Error::new_spanned(
+                        lifetime,
+                        "NumericMatrixRef cannot use the 'static lifetime",
+                    ));
+                }
+                return Ok(true);
+            }
+            Err(syn::Error::new_spanned(
+                ty,
+                "NumericMatrixRef accepts only its call lifetime",
+            ))
+        }
+        _ => Err(syn::Error::new_spanned(
+            ty,
+            "NumericMatrixRef accepts only its call lifetime",
+        )),
+    }
 }
 
 fn analyze_presence(

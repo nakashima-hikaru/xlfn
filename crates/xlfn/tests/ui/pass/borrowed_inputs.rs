@@ -33,6 +33,22 @@ fn borrowed_numeric(value: NumericMatrixRef<'_>, factor: f64) -> f64 {
     value.iter().copied().sum::<f64>() * factor
 }
 
+macro_rules! forwarded_numeric {
+    ($ty:ty) => {
+        #[excel_function(name = "TEST.BORROWED.NUMERIC.FORWARDED", thread_safe)]
+        fn forwarded_numeric(value: $ty) -> f64 {
+            value.iter().copied().sum()
+        }
+    };
+}
+
+forwarded_numeric!(NumericMatrixRef<'_>);
+
+#[excel_function(name = "TEST.BORROWED.NUMERIC.ELIDED", thread_safe)]
+fn elided_numeric(value: NumericMatrixRef) -> f64 {
+    value.iter().copied().sum()
+}
+
 #[excel_function(name = "TEST.BORROWED.CELL", thread_safe)]
 fn borrowed_cell(value: ExcelCellRef<'_>) -> f64 {
     match value {

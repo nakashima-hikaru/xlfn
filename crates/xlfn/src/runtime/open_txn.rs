@@ -704,13 +704,14 @@ fn commit_inner<A: crate::Addin>(
                         },
                     );
                 }
+                deps.observer()
+                    .commit_open(&deps, &control, attempt_id, generation);
                 Ok::<(), XllError>(())
             })
             .unwrap_or_else(|_| opening_publication_lost());
 
         match result {
             Ok(()) => {
-                deps.observer().commit_open(&deps, attempt_id, generation);
                 deps.lifecycle().notify_all();
                 Ok(())
             }

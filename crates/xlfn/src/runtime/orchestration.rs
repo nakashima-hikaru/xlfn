@@ -21,6 +21,12 @@ pub(crate) struct OpenAttemptStart {
     pub(crate) module_opening: crate::module_runtime::ModuleOpening,
 }
 
+pub(crate) enum OpenRollbackAcquisition<T = crate::lifecycle::RemovalClaim> {
+    Acquired(T),
+    ClosingOwnsCleanup,
+    Unavailable,
+}
+
 /// Lifecycle orchestration without ambient access to the runtime aggregate.
 pub(crate) struct LifecycleOrchestrator<'a, A: Addin> {
     lifecycle: &'a crate::lifecycle::LifecycleCoordinator<A>,
@@ -51,7 +57,8 @@ impl<'a, A: Addin> LifecycleOrchestrator<'a, A> {
         let test_module_lease = crate::ingress::acquire_test_module_lease();
 
         let lifecycle = self.lifecycle();
-        let attempt_id = lifecycle.begin_open_state(expected_removal_epoch)?;
+        let mut control = lifecycle.access();
+        let attempt_id = lifecycle.begin_open_state(&mut control, expected_removal_epoch)?;
         self.returns.reopen_admission()?;
 
         let module_opening = crate::module_runtime::begin_open();
@@ -59,8 +66,12 @@ impl<'a, A: Addin> LifecycleOrchestrator<'a, A> {
         {
             *self.lifecycle.test_module_lease.lock() = Some(test_module_lease);
         }
-        self.observer
-            .begin_open(self.returns, expected_removal_epoch.get(), attempt_id);
+        self.observer.begin_open(
+            &control,
+            self.returns,
+            expected_removal_epoch.get(),
+            attempt_id,
+        );
         Ok(OpenAttemptStart {
             attempt: attempt_id,
             module_opening,
@@ -79,8 +90,8 @@ impl<'a, A: Addin> LifecycleOrchestrator<'a, A> {
         }
         let disposition = lifecycle.record_open_failure(&mut control);
         lifecycle.notify_all();
+        self.observer.fail_open(&control, attempt_id);
         drop(control);
-        self.observer.fail_open(attempt_id);
         disposition
     }
 
@@ -216,21 +227,22 @@ impl<'a, A: Addin> LifecycleOrchestrator<'a, A> {
         self.lifecycle().take_opening_for_rollback()
     }
 
-    pub(crate) fn acquire_open_rollback(&self) -> Option<crate::lifecycle::RemovalClaim> {
+    pub(crate) fn acquire_open_rollback(&self) -> OpenRollbackAcquisition {
         let lifecycle = self.lifecycle();
         let mut wait_guard = lifecycle.access();
         loop {
             match wait_guard.phase() {
-                LifecyclePhase::Closed => return None,
+                LifecyclePhase::Closed | LifecyclePhase::Closing => {
+                    return OpenRollbackAcquisition::ClosingOwnsCleanup;
+                }
                 LifecyclePhase::OpenRollbackPending => {}
-                LifecyclePhase::Closing
-                | LifecyclePhase::Opening
-                | LifecyclePhase::Open
-                | LifecyclePhase::Quarantined => return None,
+                LifecyclePhase::Opening | LifecyclePhase::Open | LifecyclePhase::Quarantined => {
+                    return OpenRollbackAcquisition::Unavailable;
+                }
             }
             if let Some(claim) = lifecycle.claim_removal(&mut wait_guard) {
                 self.observer.acquire_open_rollback_owner();
-                return Some(claim);
+                return OpenRollbackAcquisition::Acquired(claim);
             }
             lifecycle.wait(&mut wait_guard);
         }

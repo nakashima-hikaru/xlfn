@@ -70,17 +70,6 @@ impl<'a, A: Addin> OpenDeps<'a, A> {
         self.host
     }
 
-    #[cfg(all(
-        any(test, feature = "refinement"),
-        any(feature = "handles", feature = "rtd")
-    ))]
-    pub(in crate::runtime) fn with_generation_services<R>(
-        &self,
-        operation: impl FnOnce(&GenerationServices) -> R,
-    ) -> Option<R> {
-        self.lifecycle.with_generation_services(operation)
-    }
-
     #[cfg(feature = "async")]
     pub(in crate::runtime) fn async_runtime(
         &self,
@@ -215,6 +204,45 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
 
     pub(in crate::runtime) fn observer(&self) -> &'a RuntimeObserver {
         self.observer
+    }
+
+    /// Observe the terminal state while its lifecycle publication is locked.
+    /// The affine proof supplies the drained subsystem facts for counters that
+    /// are not retained after their generation services have been consumed.
+    #[cfg(any(test, feature = "refinement"))]
+    pub(in crate::runtime) fn terminal_resources(
+        &self,
+        control: &crate::lifecycle::LifecycleAccess<'_, A>,
+        _proof: &crate::runtime::shutdown::QuiescenceProof,
+    ) -> crate::shutdown_trace::ShutdownResources {
+        let mut resources = crate::shutdown_trace::ShutdownResources::quiescent_snapshot();
+        let ingress = crate::module_runtime::ingress();
+        resources.ingress_open = ingress.phase() == crate::ingress::PHASE_OPEN;
+        resources.active_calls = ingress.active_udfs() as u64;
+        // external_entries remains the proof's drained-export projection:
+        // raw export reservations can include the current removal boundary,
+        // rather than another generation-owned activity awaiting teardown.
+        resources.registrations = self.host.registrations_snapshot().len() as u64;
+        resources.event_registrations = self.host.event_registrations_snapshot().len() as u64;
+        resources.registration_state_known = !self.host.registration_state_unknown();
+        let callbacks = crate::module_runtime::global().callback_admission();
+        resources.callback_gate_open =
+            callbacks.lifecycle() == crate::callback_gate::ModuleCallbackLifecycle::Open;
+        // The proof has consumed subscription callbacks. Retained host callback
+        // reservations must also prevent a falsely clean terminal observation.
+        resources.callbacks = callbacks.active() as u64;
+        resources.return_blocks = self.returns.returns.outstanding_obligations() as u64;
+        #[cfg(feature = "async")]
+        {
+            resources.async_executor_running = !self.async_runtime.is_stopped();
+        }
+        resources.generation_owned_by_runtime =
+            control.has_current_generation() || control.has_opening_generation();
+        resources.generation_unique = !resources.generation_owned_by_runtime;
+        let diagnostics = crate::diagnostics::trace_snapshot();
+        resources.diagnostics_running = diagnostics.running;
+        resources.diagnostics_pending = diagnostics.pending;
+        resources
     }
 
     pub(in crate::runtime) fn protocol_generation(

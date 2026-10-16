@@ -95,6 +95,39 @@ fn assert_unregistered(runtime: &AsyncRuntime<HoldingExecutor>) {
 }
 
 #[test]
+fn close_admission_during_advance_leaves_a_stable_control_state() {
+    use super::calculation::ControlPhase;
+    let (runtime, _) = start_runtime(AsyncTaskLimit::DEFAULT);
+    let before = runtime.snapshot_calculation().epoch();
+    let reservation = runtime.registry().reserve(before).unwrap();
+    std::thread::scope(|scope| {
+        let advancing = scope.spawn(|| runtime.advance_calculation());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !matches!(
+            runtime.registry().control.lock().phase,
+            ControlPhase::Advancing { .. }
+        ) {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        runtime.registry().close_admission();
+        drop(reservation);
+        assert!(!advancing.join().unwrap());
+    });
+    assert_eq!(runtime.snapshot_calculation().epoch(), before);
+    assert_eq!(
+        runtime.registry().control.lock().phase,
+        ControlPhase::Running
+    );
+    assert!(matches!(
+        runtime.registry().reserve(before),
+        Err(XllError::Closing)
+    ));
+    assert!(!runtime.advance_calculation());
+    assert!(runtime.close().is_ok());
+}
+
+#[test]
 fn stale_snapshot_retains_calculation_until_rejected_reservation_releases_it() {
     let (runtime, state) = start_runtime(AsyncTaskLimit::DEFAULT);
     let snapshot = runtime.snapshot_calculation();

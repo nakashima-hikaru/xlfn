@@ -33,8 +33,9 @@ impl Drop for PollerExitGuard {
                 "normal poller exited with queued work"
             );
         }
-        let last =
-            xlfn_kernel::invariant::checked_atomic_dec_release(&self.shared.live_pollers) == 1;
+        // The final poller must acquire prior exits' recovery publications,
+        // including failure and the runnables returned to the injector.
+        let last = xlfn_kernel::invariant::checked_atomic_dec(&self.shared.live_pollers) == 1;
         if last && self.shared.failed.load(Ordering::Acquire) {
             self.shared.queue.seal_and_wake_all();
             while let Some(runnable) = self.shared.queue.drain_abandoned() {
@@ -98,5 +99,40 @@ pub(super) fn run_poller(
             .queue
             .idle_pollers
             .fetch_and(!bit, Ordering::Relaxed);
+    }
+}
+
+#[cfg(all(test, not(all(target_os = "windows", target_arch = "x86"))))]
+mod tests {
+    use loom::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn loom_final_poller_acquires_failed_peer_recovery_publication() {
+        loom::model(|| {
+            let count = Arc::new(AtomicUsize::new(2));
+            let failed = Arc::new(AtomicBool::new(false));
+            let abandoned = Arc::new(AtomicBool::new(false));
+            let peer_count = Arc::clone(&count);
+            let peer_failed = Arc::clone(&failed);
+            let peer_abandoned = Arc::clone(&abandoned);
+            let peer = loom::thread::spawn(move || {
+                peer_abandoned.store(true, Ordering::Relaxed);
+                peer_failed.store(true, Ordering::Release);
+                // Same AcqRel release chain as checked_atomic_dec above.
+                if peer_count.fetch_sub(1, Ordering::AcqRel) == 1 {
+                    assert!(peer_failed.load(Ordering::Acquire));
+                    assert!(peer_abandoned.load(Ordering::Relaxed));
+                }
+            });
+            if count.fetch_sub(1, Ordering::AcqRel) == 1 {
+                assert!(failed.load(Ordering::Acquire));
+                assert!(abandoned.load(Ordering::Relaxed));
+            }
+            peer.join().unwrap();
+        });
     }
 }

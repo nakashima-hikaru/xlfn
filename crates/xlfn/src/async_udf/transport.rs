@@ -19,7 +19,6 @@ enum DeliveryState {
 pub(crate) struct ExcelAsyncResponder {
     pub(crate) udf_id: &'static str,
     pub(crate) raw: XLOPER12,
-    pub(crate) fallback_error: Option<XllError>,
     state: DeliveryState,
 }
 
@@ -28,17 +27,23 @@ pub(crate) struct ExcelAsyncResponder {
 unsafe impl Send for ExcelAsyncResponder {}
 
 impl ExcelAsyncResponder {
-    pub(crate) unsafe fn from_raw(udf_id: &'static str, raw: *mut XLOPER12) -> XllResult<Self> {
-        // SAFETY: the caller guarantees a live Excel async-handle argument.
-        let value = unsafe { raw.as_ref() }.ok_or_else(|| {
-            XllError::input("async_handle", InputError::Malformed("null async handle"))
-        })?;
+    pub(crate) unsafe fn validate_raw<'call>(raw: *mut XLOPER12) -> XllResult<&'call XLOPER12> {
+        // SAFETY: the caller guarantees live storage for aligned pointers;
+        // the common parser rejects null, misalignment, and unknown type bits.
+        let value = unsafe { crate::value::XlValueRef::from_raw(raw) }?;
+        let value = value.raw();
         if value.base_type() != XLTYPE_BIG_DATA {
             return Err(XllError::input(
                 "async_handle",
                 InputError::Malformed("expected xltypeBigData"),
             ));
         }
+        Ok(value)
+    }
+
+    pub(crate) unsafe fn from_raw(udf_id: &'static str, raw: *mut XLOPER12) -> XllResult<Self> {
+        // SAFETY: forwarded from the caller's live-handle contract.
+        let value = unsafe { Self::validate_raw(raw) }?;
         // SAFETY: XLTYPE_BIG_DATA selects the big_data union field.
         let big_data = unsafe { value.value.big_data };
         // An async handle is an opaque hdata token even when cbData is nonzero.
@@ -54,17 +59,12 @@ impl ExcelAsyncResponder {
                 },
                 xltype: XLTYPE_BIG_DATA,
             },
-            fallback_error: None,
             state: DeliveryState::Pending,
         })
     }
 
     fn pointer(&mut self) -> NonNull<XLOPER12> {
         NonNull::from_mut(&mut self.raw)
-    }
-
-    pub(crate) fn set_fallback_error(&mut self, error: XllError) {
-        self.fallback_error = Some(error);
     }
 
     pub(crate) unsafe fn deliver(&mut self, mut value: AsyncReturnValue) -> XllResult<()> {
@@ -96,15 +96,47 @@ impl Drop for ExcelAsyncResponder {
     fn drop(&mut self) {
         if self.state == DeliveryState::Pending {
             self.state = DeliveryState::Attempted;
-            let error = self
-                .fallback_error
-                .take()
-                .unwrap_or(XllError::ExcelValue(crate::ExcelError::NotAvailable));
+            let error = XllError::ExcelValue(crate::ExcelError::NotAvailable);
             // SAFETY: raw is live and owned by this handle.
             let delivery = unsafe { return_error(&mut self.raw, &error) };
             if let OwnedDeliveryOutcome::Failed(delivery_error) = delivery {
                 crate::diagnostics::report_no_unwind(self.udf_id, &delivery_error);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn malformed_async_handles_never_reach_the_excel_callback() {
+        let _callbacks = crate::test_callback::lock();
+        crate::test_callback::install();
+        crate::test_callback::reset();
+        let mut unknown_flags = XLOPER12 {
+            value: XLOPER12Value {
+                big_data: XLOPER12BigData {
+                    handle: xlfn_sys::XLOPER12BigDataHandle {
+                        data: std::ptr::null_mut(),
+                    },
+                    byte_count: 0,
+                },
+            },
+            xltype: XLTYPE_BIG_DATA | 0x8000_0000,
+        };
+        let misaligned = std::ptr::NonNull::<XLOPER12>::dangling()
+            .as_ptr()
+            .wrapping_byte_add(1);
+        for raw in [std::ptr::null_mut(), misaligned, &mut unknown_flags] {
+            // SAFETY: malformed pointer shapes are rejected before storage is
+            // accessed; the aligned non-null operand is live and initialized.
+            assert!(unsafe { ExcelAsyncResponder::from_raw("MALFORMED", raw) }.is_err());
+            // SAFETY: same rejected shapes must never be forwarded to Excel.
+            let delivery = unsafe { return_error(raw, &XllError::Panic) };
+            assert!(matches!(delivery, OwnedDeliveryOutcome::Unobserved));
+        }
+        assert_eq!(crate::test_callback::async_return_calls(), 0);
     }
 }

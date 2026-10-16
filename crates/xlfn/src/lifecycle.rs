@@ -428,6 +428,12 @@ mod tests {
         );
         assert_eq!(drops.load(Ordering::Acquire), 0);
         assert!(
+            !runtime
+                .shutdown_trace_json()
+                .contains("generationReclaimed"),
+            "retained add-in state must not be reported as reclaimed"
+        );
+        assert!(
             runtime
                 .with_addin_lifecycle_for_test(&lifecycle, |_| ())
                 .is_ok()
@@ -611,6 +617,33 @@ mod tests {
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
         assert_eq!(attempts.load(std::sync::atomic::Ordering::Acquire), 1);
         assert!(runtime.take_current_generation().is_none() && !runtime.has_opening_generation());
+    }
+
+    #[test]
+    fn open_rollback_preserves_a_final_removal_owner_that_took_over_cleanup() {
+        let runtime = Runtime::<CleanClose>::new();
+        let opening = runtime.begin_open().unwrap();
+        let opening = runtime.publish(opening, (), ());
+        assert!(opening.fail_for_test().requires_rollback());
+
+        // Final removal wins after the failed open publishes its resources but
+        // before rollback acquires the affine cleanup authority.
+        let final_owner = runtime.begin_final_removal().unwrap();
+        let lifecycle = lifecycle_access(&runtime);
+        let outcome = rollback_open::<CleanClose>(
+            &runtime,
+            &lifecycle,
+            &mut HostCallbackSession::new(),
+            active_runtime_generation(&runtime),
+        );
+        assert!(outcome.cleanup_owned_elsewhere());
+        assert!(!outcome.unload_safe());
+        assert_eq!(outcome.failure_hazard(), None);
+        assert_eq!(runtime.phase(), LifecyclePhase::Closing);
+
+        drop(final_owner);
+        assert_eq!(host_auto_remove::<CleanClose>(&runtime), 1);
+        assert_eq!(runtime.phase(), LifecyclePhase::Closed);
     }
 
     struct CleanClose;

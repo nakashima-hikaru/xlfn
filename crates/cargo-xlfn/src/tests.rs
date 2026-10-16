@@ -973,6 +973,118 @@ fn transactional_distribution_requires_a_dedicated_output_directory() {
 }
 
 #[test]
+fn package_output_and_build_directories_must_not_overlap() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    for (output, target) in [
+        ("dist", "dist"),
+        ("dist", "dist/cache"),
+        ("dist/package", "dist"),
+        ("dist/./package/..", "dist/cache"),
+    ] {
+        let error =
+            validate_output_target_separation(&root.join(output), &root.join(target)).unwrap_err();
+        assert!(error.to_string().contains("must not overlap"));
+    }
+    validate_output_target_separation(&root.join("dist"), &root.join("target")).unwrap();
+    validate_output_target_separation(&root.join("dist"), &root.join("dist-cache")).unwrap();
+    assert!(!root.join("dist").exists());
+    assert!(!root.join("target").exists());
+}
+
+#[test]
+fn package_rejects_overlap_before_creating_build_storage_or_replacing_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = 'overlap-probe'\nversion = '0.0.0'\nedition = '2024'\n\
+         [lib]\ncrate-type = ['cdylib']\npath = 'lib.rs'\n",
+    )
+    .unwrap();
+    fs::write(root.join("lib.rs"), "").unwrap();
+    let output = root.join("dist");
+    fs::create_dir(&output).unwrap();
+    fs::write(output.join("keep.txt"), b"existing distribution").unwrap();
+    for all in [false, true] {
+        let error = package(&PackageArgs {
+            all,
+            target: (!all).then_some(WindowsTarget::X64),
+            manifest_path: Some(root.join("Cargo.toml")),
+            out: output.clone(),
+            target_dir: Some(output.join("cache")),
+            offline: true,
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("must not overlap"));
+        assert_eq!(
+            fs::read(output.join("keep.txt")).unwrap(),
+            b"existing distribution"
+        );
+        assert!(!output.join("cache").exists());
+        assert_eq!(fs::read_dir(&output).unwrap().count(), 1);
+    }
+    if root.join("DIST").exists() {
+        // The volume folds case. The two fresh roots do not exist until the
+        // build ancestor is created, so path text alone cannot detect this.
+        let fresh_output = root.join("fresh-dist");
+        let target = root.join("FRESH-DIST/cache");
+        let error = package(&PackageArgs {
+            all: true,
+            manifest_path: Some(root.join("Cargo.toml")),
+            out: fresh_output,
+            target_dir: Some(target.clone()),
+            offline: true,
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("must not overlap"));
+        let target_parent = crt::ResolvedCrtPolicy::resolve(None, None).target_directory(&target);
+        assert_eq!(fs::read_dir(target_parent).unwrap().count(), 0);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn package_overlap_check_resolves_target_symlinks() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    fs::create_dir(root.join("dist")).unwrap();
+    std::os::unix::fs::symlink(root.join("dist"), root.join("target-alias")).unwrap();
+    let error =
+        validate_output_target_separation(&root.join("dist"), &root.join("target-alias/cache"))
+            .unwrap_err();
+    assert!(error.to_string().contains("must not overlap"));
+}
+
+#[cfg(unix)]
+#[test]
+fn package_overlap_check_needs_only_search_permission_on_ancestors() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let ancestor = root.join("search-only");
+    let output = ancestor.join("dist");
+    let target = ancestor.join("target");
+    fs::create_dir_all(&output).unwrap();
+    fs::create_dir_all(&target).unwrap();
+    let permissions = fs::metadata(&ancestor).unwrap().permissions();
+    fs::set_permissions(&ancestor, std::fs::Permissions::from_mode(0o111)).unwrap();
+    let read_denied = fs::read_dir(&ancestor).is_err();
+    let children_accessible = output.is_dir() && target.is_dir();
+    let result = validate_output_target_separation(&output, &target);
+    // Restore access before any assertion, including on hosts where elevated
+    // test privileges make permission denial impossible to reproduce.
+    fs::set_permissions(&ancestor, permissions).unwrap();
+    if read_denied {
+        assert!(children_accessible);
+        result.unwrap();
+    }
+}
+
+#[test]
 fn output_destination_rejects_existing_files() {
     let directory = tempfile::tempdir().unwrap();
     let destination = directory.path().join("win-x64");

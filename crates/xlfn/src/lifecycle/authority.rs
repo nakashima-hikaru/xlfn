@@ -58,9 +58,9 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
 
     pub(crate) fn begin_open_state(
         &self,
+        control: &mut LifecycleAccess<'_, A>,
         expected_removal_epoch: RemovalEpoch,
     ) -> XllResult<OpenAttemptId> {
-        let mut control = self.coordinator.access();
         if control.removal_epoch() != expected_removal_epoch.get()
             || control.phase() != crate::lifecycle::LifecyclePhase::Closed
             || control.open_attempt().is_some()
@@ -70,9 +70,9 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_PHASE,
             });
         }
-        self.coordinator.prepare_open(&mut control);
-        let attempt = self.coordinator.allocate_open_attempt(&mut control)?;
-        self.coordinator.begin_opening(&mut control, attempt);
+        self.coordinator.prepare_open(control);
+        let attempt = self.coordinator.allocate_open_attempt(control)?;
+        self.coordinator.begin_opening(control, attempt);
         Ok(attempt)
     }
 
