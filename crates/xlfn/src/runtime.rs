@@ -876,6 +876,10 @@ impl<A: crate::Addin> StaticTestRuntime<A> {
         Self { runtime }
     }
 
+    pub(crate) fn from_static(runtime: &'static Runtime<A>) -> Self {
+        Self { runtime }
+    }
+
     pub(crate) fn runtime(&self) -> &'static Runtime<A> {
         self.runtime
     }

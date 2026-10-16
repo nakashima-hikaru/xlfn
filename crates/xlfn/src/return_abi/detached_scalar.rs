@@ -84,10 +84,29 @@ fn allocate_root() -> *mut XLOPER12 {
     pointer
 }
 
-// Non-Windows builds are deterministic tests and benchmarks, rather than
-// unloadable Excel XLLs. Retaining the allocation gives them the same ABI
-// lifetime and thread-exit behavior as the Windows process heap.
+// Non-Windows builds are tests and benchmarks. Their process owner must retain
+// every allocation, including roots whose publishing thread has exited. A TLS
+// pointer alone loses that ownership at thread exit and leaves an actual leak
+// in this process-heap model.
+#[cfg(not(target_os = "windows"))]
+struct ProcessRoot(NonNull<XLOPER12>);
+
+// SAFETY: moving this owner never reads or writes its pointee. The registry
+// retains allocation ownership only; publication and Excel reads still obey
+// the same per-thread protocol as the Windows process-heap allocation.
+#[cfg(not(target_os = "windows"))]
+unsafe impl Send for ProcessRoot {}
+
+#[cfg(not(target_os = "windows"))]
+static PROCESS_ROOTS: std::sync::Mutex<Vec<ProcessRoot>> = std::sync::Mutex::new(Vec::new());
+
 #[cfg(not(target_os = "windows"))]
 fn allocate_root() -> *mut XLOPER12 {
-    Box::into_raw(Box::new(XLOPER12::nil()))
+    let root = ProcessRoot(Box::into_non_null(Box::new(XLOPER12::nil())));
+    let pointer = root.0.as_ptr();
+    PROCESS_ROOTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(root);
+    pointer
 }

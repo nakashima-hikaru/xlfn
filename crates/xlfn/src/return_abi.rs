@@ -856,7 +856,12 @@ mod tests {
     }
 
     fn open_static_test_runtime() -> crate::runtime::StaticTestRuntime<()> {
-        let fixture = crate::runtime::StaticTestRuntime::new();
+        open_test_runtime(crate::runtime::StaticTestRuntime::new())
+    }
+
+    fn open_test_runtime(
+        fixture: crate::runtime::StaticTestRuntime<()>,
+    ) -> crate::runtime::StaticTestRuntime<()> {
         let runtime = fixture.runtime();
         let open_attempt = runtime.begin_open().unwrap();
         let mut open_attempt = runtime.publish(open_attempt, (), ());
@@ -867,8 +872,9 @@ mod tests {
 
     #[test]
     fn miri_generated_primitive_returns_reuse_a_root_without_free_callbacks() {
+        static RUNTIME: Runtime<()> = Runtime::new();
         let _test = test_lock();
-        let fixture = open_static_test_runtime();
+        let fixture = open_test_runtime(crate::runtime::StaticTestRuntime::from_static(&RUNTIME));
         let runtime = fixture.runtime();
         let number = udf_boundary_named(runtime, "scalar", "SCALAR", |_, _| {
             ReturnPayload::scalar(-0.0)
@@ -907,12 +913,14 @@ mod tests {
         // SAFETY: This live root carries no free bit, so cleanup is a no-op.
         unsafe { free_return(error) };
         assert!(runtime.returns_are_quiescent());
+        assert_eq!(crate::boundary::host::host_auto_remove(runtime), 1);
     }
 
     #[test]
     fn miri_nested_udf_consumes_inner_scalar_before_outer_publication() {
+        static RUNTIME: Runtime<()> = Runtime::new();
         let _test = test_lock();
-        let fixture = open_static_test_runtime();
+        let fixture = open_test_runtime(crate::runtime::StaticTestRuntime::from_static(&RUNTIME));
         let runtime = fixture.runtime();
         let inner_address = Cell::new(0);
         let outer = udf_boundary_named(runtime, "outer", "OUTER", |_, _| {
@@ -934,10 +942,12 @@ mod tests {
         // SAFETY: The outer boundary encoded a numeric scalar.
         assert_eq!(unsafe { value.value.number }, 42.0);
         assert!(runtime.returns_are_quiescent());
+        assert_eq!(crate::boundary::host::host_auto_remove(runtime), 1);
     }
 
     #[test]
     fn miri_primitive_roots_remain_readable_after_thread_exit_and_terminal_close() {
+        static RUNTIME: Runtime<()> = Runtime::new();
         struct JoinedRoot(*mut XLOPER12);
         // SAFETY: This test never reads a transferred root until the producing
         // thread has joined, and that thread can no longer rewrite it. The
@@ -945,7 +955,7 @@ mod tests {
         unsafe impl Send for JoinedRoot {}
 
         let _test = test_lock();
-        let fixture = open_static_test_runtime();
+        let fixture = open_test_runtime(crate::runtime::StaticTestRuntime::from_static(&RUNTIME));
         let runtime = fixture.runtime();
         let (sender, receiver) = mpsc::channel();
         std::thread::scope(|scope| {
@@ -976,8 +986,9 @@ mod tests {
 
     #[test]
     fn generated_owned_returns_still_hold_cleanup_obligations() {
+        static RUNTIME: Runtime<()> = Runtime::new();
         let _test = test_lock();
-        let fixture = open_static_test_runtime();
+        let fixture = open_test_runtime(crate::runtime::StaticTestRuntime::from_static(&RUNTIME));
         let runtime = fixture.runtime();
         let root = udf_boundary_named(runtime, "text", "TEXT", |_, _| {
             ReturnPayload::scalar("owned text")
@@ -988,6 +999,7 @@ mod tests {
         // SAFETY: Excel would return this live owned root exactly once.
         unsafe { free_return(root) };
         assert!(runtime.returns_are_quiescent());
+        assert_eq!(crate::boundary::host::host_auto_remove(runtime), 1);
     }
 
     #[test]
@@ -1009,9 +1021,8 @@ mod tests {
         unsafe impl crate::PhysicallyUnloadableAddin for EmptyPhysicalAddin {}
 
         let _test = test_lock();
-        let runtime = Box::leak(Box::new(
-            Runtime::<EmptyPhysicalAddin>::new_with_physical_unload(),
-        ));
+        static RUNTIME: Runtime<EmptyPhysicalAddin> = Runtime::new_with_physical_unload();
+        let runtime = &RUNTIME;
         runtime
             .ensure_module_residency(
                 crate::boundary::host::host_auto_close::<EmptyPhysicalAddin> as *const (),
