@@ -1,10 +1,12 @@
 #![allow(unsafe_code, reason = "Benchmark-only allocator instrumentation")]
 
 use criterion::{
-    BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group, criterion_main,
+    BenchmarkGroup, BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group,
+    criterion_main, measurement::WallTime,
 };
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+use std::hash::Hash;
 use std::hint::black_box;
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, Barrier};
@@ -458,5 +460,68 @@ fn reclamation_benchmarks(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, reclamation_benchmarks);
+fn deferred_queue_churn<K>(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    name: &'static str,
+    make_key: impl Fn(u64) -> K,
+) where
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+{
+    let cache = CalculationCache::<K, u64>::new(RESIDENT_ENTRIES * 8);
+    // Keep decimal key width fixed throughout practical timing runs, so a
+    // faster variant does not pay for longer strings merely by doing more work.
+    let mut next_key = 1_u64 << 60;
+    let mut run_operation = || {
+        let value = next_key;
+        next_key = next_key
+            .checked_add(1)
+            .expect("benchmark key space exhausted");
+        // Construct the owned key inside both the allocation probe and timing
+        // loop. Its clones and retirement can produce additional deferred
+        // batches, unlike the Copy-key control.
+        let lease = cache
+            .get_or_try_insert_with(make_key(value), |_| 8, || Ok(value))
+            .expect("deferred queue benchmark initialization succeeds");
+        black_box(*lease);
+        drop(lease);
+    };
+    for _ in 0..DEFAULT_OPERATIONS_PER_WORKER {
+        run_operation();
+    }
+    let probe = AllocationProbe::start();
+    for _ in 0..DEFAULT_OPERATIONS_PER_WORKER {
+        run_operation();
+    }
+    let allocations = probe.finish();
+    println!(
+        "cache_deferred_queue_probe {}",
+        serde_json::json!({
+            "workload": name,
+            "workers": 1,
+            "value": "u64",
+            "operations_per_batch": DEFAULT_OPERATIONS_PER_WORKER,
+            "weight_budget": cache.weight_budget(),
+            "allocation_probe": {
+                "calls": allocations.calls,
+                "requested_bytes": allocations.requested_bytes,
+            },
+        })
+    );
+    group.bench_function(name, |b| b.iter(&mut run_operation));
+    cache.clear();
+    cache.maintenance();
+    assert_eq!(cache.reclamation_stats().pending_nodes, 0);
+    assert_eq!(cache.reclamation_stats().pending_weight, 0);
+}
+
+fn deferred_queue_benchmarks(c: &mut Criterion) {
+    let mut group = c.benchmark_group("cache_deferred_queue");
+    group.measurement_time(benchmark_measurement_time());
+    group.throughput(Throughput::Elements(1));
+    deferred_queue_churn(&mut group, "owned_key_churn", |key| key.to_string());
+    deferred_queue_churn(&mut group, "u64_churn", |key| key);
+    group.finish();
+}
+
+criterion_group!(benches, reclamation_benchmarks, deferred_queue_benchmarks);
 criterion_main!(benches);

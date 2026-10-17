@@ -1,5 +1,68 @@
 # Benchmark notes
 
+## 2026-10-17 deferred destruction queue experiment
+
+An empty deferred-destruction flush now checks a destructor-free TLS hint. The
+queue stores its first owned batch inline. It still takes the entire queue before
+calling destructors, and frees spilled storage at every flush; retaining capacity
+inside `ManuallyDrop` TLS would leak it at thread exit. The erased payload batch
+still has its own allocation. Operation guards and last-reader maintenance remain.
+
+Baseline `70a92282e42bda50d316f18465da43f31b26a8e6` and the candidate used
+separate source/target directories, identical fixtures, frozen SHA-256 checks,
+and ABBA order on macOS ARM64 / Rust 1.99.0. Each run used 20 samples,
+0.3 s warm-up, and 1.5 s measurement. The selected 64 KiB single-worker cases
+and both new key controls were also checked in BAAB order. Values are geometric
+means of two estimates per side, with all individual intervals retained.
+
+| Case | Baseline | Candidate | Time change |
+| --- | ---: | ---: | ---: |
+| `cache_lookup/cache_hit_hot_key/current/threads_1/u64` | 49.953 µs | 47.028 µs | -5.85% |
+| `cache_lookup/cache_hit_hot_key/current/threads_8/u64` | 1.363 ms | 1.399 ms | +2.67% |
+| `cache_deferred_queue/u64_churn` | 678.18 ns | 640.64 ns | -5.54% |
+| `cache_deferred_queue/owned_key_churn` | 845.95 ns | 822.98 ns | -2.72% |
+| `cache_reclamation/churn/payload_64b/threads_1` | 188.645 µs | 183.117 µs | -2.93% |
+| `cache_reclamation/churn/payload_65536b/threads_1` | 581.895 µs | 604.463 µs | +3.88% |
+| `cache_reclamation/live_leases/payload_65536b/threads_1` | 599.611 µs | 640.192 µs | +6.77% |
+| `cache_reclamation/live_leases/payload_65536b/threads_32` | 36.331 ms | 37.418 ms | +2.99% |
+
+The one-worker 256-operation 64-byte payload churn probe requests 1,026 allocator
+calls instead of 1,282 (-19.97%), and 113,160 bytes instead of 129,544 (-12.65%).
+The 64 KiB payload saves the same 256 calls / 16,384 requested bytes, only 0.097%
+of total requested bytes. Retained-lease probes are unchanged. The new u64-key/u64
+value control falls from 1,024 to 768 calls; the owned String key control retains
+2,049 calls but falls from 131,848 to 123,656 requested bytes. These are specific
+saved probes, not RSS or isolated queue-allocation counts. Concurrent grouping
+can change the allocation counts. All 14 deterministic cache workload controls (7 traces, cold/repeat)
+retain identical request/compute/hit/residency/pending observations.
+
+The measured tradeoff remains: 64 KiB single-worker live leases slow
+by 6.77% in ABBA and 7.95% in BAAB, with no allocation saving in that workload.
+This change was applied by explicit user request on 2026-10-17 despite that
+workload tradeoff. It is not qualified as a general performance improvement. The initial parallel regressions remain in the record; small
+timing changes and movement of unchanged controls are not presented as universal
+speed gains. Confirmation results:
+
+| Case | Baseline | Candidate | Time change |
+| --- | ---: | ---: | ---: |
+| `cache_deferred_queue/owned_key_churn` | 855.00 ns | 832.71 ns | -2.61% |
+| `cache_deferred_queue/u64_churn` | 734.90 ns | 654.68 ns | -10.92% |
+| `cache_reclamation/churn/payload_65536b/threads_1` | 581.429 µs | 594.586 µs | +2.26% |
+| `cache_reclamation/live_leases/payload_65536b/threads_1` | 564.902 µs | 609.806 µs | +7.95% |
+
+Validation: workspace nextest 1,284 passed / 11 skipped; cache-only library
+491 passed / 8 ignored; no-default library 380 passed / 7 ignored. Strict
+all-target/all-feature Clippy, rustdoc, formatting and panic-boundary checks pass.
+New queue tests pass strict-provenance Miri in both borrow models (5 each);
+existing cache review tests pass in both models (4 each / 1 preexisting ignored).
+The native late-TLS subprocess test passes. Cache-only x86_64/i686 MSVC library
+type checks pass. The 17 canonical bench-ci recipes completed with the 100 ms
+override; the last recipe was separately rechecked with its exit status saved.
+The added fixture passes its own build, strict Clippy, and final allocation probes.
+Gate timings are excluded. No native Windows/live Excel speed claim is made.
+
+[All results, confirmations, patches, allocation counters and provenance](results/2026-10-17-deferred-drop.json).
+
 ## 2026-10-16 performance review experiments
 
 Object payload ownership remains in the arena. Its mutex/map is split into 32
