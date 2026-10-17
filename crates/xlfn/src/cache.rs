@@ -34,6 +34,7 @@ use std::ptr::NonNull;
 #[cfg(test)]
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+#[cfg(any(test, feature = "bench-internals"))]
 use std::time::Instant;
 use triomphe::Arc;
 use xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT;
@@ -1046,6 +1047,14 @@ struct CacheLookupDomain<V> {
     // Once the sum exceeds u64, keep a conservative backpressure signal
     // until both retirement queues are observed empty under their locks.
     pending_weight_saturated: AtomicBool,
+    #[cfg(any(test, feature = "bench-internals"))]
+    metrics: CacheReclamationMetrics,
+}
+
+/// Observation only: admission, backpressure and retirement never read these.
+#[cfg(any(test, feature = "bench-internals"))]
+#[derive(Default)]
+struct CacheReclamationMetrics {
     peak_pending_nodes: AtomicUsize,
     peak_pending_weight: AtomicU64,
     reclaimed_nodes: AtomicUsize,
@@ -1061,11 +1070,8 @@ impl<V> CacheLookupDomain<V> {
             maintenance_requests: AtomicUsize::new(0),
             pending_weight: AtomicU64::new(0),
             pending_weight_saturated: AtomicBool::new(false),
-            peak_pending_nodes: AtomicUsize::new(0),
-            peak_pending_weight: AtomicU64::new(0),
-            reclaimed_nodes: AtomicUsize::new(0),
-            largest_batch: AtomicUsize::new(0),
-            grace_period_nanos: AtomicU64::new(0),
+            #[cfg(any(test, feature = "bench-internals"))]
+            metrics: CacheReclamationMetrics::default(),
         }
     }
 
@@ -1172,17 +1178,19 @@ impl<V> CacheLookupDomain<V> {
                     |_, mut queue| {
                         let weight = entry.weight;
                         crate::retirement_queue::append_retired!(&mut *queue, entry);
-                        let nodes = self
+                        let _nodes = self
                             .pending_nodes
                             .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                                 current.checked_add(1)
                             })
                             .map(|previous| previous + 1)
                             .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
-                        let weight = self.add_pending_weight(weight);
-                        self.peak_pending_nodes.fetch_max(nodes, Ordering::Relaxed);
-                        self.peak_pending_weight
-                            .fetch_max(weight, Ordering::Relaxed);
+                        let _weight = self.add_pending_weight(weight);
+                        #[cfg(any(test, feature = "bench-internals"))]
+                        {
+                            self.metrics.peak_pending_nodes.fetch_max(_nodes, Ordering::Relaxed);
+                            self.metrics.peak_pending_weight.fetch_max(_weight, Ordering::Relaxed);
+                        }
                     },
                 );
             }
@@ -1199,6 +1207,7 @@ impl<V> CacheLookupDomain<V> {
         if self.current_thread_is_reading() {
             return ReclaimEntries::new(self);
         }
+        #[cfg(any(test, feature = "bench-internals"))]
         let start = Instant::now();
         let batches = self
             .domain
@@ -1209,6 +1218,8 @@ impl<V> CacheLookupDomain<V> {
         // Preserve an existing batch allocation when only one generation has
         // debt, instead of allocating and copying a new flattened Vec.
         let entries = merge_reclaims(self, batches);
+        self.clear_saturated_weight_if_empty();
+        #[cfg(any(test, feature = "bench-internals"))]
         self.record_batch(&entries, start);
         entries
     }
@@ -1228,6 +1239,7 @@ impl<V> CacheLookupDomain<V> {
         if previous != 0 {
             return ReclaimEntries::new(self);
         }
+        #[cfg(any(test, feature = "bench-internals"))]
         let start = Instant::now();
         let mut entries = ReclaimEntries::new(self);
         let mut consumed = 1;
@@ -1252,6 +1264,8 @@ impl<V> CacheLookupDomain<V> {
             }
             consumed = requested - consumed;
         }
+        self.clear_saturated_weight_if_empty();
+        #[cfg(any(test, feature = "bench-internals"))]
         self.record_batch(&entries, start);
         entries
     }
@@ -1283,15 +1297,19 @@ impl<V> CacheLookupDomain<V> {
             .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop())
     }
 
+    #[cfg(any(test, feature = "bench-internals"))]
     fn record_batch(&self, entries: &[ReclaimEntry<V>], start: Instant) {
-        self.clear_saturated_weight_if_empty();
         if !entries.is_empty() {
-            self.reclaimed_nodes
+            self.metrics
+                .reclaimed_nodes
                 .fetch_add(entries.len(), Ordering::Relaxed);
-            self.largest_batch
+            self.metrics
+                .largest_batch
                 .fetch_max(entries.len(), Ordering::Relaxed);
             let nanos = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
-            self.grace_period_nanos.fetch_add(nanos, Ordering::Relaxed);
+            self.metrics
+                .grace_period_nanos
+                .fetch_add(nanos, Ordering::Relaxed);
         }
     }
 
@@ -1300,11 +1318,11 @@ impl<V> CacheLookupDomain<V> {
         CacheReclamationStats {
             pending_nodes: self.pending_nodes.load(Ordering::Relaxed),
             pending_weight: self.pending_weight(),
-            peak_pending_nodes: self.peak_pending_nodes.load(Ordering::Relaxed),
-            peak_pending_weight: self.peak_pending_weight.load(Ordering::Relaxed),
-            reclaimed_nodes: self.reclaimed_nodes.load(Ordering::Relaxed),
-            largest_batch: self.largest_batch.load(Ordering::Relaxed),
-            grace_period_nanos: self.grace_period_nanos.load(Ordering::Relaxed),
+            peak_pending_nodes: self.metrics.peak_pending_nodes.load(Ordering::Relaxed),
+            peak_pending_weight: self.metrics.peak_pending_weight.load(Ordering::Relaxed),
+            reclaimed_nodes: self.metrics.reclaimed_nodes.load(Ordering::Relaxed),
+            largest_batch: self.metrics.largest_batch.load(Ordering::Relaxed),
+            grace_period_nanos: self.metrics.grace_period_nanos.load(Ordering::Relaxed),
         }
     }
 

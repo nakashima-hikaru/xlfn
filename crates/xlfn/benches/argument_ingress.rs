@@ -120,6 +120,16 @@ fn argument_ingress_benchmarks(c: &mut Criterion) {
     group.bench_function("numeric_matrix_ref_100k/plain", |b| {
         b.iter(|| numeric_100k.run_plain());
     });
+    for cells in [1, 16, 4_096, 100_000] {
+        let mut numeric = NumericMatrixIngressBenchmark::new(cells, 1);
+        println!(
+            "fp12_identity_digest_{cells} {:02x?}",
+            numeric.run_identity()
+        );
+        group.bench_function(format!("numeric_matrix_ref_{cells}/with_identity"), |b| {
+            b.iter(|| std::hint::black_box(numeric.run_identity()));
+        });
+    }
     group.bench_function("matrix_f64_100k/with_identity", |b| {
         b.iter(|| mat_100k.run_with_identity::<Matrix<f64>>());
     });

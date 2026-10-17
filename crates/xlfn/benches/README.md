@@ -1,5 +1,65 @@
 # Benchmark notes
 
+## 2026-10-17 numeric input identity and cache observations
+
+FP12 `NumericMatrixRef` formula identity now streams values through the existing
+numeric-sequence encoder. Shape framing, little-endian value bits, finite-input
+validation, and identity-before-lookup ordering remain unchanged. The FP12
+fixture covers 1, 16, 4,096 and 100,000 cells; the 100k identity case is included
+in `just bench-ci`. Identity tests cover signed zero, subnormal/extreme finite
+values, inline promotion, and a full hash buffer.
+
+Cache peak/reclaimed/batch/grace-period observations now exist only in tests and
+`bench-internals` builds. Ordinary builds omit their fields, atomic updates,
+and timer calls. Pending-node/weight accounting, saturation reset, maintenance
+handoff, admission and reclamation ordering remain active in every build.
+
+`cache_reclamation` can now run with `--no-default-features --features cache`
+to measure the ordinary production configuration. The instrumented configuration
+remains available with `--features bench-internals,cache`. Unavailable observation
+fields are JSON `null` in the cache-only configuration. The canonical gate now
+includes cache-only roundtrip and u64 churn controls; scaling/full recipes also
+include the production cache benchmark.
+
+Baseline `c9bd491b9e1f38dc9edac034bf9cd8bb05a21e71` and the candidate use separate
+source/target directories, identical fixtures, frozen executable SHA-256 checks,
+and ABBA order on macOS ARM64 / Rust 1.99.0. Each run uses 20 samples, 0.3 s
+warm-up, and 1.5 s measurement. Values below are geometric means of two mean
+estimates per side. The saved intervals are per-run intervals, not intervals
+for the A/B difference. FP12 measurements enable `bench-internals,cache`;
+cache measurements enable only `cache`, so the baseline still performs its
+previous hidden observation updates and the candidate omits them.
+
+| Case | Baseline | Candidate | Time change |
+| --- | ---: | ---: | ---: |
+| `argument_ingress/numeric_matrix_ref_1/with_identity` | 0.304 us | 0.309 us | +1.59% |
+| `argument_ingress/numeric_matrix_ref_4096/with_identity` | 30.378 us | 23.436 us | -22.85% |
+| `argument_ingress/numeric_matrix_ref_100000/with_identity` | 739.450 us | 569.915 us | -22.93% |
+| `argument_ingress/numeric_matrix_ref_100k/plain` | 41.442 us | 41.321 us | -0.29% |
+| `cache_deferred_queue/u64_churn` | 0.643 us | 0.609 us | -5.26% |
+| `cache_deferred_queue/owned_key_churn` | 0.824 us | 0.777 us | -5.71% |
+| `cache_reclamation/churn/payload_64b/threads_1` | 179.491 us | 172.466 us | -3.91% |
+| `cache_reclamation/churn/payload_65536b/threads_1` | 479.232 us | 483.791 us | +0.95% |
+| `cache_reclamation/live_leases/payload_65536b/threads_1` | 513.309 us | 508.395 us | -0.96% |
+| `cache_reclamation/live_leases/payload_65536b/threads_32` | 37126.995 us | 36902.414 us | -0.60% |
+
+All four FP12 digest controls match across all four runs. Small timing changes
+and concurrent batch-coordination effects are not attributed to universal speed
+gains; all 22 cases, individual intervals, raw samples, allocation/latency probes,
+and source patches remain in the result record.
+
+Validation: workspace nextest 1,284 passed / 11 skipped; no-default library
+380 passed / 7 ignored; handles library 534 passed / 8 ignored; cache-only
+491 library and 25 integration tests passed / 8 library tests ignored. All 288
+feature checks pass. Strict workspace all-target/all-feature Clippy, cache-only
+benchmark Clippy, rustdoc, formatting and panic-boundary checks pass. The expanded
+numeric identity boundary test passes strict-provenance Miri under both borrow
+models (one test each). x86_64/i686 MSVC library checks pass with `blake3/pure`.
+All 18 canonical bench-ci recipes pass with the 100 ms measurement override;
+those gate timings are excluded. Native Windows/live Excel remain unmeasured.
+
+[All results, raw samples, patches, probes and provenance](results/2026-10-17-input-cache-metrics.json).
+
 ## 2026-10-17 deferred destruction queue experiment
 
 An empty deferred-destruction flush now checks a destructor-free TLS hint. The

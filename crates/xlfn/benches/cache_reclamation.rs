@@ -12,8 +12,21 @@ use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, Barrier};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
+#[cfg(feature = "bench-internals")]
 use xlfn::benchmark_support::benchmark_measurement_time;
 use xlfn::cache::{CacheLease, CalculationCache};
+
+// The cache-only build measures production without observation counters.
+// Keep the same measurement policy as the instrumented benchmark fixtures.
+#[cfg(not(feature = "bench-internals"))]
+fn benchmark_measurement_time() -> std::time::Duration {
+    std::env::var("XLFN_BENCH_MEASUREMENT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|&milliseconds| milliseconds != 0)
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(std::time::Duration::from_secs(10))
+}
 
 #[derive(Clone, Copy, Default)]
 struct AllocationCounts {
@@ -132,8 +145,8 @@ struct Payload(Box<[u8]>);
 #[derive(Default)]
 struct BatchReport {
     allocations: AllocationCounts,
-    sampled_peak_pending_nodes: usize,
-    sampled_peak_pending_weight: u64,
+    sampled_peak_pending_nodes: Option<usize>,
+    sampled_peak_pending_weight: Option<u64>,
     held_leases: usize,
     latencies_ns: Vec<u64>,
 }
@@ -184,11 +197,16 @@ fn run_worker_batch<'cache, const ALLOCATIONS: bool, const LATENCY: bool>(
                 .push(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX));
             // Observation is outside the individual operation timer. These
             // counters never flush the cache or advance a grace period.
-            let stats = cache.reclamation_stats();
-            report.sampled_peak_pending_nodes =
-                report.sampled_peak_pending_nodes.max(stats.pending_nodes);
-            report.sampled_peak_pending_weight =
-                report.sampled_peak_pending_weight.max(stats.pending_weight);
+            #[cfg(feature = "bench-internals")]
+            {
+                let stats = cache.reclamation_stats();
+                report.sampled_peak_pending_nodes = report
+                    .sampled_peak_pending_nodes
+                    .max(Some(stats.pending_nodes));
+                report.sampled_peak_pending_weight = report
+                    .sampled_peak_pending_weight
+                    .max(Some(stats.pending_weight));
+            }
         }
     }
     report.allocations = probe.map(AllocationProbe::finish).unwrap_or_default();
@@ -197,7 +215,8 @@ fn run_worker_batch<'cache, const ALLOCATIONS: bool, const LATENCY: bool>(
 }
 
 struct WorkerPool {
-    cache: Arc<CalculationCache<u64, Payload>>,
+    // Retains the driver owner through worker shutdown, even without metrics.
+    _cache: Arc<CalculationCache<u64, Payload>>,
     start: Vec<SyncSender<RunMode>>,
     done: Receiver<BatchReport>,
     barrier: Arc<Barrier>,
@@ -268,7 +287,7 @@ impl WorkerPool {
         drop(done_tx);
         barrier.wait();
         Self {
-            cache,
+            _cache: cache,
             start,
             done,
             barrier,
@@ -340,7 +359,21 @@ fn report_probes(pool: &WorkerPool, workload: Workload, workers: usize, payload_
         workload.retained_per_worker() * workers
     );
     latency.latencies_ns.sort_unstable();
-    let stats = pool.cache.reclamation_stats();
+    #[cfg(feature = "bench-internals")]
+    let lifetime_stats = {
+        let stats = pool._cache.reclamation_stats();
+        serde_json::json!({
+            "peak_pending_nodes": stats.peak_pending_nodes,
+            "peak_pending_weight": stats.peak_pending_weight,
+            "pending_nodes": stats.pending_nodes,
+            "pending_weight": stats.pending_weight,
+            "reclaimed_nodes": stats.reclaimed_nodes,
+            "largest_batch": stats.largest_batch,
+            "grace_period_nanos": stats.grace_period_nanos,
+        })
+    };
+    #[cfg(not(feature = "bench-internals"))]
+    let lifetime_stats = serde_json::Value::Null;
     println!(
         "cache_reclamation_probe {}",
         serde_json::json!({
@@ -348,7 +381,8 @@ fn report_probes(pool: &WorkerPool, workload: Workload, workers: usize, payload_
             "workers": workers,
             "payload_bytes": payload_bytes,
             "operations_per_batch": pool.operations,
-            "weight_budget": pool.cache.weight_budget(),
+            "weight_budget": RESIDENT_ENTRIES * payload_bytes,
+            "instrumented": cfg!(feature = "bench-internals"),
             "allocation_probe": {
                 "calls": allocation.allocations.calls,
                 "requested_bytes": allocation.allocations.requested_bytes,
@@ -364,15 +398,7 @@ fn report_probes(pool: &WorkerPool, workload: Workload, workers: usize, payload_
                 "held_leases": latency.held_leases,
                 "held_lease_payload_bytes": latency.held_leases * payload_bytes,
             },
-            "cache_lifetime_stats_after_probes": {
-                "peak_pending_nodes": stats.peak_pending_nodes,
-                "peak_pending_weight": stats.peak_pending_weight,
-                "pending_nodes": stats.pending_nodes,
-                "pending_weight": stats.pending_weight,
-                "reclaimed_nodes": stats.reclaimed_nodes,
-                "largest_batch": stats.largest_batch,
-                "grace_period_nanos": stats.grace_period_nanos,
-            },
+            "cache_lifetime_stats_after_probes": lifetime_stats,
         })
     );
 }
@@ -402,13 +428,17 @@ fn reclamation_benchmarks(c: &mut Criterion) {
     let release_probe = AllocationProbe::start();
     drop(value);
     let release_allocations = release_probe.finish();
+    #[cfg(feature = "bench-internals")]
+    let pending_nodes = Some(zero_capacity.reclamation_stats().pending_nodes);
+    #[cfg(not(feature = "bench-internals"))]
+    let pending_nodes: Option<usize> = None;
     println!(
         "cache_final_lease_drop_probe {}",
         serde_json::json!({
             "value": "u64", "capacity": 0,
             "calls": release_allocations.calls,
             "requested_bytes": release_allocations.requested_bytes,
-            "pending_nodes": zero_capacity.reclamation_stats().pending_nodes,
+            "pending_nodes": pending_nodes,
         })
     );
 
@@ -500,7 +530,8 @@ fn deferred_queue_churn<K>(
             "workers": 1,
             "value": "u64",
             "operations_per_batch": DEFAULT_OPERATIONS_PER_WORKER,
-            "weight_budget": cache.weight_budget(),
+            "weight_budget": RESIDENT_ENTRIES * 8,
+            "instrumented": cfg!(feature = "bench-internals"),
             "allocation_probe": {
                 "calls": allocations.calls,
                 "requested_bytes": allocations.requested_bytes,
@@ -509,9 +540,13 @@ fn deferred_queue_churn<K>(
     );
     group.bench_function(name, |b| b.iter(&mut run_operation));
     cache.clear();
-    cache.maintenance();
-    assert_eq!(cache.reclamation_stats().pending_nodes, 0);
-    assert_eq!(cache.reclamation_stats().pending_weight, 0);
+    assert!(cache.is_empty());
+    #[cfg(feature = "bench-internals")]
+    {
+        cache.maintenance();
+        assert_eq!(cache.reclamation_stats().pending_nodes, 0);
+        assert_eq!(cache.reclamation_stats().pending_weight, 0);
+    }
 }
 
 fn deferred_queue_benchmarks(c: &mut Criterion) {

@@ -235,10 +235,11 @@ bench-ci:
     just bench-one-filter formula_revision "^formula_revision/warm_hit/(f64|matrix_f64_100k)\z"
     just bench-one-filter handle_lookup "^handle_lookup/(warm_same_token|distinct_tokens)/(1|32)\z"
     just bench-one-filter formula_caller "^resolve_formula_caller/(ref|sref|concurrent/ref/(1|4))\z"
-    just bench-one-filter argument_ingress "^argument_ingress/(f64/with_identity|string_short/borrowed|string_unicode/borrowed|string_inline_[^/]+/borrowed|string_pair/borrowed|matrix_string_10k/(owned|borrowed)|matrix_f64_100k/(plain|with_identity|prepare_identity)|matrix_ref_f64_100k/(plain|prepare_identity|prepare_materialize)|numeric_matrix_ref_100k/plain|matrix_cells_100k/(ascii|unicode)/(owned|borrowed)|excel_value_matrix_100k/with_identity|handle/with_identity)\z"
+    just bench-one-filter argument_ingress "^argument_ingress/(f64/with_identity|string_short/borrowed|string_unicode/borrowed|string_inline_[^/]+/borrowed|string_pair/borrowed|matrix_string_10k/(owned|borrowed)|matrix_f64_100k/(plain|with_identity|prepare_identity)|matrix_ref_f64_100k/(plain|prepare_identity|prepare_materialize)|numeric_matrix_ref_100k/plain|numeric_matrix_ref_100000/with_identity|matrix_cells_100k/(ascii|unicode)/(owned|borrowed)|excel_value_matrix_100k/with_identity|handle/with_identity)\z"
     just bench-one-filter array_numeric_output "^array_numeric_output/(matrix_build_return|builder_build_return|matrix_convert_return|numeric_slice_convert_return)/100000\z"
     just bench-one-filter object_lease "^object_lease/(pin_acquire_release_serial|final_pin_release|same_object/4|distinct_objects/4)\z" "bench-internals async"
     just bench-one-filter cache_miss_concurrency "^cache_miss_concurrency/(distinct_keys/(cheap_u64|numeric_reduce_4096)/cache/workers_(1|4)|same_key/cheap_u64/cache/workers_4)\z" "bench-internals cache"
+    just bench-one-filter cache_reclamation "^(cache_nonresident/roundtrip|cache_deferred_queue/u64_churn)\z" "cache"
     just bench-one-filter array_string_output "^(array_string_output/borrowed_str/16384|scalar_output/(ascii_short|ascii_1k|unicode_1k)/(borrowed|owned)|scalar_output/(enum|number))\z"
     just bench-one-filter rtd_publish "^rtd_publish/(number|string|string_8k)/(changing|same_value)\z" "bench-internals rtd"
     just bench-one-filter rtd_refresh "^rtd_refresh/(number/end_to_end/dense|short_string/end_to_end/dense|string_8k/(collection|completion|end_to_end)/dense)\z" "bench-internals rtd"
@@ -256,6 +257,7 @@ bench-scaling:
     just bench-one-filter formula_caller "^resolve_formula_caller/concurrent/"
     just bench-one object_lease "bench-internals async"
     just bench-one cache_miss_concurrency "bench-internals cache"
+    just bench-one cache_reclamation "cache"
     just bench-one-filter async_spawn "^(async_spawn/(matrix_spawn|matrix_reschedule|spawn_and_drain)|cancellation_lifecycle/)" "bench-internals async-builtin"
     just bench-one-filter sync_boundary "^sync_boundary/(admission|scalar_return/no_subscriber)/(4|16)\z"
     just bench-one-filter handle_prepare "^handle_prepare/(distinct_key/(4|16)|cold_grow|revision_churn)"
@@ -266,6 +268,7 @@ bench-scaling:
 
 # Full unfiltered benchmark suite.
 bench-full:
+    just bench-one cache_reclamation "cache"
     just bench-one async_task_drain "bench-internals async"
     just bench-one async_task_drain_allocations "bench-internals async"
     just bench-one array_numeric_output

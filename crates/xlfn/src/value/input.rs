@@ -46,6 +46,9 @@ pub trait InputMode: sealed::InputModeSealed + Sized {
     fn f64(identity: &mut Self::Identity, value: f64);
 
     #[doc(hidden)]
+    fn f64_slice(identity: &mut Self::Identity, values: &[f64]) -> XllResult<()>;
+
+    #[doc(hidden)]
     fn i64(identity: &mut Self::Identity, value: i64);
 
     #[doc(hidden)]
@@ -92,6 +95,9 @@ impl InputMode for PlainInputMode {
     fn tag(_: &mut Self::Identity, _: u8) {}
     fn bool(_: &mut Self::Identity, _: bool) {}
     fn f64(_: &mut Self::Identity, _: f64) {}
+    fn f64_slice(_: &mut Self::Identity, _: &[f64]) -> XllResult<()> {
+        Ok(())
+    }
     fn i64(_: &mut Self::Identity, _: i64) {}
     fn u64(_: &mut Self::Identity, _: u64) {}
     fn string(_: &mut Self::Identity, _: &str) {}
@@ -132,6 +138,10 @@ impl InputMode for FormulaInputMode {
 
     fn f64(identity: &mut Self::Identity, value: f64) {
         identity.f64(value);
+    }
+
+    fn f64_slice(identity: &mut Self::Identity, values: &[f64]) -> XllResult<()> {
+        identity.f64_sequence(values.iter().copied().map(Ok))
     }
 
     fn i64(identity: &mut Self::Identity, value: i64) {
@@ -820,11 +830,7 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
         M::with_argument(fingerprint, index, argument, |identity| {
             M::u64(identity, value.rows() as u64);
             M::u64(identity, value.columns() as u64);
-            if M::RECORDS_IDENTITY {
-                for number in value.as_slice() {
-                    M::f64(identity, *number);
-                }
-            }
+            M::f64_slice(identity, value.as_slice())?;
             Ok(())
         })
     }

@@ -57,4 +57,28 @@ impl NumericMatrixIngressBenchmark {
             let _ = arguments.finish();
         });
     }
+
+    /// Records the semantic identity used before formula-handle lookup.
+    pub fn run_identity(&mut self) -> [u8; 32] {
+        let ingress = benchmark_ingress();
+        let call = self
+            .runtime
+            .enter(&ingress)
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
+            let mut arguments =
+                crate::value::ArgumentContext::<crate::value::FormulaInputMode>::new(
+                    call, scope, 1,
+                );
+            // SAFETY: storage owns the FP12 header and initialized contiguous
+            // doubles and remains immutable throughout this call.
+            let value = unsafe {
+                crate::value::NumericMatrixRef::from_raw(self.storage.as_ptr().cast(), "arg")
+            }
+            .expect("numeric benchmark input must be valid");
+            arguments.record_numeric_matrix(0, "arg", value).unwrap();
+            std::hint::black_box(value);
+            arguments.finish().unwrap().unwrap()
+        })
+    }
 }

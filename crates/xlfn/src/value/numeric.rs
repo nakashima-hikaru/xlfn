@@ -287,30 +287,33 @@ mod tests {
         }
     }
 
-    #[test]
-    fn miri_numeric_matrix_identity_matches_the_same_strict_numeric_values() {
+    fn assert_numeric_matrix_identity<const N: usize>() {
         use crate::value::input::{ArgumentContext, FormulaInputMode};
-        let numeric = NumericInput {
+        let numeric: NumericInput<N> = NumericInput {
             rows: 1,
-            columns: 2,
-            values: [-0.0, 42.0],
+            columns: N as i32,
+            values: std::array::from_fn(|index| match index % 6 {
+                0 => -0.0,
+                1 => 0.0,
+                2 => -(index as f64) / 7.0,
+                3 => f64::MIN_POSITIVE,
+                4 => f64::from_bits(1),
+                _ => f64::MAX,
+            }),
         };
-        let mut cells = [
-            xlfn_sys::XLOPER12::number(-0.0),
-            xlfn_sys::XLOPER12::number(42.0),
-        ];
+        let mut cells = numeric.values.map(xlfn_sys::XLOPER12::number);
         let raw = xlfn_sys::XLOPER12 {
             value: xlfn_sys::XLOPER12Value {
                 array: xlfn_sys::XLOPER12Array {
                     rows: 1,
-                    columns: 2,
+                    columns: N as i32,
                     values: cells.as_mut_ptr(),
                 },
             },
             xltype: xlfn_sys::XLTYPE_MULTI,
         };
         crate::call::with_excel_call_scope_and_state(&(raw, numeric), |(raw, numeric), scope| {
-            // SAFETY: the flexible array owns two initialized doubles and is
+            // SAFETY: the flexible array owns N initialized doubles and is
             // immutable during this call-scoped identity comparison.
             let value =
                 unsafe { NumericMatrixRef::from_raw(std::ptr::from_ref(numeric).cast(), "arg") }
@@ -332,5 +335,16 @@ mod tests {
                 strict_context.finish().unwrap()
             );
         });
+    }
+
+    #[test]
+    fn miri_numeric_matrix_identity_matches_the_same_strict_numeric_values() {
+        assert_numeric_matrix_identity::<2>();
+        // Two dimension words precede the values: 14 values fill the inline
+        // sink exactly. Exercise promotion and hash-buffer boundaries too.
+        assert_numeric_matrix_identity::<14>();
+        assert_numeric_matrix_identity::<15>();
+        assert_numeric_matrix_identity::<510>();
+        assert_numeric_matrix_identity::<511>();
     }
 }
