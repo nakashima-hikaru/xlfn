@@ -1,454 +1,47 @@
-# Benchmark notes
-
-## 2026-10-18 optional collection preparation and RTD admission
-
-Formula-identity preparation for `Option<T>` and `OptionalExcelValue<T>`
-collections now borrows the input when `T` has a framework-provided, context-free
-builtin decoder. This includes nested optional wrappers. Preparation still
-validates every cell and records presence, shape and value identity before lookup.
-Owned collections keep the previous prepared-state allocation budget and error
-precedence. `MatrixRef<Option<T>>` keeps its output-only budget and delays typed
-scratch until materialization. Custom prepared ownership stays retained.
-
-RTD pending-count, topic-byte, subscription-ID and source-ID admission checks now
-precede owned topic copying. Existing-topic lookup remains first, so reuse works
-even when new-topic quotas are full. Lookup, checks and commit retain the same
-catalog lock; this change does not claim improved contention scaling.
-
-Baseline `2999db8f184d556c04ff07aa8360e3e490dbdf40` and candidate use identical
-benchmark fixtures, separate source/target directories and frozen executable
-SHA-256 checks on macOS ARM64 / Rust 1.99.0. The final comparison uses BAAB order,
-20 samples, 0.3 s warm-up and 1.5 s measurement with
-`bench-internals,async,rtd`. Numbers are geometric means of two mean estimates;
-recorded confidence intervals are per run, not intervals for the difference.
-Input preparation excludes real handle lookup. RTD inputs are prevalidated;
-input validation, fixture construction and runtime teardown are excluded.
-
-| Case | Baseline | Candidate | Time change |
-| --- | ---: | ---: | ---: |
-| Owned Option, 100k, prepare | 1911.134 us | 1841.808 us | -3.63% |
-| Owned presence, 100k, prepare | 1930.986 us | 1853.335 us | -4.02% |
-| Borrowed Option, 100k, prepare | 1890.777 us | 1846.127 us | -2.36% |
-| Owned Option, 100k, materialize | 2216.421 us | 2262.318 us | +2.07% |
-| Owned presence, 100k, materialize | 2237.703 us | 2266.962 us | +1.31% |
-| Borrowed Option, 100k, materialize | 1968.082 us | 2285.985 us | +16.15% |
-| Borrowed Option, 1k, materialize | 16.618 us | 20.671 us | +24.39% |
-| RTD pending full, 1 MiB | 28.327 us | 0.022 us | -99.92% |
-| RTD existing reuse, 1 MiB | 33.361 us | 33.118 us | -0.73% |
-| RTD admitted + rollback, 1 MiB | 22.767 us | 25.900 us | +13.76% |
-
-At 100k cells, owned optional preparation/discard requests 6,024 bytes per call
-instead of 3,206,024; the borrowed case requests 6,024 instead of 1,607,544. All
-three now match the one-allocation numeric control. RTD rejection at 1 MiB drops
-from 65 allocations / 1,051,136 requested bytes to zero; 16 KiB drops from two
-allocations / 16,424 bytes to zero. Existing reuse remains allocation-free.
-These are cumulative allocator requests, not peak live memory or RSS.
-
-This is a memory-traffic improvement with measured latency tradeoffs. Borrowed
-optional materialization repeats conversion and is 16.15% slower at 100k and
-24.39% slower at 1k; owned 100k materialization rises 1.31–2.07%. New 1 MiB RTD
-admission plus rollback rises 13.76%; an earlier ABBA run measured +5.20%, so no
-successful-admission speedup is claimed. Unchanged non-optional matrix controls
-also moved (-10.42% and -6.84%); these differences are not attributed to the
-optional optimization. Scalar controls stay within 0.3%. All 34 cases, raw samples,
-per-run intervals and the first implementation's results are retained. The first
-implementation built transient prepared wrappers even when dropping them;
-the final version decodes builtins directly while preserving custom preparation.
-All nine optional digest controls match across all four final runs.
-
-Validation: workspace nextest 1,291 passed / 11 skipped; all 288 feature checks
-pass. Independent library tests pass with no features (384), handles (538),
-RTD (558), async (445), async-builtin (521), cache (495), serde (386), and jiff
-(386); these retain seven ignored tests each, or eight with handles/cache.
-Strict all-target/all-feature workspace Clippy, rustdoc, fmt and panic-boundary
-checks pass. The optional identity/value regression and rejected-RTD-copy test
-both pass strict-provenance Miri under Stacked and Tree Borrows (four executions).
-x86_64/i686 MSVC checks pass with `blake3/pure`; these are compile checks only.
-All 20 canonical bench-ci recipes pass with the 100 ms measurement override,
-including both allocation gates; their timings are excluded from this comparison.
-Native Windows and live Excel execution remain unmeasured.
-
-[Results, raw samples, source patches, allocation probes and provenance](results/2026-10-18-optional-rtd.json).
-
-## 2026-10-17 numeric input identity and cache observations
-
-FP12 `NumericMatrixRef` formula identity now streams values through the existing
-numeric-sequence encoder. Shape framing, little-endian value bits, finite-input
-validation, and identity-before-lookup ordering remain unchanged. The FP12
-fixture covers 1, 16, 4,096 and 100,000 cells; the 100k identity case is included
-in `just bench-ci`. Identity tests cover signed zero, subnormal/extreme finite
-values, inline promotion, and a full hash buffer.
-
-Cache peak/reclaimed/batch/grace-period observations now exist only in tests and
-`bench-internals` builds. Ordinary builds omit their fields, atomic updates,
-and timer calls. Pending-node/weight accounting, saturation reset, maintenance
-handoff, admission and reclamation ordering remain active in every build.
-
-`cache_reclamation` can now run with `--no-default-features --features cache`
-to measure the ordinary production configuration. The instrumented configuration
-remains available with `--features bench-internals,cache`. Unavailable observation
-fields are JSON `null` in the cache-only configuration. The canonical gate now
-includes cache-only roundtrip and u64 churn controls; scaling/full recipes also
-include the production cache benchmark.
-
-Baseline `c9bd491b9e1f38dc9edac034bf9cd8bb05a21e71` and the candidate use separate
-source/target directories, identical fixtures, frozen executable SHA-256 checks,
-and ABBA order on macOS ARM64 / Rust 1.99.0. Each run uses 20 samples, 0.3 s
-warm-up, and 1.5 s measurement. Values below are geometric means of two mean
-estimates per side. The saved intervals are per-run intervals, not intervals
-for the A/B difference. FP12 measurements enable `bench-internals,cache`;
-cache measurements enable only `cache`, so the baseline still performs its
-previous hidden observation updates and the candidate omits them.
-
-| Case | Baseline | Candidate | Time change |
-| --- | ---: | ---: | ---: |
-| `argument_ingress/numeric_matrix_ref_1/with_identity` | 0.304 us | 0.309 us | +1.59% |
-| `argument_ingress/numeric_matrix_ref_4096/with_identity` | 30.378 us | 23.436 us | -22.85% |
-| `argument_ingress/numeric_matrix_ref_100000/with_identity` | 739.450 us | 569.915 us | -22.93% |
-| `argument_ingress/numeric_matrix_ref_100k/plain` | 41.442 us | 41.321 us | -0.29% |
-| `cache_deferred_queue/u64_churn` | 0.643 us | 0.609 us | -5.26% |
-| `cache_deferred_queue/owned_key_churn` | 0.824 us | 0.777 us | -5.71% |
-| `cache_reclamation/churn/payload_64b/threads_1` | 179.491 us | 172.466 us | -3.91% |
-| `cache_reclamation/churn/payload_65536b/threads_1` | 479.232 us | 483.791 us | +0.95% |
-| `cache_reclamation/live_leases/payload_65536b/threads_1` | 513.309 us | 508.395 us | -0.96% |
-| `cache_reclamation/live_leases/payload_65536b/threads_32` | 37126.995 us | 36902.414 us | -0.60% |
-
-All four FP12 digest controls match across all four runs. Small timing changes
-and concurrent batch-coordination effects are not attributed to universal speed
-gains; all 22 cases, individual intervals, raw samples, allocation/latency probes,
-and source patches remain in the result record.
-
-Validation: workspace nextest 1,284 passed / 11 skipped; no-default library
-380 passed / 7 ignored; handles library 534 passed / 8 ignored; cache-only
-491 library and 25 integration tests passed / 8 library tests ignored. All 288
-feature checks pass. Strict workspace all-target/all-feature Clippy, cache-only
-benchmark Clippy, rustdoc, formatting and panic-boundary checks pass. The expanded
-numeric identity boundary test passes strict-provenance Miri under both borrow
-models (one test each). x86_64/i686 MSVC library checks pass with `blake3/pure`.
-All 18 canonical bench-ci recipes pass with the 100 ms measurement override;
-those gate timings are excluded. Native Windows/live Excel remain unmeasured.
-
-[All results, raw samples, patches, probes and provenance](results/2026-10-17-input-cache-metrics.json).
-
-## 2026-10-17 deferred destruction queue experiment
-
-An empty deferred-destruction flush now checks a destructor-free TLS hint. The
-queue stores its first owned batch inline. It still takes the entire queue before
-calling destructors, and frees spilled storage at every flush; retaining capacity
-inside `ManuallyDrop` TLS would leak it at thread exit. The erased payload batch
-still has its own allocation. Operation guards and last-reader maintenance remain.
-
-Baseline `70a92282e42bda50d316f18465da43f31b26a8e6` and the candidate used
-separate source/target directories, identical fixtures, frozen SHA-256 checks,
-and ABBA order on macOS ARM64 / Rust 1.99.0. Each run used 20 samples,
-0.3 s warm-up, and 1.5 s measurement. The selected 64 KiB single-worker cases
-and both new key controls were also checked in BAAB order. Values are geometric
-means of two estimates per side, with all individual intervals retained.
-
-| Case | Baseline | Candidate | Time change |
-| --- | ---: | ---: | ---: |
-| `cache_lookup/cache_hit_hot_key/current/threads_1/u64` | 49.953 µs | 47.028 µs | -5.85% |
-| `cache_lookup/cache_hit_hot_key/current/threads_8/u64` | 1.363 ms | 1.399 ms | +2.67% |
-| `cache_deferred_queue/u64_churn` | 678.18 ns | 640.64 ns | -5.54% |
-| `cache_deferred_queue/owned_key_churn` | 845.95 ns | 822.98 ns | -2.72% |
-| `cache_reclamation/churn/payload_64b/threads_1` | 188.645 µs | 183.117 µs | -2.93% |
-| `cache_reclamation/churn/payload_65536b/threads_1` | 581.895 µs | 604.463 µs | +3.88% |
-| `cache_reclamation/live_leases/payload_65536b/threads_1` | 599.611 µs | 640.192 µs | +6.77% |
-| `cache_reclamation/live_leases/payload_65536b/threads_32` | 36.331 ms | 37.418 ms | +2.99% |
-
-The one-worker 256-operation 64-byte payload churn probe requests 1,026 allocator
-calls instead of 1,282 (-19.97%), and 113,160 bytes instead of 129,544 (-12.65%).
-The 64 KiB payload saves the same 256 calls / 16,384 requested bytes, only 0.097%
-of total requested bytes. Retained-lease probes are unchanged. The new u64-key/u64
-value control falls from 1,024 to 768 calls; the owned String key control retains
-2,049 calls but falls from 131,848 to 123,656 requested bytes. These are specific
-saved probes, not RSS or isolated queue-allocation counts. Concurrent grouping
-can change the allocation counts. All 14 deterministic cache workload controls (7 traces, cold/repeat)
-retain identical request/compute/hit/residency/pending observations.
-
-The measured tradeoff remains: 64 KiB single-worker live leases slow
-by 6.77% in ABBA and 7.95% in BAAB, with no allocation saving in that workload.
-This change was applied by explicit user request on 2026-10-17 despite that
-workload tradeoff. It is not qualified as a general performance improvement. The initial parallel regressions remain in the record; small
-timing changes and movement of unchanged controls are not presented as universal
-speed gains. Confirmation results:
-
-| Case | Baseline | Candidate | Time change |
-| --- | ---: | ---: | ---: |
-| `cache_deferred_queue/owned_key_churn` | 855.00 ns | 832.71 ns | -2.61% |
-| `cache_deferred_queue/u64_churn` | 734.90 ns | 654.68 ns | -10.92% |
-| `cache_reclamation/churn/payload_65536b/threads_1` | 581.429 µs | 594.586 µs | +2.26% |
-| `cache_reclamation/live_leases/payload_65536b/threads_1` | 564.902 µs | 609.806 µs | +7.95% |
-
-Validation: workspace nextest 1,284 passed / 11 skipped; cache-only library
-491 passed / 8 ignored; no-default library 380 passed / 7 ignored. Strict
-all-target/all-feature Clippy, rustdoc, formatting and panic-boundary checks pass.
-New queue tests pass strict-provenance Miri in both borrow models (5 each);
-existing cache review tests pass in both models (4 each / 1 preexisting ignored).
-The native late-TLS subprocess test passes. Cache-only x86_64/i686 MSVC library
-type checks pass. The 17 canonical bench-ci recipes completed with the 100 ms
-override; the last recipe was separately rechecked with its exit status saved.
-The added fixture passes its own build, strict Clippy, and final allocation probes.
-Gate timings are excluded. No native Windows/live Excel speed claim is made.
-
-[All results, confirmations, patches, allocation counters and provenance](results/2026-10-17-deferred-drop.json).
-
-## 2026-10-16 arena and diagnostics changes
-
-Object payload ownership remains in the arena. Its mutex/map is split into 32
-cache-padded shards selected by object sequence; seal and quiescence acquire all
-shards in a fixed order. Final capability removal registers its release tail
-under the same shard lock, and application destructors/trace run outside the
-locks. Production builds omit the diagnostic observation mutex; test/refinement
-builds retain it.
-
-The original `results/2026-10-16-review.json` bundle is absent from this checkout
-and its Git history. Its source/executable hashes, raw samples, rejected
-experiments and validation logs cannot be audited here. The previously quoted
-latency and allocation comparisons have therefore been removed from this section;
-these changes require new matched measurements before making performance claims.
-The independently saved October 17 result bundles above remain available.
-
-## 2026-10-11 short borrowed strings
-
-The first nonempty borrowed string in a call now uses an inline `SmolStr`
-when its decoded UTF-8 length is at most 23 bytes. The slot stays unchanged
-until call teardown, so later arguments cannot invalidate earlier borrows.
-Further strings and large typed collections retain arena storage. Empty
-strings return a static empty slice; public owned `String` input is unchanged.
-
-Baseline `3cb4ed15df314e6cb409dfdef39134e6bb499b2d` and the candidate used
-separate source/target directories, identical shared fixtures, frozen executable
-hashes, and ABBA order on macOS ARM64 with Rust 1.99.0. Each run used 20 samples,
-0.5 s warm-up, and 2 s measurement. Values are geometric means of two estimates
-per side; individual confidence intervals are not intervals for the A/B
-difference.
-
-| Borrowed input | Baseline | Candidate | Time change |
-| --- | ---: | ---: | ---: |
-| Short ASCII | 72.4 ns | 44.5 ns | -38.5% |
-| Short Unicode | 69.6 ns | 46.5 ns | -33.1% |
-| ASCII, 23 UTF-8 bytes | 82.1 ns | 63.7 ns | -22.3% |
-| Unicode, 23 UTF-8 bytes | 75.8 ns | 57.2 ns | -24.5% |
-| Empty | 26.9 ns | 26.3 ns | -2.4% |
-| Two strings in one call | 79.5 ns | 79.6 ns | +0.1% |
-
-Short ASCII and Unicode now request zero allocations, compared with one
-496-byte allocation per call. Strings above the inline limit retain one
-allocation. Counts cover 10,000 warmed calls and describe allocator requests,
-not RSS or peak live memory. The allocation gate asserts that the short
-borrowed inputs remain allocation-free.
-
-The 23 shared cases include 24-byte boundary controls, long text, 100/10k
-string matrices, 100k mixed/numeric matrices, and eight-argument calls with
-1/4/16/32 workers. Scalar numeric ingress rose 1.2% (23.1 to 23.4 ns), and
-eight-argument batches with one worker rose 1.4%. The other long/bulk/concurrent
-controls ranged from -1.3% to +0.7%; these small differences are not claimed
-as statistically significant. An unchanged owned short-string control measured
-9.9% faster; this is not attributed to the borrowed-string optimization.
-
-The initial candidate slowed empty strings by 52.5%. It was revised to bypass
-storage for empty strings, and the full ABBA comparison above was rerun.
-[Results, both experiments, source patches, allocation logs, and provenance](results/2026-10-11-smol-input.json)
-preserve all measured cases.
-An additional ABBA run of the three-cell mixed borrowed fixture measured
--3.1% with overlapping per-run confidence intervals. Its 100-cell mixed
-controls had wide baseline intervals and much larger gains, which are
-retained in the record without claiming a general matrix improvement.
-
-Validation: workspace nextest 1,232 passed / 11 skipped; all-target/all-feature
-Clippy, strict workspace rustdoc, formatting, and panic-boundary checks passed.
-The borrow-retention test passed Miri with strict provenance and with strict
-provenance plus Tree Borrows. Compile-fail snapshots retain the original
-thread/escape errors and now include the private inline slot's `Sync` note.
-All 17 `just bench-ci` recipes passed, including the new boundary controls
-and zero-allocation assertions. That gate ran alongside validation checks;
-its timings are excluded from the isolated comparisons. Windows x86_64/i686
-library checks passed with `blake3/pure`; the default backend required an
-unavailable MSVC assembler (`ml64.exe`).
-
-These local measurements do not establish native Windows/live Excel speed
-or the remaining Excel-DNA performance gap.
-
-## 2026-10-09 value boundaries
-
-This change removes repeated scalar-return ownership work, adds an explicit
-contiguous numeric input path, and avoids intermediate collection copies in
-the Excel-comparison functions. The comparison's cells, formulas, polling,
-and acceptance criteria are unchanged.
-
-Primitive number, Boolean, and Excel-error returns reuse a process-lifetime
-`XLOPER12` root per producing thread and loaded module. Each root requests
-32 bytes, plus allocator overhead, and remains allocated after thread exit.
-Windows uses the process heap so the root does not depend on a physically
-unloaded DLL's allocator. These roots have no `xlbitDLLFree` ownership transfer;
-strings and arrays retain their tracked ownership and cleanup. The producer
-guard still protects code execution during publication. This relies on Excel
-consuming the scalar before another call on the same thread replaces it.
-
-`NumericMatrixRef` accepts Excel's `K%`/FP12 input as a borrowed contiguous
-double slice. M01, M03, and M04 explicitly select that path; existing
-`Matrix<f64>` inputs retain their strict conversion contract. FP12 coercion
-can turn blank cells into zero and reject incompatible cells before Rust runs,
-so it cannot preserve every raw cell distinction. Output arrays remain ordinary
-`Q`/`XLOPER12` values, preserving error, panic, and closing-result behavior.
-M02 fills `XlArrayBuilder` directly, and M03 uses `XlArrayBuilder::from_f64`
-instead of constructing an intermediate owned matrix.
-
-M05 borrows mixed cells through `MatrixRef<ExcelCellRef>`. After a collection
-of at least 64 KiB, scratch storage allocates a separate text arena only if
-text is actually decoded. Small collections and large numeric-only collections
-keep their previous allocation strategy. Deliberately returned Excel errors
-remain error outcomes for instrumentation but do not enter the framework's
-failure-diagnostic stream. Other failures still do. Input-fingerprint errors
-are now constructed only on the failing branch, avoiding normal-path error
-construction and destruction for scalar arguments.
-
-Baseline `dd621818ee5266f049314d08d3fef1b29ac3df2b` and the candidate used separate
-source and target directories, common fixtures for shared cases, frozen
-executables, and SHA-256 checks before/after each invocation. The ABBA run used
-macOS ARM64, Rust 1.99.0, 20 samples, 0.3 s warm-up, and 1.5 s measurement.
-The values below are geometric means of two Criterion estimates per side;
-individual confidence intervals are not intervals for the A/B difference.
-
-The following comparisons select the API paths adopted by the Excel fixture.
-They compare different supported input/output paths rather than claiming that
-every call using the previous type became faster.
-
-| Path, 100k cells | Previous path | Adopted path | Time change |
-| --- | ---: | ---: | ---: |
-| Owned strict numeric input → borrowed FP12 input | 349.62 µs | 41.63 µs | -88.1% |
-| Owned matrix construction/return → direct builder | 83.12 µs | 69.61 µs | -16.3% |
-| Owned matrix conversion/return → numeric slice conversion | 65.40 µs | 60.18 µs | -8.0% |
-| Mixed ASCII cells, owned → borrowed | 1186.60 µs | 806.42 µs | -32.0% |
-| Mixed Unicode cells, owned → borrowed | 1283.11 µs | 903.67 µs | -29.6% |
-
-Common scalar cases include admission, execution, return publication, and
-cleanup. Each measured batch performs 1,000 calls per persistent worker;
-worker dispatch/completion is included and worker startup is excluded.
-
-| Common path | Workers | Baseline batch | Candidate batch | Time change |
-| --- | ---: | ---: | ---: | ---: |
-| Scalar return | 1 | 51.15 µs | 42.33 µs | -17.2% |
-| Scalar return | 32 | 3317.72 µs | 2550.31 µs | -23.1% |
-| Eight scalar arguments | 1 | 101.63 µs | 85.65 µs | -15.7% |
-| Eight scalar arguments | 16 | 1413.13 µs | 1304.79 µs | -7.7% |
-| Eight scalar arguments | 32 | 3827.98 µs | 3175.73 µs | -17.0% |
-| One scalar argument | 16 | 1250.35 µs | 1368.49 µs | +9.4% |
-| One scalar argument | 32 | 3086.97 µs | 3180.52 µs | +3.0% |
-| Deliberate Excel error, no subscriber | 1 | 57.55 µs | 40.29 µs | -30.0% |
-| Deliberate Excel error, no subscriber | 32 | 4093.83 µs | 2741.28 µs | -33.0% |
-| Domain failure, no subscriber | 1 | 55.10 µs | 45.93 µs | -16.7% |
-| Domain failure, no subscriber | 32 | 3508.11 µs | 3204.42 µs | -8.7% |
-
-These common costs affect S01, P02, and W03, which use the same scalar UDF.
-S02 retains strict scalar conversion. P04 retains its intentional shared
-atomic contention, so removing scalar-return overhead does not remove that
-workload's contention. Improvements vary with worker count and argument count:
-the one-argument 16- and 32-worker regressions above remain in the result.
-These short batches include coordination and do not establish a universal
-multithreaded throughput improvement.
-
-The 100k mixed borrowed fixture's requested allocation bytes per call fall
-from 7,200,736 to 2,609,128, while allocations rise from two to four. Its owned
-control requests 2,480,000 bytes in 20,001 allocations. The 1k borrowed case
-remains at 73,696 bytes in two allocations. These are allocator-request counts
-and cumulative requested bytes, not process RSS or live-memory measurements.
-An eagerly separated text arena was rejected: it reduced large-input bytes
-but slowed three-cell, 100-cell, and 100k-cell borrowed conversion substantially.
-
-Other regressions remain visible. Short borrowed-string conversion rose 10.1%
-(69.24 ns to 76.26 ns), 1k-string identity rose 5.6%, strict numeric matrix
-conversion with identity rose 4.1%, and raw string-matrix identity rose 4.7%.
-Borrowed 10k-string conversion rose 2.8%, and 100-cell mixed borrowed conversion
-rose about 2.1%. Plain owned numeric matrix conversion rose 0.7%; its earlier
-11.0% result is retained in the experiment record rather than discarded.
-
-The initial candidate introduced an outlined generic byte copy for each
-numeric identity value. Inlining the byte writer restored direct numeric
-stores, but a longer 40-sample/5 s ABBA confirmation still found the warm
-100k owned-matrix formula control 10.4% slower. A private `write_u64` function
-boundary now keeps numeric writes fixed-width while separating buffer
-management from their callers. That control improved 3.6% in a separate
-30-sample/3 s experiment and 3.5% in the final paired run (733.16 µs to
-707.27 µs). This does not establish an improvement for every identity path;
-the strict numeric-conversion and string-identity regressions remain above.
-
-[All shared/new cases, per-run estimates, allocation logs, source patches,
-rejected experiment, and executable provenance](results/2026-10-09-value-boundary.json)
-include the regressions as well as the adopted-path gains.
-
-Validation: final-source workspace nextest 1,230 passed / 11 skipped.
-All-target/all-feature Clippy, formatting, and panic-boundary checks passed
-on the final source. Strict xlfn rustdoc and guide checks also passed.
-Detached scalar roots passed strict provenance and Tree Borrows with their
-intentional process-lifetime allocations; FP12 borrowing passed both modes,
-and the lazy text-storage lifetime passed strict provenance. These Miri and
-Windows x86_64/i686 library cross-checks preceded the final private writer
-boundary; that change preserves the same little-endian bytes and ownership.
-`just bench-ci` completed all 17 recipes with
-`XLFN_BENCH_MEASUREMENT_MS=500`; fixed-timing groups retained their defaults.
-This execution/allocation gate ran alongside the final workspace checks; its
-timings are excluded from the isolated ABBA performance comparison.
-
-These are local production-path measurements. They do not measure Excel's
-FP12 coercion cost, the complete Excel-DNA gap, or native Windows/live Excel
-performance. The Excel fixture still needs native qualification, including
-the registered `K%` input path and process-lifetime scalar roots.
-
-## 2026-10-06 plain input conversion
-
-The `ExcelParameter<PlainInputMode>::decode` blanket implementation only
-forwards to `T::from_excel`. In the baseline ARM64 release binary, this wrapper
-remained an out-of-line call for every numeric array cell. Inlining the wrapper
-lets the existing `f64::from_excel` implementation join the conversion loop.
-Header validation, array budgets, error ordering, and allocation policy are
-unchanged. The underlying custom converter retains its own inlining policy.
-
-Baseline `3291518b9678a1934007bd7ed422b120ba59b6a5` and the candidate used separate
-target directories, frozen executables, and SHA-256 checks before/after every
-run. The unchanged `argument_ingress` fixture ran in ABBA order on macOS ARM64
-with Rust 1.99.0, 0.5 s warm-up, 3 s measurement, and 30 samples per case. Values
-below are medians of the two Criterion slope estimates on each side, not
-confidence intervals for the A/B difference.
-
-| Input | Baseline | Candidate | Time change |
-| --- | ---: | ---: | ---: |
-| `Matrix<f64>`, 100k cells, plain | 398.40 µs | 350.27 µs | -12.1% |
-| `MatrixRef<f64>`, 100k cells, plain | 410.90 µs | 355.64 µs | -13.4% |
-| `Vec<f64>`, 100k cells, plain | 402.53 µs | 347.53 µs | -13.7% |
-| `MatrixRef<f64>`, 16 cells, plain | 131.18 ns | 114.72 ns | -12.5% |
-| `Matrix<f64>`, 100k cells, with identity | 1063.53 µs | 1067.57 µs | +0.4% |
-| `Matrix<String>`, 10k cells | 381.64 µs | 396.07 µs | +3.8% |
-| Borrowed string matrix, 10k cells | 175.91 µs | 180.43 µs | +2.6% |
-| Scalar `f64` | 22.51 ns | 23.05 ns | +2.4% |
-
-[All 15 cases, individual estimates, source patch, and executable provenance](results/2026-10-06-plain-ingress.json)
-include the small regressions as well as improvements. Do not extrapolate this
-compiler-sensitive result to every input type. Splitting the array budget's
-string branch also improved numeric input, but slowed identity conversion by
-3.7% in screening and was reverted. Numeric-output inlining had no consistent
-large-array benefit and was also reverted.
-
-`just bench-ci` now includes plain owned/borrowed numeric matrix input and
-owned string matrix input, alongside its identity and borrowed-string controls.
-These are Excel-independent production-path measurements. They do not establish
-the cause or size of the full Excel-DNA gap, and do not qualify Windows/Excel
-performance. The event-registration fix made afterwards is outside this paired
-source comparison.
-
-Validation of the combined working tree (including the event-registration
-repair): workspace nextest 1,165 passed / 11 skipped; comparison-runner Python
-tests 67 passed; all-target/all-feature Clippy, strict xlfn rustdoc, formatting,
-and panic-boundary checks passed. `just bench-ci` completed all 17 recipes with
-`XLFN_BENCH_MEASUREMENT_MS=500` (groups with fixed timing retained their default).
-That shortened gate checks execution and allocation assertions; its timings
-are not part of the isolated ABBA comparison above. Registration tests also
-passed without default features (36 tests).
-
-The Windows XLL cross-check was blocked by missing `ml64.exe` on macOS. An
-auxiliary x86_64 MSVC library check with `async,rtd,handles,cache,blake3/pure`
-passed; it does not establish a native XLL build or Excel execution.
+# Benchmarks
+
+Run commands from the repository root. [Justfile](../../../Justfile) defines
+the maintained CI and scaling suites; [Cargo.toml](../Cargo.toml) registers
+every runnable target and its required features.
+
+```sh
+rtk just bench-ci       # Canonical regression suite; bench-pr uses the same suite.
+rtk just bench-scaling  # Worker, batch, and input-size curves.
+rtk just bench-full     # Unfiltered runs of the targets selected in Justfile.
+rtk just bench-check    # Clippy for every benchmark with all features.
+```
+
+`bench-full` runs the selected targets without Criterion name filters.
+Additional targets are available for focused investigations:
+
+| Targets | Measurement | Features for `bench-one` |
+| --- | --- | --- |
+| `async_admission`, `async_admission_concurrent`, `async_admission_allocations` | Admitted/saturated async calls, concurrent launch/drain, and caller allocations | `bench-internals async-builtin` |
+| `async_handle_scoped`, `async_handle_scoped_allocations` | Actual handle-scoped task delivery and caller allocations | `bench-internals async-builtin` |
+| `cache_lookup`, `cache_workloads` | Warm lookup/live-lease retirement and deterministic weighted recalculation traces | `bench-internals cache` |
+| `diagnostics_queue`, `diagnostics_queue_allocations` | Reporting, backpressure, opt-in subscribers, and retained payloads | `bench-internals` |
+| `handle_memory` | Requested live bytes during sparse growth and publication churn | `bench-internals` |
+| `input_identity` | UTF-16 and scalar/matrix identity encoding | `bench-internals` |
+| `protocol_costs` | Handle retirement, token cache, queues, and RTD pipeline probes | `bench-internals rtd` |
+| `two_phase_ingress` | Prepared/eager input through actual formula publication, with time and allocation JSON | `bench-internals` |
+
+For example:
+
+```sh
+rtk just bench-one async_admission "bench-internals async-builtin"
+rtk just bench-one input_identity
+```
+
+Criterion groups normally use a ten-second measurement period.
+`XLFN_BENCH_MEASUREMENT_MS` overrides measurement time for short local runs;
+Criterion warmup and sample-count arguments are separate. Custom JSON and
+allocation probes use their own iteration counts.
+
+These benchmarks execute Rust paths independently of Excel/COM. Allocation
+traffic, requested live bytes, timing, and production-feature measurements
+have different scopes, described below. For A/B comparisons, use identical
+fixtures and feature selections, separate source/target directories, frozen
+executable hashes, and repeated ABBA/BAAB ordering.
 
 ## `async_task_drain`
 
@@ -528,6 +121,17 @@ allocator's disabled TLS check remains present. Final retained leases are
 released at worker shutdown, outside measurement; steady-state displaced-lease
 release is included in both the operation and batch timings.
 
+The `cache_nonresident/roundtrip` and `cache_deferred_queue` groups add
+scalar roundtrip and key-ownership controls. To measure the ordinary production
+configuration without benchmark observation counters:
+
+```sh
+rtk cargo bench -p xlfn --bench cache_reclamation --no-default-features --features cache --locked
+```
+
+Observation fields unavailable in this configuration are JSON `null`.
+Enable `bench-internals,cache` for the observation metrics described above.
+
 Run the normal ten-second-per-case measurements with 256 operations per worker
 and 20 flat samples:
 
@@ -535,7 +139,7 @@ and 20 flat samples:
 cargo bench -p xlfn --bench cache_reclamation --features bench-internals,cache
 ```
 
-For a short execution/metrics smoke check of all twelve cases, use 64
+For a short execution/metrics smoke check of the matrix and controls, use 64
 operations per worker and Criterion's test mode:
 
 ```text
@@ -557,35 +161,6 @@ clock/statistics reads. Compare repeated full runs on the deployment host,
 with matching allocator, payloads, retention windows, and cache policy, before
 using the results for a design decision.
 
-### 2026-09-07 reclamation smoke result
-
-A local macOS arm64 release build completed all twelve cases in test mode,
-using 64 operations per worker. Each final pending-node count was zero after
-the diagnostic batches, without an observer-triggered cleanup. The table
-records one short run; allocator counts and p99 come from separate probes.
-Peak pending nodes cover warm-up plus both probes, while retained leases are
-reported at the end of the latency probe.
-
-| Workload | Payload | Workers | Allocation requests / batch | Operation p99 | Peak pending nodes | Retained leases |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| churn | 64 B | 1 | 1,173 | 13.8 µs | 31 | 0 |
-| churn | 64 B | 8 | 9,242 | 147.2 µs | 32 | 0 |
-| churn | 64 B | 32 | 36,868 | 1,120.9 µs | 154 | 0 |
-| churn | 64 KiB | 1 | 1,159 | 16.7 µs | 31 | 0 |
-| churn | 64 KiB | 8 | 9,217 | 218.8 µs | 65 | 0 |
-| churn | 64 KiB | 32 | 36,954 | 1,232.5 µs | 59 | 0 |
-| live leases | 64 B | 1 | 1,197 | 10.8 µs | 16 | 32 |
-| live leases | 64 B | 8 | 9,482 | 130.0 µs | 11 | 256 |
-| live leases | 64 B | 32 | 37,770 | 698.1 µs | 35 | 1,024 |
-| live leases | 64 KiB | 1 | 1,165 | 10.7 µs | 16 | 32 |
-| live leases | 64 KiB | 8 | 9,463 | 134.4 µs | 8 | 256 |
-| live leases | 64 KiB | 32 | 37,739 | 721.8 µs | 46 | 1,024 |
-
-This run did not compare an earlier implementation, and Criterion test mode
-does not produce throughput estimates or confidence intervals. The 32-worker
-p99 includes substantial contention/scheduling effects; it is a measurement
-starting point, not evidence that tail latency has improved.
-
 ## `rtd_prepare`
 
 This benchmark times batches of 256 subscriptions on one source, with either
@@ -601,50 +176,14 @@ excluded. Timing includes reservation handling, index maintenance, pending-byte
 accounting, and destruction of consumed topics; churn also includes its temporary
 reservation vector. It does not include Excel/COM connection or publication.
 
-Run all six cases with the normal ten-second measurement policy:
+The target also measures admission rejection, existing-topic reuse, and new
+insertion/rollback with prevalidated 16 KiB and 1 MiB topics. The
+`rtd_subscribe_input` group includes the public subscription input path for
+256 or 4,096 topics. Run every group with:
 
-```text
-just bench-one rtd_prepare "bench-internals rtd"
+```sh
+rtk just bench-one rtd_prepare "bench-internals rtd"
 ```
-
-`just bench-full` includes this target. For a shorter local A/B comparison, use
-the same benchmark fixture on both revisions and save separate Criterion baselines:
-
-```text
-XLFN_BENCH_MEASUREMENT_MS=3000 cargo bench -p xlfn --bench rtd_prepare \
-  --features "bench-internals rtd" --locked -- \
-  --warm-up-time 1 --sample-size 30 --save-baseline non-owning
-```
-
-### 2026-09-09 identity index comparison
-
-A local macOS arm64 release comparison used the command above: 1 s warm-up,
-3 s measurement, and 30 samples per case. The owning baseline was revision
-`a65833b` with the same benchmark fixture copied into an isolated checkout.
-The final non-owning implementation returns the matching entry alongside its ID
-to avoid another entry lookup in `prepare`. These two measurements ran
-sequentially after the workspace tests had finished.
-
-Values are Criterion slope point estimates for one 256-subscription batch;
-negative change means less time. This is one short local A/B run, not a Windows
-or Excel performance qualification.
-
-| Operation | Topic parts | Owning index | Non-owning index | Time change |
-| --- | ---: | ---: | ---: | ---: |
-| new | 1 | 84.38 µs | 57.48 µs | -31.9% |
-| existing | 1 | 16.89 µs | 22.50 µs | +33.2% |
-| churn | 1 | 113.89 µs | 70.26 µs | -38.3% |
-| new | 10 | 206.91 µs | 58.86 µs | -71.6% |
-| existing | 10 | 54.16 µs | 57.45 µs | +6.1% |
-| churn | 10 | 378.57 µs | 103.67 µs | -72.6% |
-
-New admission and churn improved in this run. Existing-topic reuse remained
-slower, particularly for single-part topics, even after eliminating the
-redundant entry lookup. The ownership change removes the retained topic copy
-and insertion/removal deep clones, but does not establish a latency improvement
-for every path. Confirm the reuse tradeoff with repeated full measurements on
-the deployment host before setting performance thresholds. Allocation counts
-and retained bytes were not measured by this timing fixture.
 
 ## Protocol costs
 
