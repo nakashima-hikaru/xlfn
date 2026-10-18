@@ -16,7 +16,7 @@ xlfn-sys = { version = "=0.2.0", path = "../../crates/xlfn-sys", features = ["ab
 
 [build-dependencies]
 bindgen = { version = "0.73.2", optional = true }
-cc = "1.6.0"
+cc = "1.8.0"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
