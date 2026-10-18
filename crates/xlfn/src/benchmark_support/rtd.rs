@@ -45,6 +45,69 @@ pub struct RtdPrepareBenchmark {
 }
 
 impl RtdPrepareBenchmark {
+    /// Admission benchmark with inputs and quota occupancy outside measurement.
+    /// Inputs and initial quota occupancy are prepared outside measurement.
+    pub fn new_admission(case: &str, topic_bytes: usize) -> Self {
+        let mut benchmark = Self::new(0, 1, false);
+        assert!(topic_bytes > 0 && topic_bytes <= 1024 * 1024);
+        let mut remaining = topic_bytes;
+        let mut parts = Vec::new();
+        while remaining != 0 {
+            let length = remaining.min(16 * 1024);
+            parts.push("x".repeat(length));
+            remaining -= length;
+        }
+        let topic = crate::subscription::RtdTopic::new(&parts).expect("valid probe topic");
+        benchmark.runtime.limits = match case {
+            "pending_disabled" => crate::subscription::RtdLimits::standard()
+                .with_max_pending(crate::subscription::RtdCapacity::disabled()),
+            "pending_full" | "existing_reuse" => crate::subscription::RtdLimits::standard()
+                .with_max_pending(crate::subscription::RtdCapacity::disabled_if_zero(1)),
+            "source_disabled" => crate::subscription::RtdLimits::standard()
+                .with_max_source_ids(crate::subscription::RtdCapacity::disabled()),
+            "admitted" => crate::subscription::RtdLimits::standard(),
+            "byte_budget" => crate::subscription::RtdLimits::standard().with_max_total_topic_bytes(
+                crate::subscription::RtdCapacity::disabled_if_zero(topic_bytes - 1),
+            ),
+            _ => panic!("unknown quota probe case"),
+        };
+        if case == "pending_full" {
+            let seed = crate::subscription::RtdTopic::single("seed").expect("valid seed topic");
+            benchmark
+                .runtime
+                .prepare(&benchmark.source, seed.borrowed())
+                .expect("fill pending quota")
+                .commit();
+        } else if case == "existing_reuse" {
+            benchmark
+                .runtime
+                .prepare(&benchmark.source, topic.borrowed())
+                .expect("seed reusable topic")
+                .commit();
+        }
+        benchmark.topics.push(topic);
+        benchmark
+    }
+
+    /// Measures only runtime preparation of a prevalidated borrowed topic.
+    pub fn run_admission(&self, expect_overloaded: bool) {
+        let topic = &self.topics[0];
+        match self.runtime.prepare(&self.source, topic.borrowed()) {
+            Ok(prepared) => {
+                assert!(
+                    !expect_overloaded,
+                    "quota probe unexpectedly admitted topic"
+                );
+                std::hint::black_box(prepared.id());
+                prepared.rollback();
+            }
+            Err(crate::XllError::Overloaded) => {
+                assert!(expect_overloaded, "reusable topic was rejected");
+            }
+            Err(error) => panic!("unexpected probe error: {error}"),
+        }
+    }
+
     pub fn new(count: usize, parts: usize, existing: bool) -> Self {
         let generation =
             crate::generation::RuntimeGeneration::new(1).expect("benchmark generation is non-zero");

@@ -131,6 +131,11 @@ harness = false
 required-features = ["bench-internals", "rtd"]
 
 [[bench]]
+name = "rtd_prepare_allocations"
+harness = false
+required-features = ["bench-internals", "rtd"]
+
+[[bench]]
 name = "protocol_costs"
 harness = false
 required-features = ["bench-internals", "rtd"]

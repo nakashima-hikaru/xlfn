@@ -6,7 +6,7 @@ use smallvec::SmallVec;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-enum SourceRefUpdate {
+pub(super) enum SourceRefUpdate {
     Insert,
     Increment(NonZeroUsize),
 }
@@ -34,7 +34,7 @@ impl SubscriptionIdentityIndex {
         self.ids_by_key.get(&key).map_or(&[], SmallVec::as_slice)
     }
 
-    fn plan_insert(
+    pub(super) fn plan_insert(
         &self,
         key: SubscriptionIdentityKey,
         id: SubscriptionId,
@@ -66,7 +66,7 @@ impl SubscriptionIdentityIndex {
         Ok(source_ref_update)
     }
 
-    fn commit_insert(
+    pub(super) fn commit_insert(
         &mut self,
         key: SubscriptionIdentityKey,
         id: SubscriptionId,
@@ -95,6 +95,7 @@ impl SubscriptionIdentityIndex {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn insert(
         &mut self,
         key: SubscriptionIdentityKey,

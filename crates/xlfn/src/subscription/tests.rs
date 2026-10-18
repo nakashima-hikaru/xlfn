@@ -2570,6 +2570,78 @@ fn pending_count_follows_borrowed_connection_and_termination_transitions() {
 }
 
 #[test]
+fn miri_rejected_topic_admission_never_reads_parts_to_copy_them() {
+    struct CountedPart<'a> {
+        reads: &'a std::cell::Cell<usize>,
+        text: &'a str,
+    }
+    impl AsRef<str> for CountedPart<'_> {
+        fn as_ref(&self) -> &str {
+            self.reads.set(self.reads.get() + 1);
+            self.text
+        }
+    }
+    for case in ["pending", "bytes", "source", "id"] {
+        let (arena, source, _, _) = publishing_source::<f64>(None);
+        let mut runtime = SubscriptionRuntime::with_sources_for_internal(arena);
+        runtime.limits = match case {
+            "pending" => RtdLimits::standard().with_max_pending(RtdCapacity::disabled()),
+            "bytes" => RtdLimits::standard().with_max_total_topic_bytes(RtdCapacity::disabled()),
+            "source" => RtdLimits::standard().with_max_source_ids(RtdCapacity::disabled()),
+            _ => RtdLimits::standard(),
+        };
+        if case == "id" {
+            runtime.catalog.lock().next_subscription_id = u64::MAX;
+        }
+        let next_id = runtime.catalog.lock().next_subscription_id;
+        let reads = std::cell::Cell::new(0);
+        let parts = [CountedPart {
+            reads: &reads,
+            text: "a non-inline topic name which must never be copied",
+        }];
+        let topic = BorrowedTopicParts::new(&parts).unwrap();
+        reads.set(0);
+        let result = runtime.prepare(&source, topic);
+        assert!(if case == "id" {
+            matches!(result, Err(XllError::Internal { .. }))
+        } else {
+            matches!(result, Err(XllError::Overloaded))
+        });
+        assert_eq!(reads.get(), 0, "rejected topic reached owned conversion");
+        let catalog = runtime.catalog.lock();
+        assert_eq!(catalog.next_subscription_id, next_id);
+        assert!(catalog.entries.is_empty());
+        assert_eq!(catalog.pending_topic_bytes, 0);
+        catalog.assert_identity_invariants();
+    }
+}
+
+#[test]
+fn existing_topic_reuse_precedes_all_new_admission_limits() {
+    let (arena, source, _, _) = publishing_source::<f64>(None);
+    let mut runtime = SubscriptionRuntime::with_sources_for_internal(arena);
+    let prepared = runtime
+        .prepare(&source, BorrowedTopicParts::new(&["reused"]).unwrap())
+        .unwrap();
+    let key = *prepared.key();
+    prepared.commit();
+    runtime.limits = RtdLimits::standard()
+        .with_max_pending(RtdCapacity::disabled())
+        .with_max_total_topic_bytes(RtdCapacity::disabled())
+        .with_max_source_ids(RtdCapacity::disabled());
+    let reused = runtime
+        .prepare(&source, BorrowedTopicParts::new(&["reused"]).unwrap())
+        .unwrap();
+    assert_eq!(*reused.key(), key);
+    reused.commit();
+    assert!(matches!(
+        runtime.prepare(&source, BorrowedTopicParts::new(&["new"]).unwrap()),
+        Err(XllError::Overloaded)
+    ));
+    runtime.catalog.lock().assert_identity_invariants();
+}
+
+#[test]
 fn borrowed_admission_rejection_preserves_counts_and_runtime_checks() {
     let (arena, source, _, _) = publishing_source::<f64>(None);
     let runtime = SubscriptionRuntime::with_host(

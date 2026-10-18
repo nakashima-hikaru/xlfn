@@ -11,7 +11,88 @@ pub struct RawArgumentIngressBenchmark {
     _storage: Option<Box<dyn std::any::Any>>,
 }
 
+/// Numeric optional collection representation selected by the input benchmarks.
+#[derive(Clone, Copy, Debug)]
+pub enum OptionalNumericInputKind {
+    /// An owned matrix with missing/blank values mapped to None.
+    Owned,
+    /// An owned matrix retaining missing/blank as distinct variants.
+    Presence,
+    /// A call-scoped typed matrix borrowed from scratch only on a miss.
+    Borrowed,
+}
+
 impl RawArgumentIngressBenchmark {
+    /// Valid numerical cells interspersed with omitted and blank cells.
+    pub fn optional_number_matrix(cells: usize) -> Self {
+        let mut storage = (0..cells)
+            .map(|index| match index % 5 {
+                0 => xlfn_sys::XLOPER12::number(-0.0),
+                1 => xlfn_sys::XLOPER12::integer(index as i32),
+                2 => xlfn_sys::XLOPER12::nil(),
+                3 => xlfn_sys::XLOPER12::missing(),
+                _ => xlfn_sys::XLOPER12::number(f64::from_bits(1)),
+            })
+            .collect::<Vec<_>>();
+        let raw = xlfn_sys::XLOPER12 {
+            value: xlfn_sys::XLOPER12Value {
+                array: xlfn_sys::XLOPER12Array {
+                    rows: cells as i32,
+                    columns: 1,
+                    values: storage.as_mut_ptr(),
+                },
+            },
+            xltype: xlfn_sys::XLTYPE_MULTI,
+        };
+        Self {
+            runtime: get_benchmark_runtime(),
+            raw,
+            _storage: Some(Box::new(storage)),
+        }
+    }
+
+    /// Prepare/identity/discard models a warm hit; materialization models a miss.
+    pub fn run_optional_numeric_prepared(
+        &mut self,
+        kind: OptionalNumericInputKind,
+        materialize: bool,
+    ) -> [u8; 32] {
+        let ingress = benchmark_ingress();
+        let call = self
+            .runtime
+            .enter(&ingress)
+            .expect("benchmark runtime must be open");
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
+            let mut arguments =
+                crate::value::ArgumentContext::<crate::value::FormulaInputMode>::new(
+                    call, scope, 1,
+                );
+            // SAFETY: fixture-owned cells remain immutable throughout the call.
+            let raw = unsafe { crate::value::XlValueRef::from_raw(&mut self.raw) }.unwrap();
+            macro_rules! run {
+                ($ty:ty) => {{
+                    let prepared = arguments.prepare::<$ty>(0, "arg", raw).unwrap();
+                    let digest = arguments.finish().unwrap().unwrap();
+                    if materialize {
+                        std::hint::black_box(prepared.materialize().unwrap());
+                    } else {
+                        std::hint::black_box(prepared);
+                    }
+                    digest
+                }};
+            }
+            match kind {
+                OptionalNumericInputKind::Owned => run!(crate::value::Matrix<Option<f64>>),
+                OptionalNumericInputKind::Presence => {
+                    run!(crate::value::Matrix<crate::value::OptionalExcelValue<f64>>)
+                }
+                OptionalNumericInputKind::Borrowed => {
+                    run!(crate::value::MatrixRef<'_, Option<f64>>)
+                }
+            }
+        })
+    }
+
     pub fn number(value: f64) -> Self {
         Self {
             runtime: get_benchmark_runtime(),

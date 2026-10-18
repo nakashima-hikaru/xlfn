@@ -615,6 +615,10 @@ impl<'a, Part: AsRef<str>> BorrowedTopicParts<'a, Part> {
                 .eq(self.parts.iter().map(AsRef::as_ref))
     }
 
+    pub(super) fn byte_len(&self) -> usize {
+        self.metadata.byte_len
+    }
+
     pub(super) fn into_owned(self) -> RtdTopic {
         RtdTopic {
             parts: self

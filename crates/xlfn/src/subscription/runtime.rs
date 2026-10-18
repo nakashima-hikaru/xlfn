@@ -258,8 +258,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             });
         }
 
-        let (id, key) =
-            catalog.insert_pending(self.runtime_id, source.id, topic.into_owned(), self.limits)?;
+        let (id, key) = catalog.insert_pending(self.runtime_id, source.id, topic, self.limits)?;
 
         Ok(PreparedSubscription {
             id,

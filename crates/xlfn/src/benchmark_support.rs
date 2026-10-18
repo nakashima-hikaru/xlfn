@@ -101,7 +101,7 @@ pub use handle::{
     BenchHandleObject, HandleColdBatch, HandleColdGrowthBenchmark, HandleRevisionChurnBenchmark,
     HandleWarmBenchmark,
 };
-pub use ingress::{RawArgumentIngressBenchmark, TwoPhaseBenchmark};
+pub use ingress::{OptionalNumericInputKind, RawArgumentIngressBenchmark, TwoPhaseBenchmark};
 pub use lookup::{HandleDistinctKeyBenchmark, HandleLookupBenchCase, HandleLookupBenchmark};
 pub use numeric_ingress::NumericMatrixIngressBenchmark;
 pub use output::{

@@ -715,6 +715,30 @@ where
     })
 }
 
+fn prepare_optional_elements<'call, T, M, const RETAINED_BUDGET: bool>(
+    cells: ExcelInputCells<'call>,
+    context: &CallContext<'call>,
+    identity: &mut M::Identity,
+) -> XllResult<PreparedExcelSequence<'call, T, PreparedArgument<T, T::Prepared>>>
+where
+    M: InputMode,
+    T: ExcelParameter<'call, M>,
+{
+    if let Some(decode) = T::BORROWED_ELEMENT_DECODER {
+        // Resource-free built-ins need validation and identity here, but no
+        // transient tree of PreparedArgument wrappers for every cell.
+        cells.borrowed_wrapped::<_, _, RETAINED_BUDGET>(
+            |value, argument| T::decode(value, argument, context, identity).map(drop),
+            decode,
+        )
+    } else {
+        cells.retain(
+            |value, argument| T::prepare(value, argument, context, identity),
+            PreparedArgument::materialize,
+        )
+    }
+}
+
 impl<'call, T, M> input::sealed::ExcelParameterSealed<'call, M> for OptionalExcelValue<T>
 where
     M: InputMode,
@@ -727,6 +751,17 @@ where
     M: InputMode,
     T: ExcelParameter<'call, M>,
 {
+    const BORROWED_ELEMENT_DECODER: Option<fn(XlValueRef<'call>, &'static str) -> XllResult<Self>> =
+        match T::BORROWED_ELEMENT_DECODER {
+            Some(_) => Some(|value, argument| {
+                convert::optional_value(
+                    value,
+                    argument,
+                    T::BORROWED_ELEMENT_DECODER.expect("borrowed wrapper has a built-in decoder"),
+                )
+            }),
+            None => None,
+        };
     type Prepared = OptionalExcelValue<PreparedArgument<T, T::Prepared>>;
     fn prepare(
         value: XlValueRef<'call>,
@@ -764,12 +799,23 @@ where
         context: &CallContext<'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self::Elements> {
-        cells.retain(
-            |value, argument| {
-                <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)
-            },
-            PreparedArgument::materialize,
-        )
+        prepare_optional_elements::<Self, M, true>(cells, context, identity)
+    }
+    fn prepare_elements_borrowed(
+        cells: ExcelInputCells<'call>,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<Self::Elements> {
+        prepare_optional_elements::<Self, M, false>(cells, context, identity)
+    }
+    fn materialize_elements_borrowed(
+        elements: Self::Elements,
+        scope: &'call crate::call::CallScope<'call>,
+    ) -> XllResult<&'call [Self]>
+    where
+        Self: Copy,
+    {
+        elements.materialize_borrowed(scope)
     }
     fn materialize_elements(elements: Self::Elements) -> XllResult<Vec<Self>> {
         elements.materialize()
@@ -817,6 +863,17 @@ where
     M: InputMode,
     T: ExcelParameter<'call, M>,
 {
+    const BORROWED_ELEMENT_DECODER: Option<fn(XlValueRef<'call>, &'static str) -> XllResult<Self>> =
+        match T::BORROWED_ELEMENT_DECODER {
+            Some(_) => Some(|value, argument| {
+                convert::optional(
+                    value,
+                    argument,
+                    T::BORROWED_ELEMENT_DECODER.expect("borrowed wrapper has a built-in decoder"),
+                )
+            }),
+            None => None,
+        };
     type Prepared = Option<PreparedArgument<T, T::Prepared>>;
     fn prepare(
         value: XlValueRef<'call>,
@@ -846,12 +903,23 @@ where
         context: &CallContext<'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self::Elements> {
-        cells.retain(
-            |value, argument| {
-                <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)
-            },
-            PreparedArgument::materialize,
-        )
+        prepare_optional_elements::<Self, M, true>(cells, context, identity)
+    }
+    fn prepare_elements_borrowed(
+        cells: ExcelInputCells<'call>,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<Self::Elements> {
+        prepare_optional_elements::<Self, M, false>(cells, context, identity)
+    }
+    fn materialize_elements_borrowed(
+        elements: Self::Elements,
+        scope: &'call crate::call::CallScope<'call>,
+    ) -> XllResult<&'call [Self]>
+    where
+        Self: Copy,
+    {
+        elements.materialize_borrowed(scope)
     }
     fn materialize_elements(elements: Self::Elements) -> XllResult<Vec<Self>> {
         elements.materialize()
@@ -982,14 +1050,15 @@ where
         context: &CallContext<'call>,
         identity: &mut M::Identity,
     ) -> XllResult<PreparedArgument<Self, Self::Prepared>> {
-        if !M::RECORDS_IDENTITY || !T::DEFER_BORROWED_MATRIX {
+        if !M::RECORDS_IDENTITY || T::BORROWED_ELEMENT_DECODER.is_none() {
             return Self::decode(value, argument, context, identity).map(PreparedArgument::Ready);
         }
         let grid = convert::grid(value, argument, convert::GridShape::Matrix)?;
         let (rows, columns) = grid.shape();
         M::u64(identity, rows as u64);
         M::u64(identity, columns as u64);
-        let elements = T::prepare_elements(ExcelInputCells { grid, argument }, context, identity)?;
+        let elements =
+            T::prepare_elements_borrowed(ExcelInputCells { grid, argument }, context, identity)?;
         Ok(PreparedArgument::Prepared {
             value: (rows, columns, elements, context.scope()),
             materialize: |(rows, columns, elements, scope)| {

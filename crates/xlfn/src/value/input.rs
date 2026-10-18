@@ -272,6 +272,36 @@ impl<'call> ExcelInputCells<'call> {
         })
     }
 
+    fn wrapped_budget<T, P, const RETAINED: bool>(
+        length: usize,
+        argument: &'static str,
+    ) -> XllResult<super::ArrayInputBudget> {
+        let budget = super::ArrayInputBudget::new::<T>(length, argument)?;
+        if RETAINED {
+            super::ArrayInputBudget::new::<P>(length, argument)?;
+        }
+        Ok(budget)
+    }
+
+    // Owned preparation preserves its former prepared-size admission check;
+    // MatrixRef preserves its eager path's output-only budget instead.
+    pub(super) fn borrowed_wrapped<T, P, const RETAINED_BUDGET: bool>(
+        self,
+        mut validate: impl FnMut(XlValueRef<'call>, &'static str) -> XllResult<()>,
+        materialize: fn(XlValueRef<'call>, &'static str) -> XllResult<T>,
+    ) -> XllResult<PreparedExcelSequence<'call, T, P>> {
+        let mut budget =
+            Self::wrapped_budget::<T, P, RETAINED_BUDGET>(self.grid.cells().len(), self.argument)?;
+        for cell in self.grid.cells() {
+            let value = XlValueRef::from_array_cell(cell)?;
+            budget.include(value)?;
+            validate(value, self.argument)?;
+        }
+        Ok(PreparedExcelSequence {
+            state: SequenceState::Borrowed(self, materialize),
+        })
+    }
+
     pub(crate) fn borrowed<T: PrepareExcel<'call>>(
         self,
         identity: &mut InputIdentityEncoder,
@@ -337,8 +367,10 @@ impl<T, P> PreparedExcelSequence<'_, T, P> {
         }
     }
 
-    #[cfg(any(feature = "handles", test))]
-    fn materialize_borrowed<'call>(self, scope: &'call CallScope<'call>) -> XllResult<&'call [T]>
+    pub(super) fn materialize_borrowed<'call>(
+        self,
+        scope: &'call CallScope<'call>,
+    ) -> XllResult<&'call [T]>
     where
         T: Copy,
     {
@@ -387,7 +419,10 @@ impl<T, P> PreparedArgument<T, P> {
 pub trait ExcelParameter<'call, M: InputMode>:
     sealed::ExcelParameterSealed<'call, M> + Sized
 {
-    const DEFER_BORROWED_MATRIX: bool = false;
+    // Only context-free built-ins may be decoded again after lookup. Custom
+    // prepared ownership and call-scoped resources must stay retained.
+    const BORROWED_ELEMENT_DECODER: Option<fn(XlValueRef<'call>, &'static str) -> XllResult<Self>> =
+        None;
     type Prepared;
     fn prepare(
         value: XlValueRef<'call>,
@@ -404,6 +439,14 @@ pub trait ExcelParameter<'call, M: InputMode>:
         identity: &mut M::Identity,
     ) -> XllResult<Self::Elements>;
     fn materialize_elements(elements: Self::Elements) -> XllResult<Vec<Self>>;
+
+    fn prepare_elements_borrowed(
+        cells: ExcelInputCells<'call>,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<Self::Elements> {
+        Self::prepare_elements(cells, context, identity)
+    }
 
     fn materialize_elements_borrowed(
         elements: Self::Elements,
@@ -473,7 +516,12 @@ impl<'call, T> ExcelParameter<'call, FormulaInputMode> for T
 where
     T: PrepareExcel<'call>,
 {
-    const DEFER_BORROWED_MATRIX: bool = T::__BORROWED_ELEMENTS;
+    const BORROWED_ELEMENT_DECODER: Option<fn(XlValueRef<'call>, &'static str) -> XllResult<Self>> =
+        if T::__BORROWED_ELEMENTS {
+            Some(T::from_excel)
+        } else {
+            None
+        };
     type Prepared = T::Prepared;
     fn prepare(
         value: XlValueRef<'call>,
@@ -1161,6 +1209,174 @@ mod preparation_tests {
     }
 
     #[test]
+    fn miri_optional_numeric_collections_preserve_identity_and_values() {
+        use crate::value::{Matrix, MatrixRef, OptionalExcelValue};
+        for length in [1, 14, 15, 65] {
+            let mut cells = (0..length)
+                .map(|index| match index % 5 {
+                    0 => XLOPER12::number(-0.0),
+                    1 => XLOPER12::nil(),
+                    2 => XLOPER12::missing(),
+                    3 => XLOPER12::integer(7),
+                    _ => XLOPER12::number(f64::from_bits(1)),
+                })
+                .collect::<Vec<_>>();
+            let root = array_root(&mut cells);
+            crate::call::with_excel_call_scope_and_state(&root, |raw, scope| {
+                let raw = XlValueRef::from_array_cell(raw).unwrap();
+                macro_rules! check {
+                    ($ty:ty) => {{
+                        let mut arguments =
+                            ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                        let state = arguments.prepare::<$ty>(0, "values", raw).unwrap();
+                        let identity = arguments.finish().unwrap();
+                        let result = state.materialize().unwrap();
+                        let mut materialized =
+                            ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                        materialized.record_decoded(0, "values", &result).unwrap();
+                        assert_eq!(materialized.finish().unwrap(), identity);
+                        let mut eager = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                        eager.decode::<$ty>(0, "values", raw).unwrap();
+                        assert_eq!(eager.finish().unwrap(), identity);
+                        identity
+                    }};
+                }
+                let optional = check!(Matrix<Option<f64>>);
+                assert_eq!(optional, check!(MatrixRef<'_, Option<f64>>));
+                check!(Matrix<OptionalExcelValue<f64>>);
+                check!(Matrix<Option<OptionalExcelValue<f64>>>);
+                check!(Matrix<Option<Option<f64>>>);
+                check!(MatrixRef<'_, Option<Option<f64>>>);
+            });
+        }
+        // Missing and blank share Option identity, but not OptionalExcelValue identity.
+        fn digest(raw: XLOPER12, presence: bool) -> Option<[u8; 32]> {
+            let mut cells = [raw];
+            let root = array_root(&mut cells);
+            crate::call::with_excel_call_scope_and_state(&root, |raw, scope| {
+                let raw = XlValueRef::from_array_cell(raw).unwrap();
+                let mut args = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                if presence {
+                    drop(
+                        args.prepare::<Matrix<OptionalExcelValue<f64>>>(0, "v", raw)
+                            .unwrap(),
+                    );
+                } else {
+                    drop(args.prepare::<Matrix<Option<f64>>>(0, "v", raw).unwrap());
+                }
+                args.finish().unwrap()
+            })
+        }
+        assert_eq!(
+            digest(XLOPER12::nil(), false),
+            digest(XLOPER12::missing(), false)
+        );
+        assert_ne!(
+            digest(XLOPER12::nil(), true),
+            digest(XLOPER12::missing(), true)
+        );
+    }
+
+    #[test]
+    fn optional_builtin_collections_match_eager_conversion() {
+        use crate::value::{ExcelError, ExcelSerialDate, Matrix, MatrixRef, OptionalExcelValue};
+        macro_rules! check_builtin {
+            ($ty:ty, $present:expr) => {{
+                let mut cells = [XLOPER12::nil(), XLOPER12::missing(), $present];
+                let root = array_root(&mut cells);
+                crate::call::with_excel_call_scope_and_state(&root, |raw, scope| {
+                    let raw = XlValueRef::from_array_cell(raw).unwrap();
+                    macro_rules! check_collection {
+                        ($collection:ty) => {{
+                            let mut eager =
+                                ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                            let expected = eager.decode::<$collection>(0, "v", raw).unwrap();
+                            let mut args =
+                                ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                            let prepared = args.prepare::<$collection>(0, "v", raw).unwrap();
+                            assert_eq!(args.finish().unwrap(), eager.finish().unwrap());
+                            assert_eq!(
+                                prepared.materialize().unwrap().as_slice(),
+                                expected.as_slice()
+                            );
+                        }};
+                    }
+                    check_collection!(Matrix<Option<$ty>>);
+                    check_collection!(Matrix<OptionalExcelValue<$ty>>);
+                    check_collection!(MatrixRef<'_, Option<$ty>>);
+                });
+            }};
+        }
+        check_builtin!(bool, XLOPER12::boolean(true));
+        check_builtin!(i32, XLOPER12::integer(-7));
+        check_builtin!(i64, XLOPER12::number(9_007_199_254_740_991.0));
+        check_builtin!(ExcelSerialDate, XLOPER12::number(45_000.5));
+        check_builtin!(ExcelError, XLOPER12::error(15));
+    }
+
+    #[test]
+    fn optional_numeric_collection_errors_precede_materialization() {
+        use crate::value::{Matrix, MatrixRef, OptionalExcelValue};
+        for invalid in [
+            XLOPER12::number(f64::NAN),
+            XLOPER12::boolean(true),
+            XLOPER12::error(15),
+        ] {
+            let mut cells = [XLOPER12::number(1.0), XLOPER12::nil(), invalid];
+            let root = array_root(&mut cells);
+            crate::call::with_excel_call_scope_and_state(&root, |raw, scope| {
+                let raw = XlValueRef::from_array_cell(raw).unwrap();
+                macro_rules! check {
+                    ($ty:ty) => {{
+                        let mut eager = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                        let expected = eager.decode::<$ty>(0, "values", raw).unwrap_err();
+                        let mut args = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                        let error = match args.prepare::<$ty>(0, "values", raw) {
+                            Ok(_) => panic!("invalid last cell accepted before lookup"),
+                            Err(error) => error,
+                        };
+                        assert_eq!(format!("{error:?}"), format!("{expected:?}"));
+                        assert!(args.finish().is_err());
+                    }};
+                }
+                check!(Matrix<Option<f64>>);
+                check!(Matrix<OptionalExcelValue<f64>>);
+                check!(MatrixRef<'_, Option<f64>>);
+            });
+        }
+    }
+
+    #[test]
+    fn optional_borrowed_preparation_preserves_retained_budget_precedence() {
+        type LargePrepared = [u8; crate::value::MAX_ARRAY_BYTES];
+        assert!(matches!(
+            ExcelInputCells::wrapped_budget::<f64, LargePrepared, true>(2, "v"),
+            Err(XllError::Input {
+                reason: crate::error::InputError::TooLarge { .. },
+                ..
+            })
+        ));
+        assert!(ExcelInputCells::wrapped_budget::<f64, LargePrepared, false>(2, "v").is_ok());
+        // Both paths still reject output size before cell validation.
+        for error in [
+            ExcelInputCells::wrapped_budget::<LargePrepared, f64, true>(2, "v")
+                .err()
+                .unwrap(),
+            ExcelInputCells::wrapped_budget::<LargePrepared, f64, false>(2, "v")
+                .err()
+                .unwrap(),
+        ] {
+            assert!(matches!(
+                error,
+                XllError::Input {
+                    reason: crate::error::InputError::TooLarge { .. },
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
     fn custom_conversion_is_retained_once_before_revision_lookup() {
         static CONVERSIONS: AtomicUsize = AtomicUsize::new(0);
         struct Observed(f64);
@@ -1206,6 +1422,41 @@ mod preparation_tests {
             assert_eq!(CONVERSIONS.load(Ordering::Relaxed), 2);
             assert_eq!(prepared.materialize().unwrap().unwrap()[0].0, 42.0);
             assert_eq!(CONVERSIONS.load(Ordering::Relaxed), 2);
+            for materialize in [false, true] {
+                let before = CONVERSIONS.load(Ordering::Relaxed);
+                let mut args = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                let prepared = args
+                    .prepare::<crate::value::Matrix<Option<Observed>>>(0, "arg", value)
+                    .unwrap();
+                args.finish().unwrap();
+                assert_eq!(CONVERSIONS.load(Ordering::Relaxed), before + 1);
+                if materialize {
+                    assert_eq!(
+                        prepared.materialize().unwrap().as_slice()[0]
+                            .as_ref()
+                            .unwrap()
+                            .0,
+                        42.0
+                    );
+                } else {
+                    drop(prepared);
+                }
+                assert_eq!(CONVERSIONS.load(Ordering::Relaxed), before + 1);
+                let mut args = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                let prepared = args
+                    .prepare::<crate::value::Matrix<crate::value::OptionalExcelValue<Observed>>>(
+                        0, "arg", value,
+                    )
+                    .unwrap();
+                args.finish().unwrap();
+                assert_eq!(CONVERSIONS.load(Ordering::Relaxed), before + 2);
+                if materialize {
+                    drop(prepared.materialize().unwrap());
+                } else {
+                    drop(prepared);
+                }
+                assert_eq!(CONVERSIONS.load(Ordering::Relaxed), before + 2);
+            }
         });
     }
 }

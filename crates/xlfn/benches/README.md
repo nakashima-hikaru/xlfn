@@ -1,5 +1,75 @@
 # Benchmark notes
 
+## 2026-10-18 optional collection preparation and RTD admission
+
+Formula-identity preparation for `Option<T>` and `OptionalExcelValue<T>`
+collections now borrows the input when `T` has a framework-provided, context-free
+builtin decoder. This includes nested optional wrappers. Preparation still
+validates every cell and records presence, shape and value identity before lookup.
+Owned collections keep the previous prepared-state allocation budget and error
+precedence. `MatrixRef<Option<T>>` keeps its output-only budget and delays typed
+scratch until materialization. Custom prepared ownership stays retained.
+
+RTD pending-count, topic-byte, subscription-ID and source-ID admission checks now
+precede owned topic copying. Existing-topic lookup remains first, so reuse works
+even when new-topic quotas are full. Lookup, checks and commit retain the same
+catalog lock; this change does not claim improved contention scaling.
+
+Baseline `2999db8f184d556c04ff07aa8360e3e490dbdf40` and candidate use identical
+benchmark fixtures, separate source/target directories and frozen executable
+SHA-256 checks on macOS ARM64 / Rust 1.99.0. The final comparison uses BAAB order,
+20 samples, 0.3 s warm-up and 1.5 s measurement with
+`bench-internals,async,rtd`. Numbers are geometric means of two mean estimates;
+recorded confidence intervals are per run, not intervals for the difference.
+Input preparation excludes real handle lookup. RTD inputs are prevalidated;
+input validation, fixture construction and runtime teardown are excluded.
+
+| Case | Baseline | Candidate | Time change |
+| --- | ---: | ---: | ---: |
+| Owned Option, 100k, prepare | 1911.134 us | 1841.808 us | -3.63% |
+| Owned presence, 100k, prepare | 1930.986 us | 1853.335 us | -4.02% |
+| Borrowed Option, 100k, prepare | 1890.777 us | 1846.127 us | -2.36% |
+| Owned Option, 100k, materialize | 2216.421 us | 2262.318 us | +2.07% |
+| Owned presence, 100k, materialize | 2237.703 us | 2266.962 us | +1.31% |
+| Borrowed Option, 100k, materialize | 1968.082 us | 2285.985 us | +16.15% |
+| Borrowed Option, 1k, materialize | 16.618 us | 20.671 us | +24.39% |
+| RTD pending full, 1 MiB | 28.327 us | 0.022 us | -99.92% |
+| RTD existing reuse, 1 MiB | 33.361 us | 33.118 us | -0.73% |
+| RTD admitted + rollback, 1 MiB | 22.767 us | 25.900 us | +13.76% |
+
+At 100k cells, owned optional preparation/discard requests 6,024 bytes per call
+instead of 3,206,024; the borrowed case requests 6,024 instead of 1,607,544. All
+three now match the one-allocation numeric control. RTD rejection at 1 MiB drops
+from 65 allocations / 1,051,136 requested bytes to zero; 16 KiB drops from two
+allocations / 16,424 bytes to zero. Existing reuse remains allocation-free.
+These are cumulative allocator requests, not peak live memory or RSS.
+
+This is a memory-traffic improvement with measured latency tradeoffs. Borrowed
+optional materialization repeats conversion and is 16.15% slower at 100k and
+24.39% slower at 1k; owned 100k materialization rises 1.31–2.07%. New 1 MiB RTD
+admission plus rollback rises 13.76%; an earlier ABBA run measured +5.20%, so no
+successful-admission speedup is claimed. Unchanged non-optional matrix controls
+also moved (-10.42% and -6.84%); these differences are not attributed to the
+optional optimization. Scalar controls stay within 0.3%. All 34 cases, raw samples,
+per-run intervals and the first implementation's results are retained. The first
+implementation built transient prepared wrappers even when dropping them;
+the final version decodes builtins directly while preserving custom preparation.
+All nine optional digest controls match across all four final runs.
+
+Validation: workspace nextest 1,291 passed / 11 skipped; all 288 feature checks
+pass. Independent library tests pass with no features (384), handles (538),
+RTD (558), async (445), async-builtin (521), cache (495), serde (386), and jiff
+(386); these retain seven ignored tests each, or eight with handles/cache.
+Strict all-target/all-feature workspace Clippy, rustdoc, fmt and panic-boundary
+checks pass. The optional identity/value regression and rejected-RTD-copy test
+both pass strict-provenance Miri under Stacked and Tree Borrows (four executions).
+x86_64/i686 MSVC checks pass with `blake3/pure`; these are compile checks only.
+All 20 canonical bench-ci recipes pass with the 100 ms measurement override,
+including both allocation gates; their timings are excluded from this comparison.
+Native Windows and live Excel execution remain unmeasured.
+
+[Results, raw samples, source patches, allocation probes and provenance](results/2026-10-18-optional-rtd.json).
+
 ## 2026-10-17 numeric input identity and cache observations
 
 FP12 `NumericMatrixRef` formula identity now streams values through the existing
@@ -123,77 +193,21 @@ Gate timings are excluded. No native Windows/live Excel speed claim is made.
 
 [All results, confirmations, patches, allocation counters and provenance](results/2026-10-17-deferred-drop.json).
 
-## 2026-10-16 performance review experiments
+## 2026-10-16 arena and diagnostics changes
 
 Object payload ownership remains in the arena. Its mutex/map is split into 32
 cache-padded shards selected by object sequence; seal and quiescence acquire all
-shards in a fixed order. Final capability removal still registers its release
-tail under the same shard lock, and application destructors/trace run outside
-the locks. Insertion uses one map entry lookup. Same-object contention remains.
+shards in a fixed order. Final capability removal registers its release tail
+under the same shard lock, and application destructors/trace run outside the
+locks. Production builds omit the diagnostic observation mutex; test/refinement
+builds retain it.
 
-Production builds omit the diagnostic observation mutex; test/refinement builds
-retain it. The tracing probe returns early before any global or scoped dispatcher
-has been installed; its standalone speed effect is not established.
-
-An initial zero-filled ASCII buffer regressed short arrays and long scalars.
-A MaybeUninit revision restored short arrays but still slowed the 32,767-byte
-ASCII scalar by 10.67%. Incremental array capacity changes had inconsistent
-results between experiments. Both return-path changes were restored to baseline.
-The complete evidence preserves both rejected experiments and every control.
-
-Baseline `0432f8b07382d52b6b7be0b498280d5bb66d8232` and the candidate used separate
-source/target directories, identical fixtures, frozen executable SHA-256 checks
-before/after every invocation, and ABBA order on macOS ARM64 / Rust 1.99.0.
-Each run uses 20 samples, 0.3 s warm-up, and 1.5 s measurement. Values are geometric
-means of two estimates per side; individual confidence intervals are not
-intervals for the A/B difference. Concurrent values include batch coordination.
-
-| Case | Baseline | Candidate | Time change |
-| --- | ---: | ---: | ---: |
-| `object_lease/distinct_objects/4` | 170.103 µs | 88.431 µs | -48.01% |
-| `object_lease/distinct_objects/16` | 1.008 ms | 165.180 µs | -83.61% |
-| `object_lease/distinct_objects/1` | 24.328 µs | 26.320 µs | +8.19% |
-| `object_lease/same_object/1` | 25.026 µs | 23.532 µs | -5.97% |
-| `object_lease/same_object/16` | 943.635 µs | 949.733 µs | +0.65% |
-| `object_lease/dispatch_only_control/1` | 3.387 µs | 3.444 µs | +1.68% |
-| `object_lease/dispatch_only_control/16` | 69.624 µs | 75.972 µs | +9.12% |
-| `object_lease/pin_acquire_release_serial` | 19.87 ns | 18.85 ns | -5.18% |
-| `object_lease/final_pin_release` | 27.59 ns | 31.50 ns | +14.17% |
-| `handle_prepare/cold_miss_batch_100` | 76.738 µs | 77.171 µs | +0.56% |
-| `handle_prepare/warm_hit_batch_100` | 5.583 µs | 5.567 µs | -0.29% |
-| `array_string_output/borrowed_str/16384` | 245.100 µs | 239.602 µs | -2.24% |
-| `scalar_output/ascii_1k/borrowed` | 119.22 ns | 118.22 ns | -0.83% |
-| `scalar_output/ascii_limit/borrowed` | 1.640 µs | 1.612 µs | -1.73% |
-| `scalar_output/enum` | 92.60 ns | 73.47 ns | -20.66% |
-| `scalar_output/number` | 37.91 ns | 38.01 ns | +0.25% |
-| `array_numeric_output/builder_build_return/100000` | 62.904 µs | 62.976 µs | +0.11% |
-| `diagnostics_report/small_error` | 6.912 µs | 6.812 µs | -1.45% |
-| `diagnostics_report/large_burst` | 321.429 µs | 325.960 µs | +1.41% |
-| `sync_boundary/scalar_return/no_subscriber/1` | 39.177 µs | 38.599 µs | -1.47% |
-
-The arena's fixed requested live bytes rise by 4,096; the 10k-object fixture rises
-by 4,344 bytes (about 0.04%). Empty map shards allocate no backing tables.
-Republishing 10k objects retains 140,631 allocator calls on each side. The value
-boundary and diagnostic allocation probes pass on both sides. These counters
-measure allocator requests, not RSS. Diagnostic burst acceptance/drop counts
-are unchanged. Small timing changes and control movement are not attributed to
-the optimization; all regressions remain in the evidence.
-
-Validation: final-source workspace nextest 1,279 passed / 11 skipped; independent no-default,
-handles, async-builtin, cache, and rtd lib suites passed. All-target/all-feature
-Clippy, strict workspace rustdoc, formatting and panic-boundary checks passed.
-Object lifetime/race tests pass Miri in both aliasing models (5 each); the ASCII
-boundary test passes strict-provenance Miri in both models. Object Miri retains
-parking_lot_core's exposed-provenance warning. x86_64/i686 MSVC library checks
-pass with `blake3/pure`. All 17 `just bench-ci` recipes passed with the 100 ms
-measurement override before restoring the experimental return encoders; the
-final output fixtures and allocation assertions were rechecked. Gate timings
-are excluded from the isolated comparison. Storage Miri tests apply to the
-rejected MaybeUninit variant; the adopted encoder is unchanged from baseline.
-
-[All cases, confidence intervals, patches, allocation logs and provenance](results/2026-10-16-review.json)
-include limitations and the rejected experiment. No native Windows/live Excel
-performance qualification is claimed, including RTD observation callbacks.
+The original `results/2026-10-16-review.json` bundle is absent from this checkout
+and its Git history. Its source/executable hashes, raw samples, rejected
+experiments and validation logs cannot be audited here. The previously quoted
+latency and allocation comparisons have therefore been removed from this section;
+these changes require new matched measurements before making performance claims.
+The independently saved October 17 result bundles above remain available.
 
 ## 2026-10-11 short borrowed strings
 
@@ -667,8 +681,12 @@ churn.
 cargo bench -p xlfn --features bench-internals,async-builtin --bench value_boundary_allocations
 ```
 
-Each case warms up 100 calls and measures 10,000 calls through the system
-allocator. Enum and borrowed-string cases each construct and drop a 1,000-cell
+Each case warms up 100 calls and normally measures 10,000 calls through the system
+allocator. Optional numeric collection probes use five measured calls at 1,000
+and 100,000 cells; their preparation/discard counts must equal the corresponding
+`Matrix<f64>` control. They cover owned `Option<f64>`, owned
+`OptionalExcelValue<f64>`, and borrowed `Option<f64>` matrices. Numeric output
+probes use 100 calls. Enum and borrowed-string cases each construct and drop a 1,000-cell
 array containing the same `Ready` labels. The probe requires their allocation
 counts and requested bytes to match. Warm handle inputs, with and without input
 identity, must allocate nothing; the `async` feature additionally checks pending
@@ -677,6 +695,16 @@ memory or RSS. This fixture does not measure elapsed time or Excel execution.
 With `refinement` enabled the runtime rows report their counts but explicitly
 skip zero-allocation assertions, since trace recording may allocate. Run the
 command above without `refinement` for the allocation regression gate.
+
+`rtd_prepare_allocations` separately requires zero caller-thread allocations for
+prevalidated borrowed topics rejected by pending count, topic-byte or source-ID
+limits, and for existing-topic reuse. It covers 16 KiB and 1 MiB topics with eight
+warm-up calls and one measured call. Topic validation, fixture construction and
+runtime teardown are excluded. `rtd_prepare` times the same admission paths plus
+successful new-topic insertion and rollback. Both probes are in `just bench-ci`
+and `just bench-full`. `XLFN_BENCH_REPORT_ONLY=1` disables the new optional/RTD
+allocation assertions only when measuring a historical baseline; the canonical
+gate leaves it unset.
 
 ## Public cache registry
 

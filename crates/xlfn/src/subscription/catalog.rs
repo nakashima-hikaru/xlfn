@@ -372,11 +372,11 @@ impl SubscriptionCatalog {
         Ok(None)
     }
 
-    fn plan_pending_insert(
+    fn plan_pending_insert<Part: AsRef<str>>(
         &self,
         runtime_id: u64,
         source_id: SourceHandleId,
-        topic: &RtdTopic,
+        topic: &BorrowedTopicParts<'_, Part>,
         limits: RtdLimits,
     ) -> XllResult<PendingInsertPlan> {
         if self.pending_len() >= limits.max_pending.get() {
@@ -395,7 +395,7 @@ impl SubscriptionCatalog {
         })?;
         let id = SubscriptionId(raw_id);
         let key = SubscriptionKey::from_internal(runtime_id, id);
-        let identity_key = SubscriptionIdentityKey::new(SourceId(source_id), topic);
+        let identity_key = topic.identity_key(SourceId(source_id));
 
         Ok(PendingInsertPlan {
             id,
@@ -441,16 +441,23 @@ impl SubscriptionCatalog {
         (id, key)
     }
 
-    pub(crate) fn insert_pending(
+    pub(crate) fn insert_pending<Part: AsRef<str>>(
         &mut self,
         runtime_id: u64,
         source_id: SourceHandleId,
-        topic: RtdTopic,
+        topic: BorrowedTopicParts<'_, Part>,
         limits: RtdLimits,
     ) -> XllResult<(SubscriptionId, SubscriptionKey)> {
         let plan = self.plan_pending_insert(runtime_id, source_id, &topic, limits)?;
+        let source_update =
+            self.identities
+                .plan_insert(plan.identity_key, plan.id, limits.max_source_ids.get())?;
+        // All fallible admission checks precede the copy. The caller retains
+        // the catalog lock from identity lookup through this commit, so an
+        // existing subscription still bypasses new-topic capacity checks.
+        let topic = topic.into_owned();
         self.identities
-            .insert(plan.identity_key, plan.id, limits.max_source_ids.get())?;
+            .commit_insert(plan.identity_key, plan.id, source_update);
         Ok(self.commit_pending_insert(plan, topic))
     }
 

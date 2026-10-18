@@ -172,6 +172,31 @@ mod tests {
     }
 
     #[test]
+    fn miri_optional_matrix_ref_defers_scratch_until_materialization() {
+        let mut cells = [XLOPER12::number(-0.0), XLOPER12::nil(), XLOPER12::missing()];
+        let root = array_root(&mut cells);
+        crate::call::with_excel_call_scope_and_state(&root, |root, scope| {
+            let mut args = input::ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+            let prepared = args
+                .prepare::<MatrixRef<'_, Option<f64>>>(
+                    0,
+                    "v",
+                    XlValueRef::from_array_cell(root).unwrap(),
+                )
+                .unwrap();
+            args.finish().unwrap();
+            assert_eq!(scope.scratch().allocated_bytes(), 0);
+            let result = prepared.materialize().unwrap();
+            assert_eq!(
+                result.as_slice()[0].unwrap().to_bits(),
+                (-0.0_f64).to_bits()
+            );
+            assert_eq!(&result.as_slice()[1..], &[None, None]);
+            assert!(scope.scratch().allocated_bytes() > 0);
+        });
+    }
+
+    #[test]
     fn plain_numeric_matrix_ref_still_materializes_during_preparation() {
         let mut cells = [XLOPER12::number(1.0), XLOPER12::integer(2)];
         let root = array_root(&mut cells);

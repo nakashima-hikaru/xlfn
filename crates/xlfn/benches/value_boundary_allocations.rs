@@ -102,6 +102,28 @@ enum Status {
 }
 
 fn main() {
+    for cells in [1_000, 100_000] {
+        let mut control = RawArgumentIngressBenchmark::number_matrix(cells, 1);
+        let control_counts = measure_calls(&format!("optional_numeric/control/{cells}"), 5, || {
+            black_box(control.run_prepared_with_identity::<xlfn::value::Matrix<f64>>());
+        });
+        for kind in [
+            xlfn::benchmark_support::OptionalNumericInputKind::Owned,
+            xlfn::benchmark_support::OptionalNumericInputKind::Presence,
+            xlfn::benchmark_support::OptionalNumericInputKind::Borrowed,
+        ] {
+            let mut input = RawArgumentIngressBenchmark::optional_number_matrix(cells);
+            let counts = measure_calls(&format!("optional_numeric/{kind:?}/{cells}"), 5, || {
+                black_box(input.run_optional_numeric_prepared(kind, false));
+            });
+            if std::env::var_os("XLFN_BENCH_REPORT_ONLY").is_none() {
+                assert_eq!(
+                    counts, control_counts,
+                    "optional warm preparation must retain only the hash workspace"
+                );
+            }
+        }
+    }
     for (label, text) in [
         ("short", "short_str"),
         ("unicode", "日本語💡"),

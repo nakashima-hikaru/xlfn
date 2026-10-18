@@ -150,6 +150,35 @@ fn argument_ingress_benchmarks(c: &mut Criterion) {
         });
     }
 
+    for cells in [1, 1_000, 100_000] {
+        for (kind, label) in [
+            (
+                xlfn::benchmark_support::OptionalNumericInputKind::Owned,
+                "option",
+            ),
+            (
+                xlfn::benchmark_support::OptionalNumericInputKind::Presence,
+                "presence",
+            ),
+            (
+                xlfn::benchmark_support::OptionalNumericInputKind::Borrowed,
+                "borrowed_option",
+            ),
+        ] {
+            let mut input = RawArgumentIngressBenchmark::optional_number_matrix(cells);
+            let digest = input.run_optional_numeric_prepared(kind, false);
+            assert_eq!(digest, input.run_optional_numeric_prepared(kind, true));
+            println!("optional_identity_digest_{label}_{cells} {digest:02x?}");
+            for (materialize, phase) in [(false, "prepare"), (true, "materialize")] {
+                group.bench_function(format!("optional_numeric/{label}/{cells}/{phase}"), |b| {
+                    b.iter(|| {
+                        std::hint::black_box(input.run_optional_numeric_prepared(kind, materialize))
+                    });
+                });
+            }
+        }
+    }
+
     // 7. Vec<f64> 100k
     let mut vec_100k = RawArgumentIngressBenchmark::number_vec(100_000);
     group.bench_function("vec_f64_100k/plain", |b| {
