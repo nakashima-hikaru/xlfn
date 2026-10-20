@@ -213,9 +213,9 @@ checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
 name = "cc"
-version = "1.8.0"
+version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6651c9ed80effdc7db0ff72512157f901af5e3549e341e24b1dd4887d836d838"
+checksum = "877bf67ac8e52449eb2f9e98a344ea163beb70dd1f9eebe3cc5357dcfeaee4df"
 dependencies = [
  "find-msvc-tools",
  "shlex",
@@ -470,9 +470,9 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "find-msvc-tools"
-version = "0.1.14"
+version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
+checksum = "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48"
 
 [[package]]
 name = "fnv"
@@ -1502,15 +1502,15 @@ checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
 
 [[package]]
 name = "usage-argv"
-version = "7.0.2"
+version = "7.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "109c9b2a781d3293e82f7c2705769ecfe5c25d59ca70d9d879e6d06a5f3cd628"
+checksum = "d76b30ba236521bfc87a3f32b45dbd7e23a819eba0ffe1fad06ec1c6aa74b3fd"
 
 [[package]]
 name = "usage-derive"
-version = "7.0.2"
+version = "7.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b47f75a84077c869ada1c01bcb3bc44afab7f8e1bdded2aa3a0c4e9d9c096a4"
+checksum = "95a83a457f176fa20c2284cba3fa32b824267f888910d8d745090bbaad05e8c5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1519,9 +1519,9 @@ dependencies = [
 
 [[package]]
 name = "usage-rs"
-version = "7.0.2"
+version = "7.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "250714497081cfed3babb8e9d99ea58d5cae1af7334fb52b22a571e2f4b87ce6"
+checksum = "be5de950a7b389d5f634b0c17d46f501f6fc5d773d59ee223cae405d973031a6"
 dependencies = [
  "usage-argv",
  "usage-derive",
