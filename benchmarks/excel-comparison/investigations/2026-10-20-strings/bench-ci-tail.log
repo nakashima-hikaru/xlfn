@@ -1,0 +1,25 @@
+array_numeric_output/100000/builder_build_return: calls=100 Counts { allocations: 100, deallocations: 100, reallocations: 0, requested_bytes: 320000000 }
+f64/plain: calls=10000 Counts { allocations: 0, deallocations: 0, reallocations: 0, requested_bytes: 0 }
+mixed_matrix/1000/owned: calls=100 Counts { allocations: 20100, deallocations: 20100, reallocations: 0, requested_bytes: 2480000 }
+mixed_matrix/1000/borrowed: calls=100 Counts { allocations: 200, deallocations: 200, reallocations: 0, requested_bytes: 7369600 }
+mixed_matrix/100000/owned: calls=100 Counts { allocations: 2000100, deallocations: 2000100, reallocations: 0, requested_bytes: 248000000 }
+mixed_matrix/100000/borrowed: calls=100 Counts { allocations: 400, deallocations: 400, reallocations: 0, requested_bytes: 260912800 }
+matrix_ref_f64_1000/prepare_identity: calls=100 Counts { allocations: 100, deallocations: 100, reallocations: 0, requested_bytes: 602400 }
+matrix_ref_f64_1000/prepare_materialize: calls=100 Counts { allocations: 200, deallocations: 200, reallocations: 0, requested_bytes: 1420000 }
+matrix_ref_f64_100000/prepare_identity: calls=100 Counts { allocations: 100, deallocations: 100, reallocations: 0, requested_bytes: 602400 }
+matrix_ref_f64_100000/prepare_materialize: calls=100 Counts { allocations: 200, deallocations: 200, reallocations: 0, requested_bytes: 80882400 }
+handle/plain: calls=10000 Counts { allocations: 0, deallocations: 0, reallocations: 0, requested_bytes: 0 }
+handle/with_identity: calls=10000 Counts { allocations: 0, deallocations: 0, reallocations: 0, requested_bytes: 0 }
+handle/async_pending: calls=10000 Counts { allocations: 0, deallocations: 0, reallocations: 0, requested_bytes: 0 }
+just bench-one async_task_drain_allocations "bench-internals async"
+cargo bench --package xlfn --bench async_task_drain_allocations --features "bench-internals async" --locked
+   Compiling xlfn v0.2.0 (/Users/nakashimahikaru/forge/repo/xlfn/crates/xlfn)
+    Finished `bench` profile [optimized] target(s) in 0.38s
+     Running benches/async_task_drain_allocations.rs (target/release/deps/async_task_drain_allocations-7b97c30d11fff332)
+{"batch_bytes":144,"control_bytes":32}
+{"allocations":0,"reallocations":0,"requested_bytes":0,"tasks":0}
+{"allocations":0,"reallocations":0,"requested_bytes":0,"tasks":1}
+{"allocations":0,"reallocations":0,"requested_bytes":0,"tasks":4}
+{"allocations":1,"reallocations":0,"requested_bytes":160,"tasks":5}
+{"allocations":1,"reallocations":0,"requested_bytes":1024,"tasks":32}
+{"allocations":1,"reallocations":0,"requested_bytes":4096,"tasks":128}

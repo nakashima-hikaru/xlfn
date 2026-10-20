@@ -1,0 +1,184 @@
+{
+  "sdkroot": "/Library/Developer/CommandLineTools/SDKs/MacOSX15.2.sdk",
+  "checks": [
+    {
+      "name": "nextest",
+      "command": "cargo nextest run --workspace --all-features --locked",
+      "exit_code": 0,
+      "log_path": "/private/tmp/xlfn-matrix-20261019-3y90px7t/nextest.log",
+      "log_sha256": "408ab54140c28e2c2de42b3f2d8c6248f260a2efbc06ad5c6502b672c9addb6f",
+      "tail": [
+        "        PASS [  29.451s] (1291/1293) xlfn-kernel rotating_read_domain::tests::loom_publication_barrier_orders_deferred_withdrawal_before_new_readers",
+        "        SLOW [> 60.000s] (\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500) xlfn::compile trait_driven_function_signatures_compile",
+        "        PASS [  75.886s] (1292/1293) xlfn::compile trait_driven_function_signatures_compile",
+        "        PASS [   0.496s] (1293/1293) xlfn-macros::ui invalid_macro_options_fail_to_compile",
+        "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+        "     Summary [  87.451s] 1293 tests run: 1293 passed (2 slow), 11 skipped"
+      ]
+    },
+    {
+      "name": "features",
+      "command": "just features",
+      "exit_code": 0,
+      "log_path": "/private/tmp/xlfn-matrix-20261019-3y90px7t/features.log",
+      "log_sha256": "8a7ec7e96f983a652c74ec9e7396091298432ec9fe2a05af9fe39af67fb546a2",
+      "tail": [
+        "    Checking xlfn v0.2.0 (/Users/nakashimahikaru/forge/repo/xlfn/crates/xlfn)",
+        "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.96s",
+        "",
+        "info: running `cargo check --lib --locked --no-default-features --features async,cache,handles,jiff,refinement,rtd,serde` on xlfn (288/288)",
+        "    Checking xlfn v0.2.0 (/Users/nakashimahikaru/forge/repo/xlfn/crates/xlfn)",
+        "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.13s"
+      ]
+    },
+    {
+      "name": "clippy",
+      "command": "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+      "exit_code": 0,
+      "log_path": "/private/tmp/xlfn-matrix-20261019-3y90px7t/clippy.log",
+      "log_sha256": "058aa41f7f44fb2d2b0f8b06d422a68e4dbe5a64a4bfb1f7ab657e2585e66e77",
+      "tail": [
+        "    Checking xlfn-windows-bindings-gen v0.2.0 (/Users/nakashimahikaru/forge/repo/xlfn/tools/windows-bindings)",
+        "    Checking xlfn-package v0.2.0 (/Users/nakashimahikaru/forge/repo/xlfn/crates/xlfn-package)",
+        "    Checking xlfn-macros v0.1.0 (/Users/nakashimahikaru/forge/repo/xlfn/crates/xlfn-macros)",
+        "    Checking cargo-xlfn v0.2.0 (/Users/nakashimahikaru/forge/repo/xlfn/crates/cargo-xlfn)",
+        "    Checking xlfn v0.2.0 (/Users/nakashimahikaru/forge/repo/xlfn/crates/xlfn)",
+        "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 00s"
+      ]
+    },
+    {
+      "name": "rustdoc",
+      "command": "RUSTDOCFLAGS=\"-D warnings\" cargo doc -p xlfn --all-features --no-deps --locked",
+      "exit_code": 0,
+      "log_path": "/private/tmp/xlfn-matrix-20261019-3y90px7t/rustdoc.log",
+      "log_sha256": "c661a122059a512200e0624c1dbbbb10509f6271345b51052e4a2692768226b8",
+      "tail": [
+        "    Checking indexmap v2.14.2",
+        "    Checking serde_json v1.0.154",
+        "    Checking serde v1.0.229",
+        " Documenting xlfn v0.2.0 (/Users/nakashimahikaru/forge/repo/xlfn/crates/xlfn)",
+        "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 38.49s",
+        "   Generated /Users/nakashimahikaru/forge/repo/xlfn/target/doc/xlfn/index.html"
+      ]
+    },
+    {
+      "name": "python-tests",
+      "command": "python3 -m unittest discover -s benchmarks/excel-comparison -p test_*.py",
+      "exit_code": 0,
+      "log_path": "/private/tmp/xlfn-matrix-20261019-3y90px7t/python-tests.log",
+      "log_sha256": "800019ba94f6f46d196841103b2290e6d2eec2c296fdfcdeb5963a66748f7b94",
+      "tail": [
+        "................................................................s..........",
+        "----------------------------------------------------------------------",
+        "Ran 75 tests in 3.159s",
+        "",
+        "OK (skipped=1)"
+      ]
+    },
+    {
+      "name": "miri",
+      "command": "cargo +nightly-2026-09-02 miri test -p xlfn --lib miri_numeric_",
+      "exit_code": 0,
+      "log_path": "/private/tmp/xlfn-matrix-20261019-3y90px7t/miri.log",
+      "log_sha256": "a06e180271b6f0f2a0b00689fef923f09e9b9c29a418ba6cf66351dfc7d1705c",
+      "tail": [
+        "test value::numeric::tests::miri_numeric_cell_limit_is_an_input_error_even_when_count_exceeds_u32 ... ok",
+        "test value::numeric::tests::miri_numeric_matrix_identity_matches_the_same_strict_numeric_values ... ok",
+        "test value::numeric::tests::miri_numeric_validation_checks_every_block_and_tail_cell ... ok",
+        "",
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 389 filtered out; finished in 40.48s",
+        ""
+      ]
+    },
+    {
+      "name": "miri-tree",
+      "command": "MIRIFLAGS=\"-Zmiri-tree-borrows -Zmiri-strict-provenance\" cargo +nightly-2026-09-02 miri test -p xlfn --lib miri_numeric_",
+      "exit_code": 0,
+      "log_path": "/private/tmp/xlfn-matrix-20261019-3y90px7t/miri-tree.log",
+      "log_sha256": "5a2c94a9e60590b8329cb123c1458bfe03e21faf32538fc9de09eddaa42cbe26",
+      "tail": [
+        "test value::numeric::tests::miri_numeric_cell_limit_is_an_input_error_even_when_count_exceeds_u32 ... ok",
+        "test value::numeric::tests::miri_numeric_matrix_identity_matches_the_same_strict_numeric_values ... ok",
+        "test value::numeric::tests::miri_numeric_validation_checks_every_block_and_tail_cell ... ok",
+        "",
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 389 filtered out; finished in 40.57s",
+        ""
+      ]
+    },
+    {
+      "name": "windows-check",
+      "command": "cargo check --manifest-path benchmarks/excel-comparison/xlfn/Cargo.toml --target x86_64-pc-windows-msvc --locked",
+      "exit_code": 0,
+      "log_path": "/private/tmp/xlfn-matrix-20261019-3y90px7t/windows-check.log",
+      "log_sha256": "933a6fde4609790a0a40a061d1df84f71576ecf297db61cfb9b87a6f2bb7021f",
+      "tail": [
+        "   Compiling proc-macro-crate v3.5.0",
+        "   Compiling thiserror-impl v2.0.21",
+        "   Compiling xlfn-macros v0.1.0 (/Users/nakashimahikaru/forge/repo/xlfn/crates/xlfn-macros)",
+        "    Checking thiserror v2.0.21",
+        "    Checking xlfn v0.2.0 (/Users/nakashimahikaru/forge/repo/xlfn/crates/xlfn)",
+        "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 23.15s"
+      ]
+    },
+    {
+      "name": "panic-boundaries",
+      "command": "just panic-boundaries",
+      "exit_code": 0,
+      "log_path": "/private/tmp/xlfn-matrix-20261019-3y90px7t/panic-boundaries.log",
+      "log_sha256": "33a2bcf246194719ab31f6b5be48c8f9d8c12b0f00390640e1558ec966b5c405",
+      "tail": [
+        "----------------------------------------------------------------------",
+        "Ran 5 tests in 0.002s",
+        "",
+        "OK",
+        "python3 -B tools/check_panic_boundaries.py",
+        "Panic boundaries: 49 reviewed direct references; no unreviewed catch_unwind."
+      ]
+    },
+    {
+      "name": "bench-ci",
+      "command": "XLFN_BENCH_MEASUREMENT_MS=100 just bench-ci",
+      "exit_code": 0,
+      "log_path": "/private/tmp/xlfn-matrix-20261019-3y90px7t/bench-ci.log",
+      "log_sha256": "24d83d414a1de888b5ee2403dbb9889ed5fff5ec1802f81616b8888b28d40b38",
+      "tail": [
+        "{\"allocations\":0,\"reallocations\":0,\"requested_bytes\":0,\"tasks\":0}",
+        "{\"allocations\":0,\"reallocations\":0,\"requested_bytes\":0,\"tasks\":1}",
+        "{\"allocations\":0,\"reallocations\":0,\"requested_bytes\":0,\"tasks\":4}",
+        "{\"allocations\":1,\"reallocations\":0,\"requested_bytes\":160,\"tasks\":5}",
+        "{\"allocations\":1,\"reallocations\":0,\"requested_bytes\":1024,\"tasks\":32}",
+        "{\"allocations\":1,\"reallocations\":0,\"requested_bytes\":4096,\"tasks\":128}"
+      ]
+    },
+    {
+      "name": "bench-added-ingress",
+      "command": "XLFN_BENCH_MEASUREMENT_MS=100 just bench-one-filter argument_ingress ^argument_ingress/numeric_matrix_shape/(1000x10|100x100|10x1000)\\z",
+      "exit_code": 0,
+      "log_path": "/private/tmp/xlfn-matrix-20261019-3y90px7t/bench-added-ingress.log",
+      "log_sha256": "d4fc8261fd268114e1cd20547f979c1f3900f083723b95f76b69240f7b7805fb",
+      "tail": [
+        "optional_identity_digest_presence_1000 [63, 66, 4d, e6, 15, 6c, 20, 53, 82, f9, 89, ca, 6b, 2d, 81, b4, dc, a6, e8, bc, 82, cb, 30, 77, d1, c6, 45, 4e, 65, 34, aa, 88]",
+        "optional_identity_digest_borrowed_option_1000 [98, e8, 4c, 41, a1, e4, d8, ac, b2, d5, 50, 12, 8e, d0, a8, 47, 59, a6, e4, c6, c3, 6f, 36, 83, 06, 82, c0, 6c, 84, ff, 8b, 26]",
+        "optional_identity_digest_option_100000 [d6, de, 57, 38, 9f, 7a, 10, f0, f9, 1e, d9, f1, f5, 18, 97, 27, 01, 80, b1, 39, 58, 35, 8e, 0f, 90, e1, d8, 9a, b9, 48, 4f, 02]",
+        "optional_identity_digest_presence_100000 [ca, dd, c0, a2, 59, c0, 66, 69, 00, e7, c3, 14, 1f, 46, b6, f8, 0a, 1b, b4, f0, 3a, fe, f9, d9, 8a, 58, d2, 69, 28, 14, 08, 49]",
+        "optional_identity_digest_borrowed_option_100000 [d6, de, 57, 38, 9f, 7a, 10, f0, f9, 1e, d9, f1, f5, 18, 97, 27, 01, 80, b1, 39, 58, 35, 8e, 0f, 90, e1, d8, 9a, b9, 48, 4f, 02]",
+        ""
+      ]
+    },
+    {
+      "name": "bench-added-output",
+      "command": "XLFN_BENCH_MEASUREMENT_MS=100 just bench-one-filter array_numeric_output ^array_numeric_producer/push_f64/(10000|100000)\\z",
+      "exit_code": 0,
+      "log_path": "/private/tmp/xlfn-matrix-20261019-3y90px7t/bench-added-output.log",
+      "log_sha256": "f473d1cd9571eb8aa476465e270fe0b758069dcd41138807ac1b1960ab4fa7a5",
+      "tail": [
+        "Benchmarking array_numeric_producer/push_f64/100000: Warming up for 3.0000 s",
+        "Benchmarking array_numeric_producer/push_f64/100000: Collecting 100 samples in estimated 102.77 ms (1200 iterations)",
+        "Benchmarking array_numeric_producer/push_f64/100000: Analyzing",
+        "array_numeric_producer/push_f64/100000",
+        "                        time:   [86.230 \u00b5s 86.849 \u00b5s 87.477 \u00b5s]",
+        ""
+      ]
+    }
+  ]
+}

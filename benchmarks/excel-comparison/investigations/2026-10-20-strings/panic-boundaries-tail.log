@@ -1,0 +1,8 @@
+python3 -B -m unittest discover -s tools -p test_check_panic_boundaries.py
+.....
+----------------------------------------------------------------------
+Ran 5 tests in 0.004s
+
+OK
+python3 -B tools/check_panic_boundaries.py
+Panic boundaries: 49 reviewed direct references; no unreviewed catch_unwind.

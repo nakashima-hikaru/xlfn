@@ -9,6 +9,13 @@ fn argument_ingress_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("argument_ingress");
     group.measurement_time(benchmark_measurement_time());
 
+    for (rows, columns) in [(1, 1), (10, 10), (1000, 10), (100, 100), (10, 1000)] {
+        let mut numeric = NumericMatrixIngressBenchmark::new(rows, columns);
+        group.bench_function(format!("numeric_matrix_shape/{rows}x{columns}"), |b| {
+            b.iter(|| numeric.run_plain());
+        });
+    }
+
     // 1. Scalar f64
     let mut f64_bench = RawArgumentIngressBenchmark::number(42.0);
     group.bench_function("f64/plain", |b| {
@@ -90,6 +97,11 @@ fn argument_ingress_benchmarks(c: &mut Criterion) {
         RawArgumentIngressBenchmark::string(&format!("{}é", "a".repeat(1_000)));
     group.bench_function("string_unicode_sparse/borrowed", |b| {
         b.iter(|| unicode_sparse.run_borrowed_str());
+    });
+
+    let mut ascii_4k = RawArgumentIngressBenchmark::string(&"a".repeat(4096));
+    group.bench_function("string_ascii_4k/owned", |b| {
+        b.iter(|| ascii_4k.run_plain::<String>())
     });
 
     // 5. String matrices

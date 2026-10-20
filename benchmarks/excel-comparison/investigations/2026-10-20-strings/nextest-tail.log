@@ -1,0 +1,12 @@
+        PASS [   0.016s] (1287/1296) xlfn-sys callback::tests::wrapper_passes_function_and_result
+        PASS [   0.019s] (1288/1296) xlfn-sys callback::tests::xl_free_accepts_a_callback_result_without_an_ownership_flag
+        PASS [   0.013s] (1289/1296) xlfn-sys types::tests::constructors_set_exact_root_type
+        PASS [   0.013s] (1290/1296) xlfn-sys types::tests::xloper12_layout_matches_excel_sdk
+        PASS [   0.411s] (1291/1296) xlfn-package tests::generated_bytes_never_panic_the_pe_parser
+        PASS [   9.001s] (1292/1296) xlfn handle::domain::tests::loom_empty_queue_fast_path_preserves_last_reader_notification
+        PASS [  15.604s] (1293/1296) xlfn cache::tests::loom_temporal_reclamation_protocol_exhaustive_verification
+        PASS [  13.691s] (1294/1296) xlfn-kernel rotating_read_domain::tests::loom_publication_barrier_orders_deferred_withdrawal_before_new_readers
+        PASS [  29.581s] (1295/1296) xlfn::compile trait_driven_function_signatures_compile
+        PASS [   0.902s] (1296/1296) xlfn-macros::ui invalid_macro_options_fail_to_compile
+────────────
+     Summary [  36.411s] 1296 tests run: 1296 passed, 11 skipped

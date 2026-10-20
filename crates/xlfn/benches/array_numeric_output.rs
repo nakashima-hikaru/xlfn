@@ -1,5 +1,6 @@
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use xlfn::benchmark_support::{NumericArrayOutputBenchmark, benchmark_measurement_time};
+use xlfn::output::XlArrayBuilder;
 
 fn array_numeric_output_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("array_numeric_output");
@@ -32,6 +33,25 @@ fn array_numeric_output_benchmarks(c: &mut Criterion) {
                 b.iter(|| benchmark.run_numeric_slice(&values));
             },
         );
+    }
+    group.finish();
+
+    // Keep the producer in the downstream crate, like BENCH.MAT.MAKE. An
+    // internal fixture can hide the cost of crossing the public builder API.
+    let mut group = c.benchmark_group("array_numeric_producer");
+    group.measurement_time(benchmark_measurement_time());
+    for cells in [100, 10_000, 100_000] {
+        group.bench_function(BenchmarkId::new("push_f64", cells), |b| {
+            b.iter(|| {
+                let cells = std::hint::black_box(cells);
+                let mut output = XlArrayBuilder::new(cells, 1).unwrap();
+                let seed = std::hint::black_box(0.0);
+                for index in 0..cells {
+                    output.push_f64(seed + index as f64).unwrap();
+                }
+                std::hint::black_box(output.finish().unwrap());
+            });
+        });
     }
     group.finish();
 }

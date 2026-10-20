@@ -16,7 +16,7 @@ from unittest.mock import Mock, patch
 from artifact_manifest import FILES, create, verify
 from generate_registration import source
 from run import (XL_AUTOMATIC, XL_MANUAL, XL_ERR_NUM, AsyncControl, ComObject, ComRetry,
-                 ExcelSession, UnsupportedCase, WorkerProgress, calculation_mode,
+                 ExcelSession, UnsupportedCase, WorkerProgress, apply_excel_cleanup, calculation_mode,
                  check_final_values, check_scalar, close_worker_session, formula, register_xll,
                  registration_diagnostics, run_async, reap_excel_process,
                  recover_worker_record, run_async_cancel, run_async_gate, run_async_repeated, run_matrix)
@@ -151,6 +151,92 @@ class PlanTest(unittest.TestCase):
                 process.kill.assert_not_called()
                 process.wait.assert_not_called()
 
+    def test_shutdown_dump_precedes_kill_and_cannot_hide_a_missed_exit_deadline(self):
+        class ProcessError(Exception):
+            pass
+        class Timeout(ProcessError):
+            pass
+        class Missing(ProcessError):
+            pass
+
+        for capture_failure in (False, True):
+            for exits_during_capture in (False, True):
+                with self.subTest(capture_failure=capture_failure,
+                                  exits_during_capture=exits_during_capture), \
+                        tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    path = root / "excel.pid"
+                    identity = {"pid": 123, "create_time": 42.0, "creation_ticks": 123456}
+                    path.write_text(json.dumps(identity))
+                    events = []
+                    process = Mock()
+                    process.create_time.return_value = 42.0
+                    process.wait.side_effect = [Timeout(), None]
+
+                    def capture(*args):
+                        events.append("capture")
+                        self.assertEqual(args, (identity, root))
+                        if capture_failure:
+                            raise RuntimeError("dump failed")
+                        return {"status": "ok", "path": "shutdown.dmp"}
+
+                    def kill():
+                        events.append("kill")
+                        if exits_during_capture:
+                            raise Missing()
+
+                    process.kill.side_effect = kill
+                    module = SimpleNamespace(Process=Mock(return_value=process), Error=ProcessError,
+                                             TimeoutExpired=Timeout, NoSuchProcess=Missing)
+                    with patch.dict("sys.modules", {"psutil": module}), \
+                            patch("run.capture_shutdown_dump", side_effect=capture):
+                        cleanup = reap_excel_process(path, grace_s=5, dump_directory=root)
+                    self.assertEqual(events, ["capture", "kill"])
+                    self.assertEqual(cleanup["exit_timeout_s"], 5)
+                    self.assertEqual(cleanup["forced_kill"], not exits_during_capture)
+                    self.assertTrue(cleanup["original_process_exited"])
+                    self.assertEqual(cleanup["shutdown_dump"]["status"],
+                                     "error" if capture_failure else "ok")
+                    for original_error in (None, "calculation failed"):
+                        record = {"status": "ok"}
+                        if original_error:
+                            record.update(status="error", error=original_error, failure_phase="execute")
+                        apply_excel_cleanup(record, cleanup)
+                        self.assertEqual(record["status"], "error")
+                        self.assertIn("cleanup_error", record)
+                        if original_error:
+                            self.assertEqual(record["error"], original_error)
+                            self.assertEqual(record["failure_phase"], "execute")
+                        else:
+                            self.assertEqual(record["execution_status"], "ok")
+                            self.assertEqual(record["failure_phase"], "close")
+
+    def test_no_shutdown_dump_for_an_exited_or_reused_process(self):
+        class ProcessError(Exception):
+            pass
+        class Timeout(ProcessError):
+            pass
+        class Missing(ProcessError):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "excel.pid"
+            path.write_text(json.dumps({"pid": 123, "create_time": 42.0}))
+            for created in (42.0, 43.0):
+                process = Mock()
+                process.create_time.return_value = created
+                module = SimpleNamespace(Process=Mock(return_value=process), Error=ProcessError,
+                                         TimeoutExpired=Timeout, NoSuchProcess=Missing)
+                with patch.dict("sys.modules", {"psutil": module}), \
+                        patch("run.capture_shutdown_dump") as capture:
+                    cleanup = reap_excel_process(path, grace_s=5, dump_directory=root)
+                capture.assert_not_called()
+                process.kill.assert_not_called()
+                record = {"status": "ok"}
+                apply_excel_cleanup(record, cleanup)
+                self.assertEqual(record["status"], "ok")
+
     def test_progress_serializes_concurrent_stage_and_snapshot_updates(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "progress.json"
@@ -239,6 +325,32 @@ class PlanTest(unittest.TestCase):
             self.assertEqual(recovered["traceback"], "original execution traceback")
             self.assertIn("worker expired", recovered["error"])
 
+    def test_calculation_timing_includes_state_queries_and_waits(self):
+        clock = [0.0]
+        states = iter((1, 1, 0))
+
+        class App:
+            def Calculate(self):
+                clock[0] += 0.25
+
+            @property
+            def CalculationState(self):
+                clock[0] += 0.01
+                return next(states)
+
+        session = object.__new__(ExcelSession)
+        session.app = App()
+        session.memory = Mock()
+        with patch("run.time.perf_counter", side_effect=lambda: clock[0]), \
+                patch("run.time.sleep", side_effect=lambda delay: clock.__setitem__(0, clock[0] + delay)):
+            elapsed = session.calculate()
+        timing = session.last_calculation_timing
+        self.assertAlmostEqual(elapsed, 0.29)
+        self.assertEqual(timing["completion_polls"], 3)
+        self.assertAlmostEqual(timing["calculate_call_s"], 0.25)
+        self.assertAlmostEqual(timing["completion_wait_s"], 0.04)
+        self.assertEqual(timing["total_s"], elapsed)
+
     def test_calculation_timer_stops_before_process_sampling(self):
         for full in (False, True):
             with self.subTest(full=full):
@@ -260,6 +372,10 @@ class PlanTest(unittest.TestCase):
                 with patch("run.time.perf_counter", side_effect=lambda: clock[0]):
                     elapsed = session.calculate(target, full=full)
                 self.assertEqual(elapsed, 0.25)
+                self.assertEqual(session.last_calculation_timing, {
+                    "total_s": 0.25, "calculate_call_s": 0.25,
+                    "completion_wait_s": 0.0, "completion_polls": 1,
+                })
                 target.Dirty.assert_called_once_with()
                 session.memory.assert_called_once_with()
                 if full:
@@ -634,6 +750,10 @@ class PlanTest(unittest.TestCase):
 
                 def calculate(target):
                     events.append("calculate")
+                    session.last_calculation_timing = {
+                        "total_s": 0.1, "calculate_call_s": 0.08,
+                        "completion_wait_s": 0.02, "completion_polls": 1,
+                    }
                     return 0.1
 
                 reads = iter((100.0, 300.0))
@@ -650,6 +770,9 @@ class PlanTest(unittest.TestCase):
                 session.calculate.side_effect = calculate
                 session.app.Evaluate.side_effect = evaluate
                 result = run_matrix(session, Case(id, "test", {"rows": 1, "cols": 5}), 2)
+                self.assertEqual(result["formula_count"], 1)
+                self.assertEqual(len(result["recalculation_samples"]), 2)
+                self.assertEqual(result["recalculation_samples"][0]["completion_wait_s"], 0.02)
                 if id == "M05":
                     self.assertEqual(events, ["calculate", "BENCH.ALLOC.TRACK(TRUE)",
                                              "BENCH.ALLOC.BYTES()", "calculate", "calculate",

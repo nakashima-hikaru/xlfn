@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.19s
+     Running unittests src/lib.rs (target/miri/aarch64-apple-darwin/debug/build/xlfn/4259f0d29abcf4a5/out/xlfn-4259f0d29abcf4a5)
+
+running 2 tests
+test utf16::tests::miri_utf16_decoder_publishes_only_initialized_valid_utf8 ... ok
+test utf16::tests::miri_utf16_subtotals_preserve_boundaries_and_surrogate_errors ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 394 filtered out; finished in 14.83s
+

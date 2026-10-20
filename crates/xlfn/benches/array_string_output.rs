@@ -61,6 +61,11 @@ fn scalar_output_benchmarks(c: &mut Criterion) {
         ("unicode_short", "日本語💡".to_owned()),
         ("unicode_1k", "日本語💡".repeat(80)),
         ("unicode_limit", "日".repeat(32_767)),
+        ("ascii_4k", "a".repeat(4_096)),
+        ("japanese_8", "日".repeat(8)),
+        ("japanese_64", "日".repeat(64)),
+        ("japanese_512", "日".repeat(512)),
+        ("japanese_4k", "日".repeat(4_096)),
         ("empty", String::new()),
     ] {
         let benchmark = ScalarOutputBenchmark::new(payload);
@@ -70,6 +75,14 @@ fn scalar_output_benchmarks(c: &mut Criterion) {
         group.bench_function(format!("{label}/owned"), |b| {
             b.iter(|| benchmark.run_owned())
         });
+    }
+    for (label, payload) in [
+        ("ascii_4k", "a".repeat(4096)),
+        ("japanese_4k", "日".repeat(4096)),
+        ("mixed", "ABC日本語💡".repeat(128)),
+    ] {
+        let benchmark = ScalarOutputBenchmark::new(payload);
+        group.bench_function(format!("{label}/copy"), |b| b.iter(|| benchmark.run_copy()));
     }
     let benchmark = ScalarOutputBenchmark::new("Ready".to_owned());
     group.bench_function("enum", |b| b.iter(|| benchmark.run_enum()));

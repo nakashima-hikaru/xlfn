@@ -1,0 +1,1010 @@
+[
+  {
+    "case": "argument_ingress/f64_plain",
+    "baseline_ns": 24.109368083060495,
+    "candidate_ns": 24.125680592597114,
+    "change_percent": 0.06766046078197085,
+    "runs": {
+      "baseline": [
+        24.1271213484871,
+        24.09161481763389
+      ],
+      "candidate": [
+        24.14284762470784,
+        24.108513560486386
+      ]
+    }
+  },
+  {
+    "case": "argument_ingress/matrix_string_100_borrowed",
+    "baseline_ns": 1902.2523820026609,
+    "candidate_ns": 1856.7105308502528,
+    "change_percent": -2.394101412792682,
+    "runs": {
+      "baseline": [
+        1900.4906646787226,
+        1904.0140993265993
+      ],
+      "candidate": [
+        1871.931452422797,
+        1841.4896092777085
+      ]
+    }
+  },
+  {
+    "case": "argument_ingress/matrix_string_100_owned",
+    "baseline_ns": 3941.986049513308,
+    "candidate_ns": 3819.2247748521077,
+    "change_percent": -3.114198607485097,
+    "runs": {
+      "baseline": [
+        3945.5599944037444,
+        3938.412104622871
+      ],
+      "candidate": [
+        3842.303035984017,
+        3796.146513720198
+      ]
+    }
+  },
+  {
+    "case": "argument_ingress/matrix_string_10k_borrowed",
+    "baseline_ns": 178717.81874672946,
+    "candidate_ns": 177667.56666881312,
+    "change_percent": -0.5876594092750875,
+    "runs": {
+      "baseline": [
+        178468.37558869703,
+        178967.2619047619
+      ],
+      "candidate": [
+        181509.04868154158,
+        173826.08465608465
+      ]
+    }
+  },
+  {
+    "case": "argument_ingress/matrix_string_10k_owned",
+    "baseline_ns": 373634.8315476191,
+    "candidate_ns": 382370.44680611783,
+    "change_percent": 2.3380088045633407,
+    "runs": {
+      "baseline": [
+        353414.5916666667,
+        393855.0714285714
+      ],
+      "candidate": [
+        385310.33805668016,
+        379430.5555555555
+      ]
+    }
+  },
+  {
+    "case": "argument_ingress/string_1k_borrowed",
+    "baseline_ns": 542.5255068332242,
+    "candidate_ns": 183.44303623346104,
+    "change_percent": -66.18720522390986,
+    "runs": {
+      "baseline": [
+        542.3987894821228,
+        542.6522241843256
+      ],
+      "candidate": [
+        180.74441722326432,
+        186.14165524365774
+      ]
+    }
+  },
+  {
+    "case": "argument_ingress/string_1k_plain",
+    "baseline_ns": 541.3163511850966,
+    "candidate_ns": 184.46677709202964,
+    "change_percent": -65.92255587916769,
+    "runs": {
+      "baseline": [
+        542.050644118465,
+        540.5820582517281
+      ],
+      "candidate": [
+        182.0422600052651,
+        186.89129417879417
+      ]
+    }
+  },
+  {
+    "case": "argument_ingress/string_ascii_4k_owned",
+    "baseline_ns": 2018.923369572697,
+    "candidate_ns": 542.5937327683503,
+    "change_percent": -73.12459992559353,
+    "runs": {
+      "baseline": [
+        2019.7115384615386,
+        2018.1352006838558
+      ],
+      "candidate": [
+        537.8323114893237,
+        547.3551540473768
+      ]
+    }
+  },
+  {
+    "case": "argument_ingress/string_inline_ascii_23_borrowed",
+    "baseline_ns": 44.58871141169371,
+    "candidate_ns": 39.457740200869196,
+    "change_percent": -11.507332345735556,
+    "runs": {
+      "baseline": [
+        44.66267882698767,
+        44.51474399639974
+      ],
+      "candidate": [
+        39.4280311344732,
+        39.487449267265184
+      ]
+    }
+  },
+  {
+    "case": "argument_ingress/string_inline_ascii_24_borrowed",
+    "baseline_ns": 82.98885978901382,
+    "candidate_ns": 75.78238734799771,
+    "change_percent": -8.683662432930673,
+    "runs": {
+      "baseline": [
+        82.88000273519968,
+        83.09771684282794
+      ],
+      "candidate": [
+        75.6005945282357,
+        75.96418016775971
+      ]
+    }
+  },
+  {
+    "case": "argument_ingress/string_inline_empty_borrowed",
+    "baseline_ns": 26.23549198202823,
+    "candidate_ns": 26.160760396703772,
+    "change_percent": -0.28484918588777,
+    "runs": {
+      "baseline": [
+        26.249636301503614,
+        26.221347662552844
+      ],
+      "candidate": [
+        26.161403040713395,
+        26.160117752694152
+      ]
+    }
+  },
+  {
+    "case": "argument_ingress/string_inline_unicode_23_borrowed",
+    "baseline_ns": 45.41909692336246,
+    "candidate_ns": 41.92321664057161,
+    "change_percent": -7.696939216315979,
+    "runs": {
+      "baseline": [
+        45.42674385269934,
+        45.411449994025574
+      ],
+      "candidate": [
+        41.90801932046286,
+        41.938413960680364
+      ]
+    }
+  },
+  {
+    "case": "argument_ingress/string_inline_unicode_24_borrowed",
+    "baseline_ns": 69.84181234073627,
+    "candidate_ns": 67.56424747503635,
+    "change_percent": -3.2610334545564057,
+    "runs": {
+      "baseline": [
+        69.9107984889931,
+        69.77282619247944
+      ],
+      "candidate": [
+        67.04956288070784,
+        68.07893206936487
+      ]
+    }
+  },
+  {
+    "case": "argument_ingress/string_japanese_4k_borrowed",
+    "baseline_ns": 2227.467476571732,
+    "candidate_ns": 745.7298742837766,
+    "change_percent": -66.52117787903595,
+    "runs": {
+      "baseline": [
+        2241.175378675379,
+        2213.759574468085
+      ],
+      "candidate": [
+        745.6686234802016,
+        745.7911250873515
+      ]
+    }
+  },
+  {
+    "case": "argument_ingress/string_japanese_4k_owned",
+    "baseline_ns": 2209.7610879913486,
+    "candidate_ns": 739.010719673842,
+    "change_percent": -66.55698556328569,
+    "runs": {
+      "baseline": [
+        2209.4601070695217,
+        2210.0620689131756
+      ],
+      "candidate": [
+        738.9777231105644,
+        739.0437162371195
+      ]
+    }
+  },
+  {
+    "case": "argument_ingress/string_short_borrowed",
+    "baseline_ns": 31.48710401728335,
+    "candidate_ns": 30.124553773392392,
+    "change_percent": -4.327327921751866,
+    "runs": {
+      "baseline": [
+        31.5015337386461,
+        31.472674295920598
+      ],
+      "candidate": [
+        30.1399150627226,
+        30.109192484062184
+      ]
+    }
+  },
+  {
+    "case": "argument_ingress/string_short_plain",
+    "baseline_ns": 66.98946600835467,
+    "candidate_ns": 66.59101439116256,
+    "change_percent": -0.5947974225416486,
+    "runs": {
+      "baseline": [
+        66.96470726400634,
+        67.01422475270302
+      ],
+      "candidate": [
+        65.1999473616085,
+        67.98208142071664
+      ]
+    }
+  },
+  {
+    "case": "argument_ingress/string_unicode_1k_borrowed",
+    "baseline_ns": 601.4666595752926,
+    "candidate_ns": 458.908149692638,
+    "change_percent": -23.701814159294877,
+    "runs": {
+      "baseline": [
+        601.5890670257635,
+        601.3442521248217
+      ],
+      "candidate": [
+        453.7566782552324,
+        464.05962113004364
+      ]
+    }
+  },
+  {
+    "case": "argument_ingress/string_unicode_1k_owned",
+    "baseline_ns": 595.6282171369089,
+    "candidate_ns": 454.4428280917078,
+    "change_percent": -23.70360990012479,
+    "runs": {
+      "baseline": [
+        595.7444801555205,
+        595.5119541182974
+      ],
+      "candidate": [
+        450.75263313377013,
+        458.13302304964543
+      ]
+    }
+  },
+  {
+    "case": "argument_ingress/string_unicode_borrowed",
+    "baseline_ns": 35.99117154066332,
+    "candidate_ns": 35.03110569987944,
+    "change_percent": -2.6675037229593634,
+    "runs": {
+      "baseline": [
+        35.920227999999994,
+        36.06211508132665
+      ],
+      "candidate": [
+        35.008371030690085,
+        35.053840369068794
+      ]
+    }
+  },
+  {
+    "case": "argument_ingress/string_unicode_limit_owned",
+    "baseline_ns": 17422.79125650708,
+    "candidate_ns": 5662.486104757085,
+    "change_percent": -67.49954687861938,
+    "runs": {
+      "baseline": [
+        17433.10248655914,
+        17412.480026455025
+      ],
+      "candidate": [
+        5658.182565789473,
+        5666.789643724696
+      ]
+    }
+  },
+  {
+    "case": "argument_ingress/string_unicode_owned",
+    "baseline_ns": 61.316182329081585,
+    "candidate_ns": 55.31718548180436,
+    "change_percent": -9.783708997211926,
+    "runs": {
+      "baseline": [
+        66.48321210948217,
+        56.149152548680995
+      ],
+      "candidate": [
+        54.11676477636243,
+        56.51760618724629
+      ]
+    }
+  },
+  {
+    "case": "argument_ingress/string_unicode_sparse_borrowed",
+    "baseline_ns": 1168.5063867631638,
+    "candidate_ns": 812.7097315957509,
+    "change_percent": -30.448841289861672,
+    "runs": {
+      "baseline": [
+        1168.8549383814002,
+        1168.1578351449275
+      ],
+      "candidate": [
+        812.2150504454223,
+        813.2044127460795
+      ]
+    }
+  },
+  {
+    "case": "array_string_output/ascii_1k/16384",
+    "baseline_ns": 1226494.5767857144,
+    "candidate_ns": 1240202.0275526526,
+    "change_percent": 1.117612016097258,
+    "runs": {
+      "baseline": [
+        1234592.261904762,
+        1218396.8916666666
+      ],
+      "candidate": [
+        1264868.1773879142,
+        1215535.8777173914
+      ]
+    }
+  },
+  {
+    "case": "array_string_output/borrowed_str/16384",
+    "baseline_ns": 236658.2787037037,
+    "candidate_ns": 239381.3530492899,
+    "change_percent": 1.1506355748473585,
+    "runs": {
+      "baseline": [
+        236709.52857142856,
+        236607.02883597882
+      ],
+      "candidate": [
+        243123.53070175438,
+        235639.17539682542
+      ]
+    }
+  },
+  {
+    "case": "array_string_output/empty/16384",
+    "baseline_ns": 178313.5020697693,
+    "candidate_ns": 172992.8175,
+    "change_percent": -2.9838932599099866,
+    "runs": {
+      "baseline": [
+        178256.27978056425,
+        178370.72435897437
+      ],
+      "candidate": [
+        179970.95047619048,
+        166014.68452380953
+      ]
+    }
+  },
+  {
+    "case": "array_string_output/mixed/16384",
+    "baseline_ns": 1140083.871808678,
+    "candidate_ns": 934013.5860144928,
+    "change_percent": -18.07501104872805,
+    "runs": {
+      "baseline": [
+        1144271.4629156012,
+        1135896.2807017544
+      ],
+      "candidate": [
+        957672.2333333334,
+        910354.9386956522
+      ]
+    }
+  },
+  {
+    "case": "array_string_output/unicode_1k/16384",
+    "baseline_ns": 14656359.375,
+    "candidate_ns": 10620968.75,
+    "change_percent": -27.53337661659241,
+    "runs": {
+      "baseline": [
+        14599073.0,
+        14713645.75
+      ],
+      "candidate": [
+        10883916.75,
+        10358020.75
+      ]
+    }
+  },
+  {
+    "case": "array_string_output/unicode_short/16384",
+    "baseline_ns": 372023.9194444444,
+    "candidate_ns": 370648.8327050265,
+    "change_percent": -0.3696232063442051,
+    "runs": {
+      "baseline": [
+        372089.27777777775,
+        371958.5611111111
+      ],
+      "candidate": [
+        379775.9203703704,
+        361521.74503968254
+      ]
+    }
+  },
+  {
+    "case": "callback_counted_utf16/ascii_1k",
+    "baseline_ns": 87.89843261938552,
+    "candidate_ns": 90.8060999638502,
+    "change_percent": 3.307985430246929,
+    "runs": {
+      "baseline": [
+        87.95119127124352,
+        87.84567396752752
+      ],
+      "candidate": [
+        93.01804678716596,
+        88.59415314053444
+      ]
+    }
+  },
+  {
+    "case": "callback_counted_utf16/ascii_short",
+    "baseline_ns": 21.756536248484394,
+    "candidate_ns": 20.347668954790482,
+    "change_percent": -6.475604745181151,
+    "runs": {
+      "baseline": [
+        21.65268808772308,
+        21.860384409245707
+      ],
+      "candidate": [
+        20.744250892082167,
+        19.951087017498796
+      ]
+    }
+  },
+  {
+    "case": "callback_counted_utf16/unicode_1k",
+    "baseline_ns": 1023.9204883635964,
+    "candidate_ns": 497.3527897325006,
+    "change_percent": -51.426619997871406,
+    "runs": {
+      "baseline": [
+        1024.0916825095057,
+        1023.7492942176871
+      ],
+      "candidate": [
+        509.77750272487117,
+        484.92807674013
+      ]
+    }
+  },
+  {
+    "case": "callback_counted_utf16/unicode_limit",
+    "baseline_ns": 71960.13726851852,
+    "candidate_ns": 41609.541723053175,
+    "change_percent": -42.176956155895596,
+    "runs": {
+      "baseline": [
+        72363.0662037037,
+        71557.20833333334
+      ],
+      "candidate": [
+        42669.93221153846,
+        40549.1512345679
+      ]
+    }
+  },
+  {
+    "case": "callback_counted_utf16/unicode_short",
+    "baseline_ns": 13.377883302762337,
+    "candidate_ns": 11.808522488563687,
+    "change_percent": -11.73100989657011,
+    "runs": {
+      "baseline": [
+        13.375466698286615,
+        13.380299907238058
+      ],
+      "candidate": [
+        12.111582064012069,
+        11.505462913115306
+      ]
+    }
+  },
+  {
+    "case": "scalar_output/ascii_1k_borrowed",
+    "baseline_ns": 121.05795849704677,
+    "candidate_ns": 129.47335455924008,
+    "change_percent": 6.95154301846137,
+    "runs": {
+      "baseline": [
+        120.9838231780611,
+        121.13209381603244
+      ],
+      "candidate": [
+        132.7232391174349,
+        126.22347000104526
+      ]
+    }
+  },
+  {
+    "case": "scalar_output/ascii_1k_owned",
+    "baseline_ns": 171.5971827473984,
+    "candidate_ns": 177.36853589087917,
+    "change_percent": 3.3633146250288792,
+    "runs": {
+      "baseline": [
+        171.6021618684057,
+        171.59220362639113
+      ],
+      "candidate": [
+        181.8450018785084,
+        172.89206990324993
+      ]
+    }
+  },
+  {
+    "case": "scalar_output/ascii_4k_borrowed",
+    "baseline_ns": 232.653943743623,
+    "candidate_ns": 242.363397588412,
+    "change_percent": 4.1733459096178205,
+    "runs": {
+      "baseline": [
+        231.47991233478143,
+        233.82797515246455
+      ],
+      "candidate": [
+        247.7834544639615,
+        236.94334071286252
+      ]
+    }
+  },
+  {
+    "case": "scalar_output/ascii_4k_copy",
+    "baseline_ns": 2287.641160086226,
+    "candidate_ns": 741.6954317671973,
+    "change_percent": -67.57815671845836,
+    "runs": {
+      "baseline": [
+        2239.296039144084,
+        2335.9862810283685
+      ],
+      "candidate": [
+        737.676853872559,
+        745.7140096618357
+      ]
+    }
+  },
+  {
+    "case": "scalar_output/ascii_4k_owned",
+    "baseline_ns": 320.53373457757516,
+    "candidate_ns": 324.04682137759374,
+    "change_percent": 1.0960115647884683,
+    "runs": {
+      "baseline": [
+        316.1312460170874,
+        324.936223138063
+      ],
+      "candidate": [
+        331.2018821495078,
+        316.8917606056797
+      ]
+    }
+  },
+  {
+    "case": "scalar_output/ascii_limit_borrowed",
+    "baseline_ns": 1828.8957867555614,
+    "candidate_ns": 1837.5369970074998,
+    "change_percent": 0.4724823751312668,
+    "runs": {
+      "baseline": [
+        1777.089574637249,
+        1880.701998873874
+      ],
+      "candidate": [
+        1825.8169768505488,
+        1849.2570171644509
+      ]
+    }
+  },
+  {
+    "case": "scalar_output/ascii_limit_owned",
+    "baseline_ns": 2187.634890786644,
+    "candidate_ns": 2190.8651847245496,
+    "change_percent": 0.1476614745682614,
+    "runs": {
+      "baseline": [
+        2213.2591505053265,
+        2162.010631067961
+      ],
+      "candidate": [
+        2230.0632265919567,
+        2151.6671428571426
+      ]
+    }
+  },
+  {
+    "case": "scalar_output/ascii_short_borrowed",
+    "baseline_ns": 94.79798757055299,
+    "candidate_ns": 97.2823064357242,
+    "change_percent": 2.6206451516940232,
+    "runs": {
+      "baseline": [
+        94.90470712373894,
+        94.69126801736704
+      ],
+      "candidate": [
+        98.29858014368884,
+        96.26603272775957
+      ]
+    }
+  },
+  {
+    "case": "scalar_output/ascii_short_owned",
+    "baseline_ns": 127.84713184025341,
+    "candidate_ns": 115.401562973707,
+    "change_percent": -9.734726690699091,
+    "runs": {
+      "baseline": [
+        127.85441853458664,
+        127.8398451459202
+      ],
+      "candidate": [
+        118.33669884099302,
+        112.46642710642098
+      ]
+    }
+  },
+  {
+    "case": "scalar_output/empty_borrowed",
+    "baseline_ns": 93.63029800277819,
+    "candidate_ns": 92.32295097965297,
+    "change_percent": -1.396286299426741,
+    "runs": {
+      "baseline": [
+        93.75429569779124,
+        93.50630030776514
+      ],
+      "candidate": [
+        92.38934769014304,
+        92.25655426916289
+      ]
+    }
+  },
+  {
+    "case": "scalar_output/empty_owned",
+    "baseline_ns": 100.82179717432093,
+    "candidate_ns": 98.29129976757662,
+    "change_percent": -2.509871354870896,
+    "runs": {
+      "baseline": [
+        101.0078626380556,
+        100.63573171058627
+      ],
+      "candidate": [
+        98.3041810931673,
+        98.27841844198592
+      ]
+    }
+  },
+  {
+    "case": "scalar_output/enum",
+    "baseline_ns": 94.21371213025722,
+    "candidate_ns": 91.4296831830552,
+    "change_percent": -2.955014598461947,
+    "runs": {
+      "baseline": [
+        94.23490939517691,
+        94.19251486533753
+      ],
+      "candidate": [
+        91.42306355456194,
+        91.43630281154846
+      ]
+    }
+  },
+  {
+    "case": "scalar_output/japanese_4k_borrowed",
+    "baseline_ns": 9130.361216019814,
+    "candidate_ns": 1111.1277772351805,
+    "change_percent": -87.83040724297267,
+    "runs": {
+      "baseline": [
+        9186.26056763285,
+        9074.46186440678
+      ],
+      "candidate": [
+        1111.520996756291,
+        1110.73455771407
+      ]
+    }
+  },
+  {
+    "case": "scalar_output/japanese_4k_copy",
+    "baseline_ns": 11366.696468466087,
+    "candidate_ns": 1823.9962017338853,
+    "change_percent": -83.9531546672854,
+    "runs": {
+      "baseline": [
+        11366.871884300595,
+        11366.521052631579
+      ],
+      "candidate": [
+        1824.4148803589233,
+        1823.5775231088473
+      ]
+    }
+  },
+  {
+    "case": "scalar_output/japanese_4k_owned",
+    "baseline_ns": 9286.298666137405,
+    "candidate_ns": 1310.1324929643529,
+    "change_percent": -85.89176872221688,
+    "runs": {
+      "baseline": [
+        9370.133786561266,
+        9202.463545713545
+      ],
+      "candidate": [
+        1309.8354132791328,
+        1310.4295726495727
+      ]
+    }
+  },
+  {
+    "case": "scalar_output/japanese_512_borrowed",
+    "baseline_ns": 1225.9655018399994,
+    "candidate_ns": 209.7428367861154,
+    "change_percent": -82.8916199949084,
+    "runs": {
+      "baseline": [
+        1226.36156554152,
+        1225.569438138479
+      ],
+      "candidate": [
+        209.68470159381582,
+        209.80097197841494
+      ]
+    }
+  },
+  {
+    "case": "scalar_output/japanese_512_owned",
+    "baseline_ns": 1278.4218121817773,
+    "candidate_ns": 259.2090620018449,
+    "change_percent": -79.72429291084497,
+    "runs": {
+      "baseline": [
+        1280.7922875615764,
+        1276.0513368019783
+      ],
+      "candidate": [
+        259.1770821893738,
+        259.2410418143161
+      ]
+    }
+  },
+  {
+    "case": "scalar_output/japanese_64_borrowed",
+    "baseline_ns": 236.33539544508204,
+    "candidate_ns": 106.41615075201608,
+    "change_percent": -54.97240244035121,
+    "runs": {
+      "baseline": [
+        236.38291043545195,
+        236.28788045471214
+      ],
+      "candidate": [
+        106.91408510364843,
+        105.91821640038371
+      ]
+    }
+  },
+  {
+    "case": "scalar_output/japanese_64_owned",
+    "baseline_ns": 272.42358910411633,
+    "candidate_ns": 127.28387143980353,
+    "change_percent": -53.277221015116474,
+    "runs": {
+      "baseline": [
+        272.39631018469095,
+        272.4508680235417
+      ],
+      "candidate": [
+        127.27126157493606,
+        127.296481304671
+      ]
+    }
+  },
+  {
+    "case": "scalar_output/japanese_8_borrowed",
+    "baseline_ns": 111.21750622225699,
+    "candidate_ns": 96.88460532465736,
+    "change_percent": -12.887270524621163,
+    "runs": {
+      "baseline": [
+        111.37025305618513,
+        111.06475938832884
+      ],
+      "candidate": [
+        99.16857799580401,
+        94.6006326535107
+      ]
+    }
+  },
+  {
+    "case": "scalar_output/japanese_8_owned",
+    "baseline_ns": 135.98992639814966,
+    "candidate_ns": 113.88680596458468,
+    "change_percent": -16.253498342849117,
+    "runs": {
+      "baseline": [
+        135.98700806893356,
+        135.99284472736576
+      ],
+      "candidate": [
+        114.67943136924488,
+        113.0941805599245
+      ]
+    }
+  },
+  {
+    "case": "scalar_output/mixed_copy",
+    "baseline_ns": 3836.120949091167,
+    "candidate_ns": 2973.3678325598685,
+    "change_percent": -22.49024803912132,
+    "runs": {
+      "baseline": [
+        3871.0206534772183,
+        3801.2212447051156
+      ],
+      "candidate": [
+        2975.6248426089146,
+        2971.110822510823
+      ]
+    }
+  },
+  {
+    "case": "scalar_output/number",
+    "baseline_ns": 39.419968803539504,
+    "candidate_ns": 39.405160842385,
+    "change_percent": -0.03756461916116782,
+    "runs": {
+      "baseline": [
+        39.43023515384115,
+        39.40970245323786
+      ],
+      "candidate": [
+        39.36429660393796,
+        39.446025080832044
+      ]
+    }
+  },
+  {
+    "case": "scalar_output/unicode_1k_borrowed",
+    "baseline_ns": 973.3650446054869,
+    "candidate_ns": 731.7845996193554,
+    "change_percent": -24.819100123329996,
+    "runs": {
+      "baseline": [
+        980.3209030948757,
+        966.4091861160982
+      ],
+      "candidate": [
+        750.3643095293479,
+        713.2048897093629
+      ]
+    }
+  },
+  {
+    "case": "scalar_output/unicode_1k_owned",
+    "baseline_ns": 1016.7895904668151,
+    "candidate_ns": 776.271325712898,
+    "change_percent": -23.65467418322934,
+    "runs": {
+      "baseline": [
+        1026.0958894500561,
+        1007.483291483574
+      ],
+      "candidate": [
+        795.8503457398285,
+        756.6923056859677
+      ]
+    }
+  },
+  {
+    "case": "scalar_output/unicode_limit_borrowed",
+    "baseline_ns": 72842.69457130678,
+    "candidate_ns": 8566.772642692009,
+    "change_percent": -88.23935235632192,
+    "runs": {
+      "baseline": [
+        72841.82163561077,
+        72843.5675070028
+      ],
+      "candidate": [
+        8788.257464871194,
+        8345.287820512822
+      ]
+    }
+  },
+  {
+    "case": "scalar_output/unicode_limit_owned",
+    "baseline_ns": 74687.27767320261,
+    "candidate_ns": 10583.359123633283,
+    "change_percent": -85.82976987065825,
+    "runs": {
+      "baseline": [
+        74716.88823529411,
+        74657.6671111111
+      ],
+      "candidate": [
+        10864.023405996726,
+        10302.69484126984
+      ]
+    }
+  },
+  {
+    "case": "scalar_output/unicode_short_borrowed",
+    "baseline_ns": 103.07279218521704,
+    "candidate_ns": 103.35885333684084,
+    "change_percent": 0.27753313513594335,
+    "runs": {
+      "baseline": [
+        102.89810671256456,
+        103.24747765786952
+      ],
+      "candidate": [
+        105.88268461007591,
+        100.83502206360575
+      ]
+    }
+  },
+  {
+    "case": "scalar_output/unicode_short_owned",
+    "baseline_ns": 126.52302873503817,
+    "candidate_ns": 124.85658826077847,
+    "change_percent": -1.3171044756994599,
+    "runs": {
+      "baseline": [
+        126.52791019236383,
+        126.5181472777125
+      ],
+      "candidate": [
+        128.07653122020974,
+        121.63664530134719
+      ]
+    }
+  }
+]

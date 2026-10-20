@@ -7,6 +7,7 @@ use crate::{XllError, XllResult};
 /// One numerical-output policy for semantic conversion and ABI encoding.
 /// Invalid results are domain errors, regardless of the return shape or fast
 /// path used to write them; input argument labels do not belong to this error.
+#[inline]
 pub(crate) fn validate_number(value: f64) -> XllResult<f64> {
     if value.is_finite() {
         Ok(value)

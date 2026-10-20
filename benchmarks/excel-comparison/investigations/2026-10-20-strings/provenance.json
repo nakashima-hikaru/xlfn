@@ -1,0 +1,16 @@
+{
+  "head": "ec715c30f3b1f3ffd0c8cf1cf20437db4cfda04b",
+  "status": " M Justfile\n M benchmarks/excel-comparison/README.md\n M benchmarks/excel-comparison/run.py\n M benchmarks/excel-comparison/test_plan.py\n M crates/xlfn/benches/argument_ingress.rs\n M crates/xlfn/benches/array_numeric_output.rs\n M crates/xlfn/src/return_abi/array.rs\n M crates/xlfn/src/value/numeric.rs\n M crates/xlfn/src/value/output.rs\n?? benchmarks/excel-comparison/investigations/\n",
+  "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: aarch64-apple-darwin\nrelease: 1.99.0\nLLVM version: 23.1.1\n",
+  "baseline_note": "Includes previously applied matrix improvements and current working tree before string changes",
+  "experiment_path": "/private/tmp/xlfn-strings-20261019-uy451w0u",
+  "completed_date_local": "2026-10-20",
+  "user_results_sha256": "a128ba9152c20411e583ee5b14a6768f23991d51a1e903b3cc62ebf514713f2b",
+  "final_order": [
+    "candidate",
+    "baseline",
+    "baseline",
+    "candidate"
+  ],
+  "final_cases": 63
+}

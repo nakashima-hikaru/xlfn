@@ -120,6 +120,19 @@ the updated fixtures.
 
 ## Workloads and measurement
 
+Matrix cases time one formula per recalculation, including COM dispatch and
+Excel's dependency handling, coercion, spill, and completion queries.
+`ns_per_element` therefore includes fixed costs; it is not an isolated UDF
+conversion or allocation measurement. `recalculation_samples` retains each
+measured sample (excluding warmup), split into `calculate_call_s` and
+`completion_wait_s`, with `completion_polls`. The first component still includes
+both COM dispatch and Excel execution; the second includes `CalculationState`
+queries and any polling sleeps. No component is subtracted from the total.
+M01/100x100 and M04/100x100 execute the same formula and input and provide a
+useful check for session variability. For a performance comparison, repeat
+independent Excel sessions and reverse the implementation order; five
+recalculations in one session do not establish statistical significance.
+
 | IDs | What the harness does | Main observed value |
 | --- | --- | --- |
 | S01–S04 | Identity, 2/4/8 args, timed busy loop, periodic `#NUM!` | Dirty-range recalculation distribution and throughput; S03 has a 0-µs baseline |
@@ -265,6 +278,40 @@ forced termination cannot preserve an `ok` result; PID reuse never authorizes
 terminating a different process. Execution and cleanup errors are retained
 separately when both occur.
 
+For a result with `execution_status: "ok"`, `stage: "closed"`, and
+`excel_process_cleanup.forced_kill: true`, the worker completed its Python
+cleanup but Excel did not exit within the parent's five-second deadline.
+`closed` does not establish that Excel called or completed `xlAutoClose`.
+It also does not identify a string-length defect or distinguish a shutdown
+deadlock from a slow exit. Capture the surviving process before it is killed:
+
+```powershell
+python benchmarks/excel-comparison/run.py --profile full --id T02 --variant ascii-512 `
+  --implementation xlfn --artifacts .\artifacts `
+  --shutdown-diagnostics --out t02-ascii512-diagnostic.jsonl
+```
+
+Use your artifact directory; add `--allow-commit-mismatch` when intentionally
+diagnosing an older CI XLL with a newer runner. The XLL need not be rebuilt.
+`--shutdown-diagnostics` records the native process creation time at startup
+and saves a stack/module dump in a unique directory beneath
+`<out-stem>.diagnostics/` only if Excel survives teardown. The JSONL result's
+`excel_process_cleanup.shutdown_dump` records its path or capture error.
+Keep the JSONL, dump, and exact manifest/XLL together for analysis. A dump
+contains thread stacks and may contain workbook data from those stacks; it
+does not request a full heap dump and is not uploaded automatically.
+
+The dump uses Windows
+[MiniDumpWriteDump](https://learn.microsoft.com/en-us/windows/win32/api/minidumpapiset/nf-minidumpapiset-minidumpwritedump)
+in a separate helper with a 15-second timeout. The helper validates native
+creation time on the same process handle it dumps, so PID reuse cannot capture
+another process. Dump errors cannot skip reaping. `exit_timeout_s` preserves
+the missed deadline even if Excel exits naturally during capture; such a run
+remains failed. This diagnostic option does not extend the five-second exit
+acceptance window. Successful non-hanging runs produce no dump. In WinDbg,
+`~* kb` shows all captured thread stacks; use matching symbols where available
+to identify the wait inside Excel, the XLL, or Windows.
+
 Rust allocation counting is disabled by default. M05 enables it after warmup
 with `BENCH.ALLOC.TRACK(TRUE)` and disables it in a `finally` block after the
 counter reads and recalculations. These control calls are outside the timed
@@ -312,3 +359,9 @@ Relevant API references: [Excel-DNA NativeAOT support](https://excel-dna.net/doc
 [Excel-DNA packed add-in build properties](https://excel-dna.net/docs/guides-basic/sdk-style-project-properties/),
 [Excel `Range.Dirty`](https://learn.microsoft.com/en-us/office/vba/api/excel.range.dirty),
 and [Excel RTD throttle](https://learn.microsoft.com/en-us/office/vba/api/excel.rtd.throttleinterval).
+
+The [2026-10-20 string follow-up](investigations/2026-10-20-strings/README.md)
+records all 128 pairs from the supplied full run, the additional UTF conversion
+optimizations, paired local measurements, remaining regressions and Windows/Excel
+qualification limits. Local conversion timings must not replace the end-to-end
+Excel metrics in this comparison.

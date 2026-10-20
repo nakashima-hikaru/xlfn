@@ -91,6 +91,7 @@ impl XlArrayBuilder {
         Ok(builder)
     }
 
+    #[inline]
     fn ensure_capacity(&self) -> XllResult<()> {
         if self.initialized == self.cells.len() {
             return Err(XllError::input(
@@ -102,6 +103,7 @@ impl XlArrayBuilder {
         Ok(())
     }
 
+    #[inline]
     fn push_oper(&mut self, oper: XLOPER12) -> XllResult<()> {
         self.ensure_capacity()?;
         self.cells[self.initialized].write(oper);
@@ -111,6 +113,7 @@ impl XlArrayBuilder {
     }
 
     /// Appends one finite number in row-major order.
+    #[inline]
     pub fn push_f64(&mut self, value: f64) -> XllResult<()> {
         let value = crate::value::output::validate_number(value)?;
         self.push_oper(XLOPER12::number(value))
@@ -263,6 +266,42 @@ mod tests {
         for (cell, expected) in output.cells.iter().zip(values) {
             assert_eq!(cell.xltype, xlfn_sys::XLTYPE_NUM);
             // SAFETY: The checked tag selects the initialized numeric value.
+            assert_eq!(unsafe { cell.value.number }.to_bits(), expected.to_bits());
+        }
+    }
+
+    #[test]
+    fn miri_numeric_push_preserves_error_order_and_partial_builder() {
+        let mut builder = XlArrayBuilder::new(1, 2).unwrap();
+        builder.push_f64(-0.0).unwrap();
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(matches!(
+                builder.push_f64(value),
+                Err(XllError::Domain {
+                    code: DomainErrorCode::InvalidInput,
+                })
+            ));
+        }
+        assert_eq!(builder.initialized, 1);
+        builder.push_f64(f64::MAX).unwrap();
+        // Number validation precedes capacity rejection, including on a full builder.
+        assert!(matches!(
+            builder.push_f64(f64::NAN),
+            Err(XllError::Domain {
+                code: DomainErrorCode::InvalidInput,
+            })
+        ));
+        assert!(matches!(
+            builder.push_f64(1.0),
+            Err(XllError::Input {
+                reason: InputError::Malformed("too many array cells"),
+                ..
+            })
+        ));
+        let output = builder.finish().unwrap();
+        for (cell, expected) in output.cells.iter().zip([-0.0, f64::MAX]) {
+            assert_eq!(cell.xltype, xlfn_sys::XLTYPE_NUM);
+            // SAFETY: the numeric tag selects the initialized number member.
             assert_eq!(unsafe { cell.value.number }.to_bits(), expected.to_bits());
         }
     }

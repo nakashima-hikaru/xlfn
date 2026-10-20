@@ -303,3 +303,13 @@ probes. Same-key reuse combines pending followers and resident hits.
 
 Selected cases run in `just bench-ci`; full concurrency curves run in
 `just bench-scaling`. These are Excel-independent benchmarks.
+
+## Excel string comparison probes
+
+`argument_ingress` includes owned ASCII and Japanese 4,096-character inputs.
+`array_string_output` includes Japanese 8/64/512/4,096-character scalar outputs,
+plus ASCII/Japanese/mixed string copies. The copy probes include strict UTF-16
+input decoding, return encoding, synchronous publication and owning cleanup;
+the prebuilt UTF-16 input is outside the timer. They do not include Excel/COM
+or formula-entry overhead. These cases complement short strings, mixed BMP and
+astral text, empty strings, large string matrices and numeric controls.

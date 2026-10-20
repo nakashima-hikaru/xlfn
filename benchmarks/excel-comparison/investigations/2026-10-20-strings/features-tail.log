@@ -1,0 +1,12 @@
+
+info: running `cargo check --lib --locked --no-default-features --features async-builtin,handles,jiff,refinement,rtd,serde` on xlfn (286/288)
+    Checking xlfn v0.2.0 (/Users/nakashimahikaru/forge/repo/xlfn/crates/xlfn)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.70s
+
+info: running `cargo check --lib --locked --no-default-features --features cache,handles,jiff,refinement,rtd,serde` on xlfn (287/288)
+    Checking xlfn v0.2.0 (/Users/nakashimahikaru/forge/repo/xlfn/crates/xlfn)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.68s
+
+info: running `cargo check --lib --locked --no-default-features --features async,cache,handles,jiff,refinement,rtd,serde` on xlfn (288/288)
+    Checking xlfn v0.2.0 (/Users/nakashimahikaru/forge/repo/xlfn/crates/xlfn)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.71s

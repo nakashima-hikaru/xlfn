@@ -12,6 +12,8 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+extern crate usage as usage_rs;
+
 use usage::{Args, Cli, Subcommands, ValueEnum};
 use xlfn_package::{BundleMetadata, validate_windows_basename};
 #[cfg(test)]

@@ -22,10 +22,19 @@ impl<'input> Utf16Decoder<'input> {
         // Independent unit classification lets the compiler vectorize this
         // reduction and also proves ASCII when both lengths are equal.
         let utf8_len = units
-            .iter()
-            .map(|&unit| {
-                1 + usize::from(unit >= 0x80) + usize::from(unit >= 0x800)
-                    - usize::from((0xd800..=0xdfff).contains(&unit))
+            .chunks(64)
+            .map(|chunk| {
+                // Each unit contributes at most three bytes: a 64-unit
+                // subtotal fits u16, allowing wider vector reductions.
+                usize::from(
+                    chunk
+                        .iter()
+                        .map(|&unit| {
+                            1 + u16::from(unit >= 0x80) + u16::from(unit >= 0x800)
+                                - u16::from((0xd800..=0xdfff).contains(&unit))
+                        })
+                        .sum::<u16>(),
+                )
             })
             .sum();
         Self { units, utf8_len }
@@ -153,14 +162,7 @@ pub(crate) fn checked_utf16_len(
     let length = if text.is_ascii() {
         text.len()
     } else {
-        // Valid UTF-8 contributes one UTF-16 unit per leading byte, plus
-        // one more for each four-byte scalar (a surrogate pair). Counting
-        // independent bytes can vectorize and avoids decoding characters
-        // merely to determine the allocation size.
-        text.as_bytes()
-            .iter()
-            .map(|&byte| usize::from(byte & 0xc0 != 0x80) + usize::from(byte >= 0xf0))
-            .sum()
+        non_ascii_utf16_len(text)
     };
     if length > limit {
         return Err(XllError::input(
@@ -172,6 +174,27 @@ pub(crate) fn checked_utf16_len(
         ));
     }
     Ok(length)
+}
+
+// Keep the vector reduction's register/stack setup off the ASCII return path.
+#[inline(never)]
+fn non_ascii_utf16_len(text: &str) -> usize {
+    // Valid UTF-8 contributes one UTF-16 unit per leading byte, plus
+    // one more for each four-byte scalar (a surrogate pair). Counting
+    // independent bytes can vectorize and avoids decoding characters
+    // merely to determine the allocation size.
+    text.as_bytes()
+        .chunks(64)
+        .map(|chunk| {
+            // At most two units per byte: a 64-byte subtotal fits u8.
+            usize::from(
+                chunk
+                    .iter()
+                    .map(|&byte| u8::from(byte & 0xc0 != 0x80) + u8::from(byte >= 0xf0))
+                    .sum::<u8>(),
+            )
+        })
+        .sum()
 }
 
 /// Validates that `text` does not exceed `limit` UTF-16 code units.
@@ -301,6 +324,40 @@ mod tests {
             proptest::prop_assert_eq!(usize::from(actual[0]), expected.len());
             proptest::prop_assert_eq!(&actual[1..], expected);
             proptest::prop_assert_eq!(decode_owned(&actual[1..], "test").unwrap(), text);
+        }
+    }
+
+    #[test]
+    fn miri_utf16_subtotals_preserve_boundaries_and_surrogate_errors() {
+        for length in [0, 1, 63, 64, 65, 127, 128, 129] {
+            for scalar in ['\0', 'a', 'é', '日', '\u{ffff}', '💡'] {
+                let text: String = std::iter::repeat_n(scalar, length).collect();
+                let units: Vec<_> = text.encode_utf16().collect();
+                assert_eq!(
+                    checked_utf16_len(&text, "test", usize::MAX).unwrap(),
+                    units.len()
+                );
+                assert_eq!(Utf16Decoder::new(&units).utf8_len(), text.len());
+                assert_eq!(decode_owned(&units, "test").unwrap(), text);
+            }
+        }
+        // Split a valid pair across each subtotal boundary, then corrupt it.
+        for index in [63, 64, 127, 128] {
+            let mut units = vec![0x65e5; 130];
+            units[index] = 0xd83d;
+            units[index + 1] = 0xdca1;
+            assert_eq!(
+                decode_owned(&units, "test").unwrap(),
+                String::from_utf16(&units).unwrap()
+            );
+            units[index + 1] = 0x41;
+            assert!(matches!(
+                decode_owned(&units, "test"),
+                Err(XllError::Input {
+                    argument: "test",
+                    reason: InputError::InvalidUtf16,
+                })
+            ));
         }
     }
 

@@ -1,0 +1,12 @@
+    Checking toml_edit v0.25.17+spec-1.1.0
+ Documenting xlfn-windows-bindings-gen v0.2.0 (/Users/nakashimahikaru/forge/repo/xlfn/tools/windows-bindings)
+ Documenting xlfn-sys v0.2.0 (/Users/nakashimahikaru/forge/repo/xlfn/crates/xlfn-sys)
+ Documenting xlfn-package v0.2.0 (/Users/nakashimahikaru/forge/repo/xlfn/crates/xlfn-package)
+ Documenting xlfn-kernel v0.1.0 (/Users/nakashimahikaru/forge/repo/xlfn/crates/xlfn-kernel)
+ Documenting cargo-xlfn v0.2.0 (/Users/nakashimahikaru/forge/repo/xlfn/crates/cargo-xlfn)
+ Documenting xlfn v0.2.0 (/Users/nakashimahikaru/forge/repo/xlfn/crates/xlfn)
+ Documenting xlfn-common v0.1.0 (/Users/nakashimahikaru/forge/repo/xlfn/crates/xlfn-common)
+    Checking proc-macro-crate v3.5.0
+ Documenting xlfn-macros v0.1.0 (/Users/nakashimahikaru/forge/repo/xlfn/crates/xlfn-macros)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.46s
+   Generated /Users/nakashimahikaru/forge/repo/xlfn/target/doc/cargo_xlfn/index.html and 7 other files

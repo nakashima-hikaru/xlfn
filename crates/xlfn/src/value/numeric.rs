@@ -133,7 +133,13 @@ impl<'call> NumericMatrixRef<'call> {
         // SAFETY: The caller supplies the validated contiguous payload at the
         // address above, which remains readable and immutable for 'call.
         let values = unsafe { std::slice::from_raw_parts(payload, length) };
-        if values.iter().any(|number| !number.is_finite()) {
+        // Reduce each small block without a data-dependent branch per cell.
+        // The bounded blocks retain early rejection on invalid large inputs.
+        if values.chunks(64).any(|chunk| {
+            !chunk
+                .iter()
+                .fold(true, |finite, number| finite & number.is_finite())
+        }) {
             return Err(XllError::input(argument, InputError::NonFinite));
         }
         Ok(Self {
@@ -265,6 +271,49 @@ mod tests {
                 reason: InputError::Malformed("misaligned numeric matrix pointer"),
             }
         ));
+    }
+
+    #[test]
+    fn miri_numeric_validation_checks_every_block_and_tail_cell() {
+        let mut raw = NumericInput {
+            rows: 1,
+            columns: 129,
+            values: [0.0; 129],
+        };
+        let finite = [-0.0, 0.0, f64::from_bits(1), f64::MAX, f64::MIN];
+        for (index, value) in raw.values.iter_mut().enumerate() {
+            *value = finite[index % finite.len()];
+        }
+        for length in [1, 63, 64, 65, 127, 128, 129] {
+            raw.columns = length as i32;
+            // SAFETY: the live header declares no more than the initialized payload.
+            let matrix =
+                unsafe { NumericMatrixRef::from_raw(std::ptr::from_ref(&raw).cast(), "matrix") }
+                    .unwrap();
+            assert_eq!(matrix.as_slice().as_ptr(), raw.values.as_ptr());
+            assert_eq!(matrix.as_slice().len(), length);
+            for (actual, expected) in matrix.iter().zip(raw.values) {
+                assert_eq!(actual.to_bits(), expected.to_bits());
+            }
+            for index in 0..length {
+                let saved = raw.values[index];
+                for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                    raw.values[index] = invalid;
+                    // SAFETY: the header and all declared doubles remain initialized.
+                    let result = unsafe {
+                        NumericMatrixRef::from_raw(std::ptr::from_ref(&raw).cast(), "matrix")
+                    };
+                    assert!(matches!(
+                        result,
+                        Err(XllError::Input {
+                            argument: "matrix",
+                            reason: InputError::NonFinite,
+                        })
+                    ));
+                }
+                raw.values[index] = saved;
+            }
+        }
     }
 
     #[test]

@@ -6,6 +6,7 @@ use crate::return_abi::XlArrayBuilder;
 pub struct ScalarOutputBenchmark {
     runtime: &'static crate::runtime::Runtime<super::BenchmarkAddin>,
     text: String,
+    utf16: Vec<u16>,
 }
 
 #[derive(Clone, Copy, crate::ExcelEnum)]
@@ -17,6 +18,7 @@ impl ScalarOutputBenchmark {
     pub fn new(text: String) -> Self {
         Self {
             runtime: super::get_benchmark_runtime(),
+            utf16: text.encode_utf16().collect(),
             text,
         }
     }
@@ -27,6 +29,12 @@ impl ScalarOutputBenchmark {
 
     pub fn run_owned(&self) {
         self.run(self.text.clone(), xlfn_sys::XLTYPE_STR);
+    }
+
+    /// Strict input decoding followed by scalar encoding, publication and cleanup.
+    pub fn run_copy(&self) {
+        let value = crate::utf16::decode_owned(std::hint::black_box(&self.utf16), "text").unwrap();
+        self.run(value, xlfn_sys::XLTYPE_STR);
     }
 
     pub fn run_enum(&self) {

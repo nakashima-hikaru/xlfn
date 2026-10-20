@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import artifact_manifest
+from shutdown_diagnostics import capture_shutdown_dump, process_creation_ticks
 from startup_diagnostics import read_startup_log_delta, snapshot_startup_log
 from workloads import Case, cases
 
@@ -259,7 +260,7 @@ def check_final_values(target: Any, count: int, expected: Any) -> None:
 
 class ExcelSession:
     def __init__(self, xll: Path, threads: int, throttle_ms: int, pid_file: Path,
-                 progress: WorkerProgress | None = None):
+                 progress: WorkerProgress | None = None, shutdown_diagnostics: bool = False):
         import psutil
         import win32com.client
 
@@ -277,8 +278,16 @@ class ExcelSession:
 
         _, self.pid = win32process.GetWindowThreadProcessId(self.hwnd)
         self.process = psutil.Process(self.pid)
-        pid_file.write_text(json.dumps({"pid": self.pid, "create_time": self.process.create_time()}),
-                            encoding="ascii")
+        identity = {"pid": self.pid, "create_time": self.process.create_time()}
+        if shutdown_diagnostics:
+            try:
+                ticks = process_creation_ticks(self.pid)
+                if psutil.Process(self.pid).create_time() != identity["create_time"]:
+                    raise RuntimeError("Excel PID changed while recording dump identity")
+                identity["creation_ticks"] = ticks
+            except Exception as error:
+                identity["dump_identity_error"] = f"{type(error).__name__}: {error}"
+        pid_file.write_text(json.dumps(identity), encoding="ascii")
         self.app.Visible = False
         self.app.DisplayAlerts = False
         self.app.AskToUpdateLinks = False
@@ -353,9 +362,19 @@ class ExcelSession:
             self.app.CalculateFull()
         else:
             self.app.Calculate()
+        returned = time.perf_counter()
+        polls = 1
         while self.app.CalculationState != XL_DONE:
             time.sleep(0.005)
-        elapsed = time.perf_counter() - start
+            polls += 1
+        finished = time.perf_counter()
+        elapsed = finished - start
+        self.last_calculation_timing = {
+            "total_s": elapsed,
+            "calculate_call_s": returned - start,
+            "completion_wait_s": finished - returned,
+            "completion_polls": polls,
+        }
         self.memory()
         return elapsed
 
@@ -545,11 +564,18 @@ def run_matrix(session: ExcelSession, case: Case, repeat: int) -> dict[str, Any]
             if session.app.Evaluate("BENCH.ALLOC.TRACK(TRUE)") != 1:
                 raise AssertionError("allocation tracking could not be enabled")
             allocations_before = session.app.Evaluate("BENCH.ALLOC.BYTES()")
-        samples = [session.calculate(anchor) for _ in range(repeat)]
+        samples = []
+        timings = []
+        for _ in range(repeat):
+            samples.append(session.calculate(anchor))
+            timings.append(session.last_calculation_timing.copy())
         if not verify():
             raise AssertionError(f"matrix result changed; anchor: {describe_value(anchor.Value2)}")
         result = interval(samples, sum(samples), "recalculation") | {
             "elements": count, "ns_per_element": statistics.median(samples) * 1e9 / count,
+            "formula_count": 1,
+            "recalculation_samples": timings,
+            "timing_note": "End-to-end Excel recalculation of one formula; calculate_call_s includes COM dispatch and Excel calculation, completion_wait_s includes CalculationState COM queries and polling sleeps; ns_per_element is not isolated UDF time",
         }
         if case.id == "M05":
             result["fixture_allocated_bytes"] = session.app.Evaluate("BENCH.ALLOC.BYTES()") - allocations_before
@@ -1286,7 +1312,8 @@ def close_worker_session(session: ExcelSession, progress: WorkerProgress) -> Non
             failure_stage=record.get("failure_stage", record.get("stage")))
 
 
-def reap_excel_process(pid_file: Path, grace_s: float) -> dict[str, Any]:
+def reap_excel_process(pid_file: Path, grace_s: float,
+                       dump_directory: Path | None = None) -> dict[str, Any]:
     """Reap only the exact Excel process created by this worker, including on success."""
     if not pid_file.is_file():
         return {"pid_recorded": False}
@@ -1302,6 +1329,15 @@ def reap_excel_process(pid_file: Path, grace_s: float) -> dict[str, Any]:
         try:
             process.wait(timeout=grace_s)
         except psutil.TimeoutExpired:
+            # Record the failed exit deadline before diagnostics. Natural exit
+            # during capture must not turn a missed deadline into success.
+            result["exit_timeout_s"] = grace_s
+            if dump_directory is not None:
+                try:
+                    result["shutdown_dump"] = capture_shutdown_dump(identity, dump_directory)
+                except Exception as error:
+                    result["shutdown_dump"] = {"status": "error",
+                        "error": f"{type(error).__name__}: {error}"}
             process.kill()
             result["forced_kill"] = True
             process.wait(timeout=5)
@@ -1311,6 +1347,19 @@ def reap_excel_process(pid_file: Path, grace_s: float) -> dict[str, Any]:
     except (psutil.Error, OSError, ValueError, KeyError, TypeError) as error:
         result["error"] = f"{type(error).__name__}: {error}"
     return result
+
+
+def apply_excel_cleanup(record: dict[str, Any], cleanup: dict[str, Any]) -> None:
+    record["excel_process_cleanup"] = cleanup
+    if cleanup.get("forced_kill") or cleanup.get("error") or "exit_timeout_s" in cleanup:
+        error = cleanup.get("error") or (
+            "Excel survived worker teardown and required forced termination"
+            if cleanup.get("forced_kill") else
+            f"Excel exceeded the {cleanup['exit_timeout_s']}s worker teardown exit deadline")
+        if record["status"] != "error":
+            record.update(execution_status=record["status"], status="error",
+                          error=record.get("error", error), failure_phase="close", phase="close")
+        record.setdefault("cleanup_error", error)
 
 
 def worker(args: argparse.Namespace, case: Case) -> int:
@@ -1342,7 +1391,8 @@ def worker(args: argparse.Namespace, case: Case) -> int:
                 raise ValueError(f"CI XLL changed after verification: {relative}")
         progress.update(phase="load_xll", xll_load_method="RegisterXLL")
         progress.stage("load_begin")
-        session = ExcelSession(xll, record["threads"], args.throttle_ms, Path(args.pid_file), progress)
+        session = ExcelSession(xll, record["threads"], args.throttle_ms, Path(args.pid_file),
+                               progress, shutdown_diagnostics=args.shutdown_diagnostics)
         session.implementation = args.implementation
         progress.update(excel_version=str(session.app.Version), excel_build=str(session.app.Build),
                         excel_bitness=session.app.OperatingSystem)
@@ -1394,6 +1444,8 @@ def main() -> int:
     parser.add_argument("--repeat", type=int, default=5)
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--throttle-ms", type=int, default=100)
+    parser.add_argument("--shutdown-diagnostics", action="store_true",
+                        help="save an Excel stack dump before forced termination (up to 15s extra)")
     parser.add_argument("--plan", action="store_true")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--case-key", help=argparse.SUPPRESS)
@@ -1452,6 +1504,8 @@ def main() -> int:
                     cmd.append("--allow-local-artifacts")
                 if args.allow_commit_mismatch:
                     cmd.append("--allow-commit-mismatch")
+                if args.shutdown_diagnostics:
+                    cmd.append("--shutdown-diagnostics")
                 try:
                     child = subprocess.run(cmd, capture_output=True, text=True,
                                            timeout=case.timeout_s + 60)
@@ -1461,14 +1515,9 @@ def main() -> int:
                     record = json.loads(rows[-1])
                 except (subprocess.TimeoutExpired, RuntimeError) as error:
                     record = recover_worker_record(progress_file, case, implementation, error)
-                cleanup = reap_excel_process(pid_file, grace_s=5 if record["status"] == "ok" else 0)
-                record["excel_process_cleanup"] = cleanup
-                if cleanup.get("forced_kill") or cleanup.get("error"):
-                    error = cleanup.get("error", "Excel survived worker teardown and required forced termination")
-                    if record["status"] != "error":
-                        record.update(execution_status=record["status"], status="error",
-                                      error=record.get("error", error), failure_phase="close", phase="close")
-                    record.setdefault("cleanup_error", error)
+                cleanup = reap_excel_process(pid_file, grace_s=5 if record["status"] == "ok" else 0,
+                    dump_directory=out.with_suffix(".diagnostics") if args.shutdown_diagnostics else None)
+                apply_excel_cleanup(record, cleanup)
                 with out.open("a", encoding="utf-8") as file:
                     file.write(json.dumps(record, ensure_ascii=False) + "\n")
                 print(f"{case.key} {implementation}: {record['status']}", flush=True)
