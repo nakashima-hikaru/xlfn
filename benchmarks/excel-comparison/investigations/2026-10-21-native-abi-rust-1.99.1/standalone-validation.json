@@ -1,0 +1,70 @@
+[
+  {
+    "command": [
+      "rtk",
+      "cargo",
+      "check",
+      "--manifest-path",
+      "examples/basic-xll/Cargo.toml",
+      "--locked"
+    ],
+    "status": "passed"
+  },
+  {
+    "command": [
+      "rtk",
+      "cargo",
+      "check",
+      "--manifest-path",
+      "examples/rtd-source/Cargo.toml",
+      "--locked"
+    ],
+    "status": "passed"
+  },
+  {
+    "command": [
+      "rtk",
+      "cargo",
+      "check",
+      "--manifest-path",
+      "tests/xlfn-e2e-fixture/Cargo.toml",
+      "--locked"
+    ],
+    "status": "passed"
+  },
+  {
+    "command": [
+      "rtk",
+      "cargo",
+      "check",
+      "--manifest-path",
+      "benchmarks/excel-comparison/xlfn/Cargo.toml",
+      "--locked"
+    ],
+    "status": "passed"
+  },
+  {
+    "command": [
+      "rtk",
+      "cargo",
+      "check",
+      "--manifest-path",
+      "benchmarks/excel-comparison/xlfn/Cargo.toml",
+      "--features",
+      "abi-semantics",
+      "--locked"
+    ],
+    "status": "passed"
+  },
+  {
+    "command": [
+      "rtk",
+      "cargo",
+      "test",
+      "--manifest-path",
+      "probes/excel-abi-probe/Cargo.toml",
+      "--locked"
+    ],
+    "status": "passed"
+  }
+]

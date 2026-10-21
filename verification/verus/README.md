@@ -165,7 +165,7 @@ Install the pinned Verus release with `bash`, `curl`, `unzip`, Python 3 and
 
 The installer reads the release's `version.json` and installs its required Rust
 toolchain before checking that Verus starts. The pinned Verus release uses Rust
-1.98.1; the workspace uses Rust 1.99.0. These toolchains are selected separately,
+1.98.1; the workspace uses Rust 1.99.1. These toolchains are selected separately,
 so updating the workspace compiler does not satisfy Verus's compiler requirement.
 
 ```bash

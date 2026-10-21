@@ -69,13 +69,13 @@ class InstallVerusTests(unittest.TestCase):
             path.chmod(0o755)
         self.log = self.root / "commands.jsonl"
         self.toolchains = self.root / "toolchains.json"
-        self.toolchains.write_text(json.dumps(["1.99.0-x86_64-unknown-linux-gnu"]))
+        self.toolchains.write_text(json.dumps(["1.99.1-x86_64-unknown-linux-gnu"]))
         self.archive = self.root / "release.zip"
         self.destination = self.root / "installed verus"
         self.workspace = self.root / "workspace"
         self.workspace.mkdir()
         (self.workspace / "rust-toolchain.toml").write_text(
-            '[toolchain]\nchannel = "1.99.0"\n')
+            '[toolchain]\nchannel = "1.99.1"\n')
         self.env = os.environ.copy()
         for name in ("VERUS_VERSION", "CURL_EXIT", "RUSTUP_EXIT", "VERUS_EXIT"):
             self.env.pop(name, None)
@@ -86,7 +86,7 @@ class InstallVerusTests(unittest.TestCase):
             "INSTALLED_TOOLCHAINS": str(self.toolchains),
             "REQUIRED_TOOLCHAIN": TOOLCHAIN,
             "RELEASE_VERSION": VERSION,
-            "RUSTUP_TOOLCHAIN": "1.99.0",
+            "RUSTUP_TOOLCHAIN": "1.99.1",
         })
         self.write_archive()
 

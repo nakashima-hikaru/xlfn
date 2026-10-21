@@ -38,7 +38,7 @@ class BuildTimeMeasurementTests(unittest.TestCase):
         self.assertNotEqual(source_digest(self.root), before)
 
     def test_generated_consumer_forwards_async_features(self):
-        (self.root / "rust-toolchain.toml").write_text("[toolchain]\nchannel=\"1.99.0\"\n")
+        (self.root / "rust-toolchain.toml").write_text("[toolchain]\nchannel=\"1.99.1\"\n")
         (self.root / "Cargo.lock").write_text("version = 4\n")
         make_probe(self.root / "probe", self.root, "// fixture\n", 1, 1)
         manifest = (self.root / "probe/Cargo.toml").read_text()

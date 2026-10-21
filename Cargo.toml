@@ -25,7 +25,7 @@ resolver = "3"
 # Package versions are explicit in each manifest: the facade, raw ABI,
 # packaging library and CLI have independent release contracts.
 edition = "2024"
-rust-version = "1.99.0"
+rust-version = "1.99.1"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/nakashima-hikaru/xlfn"
 publish = true

@@ -1,0 +1,260 @@
+Benchmarking argument_ingress/native_abi/f64_1/plain/q
+Benchmarking argument_ingress/native_abi/f64_1/plain/q: Warming up for 150.00 ms
+Benchmarking argument_ingress/native_abi/f64_1/plain/q: Collecting 30 samples in estimated 1.0000 s (41M iterations)
+Benchmarking argument_ingress/native_abi/f64_1/plain/q: Analyzing
+argument_ingress/native_abi/f64_1/plain/q
+                        time:   [24.153 ns 24.263 ns 24.376 ns]
+                        change: [−3.3656% −2.6163% −1.9008%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 3 outliers among 30 measurements (10.00%)
+  2 (6.67%) high mild
+  1 (3.33%) high severe
+Benchmarking argument_ingress/native_abi/f64_1/prepare_identity/q
+Benchmarking argument_ingress/native_abi/f64_1/prepare_identity/q: Warming up for 150.00 ms
+Benchmarking argument_ingress/native_abi/f64_1/prepare_identity/q: Collecting 30 samples in estimated 1.0001 s (4.2M iterations)
+Benchmarking argument_ingress/native_abi/f64_1/prepare_identity/q: Analyzing
+argument_ingress/native_abi/f64_1/prepare_identity/q
+                        time:   [238.49 ns 238.69 ns 238.92 ns]
+                        change: [+1.4424% +2.1168% +2.5792%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 2 outliers among 30 measurements (6.67%)
+  1 (3.33%) high mild
+  1 (3.33%) high severe
+Benchmarking argument_ingress/native_abi/f64_1/materialize_identity/q
+Benchmarking argument_ingress/native_abi/f64_1/materialize_identity/q: Warming up for 150.00 ms
+Benchmarking argument_ingress/native_abi/f64_1/materialize_identity/q: Collecting 30 samples in estimated 1.0000 s (4.2M iterations)
+Benchmarking argument_ingress/native_abi/f64_1/materialize_identity/q: Analyzing
+argument_ingress/native_abi/f64_1/materialize_identity/q
+                        time:   [238.56 ns 238.77 ns 238.99 ns]
+                        change: [+2.4025% +2.6438% +2.8638%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) high severe
+Benchmarking argument_ingress/native_abi/f64_2/plain/q
+Benchmarking argument_ingress/native_abi/f64_2/plain/q: Warming up for 150.00 ms
+Benchmarking argument_ingress/native_abi/f64_2/plain/q: Collecting 30 samples in estimated 1.0000 s (39M iterations)
+Benchmarking argument_ingress/native_abi/f64_2/plain/q: Analyzing
+argument_ingress/native_abi/f64_2/plain/q
+                        time:   [24.700 ns 24.772 ns 24.851 ns]
+                        change: [−2.3823% −0.9311% +0.8246%] (p = 0.31 > 0.05)
+                        No change in performance detected.
+Found 4 outliers among 30 measurements (13.33%)
+  1 (3.33%) high mild
+  3 (10.00%) high severe
+Benchmarking argument_ingress/native_abi/f64_2/prepare_identity/q
+Benchmarking argument_ingress/native_abi/f64_2/prepare_identity/q: Warming up for 150.00 ms
+Benchmarking argument_ingress/native_abi/f64_2/prepare_identity/q: Collecting 30 samples in estimated 1.0000 s (2.6M iterations)
+Benchmarking argument_ingress/native_abi/f64_2/prepare_identity/q: Analyzing
+argument_ingress/native_abi/f64_2/prepare_identity/q
+                        time:   [381.33 ns 383.99 ns 387.15 ns]
+                        change: [−1.6921% −1.1175% −0.4727%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Benchmarking argument_ingress/native_abi/f64_2/materialize_identity/q
+Benchmarking argument_ingress/native_abi/f64_2/materialize_identity/q: Warming up for 150.00 ms
+Benchmarking argument_ingress/native_abi/f64_2/materialize_identity/q: Collecting 30 samples in estimated 1.0000 s (2.6M iterations)
+Benchmarking argument_ingress/native_abi/f64_2/materialize_identity/q: Analyzing
+argument_ingress/native_abi/f64_2/materialize_identity/q
+                        time:   [397.05 ns 399.60 ns 401.62 ns]
+                        change: [−0.1386% +0.7597% +1.7361%] (p = 0.12 > 0.05)
+                        No change in performance detected.
+Benchmarking argument_ingress/native_abi/f64_4/plain/q
+Benchmarking argument_ingress/native_abi/f64_4/plain/q: Warming up for 150.00 ms
+Benchmarking argument_ingress/native_abi/f64_4/plain/q: Collecting 30 samples in estimated 1.0000 s (34M iterations)
+Benchmarking argument_ingress/native_abi/f64_4/plain/q: Analyzing
+argument_ingress/native_abi/f64_4/plain/q
+                        time:   [30.920 ns 35.471 ns 40.959 ns]
+                        change: [+2.9884% +11.508% +22.879%] (p = 0.01 < 0.05)
+                        Performance has regressed.
+Found 4 outliers among 30 measurements (13.33%)
+  1 (3.33%) high mild
+  3 (10.00%) high severe
+Benchmarking argument_ingress/native_abi/f64_4/prepare_identity/q
+Benchmarking argument_ingress/native_abi/f64_4/prepare_identity/q: Warming up for 150.00 ms
+Benchmarking argument_ingress/native_abi/f64_4/prepare_identity/q: Collecting 30 samples in estimated 1.0002 s (1.6M iterations)
+Benchmarking argument_ingress/native_abi/f64_4/prepare_identity/q: Analyzing
+argument_ingress/native_abi/f64_4/prepare_identity/q
+                        time:   [599.75 ns 600.89 ns 602.82 ns]
+                        change: [−1.2394% −0.7256% −0.2014%] (p = 0.01 < 0.05)
+                        Change within noise threshold.
+Benchmarking argument_ingress/native_abi/f64_4/materialize_identity/q
+Benchmarking argument_ingress/native_abi/f64_4/materialize_identity/q: Warming up for 150.00 ms
+Benchmarking argument_ingress/native_abi/f64_4/materialize_identity/q: Collecting 30 samples in estimated 1.0001 s (1.7M iterations)
+Benchmarking argument_ingress/native_abi/f64_4/materialize_identity/q: Analyzing
+argument_ingress/native_abi/f64_4/materialize_identity/q
+                        time:   [601.13 ns 602.27 ns 603.59 ns]
+                        change: [−1.6430% −1.3142% −0.9956%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 3 outliers among 30 measurements (10.00%)
+  2 (6.67%) low mild
+  1 (3.33%) high mild
+Benchmarking argument_ingress/native_abi/f64_8/plain/q
+Benchmarking argument_ingress/native_abi/f64_8/plain/q: Warming up for 150.00 ms
+Benchmarking argument_ingress/native_abi/f64_8/plain/q: Collecting 30 samples in estimated 1.0000 s (27M iterations)
+Benchmarking argument_ingress/native_abi/f64_8/plain/q: Analyzing
+argument_ingress/native_abi/f64_8/plain/q
+                        time:   [36.990 ns 37.231 ns 37.636 ns]
+                        change: [−2.0721% −1.6002% −1.0288%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 3 outliers among 30 measurements (10.00%)
+  2 (6.67%) high mild
+  1 (3.33%) high severe
+Benchmarking argument_ingress/native_abi/f64_8/prepare_identity/q
+Benchmarking argument_ingress/native_abi/f64_8/prepare_identity/q: Warming up for 150.00 ms
+Benchmarking argument_ingress/native_abi/f64_8/prepare_identity/q: Collecting 30 samples in estimated 1.0003 s (959k iterations)
+Benchmarking argument_ingress/native_abi/f64_8/prepare_identity/q: Analyzing
+argument_ingress/native_abi/f64_8/prepare_identity/q
+                        time:   [1.0346 µs 1.0422 µs 1.0540 µs]
+                        change: [−0.7801% −0.1091% +0.8548%] (p = 0.82 > 0.05)
+                        No change in performance detected.
+Found 4 outliers among 30 measurements (13.33%)
+  4 (13.33%) high severe
+Benchmarking argument_ingress/native_abi/f64_8/materialize_identity/q
+Benchmarking argument_ingress/native_abi/f64_8/materialize_identity/q: Warming up for 150.00 ms
+Benchmarking argument_ingress/native_abi/f64_8/materialize_identity/q: Collecting 30 samples in estimated 1.0003 s (963k iterations)
+Benchmarking argument_ingress/native_abi/f64_8/materialize_identity/q: Analyzing
+argument_ingress/native_abi/f64_8/materialize_identity/q
+                        time:   [1.0345 µs 1.0377 µs 1.0425 µs]
+                        change: [−1.5175% −1.1058% −0.7173%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 3 outliers among 30 measurements (10.00%)
+  2 (6.67%) high mild
+  1 (3.33%) high severe
+Benchmarking argument_ingress/native_abi/bool/plain/q
+Benchmarking argument_ingress/native_abi/bool/plain/q: Warming up for 150.00 ms
+Benchmarking argument_ingress/native_abi/bool/plain/q: Collecting 30 samples in estimated 1.0000 s (40M iterations)
+Benchmarking argument_ingress/native_abi/bool/plain/q: Analyzing
+argument_ingress/native_abi/bool/plain/q
+                        time:   [24.494 ns 24.523 ns 24.555 ns]
+                        change: [−2.9945% −2.3092% −1.6570%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 2 outliers among 30 measurements (6.67%)
+  2 (6.67%) low mild
+Benchmarking argument_ingress/native_abi/bool/prepare_identity/q
+Benchmarking argument_ingress/native_abi/bool/prepare_identity/q: Warming up for 150.00 ms
+Benchmarking argument_ingress/native_abi/bool/prepare_identity/q: Collecting 30 samples in estimated 1.0001 s (4.2M iterations)
+Benchmarking argument_ingress/native_abi/bool/prepare_identity/q: Analyzing
+argument_ingress/native_abi/bool/prepare_identity/q
+                        time:   [237.62 ns 238.01 ns 238.54 ns]
+                        change: [+2.4151% +3.8964% +4.7963%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 2 outliers among 30 measurements (6.67%)
+  1 (3.33%) high mild
+  1 (3.33%) high severe
+Benchmarking argument_ingress/native_abi/bool/materialize_identity/q
+Benchmarking argument_ingress/native_abi/bool/materialize_identity/q: Warming up for 150.00 ms
+Benchmarking argument_ingress/native_abi/bool/materialize_identity/q: Collecting 30 samples in estimated 1.0001 s (4.2M iterations)
+Benchmarking argument_ingress/native_abi/bool/materialize_identity/q: Analyzing
+argument_ingress/native_abi/bool/materialize_identity/q
+                        time:   [237.70 ns 238.21 ns 238.85 ns]
+                        change: [+4.7354% +4.9790% +5.2567%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 2 outliers among 30 measurements (6.67%)
+  2 (6.67%) high severe
+Benchmarking argument_ingress/native_abi/i32/plain/q
+Benchmarking argument_ingress/native_abi/i32/plain/q: Warming up for 150.00 ms
+Benchmarking argument_ingress/native_abi/i32/plain/q: Collecting 30 samples in estimated 1.0000 s (41M iterations)
+Benchmarking argument_ingress/native_abi/i32/plain/q: Analyzing
+argument_ingress/native_abi/i32/plain/q
+                        time:   [24.563 ns 24.617 ns 24.668 ns]
+                        change: [−0.0874% +0.1351% +0.3743%] (p = 0.27 > 0.05)
+                        No change in performance detected.
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) low mild
+Benchmarking argument_ingress/native_abi/i32/prepare_identity/q
+Benchmarking argument_ingress/native_abi/i32/prepare_identity/q: Warming up for 150.00 ms
+Benchmarking argument_ingress/native_abi/i32/prepare_identity/q: Collecting 30 samples in estimated 1.0000 s (4.2M iterations)
+Benchmarking argument_ingress/native_abi/i32/prepare_identity/q: Analyzing
+argument_ingress/native_abi/i32/prepare_identity/q
+                        time:   [239.34 ns 239.48 ns 239.71 ns]
+                        change: [+4.2699% +4.5540% +4.7834%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 2 outliers among 30 measurements (6.67%)
+  1 (3.33%) high mild
+  1 (3.33%) high severe
+Benchmarking argument_ingress/native_abi/i32/materialize_identity/q
+Benchmarking argument_ingress/native_abi/i32/materialize_identity/q: Warming up for 150.00 ms
+Benchmarking argument_ingress/native_abi/i32/materialize_identity/q: Collecting 30 samples in estimated 1.0001 s (4.2M iterations)
+Benchmarking argument_ingress/native_abi/i32/materialize_identity/q: Analyzing
+argument_ingress/native_abi/i32/materialize_identity/q
+                        time:   [239.88 ns 242.13 ns 245.83 ns]
+                        change: [+4.8667% +5.5653% +6.6883%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 5 outliers among 30 measurements (16.67%)
+  5 (16.67%) high severe
+Benchmarking argument_ingress/native_abi/unicode_short/plain/q
+Benchmarking argument_ingress/native_abi/unicode_short/plain/q: Warming up for 150.00 ms
+Benchmarking argument_ingress/native_abi/unicode_short/plain/q: Collecting 30 samples in estimated 1.0000 s (13M iterations)
+Benchmarking argument_ingress/native_abi/unicode_short/plain/q: Analyzing
+argument_ingress/native_abi/unicode_short/plain/q
+                        time:   [75.604 ns 87.465 ns 101.24 ns]
+                        change: [+1.7692% +8.2805% +17.483%] (p = 0.02 < 0.05)
+                        Performance has regressed.
+Found 6 outliers among 30 measurements (20.00%)
+  2 (6.67%) high mild
+  4 (13.33%) high severe
+Benchmarking argument_ingress/native_abi/unicode_short/prepare_identity/q
+Benchmarking argument_ingress/native_abi/unicode_short/prepare_identity/q: Warming up for 150.00 ms
+Benchmarking argument_ingress/native_abi/unicode_short/prepare_identity/q: Collecting 30 samples in estimated 1.0001 s (2.8M iterations)
+Benchmarking argument_ingress/native_abi/unicode_short/prepare_identity/q: Analyzing
+argument_ingress/native_abi/unicode_short/prepare_identity/q
+                        time:   [339.73 ns 342.44 ns 348.39 ns]
+                        change: [−1.5270% +0.1284% +1.7803%] (p = 0.90 > 0.05)
+                        No change in performance detected.
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) high severe
+Benchmarking argument_ingress/native_abi/unicode_short/materialize_identity/q
+Benchmarking argument_ingress/native_abi/unicode_short/materialize_identity/q: Warming up for 150.00 ms
+Benchmarking argument_ingress/native_abi/unicode_short/materialize_identity/q: Collecting 30 samples in estimated 1.0001 s (2.6M iterations)
+Benchmarking argument_ingress/native_abi/unicode_short/materialize_identity/q: Analyzing
+argument_ingress/native_abi/unicode_short/materialize_identity/q
+                        time:   [384.27 ns 385.18 ns 386.28 ns]
+                        change: [−0.2330% +0.0805% +0.4436%] (p = 0.68 > 0.05)
+                        No change in performance detected.
+Found 5 outliers among 30 measurements (16.67%)
+  3 (10.00%) high mild
+  2 (6.67%) high severe
+Benchmarking argument_ingress/native_abi/unicode_long/plain/q
+Benchmarking argument_ingress/native_abi/unicode_long/plain/q: Warming up for 150.00 ms
+Benchmarking argument_ingress/native_abi/unicode_long/plain/q: Collecting 30 samples in estimated 1.0009 s (244k iterations)
+Benchmarking argument_ingress/native_abi/unicode_long/plain/q: Analyzing
+argument_ingress/native_abi/unicode_long/plain/q
+                        time:   [4.1131 µs 4.2075 µs 4.3408 µs]
+                        change: [−2.0934% −0.7782% +0.7811%] (p = 0.34 > 0.05)
+                        No change in performance detected.
+Found 4 outliers among 30 measurements (13.33%)
+  2 (6.67%) high mild
+  2 (6.67%) high severe
+Benchmarking argument_ingress/native_abi/unicode_long/prepare_identity/q
+Benchmarking argument_ingress/native_abi/unicode_long/prepare_identity/q: Warming up for 150.00 ms
+Benchmarking argument_ingress/native_abi/unicode_long/prepare_identity/q: Collecting 30 samples in estimated 1.0045 s (49k iterations)
+Benchmarking argument_ingress/native_abi/unicode_long/prepare_identity/q: Analyzing
+argument_ingress/native_abi/unicode_long/prepare_identity/q
+                        time:   [20.497 µs 20.517 µs 20.546 µs]
+                        change: [−1.9310% −0.8788% −0.0329%] (p = 0.07 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 30 measurements (6.67%)
+  2 (6.67%) high severe
+Benchmarking argument_ingress/native_abi/unicode_long/materialize_identity/q
+Benchmarking argument_ingress/native_abi/unicode_long/materialize_identity/q: Warming up for 150.00 ms
+Benchmarking argument_ingress/native_abi/unicode_long/materialize_identity/q: Collecting 30 samples in estimated 1.0078 s (41k iterations)
+Benchmarking argument_ingress/native_abi/unicode_long/materialize_identity/q: Analyzing
+argument_ingress/native_abi/unicode_long/materialize_identity/q
+                        time:   [24.611 µs 24.704 µs 24.857 µs]
+                        change: [−0.0869% +1.8180% +4.0937%] (p = 0.09 > 0.05)
+                        No change in performance detected.
+Found 3 outliers among 30 measurements (10.00%)
+  3 (10.00%) high severe
+fp12_identity_digest_1 [64, 60, 2f, 50, 15, be, ec, 17, bd, a8, e2, 80, fc, 40, 95, 88, 59, c0, f0, 41, cb, 35, 81, 37, e9, 91, 32, 56, a8, 3a, 74, a3]
+fp12_identity_digest_16 [20, 47, 9c, 08, 3f, 5b, e8, f4, d0, bd, 71, 42, 56, 41, 18, 68, 72, 80, 7e, 07, 17, d0, cf, 07, 2b, f0, 26, 26, ac, 87, 19, 63]
+fp12_identity_digest_4096 [fb, da, e6, 7d, 0a, b9, 58, d2, c9, 30, fd, 4d, 88, 7e, 26, 7d, c4, 13, cf, 5e, cf, 6a, f6, f2, d0, a3, 7b, d7, 51, d9, cb, d0]
+fp12_identity_digest_100000 [ac, ea, 8e, 82, 1a, 1d, 2f, 69, 06, ce, ef, fc, e0, ec, e4, 7c, 35, 5b, ac, 55, f1, 45, 90, 4c, b7, cc, 56, f1, 63, 89, c9, 86]
+optional_identity_digest_option_1 [33, 5c, 14, 6e, 65, 95, 0b, 82, f3, 77, 1e, c5, fc, 94, 3f, 1f, a8, 87, 97, df, 81, 3d, 3d, a6, eb, e2, 71, 58, 07, 5b, 85, 01]
+optional_identity_digest_presence_1 [3e, a8, b9, f8, 68, bd, 49, ea, 83, aa, ea, b0, 25, 54, 8d, c7, 34, 0d, bb, 9c, 4f, d9, ff, 19, 12, 40, 2f, 2e, 61, cc, c6, be]
+optional_identity_digest_borrowed_option_1 [33, 5c, 14, 6e, 65, 95, 0b, 82, f3, 77, 1e, c5, fc, 94, 3f, 1f, a8, 87, 97, df, 81, 3d, 3d, a6, eb, e2, 71, 58, 07, 5b, 85, 01]
+optional_identity_digest_option_1000 [98, e8, 4c, 41, a1, e4, d8, ac, b2, d5, 50, 12, 8e, d0, a8, 47, 59, a6, e4, c6, c3, 6f, 36, 83, 06, 82, c0, 6c, 84, ff, 8b, 26]
+optional_identity_digest_presence_1000 [63, 66, 4d, e6, 15, 6c, 20, 53, 82, f9, 89, ca, 6b, 2d, 81, b4, dc, a6, e8, bc, 82, cb, 30, 77, d1, c6, 45, 4e, 65, 34, aa, 88]
+optional_identity_digest_borrowed_option_1000 [98, e8, 4c, 41, a1, e4, d8, ac, b2, d5, 50, 12, 8e, d0, a8, 47, 59, a6, e4, c6, c3, 6f, 36, 83, 06, 82, c0, 6c, 84, ff, 8b, 26]
+optional_identity_digest_option_100000 [d6, de, 57, 38, 9f, 7a, 10, f0, f9, 1e, d9, f1, f5, 18, 97, 27, 01, 80, b1, 39, 58, 35, 8e, 0f, 90, e1, d8, 9a, b9, 48, 4f, 02]
+optional_identity_digest_presence_100000 [ca, dd, c0, a2, 59, c0, 66, 69, 00, e7, c3, 14, 1f, 46, b6, f8, 0a, 1b, b4, f0, 3a, fe, f9, d9, 8a, 58, d2, 69, 28, 14, 08, 49]
+optional_identity_digest_borrowed_option_100000 [d6, de, 57, 38, 9f, 7a, 10, f0, f9, 1e, d9, f1, f5, 18, 97, 27, 01, 80, b1, 39, 58, 35, 8e, 0f, 90, e1, d8, 9a, b9, 48, 4f, 02]
+
