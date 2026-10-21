@@ -436,9 +436,3 @@ Relevant API references: [Excel-DNA NativeAOT support](https://excel-dna.net/doc
 [Excel-DNA packed add-in build properties](https://excel-dna.net/docs/guides-basic/sdk-style-project-properties/),
 [Excel `Range.Dirty`](https://learn.microsoft.com/en-us/office/vba/api/excel.range.dirty),
 and [Excel RTD throttle](https://learn.microsoft.com/en-us/office/vba/api/excel.rtd.throttleinterval).
-
-The [2026-10-20 string follow-up](investigations/2026-10-20-strings/README.md)
-records all 128 pairs from the supplied full run, the additional UTF conversion
-optimizations, paired local measurements, remaining regressions and Windows/Excel
-qualification limits. Local conversion timings must not replace the end-to-end
-Excel metrics in this comparison.
