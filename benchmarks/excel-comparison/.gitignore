@@ -1,5 +1,6 @@
 __pycache__/
 artifacts/
+semantics-artifacts/
 results*.jsonl
 results*.csv
 excel_dna/GeneratedRegistration.cs

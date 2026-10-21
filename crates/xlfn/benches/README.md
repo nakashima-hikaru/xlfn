@@ -37,11 +37,36 @@ Criterion groups normally use a ten-second measurement period.
 Criterion warmup and sample-count arguments are separate. Custom JSON and
 allocation probes use their own iteration counts.
 
+`rtk just bench-native-abi` compares strict `Q` with native `B`, `A`, `J`,
+and `D%` admission using identical call setup in one executable. The inputs
+cover 1/2/4/8 numbers, Boolean, i32, and short/long Unicode. Each pair measures
+plain conversion, prepared input identity without materialization, and full
+identity plus materialization. The warm preparation rows model a handle
+producer's input phase; they do not time handle lookup or publication.
+Representative pairs also run in `bench-ci`. Excel preprocessing and actual
+worksheet recalculation are measured separately by
+[`benchmarks/excel-comparison`](../../../benchmarks/excel-comparison/README.md).
+
 These benchmarks execute Rust paths independently of Excel/COM. Allocation
 traffic, requested live bytes, timing, and production-feature measurements
 have different scopes, described below. For A/B comparisons, use identical
 fixtures and feature selections, separate source/target directories, frozen
 executable hashes, and repeated ABBA/BAAB ordering.
+
+## Handle object working sets
+
+`handle_lookup` covers one shared token, one fixed token per worker, and
+`rotating_65536_tokens` with 65,536 live objects and 1/4/16/32 workers. Rotating
+workers advance through disjoint strides and retain their cursor across timed
+batches; the benchmark does not repeatedly read only the first batch of tokens.
+Every lookup includes the call scope, token validation, and typed projection.
+Population, thread creation, and teardown stay outside timing, while batch
+dispatch and completion remain included.
+
+`handle_prepare/cold_grow` measures publication at scale. Its `drop/1000` and
+`drop/10000` cases populate outside timing and measure final runtime destruction.
+`handle_memory` separately reports requested live allocation bytes rather than
+allocator usable sizes or process RSS.
 
 ## `async_task_drain`
 

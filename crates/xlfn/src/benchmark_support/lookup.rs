@@ -8,15 +8,21 @@ use super::*;
 pub enum HandleLookupBenchCase {
     WarmSameToken,
     DistinctTokens,
+    RotatingTokens,
 }
 
 impl HandleLookupBenchCase {
-    pub const ALL: [Self; 2] = [Self::WarmSameToken, Self::DistinctTokens];
+    pub const ALL: [Self; 3] = [
+        Self::WarmSameToken,
+        Self::DistinctTokens,
+        Self::RotatingTokens,
+    ];
 
     pub const fn name(self) -> &'static str {
         match self {
             Self::WarmSameToken => "warm_same_token",
             Self::DistinctTokens => "distinct_tokens",
+            Self::RotatingTokens => "rotating_65536_tokens",
         }
     }
 }
@@ -39,14 +45,21 @@ impl HandleLookupBenchmark {
         assert!(worker_count != 0);
         assert!(iterations_per_worker != 0);
 
+        // Fixed-token cases retain their original population. The rotating
+        // case walks a larger working set across batches, rather than keeping
+        // one object per worker hot throughout the measurement.
+        let token_count = match case {
+            HandleLookupBenchCase::RotatingTokens => 65_536.max(worker_count),
+            _ => worker_count,
+        };
         let runtime = Arc::new(
             FormulaHandleService::try_new(
-                u32::try_from(worker_count).expect("handle capacity fits u32"),
+                u32::try_from(token_count).expect("handle capacity fits u32"),
             )
             .expect("benchmark host provides an OS CSPRNG"),
         );
-        let mut tokens = Vec::with_capacity(worker_count);
-        for worker in 0..worker_count {
+        let mut tokens = Vec::with_capacity(token_count);
+        for worker in 0..token_count {
             let key = benchmark_revision_key("BENCH.LOOKUP", worker as u64);
             let token = runtime
                 .prepare_observed(key, || Ok(BenchHandleObject { _payload: 0 }), |_, _| Ok(()))
@@ -57,7 +70,7 @@ impl HandleLookupBenchmark {
 
         match case {
             HandleLookupBenchCase::WarmSameToken => tokens.truncate(1),
-            HandleLookupBenchCase::DistinctTokens => {}
+            HandleLookupBenchCase::DistinctTokens | HandleLookupBenchCase::RotatingTokens => {}
         }
 
         let tokens = Arc::new(tokens);
@@ -72,21 +85,34 @@ impl HandleLookupBenchmark {
             let worker_tokens = Arc::clone(&tokens);
             start_tx.push(worker_tx);
             workers.push(std::thread::spawn(move || {
+                let lookup = |token: &str| {
+                    let result = crate::call::with_excel_call_scope_and_state(
+                        &worker_runtime,
+                        |worker_runtime, scope| {
+                            worker_runtime
+                                .lookup::<BenchHandleObject>(scope, token)
+                                .map(|handle| {
+                                    std::hint::black_box(&*handle);
+                                })
+                        },
+                    );
+                    std::hint::black_box(result).expect("warm handle lookup must succeed");
+                };
+                let mut token_index = worker.min(worker_tokens.len() - 1);
                 while worker_rx.recv().is_ok() {
-                    let token_index = worker.min(worker_tokens.len() - 1);
-                    let token = worker_tokens[token_index].as_ref();
-                    for _ in 0..iterations_per_worker {
-                        let result = crate::call::with_excel_call_scope_and_state(
-                            &worker_runtime,
-                            |worker_runtime, scope| {
-                                worker_runtime
-                                    .lookup::<BenchHandleObject>(scope, token)
-                                    .map(|handle| {
-                                        std::hint::black_box(&*handle);
-                                    })
-                            },
-                        );
-                        std::hint::black_box(result).expect("warm handle lookup must succeed");
+                    if matches!(case, HandleLookupBenchCase::RotatingTokens) {
+                        for _ in 0..iterations_per_worker {
+                            lookup(worker_tokens[token_index].as_ref());
+                            token_index += worker_count;
+                            if token_index >= worker_tokens.len() {
+                                token_index -= worker_tokens.len();
+                            }
+                        }
+                    } else {
+                        let token = worker_tokens[token_index].as_ref();
+                        for _ in 0..iterations_per_worker {
+                            lookup(token);
+                        }
                     }
                     done_tx
                         .send(())

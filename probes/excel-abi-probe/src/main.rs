@@ -342,6 +342,39 @@ fn verify_callback_abi() {
     assert_eq!(value, 0x1234);
 }
 
+#[cfg(feature = "sdk-bindgen")]
+fn verify_native_argument_abi() {
+    type Receiver =
+        unsafe extern "system" fn(f64, i16, i32, *const u16, *mut XLOPER12) -> *mut XLOPER12;
+
+    unsafe extern "C" {
+        fn xlfn_probe_native_arguments(receive: Receiver) -> i32;
+    }
+
+    unsafe extern "system" fn receive(
+        number: f64,
+        boolean: i16,
+        integer: i32,
+        text: *const u16,
+        result: *mut XLOPER12,
+    ) -> *mut XLOPER12 {
+        let mut mask = i32::from(number == 123.5);
+        mask |= i32::from(matches!(boolean, 0 | 1)) << 1;
+        mask |= i32::from(integer == if boolean == 1 { i32::MAX } else { i32::MIN }) << 2;
+        // SAFETY: the linked C++ caller passes a live six-unit counted buffer.
+        let units = unsafe { std::slice::from_raw_parts(text, 6) };
+        mask |= i32::from(units == [5, 0x65e5, 0, 0xd83d, 0xde00, 120]) << 3;
+        mask |= i32::from(!result.is_null()) << 4;
+        // SAFETY: the C++ caller passes its live writable XLOPER12 output.
+        unsafe { result.write(XLOPER12::integer(mask)) };
+        result
+    }
+
+    // SAFETY: the linked C++ probe uses the documented B/A/J/D%/Q argument
+    // types with __stdcall and keeps every pointer live through the callback.
+    assert_eq!(unsafe { xlfn_probe_native_arguments(receive) }, 1);
+}
+
 #[cfg(any(feature = "sdk-bindgen", test))]
 fn compare_probe_values(
     reference_name: &str,
@@ -369,6 +402,7 @@ fn compare_probe_values(
 #[cfg(feature = "sdk-bindgen")]
 fn run_probe() {
     verify_callback_abi();
+    verify_native_argument_abi();
     let rust_map = get_rust_probe_values();
     let native_map = get_native_probe_values();
     let native_errors = compare_probe_values("C++", &rust_map, &native_map);

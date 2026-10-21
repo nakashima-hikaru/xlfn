@@ -158,16 +158,13 @@ impl ObjectArena {
         id: ObjectId,
         value: T,
     ) -> XllResult<ObjectBinding> {
-        let owner: Box<dyn Any + Send + Sync> = Box::new(value);
-        let mut cell = Box::new(ObjectCell {
+        let owner: Box<dyn ErasedObject> = Box::new(value);
+        let cell = Box::new(ObjectCell {
             arena: NonNull::from(arena.as_ref()),
             id,
             owner: Some(owner),
-            pointer: NonNull::dangling(),
             type_id: TypeId::of::<T>(),
-            type_name: type_name::<T>(),
         });
-        cell.pointer = NonNull::from_ref(cell.owner.as_ref().unwrap().as_ref()).cast::<()>();
         let cell = PublishedOwner::from_box(cell);
 
         let mut state = arena.state(id).lock();
@@ -425,13 +422,23 @@ impl Drop for ObjectArena {
     }
 }
 
+/// Keeps concrete type names available through the vtable for diagnostics,
+/// without storing a name alongside every object. Lookup uses the cached TypeId.
+trait ErasedObject: Any + Send + Sync {
+    fn concrete_type_name(&self) -> &'static str;
+}
+
+impl<T: Any + Send + Sync> ErasedObject for T {
+    fn concrete_type_name(&self) -> &'static str {
+        type_name::<T>()
+    }
+}
+
 pub(crate) struct ObjectCell {
     arena: NonNull<ObjectArena>,
     id: ObjectId,
-    owner: Option<Box<dyn Any + Send + Sync>>,
-    pointer: NonNull<()>,
+    owner: Option<Box<dyn ErasedObject>>,
     type_id: TypeId,
-    type_name: &'static str,
 }
 
 impl ObjectCell {
@@ -444,12 +451,23 @@ impl ObjectCell {
     }
 
     pub(crate) fn type_name(&self) -> &'static str {
-        self.type_name
+        self.owner
+            .as_deref()
+            .expect("published object cell retains its owner")
+            .concrete_type_name()
     }
 
     pub(crate) fn typed_projection<T: 'static>(&self) -> Option<TypedObjectProjection<T>> {
         (self.type_id == TypeId::of::<T>()).then(|| TypedObjectProjection {
-            pointer: self.pointer.cast(),
+            // Recover the data pointer from the retained owner after checking
+            // the cached concrete type. The owner stays present until every
+            // binding/read capability and pin has drained.
+            pointer: NonNull::from_ref(
+                self.owner
+                    .as_deref()
+                    .expect("published object cell retains its owner"),
+            )
+            .cast(),
         })
     }
 }
@@ -1073,6 +1091,102 @@ mod tests {
             size_of::<ObjectArena>(),
             size_of::<CachePadded<Mutex<ObjectArenaState>>>(),
         );
+    }
+
+    #[test]
+    fn miri_typed_projection_survives_shared_borrows_and_binding_retirement() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Payload {
+            values: [u64; 4],
+            drops: Arc<AtomicUsize>,
+        }
+        impl Drop for Payload {
+            fn drop(&mut self) {
+                assert_eq!(self.drops.fetch_add(1, Ordering::Relaxed), 0);
+            }
+        }
+
+        let arena = PublishedOwner::new(ObjectArena::new());
+        let drops = Arc::new(AtomicUsize::new(0));
+        // SAFETY: bindings and the final pin drain before arena recovery.
+        let binding = unsafe {
+            ObjectArena::insert(
+                &arena,
+                ObjectId::new(1, 1),
+                Payload {
+                    values: [1, 2, 3, 4],
+                    drops: Arc::clone(&drops),
+                },
+            )
+        }
+        .unwrap();
+        let duplicate = binding.duplicate().unwrap();
+        let pin = binding.acquire_lease().unwrap();
+        assert_eq!(binding.object().type_name(), type_name::<Payload>());
+        assert_eq!(binding.object().type_id(), TypeId::of::<Payload>());
+        assert!(binding.object().typed_projection::<[u64; 4]>().is_none());
+        let projection = binding.object().typed_projection::<Payload>().unwrap();
+        // SAFETY: bindings and then the pin retain the payload across all reads.
+        let first = unsafe { projection.as_ref_unchecked() };
+        assert_eq!(duplicate.object().type_name(), type_name::<Payload>());
+        let second_projection = duplicate.object().typed_projection::<Payload>().unwrap();
+        // SAFETY: the same live capabilities protect this second shared borrow.
+        let second = unsafe { second_projection.as_ref_unchecked() };
+        assert!(std::ptr::eq(first, second));
+        drop(binding);
+        drop(duplicate);
+        assert_eq!(first.values, [1, 2, 3, 4]);
+        assert_eq!(second.values, first.values);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        drop(pin);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        arena.finish_quiescence().unwrap();
+        arena.assert_reclaimable();
+    }
+
+    #[test]
+    fn miri_typed_projection_preserves_overaligned_zst_pointer() {
+        #[repr(align(256))]
+        struct Aligned;
+
+        let arena = PublishedOwner::new(ObjectArena::new());
+        // SAFETY: the binding drains before arena recovery.
+        let binding = unsafe { ObjectArena::insert(&arena, ObjectId::new(1, 1), Aligned) }.unwrap();
+        let projection = binding.object().typed_projection::<Aligned>().unwrap();
+        assert_eq!(binding.object().type_name(), type_name::<Aligned>());
+        assert_eq!(projection.addr() % align_of::<Aligned>(), 0);
+        // SAFETY: binding retains this zero-sized payload throughout the borrow.
+        let _value = unsafe { projection.as_ref_unchecked() };
+        assert!(binding.object().typed_projection::<()>().is_none());
+        drop(binding);
+        arena.finish_quiescence().unwrap();
+        arena.assert_reclaimable();
+    }
+
+    #[test]
+    fn miri_erased_object_names_boxed_payload_not_erasure_container() {
+        let arena = PublishedOwner::new(ObjectArena::new());
+        // SAFETY: both bindings drain before arena recovery.
+        let boxed =
+            unsafe { ObjectArena::insert(&arena, ObjectId::new(1, 1), Box::new([1_u64, 2, 3])) }
+                .unwrap();
+        // SAFETY: both bindings drain before arena recovery.
+        let string =
+            unsafe { ObjectArena::insert(&arena, ObjectId::new(1, 2), String::from("payload")) }
+                .unwrap();
+        assert_eq!(boxed.object().type_name(), type_name::<Box<[u64; 3]>>());
+        assert_eq!(string.object().type_name(), type_name::<String>());
+        assert_eq!(boxed.object().type_id(), TypeId::of::<Box<[u64; 3]>>());
+        assert!(boxed.object().typed_projection::<[u64; 3]>().is_none());
+        let projection = boxed.object().typed_projection::<Box<[u64; 3]>>().unwrap();
+        // SAFETY: boxed retains the payload throughout this read.
+        assert_eq!(**unsafe { projection.as_ref_unchecked() }, [1, 2, 3]);
+        drop(boxed);
+        drop(string);
+        arena.finish_quiescence().unwrap();
+        arena.assert_reclaimable();
     }
 
     #[test]

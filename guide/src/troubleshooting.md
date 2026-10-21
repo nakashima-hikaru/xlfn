@@ -83,13 +83,16 @@ A registration conflict is rejected; xlfn does not overwrite another add-in's na
 
 Typical causes:
 
-- strict type mismatch, such as text supplied to `f64`;
+- strict type mismatch, such as text supplied to `#[excel_arg(strict)] f64`;
 - a blank or missing policy rejected the argument;
 - invalid UTF-16 or malformed array/reference structure;
 - a failed Excel callback or coercion;
 - an internal or application-adapter error.
 
-Check the argument named in diagnostics. xlfn does not perform broad Excel coercion for ordinary parameters.
+Check the argument named in diagnostics. Native scalar inputs are converted
+by Excel before the function is called; Excel may return a worksheet error
+without entering Rust or producing an xlfn diagnostic. Use `excel_arg(strict)`
+to check the original value type through xlfn.
 
 ## A cell shows `#NUM!`
 

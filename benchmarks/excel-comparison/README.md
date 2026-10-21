@@ -78,8 +78,11 @@ the ordinary fixture functions remain registered too. Async measurements compare
 xlfn native async delivery with Excel-DNA RTD-backed Task delivery, including
 Excel's RTD throttle; they do not isolate native async framework overhead.
 
-The synchronous paths have different representation costs. xlfn's ordinary
-arguments use XLOPER12 with strict cell validation. The numeric-range fixture
+The synchronous paths have different representation costs. xlfn automatically
+registers `f64` as `B`, `bool` as `A`, `i32` as `J`, and `String`/`&str` as
+`D%`. Excel coerces these inputs before calling Rust; explicit
+`#[excel_arg(strict)]` inputs use `Q` and xlfn's strict value validation.
+The numeric-range fixture
 uses `NumericMatrixRef` for M01/M03/M04: Excel supplies a dense FP12 buffer
 through the `K%` argument ABI, and xlfn borrows its validated doubles. This is
 an explicit numeric-coercion API: Excel converts blanks to zero and rejects
@@ -147,6 +150,80 @@ recalculations in one session do not establish statistical significance.
 | C01–C04 | Fresh Excel/add-in load, extra registrations, first call, warm workbook open | Startup/registration/first-call/open-to-complete time |
 | W01–W03 | Mixed/finance-like/10k–100k formula books | End-to-end settle, Excel CPU, peak RSS |
 | L01–L03 | Representative peak memory, 100/1000 recalculations, scalar/async/RTD tails | Peak RSS per cell, latency/RSS drift, p50/p95/p99/max |
+| N01–N05 | Within-xlfn `Q` versus `B` (1/2/4/8 arguments), `A`, `J`, `D%` (short/long Unicode), and `K%` | ABBA/BAAB samples, native/Q median ratio, signed percentage change |
+
+### Native input ABI controls
+
+Run the N-series on a newly built xlfn XLL using the same artifact verification
+as other workloads:
+
+```powershell
+py ./run.py --profile full --implementation xlfn --id N01 --id N02 --id N03 --id N04 --id N05 --repeat 10 --out ./results-native-abi.jsonl
+py ./summarize.py ./results-native-abi.jsonl
+```
+
+Each case uses identical Rust bodies and inputs, with an explicit `strict` Q
+baseline and the automatically selected native ABI. N05 uses strict
+`MatrixRef<f64>` for Q and `NumericMatrixRef` for K%. Q and native formulas
+occupy distinct ranges in the same workbook. After both ranges are warmed,
+the runner dirties only the measured range and alternates Q/native/native/Q
+and native/Q/Q/native blocks. Each block contributes two samples per ABI.
+Every output is checked, and the record retains the order and timing breakdown
+for every recalculation. `native_change_percent` preserves improvements and
+regressions; negative values mean the native median was lower.
+
+These are comparisons within xlfn, so Excel-DNA is `unsupported` for N01–N05
+and its cross-framework ratio is left empty. The CSV carries the Q/native
+medians and ratio from the xlfn record. Use multiple independent sessions and
+inspect both directions; repeated blocks in one process do not establish a
+universal speedup. These controls use valid inputs. They do not establish
+Excel's behavior for coercion failures, omitted arguments, or fractional J
+conversion. Those require live worksheet qualification, separately from the
+Rust malformed-buffer and strict conversion tests. An Excel error cell alone
+cannot prove whether Excel rejected an input before calling the wrapper.
+
+N06 provides separate instrumented worksheet qualification. Build its optional
+`abi-semantics` feature on Windows and run the dedicated profile:
+
+```powershell
+./build.ps1 -AbiSemantics
+py ./run.py --profile semantics --implementation xlfn --artifacts ./semantics-artifacts --allow-local-artifacts --out ./results-abi-semantics.jsonl
+py ./summarize.py ./results-abi-semantics.jsonl
+```
+
+This build is marked `local-unverified` and has its own `abi-semantics.xll`;
+it is not part of the paired timing artifact. Its optional `UdfLayer` counts
+admitted layer entry before input conversion and classifies completion. The test
+functions also count entry into the Rust body. N06 records those counter
+deltas for Q and native f64/Boolean/i32/string arguments, covering numbers,
+numeric text, TRUE/FALSE, fractional values, i32 bounds and overflows, a large
+finite value, Unicode, empty text, embedded NUL, blank cells, omitted
+arguments, `#N/A`, and `#VALUE!`. It verifies unambiguous same-type examples
+and retains Excel's coercion/rounding results as observations rather than
+assuming undocumented conversion outcomes. `source_preserved` reports whether
+Excel retained the COM-supplied source, so an embedded-NUL result is not
+mistaken for testing bytes that Excel discarded.
+
+An Excel error with zero observed layer entries is recorded as
+`no_observed_layer_entry`; an observed layer with an input-error
+completion and no body entry is `rust_input_rejection`. Successful body entry
+is recorded separately. Zero layer entries do not prove that the outer C
+wrapper was never called: ingress/runtime rejection also precedes layer entry.
+Successful marker and counter calls support an Excel-preprocessing inference
+while the runtime is open, but the record preserves that uncertainty.
+Unexpected instrumented errors fail qualification. Invalid
+UTF-16 cannot reliably be constructed in a worksheet and is covered by direct
+Rust boundary tests instead. Never use the instrumented feature build for
+performance measurements: the default fixture has `Layers=()` and compiles out
+this instrumentation entirely.
+
+The SDK ABI probe additionally calls a Rust `extern "system"` receiver from
+C++ with `double`, 16-bit `short`, 32-bit `long`, a counted UTF-16 pointer,
+and XLOPER12 pointers. It checks both Boolean values, signed integer extrema,
+an embedded NUL, and an astral character. Run the probe on native Windows x86
+and x64 with the Microsoft SDK header; local Rust checks cannot replace that
+calling-convention evidence. No Windows/Excel results are checked in for this
+ABI redesign yet, so no Excel speed or coercion claim is made here.
 
 Async, RTD, and mixed workloads use automatic calculation for both add-ins so
 RTD completions can update cells. Synchronous workloads use manual calculation.

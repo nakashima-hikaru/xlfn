@@ -20,6 +20,8 @@ class Case:
 
 
 def cases(profile: str = "full") -> list[Case]:
+    if profile == "semantics":
+        return [Case("N06", "input-semantics", {})]
     if profile not in ("full", "smoke"):
         raise ValueError(profile)
     smoke = profile == "smoke"
@@ -101,6 +103,14 @@ def cases(profile: str = "full") -> list[Case]:
         add("L02", str(n), cells=100 if smoke else 1_000, repetitions=n)
     for workload in ("scalar", "async", "rtd"):
         add("L03", workload, workload=workload, cells=20 if smoke else 1_000, repetitions=3 if smoke else 100)
+    # Within-xlfn controls compare the same body under Q and native ABIs.
+    for argc in (1, 2, 4, 8):
+        add("N01", f"f64-{argc}", cells=100 if smoke else 10_000, argc=argc)
+    add("N02", "bool", cells=100 if smoke else 10_000)
+    add("N03", "i32", cells=100 if smoke else 10_000)
+    for length in (8, 4096):
+        add("N04", f"unicode-{length}", cells=100 if smoke else 1_000, length=length)
+    add("N05", "matrix", rows=10 if smoke else 100, cols=10 if smoke else 100)
     return result
 
 

@@ -10,6 +10,30 @@
 #include <XLCALL.H>
 
 #include <cstddef>
+#include <limits>
+
+// xlfRegister's B, A, J and D% prototypes. On Windows `long` is 32 bits
+// on both x86 and x64; bool must never replace the two-byte `short`.
+static_assert(sizeof(double) == 8);
+static_assert(sizeof(short) == 2);
+static_assert(sizeof(long) == 4);
+static_assert(sizeof(unsigned short) == 2);
+using NativeArgumentReceiver = LPXLOPER12(__stdcall*)(
+    double, short, long, const unsigned short*, LPXLOPER12);
+
+extern "C" int xlfn_probe_native_arguments(NativeArgumentReceiver receive) {
+    const unsigned short text[] = {5, L'\u65e5', 0, 0xd83d, 0xde00, L'x'};
+    for (short boolean = 0; boolean <= 1; ++boolean) {
+        XLOPER12 result{};
+        const long integer = boolean ? (std::numeric_limits<long>::max)()
+                                     : (std::numeric_limits<long>::min)();
+        const auto returned = receive(123.5, boolean, integer, text, &result);
+        if (returned != &result || result.xltype != xltypeInt || result.val.w != 31) {
+            return 0;
+        }
+    }
+    return 1;
+}
 
 extern "C" std::size_t xlfn_probe_fp12_size() {
     return sizeof(FP12);

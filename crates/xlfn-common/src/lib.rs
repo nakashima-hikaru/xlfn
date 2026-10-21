@@ -1,8 +1,46 @@
-//! Small validation rules shared by the runtime and packaging layers.
+//! ABI definitions and validation rules shared by macros, runtime, and packaging.
 
 #![deny(unsafe_code)]
 
 use std::fmt;
+
+/// The physical input ABI shared by macro lowering and Excel registration.
+///
+/// Argument conversion and presence policies are analyzed separately. The
+/// resulting ABI determines both the generated FFI parameter and type text.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ArgumentAbi {
+    /// An XLOPER12 value operand.
+    Value12,
+    /// An XLOPER12 reference operand, available to macro-sheet functions.
+    Reference12,
+    /// A finite double passed by value.
+    Float64,
+    /// A C short Boolean passed by value (zero or one).
+    Boolean16,
+    /// A signed 32-bit integer passed by value.
+    Integer32,
+    /// A pointer to a length-prefixed UTF-16 string.
+    CountedUtf16,
+    /// A pointer to a contiguous FP12 numeric array.
+    NumericArray12,
+}
+
+impl ArgumentAbi {
+    /// Returns Excel's registration code for this physical parameter.
+    #[must_use]
+    pub const fn registration_code(self) -> &'static str {
+        match self {
+            Self::Value12 => "Q",
+            Self::Reference12 => "U",
+            Self::Float64 => "B",
+            Self::Boolean16 => "A",
+            Self::Integer32 => "J",
+            Self::CountedUtf16 => "D%",
+            Self::NumericArray12 => "K%",
+        }
+    }
+}
 
 /// The execution capability assigned to a generated Excel function.
 ///

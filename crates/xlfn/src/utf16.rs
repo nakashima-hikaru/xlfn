@@ -6,6 +6,42 @@ use std::mem::MaybeUninit;
 pub(crate) use xlfn_common::EXCEL_STRING_LIMIT;
 const INLINE_UTF16_CAPACITY: usize = 64;
 
+/// Borrows the payload of Excel's counted UTF-16 representation (`D%` or `Q`).
+///
+/// # Safety
+/// A non-null, aligned `pointer` must point to a readable count followed by
+/// that many initialized UTF-16 units, live and immutable for `'input`.
+#[allow(unsafe_code, reason = "borrows Excel-owned counted UTF-16 input")]
+pub(crate) unsafe fn borrow_counted<'input>(
+    pointer: *const u16,
+    argument: &'static str,
+) -> XllResult<&'input [u16]> {
+    if pointer.is_null() {
+        return Err(XllError::input(argument, InputError::NullPointer));
+    }
+    if !pointer.is_aligned() {
+        return Err(XllError::input(
+            argument,
+            InputError::Malformed("misaligned string pointer"),
+        ));
+    }
+    // SAFETY: the caller guarantees the aligned count unit is readable.
+    let length = usize::from(unsafe { *pointer });
+    if length > EXCEL_STRING_LIMIT {
+        return Err(XllError::input(
+            argument,
+            InputError::TooLarge {
+                limit: EXCEL_STRING_LIMIT,
+                actual: length,
+            },
+        ));
+    }
+    // SAFETY: the caller guarantees the complete counted allocation is live.
+    let data = unsafe { pointer.add(1) };
+    // SAFETY: the payload contains exactly the initialized units just counted.
+    Ok(unsafe { std::slice::from_raw_parts(data, length) })
+}
+
 /// Plans one strict UTF-16 conversion without allocating intermediate text.
 /// Valid input has an exact UTF-8 length. A lone surrogate contributes two
 /// bytes to the capacity bound but is rejected by the decoder before output

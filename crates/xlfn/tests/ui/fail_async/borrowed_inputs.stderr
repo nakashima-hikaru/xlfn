@@ -1,23 +1,8 @@
-error[E0277]: the trait bound `for<'call> &str: xlfn::__private::v1::ExcelParameter<'call, xlfn::__private::v1::PlainInputMode>` is not satisfied
+error: &str borrows the current Excel call and is only supported by synchronous functions; use String for async arguments
   --> tests/ui/fail_async/borrowed_inputs.rs:22:31
    |
 22 | async fn borrowed_text(value: &str) -> f64 {
-   |                               ^^^^ the trait `for<'call> xlfn::__private::v1::ExcelParameter<'call, xlfn::__private::v1::PlainInputMode>` is not implemented for `&str`
-   |
-help: the trait `ExcelParameter<'call, PlainInputMode>` is not implemented for `&str`
-      but trait `ExcelParameter<'_, PlainInputMode>` is implemented for it
-  --> src/value.rs
-   |
-   | impl<'call, M: InputMode> ExcelParameter<'call, M> for &'call str {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-note: required by a bound in `xlfn::__private::v1::assert_async_parameter`
-  --> src/call_return/traits.rs
-   |
-   | pub fn assert_async_parameter<R, T>()
-   |        ---------------------- required by a bound in this function
-...
-   |     T: for<'call> ExcelParameter<'call, R::InputMode> + Send + 'static,
-   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_async_parameter`
+   |                               ^^^^
 
 error[E0277]: the trait bound `for<'call> xlfn::value::MatrixRef<'_, f64>: xlfn::__private::v1::ExcelParameter<'call, xlfn::__private::v1::PlainInputMode>` is not satisfied
   --> tests/ui/fail_async/borrowed_inputs.rs:27:33

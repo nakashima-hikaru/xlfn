@@ -34,6 +34,8 @@ PRIMARY = {
     "L01": ("peak_rss_per_cell_bytes", "lower"),
     "L02": ("latency_drift_ratio", "lower"),
     "L03": ("p99_s", "lower"),
+    **{f"N{i:02}": ("native_over_q_ratio", "lower") for i in range(1, 6)},
+    "N06": ("checks", "higher"),
 }
 
 
@@ -52,6 +54,18 @@ def summarize(records: list[dict]) -> list[dict]:
                "excel_dna_status": dna["status"] if dna else "missing",
                "xlfn_value": None, "excel_dna_value": None, "xlfn_advantage_ratio": None,
                "comparable": False, "reason": "missing or failed run"}
+        if id.startswith("N"):
+            row.update(comparison="within_xlfn_native_vs_q", reason="within-xlfn ABI comparison")
+            if xlfn and xlfn["status"] == "ok":
+                metrics = xlfn["metrics"]
+                if id == "N06":
+                    row.update(comparison="input_semantics", reason="instrumented input qualification", checks=metrics["checks"])
+                else:
+                    row.update(q_p50_s=metrics["q_p50_s"], native_p50_s=metrics["native_p50_s"],
+                               native_over_q_ratio=metrics["native_over_q_ratio"],
+                               native_change_percent=metrics["native_change_percent"])
+            pairs.append(row)
+            continue
         unsupported = [f"{record['implementation']}: {record.get('unsupported_reason', 'unsupported')}"
                        for record in (xlfn, dna) if record and record["status"] == "unsupported"]
         if unsupported:

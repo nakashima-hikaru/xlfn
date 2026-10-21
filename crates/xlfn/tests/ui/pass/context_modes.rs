@@ -88,7 +88,7 @@ fn elided_macro(context: MacroSheetContext<TestAddin>) -> i32 {
 fn main() {
     type ValueExport = unsafe extern "system" fn() -> *mut xlfn::__private::v1::XLOPER12;
     type OneArgumentExport = unsafe extern "system" fn(
-        *mut xlfn::__private::v1::XLOPER12,
+        f64,
     ) -> *mut xlfn::__private::v1::XLOPER12;
 
     // Injected capabilities do not add worksheet-visible ABI arguments.

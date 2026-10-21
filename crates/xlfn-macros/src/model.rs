@@ -224,6 +224,7 @@ pub(super) struct ArgumentSpec {
     pub(super) ty: Type,
     pub(super) excel_name: String,
     pub(super) description: String,
+    pub(super) abi: xlfn_common::ArgumentAbi,
     pub(super) conversion: ArgumentConversion,
 }
 
@@ -275,6 +276,7 @@ pub(super) struct ArgumentPlan {
     pub(super) description: String,
     pub(super) raw_ident: Ident,
     pub(super) local_ident: Ident,
+    pub(super) abi: xlfn_common::ArgumentAbi,
     pub(super) conversion: ArgumentConversion,
 }
 
@@ -566,6 +568,12 @@ fn analyze_arguments(
 
     let mut analyzed = Vec::with_capacity(arguments.len());
     for argument in arguments {
+        if execution.is_async() && is_borrowed_string(&argument.ty) {
+            return Err(syn::Error::new_spanned(
+                &argument.ty,
+                "&str borrows the current Excel call and is only supported by synchronous functions; use String for async arguments",
+            ));
+        }
         let excel_name = argument
             .options
             .name
@@ -586,13 +594,14 @@ fn analyze_arguments(
                 ));
             }
             if argument.options.reference
+                || argument.options.strict
                 || argument.options.default.is_some()
                 || argument.options.blank.is_some()
                 || argument.options.missing.is_some()
             {
                 return Err(syn::Error::new_spanned(
                     &function.sig.inputs,
-                    "NumericMatrixRef uses Excel's numeric coercion and cannot use reference, blank, missing, or default policies",
+                    "NumericMatrixRef uses Excel's numeric coercion and cannot use reference, strict, blank, missing, or default policies",
                 ));
             }
             ArgumentConversion::NumericMatrix
@@ -604,26 +613,28 @@ fn analyze_arguments(
                 ));
             }
             if argument.options.reference
+                || argument.options.strict
                 || argument.options.default.is_some()
                 || argument.options.blank.is_some()
                 || argument.options.missing.is_some()
             {
                 return Err(syn::Error::new_spanned(
                     &function.sig.inputs,
-                    "HandleLease arguments cannot use reference, blank, missing, or default policies",
+                    "HandleLease arguments cannot use reference, strict, blank, missing, or default policies",
                 ));
             }
             ArgumentConversion::HandleLease {
                 object: Box::new(object),
             }
         } else if argument.options.reference {
-            if argument.options.default.is_some()
+            if argument.options.strict
+                || argument.options.default.is_some()
                 || argument.options.blank.is_some()
                 || argument.options.missing.is_some()
             {
                 return Err(syn::Error::new_spanned(
                     &function.sig.inputs,
-                    "reference arguments cannot use blank, missing, or default policies",
+                    "reference arguments cannot use strict, blank, missing, or default policies",
                 ));
             }
             ArgumentConversion::Reference
@@ -661,6 +672,22 @@ fn analyze_arguments(
             ArgumentConversion::Value(Box::new(ValueConversion { blank, missing }))
         };
 
+        let abi = match &conversion {
+            ArgumentConversion::Reference => xlfn_common::ArgumentAbi::Reference12,
+            ArgumentConversion::NumericMatrix => xlfn_common::ArgumentAbi::NumericArray12,
+            ArgumentConversion::HandleLease { .. } => xlfn_common::ArgumentAbi::Value12,
+            ArgumentConversion::Value(_) => {
+                if argument.options.strict
+                    || argument.options.default.is_some()
+                    || argument.options.blank.is_some()
+                    || argument.options.missing.is_some()
+                {
+                    xlfn_common::ArgumentAbi::Value12
+                } else {
+                    native_argument_abi(&argument.ty)
+                }
+            }
+        };
         let description = argument.options.description.unwrap_or_default();
         validate_registration_string(
             "Excel argument description",
@@ -671,6 +698,7 @@ fn analyze_arguments(
             ty: argument.ty,
             excel_name,
             description,
+            abi,
             conversion,
         });
     }
@@ -703,6 +731,82 @@ fn analyze_arguments(
     }
 
     Ok(analyzed)
+}
+
+/// Only recognized standard Rust spellings select a native ABI. In particular,
+/// aliases and user-defined qualified types keep their FromExcel contract.
+fn native_argument_abi(ty: &Type) -> xlfn_common::ArgumentAbi {
+    use xlfn_common::ArgumentAbi;
+    match ty {
+        Type::Paren(paren) => native_argument_abi(&paren.elem),
+        Type::Group(group) => native_argument_abi(&group.elem),
+        Type::Reference(reference) if reference.mutability.is_none() => {
+            if is_standard_path(
+                &reference.elem,
+                "str",
+                &["core::primitive", "std::primitive"],
+            ) {
+                ArgumentAbi::CountedUtf16
+            } else {
+                ArgumentAbi::Value12
+            }
+        }
+        _ if is_standard_path(ty, "f64", &["core::primitive", "std::primitive"]) => {
+            ArgumentAbi::Float64
+        }
+        _ if is_standard_path(ty, "bool", &["core::primitive", "std::primitive"]) => {
+            ArgumentAbi::Boolean16
+        }
+        _ if is_standard_path(ty, "i32", &["core::primitive", "std::primitive"]) => {
+            ArgumentAbi::Integer32
+        }
+        _ if is_standard_path(ty, "String", &["std::string", "alloc::string"]) => {
+            ArgumentAbi::CountedUtf16
+        }
+        _ => ArgumentAbi::Value12,
+    }
+}
+
+fn is_standard_path(ty: &Type, name: &str, prefixes: &[&str]) -> bool {
+    let Type::Path(path) = ty else {
+        return false;
+    };
+    if path.qself.is_some()
+        || path
+            .path
+            .segments
+            .iter()
+            .any(|segment| !matches!(segment.arguments, PathArguments::None))
+    {
+        return false;
+    }
+    let spelling = path
+        .path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>()
+        .join("::");
+    spelling == name
+        || prefixes
+            .iter()
+            .any(|prefix| spelling == format!("{prefix}::{name}"))
+}
+
+pub(super) fn is_borrowed_string(ty: &Type) -> bool {
+    match ty {
+        Type::Paren(paren) => is_borrowed_string(&paren.elem),
+        Type::Group(group) => is_borrowed_string(&group.elem),
+        Type::Reference(reference) => {
+            reference.mutability.is_none()
+                && is_standard_path(
+                    &reference.elem,
+                    "str",
+                    &["core::primitive", "std::primitive"],
+                )
+        }
+        _ => false,
+    }
 }
 
 /// Recognizes the framework's two-parameter generation-scoped handle lease
@@ -863,6 +967,7 @@ pub(super) fn lower(spec: UdfSpec) -> UdfPlan {
             description: argument.description,
             raw_ident: format_ident!("__raw_{index}"),
             local_ident: format_ident!("__argument_{index}"),
+            abi: argument.abi,
             conversion: argument.conversion,
         })
         .collect();

@@ -866,7 +866,7 @@ mod tests {
                 description: "sixth",
             },
         ];
-        const ABIS: [ArgumentAbi; 6] = [ArgumentAbi::CoercedValue; 6];
+        const ABIS: [ArgumentAbi; 6] = [ArgumentAbi::Value12; 6];
         let module = "C:\\test\\addin.xll";
         let module_units = module.encode_utf16().collect::<Vec<_>>();
 

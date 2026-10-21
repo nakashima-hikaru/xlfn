@@ -19,7 +19,8 @@ from run import (XL_AUTOMATIC, XL_MANUAL, XL_ERR_NUM, AsyncControl, ComObject, C
                  ExcelSession, UnsupportedCase, WorkerProgress, apply_excel_cleanup, calculation_mode,
                  check_final_values, check_scalar, close_worker_session, formula, register_xll,
                  registration_diagnostics, run_async, reap_excel_process,
-                 recover_worker_record, run_async_cancel, run_async_gate, run_async_repeated, run_matrix)
+                 recover_worker_record, run_async_cancel, run_async_gate, run_async_repeated, run_matrix,
+                 native_abi_formula, run_native_abi_pair, classify_abi_semantics, run_native_abi_semantics, artifact)
 from summarize import PRIMARY, summarize
 from workloads import IDS, Case, cases
 
@@ -697,8 +698,9 @@ class PlanTest(unittest.TestCase):
         expected |= {f"C{i:02}" for i in range(1, 5)}
         expected |= {f"W{i:02}" for i in range(1, 4)}
         expected |= {f"L{i:02}" for i in range(1, 4)}
+        expected |= {f"N{i:02}" for i in range(1, 6)}
         self.assertEqual(set(IDS), expected)
-        self.assertEqual(set(PRIMARY), expected)
+        self.assertEqual(set(PRIMARY), expected | {"N06"})
         for profile in ("full", "smoke"):
             plan = cases(profile)
             self.assertEqual(len(plan), len({case.key for case in plan}))
@@ -737,6 +739,73 @@ class PlanTest(unittest.TestCase):
                          '=BENCH.RTD("topic-0",0)')
         self.assertEqual(formula("T02", 1, {"length": 8, "kind": "ja"}),
                          "=BENCH.STR.OUT(8,TRUE)")
+
+    def test_native_abi_pair_uses_alternating_balanced_blocks(self):
+        session = Mock(implementation="xlfn")
+        session.last_calculation_timing = {"total_s": 1.0}
+        q = SimpleNamespace(Value2=((1.0,), (2.0,)))
+        native = SimpleNamespace(Value2=((1.0,), (2.0,)))
+        session.add_formulas.side_effect = [q, native]
+        session.calculate.side_effect = [0.1, 0.1, 1, 2, 4, 3, 6, 5, 7, 8]
+        case = Case("N01", "f64-1", {"cells": 2, "argc": 1})
+        result = run_native_abi_pair(session, case, 2)
+        self.assertEqual([sample["abi"] for sample in result["recalculation_samples"]],
+                         ["Q", "NATIVE", "NATIVE", "Q", "NATIVE", "Q", "Q", "NATIVE"])
+        self.assertEqual(result["q_samples_s"], [1, 3, 5, 7])
+        self.assertEqual(result["native_samples_s"], [2, 4, 6, 8])
+        self.assertEqual(result["native_over_q_ratio"], 1.25)
+        self.assertEqual(result["native_change_percent"], 25)
+        self.assertEqual(native_abi_formula(case, 3, "Q"), "=BENCH.ABI.F641.Q(3)")
+        self.assertEqual(native_abi_formula(Case("N04", "text", {}), 3, "NATIVE"),
+                         "=BENCH.ABI.STR.NATIVE(B3)")
+
+    def test_native_abi_pair_rejects_cell_errors_and_other_implementations(self):
+        case = Case("N01", "f64-1", {"cells": 1, "argc": 1})
+        with self.assertRaises(UnsupportedCase):
+            run_native_abi_pair(Mock(implementation="excel_dna"), case, 1)
+        session = Mock(implementation="xlfn")
+        session.add_formulas.return_value = SimpleNamespace(Value2=-2146826259)
+        with self.assertRaisesRegex(AssertionError, "unexpected worksheet result"):
+            run_native_abi_pair(session, case, 1)
+
+    def test_semantics_profile_is_separate_from_performance_workloads(self):
+        self.assertEqual([case.id for case in cases("semantics")], ["N06"])
+        case = cases("semantics")[0]
+        self.assertEqual(artifact(Path("root"), "xlfn", case), Path("root/xlfn/abi-semantics.xll"))
+        for profile in ("full", "smoke"):
+            self.assertNotIn("N06", {case.id for case in cases(profile)})
+        with self.assertRaisesRegex(AssertionError, "instrumented XLL"):
+            session = Mock(implementation="xlfn")
+            session.app.Evaluate.return_value = 0
+            run_native_abi_semantics(session)
+
+    def test_semantics_distinguishes_input_rejection_from_unobserved_admission(self):
+        counts = {"entered": 0, "body": 0, "input_errors": 0, "other_errors": 0}
+        self.assertEqual(classify_abi_semantics(counts, XL_ERR_NUM), "no_observed_layer_entry")
+        counts.update(entered=1, input_errors=1)
+        self.assertEqual(classify_abi_semantics(counts, XL_ERR_NUM), "rust_input_rejection")
+        counts.update(input_errors=0, body=1)
+        self.assertEqual(classify_abi_semantics(counts, 42.0), "rust_body_completed")
+        counts.update(other_errors=1)
+        with self.assertRaisesRegex(AssertionError, "unexpected instrumented outcome"):
+            classify_abi_semantics(counts, XL_ERR_NUM)
+        with self.assertRaisesRegex(AssertionError, "without observed layer"):
+            classify_abi_semantics({key: 0 for key in counts}, 42.0)
+
+    def test_native_abi_summaries_preserve_signed_change_and_semantics(self):
+        records = [
+            {"id": "N01", "variant": "f64-1", "implementation": "xlfn", "status": "ok",
+             "metrics": {"q_p50_s": 1.0, "native_p50_s": 1.25,
+                         "native_over_q_ratio": 1.25, "native_change_percent": 25.0}},
+            {"id": "N06", "variant": "input-semantics", "implementation": "xlfn", "status": "ok",
+             "metrics": {"checks": 152}},
+        ]
+        timing, qualification = summarize(records)
+        self.assertEqual(timing["native_change_percent"], 25.0)
+        self.assertFalse(timing["comparable"])
+        self.assertEqual(qualification["comparison"], "input_semantics")
+        self.assertEqual(qualification["checks"], 152)
+        self.assertNotIn("q_p50_s", qualification)
 
     def test_matrix_allocation_tracking_is_limited_to_mixed_measurement(self):
         for id in ("M01", "M05"):

@@ -229,11 +229,12 @@ bench: bench-ci
 
 # Canonical CI regression suite.
 bench-ci:
+    just bench-one-filter argument_ingress "^argument_ingress/native_abi/((f64_1|f64_8|bool|i32)/plain|unicode_(short|long)/(prepare_identity|materialize_identity))/(q|native)\z"
     just bench-one-filter async_spawn "^(async_spawn/per_iteration/(1|32)|async_spawn/matrix_reschedule/workers_4/16|async_spawn/spawn_and_drain/workers_4/16|cancellation_lifecycle/allocate_release/(1|8))\z" "bench-internals async-builtin"
     just bench-one-filter sync_boundary "^sync_boundary/((admission|scalar_return/no_subscriber|worksheet_error/no_subscriber|domain_error/no_subscriber)/(1|32)|scalar_arguments/8/(1|32))\z"
     just bench-one-filter handle_prepare "^handle_prepare/(cold_miss_batch_100|warm_hit_batch_100|distinct_key/(1|32))\z"
     just bench-one-filter formula_revision "^formula_revision/warm_hit/(f64|matrix_f64_100k)\z"
-    just bench-one-filter handle_lookup "^handle_lookup/(warm_same_token|distinct_tokens)/(1|32)\z"
+    just bench-one-filter handle_lookup "^handle_lookup/(warm_same_token|distinct_tokens|rotating_65536_tokens)/(1|32)\z"
     just bench-one-filter formula_caller "^resolve_formula_caller/(ref|sref|concurrent/ref/(1|4))\z"
     just bench-one-filter argument_ingress "^argument_ingress/(f64/with_identity|string_(ascii_4k|japanese_4k)/owned|string_short/borrowed|string_unicode/borrowed|string_inline_[^/]+/borrowed|string_pair/borrowed|matrix_string_10k/(owned|borrowed)|matrix_f64_100k/(plain|with_identity|prepare_identity)|matrix_ref_f64_100k/(plain|prepare_identity|prepare_materialize)|numeric_matrix_ref_100k/plain|numeric_matrix_shape/(1000x10|100x100|10x1000)|numeric_matrix_ref_100000/with_identity|matrix_cells_100k/(ascii|unicode)/(owned|borrowed)|excel_value_matrix_100k/with_identity|handle/with_identity|optional_numeric/(option|presence|borrowed_option)/100000/(prepare|materialize))\z"
     just bench-one-filter array_numeric_output "^(array_numeric_output/(matrix_build_return|builder_build_return|matrix_convert_return|numeric_slice_convert_return)/100000|array_numeric_producer/push_f64/(10000|100000))\z"
@@ -262,8 +263,8 @@ bench-scaling:
     just bench-one cache_reclamation "cache"
     just bench-one-filter async_spawn "^(async_spawn/(matrix_spawn|matrix_reschedule|spawn_and_drain)|cancellation_lifecycle/)" "bench-internals async-builtin"
     just bench-one-filter sync_boundary "^sync_boundary/(admission|scalar_return/no_subscriber)/(4|16)\z"
-    just bench-one-filter handle_prepare "^handle_prepare/(distinct_key/(4|16)|cold_grow|revision_churn)"
-    just bench-one-filter handle_lookup "^handle_lookup/(warm_same_token|distinct_tokens)/(4|16)\z"
+    just bench-one-filter handle_prepare "^handle_prepare/(distinct_key/(4|16)|cold_grow|drop|revision_churn)"
+    just bench-one-filter handle_lookup "^handle_lookup/(warm_same_token|distinct_tokens|rotating_65536_tokens)/(4|16)\z"
     just bench-one-filter handle_call_resolution "^handle_call_resolution/handles/(2|4)\z"
     just bench-one-filter rtd_publish "^rtd_publish/string_8k/(changing|same_value)\z" "bench-internals rtd"
     just bench-one-filter rtd_refresh "^rtd_refresh/.+/end_to_end" "bench-internals rtd"
@@ -291,6 +292,10 @@ bench-full:
     just bench-one handle_call_resolution
     just bench-one cache_registry "bench-internals cache"
     just bench-one value_boundary_allocations "bench-internals async"
+
+# Strict Q versus native B/A/J/D% admission, including handle input identity.
+bench-native-abi:
+    just bench-one-filter argument_ingress "^argument_ingress/native_abi/"
 
 bench-one name features="bench-internals":
     cargo bench --package xlfn --bench {{name}} --features "{{features}}" --locked

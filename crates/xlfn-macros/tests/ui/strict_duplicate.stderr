@@ -1,0 +1,5 @@
+error: duplicate `strict`
+ --> tests/ui/strict_duplicate.rs:4:32
+  |
+4 | fn example(#[excel_arg(strict, strict)] value: f64) -> f64 {
+  |                                ^^^^^^

@@ -2,6 +2,9 @@
 // MSVC reports LNK4104 for the framework's intentional COM class exports.
 #![allow(linker_messages)]
 
+mod native_abi;
+#[cfg(feature = "abi-semantics")]
+mod native_abi_semantics;
 mod rtd_source;
 use rtd_source::{BenchRtdSource, RtdShared};
 
@@ -70,7 +73,10 @@ impl Addin for BenchAddin {
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;
+    #[cfg(not(feature = "abi-semantics"))]
     type Layers = ();
+    #[cfg(feature = "abi-semantics")]
+    type Layers = (native_abi_semantics::SemanticLayer,);
     type AsyncExecutor = BuiltinAsyncExecutor;
 
     fn open(context: &OpenContext) -> OpenResult<Self> {
@@ -81,10 +87,11 @@ impl Addin for BenchAddin {
             .with_max_active(RtdCapacity::disabled_if_zero(120_000))
             .with_max_queued_updates(RtdCapacity::disabled_if_zero(120_000));
         let config = RuntimeConfig::new().with_rtd(RtdConfig::new().with_limits(limits));
-        let executor = BuiltinAsyncExecutor::new(BuiltinExecutorConfig::new().with_poller_count(
-            AsyncPollerCount::new(32).expect("32 pollers are supported"),
-        ));
-        Ok(Opened::new(State {
+        let executor = BuiltinAsyncExecutor::new(
+            BuiltinExecutorConfig::new()
+                .with_poller_count(AsyncPollerCount::new(32).expect("32 pollers are supported")),
+        );
+        let opened = Opened::new(State {
             shared_read: AtomicU64::new(0),
             contended: AtomicU64::new(0),
             async_control: AsyncControl::default(),
@@ -92,7 +99,10 @@ impl Addin for BenchAddin {
             rtd_shared,
         })
         .with_runtime_config(config)
-        .with_async_executor(executor))
+        .with_async_executor(executor);
+        #[cfg(feature = "abi-semantics")]
+        let opened = opened.with_layers((native_abi_semantics::SemanticLayer,));
+        Ok(opened)
     }
 }
 
@@ -112,6 +122,7 @@ pub fn sum4(a: f64, b: f64, c: f64, d: f64) -> f64 {
 }
 
 #[excel_function(name = "BENCH.SUM8", thread_safe)]
+#[allow(clippy::too_many_arguments, reason = "Measures eight Excel arguments")]
 pub fn sum8(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, h: f64) -> f64 {
     a + b + c + d + e + f + g + h
 }

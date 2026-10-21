@@ -2,6 +2,7 @@
 fn trait_driven_function_signatures_compile() {
     let tests = trybuild::TestCases::new();
     tests.pass("tests/ui/pass/argument_defaults.rs");
+    tests.pass("tests/ui/pass/native_abi.rs");
     tests.pass("tests/ui/pass/borrowed_inputs.rs");
     tests.pass("tests/ui/pass/case_distinct_udfs.rs");
     tests.pass("tests/ui/pass/cfg_gating.rs");
@@ -60,6 +61,7 @@ fn trait_driven_function_signatures_compile() {
     #[cfg(feature = "async")]
     {
         tests.pass("tests/ui/pass_async/owned_matrix.rs");
+        tests.pass("tests/ui/pass_async/native_abi.rs");
         tests.pass("tests/ui/pass_async/context_modes.rs");
         tests.compile_fail("tests/ui/fail_async/context_*.rs");
         tests.compile_fail("tests/ui/fail_async/executor_*.rs");

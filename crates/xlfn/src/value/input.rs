@@ -56,6 +56,13 @@ pub trait InputMode: sealed::InputModeSealed + Sized {
 
     #[doc(hidden)]
     fn string(identity: &mut Self::Identity, value: &str);
+
+    #[doc(hidden)]
+    fn prepare_native_string<'call>(
+        identity: &mut Self::Identity,
+        units: &'call [u16],
+        argument: &'static str,
+    ) -> XllResult<PreparedArgument<String, super::PreparedString<'call>>>;
 }
 
 /// Plain worksheet conversion, without formula-revision identity recording.
@@ -101,6 +108,14 @@ impl InputMode for PlainInputMode {
     fn i64(_: &mut Self::Identity, _: i64) {}
     fn u64(_: &mut Self::Identity, _: u64) {}
     fn string(_: &mut Self::Identity, _: &str) {}
+
+    fn prepare_native_string<'call>(
+        _: &mut Self::Identity,
+        units: &'call [u16],
+        argument: &'static str,
+    ) -> XllResult<PreparedArgument<String, super::PreparedString<'call>>> {
+        crate::utf16::decode_owned(units, argument).map(PreparedArgument::Ready)
+    }
 }
 
 #[cfg(any(feature = "handles", test))]
@@ -154,6 +169,18 @@ impl InputMode for FormulaInputMode {
 
     fn string(identity: &mut Self::Identity, value: &str) {
         identity.string(value);
+    }
+
+    fn prepare_native_string<'call>(
+        identity: &mut Self::Identity,
+        units: &'call [u16],
+        argument: &'static str,
+    ) -> XllResult<PreparedArgument<String, super::PreparedString<'call>>> {
+        identity.semantic_utf16(units)?;
+        Ok(PreparedArgument::Prepared {
+            value: super::PreparedString { units, argument },
+            materialize: <String as PrepareExcel>::materialize,
+        })
     }
 }
 
@@ -864,6 +891,127 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
         })
     }
 
+    fn with_native<T>(
+        &mut self,
+        index: usize,
+        argument: &'static str,
+        convert: impl FnOnce(&mut M::Identity) -> XllResult<T>,
+    ) -> XllResult<T> {
+        let Some(fingerprint) = self.inputs.as_mut() else {
+            return Err(XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::INPUT_FINGERPRINT,
+            });
+        };
+        M::with_argument(fingerprint, index, argument, convert)
+    }
+
+    pub(crate) fn native_f64(
+        &mut self,
+        index: usize,
+        argument: &'static str,
+        raw: f64,
+    ) -> XllResult<f64> {
+        self.with_native(index, argument, |identity| {
+            if !raw.is_finite() {
+                return Err(XllError::input(
+                    argument,
+                    crate::error::InputError::NonFinite,
+                ));
+            }
+            M::f64(identity, raw);
+            Ok(raw)
+        })
+    }
+
+    pub(crate) fn native_bool(
+        &mut self,
+        index: usize,
+        argument: &'static str,
+        raw: i16,
+    ) -> XllResult<bool> {
+        self.with_native(index, argument, |identity| {
+            let value = match raw {
+                0 => false,
+                1 => true,
+                _ => {
+                    return Err(XllError::input(
+                        argument,
+                        crate::error::InputError::Malformed("invalid Excel Boolean"),
+                    ));
+                }
+            };
+            M::bool(identity, value);
+            Ok(value)
+        })
+    }
+
+    pub(crate) fn native_i32(
+        &mut self,
+        index: usize,
+        argument: &'static str,
+        raw: i32,
+    ) -> XllResult<i32> {
+        self.with_native(index, argument, |identity| {
+            M::i64(identity, i64::from(raw));
+            Ok(raw)
+        })
+    }
+
+    /// # Safety
+    /// `raw` satisfies `utf16::borrow_counted` for the complete call lifetime.
+    #[allow(unsafe_code, reason = "borrows Excel's native counted string argument")]
+    pub(crate) unsafe fn prepare_native_string(
+        &mut self,
+        index: usize,
+        argument: &'static str,
+        raw: *const u16,
+    ) -> XllResult<PreparedArgument<String, super::PreparedString<'call>>> {
+        self.with_native(index, argument, |identity| {
+            // SAFETY: the generated wrapper retains Excel's live input for 'call.
+            let units = unsafe { crate::utf16::borrow_counted(raw, argument) }?;
+            M::prepare_native_string(identity, units, argument)
+        })
+    }
+
+    /// # Safety
+    /// `raw` satisfies `utf16::borrow_counted` until this method returns.
+    #[allow(
+        unsafe_code,
+        reason = "copies Excel's native counted string into owned data"
+    )]
+    pub(crate) unsafe fn native_string(
+        &mut self,
+        index: usize,
+        argument: &'static str,
+        raw: *const u16,
+    ) -> XllResult<String> {
+        self.with_native(index, argument, |identity| {
+            // SAFETY: the caller retains this input through materialization;
+            // neither the resulting String nor the fingerprint borrows it.
+            let units = unsafe { crate::utf16::borrow_counted(raw, argument) }?;
+            M::prepare_native_string(identity, units, argument)?.materialize()
+        })
+    }
+
+    /// # Safety
+    /// `raw` satisfies `utf16::borrow_counted` for the complete call lifetime.
+    #[allow(unsafe_code, reason = "borrows Excel's native counted string argument")]
+    pub(crate) unsafe fn prepare_native_str(
+        &mut self,
+        index: usize,
+        argument: &'static str,
+        raw: *const u16,
+    ) -> XllResult<PreparedArgument<&'call str, ()>> {
+        let scratch = self.call.scratch();
+        self.with_native(index, argument, |identity| {
+            // SAFETY: the generated wrapper retains Excel's live input for 'call.
+            let units = unsafe { crate::utf16::borrow_counted(raw, argument) }?;
+            let text = scratch.decode_utf16(units, argument)?;
+            M::string(identity, text);
+            Ok(PreparedArgument::Ready(text))
+        })
+    }
+
     pub(crate) fn record_numeric_matrix(
         &mut self,
         index: usize,
@@ -984,6 +1132,221 @@ pub unsafe fn cell_presence_from_raw(
 mod preparation_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn miri_native_scalars_match_value12_semantic_identity() {
+        for raw in [-0.0, 0.0, -123.25, f64::MIN, f64::MAX] {
+            let input = XLOPER12::number(raw);
+            crate::call::with_excel_call_scope_and_state(&input, |input, scope| {
+                let value = XlValueRef::from_array_cell(input).unwrap();
+                let mut ordinary = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                let expected = ordinary.decode::<f64>(0, "value", value).unwrap();
+                let mut native = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                assert_eq!(
+                    native.native_f64(0, "value", raw).unwrap().to_bits(),
+                    expected.to_bits()
+                );
+                assert_eq!(native.finish().unwrap(), ordinary.finish().unwrap());
+            });
+        }
+        for raw in [false, true] {
+            let input = XLOPER12::boolean(raw);
+            crate::call::with_excel_call_scope_and_state(&input, |input, scope| {
+                let value = XlValueRef::from_array_cell(input).unwrap();
+                let mut ordinary = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                let expected = ordinary.decode::<bool>(0, "value", value).unwrap();
+                let mut native = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                assert_eq!(
+                    native.native_bool(0, "value", i16::from(raw)).unwrap(),
+                    expected
+                );
+                assert_eq!(native.finish().unwrap(), ordinary.finish().unwrap());
+            });
+        }
+        for raw in [i32::MIN, -1, 0, 1, i32::MAX] {
+            let input = XLOPER12::integer(raw);
+            crate::call::with_excel_call_scope_and_state(&input, |input, scope| {
+                let value = XlValueRef::from_array_cell(input).unwrap();
+                let mut ordinary = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                let expected = ordinary.decode::<i32>(0, "value", value).unwrap();
+                let mut native = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                assert_eq!(native.native_i32(0, "value", raw).unwrap(), expected);
+                assert_eq!(native.finish().unwrap(), ordinary.finish().unwrap());
+            });
+        }
+    }
+
+    #[test]
+    fn miri_native_scalars_reject_invalid_values_before_identity_completion() {
+        use crate::error::InputError;
+        crate::call::with_excel_call_scope(|scope| {
+            for raw in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                let mut arguments = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                assert!(matches!(
+                    arguments.native_f64(0, "value", raw),
+                    Err(XllError::Input {
+                        argument: "value",
+                        reason: InputError::NonFinite
+                    }),
+                ));
+                assert!(arguments.finish().is_err());
+                let mut plain = ArgumentContext::<PlainInputMode>::from_scope(scope, 1);
+                assert!(plain.native_f64(0, "value", raw).is_err());
+            }
+            for raw in [i16::MIN, -1, 2, i16::MAX] {
+                let mut arguments = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                assert!(matches!(
+                    arguments.native_bool(0, "value", raw),
+                    Err(XllError::Input {
+                        argument: "value",
+                        reason: InputError::Malformed("invalid Excel Boolean")
+                    }),
+                ));
+                assert!(arguments.finish().is_err());
+                let mut plain = ArgumentContext::<PlainInputMode>::from_scope(scope, 1);
+                assert!(plain.native_bool(0, "value", raw).is_err());
+            }
+        });
+    }
+
+    #[test]
+    #[allow(
+        unsafe_code,
+        reason = "tests native counted-string input using owned live buffers"
+    )]
+    fn miri_native_strings_preserve_value12_identity_and_defer_owned_materialization() {
+        for text in ["", "a\0b", "価格💡école", &"日💡a".repeat(257)] {
+            let mut units = crate::utf16::encode_counted(text, "value", 32_767).unwrap();
+            let root = XLOPER12 {
+                value: xlfn_sys::XLOPER12Value {
+                    string: units.as_mut_ptr(),
+                },
+                xltype: xlfn_sys::XLTYPE_STR,
+            };
+            crate::call::with_excel_call_scope_and_state(&root, |root, scope| {
+                let value = XlValueRef::from_array_cell(root).unwrap();
+                let mut ordinary = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                let expected = ordinary.prepare::<String>(0, "value", value).unwrap();
+                let identity = ordinary.finish().unwrap();
+                // SAFETY: root owns a live immutable string buffer for this scope.
+                let pointer = unsafe { root.value.string };
+                let mut native = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                // SAFETY: the counted buffer remains live and immutable for this call.
+                let warm = unsafe { native.prepare_native_string(0, "value", pointer) }.unwrap();
+                assert!(matches!(warm, PreparedArgument::Prepared { .. }));
+                assert_eq!(native.finish().unwrap(), identity);
+                drop(warm);
+                let mut native = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                // SAFETY: the counted buffer remains live and immutable for this call.
+                let cold = unsafe { native.prepare_native_string(0, "value", pointer) }.unwrap();
+                assert_eq!(native.finish().unwrap(), identity);
+                assert_eq!(cold.materialize().unwrap(), expected.materialize().unwrap());
+                let mut borrowed = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                // SAFETY: the counted buffer remains live and immutable for this call.
+                let borrowed_text =
+                    unsafe { borrowed.prepare_native_str(0, "value", pointer) }.unwrap();
+                assert_eq!(borrowed.finish().unwrap(), identity);
+                assert_eq!(borrowed_text.materialize().unwrap(), text);
+                let mut plain = ArgumentContext::<PlainInputMode>::from_scope(scope, 1);
+                // SAFETY: the counted buffer remains live and immutable for this call.
+                let owned = unsafe { plain.prepare_native_string(0, "value", pointer) }.unwrap();
+                assert!(matches!(owned, PreparedArgument::Ready(_)));
+                assert_eq!(owned.materialize().unwrap(), text);
+            });
+        }
+    }
+
+    #[test]
+    #[allow(
+        unsafe_code,
+        reason = "tests malformed native string payloads using live owned buffers"
+    )]
+    fn miri_native_strings_validate_before_cache_lookup() {
+        use crate::error::InputError;
+        for units in [
+            [1_u16, 0xd800, 0],
+            [1, 0xdc00, 0],
+            [2, 0xd800, 0x41],
+            [2, 0x41, 0xdc00],
+        ] {
+            crate::call::with_excel_call_scope_and_state(&units, |units, scope| {
+                let mut arguments = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                // SAFETY: the readable count and its complete payload are live.
+                let result = unsafe { arguments.prepare_native_string(0, "value", units.as_ptr()) };
+                assert!(matches!(
+                    result,
+                    Err(XllError::Input {
+                        argument: "value",
+                        reason: InputError::InvalidUtf16
+                    })
+                ));
+                assert!(arguments.finish().is_err());
+                let mut borrowed = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                // SAFETY: the readable count and its complete payload are live.
+                let result = unsafe { borrowed.prepare_native_str(0, "value", units.as_ptr()) };
+                assert!(result.is_err());
+                assert!(borrowed.finish().is_err());
+                let mut plain = ArgumentContext::<PlainInputMode>::from_scope(scope, 1);
+                // SAFETY: the readable count and its complete payload are live.
+                let result = unsafe { plain.prepare_native_string(0, "value", units.as_ptr()) };
+                assert!(result.is_err());
+            });
+        }
+        crate::call::with_excel_call_scope(|scope| {
+            let mut arguments = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+            // SAFETY: null is rejected before dereferencing the native pointer.
+            let result = unsafe { arguments.prepare_native_string(0, "value", std::ptr::null()) };
+            assert!(matches!(
+                result,
+                Err(XllError::Input {
+                    argument: "value",
+                    reason: InputError::NullPointer
+                })
+            ));
+            assert!(arguments.finish().is_err());
+        });
+        let aligned = [0_u16; 2];
+        crate::call::with_excel_call_scope_and_state(&aligned, |aligned, scope| {
+            let mut arguments = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+            let misaligned = aligned.as_ptr().map_addr(|address| address + 1);
+            // SAFETY: misalignment is rejected before reading the count.
+            let result = unsafe { arguments.prepare_native_string(0, "value", misaligned) };
+            assert!(matches!(
+                result,
+                Err(XllError::Input {
+                    argument: "value",
+                    reason: InputError::Malformed("misaligned string pointer"),
+                })
+            ));
+            assert!(arguments.finish().is_err());
+        });
+        let mut units = vec![0; 32_769];
+        units[0] = 32_767;
+        crate::call::with_excel_call_scope_and_state(&units, |units, scope| {
+            let mut arguments = ArgumentContext::<PlainInputMode>::from_scope(scope, 1);
+            // SAFETY: the live allocation contains its declared payload.
+            let prepared =
+                unsafe { arguments.prepare_native_string(0, "value", units.as_ptr()) }.unwrap();
+            assert_eq!(prepared.materialize().unwrap().len(), 32_767);
+        });
+        units[0] = 32_768;
+        crate::call::with_excel_call_scope_and_state(&units, |units, scope| {
+            let mut arguments = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+            // SAFETY: an over-limit count is rejected before constructing the payload slice.
+            let result = unsafe { arguments.prepare_native_string(0, "value", units.as_ptr()) };
+            assert!(matches!(
+                result,
+                Err(XllError::Input {
+                    argument: "value",
+                    reason: InputError::TooLarge {
+                        limit: 32_767,
+                        actual: 32_768
+                    }
+                })
+            ));
+            assert!(arguments.finish().is_err());
+        });
+    }
 
     fn array_root(cells: &mut [XLOPER12]) -> XLOPER12 {
         XLOPER12 {

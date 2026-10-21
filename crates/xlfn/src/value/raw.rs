@@ -262,30 +262,8 @@ impl<'call> XlValueRef<'call> {
         }
         // SAFETY: XLTYPE_STR selects the string union member.
         let pointer = unsafe { self.raw.value.string };
-        if pointer.is_null() {
-            return Err(XllError::input(argument, InputError::NullPointer));
-        }
-        if !pointer.is_aligned() {
-            return Err(XllError::input(
-                argument,
-                InputError::Malformed("misaligned string pointer"),
-            ));
-        }
-        // SAFETY: Excel strings begin with one readable length code unit.
-        let length = unsafe { *pointer } as usize;
-        if length > crate::utf16::EXCEL_STRING_LIMIT {
-            return Err(XllError::input(
-                argument,
-                InputError::TooLarge {
-                    limit: crate::utf16::EXCEL_STRING_LIMIT,
-                    actual: length,
-                },
-            ));
-        }
-        // SAFETY: pointer points to a valid Excel string with at least length+1 units.
-        let data = unsafe { pointer.add(1) };
-        // SAFETY: The Excel string contract guarantees length following units.
-        Ok(unsafe { slice::from_raw_parts(data, length) })
+        // SAFETY: this live Excel string retains its counted allocation for 'call.
+        unsafe { crate::utf16::borrow_counted(pointer, argument) }
     }
 
     pub(crate) fn array(&self, argument: &'static str) -> XllResult<XLOPER12Array> {

@@ -1,0 +1,5 @@
+error: NumericMatrixRef uses Excel's numeric coercion and cannot use reference, strict, blank, missing, or default policies
+ --> tests/ui/strict_numeric_array.rs:4:33
+  |
+4 | fn example(#[excel_arg(strict)] value: NumericMatrixRef<'_>) -> f64 {
+  |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -1,13 +1,42 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use xlfn::benchmark_support::{
-    BenchHandleObject, NumericMatrixIngressBenchmark, RawArgumentIngressBenchmark,
-    benchmark_measurement_time,
+    BenchHandleObject, NativeArgumentIngressBenchmark, NumericMatrixIngressBenchmark,
+    RawArgumentIngressBenchmark, benchmark_measurement_time,
 };
 use xlfn::value::{ExcelCellValue, ExcelValue, Matrix};
 
 fn argument_ingress_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("argument_ingress");
     group.measurement_time(benchmark_measurement_time());
+
+    for (label, mut fixture) in [
+        ("f64_1", NativeArgumentIngressBenchmark::numbers(1)),
+        ("f64_2", NativeArgumentIngressBenchmark::numbers(2)),
+        ("f64_4", NativeArgumentIngressBenchmark::numbers(4)),
+        ("f64_8", NativeArgumentIngressBenchmark::numbers(8)),
+        ("bool", NativeArgumentIngressBenchmark::boolean()),
+        ("i32", NativeArgumentIngressBenchmark::integer()),
+        (
+            "unicode_short",
+            NativeArgumentIngressBenchmark::string("日本語💡"),
+        ),
+        (
+            "unicode_long",
+            NativeArgumentIngressBenchmark::string(&"日本語💡".repeat(800)),
+        ),
+    ] {
+        for (mode, identity, materialize) in [
+            ("plain", false, true),
+            ("prepare_identity", true, false),
+            ("materialize_identity", true, true),
+        ] {
+            for (abi, native) in [("q", false), ("native", true)] {
+                group.bench_function(format!("native_abi/{label}/{mode}/{abi}"), |b| {
+                    b.iter(|| fixture.run(native, identity, materialize));
+                });
+            }
+        }
+    }
 
     for (rows, columns) in [(1, 1), (10, 10), (1000, 10), (100, 100), (10, 1000)] {
         let mut numeric = NumericMatrixIngressBenchmark::new(rows, columns);

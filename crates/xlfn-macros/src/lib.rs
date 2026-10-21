@@ -36,7 +36,13 @@ use validation::validate_addin_metadata;
 /// Attributes a function as an Excel UDF.
 ///
 /// Excel-visible arguments and return values are selected by their conversion
-/// trait implementations. An `async fn` selects asynchronous mode directly;
+/// trait implementations. Recognized `f64`, `bool`, `i32`, `String`, and
+/// synchronous `&str` arguments use Excel's native scalar ABIs and accept Excel's
+/// coercion rules. `#[excel_arg(strict)]` selects XLOPER12 with the type's strict
+/// conversion instead. Explicit blank, missing, or default policies also select
+/// XLOPER12 so the original input's presence is available. Other types and
+/// unrecognized aliases use their ordinary conversion.
+/// An `async fn` selects asynchronous mode directly;
 /// there is no `#[excel_function(async)]` mode flag. A standard context type
 /// (`MainThreadContext`, `ThreadSafeContext`, `MacroSheetContext`, or
 /// `AsyncContext`) is injected when passed by value as the first parameter.
@@ -401,9 +407,181 @@ mod tests {
         .to_string();
         assert!(expanded.contains("FunctionRegistration :: new"));
         assert!(expanded.contains("sync_udf"));
-        assert!(expanded.contains("prepare_argument"));
+        assert!(expanded.contains("prepare_native_f64"));
         assert!(expanded.contains("assert_thread_safe_return"));
         assert!(expanded.contains("assert_volatile_return"));
+    }
+
+    #[test]
+    fn native_argument_abi_is_selected_from_standard_type_spellings() {
+        use xlfn_common::ArgumentAbi;
+        for (ty, abi) in [
+            (quote!(f64), ArgumentAbi::Float64),
+            (quote!(::core::primitive::f64), ArgumentAbi::Float64),
+            (quote!(bool), ArgumentAbi::Boolean16),
+            (quote!(std::primitive::bool), ArgumentAbi::Boolean16),
+            (quote!(i32), ArgumentAbi::Integer32),
+            (quote!(String), ArgumentAbi::CountedUtf16),
+            (quote!(::std::string::String), ArgumentAbi::CountedUtf16),
+            (quote!(alloc::string::String), ArgumentAbi::CountedUtf16),
+            (quote!(&str), ArgumentAbi::CountedUtf16),
+            (quote!(i64), ArgumentAbi::Value12),
+            (quote!(NumericAlias), ArgumentAbi::Value12),
+            (quote!(custom::String), ArgumentAbi::Value12),
+            (quote!(custom::f64), ArgumentAbi::Value12),
+            (quote!(Option<f64>), ArgumentAbi::Value12),
+            (quote!(OptionalExcelValue<f64>), ArgumentAbi::Value12),
+            (quote!(Matrix<f64>), ArgumentAbi::Value12),
+            (quote!(MatrixRef<'_, f64>), ArgumentAbi::Value12),
+            (quote!(ExcelError), ArgumentAbi::Value12),
+            (quote!(ExcelSerialDate), ArgumentAbi::Value12),
+        ] {
+            let parsed = model::parse_udf(
+                quote!(),
+                function(quote!(fn typed(value: #ty) -> f64 { 0.0 })),
+            )
+            .unwrap();
+            let analyzed = model::analyze(parsed).unwrap();
+            assert_eq!(analyzed.arguments[0].abi, abi, "{ty}");
+            let lowered = model::lower(analyzed);
+            assert_eq!(lowered.arguments[0].abi, abi, "{ty}");
+        }
+    }
+
+    #[test]
+    fn strict_and_all_explicit_presence_policies_select_value12() {
+        for options in [
+            quote!(strict),
+            quote!(default = 1.0),
+            quote!(blank = error),
+            quote!(missing = error),
+            quote!(blank = convert),
+            quote!(missing = "convert"),
+            quote!(strict, blank = error),
+        ] {
+            let parsed = model::parse_udf(
+                quote!(),
+                function(quote!(
+                    fn typed(#[excel_arg(#options)] value: f64) -> f64 {
+                        value
+                    }
+                )),
+            )
+            .unwrap();
+            let analyzed = model::analyze(parsed).unwrap();
+            assert_eq!(analyzed.arguments[0].abi, xlfn_common::ArgumentAbi::Value12);
+        }
+    }
+
+    #[test]
+    fn registration_metadata_does_not_disable_native_abi() {
+        let parsed = model::parse_udf(
+            quote!(),
+            function(quote!(
+                fn typed(#[excel_arg(name = "input", description = "value")] value: f64) -> f64 {
+                    value
+                }
+            )),
+        )
+        .unwrap();
+        let analyzed = model::analyze(parsed).unwrap();
+        assert_eq!(analyzed.arguments[0].abi, xlfn_common::ArgumentAbi::Float64);
+    }
+
+    #[test]
+    fn native_abi_drives_ffi_types_and_both_execution_conversions() {
+        for asynchronous in [false, true] {
+            let qualifier = asynchronous.then(|| quote!(async));
+            let expanded = expand_excel_function(
+                quote!(),
+                function(quote!(
+                    #qualifier fn typed(
+                        number: f64,
+                        enabled: bool,
+                        count: i32,
+                        text: String,
+                        #[excel_arg(strict)] strict_number: f64,
+                    ) -> f64 { number }
+                )),
+            )
+            .unwrap();
+            let file: syn::File = syn::parse2(expanded.clone()).unwrap();
+            let wrapper = file
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    syn::Item::Fn(function) if function.sig.abi.is_some() => Some(function),
+                    _ => None,
+                })
+                .unwrap();
+            let types = wrapper
+                .sig
+                .inputs
+                .iter()
+                .map(|argument| match argument {
+                    syn::FnArg::Typed(argument) => quote!(#argument).to_string(),
+                    _ => panic!("generated free function"),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(types[0], "__raw_0 : :: core :: primitive :: f64");
+            assert_eq!(types[1], "__raw_1 : :: core :: primitive :: i16");
+            assert_eq!(types[2], "__raw_2 : :: core :: primitive :: i32");
+            assert_eq!(types[3], "__raw_3 : * const :: core :: primitive :: u16");
+            assert_eq!(
+                types[4],
+                "__raw_4 : * mut :: xlfn :: __private :: v1 :: XLOPER12"
+            );
+            assert_eq!(types.len(), if asynchronous { 6 } else { 5 });
+            let expanded = expanded.to_string();
+            for variant in [
+                "Float64",
+                "Boolean16",
+                "Integer32",
+                "CountedUtf16",
+                "Value12",
+            ] {
+                assert!(expanded.contains(&format!("ArgumentAbi :: {variant}")));
+            }
+            for suffix in ["f64", "bool", "i32", "string"] {
+                let prefix = if asynchronous { "" } else { "prepare_" };
+                assert!(expanded.contains(&format!("{prefix}native_{suffix}")));
+            }
+        }
+    }
+
+    #[test]
+    fn strict_rejects_special_abis_and_duplicates() {
+        for (options, ty) in [
+            (quote!(strict), quote!(NumericMatrixRef<'_>)),
+            (quote!(strict, reference), quote!(ExcelReference<'_>)),
+            (quote!(strict, strict), quote!(f64)),
+            (quote!(coerce), quote!(f64)),
+            (quote!(abi = "B"), quote!(f64)),
+        ] {
+            assert!(
+                expand_excel_function(
+                    quote!(macro_sheet),
+                    function(quote!(
+                        fn typed(#[excel_arg(#options)] value: #ty) -> f64 { 0.0 }
+                    ))
+                )
+                .is_err()
+            );
+        }
+        let error = expand_excel_function(
+            quote!(),
+            function(quote!(
+                async fn typed(value: &str) -> f64 {
+                    0.0
+                }
+            )),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("only supported by synchronous functions")
+        );
     }
 
     #[test]
@@ -418,10 +596,10 @@ mod tests {
         )
         .unwrap()
         .to_string();
-        assert!(expanded.contains("ArgumentAbi :: NumericArray"));
+        assert!(expanded.contains("ArgumentAbi :: NumericArray12"));
         assert!(expanded.contains("* const :: xlfn :: __private :: v1 :: FP12"));
         assert!(expanded.contains("prepare_numeric_matrix"));
-        assert!(expanded.contains("prepare_argument :: < f64 >"));
+        assert!(expanded.contains("prepare_native_f64"));
     }
 
     #[test]
@@ -517,12 +695,12 @@ mod tests {
             (
                 quote!(NumericMatrixRef<'_>),
                 false,
-                "ArgumentAbi :: NumericArray",
+                "ArgumentAbi :: NumericArray12",
             ),
             (
                 quote!(NumericMatrixRef),
                 false,
-                "ArgumentAbi :: NumericArray",
+                "ArgumentAbi :: NumericArray12",
             ),
             (
                 quote!(HandleLease<'_, Dataset>),

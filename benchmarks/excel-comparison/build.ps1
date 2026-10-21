@@ -1,9 +1,26 @@
-param([switch]$Smoke)
+param([switch]$Smoke, [switch]$AbiSemantics)
 
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $artifactRoot = Join-Path $here 'artifacts'
 $counts = if ($Smoke) { @(10) } else { @(10, 100, 1000, 5000) }
+
+if ($AbiSemantics) {
+    # Instrumented layer-entry evidence uses a separate XLL and directory;
+    # the ordinary timing fixture keeps Layers=() and has no counter overhead.
+    $previousExtras = $env:BENCH_EXTRA_FUNCTIONS
+    try {
+        $env:BENCH_EXTRA_FUNCTIONS = '0'
+        cargo build --manifest-path (Join-Path $here 'xlfn\Cargo.toml') --release --target x86_64-pc-windows-msvc --features abi-semantics --locked
+        if ($LASTEXITCODE -ne 0) { throw 'ABI semantics XLL build failed' }
+        $semanticsOut = Join-Path $here 'semantics-artifacts\xlfn'
+        New-Item -ItemType Directory -Force -Path $semanticsOut | Out-Null
+        Copy-Item (Join-Path $here 'xlfn\target\x86_64-pc-windows-msvc\release\xlfn_excel_comparison.dll') (Join-Path $semanticsOut 'abi-semantics.xll') -Force
+        Write-Host "Instrumented ABI semantics XLL built in $semanticsOut"
+    }
+    finally { $env:BENCH_EXTRA_FUNCTIONS = $previousExtras }
+    return
+}
 
 function Build-Pair([int]$extras, [string]$outputName) {
     $env:BENCH_EXTRA_FUNCTIONS = "$extras"

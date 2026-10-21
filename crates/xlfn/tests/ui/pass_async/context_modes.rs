@@ -47,7 +47,7 @@ async fn elided_context(context: AsyncContext<TestAddin>, value: f64) -> f64 {
 
 fn main() {
     type AsyncExport = unsafe extern "system" fn(
-        *mut xlfn::__private::v1::XLOPER12,
+        f64,
         *mut xlfn::__private::v1::XLOPER12,
     );
 

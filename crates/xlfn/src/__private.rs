@@ -567,6 +567,113 @@ pub mod v1 {
         }
 
         #[doc(hidden)]
+        pub fn prepare_native_f64(
+            &mut self,
+            index: usize,
+            name: &'static str,
+            raw: f64,
+        ) -> XllResult<PreparedArgument<f64, ()>> {
+            self.native_f64(index, name, raw)
+                .map(PreparedArgument::Ready)
+        }
+
+        #[doc(hidden)]
+        pub fn prepare_native_bool(
+            &mut self,
+            index: usize,
+            name: &'static str,
+            raw: i16,
+        ) -> XllResult<PreparedArgument<bool, ()>> {
+            self.native_bool(index, name, raw)
+                .map(PreparedArgument::Ready)
+        }
+
+        #[doc(hidden)]
+        pub fn prepare_native_i32(
+            &mut self,
+            index: usize,
+            name: &'static str,
+            raw: i32,
+        ) -> XllResult<PreparedArgument<i32, ()>> {
+            self.native_i32(index, name, raw)
+                .map(PreparedArgument::Ready)
+        }
+
+        /// Validates and records a native string before a possible cache hit.
+        ///
+        /// # Safety
+        /// `raw` points to Excel's counted UTF-16 string, live and immutable
+        /// for the duration of this call.
+        #[doc(hidden)]
+        #[allow(unsafe_code, reason = "receives Excel's native counted UTF-16 input")]
+        pub unsafe fn prepare_native_string(
+            &mut self,
+            index: usize,
+            name: &'static str,
+            raw: *const u16,
+        ) -> XllResult<PreparedArgument<String, crate::value::PreparedString<'call>>> {
+            // SAFETY: the generated wrapper forwards Excel's live string argument.
+            unsafe { self.arguments.prepare_native_string(index, name, raw) }
+        }
+
+        /// Decodes a native string into the synchronous call's scratch storage.
+        ///
+        /// # Safety
+        /// `raw` points to Excel's counted UTF-16 string, live and immutable
+        /// for the duration of this call.
+        #[doc(hidden)]
+        #[allow(unsafe_code, reason = "receives Excel's native counted UTF-16 input")]
+        pub unsafe fn prepare_native_str(
+            &mut self,
+            index: usize,
+            name: &'static str,
+            raw: *const u16,
+        ) -> XllResult<PreparedArgument<&'call str, ()>> {
+            // SAFETY: the generated wrapper forwards Excel's live string argument.
+            unsafe { self.arguments.prepare_native_str(index, name, raw) }
+        }
+
+        #[doc(hidden)]
+        pub fn native_f64(&mut self, index: usize, name: &'static str, raw: f64) -> XllResult<f64> {
+            self.arguments.native_f64(index, name, raw)
+        }
+
+        #[doc(hidden)]
+        pub fn native_bool(
+            &mut self,
+            index: usize,
+            name: &'static str,
+            raw: i16,
+        ) -> XllResult<bool> {
+            self.arguments.native_bool(index, name, raw)
+        }
+
+        #[doc(hidden)]
+        pub fn native_i32(&mut self, index: usize, name: &'static str, raw: i32) -> XllResult<i32> {
+            self.arguments.native_i32(index, name, raw)
+        }
+
+        /// Copies Excel's native string into owned data before an async task.
+        ///
+        /// # Safety
+        /// `raw` points to Excel's counted UTF-16 string, live and immutable
+        /// until this method returns. No Excel memory is retained in the result.
+        #[doc(hidden)]
+        #[allow(
+            unsafe_code,
+            reason = "copies Excel's native UTF-16 input for async use"
+        )]
+        pub unsafe fn native_string(
+            &mut self,
+            index: usize,
+            name: &'static str,
+            raw: *const u16,
+        ) -> XllResult<String> {
+            // SAFETY: Excel's input is live throughout this owned conversion.
+            unsafe { self.arguments.native_string(index, name, raw) }
+        }
+
+        #[doc(hidden)]
         #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
         pub unsafe fn prepare_argument<T: ExcelParameter<'call, M>>(
             &mut self,
@@ -973,6 +1080,43 @@ pub mod v1 {
                 token: &str,
             ) -> XllResult<Handle<'call, T>> {
                 self.0.lookup_handle::<T>(scope, token)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod native_input_tests {
+        use super::*;
+
+        #[test]
+        #[allow(
+            unsafe_code,
+            reason = "tests native admission with an owned counted string buffer"
+        )]
+        fn miri_native_async_string_owns_bytes_after_excel_input_is_released() {
+            fn convert<M: InputMode>() -> String {
+                let text = "価格\0💡";
+                let state = (
+                    crate::utf16::encode_counted(text, "label", 32_767).unwrap(),
+                    crate::host_callback::HostCallbackSession::new(),
+                );
+                with_excel_call_scope_and_state(&state, |state, scope| {
+                    let mut frame = CallFrame::<M> {
+                        arguments: ArgumentContext::from_scope(scope, 1),
+                        callbacks: &state.1,
+                    };
+                    // SAFETY: state owns the complete immutable counted input
+                    // while admission copies it into the returned String.
+                    let value =
+                        unsafe { frame.native_string(0, "label", state.0.as_ptr()) }.unwrap();
+                    frame.arguments.finish().unwrap();
+                    value
+                })
+            }
+            fn assert_async_owned<T: Send + 'static>(_: &T) {}
+            for owned in [convert::<PlainInputMode>(), convert::<FormulaInputMode>()] {
+                assert_eq!(owned, "価格\0💡");
+                assert_async_owned(&owned);
             }
         }
     }

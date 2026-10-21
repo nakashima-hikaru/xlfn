@@ -42,6 +42,7 @@ pub(super) struct ParsedArgumentOptions {
     pub(super) blank: Option<String>,
     pub(super) missing: Option<String>,
     pub(super) reference: bool,
+    pub(super) strict: bool,
 }
 
 #[derive(Default)]
@@ -104,6 +105,12 @@ pub(super) fn parse_argument_options(
                 }
                 options.missing = Some(policy_value(&value.value, "missing")?);
             }
+            Meta::Path(path) if path.is_ident("strict") => {
+                if options.strict {
+                    return Err(syn::Error::new_spanned(path, "duplicate `strict`"));
+                }
+                options.strict = true;
+            }
             Meta::Path(path) if path.is_ident("reference") => {
                 if options.reference {
                     return Err(syn::Error::new_spanned(path, "duplicate `reference`"));
@@ -113,7 +120,7 @@ pub(super) fn parse_argument_options(
             other => {
                 return Err(syn::Error::new_spanned(
                     other,
-                    "expected `name`, `description`, `default`, `blank`, `missing`, or `reference`",
+                    "expected `name`, `description`, `default`, `blank`, `missing`, `strict`, or `reference`",
                 ));
             }
         }

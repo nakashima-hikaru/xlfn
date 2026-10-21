@@ -17,16 +17,7 @@ pub struct ArgumentDescriptor {
     pub description: &'static str,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-/// Whether Excel coerces an argument or passes its worksheet reference.
-pub enum ArgumentAbi {
-    /// Excel supplies a coerced value operand.
-    CoercedValue,
-    /// Excel supplies a reference operand for an eligible execution mode.
-    RawReference,
-    /// Excel supplies a contiguous, coerced numeric FP12 array (`K%`).
-    NumericArray,
-}
+pub use xlfn_common::ArgumentAbi;
 
 pub(crate) use xlfn_common::{ExecutionKind, FunctionVisibility};
 
@@ -40,9 +31,9 @@ pub(crate) struct RegistrationSignature {
 impl RegistrationSignature {
     pub(crate) fn encode(self) -> XllResult<String> {
         if self.arguments.len() > xlfn_common::max_excel_function_arguments(self.execution)
-            || (self.arguments.contains(&ArgumentAbi::RawReference)
+            || (self.arguments.contains(&ArgumentAbi::Reference12)
                 && !self.execution.allows_reference_arguments())
-            || (self.arguments.contains(&ArgumentAbi::NumericArray) && self.execution.is_async())
+            || (self.arguments.contains(&ArgumentAbi::NumericArray12) && self.execution.is_async())
         {
             return Err(XllError::Internal {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRATION_SIGNATURE,
@@ -56,11 +47,7 @@ impl RegistrationSignature {
             }
         });
         for argument in self.arguments {
-            text.push_str(match argument {
-                ArgumentAbi::CoercedValue => "Q",
-                ArgumentAbi::RawReference => "U",
-                ArgumentAbi::NumericArray => "K%",
-            });
+            text.push_str(argument.registration_code());
         }
         if self.execution.is_async() {
             text.push('X');
@@ -83,13 +70,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_scalars_share_the_canonical_registration_codes() {
+        const INPUTS: &[ArgumentAbi] = &[
+            ArgumentAbi::Float64,
+            ArgumentAbi::Boolean16,
+            ArgumentAbi::Integer32,
+            ArgumentAbi::CountedUtf16,
+        ];
+        for (execution, expected) in [
+            (ExecutionKind::ThreadSafe, "QBAJD%$"),
+            (ExecutionKind::MainThread, "QBAJD%"),
+            (ExecutionKind::Async, ">BAJD%X$"),
+        ] {
+            assert_eq!(
+                RegistrationSignature {
+                    execution,
+                    arguments: INPUTS,
+                    volatile: false,
+                }
+                .encode()
+                .unwrap(),
+                expected,
+            );
+        }
+        assert_eq!(
+            RegistrationSignature {
+                execution: ExecutionKind::ThreadSafe,
+                arguments: &[
+                    ArgumentAbi::Value12,
+                    ArgumentAbi::Boolean16,
+                    ArgumentAbi::Value12
+                ],
+                volatile: false,
+            }
+            .encode()
+            .unwrap(),
+            "QQAQ$",
+        );
+    }
+
+    #[test]
     fn numeric_arrays_use_one_fp12_argument_with_two_registration_characters() {
         let signature = RegistrationSignature {
             execution: ExecutionKind::ThreadSafe,
             arguments: &[
-                ArgumentAbi::NumericArray,
-                ArgumentAbi::CoercedValue,
-                ArgumentAbi::NumericArray,
+                ArgumentAbi::NumericArray12,
+                ArgumentAbi::Value12,
+                ArgumentAbi::NumericArray12,
             ],
             volatile: false,
         };
@@ -100,7 +127,7 @@ mod tests {
     fn fp12_keeps_macro_sheet_and_volatile_registration_flags() {
         let signature = RegistrationSignature {
             execution: ExecutionKind::MacroSheet,
-            arguments: &[ArgumentAbi::NumericArray],
+            arguments: &[ArgumentAbi::NumericArray12],
             volatile: true,
         };
         assert_eq!(signature.encode().unwrap(), "QK%#!");
@@ -111,22 +138,22 @@ mod tests {
         for signature in [
             RegistrationSignature {
                 execution: ExecutionKind::Async,
-                arguments: &[ArgumentAbi::NumericArray],
+                arguments: &[ArgumentAbi::NumericArray12],
                 volatile: false,
             },
             RegistrationSignature {
                 execution: ExecutionKind::ThreadSafe,
-                arguments: &[ArgumentAbi::RawReference],
+                arguments: &[ArgumentAbi::Reference12],
                 volatile: false,
             },
             RegistrationSignature {
                 execution: ExecutionKind::MainThread,
-                arguments: &[ArgumentAbi::CoercedValue; 256],
+                arguments: &[ArgumentAbi::Value12; 256],
                 volatile: false,
             },
             RegistrationSignature {
                 execution: ExecutionKind::Async,
-                arguments: &[ArgumentAbi::CoercedValue; 255],
+                arguments: &[ArgumentAbi::Value12; 255],
                 volatile: false,
             },
         ] {
@@ -145,7 +172,7 @@ mod tests {
         // one worksheet argument even though its type code uses two units.
         let signature = RegistrationSignature {
             execution: ExecutionKind::ThreadSafe,
-            arguments: &[ArgumentAbi::NumericArray; 255],
+            arguments: &[ArgumentAbi::NumericArray12; 255],
             volatile: true,
         };
         let encoded = signature.encode().unwrap();
@@ -154,7 +181,7 @@ mod tests {
 
         let asynchronous = RegistrationSignature {
             execution: ExecutionKind::Async,
-            arguments: &[ArgumentAbi::CoercedValue; 254],
+            arguments: &[ArgumentAbi::Value12; 254],
             volatile: true,
         };
         assert_eq!(

@@ -1,4 +1,5 @@
-use quote::quote;
+use quote::{format_ident, quote};
+use xlfn_common::ArgumentAbi;
 
 use crate::model;
 
@@ -31,14 +32,17 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
         .iter()
         .map(|argument| {
             let raw = &argument.raw_ident;
-            if matches!(
-                argument.conversion,
-                model::ArgumentConversion::NumericMatrix
-            ) {
-                quote!(#raw: *const #krate::__private::v1::FP12)
-            } else {
-                quote!(#raw: *mut #krate::__private::v1::XLOPER12)
-            }
+            let ty = match argument.abi {
+                ArgumentAbi::Value12 | ArgumentAbi::Reference12 => {
+                    quote!(*mut #krate::__private::v1::XLOPER12)
+                }
+                ArgumentAbi::NumericArray12 => quote!(*const #krate::__private::v1::FP12),
+                ArgumentAbi::Float64 => quote!(::core::primitive::f64),
+                ArgumentAbi::Boolean16 => quote!(::core::primitive::i16),
+                ArgumentAbi::Integer32 => quote!(::core::primitive::i32),
+                ArgumentAbi::CountedUtf16 => quote!(*const ::core::primitive::u16),
+            };
+            quote!(#raw: #ty)
         })
         .collect::<Vec<_>>();
     let converted_names = arguments
@@ -164,6 +168,36 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                     // SAFETY: Excel supplies a live FP12 numeric-array argument.
                     unsafe { __frame.prepare_numeric_matrix(#index, #argument_name, #raw) }
                 },
+                model::ArgumentConversion::Value(_) if argument.abi != ArgumentAbi::Value12 => {
+                    let suffix = match argument.abi {
+                        ArgumentAbi::Float64 => "f64",
+                        ArgumentAbi::Boolean16 => "bool",
+                        ArgumentAbi::Integer32 => "i32",
+                        ArgumentAbi::CountedUtf16 if model::is_borrowed_string(ty) => "str",
+                        ArgumentAbi::CountedUtf16 => "string",
+                        _ => unreachable!("validated native value ABI"),
+                    };
+                    let method = format_ident!("{}native_{suffix}", if is_async { "" } else { "prepare_" });
+                    let convert = quote!(__frame.#method(#index, #argument_name, #raw));
+                    let convert = if argument.abi == ArgumentAbi::CountedUtf16 {
+                        quote! {
+                            // SAFETY: Excel supplies a live length-prefixed UTF-16 buffer for this call.
+                            unsafe { #convert }
+                        }
+                    } else {
+                        convert
+                    };
+                    let async_assertion = is_async.then(|| {
+                        quote!(#krate::__private::v1::assert_async_parameter::<#return_type, #ty>();)
+                    });
+                    quote! {
+                        {
+                            #async_assertion
+                            #krate::__private::v1::assert_excel_parameter::<#return_type, #ty>(__frame);
+                            #convert
+                        }
+                    }
+                }
                 model::ArgumentConversion::Value(_) => {
                     let convert = if is_async {
                         quote!(#krate::__private::v1::convert_argument::<#return_type, #ty>(__frame, #index, #argument_name, #raw))
@@ -480,7 +514,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
             #[doc = concat!("Excel async ABI wrapper for `", #excel_name, "`.")]
             #[doc = ""]
             #[doc = "# Safety"]
-            #[doc = "Excel must invoke this entrypoint in its registered execution mode on the permitted thread. Every argument pointer and the async handle must be a live XLOPER12 supplied by Excel for this call. Never call this wrapper to restart an active invocation after Abort or Uncalced."]
+            #[doc = "Excel must invoke this entrypoint in its registered execution mode on the permitted thread. Every argument must match its registered ABI; argument pointers must remain live for this call, and the async handle must be a live XLOPER12 supplied by Excel. Never call this wrapper to restart an active invocation after Abort or Uncalced."]
             #[unsafe(no_mangle)]
             pub unsafe extern "system" fn #export_ident(
                 #(#raw_parameters,)*
@@ -495,7 +529,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
             #[doc = concat!("Excel ABI wrapper for `", #excel_name, "`.")]
             #[doc = ""]
             #[doc = "# Safety"]
-            #[doc = "Excel must invoke this entrypoint in its registered execution mode on the permitted thread. Every argument pointer must be live storage of its registered XLOPER12 or FP12 type supplied by Excel for this call. Never call this wrapper to restart an active invocation after Abort or Uncalced."]
+            #[doc = "Excel must invoke this entrypoint in its registered execution mode on the permitted thread. Every argument must match its registered ABI; pointer arguments must refer to live XLOPER12, FP12, or counted UTF-16 storage as registered for this call. Never call this wrapper to restart an active invocation after Abort or Uncalced."]
             #[unsafe(no_mangle)]
             pub unsafe extern "system" fn #export_ident(
                 #(#raw_parameters),*
@@ -506,16 +540,16 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
     };
 
     let argument_abi_tokens = arguments.iter().map(|argument| {
-        if matches!(
-            argument.conversion,
-            model::ArgumentConversion::NumericMatrix
-        ) {
-            quote!(#krate::__private::v1::ArgumentAbi::NumericArray)
-        } else if argument.conversion.is_reference() {
-            quote!(#krate::__private::v1::ArgumentAbi::RawReference)
-        } else {
-            quote!(#krate::__private::v1::ArgumentAbi::CoercedValue)
-        }
+        let variant = match argument.abi {
+            ArgumentAbi::Value12 => quote!(Value12),
+            ArgumentAbi::Reference12 => quote!(Reference12),
+            ArgumentAbi::Float64 => quote!(Float64),
+            ArgumentAbi::Boolean16 => quote!(Boolean16),
+            ArgumentAbi::Integer32 => quote!(Integer32),
+            ArgumentAbi::CountedUtf16 => quote!(CountedUtf16),
+            ArgumentAbi::NumericArray12 => quote!(NumericArray12),
+        };
+        quote!(#krate::__private::v1::ArgumentAbi::#variant)
     });
 
     quote! {

@@ -3,24 +3,85 @@
 Start with an owned `Matrix<T>` when a function accepts or returns a rectangular
 range. Use borrowed views or incremental output when conversion cost matters.
 
-xlfn converts Excel values strictly. Ordinary parameters do not ask Excel to
-coerce text to numbers, booleans to numbers, or arrays to scalars.
+xlfn selects the input ABI from each Rust parameter type. Native scalar
+parameters let Excel convert the input before Rust is called. Use
+`#[excel_arg(strict)]` when the original worksheet type must be checked by
+xlfn instead.
 
 ## Choose a scalar type
 
-| Rust input | Excel value | Notes |
+| Rust input | Default input ABI | Notes |
 | --- | --- | --- |
-| `f64` | number or integer | must be finite |
-| `bool` | Boolean | no numeric or text coercion |
-| `i32` | integer or integral number | rejects fractions and overflow |
-| `i64` | integer or exactly representable integral number | numeric input is limited to the exact binary64 integer range |
-| `String` | string | owned UTF-8 after validated UTF-16 decoding |
-| `&str` | string | call-local view for synchronous functions |
-| `ExcelError` | Excel error | preserves the exact Excel error |
-| `ExcelSerialDate` | finite number | retains an unresolved workbook date system |
+| `f64` | `B`: double by value | Excel numeric conversion, then finite validation |
+| `bool` | `A`: 16-bit Boolean by value | Excel Boolean conversion; only 0 and 1 are accepted at the ABI boundary |
+| `i32` | `J`: 32-bit integer by value | Excel integer conversion, including its fractional-input rules |
+| `String` | `D%`: counted UTF-16 pointer | validated UTF-16 converted to owned UTF-8 |
+| `&str` | `D%`: counted UTF-16 pointer | decoded call-local UTF-8 for synchronous functions |
+| `NumericMatrixRef<'_>` | `K%`: FP12 pointer | borrowed numeric array after Excel conversion |
+| `i64` | `Q`: XLOPER12 value | integral input within the exact binary64 integer range |
+| `Matrix<T>`, `MatrixRef<'_, T>` | `Q` | strict element conversion |
+| `Option<T>`, `OptionalExcelValue<T>` | `Q` | original missing/blank states are retained |
+| `ExcelError`, `ExcelSerialDate` | `Q` | error value or finite serial with unresolved workbook date system |
+| custom `FromExcel` types and unrecognized type aliases | `Q` | declared conversion contract |
 
-An Excel error passed where a different type is expected is propagated as the
-original error. Input views such as `ExcelCellRef` and `XlArrayRef` are
+Cell reference parameters continue to use `U` in macro-sheet mode. Native
+scalars are supported in both synchronous and async functions. Async `String`
+inputs are owned before the task is submitted; `&str` and `NumericMatrixRef`
+remain synchronous only. Return values keep the ordinary `Q` value ABI and
+async completion keeps its existing handle and return protocol.
+
+For example, `(spot: f64, enabled: bool, periods: i32, label: &str)` in a
+thread-safe function registers as `QBAJD%$`. The registration text, FFI
+parameter types, and admission path come from one analyzed ABI plan. The
+Boolean FFI parameter is `i16`, never Rust `bool`.
+The registration codes and C widths follow Microsoft's
+[xlfRegister specification](https://learn.microsoft.com/en-us/office/client-developer/excel/xlfregister-form-1).
+
+### Require the original worksheet type
+
+```rust
+{{#include ../fixtures/addin.md}}
+# use xlfn::prelude::*;
+#[excel_function(name = "CALC.STRICT", thread_safe)]
+fn calculate(
+    #[excel_arg(strict)] spot: f64,
+    enabled: bool,
+    #[excel_arg(strict)] periods: i32,
+) -> f64 {
+    if enabled { spot * f64::from(periods) } else { 0.0 }
+}
+```
+
+This registers as `QQAQ$`. `strict` selects `Q` and the existing `FromExcel`
+rules: `f64` accepts only finite numbers or integers, `bool` only Booleans,
+`i32` only in-range integral numbers or integers, and strings only text.
+An Excel error passed to a strict parameter expecting another type propagates
+the original error. `strict` cannot be applied to a reference, FP12 numeric
+view, or async handle lease. Native registration codes cannot be selected
+directly, and there is no `excel_arg(coerce)` option.
+
+Presence/default policies automatically select `Q`, including an explicit
+`blank = convert` or `missing = convert`. They need the original Excel value;
+`strict` is unnecessary for them. Metadata such as the argument name and
+description does not affect the ABI. Unrecognized type aliases use `Q`
+because a procedural macro cannot resolve their underlying Rust type.
+
+Excel can reject a native input before invoking the UDF. Such a worksheet
+error does not produce a Rust argument-conversion diagnostic. Exact Excel
+coercion, blank, omitted-argument, error, overflow, and fractional-integer
+behavior must be qualified on the target Excel version; the live comparison
+harness includes native/strict cases, and local Rust tests do not establish
+Excel's preprocessing behavior.
+
+`D%` strings contain a length followed by up to 32,767 UTF-16 code units.
+Empty text and embedded NUL are preserved; malformed UTF-16 is rejected on
+every call, including a handle cache hit. Handle producers validate and hash
+native strings before deferring owned-string materialization until needed.
+Equal Rust values retain the same input fingerprint through native and `Q`
+admission. Native ABI selection is a conversion contract, not a speed claim;
+measure both conversion cost and actual Excel recalculation time.
+
+Input views such as `ExcelCellRef` and `XlArrayRef` are
 synchronous, call-scoped values; see [Borrow a range](#borrow-a-range-during-a-synchronous-call).
 
 Built-in scalar outputs are `f64`, `f32`, `bool`, `i8`, `i16`, `i32`, `u8`,
@@ -129,7 +190,7 @@ Excel coerces this argument before invoking Rust. Blank cells become zero;
 inputs that Excel cannot coerce into a numeric array return a worksheet error
 without calling the function. The function cannot inspect original text,
 Boolean, blank, missing, or error cell types. `NumericMatrixRef` therefore
-cannot use `excel_arg` presence/default/reference policies. Keep `Matrix<f64>`
+cannot use `excel_arg` strict/presence/default/reference policies. Keep `Matrix<f64>`
 or `MatrixRef<'_, f64>` when strict xlfn conversion is required, and use mixed
 cell views when the original cell distinctions matter.
 
@@ -138,7 +199,7 @@ with `as_slice()`, `iter()`, `row()`, or checked `get(row, column)`. The buffer
 exists only during the synchronous call and cannot be an async argument.
 Returns continue to use xlfn's ordinary value ABI, which preserves error and
 panic handling for functions accepting numeric arrays. Opting into the FP12
-input ABI does not opt into FP12 output or change scalar parameter conversion.
+input ABI does not opt into FP12 output.
 
 ### Build a large result incrementally
 
