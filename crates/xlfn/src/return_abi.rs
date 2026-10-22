@@ -36,9 +36,9 @@ pub(crate) use ownership::{ReturnFreeGuard, ReturnObligation, ReturnProducerGuar
 
 pub use array::{XlArrayBuilder, XlArrayOutput};
 pub use numeric::{
-    MAX_MODULE_NUMERIC_RETURN_BYTES, MAX_NUMERIC_RETURN_BYTES, MAX_THREAD_NUMERIC_RETURN_BYTES,
-    NumericArrayBuilder, NumericArrayOutput, NumericReturnMemoryMetrics,
-    numeric_return_memory_metrics,
+    MAX_MODULE_NUMERIC_RETURN_BYTES, MAX_NUMERIC_RETURN_BYTES, MAX_PROCESS_NUMERIC_RETURN_BYTES,
+    MAX_THREAD_NUMERIC_RETURN_BYTES, NumericArrayBuilder, NumericArrayOutput,
+    NumericReturnMemoryMetrics, numeric_return_memory_metrics,
 };
 pub(crate) use scalar::XlScalarOutput;
 pub(crate) use storage::ReturnStorage;

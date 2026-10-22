@@ -794,7 +794,12 @@ mod numeric_launch_tests {
         );
         assert!(!first.is_null());
         assert!(!second.is_null());
-        assert_eq!(numeric_return_memory_metrics().thread_published_buffers, 2);
+        assert_eq!(
+            numeric_return_memory_metrics()
+                .unwrap()
+                .thread_published_buffers,
+            2
+        );
         // SAFETY: sibling launch calls share the still-active outer epoch.
         assert_eq!(unsafe { first_number(first) }, 1.0);
         first
@@ -833,7 +838,12 @@ mod numeric_launch_tests {
         launch(runtime, &mut handle, &first);
         assert!(!first.get().is_null());
         assert_eq!(crate::test_callback::async_return_calls(), 1);
-        assert_eq!(numeric_return_memory_metrics().thread_published_buffers, 2);
+        assert_eq!(
+            numeric_return_memory_metrics()
+                .unwrap()
+                .thread_published_buffers,
+            2
+        );
         // SAFETY: return from launch, including runtime guard teardown, must
         // retain both numeric results until the next outer worksheet entry.
         assert_eq!(unsafe { first_number(first.get()) }, 1.0);

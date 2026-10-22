@@ -254,12 +254,44 @@ retained across thread exit and physical DLL unload because Excel supplies no
 FP12 release notification. Unpublished buffers are released normally.
 
 Provisional limits are 16 MiB per result (8 + 8 × rows × columns), 64 MiB
-published per thread, and 256 MiB published per module image, with allocation
-headers included in the latter two limits. `numeric_return_memory_metrics()`
-reports current-thread and module retention. These are implementation safety
-budgets pending native Excel load testing, not empirically tuned limits.
-An unloaded image's retained allocations cannot be reclaimed or counted by a
-new image; repeated physical reloads can accumulate retention until process exit.
+published per thread, 256 MiB published per module image, and 512 MiB reserved
+across the process. Allocation headers count toward the thread, module, and
+process limits. The process budget is reserved before allocation and includes
+unpublished builders, outputs, queued asynchronous results, and published
+buffers. Failed allocations and dropped unpublished outputs release their
+reservation; published buffers release it only when reclamation is safe.
+Exceeding a limit on the FP12 return path produces `#NUM!` and a diagnostic.
+
+On Windows, process accounting uses shared state that survives physical DLL
+unload. All module images using the same accounting protocol share the 512 MiB
+budget, including final buffers retained by unloaded images. One shared-state
+mapping and handle are retained per process; reloads do not retain additional
+mappings or handles. An incompatible accounting header or limit is an error;
+loading another DLL never creates a separate budget. Allocations made by older
+xlfn versions without this protocol cannot be counted retrospectively. Published buffers left by an
+unloaded image remain retained until process exit; the shared budget bounds
+further allocations rather than reclaiming those buffers. If abandoned buffers
+exhaust the budget, restart the Excel process to release them. Unloading and
+reloading the add-in does not reset the process budget.
+
+`numeric_return_memory_metrics()?` reports current-thread and module published
+retention, plus process reserved and published bytes, buffer counts, and byte
+peaks. It returns an error if the operating system cannot initialize or attach
+the shared accounting state. Querying metrics can initialize that state without
+changing UDF execution or admission. Concurrent updates can make the individual
+fields describe slightly different instants. These limits are implementation
+safety budgets pending native Excel load testing, not empirically tuned limits.
+
+```rust
+{{#include ../fixtures/addin.md}}
+use xlfn::prelude::*;
+use xlfn::output::numeric_return_memory_metrics;
+
+#[excel_function(name = "ARRAY.PROCESS.RESERVED.BYTES", thread_safe)]
+fn process_reserved_bytes() -> XllResult<f64> {
+    Ok(numeric_return_memory_metrics()?.process_reserved_bytes as f64)
+}
+```
 
 The FP12 registration and delayed reclamation follow Microsoft's
 [data types](https://learn.microsoft.com/en-us/office/client-developer/excel/data-types-used-by-excel)

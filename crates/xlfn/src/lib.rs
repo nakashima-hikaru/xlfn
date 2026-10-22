@@ -275,9 +275,10 @@ macro_rules! __xlfn_private_excel_rtd_exports {
 /// Efficient construction of Excel array return values.
 pub mod output {
     pub use crate::return_abi::{
-        MAX_MODULE_NUMERIC_RETURN_BYTES, MAX_NUMERIC_RETURN_BYTES, MAX_THREAD_NUMERIC_RETURN_BYTES,
-        NumericArrayBuilder, NumericArrayOutput, NumericReturnMemoryMetrics, XlArrayBuilder,
-        XlArrayOutput, numeric_return_memory_metrics,
+        MAX_MODULE_NUMERIC_RETURN_BYTES, MAX_NUMERIC_RETURN_BYTES,
+        MAX_PROCESS_NUMERIC_RETURN_BYTES, MAX_THREAD_NUMERIC_RETURN_BYTES, NumericArrayBuilder,
+        NumericArrayOutput, NumericReturnMemoryMetrics, XlArrayBuilder, XlArrayOutput,
+        numeric_return_memory_metrics,
     };
 }
 

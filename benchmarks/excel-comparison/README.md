@@ -450,8 +450,30 @@ python run.py --id M06 --implementation xlfn --repeat 10 --out fp12-results.json
 
 Repeat across independent Excel sessions and thread counts. Process-heap FP12
 allocations bypass Rust allocator counters. Module retention metrics reset on
-physical reload; old image allocations remain process-owned, so use process RSS
-and repeated reload sessions as well as `numeric_return_memory_metrics()` when
-qualifying memory bounds. The 16/64/256 MiB limits are provisional. This harness
-has not yet established live Excel speed or physical-unload safety evidence.
+physical reload, while process accounting survives reloads for all images using
+the same accounting protocol. `numeric_return_memory_metrics()?` exposes process
+reserved and published bytes, buffer counts, and byte peaks as well as the
+current thread and module published retention. It can fail if the shared
+operating-system accounting state cannot be initialized or attached, and its
+fields are sampled independently during concurrent execution.
+
+The provisional limits are 16 MiB per result, 64 MiB published per thread,
+256 MiB published per module, and 512 MiB reserved per process. The process
+budget includes allocation headers and both unpublished and published buffers;
+dropped unpublished buffers and safely reclaimed published buffers release it.
+Final buffers left by unloaded images remain charged until process exit. Each
+process retains one shared-state mapping and handle, without adding a retained
+mapping or handle on every reload. Incompatible accounting headers or limits
+fail instead of creating a separate budget. Older xlfn versions
+that did not use the shared protocol cannot have their allocations counted
+retrospectively.
+
+Use process RSS, the fallible metrics API, and repeated physical reload sessions
+to qualify retention and limit failures together. At the process cap, new FP12
+returns must fail with `#NUM!` and a diagnostic while existing published results
+stay valid. This harness has not yet established live Excel speed or
+physical-unload safety evidence.
+The standalone [process quota reload probe](../../probes/fp12-process-quota/README.md)
+provides native Windows checks for persistent accounting, physical DLL reloads,
+and aggregate quota rejection without requiring Excel.
 Existing CI regressions must be investigated separately.

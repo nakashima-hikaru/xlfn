@@ -15,6 +15,9 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use xlfn_sys::FP12;
 
+mod process;
+pub use process::MAX_PROCESS_NUMERIC_RETURN_BYTES;
+
 /// Provisional maximum FP12 result size, including its eight-byte ABI header.
 ///
 /// Native Excel load qualification is required before increasing this limit.
@@ -28,6 +31,7 @@ pub const MAX_MODULE_NUMERIC_RETURN_BYTES: usize = 256 * 1024 * 1024;
 struct NumericBlock {
     next: *mut NumericBlock,
     allocation_bytes: usize,
+    budget: &'static process::ProcessState,
     fp: FP12,
 }
 
@@ -74,8 +78,10 @@ const _: () = assert!(!std::mem::needs_drop::<Cell<ThreadState>>());
 /// allocation includes a private intrusive-list header as well as its FP12 ABI
 /// bytes. Independently read atomic module counters are approximate during
 /// concurrent publication/reclamation. Reloaded module images start new
-/// counters; earlier images' intentionally retained buffers remain process
-/// owned and cannot be counted by these counters.
+/// counters. Process counters live outside DLL images and include earlier
+/// participating images' retained buffers. The reserved counters include
+/// unpublished builders and in-progress allocations, with private headers;
+/// published counters cover only buffers already exposed to Excel.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct NumericReturnMemoryMetrics {
     /// Bytes retained by the current thread.
@@ -90,21 +96,38 @@ pub struct NumericReturnMemoryMetrics {
     pub module_published_buffers: usize,
     /// Largest retained byte count observed by this module image.
     pub module_peak_published_bytes: usize,
+    /// Bytes reserved process-wide, including unpublished/in-progress buffers.
+    pub process_reserved_bytes: usize,
+    /// Allocation reservations process-wide, including unpublished buffers.
+    pub process_reserved_buffers: usize,
+    /// Largest process-wide reserved byte count observed.
+    pub process_peak_reserved_bytes: usize,
+    /// Published bytes process-wide, including earlier participating images.
+    pub process_published_bytes: usize,
+    /// Published buffers process-wide, including earlier participating images.
+    pub process_published_buffers: usize,
+    /// Largest process-wide published byte count observed.
+    pub process_peak_published_bytes: usize,
 }
 
 /// Reads FP12 retention counters without changing UDF execution or ownership.
-#[must_use]
-pub fn numeric_return_memory_metrics() -> NumericReturnMemoryMetrics {
+///
+/// Returns an error if the process accounting mapping cannot be attached or its
+/// protocol is incompatible. Unavailable accounting is never reported as zero.
+pub fn numeric_return_memory_metrics() -> XllResult<NumericReturnMemoryMetrics> {
     THREAD_STATE.with(|slot| {
         let state = slot.get();
-        NumericReturnMemoryMetrics {
+        let mut metrics = NumericReturnMemoryMetrics {
             thread_published_bytes: state.bytes,
             thread_published_buffers: state.buffers,
             thread_peak_published_bytes: state.peak_bytes,
             module_published_bytes: MODULE_BYTES.load(Ordering::Relaxed),
             module_published_buffers: MODULE_BUFFERS.load(Ordering::Relaxed),
             module_peak_published_bytes: MODULE_PEAK_BYTES.load(Ordering::Relaxed),
-        }
+            ..NumericReturnMemoryMetrics::default()
+        };
+        process::read_metrics(&mut metrics)?;
+        Ok(metrics)
     })
 }
 
@@ -166,12 +189,18 @@ unsafe fn reclaim_epoch(mut pointer: *mut NumericBlock) {
         let next = unsafe { (*pointer).next };
         // SAFETY: the same retained header stores the original allocation size.
         let bytes = unsafe { (*pointer).allocation_bytes };
+        // SAFETY: the original allocation retains its process-lifetime ledger.
+        let budget = unsafe { (*pointer).budget };
         let allocation = NonNull::new(pointer).expect("epoch node is non-null");
         // SAFETY: the outer entry establishes that Excel no longer reads this
         // node. No Rust owner remains after publication.
-        unsafe { release_block(allocation, bytes) };
-        MODULE_BYTES.fetch_sub(bytes, Ordering::Relaxed);
-        MODULE_BUFFERS.fetch_sub(1, Ordering::Relaxed);
+        if unsafe { release_block(allocation, bytes) } {
+            budget.release_published(bytes);
+            MODULE_BYTES.fetch_sub(bytes, Ordering::Relaxed);
+            MODULE_BUFFERS.fetch_sub(1, Ordering::Relaxed);
+        }
+        // If HeapFree fails, keep both process and module charges. The block
+        // is abandoned conservatively rather than reopening quota for it.
         pointer = next;
     }
 }
@@ -179,6 +208,7 @@ unsafe fn reclaim_epoch(mut pointer: *mut NumericBlock) {
 struct NumericAllocation {
     pointer: NonNull<NumericBlock>,
     bytes: usize,
+    reservation: ManuallyDrop<process::Reservation>,
 }
 
 // SAFETY: an unpublished allocation is exclusively owned, with no pointers
@@ -198,6 +228,9 @@ impl NumericAllocation {
             })?;
         enforce_limit(abi_bytes, MAX_NUMERIC_RETURN_BYTES, "<numeric return>")?;
         let bytes = FP_OFFSET + abi_bytes;
+        // Charge before allocation, including unpublished builders/async outputs.
+        // Allocation failure drops this reservation and restores the budget.
+        let reservation = process::Reservation::reserve(bytes)?;
         let pointer = allocate_block(bytes)?;
         // SAFETY: the allocation has space/alignment for the full block and
         // flexible array. Validated positive dimensions fit Excel's i32 axes.
@@ -205,6 +238,7 @@ impl NumericAllocation {
             pointer.as_ptr().write(NumericBlock {
                 next: std::ptr::null_mut(),
                 allocation_bytes: bytes,
+                budget: reservation.state(),
                 fp: FP12 {
                     rows: rows as i32,
                     columns: columns as i32,
@@ -212,7 +246,11 @@ impl NumericAllocation {
                 },
             });
         }
-        Ok(Self { pointer, bytes })
+        Ok(Self {
+            pointer,
+            bytes,
+            reservation: ManuallyDrop::new(reservation),
+        })
     }
 
     fn values_pointer(&self) -> *mut f64 {
@@ -230,7 +268,12 @@ impl Drop for NumericAllocation {
     fn drop(&mut self) {
         // SAFETY: this owner is never retained after publication. Thus an
         // ordinary drop releases only an unpublished, exclusively owned block.
-        unsafe { release_block(self.pointer, self.bytes) };
+        if unsafe { release_block(self.pointer, self.bytes) } {
+            // SAFETY: publication forgets the owner; this is the unique
+            // unpublished reservation, and its allocation was just freed.
+            unsafe { ManuallyDrop::drop(&mut self.reservation) };
+        }
+        // A failed free retains the reservation until process exit.
     }
 }
 
@@ -299,6 +342,7 @@ impl NumericArrayOutput {
             // From here to publication only primitive non-panicking operations
             // remain. The block becomes process owned and has no Rust drop.
             let output = ManuallyDrop::new(self);
+            output.allocation.reservation.publish();
             let pointer = output.allocation.pointer.as_ptr();
             // SAFETY: this is an unpublished exclusive block; changing its
             // private list link does not touch any already published FP12.
@@ -480,14 +524,14 @@ fn allocate_block(bytes: usize) -> XllResult<NonNull<NumericBlock>> {
 }
 
 #[cfg(target_os = "windows")]
-unsafe fn release_block(pointer: NonNull<NumericBlock>, _bytes: usize) {
+unsafe fn release_block(pointer: NonNull<NumericBlock>, _bytes: usize) -> bool {
     windows_link::link!("kernel32.dll" "system" fn GetProcessHeap() -> *mut core::ffi::c_void);
     windows_link::link!("kernel32.dll" "system" fn HeapFree(heap: *mut core::ffi::c_void, flags: u32, memory: *mut core::ffi::c_void) -> i32);
     // SAFETY: GetProcessHeap has no preconditions.
     let heap = unsafe { GetProcessHeap() };
     // SAFETY: only an unpublished owner or a completed epoch calls this, once,
     // with the original HeapAlloc allocation on the same process heap.
-    let _ = unsafe { HeapFree(heap, 0, pointer.as_ptr().cast()) };
+    unsafe { HeapFree(heap, 0, pointer.as_ptr().cast()) != 0 }
 }
 
 // Test/benchmark hosts retain process ownership explicitly so Miri can see the
@@ -524,7 +568,7 @@ fn allocate_block(bytes: usize) -> XllResult<NonNull<NumericBlock>> {
 }
 
 #[cfg(not(target_os = "windows"))]
-unsafe fn release_block(pointer: NonNull<NumericBlock>, bytes: usize) {
+unsafe fn release_block(pointer: NonNull<NumericBlock>, bytes: usize) -> bool {
     let mut allocations = PROCESS_ALLOCATIONS
         .lock()
         .unwrap_or_else(|p| p.into_inner());
@@ -536,6 +580,7 @@ unsafe fn release_block(pointer: NonNull<NumericBlock>, bytes: usize) {
     // SAFETY: the caller established exclusive release and supplies the same
     // layout as the allocation. The registry no longer retains the pointer.
     unsafe { std::alloc::dealloc(pointer.as_ptr().cast(), block_layout(bytes)) };
+    true
 }
 
 #[cfg(test)]
@@ -667,13 +712,28 @@ mod tests {
             .unwrap()
             .publish(&outer)
             .unwrap();
-        assert_eq!(numeric_return_memory_metrics().thread_published_buffers, 3);
+        assert_eq!(
+            numeric_return_memory_metrics()
+                .unwrap()
+                .thread_published_buffers,
+            3
+        );
         drop(outer);
         // SAFETY: Excel may still read the final result after the wrapper exits.
         assert_eq!(unsafe { values(final_result) }, &[9.0]);
         let next = Fp12CallGuard::enter();
-        assert_eq!(numeric_return_memory_metrics().thread_published_bytes, 0);
-        assert_eq!(numeric_return_memory_metrics().thread_published_buffers, 0);
+        assert_eq!(
+            numeric_return_memory_metrics()
+                .unwrap()
+                .thread_published_bytes,
+            0
+        );
+        assert_eq!(
+            numeric_return_memory_metrics()
+                .unwrap()
+                .thread_published_buffers,
+            0
+        );
         drop(next);
     }
 
@@ -687,7 +747,12 @@ mod tests {
                         .unwrap()
                         .publish(&guard)
                         .unwrap();
-                    assert_eq!(numeric_return_memory_metrics().thread_published_buffers, 1);
+                    assert_eq!(
+                        numeric_return_memory_metrics()
+                            .unwrap()
+                            .thread_published_buffers,
+                        1
+                    );
                     drop(guard);
                     (PublishedTestPointer(pointer), index)
                 })
@@ -712,15 +777,30 @@ mod tests {
     fn repeated_outer_calls_retain_only_one_epoch() {
         for index in 0..100 {
             let call = Fp12CallGuard::enter();
-            assert_eq!(numeric_return_memory_metrics().thread_published_buffers, 0);
+            assert_eq!(
+                numeric_return_memory_metrics()
+                    .unwrap()
+                    .thread_published_buffers,
+                0
+            );
             NumericArrayOutput::from_f64(1, 1, &[index as f64])
                 .unwrap()
                 .publish(&call)
                 .unwrap();
-            assert_eq!(numeric_return_memory_metrics().thread_published_buffers, 1);
+            assert_eq!(
+                numeric_return_memory_metrics()
+                    .unwrap()
+                    .thread_published_buffers,
+                1
+            );
         }
         drop(Fp12CallGuard::enter());
-        assert_eq!(numeric_return_memory_metrics().thread_published_bytes, 0);
+        assert_eq!(
+            numeric_return_memory_metrics()
+                .unwrap()
+                .thread_published_bytes,
+            0
+        );
     }
 
     #[test]
@@ -739,7 +819,9 @@ mod tests {
             // SAFETY: every payload cell remains live in this epoch.
             assert_eq!(unsafe { values(pointer) }, &numbers);
             assert_eq!(
-                numeric_return_memory_metrics().thread_published_bytes,
+                numeric_return_memory_metrics()
+                    .unwrap()
+                    .thread_published_bytes,
                 FP_OFFSET + 8 + rows * columns * 8
             );
         }
