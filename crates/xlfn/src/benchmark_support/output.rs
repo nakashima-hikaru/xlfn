@@ -137,6 +137,11 @@ impl NumericArrayOutputBenchmark {
         });
     }
 
+    /// The numeric slice copy under Q, matching BENCH.MAT.COPY's output path.
+    pub fn run_numeric_slice_q(&self, values: &[f64]) {
+        self.run(|| XlArrayBuilder::from_f64(values.len(), 1, values)?.finish());
+    }
+
     pub fn run_prepared_matrix(&self, matrix: crate::value::Matrix<f64>) {
         self.run_fp12(|| Ok(matrix));
     }

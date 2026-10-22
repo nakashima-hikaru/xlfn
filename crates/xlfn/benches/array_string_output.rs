@@ -56,6 +56,9 @@ fn scalar_output_benchmarks(c: &mut Criterion) {
     group.measurement_time(benchmark_measurement_time());
     for (label, payload) in [
         ("ascii_short", "Ready".to_owned()),
+        ("ascii_8", "a".repeat(8)),
+        ("ascii_64", "a".repeat(64)),
+        ("ascii_512", "a".repeat(512)),
         ("ascii_1k", "x".repeat(1_024)),
         ("ascii_limit", "x".repeat(32_767)),
         ("unicode_short", "日本語💡".to_owned()),
@@ -77,6 +80,12 @@ fn scalar_output_benchmarks(c: &mut Criterion) {
         });
     }
     for (label, payload) in [
+        ("ascii_8", "a".repeat(8)),
+        ("ascii_64", "a".repeat(64)),
+        ("ascii_512", "a".repeat(512)),
+        ("japanese_8", "日".repeat(8)),
+        ("japanese_64", "日".repeat(64)),
+        ("japanese_512", "日".repeat(512)),
         ("ascii_4k", "a".repeat(4096)),
         ("japanese_4k", "日".repeat(4096)),
         ("mixed", "ABC日本語💡".repeat(128)),

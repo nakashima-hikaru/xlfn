@@ -6,7 +6,7 @@ fn array_numeric_output_benchmarks(c: &mut Criterion) {
     let mut group = c.benchmark_group("array_numeric_output");
     group.measurement_time(benchmark_measurement_time());
 
-    for cells in [1_000, 100_000] {
+    for cells in [100, 1_000, 10_000, 100_000] {
         let benchmark = NumericArrayOutputBenchmark::new(cells);
         group.throughput(Throughput::Elements(cells as u64));
         // Both construction paths calculate the same finite result cells and
@@ -38,6 +38,12 @@ fn array_numeric_output_benchmarks(c: &mut Criterion) {
             BenchmarkId::new("numeric_slice_convert_return", cells),
             |b| {
                 b.iter(|| benchmark.run_numeric_slice(&values));
+            },
+        );
+        group.bench_function(
+            BenchmarkId::new("numeric_slice_convert_return_q", cells),
+            |b| {
+                b.iter(|| benchmark.run_numeric_slice_q(&values));
             },
         );
     }

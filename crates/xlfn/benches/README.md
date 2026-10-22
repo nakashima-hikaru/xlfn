@@ -322,6 +322,12 @@ adds real formula publication and separately probes warm, cold, and changed inpu
 and persistent-worker cases; final-pin setup and arena cleanup are outside timing.
 `array_numeric_output` includes result construction, return publication and free;
 `matrix_convert_return` excludes construction of the existing owned Matrix.
+The slice-copy probes cover 100, 1,000, 10,000 and 100,000 cells:
+`numeric_slice_convert_return` returns FP12, while
+`numeric_slice_convert_return_q` uses `XlArrayBuilder::from_f64` and Q, matching
+the output path of the live Excel M03 fixture. M02 instead uses the separate
+`push_f64` producer. Improvements to the FP12 slice constructor do not establish
+improvements to either live M02 or M03.
 `cache_miss_concurrency` keeps one 1 MiB resident budget and reports cold batches at
 1, 4, 16, and 32 workers, plus compute/dispatch controls and untimed correctness
 probes. Same-key reuse combines pending followers and resident hits.
@@ -332,8 +338,10 @@ Selected cases run in `just bench-ci`; full concurrency curves run in
 ## Excel string comparison probes
 
 `argument_ingress` includes owned ASCII and Japanese 4,096-character inputs.
-`array_string_output` includes Japanese 8/64/512/4,096-character scalar outputs,
-plus ASCII/Japanese/mixed string copies. The copy probes include strict UTF-16
+`array_string_output` includes ASCII and Japanese 8/64/512/4,096-character scalar
+outputs, plus ASCII/Japanese/mixed string copies. The short probes cover the
+T02/T03 sizes where the live Excel comparison showed the largest gaps.
+The copy probes include strict UTF-16
 input decoding, return encoding, synchronous publication and owning cleanup;
 the prebuilt UTF-16 input is outside the timer. They do not include Excel/COM
 or formula-entry overhead. These cases complement short strings, mixed BMP and

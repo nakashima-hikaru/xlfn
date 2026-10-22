@@ -392,13 +392,24 @@ impl NumericArrayBuilder {
             });
         }
         let mut builder = Self::new(rows, columns)?;
-        for (index, &value) in values.iter().enumerate() {
-            let value = crate::value::output::validate_number(value)?;
-            // SAFETY: the validated slice length equals the allocation's cell
-            // count. Each index selects one distinct row-major cell.
-            let cell = unsafe { builder.allocation.values_pointer().add(index) };
-            // SAFETY: the selected cell belongs to this exclusive builder.
-            unsafe { cell.write(value) };
+        for (index, values) in values.chunks(64).enumerate() {
+            // Bounded reductions allow finite checks to vectorize while
+            // retaining early rejection without scanning the entire input.
+            if !values
+                .iter()
+                .fold(true, |finite, value| finite & value.is_finite())
+            {
+                return Err(XllError::Domain {
+                    code: DomainErrorCode::InvalidInput,
+                });
+            }
+            // SAFETY: the complete slice length equals this allocation's cell
+            // count. Each chunk selects a distinct range inside the buffer.
+            let cells = unsafe { builder.allocation.values_pointer().add(index * 64) };
+            // SAFETY: this new exclusive allocation cannot overlap the source.
+            // The source chunk is initialized and its whole destination range
+            // is in bounds. Copying preserves every finite number's exact bits.
+            unsafe { std::ptr::copy_nonoverlapping(values.as_ptr(), cells, values.len()) };
         }
         builder.initialized = values.len();
         Ok(builder)
@@ -649,6 +660,38 @@ mod tests {
             })
         ));
         assert!(NumericArrayOutput::from_f64(1, 2, &[1.0]).is_err());
+    }
+
+    #[test]
+    fn miri_numeric_slice_blocks_preserve_bits_and_reject_every_nonfinite_position() {
+        let finite = [-0.0, 0.0, f64::from_bits(1), f64::MAX, f64::MIN];
+        for length in [1, 63, 64, 65, 127, 128, 129] {
+            let mut values: Vec<_> = (0..length)
+                .map(|index| finite[index % finite.len()])
+                .collect();
+            let output = NumericArrayOutput::from_f64(1, length, &values).unwrap();
+            assert_eq!((output.rows(), output.columns()), (1, length));
+            for (actual, expected) in output.as_slice().iter().zip(&values) {
+                assert_eq!(actual.to_bits(), expected.to_bits());
+            }
+            for index in 0..length {
+                let saved = values[index];
+                for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                    values[index] = invalid;
+                    assert!(matches!(
+                        NumericArrayBuilder::from_f64(1, length, &values),
+                        Err(XllError::Domain {
+                            code: DomainErrorCode::InvalidInput,
+                        })
+                    ));
+                }
+                values[index] = saved;
+            }
+        }
+        assert!(matches!(
+            NumericArrayBuilder::from_f64(1, 2, &[f64::NAN]),
+            Err(XllError::ElementCountMismatch { .. })
+        ));
     }
 
     #[test]
