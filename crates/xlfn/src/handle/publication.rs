@@ -224,11 +224,11 @@ impl<'runtime> ProvisionalPublicationTxn<'runtime> {
     pub(super) fn publish_and_observe(
         self,
         publication: PublishedTopic,
+        lifetime_key: &str,
         observe: impl FnOnce(&str, &str) -> XllResult<()>,
         on_linearized: impl FnOnce(PublishedTopicPtr),
     ) -> XllResult<ObservedPublicationTxn<'runtime>> {
         let token = &self.provisional.token;
-        let lifetime_key = publication.lifetime_key.clone();
         let publication = self.runtime.topics.insert_provisional(
             self.key,
             self.generation,
@@ -238,7 +238,9 @@ impl<'runtime> ProvisionalPublicationTxn<'runtime> {
         self.runtime
             .topics
             .is_current(self.key, self.generation, token)?;
-        observe(&lifetime_key, token)?;
+        // The caller owns this key independently of the topic, which observation
+        // may remove reentrantly.
+        observe(lifetime_key, token)?;
         self.runtime
             .topics
             .is_current(self.key, self.generation, token)?;

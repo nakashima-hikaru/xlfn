@@ -63,6 +63,12 @@ pub trait InputMode: sealed::InputModeSealed + Sized {
         units: &'call [u16],
         argument: &'static str,
     ) -> XllResult<PreparedArgument<String, super::PreparedString<'call>>>;
+
+    #[doc(hidden)]
+    fn prepare_borrowed_string<'call>(
+        identity: &mut Self::Identity,
+        value: super::PreparedBorrowedString<'call>,
+    ) -> XllResult<PreparedArgument<&'call str, super::PreparedBorrowedString<'call>>>;
 }
 
 /// Plain worksheet conversion, without formula-revision identity recording.
@@ -115,6 +121,13 @@ impl InputMode for PlainInputMode {
         argument: &'static str,
     ) -> XllResult<PreparedArgument<String, super::PreparedString<'call>>> {
         crate::utf16::decode_owned(units, argument).map(PreparedArgument::Ready)
+    }
+
+    fn prepare_borrowed_string<'call>(
+        _: &mut Self::Identity,
+        value: super::PreparedBorrowedString<'call>,
+    ) -> XllResult<PreparedArgument<&'call str, super::PreparedBorrowedString<'call>>> {
+        value.materialize().map(PreparedArgument::Ready)
     }
 }
 
@@ -180,6 +193,17 @@ impl InputMode for FormulaInputMode {
         Ok(PreparedArgument::Prepared {
             value: super::PreparedString { units, argument },
             materialize: <String as PrepareExcel>::materialize,
+        })
+    }
+
+    fn prepare_borrowed_string<'call>(
+        identity: &mut Self::Identity,
+        value: super::PreparedBorrowedString<'call>,
+    ) -> XllResult<PreparedArgument<&'call str, super::PreparedBorrowedString<'call>>> {
+        identity.semantic_utf16(value.units)?;
+        Ok(PreparedArgument::Prepared {
+            value,
+            materialize: super::PreparedBorrowedString::materialize,
         })
     }
 }
@@ -459,6 +483,16 @@ pub trait ExcelParameter<'call, M: InputMode>:
     ) -> XllResult<PreparedArgument<Self, Self::Prepared>> {
         Self::decode(value, argument, context, identity).map(PreparedArgument::Ready)
     }
+    // Scalar preparation may carry state that is unnecessary for retained
+    // collection cells. Keep their storage and admission budgets independent.
+    type ElementPrepared;
+    fn prepare_element(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<PreparedArgument<Self, Self::ElementPrepared>>;
+
     type Elements;
     fn prepare_elements(
         cells: ExcelInputCells<'call>,
@@ -502,14 +536,25 @@ impl<'call, T: FromExcel<'call>> sealed::ExcelParameterSealed<'call, PlainInputM
 
 impl<'call, T: FromExcel<'call>> ExcelParameter<'call, PlainInputMode> for T {
     type Prepared = ();
-    type Elements = PreparedExcelSequence<'call, Self, PreparedArgument<Self, Self::Prepared>>;
+    type ElementPrepared = Self::Prepared;
+    fn prepare_element(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        context: &CallContext<'call>,
+        identity: &mut (),
+    ) -> XllResult<PreparedArgument<Self, Self::ElementPrepared>> {
+        <Self as ExcelParameter<'call, PlainInputMode>>::prepare(value, argument, context, identity)
+    }
+
+    type Elements =
+        PreparedExcelSequence<'call, Self, PreparedArgument<Self, Self::ElementPrepared>>;
     fn prepare_elements(
         cells: ExcelInputCells<'call>,
         context: &CallContext<'call>,
         identity: &mut (),
     ) -> XllResult<Self::Elements> {
         cells.retain(
-            |value, argument| Self::prepare(value, argument, context, identity),
+            |value, argument| Self::prepare_element(value, argument, context, identity),
             PreparedArgument::materialize,
         )
     }
@@ -561,6 +606,18 @@ where
             materialize: T::materialize,
         })
     }
+    type ElementPrepared = Self::Prepared;
+    fn prepare_element(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        context: &CallContext<'call>,
+        identity: &mut InputIdentityEncoder,
+    ) -> XllResult<PreparedArgument<Self, Self::ElementPrepared>> {
+        <Self as ExcelParameter<'call, FormulaInputMode>>::prepare(
+            value, argument, context, identity,
+        )
+    }
+
     type Elements = PreparedExcelSequence<'call, T, T::Prepared>;
     fn prepare_elements(
         cells: ExcelInputCells<'call>,
@@ -1001,14 +1058,19 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
         index: usize,
         argument: &'static str,
         raw: *const u16,
-    ) -> XllResult<PreparedArgument<&'call str, ()>> {
+    ) -> XllResult<PreparedArgument<&'call str, super::PreparedBorrowedString<'call>>> {
         let scratch = self.call.scratch();
         self.with_native(index, argument, |identity| {
             // SAFETY: the generated wrapper retains Excel's live input for 'call.
             let units = unsafe { crate::utf16::borrow_counted(raw, argument) }?;
-            let text = scratch.decode_utf16(units, argument)?;
-            M::string(identity, text);
-            Ok(PreparedArgument::Ready(text))
+            M::prepare_borrowed_string(
+                identity,
+                super::PreparedBorrowedString {
+                    units,
+                    argument,
+                    scratch,
+                },
+            )
         })
     }
 
@@ -1259,20 +1321,97 @@ mod preparation_tests {
     #[test]
     #[allow(
         unsafe_code,
+        reason = "tests native and value12 string preparation using live owned buffers"
+    )]
+    fn miri_prepared_scalar_borrowed_strings_defer_scratch_and_preserve_identity() {
+        for text in [String::new(), "a".repeat(24), "日💡a".repeat(17)] {
+            let mut units = crate::utf16::encode_counted(&text, "value", 32_767).unwrap();
+            let root = XLOPER12 {
+                value: xlfn_sys::XLOPER12Value {
+                    string: units.as_mut_ptr(),
+                },
+                xltype: xlfn_sys::XLTYPE_STR,
+            };
+            crate::call::with_excel_call_scope_and_state(&root, |root, scope| {
+                let value = XlValueRef::from_array_cell(root).unwrap();
+                // SAFETY: root's counted string is live and immutable for this scope.
+                let pointer = unsafe { root.value.string };
+                let mut owned = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                let prepared = owned.prepare::<String>(0, "value", value).unwrap();
+                let identity = owned.finish().unwrap();
+                drop(prepared);
+
+                let mut ordinary = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                let warm = ordinary.prepare::<&str>(0, "value", value).unwrap();
+                assert!(matches!(warm, PreparedArgument::Prepared { .. }));
+                assert_eq!(ordinary.finish().unwrap(), identity);
+                let _ = warm;
+                let mut native = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                // SAFETY: the counted buffer remains live and immutable for this call.
+                let warm = unsafe { native.prepare_native_str(0, "value", pointer) }.unwrap();
+                assert!(matches!(warm, PreparedArgument::Prepared { .. }));
+                assert_eq!(native.finish().unwrap(), identity);
+                let _ = warm;
+                #[cfg(feature = "bench-internals")]
+                assert_eq!(scope.scratch().allocated_bytes(), 0);
+
+                let mut ordinary = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                let cold = ordinary.prepare::<&str>(0, "value", value).unwrap();
+                assert_eq!(ordinary.finish().unwrap(), identity);
+                let mut native = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                // SAFETY: the counted buffer remains live and immutable for this call.
+                let native_cold =
+                    unsafe { native.prepare_native_str(0, "value", pointer) }.unwrap();
+                assert_eq!(native.finish().unwrap(), identity);
+                #[cfg(feature = "bench-internals")]
+                assert_eq!(scope.scratch().allocated_bytes(), 0);
+
+                let ordinary_text = cold.materialize().unwrap();
+                let extra = vec![b'z' as u16; if cfg!(miri) { 4_096 } else { 32_767 }];
+                scope.scratch().decode_utf16(&extra, "extra").unwrap();
+                let native_text = native_cold.materialize().unwrap();
+                scope.scratch().decode_utf16(&extra, "extra").unwrap();
+                assert_eq!(ordinary_text, text);
+                assert_eq!(native_text, text);
+
+                let mut plain = ArgumentContext::<PlainInputMode>::from_scope(scope, 1);
+                let eager = plain.prepare::<&str>(0, "value", value).unwrap();
+                assert!(matches!(eager, PreparedArgument::Ready(_)));
+                assert_eq!(eager.materialize().unwrap(), text);
+                let mut plain = ArgumentContext::<PlainInputMode>::from_scope(scope, 1);
+                // SAFETY: the counted buffer remains live and immutable for this call.
+                let eager = unsafe { plain.prepare_native_str(0, "value", pointer) }.unwrap();
+                assert!(matches!(eager, PreparedArgument::Ready(_)));
+                assert_eq!(eager.materialize().unwrap(), text);
+            });
+        }
+    }
+
+    #[test]
+    #[allow(
+        unsafe_code,
         reason = "tests malformed native string payloads using live owned buffers"
     )]
     fn miri_native_strings_validate_before_cache_lookup() {
         use crate::error::InputError;
-        for units in [
+        for mut units in [
             [1_u16, 0xd800, 0],
             [1, 0xdc00, 0],
             [2, 0xd800, 0x41],
             [2, 0x41, 0xdc00],
         ] {
-            crate::call::with_excel_call_scope_and_state(&units, |units, scope| {
+            let root = XLOPER12 {
+                value: xlfn_sys::XLOPER12Value {
+                    string: units.as_mut_ptr(),
+                },
+                xltype: xlfn_sys::XLTYPE_STR,
+            };
+            crate::call::with_excel_call_scope_and_state(&root, |root, scope| {
+                // SAFETY: root's string buffer remains live and immutable for this scope.
+                let pointer = unsafe { root.value.string };
                 let mut arguments = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
                 // SAFETY: the readable count and its complete payload are live.
-                let result = unsafe { arguments.prepare_native_string(0, "value", units.as_ptr()) };
+                let result = unsafe { arguments.prepare_native_string(0, "value", pointer) };
                 assert!(matches!(
                     result,
                     Err(XllError::Input {
@@ -1283,12 +1422,28 @@ mod preparation_tests {
                 assert!(arguments.finish().is_err());
                 let mut borrowed = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
                 // SAFETY: the readable count and its complete payload are live.
-                let result = unsafe { borrowed.prepare_native_str(0, "value", units.as_ptr()) };
-                assert!(result.is_err());
+                let result = unsafe { borrowed.prepare_native_str(0, "value", pointer) };
+                assert!(matches!(
+                    result,
+                    Err(XllError::Input {
+                        argument: "value",
+                        reason: InputError::InvalidUtf16
+                    })
+                ));
                 assert!(borrowed.finish().is_err());
+                let value = XlValueRef::from_array_cell(root).unwrap();
+                let mut ordinary = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                assert!(matches!(
+                    ordinary.prepare::<&str>(0, "value", value),
+                    Err(XllError::Input {
+                        argument: "value",
+                        reason: InputError::InvalidUtf16
+                    })
+                ));
+                assert!(ordinary.finish().is_err());
                 let mut plain = ArgumentContext::<PlainInputMode>::from_scope(scope, 1);
                 // SAFETY: the readable count and its complete payload are live.
-                let result = unsafe { plain.prepare_native_string(0, "value", units.as_ptr()) };
+                let result = unsafe { plain.prepare_native_string(0, "value", pointer) };
                 assert!(result.is_err());
             });
         }
@@ -1420,6 +1575,7 @@ mod preparation_tests {
 
     #[test]
     fn prepared_borrowed_strings_keep_validation_order_and_poison_identity() {
+        use crate::value::{Matrix, OptionalExcelValue};
         let mut malformed = [1_u16, 0xd800];
         let text = XLOPER12 {
             value: xlfn_sys::XLOPER12Value {
@@ -1432,17 +1588,123 @@ mod preparation_tests {
             let root = array_root(&mut cells);
             crate::call::with_excel_call_scope_and_state(&root, |root, scope| {
                 let value = XlValueRef::from_array_cell(root).unwrap();
-                let mut eager = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
-                let expected = eager.decode::<Vec<&str>>(0, "values", value).unwrap_err();
-                let mut prepared = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
-                let error = match prepared.prepare::<Vec<&str>>(0, "values", value) {
-                    Ok(_) => panic!("invalid input must fail during preparation"),
-                    Err(error) => error,
-                };
-                assert_eq!(error.to_string(), expected.to_string());
-                assert!(prepared.finish().is_err());
+                macro_rules! check {
+                    ($ty:ty) => {{
+                        let mut eager = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                        let expected = eager.decode::<$ty>(0, "values", value).unwrap_err();
+                        let mut prepared =
+                            ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                        let error = match prepared.prepare::<$ty>(0, "values", value) {
+                            Ok(_) => panic!("invalid input must fail during preparation"),
+                            Err(error) => error,
+                        };
+                        assert_eq!(error.to_string(), expected.to_string());
+                        assert!(prepared.finish().is_err());
+                    }};
+                }
+                check!(Vec<&str>);
+                check!(Matrix<Option<&str>>);
+                check!(Matrix<OptionalExcelValue<&str>>);
+                check!(Matrix<Option<OptionalExcelValue<&str>>>);
+                check!(Matrix<OptionalExcelValue<Option<&str>>>);
             });
         }
+    }
+
+    #[test]
+    fn prepared_borrowed_strings_preserve_collection_cell_budgets() {
+        use crate::value::OptionalExcelValue;
+
+        fn check<'call, T, P>()
+        where
+            T: ExcelParameter<
+                    'call,
+                    FormulaInputMode,
+                    ElementPrepared = P,
+                    Elements = PreparedExcelSequence<'call, T, PreparedArgument<T, P>>,
+                >,
+        {
+            // The explicit P at each call below is the former retained-cell
+            // shape. Check the actual collection type and its admission limit
+            // without constructing a matrix near the allocation ceiling.
+            let bytes_per_cell = size_of::<XLOPER12>() + size_of::<PreparedArgument<T, P>>();
+            let maximum = crate::value::MAX_ARRAY_BYTES / bytes_per_cell;
+            assert!(
+                ExcelInputCells::wrapped_budget::<T, PreparedArgument<T, P>, true>(maximum, "v")
+                    .is_ok()
+            );
+            assert!(matches!(
+                ExcelInputCells::wrapped_budget::<T, PreparedArgument<T, P>, true>(maximum + 1, "v"),
+                Err(XllError::Input {
+                    argument: "v",
+                    reason: crate::error::InputError::TooLarge { limit, actual },
+                }) if limit == crate::value::MAX_ARRAY_BYTES
+                    && actual == (maximum + 1) * bytes_per_cell
+            ));
+        }
+
+        type Text<'a> = PreparedArgument<&'a str, ()>;
+        check::<&str, ()>();
+        check::<Option<&str>, Option<Text<'_>>>();
+        check::<OptionalExcelValue<&str>, OptionalExcelValue<Text<'_>>>();
+        check::<Option<Option<&str>>, Option<PreparedArgument<Option<&str>, Option<Text<'_>>>>>();
+        check::<
+            Option<OptionalExcelValue<&str>>,
+            Option<PreparedArgument<OptionalExcelValue<&str>, OptionalExcelValue<Text<'_>>>>,
+        >();
+        check::<
+            OptionalExcelValue<Option<&str>>,
+            OptionalExcelValue<PreparedArgument<Option<&str>, Option<Text<'_>>>>,
+        >();
+    }
+
+    #[test]
+    fn miri_prepared_optional_borrowed_strings_preserve_identity_and_values() {
+        use crate::value::{Matrix, MatrixRef, OptionalExcelValue};
+        let mut ascii = crate::utf16::encode_counted("ascii", "v", 32_767).unwrap();
+        let mut unicode = crate::utf16::encode_counted("価格💡", "v", 32_767).unwrap();
+        let mut cells = [
+            XLOPER12::missing(),
+            XLOPER12::nil(),
+            XLOPER12 {
+                value: xlfn_sys::XLOPER12Value {
+                    string: ascii.as_mut_ptr(),
+                },
+                xltype: xlfn_sys::XLTYPE_STR,
+            },
+            XLOPER12 {
+                value: xlfn_sys::XLOPER12Value {
+                    string: unicode.as_mut_ptr(),
+                },
+                xltype: xlfn_sys::XLTYPE_STR,
+            },
+        ];
+        let root = array_root(&mut cells);
+        crate::call::with_excel_call_scope_and_state(&root, |root, scope| {
+            let value = XlValueRef::from_array_cell(root).unwrap();
+            macro_rules! check {
+                ($ty:ty) => {{
+                    let mut eager = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                    let expected = eager.decode::<$ty>(0, "v", value).unwrap();
+                    let identity = eager.finish().unwrap();
+                    let mut args = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                    let state = args.prepare::<$ty>(0, "v", value).unwrap();
+                    assert_eq!(args.finish().unwrap(), identity);
+                    let result = state.materialize().unwrap();
+                    assert_eq!(result.as_slice(), expected.as_slice());
+                    let mut materialized =
+                        ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                    materialized.record_decoded(0, "v", &result).unwrap();
+                    assert_eq!(materialized.finish().unwrap(), identity);
+                }};
+            }
+            check!(Matrix<Option<&str>>);
+            check!(Matrix<OptionalExcelValue<&str>>);
+            check!(Matrix<Option<Option<&str>>>);
+            check!(Matrix<Option<OptionalExcelValue<&str>>>);
+            check!(Matrix<OptionalExcelValue<Option<&str>>>);
+            check!(MatrixRef<'_, Option<&str>>);
+        });
     }
 
     #[test]

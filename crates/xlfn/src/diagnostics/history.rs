@@ -298,7 +298,9 @@ impl DiagnosticHistory {
             if page.errors.len() == limit {
                 return page;
             }
-            if page.errors.try_reserve_exact(1).is_err() {
+            // Grow amortized while the history lock is held, preserving the
+            // copied prefix and its cursor if a later reservation fails.
+            if page.errors.try_reserve(1).is_err() {
                 page.allocation_failed = true;
                 return page;
             }

@@ -54,11 +54,20 @@ impl CallScratch {
             return Ok("");
         }
         let decoder = crate::utf16::Utf16Decoder::new(units);
+        if decoder.utf8_len() <= INLINE_TEXT_CAPACITY && self.inline_text.get().is_none() {
+            let mut buffer = [std::mem::MaybeUninit::uninit(); INLINE_TEXT_CAPACITY];
+            let text = decoder.decode_into(&mut buffer, argument)?;
+            self.inline_text
+                .set(ManuallyDrop::new(smol_str::SmolStr::new_inline(text)))
+                .expect("the first inline text slot is empty");
+            return Ok(self.inline_text.get().unwrap().as_str());
+        }
         // Scalar and small collection text share the primary arena. A large
         // typed collection can fill a matrix-sized chunk before its first
-        // string, so only that case creates a separate text arena. Its bounded
-        // initial capacity avoids a chain of tiny growing chunks; numeric-only
-        // collections never create it. Both arenas live until scope teardown.
+        // string, so text that cannot use the inline slot gets a separate
+        // arena in that case. Its bounded initial capacity avoids a chain of
+        // tiny growing chunks; numeric-only collections never create it.
+        // Both arenas live until scope teardown.
         let strings = if self.large_collection.get() {
             self.strings
                 .get_or_init(|| {
@@ -66,14 +75,6 @@ impl CallScratch {
                 })
                 .as_ref()
         } else {
-            if decoder.utf8_len() <= INLINE_TEXT_CAPACITY && self.inline_text.get().is_none() {
-                let mut buffer = [std::mem::MaybeUninit::uninit(); INLINE_TEXT_CAPACITY];
-                let text = decoder.decode_into(&mut buffer, argument)?;
-                self.inline_text
-                    .set(ManuallyDrop::new(smol_str::SmolStr::new_inline(text)))
-                    .expect("the first inline text slot is empty");
-                return Ok(self.inline_text.get().unwrap().as_str());
-            }
             &self.arena.0
         };
         let output =
@@ -315,7 +316,7 @@ mod scratch_tests {
     }
 
     #[test]
-    fn large_numeric_collection_does_not_allocate_text_storage() {
+    fn miri_large_numeric_collection_keeps_first_short_text_inline() {
         let scratch = CallScratch::new();
         let length = LARGE_TYPED_COLLECTION_BYTES / std::mem::size_of::<u64>();
         let values = scratch
@@ -323,6 +324,19 @@ mod scratch_tests {
             .unwrap();
         assert_eq!(values.last(), Some(&((length - 1) as u64)));
         assert!(scratch.strings.get().is_none());
+        assert!(scratch.decode_utf16(&[0xd800], "invalid").is_err());
+        assert!(scratch.inline_text.get().is_none());
+        assert!(scratch.strings.get().is_none());
+        let first = scratch
+            .decode_utf16(&[0x65e5, 0xd83d, 0xdca1], "first")
+            .unwrap();
+        assert!(scratch.inline_text.get().is_some());
+        assert!(scratch.strings.get().is_none());
+        let later = scratch.decode_utf16(&[b'x' as u16; 24], "later").unwrap();
+        assert!(scratch.strings.get().is_some());
+        assert_eq!(first, "日💡");
+        assert_eq!(later, "x".repeat(24));
+        assert_eq!(values[length - 1], (length - 1) as u64);
     }
 
     #[test]

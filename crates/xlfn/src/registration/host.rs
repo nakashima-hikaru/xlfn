@@ -558,7 +558,18 @@ impl<'call, M: InputMode> ExcelParameterSealed<'call, M> for ModuleName {}
 impl<'call, M: InputMode> ExcelParameter<'call, M> for ModuleName {
     type Prepared = ();
 
-    type Elements = PreparedExcelSequence<'call, Self, PreparedArgument<Self, Self::Prepared>>;
+    type ElementPrepared = Self::Prepared;
+    fn prepare_element(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<PreparedArgument<Self, Self::ElementPrepared>> {
+        <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)
+    }
+
+    type Elements =
+        PreparedExcelSequence<'call, Self, PreparedArgument<Self, Self::ElementPrepared>>;
     fn prepare_elements(
         cells: ExcelInputCells<'call>,
         context: &CallContext<'call>,
@@ -566,7 +577,9 @@ impl<'call, M: InputMode> ExcelParameter<'call, M> for ModuleName {
     ) -> XllResult<Self::Elements> {
         cells.retain(
             |value, argument| {
-                <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)
+                <Self as ExcelParameter<'call, M>>::prepare_element(
+                    value, argument, context, identity,
+                )
             },
             PreparedArgument::materialize,
         )

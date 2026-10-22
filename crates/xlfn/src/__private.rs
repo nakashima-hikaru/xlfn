@@ -653,7 +653,8 @@ pub mod v1 {
             unsafe { self.arguments.prepare_native_string(index, name, raw) }
         }
 
-        /// Decodes a native string into the synchronous call's scratch storage.
+        /// Validates a native string and prepares its borrowed Rust value.
+        /// Formula inputs decode into call scratch storage only on materialization.
         ///
         /// # Safety
         /// `raw` points to Excel's counted UTF-16 string, live and immutable
@@ -665,7 +666,8 @@ pub mod v1 {
             index: usize,
             name: &'static str,
             raw: *const u16,
-        ) -> XllResult<PreparedArgument<&'call str, ()>> {
+        ) -> XllResult<PreparedArgument<&'call str, crate::value::PreparedBorrowedString<'call>>>
+        {
             // SAFETY: the generated wrapper forwards Excel's live string argument.
             unsafe { self.arguments.prepare_native_str(index, name, raw) }
         }

@@ -350,6 +350,7 @@ impl FormulaHandleService {
         let publication = PublishedTopic::new(token.clone(), lifetime_key.clone());
         let publication_txn = publication_txn.publish_and_observe(
             publication,
+            &lifetime_key,
             observe
                 .take()
                 .expect("the cold path owns the observation closure"),
