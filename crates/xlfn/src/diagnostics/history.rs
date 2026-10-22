@@ -1,9 +1,11 @@
 //! Runtime-owned synchronous failure history, independent of sink delivery.
 
 use super::DiagnosticId;
+use crate::error::DomainErrorCode;
 use crate::execution::{CalculationId, CallId};
 use crate::sync::Mutex;
 use crate::{ExcelError, XllError};
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::fmt::{self, Write};
 use std::time::SystemTime;
@@ -49,31 +51,6 @@ pub struct DiagnosticRecord {
     pub argument: Option<String>,
     /// Bounded human-readable diagnostic detail.
     pub message: String,
-}
-
-impl DiagnosticRecord {
-    fn dynamic_bytes(&self) -> usize {
-        self.udf_id.capacity()
-            + self.argument.as_ref().map_or(0, String::capacity)
-            + self.message.capacity()
-    }
-
-    fn try_clone(&self) -> Option<Self> {
-        Some(Self {
-            diagnostic_id: self.diagnostic_id,
-            udf_id: try_text(format_args!("{}", self.udf_id))?,
-            call_id: self.call_id,
-            calculation_id: self.calculation_id,
-            timestamp: self.timestamp,
-            error_kind: self.error_kind,
-            excel_error: self.excel_error,
-            argument: match &self.argument {
-                Some(argument) => Some(try_text(format_args!("{argument}"))?),
-                None => None,
-            },
-            message: try_text(format_args!("{}", self.message))?,
-        })
-    }
 }
 
 /// A page of history, ordered by synchronous recording time.
@@ -124,7 +101,101 @@ pub struct DiagnosticHistoryStats {
 
 struct StoredRecord {
     sequence: u64,
-    record: DiagnosticRecord,
+    metadata: FailureMetadata,
+    error_kind: DiagnosticErrorKind,
+    excel_error: ExcelError,
+    argument: Option<&'static str>,
+    message: StoredMessage,
+}
+
+// Keep small, self-contained failures synchronously without constructing their
+// Display text on every UDF invocation. Public snapshots still own bounded text
+// and use XllError's canonical Display implementation. Other failures retain
+// their bounded text eagerly, so application-owned error data never escapes.
+enum StoredMessage {
+    Domain(DomainErrorCode),
+    ExcelValue(ExcelError),
+    InvalidHandle,
+    StaleHandle,
+    Closing,
+    Overloaded,
+    ReentrantCall,
+    Panic,
+    Internal(DiagnosticId),
+    Static(&'static str),
+    Text(String),
+}
+
+impl StoredMessage {
+    fn new(error: &XllError, message: Option<&str>) -> Option<Self> {
+        if let Some(message) = message {
+            return Some(Self::Text(try_text(format_args!("{message}"))?));
+        }
+        Some(match error {
+            XllError::Domain { code } => Self::Domain(*code),
+            XllError::ExcelValue(error) => Self::ExcelValue(*error),
+            XllError::InvalidHandle => Self::InvalidHandle,
+            XllError::StaleHandle => Self::StaleHandle,
+            XllError::Closing => Self::Closing,
+            XllError::Overloaded => Self::Overloaded,
+            XllError::ReentrantCall => Self::ReentrantCall,
+            XllError::Panic => Self::Panic,
+            XllError::Internal { diagnostic_id } => Self::Internal(*diagnostic_id),
+            XllError::Custom {
+                message: Cow::Borrowed(message),
+                ..
+            } => Self::Static(message),
+            _ => Self::Text(try_text(format_args!(
+                "{}",
+                super::payload::TracedError(error)
+            ))?),
+        })
+    }
+
+    fn dynamic_bytes(&self) -> usize {
+        match self {
+            Self::Text(text) => text.capacity(),
+            _ => 0,
+        }
+    }
+
+    fn try_text(&self) -> Option<String> {
+        let error = match self {
+            Self::Domain(code) => XllError::Domain { code: *code },
+            Self::ExcelValue(error) => XllError::ExcelValue(*error),
+            Self::InvalidHandle => XllError::InvalidHandle,
+            Self::StaleHandle => XllError::StaleHandle,
+            Self::Closing => XllError::Closing,
+            Self::Overloaded => XllError::Overloaded,
+            Self::ReentrantCall => XllError::ReentrantCall,
+            Self::Panic => XllError::Panic,
+            Self::Internal(diagnostic_id) => XllError::Internal {
+                diagnostic_id: *diagnostic_id,
+            },
+            Self::Static(text) => return try_text(format_args!("{text}")),
+            Self::Text(text) => return try_text(format_args!("{text}")),
+        };
+        try_text(format_args!("{error}"))
+    }
+}
+
+impl StoredRecord {
+    fn try_snapshot(&self) -> Option<DiagnosticRecord> {
+        Some(DiagnosticRecord {
+            diagnostic_id: self.metadata.diagnostic_id,
+            udf_id: try_text(format_args!("{}", self.metadata.udf_id))?,
+            call_id: self.metadata.call_id,
+            calculation_id: self.metadata.calculation_id,
+            timestamp: self.metadata.timestamp,
+            error_kind: self.error_kind,
+            excel_error: self.excel_error,
+            argument: match self.argument {
+                Some(argument) => Some(try_text(format_args!("{argument}"))?),
+                None => None,
+            },
+            message: self.message.try_text()?,
+        })
+    }
 }
 
 pub(super) struct FailureMetadata {
@@ -156,11 +227,11 @@ impl HistoryState {
         self.records.capacity() * size_of::<StoredRecord>() + self.dynamic_bytes
     }
 
-    fn evict_oldest(&mut self) {
-        if let Some(oldest) = self.records.pop_front() {
-            self.dynamic_bytes -= oldest.record.dynamic_bytes();
+    fn evict_oldest(&mut self) -> Option<StoredRecord> {
+        self.records.pop_front().inspect(|oldest| {
+            self.dynamic_bytes -= oldest.message.dynamic_bytes();
             self.dropped_events = self.dropped_events.saturating_add(1);
-        }
+        })
     }
 }
 
@@ -231,7 +302,7 @@ impl DiagnosticHistory {
                 page.allocation_failed = true;
                 return page;
             }
-            let Some(record) = stored.record.try_clone() else {
+            let Some(record) = stored.try_snapshot() else {
                 page.allocation_failed = true;
                 return page;
             };
@@ -268,10 +339,14 @@ impl DiagnosticHistory {
         error: &XllError,
         message: Option<&str>,
     ) {
+        // Formatting and fallible text allocations do not need the history
+        // lock. Commit the sequence only after preparation so every visible
+        // cursor still describes a completed recording attempt.
+        let record = Self::make_record(metadata, error, message);
         let mut state = self.state.lock();
         let sequence = state.next_sequence;
         state.next_sequence = state.next_sequence.saturating_add(1);
-        let Some(record) = Self::make_record(metadata, error, message) else {
+        let Some(mut record) = record else {
             state.dropped_events = state.dropped_events.saturating_add(1);
             return;
         };
@@ -293,42 +368,42 @@ impl DiagnosticHistory {
             state.dropped_events = state.dropped_events.saturating_add(1);
             return;
         }
-        let bytes = record.dynamic_bytes();
+        let bytes = record.message.dynamic_bytes();
         if bytes > self.limits.max_bytes.saturating_sub(fixed_bytes) {
             state.dropped_events = state.dropped_events.saturating_add(1);
             return;
         }
+        let mut retired = None;
         while state.records.len() >= self.limits.max_records
             || state.records.len() >= state.records.capacity()
             || bytes > self.limits.max_bytes.saturating_sub(state.retained_bytes())
         {
-            state.evict_oldest();
+            retired = state.evict_oldest();
         }
         state.dynamic_bytes += bytes;
-        state.records.push_back(StoredRecord { sequence, record });
+        record.sequence = sequence;
+        state.records.push_back(record);
+        drop(state);
+        // Count-bounded steady-state recording displaces one record. Release
+        // its strings after the lock; byte-pressure eviction may displace more.
+        drop(retired);
     }
 
     fn make_record(
         metadata: FailureMetadata,
         error: &XllError,
         message: Option<&str>,
-    ) -> Option<DiagnosticRecord> {
-        Some(DiagnosticRecord {
-            diagnostic_id: metadata.diagnostic_id,
-            udf_id: try_text(format_args!("{}", metadata.udf_id))?,
-            call_id: metadata.call_id,
-            calculation_id: metadata.calculation_id,
-            timestamp: metadata.timestamp,
+    ) -> Option<StoredRecord> {
+        Some(StoredRecord {
+            sequence: 0,
+            metadata,
             error_kind: crate::execution::classify_error(error).0,
             excel_error: error.excel_error(),
             argument: match error {
-                XllError::Input { argument, .. } => Some(try_text(format_args!("{argument}"))?),
+                XllError::Input { argument, .. } => Some(argument),
                 _ => None,
             },
-            message: match message {
-                Some(message) => try_text(format_args!("{message}"))?,
-                None => try_text(format_args!("{}", super::payload::TracedError(error)))?,
-            },
+            message: StoredMessage::new(error, message)?,
         })
     }
 }
@@ -427,6 +502,151 @@ mod tests {
         assert_eq!(page.errors[1].error_kind, DiagnosticErrorKind::ExcelValue);
         assert_eq!(page.errors[1].excel_error, ExcelError::NotAvailable);
         assert_eq!(page.missed_events, 0);
+    }
+
+    #[test]
+    fn compact_failures_keep_canonical_messages_without_owned_recording_text() {
+        let history = DiagnosticHistory::new();
+        let errors = [
+            XllError::Domain {
+                code: DomainErrorCode::InvalidInput,
+            },
+            XllError::Domain {
+                code: DomainErrorCode::Overflow,
+            },
+            XllError::Domain {
+                code: DomainErrorCode::NativeFailure,
+            },
+            XllError::ExcelValue(ExcelError::Null),
+            XllError::ExcelValue(ExcelError::DivisionByZero),
+            XllError::ExcelValue(ExcelError::Value),
+            XllError::ExcelValue(ExcelError::Reference),
+            XllError::ExcelValue(ExcelError::Name),
+            XllError::ExcelValue(ExcelError::Number),
+            XllError::ExcelValue(ExcelError::NotAvailable),
+            XllError::ExcelValue(ExcelError::GettingData),
+            XllError::InvalidHandle,
+            XllError::StaleHandle,
+            XllError::Closing,
+            XllError::Overloaded,
+            XllError::ReentrantCall,
+            XllError::Panic,
+            XllError::Internal {
+                diagnostic_id: DiagnosticId::from_u64(0x1a2b),
+            },
+            XllError::custom(ExcelError::Number, "static application detail"),
+        ];
+        for (id, error) in errors.iter().enumerate() {
+            record(&history, id as u64, error);
+        }
+        assert_eq!(history.state.lock().dynamic_bytes, 0);
+        let page = history.errors_since(DiagnosticCursor::START, errors.len());
+        assert_eq!(page.missed_events, 0);
+        assert_eq!(page.errors.len(), errors.len());
+        for (record, error) in page.errors.iter().zip(&errors) {
+            assert_eq!(record.message, error.to_string());
+            assert_eq!(record.excel_error, error.excel_error());
+            assert_eq!(record.error_kind, crate::execution::classify_error(error).0);
+        }
+    }
+
+    #[test]
+    fn explicit_detail_overrides_compact_error_and_is_owned_synchronously() {
+        let history = DiagnosticHistory::new();
+        let mut detail = "panic payload with application context".to_owned();
+        history.record(
+            FailureMetadata {
+                diagnostic_id: DiagnosticId::from_u64(1),
+                udf_id: "prices",
+                call_id: None,
+                calculation_id: None,
+                timestamp: SystemTime::UNIX_EPOCH,
+            },
+            &XllError::Panic,
+            Some(&detail),
+        );
+        detail.clear();
+        let page = history.errors_since(DiagnosticCursor::START, 1);
+        assert_eq!(
+            page.errors[0].message,
+            "panic payload with application context"
+        );
+        assert_eq!(page.errors[0].error_kind, DiagnosticErrorKind::Panic);
+        assert!(history.state.lock().dynamic_bytes > 0);
+    }
+
+    #[test]
+    fn static_identity_argument_and_message_are_utf8_bounded_in_snapshots() {
+        const LENGTH: usize = (super::super::DIAGNOSTIC_TEXT_MAX_BYTES / 3 + 2) * 3;
+        static TEXT: [u8; LENGTH] = {
+            let mut text = [0; LENGTH];
+            let mut index = 0;
+            while index < LENGTH {
+                text[index] = 0xe6;
+                text[index + 1] = 0x97;
+                text[index + 2] = 0xa5;
+                index += 3;
+            }
+            text
+        };
+        let text = std::str::from_utf8(&TEXT).unwrap();
+        let history = DiagnosticHistory::new();
+        history.record(
+            FailureMetadata {
+                diagnostic_id: DiagnosticId::from_u64(1),
+                udf_id: text,
+                call_id: None,
+                calculation_id: None,
+                timestamp: SystemTime::UNIX_EPOCH,
+            },
+            &XllError::input(text, InputError::NonFinite),
+            None,
+        );
+        record(&history, 2, &XllError::custom(ExcelError::Value, text));
+        let page = history.errors_since(DiagnosticCursor::START, 2);
+        for text in [
+            &page.errors[0].udf_id,
+            page.errors[0].argument.as_ref().unwrap(),
+            &page.errors[0].message,
+            &page.errors[1].message,
+        ] {
+            assert!(text.len() <= super::super::DIAGNOSTIC_TEXT_MAX_BYTES);
+            assert!(text.ends_with(super::super::DIAGNOSTIC_TRUNCATION_SUFFIX));
+        }
+        let error = XllError::custom(ExcelError::Value, text);
+        assert_eq!(
+            page.errors[1].message,
+            try_text(format_args!(
+                "{}",
+                super::super::payload::TracedError(&error)
+            ))
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn compact_records_obey_fixed_byte_budget_and_expose_rejected_text_gaps() {
+        let history = DiagnosticHistory::with_limits(DiagnosticHistoryLimits {
+            max_records: 1,
+            max_bytes: size_of::<StoredRecord>(),
+        });
+        record(&history, 1, &XllError::Panic);
+        record(
+            &history,
+            2,
+            &XllError::custom(ExcelError::Number, "owned detail".to_owned()),
+        );
+        let first = history.errors_since(DiagnosticCursor::START, 10);
+        assert_eq!(first.errors.len(), 1);
+        assert_eq!(first.errors[0].diagnostic_id.as_u64(), 1);
+        assert_eq!(first.missed_events, 1);
+        assert_eq!(history.stats().retained_bytes, size_of::<StoredRecord>());
+        record(&history, 3, &XllError::Closing);
+        let next = history.errors_since(first.next_cursor, 10);
+        assert_eq!(next.errors.len(), 1);
+        assert_eq!(next.errors[0].diagnostic_id.as_u64(), 3);
+        assert_eq!(next.missed_events, 0);
+        assert_eq!(history.stats().dropped_events, 2);
     }
 
     #[test]

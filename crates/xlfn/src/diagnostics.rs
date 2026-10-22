@@ -533,7 +533,7 @@ pub(crate) fn report_udf_failure_with_history_no_unwind(
         error,
         None,
     );
-    report_with_id_no_unwind(udf_id, error, diagnostic_id, timestamp);
+    report_with_id_no_unwind(udf_id, error, diagnostic_id, || timestamp);
 }
 
 /// Preserves bounded standard panic text in history without retaining the payload.
@@ -557,13 +557,13 @@ pub(crate) fn report_udf_panic_with_history_no_unwind(
         &XllError::Panic,
         Some(message),
     );
-    report_with_id_no_unwind(udf_id, &XllError::Panic, diagnostic_id, timestamp);
+    report_with_id_no_unwind(udf_id, &XllError::Panic, diagnostic_id, || timestamp);
 }
 
 /// Reports framework and application failures, including diagnostic identity.
 pub(crate) fn report_no_unwind(udf_id: &'static str, error: &XllError) -> DiagnosticId {
     let diagnostic_id = DiagnosticId::from_u64(NEXT_ID.fetch_add(1, Ordering::Relaxed));
-    report_with_id_no_unwind(udf_id, error, diagnostic_id, SystemTime::now());
+    report_with_id_no_unwind(udf_id, error, diagnostic_id, SystemTime::now);
     diagnostic_id
 }
 
@@ -571,7 +571,7 @@ fn report_with_id_no_unwind(
     udf_id: &'static str,
     error: &XllError,
     diagnostic_id: DiagnosticId,
-    timestamp: SystemTime,
+    timestamp: impl FnOnce() -> SystemTime,
 ) {
     let argument = match error {
         XllError::Input { argument, .. } => Some(*argument),
@@ -593,7 +593,9 @@ fn report_with_id_no_unwind(
                 udf_id,
                 argument,
                 diagnostic_id,
-                timestamp,
+                // Sink-only reports need no wall-clock access unless a sink
+                // admits the event. History reports reuse their captured time.
+                timestamp: timestamp(),
             });
         }
     }));
@@ -614,6 +616,46 @@ mod tests {
         fn report(&self, _: &DiagnosticEvent<'_>) {
             panic!("injected diagnostic failure");
         }
+    }
+
+    #[test]
+    fn miri_sink_only_timestamp_is_lazy_and_preserved_on_delivery() {
+        let _router_guard = prepare_global_router();
+        let samples = std::cell::Cell::new(0);
+        let timestamp = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(17);
+        let sample = || {
+            samples.set(samples.get() + 1);
+            timestamp
+        };
+        report_with_id_no_unwind(
+            "sinkless_timestamp",
+            &XllError::Panic,
+            DiagnosticId::from_u64(1),
+            sample,
+        );
+        assert_eq!(samples.get(), 0);
+        // Exercise the public framework reporter too: Linux Miri isolation
+        // rejects wall-clock reads, so this catches an eager real timestamp.
+        report_no_unwind("sinkless_real_timestamp", &XllError::Panic);
+
+        struct TimestampSink(std::sync::mpsc::SyncSender<SystemTime>);
+        impl DiagnosticSink for TimestampSink {
+            fn report(&self, event: &DiagnosticEvent<'_>) {
+                self.0.send(event.timestamp()).unwrap();
+            }
+        }
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        set_diagnostic_sink(TimestampSink(sender)).unwrap();
+        report_with_id_no_unwind(
+            "delivered_timestamp",
+            &XllError::Panic,
+            DiagnosticId::from_u64(2),
+            sample,
+        );
+        clear_diagnostic_sink().unwrap();
+        assert_eq!(samples.get(), 1);
+        assert_eq!(receiver.try_recv().unwrap(), timestamp);
+        assert!(receiver.try_recv().is_err());
     }
 
     #[test]
