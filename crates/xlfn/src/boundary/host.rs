@@ -326,8 +326,8 @@ mod tests {
         use crate::registration::RegistrationSignature;
         use xlfn_common::{ExecutionKind, FunctionVisibility};
         use xlfn_sys::{
-            XL_FREE, XL_GET_NAME, XLERR_NAME, XLF_EVALUATE, XLF_REGISTER, XLF_UNREGISTER, XLOPER12,
-            XLOPER12Value, XLRET_FAILED, XLRET_SUCCESS, XLTYPE_STR,
+            XL_EVENT_REGISTER, XL_FREE, XL_GET_NAME, XLERR_NAME, XLF_EVALUATE, XLF_REGISTER,
+            XLF_UNREGISTER, XLOPER12, XLOPER12Value, XLRET_FAILED, XLRET_SUCCESS, XLTYPE_STR,
         };
 
         struct ReloadAddin;
@@ -468,6 +468,7 @@ mod tests {
                     XLOPER12::number(id as f64)
                 }
                 XLF_UNREGISTER => XLOPER12::boolean(true),
+                XL_EVENT_REGISTER => XLOPER12::integer(1),
                 _ => return XLRET_FAILED,
             };
             // SAFETY: Excel's callback contract supplies writable result
@@ -487,6 +488,7 @@ mod tests {
                 export_name: "test_reload_export",
                 excel_name: "TEST.RELOAD.EXPORT",
                 signature: RegistrationSignature {
+                    return_abi: xlfn_common::ReturnAbi::Value12,
                     execution: ExecutionKind::MainThread,
                     arguments: &[],
                     volatile: false,
@@ -536,15 +538,19 @@ mod tests {
                     calls,
                     [
                         XL_GET_NAME,
+                        XL_EVENT_REGISTER,
                         XLF_EVALUATE,
                         XLF_REGISTER,
                         XLF_UNREGISTER,
                         XLF_EVALUATE,
+                        XL_EVENT_REGISTER,
                         XL_GET_NAME,
+                        XL_EVENT_REGISTER,
                         XLF_EVALUATE,
                         XLF_REGISTER,
                         XLF_UNREGISTER,
                         XLF_EVALUATE,
+                        XL_EVENT_REGISTER,
                     ]
                 );
                 assert_eq!(

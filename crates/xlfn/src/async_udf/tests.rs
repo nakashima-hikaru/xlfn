@@ -492,7 +492,7 @@ fn close_allows_aborted_future_drop_to_reenter_runtime() {
     impl Drop for ReentrantDrop {
         fn drop(&mut self) {
             cancel_async_calculation(self.runtime);
-            end_async_calculation(self.runtime);
+            self.runtime.finish_calculation();
             self.dropped.send(()).unwrap();
         }
     }
@@ -603,7 +603,7 @@ fn close_allows_aborted_layer_cleanup_to_reenter_runtime() {
     let (exited_tx, exited_rx) = std::sync::mpsc::channel();
     let on_exit = std::sync::Arc::new(move || {
         cancel_async_calculation(runtime);
-        end_async_calculation(runtime);
+        runtime.finish_calculation();
         exited_tx.send(()).unwrap();
     });
     let open_attempt = runtime.begin_open().unwrap();

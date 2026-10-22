@@ -11,7 +11,7 @@ PRIMARY = {
     "S03": ("p50_s", "lower"), "S04": ("calls_per_s", "higher"),
     "M01": ("ns_per_element", "lower"), "M02": ("ns_per_element", "lower"),
     "M03": ("ns_per_element", "lower"), "M04": ("ns_per_element", "lower"),
-    "M05": ("p50_s", "lower"),
+    "M05": ("p50_s", "lower"), "M06": ("fp12_over_q_ratio", "lower"),
     "T01": ("ns_per_char", "lower"), "T02": ("ns_per_char", "lower"),
     "T03": ("ns_per_char", "lower"),
     "P01": ("calls_per_s", "higher"), "P02": ("calls_per_s", "higher"),
@@ -54,6 +54,15 @@ def summarize(records: list[dict]) -> list[dict]:
                "excel_dna_status": dna["status"] if dna else "missing",
                "xlfn_value": None, "excel_dna_value": None, "xlfn_advantage_ratio": None,
                "comparable": False, "reason": "missing or failed run"}
+        if id == "M06":
+            row.update(comparison="within_xlfn_fp12_vs_q", reason="within-xlfn return ABI comparison")
+            if xlfn and xlfn["status"] == "ok":
+                metrics = xlfn["metrics"]
+                row.update(q_p50_s=metrics["q_p50_s"], fp12_p50_s=metrics["fp12_p50_s"],
+                           fp12_over_q_ratio=metrics["fp12_over_q_ratio"],
+                           fp12_change_percent=metrics["fp12_change_percent"])
+            pairs.append(row)
+            continue
         if id.startswith("N"):
             row.update(comparison="within_xlfn_native_vs_q", reason="within-xlfn ABI comparison")
             if xlfn and xlfn["status"] == "ok":

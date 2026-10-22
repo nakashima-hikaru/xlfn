@@ -704,6 +704,7 @@ impl<A: Addin> AsRef<A::SharedState> for ThreadSafeContext<'_, A> {
 /// selects thread-safe execution without a function-level mode option.
 pub struct ThreadSafeContext<'call, A: Addin> {
     state: &'call A::SharedState,
+    diagnostics: &'call crate::diagnostics::DiagnosticHistory,
 }
 
 impl<A: Addin> Clone for ThreadSafeContext<'_, A> {
@@ -785,14 +786,23 @@ impl<A: Addin> AsRef<A::SharedState> for MainThreadContext<'_, A> {
 impl<'call, A: Addin> ThreadSafeContext<'call, A> {
     #[doc(hidden)]
     #[must_use]
-    pub const fn new(state: &'call A::SharedState) -> Self {
-        Self { state }
+    pub const fn new(
+        state: &'call A::SharedState,
+        diagnostics: &'call crate::diagnostics::DiagnosticHistory,
+    ) -> Self {
+        Self { state, diagnostics }
     }
 
     #[must_use]
     /// Borrows shared state for the whole worksheet invocation.
     pub const fn state(&self) -> &'call A::SharedState {
         self.state
+    }
+
+    /// Returns this add-in runtime's bounded failure history.
+    #[must_use]
+    pub const fn diagnostics(&self) -> &'call crate::diagnostics::DiagnosticHistory {
+        self.diagnostics
     }
 }
 
@@ -805,6 +815,7 @@ impl<'call, A: Addin> ThreadSafeContext<'call, A> {
 /// selects main-thread execution without a function-level mode option.
 pub struct MainThreadContext<'call, A: Addin> {
     state: &'call A::SharedState,
+    diagnostics: &'call crate::diagnostics::DiagnosticHistory,
     #[cfg(feature = "rtd")]
     rtd: RtdCallContext<'call>,
     _not_send_or_sync: PhantomData<Rc<()>>,
@@ -814,6 +825,7 @@ impl<A: Addin> Clone for MainThreadContext<'_, A> {
     fn clone(&self) -> Self {
         Self {
             state: self.state,
+            diagnostics: self.diagnostics,
             #[cfg(feature = "rtd")]
             rtd: self.rtd,
             _not_send_or_sync: PhantomData,
@@ -834,6 +846,7 @@ impl<A: Addin> Clone for MainThreadContext<'_, A> {
 /// selects macro-sheet execution without a function-level mode option.
 pub struct MacroSheetContext<'call, A: Addin> {
     state: &'call A::SharedState,
+    diagnostics: &'call crate::diagnostics::DiagnosticHistory,
     host: ExcelHost<'call>,
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
@@ -842,6 +855,7 @@ impl<A: Addin> Clone for MacroSheetContext<'_, A> {
     fn clone(&self) -> Self {
         Self {
             state: self.state,
+            diagnostics: self.diagnostics,
             host: self.host,
             _not_send_or_sync: PhantomData,
         }
@@ -859,10 +873,12 @@ impl<A: Addin> MacroSheetContext<'_, A> {
     #[must_use]
     pub(crate) fn new<'ctx>(
         state: &'ctx A::SharedState,
+        diagnostics: &'ctx crate::diagnostics::DiagnosticHistory,
         host: ExcelHost<'ctx>,
     ) -> MacroSheetContext<'ctx, A> {
         MacroSheetContext {
             state,
+            diagnostics,
             host,
             _not_send_or_sync: PhantomData,
         }
@@ -870,6 +886,12 @@ impl<A: Addin> MacroSheetContext<'_, A> {
 }
 
 impl<'call, A: Addin> MacroSheetContext<'call, A> {
+    /// Returns this add-in runtime's bounded failure history.
+    #[must_use]
+    pub const fn diagnostics(&self) -> &'call crate::diagnostics::DiagnosticHistory {
+        self.diagnostics
+    }
+
     #[must_use]
     /// Borrows shared state for the whole worksheet invocation.
     pub const fn state(&self) -> &'call A::SharedState {
@@ -901,10 +923,12 @@ impl<A: Addin> MainThreadContext<'_, A> {
     #[cfg(feature = "rtd")]
     pub(crate) fn new<'ctx>(
         state: &'ctx A::SharedState,
+        diagnostics: &'ctx crate::diagnostics::DiagnosticHistory,
         rtd: RtdCallContext<'ctx>,
     ) -> MainThreadContext<'ctx, A> {
         MainThreadContext {
             state,
+            diagnostics,
             #[cfg(feature = "rtd")]
             rtd,
             _not_send_or_sync: PhantomData,
@@ -914,15 +938,25 @@ impl<A: Addin> MainThreadContext<'_, A> {
     #[doc(hidden)]
     #[must_use]
     #[cfg(not(feature = "rtd"))]
-    pub(crate) fn new<'ctx>(state: &'ctx A::SharedState) -> MainThreadContext<'ctx, A> {
+    pub(crate) fn new<'ctx>(
+        state: &'ctx A::SharedState,
+        diagnostics: &'ctx crate::diagnostics::DiagnosticHistory,
+    ) -> MainThreadContext<'ctx, A> {
         MainThreadContext {
             state,
+            diagnostics,
             _not_send_or_sync: PhantomData,
         }
     }
 }
 
 impl<'call, A: Addin> MainThreadContext<'call, A> {
+    /// Returns this add-in runtime's bounded failure history.
+    #[must_use]
+    pub const fn diagnostics(&self) -> &'call crate::diagnostics::DiagnosticHistory {
+        self.diagnostics
+    }
+
     #[must_use]
     /// Borrows shared state for the whole worksheet invocation.
     pub const fn state(&self) -> &'call A::SharedState {
@@ -1022,7 +1056,7 @@ mod tests {
         let opening = runtime.begin_open().unwrap();
         let mut opening = runtime.publish(opening, state, ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
-        let thread_safe = ThreadSafeContext::<TestU32Addin>::new(&state);
+        let thread_safe = ThreadSafeContext::<TestU32Addin>::new(&state, runtime.diagnostics());
         let callbacks = crate::host_callback::HostCallbackSession::new();
         crate::call::with_excel_call_scope_and_state(&state, |state, _scope| {
             #[cfg(feature = "rtd")]
@@ -1030,6 +1064,7 @@ mod tests {
                 .with_generation_services(|services| {
                     let main_thread = MainThreadContext::<TestU32Addin>::new(
                         state,
+                        runtime.diagnostics(),
                         crate::rtd::RtdCallContext::new(
                             services.rtd_call_access(),
                             crate::host_api::ExcelHost::new(&callbacks),
@@ -1037,12 +1072,25 @@ mod tests {
                     );
                     let macro_sheet = MacroSheetContext::<TestU32Addin>::new(
                         state,
+                        runtime.diagnostics(),
                         crate::host_api::ExcelHost::new(&callbacks),
                     );
 
                     assert_eq!(thread_safe.state(), &17);
                     assert_eq!(main_thread.state(), &17);
                     assert_eq!(macro_sheet.state(), &17);
+                    assert!(std::ptr::eq(
+                        thread_safe.diagnostics(),
+                        runtime.diagnostics()
+                    ));
+                    assert!(std::ptr::eq(
+                        main_thread.diagnostics(),
+                        runtime.diagnostics()
+                    ));
+                    assert!(std::ptr::eq(
+                        macro_sheet.diagnostics(),
+                        runtime.diagnostics()
+                    ));
 
                     let copied = main_thread.clone();
                     assert_eq!(copied.state(), &17);
@@ -1051,15 +1099,29 @@ mod tests {
                 .unwrap();
             #[cfg(not(feature = "rtd"))]
             {
-                let main_thread = MainThreadContext::<TestU32Addin>::new(state);
+                let main_thread =
+                    MainThreadContext::<TestU32Addin>::new(state, runtime.diagnostics());
                 let macro_sheet = MacroSheetContext::<TestU32Addin>::new(
                     state,
+                    runtime.diagnostics(),
                     crate::host_api::ExcelHost::new(&callbacks),
                 );
 
                 assert_eq!(thread_safe.state(), &17);
                 assert_eq!(main_thread.state(), &17);
                 assert_eq!(macro_sheet.state(), &17);
+                assert!(std::ptr::eq(
+                    thread_safe.diagnostics(),
+                    runtime.diagnostics()
+                ));
+                assert!(std::ptr::eq(
+                    main_thread.diagnostics(),
+                    runtime.diagnostics()
+                ));
+                assert!(std::ptr::eq(
+                    macro_sheet.diagnostics(),
+                    runtime.diagnostics()
+                ));
 
                 let copied = main_thread.clone();
                 assert_eq!(copied.state(), &17);
@@ -1097,12 +1159,16 @@ mod tests {
         let reference: crate::reference::ExcelReference<'_> =
             unsafe { crate::reference::reference_from_raw("reference", &mut raw) }.unwrap();
         let state = ();
+        let diagnostics = crate::diagnostics::DiagnosticHistory::new();
         for status in [XLRET_ABORT, XLRET_UNCALCED] {
             crate::test_callback::reset();
             crate::test_callback::set_terminal(XL_SHEET_NM, status);
             let callbacks = crate::host_callback::HostCallbackSession::new();
-            let context =
-                MacroSheetContext::<()>::new(&state, crate::host_api::ExcelHost::new(&callbacks));
+            let context = MacroSheetContext::<()>::new(
+                &state,
+                &diagnostics,
+                crate::host_api::ExcelHost::new(&callbacks),
+            );
             let cloned_before_terminal = context.clone();
             assert!(context.sheet_name(&reference).is_err());
             assert_eq!(crate::test_callback::total_calls(), 2);
@@ -1222,6 +1288,7 @@ mod tests {
                 .with_generation_services(|services| {
                     let context = MainThreadContext::<()>::new(
                         &_state,
+                        runtime.diagnostics(),
                         crate::rtd::RtdCallContext::new(
                             services.rtd_call_access(),
                             crate::host_api::ExcelHost::new(&callbacks),

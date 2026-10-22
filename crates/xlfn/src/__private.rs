@@ -19,6 +19,15 @@ pub mod v1 {
             .unwrap_or_else(|_| crate::return_abi::closing_error_pointer())
     }
 
+    /// Final generated FP12 boundary. Excel interprets null as #NUM!.
+    #[doc(hidden)]
+    pub fn export_numeric_boundary(
+        operation: impl FnOnce() -> *mut xlfn_sys::FP12,
+    ) -> *mut xlfn_sys::FP12 {
+        crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(operation))
+            .unwrap_or(std::ptr::null_mut())
+    }
+
     /// Final metadata boundary, whose detached fallback is always #VALUE!.
     #[doc(hidden)]
     pub fn export_metadata_boundary(
@@ -55,7 +64,6 @@ pub mod v1 {
     use crate::error::{XllError, XllResult};
     use crate::reference::{FromExcelReference, reference_from_raw};
     use crate::registration::{RegistrationDescriptor, RegistrationSignature};
-    #[cfg(feature = "async")]
     use crate::return_abi::ffi_boundary_void;
     pub use crate::return_abi::metadata::AddinMetadata;
     use crate::return_abi::{free_return_boundary, udf_boundary_named};
@@ -94,11 +102,11 @@ pub mod v1 {
     pub use inventory::submit as submit_registration;
 
     #[doc(hidden)]
-    pub use crate::call_return::ReturnContext;
+    pub use crate::call_return::{NumericReturn, ReturnContext};
     #[doc(hidden)]
     pub use crate::input_identity::InputIdentityEncoder;
     #[doc(hidden)]
-    pub use crate::registration::{ArgumentAbi, ArgumentDescriptor};
+    pub use crate::registration::{ArgumentAbi, ArgumentDescriptor, ReturnAbi};
     /// Forwards the generated COM export to the private Excel RTD transport.
     #[cfg(any(feature = "rtd", feature = "handles"))]
     #[doc(hidden)]
@@ -125,6 +133,7 @@ pub mod v1 {
     pub use crate::__xlfn_private_async_exports as __xlfn_async_exports;
     #[doc(hidden)]
     pub use crate::__xlfn_private_async_only as __xlfn_async_only;
+    pub use crate::__xlfn_private_calculation_exports as __xlfn_calculation_exports;
     #[doc(hidden)]
     pub use crate::__xlfn_private_excel_rtd_exports as __xlfn_excel_rtd_exports;
     pub use crate::call_return::ReturnPayload as ExcelOutput;
@@ -203,10 +212,11 @@ pub mod v1 {
 
     /// Instantiates a [`ThreadSafeContext`](crate::addin::ThreadSafeContext) for generated UDFs.
     #[doc(hidden)]
-    pub fn thread_safe_context<'state, A: Addin>(
-        state: &'state A::SharedState,
-    ) -> crate::addin::ThreadSafeContext<'state, A> {
-        crate::addin::ThreadSafeContext::new(state)
+    pub fn thread_safe_context<'call, A: Addin, M: InputMode>(
+        frame: &CallFrame<'call, M>,
+        state: &'call A::SharedState,
+    ) -> crate::addin::ThreadSafeContext<'call, A> {
+        crate::addin::ThreadSafeContext::new(state, frame.diagnostics)
     }
 
     /// Instantiates a [`MainThreadContext`](crate::addin::MainThreadContext) for generated UDFs.
@@ -219,6 +229,7 @@ pub mod v1 {
         {
             crate::addin::MainThreadContext::new(
                 state,
+                _frame.diagnostics,
                 crate::rtd::RtdCallContext::new(
                     _frame.rtd_access(),
                     crate::host_api::ExcelHost::new(_frame.callbacks),
@@ -226,7 +237,7 @@ pub mod v1 {
             )
         }
         #[cfg(not(feature = "rtd"))]
-        crate::addin::MainThreadContext::new(state)
+        crate::addin::MainThreadContext::new(state, _frame.diagnostics)
     }
 
     /// Instantiates a [`MacroSheetContext`](crate::addin::MacroSheetContext) for generated UDFs.
@@ -237,6 +248,7 @@ pub mod v1 {
     ) -> crate::addin::MacroSheetContext<'call, A> {
         crate::addin::MacroSheetContext::new(
             state,
+            frame.diagnostics,
             crate::host_api::ExcelHost::new(frame.callbacks),
         )
     }
@@ -309,6 +321,7 @@ pub mod v1 {
 
         arguments: &'static [ArgumentDescriptor],
         argument_abis: &'static [ArgumentAbi],
+        return_abi: ReturnAbi,
 
         execution: ExecutionKind,
         volatile: bool,
@@ -331,6 +344,7 @@ pub mod v1 {
             help_topic: &'static str,
             arguments: &'static [ArgumentDescriptor],
             argument_abis: &'static [ArgumentAbi],
+            return_abi: ReturnAbi,
             execution: ExecutionKind,
             volatile: bool,
             visibility: FunctionVisibility,
@@ -343,6 +357,7 @@ pub mod v1 {
                 help_topic,
                 arguments,
                 argument_abis,
+                return_abi,
                 execution,
                 volatile,
                 visibility,
@@ -363,6 +378,7 @@ pub mod v1 {
                 excel_name: self.excel_name,
                 signature: RegistrationSignature {
                     execution: self.execution,
+                    return_abi: self.return_abi,
                     arguments: self.argument_abis,
                     volatile: self.volatile,
                 },
@@ -511,6 +527,7 @@ pub mod v1 {
     pub struct CallFrame<'call, M: InputMode> {
         arguments: ArgumentContext<'call, M>,
         callbacks: &'call crate::host_callback::HostCallbackSession,
+        diagnostics: &'call crate::diagnostics::DiagnosticHistory,
     }
 
     impl<'call, M: InputMode> CallFrame<'call, M> {
@@ -524,6 +541,7 @@ pub mod v1 {
             Self {
                 arguments: ArgumentContext::new(call, scope, argument_count),
                 callbacks,
+                diagnostics: call.diagnostics(),
             }
         }
 
@@ -900,6 +918,44 @@ pub mod v1 {
         })
     }
 
+    /// Top-level synchronous FP12 UDF execution boundary.
+    ///
+    /// # Safety
+    /// The caller must satisfy the entrypoint and callback authority contract of [`sync_udf`].
+    #[doc(hidden)]
+    #[allow(unsafe_code, reason = "Generated Excel entrypoint authority boundary")]
+    pub unsafe fn sync_udf_fp12<A: Addin, R: NumericReturn, F>(
+        runtime: &'static MacroRuntime<A>,
+        udf_id: &'static str,
+        excel_name: &'static str,
+        argument_count: usize,
+        execute: F,
+    ) -> *mut xlfn_sys::FP12
+    where
+        F: for<'call> FnOnce(
+            &'call A::SharedState,
+            &mut CallFrame<'call, R::InputMode>,
+        ) -> XllResult<crate::output::NumericArrayOutput>,
+    {
+        crate::return_abi::udf_boundary_numeric_named(
+            runtime.runtime(),
+            udf_id,
+            excel_name,
+            |_, call| {
+                let callbacks = crate::host_callback::HostCallbackSession::new();
+                crate::call::with_excel_callback_scope_and_call(
+                    call,
+                    &callbacks,
+                    |call, scope, callbacks| {
+                        let mut frame =
+                            CallFrame::<R::InputMode>::new(call, scope, callbacks, argument_count);
+                        execute(call.state(), &mut frame)
+                    },
+                )
+            },
+        )
+    }
+
     /// Top-level asynchronous UDF execution boundary.
     ///
     /// # Safety
@@ -1024,12 +1080,11 @@ pub mod v1 {
         });
     }
 
-    /// Ends calculation in the async runtime.
-    #[cfg(feature = "async")]
+    /// Advances diagnostic calculation identity and async completion state.
     #[doc(hidden)]
-    pub fn end_async_calculation<A: Addin>(runtime: &'static MacroRuntime<A>) {
+    pub fn end_calculation<A: Addin>(runtime: &'static MacroRuntime<A>) {
         ffi_boundary_void(runtime.runtime(), || {
-            crate::async_udf::end_async_calculation(runtime.runtime());
+            runtime.runtime().finish_calculation();
         });
     }
 
@@ -1099,11 +1154,13 @@ pub mod v1 {
                 let state = (
                     crate::utf16::encode_counted(text, "label", 32_767).unwrap(),
                     crate::host_callback::HostCallbackSession::new(),
+                    crate::diagnostics::DiagnosticHistory::new(),
                 );
                 with_excel_call_scope_and_state(&state, |state, scope| {
                     let mut frame = CallFrame::<M> {
                         arguments: ArgumentContext::from_scope(scope, 1),
                         callbacks: &state.1,
+                        diagnostics: &state.2,
                     };
                     // SAFETY: state owns the complete immutable counted input
                     // while admission copies it into the returned String.

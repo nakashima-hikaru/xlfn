@@ -1,0 +1,5 @@
+error: duplicate `return_abi`
+ --> tests/ui/return_abi_duplicate.rs:3:39
+  |
+3 | #[excel_function(return_abi = "fp12", return_abi = "xloper12")]
+  |                                       ^^^^^^^^^^^^^^^^^^^^^^^

@@ -16,8 +16,8 @@ use crate::runtime::Runtime;
 use std::cell::Cell;
 use xlfn_common::{ExecutionKind, FunctionVisibility};
 use xlfn_sys::{
-    XL_GET_NAME, XLERR_NAME, XLF_EVALUATE, XLF_REGISTER, XLF_SET_NAME, XLF_UNREGISTER, XLOPER12,
-    XLOPER12Value, XLRET_ABORT, XLRET_UNCALCED, XLTYPE_STR,
+    XL_EVENT_REGISTER, XL_GET_NAME, XLERR_NAME, XLF_EVALUATE, XLF_REGISTER, XLF_SET_NAME,
+    XLF_UNREGISTER, XLOPER12, XLOPER12Value, XLRET_ABORT, XLRET_UNCALCED, XLTYPE_STR,
 };
 
 struct ReloadAddin;
@@ -55,6 +55,7 @@ fn descriptors() -> [RegistrationDescriptor; 1] {
         export_name: "test_terminal_reload_export",
         excel_name: "TEST.TERMINAL.RELOAD",
         signature: RegistrationSignature {
+            return_abi: xlfn_common::ReturnAbi::Value12,
             execution: ExecutionKind::MainThread,
             arguments: &[],
             volatile: false,
@@ -112,9 +113,10 @@ fn open(runtime: &Runtime<ReloadAddin>) -> i32 {
     )
 }
 
-fn replacement_replies() -> [Reply; 3] {
+fn replacement_replies() -> [Reply; 4] {
     [
         Reply::success(XL_GET_NAME, module_name()),
+        Reply::success(XL_EVENT_REGISTER, XLOPER12::integer(1)),
         Reply::success(XLF_EVALUATE, XLOPER12::error(XLERR_NAME)),
         Reply::success(XLF_REGISTER, XLOPER12::number(9.0)),
     ]
@@ -126,6 +128,7 @@ fn close_replacement(runtime: &Runtime<ReloadAddin>) {
         Reply::success(XLF_UNREGISTER, XLOPER12::boolean(true)),
         Reply::success(XLF_EVALUATE, XLOPER12::number(9.0)),
         Reply::success(XLF_SET_NAME, XLOPER12::boolean(true)),
+        Reply::success(XL_EVENT_REGISTER, XLOPER12::integer(1)),
     ]);
     assert_eq!(host_auto_close(runtime), 1);
     assert_eq!(runtime.phase(), LifecyclePhase::Closed);
@@ -133,7 +136,12 @@ fn close_replacement(runtime: &Runtime<ReloadAddin>) {
     assert!(!runtime.module_residency_held());
     assert_eq!(runtime.metadata_debt_count_for_test(), 0);
     assert_eq!((OPENS.get(), QUIESCES.get()), (1, previous_quiesces + 1));
-    script.assert_calls(&[XLF_UNREGISTER, XLF_EVALUATE, XLF_SET_NAME]);
+    script.assert_calls(&[
+        XLF_UNREGISTER,
+        XLF_EVALUATE,
+        XLF_SET_NAME,
+        XL_EVENT_REGISTER,
+    ]);
 }
 
 #[test]
@@ -190,6 +198,7 @@ fn reload_stops_after_terminal_metadata_cleanup_and_retries_debt_on_later_entry(
                 XLF_EVALUATE,
                 XLF_SET_NAME,
                 XL_GET_NAME,
+                XL_EVENT_REGISTER,
                 XLF_EVALUATE,
                 XLF_REGISTER,
             ]);
@@ -259,6 +268,7 @@ fn pending_rollback_terminal_cleanup_stops_before_a_replacement_open() {
                 XLF_EVALUATE,
                 XLF_SET_NAME,
                 XL_GET_NAME,
+                XL_EVENT_REGISTER,
                 XLF_EVALUATE,
                 XLF_REGISTER,
             ]);
@@ -330,6 +340,7 @@ fn nonterminal_reload_opens_replacement_and_later_close_releases_residency() {
         XLF_EVALUATE,
         XLF_SET_NAME,
         XL_GET_NAME,
+        XL_EVENT_REGISTER,
         XLF_EVALUATE,
         XLF_REGISTER,
     ]);

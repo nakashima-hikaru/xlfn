@@ -4,12 +4,14 @@ mod collections;
 mod context;
 #[cfg(feature = "handles")]
 mod handles;
+mod numeric;
 mod payload;
 #[cfg(feature = "rtd")]
 mod rtd;
 mod traits;
 
 pub use context::ReturnContext;
+pub use numeric::NumericReturn;
 pub use payload::ReturnPayload;
 pub use traits::{
     AsyncReturn, ExcelReturn, ExcelReturnSealed, MacroSheetReturn, MainThreadReturn,

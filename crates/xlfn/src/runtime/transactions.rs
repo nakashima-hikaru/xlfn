@@ -75,26 +75,17 @@ where
     let has_async_functions = prepared_set
         .iter()
         .any(|descriptor| descriptor.signature.execution.is_async());
-    if has_async_functions {
-        #[cfg(feature = "async")]
-        {
-            let event_result = {
-                let host = RegistrationHost::new(transaction.callbacks_mut());
-                registrar.register_async_events(&host)
-            };
-            match event_result {
-                Ok(events) => transaction.stage_events(events),
-                Err(error) => {
-                    let error = retain_transaction_error(&mut transaction, error);
-                    return Err(transaction.failure(error));
-                }
+    if !prepared_set.as_slice().is_empty() {
+        let event_result = {
+            let host = RegistrationHost::new(transaction.callbacks_mut());
+            registrar.register_calculation_events(&host, has_async_functions)
+        };
+        match event_result {
+            Ok(events) => transaction.stage_events(events),
+            Err(error) => {
+                let error = retain_transaction_error(&mut transaction, error);
+                return Err(transaction.failure(error));
             }
-        }
-        #[cfg(not(feature = "async"))]
-        {
-            return Err(transaction.failure(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::ASYNC_FEATURE,
-            }));
         }
     }
     let registration_result = {

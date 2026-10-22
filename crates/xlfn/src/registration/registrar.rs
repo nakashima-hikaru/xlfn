@@ -14,7 +14,8 @@ use crate::XllError;
 use std::path::PathBuf;
 
 #[cfg(feature = "async")]
-use super::host::{CALCULATION_CANCELED_EVENT, CALCULATION_ENDED_EVENT};
+use super::host::CALCULATION_CANCELED_EVENT;
+use super::host::CALCULATION_ENDED_EVENT;
 
 pub(crate) struct HostRegistrar {
     module_path: PathBuf,
@@ -60,19 +61,19 @@ impl HostRegistrar {
         )
     }
 
-    #[cfg(feature = "async")]
-    pub(crate) fn register_async_events(
+    pub(crate) fn register_calculation_events(
         &self,
         host: &RegistrationHost<'_>,
+        has_async_functions: bool,
     ) -> Result<Vec<EventRegistration>, RegistrationTransactionError> {
-        register_async_events_transaction(
+        register_calculation_events_transaction(
             host,
+            has_async_functions,
             |host, procedure, event| self.register_event(host, procedure, event),
             Self::unregister_events_detailed,
         )
     }
 
-    #[cfg(feature = "async")]
     fn register_event(
         &self,
         host: &RegistrationHost<'_>,
@@ -373,7 +374,6 @@ fn registration_release_failure(
     error
 }
 
-#[cfg(feature = "async")]
 fn event_release_failure(
     host: &RegistrationHost<'_>,
     registration: EventRegistration,
@@ -396,9 +396,9 @@ fn event_release_failure(
     error
 }
 
-#[cfg(feature = "async")]
-fn register_async_events_transaction(
+fn register_calculation_events_transaction(
     host: &RegistrationHost<'_>,
+    has_async_functions: bool,
     mut register: impl FnMut(
         &RegistrationHost<'_>,
         &'static str,
@@ -410,11 +410,18 @@ fn register_async_events_transaction(
     ) -> UnregisterResult<EventRegistration>,
 ) -> Result<Vec<EventRegistration>, RegistrationTransactionError> {
     let mut registrations = Vec::with_capacity(2);
-    registrations.push(register(
-        host,
-        "__xlfn_calculation_canceled",
-        CALCULATION_CANCELED_EVENT,
-    )?);
+    if has_async_functions {
+        #[cfg(feature = "async")]
+        registrations.push(register(
+            host,
+            "__xlfn_calculation_canceled",
+            CALCULATION_CANCELED_EVENT,
+        )?);
+        #[cfg(not(feature = "async"))]
+        return Err(RegistrationTransactionError::new(XllError::Internal {
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::ASYNC_FEATURE,
+        }));
+    }
     match register(host, "__xlfn_calculation_ended", CALCULATION_ENDED_EVENT) {
         Ok(registration) => {
             registrations.push(registration);
@@ -455,6 +462,7 @@ mod tests {
             export_name: "test_export",
             excel_name: "TEST.EXPORT",
             signature: RegistrationSignature {
+                return_abi: crate::registration::ReturnAbi::Value12,
                 execution: ExecutionKind::MainThread,
                 arguments: ABI_ARGUMENTS,
                 volatile: false,
@@ -873,6 +881,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn synchronous_functions_register_calculation_end_without_async_events() {
+        let callbacks = HostCallbackSession::new();
+        let host = RegistrationHost::new(&callbacks);
+        let registered = register_calculation_events_transaction(
+            &host,
+            false,
+            |_host, procedure, event| {
+                Ok(EventRegistration {
+                    procedure,
+                    event,
+                    registration_id: 1,
+                    unregistered: false,
+                })
+            },
+            |_host, _registrations| panic!("successful event registration does not roll back"),
+        )
+        .unwrap_or_else(|_| panic!("calculation end event must register"));
+        assert_eq!(registered.len(), 1);
+        assert_eq!(registered[0].procedure, "__xlfn_calculation_ended");
+        assert_eq!(registered[0].event, CALCULATION_ENDED_EVENT);
+    }
+
     #[cfg(feature = "async")]
     #[test]
     fn second_async_event_failure_rolls_back_the_first_event() {
@@ -881,8 +912,9 @@ mod tests {
         let attempts = Cell::new(0);
         let rolled_back = RefCell::new(Vec::new());
 
-        let result = register_async_events_transaction(
+        let result = register_calculation_events_transaction(
             &host,
+            true,
             |_host, procedure, event| {
                 let attempt = attempts.get() + 1;
                 attempts.set(attempt);

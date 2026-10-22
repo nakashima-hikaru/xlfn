@@ -22,7 +22,11 @@ impl CallId {
     }
 }
 
-/// Identifier of the calculation generation that admitted a call.
+/// Identifier of the runtime calculation generation that admitted a call.
+///
+/// Advances on Excel's registered calculation-ended events. Excel may omit
+/// those events for some programmatic recalculations, so this is not a unique
+/// identifier for every possible recalculation request.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct CalculationId(u64);
 

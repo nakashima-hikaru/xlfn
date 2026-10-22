@@ -8,6 +8,7 @@ pub const REQUIRED_XLL_EXPORTS: &[&str] = &[
     "xlAutoRemove",
     "xlAutoFree12",
     "xlAddInManagerInfo12",
+    "__xlfn_calculation_ended",
 ];
 
 pub(crate) const MAX_PREPARED_ENTRIES: usize = 100_000;

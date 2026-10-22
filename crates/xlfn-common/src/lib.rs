@@ -4,6 +4,30 @@
 
 use std::fmt;
 
+/// The physical result ABI shared by generated entrypoints and registration.
+///
+/// Numeric arrays use a directly returned FP12 pointer. Other synchronous
+/// results use an XLOPER12 pointer; scalar native result ABIs are not selected.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum ReturnAbi {
+    /// An XLOPER12 value operand, including its Excel error representation.
+    #[default]
+    Value12,
+    /// A contiguous FP12 numeric array, or null to report `#NUM!`.
+    NumericArray12,
+}
+
+impl ReturnAbi {
+    /// Returns Excel's registration code for this synchronous result.
+    #[must_use]
+    pub const fn registration_code(self) -> &'static str {
+        match self {
+            Self::Value12 => "Q",
+            Self::NumericArray12 => "K%",
+        }
+    }
+}
+
 /// The physical input ABI shared by macro lowering and Excel registration.
 ///
 /// Argument conversion and presence policies are analyzed separately. The

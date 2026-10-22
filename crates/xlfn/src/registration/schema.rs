@@ -17,7 +17,7 @@ pub struct ArgumentDescriptor {
     pub description: &'static str,
 }
 
-pub use xlfn_common::ArgumentAbi;
+pub use xlfn_common::{ArgumentAbi, ReturnAbi};
 
 pub(crate) use xlfn_common::{ExecutionKind, FunctionVisibility};
 
@@ -25,6 +25,7 @@ pub(crate) use xlfn_common::{ExecutionKind, FunctionVisibility};
 pub(crate) struct RegistrationSignature {
     pub(crate) execution: ExecutionKind,
     pub(crate) arguments: &'static [ArgumentAbi],
+    pub(crate) return_abi: ReturnAbi,
     pub(crate) volatile: bool,
 }
 
@@ -34,18 +35,18 @@ impl RegistrationSignature {
             || (self.arguments.contains(&ArgumentAbi::Reference12)
                 && !self.execution.allows_reference_arguments())
             || (self.arguments.contains(&ArgumentAbi::NumericArray12) && self.execution.is_async())
+            || (self.return_abi == ReturnAbi::NumericArray12 && self.execution.is_async())
         {
             return Err(XllError::Internal {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRATION_SIGNATURE,
             });
         }
         let mut text = String::with_capacity(self.arguments.len() + 4);
-        text.push(match self.execution {
-            ExecutionKind::Async => '>',
-            ExecutionKind::MainThread | ExecutionKind::ThreadSafe | ExecutionKind::MacroSheet => {
-                'Q'
-            }
-        });
+        if self.execution.is_async() {
+            text.push('>');
+        } else {
+            text.push_str(self.return_abi.registration_code());
+        }
         for argument in self.arguments {
             text.push_str(argument.registration_code());
         }
@@ -84,6 +85,7 @@ mod tests {
         ] {
             assert_eq!(
                 RegistrationSignature {
+                    return_abi: crate::registration::ReturnAbi::Value12,
                     execution,
                     arguments: INPUTS,
                     volatile: false,
@@ -95,6 +97,7 @@ mod tests {
         }
         assert_eq!(
             RegistrationSignature {
+                return_abi: crate::registration::ReturnAbi::Value12,
                 execution: ExecutionKind::ThreadSafe,
                 arguments: &[
                     ArgumentAbi::Value12,
@@ -112,6 +115,7 @@ mod tests {
     #[test]
     fn numeric_arrays_use_one_fp12_argument_with_two_registration_characters() {
         let signature = RegistrationSignature {
+            return_abi: crate::registration::ReturnAbi::Value12,
             execution: ExecutionKind::ThreadSafe,
             arguments: &[
                 ArgumentAbi::NumericArray12,
@@ -124,8 +128,31 @@ mod tests {
     }
 
     #[test]
+    fn numeric_results_encode_the_same_abi_as_the_generated_fp12_entrypoint() {
+        let signature = RegistrationSignature {
+            execution: ExecutionKind::ThreadSafe,
+            arguments: &[ArgumentAbi::Float64, ArgumentAbi::NumericArray12],
+            return_abi: ReturnAbi::NumericArray12,
+            volatile: false,
+        };
+        assert_eq!(signature.encode().unwrap(), "K%BK%$");
+        let explicit_value = RegistrationSignature {
+            return_abi: ReturnAbi::Value12,
+            ..signature
+        };
+        assert_eq!(explicit_value.encode().unwrap(), "QBK%$");
+        let macro_sheet = RegistrationSignature {
+            execution: ExecutionKind::MacroSheet,
+            volatile: true,
+            ..signature
+        };
+        assert_eq!(macro_sheet.encode().unwrap(), "K%BK%#!");
+    }
+
+    #[test]
     fn fp12_keeps_macro_sheet_and_volatile_registration_flags() {
         let signature = RegistrationSignature {
+            return_abi: crate::registration::ReturnAbi::Value12,
             execution: ExecutionKind::MacroSheet,
             arguments: &[ArgumentAbi::NumericArray12],
             volatile: true,
@@ -137,21 +164,31 @@ mod tests {
     fn signatures_reject_unsupported_async_inputs_and_argument_counts() {
         for signature in [
             RegistrationSignature {
+                return_abi: ReturnAbi::NumericArray12,
+                execution: ExecutionKind::Async,
+                arguments: &[],
+                volatile: false,
+            },
+            RegistrationSignature {
+                return_abi: crate::registration::ReturnAbi::Value12,
                 execution: ExecutionKind::Async,
                 arguments: &[ArgumentAbi::NumericArray12],
                 volatile: false,
             },
             RegistrationSignature {
+                return_abi: crate::registration::ReturnAbi::Value12,
                 execution: ExecutionKind::ThreadSafe,
                 arguments: &[ArgumentAbi::Reference12],
                 volatile: false,
             },
             RegistrationSignature {
+                return_abi: crate::registration::ReturnAbi::Value12,
                 execution: ExecutionKind::MainThread,
                 arguments: &[ArgumentAbi::Value12; 256],
                 volatile: false,
             },
             RegistrationSignature {
+                return_abi: crate::registration::ReturnAbi::Value12,
                 execution: ExecutionKind::Async,
                 arguments: &[ArgumentAbi::Value12; 255],
                 volatile: false,
@@ -171,6 +208,7 @@ mod tests {
         // Excel12 counted Unicode strings support 32,767 code units. K% is
         // one worksheet argument even though its type code uses two units.
         let signature = RegistrationSignature {
+            return_abi: crate::registration::ReturnAbi::Value12,
             execution: ExecutionKind::ThreadSafe,
             arguments: &[ArgumentAbi::NumericArray12; 255],
             volatile: true,
@@ -180,6 +218,7 @@ mod tests {
         assert!(xlfn_common::validate_excel_string(&encoded).is_ok());
 
         let asynchronous = RegistrationSignature {
+            return_abi: crate::registration::ReturnAbi::Value12,
             execution: ExecutionKind::Async,
             arguments: &[ArgumentAbi::Value12; 254],
             volatile: true,

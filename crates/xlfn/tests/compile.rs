@@ -14,6 +14,7 @@ fn trait_driven_function_signatures_compile() {
     tests.pass("tests/ui/pass/macro_hygiene.rs");
     tests.pass("tests/ui/pass/opaque_udf_body.rs");
     tests.pass("tests/ui/pass/output_array.rs");
+    tests.pass("tests/ui/pass/numeric_return_abi.rs");
     tests.pass("tests/ui/pass/physical_unload.rs");
     tests.pass("tests/ui/pass/raw_identifiers.rs");
     tests.pass("tests/ui/pass/udf_layers_tuple.rs");
@@ -26,6 +27,7 @@ fn trait_driven_function_signatures_compile() {
     tests.compile_fail("tests/ui/fail/nested_return_array.rs");
     tests.compile_fail("tests/ui/fail/removed_export_macro.rs");
     tests.compile_fail("tests/ui/fail/return_trait_missing.rs");
+    tests.compile_fail("tests/ui/fail/return_abi_mismatch.rs");
     tests.compile_fail("tests/ui/fail/sys_module_is_not_public.rs");
     tests.compile_fail("tests/ui/fail/value_raw_abi_is_not_public.rs");
     tests.compile_fail("tests/ui/fail/prepared_borrow_cannot_escape.rs");

@@ -1,5 +1,5 @@
 use quote::{format_ident, quote};
-use xlfn_common::ArgumentAbi;
+use xlfn_common::{ArgumentAbi, ReturnAbi};
 
 use crate::model;
 
@@ -8,6 +8,25 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
     let krate = &plan.crate_path;
     let gating = &plan.gating;
     let return_type = &plan.return_type;
+    let numeric_return = plan.return_abi == ReturnAbi::NumericArray12;
+    let (return_abi, return_pointer, sync_boundary, export_boundary, return_trait) =
+        if numeric_return {
+            (
+                quote!(#krate::__private::v1::ReturnAbi::NumericArray12),
+                quote!(*mut #krate::__private::v1::FP12),
+                quote!(sync_udf_fp12),
+                quote!(export_numeric_boundary),
+                quote!(NumericReturn),
+            )
+        } else {
+            (
+                quote!(#krate::__private::v1::ReturnAbi::Value12),
+                quote!(*mut #krate::__private::v1::XLOPER12),
+                quote!(sync_udf),
+                quote!(export_value_boundary),
+                quote!(ExcelReturn),
+            )
+        };
     let function_ident = &function.sig.ident;
     let udf_id = plan.metadata.id.as_str();
     let excel_name = &plan.metadata.excel_name;
@@ -61,7 +80,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
     let generated_context_expression = match execution {
         model::ExecutionSpec::ThreadSafe {
             context_ty: Some(_),
-        } => Some(quote!(#krate::__private::v1::thread_safe_context(__state))),
+        } => Some(quote!(#krate::__private::v1::thread_safe_context(__frame, __state))),
         model::ExecutionSpec::MainThread {
             context_ty: Some(_),
         } => Some(quote!(#krate::__private::v1::main_thread_context(
@@ -485,7 +504,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
             // SAFETY: the generated wrapper is invoked by Excel using the
             // registered execution mode and starts this invocation exactly once.
             unsafe {
-                #krate::__private::v1::sync_udf::<_, #return_type, _>(
+                #krate::__private::v1::#sync_boundary::<_, #return_type, _>(
                 &crate::__XLFN_RUNTIME,
                 #udf_id,
                 #excel_name,
@@ -496,7 +515,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                     #(#conversions)*
                     let mut __return_context =
                         __frame.return_context(#udf_id)?;
-                    #krate::__private::v1::ExcelReturn::invoke(
+                    #krate::__private::v1::#return_trait::invoke(
                         &mut __return_context,
                         || {
                             #(#materializations)*
@@ -533,8 +552,8 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
             #[unsafe(no_mangle)]
             pub unsafe extern "system" fn #export_ident(
                 #(#raw_parameters),*
-            ) -> *mut #krate::__private::v1::XLOPER12 {
-                #krate::__private::v1::export_value_boundary(|| { #boundary })
+            ) -> #return_pointer {
+                #krate::__private::v1::#export_boundary(|| { #boundary })
             }
         }
     };
@@ -576,6 +595,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                 &[
                     #(#argument_abi_tokens),*
                 ],
+                #return_abi,
                 #execution_kind,
                 #volatile,
                 #visibility,

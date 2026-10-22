@@ -43,6 +43,8 @@ def cases(profile: str = "full") -> list[Case]:
     for id in ("M01", "M02", "M03"):
         for rows, cols in dimensions:
             add(id, f"{rows}x{cols}", rows=rows, cols=cols)
+    for rows, cols in dimensions:
+        add("M06", f"{rows}x{cols}", rows=rows, cols=cols)
     for rows, cols in ([(10, 10)] if smoke else [(1_000, 10), (100, 100), (10, 1_000)]):
         add("M04", f"{rows}x{cols}", rows=rows, cols=cols)
     for rows, cols in dimensions:

@@ -252,6 +252,20 @@ fn xll_verification_requires_the_framework_manifest_and_lifecycle_exports() {
             .contains("xlAutoOpen")
     );
 
+    let mut missing_calculation_event = xll_info();
+    missing_calculation_event
+        .exports
+        .remove("__xlfn_calculation_ended");
+    missing_calculation_event
+        .expected_exports
+        .remove("__xlfn_calculation_ended");
+    assert!(
+        verify_xll_exports(&missing_calculation_event, path, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("__xlfn_calculation_ended")
+    );
+
     assert!(verify_xll_exports(&xll_info(), path, &[]).is_ok());
 }
 

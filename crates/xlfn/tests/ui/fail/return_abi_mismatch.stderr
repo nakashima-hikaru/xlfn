@@ -1,0 +1,67 @@
+error[E0277]: `f64` cannot be returned using the FP12 ABI
+  --> tests/ui/fail/return_abi_mismatch.rs:22:16
+   |
+22 | fn scalar() -> f64 { 1.0 }
+   |                ^^^ the trait `xlfn::__private::v1::NumericReturn` is not implemented for `f64`
+   |
+   = note: FP12 requires Matrix<f64>, Row<f64>, Column<f64>, NumericArrayOutput, or a Result containing one of these types
+   = help: the following other types implement trait `xlfn::__private::v1::NumericReturn`:
+             Column<f64>
+             NumericArrayOutput
+             Result<T, E>
+             Row<f64>
+             xlfn::value::Matrix<f64>
+note: required by a bound in `xlfn::__private::v1::sync_udf_fp12`
+  --> src/__private.rs
+   |
+   |     pub unsafe fn sync_udf_fp12<A: Addin, R: NumericReturn, F>(
+   |                                              ^^^^^^^^^^^^^ required by this bound in `sync_udf_fp12`
+
+error[E0277]: `f64` cannot be returned using the FP12 ABI
+  --> tests/ui/fail/return_abi_mismatch.rs:21:1
+   |
+21 | #[excel_function(thread_safe, return_abi = "fp12")]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `xlfn::__private::v1::NumericReturn` is not implemented for `f64`
+   |
+   = note: FP12 requires Matrix<f64>, Row<f64>, Column<f64>, NumericArrayOutput, or a Result containing one of these types
+   = help: the following other types implement trait `xlfn::__private::v1::NumericReturn`:
+             Column<f64>
+             NumericArrayOutput
+             Result<T, E>
+             Row<f64>
+             xlfn::value::Matrix<f64>
+   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `xlfn::value::Matrix<std::string::String>` cannot be returned using the FP12 ABI
+  --> tests/ui/fail/return_abi_mismatch.rs:25:17
+   |
+25 | fn strings() -> XllResult<Matrix<String>> { Matrix::new(1, 1, vec!["one".into()]) }
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `xlfn::__private::v1::NumericReturn` is not implemented for `xlfn::value::Matrix<std::string::String>`
+   |
+   = note: FP12 requires Matrix<f64>, Row<f64>, Column<f64>, NumericArrayOutput, or a Result containing one of these types
+help: the trait `xlfn::__private::v1::NumericReturn` is implemented for `xlfn::value::Matrix<f64>`
+  --> src/call_return/numeric.rs
+   |
+   | impl NumericReturn for Matrix<f64> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: required for `Result<xlfn::value::Matrix<std::string::String>, xlfn::XllError>` to implement `xlfn::__private::v1::NumericReturn`
+note: required by a bound in `xlfn::__private::v1::sync_udf_fp12`
+  --> src/__private.rs
+   |
+   |     pub unsafe fn sync_udf_fp12<A: Addin, R: NumericReturn, F>(
+   |                                              ^^^^^^^^^^^^^ required by this bound in `sync_udf_fp12`
+
+error[E0277]: `xlfn::value::Matrix<std::string::String>` cannot be returned using the FP12 ABI
+  --> tests/ui/fail/return_abi_mismatch.rs:24:1
+   |
+24 | #[excel_function(thread_safe, return_abi = "fp12")]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `xlfn::__private::v1::NumericReturn` is not implemented for `xlfn::value::Matrix<std::string::String>`
+   |
+   = note: FP12 requires Matrix<f64>, Row<f64>, Column<f64>, NumericArrayOutput, or a Result containing one of these types
+help: the trait `xlfn::__private::v1::NumericReturn` is implemented for `xlfn::value::Matrix<f64>`
+  --> src/call_return/numeric.rs
+   |
+   | impl NumericReturn for Matrix<f64> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: required for `Result<xlfn::value::Matrix<std::string::String>, xlfn::XllError>` to implement `xlfn::__private::v1::NumericReturn`
+   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)

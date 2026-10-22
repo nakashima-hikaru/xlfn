@@ -25,6 +25,7 @@ pub(crate) mod array;
 pub(crate) mod conversion;
 mod detached_scalar;
 pub(crate) mod metadata;
+pub(crate) mod numeric;
 pub(crate) mod ownership;
 pub(crate) mod scalar;
 pub(crate) mod storage;
@@ -34,6 +35,11 @@ pub(crate) use ownership::ReturnFreeBoundaryGuard;
 pub(crate) use ownership::{ReturnFreeGuard, ReturnObligation, ReturnProducerGuard, ReturnTracker};
 
 pub use array::{XlArrayBuilder, XlArrayOutput};
+pub use numeric::{
+    MAX_MODULE_NUMERIC_RETURN_BYTES, MAX_NUMERIC_RETURN_BYTES, MAX_THREAD_NUMERIC_RETURN_BYTES,
+    NumericArrayBuilder, NumericArrayOutput, NumericReturnMemoryMetrics,
+    numeric_return_memory_metrics,
+};
 pub(crate) use scalar::XlScalarOutput;
 pub(crate) use storage::ReturnStorage;
 
@@ -418,7 +424,61 @@ pub(crate) fn ffi_boundary_void<A: crate::Addin>(runtime: &Runtime<A>, operation
     let _ = catch_no_unwind(AssertUnwindSafe(operation));
 }
 
-/// Runs a generated UDF boundary and reports detailed failures to the configured sink.
+/// ABI-specific publication behind the common admission and execution boundary.
+trait SyncReturnAbi {
+    type Payload;
+    type Pointer: Copy;
+    const INCLUDE_EXCEL_VALUE: bool;
+    fn rejected() -> Self::Pointer;
+    fn publish(
+        payload: Self::Payload,
+        producer: &mut ReturnProducerGuard<'static>,
+        numeric: &numeric::Fp12CallGuard,
+    ) -> XllResult<Self::Pointer>;
+    fn error(error: &XllError, producer: &mut ReturnProducerGuard<'static>) -> Self::Pointer;
+}
+
+struct ValueReturnAbi;
+impl SyncReturnAbi for ValueReturnAbi {
+    type Payload = ReturnPayload;
+    type Pointer = *mut XLOPER12;
+    const INCLUDE_EXCEL_VALUE: bool = false;
+    fn rejected() -> Self::Pointer {
+        closing_error_pointer()
+    }
+    fn publish(
+        payload: ReturnPayload,
+        producer: &mut ReturnProducerGuard<'static>,
+        _: &numeric::Fp12CallGuard,
+    ) -> XllResult<Self::Pointer> {
+        Ok(PreparedReturn::encode(payload)?.publish_excel(producer))
+    }
+    fn error(error: &XllError, producer: &mut ReturnProducerGuard<'static>) -> Self::Pointer {
+        PreparedReturn::error(error).publish_excel(producer)
+    }
+}
+
+struct NumericReturnAbi;
+impl SyncReturnAbi for NumericReturnAbi {
+    type Payload = numeric::NumericArrayOutput;
+    type Pointer = *mut xlfn_sys::FP12;
+    const INCLUDE_EXCEL_VALUE: bool = true;
+    fn rejected() -> Self::Pointer {
+        std::ptr::null_mut()
+    }
+    fn publish(
+        payload: Self::Payload,
+        _: &mut ReturnProducerGuard<'static>,
+        numeric: &numeric::Fp12CallGuard,
+    ) -> XllResult<Self::Pointer> {
+        payload.publish(numeric)
+    }
+    fn error(_: &XllError, _: &mut ReturnProducerGuard<'static>) -> Self::Pointer {
+        std::ptr::null_mut()
+    }
+}
+
+/// Runs a generated Q UDF with common execution and shutdown protection.
 #[must_use]
 pub(crate) fn udf_boundary_named<A, F>(
     runtime: &'static Runtime<A>,
@@ -433,30 +493,122 @@ where
         &'call crate::runtime::CallGuard<'call, A>,
     ) -> XllResult<ReturnPayload>,
 {
+    sync_boundary::<A, ValueReturnAbi, F>(runtime, udf_id, excel_name, operation)
+}
+
+/// Runs a generated K% UDF; null is Excel's #NUM! pointer result.
+#[must_use]
+pub(crate) fn udf_boundary_numeric_named<A, F>(
+    runtime: &'static Runtime<A>,
+    udf_id: &'static str,
+    excel_name: &'static str,
+    operation: F,
+) -> *mut xlfn_sys::FP12
+where
+    A: crate::Addin,
+    F: for<'call> FnOnce(
+        &'call A::SharedState,
+        &'call crate::runtime::CallGuard<'call, A>,
+    ) -> XllResult<numeric::NumericArrayOutput>,
+{
+    sync_boundary::<A, NumericReturnAbi, F>(runtime, udf_id, excel_name, operation)
+}
+
+fn report_sync_panic<A: crate::Addin>(
+    runtime: &Runtime<A>,
+    udf_id: &'static str,
+    call_id: CallId,
+    calculation_id: crate::execution::CalculationId,
+    message: &str,
+) {
+    crate::diagnostics::report_udf_panic_with_history_no_unwind(
+        runtime.diagnostics(),
+        udf_id,
+        Some(call_id),
+        Some(calculation_id),
+        message,
+    );
+}
+
+fn report_sync_failure<A: crate::Addin, B: SyncReturnAbi>(
+    runtime: &Runtime<A>,
+    udf_id: &'static str,
+    call_id: Option<CallId>,
+    calculation_id: crate::execution::CalculationId,
+    error: &XllError,
+) {
+    crate::diagnostics::report_udf_failure_with_history_no_unwind(
+        runtime.diagnostics(),
+        udf_id,
+        call_id,
+        Some(calculation_id),
+        error,
+        B::INCLUDE_EXCEL_VALUE,
+    );
+}
+
+fn sync_boundary<A, B, F>(
+    runtime: &'static Runtime<A>,
+    udf_id: &'static str,
+    excel_name: &'static str,
+    operation: F,
+) -> B::Pointer
+where
+    A: crate::Addin,
+    B: SyncReturnAbi,
+    F: for<'call> FnOnce(
+        &'call A::SharedState,
+        &'call crate::runtime::CallGuard<'call, A>,
+    ) -> XllResult<B::Payload>,
+{
+    // Retain nesting authority through admission, publication, and every guard's
+    // teardown: teardown can itself reenter a UDF before Excel reads this result.
+    let numeric = numeric::Fp12CallGuard::enter();
+    let calculation_id = runtime.calculation_id();
     let ingress = match crate::module_runtime::ingress()
         .enter_udf_with(|| {})
         .into_admitted()
     {
         Ok(ingress) => ingress,
-        Err(_) => return closing_error_pointer(),
+        Err(_) => {
+            report_sync_failure::<A, B>(runtime, udf_id, None, calculation_id, &XllError::Closing);
+            return B::rejected();
+        }
     };
     let _external = runtime.observer().observe_external();
     let call = match runtime.enter(&ingress) {
         Ok(call) => call,
-        Err(_) => return closing_error_pointer(),
+        Err(error) => {
+            report_sync_failure::<A, B>(runtime, udf_id, None, calculation_id, &error);
+            return B::rejected();
+        }
     };
     let Some(mut producer) = runtime.enter_return_producer() else {
-        return closing_error_pointer();
+        report_sync_failure::<A, B>(runtime, udf_id, None, calculation_id, &XllError::Closing);
+        return B::rejected();
     };
-    let result = match catch_no_unwind(AssertUnwindSafe(|| {
-        udf_boundary_named_inner(runtime, &call, &mut producer, udf_id, excel_name, operation)
+    // Allocate correlation even without a sink, layer, or tracing subscriber.
+    let call_id = CallId::new(runtime.next_call_id());
+    let result = match crate::panic_boundary::catch_udf_no_unwind(AssertUnwindSafe(|| {
+        sync_boundary_inner::<A, B, F>(
+            runtime,
+            &call,
+            &mut producer,
+            &numeric,
+            udf_id,
+            excel_name,
+            call_id,
+            calculation_id,
+            operation,
+        )
     })) {
         Ok(pointer) => pointer,
-        Err(_) => {
+        Err(message) => {
             if !producer.is_armed() {
                 std::process::abort();
             }
-            PreparedReturn::error(&XllError::Panic).publish_excel(&mut producer)
+            report_sync_panic(runtime, udf_id, call_id, calculation_id, &message);
+            B::error(&XllError::Panic, &mut producer)
         }
     };
     drop(producer);
@@ -464,100 +616,51 @@ where
     result
 }
 
-fn udf_boundary_named_inner<A, F>(
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Shared UDF boundary carries ABI and invocation authority"
+)]
+fn sync_boundary_inner<A, B, F>(
     runtime: &Runtime<A>,
     guard: &crate::runtime::CallGuard<'_, A>,
     producer: &mut ReturnProducerGuard<'static>,
+    numeric: &numeric::Fp12CallGuard,
     udf_id: &'static str,
     excel_name: &'static str,
+    call_id: CallId,
+    calculation_id: crate::execution::CalculationId,
     operation: F,
-) -> *mut XLOPER12
+) -> B::Pointer
 where
     A: crate::Addin,
+    B: SyncReturnAbi,
     F: for<'call> FnOnce(
         &'call A::SharedState,
         &'call crate::runtime::CallGuard<'call, A>,
-    ) -> XllResult<ReturnPayload>,
+    ) -> XllResult<B::Payload>,
 {
     let instrumentation = crate::execution::InstrumentationPlan::for_call(guard);
-
     if !instrumentation.enabled() {
-        return udf_boundary_uninstrumented(guard, producer, udf_id, operation);
+        let caught = crate::panic_boundary::catch_udf_no_unwind(AssertUnwindSafe(|| {
+            B::publish(operation(guard.state(), guard)?, producer, numeric)
+        }));
+        let result = match caught {
+            Ok(result) => result,
+            Err(message) => {
+                report_sync_panic(runtime, udf_id, call_id, calculation_id, &message);
+                return B::error(&XllError::Panic, producer);
+            }
+        };
+        return match result {
+            Ok(pointer) => pointer,
+            Err(error) => {
+                report_sync_failure::<A, B>(runtime, udf_id, Some(call_id), calculation_id, &error);
+                B::error(&error, producer)
+            }
+        };
     }
-
     let concurrent_calls = crate::module_runtime::ingress().active_udfs();
-
-    udf_boundary_instrumented(
-        runtime,
-        guard,
-        producer,
-        udf_id,
-        excel_name,
-        operation,
-        InstrumentedUdfContext {
-            instrumentation,
-            concurrent_calls,
-        },
-    )
-}
-
-#[inline]
-fn udf_boundary_uninstrumented<A, F>(
-    guard: &crate::runtime::CallGuard<'_, A>,
-    producer: &mut ReturnProducerGuard<'static>,
-    udf_id: &'static str,
-    operation: F,
-) -> *mut XLOPER12
-where
-    A: crate::Addin,
-    F: for<'call> FnOnce(
-        &'call A::SharedState,
-        &'call crate::runtime::CallGuard<'call, A>,
-    ) -> XllResult<ReturnPayload>,
-{
-    let prepared = catch_no_unwind(AssertUnwindSafe(|| {
-        PreparedReturn::encode(operation(guard.state(), guard)?)
-    }))
-    .unwrap_or(Err(XllError::Panic));
-
-    match prepared {
-        Ok(prepared) => prepared.publish_excel(producer),
-        Err(error) => {
-            crate::diagnostics::report_udf_failure_no_unwind(udf_id, &error);
-            PreparedReturn::error(&error).publish_excel(producer)
-        }
-    }
-}
-
-struct InstrumentedUdfContext<A: crate::Addin> {
-    instrumentation: crate::execution::InstrumentationPlan<A>,
-    concurrent_calls: usize,
-}
-
-fn udf_boundary_instrumented<A, F>(
-    runtime: &Runtime<A>,
-    guard: &crate::runtime::CallGuard<'_, A>,
-    producer: &mut ReturnProducerGuard<'static>,
-    udf_id: &'static str,
-    excel_name: &'static str,
-    operation: F,
-    context: InstrumentedUdfContext<A>,
-) -> *mut XLOPER12
-where
-    A: crate::Addin,
-    F: for<'call> FnOnce(
-        &'call A::SharedState,
-        &'call crate::runtime::CallGuard<'call, A>,
-    ) -> XllResult<ReturnPayload>,
-{
-    let InstrumentedUdfContext {
-        instrumentation,
-        concurrent_calls,
-    } = context;
-    let call_id = CallId::new(runtime.next_call_id());
-    let calculation_id = runtime.calculation_id();
     let timer = crate::execution::CallTimer::start();
-
     let trace_metadata = crate::execution::UdfTraceMetadata {
         udf_id,
         excel_name,
@@ -565,9 +668,8 @@ where
         calculation_id,
         concurrent_calls,
     };
-
     let layers = if instrumentation.has_layers() {
-        let layer_metadata = CallMetadata {
+        let metadata = CallMetadata {
             udf_id,
             excel_name,
             call_id,
@@ -575,48 +677,48 @@ where
             started_at: std::time::SystemTime::now(),
             concurrent_calls,
         };
-        match crate::execution::enter_layers(guard.layers(), &layer_metadata) {
+        match crate::execution::enter_layers(guard.layers(), &metadata) {
             Ok(layers) => Some(layers),
             Err(error) => {
-                crate::diagnostics::report_udf_failure_no_unwind(udf_id, &error);
+                report_sync_failure::<A, B>(runtime, udf_id, Some(call_id), calculation_id, &error);
                 let outcome = CallOutcome::from_error(&error, timer.elapsed());
                 if instrumentation.trace_enabled() {
                     crate::execution::trace(&trace_metadata, &outcome);
                 }
-                return PreparedReturn::error(&error).publish_excel(producer);
+                return B::error(&error, producer);
             }
         }
     } else {
         None
     };
-
-    let prepared = catch_no_unwind(AssertUnwindSafe(|| {
-        PreparedReturn::encode(operation(guard.state(), guard)?)
-    }))
-    .unwrap_or(Err(XllError::Panic));
-
-    match prepared {
-        Ok(prepared) => {
-            let outcome = CallOutcome::success(timer.elapsed());
-            if let Some(layers) = layers {
-                crate::execution::exit_layers(layers, &outcome);
-            }
-            if instrumentation.trace_enabled() {
-                crate::execution::trace(&trace_metadata, &outcome);
-            }
-            prepared.publish_excel(producer)
+    let caught = crate::panic_boundary::catch_udf_no_unwind(AssertUnwindSafe(|| {
+        B::publish(operation(guard.state(), guard)?, producer, numeric)
+    }));
+    let (result, panic_reported) = match caught {
+        Ok(result) => (result, false),
+        Err(message) => {
+            report_sync_panic(runtime, udf_id, call_id, calculation_id, &message);
+            (Err(XllError::Panic), true)
         }
+    };
+    let outcome = match &result {
+        Ok(_) => CallOutcome::success(timer.elapsed()),
         Err(error) => {
-            crate::diagnostics::report_udf_failure_no_unwind(udf_id, &error);
-            let outcome = CallOutcome::from_error(&error, timer.elapsed());
-            if let Some(layers) = layers {
-                crate::execution::exit_layers(layers, &outcome);
+            if !panic_reported {
+                report_sync_failure::<A, B>(runtime, udf_id, Some(call_id), calculation_id, error);
             }
-            if instrumentation.trace_enabled() {
-                crate::execution::trace(&trace_metadata, &outcome);
-            }
-            PreparedReturn::error(&error).publish_excel(producer)
+            CallOutcome::from_error(error, timer.elapsed())
         }
+    };
+    if let Some(layers) = layers {
+        crate::execution::exit_layers(layers, &outcome);
+    }
+    if instrumentation.trace_enabled() {
+        crate::execution::trace(&trace_metadata, &outcome);
+    }
+    match result {
+        Ok(pointer) => pointer,
+        Err(error) => B::error(&error, producer),
     }
 }
 
@@ -2006,7 +2108,7 @@ mod tests {
     }
 
     #[test]
-    fn uninstrumented_udf_does_not_allocate_call_id() {
+    fn uninstrumented_udf_allocates_correlation_ids_for_history() {
         let _test = test_lock();
         let fixture = open_static_test_runtime();
         let runtime = fixture.runtime();
@@ -2023,6 +2125,135 @@ mod tests {
         }
 
         let after = runtime.peek_next_call_id();
-        assert_eq!(before, after);
+        assert_eq!(after - before, 100);
+    }
+    #[test]
+    fn fp12_failures_record_original_error_and_correlation_without_sink() {
+        use crate::diagnostics::{DiagnosticCursor, DiagnosticErrorKind};
+        static RUNTIME: Runtime<()> = Runtime::new();
+        let _test = test_lock();
+        let fixture = open_test_runtime(crate::runtime::StaticTestRuntime::from_static(&RUNTIME));
+        let runtime = fixture.runtime();
+        let errors = [
+            XllError::input("spot", crate::error::InputError::NonFinite),
+            XllError::ExcelValue(ExcelError::NotAvailable),
+            XllError::Domain {
+                code: crate::error::DomainErrorCode::InvalidInput,
+            },
+        ];
+        for error in errors {
+            let pointer =
+                udf_boundary_numeric_named(runtime, "fp_failure", "FP.FAILURE", |_, _| Err(error));
+            assert!(pointer.is_null());
+        }
+        assert!(
+            udf_boundary_numeric_named(runtime, "fp_nonfinite", "FP.NONFINITE", |_, _| {
+                numeric::NumericArrayOutput::from_f64(1, 1, &[f64::NAN])
+            })
+            .is_null()
+        );
+        assert!(
+            udf_boundary_numeric_named(runtime, "fp_size", "FP.SIZE", |_, _| {
+                numeric::NumericArrayBuilder::new(1_048_576, 4)?.finish()
+            })
+            .is_null()
+        );
+        assert!(
+            udf_boundary_numeric_named(runtime, "fp_panic", "FP.PANIC", |_, _| {
+                panic!("pricing failed at strike 42")
+            })
+            .is_null()
+        );
+        let page = runtime
+            .diagnostics()
+            .errors_since(DiagnosticCursor::START, 100);
+        assert_eq!(page.errors.len(), 6);
+        assert_eq!(page.missed_events, 0);
+        assert_eq!(page.errors[0].argument.as_deref(), Some("spot"));
+        assert_eq!(page.errors[0].excel_error, ExcelError::Value);
+        assert_eq!(page.errors[1].excel_error, ExcelError::NotAvailable);
+        assert_eq!(page.errors[1].error_kind, DiagnosticErrorKind::ExcelValue);
+        assert_eq!(page.errors[5].error_kind, DiagnosticErrorKind::Panic);
+        assert_eq!(page.errors[5].message, "pricing failed at strike 42");
+        assert!(page.errors[4].message.contains("16777216"));
+        for pair in page.errors.windows(2) {
+            assert!(pair[0].call_id.unwrap().get() < pair[1].call_id.unwrap().get());
+            assert_eq!(pair[0].calculation_id, pair[1].calculation_id);
+        }
+        let before = runtime.diagnostics().stats().retained_records;
+        let success = udf_boundary_numeric_named(runtime, "fp_success", "FP.SUCCESS", |_, _| {
+            numeric::NumericArrayOutput::from_f64(1, 1, &[42.0])
+        });
+        assert!(!success.is_null());
+        assert_eq!(runtime.diagnostics().stats().retained_records, before);
+        let q = udf_boundary_named(runtime, "q_error", "Q.ERROR", |_, _| {
+            Err(XllError::ExcelValue(ExcelError::NotAvailable))
+        });
+        // SAFETY: q is the live scalar returned above, tagged as an error.
+        let q = unsafe { &*q };
+        // SAFETY: the boundary returned the error variant.
+        assert_eq!(unsafe { q.value.error }, ExcelError::NotAvailable.code());
+        assert_eq!(runtime.diagnostics().stats().retained_records, before);
+        assert_eq!(crate::boundary::host::host_auto_remove(runtime), 1);
+        assert!(
+            udf_boundary_numeric_named(runtime, "closed", "CLOSED", |_, _| panic!("must not run"))
+                .is_null()
+        );
+        let page = runtime.diagnostics().errors_since(page.next_cursor, 100);
+        assert_eq!(
+            page.errors.last().unwrap().error_kind,
+            DiagnosticErrorKind::Closing
+        );
+    }
+
+    #[test]
+    fn miri_fp12_nested_in_q_and_logical_close_preserve_published_arrays() {
+        static RUNTIME: Runtime<()> = Runtime::new();
+        let _test = test_lock();
+        let fixture = open_test_runtime(crate::runtime::StaticTestRuntime::from_static(&RUNTIME));
+        let runtime = fixture.runtime();
+        let pointer = Cell::new(std::ptr::null_mut::<xlfn_sys::FP12>());
+        let q = udf_boundary_named(runtime, "outer_q", "OUTER.Q", |_, _| {
+            let first = udf_boundary_numeric_named(runtime, "inner_k", "INNER.K", |_, _| {
+                numeric::NumericArrayOutput::from_f64(1, 1, &[7.0])
+            });
+            let second = udf_boundary_numeric_named(runtime, "inner_k", "INNER.K", |_, _| {
+                numeric::NumericArrayOutput::from_f64(1, 1, &[9.0])
+            });
+            // SAFETY: sibling nested calls defer reclamation until the next outer call.
+            assert_eq!(unsafe { (*first).array[0] }, 7.0);
+            // SAFETY: the second nested result remains published in the active epoch.
+            assert_eq!(unsafe { (*second).array[0] }, 9.0);
+            pointer.set(first);
+            ReturnPayload::scalar(1.0)
+        });
+        // SAFETY: the outer root remains live, and both numeric buffers remain published.
+        let q = unsafe { &*q };
+        // SAFETY: the outer boundary returned a numeric scalar.
+        assert_eq!(unsafe { q.value.number }, 1.0);
+        // SAFETY: no subsequent outer UDF has started on this thread.
+        assert_eq!(unsafe { (*pointer.get()).array[0] }, 7.0);
+        assert_eq!(crate::boundary::host::host_auto_remove(runtime), 1);
+        // SAFETY: logical close does not free process-owned published FP12 memory.
+        assert_eq!(unsafe { (*pointer.get()).array[0] }, 7.0);
+    }
+    #[test]
+    fn fp12_history_uses_admitted_calculation_even_if_epoch_advances() {
+        static RUNTIME: Runtime<()> = Runtime::new();
+        let _test = test_lock();
+        let fixture = open_test_runtime(crate::runtime::StaticTestRuntime::from_static(&RUNTIME));
+        let runtime = fixture.runtime();
+        let entered = runtime.calculation_id();
+        let pointer = udf_boundary_numeric_named(runtime, "epoch", "EPOCH", |_, _| {
+            runtime.finish_calculation();
+            Err(XllError::ExcelValue(ExcelError::NotAvailable))
+        });
+        assert!(pointer.is_null());
+        let page = runtime
+            .diagnostics()
+            .errors_since(crate::diagnostics::DiagnosticCursor::START, 10);
+        assert_eq!(page.errors.len(), 1);
+        assert_eq!(page.errors[0].calculation_id, Some(entered));
+        assert_ne!(runtime.calculation_id(), entered);
     }
 }

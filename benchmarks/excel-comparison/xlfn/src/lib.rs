@@ -22,7 +22,7 @@ use async_control::AsyncControl;
 use xlfn::{
     AsyncPollerCount, BuiltinAsyncExecutor, BuiltinExecutorConfig, RtdConfig, RuntimeConfig,
     error::InputError,
-    output::{XlArrayBuilder, XlArrayOutput},
+    output::{NumericArrayBuilder, NumericArrayOutput, XlArrayBuilder, XlArrayOutput},
     prelude::*,
     rtd::{RtdCapacity, RtdLimits, RtdSourceHandle, RtdValue},
 };
@@ -158,7 +158,7 @@ pub fn matrix_sum(values: NumericMatrixRef<'_>) -> f64 {
 }
 
 #[excel_function(name = "BENCH.MAT.MAKE", thread_safe)]
-pub fn matrix_make(rows: i32, columns: i32, seed: f64) -> XllResult<XlArrayOutput> {
+pub fn matrix_make(rows: i32, columns: i32, seed: f64) -> XllResult<NumericArrayOutput> {
     let rows =
         usize::try_from(rows).map_err(|_| XllError::input("rows", InputError::OutOfRange))?;
     let columns =
@@ -166,11 +166,17 @@ pub fn matrix_make(rows: i32, columns: i32, seed: f64) -> XllResult<XlArrayOutpu
     let count = rows
         .checked_mul(columns)
         .ok_or_else(|| XllError::input("rows", InputError::OutOfRange))?;
-    let mut output = XlArrayBuilder::new(rows, columns)?;
+    let mut output = NumericArrayBuilder::new(rows, columns)?;
     for i in 0..count {
         output.push_f64(seed + i as f64)?;
     }
     output.finish()
+}
+
+// The same numeric producer under the explicit Q ABI isolates return encoding.
+#[excel_function(name = "BENCH.MAT.MAKE.Q", thread_safe, return_abi = "xloper12")]
+pub fn matrix_make_q(rows: i32, columns: i32, seed: f64) -> XllResult<NumericArrayOutput> {
+    matrix_make(rows, columns, seed)
 }
 
 #[excel_function(name = "BENCH.MAT.COPY", thread_safe)]

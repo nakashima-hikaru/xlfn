@@ -1,0 +1,5 @@
+error: `return_abi` must be a string literal
+ --> tests/ui/return_abi_non_string.rs:3:31
+  |
+3 | #[excel_function(return_abi = fp12)]
+  |                               ^^^^

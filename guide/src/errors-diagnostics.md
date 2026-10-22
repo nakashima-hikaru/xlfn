@@ -29,7 +29,7 @@ error type, implement `IntoXllError` to convert it to `XllError`.
 `ExcelError`, `std::io::Error`, and `DiagnosticInitError` already implement
 `IntoXllError` and convert into `XllError` with `From`, so they work with `?`.
 For an intentional worksheet error, a function can return `Result<f64, ExcelError>`.
-These values preserve the selected cell error without emitting a failure diagnostic.
+On the Q path, these values preserve the selected cell error without emitting a failure diagnostic.
 Execution layers and UDF tracing still observe the `ExcelValue` completion:
 
 ```rust
@@ -48,7 +48,7 @@ fn available(value: f64) -> Result<f64, ExcelError> {
 
 When the same cell error needs application diagnostic detail, use
 `XllError::custom(ExcelError::NotAvailable, "market data connection is unavailable")`.
-The cell receives `#N/A`; the message is retained only in the diagnostic stream.
+On the Q path the cell receives `#N/A`; the message is retained in diagnostics.
 
 ## Error types
 
@@ -69,7 +69,7 @@ Use `XllError::input(argument, reason)` for user-correctable worksheet input. Re
 
 ## Worksheet mapping
 
-The framework maps errors conservatively:
+The Q (`XLOPER12*`) path maps errors conservatively:
 
 | Error family | Typical Excel result |
 |---|---|
@@ -85,7 +85,64 @@ output, and custom `IntoExcel` conversions. These output errors carry no
 worksheet argument name. A non-finite numeric input remains
 `InputError::NonFinite`, with the supplied argument name, and maps to `#VALUE!`.
 
-This mapping is intentionally coarse. The diagnostic stream carries the specific variant, argument, function ID, and diagnostic identifier.
+Synchronous numeric arrays default to FP12 (`K%`). Every FP12 failure returns
+null (`#NUM!`), including `ExcelValue` errors. Use
+`#[excel_function(return_abi = "xloper12")]` to preserve Q error distinctions.
+A diagnostic record cannot restore `IFNA` or other Excel formula semantics.
+If Excel fails native argument coercion before calling Rust, xlfn receives no
+call and cannot record that failure.
+
+## Read bounded runtime history
+
+History belongs to one add-in runtime, separately from the process-wide async
+sink. Each detected synchronous failure is inserted before external delivery;
+no sink or tracing subscriber is required. Querying history does not change
+execution or shutdown state.
+
+```rust
+# fn read_history(diagnostics: &xlfn::diagnostics::DiagnosticHistory) {
+use xlfn::diagnostics::DiagnosticCursor;
+let mut cursor = DiagnosticCursor::START;
+let page = diagnostics.errors_since(cursor, 100);
+for error in &page.errors {
+    println!("{}: {}", error.udf_id, error.message);
+}
+cursor = page.next_cursor;
+let missed = page.missed_events;
+# let _ = (cursor, missed);
+# }
+```
+
+`ThreadSafeContext`, `MainThreadContext`, and `MacroSheetContext` expose
+`diagnostics()` for application code. For example:
+
+```rust
+{{#include ../fixtures/addin.md}}
+use xlfn::prelude::*;
+use xlfn::diagnostics::DiagnosticCursor;
+
+#[excel_function(name = "HELLO.ERROR.COUNT")]
+fn error_count(context: ThreadSafeContext<'_, GuideAddin>) -> f64 {
+    context.diagnostics().errors_since(DiagnosticCursor::START, 100).errors.len() as f64
+}
+```
+
+Records include diagnostic, UDF, call,
+and calculation identifiers, timestamp, error classification, the original
+Excel error, argument, and bounded text. FP12 records retain the original
+error even though the cell displays `#NUM!`. Calculation identity is captured
+at UDF entry and advances on Excel's calculation-ended event in every feature
+set. Excel can omit that event for some programmatic recalculations, so the ID
+does not promise a distinct value for every recalculation request.
+Standard panic text is retained;
+arbitrary panic payloads are described without running their destructors.
+
+Default retention is bounded by 1,024 records and 4 MiB of accounted record
+storage. Old records are evicted. Pages expose `missed_events` for overwritten
+or unrecordable events, and statistics expose cumulative drops. Allocation
+failure can prevent recording or copying a page, so history is best effort.
+Retain the returned cursor and inspect the page's allocation-failure flag before
+retrying. Sink queue losses are counted separately.
 
 ## Install the file sink
 

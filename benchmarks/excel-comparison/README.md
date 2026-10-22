@@ -90,11 +90,11 @@ incompatible input before invoking Rust. It does not change the strict
 `Matrix<f64>` API. These cases contain only numeric cells, so their values and
 function bodies retain the same workload.
 
-M02 builds numeric output directly with `XlArrayBuilder`; M03 encodes the
-borrowed numeric slice with `XlArrayBuilder::from_f64`. Both avoid an
-intermediate owned matrix. Outputs still use the ordinary `Q` value ABI and
-XLOPER12 cells, preserving worksheet errors, panic handling, and closing-state
-results; they are not dense FP12 outputs. M05 uses
+M02 builds numeric output directly with `NumericArrayBuilder` and returns FP12.
+M03 encodes the borrowed numeric slice with `XlArrayBuilder::from_f64`. Both
+avoid an intermediate owned matrix. M03 uses Q and preserves worksheet error
+distinctions; M02 failures display #NUM! and retain details in runtime history.
+M06 compares both return ABIs with the same numeric builder. M05 uses
 `MatrixRef<ExcelCellRef>` to classify the same five cell types without owning
 each string. Strings still require validated UTF-16 to UTF-8 decoding into
 call-local scratch.
@@ -436,3 +436,22 @@ Relevant API references: [Excel-DNA NativeAOT support](https://excel-dna.net/doc
 [Excel-DNA packed add-in build properties](https://excel-dna.net/docs/guides-basic/sdk-style-project-properties/),
 [Excel `Range.Dirty`](https://learn.microsoft.com/en-us/office/vba/api/excel.range.dirty),
 and [Excel RTD throttle](https://learn.microsoft.com/en-us/office/vba/api/excel.rtd.throttleinterval).
+
+
+## Q versus FP12 numeric returns
+
+M06 compares the same numeric builder under default FP12 and explicit Q in one
+xlfn XLL. Each ABBA/BAAB block verifies the complete spill, including the 100,000
+cell workload. It records both timing vectors and their ratio. Run on Windows:
+
+```powershell
+python run.py --id M06 --implementation xlfn --repeat 10 --out fp12-results.jsonl
+```
+
+Repeat across independent Excel sessions and thread counts. Process-heap FP12
+allocations bypass Rust allocator counters. Module retention metrics reset on
+physical reload; old image allocations remain process-owned, so use process RSS
+and repeated reload sessions as well as `numeric_return_memory_metrics()` when
+qualifying memory bounds. The 16/64/256 MiB limits are provisional. This harness
+has not yet established live Excel speed or physical-unload safety evidence.
+Existing CI regressions must be investigated separately.

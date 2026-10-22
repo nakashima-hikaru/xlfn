@@ -117,20 +117,59 @@ impl NumericArrayOutputBenchmark {
     }
 
     pub fn run_matrix(&self) {
-        self.run(|| Ok(self.prepared_matrix()));
+        self.run_fp12(|| Ok(self.prepared_matrix()));
     }
 
     pub fn run_direct(&self) {
-        self.run(|| self.build_direct());
+        self.run_fp12(|| {
+            let mut builder = crate::output::NumericArrayBuilder::new(self.values.len(), 1)?;
+            for &value in std::hint::black_box(&self.values) {
+                builder.push_f64(Self::result_value(value))?;
+            }
+            builder.finish()
+        });
     }
 
     /// Converts an existing borrowed numeric result without an intermediate matrix.
     pub fn run_numeric_slice(&self, values: &[f64]) {
-        self.run(|| XlArrayBuilder::from_f64(values.len(), 1, values)?.finish());
+        self.run_fp12(|| {
+            crate::output::NumericArrayBuilder::from_f64(values.len(), 1, values)?.finish()
+        });
     }
 
     pub fn run_prepared_matrix(&self, matrix: crate::value::Matrix<f64>) {
-        self.run(|| Ok(matrix));
+        self.run_fp12(|| Ok(matrix));
+    }
+
+    pub fn run_matrix_q(&self) {
+        self.run(|| Ok(self.prepared_matrix()));
+    }
+    pub fn run_direct_q(&self) {
+        self.run(|| self.build_direct());
+    }
+
+    fn run_fp12<T: crate::call_return::NumericReturn>(
+        &self,
+        operation: impl FnOnce() -> crate::XllResult<T>,
+    ) {
+        let pointer = crate::return_abi::udf_boundary_numeric_named(
+            self.runtime,
+            "bench_array_output",
+            "BENCH.ARRAY.OUTPUT",
+            |_, _| {
+                let mut context = crate::call_return::ReturnContext::new();
+                <T as crate::call_return::NumericReturn>::invoke(&mut context, operation)
+            },
+        );
+        assert!(
+            !pointer.is_null(),
+            "benchmark must return FP12 rather than time an error path"
+        );
+        // SAFETY: the boundary published a complete FP12, live until the next outer UDF invocation.
+        let fp = unsafe { &*pointer };
+        let (rows, columns) = (fp.rows, fp.columns);
+        assert_eq!((rows as usize, columns), (self.values.len(), 1));
+        std::hint::black_box(pointer);
     }
 
     fn run<T: crate::call_return::ExcelReturn>(

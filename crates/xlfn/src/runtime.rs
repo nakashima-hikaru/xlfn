@@ -99,6 +99,7 @@ pub struct Runtime<A: crate::Addin> {
     addin_lifecycle: ThreadAffineSlot<A::LifecycleState>,
     host: HostLedger,
     return_protocol: ReturnProtocol,
+    diagnostics: crate::diagnostics::DiagnosticHistory,
     #[cfg(feature = "async")]
     async_runtime: crate::async_udf::AsyncRuntime<A::AsyncExecutor>,
     residency: ModuleResidency,
@@ -227,6 +228,7 @@ impl<A: crate::Addin> Runtime<A> {
             addin_lifecycle: ThreadAffineSlot::new(),
             host: HostLedger::new(),
             return_protocol: ReturnProtocol::new(),
+            diagnostics: crate::diagnostics::DiagnosticHistory::new(),
             #[cfg(feature = "async")]
             async_runtime: crate::async_udf::AsyncRuntime::new(),
             residency: ModuleResidency::new(),
@@ -249,6 +251,7 @@ impl<A: crate::Addin> Runtime<A> {
             addin_lifecycle: ThreadAffineSlot::new(),
             host: HostLedger::new(),
             return_protocol: ReturnProtocol::new(),
+            diagnostics: crate::diagnostics::DiagnosticHistory::new(),
             #[cfg(feature = "async")]
             async_runtime: crate::async_udf::AsyncRuntime::new(),
             residency: ModuleResidency::new(),
@@ -278,6 +281,15 @@ impl<A: crate::Addin> Runtime<A> {
     #[must_use]
     pub fn phase(&self) -> LifecyclePhase {
         self.lifecycle.observed_phase()
+    }
+
+    /// Returns this runtime's bounded, synchronous worksheet failure history.
+    ///
+    /// History survives logical close and reopening of this runtime. Reading it
+    /// never changes UDF admission, calculation state, or asynchronous delivery.
+    #[must_use]
+    pub fn diagnostics(&self) -> &crate::diagnostics::DiagnosticHistory {
+        &self.diagnostics
     }
 
     pub(crate) fn host_intent(&self) -> HostLifecycleIntent {
@@ -576,6 +588,7 @@ impl<A: crate::Addin> Runtime<A> {
         let admission = self.lifecycle.try_admit()?;
         let observation = self.observer().observe_call();
         Ok(CallGuard {
+            diagnostics: &self.diagnostics,
             admission,
             _ingress: ingress,
             _observation: observation,
@@ -674,9 +687,15 @@ impl<A: crate::Addin> Runtime<A> {
         }
     }
 
-    #[cfg(feature = "async")]
     pub(crate) fn finish_calculation(&self) {
+        #[cfg(feature = "async")]
         let _ = self.async_runtime.advance_calculation();
+        #[cfg(not(feature = "async"))]
+        let _ = self.return_protocol.calculation_id.try_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |current| current.checked_add(1),
+        );
     }
 
     #[cfg(all(feature = "handles", any(test, feature = "bench-internals")))]
@@ -902,12 +921,17 @@ pub(crate) mod test_support {
 }
 
 pub struct CallGuard<'runtime, A: crate::Addin> {
+    diagnostics: &'runtime crate::diagnostics::DiagnosticHistory,
     _ingress: &'runtime AdmittedExport<'runtime>,
     admission: GenerationAdmission<'runtime, A>,
     _observation: observer::CallObservation<'runtime>,
 }
 
 impl<A: crate::Addin> CallGuard<'_, A> {
+    pub(crate) fn diagnostics(&self) -> &crate::diagnostics::DiagnosticHistory {
+        self.diagnostics
+    }
+
     #[must_use]
     pub fn state(&self) -> &A::SharedState {
         &self.generation().shared_state
@@ -2030,6 +2054,17 @@ pub(crate) mod tests {
             crate::BuiltinExecutorConfig::new()
                 .with_poller_count(crate::AsyncPollerCount::new(1).unwrap()),
         )
+    }
+
+    #[cfg(not(feature = "async"))]
+    #[test]
+    fn calculation_end_advances_synchronous_diagnostic_identity() {
+        let runtime = Runtime::<()>::new();
+        let first = runtime.calculation_id();
+        runtime.finish_calculation();
+        assert_eq!(runtime.calculation_id().get(), first.get() + 1);
+        runtime.finish_calculation();
+        assert_eq!(runtime.calculation_id().get(), first.get() + 2);
     }
 
     #[cfg(feature = "async-builtin")]

@@ -197,9 +197,74 @@ cell views when the original cell distinctions matter.
 Read dimensions with `shape()`, `rows()`, and `columns()`, and access elements
 with `as_slice()`, `iter()`, `row()`, or checked `get(row, column)`. The buffer
 exists only during the synchronous call and cannot be an async argument.
-Returns continue to use xlfn's ordinary value ABI, which preserves error and
-panic handling for functions accepting numeric arrays. Opting into the FP12
-input ABI does not opt into FP12 output.
+Return ABI selection depends on the Rust return type, independently of input ABI.
+Synchronous `Matrix<f64>`, `Row<f64>`, `Column<f64>`, and `NumericArrayOutput`
+return `FP12*` (`K%`) by default. `Result<T, E>` inherits `T`'s ABI.
+Other types, including scalars and mixed arrays, use `XLOPER12*` (`Q`).
+Unrecognized type aliases default to Q; `return_abi = "fp12"` can select the
+numeric ABI explicitly and requires a compatible numeric return type.
+Asynchronous functions keep the `xlAsyncReturn` completion path.
+
+### Return numeric arrays directly
+
+`NumericArrayBuilder` writes finite doubles directly into FP12-compatible
+contiguous storage, without building an XLOPER12 for each cell:
+
+```rust
+{{#include ../fixtures/addin.md}}
+use xlfn::prelude::*;
+use xlfn::output::{NumericArrayBuilder, NumericArrayOutput};
+
+#[excel_function(name = "ARRAY.PRICES", thread_safe)]
+fn prices(spot: f64, strikes: NumericMatrixRef<'_>) -> XllResult<NumericArrayOutput> {
+    let mut output = NumericArrayBuilder::new(strikes.rows(), strikes.columns())?;
+    for &strike in strikes.as_slice() {
+        output.push_f64((spot - strike).max(0.0))?;
+    }
+    output.finish()
+}
+```
+
+This registers `K%BK%$`. Existing numeric matrices and vectors use the same
+FP12 publication path with a final copy into contiguous return storage.
+All FP12 failures, including input errors, `ExcelValue`, panics, non-finite
+numbers, and exceeded limits, return null, which Excel displays as `#NUM!`.
+The runtime records details synchronously in its bounded diagnostic history.
+
+Choose Q when worksheet error distinctions such as `#N/A` and `IFNA` matter:
+
+```rust
+{{#include ../fixtures/addin.md}}
+use xlfn::prelude::*;
+
+#[excel_function(name = "ARRAY.STRICT", thread_safe, return_abi = "xloper12")]
+fn strict_prices() -> Result<Matrix<f64>, ExcelError> {
+    Err(ExcelError::NotAvailable)
+}
+```
+
+Diagnostics cannot restore Excel formula error semantics lost by FP12.
+Excel input coercion can fail before entering Rust; those failures cannot be
+recorded by xlfn. See [Errors and diagnostics](errors-diagnostics.md).
+
+FP12 storage uses Windows process-heap allocations. Published buffers stay
+immutable until the next outer synchronous UDF invocation on the same thread;
+nested calls defer reclamation. The final published buffer is deliberately
+retained across thread exit and physical DLL unload because Excel supplies no
+FP12 release notification. Unpublished buffers are released normally.
+
+Provisional limits are 16 MiB per result (8 + 8 × rows × columns), 64 MiB
+published per thread, and 256 MiB published per module image, with allocation
+headers included in the latter two limits. `numeric_return_memory_metrics()`
+reports current-thread and module retention. These are implementation safety
+budgets pending native Excel load testing, not empirically tuned limits.
+An unloaded image's retained allocations cannot be reclaimed or counted by a
+new image; repeated physical reloads can accumulate retention until process exit.
+
+The FP12 registration and delayed reclamation follow Microsoft's
+[data types](https://learn.microsoft.com/en-us/office/client-developer/excel/data-types-used-by-excel)
+and [memory management](https://learn.microsoft.com/en-us/office/client-developer/excel/memory-management-in-excel)
+contracts. Native Windows/Excel validation remains required for deployment.
 
 ### Build a large result incrementally
 

@@ -588,6 +588,50 @@ def run_matrix(session: ExcelSession, case: Case, repeat: int) -> dict[str, Any]
                 raise AssertionError("allocation tracking could not be disabled")
 
 
+def run_numeric_output_pair(session: ExcelSession, case: Case, repeat: int) -> dict[str, Any]:
+    """Compare Q and FP12 return encoding of the same numeric producer."""
+    if session.implementation != "xlfn":
+        raise UnsupportedCase("M06 compares xlfn's Q/FP12 returns within one XLL")
+    if repeat < 1:
+        raise ValueError("numeric output comparison requires at least one ABBA block")
+    sheet = session.new_book()
+    rows, cols = case.params["rows"], case.params["cols"]
+    count = rows * cols
+    targets, areas = {}, {}
+    for abi, column, function in (("Q", 1, "BENCH.MAT.MAKE.Q"), ("FP12", cols + 2, "BENCH.MAT.MAKE")):
+        targets[abi] = sheet.Cells(1, column)
+        targets[abi].Formula2 = f"={function}({rows},{cols},0)"
+        areas[abi] = sheet.Range(sheet.Cells(1, column), sheet.Cells(rows, column + cols - 1))
+
+    def check(abi: str) -> None:
+        values = flatten(areas[abi].Value2)
+        if len(values) != count or any(type(value) not in (int, float) or value != index
+                                       for index, value in enumerate(values)):
+            raise AssertionError(f"{case.key}/{abi}: numeric spill verification failed")
+
+    for abi, target in targets.items():
+        session.calculate(target)
+        check(abi)
+    samples: dict[str, list[float]] = {"Q": [], "FP12": []}
+    observations = []
+    for block in range(repeat):
+        order = ("Q", "FP12", "FP12", "Q") if block % 2 == 0 else ("FP12", "Q", "Q", "FP12")
+        for abi in order:
+            elapsed = session.calculate(targets[abi])
+            samples[abi].append(elapsed)
+            observations.append({"block": block, "abi": abi, "elapsed_s": elapsed,
+                                 "timing": session.last_calculation_timing.copy()})
+            check(abi)
+    q_s, fp12_s = (statistics.median(samples[abi]) for abi in ("Q", "FP12"))
+    return {"elements": count, "formula_count": 2,
+            "q_samples_s": samples["Q"], "fp12_samples_s": samples["FP12"],
+            "q_p50_s": q_s, "fp12_p50_s": fp12_s,
+            "fp12_over_q_ratio": fp12_s / q_s,
+            "fp12_change_percent": (fp12_s / q_s - 1) * 100,
+            "recalculation_samples": observations,
+            "timing_note": "Within-xlfn ABBA/BAAB return-ABI comparison. Includes Excel, COM and completion; validate independent sessions. Windows process-heap allocations bypass Rust allocator counters."}
+
+
 def run_text(session: ExcelSession, case: Case, repeat: int) -> dict[str, Any]:
     sheet = session.new_book()
     count = case.params["cells"]
@@ -1436,6 +1480,8 @@ def execute(session: ExcelSession, case: Case, repeat: int) -> dict[str, Any]:
         return run_native_abi_pair(session, case, repeat)
     if case.id in ("S01", "S02", "S03", "S04", "P01", "P02", "P03", "P04", "W03", "L02"):
         return run_scalar(session, case, case.params.get("repetitions", repeat))
+    if case.id == "M06":
+        return run_numeric_output_pair(session, case, repeat)
     if case.id.startswith("M"):
         return run_matrix(session, case, repeat)
     if case.id.startswith("T"):
@@ -1675,7 +1721,7 @@ def main() -> int:
     implementations = [args.implementation] if args.implementation else ["xlfn", "excel_dna"]
     for case in selected:
         for implementation in implementations:
-            if case.id.startswith("N") and implementation == "excel_dna" and args.implementation is None:
+            if (case.id.startswith("N") or case.id == "M06") and implementation == "excel_dna" and args.implementation is None:
                 continue
             xll = artifact(Path(args.artifacts), implementation, case)
             if not xll.is_file():

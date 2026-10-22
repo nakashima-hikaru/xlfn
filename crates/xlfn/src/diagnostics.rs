@@ -28,6 +28,7 @@ pub(crate) mod benchmark;
 pub(crate) mod event;
 /// Private file-sink and startup-log integration.
 pub(crate) mod file;
+mod history;
 mod payload;
 /// Private bounded worker and ownership handoff.
 pub(crate) mod worker;
@@ -44,6 +45,10 @@ pub(crate) use event::DiagnosticsDrained;
 pub use event::{
     AddinId, DiagnosticEvent, DiagnosticInitError, DiagnosticSink, DiagnosticStats, InvalidAddinId,
     diagnostic_stats,
+};
+pub use history::{
+    DiagnosticCursor, DiagnosticErrorKind, DiagnosticHistory, DiagnosticHistoryLimits,
+    DiagnosticHistoryStats, DiagnosticPage, DiagnosticRecord,
 };
 use worker::{AsyncDiagnosticSink, DiagnosticEventMetadata, DiagnosticObserver};
 
@@ -494,6 +499,7 @@ pub(crate) fn failed_diagnostic_writes() -> u64 {
 
 /// Reports a failure without allowing tracing subscribers or user-provided sink code
 /// to unwind into an Excel ABI entry point.
+#[cfg(any(feature = "async", test))]
 pub(crate) fn report_udf_failure_no_unwind(udf_id: &'static str, error: &XllError) {
     // A preserved worksheet error has no diagnostic detail. Instrumentation
     // still receives its ExcelValue completion; Custom carries reportable text.
@@ -502,9 +508,71 @@ pub(crate) fn report_udf_failure_no_unwind(udf_id: &'static str, error: &XllErro
     }
 }
 
+/// Records the failure synchronously before attempting asynchronous sink delivery.
+pub(crate) fn report_udf_failure_with_history_no_unwind(
+    history: &DiagnosticHistory,
+    udf_id: &'static str,
+    call_id: Option<crate::execution::CallId>,
+    calculation_id: Option<crate::execution::CalculationId>,
+    error: &XllError,
+    include_excel_value: bool,
+) {
+    if !include_excel_value && matches!(error, XllError::ExcelValue(_)) {
+        return;
+    }
+    let diagnostic_id = DiagnosticId::from_u64(NEXT_ID.fetch_add(1, Ordering::Relaxed));
+    let timestamp = SystemTime::now();
+    history.record(
+        history::FailureMetadata {
+            diagnostic_id,
+            udf_id,
+            call_id,
+            calculation_id,
+            timestamp,
+        },
+        error,
+        None,
+    );
+    report_with_id_no_unwind(udf_id, error, diagnostic_id, timestamp);
+}
+
+/// Preserves bounded standard panic text in history without retaining the payload.
+pub(crate) fn report_udf_panic_with_history_no_unwind(
+    history: &DiagnosticHistory,
+    udf_id: &'static str,
+    call_id: Option<crate::execution::CallId>,
+    calculation_id: Option<crate::execution::CalculationId>,
+    message: &str,
+) {
+    let diagnostic_id = DiagnosticId::from_u64(NEXT_ID.fetch_add(1, Ordering::Relaxed));
+    let timestamp = SystemTime::now();
+    history.record(
+        history::FailureMetadata {
+            diagnostic_id,
+            udf_id,
+            call_id,
+            calculation_id,
+            timestamp,
+        },
+        &XllError::Panic,
+        Some(message),
+    );
+    report_with_id_no_unwind(udf_id, &XllError::Panic, diagnostic_id, timestamp);
+}
+
 /// Reports framework and application failures, including diagnostic identity.
 pub(crate) fn report_no_unwind(udf_id: &'static str, error: &XllError) -> DiagnosticId {
     let diagnostic_id = DiagnosticId::from_u64(NEXT_ID.fetch_add(1, Ordering::Relaxed));
+    report_with_id_no_unwind(udf_id, error, diagnostic_id, SystemTime::now());
+    diagnostic_id
+}
+
+fn report_with_id_no_unwind(
+    udf_id: &'static str,
+    error: &XllError,
+    diagnostic_id: DiagnosticId,
+    timestamp: SystemTime,
+) {
     let argument = match error {
         XllError::Input { argument, .. } => Some(*argument),
         _ => None,
@@ -525,11 +593,10 @@ pub(crate) fn report_no_unwind(udf_id: &'static str, error: &XllError) -> Diagno
                 udf_id,
                 argument,
                 diagnostic_id,
-                timestamp: SystemTime::now(),
+                timestamp,
             });
         }
     }));
-    diagnostic_id
 }
 
 fn deliver_no_unwind<S: DiagnosticSink>(sink: &S, event: &DiagnosticEvent<'_>) {
@@ -912,6 +979,59 @@ mod tests {
         report_udf_failure_no_unwind("panic_error", &XllError::Panic);
         clear_diagnostic_sink().unwrap();
         assert_eq!(reports.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn synchronous_history_precedes_sink_delivery_and_fp12_preserves_excel_errors() {
+        let _router_guard = prepare_global_router();
+        type CapturedEvents = Arc<Mutex<Vec<(DiagnosticId, SystemTime)>>>;
+        struct CapturingSink(CapturedEvents);
+        impl DiagnosticSink for CapturingSink {
+            fn report(&self, event: &DiagnosticEvent<'_>) {
+                self.0
+                    .lock()
+                    .push((event.diagnostic_id(), event.timestamp()));
+            }
+        }
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+        set_diagnostic_sink(CapturingSink(Arc::clone(&delivered))).unwrap();
+        let history = DiagnosticHistory::new();
+        let error = XllError::ExcelValue(crate::ExcelError::NotAvailable);
+        report_udf_failure_with_history_no_unwind(&history, "q_result", None, None, &error, false);
+        assert!(
+            history
+                .errors_since(DiagnosticCursor::START, 10)
+                .errors
+                .is_empty()
+        );
+        report_udf_failure_with_history_no_unwind(
+            &history,
+            "fp12_result",
+            Some(crate::execution::CallId::new(17)),
+            Some(crate::execution::CalculationId::new(5)),
+            &error,
+            true,
+        );
+        report_udf_panic_with_history_no_unwind(
+            &history,
+            "panic_result",
+            None,
+            None,
+            "calculation panic detail",
+        );
+        let page = history.errors_since(DiagnosticCursor::START, 10);
+        assert_eq!(page.errors.len(), 2);
+        assert_eq!(page.errors[0].excel_error, crate::ExcelError::NotAvailable);
+        assert_eq!(page.errors[0].call_id.unwrap().get(), 17);
+        assert_eq!(page.errors[1].error_kind, DiagnosticErrorKind::Panic);
+        assert_eq!(page.errors[1].message, "calculation panic detail");
+        clear_diagnostic_sink().unwrap();
+        let expected: Vec<_> = page
+            .errors
+            .iter()
+            .map(|error| (error.diagnostic_id, error.timestamp))
+            .collect();
+        assert_eq!(*delivered.lock(), expected);
     }
 
     #[test]

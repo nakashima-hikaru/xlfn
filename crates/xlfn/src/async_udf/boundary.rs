@@ -167,6 +167,9 @@ pub(crate) unsafe fn async_udf_boundary_named<A, Start, Fut, T>(
     Fut: Future<Output = XllResult<T>> + Send + 'static,
     T: ExcelReturn + Send + 'static,
 {
+    // Only synchronous launch owns this epoch. Reentrant numeric siblings
+    // remain live through admission, user preparation, and call teardown.
+    let _numeric = crate::return_abi::numeric::Fp12CallGuard::enter();
     let ingress = match crate::module_runtime::ingress()
         .enter_udf_with(|| {})
         .into_admitted()
@@ -445,6 +448,9 @@ pub(crate) unsafe fn async_udf_boundary_named_handle<A, Start, Build, T>(
     Build: HandleScopedBuilder<T> + Send + 'static,
     T: ExcelReturn + Send + 'static,
 {
+    // The guard remains on the launch stack; no async task captures it.
+    // Keep it through teardown, which can itself reenter a worksheet UDF.
+    let _numeric = crate::return_abi::numeric::Fp12CallGuard::enter();
     let ingress = match crate::module_runtime::ingress()
         .enter_udf_with(|| {})
         .into_admitted()
@@ -744,6 +750,150 @@ pub(crate) fn cancel_async_calculation<A: crate::Addin>(runtime: &Runtime<A>) {
     runtime.cancel_async();
 }
 
-pub(crate) fn end_async_calculation<A: crate::Addin>(runtime: &Runtime<A>) {
-    runtime.finish_calculation();
+#[cfg(test)]
+mod numeric_launch_tests {
+    use super::*;
+    use crate::return_abi::numeric::{NumericArrayOutput, numeric_return_memory_metrics};
+    use std::cell::Cell;
+    use xlfn_sys::{FP12, XLOPER12BigData, XLOPER12BigDataHandle, XLOPER12Value, XLTYPE_BIG_DATA};
+
+    struct LaunchTestAddin;
+
+    impl crate::Addin for LaunchTestAddin {
+        type SharedState = ();
+        type LifecycleState = ();
+        type Error = XllError;
+        type Layers = ();
+        type AsyncExecutor = crate::NoAsyncExecutor;
+
+        fn open(_: &crate::OpenContext) -> crate::OpenResult<Self> {
+            unreachable!()
+        }
+    }
+
+    unsafe fn first_number(pointer: *mut FP12) -> f64 {
+        // SAFETY: each caller retains the current published epoch, whose
+        // initialized 1x1 FP12 payload begins after the eight-byte ABI header.
+        let payload = unsafe { pointer.cast::<f64>().add(1) };
+        // SAFETY: the selected numeric payload is initialized and still live.
+        unsafe { payload.read() }
+    }
+
+    fn numeric_siblings(runtime: &'static Runtime<LaunchTestAddin>) -> *mut FP12 {
+        let first = crate::return_abi::udf_boundary_numeric_named(
+            runtime,
+            "async_launch_first_numeric",
+            "ASYNC.LAUNCH.FIRST.NUMERIC",
+            |_, _| NumericArrayOutput::from_f64(1, 1, &[1.0]),
+        );
+        let second = crate::return_abi::udf_boundary_numeric_named(
+            runtime,
+            "async_launch_second_numeric",
+            "ASYNC.LAUNCH.SECOND.NUMERIC",
+            |_, _| NumericArrayOutput::from_f64(1, 1, &[2.0]),
+        );
+        assert!(!first.is_null());
+        assert!(!second.is_null());
+        assert_eq!(numeric_return_memory_metrics().thread_published_buffers, 2);
+        // SAFETY: sibling launch calls share the still-active outer epoch.
+        assert_eq!(unsafe { first_number(first) }, 1.0);
+        first
+    }
+
+    fn verify_launch(
+        runtime: &'static Runtime<LaunchTestAddin>,
+        launch: impl FnOnce(&'static Runtime<LaunchTestAddin>, *mut XLOPER12, &Cell<*mut FP12>),
+    ) {
+        let _test = crate::runtime::tests::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let fixture = crate::runtime::StaticTestRuntime::from_static(runtime);
+        let runtime = fixture.runtime();
+        let open = runtime.begin_open().unwrap();
+        let mut open = runtime.publish(open, (), ());
+        runtime.finish_open(&mut open, Vec::new()).unwrap();
+        runtime
+            .start_async(crate::NoAsyncExecutor, crate::AsyncTaskLimit::DEFAULT)
+            .unwrap();
+        let _callback = crate::test_callback::lock();
+        crate::test_callback::install();
+        crate::test_callback::reset();
+        let mut handle = XLOPER12 {
+            value: XLOPER12Value {
+                big_data: XLOPER12BigData {
+                    handle: XLOPER12BigDataHandle {
+                        data: std::ptr::null_mut(),
+                    },
+                    byte_count: 0,
+                },
+            },
+            xltype: XLTYPE_BIG_DATA,
+        };
+        let first = Cell::new(std::ptr::null_mut());
+        launch(runtime, &mut handle, &first);
+        assert!(!first.get().is_null());
+        assert_eq!(crate::test_callback::async_return_calls(), 1);
+        assert_eq!(numeric_return_memory_metrics().thread_published_buffers, 2);
+        // SAFETY: return from launch, including runtime guard teardown, must
+        // retain both numeric results until the next outer worksheet entry.
+        assert_eq!(unsafe { first_number(first.get()) }, 1.0);
+        assert!(runtime.close_async().unwrap().issues.is_empty());
+        drop(crate::return_abi::numeric::Fp12CallGuard::enter());
+    }
+
+    #[test]
+    fn miri_async_launch_retains_nested_numeric_siblings() {
+        static RUNTIME: Runtime<LaunchTestAddin> = Runtime::new();
+        verify_launch(&RUNTIME, |runtime, handle, first| {
+            // SAFETY: verify_launch owns this aligned, initialized async token
+            // for the entire synchronous launch call.
+            unsafe {
+                async_udf_boundary_named(
+                    runtime,
+                    "async_launch",
+                    "ASYNC.LAUNCH",
+                    handle,
+                    |_, _, _| {
+                        first.set(numeric_siblings(runtime));
+                        Err::<std::future::Ready<XllResult<f64>>, _>(XllError::Overloaded)
+                    },
+                );
+            }
+        });
+    }
+
+    #[cfg(feature = "handles")]
+    struct UnusedHandleBuilder;
+
+    #[cfg(feature = "handles")]
+    impl HandleScopedBuilder<f64> for UnusedHandleBuilder {
+        fn build<'generation>(
+            self,
+            _: super::super::task_scope::AsyncTaskScope<'generation>,
+        ) -> ScopedTaskFuture<'generation, XllResult<f64>> {
+            unreachable!("launch returns an error before building any async task")
+        }
+    }
+
+    #[cfg(feature = "handles")]
+    #[test]
+    fn miri_handle_async_launch_retains_nested_numeric_siblings() {
+        static RUNTIME: Runtime<LaunchTestAddin> = Runtime::new();
+        verify_launch(&RUNTIME, |runtime, handle, first| {
+            // SAFETY: verify_launch owns this aligned, initialized async token
+            // for the entire synchronous launch call.
+            unsafe {
+                async_udf_boundary_named_handle(
+                    runtime,
+                    "handle_async_launch",
+                    "HANDLE.ASYNC.LAUNCH",
+                    handle,
+                    |_, _, _| {
+                        first.set(numeric_siblings(runtime));
+                        Err::<UnusedHandleBuilder, _>(XllError::Overloaded)
+                    },
+                );
+            }
+        });
+    }
 }

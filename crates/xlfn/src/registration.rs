@@ -18,5 +18,5 @@ pub(crate) use ledger::{
 pub(crate) use preflight::preflight_registration;
 pub(crate) use recovery::retry_metadata_debt;
 pub(crate) use registrar::HostRegistrar;
-pub use schema::{ArgumentAbi, ArgumentDescriptor};
+pub use schema::{ArgumentAbi, ArgumentDescriptor, ReturnAbi};
 pub(crate) use schema::{RegistrationDescriptor, RegistrationId, RegistrationSignature};

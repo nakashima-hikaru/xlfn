@@ -19,7 +19,7 @@ from run import (XL_AUTOMATIC, XL_MANUAL, XL_ERR_NUM, AsyncControl, ComObject, C
                  ExcelSession, UnsupportedCase, WorkerProgress, apply_excel_cleanup, calculation_mode,
                  check_final_values, check_scalar, close_worker_session, formula, register_xll,
                  registration_diagnostics, run_async, reap_excel_process,
-                 recover_worker_record, run_async_cancel, run_async_gate, run_async_repeated, run_matrix,
+                 recover_worker_record, run_async_cancel, run_async_gate, run_async_repeated, run_matrix, run_numeric_output_pair,
                  native_abi_formula, run_native_abi_pair, classify_abi_semantics, run_native_abi_semantics, artifact)
 from summarize import PRIMARY, summarize
 from workloads import IDS, Case, cases
@@ -32,6 +32,44 @@ def atomic_write_json(path: Path, payload: Any) -> None:
 
 
 class PlanTest(unittest.TestCase):
+    def test_numeric_output_pair_verifies_every_cell_and_uses_balanced_order(self):
+        anchors = {}
+        areas = []
+        class Sheet:
+            def Cells(self, row, column):
+                return anchors.setdefault((row, column), SimpleNamespace())
+            def Range(self, first, last):
+                area = SimpleNamespace(Value2=((0.0, 1.0),))
+                areas.append(area)
+                return area
+        sheet = Sheet()
+        order = []
+        def calculate(target):
+            order.append("Q" if target is anchors[(1, 1)] else "FP12")
+            return 1.0 if order[-1] == "Q" else 0.5
+        session = SimpleNamespace(implementation="xlfn", new_book=lambda: sheet,
+                                  calculate=calculate, last_calculation_timing={})
+        case = Case("M06", "1x2", {"rows": 1, "cols": 2})
+        result = run_numeric_output_pair(session, case, 2)
+        self.assertEqual(order[2:], ["Q", "FP12", "FP12", "Q", "FP12", "Q", "Q", "FP12"])
+        self.assertEqual(result["fp12_over_q_ratio"], 0.5)
+        self.assertEqual(anchors[(1, 1)].Formula2, "=BENCH.MAT.MAKE.Q(1,2,0)")
+        with self.assertRaises(UnsupportedCase):
+            run_numeric_output_pair(SimpleNamespace(implementation="excel_dna"), case, 1)
+        areas.clear()
+        with patch.object(Sheet, "Range", return_value=SimpleNamespace(Value2=((0.0, -1.0),))):
+            with self.assertRaisesRegex(AssertionError, "spill verification"):
+                run_numeric_output_pair(session, case, 1)
+
+    def test_numeric_output_pair_summary_retains_within_xlfn_metrics(self):
+        record = {"id": "M06", "variant": "1000x100", "implementation": "xlfn", "status": "ok",
+                  "metrics": {"q_p50_s": 2.0, "fp12_p50_s": 1.0,
+                              "fp12_over_q_ratio": 0.5, "fp12_change_percent": -50.0}}
+        row = summarize([record])[0]
+        self.assertEqual(row["comparison"], "within_xlfn_fp12_vs_q")
+        self.assertEqual(row["fp12_over_q_ratio"], 0.5)
+        self.assertFalse(row["comparable"])
+
     def test_close_releases_excel_references_including_cycles_before_worker_exit(self):
         calls = []
 
@@ -690,7 +728,7 @@ class PlanTest(unittest.TestCase):
 
     def test_every_requested_id_has_a_case_and_primary_metric(self):
         expected = {f"S{i:02}" for i in range(1, 5)}
-        expected |= {f"M{i:02}" for i in range(1, 6)}
+        expected |= {f"M{i:02}" for i in range(1, 7)}
         expected |= {f"T{i:02}" for i in range(1, 4)}
         expected |= {f"P{i:02}" for i in range(1, 5)}
         expected |= {f"A{i:02}" for i in range(1, 7)}

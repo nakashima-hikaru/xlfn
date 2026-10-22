@@ -622,7 +622,6 @@ where
             .callbacks
     }
 
-    #[cfg(feature = "async")]
     pub(crate) fn stage_events(
         &mut self,
         registrations: Vec<crate::registration::EventRegistration>,

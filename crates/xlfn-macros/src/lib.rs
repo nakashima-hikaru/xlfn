@@ -42,6 +42,14 @@ use validation::validate_addin_metadata;
 /// conversion instead. Explicit blank, missing, or default policies also select
 /// XLOPER12 so the original input's presence is available. Other types and
 /// unrecognized aliases use their ordinary conversion.
+/// Synchronous `Matrix<f64>`, `Row<f64>`, `Column<f64>`, and
+/// `NumericArrayOutput` results use the FP12 (`K%`) result ABI; `Result<T, E>`
+/// and `XllResult<T>` inherit this choice. Unrecognized return aliases use
+/// XLOPER12 (`Q`). `return_abi = "fp12"` explicitly selects FP12 for a numeric
+/// array alias; incompatible resolved types fail to compile.
+/// `return_abi = "xloper12"` preserves individual Excel error values such as
+/// `#N/A`. FP12 failures return `#NUM!`, with details in the runtime's diagnostic
+/// history. Async results always use Excel's asynchronous completion API.
 /// An `async fn` selects asynchronous mode directly;
 /// there is no `#[excel_function(async)]` mode flag. A standard context type
 /// (`MainThreadContext`, `ThreadSafeContext`, `MacroSheetContext`, or
@@ -172,6 +180,9 @@ fn expand_excel_addin(
 
         #(#gating)*
         #krate::__private::v1::__xlfn_async_exports!(&crate::__XLFN_RUNTIME);
+
+        #(#gating)*
+        #krate::__private::v1::__xlfn_calculation_exports!(&crate::__XLFN_RUNTIME);
 
         #(#gating)*
         #krate::__private::v1::__xlfn_excel_rtd_exports!(&crate::__XLFN_RUNTIME);
@@ -343,6 +354,14 @@ mod tests {
                 ),
                 "export_void_boundary",
             ),
+            (
+                quote!(
+                    fn value() -> Matrix<f64> {
+                        unreachable!()
+                    }
+                ),
+                "export_numeric_boundary",
+            ),
         ] {
             let expanded = expand_excel_function(quote!(), function(source)).unwrap();
             let file: syn::File = syn::parse2(expanded).unwrap();
@@ -410,6 +429,165 @@ mod tests {
         assert!(expanded.contains("prepare_native_f64"));
         assert!(expanded.contains("assert_thread_safe_return"));
         assert!(expanded.contains("assert_volatile_return"));
+    }
+
+    #[test]
+    fn numeric_return_abi_is_selected_only_from_recognizable_numeric_array_types() {
+        use xlfn_common::ReturnAbi;
+        for (ty, abi) in [
+            (quote!(Matrix<f64>), ReturnAbi::NumericArray12),
+            (quote!(Matrix<(f64)>), ReturnAbi::NumericArray12),
+            (quote!(Row<f64>), ReturnAbi::NumericArray12),
+            (quote!(Column<f64>), ReturnAbi::NumericArray12),
+            (
+                quote!(xlfn::value::Matrix<::core::primitive::f64>),
+                ReturnAbi::NumericArray12,
+            ),
+            (quote!(xlfn::prelude::Row<f64>), ReturnAbi::NumericArray12),
+            (quote!(NumericArrayOutput), ReturnAbi::NumericArray12),
+            (
+                quote!(xlfn::output::NumericArrayOutput),
+                ReturnAbi::NumericArray12,
+            ),
+            (quote!(XllResult<Matrix<f64>>), ReturnAbi::NumericArray12),
+            (
+                quote!(xlfn::error::XllResult<Row<f64>>),
+                ReturnAbi::NumericArray12,
+            ),
+            (
+                quote!(Result<Column<f64>, CustomError>),
+                ReturnAbi::NumericArray12,
+            ),
+            (
+                quote!(std::result::Result<Matrix<f64>, CustomError>),
+                ReturnAbi::NumericArray12,
+            ),
+            (quote!(f64), ReturnAbi::Value12),
+            (quote!(bool), ReturnAbi::Value12),
+            (quote!(i32), ReturnAbi::Value12),
+            (quote!(String), ReturnAbi::Value12),
+            (quote!(&str), ReturnAbi::Value12),
+            (quote!(Matrix<i32>), ReturnAbi::Value12),
+            (quote!(Matrix<FloatAlias>), ReturnAbi::Value12),
+            (quote!(Matrix<custom::f64>), ReturnAbi::Value12),
+            (quote!(XlArrayOutput), ReturnAbi::Value12),
+            (quote!(NumericAlias), ReturnAbi::Value12),
+            (quote!(custom::Matrix<f64>), ReturnAbi::Value12),
+            (quote!(<Owner as Trait>::Matrix<f64>), ReturnAbi::Value12),
+        ] {
+            let parsed = model::parse_udf(
+                quote!(),
+                function(quote!(fn typed() -> #ty { unreachable!() })),
+            )
+            .unwrap();
+            let analyzed = model::analyze(parsed).unwrap();
+            assert_eq!(analyzed.return_abi, abi, "{ty}");
+            assert_eq!(model::lower(analyzed).return_abi, abi, "{ty}");
+        }
+    }
+
+    #[test]
+    fn numeric_wrapper_and_registration_choose_the_same_return_abi() {
+        let expanded = expand_excel_function(
+            quote!(thread_safe),
+            function(quote!(
+                fn prices(spot: f64, strikes: NumericMatrixRef<'_>) -> XllResult<Matrix<f64>> {
+                    unreachable!()
+                }
+            )),
+        )
+        .unwrap()
+        .to_string();
+        assert!(expanded.contains("sync_udf_fp12"));
+        assert!(expanded.contains("NumericReturn :: invoke"));
+        assert!(expanded.contains("export_numeric_boundary"));
+        assert!(expanded.contains("-> * mut :: xlfn :: __private :: v1 :: FP12"));
+        assert!(expanded.contains("ReturnAbi :: NumericArray12"));
+
+        let explicit_value = expand_excel_function(
+            quote!(thread_safe, return_abi = "xloper12"),
+            function(quote!(
+                fn prices() -> Matrix<f64> {
+                    unreachable!()
+                }
+            )),
+        )
+        .unwrap()
+        .to_string();
+        assert!(explicit_value.contains("ReturnAbi :: Value12"));
+        assert!(explicit_value.contains("ExcelReturn :: invoke"));
+        assert!(explicit_value.contains("export_value_boundary"));
+        assert!(!explicit_value.contains("sync_udf_fp12"));
+
+        let explicit_alias = expand_excel_function(
+            quote!(return_abi = "fp12"),
+            function(quote!(
+                fn prices() -> NumericAlias {
+                    unreachable!()
+                }
+            )),
+        )
+        .unwrap()
+        .to_string();
+        assert!(explicit_alias.contains("NumericReturn :: invoke"));
+    }
+
+    #[test]
+    fn renamed_framework_paths_keep_numeric_result_selection() {
+        let expanded = expand_excel_function(
+            quote!(crate = "framework", thread_safe),
+            function(quote!(
+                fn prices() -> framework::XllResult<framework::value::Matrix<f64>> {
+                    unreachable!()
+                }
+            )),
+        )
+        .unwrap()
+        .to_string();
+        assert!(expanded.contains("framework :: __private :: v1 :: sync_udf_fp12"));
+        assert!(expanded.contains("ReturnAbi :: NumericArray12"));
+    }
+
+    #[test]
+    fn async_numeric_result_uses_async_completion_and_rejects_fp12_override() {
+        let expanded = expand_excel_function(
+            quote!(),
+            function(quote!(
+                async fn prices() -> Matrix<f64> {
+                    unreachable!()
+                }
+            )),
+        )
+        .unwrap()
+        .to_string();
+        assert!(expanded.contains("ReturnAbi :: Value12"));
+        assert!(expanded.contains("async_udf"));
+        assert!(!expanded.contains("sync_udf_fp12"));
+        for (options, expected) in [
+            (
+                quote!(return_abi = "fp12"),
+                "only supported for synchronous",
+            ),
+            (
+                quote!(return_abi = "native"),
+                "must be \"xloper12\" or \"fp12\"",
+            ),
+            (
+                quote!(return_abi = "fp12", return_abi = "xloper12"),
+                "duplicate `return_abi`",
+            ),
+        ] {
+            let error = expand_excel_function(
+                options,
+                function(quote!(
+                    async fn prices() -> Matrix<f64> {
+                        unreachable!()
+                    }
+                )),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
     }
 
     #[test]

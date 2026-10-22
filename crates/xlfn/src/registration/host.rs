@@ -20,7 +20,6 @@ use std::path::PathBuf;
 use std::ptr::NonNull;
 
 use super::RegistrationId;
-#[cfg(feature = "async")]
 use super::ledger::EventRegistration;
 use super::preflight::PreparedRegistration;
 use super::schema::FunctionVisibility;
@@ -32,7 +31,6 @@ use xlfn_sys::{
 #[cfg(feature = "async")]
 pub(crate) const CALCULATION_CANCELED_EVENT: i32 = xlfn_sys::XLEVENT_CALCULATION_CANCELED;
 
-#[cfg(feature = "async")]
 pub(crate) const CALCULATION_ENDED_EVENT: i32 = xlfn_sys::XLEVENT_CALCULATION_ENDED;
 
 /// The result of a host-side registration mutation.
@@ -159,7 +157,6 @@ impl<'call> RegistrationHost<'call> {
         )
     }
 
-    #[cfg(feature = "async")]
     pub(crate) fn register_event(
         &self,
         procedure: &'static str,
@@ -877,6 +874,7 @@ mod tests {
                 export_name: "xll_test",
                 excel_name: "TEST.REGISTER",
                 signature: super::super::RegistrationSignature {
+                    return_abi: crate::registration::ReturnAbi::Value12,
                     execution: xlfn_common::ExecutionKind::MainThread,
                     arguments: &ABIS[..count],
                     volatile: false,
@@ -953,6 +951,7 @@ mod tests {
             export_name: "nested_registration",
             excel_name: "TEST.NESTED.REGISTRATION",
             signature: RegistrationSignature {
+                return_abi: crate::registration::ReturnAbi::Value12,
                 execution: xlfn_common::ExecutionKind::MainThread,
                 arguments: &[],
                 volatile: false,

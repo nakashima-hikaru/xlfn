@@ -390,5 +390,13 @@
     "count": 1,
     "category": "test",
     "reason": "Observes fixed string key Clone/Hash panics during resident insertion and verifies that only the resident pin is released, retaining the creator pin."
+  },
+  {
+    "path": "crates/xlfn/src/panic_boundary.rs",
+    "context": "fn catch_udf_no_unwind",
+    "code": "match std::panic::catch_unwind(operation) {",
+    "count": 1,
+    "category": "implementation",
+    "reason": "Captures at most 16 KiB of standard panic text before applying contain_panic to the payload; arbitrary payload destructors never run."
   }
 ]

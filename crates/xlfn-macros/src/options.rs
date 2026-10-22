@@ -27,6 +27,7 @@ pub(super) struct ParsedFunctionOptions {
     pub(super) category: Option<String>,
     pub(super) description: Option<String>,
     pub(super) help_topic: Option<String>,
+    pub(super) return_abi: Option<String>,
     pub(super) thread_safe: bool,
     pub(super) macro_sheet: bool,
     pub(super) volatile: bool,
@@ -205,6 +206,12 @@ pub(super) fn parse_function_options(tokens: TokenStream) -> syn::Result<ParsedF
                 }
                 options.help_topic = Some(string_value(&value.value, "help_topic")?);
             }
+            Meta::NameValue(value) if value.path.is_ident("return_abi") => {
+                if options.return_abi.is_some() {
+                    return Err(syn::Error::new_spanned(value, "duplicate `return_abi`"));
+                }
+                options.return_abi = Some(string_value(&value.value, "return_abi")?);
+            }
             Meta::NameValue(value) if value.path.is_ident("crate") => {
                 if options.krate.is_some() {
                     return Err(syn::Error::new_spanned(value, "duplicate `crate`"));
@@ -214,7 +221,7 @@ pub(super) fn parse_function_options(tokens: TokenStream) -> syn::Result<ParsedF
             other => {
                 return Err(syn::Error::new_spanned(
                     other,
-                    "expected `name`, `id`, `category`, `description`, `help_topic`, `thread_safe`, `macro_sheet`, `volatile`, `hidden`, or `crate`",
+                    "expected `name`, `id`, `category`, `description`, `help_topic`, `return_abi`, `thread_safe`, `macro_sheet`, `volatile`, `hidden`, or `crate`",
                 ));
             }
         }

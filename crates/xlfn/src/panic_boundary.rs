@@ -44,6 +44,33 @@ pub(crate) fn catch_no_unwind<T>(
     contain_panic(std::panic::catch_unwind(operation))
 }
 
+/// Retains a bounded standard panic message without dropping arbitrary payloads.
+pub(crate) fn catch_udf_no_unwind<T>(
+    operation: impl FnOnce() -> T + UnwindSafe,
+) -> Result<T, String> {
+    match std::panic::catch_unwind(operation) {
+        Ok(value) => Ok(value),
+        Err(payload) => {
+            let text = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&'static str>().copied())
+                .unwrap_or("UDF panicked with a non-string payload");
+            let mut end = text.len().min(16 * 1024);
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            let mut message = String::new();
+            if message.try_reserve_exact(end).is_ok() {
+                message.push_str(&text[..end]);
+            }
+            // Apply the same arbitrary-payload destructor policy as every other boundary.
+            let _ = contain_panic::<()>(Err(payload));
+            Err(message)
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -80,6 +107,20 @@ pub(crate) mod tests {
         let payload = PanickingPayload(Arc::clone(&dropped));
         let worker = std::thread::spawn(|| std::panic::panic_any(payload));
         assert_eq!(contain_panic(worker.join()), Err(CaughtPanic));
+        assert_eq!(dropped.load(Ordering::Acquire), 0);
+    }
+    #[test]
+    fn udf_panic_text_is_bounded_and_arbitrary_payload_is_not_destroyed() {
+        let message = catch_udf_no_unwind(|| panic!("pricing failure")).unwrap_err();
+        assert_eq!(message, "pricing failure");
+        let long = "日".repeat(10_000);
+        let message = catch_udf_no_unwind(|| std::panic::panic_any(long)).unwrap_err();
+        assert!(message.len() <= 16 * 1024);
+        assert!(message.chars().all(|character| character == '日'));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let payload = PanickingPayload(Arc::clone(&dropped));
+        let message = catch_udf_no_unwind(|| std::panic::panic_any(payload)).unwrap_err();
+        assert!(message.contains("non-string payload"));
         assert_eq!(dropped.load(Ordering::Acquire), 0);
     }
 }

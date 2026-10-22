@@ -256,6 +256,7 @@ pub(super) struct UdfSpec {
     pub(super) execution: ExecutionSpec,
     pub(super) arguments: Vec<ArgumentSpec>,
     pub(super) return_type: Type,
+    pub(super) return_abi: xlfn_common::ReturnAbi,
     pub(super) volatile: bool,
     pub(super) hidden: bool,
     pub(super) gating: Vec<Attribute>,
@@ -288,6 +289,7 @@ pub(super) struct UdfPlan {
     pub(super) execution: ExecutionSpec,
     pub(super) arguments: Vec<ArgumentPlan>,
     pub(super) return_type: Type,
+    pub(super) return_abi: xlfn_common::ReturnAbi,
     pub(super) volatile: bool,
     pub(super) hidden: bool,
     pub(super) gating: Vec<Attribute>,
@@ -465,6 +467,13 @@ pub(super) fn analyze(parsed: ParsedUdf) -> syn::Result<UdfSpec> {
         syn::ReturnType::Default => syn::parse_quote!(()),
         syn::ReturnType::Type(_, ty) => ty.as_ref().clone(),
     };
+    let crate_path = resolve_crate_path(options.krate.as_ref());
+    let return_abi = analyze_return_abi(
+        &return_type,
+        options.return_abi.as_deref(),
+        &execution,
+        &crate_path,
+    )?;
     let arguments = analyze_arguments(arguments, &execution, &function)?;
     let metadata = UdfMetadata {
         id,
@@ -490,11 +499,116 @@ pub(super) fn analyze(parsed: ParsedUdf) -> syn::Result<UdfSpec> {
         execution,
         arguments,
         return_type,
+        return_abi,
         volatile: options.volatile,
         hidden: options.hidden,
         gating,
-        crate_path: resolve_crate_path(options.krate.as_ref()),
+        crate_path,
     })
+}
+
+fn analyze_return_abi(
+    ty: &Type,
+    requested: Option<&str>,
+    execution: &ExecutionSpec,
+    crate_path: &Path,
+) -> syn::Result<xlfn_common::ReturnAbi> {
+    use xlfn_common::ReturnAbi;
+    match requested {
+        Some("fp12") if execution.is_async() => Err(syn::Error::new_spanned(
+            ty,
+            "`return_abi = \"fp12\"` is only supported for synchronous Excel functions",
+        )),
+        // Rust's NumericReturn bound validates the resolved type, including
+        // numeric aliases that syntax alone cannot recognize.
+        Some("fp12") => Ok(ReturnAbi::NumericArray12),
+        Some("xloper12") => Ok(ReturnAbi::Value12),
+        Some(_) => Err(syn::Error::new_spanned(
+            ty,
+            "`return_abi` must be \"xloper12\" or \"fp12\"",
+        )),
+        None if execution.is_async() => Ok(ReturnAbi::Value12),
+        None if is_numeric_array_return(ty, crate_path) => Ok(ReturnAbi::NumericArray12),
+        None => Ok(ReturnAbi::Value12),
+    }
+}
+
+/// Type aliases and associated types require Rust name resolution and therefore
+/// keep the Q default. Only standard framework spellings select FP12 by syntax.
+fn is_numeric_array_return(ty: &Type, crate_path: &Path) -> bool {
+    match ty {
+        Type::Paren(paren) => return is_numeric_array_return(&paren.elem, crate_path),
+        Type::Group(group) => return is_numeric_array_return(&group.elem, crate_path),
+        _ => {}
+    }
+    let Type::Path(path) = ty else {
+        return false;
+    };
+    if path.qself.is_some() {
+        return false;
+    }
+    let Some(segment) = path.path.segments.last() else {
+        return false;
+    };
+    let name = segment.ident.to_string();
+    let prefix = path
+        .path
+        .segments
+        .iter()
+        .take(path.path.segments.len() - 1)
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>()
+        .join("::");
+    let framework = crate_path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>()
+        .join("::");
+    let framework_path = |modules: &[&str]| {
+        prefix.is_empty()
+            || modules.iter().any(|module| {
+                prefix
+                    == if module.is_empty() {
+                        framework.clone()
+                    } else {
+                        format!("{framework}::{module}")
+                    }
+            })
+    };
+    let arguments = match &segment.arguments {
+        PathArguments::None => None,
+        PathArguments::AngleBracketed(arguments) => Some(&arguments.args),
+        _ => return false,
+    };
+    match name.as_str() {
+        "NumericArrayOutput" if framework_path(&["output"]) => arguments.is_none(),
+        "Matrix" | "Row" | "Column" if framework_path(&["value", "prelude"]) => {
+            let Some(arguments) = arguments else {
+                return false;
+            };
+            arguments.len() == 1
+                && matches!(arguments.first(), Some(GenericArgument::Type(element))
+                    if native_argument_abi(element) == xlfn_common::ArgumentAbi::Float64)
+        }
+        "XllResult" if framework_path(&["", "error", "prelude"]) => {
+            let Some(arguments) = arguments else {
+                return false;
+            };
+            arguments.len() == 1
+                && matches!(arguments.first(), Some(GenericArgument::Type(inner))
+                    if is_numeric_array_return(inner, crate_path))
+        }
+        "Result" if matches!(prefix.as_str(), "" | "std::result" | "core::result") => {
+            let Some(arguments) = arguments else {
+                return false;
+            };
+            arguments.len() == 2
+                && matches!(arguments.first(), Some(GenericArgument::Type(inner))
+                    if is_numeric_array_return(inner, crate_path))
+        }
+        _ => false,
+    }
 }
 
 fn analyze_execution(
@@ -978,6 +1092,7 @@ pub(super) fn lower(spec: UdfSpec) -> UdfPlan {
         execution: spec.execution,
         arguments,
         return_type: spec.return_type,
+        return_abi: spec.return_abi,
         volatile: spec.volatile,
         hidden: spec.hidden,
         gating: spec.gating,

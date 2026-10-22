@@ -8,20 +8,29 @@ error[E0624]: associated function `new` is private
   |
   | /     pub(crate) fn new<'ctx>(
   | |         state: &'ctx A::SharedState,
+  | |         diagnostics: &'ctx crate::diagnostics::DiagnosticHistory,
   | |         host: ExcelHost<'ctx>,
   | |     ) -> MacroSheetContext<'ctx, A> {
   | |___________________________________- private associated function defined here
 
-error[E0308]: mismatched types
- --> tests/ui/fail/context_callback_constructor.rs:4:66
+error[E0061]: this function takes 3 arguments but 2 arguments were supplied
+ --> tests/ui/fail/context_callback_constructor.rs:4:24
   |
 4 |         let _context = xlfn::MacroSheetContext::<()>::new(state, scope);
-  |                        ----------------------------------        ^^^^^ expected `ExcelHost<'_>`, found `&CallScope<'_>`
-  |                        |
-  |                        arguments to this function are incorrect
+  |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^--------------
+  |                                                          |       |
+  |                                                          |       expected `&DiagnosticHistory`, found `&CallScope<'_>`
+  |                                                          argument #3 of type `xlfn::host_api::ExcelHost<'_>` is missing
   |
+  = note: expected reference `&DiagnosticHistory`
+             found reference `&xlfn::__private::v1::CallScope<'_>`
 note: associated function defined here
  --> src/addin.rs
   |
   |     pub(crate) fn new<'ctx>(
   |                   ^^^
+help: provide the argument
+  |
+4 -         let _context = xlfn::MacroSheetContext::<()>::new(state, scope);
+4 +         let _context = xlfn::MacroSheetContext::<()>::new(state, /* &DiagnosticHistory */, /* ExcelHost<'_> */);
+  |

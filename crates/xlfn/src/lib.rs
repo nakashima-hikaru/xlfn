@@ -184,23 +184,14 @@ macro_rules! __xlfn_private_async_exports {
         #[used]
         #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,.xllexp"))]
         #[cfg_attr(not(target_os = "macos"), unsafe(link_section = ".xllexp"))]
-        static __XLFN_ASYNC_MANIFEST: [u8;
-            b"__xlfn_calculation_canceled\0__xlfn_calculation_ended\0".len()] =
-            *b"__xlfn_calculation_canceled\0__xlfn_calculation_ended\0";
+        static __XLFN_ASYNC_MANIFEST: [u8; b"__xlfn_calculation_canceled\0".len()] =
+            *b"__xlfn_calculation_canceled\0";
 
         #[doc(hidden)]
         #[unsafe(no_mangle)]
         pub extern "system" fn __xlfn_calculation_canceled() {
             $crate::__private::v1::export_void_boundary(|| {
                 $crate::__private::v1::cancel_async_calculation($runtime);
-            });
-        }
-
-        #[doc(hidden)]
-        #[unsafe(no_mangle)]
-        pub extern "system" fn __xlfn_calculation_ended() {
-            $crate::__private::v1::export_void_boundary(|| {
-                $crate::__private::v1::end_async_calculation($runtime);
             });
         }
     };
@@ -211,6 +202,26 @@ macro_rules! __xlfn_private_async_exports {
 #[macro_export]
 macro_rules! __xlfn_private_async_exports {
     ($runtime:expr) => {};
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __xlfn_private_calculation_exports {
+    ($runtime:expr) => {
+        #[used]
+        #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,.xllexp"))]
+        #[cfg_attr(not(target_os = "macos"), unsafe(link_section = ".xllexp"))]
+        static __XLFN_CALCULATION_MANIFEST: [u8; b"__xlfn_calculation_ended\0".len()] =
+            *b"__xlfn_calculation_ended\0";
+
+        #[doc(hidden)]
+        #[unsafe(no_mangle)]
+        pub extern "system" fn __xlfn_calculation_ended() {
+            $crate::__private::v1::export_void_boundary(|| {
+                $crate::__private::v1::end_calculation($runtime);
+            });
+        }
+    };
 }
 
 #[cfg(any(feature = "rtd", feature = "handles"))]
@@ -263,7 +274,11 @@ macro_rules! __xlfn_private_excel_rtd_exports {
 
 /// Efficient construction of Excel array return values.
 pub mod output {
-    pub use crate::return_abi::{XlArrayBuilder, XlArrayOutput};
+    pub use crate::return_abi::{
+        MAX_MODULE_NUMERIC_RETURN_BYTES, MAX_NUMERIC_RETURN_BYTES, MAX_THREAD_NUMERIC_RETURN_BYTES,
+        NumericArrayBuilder, NumericArrayOutput, NumericReturnMemoryMetrics, XlArrayBuilder,
+        XlArrayOutput, numeric_return_memory_metrics,
+    };
 }
 
 #[cfg(feature = "handles")]
