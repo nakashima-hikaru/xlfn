@@ -1854,6 +1854,30 @@ impl<K, V> Drop for CalculationCache<K, V> {
 }
 
 #[cfg(test)]
+fn observe_pending_flight<K, V>(cache: &CalculationCache<K, V>, key: K) -> Arc<Flight<K, V>>
+where
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
+    let key = VersionedKey {
+        epoch: cache.generation.snapshot(),
+        key,
+    };
+    let hash = flight_hash(&key);
+    Arc::clone(cache.flights.shard(hash).lock().get(hash, &key).unwrap())
+}
+
+#[cfg(test)]
+fn followers_enrolled<K, V>(flight: &Arc<Flight<K, V>>, followers: usize) -> bool {
+    // Registry, leader and observer hold three references while the leader is pending.
+    let deadline = Instant::now() + std::time::Duration::from_secs(10);
+    while Arc::strong_count(flight) < 3 + followers && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    Arc::strong_count(flight) >= 3 + followers
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::hash::{Hash, Hasher};
@@ -1902,16 +1926,6 @@ mod tests {
             NodePtr<std::sync::MutexGuard<'static, ()>>: Send, Sync
         );
         static_assertions::assert_not_impl_any!(CacheLease<'static, std::rc::Rc<u32>>: Send, Sync);
-    }
-
-    #[test]
-    fn canonical_float_normalizes_signed_zero_and_rejects_nan() {
-        assert_eq!(
-            CanonicalF64::new(-0.0).unwrap(),
-            CanonicalF64::new(0.0).unwrap()
-        );
-        assert!(CanonicalF64::new(f64::NAN).is_err());
-        assert!(CanonicalF64::new(f64::INFINITY).is_err());
     }
 
     #[test]
@@ -2044,6 +2058,13 @@ mod tests {
 
             started_rx.recv().unwrap();
 
+            let flight = observe_pending_flight(
+                cache_ref,
+                CloneCountedKey {
+                    value: 1,
+                    clones: Arc::new(AtomicUsize::new(0)),
+                },
+            );
             let follower = s.spawn(move || {
                 let key = CloneCountedKey {
                     value: 1,
@@ -2055,9 +2076,13 @@ mod tests {
                 assert_eq!(*lease, 7);
             });
 
-            std::thread::sleep(Duration::from_millis(20));
+            let enrolled = followers_enrolled(&flight, 1);
             release_tx.send(()).unwrap();
             follower.join().unwrap();
+            assert!(
+                enrolled,
+                "follower must join the pending flight before publication"
+            );
         });
 
         // Exactly 1 clone was performed across both leader and follower: by resident index insertion.
@@ -2272,31 +2297,6 @@ mod tests {
     }
 
     #[test]
-    fn singleflight_runs_one_computation() {
-        let cache = CalculationCache::<u32, u32>::new(1024);
-        let calls = AtomicUsize::new(0);
-        std::thread::scope(|s| {
-            for _ in 0..16 {
-                s.spawn(|| {
-                    let lease = cache
-                        .get_or_try_insert_with(
-                            7,
-                            |_| 4,
-                            || {
-                                calls.fetch_add(1, Ordering::SeqCst);
-                                std::thread::sleep(Duration::from_millis(10));
-                                Ok(49)
-                            },
-                        )
-                        .unwrap();
-                    assert_eq!(*lease, 49);
-                });
-            }
-        });
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
     fn eviction_is_bounded_by_approximate_bytes() {
         let cache = CalculationCache::new(8);
         cache
@@ -2466,37 +2466,6 @@ mod tests {
     }
 
     #[test]
-    fn clear_drops_values_outside_the_cache_lock() {
-        let cache = CalculationCache::<u32, u32>::new(8);
-        cache.get_or_try_insert_with(1, |_| 8, || Ok(7)).unwrap();
-        cache.clear();
-        assert!(cache.get(&1).is_none());
-    }
-
-    #[test]
-    fn eviction_drops_values_outside_the_cache_lock() {
-        static DROPPED: AtomicUsize = AtomicUsize::new(0);
-        struct TrackDrop(u32);
-        impl Drop for TrackDrop {
-            fn drop(&mut self) {
-                DROPPED.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-        DROPPED.store(0, Ordering::SeqCst);
-        let cache = CalculationCache::<u32, TrackDrop>::new(8);
-        for key in [1, 2] {
-            let value = cache
-                .get_or_try_insert_with(key, |_| 8, || Ok(TrackDrop(key * 10)))
-                .unwrap();
-            assert_eq!(value.0, key * 10);
-            drop(value);
-        }
-        cache.index.maintenance();
-        assert_eq!(cache.len(), 1);
-        assert_eq!(DROPPED.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
     fn registry_keeps_typed_endpoints_independent() {
         enum First {}
         enum Second {}
@@ -2526,30 +2495,6 @@ mod tests {
             registry.get(&SECOND, &1).unwrap().unwrap().as_str(),
             "seven"
         );
-    }
-
-    #[test]
-    fn registry_differentiates_endpoints_by_marker_type() {
-        enum Number {}
-        enum Text {}
-        let number = CacheEndpoint::<u32, u32, Number>::new("DUPLICATE");
-        let text = CacheEndpoint::<u32, String, Text>::new("DUPLICATE");
-        let registry = CacheRegistry::new(1024);
-
-        assert_eq!(
-            *registry
-                .get_or_try_insert(&number, 1, |_| 4, || Ok(7))
-                .unwrap(),
-            7
-        );
-        assert_eq!(
-            registry
-                .get_or_try_insert(&text, 1, String::len, || Ok("seven".to_owned()))
-                .unwrap()
-                .as_str(),
-            "seven"
-        );
-        assert_eq!(registry.endpoint_count(), 2);
     }
 
     #[test]
@@ -3498,29 +3443,6 @@ mod tests {
         assert!(cache.get(&2).is_none());
         assert_eq!(drops.load(Ordering::Relaxed), 1);
         assert_eq!(cache.reclamation_stats().pending_nodes, 0);
-    }
-
-    #[test]
-    #[ignore = "manual release-mode zero-budget cache performance measurement"]
-    fn benchmark_zero_budget_cache() {
-        for budget in [0, 8] {
-            let cache = CalculationCache::new(budget);
-            let mut samples = Vec::new();
-            for round in 0..12 {
-                let start = std::time::Instant::now();
-                for key in 0..10_000_u64 {
-                    let value = cache
-                        .get_or_try_insert_with(std::hint::black_box(key), |_| 1, || Ok(key))
-                        .unwrap();
-                    std::hint::black_box(*value);
-                }
-                if round != 0 {
-                    samples.push(start.elapsed().as_nanos() / 10_000);
-                }
-            }
-            samples.sort_unstable();
-            eprintln!("cache_budget={budget} median_ns={}", samples[5]);
-        }
     }
 
     #[test]

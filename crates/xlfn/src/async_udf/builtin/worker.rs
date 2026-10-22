@@ -19,6 +19,26 @@ pub(super) struct PollerExitGuard {
     pub(super) local: Worker<Runnable>,
 }
 
+// The final poller must acquire recovery publications from every previous
+// exit. Keep both the checked decrement and its ordering identical in native
+// execution and Loom; only the atomic backend changes.
+macro_rules! release_poller {
+    ($counter:expr) => {{
+        let counter = &$counter;
+        let mut previous = counter.load(Ordering::Acquire);
+        loop {
+            let next = previous
+                .checked_sub(1)
+                .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+            match counter.compare_exchange_weak(previous, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(previous) => break previous == 1,
+                Err(current) => previous = current,
+            }
+        }
+    }};
+}
+
 impl Drop for PollerExitGuard {
     fn drop(&mut self) {
         if std::thread::panicking() {
@@ -35,7 +55,7 @@ impl Drop for PollerExitGuard {
         }
         // The final poller must acquire prior exits' recovery publications,
         // including failure and the runnables returned to the injector.
-        let last = xlfn_kernel::invariant::checked_atomic_dec(&self.shared.live_pollers) == 1;
+        let last = release_poller!(self.shared.live_pollers);
         if last && self.shared.failed.load(Ordering::Acquire) {
             self.shared.queue.seal_and_wake_all();
             while let Some(runnable) = self.shared.queue.drain_abandoned() {
@@ -122,13 +142,12 @@ mod tests {
             let peer = loom::thread::spawn(move || {
                 peer_abandoned.store(true, Ordering::Relaxed);
                 peer_failed.store(true, Ordering::Release);
-                // Same AcqRel release chain as checked_atomic_dec above.
-                if peer_count.fetch_sub(1, Ordering::AcqRel) == 1 {
+                if release_poller!(peer_count) {
                     assert!(peer_failed.load(Ordering::Acquire));
                     assert!(peer_abandoned.load(Ordering::Relaxed));
                 }
             });
-            if count.fetch_sub(1, Ordering::AcqRel) == 1 {
+            if release_poller!(count) {
                 assert!(failed.load(Ordering::Acquire));
                 assert!(abandoned.load(Ordering::Relaxed));
             }

@@ -1405,8 +1405,6 @@ fn retired_callback_drop_can_reenter_terminate_after_quiescence() {
 #[cfg(feature = "handles")]
 #[test]
 fn callback_subscription_attach_handshake_covers_early_empty_snapshot() {
-    use std::sync::Barrier;
-
     let _guard = TEST_LOCK.lock().unwrap();
     let handles = FormulaHandleService::new(4);
     let ensured = ensure_server(Some(&handles), None).unwrap();
@@ -1421,19 +1419,26 @@ fn callback_subscription_attach_handshake_covers_early_empty_snapshot() {
     let operation = unsafe { (*server).operations.enter() }.unwrap();
 
     let subscriptions = SubscriptionRuntime::new();
-    let rendezvous = Barrier::new(2);
-    std::thread::scope(|scope| {
-        scope.spawn(|| {
+    let (attached_tx, attached_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let notifier_attached = std::thread::scope(|scope| {
+        let subscriptions = &subscriptions;
+        scope.spawn(move || {
             let attached =
-                ensure_server_without_handles(Some(&subscriptions)).expect("attach subscriptions");
-            rendezvous.wait();
-            rendezvous.wait();
+                ensure_server_without_handles(Some(subscriptions)).expect("attach subscriptions");
+            attached_tx.send(()).unwrap();
+            // An assertion on the installing side must not strand this thread.
+            let _ = release_rx.recv_timeout(Duration::from_secs(2));
             drop(attached);
         });
 
         // The attaching side has published subscriptions and observed that
         // no callback exists yet.
-        rendezvous.wait();
+        attached_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        // SAFETY: `ensured` and the operation retain the attached server.
+        let subscription_server = unsafe { (*server).backends.lock().subscription_server }
+            .expect("subscription attachment must publish its server handle");
+        assert!(subscription_server.detach_update_notifier().is_none());
 
         let callback = Box::new(RetainedUpdateCallback {
             cookie: None,
@@ -1443,16 +1448,29 @@ fn callback_subscription_attach_handshake_covers_early_empty_snapshot() {
         // SAFETY: the retained server remains live.
         let callback_ptr = unsafe { install_callback(&(*server).callbacks, callback) };
         // SAFETY: the same retained server remains live. This post-install
-        // re-read must observe the attachment made before the barrier.
+        // re-read must observe the attachment acknowledged by the channel.
         unsafe { synchronize_callback_notification(&*server, callback_ptr) }.unwrap();
-
-        rendezvous.wait();
+        // Inspect the real subscription server's installed capability. A
+        // no-op synchronization would leave it empty despite returning Ok.
+        let notifier = subscription_server.detach_update_notifier();
+        let notifier_attached = notifier.is_some();
+        if let Some(notifier) = notifier {
+            subscription_server
+                .attach_update_notifier(notifier)
+                .unwrap();
+        }
+        release_tx.send(()).unwrap();
+        notifier_attached
     });
 
     drop(operation);
     shutdown_subscriptions(&subscriptions).unwrap();
     drop(ensured);
     handles.seal().map(|_| ()).unwrap();
+    assert!(
+        notifier_attached,
+        "callback installation must attach a subscription notifier"
+    );
 }
 
 fn iid_null_from_fields() -> GUID {

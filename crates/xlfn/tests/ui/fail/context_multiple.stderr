@@ -1,5 +1,0 @@
-error: only one injected context parameter is allowed
- --> tests/ui/fail/context_multiple.rs:7:42
-  |
-7 | fn bad(first: MainThreadContext<'_, ()>, second: ThreadSafeContext<'_, ()>) -> f64 {
-  |                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

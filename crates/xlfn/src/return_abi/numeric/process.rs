@@ -211,7 +211,7 @@ mod tests {
         assert_eq!(state.peak_reserved_bytes.load(Ordering::Relaxed), 128);
     }
     #[test]
-    fn failed_allocation_rolls_back_the_owning_reservation() {
+    fn reservation_drop_rolls_back_after_an_early_error() {
         static STATE: ProcessState = ProcessState::new();
         STATE.initialize().unwrap();
         let failed: XllResult<()> = (|| {

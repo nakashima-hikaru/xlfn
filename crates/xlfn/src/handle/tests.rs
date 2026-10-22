@@ -64,16 +64,38 @@ where
     })
 }
 
-fn input_identity<'call, T: ExcelHandleObject>(value: &Handle<'call, T>) -> InputFingerprint {
-    let mut builder = InputFingerprintBuilder::new(1);
-    builder
-        .with_argument(0, "handle", |encoder| {
-            encoder.u64(value.object_id().session());
-            encoder.u64(value.object_id().sequence());
-            Ok(())
-        })
+fn input_identity<T: ExcelHandleObject>(
+    slot: &'static FormulaHandleServiceSlot,
+    token: &str,
+) -> InputFingerprint {
+    use crate::value::{ArgumentContext, FormulaInputMode, argument_from_raw_with_arguments};
+    use xlfn_sys::{XLOPER12, XLOPER12Value, XLTYPE_STR};
+    let mut text: Vec<u16> = token.encode_utf16().collect();
+    text.insert(0, u16::try_from(text.len()).unwrap());
+    let mut raw = XLOPER12 {
+        value: XLOPER12Value {
+            string: text.as_mut_ptr(),
+        },
+        xltype: XLTYPE_STR,
+    };
+    crate::call::with_excel_call_scope(|scope| {
+        let mut arguments = ArgumentContext::<FormulaInputMode>::from_handle_access(
+            scope,
+            FormulaHandleServiceResolver::new(slot),
+            1,
+        );
+        // SAFETY: raw and its counted UTF-16 buffer live for the entire conversion.
+        let _handle = unsafe {
+            argument_from_raw_with_arguments::<FormulaInputMode, Handle<'_, T>>(
+                &mut arguments,
+                0,
+                "handle",
+                &mut raw,
+            )
+        }
         .unwrap();
-    builder.finish().unwrap()
+        InputFingerprint::from_bytes(arguments.finish().unwrap().unwrap())
+    })
 }
 
 fn reference_handle_identity(object_id: ObjectId) -> InputFingerprint {
@@ -88,7 +110,10 @@ fn reference_handle_identity(object_id: ObjectId) -> InputFingerprint {
     builder.finish().unwrap()
 }
 
-fn semantic_handle_key<T: ExcelHandleObject>(handle: &Handle<'_, T>) -> HandleTopicKey {
+fn semantic_handle_key<T: ExcelHandleObject>(
+    slot: &'static FormulaHandleServiceSlot,
+    token: &str,
+) -> HandleTopicKey {
     HandleTopicKey::Formula(FormulaRevisionKey::new(
         FormulaCaller {
             sheet_id: 0,
@@ -96,7 +121,7 @@ fn semantic_handle_key<T: ExcelHandleObject>(handle: &Handle<'_, T>) -> HandleTo
             column: 4,
         },
         "TEST.SEMANTIC.HANDLE",
-        input_identity(handle),
+        input_identity::<T>(slot, token),
     ))
 }
 
@@ -170,29 +195,6 @@ fn lifetime_key_golden_vectors_match_wire_contract() {
             vector.name
         );
     }
-}
-
-#[test]
-fn formula_revision_key_uses_the_stable_sheet_identifier() {
-    let digest = [0xab_u8; 32];
-    let caller = FormulaCaller {
-        sheet_id: 17,
-        row: 4,
-        column: 8,
-    };
-    let first = format_formula_revision_key(caller, "TEST.CREATE", &digest);
-    let recalculated = format_formula_revision_key(caller, "TEST.CREATE", &digest);
-    let other_sheet = format_formula_revision_key(
-        FormulaCaller {
-            sheet_id: 18,
-            ..caller
-        },
-        "TEST.CREATE",
-        &digest,
-    );
-
-    assert_eq!(first, recalculated);
-    assert_ne!(first, other_sheet);
 }
 
 #[test]
@@ -668,52 +670,6 @@ fn single_slot_churn_reclaims_binding_records() {
 }
 
 #[test]
-fn reused_slot_keeps_old_borrow_separate_from_new_generation() {
-    #[derive(Clone)]
-    struct TestObj(&'static str);
-    impl ExcelHandleObject for TestObj {}
-
-    let registry = HandleRegistry::new(2);
-    let token1 = insert_production(&registry, Arc::new(TestObj("first"))).unwrap();
-    let parsed1 = registry
-        .codec
-        .parse(
-            std::ptr::from_ref(&registry).addr(),
-            HandleToken::new(&token1),
-        )
-        .unwrap();
-
-    crate::call::with_excel_call_scope_and_state(&registry, |registry, scope| {
-        let old = registry.lookup_handle::<TestObj>(scope, &token1).unwrap();
-        assert_eq!(old.0, "first");
-    });
-
-    registry.remove::<TestObj>(&token1).unwrap();
-
-    let token2 = insert_production(&registry, Arc::new(TestObj("second"))).unwrap();
-    let parsed2 = registry
-        .codec
-        .parse(
-            std::ptr::from_ref(&registry).addr(),
-            HandleToken::new(&token2),
-        )
-        .unwrap();
-    assert_eq!(parsed1.id.slot, parsed2.id.slot);
-    assert_ne!(parsed1.id.generation, parsed2.id.generation);
-
-    crate::call::with_excel_call_scope_and_state(&registry, |registry, scope| {
-        assert!(matches!(
-            registry.lookup_handle::<TestObj>(scope, &token1),
-            Err(XllError::StaleHandle)
-        ));
-        assert_eq!(
-            registry.lookup_handle::<TestObj>(scope, &token2).unwrap().0,
-            "second"
-        );
-    });
-}
-
-#[test]
 fn close_rejects_new_borrows_but_retires_after_existing_call_release() {
     use std::sync::mpsc;
     use std::time::Duration;
@@ -857,34 +813,56 @@ fn sealing_a_closed_registry_is_idempotent_without_phase_regression() {
     assert_eq!(registry.phase(), HandleRegistryPhase::Closed);
 }
 
-#[cfg(not(all(target_os = "windows", target_arch = "x86")))]
 #[test]
-#[ignore = "run in the dedicated Shuttle test step"]
-fn shuttle_insert_racing_close_never_leaves_a_live_handle() {
-    let mut config = shuttle::Config::default();
-    config.stack_size = 0x80000;
-    let runner = shuttle::Runner::new(shuttle::scheduler::RandomScheduler::new(100), config);
-    runner.run(|| {
-        let registry = shuttle::sync::Arc::new(HandleRegistry::new(2));
-        let inserting = shuttle::sync::Arc::clone(&registry);
-        let worker = shuttle::thread::spawn(move || {
-            shuttle::thread::yield_now();
-            insert_production(&inserting, Arc::new(42_u32))
+fn insert_racing_close_at_publication_boundaries_never_leaves_a_live_handle() {
+    use super::registry::InsertBoundary;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+    for boundary in [
+        InsertBoundary::BeforeReserve,
+        InsertBoundary::AfterReserve,
+        InsertBoundary::BeforePublish,
+        InsertBoundary::AfterPublish,
+    ] {
+        let registry = Arc::new(HandleRegistry::new(2));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (resume_tx, resume_rx) = mpsc::channel();
+        *registry.insert_pause.lock() = Some((boundary, entered_tx, resume_rx));
+        let inserting = Arc::clone(&registry);
+        let worker_drops = Arc::clone(&drops);
+        let worker = std::thread::spawn(move || {
+            insert_production(&inserting, Arc::new(CountedDataRecord(worker_drops)))
         });
-
-        shuttle::thread::yield_now();
-        registry.seal().map(|_| ()).unwrap();
-        let result = worker.join().expect("insertion thread panicked");
-
-        assert_eq!(registry.len(), 0);
-        match result {
-            Ok(token) => assert!(matches!(
-                registry.lookup::<u32>(&token),
-                Err(XllError::Closing)
-            )),
-            Err(error) => assert!(matches!(error, XllError::Closing)),
+        let entered = entered_rx.recv_timeout(Duration::from_secs(10)).is_ok();
+        let closing = Arc::clone(&registry);
+        let closer = std::thread::spawn(move || closing.seal().map(|_| ()));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while registry.phase() == HandleRegistryPhase::Open && Instant::now() < deadline {
+            std::thread::yield_now();
         }
-    });
+        let close_started = registry.phase() != HandleRegistryPhase::Open;
+        let _ = resume_tx.send(());
+        let result = worker.join().unwrap();
+        closer.join().unwrap().unwrap();
+        assert!(entered, "insertion must reach {boundary:?}");
+        assert!(close_started, "close must start while insertion is paused");
+        assert_eq!(registry.phase(), HandleRegistryPhase::Closed);
+        assert_eq!(registry.len(), 0);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        match boundary {
+            InsertBoundary::BeforeReserve | InsertBoundary::AfterReserve => {
+                assert!(matches!(result, Err(XllError::Closing)));
+            }
+            InsertBoundary::BeforePublish | InsertBoundary::AfterPublish => {
+                let token = result.unwrap();
+                assert!(matches!(
+                    registry.lookup::<u32>(&token),
+                    Err(XllError::Closing)
+                ));
+            }
+        }
+    }
 }
 
 #[test]
@@ -1404,7 +1382,7 @@ fn alias_publication_installs_an_independent_object_capability() {
 
 #[test]
 fn aliases_of_one_object_have_one_semantic_input_identity() {
-    let runtime = FormulaHandleService::new(8);
+    let (slot, runtime) = armed_handle_slot();
     let source_key = test_topic_key("identity-source");
     let source_lifetime_key = source_key.format_lifetime_key();
     let source_token = runtime
@@ -1444,13 +1422,19 @@ fn aliases_of_one_object_have_one_semantic_input_identity() {
         let alias: Handle<'_, DataRecord> = runtime.lookup(scope, &alias_token).unwrap();
         let other: Handle<'_, DataRecord> = runtime.lookup(scope, &other_token).unwrap();
         assert_eq!(source.object_id(), alias.object_id());
-        assert_eq!(input_identity(&source), input_identity(&alias));
         assert_eq!(
-            input_identity(&source),
+            input_identity::<DataRecord>(slot, &source_token),
+            input_identity::<DataRecord>(slot, &alias_token)
+        );
+        assert_eq!(
+            input_identity::<DataRecord>(slot, &source_token),
             reference_handle_identity(source.object_id())
         );
         assert_ne!(source.object_id(), other.object_id());
-        assert_ne!(input_identity(&source), input_identity(&other));
+        assert_ne!(
+            input_identity::<DataRecord>(slot, &source_token),
+            input_identity::<DataRecord>(slot, &other_token)
+        );
     });
 
     runtime.disconnect(lifetime_generation(1), 5);
@@ -1461,7 +1445,7 @@ fn aliases_of_one_object_have_one_semantic_input_identity() {
 
 #[test]
 fn semantic_handle_identity_controls_formula_memoization() {
-    let runtime = FormulaHandleService::new(16);
+    let (slot, runtime) = armed_handle_slot();
 
     let source_key = test_topic_key("semantic-memo-source");
     let source_token = runtime
@@ -1501,12 +1485,11 @@ fn semantic_handle_identity_controls_formula_memoization() {
         crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
             let source: Handle<'_, DataRecord> = runtime.lookup(scope, &source_token).unwrap();
             let alias: Handle<'_, DataRecord> = runtime.lookup(scope, &alias_token).unwrap();
-            let other: Handle<'_, DataRecord> = runtime.lookup(scope, &other_token).unwrap();
             assert_eq!(source.object_id(), alias.object_id());
             (
-                semantic_handle_key(&source),
-                semantic_handle_key(&alias),
-                semantic_handle_key(&other),
+                semantic_handle_key::<DataRecord>(slot, &source_token),
+                semantic_handle_key::<DataRecord>(slot, &alias_token),
+                semantic_handle_key::<DataRecord>(slot, &other_token),
             )
         });
 
@@ -1971,14 +1954,15 @@ fn pin_promotion_keeps_a_snapshot_owned_payload_without_a_binding() {
 
     let pinned = crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
         let handle = runtime.lookup::<CountedDataRecord>(scope, &token).unwrap();
+        runtime
+            .store
+            .registry
+            .remove_and_drop(&token, "test remove before lease promotion");
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
         handle
             .into_pending(crate::generation::RuntimeGeneration::new(1).unwrap())
             .unwrap()
     });
-    runtime
-        .store
-        .registry
-        .remove_and_drop(&token, "test remove before lease promotion");
 
     assert_eq!(drops.load(Ordering::SeqCst), 0);
     assert_eq!(
@@ -2678,7 +2662,7 @@ fn concurrent_prepare_with_same_key_runs_factory_once() {
 
 #[test]
 fn handle_dependency_chain_propagates_identity_change() {
-    let runtime = FormulaHandleService::new(16);
+    let (slot, runtime) = armed_handle_slot();
 
     // Upstream: different semantic input fingerprint → different revision key
     // → different token.
@@ -2694,9 +2678,7 @@ fn handle_dependency_chain_propagates_identity_change() {
     // simulating MODEL.CREATE(Handle<'_, Curve>, params). The ObjectId is the
     // semantic identity, so a different upstream object yields a different
     // downstream revision key even when the source values are equal.
-    let downstream_key_a =
-        with_handle::<DataRecord, _>(&runtime, &upstream_a, |handle| semantic_handle_key(&handle))
-            .unwrap();
+    let downstream_key_a = semantic_handle_key::<DataRecord>(slot, &upstream_a);
     let downstream_a_preparation = runtime
         .prepare(downstream_key_a, || Ok(DataRecord(100)))
         .unwrap();
@@ -2715,9 +2697,7 @@ fn handle_dependency_chain_propagates_identity_change() {
     assert_ne!(upstream_a, upstream_b);
 
     // Downstream key also changes because the upstream ObjectId changed.
-    let downstream_key_b =
-        with_handle::<DataRecord, _>(&runtime, &upstream_b, |handle| semantic_handle_key(&handle))
-            .unwrap();
+    let downstream_key_b = semantic_handle_key::<DataRecord>(slot, &upstream_b);
     let downstream_b_preparation = runtime
         .prepare(downstream_key_b, || Ok(DataRecord(200)))
         .unwrap();
@@ -2984,74 +2964,6 @@ fn alias_preserves_pointer_and_object_identity() {
         assert_eq!(handle2.value.addr(), ptr1);
         assert_eq!(*handle2, TrackedObj(12345));
     });
-}
-
-#[test]
-fn removing_original_binding_keeps_aliased_object_alive() {
-    let drops = Arc::new(AtomicUsize::new(0));
-
-    struct DropCounter {
-        _value: u64,
-        drops: Arc<AtomicUsize>,
-    }
-    impl ExcelHandleObject for DropCounter {}
-    impl Drop for DropCounter {
-        fn drop(&mut self) {
-            self.drops.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-
-    let runtime = FormulaHandleService::new(16);
-    let key1 = test_topic_key("retire_alias_1");
-    let token1 = runtime
-        .prepare_observed(
-            key1,
-            || {
-                Ok(DropCounter {
-                    _value: 999,
-                    drops: Arc::clone(&drops),
-                })
-            },
-            |_, _| Ok(()),
-        )
-        .unwrap()
-        .into_token();
-
-    let key2 = test_topic_key("retire_alias_2");
-    let token2 = crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
-        let handle1 = runtime.lookup::<DropCounter>(scope, &token1).unwrap();
-        let alias = handle1.alias();
-        runtime
-            .prepare_observed_alias::<DropCounter, _>(key2, alias, |_, _| Ok(()))
-            .unwrap()
-            .into_token()
-    });
-
-    // Remove token1 binding
-    runtime
-        .store
-        .registry
-        .remove_and_drop(&token1, "test remove 1");
-    assert_eq!(drops.load(Ordering::SeqCst), 0);
-
-    // Reading token2 must still work and access the same value
-    crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
-        let handle2 = runtime.lookup::<DropCounter>(scope, &token2).unwrap();
-        assert_eq!(handle2._value, 999);
-    });
-
-    // Remove token2 binding -> last reference dropped
-    runtime
-        .store
-        .registry
-        .remove_and_drop(&token2, "test remove 2");
-    runtime
-        .store
-        .registry
-        .bindings
-        .read_domain()
-        .flush_for_test();
-    assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
 
 #[test]

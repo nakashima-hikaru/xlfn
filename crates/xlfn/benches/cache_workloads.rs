@@ -22,7 +22,33 @@ fn mix(mut value: u64) -> u64 {
     value ^ (value >> 31)
 }
 
+fn measure_small_budget_misses() {
+    for budget in [0, 8] {
+        let cache = CalculationCache::new(budget);
+        for round in 0..12 {
+            let started = Instant::now();
+            for key in 0..10_000_u64 {
+                let value = cache
+                    .get_or_try_insert_with(black_box(key), |_| 1, || Ok(key))
+                    .unwrap();
+                black_box(*value);
+            }
+            if round != 0 {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "trace": "small_budget_unique_misses", "budget_bytes": budget,
+                        "round": round, "requests": 10_000,
+                        "elapsed_ns": started.elapsed().as_nanos(),
+                    })
+                );
+            }
+        }
+    }
+}
+
 fn main() {
+    measure_small_budget_misses();
     let traces = [
         Trace {
             name: "fits_half_budget",

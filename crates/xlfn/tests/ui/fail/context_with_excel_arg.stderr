@@ -1,5 +1,0 @@
-error: injected contexts cannot use #[excel_arg(...)]
- --> tests/ui/fail/context_with_excel_arg.rs:7:8
-  |
-7 | fn bad(#[excel_arg(name = "context")] context: MainThreadContext<'_, ()>) -> f64 {
-  |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

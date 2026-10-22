@@ -312,6 +312,16 @@ impl<E: AsyncExecutor> AsyncRuntime<E> {
     }
 
     pub(crate) fn close(&self) -> XllResult<crate::shutdown::StopOutcome<AsyncStopped>> {
+        self.close_with_task_drain(|registry| {
+            registry.wait_idle();
+            Ok(())
+        })
+    }
+
+    fn close_with_task_drain(
+        &self,
+        wait_for_tasks: impl FnOnce(&TaskRegistry) -> XllResult<()>,
+    ) -> XllResult<crate::shutdown::StopOutcome<AsyncStopped>> {
         self.registry().close_admission();
         let Some(executor) = self.take_for_close() else {
             return Ok(crate::shutdown::StopOutcome {
@@ -325,7 +335,11 @@ impl<E: AsyncExecutor> AsyncRuntime<E> {
         self.spawn_admission.wait_until_idle();
         let tasks = self.registry().request_close();
         cancel_tasks(tasks);
-        self.registry().wait_idle();
+        if let Err(error) = wait_for_tasks(self.registry()) {
+            *self.state.lock() = ExecutorSlot::Closing(Some(executor));
+            self.state_changed.notify_all();
+            return Err(error);
+        }
         let stopped = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
             executor.shutdown()
         }))
@@ -357,34 +371,19 @@ impl<E: AsyncExecutor> AsyncRuntime<E> {
 
     #[cfg(all(test, feature = "async-builtin"))]
     pub(crate) fn close_with_timeout(&self, timeout: std::time::Duration) -> XllResult<()> {
-        self.registry().close_admission();
-        let Some(executor) = self.take_for_close() else {
-            return Ok(());
-        };
-        self.spawn_admission.wait_until_idle();
-        cancel_tasks(self.registry().request_close());
-        if !self.registry().wait_idle_timeout(timeout) {
-            *self.state.lock() = ExecutorSlot::Closing(Some(executor));
-            self.state_changed.notify_all();
-            return Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::ASYNC_TIME,
-            });
-        }
-        let stopped = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
-            executor.shutdown()
-        }))
-        .unwrap_or(Err(XllError::Panic));
-        if let Err(error) = stopped {
-            *self.state.lock() = ExecutorSlot::Closing(Some(executor));
-            self.state_changed.notify_all();
-            return Err(error);
-        }
-        self.registry().finish_close();
-        let disposal =
-            crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| drop(executor)));
-        *self.state.lock() = ExecutorSlot::Stopped;
-        self.state_changed.notify_all();
-        disposal.map_err(|_| XllError::Panic)
+        self.close_with_task_drain(|registry| {
+            if registry.wait_idle_timeout(timeout) {
+                Ok(())
+            } else {
+                Err(XllError::Internal {
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::ASYNC_TIME,
+                })
+            }
+        })?
+        .issues
+        .into_iter()
+        .next()
+        .map_or(Ok(()), |issue| Err(issue.error))
     }
 
     fn take_for_close(&self) -> Option<PublishedOwner<E>> {

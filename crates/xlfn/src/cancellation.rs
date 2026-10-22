@@ -673,7 +673,7 @@ mod tests {
     }
 
     #[test]
-    fn delivery_cas_linearizes_against_cancellation() {
+    fn cancellation_after_delivery_start_preserves_completion_authority() {
         let (source, token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
         assert!(token.try_start_delivery());
         // Second delivery attempt fails
@@ -681,6 +681,16 @@ mod tests {
 
         // Cancel after delivery started cannot transition state to CANCELED
         source.cancel();
+        assert!(token.is_cancelled());
+        // SAFETY: cancellation slots remain allocated for the process lifetime.
+        let slot = unsafe { token.slot.as_ref() };
+        assert_eq!(
+            slot.delivery_state.load(Ordering::Acquire),
+            STATE_DELIVERING
+        );
+        token.finish_delivery();
+        assert_eq!(slot.delivery_state.load(Ordering::Acquire), STATE_DONE);
+        assert!(!token.try_start_delivery());
     }
 
     #[test]

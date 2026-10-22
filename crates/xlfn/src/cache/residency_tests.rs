@@ -2,6 +2,7 @@
 
 use super::*;
 use std::sync::{Arc, Barrier, mpsc};
+use std::time::Duration;
 
 #[derive(Debug)]
 struct DropProbe {
@@ -169,30 +170,54 @@ fn generation_rollover_cannot_publish_an_old_initializer_as_current() {
 #[test]
 fn duplicate_initializers_share_a_single_computation() {
     let cache = CalculationCache::new(16);
-    let workers = if cfg!(miri) { 3 } else { 16 };
-    let barrier = Barrier::new(workers);
     let computes = AtomicUsize::new(0);
+    let followers = if cfg!(miri) { 2 } else { 15 };
     std::thread::scope(|scope| {
-        for _ in 0..workers {
-            let cache = &cache;
-            let barrier = &barrier;
-            let computes = &computes;
-            scope.spawn(move || {
-                barrier.wait();
-                let lease = cache
-                    .get_or_try_insert_with(
-                        7,
-                        |_| 1,
-                        || {
-                            computes.fetch_add(1, Ordering::SeqCst);
-                            std::thread::yield_now();
-                            Ok(42)
-                        },
-                    )
-                    .unwrap();
-                assert_eq!(*lease, 42);
-            });
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let cache_ref = &cache;
+        let computes_ref = &computes;
+        let leader = scope.spawn(move || {
+            let lease = cache_ref
+                .get_or_try_insert_with(
+                    7,
+                    |_| 1,
+                    || {
+                        computes_ref.fetch_add(1, Ordering::SeqCst);
+                        started_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        Ok(42)
+                    },
+                )
+                .unwrap();
+            assert_eq!(*lease, 42);
+        });
+        started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let flight = super::observe_pending_flight(&cache, 7);
+        let workers: Vec<_> = (0..followers)
+            .map(|_| {
+                scope.spawn(|| {
+                    let lease = cache
+                        .get_or_try_insert_with(
+                            7,
+                            |_| 1,
+                            || {
+                                computes.fetch_add(1, Ordering::SeqCst);
+                                Ok(42)
+                            },
+                        )
+                        .unwrap();
+                    assert_eq!(*lease, 42);
+                })
+            })
+            .collect();
+        let enrolled = super::followers_enrolled(&flight, followers);
+        release_tx.send(()).unwrap();
+        leader.join().unwrap();
+        for worker in workers {
+            worker.join().unwrap();
         }
+        assert!(enrolled, "all workers must join the pending flight");
     });
     assert_eq!(computes.load(Ordering::SeqCst), 1);
 }

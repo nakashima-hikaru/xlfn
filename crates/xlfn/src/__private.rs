@@ -432,6 +432,9 @@ pub mod v1 {
         target: &'static str,
         module_anchor: *const (),
     ) -> i32 {
+        #[cfg(feature = "lifecycle-diagnostics")]
+        let diagnostic =
+            crate::lifecycle_diagnostics::Boundary::enter("xlAutoOpen", runtime.runtime().phase());
         let newly_acquired = match runtime.runtime().ensure_module_residency(module_anchor) {
             Ok(newly_acquired) => newly_acquired,
             Err(error) => crate::boundary::fail_stop_module_residency(&error),
@@ -462,6 +465,8 @@ pub mod v1 {
         {
             release_open_residency_after_failure(runtime, true);
         }
+        #[cfg(feature = "lifecycle-diagnostics")]
+        diagnostic.finish(result, runtime.runtime().phase());
         result
     }
 
@@ -477,7 +482,13 @@ pub mod v1 {
         reason = "Excel lifecycle entrypoint grants callback authority"
     )]
     pub unsafe fn auto_close_generated_addin<A: Addin>(runtime: &'static MacroRuntime<A>) -> i32 {
-        host_auto_close::<A>(runtime.runtime())
+        #[cfg(feature = "lifecycle-diagnostics")]
+        let diagnostic =
+            crate::lifecycle_diagnostics::Boundary::enter("xlAutoClose", runtime.runtime().phase());
+        let result = host_auto_close::<A>(runtime.runtime());
+        #[cfg(feature = "lifecycle-diagnostics")]
+        diagnostic.finish(result, runtime.runtime().phase());
+        result
     }
 
     /// Performs explicit terminal removal and unregisters all functions.
@@ -492,7 +503,15 @@ pub mod v1 {
         reason = "Excel lifecycle entrypoint grants callback authority"
     )]
     pub unsafe fn auto_remove_generated_addin<A: Addin>(runtime: &'static MacroRuntime<A>) -> i32 {
-        host_auto_remove::<A>(runtime.runtime())
+        #[cfg(feature = "lifecycle-diagnostics")]
+        let diagnostic = crate::lifecycle_diagnostics::Boundary::enter(
+            "xlAutoRemove",
+            runtime.runtime().phase(),
+        );
+        let result = host_auto_remove::<A>(runtime.runtime());
+        #[cfg(feature = "lifecycle-diagnostics")]
+        diagnostic.finish(result, runtime.runtime().phase());
+        result
     }
 
     /// Releases a return value pointer returned to Excel.

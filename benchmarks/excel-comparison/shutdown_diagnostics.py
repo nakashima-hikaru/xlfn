@@ -14,7 +14,7 @@ import tempfile
 class ProcessHandle:
     """Hold one kernel process identity across validation and dump capture."""
 
-    def __init__(self, pid: int, *, read_memory: bool = False):
+    def __init__(self, pid: int, *, read_memory: bool = False, synchronize: bool = False):
         from ctypes import wintypes
 
         self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -25,9 +25,15 @@ class ProcessHandle:
         self.kernel.GetProcessTimes.argtypes = [wintypes.HANDLE] + [
             ctypes.POINTER(wintypes.FILETIME)] * 4
         self.kernel.GetProcessTimes.restype = wintypes.BOOL
-        # Dump capture requires QUERY_INFORMATION | VM_READ. Identity alone
+        self.kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        self.kernel.WaitForSingleObject.restype = wintypes.DWORD
+        self.kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        self.kernel.GetExitCodeProcess.restype = wintypes.BOOL
+        # Dump capture requires QUERY_INFORMATION | VM_READ | DUP_HANDLE for
+        # handle metadata. Identity alone
         # needs only QUERY_LIMITED_INFORMATION.
-        self.handle = self.kernel.OpenProcess(0x0410 if read_memory else 0x1000, False, pid)
+        access = (0x0450 if read_memory else 0x1000) | (0x100000 if synchronize else 0)
+        self.handle = self.kernel.OpenProcess(access, False, pid)
         if not self.handle:
             raise ctypes.WinError(ctypes.get_last_error())
 
@@ -37,13 +43,31 @@ class ProcessHandle:
     def __exit__(self, *_):
         self.kernel.CloseHandle(self.handle)
 
-    def creation_ticks(self) -> int:
+    def times(self) -> tuple[int, int]:
         from ctypes import wintypes
 
         times = [wintypes.FILETIME() for _ in range(4)]
         if not self.kernel.GetProcessTimes(self.handle, *(ctypes.byref(t) for t in times)):
             raise ctypes.WinError(ctypes.get_last_error())
-        return (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+        return tuple((t.dwHighDateTime << 32) | t.dwLowDateTime for t in times[:2])
+
+    def creation_ticks(self) -> int:
+        return self.times()[0]
+
+    def wait(self, timeout_ms: int) -> bool:
+        result = self.kernel.WaitForSingleObject(self.handle, timeout_ms)
+        if result == 0:
+            return True
+        if result == 258:
+            return False
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    def exit_code(self) -> int:
+        from ctypes import wintypes
+        code = wintypes.DWORD()
+        if not self.kernel.GetExitCodeProcess(self.handle, ctypes.byref(code)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return code.value
 
 
 def process_creation_ticks(pid: int) -> int:
@@ -65,11 +89,12 @@ def write_dump(pid: int, creation_ticks: int, path: Path) -> None:
         dump.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.HANDLE, wintypes.DWORD,
                          ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
         dump.restype = wintypes.BOOL
-        # Normal stacks/modules plus thread metadata and unloaded modules.
+        # Stacks/modules, thread metadata, unloaded modules and handle data.
+        # Handle data helps identify the thread behind an Office shutdown wait.
         # Do not capture the entire Excel heap.
         with path.open("xb") as output:
             if not dump(process.handle, pid, msvcrt.get_osfhandle(output.fileno()),
-                        0x1000 | 0x0020, None, None, None):
+                        0x1000 | 0x0020 | 0x0004, None, None, None):
                 raise ctypes.WinError(ctypes.get_last_error())
 
 

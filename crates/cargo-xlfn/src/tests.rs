@@ -1307,16 +1307,13 @@ fn base_cargo_command_does_not_rewrite_rustflags() {
         .get_args()
         .map(std::ffi::OsString::from)
         .collect::<Vec<_>>();
-    let environment = command
-        .get_envs()
-        .filter_map(|(_, value)| value)
-        .map(std::ffi::OsString::from)
-        .collect::<Vec<_>>();
     assert!(arguments.is_empty());
-    assert!(!environment.iter().any(|value| {
-        let value = value.to_string_lossy();
-        value.contains("crt-static") || value.contains("RUSTFLAGS")
-    }));
+    for (name, value) in command.get_envs() {
+        assert!(
+            name != "RUSTFLAGS" && name != "CARGO_ENCODED_RUSTFLAGS",
+            "base cargo command must inherit {name:?}, not override it with {value:?}"
+        );
+    }
 }
 
 #[test]

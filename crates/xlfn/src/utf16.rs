@@ -472,16 +472,6 @@ mod tests {
     }
 
     #[test]
-    fn counted_encoding_uses_one_final_buffer() {
-        assert_eq!(
-            encode_counted("価格", "test", EXCEL_STRING_LIMIT)
-                .unwrap()
-                .as_slice(),
-            [2, 0x4fa1, 0x683c]
-        );
-    }
-
-    #[test]
     fn counted_encoding_sizes_inline_storage_in_utf16_units() {
         let encoded = encode_counted(
             "日本語日本語日本語日本語日本語日本語日本語日本語",

@@ -275,6 +275,24 @@ mod tests {
 
     #[test]
     fn miri_numeric_validation_checks_every_block_and_tail_cell() {
+        // Retain the SDK's concrete one-cell FP12 layout as well as the
+        // flexible block/tail layouts below.
+        for number in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let raw = xlfn_sys::FP12 {
+                rows: 1,
+                columns: 1,
+                array: [number],
+            };
+            // SAFETY: the header and its single initialized double are live.
+            let result = unsafe { NumericMatrixRef::from_raw(&raw, "matrix") };
+            assert!(matches!(
+                result,
+                Err(XllError::Input {
+                    argument: "matrix",
+                    reason: InputError::NonFinite,
+                })
+            ));
+        }
         let mut raw = NumericInput {
             rows: 1,
             columns: 129,
@@ -313,26 +331,6 @@ mod tests {
                 }
                 raw.values[index] = saved;
             }
-        }
-    }
-
-    #[test]
-    fn miri_rejects_non_finite_numbers_before_exposing_the_borrow() {
-        for number in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            let raw = xlfn_sys::FP12 {
-                rows: 1,
-                columns: 1,
-                array: [number],
-            };
-            // SAFETY: the header and its single initialized double are live.
-            let result = unsafe { NumericMatrixRef::from_raw(&raw, "matrix") };
-            assert!(matches!(
-                result,
-                Err(XllError::Input {
-                    reason: InputError::NonFinite,
-                    ..
-                })
-            ));
         }
     }
 

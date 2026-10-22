@@ -1725,18 +1725,55 @@ pub(crate) mod tests {
 
     #[test]
     fn registration_storage_is_replaceable() {
+        use crate::registration::{PendingRegistration, RegistrationCleanupState};
+
         let runtime = Runtime::<()>::new();
-        let mut journal = crate::registration::HostMutationJournal::default();
-        journal
-            .pending_registrations
-            .push(crate::registration::PendingRegistration::from(
-                RegistrationId {
-                    id: 1.0,
-                    excel_name: "TEST",
-                },
-            ));
-        runtime.host.merge(journal);
-        assert_eq!(runtime.host.registrations_snapshot().len(), 1);
+        for (id, excel_name) in [(1.0, "FIRST"), (2.0, "SECOND")] {
+            runtime
+                .host
+                .merge(crate::registration::HostMutationJournal {
+                    pending_registrations: vec![RegistrationId { id, excel_name }.into()],
+                    ..Default::default()
+                });
+        }
+        let snapshot = runtime.host.registrations_snapshot();
+        assert_eq!(
+            snapshot
+                .iter()
+                .map(|pending| (
+                    pending.registration.id,
+                    pending.registration.excel_name,
+                    pending.state,
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (1.0, "FIRST", RegistrationCleanupState::Registered),
+                (2.0, "SECOND", RegistrationCleanupState::Registered),
+            ],
+        );
+        assert!(!runtime.host.callbacks_detached());
+        assert!(!runtime.host.is_quiescent());
+
+        // Cleanup retries replace the ledger with only unfinished work and
+        // preserve the progress already made for that registration.
+        runtime
+            .host
+            .replace_registrations(vec![PendingRegistration {
+                registration: snapshot[1].registration,
+                state: RegistrationCleanupState::Unregistered,
+            }]);
+        let remaining = runtime.host.registrations_snapshot();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].registration.id, 2.0);
+        assert_eq!(remaining[0].registration.excel_name, "SECOND");
+        assert_eq!(remaining[0].state, RegistrationCleanupState::Unregistered);
+        assert!(!runtime.host.callbacks_detached());
+        assert!(!runtime.host.is_quiescent());
+
+        runtime.host.replace_registrations(Vec::new());
+        assert!(runtime.host.registrations_snapshot().is_empty());
+        assert!(runtime.host.callbacks_detached());
+        assert!(runtime.host.is_quiescent());
     }
 
     #[cfg(not(target_os = "windows"))]

@@ -31,6 +31,8 @@ impl RuntimeObserver {
 
     #[inline(always)]
     fn event(&self, event: crate::shutdown_trace::ShutdownEvent) {
+        #[cfg(feature = "lifecycle-diagnostics")]
+        crate::lifecycle_diagnostics::checkpoint(&event);
         #[cfg(any(test, feature = "refinement"))]
         self.trace_handle().record(event);
         #[cfg(not(any(test, feature = "refinement")))]

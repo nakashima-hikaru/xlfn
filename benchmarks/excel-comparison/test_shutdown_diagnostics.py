@@ -80,7 +80,7 @@ class ShutdownDiagnosticsTest(unittest.TestCase):
                 count, offset = struct.unpack_from("<II", data, 8)
                 streams = {struct.unpack_from("<I", data, offset + 12 * i)[0]
                            for i in range(count)}
-                self.assertTrue({3, 4}.issubset(streams), streams)
+                self.assertTrue({3, 4, 12, 17}.issubset(streams), streams)
         finally:
             child.stdin.close()
             try:

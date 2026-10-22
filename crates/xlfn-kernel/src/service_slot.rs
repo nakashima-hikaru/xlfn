@@ -243,6 +243,8 @@ pub struct GenerationServiceSlot<C, R, E> {
     readers: StripedDrainGate<SERVICE_READER_STRIPES>,
     state: Mutex<GenerationServiceState<C, R, E>>,
     changed: Condvar,
+    #[cfg(test)]
+    before_read_wait: Mutex<Option<std::sync::mpsc::SyncSender<()>>>,
     _runtime: PhantomData<R>,
 }
 
@@ -253,6 +255,8 @@ impl<C, R, E> GenerationServiceSlot<C, R, E> {
             readers: StripedDrainGate::new_sealed(),
             state: Mutex::new(GenerationServiceState::Closed),
             changed: Condvar::new(),
+            #[cfg(test)]
+            before_read_wait: Mutex::new(None),
             _runtime: PhantomData,
         }
     }
@@ -360,6 +364,10 @@ impl<C, R, E: Clone> GenerationServiceSlot<C, R, E> {
                     return Err(ServiceSlotError::Fault(fault.as_ref().clone()));
                 }
                 GenerationServiceState::Initializing | GenerationServiceState::Sealing => {
+                    #[cfg(test)]
+                    if let Some(observed) = self.before_read_wait.lock().take() {
+                        observed.send(()).unwrap();
+                    }
                     self.changed.wait(&mut state);
                 }
                 GenerationServiceState::Cold { .. } => {
@@ -940,21 +948,51 @@ mod tests {
 
     #[test]
     fn initialization_panic_is_retained_and_wakes_waiters() {
-        let slot = GenerationServiceSlot::<(), Service, TestError>::new();
-        slot.arm(()).expect("service slot can be armed");
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            let _ = slot.read(
-                |_| -> Result<Box<Service>, TestError> { panic!("injected initializer panic") },
-                |_| {},
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+        let slot = Arc::new(GenerationServiceSlot::<(), Service, TestError>::new());
+        slot.arm(()).unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (panic_tx, panic_rx) = mpsc::channel();
+        let initializing = Arc::clone(&slot);
+        let initializer = std::thread::spawn(move || {
+            catch_unwind(AssertUnwindSafe(|| {
+                let _ = initializing.read(
+                    |_| -> Result<Box<Service>, TestError> {
+                        started_tx.send(()).unwrap();
+                        panic_rx.recv().unwrap();
+                        panic!("injected initializer panic");
+                    },
+                    |_| {},
+                );
+            }))
+        });
+        started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let (waiting_tx, waiting_rx) = mpsc::sync_channel(1);
+        *slot.before_read_wait.lock() = Some(waiting_tx);
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let waiting = Arc::clone(&slot);
+        let waiter = std::thread::spawn(move || {
+            let faulted = matches!(
+                waiting.read(|_| panic!("waiter must not initialize"), |_| {}),
+                Err(ServiceSlotError::Fault(ServiceFault::Panicked))
             );
-        }));
-        assert!(result.is_err());
-        assert!(matches!(
-            &*slot.state.lock(),
-            GenerationServiceState::InitFaulted {
-                fault,
-            } if matches!(fault.as_ref(), ServiceFault::Panicked)
-        ));
+            finished_tx.send(faulted).unwrap();
+        });
+        let enrolled = waiting_rx.recv_timeout(Duration::from_secs(10)).is_ok();
+        // Acquiring the state lock after the witness ensures Condvar::wait
+        // atomically released it before we permit the initializer to panic.
+        drop(slot.state.lock());
+        panic_tx.send(()).unwrap();
+        assert!(initializer.join().unwrap().is_err());
+        let woke = finished_rx.recv_timeout(Duration::from_secs(10));
+        if woke.is_err() {
+            // Rescue a missing-notification regression before joining.
+            slot.changed.notify_all();
+        }
+        waiter.join().unwrap();
+        assert!(enrolled, "reader must wait on the initializing state");
+        assert!(woke.unwrap());
         assert!(matches!(
             slot.read(|_| Ok(Box::new(Service)), |_| {}),
             Err(ServiceSlotError::Fault(ServiceFault::Panicked))

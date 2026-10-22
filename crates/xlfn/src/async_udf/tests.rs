@@ -914,7 +914,7 @@ fn pending_task_limit_is_reserved_atomically() {
 }
 
 #[test]
-fn shutdown_timeout_refuses_close_until_blocking_poll_returns() {
+fn timed_close_retains_executor_until_blocking_poll_returns() {
     let lifecycle = TestRuntime::new();
     lifecycle
         .start(builtin(1), AsyncTaskLimit::DEFAULT)
@@ -926,21 +926,34 @@ fn shutdown_timeout_refuses_close_until_blocking_poll_returns() {
             TEST_CALCULATION,
             async move {
                 started_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
+                release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
             },
             test_cancellation_source(),
         )
         .unwrap();
     started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-    assert!(
-        lifecycle
-            .close_with_timeout(Duration::from_millis(10))
-            .is_err()
-    );
+    assert!(matches!(
+        lifecycle.close_with_timeout(Duration::from_millis(10)),
+        Err(XllError::Internal {
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::ASYNC_TIME,
+        })
+    ));
+    assert!(lifecycle.registry().is_closing());
+    assert!(lifecycle.snapshot_executor().is_none());
+    {
+        let state = lifecycle.state.lock();
+        let ExecutorSlot::Closing(Some(executor)) = &*state else {
+            panic!("timed close must retain the executor for retry");
+        };
+        assert!(
+            executor.reserve().is_ok(),
+            "executor shutdown must wait for its task"
+        );
+    }
     release_tx.send(()).unwrap();
-    lifecycle
-        .close_with_timeout(Duration::from_secs(1))
-        .unwrap();
+    assert!(lifecycle.close().unwrap().issues.is_empty());
+    assert!(matches!(*lifecycle.state.lock(), ExecutorSlot::Stopped));
+    assert_eq!(lifecycle.registry().active_tasks.load(Ordering::Acquire), 0);
 }
 
 #[test]
@@ -2470,7 +2483,11 @@ fn advance_does_not_hold_control_mutex_while_waiting_for_idle() {
             .unwrap();
     });
 
-    std::thread::sleep(Duration::from_millis(50));
+    wait_for_advancing(&lifecycle);
+    assert!(matches!(
+        advance_done_rx.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
 
     {
         let state = lifecycle.state.lock();
@@ -2494,6 +2511,25 @@ fn advance_does_not_hold_control_mutex_while_waiting_for_idle() {
     advancing.join().unwrap();
     lifecycle.set_after_calculation_admission_hook(None);
     assert!(lifecycle.close().unwrap().issues.is_empty());
+}
+
+fn wait_for_advancing(lifecycle: &TestRuntime) {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        if let Some(control) = lifecycle.registry().control.try_lock()
+            && matches!(
+                control.phase,
+                super::calculation::ControlPhase::Advancing { .. }
+            )
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "advance did not release control after entering Advancing"
+        );
+        std::thread::yield_now();
+    }
 }
 
 #[test]
@@ -2534,7 +2570,11 @@ fn close_preempts_in_progress_advance_calculation() {
             .unwrap();
     });
 
-    std::thread::sleep(Duration::from_millis(50));
+    wait_for_advancing(&lifecycle);
+    assert!(matches!(
+        advance_done_rx.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
 
     let closing_lifecycle = Arc::clone(&lifecycle);
     let (close_done_tx, close_done_rx) = std::sync::mpsc::sync_channel(1);
@@ -2542,17 +2582,28 @@ fn close_preempts_in_progress_advance_calculation() {
         close_done_tx.send(closing_lifecycle.close()).unwrap();
     });
 
-    std::thread::sleep(Duration::from_millis(50));
-
-    {
-        let state = lifecycle.state.lock();
-        if let ExecutorSlot::Closing(Some(_executor)) = &*state {
-            assert!(
-                lifecycle.registry().is_closing(),
-                "close must set closing atomic mirror even while advance is waiting"
-            );
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        if let Some(state) = lifecycle.state.try_lock()
+            && matches!(*state, ExecutorSlot::Closing(None))
+        {
+            break;
         }
+        assert!(
+            Instant::now() < deadline,
+            "close did not claim the executor while advance was waiting"
+        );
+        std::thread::yield_now();
     }
+    assert!(lifecycle.registry().is_closing());
+    assert!(matches!(
+        close_done_rx.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    assert!(matches!(
+        advance_done_rx.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
 
     release_tx.send(()).unwrap();
 
@@ -2796,45 +2847,4 @@ fn executor_can_restart_after_publication_is_drained() {
     drop(new_snapshot);
 
     assert!(lifecycle.close().unwrap().issues.is_empty());
-}
-
-#[test]
-fn test_close_with_timeout_preserves_open_queue_and_resumes() {
-    let lifecycle = Arc::new(TestRuntime::new());
-    lifecycle
-        .start(builtin(1), AsyncTaskLimit::DEFAULT)
-        .unwrap();
-
-    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
-    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
-
-    lifecycle
-        .submit(
-            TEST_CALCULATION,
-            async move {
-                started_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-            },
-            test_cancellation_source(),
-        )
-        .unwrap();
-
-    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-
-    // Timeout while task is still active
-    assert!(
-        lifecycle
-            .close_with_timeout(Duration::from_millis(20))
-            .is_err()
-    );
-
-    // Invariant check: queue is NOT sealed during intermediate timeout
-    let executor = lifecycle.snapshot_executor();
-    assert!(executor.is_none());
-
-    // Release task so it completes
-    release_tx.send(()).unwrap();
-
-    // Second close succeeds cleanly
-    assert!(lifecycle.close_with_timeout(Duration::from_secs(1)).is_ok());
 }

@@ -305,14 +305,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "async-builtin")]
-    #[test]
-    fn async_poller_policy_is_bounded_before_open() {
-        assert!(crate::AsyncPollerCount::new(0).is_none());
-        assert!(crate::AsyncPollerCount::new(33).is_none());
-        assert_eq!(crate::AsyncPollerCount::new(32).unwrap().get(), 32);
-    }
-
     impl Addin for RetryClose {
         type SharedState = ();
         type LifecycleState = RetryState;

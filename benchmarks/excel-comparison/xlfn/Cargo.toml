@@ -11,7 +11,7 @@ crate-type = ["cdylib"]
 abi-semantics = []
 
 [dependencies]
-xlfn = { path = "../../../crates/xlfn", features = ["async-builtin", "rtd"] }
+xlfn = { path = "../../../crates/xlfn", features = ["async-builtin", "rtd", "lifecycle-diagnostics"] }
 futures-timer = "3.0.4"
 futures-channel = "0.3.34"
 

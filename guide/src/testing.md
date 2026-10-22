@@ -11,7 +11,20 @@ function. To keep calculations easily testable without mock Excel environments,
 keep the core computation in pure Rust functions:
 
 ```rust
-{{#include ../fixtures/addin.md}}
+# #[xlfn::excel_addin(name = "Guide example", id = "guide-example", category = "Guide")]
+# pub struct GuideAddin;
+# impl xlfn::Addin for GuideAddin {
+#     type SharedState = ();
+#     type LifecycleState = ();
+#     type Error = xlfn::XllError;
+#     type Layers = ();
+#     #[cfg(feature = "async")]
+#     type AsyncExecutor = xlfn::NoAsyncExecutor;
+#     fn open(_: &xlfn::OpenContext) -> xlfn::XllResult<xlfn::Opened<()>> {
+#         Ok(xlfn::Opened::new(()))
+#     }
+# }
+# fn main() { assert_eq!(compute_hypot(3.0, 4.0), 5.0); }
 # use xlfn::prelude::*;
 pub fn compute_hypot(x: f64, y: f64) -> f64 {
     x.hypot(y)

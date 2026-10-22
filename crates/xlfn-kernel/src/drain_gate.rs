@@ -27,6 +27,8 @@ trait IdleWait {
 struct IdleNotification {
     lock: Mutex<()>,
     changed: Condvar,
+    #[cfg(test)]
+    before_wait: Mutex<Option<std::sync::mpsc::Sender<()>>>,
 }
 
 impl IdleNotification {
@@ -34,6 +36,8 @@ impl IdleNotification {
         Self {
             lock: Mutex::new(()),
             changed: Condvar::new(),
+            #[cfg(test)]
+            before_wait: Mutex::new(None),
         }
     }
 }
@@ -46,6 +50,10 @@ impl IdleWait for IdleNotification {
     }
 
     fn wait<'a>(&'a self, mut guard: Self::Guard<'a>) -> Self::Guard<'a> {
+        #[cfg(test)]
+        if let Some(entered) = self.before_wait.lock().take() {
+            let _ = entered.send(());
+        }
         self.changed.wait(&mut guard);
         guard
     }
@@ -525,16 +533,34 @@ mod tests {
 
     #[test]
     fn drain_gate_waits_for_the_last_permit() {
+        use std::sync::mpsc;
         let gate = Arc::new(DrainGate::new_open());
         let permit = gate.try_enter().unwrap();
         gate.seal();
-
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        *gate.idle.before_wait.lock() = Some(entered_tx);
         let waiting = Arc::clone(&gate);
-        let waiter = std::thread::spawn(move || waiting.wait_until_idle());
-        std::thread::sleep(Duration::from_millis(5));
-        assert!(!waiter.is_finished());
+        let waiter = std::thread::spawn(move || {
+            // Keep the public wrapper's counter observation in the tested
+            // path; the native condvar reports entry while holding its lock.
+            waiting.wait_until_idle();
+            done_tx.send(()).unwrap();
+        });
+        let entered = entered_rx.recv_timeout(Duration::from_secs(10)).is_ok();
+        // The witness precedes Condvar::wait. Acquiring this lock afterwards
+        // confirms the waiter atomically released it to park.
+        drop(gate.idle.lock());
+        let premature = done_rx.try_recv().is_ok();
         drop(permit);
+        let completed = done_rx.recv_timeout(Duration::from_secs(10)).is_ok();
+        if !completed {
+            gate.idle.notify_all();
+        }
         waiter.join().unwrap();
+        assert!(entered, "waiter must enter the production parking branch");
+        assert!(!premature, "a live permit must keep the waiter blocked");
+        assert!(completed, "final release must wake the waiter");
     }
 
     #[test]

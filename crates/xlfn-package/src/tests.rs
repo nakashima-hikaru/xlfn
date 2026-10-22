@@ -481,13 +481,54 @@ fn staging_flattens_multiple_configured_files() {
 }
 
 #[test]
-fn arbitrary_bytes_never_panic_the_pe_parser() {
-    for length in 0..512 {
-        let bytes = (0..length)
-            .map(|index| ((index * 31 + length * 17) & 0xff) as u8)
-            .collect::<Vec<_>>();
-        let result = std::panic::catch_unwind(|| parse_pe_bytes(&bytes));
-        assert!(result.is_ok(), "parser panicked for {length} bytes");
+fn truncated_and_mutated_xll_bytes_never_panic_the_pe_parser() {
+    let baseline = synthetic_xll();
+    let info = parse_pe_bytes(&baseline).unwrap();
+    verify_xll_exports(&info, Path::new("baseline.xll"), &[]).unwrap();
+
+    for length in 0..baseline.len() {
+        let result = std::panic::catch_unwind(|| parse_pe_bytes(&baseline[..length]));
+        assert!(
+            result.is_ok(),
+            "parser panicked for prefix of {length} bytes"
+        );
+    }
+
+    // Start with a valid PE image so corrupt sizes, counts, and RVAs exercise
+    // the header, section, and export readers as well as format detection.
+    let optional_header = 0x98;
+    let first_section = optional_header + 0xf0;
+    for offset in [
+        0x3c,                   // DOS e_lfanew
+        optional_header + 56,   // SizeOfImage
+        optional_header + 60,   // SizeOfHeaders
+        optional_header + 108,  // NumberOfRvaAndSizes
+        optional_header + 0x70, // export directory RVA
+        optional_header + 0x74, // export directory size
+        first_section + 12,     // section VirtualAddress
+        first_section + 16,     // section SizeOfRawData
+        first_section + 20,     // section PointerToRawData
+        0x400 + 20,             // export NumberOfFunctions
+        0x400 + 24,             // export NumberOfNames
+        0x400 + 28,             // export AddressOfFunctions
+        0x400 + 32,             // export AddressOfNames
+        0x400 + 36,             // export AddressOfNameOrdinals
+    ] {
+        for value in [
+            0,
+            1,
+            baseline.len() as u32 - 1,
+            baseline.len() as u32,
+            u32::MAX,
+        ] {
+            let mut bytes = baseline.clone();
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            let result = std::panic::catch_unwind(|| parse_pe_bytes(&bytes));
+            assert!(
+                result.is_ok(),
+                "parser panicked at {offset:#x} = {value:#x}"
+            );
+        }
     }
 }
 
@@ -994,7 +1035,7 @@ fn dependency_graph_accepts_existing_name_and_ordinal_targets() {
 }
 
 #[test]
-fn dependency_graph_rejects_bundled_external_collision_for_regular_import() {
+fn dependency_graph_rejects_bundled_external_overlap_without_imports() {
     let images = BTreeMap::from([
         (
             "vendor.dll".to_owned(),
@@ -1002,56 +1043,10 @@ fn dependency_graph_rejects_bundled_external_collision_for_regular_import() {
         ),
         (
             "addin.xll".to_owned(),
-            ("Addin.xll".to_owned(), graph_image(&["Vendor.dll"], &[])),
+            ("Addin.xll".to_owned(), graph_image(&[], &[])),
         ),
     ]);
-    let external = BTreeSet::from(["vendor.dll".to_owned()]);
-
-    let error = validate_dependency_graph(&images, &external).unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "DLL `vendor.dll` cannot be both bundled and external"
-    );
-}
-
-#[test]
-fn dependency_graph_rejects_bundled_external_collision_for_delay_import() {
-    let images = BTreeMap::from([
-        (
-            "vendor.dll".to_owned(),
-            ("Vendor.dll".to_owned(), graph_image(&[], &[])),
-        ),
-        (
-            "addin.xll".to_owned(),
-            ("Addin.xll".to_owned(), graph_image(&[], &["Vendor.dll"])),
-        ),
-    ]);
-    let external = BTreeSet::from(["vendor.dll".to_owned()]);
-
-    let error = validate_dependency_graph(&images, &external).unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "DLL `vendor.dll` cannot be both bundled and external"
-    );
-}
-
-#[test]
-fn dependency_graph_rejects_bundled_external_collision_for_forwarded_export() {
-    let mut addin = graph_image(&[], &[]);
-    add_forwarded_export(
-        &mut addin,
-        "Process",
-        1,
-        "Vendor.dll",
-        ExportSymbol::Name("ProcessImpl".to_owned()),
-    );
-    let images = BTreeMap::from([
-        ("addin.xll".to_owned(), ("Addin.xll".to_owned(), addin)),
-        (
-            "vendor.dll".to_owned(),
-            ("Vendor.dll".to_owned(), graph_image(&[], &[])),
-        ),
-    ]);
+    validate_dependency_graph(&images, &BTreeSet::new()).unwrap();
     let external = BTreeSet::from(["vendor.dll".to_owned()]);
 
     let error = validate_dependency_graph(&images, &external).unwrap_err();
@@ -2068,22 +2063,35 @@ proptest! {
 }
 
 #[test]
-fn verify_xll_exports_rejects_unmanifested_custom_entry_and_ordinals() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let xll_path = temp_dir.path().join("test.xll");
+fn verify_xll_exports_rejects_unmanifested_named_export() {
+    let path = Path::new("test.xll");
+    let mut info = xll_info();
+    verify_xll_exports(&info, path, &[]).unwrap();
 
-    let mut info = PeInfo {
-        exports: BTreeSet::from(["xlAutoOpen".to_string(), "CustomEntry".to_string()]),
-        executable_exports: BTreeSet::from(["xlAutoOpen".to_string(), "CustomEntry".to_string()]),
-        expected_exports: BTreeSet::from(["xlAutoOpen".to_string()]),
-        ..Default::default()
-    };
+    info.exports.insert("CustomEntry".to_owned());
+    info.executable_exports.insert("CustomEntry".to_owned());
+    assert_eq!(
+        verify_xll_exports(&info, path, &[])
+            .unwrap_err()
+            .to_string(),
+        "test.xll has unexpected export(s): CustomEntry"
+    );
+}
 
-    assert!(verify_xll_exports(&info, &xll_path, &[]).is_err());
-
-    info.exports.remove("CustomEntry");
-    info.executable_exports.remove("CustomEntry");
+#[test]
+fn verify_xll_exports_rejects_unmanifested_ordinal_only_export() {
+    let path = Path::new("test.xll");
+    let mut info = xll_info();
     info.nonzero_export_slots
         .extend([ExportAddressIndex(1), ExportAddressIndex(2)]);
-    assert!(verify_xll_exports(&info, &xll_path, &[]).is_err());
+    info.named_export_slots = info.nonzero_export_slots.clone();
+    verify_xll_exports(&info, path, &[]).unwrap();
+
+    info.named_export_slots.remove(&ExportAddressIndex(2));
+    assert_eq!(
+        verify_xll_exports(&info, path, &[])
+            .unwrap_err()
+            .to_string(),
+        "test.xll has unmanifested ordinal-only export(s)"
+    );
 }

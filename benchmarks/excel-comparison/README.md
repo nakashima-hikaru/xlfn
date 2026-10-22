@@ -369,9 +369,12 @@ python benchmarks/excel-comparison/run.py --profile full --id T02 --variant asci
 ```
 
 Use your artifact directory; add `--allow-commit-mismatch` when intentionally
-diagnosing an older CI XLL with a newer runner. The XLL need not be rebuilt.
+diagnosing an older CI XLL with a newer runner. Process timing and dumps work
+with older XLLs, but the native lifecycle trace below requires rebuilding both
+fixtures with this instrumentation. An empty trace is reported as
+`instrumentation_unverified`, never as proof that Excel skipped `xlAutoClose`.
 `--shutdown-diagnostics` records the native process creation time at startup
-and saves a stack/module dump in a unique directory beneath
+and saves a stack/module/handle dump in a unique directory beneath
 `<out-stem>.diagnostics/` only if Excel survives teardown. The JSONL result's
 `excel_process_cleanup.shutdown_dump` records its path or capture error.
 Keep the JSONL, dump, and exact manifest/XLL together for analysis. A dump
@@ -388,6 +391,90 @@ remains failed. This diagnostic option does not extend the five-second exit
 acceptance window. Successful non-hanging runs produce no dump. In WinDbg,
 `~* kb` shows all captured thread stacks; use matching symbols where available
 to identify the wait inside Excel, the XLL, or Windows.
+
+### Comparing shutdown from the same starting point
+
+`--shutdown-diagnostics` also enables a passive parent observer for **both**
+implementations. Before `RegisterXLL`, the parent acquires a process handle and
+checks its native creation time; the worker waits for that acknowledgement.
+The parent retains the handle while the worker calls `Quit`, releases COM
+references, and collects Python cycles. Once the handle is signaled,
+`GetProcessTimes` provides the actual exit timestamp, even if Excel exited
+while the worker was still blocked. This avoids starting the measurement only
+when the worker exits. Normal runs without the diagnostic option do not start
+this observer or record these timestamps.
+
+The JSONL result contains:
+
+- `shutdown_timing`: the first `Quit` attempt, the final Quit call completion,
+  each COM-reference release, and completion of `gc.collect()`. The start is
+  persisted immediately before attempting the COM call; retries/fallback Quit
+  do not reset it. A call completion can also be an exception, retained by the
+  existing cleanup error reporting.
+- `process_exit_observation.quit_to_exit_s`: first Quit attempt to kernel exit
+  time, including any time spent inside COM cleanup. `termination` and
+  `exit_code` distinguish runner-forced death, unforced zero-code exit, and
+  unforced nonzero-code exit. Only unforced zero-code exits receive
+  `quit_to_natural_exit_s`; this label does not exclude an external terminator.
+- `quit_to_exit_observed_s`: QPC time until the observer saw the process signal.
+  It includes observer scheduling delay. The kernel exit duration uses FILETIME;
+  inspect the independent QPC timeline if a system-clock adjustment is suspected.
+- `lifecycle_trace`: identity-checked events with native thread IDs, QPC and
+  FILETIME clocks, and times relative to Quit. The complete trace file is also
+  kept beneath `<out-stem>.diagnostics/`, including on successful runs.
+
+The xlfn fixture enables the `lifecycle-diagnostics` feature. It records entry,
+normal body return (status and lifecycle phase), and abnormal scope exit for
+`xlAutoOpen`, `xlAutoRemove`, and `xlAutoClose`. Sparse internal checkpoints
+include call/return drains, async executor stop, subscriptions/RTD, callback
+detachment, add-in cleanup, and final close. Individual UDF calls and thousands
+of registration operations are not logged. Invocation IDs prevent a nested
+close's return from hiding an unfinished outer close. A return with phase
+`Quarantined` is not successful teardown.
+
+The Excel-DNA fixture records `IExcelAddIn.AutoOpen`/`AutoClose` and its RTD/async
+cleanup stages. These are **managed add-in callbacks**, not the full native
+Excel-DNA `xlAutoClose` wrapper; `boundary_scope` preserves that distinction.
+Both writers use a process-creation-time-bound control file under
+`%LOCALAPPDATA%/xlfn/lifecycle-diagnostics/`, installed before registration and
+removed after collection. This does not rely on COM-launched Excel inheriting
+the worker's environment. Trace writes are synchronous and opt-in; use these
+runs for diagnosis rather than publishing performance results.
+
+With freshly rebuilt/downloaded paired XLLs, collect all four C02 variants:
+
+```powershell
+python benchmarks/excel-comparison/run.py --profile full --id C02 `
+  --artifacts .\artifacts --shutdown-diagnostics --out c02-shutdown.jsonl
+python benchmarks/excel-comparison/summarize_shutdown.py c02-shutdown.jsonl `
+  --csv c02-shutdown.csv
+```
+
+For a local build, run `./benchmarks/excel-comparison/build.ps1` first, use
+`--artifacts benchmarks/excel-comparison/artifacts`, and add
+`--allow-local-artifacts` if that directory has no CI manifest. Do not mix an
+old CI manifest with newly built binaries. For a short check, add
+`--variant 10`; omit `--implementation` to run both. `--repeat` does not repeat
+C02 process launches. To assess reproducibility, run again into new output
+files, alternate implementation order with separate `--implementation` runs,
+and pass all result files to `summarize_shutdown.py`; it retains every row,
+including failures and repetitions.
+
+Interpret the trace together with the exit observation:
+
+| Observation | What it establishes |
+|---|---|
+| Trace unavailable | Instrumentation has not been verified; check fixture version and activation. |
+| `entered_without_return` | The outer close body did not record normal completion; inspect its last checkpoint and dump. |
+| `scope_exit_without_return` | An early return/unwind was observed; this is not a close-completion certificate. |
+| xlfn return with `Closed`, followed by a long process-exit interval | Logical xlfn close finished before the later wait; investigate the remaining Office wait/handle and any indirect effects. |
+| Excel-DNA callback returned, followed by a long interval | Its managed callback finished; native loader/Office work remains outside that callback's scope. |
+| Long `application_release_s` or `gc_s` | The worker spent time in that COM-release interval; the parent observer still measured Excel's exit independently. |
+
+The existing **five seconds after worker exit** remains the acceptance rule.
+It is not redefined as five seconds after Quit. Diagnostics neither extend that
+rule nor turn a forced kill into success. These additions localize a difference;
+they do not establish a shutdown fix without a Windows Excel rerun.
 
 Rust allocation counting is disabled by default. M05 enables it after warmup
 with `BENCH.ALLOC.TRACK(TRUE)` and disables it in a `finally` block after the

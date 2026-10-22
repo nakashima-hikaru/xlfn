@@ -93,6 +93,12 @@ mod host_api;
 mod host_callback;
 mod input_identity;
 mod lifecycle;
+#[cfg(feature = "lifecycle-diagnostics")]
+#[allow(
+    unsafe_code,
+    reason = "Read-only Win32 clocks and process identity for opt-in lifecycle diagnostics"
+)]
+mod lifecycle_diagnostics;
 #[allow(
     unsafe_code,
     reason = "Win32 module residency management requires raw FFI calls"

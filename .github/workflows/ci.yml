@@ -99,15 +99,13 @@ jobs:
                       command: just test-ci
                     - name: production feature tests
                       command: just test-features
-                    - name: handle model
+                    - name: handle publication interleavings
                       command: >-
                           cargo test
                           --package xlfn
                           --all-features
-                          shuttle_insert_racing_close_never_leaves_a_live_handle
+                          insert_racing_close_at_publication_boundaries_never_leaves_a_live_handle
                           --locked
-                          --
-                          --ignored
         steps:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

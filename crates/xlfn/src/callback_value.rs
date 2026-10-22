@@ -292,7 +292,6 @@ mod tests {
     use super::*;
     use crate::host_callback::HostCallbackSession;
     use static_assertions::assert_not_impl_any;
-    use std::cell::Cell;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use xlfn_sys::{XLRET_ABORT, XLRET_FAILED, XLRET_SUCCESS, XLRET_UNCALCED};
 
@@ -375,6 +374,7 @@ mod tests {
     #[test]
     fn xlf_register_release_abort_suppresses_unregister() {
         let _test_guard = TEST_LOCK.lock().unwrap();
+        let script = crate::registration::host::test_support::CallbackScript::install([]);
         FREE_CALLS.store(0, Ordering::Relaxed);
         let session = HostCallbackSession::new();
         let mut register_result = ExcelCallbackValue::from_callback_for_test_with_session(
@@ -385,22 +385,20 @@ mod tests {
         );
         assert!(register_result.try_release().is_err());
 
-        let followup_calls = Cell::new(0);
-        assert!(
-            session
-                .call_for_test(|| {
-                    followup_calls.set(followup_calls.get() + 1);
-                    ExcelCallbackStatus::Success
-                })
-                .is_err()
-        );
-        assert_eq!(followup_calls.get(), 0);
+        // SAFETY: terminal suppression prevents this argument-free call from
+        // reaching the script, which deliberately has no replies.
+        let suppressed = unsafe { session.call(xlfn_sys::XLF_UNREGISTER, &[]) }
+            .err()
+            .expect("aborted release must suppress unregister");
+        assert_eq!(suppressed.status, ExcelCallbackStatus::Abort);
+        script.assert_calls(&[]);
         assert_eq!(FREE_CALLS.load(Ordering::Relaxed), 1);
     }
 
     #[test]
     fn xlf_unregister_release_uncalced_suppresses_set_name() {
         let _test_guard = TEST_LOCK.lock().unwrap();
+        let script = crate::registration::host::test_support::CallbackScript::install([]);
         FREE_CALLS.store(0, Ordering::Relaxed);
         let session = HostCallbackSession::new();
         let mut unregister_result = ExcelCallbackValue::from_callback_for_test_with_session(
@@ -411,16 +409,13 @@ mod tests {
         );
         assert!(unregister_result.try_release().is_err());
 
-        let followup_calls = Cell::new(0);
-        assert!(
-            session
-                .call_for_test(|| {
-                    followup_calls.set(followup_calls.get() + 1);
-                    ExcelCallbackStatus::Success
-                })
-                .is_err()
-        );
-        assert_eq!(followup_calls.get(), 0);
+        // SAFETY: terminal suppression prevents this argument-free call from
+        // reaching the script, which deliberately has no replies.
+        let suppressed = unsafe { session.call(xlfn_sys::XLF_SET_NAME, &[]) }
+            .err()
+            .expect("uncalced release must suppress name deletion");
+        assert_eq!(suppressed.status, ExcelCallbackStatus::Uncalced);
+        script.assert_calls(&[]);
         assert_eq!(FREE_CALLS.load(Ordering::Relaxed), 1);
     }
 
@@ -474,25 +469,43 @@ mod tests {
 
     #[test]
     fn callback_value_holding_module_permit_keeps_gate_closing_until_released() {
+        use crate::callback_gate::ModuleCallbackLifecycle;
+        static ACTIVE_DURING_FREE: AtomicUsize = AtomicUsize::new(usize::MAX);
+        unsafe fn observe_free(_: &mut XLOPER12) -> i32 {
+            ACTIVE_DURING_FREE.store(
+                crate::module_runtime::global()
+                    .callback_admission()
+                    .active(),
+                Ordering::Relaxed,
+            );
+            XLRET_SUCCESS
+        }
         let _callback_guard = crate::test_callback::lock();
         let _test_guard = TEST_LOCK.lock().unwrap();
         crate::module_runtime::reset_callbacks_for_test();
+        ACTIVE_DURING_FREE.store(usize::MAX, Ordering::Relaxed);
         let permit = crate::callback_gate::enter_callback().expect("open gate admits");
         let session = HostCallbackSession::new();
         let mut value = ExcelCallbackValue::from_callback_for_test_with_permit(
             XLOPER12::integer(42),
             ExcelCallbackStatus::Success,
-            successful_free,
+            observe_free,
             &session,
             Some(permit),
         );
 
         crate::module_runtime::close_callbacks_for_test();
+        let gate = crate::module_runtime::global().callback_admission();
+        assert_eq!(gate.active(), 1);
+        assert_eq!(gate.lifecycle(), ModuleCallbackLifecycle::Closing);
         // New callbacks are rejected while the gate is closing.
         assert!(crate::callback_gate::enter_callback().is_err());
 
         // Releasing the value releases the permit.
         assert!(value.try_release().is_ok());
+        assert_eq!(ACTIVE_DURING_FREE.load(Ordering::Relaxed), 1);
+        assert_eq!(gate.active(), 0);
+        assert_eq!(gate.lifecycle(), ModuleCallbackLifecycle::Closed);
 
         // Gate has fully closed once the permit is dropped.
         assert!(crate::callback_gate::enter_callback().is_err());

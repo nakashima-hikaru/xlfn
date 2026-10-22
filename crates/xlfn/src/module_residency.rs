@@ -98,11 +98,16 @@ mod tests {
 
     #[test]
     fn windows_address_probe_acquires_and_releases_a_residency_reference() {
-        let lease = ModuleResidencyLease::acquire(residency_probe_anchor as *const ());
-        assert!(
-            lease.is_ok(),
-            "GetModuleHandleExW failed for an in-module address"
-        );
+        let mut lease = ModuleResidencyLease::acquire(residency_probe_anchor as *const ())
+            .expect("GetModuleHandleExW failed for an in-module address");
+        assert_ne!(lease.module, 0);
+        lease
+            .try_release()
+            .expect("FreeLibrary failed to release the reference");
+        assert_eq!(lease.module, 0);
+        lease
+            .try_release()
+            .expect("releasing an empty lease must be a no-op");
         drop(lease);
     }
 }

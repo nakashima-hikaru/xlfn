@@ -604,14 +604,22 @@ mod tests {
 
     #[test]
     fn unicode_decimal_digits_match_all_unicode_5_1_blocks() {
-        for zero in UNICODE_DECIMAL_ZEROES {
-            for digit in 0..10 {
-                assert_eq!(
-                    unicode_decimal_digit(char::from_u32(zero + digit).unwrap()),
-                    Some(digit)
-                );
-            }
+        // This fixture comes from UnicodeData.txt, independently of the
+        // implementation's block table. Removing a supported block must not
+        // remove its expected input from the test too.
+        let fixture = include_str!("../tests/fixtures/unicode-5.1-decimal-digits.txt");
+        let mut checked = 0;
+        for record in fixture.lines().filter(|line| !line.starts_with('#')) {
+            let (codepoint, digit) = record.split_once(';').unwrap();
+            let character = char::from_u32(u32::from_str_radix(codepoint, 16).unwrap()).unwrap();
+            assert_eq!(
+                unicode_decimal_digit(character),
+                Some(digit.parse().unwrap()),
+                "U+{codepoint}"
+            );
+            checked += 1;
         }
+        assert_eq!(checked, 370);
         for character in ['x', '💡', '²', '\u{1e950}'] {
             assert_eq!(unicode_decimal_digit(character), None);
         }

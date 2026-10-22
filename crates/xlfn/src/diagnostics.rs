@@ -781,16 +781,19 @@ mod tests {
     }
 
     struct ReentrantClearSink {
-        clear_result: Arc<Mutex<Option<Result<(), DiagnosticShutdownError>>>>,
+        reports: std::sync::mpsc::Sender<(DiagnosticId, Result<(), DiagnosticShutdownError>)>,
     }
 
     impl DiagnosticSink for ReentrantClearSink {
-        fn report(&self, _: &DiagnosticEvent<'_>) {
-            let mut guard = self.clear_result.lock();
-            if guard.is_none() {
-                let res = clear_diagnostic_sink().map(|_| ());
-                *guard = Some(res);
+        fn report(&self, event: &DiagnosticEvent<'_>) {
+            if !matches!(
+                event.udf_id(),
+                "reentrant_test" | "preserved_after_reentrant_clear"
+            ) {
+                return;
             }
+            let result = clear_diagnostic_sink().map(|_| ());
+            let _ = self.reports.send((event.diagnostic_id(), result));
         }
     }
 
@@ -829,68 +832,72 @@ mod tests {
     #[test]
     fn reentrant_clear_diagnostic_sink_returns_error_and_preserves_sink() {
         let _router_guard = prepare_global_router();
-        let clear_result = Arc::new(Mutex::new(None));
-        set_diagnostic_sink(ReentrantClearSink {
-            clear_result: Arc::clone(&clear_result),
-        })
-        .unwrap();
+        let (reports, received) = std::sync::mpsc::channel();
+        set_diagnostic_sink(ReentrantClearSink { reports }).unwrap();
 
-        report_no_unwind("reentrant_test", &XllError::Panic);
-
-        loop {
-            if clear_result.lock().is_some() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+        for udf in ["reentrant_test", "preserved_after_reentrant_clear"] {
+            let id = report_no_unwind(udf, &XllError::Panic);
+            let observed = received
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            assert_eq!(
+                observed,
+                (id, Err(DiagnosticShutdownError::ReentrantShutdown))
+            );
         }
-
-        let res = clear_result.lock().take().unwrap();
-        assert_eq!(res, Err(DiagnosticShutdownError::ReentrantShutdown));
 
         // Clearing from the main thread succeeds (sink was preserved)
         assert!(clear_diagnostic_sink().is_ok());
     }
 
     struct ReentrantReplaceSink {
-        replace_result: Arc<Mutex<Option<Result<(), DiagnosticInitError>>>>,
+        reports: std::sync::mpsc::Sender<(DiagnosticId, bool)>,
+        replacement_reports: Arc<AtomicUsize>,
     }
 
     impl DiagnosticSink for ReentrantReplaceSink {
-        fn report(&self, _: &DiagnosticEvent<'_>) {
-            let mut guard = self.replace_result.lock();
-            if guard.is_none() {
-                let res = set_diagnostic_sink(PanickingSink);
-                *guard = Some(res);
+        fn report(&self, event: &DiagnosticEvent<'_>) {
+            if !matches!(
+                event.udf_id(),
+                "reentrant_replace_test" | "preserved_after_reentrant_replace"
+            ) {
+                return;
             }
+            let result = set_diagnostic_sink(CountingSink(Arc::clone(&self.replacement_reports)));
+            let _ = self.reports.send((
+                event.diagnostic_id(),
+                matches!(result, Err(DiagnosticInitError::ReentrantMutation)),
+            ));
         }
     }
 
     #[test]
     fn reentrant_set_diagnostic_sink_returns_error_and_does_not_commit() {
         let _router_guard = prepare_global_router();
-        let replace_result = Arc::new(Mutex::new(None));
+        let (reports, received) = std::sync::mpsc::channel();
+        let replacement_reports = Arc::new(AtomicUsize::new(0));
         set_diagnostic_sink(ReentrantReplaceSink {
-            replace_result: Arc::clone(&replace_result),
+            reports,
+            replacement_reports: Arc::clone(&replacement_reports),
         })
         .unwrap();
 
-        report_no_unwind("reentrant_replace_test", &XllError::Panic);
-
-        loop {
-            if replace_result.lock().is_some() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+        for udf in [
+            "reentrant_replace_test",
+            "preserved_after_reentrant_replace",
+        ] {
+            let id = report_no_unwind(udf, &XllError::Panic);
+            assert_eq!(
+                received
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap(),
+                (id, true)
+            );
         }
-
-        let res = replace_result.lock().take().unwrap();
-        assert!(
-            matches!(res, Err(DiagnosticInitError::ReentrantMutation)),
-            "expected ReentrantMutation, got {res:?}"
-        );
 
         // Clearing from the main thread succeeds since the original sink was preserved
         assert!(clear_diagnostic_sink().is_ok());
+        assert_eq!(replacement_reports.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -969,7 +976,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_spawn_failure_is_returned_instead_of_panicking() {
+    fn invalid_worker_name_is_rejected_without_unwinding() {
         let error = AsyncDiagnosticSink::new_named(PanickingSink, "invalid\0name")
             .err()
             .unwrap();
@@ -1026,18 +1033,67 @@ mod tests {
     #[test]
     fn synchronous_history_precedes_sink_delivery_and_fp12_preserves_excel_errors() {
         let _router_guard = prepare_global_router();
-        type CapturedEvents = Arc<Mutex<Vec<(DiagnosticId, SystemTime)>>>;
-        struct CapturingSink(CapturedEvents);
+        type CapturedEvents = Arc<Mutex<Vec<(DiagnosticId, SystemTime, bool)>>>;
+        struct CapturingSink(CapturedEvents, Arc<DiagnosticHistory>);
         impl DiagnosticSink for CapturingSink {
             fn report(&self, event: &DiagnosticEvent<'_>) {
+                if !matches!(event.udf_id(), "fp12_result" | "panic_result") {
+                    return;
+                }
+                let recorded = self
+                    .1
+                    .errors_since(DiagnosticCursor::START, 10)
+                    .errors
+                    .iter()
+                    .any(|record| record.diagnostic_id == event.diagnostic_id());
                 self.0
                     .lock()
-                    .push((event.diagnostic_id(), event.timestamp()));
+                    .push((event.diagnostic_id(), event.timestamp(), recorded));
             }
         }
+        // Tracing runs synchronously on the reporting thread, so observing the
+        // history here also catches reordering without relying on worker timing.
+        struct HistorySubscriber(Arc<DiagnosticHistory>, Arc<Mutex<Vec<bool>>>);
+        impl tracing::Subscriber for HistorySubscriber {
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                struct Id(Option<u64>);
+                impl tracing::field::Visit for Id {
+                    fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {
+                    }
+                    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+                        if field.name() == "diagnostic_id" {
+                            self.0 = Some(value);
+                        }
+                    }
+                }
+                let mut id = Id(None);
+                event.record(&mut id);
+                let recorded = self
+                    .0
+                    .errors_since(DiagnosticCursor::START, 10)
+                    .errors
+                    .iter()
+                    .any(|record| Some(record.diagnostic_id.as_u64()) == id.0);
+                self.1.lock().push(recorded);
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+        let history = Arc::new(DiagnosticHistory::new());
+        let traced = Arc::new(Mutex::new(Vec::new()));
+        let dispatch =
+            tracing::Dispatch::new(HistorySubscriber(Arc::clone(&history), Arc::clone(&traced)));
+        let _dispatch = tracing::dispatcher::set_default(&dispatch);
         let delivered = Arc::new(Mutex::new(Vec::new()));
-        set_diagnostic_sink(CapturingSink(Arc::clone(&delivered))).unwrap();
-        let history = DiagnosticHistory::new();
+        set_diagnostic_sink(CapturingSink(Arc::clone(&delivered), Arc::clone(&history))).unwrap();
         let error = XllError::ExcelValue(crate::ExcelError::NotAvailable);
         report_udf_failure_with_history_no_unwind(&history, "q_result", None, None, &error, false);
         assert!(
@@ -1071,9 +1127,10 @@ mod tests {
         let expected: Vec<_> = page
             .errors
             .iter()
-            .map(|error| (error.diagnostic_id, error.timestamp))
+            .map(|error| (error.diagnostic_id, error.timestamp, true))
             .collect();
         assert_eq!(*delivered.lock(), expected);
+        assert_eq!(*traced.lock(), [true, true]);
     }
 
     #[test]
@@ -1096,7 +1153,7 @@ mod tests {
     }
 
     #[test]
-    fn router_flushes_the_previous_sink_before_replacement() {
+    fn replacement_returns_after_previous_sink_is_flushed() {
         let first = Arc::new(AtomicUsize::new(0));
         let second = Arc::new(AtomicUsize::new(0));
         let router = DiagnosticRouter {
@@ -1128,6 +1185,7 @@ mod tests {
                 |_| Ok(()),
             )
             .unwrap();
+        assert_eq!(first.load(Ordering::Relaxed), 1);
         router
             .sink
             .read_if_ready()
@@ -1140,7 +1198,6 @@ mod tests {
                 timestamp: SystemTime::now(),
             });
         router.drain_reopenable().unwrap();
-        assert_eq!(first.load(Ordering::Relaxed), 1);
         assert_eq!(second.load(Ordering::Relaxed), 1);
     }
 
@@ -1249,7 +1306,7 @@ mod tests {
 
     #[test]
     fn file_delivery_failures_are_counted() {
-        let before = failed_diagnostic_writes();
+        let before = diagnostic_stats().file_write_failures;
         let tempdir = tempfile::tempdir().unwrap();
         let sink = FileDiagnosticSink {
             log: Mutex::new(RotatingLog {
@@ -1267,6 +1324,7 @@ mod tests {
             timestamp: SystemTime::now(),
         });
         assert!(failed_diagnostic_writes() > before);
+        assert!(diagnostic_stats().file_write_failures > before);
     }
 
     #[test]
@@ -1560,7 +1618,7 @@ mod tests {
             })
             .unwrap(),
         );
-        let before = dropped_diagnostic_events();
+        let before = diagnostic_stats().dropped_events;
 
         sink.report(&XllError::Panic, || DiagnosticEventMetadata {
             udf_id: "bounded",
@@ -1578,6 +1636,7 @@ mod tests {
             });
         }
         assert!(dropped_diagnostic_events() > before);
+        assert!(diagnostic_stats().dropped_events > before);
         sink.report(&XllError::Panic, || {
             panic!("a full queue must not build the dropped event")
         });
@@ -1683,19 +1742,19 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("diagnostics.log");
 
-        for value in ["first", "second", "third"] {
+        for value in ["first", "second", "third", "fourth"] {
             let mut log = RotatingLog::open_with_policy(path.clone(), 12, 2).unwrap();
             log.write_line(value).unwrap();
         }
 
-        assert_eq!(fs::read_to_string(&path).unwrap(), "third\n");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "fourth\n");
         assert_eq!(
             fs::read_to_string(path.with_file_name("diagnostics.log.1")).unwrap(),
-            "second\n"
+            "third\n"
         );
         assert_eq!(
             fs::read_to_string(path.with_file_name("diagnostics.log.2")).unwrap(),
-            "first\n"
+            "second\n"
         );
         assert!(!path.with_file_name("diagnostics.log.3").exists());
     }
@@ -1789,12 +1848,5 @@ mod tests {
         })
         .unwrap();
         clear_diagnostic_sink().unwrap();
-    }
-
-    #[test]
-    fn diagnostic_stats_snapshot_metrics() {
-        let stats = diagnostic_stats();
-        assert_eq!(stats.dropped_events, dropped_diagnostic_events());
-        assert_eq!(stats.file_write_failures, failed_diagnostic_writes());
     }
 }

@@ -245,3 +245,31 @@ fn failed_follower_reclaims_after_flight_state_unlock() {
     assert_eq!(cache.reclamation_stats().pending_nodes, 0);
     assert!(cache.flights.shard(hash).lock().remove(&flight).is_some());
 }
+
+#[test]
+fn eviction_drops_values_outside_the_cache_lock() {
+    let cache = StdArc::new(CalculationCache::new(1));
+    let reentry = Reentry::new(&cache, 100, false);
+    drop(
+        cache
+            .get_or_try_insert_with(
+                Key::plain(0),
+                |_| 1,
+                || Ok(DropProbe(Some(StdArc::clone(&reentry)))),
+            )
+            .unwrap(),
+    );
+    // Insert enough entries to force the original resident out of the clock.
+    for key in 1..16 {
+        drop(
+            cache
+                .get_or_try_insert_with(Key::plain(key), |_| 1, || Ok(DropProbe(None)))
+                .unwrap(),
+        );
+        cache.maintenance();
+        if reentry.completed_during_drop.load(Ordering::Acquire) {
+            break;
+        }
+    }
+    reentry.assert_completed();
+}

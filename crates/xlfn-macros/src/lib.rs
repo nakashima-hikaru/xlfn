@@ -1608,16 +1608,70 @@ mod tests {
 
     #[test]
     fn excel_function_propagates_cfg_to_generated_items() {
-        let expanded = expand_excel_function(
-            quote!(name = "TEST.GATED"),
-            function(quote! {
-                #[cfg(feature = "gated")]
-                fn gated() -> f64 { 1.0 }
-            }),
-        )
-        .unwrap()
-        .to_string();
-        assert!(expanded.matches(r#"cfg (feature = "gated")"#).count() >= 5);
+        for signature in [
+            quote!(
+                fn gated() -> f64 {
+                    1.0
+                }
+            ),
+            quote!(
+                async fn gated() -> f64 {
+                    1.0
+                }
+            ),
+        ] {
+            let expanded = expand_excel_function(
+                quote!(name = "TEST.GATED"),
+                function(quote! {
+                    #[cfg(feature = "gated")]
+                    #signature
+                }),
+            )
+            .unwrap();
+            assert_generated_items_are_gated(
+                expanded,
+                &[
+                    "gated",
+                    "__XLFN_DESCRIPTOR_gated",
+                    "submit_registration",
+                    "__XLFN_EXP_gated",
+                    "xll_gated",
+                ],
+            );
+        }
+    }
+
+    fn assert_generated_items_are_gated(
+        expanded: proc_macro2::TokenStream,
+        expected_names: &[&str],
+    ) {
+        let file: syn::File = syn::parse2(expanded).unwrap();
+        let expected: syn::Attribute = syn::parse_quote!(#[cfg(feature = "gated")]);
+        let expected = quote!(#expected).to_string();
+        let mut names = Vec::new();
+        for item in file.items {
+            let (name, attributes) = match item {
+                syn::Item::Fn(item) => (item.sig.ident.to_string(), item.attrs),
+                syn::Item::Struct(item) => (item.ident.to_string(), item.attrs),
+                syn::Item::Static(item) => (item.ident.to_string(), item.attrs),
+                syn::Item::Macro(item) => (
+                    item.mac.path.segments.last().unwrap().ident.to_string(),
+                    item.attrs,
+                ),
+                item => panic!("uninspected generated item: {}", quote!(#item)),
+            };
+            assert!(
+                attributes
+                    .iter()
+                    .any(|attribute| quote!(#attribute).to_string() == expected),
+                "generated item {name} is missing its cfg gate"
+            );
+            names.push(name);
+        }
+        names.sort_unstable();
+        let mut expected_names = expected_names.to_vec();
+        expected_names.sort_unstable();
+        assert_eq!(names, expected_names);
     }
 
     #[test]
@@ -1627,8 +1681,24 @@ mod tests {
             struct GatedAddin;
         })
         .unwrap();
-        let expanded = expand_excel_addin(quote!(), item).unwrap().to_string();
-        assert!(expanded.matches(r#"cfg (feature = "gated")"#).count() >= 8);
+        let expanded = expand_excel_addin(quote!(), item).unwrap();
+        assert_generated_items_are_gated(
+            expanded,
+            &[
+                "GatedAddin",
+                "__XLFN_RUNTIME",
+                "__XLFN_METADATA",
+                "__XLFN_FRAMEWORK_EXPORTS",
+                "__xlfn_async_exports",
+                "__xlfn_calculation_exports",
+                "__xlfn_excel_rtd_exports",
+                "xlAutoOpen",
+                "xlAutoClose",
+                "xlAutoRemove",
+                "xlAutoFree12",
+                "xlAddInManagerInfo12",
+            ],
+        );
     }
 
     #[test]

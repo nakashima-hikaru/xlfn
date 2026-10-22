@@ -29,6 +29,7 @@ let value = cache.get_or_try_insert_with(
 assert_eq!(&*value, "ABC");
 # Ok(())
 # }
+# example().unwrap();
 ```
 
 This small example uses string length as weight. In an application, replace

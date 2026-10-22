@@ -397,6 +397,13 @@ lake exe serialization_golden_checker < fixtures/topics/serialization-golden.jso
 
 Validates RTD key parser and formatter against canonical golden vectors.
 
+Topic transaction examples are executable definitions and theorems in
+`XlFnFormal/Handle/Topics/Trace.lean`. They cover successful publication,
+connection reuse and rollback, owner reuse, sealing and observation failure,
+and rejection of unsettled connections or mismatched server generations.
+These examples are checked by `lake build`; the topic fixture directory keeps
+only the serialization vectors consumed by both Rust and Lean.
+
 ---
 
 ## Verification boundary

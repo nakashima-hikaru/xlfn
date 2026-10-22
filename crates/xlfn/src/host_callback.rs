@@ -84,19 +84,6 @@ impl HostCallbackSession {
     pub(crate) fn suppress_for_test(&self, status: ExcelCallbackStatus) {
         self.observe(status);
     }
-
-    #[cfg(test)]
-    pub(crate) fn call_for_test(
-        &self,
-        invoke: impl FnOnce() -> ExcelCallbackStatus,
-    ) -> Result<ExcelCallbackStatus, HostCallbackSuppressed> {
-        if let Some(status) = self.state.get().blocked_status() {
-            return Err(HostCallbackSuppressed { status });
-        }
-        let status = invoke();
-        self.observe(status);
-        Ok(status)
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -107,8 +94,8 @@ pub(crate) struct HostCallbackSuppressed {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registration::host::test_support::{CallbackScript, Reply};
     use static_assertions::assert_not_impl_any;
-    use std::cell::Cell;
     use xlfn_sys::{XLRET_ABORT, XLRET_UNCALCED};
 
     assert_not_impl_any!(HostCallbackSession: Send, Sync);
@@ -150,21 +137,26 @@ mod tests {
 
     #[test]
     fn session_never_invokes_the_backend_after_a_terminal_callback() {
-        let session = HostCallbackSession::new();
-        let calls = Cell::new(0);
-
-        session
-            .call_for_test(|| {
-                calls.set(calls.get() + 1);
-                ExcelCallbackStatus::Abort
-            })
-            .unwrap();
-        let result = session.call_for_test(|| {
-            calls.set(calls.get() + 1);
-            ExcelCallbackStatus::Success
-        });
-
-        assert_eq!(calls.get(), 1);
-        assert_eq!(result.unwrap_err().status, ExcelCallbackStatus::Abort);
+        for raw_status in [XLRET_ABORT, XLRET_UNCALCED] {
+            let script = CallbackScript::install([Reply::success(
+                xlfn_sys::XLF_CALLER,
+                XLOPER12::integer(1),
+            )
+            .status(raw_status)]);
+            let session = HostCallbackSession::new();
+            // SAFETY: the installed script implements the callback ABI and
+            // this operation has no arguments to borrow.
+            let (status, value) = unsafe { session.call(xlfn_sys::XLF_CALLER, &[]) }.unwrap();
+            assert_eq!(status, ExcelCallbackStatus::from_raw(raw_status));
+            drop(value);
+            assert_eq!(session.terminal_status(), Some(status));
+            // SAFETY: terminal suppression must reject this call before it
+            // can reach the script's deliberately absent second reply.
+            let suppressed = unsafe { session.call(xlfn_sys::XLF_CALLER, &[]) }
+                .err()
+                .expect("terminal session must suppress follow-up callbacks");
+            assert_eq!(suppressed.status, status);
+            script.assert_calls(&[xlfn_sys::XLF_CALLER]);
+        }
     }
 }

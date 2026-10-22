@@ -2253,15 +2253,6 @@ mod tests {
     }
 
     #[test]
-    fn integer_identity_uses_the_converted_value() {
-        let mut integer = XLOPER12::integer(1);
-        let mut number = XLOPER12::number(1.0);
-        let (_, integer_identity) = convert_with_identity::<i32>(&mut integer).unwrap();
-        let (_, number_identity) = convert_with_identity::<i32>(&mut number).unwrap();
-        assert_eq!(integer_identity, number_identity);
-    }
-
-    #[test]
     fn array_input_budget_checks_host_and_converted_storage_before_allocation() {
         let per_cell = std::mem::size_of::<XLOPER12>() + std::mem::size_of::<f64>();
         let maximum = MAX_ARRAY_BYTES / per_cell;
@@ -3104,14 +3095,6 @@ mod tests {
     }
 
     #[test]
-    fn matrix_dimensions_must_fit_a_non_empty_worksheet_shape() {
-        assert!(Matrix::<f64>::new(0, 1, Vec::new()).is_err());
-        assert!(Matrix::<f64>::new(1, 0, Vec::new()).is_err());
-        assert!(Matrix::<f64>::new(EXCEL_MAX_ROWS + 1, 1, Vec::new()).is_err());
-        assert!(Matrix::<f64>::new(1, EXCEL_MAX_COLUMNS + 1, Vec::new()).is_err());
-    }
-
-    #[test]
     fn empty_collection_inputs_keep_argument_names_in_decode_and_prepare() {
         for (rows, columns) in [(0, 0), (1, 0), (0, 1), (0, 2)] {
             let raw = XLOPER12 {
@@ -3202,6 +3185,32 @@ mod tests {
         for (rows, columns, reason) in [
             (
                 0,
+                1,
+                InputError::Malformed("matrix dimensions must be non-zero"),
+            ),
+            (
+                1,
+                0,
+                InputError::Malformed("matrix dimensions must be non-zero"),
+            ),
+            (
+                EXCEL_MAX_ROWS + 1,
+                1,
+                InputError::TooLarge {
+                    limit: EXCEL_MAX_ROWS,
+                    actual: EXCEL_MAX_ROWS + 1,
+                },
+            ),
+            (
+                1,
+                EXCEL_MAX_COLUMNS + 1,
+                InputError::TooLarge {
+                    limit: EXCEL_MAX_COLUMNS,
+                    actual: EXCEL_MAX_COLUMNS + 1,
+                },
+            ),
+            (
+                0,
                 usize::MAX,
                 InputError::Malformed("matrix dimensions must be non-zero"),
             ),
@@ -3287,14 +3296,6 @@ mod tests {
     }
 
     #[test]
-    fn matrix_number_return_uses_encoded_array_output() {
-        let matrix = Matrix::new(1, 2, vec![1.0, 2.0]).unwrap();
-        let value =
-            <Matrix<f64> as ExcelReturn>::into_excel(matrix, &mut ReturnContext::new()).unwrap();
-        assert!(matches!(value, ReturnPayload::Array(_)));
-    }
-
-    #[test]
     fn element_conversion_is_called_exactly_once() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -3325,11 +3326,53 @@ mod tests {
     }
 
     #[test]
-    fn partial_failure_during_matrix_conversion_cleans_up_safely() {
-        let data = vec![1.0, 2.0, f64::NAN, 4.0];
-        let matrix = Matrix::new(2, 2, data).unwrap();
-        let result = <Matrix<f64> as ExcelReturn>::into_excel(matrix, &mut ReturnContext::new());
-        assert!(result.is_err());
+    fn miri_partial_matrix_conversion_releases_owned_cells_and_unconverted_tail() {
+        use std::cell::Cell;
+
+        struct OwnedCell<'a> {
+            index: usize,
+            text: String,
+            conversions: &'a Cell<usize>,
+            drops: &'a [Cell<usize>; 4],
+        }
+        impl IntoExcel for OwnedCell<'_> {
+            fn into_excel(self) -> XllResult<ExcelCellOutput> {
+                self.conversions.set(self.conversions.get() + 1);
+                if self.index == 2 {
+                    IntoExcel::into_excel(f64::NAN)
+                } else {
+                    Ok(ExcelCellOutput::String(self.text.clone()))
+                }
+            }
+        }
+        impl Drop for OwnedCell<'_> {
+            fn drop(&mut self) {
+                self.drops[self.index].set(self.drops[self.index].get() + 1);
+            }
+        }
+
+        let conversions = Cell::new(0);
+        let drops = std::array::from_fn(|_| Cell::new(0));
+        let cells = (0..4)
+            .map(|index| OwnedCell {
+                index,
+                text: "価格 💡".repeat(128),
+                conversions: &conversions,
+                drops: &drops,
+            })
+            .collect();
+        let matrix = Matrix::new(2, 2, cells).unwrap();
+        let result = <Matrix<_> as ExcelReturn>::into_excel(matrix, &mut ReturnContext::new());
+        assert!(matches!(
+            result,
+            Err(XllError::Domain {
+                code: crate::error::DomainErrorCode::InvalidInput,
+            })
+        ));
+        assert_eq!(conversions.get(), 3);
+        assert_eq!(drops.map(|count| count.get()), [1; 4]);
+        // The first two cells allocated counted UTF-16 arena storage. Miri's
+        // leak check also requires the failed builder to release that storage.
     }
 
     #[test]
@@ -3351,13 +3394,15 @@ mod tests {
 
     #[test]
     fn i32_semantic_identity_canonicalizes_integer_and_number() {
-        let mut int_raw = XLOPER12::integer(42);
-        let mut num_raw = XLOPER12::number(42.0);
-        let (int_val, int_id) = convert_with_identity::<i32>(&mut int_raw).unwrap();
-        let (num_val, num_id) = convert_with_identity::<i32>(&mut num_raw).unwrap();
-        assert_eq!(int_val, 42);
-        assert_eq!(num_val, 42);
-        assert_eq!(int_id, num_id);
+        for value in [1, 42] {
+            let mut int_raw = XLOPER12::integer(value);
+            let mut num_raw = XLOPER12::number(f64::from(value));
+            let (int_val, int_id) = convert_with_identity::<i32>(&mut int_raw).unwrap();
+            let (num_val, num_id) = convert_with_identity::<i32>(&mut num_raw).unwrap();
+            assert_eq!(int_val, value);
+            assert_eq!(num_val, value);
+            assert_eq!(int_id, num_id);
+        }
     }
 
     #[test]
@@ -3458,6 +3503,32 @@ mod tests {
         assert_eq!(int_val, ExcelValue::Scalar(ExcelCellValue::Number(10.0)));
         assert_eq!(num_val, ExcelValue::Scalar(ExcelCellValue::Number(10.0)));
         assert_eq!(int_id, num_id);
+
+        let mut cells = [XLOPER12::number(10.0), XLOPER12::number(20.0)];
+        let mut array = |rows, columns| {
+            let mut raw = XLOPER12 {
+                value: XLOPER12Value {
+                    array: XLOPER12Array {
+                        values: cells.as_mut_ptr(),
+                        rows,
+                        columns,
+                    },
+                },
+                xltype: XLTYPE_MULTI,
+            };
+            let (value, identity) = convert_with_identity::<ExcelValue>(&mut raw).unwrap();
+            let ExcelValue::Array(matrix) = value else {
+                panic!("array expected");
+            };
+            assert_eq!(
+                (matrix.rows(), matrix.columns()),
+                (rows as usize, columns as usize)
+            );
+            assert_eq!(matrix.as_slice()[0], ExcelCellValue::Number(10.0));
+            identity
+        };
+        assert_ne!(array(1, 2), array(2, 1));
+        assert_ne!(num_id, array(1, 1));
     }
 
     #[test]

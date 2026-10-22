@@ -1377,10 +1377,17 @@ mod tests {
             super::RuntimeGeneration::new(1).expect("test generation is non-zero"),
         );
         let diag = context.diagnostics();
-        let copied = diag;
+        assert!(std::ptr::eq(diag.context, &context));
+        assert_eq!(diag.context.build_info().addin_id().as_str(), "test-addin");
+        assert_eq!(diag.context.build_info().version(), "0.1.0");
+        assert_eq!(diag.context.build_info().target(), "x86_64-pc-windows-msvc");
         assert_eq!(
-            diag.context.build_info().version(),
-            copied.context.build_info().version()
+            diag.context.module_path(),
+            std::path::Path::new("/test/module.xll")
+        );
+        assert_eq!(
+            diag.context.module_directory(),
+            std::path::Path::new("/test")
         );
     }
 }

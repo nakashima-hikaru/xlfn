@@ -55,71 +55,75 @@ fn pre_clear_computation_cannot_republish_stale_value() {
 
 #[test]
 fn follower_retrying_after_leader_panic_across_clear_does_not_pollute_new_epoch() {
-    let cache = CalculationCache::<String, String>::new(1024);
-    let leader_started = Barrier::new(2);
-    let follower_ready = Barrier::new(2);
-    let follower_computing = Barrier::new(2);
-    let follower_finish = Barrier::new(2);
-
-    let cache_ref = &cache;
-    thread::scope(|s| {
-        let leader = s.spawn(|| {
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    use super::single_flight::{FlightWitness, WitnessKey};
+    use std::sync::{Arc, atomic::AtomicUsize, mpsc};
+    use std::time::Duration;
+    let cache = CalculationCache::<WitnessKey, String>::new(1024);
+    let (matched_tx, matched_rx) = mpsc::sync_channel(2);
+    let witness = Arc::new(FlightWitness {
+        seen: AtomicUsize::new(1),
+        matched: matched_tx,
+    });
+    let key = |caller| WitnessKey {
+        value: 1,
+        caller,
+        witness: Arc::clone(&witness),
+    };
+    thread::scope(|scope| {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (panic_tx, panic_rx) = mpsc::channel();
+        let (computing_tx, computing_rx) = mpsc::channel();
+        let (finish_tx, finish_rx) = mpsc::channel();
+        let cache_ref = &cache;
+        let leader_key = key(0);
+        let leader = scope.spawn(move || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 cache_ref
                     .get_or_try_insert_with(
-                        "k1".to_string(),
+                        leader_key,
                         |_| 1,
                         || {
-                            leader_started.wait();
+                            started_tx.send(()).unwrap();
+                            panic_rx.recv().unwrap();
                             panic!("injected leader compute panic");
                         },
                     )
-                    .unwrap();
-            }));
+                    .map(|lease| (*lease).clone())
+            }))
         });
-
-        leader_started.wait();
-
-        let follower = s.spawn(|| {
-            follower_ready.wait();
+        started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let follower_key = key(1);
+        let follower = scope.spawn(move || {
             cache_ref
                 .get_or_try_insert_with(
-                    "k1".to_string(),
+                    follower_key,
                     |_| 1,
                     || {
-                        follower_computing.wait();
-                        follower_finish.wait();
-                        Ok("v1_follower_stale".to_string())
+                        computing_tx.send(()).unwrap();
+                        finish_rx.recv().unwrap();
+                        Ok("v1_follower_stale".to_owned())
                     },
                 )
                 .unwrap()
         });
-
-        follower_ready.wait();
-        leader.join().unwrap();
-
-        // Follower retries and enters its own compute closure
-        follower_computing.wait();
-
-        // Clear the cache while follower is executing pre-clear computation
-        cache.clear();
-
-        follower_finish.wait();
-        let follower_lease = follower.join().unwrap();
-
-        // Follower receives its computed lease
-        assert_eq!(&*follower_lease, "v1_follower_stale");
+        let enrolled = matched_rx.recv_timeout(Duration::from_secs(10)).is_ok();
+        panic_tx.send(()).unwrap();
+        let retrying = computing_rx.recv_timeout(Duration::from_secs(10)).is_ok();
+        if retrying {
+            cache.clear();
+        }
+        let _ = finish_tx.send(());
+        assert!(leader.join().unwrap().is_err());
+        assert_eq!(&*follower.join().unwrap(), "v1_follower_stale");
+        assert!(enrolled, "follower must join the original pending flight");
+        assert!(retrying, "follower must retry after leader panic");
     });
-
-    // The stale computation from pre-clear must NOT have been published to the new epoch
-    assert!(cache.get(&"k1".to_string()).is_none());
+    assert!(cache.get(&key(0)).is_none());
     assert_eq!(cache.len(), 0);
-
-    // Subsequent request in the new generation computes freshly
     let fresh = cache
-        .get_or_try_insert_with("k1".to_string(), |_| 1, || Ok("v2_fresh".to_string()))
+        .get_or_try_insert_with(key(0), |_| 1, || Ok("v2_fresh".to_owned()))
         .unwrap();
     assert_eq!(&*fresh, "v2_fresh");
     assert_eq!(cache.len(), 1);
-    assert_eq!(&*cache.get(&"k1".to_string()).unwrap(), "v2_fresh");
+    assert_eq!(&*cache.get(&key(0)).unwrap(), "v2_fresh");
 }

@@ -240,8 +240,9 @@ mod tests {
     }
 
     #[test]
-    fn two_phase_identity_and_materialization_match_eager_ingress() {
-        if run_isolated("two_phase_identity_and_materialization_match_eager_ingress") {
+    fn two_phase_formula_identity_and_materialization_counts_match_eager_ingress() {
+        if run_isolated("two_phase_formula_identity_and_materialization_counts_match_eager_ingress")
+        {
             return;
         }
         for (kind, elements) in [

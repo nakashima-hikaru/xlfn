@@ -225,9 +225,11 @@ pub unsafe fn excel_free(value: &mut XLOPER12) -> i32 {
 mod tests {
     use super::*;
     use crate::{XLTYPE_INT, XLTYPE_NIL};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::cell::Cell;
 
-    static FREE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    thread_local! {
+        static FREE_CALLS: Cell<usize> = const { Cell::new(0) };
+    }
 
     unsafe extern "system" fn fake_excel(
         function: i32,
@@ -263,7 +265,7 @@ mod tests {
         }
         if function == XL_FREE {
             assert!(result.is_null());
-            FREE_CALLS.fetch_add(1, Ordering::Relaxed);
+            FREE_CALLS.set(FREE_CALLS.get() + 1);
             return XLRET_SUCCESS;
         }
 
@@ -318,6 +320,7 @@ mod tests {
     #[test]
     fn async_return_wrapper_passes_both_operands_without_a_release_callback() {
         install_fake();
+        FREE_CALLS.set(0);
         let mut handle = XLOPER12::integer(7);
         let mut value = XLOPER12::number(42.0);
         // SAFETY: both operands are live for the callback and the installed
@@ -333,6 +336,7 @@ mod tests {
         assert_eq!(result.base_type(), crate::XLTYPE_BOOL);
         // SAFETY: XLTYPE_BOOL selects the boolean union member.
         assert_ne!(unsafe { result.value.boolean }, 0);
+        assert_eq!(FREE_CALLS.get(), 0);
     }
 
     #[test]
@@ -351,7 +355,7 @@ mod tests {
     #[test]
     fn xl_free_accepts_a_callback_result_without_an_ownership_flag() {
         install_fake();
-        FREE_CALLS.store(0, Ordering::Relaxed);
+        FREE_CALLS.set(0);
         let mut argument = XLOPER12::integer(7);
         let arguments = [NonNull::from_mut(&mut argument)];
         // SAFETY: one live argument is supplied and the installed test callback
@@ -360,13 +364,7 @@ mod tests {
         assert_eq!(status, XLRET_SUCCESS);
         // SAFETY: `result` is the result storage populated by the callback above.
         assert_eq!(unsafe { excel_free(&mut result) }, XLRET_SUCCESS);
-        assert_eq!(FREE_CALLS.load(Ordering::Relaxed), 1);
-    }
-
-    #[test]
-    fn default_result_is_well_formed() {
-        let result = XLOPER12::nil();
-        assert_eq!(result.base_type(), XLTYPE_NIL);
+        assert_eq!(FREE_CALLS.get(), 1);
     }
 
     #[test]

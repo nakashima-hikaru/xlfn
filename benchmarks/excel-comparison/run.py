@@ -23,6 +23,8 @@ from typing import Any
 
 import artifact_manifest
 from shutdown_diagnostics import capture_shutdown_dump, process_creation_ticks
+from shutdown_observation import (ProcessExitObserver, atomic_json, await_observer, clock_stamp,
+                                  collect_lifecycle_trace, prepare_lifecycle_trace, summarize_exit)
 from startup_diagnostics import read_startup_log_delta, snapshot_startup_log
 from workloads import Case, cases
 
@@ -260,13 +262,16 @@ def check_final_values(target: Any, count: int, expected: Any) -> None:
 
 class ExcelSession:
     def __init__(self, xll: Path, threads: int, throttle_ms: int, pid_file: Path,
-                 progress: WorkerProgress | None = None, shutdown_diagnostics: bool = False):
+                 progress: WorkerProgress | None = None, shutdown_diagnostics: bool = False,
+                 lifecycle_trace_file: Path | None = None):
         import psutil
         import win32com.client
 
         self.psutil = psutil
         self.control_root = pid_file.parent
         self.progress = progress
+        self.shutdown_diagnostics = shutdown_diagnostics
+        self.shutdown_timing = {}
         self.com_retry = ComRetry(progress=progress)
         if progress is not None:
             progress.update(com_retry=dict(self.com_retry.stats))
@@ -283,11 +288,23 @@ class ExcelSession:
             try:
                 ticks = process_creation_ticks(self.pid)
                 if psutil.Process(self.pid).create_time() != identity["create_time"]:
-                    raise RuntimeError("Excel PID changed while recording dump identity")
+                    raise RuntimeError("Excel PID changed while recording native identity")
                 identity["creation_ticks"] = ticks
             except Exception as error:
                 identity["dump_identity_error"] = f"{type(error).__name__}: {error}"
-        pid_file.write_text(json.dumps(identity), encoding="ascii")
+        atomic_json(pid_file, identity)
+        if shutdown_diagnostics:
+            observation = await_observer(pid_file, identity)
+            if progress is not None:
+                progress.update(process_exit_observer=observation)
+        if shutdown_diagnostics and lifecycle_trace_file is not None:
+            try:
+                config = prepare_lifecycle_trace(identity, lifecycle_trace_file)
+                if progress is not None:
+                    progress.update(lifecycle_trace_config=config)
+            except (OSError, ValueError, KeyError) as error:
+                if progress is not None:
+                    progress.update(lifecycle_trace={"status": "error", "error": str(error)})
         self.app.Visible = False
         self.app.DisplayAlerts = False
         self.app.AskToUpdateLinks = False
@@ -321,6 +338,21 @@ class ExcelSession:
         self.last_stage = name
         if self.progress is not None:
             self.progress.stage(name, **details)
+
+    def mark_shutdown(self, name: str) -> None:
+        if not getattr(self, "shutdown_diagnostics", False):
+            return
+        if not hasattr(self, "shutdown_timing"):
+            self.shutdown_timing = {}
+        # Retry/fallback Quit must not move the measurement's starting point.
+        if name == "quit_begin" and name in self.shutdown_timing:
+            return
+        try:
+            self.shutdown_timing[name] = clock_stamp()
+        except Exception as error:
+            self.shutdown_timing.setdefault("clock_errors", []).append({"stage": name, "error": str(error)})
+        if self.progress is not None:
+            self.progress.update(shutdown_timing=dict(self.shutdown_timing))
 
     def _sample_memory(self):
         while not self._stop_sampler.wait(0.01):
@@ -439,6 +471,14 @@ class ExcelSession:
             self.app.MultiThreadedCalculation.Enabled = self.original_mtr_enabled
             self.app.Calculation = self.original_calculation
 
+        def request_quit():
+            self.mark_shutdown("quit_begin")
+            try:
+                self.app.Quit()
+            finally:
+                # A returned COM call is not evidence that Excel has exited.
+                self.mark_shutdown("quit_call_finished")
+
         try:
             # A failed step must not skip closing the remaining workbook or
             # requesting Quit. Keep every failure even if later steps succeed.
@@ -446,18 +486,23 @@ class ExcelSession:
             attempt("restore_excel_settings", restore_settings)
             attempt("close_bootstrap_workbook", lambda: self.bootstrap_book.Close(SaveChanges=False))
             # This dedicated Excel process owns the RegisterXLL load.
-            if not attempt("excel_quit", lambda: self.app.Quit()):
-                attempt("excel_quit_after_cleanup_error", lambda: self.app.Quit())
+            if not attempt("excel_quit", request_quit):
+                attempt("excel_quit_after_cleanup_error", request_quit)
         finally:
             # Quit requests shutdown but does not release our COM references.
             # Release children before Application, while Python/COM are still
             # operational. pywin32 wrappers can form cycles; do not defer those
             # releases to interpreter shutdown after the worker has reported ok.
             self.stage("release_excel_references")
+            self.mark_shutdown("references_release_begin")
             self.book = None
+            self.mark_shutdown("workbook_reference_released")
             self.bootstrap_book = None
+            self.mark_shutdown("bootstrap_reference_released")
             self.app = None
+            self.mark_shutdown("application_reference_released")
             gc.collect()
+            self.mark_shutdown("gc_finished")
         if failures:
             self.stage("close_failed", failures=failures)
             raise RuntimeError(f"Excel teardown failed: {json.dumps(failures)}")
@@ -1625,7 +1670,8 @@ def worker(args: argparse.Namespace, case: Case) -> int:
         progress.update(phase="load_xll", xll_load_method="RegisterXLL")
         progress.stage("load_begin")
         session = ExcelSession(xll, record["threads"], args.throttle_ms, Path(args.pid_file),
-                               progress, shutdown_diagnostics=args.shutdown_diagnostics)
+                               progress, shutdown_diagnostics=args.shutdown_diagnostics,
+                               lifecycle_trace_file=Path(args.lifecycle_trace_file) if args.lifecycle_trace_file else None)
         session.implementation = args.implementation
         progress.update(excel_version=str(session.app.Version), excel_build=str(session.app.Build),
                         excel_bitness=session.app.OperatingSystem)
@@ -1678,12 +1724,13 @@ def main() -> int:
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--throttle-ms", type=int, default=100)
     parser.add_argument("--shutdown-diagnostics", action="store_true",
-                        help="save an Excel stack dump before forced termination (up to 15s extra)")
+                        help="record native lifecycle events and save a dump before forced termination (up to 15s extra)")
     parser.add_argument("--plan", action="store_true")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--case-key", help=argparse.SUPPRESS)
     parser.add_argument("--pid-file", help=argparse.SUPPRESS)
     parser.add_argument("--progress-file", help=argparse.SUPPRESS)
+    parser.add_argument("--lifecycle-trace-file", help=argparse.SUPPRESS)
     args = parser.parse_args()
     selected = [case for case in cases(args.profile)
                 if (not args.id or case.id in args.id) and (not args.variant or case.variant == args.variant)]
@@ -1741,17 +1788,31 @@ def main() -> int:
                     cmd.append("--allow-commit-mismatch")
                 if args.shutdown_diagnostics:
                     cmd.append("--shutdown-diagnostics")
+                    diagnostic_root = out.with_suffix(".diagnostics")
+                    diagnostic_root.mkdir(parents=True, exist_ok=True)
+                    trace_directory = Path(tempfile.mkdtemp(prefix=f"{case.id}-{implementation}-", dir=diagnostic_root))
+                    cmd.extend(["--lifecycle-trace-file", str((trace_directory / "lifecycle.jsonl").resolve())])
+                observer = ProcessExitObserver(pid_file).start() if args.shutdown_diagnostics else None
                 try:
-                    child = subprocess.run(cmd, capture_output=True, text=True,
-                                           timeout=case.timeout_s + 60)
-                    rows = [line for line in child.stdout.splitlines() if line.startswith("{")]
-                    if not rows:
-                        raise RuntimeError(child.stderr or "worker returned no result")
-                    record = json.loads(rows[-1])
-                except (subprocess.TimeoutExpired, RuntimeError) as error:
-                    record = recover_worker_record(progress_file, case, implementation, error)
-                cleanup = reap_excel_process(pid_file, grace_s=5 if record["status"] == "ok" else 0,
-                    dump_directory=out.with_suffix(".diagnostics") if args.shutdown_diagnostics else None)
+                    try:
+                        child = subprocess.run(cmd, capture_output=True, text=True,
+                                               timeout=case.timeout_s + 60)
+                        rows = [line for line in child.stdout.splitlines() if line.startswith("{")]
+                        if not rows:
+                            raise RuntimeError(child.stderr or "worker returned no result")
+                        record = json.loads(rows[-1])
+                    except (subprocess.TimeoutExpired, RuntimeError, OSError, ValueError) as error:
+                        record = recover_worker_record(progress_file, case, implementation, error)
+                    cleanup = reap_excel_process(pid_file, grace_s=5 if record["status"] == "ok" else 0,
+                        dump_directory=out.with_suffix(".diagnostics") if args.shutdown_diagnostics else None)
+                finally:
+                    observation = observer.finish() if observer is not None else None
+                if observation is not None:
+                    record["process_exit_observation"] = summarize_exit(record, observation, cleanup)
+                config = record.pop("lifecycle_trace_config", None)
+                if config is not None:
+                    record["lifecycle_trace"] = collect_lifecycle_trace(
+                        config, record.get("shutdown_timing", {}).get("quit_begin"))
                 apply_excel_cleanup(record, cleanup)
                 with out.open("a", encoding="utf-8") as file:
                     file.write(json.dumps(record, ensure_ascii=False) + "\n")

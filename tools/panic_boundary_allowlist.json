@@ -10,7 +10,7 @@
   {
     "path": "crates/xlfn-kernel/src/service_slot.rs",
     "context": "# [ cfg ( test ) ] mod tests / # [ test ] fn initialization_panic_is_retained_and_wakes_waiters",
-    "code": "let result = catch_unwind(AssertUnwindSafe(|| {",
+    "code": "catch_unwind(AssertUnwindSafe(|| {",
     "count": 1,
     "category": "test",
     "reason": "Observes the fixed string initialization panic escaping an intentionally propagating slot API."
@@ -33,7 +33,15 @@
   },
   {
     "path": "crates/xlfn-package/src/tests.rs",
-    "context": "# [ test ] fn arbitrary_bytes_never_panic_the_pe_parser",
+    "context": "# [ test ] fn truncated_and_mutated_xll_bytes_never_panic_the_pe_parser",
+    "code": "let result = std::panic::catch_unwind(|| parse_pe_bytes(&baseline[..length]));",
+    "count": 1,
+    "category": "test",
+    "reason": "Valid-XLL truncation regression asserts that the data-only PE parser never unwinds."
+  },
+  {
+    "path": "crates/xlfn-package/src/tests.rs",
+    "context": "# [ test ] fn truncated_and_mutated_xll_bytes_never_panic_the_pe_parser",
     "code": "let result = std::panic::catch_unwind(|| parse_pe_bytes(&bytes));",
     "count": 1,
     "category": "test",
@@ -362,7 +370,7 @@
   {
     "path": "crates/xlfn/tests/cache_contract/generations.rs",
     "context": "# [ test ] fn follower_retrying_after_leader_panic_across_clear_does_not_pollute_new_epoch",
-    "code": "let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {",
+    "code": "std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {",
     "count": 1,
     "category": "test",
     "reason": "Observes injected leader computation panic to verify retrying follower after clear does not pollute new epoch."

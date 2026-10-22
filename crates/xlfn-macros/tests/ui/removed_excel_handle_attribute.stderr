@@ -1,5 +1,13 @@
-error: cannot find attribute `excel_handle` in this scope
- --> tests/ui/removed_excel_handle_attribute.rs:1:3
+error[E0432]: unresolved import `xlfn_macros::excel_handle`
+ --> tests/ui/removed_excel_handle_attribute.rs:1:5
   |
-1 | #[excel_handle(name = "Dataset")]
-  |   ^^^^^^^^^^^^
+1 | use xlfn_macros::excel_handle;
+  |     ^^^^^^^^^^^^^------------
+  |                  |
+  |                  no `excel_handle` in the root
+  |
+help: a similar name exists in the module
+  |
+1 - use xlfn_macros::excel_handle;
+1 + use xlfn_macros::excel_addin;
+  |

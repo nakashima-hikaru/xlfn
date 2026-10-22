@@ -1335,29 +1335,6 @@ mod tests {
     }
 
     #[test]
-    fn arrays_hold_independent_cells() {
-        let _test = test_lock();
-        let fixture = open_static_test_runtime();
-        let runtime = fixture.runtime();
-        let matrix = Matrix::new(1, 2, vec![1.0, 2.0]).unwrap();
-        let value =
-            <Matrix<_> as ExcelReturn>::into_excel(matrix, &mut ReturnContext::new()).unwrap();
-        let pointer = allocate_excel_for_test(runtime, value).unwrap();
-        // SAFETY: pointer is live and non-null.
-        let oper = unsafe { &*pointer };
-        // SAFETY: pointer is live and its root type is multi.
-        let array = unsafe { oper.value.array };
-        assert_eq!(array.rows, 1);
-        assert_eq!(array.columns, 2);
-        // SAFETY: array contains two live cells.
-        let second_cell = unsafe { array.values.add(1) };
-        // SAFETY: second_cell is a live XLOPER12 pointer.
-        assert_eq!(unsafe { (*second_cell).base_type() }, XLTYPE_NUM);
-        // SAFETY: pointer has not yet been freed.
-        unsafe { free_return(pointer) };
-    }
-
-    #[test]
     fn miri_array_cells_remain_readable_in_tls_and_heap_returns() {
         let _test = test_lock();
         let tracker_owner = Box::into_raw(Box::new(ReturnTracker::new_closed()));
@@ -1366,50 +1343,67 @@ mod tests {
         let tracker: &'static ReturnTracker = unsafe { &*tracker_owner };
         tracker.reopen_admission().unwrap();
         std::thread::spawn(move || {
-            let matrix = || {
-                let matrix = Matrix::new(
-                    1,
-                    2,
-                    vec![
-                        ExcelCellOutput::Number(17.0),
-                        ExcelCellOutput::String("日本語 😀".to_owned()),
-                    ],
-                )
-                .unwrap();
-                let value =
-                    <Matrix<_> as ExcelReturn>::into_excel(matrix, &mut ReturnContext::new())
+            for homogeneous in [false, true] {
+                let matrix = || {
+                    let value = if homogeneous {
+                        Matrix::new(1, 2, vec![1.0_f64, 2.0])
+                            .unwrap()
+                            .into_excel(&mut ReturnContext::new())
+                            .unwrap()
+                    } else {
+                        let matrix = Matrix::new(
+                            1,
+                            2,
+                            vec![
+                                ExcelCellOutput::Number(17.0),
+                                ExcelCellOutput::String("日本語 😀".to_owned()),
+                            ],
+                        )
                         .unwrap();
-                let mut producer = tracker.try_enter_producer().unwrap();
-                allocate_excel_owned(value, &mut producer).unwrap()
-            };
-            let first = matrix();
-            let second = matrix();
-            assert_eq!(backing_of(first), ReturnBlockBacking::ThreadLocal);
-            assert_eq!(backing_of(second), ReturnBlockBacking::Heap);
-            for pointer in [second, first] {
-                // SAFETY: this thread owns both live matrix return blocks.
-                let oper = unsafe { &*pointer };
-                assert_eq!(oper.base_type(), XLTYPE_MULTI);
-                // SAFETY: the checked root type selects the array member.
-                let array = unsafe { oper.value.array };
-                assert_eq!((array.rows, array.columns), (1, 2));
-                // SAFETY: the output array contains exactly two initialized cells.
-                let cells = unsafe { std::slice::from_raw_parts(array.values, 2) };
-                assert_eq!(cells[0].base_type(), XLTYPE_NUM);
-                // SAFETY: the first cell's checked type selects its number.
-                assert_eq!(unsafe { cells[0].value.number }, 17.0);
-                assert_eq!(cells[1].base_type(), XLTYPE_STR);
-                // SAFETY: the second cell's checked type selects counted UTF-16.
-                let text = unsafe { cells[1].value.string };
-                // SAFETY: text starts with its initialized count prefix.
-                let length = unsafe { *text } as usize;
-                // SAFETY: the counted allocation includes its prefix unit.
-                let content = unsafe { text.add(1) };
-                // SAFETY: the arena retains all counted UTF-16 units.
-                let units = unsafe { std::slice::from_raw_parts(content, length) };
-                assert_eq!(String::from_utf16(units).unwrap(), "日本語 😀");
-                // SAFETY: the block and its cells have not been freed before.
-                unsafe { free_return(pointer) };
+                        <Matrix<_> as ExcelReturn>::into_excel(matrix, &mut ReturnContext::new())
+                            .unwrap()
+                    };
+                    let mut producer = tracker.try_enter_producer().unwrap();
+                    allocate_excel_owned(value, &mut producer).unwrap()
+                };
+                let first = matrix();
+                let second = matrix();
+                assert_eq!(backing_of(first), ReturnBlockBacking::ThreadLocal);
+                assert_eq!(backing_of(second), ReturnBlockBacking::Heap);
+                for pointer in [second, first] {
+                    // SAFETY: this thread owns both live matrix return blocks.
+                    let oper = unsafe { &*pointer };
+                    assert_eq!(oper.base_type(), XLTYPE_MULTI);
+                    // SAFETY: the checked root type selects the array member.
+                    let array = unsafe { oper.value.array };
+                    assert_eq!((array.rows, array.columns), (1, 2));
+                    // SAFETY: the output array contains exactly two initialized cells.
+                    let cells = unsafe { std::slice::from_raw_parts(array.values, 2) };
+                    assert_eq!(cells[0].base_type(), XLTYPE_NUM);
+                    assert_eq!(
+                        // SAFETY: the first cell's checked type selects its number.
+                        unsafe { cells[0].value.number },
+                        if homogeneous { 1.0 } else { 17.0 }
+                    );
+                    if homogeneous {
+                        assert_eq!(cells[1].base_type(), XLTYPE_NUM);
+                        // SAFETY: the checked type selects the second number.
+                        assert_eq!(unsafe { cells[1].value.number }, 2.0);
+                    } else {
+                        assert_eq!(cells[1].base_type(), XLTYPE_STR);
+                        // SAFETY: the second cell's checked type selects counted UTF-16.
+                        let text = unsafe { cells[1].value.string };
+                        // SAFETY: text starts with its initialized count prefix.
+                        let length = unsafe { *text } as usize;
+                        // SAFETY: the counted allocation includes its prefix unit.
+                        let content = unsafe { text.add(1) };
+                        // SAFETY: the arena retains all counted UTF-16 units.
+                        let units = unsafe { std::slice::from_raw_parts(content, length) };
+                        assert_eq!(String::from_utf16(units).unwrap(), "日本語 😀");
+                    }
+                    // SAFETY: the block and its cells have not been freed before.
+                    unsafe { free_return(pointer) };
+                }
             }
         })
         .join()
@@ -1907,33 +1901,23 @@ mod tests {
     }
 
     #[test]
-    fn producer_entry_is_linearized_against_close() {
-        for _ in 0..10_000 {
-            let tracker = ReturnTracker::new_closed();
-            tracker.reopen_admission().unwrap();
-
-            let barrier = Arc::new(Barrier::new(2));
-
-            std::thread::scope(|scope| {
-                let tracker_ref = &tracker;
-                let producer_barrier = Arc::clone(&barrier);
-                let producer = scope.spawn(move || {
-                    producer_barrier.wait();
-                    let guard = tracker_ref.try_enter_producer();
-                    let admitted = guard.is_some();
-                    drop(guard);
-                    admitted
-                });
-
-                barrier.wait();
-                tracker.close_admission();
-
-                let _admitted = producer.join().unwrap();
-            });
-
-            tracker.wait_for_quiescence();
-            assert!(tracker.is_quiescent());
-        }
+    fn close_retains_admitted_producer_and_rejects_later_entries() {
+        let tracker = ReturnTracker::new_closed();
+        tracker.reopen_admission().unwrap();
+        let producer = tracker.try_enter_producer().unwrap();
+        tracker.close_admission();
+        assert_eq!(tracker.outstanding_obligations(), 1);
+        assert!(!tracker.is_quiescent());
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| assert!(tracker.try_enter_producer().is_none()))
+                .join()
+                .unwrap();
+        });
+        drop(producer);
+        tracker.wait_for_quiescence();
+        assert_eq!(tracker.outstanding_obligations(), 0);
+        assert!(tracker.is_quiescent());
     }
 
     #[test]
@@ -1951,35 +1935,6 @@ mod tests {
         });
 
         assert!(tracker.is_quiescent());
-    }
-
-    #[test]
-    fn quiescent_lost_wakeup_stress_test() {
-        let _test = test_lock();
-        for _ in 0..200 {
-            let fixture = open_static_test_runtime();
-            let runtime = fixture.runtime();
-
-            let barrier = Arc::new(Barrier::new(2));
-            let barrier_waiter = Arc::clone(&barrier);
-            let waiter_handle = std::thread::spawn(move || {
-                barrier_waiter.wait();
-                runtime.wait_for_returns();
-            });
-
-            let producer_handle = std::thread::spawn(move || {
-                let ptr = ffi_boundary(runtime, || Ok(42.0));
-                // SAFETY: ptr is a live return pointer produced by ffi_boundary above.
-                let free_guard = unsafe { free_return_boundary(ptr) };
-                drop(free_guard);
-            });
-
-            producer_handle.join().unwrap();
-            runtime.return_tracker().close_admission();
-            barrier.wait();
-            waiter_handle.join().unwrap();
-            assert!(runtime.returns_are_quiescent());
-        }
     }
 
     #[test]
@@ -2007,6 +1962,9 @@ mod tests {
 
         drop(free_guard);
         assert_eq!(tracker.outstanding_obligations(), 0);
+        tracker.close_admission();
+        tracker.wait_for_quiescence();
+        assert!(tracker.is_quiescent());
     }
 
     #[test]

@@ -22,6 +22,8 @@ rtd = []
 handles = ["dep:blake3", "dep:constant_time_eq", "dep:getrandom", "dep:papaya"]
 cache = ["dep:quick_cache"]
 refinement = ["serde/derive"]
+# Opt-in native lifecycle diagnostics; inactive without a process-bound control file.
+lifecycle-diagnostics = []
 # Internal instrumentation for production-path benchmarks.
 bench-internals = ["handles", "xlfn-sys/abi-probe"]
 
@@ -205,7 +207,6 @@ xlfn-sys = { workspace = true, features = ["abi-probe"] }
 
 [target.'cfg(not(all(target_os = "windows", target_arch = "x86")))'.dev-dependencies]
 loom.workspace = true
-shuttle.workspace = true
 
 [lints]
 workspace = true

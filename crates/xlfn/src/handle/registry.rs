@@ -53,6 +53,22 @@ impl HandleRegistrySealed {
     }
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum InsertBoundary {
+    BeforeReserve,
+    AfterReserve,
+    BeforePublish,
+    AfterPublish,
+}
+
+#[cfg(test)]
+type InsertPause = (
+    InsertBoundary,
+    std::sync::mpsc::SyncSender<()>,
+    std::sync::mpsc::Receiver<()>,
+);
+
 pub(crate) struct HandleRegistry {
     pub(super) codec: TokenCodec,
     pub(super) phase: AtomicU8,
@@ -65,6 +81,8 @@ pub(crate) struct HandleRegistry {
             std::sync::mpsc::Receiver<()>,
         )>,
     >,
+    #[cfg(test)]
+    pub(super) insert_pause: Mutex<Option<InsertPause>>,
     next_object_id: AtomicU64,
     #[cfg(any(test, feature = "refinement"))]
     pub(super) trace: Mutex<Option<crate::shutdown_trace::ShutdownTraceHandle>>,
@@ -119,6 +137,8 @@ impl HandleRegistry {
             objects: xlfn_kernel::published_owner::PublishedOwner::new(ObjectArena::new()),
             #[cfg(test)]
             after_lookup_live: Mutex::new(None),
+            #[cfg(test)]
+            insert_pause: Mutex::new(None),
             next_object_id: AtomicU64::new(1),
             #[cfg(any(test, feature = "refinement"))]
             trace: Mutex::new(None),
@@ -240,17 +260,43 @@ impl HandleRegistry {
         let object = value.as_ref().expect("pending handle object is armed");
         self.check_object_arena(object)?;
         self.validate_type::<T>(object)?;
+        #[cfg(test)]
+        self.pause_insert(InsertBoundary::BeforeReserve);
         let reservation = self.bindings.reserve()?;
+        #[cfg(test)]
+        self.pause_insert(InsertBoundary::AfterReserve);
         if !self.is_open() {
             drop(reservation);
             return Err(XllError::Closing);
         }
+        #[cfg(test)]
+        self.pause_insert(InsertBoundary::BeforePublish);
         let object = value.take().expect("pending handle object is armed");
         let object_id = object.id();
         let (id, reused) = reservation.publish(object);
+        #[cfg(test)]
+        self.pause_insert(InsertBoundary::AfterPublish);
         #[cfg(any(test, feature = "refinement"))]
         self.record_shutdown_event(crate::shutdown_trace::ShutdownEvent::AddHandle);
         Ok((self.codec.format(id), id, object_id, reused))
+    }
+
+    #[cfg(test)]
+    fn pause_insert(&self, boundary: InsertBoundary) {
+        let pause = {
+            let mut pause = self.insert_pause.lock();
+            if pause.as_ref().is_some_and(|(at, _, _)| *at == boundary) {
+                pause.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, entered, resume)) = pause {
+            entered.send(()).unwrap();
+            resume
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+        }
     }
 
     fn validate_type<T: Send + Sync + 'static>(&self, object: &ObjectBinding) -> XllResult<()> {

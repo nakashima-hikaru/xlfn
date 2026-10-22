@@ -1,0 +1,23 @@
+error: injected contexts cannot use qualified associated type paths
+  --> tests/ui/fail/context_shape.rs:15:29
+   |
+15 | fn associated_type(context: <() as ContextTypes>::MainThreadContext) -> f64 {
+   |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: an injected context must be the first argument
+  --> tests/ui/fail/context_shape.rs:21:34
+   |
+21 | fn context_not_first(value: f64, context: MainThreadContext<'_, ()>) -> f64 {
+   |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: only one injected context parameter is allowed
+  --> tests/ui/fail/context_shape.rs:27:56
+   |
+27 | fn multiple_contexts(first: MainThreadContext<'_, ()>, second: ThreadSafeContext<'_, ()>) -> f64 {
+   |                                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: injected contexts cannot use #[excel_arg(...)]
+  --> tests/ui/fail/context_shape.rs:33:27
+   |
+33 | fn context_with_excel_arg(#[excel_arg(name = "context")] context: MainThreadContext<'_, ()>) -> f64 {
+   |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

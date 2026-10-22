@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import gc
+import os
+import re
 import struct
+import subprocess
 import tempfile
 import threading
 import time
@@ -982,12 +985,39 @@ class PlanTest(unittest.TestCase):
                          {"error": "probe unavailable"})
 
     def test_registration_names_match_rust_generator(self):
-        generated = source(10)
-        self.assertIn('Name = "BENCH.EXTRA.0000"', generated)
-        self.assertIn('Name = "BENCH.EXTRA.0009"', generated)
-        self.assertNotIn('BENCH.EXTRA.0010', generated)
-        with self.assertRaises(ValueError):
-            source(5_001)
+        build_script = Path(__file__).parent / "xlfn" / "build.rs"
+        with tempfile.TemporaryDirectory(prefix="xlfn-registration-") as directory:
+            output = Path(directory)
+            executable = output / ("registration-builder.exe" if os.name == "nt"
+                                   else "registration-builder")
+            compiled = subprocess.run(
+                ["rustc", "--edition=2024", str(build_script), "-o", str(executable)],
+                capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            for count in (0, 10, 5_000):
+                with self.subTest(count=count):
+                    generated = subprocess.run(
+                        [str(executable)],
+                        env=os.environ | {"OUT_DIR": directory, "BENCH_EXTRA_FUNCTIONS": str(count)},
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    self.assertEqual(generated.returncode, 0, generated.stderr)
+                    rust_names = re.findall(r'name = "(BENCH\.EXTRA\.\d+)"',
+                                            (output / "extra.rs").read_text(encoding="utf-8"))
+                    csharp_names = re.findall(r'Name = "(BENCH\.EXTRA\.\d+)"', source(count))
+                    self.assertEqual(rust_names, [f"BENCH.EXTRA.{i:04}" for i in range(count)])
+                    self.assertEqual(csharp_names, rust_names)
+            for count in (-1, 5_001):
+                with self.subTest(rejected_count=count):
+                    with self.assertRaises(ValueError):
+                        source(count)
+                    rejected = subprocess.run(
+                        [str(executable)],
+                        env=os.environ | {"OUT_DIR": directory, "BENCH_EXTRA_FUNCTIONS": str(count)},
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    self.assertNotEqual(rejected.returncode, 0)
 
     def test_summary_requires_matching_conditions(self):
         common = {"id": "S01", "variant": "1000", "status": "ok", "profile": "full",

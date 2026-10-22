@@ -7,5 +7,6 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../excel_dna/AsyncControl.cs" Link="AsyncControl.cs" />
+    <Compile Include="../excel_dna/LifecycleTrace.cs" Link="LifecycleTrace.cs" />
   </ItemGroup>
 </Project>

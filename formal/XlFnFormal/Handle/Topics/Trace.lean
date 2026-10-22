@@ -218,6 +218,11 @@ def server_generation_claim_and_connection_trace : List Event :=
     [.beginConnection fixtureKey fixtureOwner1,
      .commitConnection fixtureKey fixtureOwner1]
 
+def server_generation_trace : List Event :=
+  server_generation_claim_and_connection_trace ++
+    [.commitPublication fixtureKey 1,
+     .finishInitializer fixtureKey 1] ++ close_suffix
+
 def server_generation_claim_idempotent_trace : List Event :=
   server_generation_claim_prefix ++ [.claimServer fixtureKey 1]
 
@@ -339,7 +344,15 @@ theorem server_generation_claim_and_connection_replays :
   native_decide
 
 theorem server_generation_claim_is_idempotent :
-    (replay? (initialState 0) server_generation_claim_idempotent_trace).isSome = true := by
+    (replay? (initialState 0) server_generation_claim_prefix).isSome = true ∧
+    replay? (initialState 0) server_generation_claim_idempotent_trace =
+      replay? (initialState 0) server_generation_claim_prefix := by
+  native_decide
+
+theorem server_generation_trace_replays :
+    ∃ s, replay? (initialState 0) server_generation_trace = some s ∧
+      s.runtime.phase = .closed ∧ CloseCertified s := by
+  apply replay_phase_is_closed
   native_decide
 
 theorem different_server_generation_claim_rejected :
