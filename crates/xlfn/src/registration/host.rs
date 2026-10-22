@@ -622,10 +622,8 @@ fn decode_module_name<'call>(value: XlValueRef<'call>) -> XllResult<ModuleName> 
     ModuleName::from_value(value, "module")
 }
 
-#[cfg(all(
-    test,
-    any(not(target_os = "windows"), feature = "async", feature = "handles")
-))]
+// Core callback-session tests need this fixture even without async or handles.
+#[cfg(test)]
 pub(crate) mod test_support {
     use std::cell::RefCell;
     use std::collections::VecDeque;
@@ -692,6 +690,7 @@ pub(crate) mod test_support {
             self
         }
 
+        #[cfg(any(not(target_os = "windows"), feature = "async", feature = "handles"))]
         pub(crate) fn release_status(mut self, status: i32) -> Self {
             self.release_status = status;
             self
@@ -845,7 +844,6 @@ mod tests {
     use crate::error::ExcelApiFailure;
 
     #[test]
-    #[cfg(any(not(target_os = "windows"), feature = "async", feature = "handles"))]
     fn registration_arguments_keep_utf16_owners_live_when_pointer_storage_spills() {
         use super::test_support::{CallbackScript, RegisterArgument, Reply};
         use crate::registration::{ArgumentAbi, ArgumentDescriptor, RegistrationDescriptor};
@@ -953,7 +951,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(not(target_os = "windows"), feature = "async", feature = "handles"))]
     fn registration_spills_survive_nested_registration_and_result_release() {
         use super::test_support::{CallbackScript, Reply, read_registration_arguments};
         use crate::registration::{RegistrationDescriptor, RegistrationSignature};

@@ -68,10 +68,8 @@ mod tests {
     }
 }
 
-#[cfg(any(not(target_os = "windows"), feature = "async", feature = "handles"))]
 pub(crate) use mock::*;
 
-#[cfg(any(not(target_os = "windows"), feature = "async", feature = "handles"))]
 mod mock {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
@@ -121,6 +119,7 @@ mod mock {
         }
     }
 
+    #[cfg(any(not(target_os = "windows"), feature = "async", feature = "handles"))]
     pub(crate) fn reset() {
         crate::module_runtime::reset_callbacks_for_test();
         TOTAL_CALLS.store(0, Ordering::Relaxed);
