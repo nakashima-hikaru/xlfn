@@ -230,11 +230,24 @@ impl<'call> RegistrationHost<'call> {
     ) -> RegistrationMutation<()> {
         let mut id = XLOPER12::number(registration.id);
         let arguments = [NonNull::from_mut(&mut id)];
+        #[cfg(feature = "lifecycle-diagnostics")]
+        let mut raw_result = None;
         let invocation = self
             .excel
             .invoke_protocol(XLF_UNREGISTER, &arguments, |result| {
+                #[cfg(feature = "lifecycle-diagnostics")]
+                {
+                    raw_result = crate::lifecycle_diagnostics::registration_result(result);
+                }
                 read_applied_bool(result, ExcelApiFunction::Unregister)
             });
+        #[cfg(feature = "lifecycle-diagnostics")]
+        crate::lifecycle_diagnostics::registration_removal(
+            "xlfUnregister",
+            registration.id,
+            &invocation,
+            raw_result,
+        );
         mutation_from_invocation(
             invocation,
             ExcelApiFunction::Unregister,
@@ -292,6 +305,8 @@ impl<'call> RegistrationHost<'call> {
         // operation subject to version/bitness live-Excel qualification; a
         // malformed acknowledgement cannot certify host-side event removal.
         let mut nil_procedure = XLOPER12::nil();
+        #[cfg(feature = "lifecycle-diagnostics")]
+        let mut raw_result = None;
         let mut event_value = XLOPER12::integer(event);
         let arguments = [
             NonNull::from_mut(&mut nil_procedure),
@@ -300,8 +315,19 @@ impl<'call> RegistrationHost<'call> {
         let invocation = self
             .excel
             .invoke_protocol(XL_EVENT_REGISTER, &arguments, |result| {
+                #[cfg(feature = "lifecycle-diagnostics")]
+                {
+                    raw_result = crate::lifecycle_diagnostics::registration_result(result);
+                }
                 validate_event_unregister_result(result)
             });
+        #[cfg(feature = "lifecycle-diagnostics")]
+        crate::lifecycle_diagnostics::registration_removal(
+            "xlEventRegister.remove",
+            f64::from(event),
+            &invocation,
+            raw_result,
+        );
         mutation_from_invocation(
             invocation,
             ExcelApiFunction::EventRegister,

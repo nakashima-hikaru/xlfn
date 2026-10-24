@@ -21,7 +21,7 @@ from generate_registration import source
 from run import (XL_AUTOMATIC, XL_MANUAL, XL_ERR_NUM, AsyncControl, ComObject, ComRetry,
                  ExcelSession, UnsupportedCase, WorkerProgress, apply_excel_cleanup, calculation_mode,
                  check_final_values, check_scalar, close_worker_session, formula, register_xll,
-                 registration_diagnostics, run_async, reap_excel_process,
+                 registration_diagnostics, run_async, reap_excel_process, run_scalar, allocation_snapshot,
                  recover_worker_record, run_async_cancel, run_async_gate, run_async_repeated, run_matrix, run_numeric_output_pair,
                  native_abi_formula, run_native_abi_pair, classify_abi_semantics, run_native_abi_semantics, artifact)
 from summarize import PRIMARY, summarize
@@ -847,6 +847,86 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(qualification["comparison"], "input_semantics")
         self.assertEqual(qualification["checks"], 152)
         self.assertNotIn("q_p50_s", qualification)
+
+    def test_repeat_observations_include_first_recalculation_and_phase_times(self):
+        for tracking in (False, True):
+            session = Mock(repeat_diagnostics=tracking, implementation="xlfn")
+            session.add_formulas.return_value.Value2 = ((1.0,),)
+            session.memory_snapshot.side_effect = [
+                {"rss_bytes": 100, "private_bytes": 200},
+                {"rss_bytes": 150, "private_bytes": 280},
+                {"rss_bytes": 160, "private_bytes": 290}]
+            durations = iter((0.5, 1.0, 2.0))
+            def calculate(target, full=False):
+                duration = next(durations)
+                session.last_calculation_timing = {"total_s": duration,
+                    "calculate_call_s": duration - 0.1, "completion_wait_s": 0.1,
+                    "completion_polls": 1}
+                return duration
+            session.calculate.side_effect = calculate
+            counters = iter((100, 50, 400, 250))
+            def evaluate(expression):
+                if expression == "BENCH.ALLOC.TRACK(TRUE)": return 1
+                if expression == "BENCH.ALLOC.TRACK(FALSE)": return 0
+                return next(counters)
+            session.app.Evaluate.side_effect = evaluate
+            result = run_scalar(session, Case("L02", "test", {"cells": 1}), 2)
+            self.assertEqual(result["rss_growth_bytes"], 10)
+            self.assertEqual(result["post_warmup_rss_bytes_growth"], 60)
+            self.assertEqual(result["post_warmup_private_bytes_growth"], 90)
+            self.assertEqual(result["recalculation_samples"][1]["calculate_call_s"], 1.9)
+            self.assertEqual(result["recalculation_blocks"][1]["p99_s"], 2.0)
+            if tracking:
+                self.assertEqual(result["fixture_allocation_window"],
+                    {"allocated_bytes": 300, "freed_bytes": 200, "net_requested_bytes": 100})
+            else:
+                session.app.Evaluate.assert_not_called()
+
+    def test_repeat_tracking_disabled_on_counter_and_calculation_failures(self):
+        for failure in ("enable", "counter", "calculate"):
+            session = Mock(repeat_diagnostics=True, implementation="xlfn")
+            session.add_formulas.return_value.Value2 = ((1.0,),)
+            session.calculate.side_effect = [0.1, RuntimeError("calculation failed")]
+            def evaluate(expression):
+                if expression == "BENCH.ALLOC.TRACK(FALSE)": return 0
+                if expression == "BENCH.ALLOC.TRACK(TRUE)": return -1 if failure == "enable" else 1
+                if failure == "counter": raise RuntimeError("counter failed")
+                return 100
+            session.app.Evaluate.side_effect = evaluate
+            with self.assertRaises((AssertionError, RuntimeError)):
+                run_scalar(session, Case("L02", "test", {"cells": 1}), 1)
+            session.app.Evaluate.assert_called_with("BENCH.ALLOC.TRACK(FALSE)")
+
+    def test_repeat_counter_scope_and_invalid_excel_values(self):
+        session = Mock(implementation="excel_dna")
+        session.app.Evaluate.return_value = 100
+        self.assertEqual(allocation_snapshot(session), {"allocated_bytes": 100})
+        session.app.Evaluate.assert_called_once_with("BENCH.ALLOC.BYTES()")
+        for value in (True, XL_ERR_NUM, "#NAME?", float("nan")):
+            session.app.Evaluate.return_value = value
+            with self.assertRaises(AssertionError):
+                allocation_snapshot(session)
+
+    def test_repeat_diagnostics_are_excluded_from_framework_ratios(self):
+        for tracked in ((True, False), (True, True)):
+            records = [{"id": "L02", "variant": "1000", "implementation": impl,
+                        "repeat_diagnostics": enabled, "status": "ok",
+                        "metrics": {"latency_drift_ratio": 1.0}}
+                       for impl, enabled in zip(("xlfn", "excel_dna"), tracked)]
+            row, = summarize(records)
+            self.assertFalse(row["comparable"])
+            self.assertIsNone(row["xlfn_advantage_ratio"])
+            self.assertIn("diagnostic", row["reason"])
+
+    def test_memory_snapshot_does_not_substitute_vms_for_private_commit(self):
+        session = ExcelSession.__new__(ExcelSession)
+        session.process = Mock()
+        session.peak_rss = 0
+        session.process.memory_info.return_value = SimpleNamespace(rss=10, vms=30)
+        self.assertEqual(session.memory_snapshot(), {"rss_bytes": 10})
+        session.process.memory_info.return_value = SimpleNamespace(rss=20, private=40)
+        self.assertEqual(session.memory_snapshot(), {"rss_bytes": 20, "private_bytes": 40})
+        self.assertEqual(session.peak_rss, 20)
 
     def test_matrix_allocation_tracking_is_limited_to_mixed_measurement(self):
         for id in ("M01", "M05"):

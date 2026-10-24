@@ -481,11 +481,67 @@ with `BENCH.ALLOC.TRACK(TRUE)` and disables it in a `finally` block after the
 counter reads and recalculations. These control calls are outside the timed
 recalculations. The matching Excel-DNA control is a no-op because its CLR
 allocation counter is already available. M05 timing includes Rust's counting
-overhead; other workloads only check the disabled flag when allocating.
+overhead; other workloads only check the disabled flag when allocating or
+freeing, unless L02 diagnostics below are explicitly enabled.
 Earlier fixtures incremented a shared atomic counter on every Rust allocation
 and reallocation throughout every workload. Those historical results include
 that instrumentation cost and should be rerun with newly built XLLs before
 attributing the differences to the frameworks.
+
+### Repeated calculation and unregister diagnostics
+
+L02 retains every measured iteration in `recalculation_samples`: total time,
+the `CalculateFull` COM call, completion-state polling, Excel RSS and, on
+Windows, private committed bytes. Memory reads are outside the calculation
+timer. `post_warmup_memory` is taken **before** the first measured iteration;
+`post_warmup_rss_bytes_growth` and `post_warmup_private_bytes_growth` include
+that iteration. The historical `rss_growth_bytes` still measures first-to-last
+post-calculation RSS. `recalculation_blocks` reports p50/p99 over consecutive
+blocks (about ten blocks); inspect the samples and block sizes before treating
+a tail percentile or first/last ratio as sustained latency drift.
+
+For allocation attribution, rebuild/fetch XLLs from the same revision as the
+runner and run a separate diagnostic observation:
+
+```powershell
+python .\run.py --id L02 --artifacts .\artifacts --repeat-diagnostics --shutdown-diagnostics --out l02-diagnostic.jsonl
+```
+
+Run the same command without `--repeat-diagnostics` to collect normal timings
+into a different output file. L02 uses its variant's `repetitions`, not
+`--repeat`. The diagnostic option enables the Rust fixture allocator only
+after warmup and disables it in `finally`, including on failures. Boundary
+`Evaluate` calls and counter atomics affect this observation; do not mix these
+timings with normal results. `fixture_allocation_window` reports successful
+requested allocation bytes and released bytes (including successful reallocs).
+The CSV summarizer marks instrumented L02 runs non-comparable and omits their
+framework advantage ratio.
+Failed allocations/reallocations are not counted. Releases may refer to
+allocations made before the observation window, so `net_requested_bytes` can
+be negative and **is not total live heap size**. Native process-heap allocations
+(including scalar return roots), Excel allocations, allocator overhead and
+fragmentation are outside these Rust counters. Excel-DNA supplies only its
+managed cumulative allocation delta; the counter scopes are not comparable.
+RSS alone cannot establish a leak; compare private commit, window balance and
+the shape of the repeated observations.
+
+With `--shutdown-diagnostics`, the xlfn lifecycle trace also contains
+`registration.removal` records for failed `xlfUnregister` calls and event
+removal attempts. Records identify the operation and numeric registration ID
+or event selector, callback status, inline scalar result type/value, decoder
+error and cleanup outcome. Suppressed callbacks are marked `invoked: false`;
+non-success callback statuses have no decoded raw result. Pointer payloads
+are never followed. This stream is capped at 64 records per loaded module,
+followed by one truncation marker. No record formatting occurs without an
+active trace sink.
+
+These records distinguish function removal rejection, event acknowledgement
+failure and callback suppression behind `Quarantine(UnregisterFailed)`.
+They do not change removal acceptance or prove unload safety: a successful
+`xlAutoClose` return or natural Excel exit does not turn a quarantined phase
+into `Closed`. In particular, signed event registration tokens do not by
+themselves qualify the separate nil-procedure removal convention; see
+[`event-qualification/README.md`](event-qualification/README.md).
 
 The Rust RTD fixture starts its source worker at the first subscription and
 waits when there is no periodic or pulse work. Earlier fixtures started a

@@ -54,6 +54,11 @@ def summarize(records: list[dict]) -> list[dict]:
                "excel_dna_status": dna["status"] if dna else "missing",
                "xlfn_value": None, "excel_dna_value": None, "xlfn_advantage_ratio": None,
                "comparable": False, "reason": "missing or failed run"}
+        if id == "L02" and any(record and record.get("repeat_diagnostics", False)
+                               for record in (xlfn, dna)):
+            row["reason"] = "allocation-instrumented L02 diagnostic run"
+            pairs.append(row)
+            continue
         if id == "M06":
             row.update(comparison="within_xlfn_fp12_vs_q", reason="within-xlfn return ABI comparison")
             if xlfn and xlfn["status"] == "ok":

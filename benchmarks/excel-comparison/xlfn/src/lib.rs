@@ -9,10 +9,9 @@ mod rtd_source;
 use rtd_source::{BenchRtdSource, RtdShared};
 
 use std::{
-    alloc::{GlobalAlloc, Layout, System},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -27,32 +26,9 @@ use xlfn::{
     rtd::{RtdCapacity, RtdLimits, RtdSourceHandle, RtdValue},
 };
 
-struct CountingAllocator;
-static TRACK_ALLOCATIONS: AtomicBool = AtomicBool::new(false);
-static ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if TRACK_ALLOCATIONS.load(Ordering::Relaxed) {
-            ALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
-        }
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) }
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        if TRACK_ALLOCATIONS.load(Ordering::Relaxed) {
-            ALLOC_BYTES.fetch_add(size as u64, Ordering::Relaxed);
-        }
-        unsafe { System.realloc(pointer, layout, size) }
-    }
-}
-
+mod allocation;
 #[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
+static ALLOCATOR: allocation::CountingAllocator = allocation::CountingAllocator::new();
 
 pub struct State {
     shared_read: AtomicU64,
@@ -226,13 +202,19 @@ pub fn contended(context: ThreadSafeContext<'_, BenchAddin>, value: f64) -> f64 
 
 #[excel_function(name = "BENCH.ALLOC.BYTES", thread_safe)]
 pub fn alloc_bytes() -> f64 {
-    ALLOC_BYTES.load(Ordering::Relaxed) as f64
+    ALLOCATOR.allocated() as f64
+}
+
+/// Requested bytes released during enabled observation windows, including realloc.
+#[excel_function(name = "BENCH.ALLOC.FREED", thread_safe)]
+pub fn alloc_freed() -> f64 {
+    ALLOCATOR.freed() as f64
 }
 
 /// Enables allocation counting without resetting the cumulative counter.
 #[excel_function(name = "BENCH.ALLOC.TRACK")]
 pub fn alloc_track(enabled: bool) -> f64 {
-    TRACK_ALLOCATIONS.store(enabled, Ordering::Relaxed);
+    ALLOCATOR.track(enabled);
     if enabled { 1.0 } else { 0.0 }
 }
 

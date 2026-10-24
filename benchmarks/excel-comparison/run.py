@@ -366,6 +366,16 @@ class ExcelSession:
         self.peak_rss = max(self.peak_rss, rss)
         return rss
 
+    def memory_snapshot(self) -> dict[str, int]:
+        info = self.process.memory_info()
+        self.peak_rss = max(self.peak_rss, info.rss)
+        result = {"rss_bytes": info.rss}
+        # Windows private commit differs from the resident working set. Do not
+        # substitute VMS/USS on another platform under the same metric name.
+        if hasattr(info, "private"):
+            result["private_bytes"] = info.private
+        return result
+
     def cpu_s(self) -> float:
         now = self.process.cpu_times()
         return now.user + now.system - self.cpu_start.user - self.cpu_start.system
@@ -545,22 +555,71 @@ def run_scalar(session: ExcelSession, case: Case, repeat: int) -> dict[str, Any]
     session.calculate(target)
     check_scalar(target, case)
     samples = []
-    rss = []
-    for _ in range(repeat):
-        samples.append(session.calculate(target, full=case.id == "L02"))
-        if case.id == "L02":
-            rss.append(session.memory())
-    check_scalar(target, case)
+    observations = []
+    repeated = case.id == "L02"
+    track = repeated and getattr(session, "repeat_diagnostics", False)
+    baseline = session.memory_snapshot() if repeated else None
+    allocation_before = None
+    try:
+        if track:
+            if session.app.Evaluate("BENCH.ALLOC.TRACK(TRUE)") != 1:
+                raise AssertionError("allocation tracking could not be enabled")
+            allocation_before = allocation_snapshot(session)
+        for index in range(repeat):
+            samples.append(session.calculate(target, full=repeated))
+            if repeated:
+                observations.append({"iteration": index + 1,
+                    **session.last_calculation_timing, **session.memory_snapshot()})
+        check_scalar(target, case)
+    finally:
+        if track:
+            if session.app.Evaluate("BENCH.ALLOC.TRACK(FALSE)") != 0:
+                raise AssertionError("allocation tracking could not be disabled")
     result = interval(samples, sum(samples), "recalculation") | {"formula_count": count,
         "calls_per_s": count / statistics.median(samples), "ns_per_call": statistics.median(samples) * 1e9 / count}
     if case.id == "S03":
         result["nominal_cpu_s"] = count * case.params["delay_us"] / 1e6
         result["overhead_note"] = "Compare the 0-us baseline against total time; nominal busy-loop duration is not a calibrated CPU timer"
-    if case.id == "L02":
+    if repeated:
         result["first_recalc_s"] = samples[0]
         result["last_recalc_s"] = samples[-1]
         result["latency_drift_ratio"] = samples[-1] / samples[0]
-        result["rss_growth_bytes"] = rss[-1] - rss[0]
+        # Preserve the historical first-to-last definition alongside the new
+        # post-warmup baseline, which includes the first measured recalculation.
+        result["rss_growth_bytes"] = observations[-1]["rss_bytes"] - observations[0]["rss_bytes"]
+        result["post_warmup_memory"] = baseline
+        result["recalculation_samples"] = observations
+        for metric in baseline:
+            result[f"post_warmup_{metric}_growth"] = observations[-1][metric] - baseline[metric]
+        block_size = max(1, repeat // 10)
+        result["recalculation_blocks"] = [
+            {"first_iteration": start + 1, "last_iteration": min(start + block_size, repeat),
+             "p50_s": statistics.median(samples[start:start + block_size]),
+             "p99_s": percentile(samples[start:start + block_size], 99)}
+            for start in range(0, repeat, block_size)]
+        result["repeat_diagnostics"] = bool(track)
+        result["timing_note"] = "CalculateFull plus COM dispatch and CalculationState polling; memory reads are outside the timer; block p99 uses only that block's samples"
+        if track:
+            after = allocation_snapshot(session)
+            result["fixture_allocation_window"] = {key: after[key] - value for key, value in allocation_before.items()}
+            if "freed_bytes" in after:
+                window = result["fixture_allocation_window"]
+                window["net_requested_bytes"] = window["allocated_bytes"] - window["freed_bytes"]
+            result["allocation_note"] = "Diagnostic run includes counter overhead and boundary Evaluate calls; Rust requested bytes exclude native process-heap/Excel allocations; frees can belong to allocations before the window, so net is not live heap size. .NET reports cumulative managed allocations only. Do not compare ratios or mix with normal timings."
+
+    return result
+
+
+def allocation_snapshot(session: ExcelSession) -> dict[str, float]:
+    names = {"allocated_bytes": "BENCH.ALLOC.BYTES()"}
+    if session.implementation == "xlfn":
+        names["freed_bytes"] = "BENCH.ALLOC.FREED()"
+    result = {}
+    for key, expression in names.items():
+        value = session.app.Evaluate(expression)
+        if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+            raise AssertionError(f"invalid allocation counter {expression}: {value!r}")
+        result[key] = value
     return result
 
 
@@ -1648,6 +1707,7 @@ def worker(args: argparse.Namespace, case: Case) -> int:
     record: dict[str, Any] = {
         "id": case.id, "variant": case.variant, "implementation": args.implementation,
         "params": case.params, "profile": args.profile, "repeat": args.repeat,
+        "repeat_diagnostics": args.repeat_diagnostics and case.id == "L02",
         "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "host": platform.node(), "os": platform.platform(),
         "xll": str(xll.resolve()), "xll_sha256": hashlib.sha256(xll.read_bytes()).hexdigest(),
@@ -1673,6 +1733,7 @@ def worker(args: argparse.Namespace, case: Case) -> int:
                                progress, shutdown_diagnostics=args.shutdown_diagnostics,
                                lifecycle_trace_file=Path(args.lifecycle_trace_file) if args.lifecycle_trace_file else None)
         session.implementation = args.implementation
+        session.repeat_diagnostics = args.repeat_diagnostics
         progress.update(excel_version=str(session.app.Version), excel_build=str(session.app.Build),
                         excel_bitness=session.app.OperatingSystem)
         mode = calculation_mode(case)
@@ -1723,6 +1784,8 @@ def main() -> int:
     parser.add_argument("--repeat", type=int, default=5)
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--throttle-ms", type=int, default=100)
+    parser.add_argument("--repeat-diagnostics", action="store_true",
+                        help="L02 only: enable fixture allocation counters; diagnostic timings include counting overhead")
     parser.add_argument("--shutdown-diagnostics", action="store_true",
                         help="record native lifecycle events and save a dump before forced termination (up to 15s extra)")
     parser.add_argument("--plan", action="store_true")
@@ -1786,6 +1849,8 @@ def main() -> int:
                     cmd.append("--allow-local-artifacts")
                 if args.allow_commit_mismatch:
                     cmd.append("--allow-commit-mismatch")
+                if args.repeat_diagnostics:
+                    cmd.append("--repeat-diagnostics")
                 if args.shutdown_diagnostics:
                     cmd.append("--shutdown-diagnostics")
                     diagnostic_root = out.with_suffix(".diagnostics")

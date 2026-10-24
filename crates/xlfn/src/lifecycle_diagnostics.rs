@@ -80,6 +80,94 @@ impl Sink {
 
 static SINK: OnceLock<Option<Sink>> = OnceLock::new();
 static INVOCATION: AtomicU64 = AtomicU64::new(1);
+static REGISTRATION_RECORDS: AtomicU64 = AtomicU64::new(0);
+
+/// Copy only inline scalar fields while the callback result is readable. Never
+/// retain host pointers or inspect strings/arrays for diagnostic purposes.
+pub(crate) fn registration_result(
+    result: &crate::callback_value::ExcelCallbackValue<'_>,
+) -> Option<Value> {
+    matches!(SINK.get(), Some(Some(_)))
+        .then(|| scalar_result(result))
+        .flatten()
+}
+
+fn scalar_result(result: &crate::callback_value::ExcelCallbackValue<'_>) -> Option<Value> {
+    use xlfn_sys::{XLTYPE_BOOL, XLTYPE_ERR, XLTYPE_INT, XLTYPE_NUM};
+    let raw = result.raw().ok()?;
+    let value = match raw.base_type() {
+        // SAFETY: each inline union member is selected by its exact base type.
+        XLTYPE_BOOL => json!(unsafe { raw.value.boolean }),
+        // SAFETY: XLTYPE_ERR selects the error member.
+        XLTYPE_ERR => json!(unsafe { raw.value.error }),
+        // SAFETY: XLTYPE_INT selects the integer member.
+        XLTYPE_INT => json!(unsafe { raw.value.integer }),
+        // SAFETY: XLTYPE_NUM selects the number member.
+        XLTYPE_NUM => json!(unsafe { raw.value.number }),
+        _ => Value::Null,
+    };
+    Some(json!({"xltype": raw.xltype, "value": value}))
+}
+
+pub(crate) fn registration_removal<T>(
+    operation: &'static str,
+    target: f64,
+    invocation: &crate::host_api::HostInvocation<T>,
+    raw_result: Option<Value>,
+) {
+    use crate::host_api::HostInvocation;
+    let Some(Some(sink)) = SINK.get() else { return };
+    // Successful function removals can number in the thousands. Event removal
+    // acknowledgements are useful even on success (the convention needs qualification).
+    if operation == "xlfUnregister"
+        && matches!(
+            invocation,
+            HostInvocation::Completed {
+                status: crate::return_abi::ExcelCallbackStatus::Success,
+                decoded: Some(Ok(_)),
+                cleanup: Ok(())
+            }
+        )
+    {
+        return;
+    }
+    let Ok(index) = REGISTRATION_RECORDS.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+        (n < 65).then_some(n + 1)
+    }) else {
+        return;
+    };
+    if index == 64 {
+        sink.write("registration.removal.truncated", json!({"limit": 64}));
+        return;
+    }
+    sink.write(
+        "registration.removal",
+        removal_details(operation, target, invocation, raw_result),
+    );
+}
+
+fn removal_details<T>(
+    operation: &str,
+    target: f64,
+    invocation: &crate::host_api::HostInvocation<T>,
+    raw_result: Option<Value>,
+) -> Value {
+    use crate::host_api::HostInvocation;
+    match invocation {
+        HostInvocation::Suppressed { status } => json!({"operation": operation, "target": target,
+            "invoked": false, "status": format!("{status:?}")}),
+        HostInvocation::Completed {
+            status,
+            decoded,
+            cleanup,
+        } => json!({
+            "operation": operation, "target": target, "invoked": true,
+            "status": format!("{status:?}"), "raw_result": raw_result,
+            "decoded": decoded.as_ref().map(|r| r.as_ref().map(|_| ()).map_err(|e| e.to_string())),
+            "cleanup": cleanup.as_ref().map_err(|e| e.to_string()),
+        }),
+    }
+}
 
 fn record(event: &str, details: Value) {
     if let Some(Some(sink)) = SINK.get() {
@@ -237,6 +325,56 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removal_evidence_preserves_signed_acknowledgements_and_callback_status() {
+        use crate::{
+            XllError,
+            callback_value::ExcelCallbackValue,
+            error::{ExcelApiFailure, ExcelApiFunction},
+            host_api::HostInvocation,
+            return_abi::ExcelCallbackStatus,
+        };
+        let value =
+            ExcelCallbackValue::from_raw_for_test(xlfn_sys::XLOPER12::integer(-1_657_274_367));
+        let raw = scalar_result(&value).unwrap();
+        assert_eq!(raw["value"], -1_657_274_367);
+        let invocation: HostInvocation<()> = HostInvocation::Completed {
+            status: ExcelCallbackStatus::Success,
+            decoded: Some(Err(XllError::ExcelApi {
+                function: ExcelApiFunction::EventRegister,
+                failure: ExcelApiFailure::InvalidRegistrationId(-1_657_274_367),
+            })),
+            cleanup: Ok(()),
+        };
+        let details = removal_details("xlEventRegister.remove", 1.0, &invocation, Some(raw));
+        assert_eq!(details["invoked"], true);
+        assert_eq!(details["status"], "Success");
+        assert!(details["decoded"]["Err"].is_string());
+        assert_eq!(details["cleanup"], serde_json::json!({"Ok": null}));
+        let suppressed: HostInvocation<()> = HostInvocation::Suppressed {
+            status: ExcelCallbackStatus::Abort,
+        };
+        let details = removal_details("xlfUnregister", 7.0, &suppressed, None);
+        assert_eq!(details["invoked"], false);
+        assert_eq!(details["status"], "Abort");
+        assert!(details.get("raw_result").is_none());
+    }
+
+    #[test]
+    fn diagnostics_do_not_dereference_pointer_results() {
+        let value =
+            crate::callback_value::ExcelCallbackValue::from_raw_for_test(xlfn_sys::XLOPER12 {
+                xltype: xlfn_sys::XLTYPE_STR,
+                value: xlfn_sys::XLOPER12Value {
+                    string: std::ptr::null_mut(),
+                },
+            });
+        assert_eq!(
+            scalar_result(&value).unwrap(),
+            json!({"xltype": xlfn_sys::XLTYPE_STR, "value": null})
+        );
+    }
 
     #[cfg(windows)]
     #[test]
