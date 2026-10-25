@@ -152,16 +152,18 @@ Initial DrainGate validation snapshot (2026-09-21, macOS aarch64; subsequent cha
 3. **Shared Kernels Where Present**: Directly verified transition and control expressions are shared with production. Independent protocol models and their remaining native refinement obligations are identified explicitly in the worklist.
 4. **Zero Fast-Path Overhead**: All ghost specifications and proofs are completely erased at compilation time.
 
-The source audit resolves both `use` and `extern crate ... as ...` aliases
-before checking qualified primitive calls and function-value references.
-It tracks inline module namespaces and `crate::`, `self::`, `super::` and
-absolute external-crate paths. Conditional declarations retain every target
-of a binding so declaration order cannot hide a trust primitive.
-It reserves bare `assume(...)` and `admit()` calls, including when
-a local Rust function shadows the name. It does not perform full Rust/Verus name
-resolution; qualified unrelated functions such as `ordinary::assume(...)`,
-methods, declarations, comments and string literals are permitted. Use an
-unambiguous qualified path for an unrelated function with one of these names.
+The source audit reserves qualified references and imports whose name is
+`assume`, `admit`, or `assume_specification`, including function-value references,
+grouped imports and `as` renaming. This policy applies regardless of namespace:
+even an unrelated `ordinary::assume(...)` is rejected. Rename such ordinary
+functions in audited code instead of qualifying them to bypass the check.
+The audit also reserves bare `assume(...)` and `admit()` calls, including local
+functions that shadow those names, and `assume_specification` declarations.
+It does not guess Rust/Verus name resolution: cross-file module reexports,
+crate aliases and conditional declarations cannot exempt these references.
+Method calls, ordinary declarations, comments and string literals are permitted.
+This is a source inventory, not a replacement for semantic verification or
+a proof that every possible macro expansion is free of trust boundaries.
 
 ---
 

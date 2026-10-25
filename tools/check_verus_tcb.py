@@ -31,7 +31,6 @@ EXTERNALS = {
     "external_trait_blanket", "external_derive", "trusted",
 }
 ASSUMPTION_ATTRIBUTES = {"axiom", "assume", "assume_termination"}
-VERUS_ROOTS = {"vstd", "builtin", "verus_builtin"}
 
 
 @dataclass(frozen=True)
@@ -77,132 +76,31 @@ def use_tree(tokens: list[Token], prefix: tuple[str, ...] = ()):
             index += 1
 
 
-def module_paths(tokens: list[Token]) -> list[tuple[str, ...]]:
-    """Track inline module namespaces; ordinary blocks/macros do not add one."""
-    paths = []
-    module: tuple[str, ...] = ()
-    blocks = []
-    for index, token in enumerate(tokens):
-        paths.append(module)
-        if token.value == "{":
-            blocks.append(module)
-            if (index >= 2 and tokens[index - 2].value == "mod"
-                    and tokens[index - 1].value.isidentifier()):
-                module += (tokens[index - 1].value,)
-        elif token.value == "}" and blocks:
-            module = blocks.pop()
-    return paths
-
-
 def trust_boundaries(sanitized: str) -> tuple[set[int], set[int]]:
-    """Inspect token structure, rather than matching words in Rust identifiers.
+    """Inspect reserved trust-primitive syntax without guessing name resolution.
 
-    This is a conservative source audit, not a replacement for name resolution.
-    Explicit trust-primitive imports are forbidden at their declaration, so
-    renaming, re-exporting, function-value indirection and cross-file aliases
-    cannot hide their use. Prelude globs remain supported; bare trust calls are
-    always inspected. Bare assume/admit calls are reserved by this audit even
-    when a local function shadows their name: accepting them would require full
-    Rust/Verus name resolution. Qualified unrelated functions and methods are
-    not trust primitives. Other vstd globs do not hide direct primitive names.
+    Qualified references and imports named assume/admit/assume_specification
+    are forbidden regardless of their namespace, including unrelated functions.
+    This makes cross-file reexports, crate renaming and cfg branches irrelevant
+    to detection. Bare calls and specification declarations are reserved too.
+    Method calls, ordinary declarations, comments and literals remain allowed.
+    This source inventory does not replace Rust/Verus semantic verification.
     """
     tokens = [Token(m.group().removeprefix("r#"), m.start()) for m in TOKEN.finditer(sanitized)]
-    modules = module_paths(tokens)
-    imports = []
-    # The sentinel distinguishes a project module from an external crate with
-    # a similar path. Import bindings are keyed by their full module location.
-    local_root = ("<crate>",)
-    external_aliases: dict[tuple[str, ...], set[tuple[str, ...]]] = {}
-    external_offsets: set[int] = set()
     assumptions: set[int] = set()
     externals: set[int] = set()
     for index, token in enumerate(tokens):
-        module = modules[index]
-        # Rust permits crate renaming independently of use trees. Feed these
-        # aliases into the same resolution pass so later use aliases and
-        # qualified function-value references cannot hide a trust primitive.
-        if (token.value == "extern" and index + 3 < len(tokens)
-                and tokens[index + 1].value == "crate"):
-            root = tokens[index + 2]
-            alias = root
-            end = index + 3
-            if tokens[end].value == "as" and end + 2 < len(tokens):
-                alias = tokens[end + 1]
-                end += 2
-            if (tokens[end].value == ";" and root.value.isidentifier()
-                    and alias.value.isidentifier() and alias.value != "_"):
-                imports.append((module, (root.value,), alias.value, root.offset))
-                external_offsets.add(root.offset)
-                external_aliases.setdefault(local_root + module + (alias.value,), set()).add((root.value,))
         if token.value == "use" and index + 1 < len(tokens) and tokens[index + 1].value != "<":
             end = index + 1
             while end < len(tokens) and tokens[end].value != ";":
                 end += 1
             if end == len(tokens):
                 raise ValueError("unterminated use declaration")
-            imports.extend((module, path, alias, offset)
-                           for path, alias, offset in use_tree(tokens[index + 1:end]))
-
-    bindings = {local_root + module + (alias,)
-                for module, _, alias, _ in imports if alias not in {"*", "_"}}
-    external_prelude = {key[-1] for key in external_aliases if len(key) == 2}
-
-    def canonical(path: tuple[str, ...], module: tuple[str, ...],
-                  importing: tuple[str, ...] = ()) -> tuple[str, ...]:
-        if path[0] == "::":
-            return local_root + path[1:] if path[1] in external_prelude else path[1:]
-        if path[0] == "crate":
-            return local_root + path[1:]
-        if path[0] == "self":
-            return local_root + module + path[1:]
-        if path[0] == "super":
-            while path and path[0] == "super":
-                module = module[:-1]
-                path = path[1:]
-            return local_root + module + path
-        if path[0] in VERUS_ROOTS:
-            return path
-        binding = local_root + module + path[:1]
-        if binding != importing and binding in bindings:
-            return local_root + module + path
-        if path[0] in external_prelude:
-            return local_root + path
-        return local_root + module + path
-
-    aliases = dict(external_aliases)
-    for module, path, alias, offset in imports:
-        binding = local_root + module + (alias,)
-        if alias not in {"*", "_"} and offset not in external_offsets:
-            aliases.setdefault(binding, set()).add(canonical(path, module, importing=binding))
-
-    def resolved(path: tuple[str, ...], module: tuple[str, ...]) -> set[tuple[str, ...]]:
-        # cfg branches can declare different targets for the same binding.
-        # Inspect every target rather than letting source order hide one.
-        pending = [(canonical(path, module), {})]
-        results = set()
-        while pending:
-            path, seen = pending.pop()
-            if path[:1] != local_root:
-                results.add(path)
-                continue
-            # A module alias can cover any prefix, not just the first name:
-            # crate::bridge::renamed and bridge_alias::renamed both work.
-            for end in range(len(path), 1, -1):
-                binding = path[:end]
-                # Repeated crate aliases can consume a path (root::root::x).
-                # A repeated binding that cannot shorten it is an import cycle.
-                if binding in aliases and (binding not in seen or len(path) < seen[binding]):
-                    pending.extend((target + path[end:], seen | {binding: len(path)})
-                                   for target in aliases[binding])
-                    break
-            else:
-                results.add(path)
-        return results
-
-    for module, path, _, offset in imports:
-        if any(target[0] in VERUS_ROOTS and target[-1] in ASSUMPTIONS
-               for target in resolved(path, module)):
-            assumptions.add(offset)
+            # Flatten groups to see the original name before `as` renaming,
+            # even when the exporting module is defined in another file.
+            for path, _, offset in use_tree(tokens[index + 1:end]):
+                if path[-1] in ASSUMPTIONS:
+                    assumptions.add(offset)
 
     attribute_depth = 0
     for index, token in enumerate(tokens):
@@ -243,8 +141,7 @@ def trust_boundaries(sanitized: str) -> tuple[set[int], set[int]]:
         # Qualified primitive references are forbidden even when used as a
         # function value rather than called here. Otherwise a local variable
         # could rename a primitive after importing only its parent module.
-        if len(path) > 1 and any(target[0] in VERUS_ROOTS
-                                 for target in resolved(path, modules[index])):
+        if len(path) > 1:
             assumptions.add(tokens[start].offset)
         elif len(path) == 1 and (
             (value == "assume_specification" and following in {"[", "<"})

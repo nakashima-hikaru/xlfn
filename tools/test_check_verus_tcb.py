@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from contextlib import redirect_stderr, redirect_stdout
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -132,13 +134,13 @@ class TestCheckVerusTcb(unittest.TestCase):
             extern crate unrelated as ordinary;
             use renamed::prelude::*;
             fn f() {
-                ordinary::assume(false);
-                ordinary::admit();
+                ordinary::check(false);
+                ordinary::accept();
                 let _ = renamed::math::add(1, 2);
             }
             // extern crate vstd as disguised;
             const TEXT: &str = "extern crate vstd as disguised;";
-            disguised::pervasive::assume(false);
+            disguised::check(false);
         '''
         self.assertEqual(self.audit_source(source), ([], []))
 
@@ -170,7 +172,7 @@ class TestCheckVerusTcb(unittest.TestCase):
                 assumptions, _ = self.audit_source(source)
                 self.assertTrue(assumptions)
 
-    def test_module_qualification_preserves_unrelated_names_and_scopes(self):
+    def test_qualified_primitive_names_are_reserved_even_in_unrelated_modules(self):
         source = r'''
             mod first { use vstd as same; }
             mod second {
@@ -185,13 +187,71 @@ class TestCheckVerusTcb(unittest.TestCase):
             }
             mod inner { fn f() { super::ordinary::assume(false); } }
         '''
-        self.assertEqual(self.audit_source(source), ([], []))
+        assumptions, externals = self.audit_source(source)
+        self.assertEqual(len(assumptions), 6)
+        self.assertEqual(externals, [])
 
     def test_module_qualified_call_keeps_its_diagnostic_location(self):
         source = "extern crate vstd as renamed;\nproof fn fake() ensures false { crate::renamed::pervasive::assume(false); }"
         assumptions, _ = self.audit_source(source)
         self.assertEqual(len(assumptions), 1)
         self.assertIn("test.rs:2:", assumptions[0])
+
+    def test_cross_file_reexports_cannot_hide_trust_primitives(self):
+        cases = [
+            ("pub extern crate vstd as renamed;",
+             "crate::bridge::renamed::pervasive::assume(false);"),
+            ("pub use vstd as renamed;",
+             "crate::bridge::renamed::pervasive::admit();"),
+            ("pub use vstd::pervasive as api;",
+             "use crate::bridge::api::{assume as trusted}; trusted(false);"),
+            ("pub use verus_builtin as api;",
+             "let trusted = crate::bridge::api::assume;"),
+            ("pub use verus_builtin as api;",
+             "crate::bridge::api::assume_specification[foreign]() ensures false;"),
+        ]
+        for bridge, expression in cases:
+            with self.subTest(expression=expression), tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                (root / "bridge.rs").write_text(bridge)
+                (root / "main.rs").write_text(
+                    "use vstd::prelude::*;\nmod bridge;\nverus! {\n"
+                    f"proof fn false_claim() ensures false {{ {expression} }}\n}}\n"
+                )
+                assumptions, externals = audit_verus_files([root], set())
+                self.assertTrue(assumptions)
+                self.assertTrue(any("main.rs:4:" in item for item in assumptions))
+                self.assertEqual(externals, [])
+
+    def test_cli_fails_for_cross_file_assumption_and_accepts_clean_reexport(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            sources = root / "verification" / "verus"
+            sources.mkdir(parents=True)
+            (sources / "bridge.rs").write_text("pub extern crate vstd as renamed;\n")
+            for expression, status in [
+                ("crate::bridge::renamed::pervasive::assume(false);", 1),
+                ("assert(true);", 0),
+            ]:
+                with self.subTest(expression=expression):
+                    (sources / "main.rs").write_text(
+                        "use vstd::prelude::*;\nmod bridge;\n"
+                        f"verus! {{ proof fn example() {{ {expression} }} }}\n"
+                    )
+                    output, errors = io.StringIO(), io.StringIO()
+                    with (
+                        patch.object(check_verus_tcb, "ROOT", root),
+                        patch("sys.argv", ["check_verus_tcb.py", "--allowlist", str(root / "allowlist.json")]),
+                        redirect_stdout(output),
+                        redirect_stderr(errors),
+                    ):
+                        self.assertEqual(check_verus_tcb.main(), status)
+                    if status:
+                        self.assertIn("verification/verus/main.rs:3:", errors.getvalue())
+                        self.assertNotIn("PASS: 0 project-local", output.getvalue())
+                    else:
+                        self.assertEqual(errors.getvalue(), "")
+                        self.assertIn("PASS: 0 project-local", output.getvalue())
 
     def test_conditional_aliases_preserve_every_trust_target(self):
         for declaration in ("use {root} as renamed;", "extern crate {root} as renamed;"):
@@ -244,19 +304,19 @@ class TestCheckVerusTcb(unittest.TestCase):
             fn assume() {}
             fn admit() {}
             fn normal() {
-                unrelated::assume(false);
-                unrelated::admit();
+                unrelated::check(false);
+                unrelated::accept();
                 value.assume(false);
                 let external_fn_specification = 1;
                 let external = verifier::external;
             }
-            use unrelated::assume as ordinary;
+            use unrelated::check as ordinary;
         '''
         self.assertEqual(self.audit_source(source), ([], []))
 
     def test_bare_primitive_calls_are_reserved_even_with_local_shadowing(self):
         # The audit is deliberately conservative about unqualified proof
-        # primitive names; qualified unrelated paths remain allowed above.
+        # primitive names; qualified references are reserved as well.
         for source in ("fn assume(_: bool) {} fn f() { assume(true); }",
                        "fn admit() {} fn f() { admit(); }"):
             with self.subTest(source=source):
