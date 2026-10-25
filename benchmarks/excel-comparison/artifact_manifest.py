@@ -64,6 +64,16 @@ def create(root: Path, commit: str, run_id: str, run_attempt: str) -> dict:
         "run_attempt": str(run_attempt),
         "files": files,
     }
+    symbols = {}
+    for implementation in ("xlfn", "excel_dna"):
+        for path in sorted((root / "symbols" / implementation).rglob("*.pdb")):
+            symbols[path.relative_to(root).as_posix()] = {
+                "sha256": sha256(path), "bytes": path.stat().st_size,
+                "image": f"{implementation}/benchmark.xll",
+                "image_sha256": files[f"{implementation}/benchmark.xll"]["sha256"],
+            }
+    if symbols:
+        manifest["symbols"] = symbols
     (root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return manifest
 
@@ -98,7 +108,41 @@ def verify(root: Path, *, run_id: str | None = None, commit: str | None = None) 
             raise ValueError(f"artifact checksum mismatch: {relative}")
         if pe_machine(path) != 0x8664:
             raise ValueError(f"artifact is not x86_64: {relative}")
+    verify_symbols(root, manifest)
     return manifest
+
+
+def verify_symbols(root: Path, manifest: dict, *, required: tuple[str, ...] = ()) -> None:
+    """Verify optional symbols, bound to the baseline XLL from the same CI build.
+
+    Ordinary runs still accept older artifact sets. Memory attribution requires
+    symbols explicitly and never substitutes PDBs from another build.
+    """
+    symbols = manifest.get("symbols", {})
+    if not isinstance(symbols, dict):
+        raise ValueError("manifest symbols must be an object")
+    actual = {p.relative_to(root).as_posix() for p in (root / "symbols").rglob("*.pdb")}
+    if actual != set(symbols):
+        raise ValueError("artifact symbols differ from the manifest")
+    available = set()
+    for relative, entry in symbols.items():
+        parts = relative.split("/")
+        if (len(parts) < 3 or parts[0] != "symbols" or parts[1] not in ("xlfn", "excel_dna")
+                or any(p in ("", ".", "..") or "\\" in p or ":" in p for p in parts)
+                or not relative.endswith(".pdb")):
+            raise ValueError(f"invalid symbol path: {relative}")
+        path = root / relative
+        if not path.resolve().is_relative_to(root.resolve()):
+            raise ValueError(f"symbol escapes artifact root: {relative}")
+        image = f"{parts[1]}/benchmark.xll"
+        if entry.get("image") != image or entry.get("image_sha256") != manifest["files"][image]["sha256"]:
+            raise ValueError(f"symbol image binding mismatch: {relative}")
+        if path.stat().st_size != entry.get("bytes") or sha256(path) != entry.get("sha256"):
+            raise ValueError(f"symbol checksum mismatch: {relative}")
+        available.add(parts[1])
+    if set(required) - available:
+        raise ValueError("Matching PDBs are required; download a new symbol-bearing CI artifact: "
+                         + ", ".join(sorted(set(required) - available)))
 
 
 def main() -> None:
@@ -113,11 +157,15 @@ def main() -> None:
     check.add_argument("--root", type=Path, required=True)
     check.add_argument("--commit")
     check.add_argument("--run-id")
+    check.add_argument("--require-symbols", action="store_true",
+                       help="require matching baseline xlfn and Excel-DNA PDBs")
     args = parser.parse_args()
     if args.command == "create":
         manifest = create(args.root, args.commit, args.run_id, args.run_attempt)
     else:
         manifest = verify(args.root, commit=args.commit, run_id=args.run_id)
+        if args.require_symbols:
+            verify_symbols(args.root, manifest, required=("xlfn", "excel_dna"))
     print(f"Verified {len(manifest['files'])} {ARCHITECTURE} XLLs from CI run {manifest['run_id']}")
 
 

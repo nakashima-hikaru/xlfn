@@ -32,6 +32,14 @@ function Build-Pair([int]$extras, [string]$outputName) {
         $rustOut = Join-Path $artifactRoot 'xlfn'
         New-Item -ItemType Directory -Force -Path $rustOut | Out-Null
         Copy-Item $rustDll (Join-Path $rustOut $outputName) -Force
+        if ($extras -eq 0) {
+            $rustPdb = [System.IO.Path]::ChangeExtension($rustDll, '.pdb')
+            if (-not (Test-Path -LiteralPath $rustPdb)) { throw "Missing native xlfn symbols: $rustPdb" }
+            $rustSymbols = Join-Path $artifactRoot 'symbols\xlfn'
+            if (Test-Path -LiteralPath $rustSymbols) { Remove-Item -LiteralPath $rustSymbols -Recurse -Force }
+            New-Item -ItemType Directory -Force -Path $rustSymbols | Out-Null
+            Copy-Item -LiteralPath $rustPdb -Destination $rustSymbols
+        }
 
         python (Join-Path $here 'generate_registration.py') $extras
         if ($LASTEXITCODE -ne 0) { throw "registration source generation failed ($extras)" }
@@ -43,6 +51,18 @@ function Build-Pair([int]$extras, [string]$outputName) {
         $dnaOut = Join-Path $artifactRoot 'excel_dna'
         New-Item -ItemType Directory -Force -Path $dnaOut | Out-Null
         Copy-Item $packed (Join-Path $dnaOut $outputName) -Force
+        if ($extras -eq 0) {
+            $pdbs = @(Get-ChildItem -LiteralPath $publishDir -Filter '*.pdb' -File -Recurse)
+            if ($pdbs.Count -eq 0) { throw 'NativeAOT publish produced no PDB files' }
+            $dnaSymbols = Join-Path $artifactRoot 'symbols\excel_dna'
+            if (Test-Path -LiteralPath $dnaSymbols) { Remove-Item -LiteralPath $dnaSymbols -Recurse -Force }
+            foreach ($pdb in $pdbs) {
+                $relative = [System.IO.Path]::GetRelativePath($publishDir, $pdb.FullName)
+                $destination = Join-Path $dnaSymbols $relative
+                New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+                Copy-Item -LiteralPath $pdb.FullName -Destination $destination
+            }
+        }
     }
     finally {
         Remove-Item Env:BENCH_EXTRA_FUNCTIONS -ErrorAction SilentlyContinue

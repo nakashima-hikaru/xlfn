@@ -16,3 +16,7 @@ futures-timer = "3.0.4"
 futures-channel = "0.3.34"
 
 [workspace]
+
+# Preserve optimized code while shipping its matching native PDB for WPR/WPA.
+[profile.release]
+debug = 2

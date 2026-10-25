@@ -19,7 +19,7 @@ import threading
 import time
 import traceback
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import artifact_manifest
 from shutdown_diagnostics import capture_shutdown_dump, process_creation_ticks
@@ -261,9 +261,10 @@ def check_final_values(target: Any, count: int, expected: Any) -> None:
 
 
 class ExcelSession:
-    def __init__(self, xll: Path, threads: int, throttle_ms: int, pid_file: Path,
+    def __init__(self, xll: Path | None, threads: int, throttle_ms: int, pid_file: Path,
                  progress: WorkerProgress | None = None, shutdown_diagnostics: bool = False,
-                 lifecycle_trace_file: Path | None = None):
+                 lifecycle_trace_file: Path | None = None,
+                 process_ready: Callable[[dict[str, Any]], None] | None = None):
         import psutil
         import win32com.client
 
@@ -293,6 +294,10 @@ class ExcelSession:
             except Exception as error:
                 identity["dump_identity_error"] = f"{type(error).__name__}: {error}"
         atomic_json(pid_file, identity)
+        # The memory probe pauses here while its parent binds the native process
+        # identity and enables PID-scoped heap tracing, before loading the XLL.
+        if process_ready is not None:
+            process_ready(identity)
         if shutdown_diagnostics:
             observation = await_observer(pid_file, identity)
             if progress is not None:
@@ -322,9 +327,12 @@ class ExcelSession:
         self.app.MultiThreadedCalculation.ThreadMode = 1  # xlThreadModeManual
         self.app.MultiThreadedCalculation.ThreadCount = threads
         self.app.RTD.ThrottleInterval = throttle_ms
-        self.stage("register_xll", xll=str(xll))
         t = time.perf_counter()
-        register_xll(self.app, xll)
+        if xll is not None:
+            self.stage("register_xll", xll=str(xll))
+            register_xll(self.app, xll)
+        else:
+            self.stage("no_addin_control")
         self.load_s = time.perf_counter() - t
         self.ready_s = time.perf_counter() - self.started
         self.book = None

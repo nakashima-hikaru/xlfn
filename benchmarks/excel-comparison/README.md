@@ -22,7 +22,7 @@ The [Excel comparison XLLs workflow](../../.github/workflows/excel-comparison-xl
 builds **x86_64** xlfn and Excel-DNA **NativeAOT** XLLs for the same commit. It
 uploads `excel-comparison-x86_64`, containing both `benchmark.xll` files,
 four registration variants per implementation, the standalone event probe,
-and a manifest with SHA-256
+matching baseline PDBs under `symbols/`, and a manifest with SHA-256
 digests. A second CI job downloads and verifies that artifact. CI does not
 run Excel.
 
@@ -514,6 +514,13 @@ that instrumentation cost and should be rerun with newly built XLLs before
 attributing the differences to the frameworks.
 
 ### Repeated calculation and unregister diagnostics
+
+For allocation-owner attribution after reproducing growth, use the
+[Windows memory probe](memory-probe.md). It captures PID-scoped WPR heap
+snapshots and VirtualAlloc stacks before, during and after repeated calculation,
+with an Excel-only control. It requires elevated Windows x64 and a matching
+symbol-bearing CI artifact; ordinary L02 counters do not provide allocation
+stacks. Its traces are diagnostic evidence, not performance measurements.
 
 For interactive event removal observations, use the separate
 [event qualification probe](event-qualification/README.md#runnable-interactive-probe).
