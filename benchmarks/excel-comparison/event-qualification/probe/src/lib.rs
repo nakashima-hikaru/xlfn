@@ -9,7 +9,7 @@ use std::{
     ptr::NonNull,
     sync::{
         Mutex, OnceLock, RwLock,
-        atomic::{AtomicBool, AtomicU64, Ordering::SeqCst},
+        atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering::SeqCst},
     },
     time::{Duration, Instant},
 };
@@ -29,6 +29,14 @@ static STARTED: AtomicU64 = AtomicU64::new(0);
 static ACTIVE: AtomicU64 = AtomicU64::new(0);
 static CLOSED: AtomicBool = AtomicBool::new(false);
 static RETURN_GATE: RwLock<()> = RwLock::new(());
+static REMOVAL_METHOD: OnceLock<RemovalMethod> = OnceLock::new();
+static REGISTRATION_IDS: [AtomicI32; 2] = [AtomicI32::new(0), AtomicI32::new(0)];
+
+#[derive(Clone, Copy, PartialEq)]
+enum RemovalMethod {
+    Nil,
+    UnregisterId,
+}
 
 fn log(event: &str, details: Value) {
     if let Some(t) = TRACE.get() {
@@ -71,6 +79,11 @@ fn initialize() -> bool {
     let Ok(config) = serde_json::from_str::<Value>(&text) else {
         return false;
     };
+    let method = match config["removal_method"].as_str().unwrap_or("nil") {
+        "nil" => RemovalMethod::Nil,
+        "unregister-id" => RemovalMethod::UnregisterId,
+        _ => return false,
+    };
     let Some(token) = config["token"].as_str() else {
         return false;
     };
@@ -89,6 +102,9 @@ fn initialize() -> bool {
     let Ok(file) = OpenOptions::new().append(true).open(path) else {
         return false;
     };
+    if REMOVAL_METHOD.set(method).is_err() {
+        return false;
+    }
     TRACE
         .set(Trace {
             file: Mutex::new(file),
@@ -144,6 +160,13 @@ fn release(value: &mut XLOPER12, invoked: bool) -> Option<i32> {
 }
 
 fn events(remove: bool) -> bool {
+    events_with_method(
+        remove,
+        REMOVAL_METHOD.get().copied().unwrap_or(RemovalMethod::Nil),
+    )
+}
+
+fn events_with_method(remove: bool, method: RemovalMethod) -> bool {
     if ACTIVE.load(SeqCst) != 0 || CLOSED.load(SeqCst) {
         log("command.refused", json!({"active":ACTIVE.load(SeqCst)}));
         return false;
@@ -164,30 +187,62 @@ fn events(remove: bool) -> bool {
     };
     let mut ok = true;
     for (selector, name) in [(1, handlers[0]), (2, handlers[1])] {
+        let registration_id = REGISTRATION_IDS[(selector - 1) as usize].load(SeqCst);
         let mut procedure = Text::new(name);
         let arg = if remove {
             XLOPER12::nil()
         } else {
             procedure.value()
         };
-        let (status, mut result, invoked) =
-            invoke(XL_EVENT_REGISTER, &mut [arg, XLOPER12::integer(selector)]);
+        let by_id = remove && method == RemovalMethod::UnregisterId;
+        if by_id && registration_id == 0 {
+            return false;
+        }
+        // Experimental only: the public xlfUnregister documentation covers
+        // xlfRegister IDs, not xlEventRegister IDs. Keep this out of production
+        // until actual event behavior establishes whether the candidate works.
+        let (status, mut result, invoked) = if by_id {
+            invoke(
+                XLF_UNREGISTER,
+                &mut [XLOPER12::number(f64::from(registration_id))],
+            )
+        } else {
+            invoke(XL_EVENT_REGISTER, &mut [arg, XLOPER12::integer(selector)])
+        };
         let value = raw(&result);
         let accepted = invoked
             && status == XLRET_SUCCESS
             && (remove
                 || (result.base_type() == XLTYPE_INT
                     && value["value"].as_i64().is_some_and(|n| n != 0)));
+        if !remove && accepted {
+            REGISTRATION_IDS[(selector - 1) as usize]
+                .store(value["value"].as_i64().unwrap() as i32, SeqCst);
+        }
         let cleanup = release(&mut result, invoked);
+        let mut details = json!({"selector":selector,"transport":status,"invoked":invoked,"raw":value,"cleanup":cleanup});
+        if by_id {
+            details["method"] = json!("unregister-id");
+            details["api"] = json!("xlfUnregister");
+            details["registration_id"] = json!(registration_id);
+            details["argument_xltype"] = json!(XLTYPE_NUM);
+            details["argument_value"] = json!(f64::from(registration_id));
+        } else {
+            details["api"] = json!("xlEventRegister");
+            details["procedure"] = if remove { Value::Null } else { json!(name) };
+            details["procedure_xltype"] = json!(arg.xltype);
+            details["event_xltype"] = json!(XLTYPE_INT);
+            if remove {
+                details["method"] = json!("nil");
+            }
+        }
         log(
             if remove {
                 "event.remove"
             } else {
                 "event.register"
             },
-            json!({"selector":selector,
-            "procedure":if remove {Value::Null} else {json!(name)},"procedure_xltype":arg.xltype,
-            "event_xltype":XLTYPE_INT,"transport":status,"invoked":invoked,"raw":value,"cleanup":cleanup}),
+            details,
         );
         ok &= accepted && cleanup == Some(XLRET_SUCCESS);
         if !ok {
@@ -455,6 +510,20 @@ mod tests {
             CALLS.lock().unwrap().push((function, 0, 0));
             return XLRET_SUCCESS;
         }
+        if function == XLF_UNREGISTER {
+            assert_eq!(count, 1);
+            // SAFETY: invoke supplies one live numeric argument and writable result.
+            unsafe {
+                let id = **args;
+                assert_eq!(id.base_type(), XLTYPE_NUM);
+                CALLS
+                    .lock()
+                    .unwrap()
+                    .push((function, id.xltype, id.value.number as i32));
+                *result = XLOPER12::boolean(true);
+            }
+            return XLRET_SUCCESS;
+        }
         assert_eq!(function, XL_EVENT_REGISTER);
         assert_eq!(count, 2);
         // SAFETY: invoke supplies two live carriers; result is the writable host return slot.
@@ -500,6 +569,16 @@ mod tests {
         assert!(!events(true));
         ACTIVE.store(0, SeqCst);
         assert_eq!(*CALLS.lock().unwrap(), calls);
+        assert!(events_with_method(true, RemovalMethod::UnregisterId));
+        assert_eq!(
+            &CALLS.lock().unwrap()[calls.len()..],
+            &[
+                (XLF_UNREGISTER, XLTYPE_NUM, -1657274367),
+                (XL_FREE, 0, 0),
+                (XLF_UNREGISTER, XLTYPE_NUM, -1657274367),
+                (XL_FREE, 0, 0),
+            ]
+        );
         // SAFETY: null restores the normal resolver after this serialized protocol test.
         unsafe { install_callback_for_abi_probe(std::ptr::null_mut()) };
     }

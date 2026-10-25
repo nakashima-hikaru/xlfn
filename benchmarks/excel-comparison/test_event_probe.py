@@ -34,6 +34,28 @@ def evidence():
 
 
 class EventProbeTest(unittest.TestCase):
+    def test_live_nil_removal_counterexample_is_not_inconclusive(self):
+        record = json.loads((Path(__file__).parent / "event-qualification/probe-2026-10-25-nil.json").read_text())
+        phases = [{k: v for k, v in p.items() if k not in ("event_start", "event_stop")} |
+                  {"events": record["events"][p["event_start"]:p["event_stop"]]} for p in record["phases"]]
+        result = assess(phases, record["events"], record["cycles"])
+        self.assertEqual(result["verdict"], "callbacks_observed_after_removal")
+        self.assertEqual(result["reasons"], [])
+        self.assertEqual(len(result["stale_handler_phases"]), 6)
+        self.assertFalse(result["production_shutdown_qualified"])
+
+    def test_candidate_requires_exact_signed_registration_token(self):
+        phases, events = evidence()
+        for e in events:
+            if e["event"] == "event.remove":
+                e["details"] = dict(selector=e["details"]["selector"], method="unregister-id",
+                                    api="xlfUnregister", registration_id=-1657274367,
+                                    argument_xltype=1, argument_value=-1657274367.0,
+                                    transport=0, invoked=True, cleanup=0, raw={"xltype": 4, "value": 1})
+        self.assertEqual(assess(phases, events, 1, "unregister-id")["verdict"], "no_callbacks_observed_after_removal")
+        events[2]["details"]["argument_value"] = 1
+        self.assertEqual(assess(phases, events, 1, "unregister-id")["verdict"], "inconclusive")
+
     def test_zero_ack_does_not_override_observed_callback_absence(self):
         phases, events = evidence()
         result = assess(phases, events, 1)
@@ -47,7 +69,7 @@ class EventProbeTest(unittest.TestCase):
         self.assertEqual(assess(phases, events, 1)["verdict"], "callbacks_observed_after_removal")
 
     def test_missing_controls_cancellation_and_workload_cannot_pass(self):
-        for failure in ("control", "restore", "cancel", "workload", "cleanup", "sequence", "trace", "stale"):
+        for failure in ("control", "restore", "cancel", "workload", "cleanup", "sequence", "trace"):
             with self.subTest(failure=failure):
                 phases, events = evidence()
                 if failure == "control": phases[1]["after"]["ended"] = 0
@@ -57,8 +79,27 @@ class EventProbeTest(unittest.TestCase):
                 if failure == "cleanup": events[2]["details"]["cleanup"] = 32
                 if failure == "sequence": events[2], events[4] = events[4], events[2]
                 if failure == "trace": phases[1]["events"] = []
-                if failure == "stale": phases[5]["events"][0]["details"]["handler_generation"] = 1
                 self.assertEqual(assess(phases, events, 1)["verdict"], "inconclusive")
+
+    def test_stale_handlers_are_failure_evidence_not_missing_evidence(self):
+        phases, events = evidence()
+        phases[5]["events"][0]["details"]["handler_generation"] = 1
+        result = assess(phases, events, 1)
+        self.assertEqual(result["verdict"], "stale_callbacks_after_reregistration")
+        self.assertEqual(result["stale_handler_phases"], ["restored1.normal"])
+
+    def test_programmatic_events_do_not_hide_interactive_removal_failure(self):
+        phases, events = evidence()
+        for index in (0, 3):
+            phases[index]["events"].append({"event": "callback.ended", "details": {"handler_generation": 1}})
+            phases[index]["after"]["ended"] = 1
+        phases[5]["events"][0]["details"]["handler_generation"] = 1
+        result = assess(phases, events, 1)
+        self.assertEqual(result["verdict"], "callbacks_observed_after_removal")
+        self.assertEqual(result["observations"], ["programmatic control raised callbacks"])
+        # Counter corruption still invalidates the evidence, even with callbacks.
+        phases[3]["after"]["ended"] = 2
+        self.assertEqual(assess(phases, events, 1)["verdict"], "inconclusive")
 
     def test_identity_mismatch_and_partial_trace_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

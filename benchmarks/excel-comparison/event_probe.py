@@ -37,9 +37,13 @@ def read_trace(config: dict, *, live: bool = False) -> list[dict]:
     return events
 
 
-def assess(phases: list[dict], events: list[dict], cycles: int) -> dict:
+def assess(phases: list[dict], events: list[dict], cycles: int, removal_method: str = "nil") -> dict:
     """Require positive controls on BOTH sides; absence alone never passes."""
     reasons = []
+    observations = []
+    stale_handlers = []
+    if removal_method not in ("nil", "unregister-id"):
+        reasons.append("unsupported removal method")
     names = [p["name"] for p in phases]
     expected = ["programmatic", "registered.normal", "registered.cancel"]
     for cycle in range(1, cycles + 1):
@@ -61,7 +65,7 @@ def assess(phases: list[dict], events: list[dict], cycles: int) -> dict:
         callbacks = [e["event"] for e in p["events"] if e["event"].startswith("callback.")]
         if any(e["details"].get("handler_generation") != generation
                for e in p["events"] if e["event"].startswith("callback.")):
-            reasons.append(f"{name}: callback from a stale handler generation")
+            stale_handlers.append(name)
         if callbacks.count("callback.ended") != delta["ended"] or callbacks.count("callback.canceled") != delta["canceled"]:
             reasons.append(f"{name}: callback trace and counters disagree")
         if name.endswith(".normal") or name == "programmatic":
@@ -69,7 +73,9 @@ def assess(phases: list[dict], events: list[dict], cycles: int) -> dict:
                 reasons.append(f"{name}: completed worksheet value missing")
         if name == "programmatic":
             if callbacks:
-                reasons.append("programmatic control raised callbacks")
+                # This control records host behavior. It must not mask direct
+                # interactive evidence that a supposedly removed handler ran.
+                observations.append("programmatic control raised callbacks")
         elif name.startswith("removed"):
             after_removal |= bool(callbacks)
             if name.endswith(".cancel") and not callbacks:
@@ -93,26 +99,43 @@ def assess(phases: list[dict], events: list[dict], cycles: int) -> dict:
         expected_operations += ["event.remove"] * 2 + ["event.register"] * 2
     if [e["event"] for e in operations] != expected_operations:
         reasons.append("incomplete registration/removal call sequence")
+    registered_ids = {}
     for index, e in enumerate(operations):
         d = e["details"]
         if (not d.get("invoked") or d.get("transport") != 0 or d.get("cleanup") != 0
-                or d.get("selector") != index % 2 + 1 or d.get("event_xltype") != 0x800):
+                or d.get("selector") != index % 2 + 1):
             reasons.append("event call transport, arguments or cleanup failed")
         if e["event"] == "event.remove":
-            if d.get("procedure_xltype") != 0x100 or d.get("procedure") is not None:
-                reasons.append("removal did not use the nil-procedure convention")
-        elif (d.get("raw", {}).get("xltype", 0) & 0xfff) != 0x800 or not d["raw"].get("value"):
-            reasons.append("registration acknowledgement was not a nonzero integer")
+            if d.get("method", "nil") != removal_method:
+                reasons.append("recorded removal method differs from requested method")
+            if removal_method == "nil":
+                if d.get("procedure_xltype") != 0x100 or d.get("procedure") is not None or d.get("event_xltype") != 0x800:
+                    reasons.append("removal did not use the nil-procedure convention")
+            else:
+                token = registered_ids.get(d.get("selector"))
+                if (not token or d.get("api") != "xlfUnregister" or d.get("argument_xltype") != 1
+                        or d.get("registration_id") != token or d.get("argument_value") != token):
+                    reasons.append("removal did not use the exact registered ID as xltypeNum")
+        else:
+            if (d.get("raw", {}).get("xltype", 0) & 0xfff) != 0x800 or not d["raw"].get("value"):
+                reasons.append("registration acknowledgement was not a nonzero integer")
+            if d.get("event_xltype") != 0x800 or d.get("procedure_xltype") != 2:
+                reasons.append("registration arguments do not match the event protocol")
+            registered_ids[d.get("selector")] = d.get("raw", {}).get("value")
     if reasons:
         verdict = "inconclusive"
     elif after_removal:
         verdict = "callbacks_observed_after_removal"
+    elif stale_handlers:
+        verdict = "stale_callbacks_after_reregistration"
     else:
         verdict = "no_callbacks_observed_after_removal"
-    return {"verdict": verdict, "reasons": reasons,
+    return {"verdict": verdict, "reasons": reasons, "observations": observations,
+            "stale_handler_phases": stale_handlers,
+            "removal_method": removal_method,
             "callbacks_observed_after_removal": after_removal,
             "production_shutdown_qualified": False,
-            "scope": "Standalone pinned probe, command-context nil removal, normal/cancel controls and re-registration; not production xlAutoClose ordering or unload qualification"}
+            "scope": f"Standalone pinned probe, command-context {removal_method} removal, normal/cancel controls and re-registration; not production xlAutoClose ordering or unload qualification"}
 
 
 def main() -> int:
@@ -120,6 +143,8 @@ def main() -> int:
     parser.add_argument("--artifacts", type=Path, required=True)
     parser.add_argument("--out", type=Path, default=Path("event-probe-results"))
     parser.add_argument("--cycles", type=int, choices=range(1, 4), default=2)
+    parser.add_argument("--removal-method", choices=("nil", "unregister-id"), default="nil",
+                        help="unregister-id is an experimental xlfUnregister candidate, not a production fix")
     args = parser.parse_args()
     if os.name != "nt":
         parser.error("Windows desktop Excel is required")
@@ -142,7 +167,8 @@ def main() -> int:
               "os": platform.platform(), "runner_commit": commit, "manifest": manifest,
               "runner_sources_sha256": {name: sha256(Path(__file__).with_name(name)) for name in
                                         ("event_probe.py", "artifact_manifest.py", "run.py", "shutdown_diagnostics.py")},
-              "xll_sha256": sha256(xll), "cycles": args.cycles, "phases": [], "status": "incomplete"}
+              "xll_sha256": sha256(xll), "cycles": args.cycles, "removal_method": args.removal_method,
+              "phases": [], "status": "incomplete"}
 
     def save():
         (root / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -191,7 +217,7 @@ def main() -> int:
             raise RuntimeError("Excel reused an existing process; no experiment performed")
         process = ProcessHandle(pid, synchronize=True)
         config = {"schema": 1, "pid": pid, "creation_ticks": process_creation_ticks(pid),
-                  "token": uuid.uuid4().hex, "path": str(root / "probe.jsonl")}
+                  "token": uuid.uuid4().hex, "path": str(root / "probe.jsonl"), "removal_method": args.removal_method}
         Path(config["path"]).touch(exist_ok=False)
         control = Path(os.environ["LOCALAPPDATA"]) / "xlfn/event-probe" / f"{pid}.json"
         control.parent.mkdir(parents=True, exist_ok=True)
@@ -229,7 +255,7 @@ def main() -> int:
             command("XEP.REGISTER")
             observe(f"restored{cycle}.normal")
             observe(f"restored{cycle}.cancel", cancel=True)
-        report["assessment"] = assess(report["phases"], read_trace(config), args.cycles)
+        report["assessment"] = assess(report["phases"], read_trace(config), args.cycles, args.removal_method)
         report["status"] = "complete"
     except (Exception, KeyboardInterrupt) as error:
         report["error"] = f"{type(error).__name__}: {error}"

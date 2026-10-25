@@ -10,12 +10,12 @@
     "procedure_argument_type": "xltypeNil",
     "event_argument_type": "xltypeInt",
     "public_documentation": "not specified by the referenced xlEventRegister page",
-    "live_excel_status": "unverified",
+    "live_excel_status": "failed_on_observed_build",
     "acknowledgement_policy": "Require a positive xltypeInt; negative removal results remain indeterminate and retain pending cleanup."
   },
   "qualification_status": "unverified",
   "qualification_scope": "one exact Excel product/version/build/channel and process bitness per real run",
-  "unverified_reason": "Live Windows Excel removal acknowledgements are recorded below, but registration acknowledgements, interactive callback sequences and post-removal handler counters remain unavailable. Natural process exit does not qualify removal.",
+  "unverified_reason": "The standalone pinned probe demonstrated callbacks after nil-procedure removal on Excel 16.0 build 20527.0 (64-bit); this convention failed. Production xlAutoClose ordering, alternative removal APIs and physical unload remain unqualified.",
   "observations": [
     {
       "timestamp_utc": "2026-10-25T09:39:57Z",
@@ -192,6 +192,44 @@
       ],
       "verdict": "unverified",
       "acknowledgement_policy_result": "failed: both removals returned zero; host mutation remains indeterminate"
+    },
+    {
+      "timestamp_utc": "2026-10-25T10:44:44.663256+00:00",
+      "operator": null,
+      "windows_version": "Windows-11-10.0.26200-SP0",
+      "excel_version": "16.0",
+      "excel_build": "20527.0",
+      "excel_update_channel": null,
+      "excel_bitness_reported": "Windows (64-bit) NT 10.00",
+      "excel_executable_identity": "C:\\Program Files\\Microsoft Office\\root\\Office16\\EXCEL.EXE",
+      "candidate_commit": "157fcf162d3a2be81268cc97895b825374d9cc5f",
+      "xll_target_architecture": "x86_64",
+      "xll_sha256": "6d9436408dadf0c8466281a6e0846770501bf67117fe91882dd814db92efc233",
+      "instrumentation": "Standalone process-pinned event probe with distinct generation handler addresses",
+      "calculation_mode": "manual",
+      "threads": 1,
+      "tested_scope": "Command-context nil-procedure removal; normal and canceled interactive recalculation before/after removal and re-registration, two cycles",
+      "verdict": "failed",
+      "failure": "Handlers remained callable after all four integer-zero removal acknowledgements; old generations accumulated across re-registration",
+      "production_shutdown_qualified": false,
+      "omitted_cases": [
+        "Production xlAutoClose ordering",
+        "Physical unload",
+        "Close/reopen",
+        "Excel update channel verification"
+      ],
+      "evidence_file": "probe-2026-10-25-nil.json",
+      "evidence_sha256": "6d2f99544e879fda65223a2cc664bb25f75ef0ced8c69496842e7dd4c4ce07ba",
+      "source_files": {
+        "report.json": {
+          "sha256": "a105762eeeecaa2ca1c69f440333e388bd9f5d1bb56d5b51dda12c8d1bc99c78",
+          "bytes": 74785
+        },
+        "probe.jsonl": {
+          "sha256": "9a96e9c9f0a127bc4a64b558d5d022846fd62fff852814a953de2d09e40e8aea",
+          "bytes": 24705
+        }
+      }
     }
   ],
   "implementation_reviewed_on": "2026-10-07",

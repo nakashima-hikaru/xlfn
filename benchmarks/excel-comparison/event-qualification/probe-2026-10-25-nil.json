@@ -1,0 +1,1334 @@
+{
+  "timestamp_utc": "2026-10-25T10:44:44.663256+00:00",
+  "os": "Windows-11-10.0.26200-SP0",
+  "runner_commit": "157fcf162d3a2be81268cc97895b825374d9cc5f",
+  "xll_sha256": "6d9436408dadf0c8466281a6e0846770501bf67117fe91882dd814db92efc233",
+  "cycles": 2,
+  "excel_version": "16.0",
+  "excel_build": "20527.0",
+  "excel_bitness": "Windows (64-bit) NT 10.00",
+  "excel_executable": "C:\\Program Files\\Microsoft Office\\root\\Office16\\EXCEL.EXE",
+  "excel_update_channel": null,
+  "calculation_mode": "manual",
+  "threads": 1,
+  "status": "complete",
+  "process_exited": true,
+  "runner_sources_sha256": {
+    "event_probe.py": "e4dc45245a928b522f45885b933081a6c33fc787f7c0b941d55536e94697c01f",
+    "artifact_manifest.py": "a64d592a677291ae2b4e2342cde47f82c8d10035ed9c36d0aaf7f750a07c241c",
+    "run.py": "27974e241c76426d4994b45ed8d0cfe01ee98972393e47935322e32906617d5b",
+    "shutdown_diagnostics.py": "278fab54e8cf3335271c8219bc95a389efb3af9d8d81fc07750407c730fc8e7a"
+  },
+  "ci": {
+    "commit": "157fcf162d3a2be81268cc97895b825374d9cc5f",
+    "run_id": "40184459490",
+    "run_attempt": "1",
+    "architecture": "x86_64",
+    "source": "github-actions"
+  },
+  "source_files": {
+    "report.json": {
+      "sha256": "a105762eeeecaa2ca1c69f440333e388bd9f5d1bb56d5b51dda12c8d1bc99c78",
+      "bytes": 74785
+    },
+    "probe.jsonl": {
+      "sha256": "9a96e9c9f0a127bc4a64b558d5d022846fd62fff852814a953de2d09e40e8aea",
+      "bytes": 24705
+    }
+  },
+  "evidence_scope": "Selected-field projection; process token and user-specific paths omitted; all native events and phase ranges retained.",
+  "source_verification": "All four recorded runner source hashes match commit 157fcf1 after converting LF to Windows CRLF; raw report/trace hashes and duplicated events agree.",
+  "original_assessment": {
+    "verdict": "inconclusive",
+    "reasons": [
+      "programmatic control raised callbacks",
+      "restored1.normal: callback from a stale handler generation",
+      "restored1.cancel: callback from a stale handler generation",
+      "removed2.normal: callback from a stale handler generation",
+      "removed2.cancel: callback from a stale handler generation",
+      "restored2.normal: callback from a stale handler generation",
+      "restored2.cancel: callback from a stale handler generation"
+    ],
+    "callbacks_observed_after_removal": true,
+    "production_shutdown_qualified": false,
+    "scope": "Standalone pinned probe, command-context nil removal, normal/cancel controls and re-registration; not production xlAutoClose ordering or unload qualification"
+  },
+  "assessment": {
+    "verdict": "callbacks_observed_after_removal",
+    "reasons": [],
+    "observations": [
+      "programmatic control raised callbacks"
+    ],
+    "stale_handler_phases": [
+      "restored1.normal",
+      "restored1.cancel",
+      "removed2.normal",
+      "removed2.cancel",
+      "restored2.normal",
+      "restored2.cancel"
+    ],
+    "removal_method": "nil",
+    "callbacks_observed_after_removal": true,
+    "production_shutdown_qualified": false,
+    "scope": "Standalone pinned probe, command-context nil removal, normal/cancel controls and re-registration; not production xlAutoClose ordering or unload qualification"
+  },
+  "events": [
+    {
+      "elapsed_ns": 7700,
+      "generation": 0,
+      "event": "open",
+      "details": {
+        "process_pinned": true
+      }
+    },
+    {
+      "elapsed_ns": 305700,
+      "generation": 1,
+      "event": "event.register",
+      "details": {
+        "cleanup": 0,
+        "event_xltype": 2048,
+        "invoked": true,
+        "procedure": "probe_ended_1",
+        "procedure_xltype": 2,
+        "raw": {
+          "bits": "0x6bfe0001",
+          "value": 1811808257,
+          "xltype": 2048
+        },
+        "selector": 1,
+        "transport": 0
+      }
+    },
+    {
+      "elapsed_ns": 368400,
+      "generation": 1,
+      "event": "event.register",
+      "details": {
+        "cleanup": 0,
+        "event_xltype": 2048,
+        "invoked": true,
+        "procedure": "probe_canceled_1",
+        "procedure_xltype": 2,
+        "raw": {
+          "bits": "0x4f4c0002",
+          "value": 1330380802,
+          "xltype": 2048
+        },
+        "selector": 2,
+        "transport": 0
+      }
+    },
+    {
+      "elapsed_ns": 1528300,
+      "generation": 1,
+      "event": "function.register",
+      "details": {
+        "cleanup": 0,
+        "name": "XEP.REGISTER",
+        "raw": {
+          "value": -122093565.0,
+          "xltype": 1
+        },
+        "transport": 0
+      }
+    },
+    {
+      "elapsed_ns": 1595200,
+      "generation": 1,
+      "event": "function.register",
+      "details": {
+        "cleanup": 0,
+        "name": "XEP.REMOVE",
+        "raw": {
+          "value": -1846804476.0,
+          "xltype": 1
+        },
+        "transport": 0
+      }
+    },
+    {
+      "elapsed_ns": 1632800,
+      "generation": 1,
+      "event": "function.register",
+      "details": {
+        "cleanup": 0,
+        "name": "XEP.SNAPSHOT",
+        "raw": {
+          "value": -2058813435.0,
+          "xltype": 1
+        },
+        "transport": 0
+      }
+    },
+    {
+      "elapsed_ns": 1661600,
+      "generation": 1,
+      "event": "function.register",
+      "details": {
+        "cleanup": 0,
+        "name": "XEP.DELAY",
+        "raw": {
+          "value": 126877702.0,
+          "xltype": 1
+        },
+        "transport": 0
+      }
+    },
+    {
+      "elapsed_ns": 13745500,
+      "generation": 1,
+      "event": "task.started",
+      "details": {
+        "milliseconds": 1000.0
+      }
+    },
+    {
+      "elapsed_ns": 1015579800,
+      "generation": 1,
+      "event": "task.return",
+      "details": {
+        "invoked": true,
+        "raw": {
+          "xltype": 0
+        },
+        "transport": 0
+      }
+    },
+    {
+      "elapsed_ns": 1015659600,
+      "generation": 1,
+      "event": "task.finished",
+      "details": {
+        "active": 0
+      }
+    },
+    {
+      "elapsed_ns": 1020337400,
+      "generation": 1,
+      "event": "callback.ended",
+      "details": {
+        "handler_generation": 1
+      }
+    },
+    {
+      "elapsed_ns": 1046387900,
+      "generation": 1,
+      "event": "snapshot",
+      "details": {
+        "active": 0,
+        "canceled": 0,
+        "ended": 1,
+        "generation": 1,
+        "started": 1
+      }
+    },
+    {
+      "elapsed_ns": 1334353700,
+      "generation": 1,
+      "event": "task.started",
+      "details": {
+        "milliseconds": 1000.0
+      }
+    },
+    {
+      "elapsed_ns": 2340845500,
+      "generation": 1,
+      "event": "task.return",
+      "details": {
+        "invoked": true,
+        "raw": {
+          "xltype": 0
+        },
+        "transport": 0
+      }
+    },
+    {
+      "elapsed_ns": 2340973000,
+      "generation": 1,
+      "event": "task.finished",
+      "details": {
+        "active": 0
+      }
+    },
+    {
+      "elapsed_ns": 2359353700,
+      "generation": 1,
+      "event": "callback.ended",
+      "details": {
+        "handler_generation": 1
+      }
+    },
+    {
+      "elapsed_ns": 2372703600,
+      "generation": 1,
+      "event": "snapshot",
+      "details": {
+        "active": 0,
+        "canceled": 0,
+        "ended": 2,
+        "generation": 1,
+        "started": 2
+      }
+    },
+    {
+      "elapsed_ns": 2400874600,
+      "generation": 1,
+      "event": "snapshot",
+      "details": {
+        "active": 0,
+        "canceled": 0,
+        "ended": 2,
+        "generation": 1,
+        "started": 2
+      }
+    },
+    {
+      "elapsed_ns": 6686904800,
+      "generation": 1,
+      "event": "task.started",
+      "details": {
+        "milliseconds": 1000.0
+      }
+    },
+    {
+      "elapsed_ns": 7689628900,
+      "generation": 1,
+      "event": "task.return",
+      "details": {
+        "invoked": true,
+        "raw": {
+          "xltype": 0
+        },
+        "transport": 0
+      }
+    },
+    {
+      "elapsed_ns": 7689679600,
+      "generation": 1,
+      "event": "task.finished",
+      "details": {
+        "active": 0
+      }
+    },
+    {
+      "elapsed_ns": 7695854500,
+      "generation": 1,
+      "event": "callback.ended",
+      "details": {
+        "handler_generation": 1
+      }
+    },
+    {
+      "elapsed_ns": 12009153900,
+      "generation": 1,
+      "event": "snapshot",
+      "details": {
+        "active": 0,
+        "canceled": 0,
+        "ended": 3,
+        "generation": 1,
+        "started": 3
+      }
+    },
+    {
+      "elapsed_ns": 12029958500,
+      "generation": 1,
+      "event": "snapshot",
+      "details": {
+        "active": 0,
+        "canceled": 0,
+        "ended": 3,
+        "generation": 1,
+        "started": 3
+      }
+    },
+    {
+      "elapsed_ns": 19016725900,
+      "generation": 1,
+      "event": "task.started",
+      "details": {
+        "milliseconds": 10000.0
+      }
+    },
+    {
+      "elapsed_ns": 19231804500,
+      "generation": 1,
+      "event": "callback.canceled",
+      "details": {
+        "handler_generation": 1
+      }
+    },
+    {
+      "elapsed_ns": 19238139200,
+      "generation": 1,
+      "event": "task.finished",
+      "details": {
+        "active": 0
+      }
+    },
+    {
+      "elapsed_ns": 19238163900,
+      "generation": 1,
+      "event": "callback.ended",
+      "details": {
+        "handler_generation": 1
+      }
+    },
+    {
+      "elapsed_ns": 24468319100,
+      "generation": 1,
+      "event": "snapshot",
+      "details": {
+        "active": 0,
+        "canceled": 1,
+        "ended": 4,
+        "generation": 1,
+        "started": 4
+      }
+    },
+    {
+      "elapsed_ns": 24479980500,
+      "generation": 1,
+      "event": "event.remove",
+      "details": {
+        "cleanup": 0,
+        "event_xltype": 2048,
+        "invoked": true,
+        "procedure": null,
+        "procedure_xltype": 256,
+        "raw": {
+          "bits": "0x00000000",
+          "value": 0,
+          "xltype": 2048
+        },
+        "selector": 1,
+        "transport": 0
+      }
+    },
+    {
+      "elapsed_ns": 24480011800,
+      "generation": 1,
+      "event": "event.remove",
+      "details": {
+        "cleanup": 0,
+        "event_xltype": 2048,
+        "invoked": true,
+        "procedure": null,
+        "procedure_xltype": 256,
+        "raw": {
+          "bits": "0x00000000",
+          "value": 0,
+          "xltype": 2048
+        },
+        "selector": 2,
+        "transport": 0
+      }
+    },
+    {
+      "elapsed_ns": 24480388700,
+      "generation": 1,
+      "event": "snapshot",
+      "details": {
+        "active": 0,
+        "canceled": 1,
+        "ended": 4,
+        "generation": 1,
+        "started": 4
+      }
+    },
+    {
+      "elapsed_ns": 31450175300,
+      "generation": 1,
+      "event": "task.started",
+      "details": {
+        "milliseconds": 1000.0
+      }
+    },
+    {
+      "elapsed_ns": 32459927500,
+      "generation": 1,
+      "event": "task.return",
+      "details": {
+        "invoked": true,
+        "raw": {
+          "xltype": 0
+        },
+        "transport": 0
+      }
+    },
+    {
+      "elapsed_ns": 32460053200,
+      "generation": 1,
+      "event": "task.finished",
+      "details": {
+        "active": 0
+      }
+    },
+    {
+      "elapsed_ns": 32468740100,
+      "generation": 1,
+      "event": "callback.ended",
+      "details": {
+        "handler_generation": 1
+      }
+    },
+    {
+      "elapsed_ns": 36281304900,
+      "generation": 1,
+      "event": "snapshot",
+      "details": {
+        "active": 0,
+        "canceled": 1,
+        "ended": 5,
+        "generation": 1,
+        "started": 5
+      }
+    },
+    {
+      "elapsed_ns": 36298954200,
+      "generation": 1,
+      "event": "snapshot",
+      "details": {
+        "active": 0,
+        "canceled": 1,
+        "ended": 5,
+        "generation": 1,
+        "started": 5
+      }
+    },
+    {
+      "elapsed_ns": 40628127000,
+      "generation": 1,
+      "event": "task.started",
+      "details": {
+        "milliseconds": 10000.0
+      }
+    },
+    {
+      "elapsed_ns": 40958360400,
+      "generation": 1,
+      "event": "callback.canceled",
+      "details": {
+        "handler_generation": 1
+      }
+    },
+    {
+      "elapsed_ns": 40961900700,
+      "generation": 1,
+      "event": "task.finished",
+      "details": {
+        "active": 0
+      }
+    },
+    {
+      "elapsed_ns": 40964563700,
+      "generation": 1,
+      "event": "callback.ended",
+      "details": {
+        "handler_generation": 1
+      }
+    },
+    {
+      "elapsed_ns": 44037528500,
+      "generation": 1,
+      "event": "snapshot",
+      "details": {
+        "active": 0,
+        "canceled": 2,
+        "ended": 6,
+        "generation": 1,
+        "started": 6
+      }
+    },
+    {
+      "elapsed_ns": 44063539600,
+      "generation": 2,
+      "event": "event.register",
+      "details": {
+        "cleanup": 0,
+        "event_xltype": 2048,
+        "invoked": true,
+        "procedure": "probe_ended_2",
+        "procedure_xltype": 2,
+        "raw": {
+          "bits": "0x6bce0000",
+          "value": 1808662528,
+          "xltype": 2048
+        },
+        "selector": 1,
+        "transport": 0
+      }
+    },
+    {
+      "elapsed_ns": 44063607000,
+      "generation": 2,
+      "event": "event.register",
+      "details": {
+        "cleanup": 0,
+        "event_xltype": 2048,
+        "invoked": true,
+        "procedure": "probe_canceled_2",
+        "procedure_xltype": 2,
+        "raw": {
+          "bits": "0x4f7c0007",
+          "value": 1333526535,
+          "xltype": 2048
+        },
+        "selector": 2,
+        "transport": 0
+      }
+    },
+    {
+      "elapsed_ns": 44064366300,
+      "generation": 2,
+      "event": "snapshot",
+      "details": {
+        "active": 0,
+        "canceled": 2,
+        "ended": 6,
+        "generation": 2,
+        "started": 6
+      }
+    },
+    {
+      "elapsed_ns": 47562342700,
+      "generation": 2,
+      "event": "task.started",
+      "details": {
+        "milliseconds": 1000.0
+      }
+    },
+    {
+      "elapsed_ns": 48571176700,
+      "generation": 2,
+      "event": "task.return",
+      "details": {
+        "invoked": true,
+        "raw": {
+          "xltype": 0
+        },
+        "transport": 0
+      }
+    },
+    {
+      "elapsed_ns": 48571329400,
+      "generation": 2,
+      "event": "task.finished",
+      "details": {
+        "active": 0
+      }
+    },
+    {
+      "elapsed_ns": 48576013100,
+      "generation": 2,
+      "event": "callback.ended",
+      "details": {
+        "handler_generation": 2
+      }
+    },
+    {
+      "elapsed_ns": 48577421300,
+      "generation": 2,
+      "event": "callback.ended",
+      "details": {
+        "handler_generation": 1
+      }
+    },
+    {
+      "elapsed_ns": 52324189700,
+      "generation": 2,
+      "event": "snapshot",
+      "details": {
+        "active": 0,
+        "canceled": 2,
+        "ended": 8,
+        "generation": 2,
+        "started": 7
+      }
+    },
+    {
+      "elapsed_ns": 52350499300,
+      "generation": 2,
+      "event": "snapshot",
+      "details": {
+        "active": 0,
+        "canceled": 2,
+        "ended": 8,
+        "generation": 2,
+        "started": 7
+      }
+    },
+    {
+      "elapsed_ns": 56402242700,
+      "generation": 2,
+      "event": "task.started",
+      "details": {
+        "milliseconds": 10000.0
+      }
+    },
+    {
+      "elapsed_ns": 57289550600,
+      "generation": 2,
+      "event": "callback.canceled",
+      "details": {
+        "handler_generation": 1
+      }
+    },
+    {
+      "elapsed_ns": 57294474400,
+      "generation": 2,
+      "event": "callback.canceled",
+      "details": {
+        "handler_generation": 2
+      }
+    },
+    {
+      "elapsed_ns": 57296961100,
+      "generation": 2,
+      "event": "callback.ended",
+      "details": {
+        "handler_generation": 2
+      }
+    },
+    {
+      "elapsed_ns": 57299302000,
+      "generation": 2,
+      "event": "task.finished",
+      "details": {
+        "active": 0
+      }
+    },
+    {
+      "elapsed_ns": 57299622200,
+      "generation": 2,
+      "event": "callback.ended",
+      "details": {
+        "handler_generation": 1
+      }
+    },
+    {
+      "elapsed_ns": 60720151600,
+      "generation": 2,
+      "event": "snapshot",
+      "details": {
+        "active": 0,
+        "canceled": 4,
+        "ended": 10,
+        "generation": 2,
+        "started": 8
+      }
+    },
+    {
+      "elapsed_ns": 60744544000,
+      "generation": 2,
+      "event": "event.remove",
+      "details": {
+        "cleanup": 0,
+        "event_xltype": 2048,
+        "invoked": true,
+        "procedure": null,
+        "procedure_xltype": 256,
+        "raw": {
+          "bits": "0x00000000",
+          "value": 0,
+          "xltype": 2048
+        },
+        "selector": 1,
+        "transport": 0
+      }
+    },
+    {
+      "elapsed_ns": 60744616600,
+      "generation": 2,
+      "event": "event.remove",
+      "details": {
+        "cleanup": 0,
+        "event_xltype": 2048,
+        "invoked": true,
+        "procedure": null,
+        "procedure_xltype": 256,
+        "raw": {
+          "bits": "0x00000000",
+          "value": 0,
+          "xltype": 2048
+        },
+        "selector": 2,
+        "transport": 0
+      }
+    },
+    {
+      "elapsed_ns": 60745386700,
+      "generation": 2,
+      "event": "snapshot",
+      "details": {
+        "active": 0,
+        "canceled": 4,
+        "ended": 10,
+        "generation": 2,
+        "started": 8
+      }
+    },
+    {
+      "elapsed_ns": 67999308200,
+      "generation": 2,
+      "event": "task.started",
+      "details": {
+        "milliseconds": 1000.0
+      }
+    },
+    {
+      "elapsed_ns": 69009360800,
+      "generation": 2,
+      "event": "task.return",
+      "details": {
+        "invoked": true,
+        "raw": {
+          "xltype": 0
+        },
+        "transport": 0
+      }
+    },
+    {
+      "elapsed_ns": 69009504000,
+      "generation": 2,
+      "event": "task.finished",
+      "details": {
+        "active": 0
+      }
+    },
+    {
+      "elapsed_ns": 69024201700,
+      "generation": 2,
+      "event": "callback.ended",
+      "details": {
+        "handler_generation": 2
+      }
+    },
+    {
+      "elapsed_ns": 69029635500,
+      "generation": 2,
+      "event": "callback.ended",
+      "details": {
+        "handler_generation": 1
+      }
+    },
+    {
+      "elapsed_ns": 72389987300,
+      "generation": 2,
+      "event": "snapshot",
+      "details": {
+        "active": 0,
+        "canceled": 4,
+        "ended": 12,
+        "generation": 2,
+        "started": 9
+      }
+    },
+    {
+      "elapsed_ns": 72406905000,
+      "generation": 2,
+      "event": "snapshot",
+      "details": {
+        "active": 0,
+        "canceled": 4,
+        "ended": 12,
+        "generation": 2,
+        "started": 9
+      }
+    },
+    {
+      "elapsed_ns": 80737898500,
+      "generation": 2,
+      "event": "task.started",
+      "details": {
+        "milliseconds": 10000.0
+      }
+    },
+    {
+      "elapsed_ns": 81505181400,
+      "generation": 2,
+      "event": "callback.canceled",
+      "details": {
+        "handler_generation": 1
+      }
+    },
+    {
+      "elapsed_ns": 81506739900,
+      "generation": 2,
+      "event": "callback.canceled",
+      "details": {
+        "handler_generation": 2
+      }
+    },
+    {
+      "elapsed_ns": 81507464200,
+      "generation": 2,
+      "event": "callback.ended",
+      "details": {
+        "handler_generation": 2
+      }
+    },
+    {
+      "elapsed_ns": 81508106900,
+      "generation": 2,
+      "event": "callback.ended",
+      "details": {
+        "handler_generation": 1
+      }
+    },
+    {
+      "elapsed_ns": 81511428600,
+      "generation": 2,
+      "event": "task.finished",
+      "details": {
+        "active": 0
+      }
+    },
+    {
+      "elapsed_ns": 85694714400,
+      "generation": 2,
+      "event": "snapshot",
+      "details": {
+        "active": 0,
+        "canceled": 6,
+        "ended": 14,
+        "generation": 2,
+        "started": 10
+      }
+    },
+    {
+      "elapsed_ns": 85720460300,
+      "generation": 3,
+      "event": "event.register",
+      "details": {
+        "cleanup": 0,
+        "event_xltype": 2048,
+        "invoked": true,
+        "procedure": "probe_ended_3",
+        "procedure_xltype": 2,
+        "raw": {
+          "bits": "0x6bde0008",
+          "value": 1809711112,
+          "xltype": 2048
+        },
+        "selector": 1,
+        "transport": 0
+      }
+    },
+    {
+      "elapsed_ns": 85720522300,
+      "generation": 3,
+      "event": "event.register",
+      "details": {
+        "cleanup": 0,
+        "event_xltype": 2048,
+        "invoked": true,
+        "procedure": "probe_canceled_3",
+        "procedure_xltype": 2,
+        "raw": {
+          "bits": "0x4f6c0009",
+          "value": 1332477961,
+          "xltype": 2048
+        },
+        "selector": 2,
+        "transport": 0
+      }
+    },
+    {
+      "elapsed_ns": 85721100100,
+      "generation": 3,
+      "event": "snapshot",
+      "details": {
+        "active": 0,
+        "canceled": 6,
+        "ended": 14,
+        "generation": 3,
+        "started": 10
+      }
+    },
+    {
+      "elapsed_ns": 87891342000,
+      "generation": 3,
+      "event": "task.started",
+      "details": {
+        "milliseconds": 1000.0
+      }
+    },
+    {
+      "elapsed_ns": 88895306400,
+      "generation": 3,
+      "event": "task.return",
+      "details": {
+        "invoked": true,
+        "raw": {
+          "xltype": 0
+        },
+        "transport": 0
+      }
+    },
+    {
+      "elapsed_ns": 88895475900,
+      "generation": 3,
+      "event": "task.finished",
+      "details": {
+        "active": 0
+      }
+    },
+    {
+      "elapsed_ns": 88908364000,
+      "generation": 3,
+      "event": "callback.ended",
+      "details": {
+        "handler_generation": 2
+      }
+    },
+    {
+      "elapsed_ns": 88909926000,
+      "generation": 3,
+      "event": "callback.ended",
+      "details": {
+        "handler_generation": 1
+      }
+    },
+    {
+      "elapsed_ns": 88910709100,
+      "generation": 3,
+      "event": "callback.ended",
+      "details": {
+        "handler_generation": 3
+      }
+    },
+    {
+      "elapsed_ns": 91998133500,
+      "generation": 3,
+      "event": "snapshot",
+      "details": {
+        "active": 0,
+        "canceled": 6,
+        "ended": 17,
+        "generation": 3,
+        "started": 11
+      }
+    },
+    {
+      "elapsed_ns": 92016700000,
+      "generation": 3,
+      "event": "snapshot",
+      "details": {
+        "active": 0,
+        "canceled": 6,
+        "ended": 17,
+        "generation": 3,
+        "started": 11
+      }
+    },
+    {
+      "elapsed_ns": 94730618400,
+      "generation": 3,
+      "event": "task.started",
+      "details": {
+        "milliseconds": 10000.0
+      }
+    },
+    {
+      "elapsed_ns": 95397743200,
+      "generation": 3,
+      "event": "callback.canceled",
+      "details": {
+        "handler_generation": 1
+      }
+    },
+    {
+      "elapsed_ns": 95402606900,
+      "generation": 3,
+      "event": "callback.canceled",
+      "details": {
+        "handler_generation": 2
+      }
+    },
+    {
+      "elapsed_ns": 95405175300,
+      "generation": 3,
+      "event": "callback.canceled",
+      "details": {
+        "handler_generation": 3
+      }
+    },
+    {
+      "elapsed_ns": 95405313600,
+      "generation": 3,
+      "event": "task.finished",
+      "details": {
+        "active": 0
+      }
+    },
+    {
+      "elapsed_ns": 95408957300,
+      "generation": 3,
+      "event": "callback.ended",
+      "details": {
+        "handler_generation": 2
+      }
+    },
+    {
+      "elapsed_ns": 95410772600,
+      "generation": 3,
+      "event": "callback.ended",
+      "details": {
+        "handler_generation": 1
+      }
+    },
+    {
+      "elapsed_ns": 95412298600,
+      "generation": 3,
+      "event": "callback.ended",
+      "details": {
+        "handler_generation": 3
+      }
+    },
+    {
+      "elapsed_ns": 98002234000,
+      "generation": 3,
+      "event": "snapshot",
+      "details": {
+        "active": 0,
+        "canceled": 9,
+        "ended": 20,
+        "generation": 3,
+        "started": 12
+      }
+    },
+    {
+      "elapsed_ns": 98074483100,
+      "generation": 3,
+      "event": "close",
+      "details": {
+        "active": 0,
+        "process_pinned": true
+      }
+    }
+  ],
+  "phases": [
+    {
+      "name": "programmatic",
+      "before": {
+        "active": 0,
+        "canceled": 0,
+        "ended": 1,
+        "generation": 1,
+        "started": 1
+      },
+      "after": {
+        "active": 0,
+        "canceled": 0,
+        "ended": 2,
+        "generation": 1,
+        "started": 2
+      },
+      "cell_value": 1.0,
+      "event_start": 12,
+      "event_stop": 17
+    },
+    {
+      "name": "registered.normal",
+      "before": {
+        "active": 0,
+        "canceled": 0,
+        "ended": 2,
+        "generation": 1,
+        "started": 2
+      },
+      "after": {
+        "active": 0,
+        "canceled": 0,
+        "ended": 3,
+        "generation": 1,
+        "started": 3
+      },
+      "cell_value": 1.0,
+      "event_start": 18,
+      "event_stop": 23
+    },
+    {
+      "name": "registered.cancel",
+      "before": {
+        "active": 0,
+        "canceled": 0,
+        "ended": 3,
+        "generation": 1,
+        "started": 3
+      },
+      "after": {
+        "active": 0,
+        "canceled": 1,
+        "ended": 4,
+        "generation": 1,
+        "started": 4
+      },
+      "cell_value": -2146826237,
+      "event_start": 24,
+      "event_stop": 29
+    },
+    {
+      "name": "removed1.normal",
+      "before": {
+        "active": 0,
+        "canceled": 1,
+        "ended": 4,
+        "generation": 1,
+        "started": 4
+      },
+      "after": {
+        "active": 0,
+        "canceled": 1,
+        "ended": 5,
+        "generation": 1,
+        "started": 5
+      },
+      "cell_value": 1.0,
+      "event_start": 32,
+      "event_stop": 37
+    },
+    {
+      "name": "removed1.cancel",
+      "before": {
+        "active": 0,
+        "canceled": 1,
+        "ended": 5,
+        "generation": 1,
+        "started": 5
+      },
+      "after": {
+        "active": 0,
+        "canceled": 2,
+        "ended": 6,
+        "generation": 1,
+        "started": 6
+      },
+      "cell_value": -2146826237,
+      "event_start": 38,
+      "event_stop": 43
+    },
+    {
+      "name": "restored1.normal",
+      "before": {
+        "active": 0,
+        "canceled": 2,
+        "ended": 6,
+        "generation": 2,
+        "started": 6
+      },
+      "after": {
+        "active": 0,
+        "canceled": 2,
+        "ended": 8,
+        "generation": 2,
+        "started": 7
+      },
+      "cell_value": 1.0,
+      "event_start": 46,
+      "event_stop": 52
+    },
+    {
+      "name": "restored1.cancel",
+      "before": {
+        "active": 0,
+        "canceled": 2,
+        "ended": 8,
+        "generation": 2,
+        "started": 7
+      },
+      "after": {
+        "active": 0,
+        "canceled": 4,
+        "ended": 10,
+        "generation": 2,
+        "started": 8
+      },
+      "cell_value": -2146826237,
+      "event_start": 53,
+      "event_stop": 60
+    },
+    {
+      "name": "removed2.normal",
+      "before": {
+        "active": 0,
+        "canceled": 4,
+        "ended": 10,
+        "generation": 2,
+        "started": 8
+      },
+      "after": {
+        "active": 0,
+        "canceled": 4,
+        "ended": 12,
+        "generation": 2,
+        "started": 9
+      },
+      "cell_value": 1.0,
+      "event_start": 63,
+      "event_stop": 69
+    },
+    {
+      "name": "removed2.cancel",
+      "before": {
+        "active": 0,
+        "canceled": 4,
+        "ended": 12,
+        "generation": 2,
+        "started": 9
+      },
+      "after": {
+        "active": 0,
+        "canceled": 6,
+        "ended": 14,
+        "generation": 2,
+        "started": 10
+      },
+      "cell_value": -2146826237,
+      "event_start": 70,
+      "event_stop": 77
+    },
+    {
+      "name": "restored2.normal",
+      "before": {
+        "active": 0,
+        "canceled": 6,
+        "ended": 14,
+        "generation": 3,
+        "started": 10
+      },
+      "after": {
+        "active": 0,
+        "canceled": 6,
+        "ended": 17,
+        "generation": 3,
+        "started": 11
+      },
+      "cell_value": 1.0,
+      "event_start": 80,
+      "event_stop": 87
+    },
+    {
+      "name": "restored2.cancel",
+      "before": {
+        "active": 0,
+        "canceled": 6,
+        "ended": 17,
+        "generation": 3,
+        "started": 11
+      },
+      "after": {
+        "active": 0,
+        "canceled": 9,
+        "ended": 20,
+        "generation": 3,
+        "started": 12
+      },
+      "cell_value": -2146826237,
+      "event_start": 88,
+      "event_stop": 97
+    }
+  ]
+}

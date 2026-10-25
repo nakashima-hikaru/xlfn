@@ -1,10 +1,54 @@
 # Async calculation-event qualification
 
-Status on 2026-10-25: **full event lifecycle qualification unverified**. No local macOS test, Windows
+Status on 2026-10-25: **nil-procedure removal failed on the observed Excel build;
+full production lifecycle qualification remains unverified**. No local macOS test, Windows
 cross-compilation, callback mock, or performance benchmark establishes native
 event registration or removal. The current evidence record is
-[records.json](records.json); it now includes two partial live Windows shutdown
-observations. Neither qualifies event removal.
+[records.json](records.json); it includes two partial shutdown observations and
+an interactive counterexample to nil-procedure removal.
+
+## Interactive removal counterexample, 2026-10-25
+
+[Selected native evidence](probe-2026-10-25-nil.json) preserves all 98 native
+events and the 11 phase ranges from the supplied report/trace. Their original
+SHA-256 values are retained. The trace hash matches the report and both copies
+of the events agree. All four recorded Python source hashes match commit
+`157fcf162d3a2be81268cc97895b825374d9cc5f` after LF-to-CRLF conversion.
+The XLL came from CI run `40184459490`, attempt 1, with SHA-256
+`6d9436408dadf0c8466281a6e0846770501bf67117fe91882dd814db92efc233`.
+Excel reported version 16.0, build 20527.0, 64-bit; its update channel was not
+captured. This is a result for that observed configuration, not all Excel builds.
+
+| Stage | Ended callbacks per normal calculation | Canceled / Ended callbacks per interruption | Handler generations |
+| --- | ---: | ---: | --- |
+| Initially registered | 1 | 1 / 1 | 1 |
+| First nil removal | 1 | 1 / 1 | 1 |
+| First re-registration | 2 | 2 / 2 | 1, 2 |
+| Second nil removal | 2 | 2 / 2 | 1, 2 |
+| Second re-registration | 3 | 3 / 3 | 1, 2, 3 |
+
+All four removal calls returned `xltypeInt 0`, transport success and successful
+result cleanup. Both event kinds continued to invoke their old handler addresses.
+Every phase started exactly one async task and ended with no active workers;
+normal calculation returned worksheet value 1, and cancellation preceded the
+Ended events. The process exited naturally. **Nil-procedure removal did not
+detach these handlers.** Re-registration added further live handlers in this
+probe; it did not replace the old generation.
+
+The original analyzer labeled this report `inconclusive` because programmatic
+calculation also raised an Ended callback and old generations remained callable.
+The latter is failure evidence, not missing evidence. The revised analyzer
+classifies this same immutable input as `callbacks_observed_after_removal`;
+it records programmatic behavior separately and still rejects inconsistent
+counters, incomplete call sequences and missing workload observations. The
+programmatic observation does not by itself qualify interactive cancellation.
+
+The production zero-result rejection and unload hold remain justified by this
+counterexample. A candidate experiment now passes the signed registration ID
+returned by `xlEventRegister` to `xlfUnregister` as `xltypeNum`. Microsoft's
+[xlfUnregister documentation](https://learn.microsoft.com/en-us/office/client-developer/excel/xlfunregister-form-1)
+covers IDs from `xlfRegister`, so its applicability to event IDs is a hypothesis
+to test, not an established production contract.
 
 ## Live L02 observations, 2026-10-25
 
@@ -125,6 +169,20 @@ From `benchmarks/excel-comparison` on Windows with 64-bit desktop Excel:
 python .\event_probe.py --artifacts C:\path\to\verified-artifacts --out event-probe-results
 ```
 
+To test the registration-ID candidate, use an artifact containing the new
+method and a fresh process/output directory:
+
+```powershell
+python .\event_probe.py --artifacts C:\path\to\verified-artifacts --removal-method unregister-id --out event-probe-id-results
+```
+
+The default `--removal-method nil` retains the original experiment for direct
+reproduction. `unregister-id` records the exact signed token, numeric argument,
+transport, return value and cleanup for both selectors. A positive return alone
+does not establish callback removal. The analyzer checks the target against
+the preceding registration token and uses the same interactive controls.
+Run `40184459490` supports only the original nil experiment.
+
 The output directory must be new. The runner creates a separate visible Excel
 process and a temporary workbook; it refuses to modify an already-running
 Excel process. It guides the following sequence (two removal cycles by default):
@@ -159,9 +217,12 @@ closes only its own workbook/process; it never force-kills Excel. The pinned DLL
 is released by Windows when that process exits.
 
 Possible assessments are `no_callbacks_observed_after_removal`,
-`callbacks_observed_after_removal`, and `inconclusive`. Missing positive controls,
-missing workload execution, stale generations, or incomplete evidence cannot
-pass. Even a complete pass establishes only the observed **command-context**
+`callbacks_observed_after_removal`, `stale_callbacks_after_reregistration`, and
+`inconclusive`. Missing positive controls, missing workload execution or
+inconsistent evidence prevent a conclusive assessment. Old handler generations
+are retained as failure evidence; unexpected programmatic callbacks are recorded
+as observations rather than masking an interactive counterexample.
+Even a complete pass establishes only the observed **command-context**
 removal behavior on this build. Production `xlAutoClose` ordering, module unload,
 task/ledger reclamation and close/reopen remain separate qualification cases.
 Use this result to choose the next production change; do not infer that raw
@@ -231,8 +292,10 @@ earlier runs. Every observation must contain:
   and a final `verified`, `failed`, or `unverified` verdict.
 
 Use `verified` only after all required observations for that exact
-configuration pass. Leave unavailable values absent or null and keep the
-verdict `unverified`; do not turn a planned configuration into an observed run.
+configuration pass. Leave unavailable values absent or null. Missing required
+evidence prevents `verified`, but does not erase a directly observed failure;
+record a counterexample as `failed` with its actual tested scope. Do not turn
+a planned configuration into an observed run.
 The following test coverage is local mock evidence only: signed nonzero
 registration acceptance, zero/wrong-type rejection, indeterminate event
 mutations, and retention/retry after a negative removal acknowledgement.

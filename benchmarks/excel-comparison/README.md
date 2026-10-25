@@ -17,7 +17,8 @@ results do not establish either native lifecycle behavior or event removal.
 The [Excel comparison XLLs workflow](../../.github/workflows/excel-comparison-xll.yml)
 builds **x86_64** xlfn and Excel-DNA **NativeAOT** XLLs for the same commit. It
 uploads `excel-comparison-x86_64`, containing both `benchmark.xll` files,
-four registration variants per implementation, and a manifest with SHA-256
+four registration variants per implementation, the standalone event probe,
+and a manifest with SHA-256
 digests. A second CI job downloads and verifies that artifact. CI does not
 run Excel.
 
@@ -43,7 +44,7 @@ an existing destination so artifacts from different runs cannot be mixed;
 you choose another destination, pass the same path to `run.py --artifacts`.
 An explicit relative `-Destination` is resolved against your current PowerShell
 location; the default remains the `artifacts` directory beside `fetch-ci.ps1`.
-The runner verifies the CI manifest (including Excel-DNA's NativeAOT build mode), all ten XLL digests, the x86_64 PE
+The runner verifies the CI manifest (including Excel-DNA's NativeAOT build mode), all eleven XLL digests, the x86_64 PE
 machine type, and the checkout commit before opening Excel. For a PR artifact,
 check out the CI run's merge commit; `--allow-commit-mismatch` is available
 only for runner-only changes that remain compatible with the artifact's
