@@ -1,0 +1,18 @@
+[package]
+name = "xlfn-event-probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+xlfn-sys = { path = "../../../../crates/xlfn-sys" }
+serde_json = "1"
+windows-link = "=0.100.0"
+
+[dev-dependencies]
+xlfn-sys = { path = "../../../../crates/xlfn-sys", features = ["abi-probe"] }
+
+[workspace]

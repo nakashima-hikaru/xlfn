@@ -15,8 +15,185 @@
   },
   "qualification_status": "unverified",
   "qualification_scope": "one exact Excel product/version/build/channel and process bitness per real run",
-  "unverified_reason": "Live Windows Excel is unavailable on the local macOS host; no complete build-specific registration/removal traces were collected for this qualification record. Historical registration evidence below does not qualify removal.",
-  "observations": [],
+  "unverified_reason": "Live Windows Excel removal acknowledgements are recorded below, but registration acknowledgements, interactive callback sequences and post-removal handler counters remain unavailable. Natural process exit does not qualify removal.",
+  "observations": [
+    {
+      "timestamp_utc": "2026-10-25T09:39:57Z",
+      "operator": null,
+      "windows_version": "Windows-11-10.0.26200-SP0",
+      "excel_version": "16.0",
+      "excel_build": "20527.0",
+      "excel_update_channel": null,
+      "excel_bitness_reported": "Windows (64-bit) NT 10.00",
+      "excel_executable_identity": null,
+      "candidate_commit": "cd9fb4b95fc67af4dad8fd6ba98abd418c2b2986",
+      "runner_commit": "cd9fb4b95fc67af4dad8fd6ba98abd418c2b2986",
+      "xll_target_architecture": "x86_64",
+      "xll_sha256": "90390bc1b652ff7028bfc55a5f8b00e658eb82593a43f1bd5d416e98c6438522",
+      "instrumentation": "Existing --repeat-diagnostics and --shutdown-diagnostics at candidate commit; no additional instrumentation diff reported",
+      "calculation_mode": "manual",
+      "threads": 1,
+      "test_inputs": {
+        "id": "L02",
+        "variant": "100",
+        "cells": 1000,
+        "repetitions": 100
+      },
+      "registration_calls": null,
+      "removal_argument_source": "Candidate RegistrationHost::unregister_event passes xltypeNil procedure and xltypeInt event; argument types are source-derived, not independently captured by the trace",
+      "removal_calls": [
+        {
+          "event": "registration.removal",
+          "details": {
+            "cleanup": {
+              "Ok": null
+            },
+            "decoded": {
+              "Err": "Excel API xlEventRegister failed: invalid registration id 0"
+            },
+            "invoked": true,
+            "operation": "xlEventRegister.remove",
+            "raw_result": {
+              "value": 0,
+              "xltype": 2048
+            },
+            "status": "Success",
+            "target": 1.0
+          },
+          "since_quit_s": 0.0324137
+        },
+        {
+          "event": "registration.removal",
+          "details": {
+            "cleanup": {
+              "Ok": null
+            },
+            "decoded": {
+              "Err": "Excel API xlEventRegister failed: invalid registration id 0"
+            },
+            "invoked": true,
+            "operation": "xlEventRegister.remove",
+            "raw_result": {
+              "value": 0,
+              "xltype": 2048
+            },
+            "status": "Success",
+            "target": 2.0
+          },
+          "since_quit_s": 0.0326956
+        }
+      ],
+      "terminal_phase": "Quarantined",
+      "terminal_reason": "UnregisterFailed",
+      "process_exit": "natural",
+      "interactive_event_traces": null,
+      "post_removal_handler_counters": null,
+      "repeated_registration_cycles": null,
+      "task_ledger_and_late_result_checks": null,
+      "evidence_file": "l02-2026-10-25.json",
+      "evidence_observation_index": 0,
+      "evidence_sha256": "816a48f903febcab3af53b7514f9c8094da59ee1427a944d8cc7b3140d49fe3a",
+      "source_jsonl_sha256": "ccc0cade587d0d20d35a56b06c7cd29946534dfe634ad66ee16255f535ba2f0c",
+      "tested_scope": "Programmatic L02 recalculation followed by process shutdown; two removal returns were xltypeInt 0 with callback transport Success and cleanup Ok",
+      "omitted_cases": [
+        "Raw registration acknowledgement",
+        "Interactive calculation and cancellation",
+        "Post-removal callback absence",
+        "Close/reopen cycles",
+        "Excel executable and update channel verification"
+      ],
+      "verdict": "unverified",
+      "acknowledgement_policy_result": "failed: both removals returned zero; host mutation remains indeterminate"
+    },
+    {
+      "timestamp_utc": "2026-10-25T09:40:14Z",
+      "operator": null,
+      "windows_version": "Windows-11-10.0.26200-SP0",
+      "excel_version": "16.0",
+      "excel_build": "20527.0",
+      "excel_update_channel": null,
+      "excel_bitness_reported": "Windows (64-bit) NT 10.00",
+      "excel_executable_identity": null,
+      "candidate_commit": "cd9fb4b95fc67af4dad8fd6ba98abd418c2b2986",
+      "runner_commit": "cd9fb4b95fc67af4dad8fd6ba98abd418c2b2986",
+      "xll_target_architecture": "x86_64",
+      "xll_sha256": "90390bc1b652ff7028bfc55a5f8b00e658eb82593a43f1bd5d416e98c6438522",
+      "instrumentation": "Existing --repeat-diagnostics and --shutdown-diagnostics at candidate commit; no additional instrumentation diff reported",
+      "calculation_mode": "manual",
+      "threads": 1,
+      "test_inputs": {
+        "id": "L02",
+        "variant": "1000",
+        "cells": 1000,
+        "repetitions": 1000
+      },
+      "registration_calls": null,
+      "removal_argument_source": "Candidate RegistrationHost::unregister_event passes xltypeNil procedure and xltypeInt event; argument types are source-derived, not independently captured by the trace",
+      "removal_calls": [
+        {
+          "event": "registration.removal",
+          "details": {
+            "cleanup": {
+              "Ok": null
+            },
+            "decoded": {
+              "Err": "Excel API xlEventRegister failed: invalid registration id 0"
+            },
+            "invoked": true,
+            "operation": "xlEventRegister.remove",
+            "raw_result": {
+              "value": 0,
+              "xltype": 2048
+            },
+            "status": "Success",
+            "target": 1.0
+          },
+          "since_quit_s": 0.0237574
+        },
+        {
+          "event": "registration.removal",
+          "details": {
+            "cleanup": {
+              "Ok": null
+            },
+            "decoded": {
+              "Err": "Excel API xlEventRegister failed: invalid registration id 0"
+            },
+            "invoked": true,
+            "operation": "xlEventRegister.remove",
+            "raw_result": {
+              "value": 0,
+              "xltype": 2048
+            },
+            "status": "Success",
+            "target": 2.0
+          },
+          "since_quit_s": 0.0239779
+        }
+      ],
+      "terminal_phase": "Quarantined",
+      "terminal_reason": "UnregisterFailed",
+      "process_exit": "natural",
+      "interactive_event_traces": null,
+      "post_removal_handler_counters": null,
+      "repeated_registration_cycles": null,
+      "task_ledger_and_late_result_checks": null,
+      "evidence_file": "l02-2026-10-25.json",
+      "evidence_observation_index": 2,
+      "evidence_sha256": "816a48f903febcab3af53b7514f9c8094da59ee1427a944d8cc7b3140d49fe3a",
+      "source_jsonl_sha256": "ccc0cade587d0d20d35a56b06c7cd29946534dfe634ad66ee16255f535ba2f0c",
+      "tested_scope": "Programmatic L02 recalculation followed by process shutdown; two removal returns were xltypeInt 0 with callback transport Success and cleanup Ok",
+      "omitted_cases": [
+        "Raw registration acknowledgement",
+        "Interactive calculation and cancellation",
+        "Post-removal callback absence",
+        "Close/reopen cycles",
+        "Excel executable and update channel verification"
+      ],
+      "verdict": "unverified",
+      "acknowledgement_policy_result": "failed: both removals returned zero; host mutation remains indeterminate"
+    }
+  ],
   "implementation_reviewed_on": "2026-10-07",
   "registration_acknowledgement_policy": "Accept nonzero xltypeInt, preserving signed bits; zero and other result types are rejected.",
   "historical_registration_evidence": {

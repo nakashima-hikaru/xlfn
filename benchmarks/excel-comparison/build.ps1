@@ -51,6 +51,11 @@ function Build-Pair([int]$extras, [string]$outputName) {
 
 Build-Pair 0 'benchmark.xll'
 foreach ($count in $counts) { Build-Pair $count "registration-$count.xll" }
+cargo build --manifest-path (Join-Path $here 'event-qualification\probe\Cargo.toml') --release --target x86_64-pc-windows-msvc --locked
+if ($LASTEXITCODE -ne 0) { throw 'Event qualification probe build failed' }
+$probeOut = Join-Path $artifactRoot 'event_probe'
+New-Item -ItemType Directory -Force -Path $probeOut | Out-Null
+Copy-Item (Join-Path $here 'event-qualification\probe\target\x86_64-pc-windows-msvc\release\xlfn_event_probe.dll') (Join-Path $probeOut 'event-probe.xll') -Force
 python (Join-Path $here 'generate_registration.py') 0
 if ($LASTEXITCODE -ne 0) { throw 'Could not restore baseline generated source' }
 Write-Host "Paired add-ins built in $artifactRoot"

@@ -10,7 +10,10 @@ if ([string]::IsNullOrWhiteSpace($Destination)) {
     $Destination = Join-Path $here 'artifacts'
 }
 $repoRoot = (Resolve-Path (Join-Path $here '..\..')).Path
-$destinationPath = [System.IO.Path]::GetFullPath($Destination)
+# PowerShell's current location can differ from the process working directory
+# used by System.IO.Path.GetFullPath. Resolve against the caller's PS location,
+# before Push-Location, and allow the destination not to exist yet.
+$destinationPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Destination)
 if (Test-Path -LiteralPath $destinationPath) {
     throw "Destination already exists: $destinationPath. Choose an unused -Destination to avoid mixing CI runs."
 }

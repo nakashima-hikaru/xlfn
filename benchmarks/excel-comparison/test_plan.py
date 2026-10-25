@@ -14,7 +14,7 @@ import unittest
 import weakref
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from artifact_manifest import FILES, create, verify
 from generate_registration import source
@@ -871,6 +871,9 @@ class PlanTest(unittest.TestCase):
                 return next(counters)
             session.app.Evaluate.side_effect = evaluate
             result = run_scalar(session, Case("L02", "test", {"cells": 1}), 2)
+            self.assertEqual(session.calculate.call_args_list,
+                [call(session.add_formulas.return_value, full=True)] * 3)
+            self.assertEqual(result["warmup_calculation"], "CalculateFull")
             self.assertEqual(result["rss_growth_bytes"], 10)
             self.assertEqual(result["post_warmup_rss_bytes_growth"], 60)
             self.assertEqual(result["post_warmup_private_bytes_growth"], 90)

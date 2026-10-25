@@ -43,6 +43,8 @@ jobs:
         run: |
           cargo test --manifest-path benchmarks/excel-comparison/xlfn/Cargo.toml --locked --lib
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --manifest-path benchmarks/excel-comparison/event-qualification/probe/Cargo.toml --locked --lib
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           dotnet run --project benchmarks/excel-comparison/control-tests/ControlTests.csproj -- normal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           dotnet run --project benchmarks/excel-comparison/control-tests/ControlTests.csproj --no-build -- emergency

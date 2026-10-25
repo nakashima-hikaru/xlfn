@@ -1,9 +1,66 @@
 # Async calculation-event qualification
 
-Status on 2026-10-07: **full event lifecycle qualification unverified**. No local macOS test, Windows
+Status on 2026-10-25: **full event lifecycle qualification unverified**. No local macOS test, Windows
 cross-compilation, callback mock, or performance benchmark establishes native
 event registration or removal. The current evidence record is
-[records.json](records.json); its observation list is deliberately empty.
+[records.json](records.json); it now includes two partial live Windows shutdown
+observations. Neither qualifies event removal.
+
+## Live L02 observations, 2026-10-25
+
+[Selected evidence](l02-2026-10-25.json) retains provenance, metric summaries,
+consecutive-block timings, memory segments, slowest iterations and lifecycle
+events from four supplied JSONL records. It includes the original input's
+SHA-256; it is not a copy of all iteration samples. Both runner and XLLs used
+`cd9fb4b95fc67af4dad8fd6ba98abd418c2b2986`, CI run `40175450611`, attempt 1.
+Excel reported version `16.0`, build `20527.0`, and 64-bit Windows. Each run
+used 1,000 cells, one calculation thread, manual calculation, and allocation
+diagnostics. The update channel and executable identity were not captured.
+
+Both xlfn runs recorded the same direct trigger for
+`Quarantine(UnregisterFailed)`: removal of CalculationEnded (selector 1) and
+CalculationCanceled (selector 2) returned callback transport `Success`, raw
+`xltypeInt` (`0x0800`) with integer value `0`, and result cleanup `Ok`.
+The decoder rejected zero, so removal stayed indeterminate. There were no
+function-removal failure records or diagnostic-cap markers. This identifies
+the failed acknowledgement check, **not whether Excel actually removed the
+handlers**. The close callback reached `Quarantined` and returned status 1.
+All four Excel processes exited naturally with exit code 0 and no forced kill.
+
+| Implementation / repetitions | Rust allocated / freed bytes | RSS growth (MiB) | Private bytes growth (MiB) | p50 / p99 (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| xlfn / 100 | 415,200 / 415,200 | 20.10 | 12.39 | 4.937 / 31.219 |
+| Excel-DNA / 100 | Not supplied | 3.09 | -0.78 | 4.559 / 9.659 |
+| xlfn / 1000 | 4,152,000 / 4,152,000 | 21.40 | 9.69 | 5.410 / 7.484 |
+| Excel-DNA / 1000 | Not supplied | 17.86 | 5.79 | 5.976 / 8.478 |
+
+Growth is from the post-warmup baseline to the final measured iteration;
+1 MiB = 1,048,576 bytes. These instrumented timings are diagnostic observations,
+not framework performance ratios. Excel-DNA reports cumulative managed
+allocations, which cannot supply the Rust allocated/freed comparison.
+Balanced requested-byte counters do not establish a flat live heap or rule
+out native process-heap allocation, Excel retention, or allocator effects.
+
+In the 1,000-iteration runs, private bytes grew by only 1.29 MiB (xlfn) and
+0.23 MiB (Excel-DNA) over iterations 501–1000. First/last 100-iteration median
+times rose from 4.946 to 5.745 ms for xlfn and 5.211 to 6.394 ms for Excel-DNA,
+although each run's final individual iteration was faster than its first.
+Single first/last ratios therefore conceal the block-level drift. These
+observations do not isolate a framework-specific leak or latency cause.
+
+The slowest xlfn / 100 iteration took 65.613 ms: 7.434 ms in `CalculateFull`
+and 58.179 ms in completion-state observation. All measured iterations in
+all four runs used exactly one completion poll. That long observation is a
+COM query/scheduling interval, not evidence of repeated polling sleeps or
+proof that Excel was still calculating throughout it.
+
+The measured runner used range calculation for warmup and `CalculateFull`
+for measurement. The updated runner warms `CalculateFull` as well and records
+`warmup_calculation`; its effect requires a fresh live run. The earlier large
+RSS increase occurred on a different Excel build and code revision, so its
+absence here is not evidence that a leak was fixed. Event removal still needs
+the interactive, pinned-module qualification below; accepting zero solely to
+eliminate Quarantine would assert host behavior not established by this run.
 
 ## Public contract and remaining uncertainty
 
@@ -46,6 +103,72 @@ claiming an unobserved host state.
 
 ## Qualification gate
 
+### Runnable interactive probe
+
+The CI artifact set now includes `event_probe/event-probe.xll`, built from
+[`probe/`](probe/). It uses the repository's physical Excel ABI, but has its own
+handlers, async delay workload and raw C API logging. It does not change the
+production `RegistrationHost` decoder or discard production cleanup debt.
+Windows pins the probe DLL until process exit **before** any handler is
+registered. Each registration cycle uses different exported handler addresses,
+so an old handler cannot be mistaken for the current generation.
+
+Use a CI artifact produced **after this probe was added**, with a checkout at
+the manifest's exact commit. Earlier artifacts, including run `40175450611`,
+do not contain it. The existing `fetch-ci.ps1` verifies its hash and x86_64 PE
+architecture along with the comparison XLLs. Install `pywin32` and `psutil` in
+the same Python environment as the normal comparison runner.
+
+From `benchmarks/excel-comparison` on Windows with 64-bit desktop Excel:
+
+```powershell
+python .\event_probe.py --artifacts C:\path\to\verified-artifacts --out event-probe-results
+```
+
+The output directory must be new. The runner creates a separate visible Excel
+process and a temporary workbook; it refuses to modify an already-running
+Excel process. It guides the following sequence (two removal cycles by default):
+
+1. A programmatic calculation control, recorded separately.
+2. In Excel, press **F9** and wait for cell A6 to become `1`; return to the
+   terminal and press Enter. This must produce CalculationEnded.
+3. Press **F9**, then **Esc** while the 10-second async calculation is pending;
+   return to the terminal and press Enter. This must produce CalculationCanceled
+   followed by CalculationEnded.
+4. The runner calls nil-procedure removal from a registered XLL command, captures
+   both raw acknowledgements, then asks for the same normal/cancel operations.
+5. It re-registers new handler addresses and repeats both positive controls,
+   then repeats steps 4–5 once more.
+
+Do not use the COM console, VBA, or another automation tool for the requested
+F9/Esc actions: these are the interactive stimulus. Do not close Excel until
+the script finishes. No additional comparison XLL needs to be loaded. All
+workers must drain before event registration changes. After removal, a canceled
+worker may remain alive for the rest of its 10-second delay because its handler
+is absent; the probe preserves Excel's late `xlAsyncReturn` response. For this
+case the analyzer requires `xlretInvAsynchronousContext` (`256`) to corroborate
+the cancellation. A different response stays inconclusive, even if the operator
+pressed Esc.
+
+Return **both `report.json` and `probe.jsonl`** from the output directory. The
+report records the CI manifest, XLL hash, runner commit, process identity, Excel
+build/bitness/executable, phase counters, raw responses and trace hash. The raw
+log preserves handler generations, callback order, async attempts and close.
+Interrupted or failed experiments retain their partial evidence. The runner
+closes only its own workbook/process; it never force-kills Excel. The pinned DLL
+is released by Windows when that process exits.
+
+Possible assessments are `no_callbacks_observed_after_removal`,
+`callbacks_observed_after_removal`, and `inconclusive`. Missing positive controls,
+missing workload execution, stale generations, or incomplete evidence cannot
+pass. Even a complete pass establishes only the observed **command-context**
+removal behavior on this build. Production `xlAutoClose` ordering, module unload,
+task/ledger reclamation and close/reopen remain separate qualification cases.
+Use this result to choose the next production change; do not infer that raw
+integer zero always means successful removal.
+
+### Full production qualification
+
 Record one result for every exact Excel version, build, update channel, and
 Excel process bitness distributed to. A record for one version or architecture
 does not qualify another. Include both 32-bit and 64-bit Excel only when both
@@ -56,8 +179,10 @@ rather than the operating-system or Python bitness.
 Use a fresh interactive Windows Excel process and a trusted instrumented XLL
 from the candidate commit. Retain the XLL's SHA-256 and the instrumented
 source/build diff. The existing comparison runner's version/build and XLL
-metadata can accompany the record, but its worksheet results do not capture
-raw event acknowledgements or prove nil-procedure removal.
+metadata can accompany the record. With `--shutdown-diagnostics`, failed or
+indeterminate removals include raw results; successful registration results
+and interactive callback counters still need a dedicated probe. Worksheet
+results alone do not prove nil-procedure removal.
 
 1. Capture the actual `xlEventRegister` arguments, callback transport status,
    raw result `xltype`, signed integer value, and raw integer bits for both

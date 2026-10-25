@@ -552,11 +552,12 @@ def run_scalar(session: ExcelSession, case: Case, repeat: int) -> dict[str, Any]
     sheet = session.new_book()
     count = case.params["cells"]
     target = session.add_formulas(sheet, count, lambda row: formula(case.id, row, case.params))
-    session.calculate(target)
+    repeated = case.id == "L02"
+    # Warm the same calculation path that the measured iterations exercise.
+    session.calculate(target, full=repeated)
     check_scalar(target, case)
     samples = []
     observations = []
-    repeated = case.id == "L02"
     track = repeated and getattr(session, "repeat_diagnostics", False)
     baseline = session.memory_snapshot() if repeated else None
     allocation_before = None
@@ -581,6 +582,7 @@ def run_scalar(session: ExcelSession, case: Case, repeat: int) -> dict[str, Any]
         result["nominal_cpu_s"] = count * case.params["delay_us"] / 1e6
         result["overhead_note"] = "Compare the 0-us baseline against total time; nominal busy-loop duration is not a calibrated CPU timer"
     if repeated:
+        result["warmup_calculation"] = "CalculateFull"
         result["first_recalc_s"] = samples[0]
         result["last_recalc_s"] = samples[-1]
         result["latency_drift_ratio"] = samples[-1] / samples[0]
@@ -1822,7 +1824,8 @@ def main() -> int:
         if not args.allow_commit_mismatch and runner_commit != manifest["commit"]:
             parser.error(f"checkout commit {runner_commit} differs from CI artifact commit {manifest['commit']}")
     elif not args.allow_local_artifacts:
-        parser.error("CI artifact manifest is missing; download a CI run with fetch-ci.ps1")
+        parser.error(f"CI artifact manifest is missing: {artifact_root.resolve() / 'manifest.json'}; "
+                     "download a CI run with fetch-ci.ps1 and pass its verified destination to --artifacts")
     out = Path(args.out)
     if out.exists() and out.stat().st_size > 0 and not args.append:
         parser.error(f"{out} already contains results; choose a new --out or pass --append")

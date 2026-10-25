@@ -17,7 +17,7 @@ FILES = tuple(
     f"{implementation}/{name}"
     for implementation in ("xlfn", "excel_dna")
     for name in ("benchmark.xll", *(f"registration-{count}.xll" for count in REGISTRATION_COUNTS))
-)
+) + ("event_probe/event-probe.xll",)
 
 
 def sha256(path: Path) -> str:

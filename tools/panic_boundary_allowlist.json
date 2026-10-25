@@ -406,5 +406,13 @@
     "count": 1,
     "category": "implementation",
     "reason": "Captures at most 16 KiB of standard panic text before applying contain_panic to the payload; arbitrary payload destructors never run."
+  },
+  {
+    "path": "benchmarks/excel-comparison/event-qualification/probe/src/lib.rs",
+    "context": "fn boundary",
+    "code": "match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {",
+    "count": 1,
+    "category": "experiment",
+    "reason": "Standalone pinned raw-ABI event probe: contain panics at all exported Excel entry points and worker bodies; forget the consumed payload so its destructor cannot unwind across the host ABI. This probe has no production lifecycle or unload authority."
   }
 ]

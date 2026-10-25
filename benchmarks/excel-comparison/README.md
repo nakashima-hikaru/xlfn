@@ -41,6 +41,8 @@ Replace `123456789` with a completed workflow run ID. `fetch-ci.ps1` rejects
 an existing destination so artifacts from different runs cannot be mixed;
 `-Repository OWNER/REPO` and `-Destination PATH` are available if needed. If
 you choose another destination, pass the same path to `run.py --artifacts`.
+An explicit relative `-Destination` is resolved against your current PowerShell
+location; the default remains the `artifacts` directory beside `fetch-ci.ps1`.
 The runner verifies the CI manifest (including Excel-DNA's NativeAOT build mode), all ten XLL digests, the x86_64 PE
 machine type, and the checkout commit before opening Excel. For a PR artifact,
 check out the CI run's merge commit; `--allow-commit-mismatch` is available
@@ -490,9 +492,18 @@ attributing the differences to the frameworks.
 
 ### Repeated calculation and unregister diagnostics
 
+For interactive event removal observations, use the separate
+[event qualification probe](event-qualification/README.md#runnable-interactive-probe).
+It ships in the same CI artifact set and guides F9/Esc operations; the COM-only
+L02 runner cannot establish whether event callbacks stop after removal.
+
 L02 retains every measured iteration in `recalculation_samples`: total time,
 the `CalculateFull` COM call, completion-state polling, Excel RSS and, on
-Windows, private committed bytes. Memory reads are outside the calculation
+Windows, private committed bytes. L02 uses one `CalculateFull` warmup before
+the baseline and measured iterations; `warmup_calculation` records this choice.
+Older records without that field used a range calculation for warmup and
+`CalculateFull` for measurement, so their first-iteration growth can include
+initialization of the full-calculation path. Memory reads are outside the calculation
 timer. `post_warmup_memory` is taken **before** the first measured iteration;
 `post_warmup_rss_bytes_growth` and `post_warmup_private_bytes_growth` include
 that iteration. The historical `rss_growth_bytes` still measures first-to-last
