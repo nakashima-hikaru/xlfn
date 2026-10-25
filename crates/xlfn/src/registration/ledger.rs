@@ -133,12 +133,11 @@ pub(crate) enum RegistrationCertainty {
 /// Host mutations that belong to one registration/open transaction.
 ///
 /// The journal is the sole owner of cleanup obligations until the transaction
-/// commits them into [`HostLedger`].  Keeping registrations, events, metadata
+/// commits them into [`HostLedger`].  Keeping registrations, metadata
 /// debt, and certainty together prevents one failure path from retaining only
 /// part of the host-side side effects.
 pub(crate) struct HostMutationJournal {
     pub(crate) pending_registrations: Vec<PendingRegistration>,
-    pub(crate) pending_events: Vec<EventRegistration>,
     pub(crate) metadata_debt: Vec<MetadataDebt>,
     pub(crate) unknown_registrations: Vec<UnknownRegistrationState>,
     pub(crate) certainty: RegistrationCertainty,
@@ -148,7 +147,6 @@ impl Default for HostMutationJournal {
     fn default() -> Self {
         Self {
             pending_registrations: Vec::new(),
-            pending_events: Vec::new(),
             metadata_debt: Vec::new(),
             unknown_registrations: Vec::new(),
             certainty: RegistrationCertainty::Known,
@@ -165,7 +163,6 @@ impl HostMutationJournal {
     pub(crate) fn merge(&mut self, mut other: Self) {
         self.pending_registrations
             .append(&mut other.pending_registrations);
-        self.pending_events.append(&mut other.pending_events);
         self.metadata_debt.append(&mut other.metadata_debt);
         self.unknown_registrations
             .append(&mut other.unknown_registrations);
@@ -208,14 +205,6 @@ pub(crate) struct MetadataDebtRetryResult {
     pub(crate) remaining: BTreeMap<ExcelNameKey, Vec<MetadataDebt>>,
     pub(crate) cleanup_issues: Vec<XllError>,
     pub(crate) terminal: Option<XllError>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct EventRegistration {
-    pub(crate) procedure: &'static str,
-    pub(crate) event: i32,
-    pub(crate) registration_id: i32,
-    pub(crate) unregistered: bool,
 }
 
 #[cfg(test)]

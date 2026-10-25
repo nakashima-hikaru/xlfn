@@ -588,12 +588,29 @@ jobs:
                   --
                   --ignored
 
+            - name: Validate resident-event close and reopen traces
+              env:
+                  XLFN_SHUTDOWN_CHECKER: ${{ github.workspace }}/formal/.lake/build/bin/shutdown_trace_checker
+                  XLFN_COMPOSITION_CHECKER: ${{ github.workspace }}/formal/.lake/build/bin/composition_trace_checker
+                  XLFN_COMPOSITION_TRACE_DIR: ${{ github.workspace }}
+              run: >-
+                  cargo test
+                  --package xlfn
+                  --lib
+                  --features "async-builtin refinement"
+                  boundary::event_lifecycle_tests::close_and_reopen_reuse_resident_events_and_reclaim_each_generation
+                  --locked
+                  --
+                  --exact
+                  --test-threads=1
+
             - name: Upload Rust composition traces
               if: always()
               uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
               with:
                   name: rust-composition-traces
                   path: |
+                      rust-resident-events-*.json
                       rust-composition-trace.json
                       rust-composition-owner-takeover-trace.json
                       rust-composition-uncommitted-trace.json

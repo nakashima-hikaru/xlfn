@@ -4,8 +4,7 @@ use crate::sync::Mutex;
 use std::collections::BTreeMap;
 
 use crate::registration::{
-    EventRegistration, ExcelNameKey, HostMutationJournal, MetadataDebt, PendingRegistration,
-    RegistrationCertainty,
+    ExcelNameKey, HostMutationJournal, MetadataDebt, PendingRegistration, RegistrationCertainty,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -17,7 +16,6 @@ enum RegistrationState {
 struct HostLedgerState {
     registrations: Vec<PendingRegistration>,
     metadata_debt: BTreeMap<ExcelNameKey, Vec<MetadataDebt>>,
-    event_registrations: Vec<EventRegistration>,
     registration_state: RegistrationState,
 }
 
@@ -26,7 +24,6 @@ impl HostLedgerState {
         Self {
             registrations: Vec::new(),
             metadata_debt: BTreeMap::new(),
-            event_registrations: Vec::new(),
             registration_state: RegistrationState::Known,
         }
     }
@@ -34,7 +31,7 @@ impl HostLedgerState {
 
 /// The Excel host registration protocol and its recovery ledger.
 ///
-/// Registration mutations, event registrations, metadata debt, and the
+/// Generation function registrations, metadata debt, and the
 /// registration-state certainty flag form one cold-path transaction domain.
 /// Keeping them under one mutex makes the snapshot used by shutdown
 /// certification coherent without maintaining several synchronization orders.
@@ -52,7 +49,6 @@ impl HostLedger {
     pub(crate) fn merge(&self, journal: HostMutationJournal) {
         let mut state = self.state.lock();
         state.registrations.extend(journal.pending_registrations);
-        state.event_registrations.extend(journal.pending_events);
         for debt in journal.metadata_debt {
             state
                 .metadata_debt
@@ -69,28 +65,18 @@ impl HostLedger {
         self.state.lock().registrations.clone()
     }
 
-    pub(crate) fn event_registrations_snapshot(&self) -> Vec<EventRegistration> {
-        self.state.lock().event_registrations.clone()
-    }
-
-    pub(crate) fn callbacks_detached(&self) -> bool {
+    pub(crate) fn generation_callbacks_detached(&self) -> bool {
         let state = self.state.lock();
-        state.registrations.is_empty() && state.event_registrations.is_empty()
+        state.registrations.is_empty()
     }
 
     pub(crate) fn is_quiescent(&self) -> bool {
         let state = self.state.lock();
-        state.registrations.is_empty()
-            && state.event_registrations.is_empty()
-            && state.registration_state == RegistrationState::Known
+        state.registrations.is_empty() && state.registration_state == RegistrationState::Known
     }
 
     pub(crate) fn replace_registrations(&self, registrations: Vec<PendingRegistration>) {
         self.state.lock().registrations = registrations;
-    }
-
-    pub(crate) fn replace_event_registrations(&self, registrations: Vec<EventRegistration>) {
-        self.state.lock().event_registrations = registrations;
     }
 
     pub(crate) fn registration_state_unknown(&self) -> bool {

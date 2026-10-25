@@ -171,50 +171,50 @@ theorem Step.valid_preserved
           simp_all [State.SessionConsistent], by
         simpa [State.CurrentShutdownCertified] using hValid.2.2⟩
 
-theorem Step.unloadCertificationConsistent_preserved
+theorem Step.logicalCloseCertificationConsistent_preserved
     {s t : State} {event : Event}
-    (hConsistent : s.UnloadCertificationConsistent)
+    (hConsistent : s.LogicalCloseCertificationConsistent)
     (hStep : Step s event t) :
-    t.UnloadCertificationConsistent := by
+    t.LogicalCloseCertificationConsistent := by
   cases hStep with
   | beginOpen hNoSession hLifecycle =>
       cases hLifecycle <;>
-        simp_all [State.UnloadCertificationConsistent]
+        simp_all [State.LogicalCloseCertificationConsistent]
   | finishOpenRejectedByClose hNoSession hLifecycle =>
       cases hLifecycle <;>
-        simp_all [State.UnloadCertificationConsistent]
+        simp_all [State.LogicalCloseCertificationConsistent]
   | failOpen hNoSession hLifecycle =>
       cases hLifecycle <;>
-        simp_all [State.UnloadCertificationConsistent]
+        simp_all [State.LogicalCloseCertificationConsistent]
   | quarantineOpen hNoSession hLifecycle =>
-      cases hLifecycle <;> simp [State.UnloadCertificationConsistent]
+      cases hLifecycle <;> simp [State.LogicalCloseCertificationConsistent]
   | requestFinalClose hLifecycle =>
       cases hLifecycle <;>
         cases hPhase : s.lifecycle.phase <;>
-          simp_all [State.UnloadCertificationConsistent, Lifecycle.phaseAfterFinalClose]
+          simp_all [State.LogicalCloseCertificationConsistent, Lifecycle.phaseAfterFinalClose]
   | acquireFinalCloseOwner hLifecycle =>
       cases hLifecycle <;>
-        simp_all [State.UnloadCertificationConsistent]
+        simp_all [State.LogicalCloseCertificationConsistent]
   | acquireOpenRollbackOwner hNoSession hLifecycle =>
       cases hLifecycle <;>
-        simp_all [State.UnloadCertificationConsistent]
+        simp_all [State.LogicalCloseCertificationConsistent]
   | commitOpen hNoSession hPhase hAttempt hNonzero =>
-      simp [State.UnloadCertificationConsistent]
+      simp [State.LogicalCloseCertificationConsistent]
   | liftShutdown hSession hLifecycle hShutdown hNotFinish hOpenTarget =>
-      simpa [State.UnloadCertificationConsistent] using hConsistent
+      simpa [State.LogicalCloseCertificationConsistent] using hConsistent
   | finishCommittedShutdown hSession hCertificate =>
-      simpa [State.UnloadCertificationConsistent] using hConsistent
+      simpa [State.LogicalCloseCertificationConsistent] using hConsistent
   | publishCommittedClosed hSession hPhase hNoAttempt hOwner hShutdownClosed =>
-      simp [State.UnloadCertificationConsistent]
+      simp [State.LogicalCloseCertificationConsistent]
   | retireCommittedShutdown hSession hPhase hOwner hShutdownClosed hGeneration =>
-      simpa [State.UnloadCertificationConsistent] using hConsistent
+      simpa [State.LogicalCloseCertificationConsistent] using hConsistent
   | finishUncommittedFinalClose hNoSession hCertificate =>
-      simp [State.UnloadCertificationConsistent]
+      simp [State.LogicalCloseCertificationConsistent]
   | finishOpenRollback hNoSession hCertificate =>
-      simp [State.UnloadCertificationConsistent]
+      simp [State.LogicalCloseCertificationConsistent]
   | releaseCleanupOwner hAllowed hLifecycle =>
       cases hLifecycle <;>
-        simp_all [State.UnloadCertificationConsistent]
+        simp_all [State.LogicalCloseCertificationConsistent]
 
 theorem Reachable.valid
     {initial current : State}
@@ -227,24 +227,24 @@ theorem Reachable.valid
   | step _ hStep ih =>
       exact Step.valid_preserved ih hStep
 
-theorem Reachable.unloadCertificationConsistent
+theorem Reachable.logicalCloseCertificationConsistent
     {initial current : State}
-    (hInitial : initial.UnloadCertificationConsistent)
+    (hInitial : initial.LogicalCloseCertificationConsistent)
     (hReachable : Reachable initial current) :
-    current.UnloadCertificationConsistent := by
+    current.LogicalCloseCertificationConsistent := by
   induction hReachable with
   | initial =>
       exact hInitial
   | step _ hStep ih =>
-      exact Step.unloadCertificationConsistent_preserved ih hStep
+      exact Step.logicalCloseCertificationConsistent_preserved ih hStep
 
 def State.Invariant (s : State) : Prop :=
-  s.Valid ∧ s.UnloadCertificationConsistent
+  s.Valid ∧ s.LogicalCloseCertificationConsistent
 
 theorem State.initialState_invariant :
     State.initialState.Invariant := by
   exact ⟨State.initialState_valid,
-    State.initialState_unloadCertificationConsistent⟩
+    State.initialState_logicalCloseCertificationConsistent⟩
 
 theorem Step.invariant_preserved
     {s t : State} {event : Event}
@@ -253,7 +253,7 @@ theorem Step.invariant_preserved
     t.Invariant := by
   exact ⟨
     Step.valid_preserved hInvariant.1 hStep,
-    Step.unloadCertificationConsistent_preserved hInvariant.2 hStep
+    Step.logicalCloseCertificationConsistent_preserved hInvariant.2 hStep
   ⟩
 
 theorem Reachable.invariant

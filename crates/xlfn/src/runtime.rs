@@ -302,10 +302,25 @@ impl<A: crate::Addin> Runtime<A> {
         self.residency.ensure(anchor)
     }
 
-    /// Releases the physical residency reference after explicit removal has
-    /// completed. Ordinary host shutdown hints never call this method.
-    pub(crate) fn release_module_residency(&self) -> XllResult<()> {
+    /// Attempts physical release after logical removal. Returns false while
+    /// a native event registration (including an uncertain one) requires the
+    /// DLL. Both normal close and failed-open cleanup use this same guard.
+    pub(crate) fn release_module_residency(&self) -> XllResult<bool> {
         self.residency.release()
+    }
+
+    pub(crate) fn ensure_calculation_events(
+        &self,
+        host: &crate::registration::RegistrationHost<'_>,
+        has_async_functions: bool,
+    ) -> XllResult<()> {
+        self.residency
+            .ensure_calculation_events(host, has_async_functions)
+    }
+
+    #[cfg(any(test, feature = "lifecycle-diagnostics"))]
+    pub(crate) fn resident_event_count(&self) -> usize {
+        self.residency.resident_event_count()
     }
 
     pub(crate) fn physical_unload_enabled(&self) -> bool {
@@ -322,7 +337,12 @@ impl<A: crate::Addin> Runtime<A> {
             .map_err(crate::error::IntoXllError::into_xll_error)
     }
 
-    #[cfg(any(feature = "rtd", feature = "handles", test))]
+    #[cfg(any(
+        test,
+        feature = "rtd",
+        feature = "handles",
+        feature = "lifecycle-diagnostics"
+    ))]
     pub(crate) fn module_residency_held(&self) -> bool {
         self.residency.is_held()
     }
@@ -1751,7 +1771,7 @@ pub(crate) mod tests {
                 (2.0, "SECOND", RegistrationCleanupState::Registered),
             ],
         );
-        assert!(!runtime.host.callbacks_detached());
+        assert!(!runtime.host.generation_callbacks_detached());
         assert!(!runtime.host.is_quiescent());
 
         // Cleanup retries replace the ledger with only unfinished work and
@@ -1767,12 +1787,12 @@ pub(crate) mod tests {
         assert_eq!(remaining[0].registration.id, 2.0);
         assert_eq!(remaining[0].registration.excel_name, "SECOND");
         assert_eq!(remaining[0].state, RegistrationCleanupState::Unregistered);
-        assert!(!runtime.host.callbacks_detached());
+        assert!(!runtime.host.generation_callbacks_detached());
         assert!(!runtime.host.is_quiescent());
 
         runtime.host.replace_registrations(Vec::new());
         assert!(runtime.host.registrations_snapshot().is_empty());
-        assert!(runtime.host.callbacks_detached());
+        assert!(runtime.host.generation_callbacks_detached());
         assert!(runtime.host.is_quiescent());
     }
 

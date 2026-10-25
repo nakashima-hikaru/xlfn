@@ -623,7 +623,12 @@ pub trait Addin: Send + Sync + 'static {
     /// terminal removal, because arbitrary user-created threads and native
     /// callbacks cannot be verified by the framework from this safe trait.
     /// Implement [`PhysicallyUnloadableAddin`] to opt into physical unload
-    /// after accepting that stronger contract explicitly.
+    /// eligibility after accepting that stronger contract explicitly.
+    ///
+    /// Native calculation-event registrations have loaded-module lifetime.
+    /// Logical close shuts their generation admission and reclaims generation
+    /// resources while retaining the DLL. Reopening the same runtime reuses
+    /// confirmed registrations instead of registering another handler.
     ///
     /// Handle values are call-scoped and cannot be stored in either state.
     /// Vendor operations must be canceled cooperatively; unload waits rather
@@ -654,20 +659,29 @@ pub trait Addin: Send + Sync + 'static {
 /// contract can execute unmapped XLL code after `FreeLibrary`, so the opt-in
 /// is deliberately an `unsafe impl` rather than a safe configuration flag.
 ///
+/// This opt-in permits release only when all framework-owned native event
+/// registration slots are empty as well. Confirmed, in-flight, or indeterminate
+/// calculation-event registrations retain DLL residency even after successful
+/// logical close. The trait does not guarantee that Excel will unload the DLL.
+///
 /// # Safety
 ///
-/// Implementors must ensure that no thread, callback, future, native handle,
-/// or other executable source that can enter this XLL remains active after
-/// [`Self::quiesce_for_physical_unload`] returns successfully. They must also
+/// Implementors must ensure that no application-created thread, callback,
+/// future, native handle, or other executable source that can enter this XLL
+/// remains active after [`Self::quiesce_for_physical_unload`] returns successfully.
+/// They must also
 /// ensure that the hook itself synchronously establishes that condition before
 /// returning. The framework's own admission and executor accounting is not a
-/// substitute for this application-level guarantee.
+/// substitute for this application-level guarantee. Conversely, satisfying
+/// this contract does not remove framework-owned native event roots or permit
+/// releasing their residency hold.
 ///
 /// If `Addin::open` fails before returning its state, the framework retains
 /// DLL residency and quarantines the runtime rather than invoking this hook.
 pub unsafe trait PhysicallyUnloadableAddin: Addin {
     /// Performs the stronger quiescence required before releasing the DLL's
-    /// physical residency lease.
+    /// physical residency lease. Successful quiescence does not override a
+    /// residency hold for native calculation-event registrations.
     fn quiesce_for_physical_unload(
         shared: &mut Self::SharedState,
         lifecycle: &mut Self::LifecycleState,

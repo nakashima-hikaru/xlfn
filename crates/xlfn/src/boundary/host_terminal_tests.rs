@@ -128,20 +128,17 @@ fn close_replacement(runtime: &Runtime<ReloadAddin>) {
         Reply::success(XLF_UNREGISTER, XLOPER12::boolean(true)),
         Reply::success(XLF_EVALUATE, XLOPER12::number(9.0)),
         Reply::success(XLF_SET_NAME, XLOPER12::boolean(true)),
-        Reply::success(XL_EVENT_REGISTER, XLOPER12::integer(1)),
     ]);
     assert_eq!(host_auto_close(runtime), 1);
     assert_eq!(runtime.phase(), LifecyclePhase::Closed);
     assert_eq!(runtime.host_intent(), HostLifecycleIntent::None);
-    assert!(!runtime.module_residency_held());
+    // The replacement installed the module's native event export. Logical
+    // close reclaims its generation while retaining that export and DLL.
+    assert_eq!(runtime.resident_event_count(), 1);
+    assert!(runtime.module_residency_held());
     assert_eq!(runtime.metadata_debt_count_for_test(), 0);
     assert_eq!((OPENS.get(), QUIESCES.get()), (1, previous_quiesces + 1));
-    script.assert_calls(&[
-        XLF_UNREGISTER,
-        XLF_EVALUATE,
-        XLF_SET_NAME,
-        XL_EVENT_REGISTER,
-    ]);
+    script.assert_calls(&[XLF_UNREGISTER, XLF_EVALUATE, XLF_SET_NAME]);
 }
 
 #[test]
@@ -158,8 +155,8 @@ fn reload_stops_after_terminal_metadata_cleanup_and_retries_debt_on_later_entry(
                 Reply::success(XLF_UNREGISTER, XLOPER12::boolean(true)),
                 evaluate,
             ]);
-            // Publish exactly one synchronous UDF. No async event callback
-            // remains to turn the terminal metadata error into quarantine.
+            // Publish exactly one synchronous UDF directly. This fixture has
+            // no native events until the replacement performs a full open.
             let runtime = publish_old_generation();
             let old_generation = runtime.last_committed_generation();
 
@@ -308,6 +305,9 @@ fn reload_stops_after_terminal_free_of_successful_final_name_deletion() {
         assert_eq!(host_auto_close(&runtime), 1);
         assert_eq!(runtime.phase(), LifecyclePhase::Closed);
         assert_eq!(runtime.host_intent(), HostLifecycleIntent::None);
+        // No replacement opened, so this direct-publication fixture never
+        // installed an event and its physical opt-in can release the lease.
+        assert_eq!(runtime.resident_event_count(), 0);
         assert!(!runtime.module_residency_held());
         assert_eq!((OPENS.get(), QUIESCES.get()), (0, 1));
         close.assert_calls(&[]);
@@ -315,7 +315,7 @@ fn reload_stops_after_terminal_free_of_successful_final_name_deletion() {
 }
 
 #[test]
-fn nonterminal_reload_opens_replacement_and_later_close_releases_residency() {
+fn nonterminal_reload_opens_replacement_and_later_close_retains_event_residency() {
     let script = CallbackScript::install(
         [
             Reply::success(XLF_UNREGISTER, XLOPER12::boolean(true)),

@@ -13,8 +13,6 @@ inductive Completion where
 inductive Event where
   | registerFunction
   | unregisterFunction
-  | registerEvent
-  | unregisterEvent
   | enterExternal
   | leaveExternal
   | enterCall
@@ -91,19 +89,6 @@ inductive Step : State → Event → State → Prop where
       (hCount : s.resources.registrations = n + 1) :
       Step s .unregisterFunction
         { s with resources := { s.resources with registrations := n } }
-
-  | registerEvent {s : State}
-      (hOpen : s.phase = .open)
-      (hIngress : s.resources.ingressOpen = true) :
-      Step s .registerEvent
-        { s with resources :=
-            { s.resources with eventRegistrations := s.resources.eventRegistrations + 1 } }
-
-  | unregisterEvent {s : State} {n : Nat}
-      (hLive : s.phase.IsLive)
-      (hCount : s.resources.eventRegistrations = n + 1) :
-      Step s .unregisterEvent
-        { s with resources := { s.resources with eventRegistrations := n } }
 
   | enterExternal {s : State}
       (hOpen : s.phase = .open)

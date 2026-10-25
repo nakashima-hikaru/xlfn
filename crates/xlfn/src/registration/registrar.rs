@@ -7,15 +7,11 @@
 use super::host::{RegistrationHost, RegistrationMutation};
 use super::preflight::{PreparedRegistration, PreparedRegistrationSet};
 use super::{
-    EventRegistration, PendingRegistration, RegistrationId, RegistrationTransactionError,
-    UnknownRegistrationState, UnregisterResult,
+    PendingRegistration, RegistrationId, RegistrationTransactionError, UnknownRegistrationState,
+    UnregisterResult,
 };
 use crate::XllError;
 use std::path::PathBuf;
-
-#[cfg(feature = "async")]
-use super::host::CALCULATION_CANCELED_EVENT;
-use super::host::CALCULATION_ENDED_EVENT;
 
 pub(crate) struct HostRegistrar {
     module_path: PathBuf,
@@ -59,61 +55,6 @@ impl HostRegistrar {
             |host, registration| self.register_one(host, registration),
             Self::unregister_pending,
         )
-    }
-
-    pub(crate) fn register_calculation_events(
-        &self,
-        host: &RegistrationHost<'_>,
-        has_async_functions: bool,
-    ) -> Result<Vec<EventRegistration>, RegistrationTransactionError> {
-        register_calculation_events_transaction(
-            host,
-            has_async_functions,
-            |host, procedure, event| self.register_event(host, procedure, event),
-            Self::unregister_events_detailed,
-        )
-    }
-
-    fn register_event(
-        &self,
-        host: &RegistrationHost<'_>,
-        procedure: &'static str,
-        event: i32,
-    ) -> Result<EventRegistration, RegistrationTransactionError> {
-        match host.register_event(procedure, event) {
-            RegistrationMutation::Applied { value, cleanup } => match cleanup {
-                Ok(()) => Ok(value),
-                Err(error) => Err(event_release_failure(
-                    host,
-                    value,
-                    error,
-                    Self::unregister_events_detailed,
-                )),
-            },
-            RegistrationMutation::Rejected { error } => {
-                Err(RegistrationTransactionError::new(error))
-            }
-            RegistrationMutation::Indeterminate { status, error } => {
-                let registration = EventRegistration {
-                    procedure,
-                    event,
-                    registration_id: 0,
-                    unregistered: false,
-                };
-                let mut transaction_error = RegistrationTransactionError::new(error);
-                if status.is_terminal() {
-                    transaction_error.journal.pending_events.push(registration);
-                    Err(transaction_error)
-                } else {
-                    Err(event_release_failure(
-                        host,
-                        registration,
-                        *transaction_error.source,
-                        Self::unregister_events_detailed,
-                    ))
-                }
-            }
-        }
     }
 
     fn register_one(
@@ -241,15 +182,6 @@ impl HostRegistrar {
         }
         outcome
     }
-
-    pub(crate) fn unregister_events_detailed(
-        host: &RegistrationHost<'_>,
-        registrations: &[EventRegistration],
-    ) -> UnregisterResult<EventRegistration> {
-        unregister_events_with(registrations, |registration| {
-            host.unregister_event(registration.event)
-        })
-    }
 }
 
 fn reconcile_malformed_registration_result_with(
@@ -280,34 +212,6 @@ fn reconcile_malformed_registration_result_with(
             error
         }
     }
-}
-
-fn unregister_events_with(
-    registrations: &[EventRegistration],
-    mut unregister: impl FnMut(&EventRegistration) -> RegistrationMutation<()>,
-) -> UnregisterResult<EventRegistration> {
-    let mut outcome = UnregisterResult::new(registrations.len());
-    for registration in registrations.iter().rev() {
-        let mut registration = registration.clone();
-        if registration.unregistered {
-            outcome.succeeded.push(registration);
-            continue;
-        }
-        match unregister(&registration) {
-            RegistrationMutation::Applied { cleanup, .. } => {
-                registration.unregistered = true;
-                if let Err(error) = cleanup {
-                    outcome.cleanup_issues.push(error);
-                }
-                outcome.succeeded.push(registration);
-            }
-            RegistrationMutation::Rejected { error }
-            | RegistrationMutation::Indeterminate { error, .. } => {
-                outcome.failed.push((registration, error));
-            }
-        }
-    }
-    outcome
 }
 
 fn register_all_transaction<T>(
@@ -372,75 +276,6 @@ fn registration_release_failure(
         outcome.failed.into_iter().map(|(entry, _)| entry).collect();
     error.journal.metadata_debt = outcome.metadata_debt;
     error
-}
-
-fn event_release_failure(
-    host: &RegistrationHost<'_>,
-    registration: EventRegistration,
-    source: XllError,
-    unregister: impl FnOnce(
-        &RegistrationHost<'_>,
-        &[EventRegistration],
-    ) -> UnregisterResult<EventRegistration>,
-) -> RegistrationTransactionError {
-    let mut error = RegistrationTransactionError::new(source);
-    if !host.permits_callbacks() {
-        error.journal.pending_events.push(registration);
-        return error;
-    }
-    error.journal.pending_events = unregister(host, &[registration])
-        .failed
-        .into_iter()
-        .map(|(entry, _)| entry)
-        .collect();
-    error
-}
-
-fn register_calculation_events_transaction(
-    host: &RegistrationHost<'_>,
-    has_async_functions: bool,
-    mut register: impl FnMut(
-        &RegistrationHost<'_>,
-        &'static str,
-        i32,
-    ) -> Result<EventRegistration, RegistrationTransactionError>,
-    mut unregister: impl FnMut(
-        &RegistrationHost<'_>,
-        &[EventRegistration],
-    ) -> UnregisterResult<EventRegistration>,
-) -> Result<Vec<EventRegistration>, RegistrationTransactionError> {
-    let mut registrations = Vec::with_capacity(2);
-    if has_async_functions {
-        #[cfg(feature = "async")]
-        registrations.push(register(
-            host,
-            "__xlfn_calculation_canceled",
-            CALCULATION_CANCELED_EVENT,
-        )?);
-        #[cfg(not(feature = "async"))]
-        return Err(RegistrationTransactionError::new(XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::ASYNC_FEATURE,
-        }));
-    }
-    match register(host, "__xlfn_calculation_ended", CALCULATION_ENDED_EVENT) {
-        Ok(registration) => {
-            registrations.push(registration);
-            Ok(registrations)
-        }
-        Err(mut error) => {
-            if !host.permits_callbacks() {
-                error.journal.pending_events.extend(registrations);
-            } else {
-                error.journal.pending_events.extend(
-                    unregister(host, &registrations)
-                        .failed
-                        .into_iter()
-                        .map(|(entry, _)| entry),
-                );
-            }
-            Err(error)
-        }
-    }
 }
 
 #[cfg(test)]
@@ -681,31 +516,6 @@ mod tests {
     }
 
     #[test]
-    fn unregister_mutation_is_committed_before_result_cleanup() {
-        let registration = EventRegistration {
-            procedure: "event",
-            event: 1,
-            registration_id: 1,
-            unregistered: false,
-        };
-        let first = unregister_events_with(&[registration], |_registration| {
-            RegistrationMutation::Applied {
-                value: (),
-                cleanup: Err(XllError::Closing),
-            }
-        });
-
-        assert!(first.failed.is_empty());
-        assert_eq!(first.cleanup_issues.len(), 1);
-        assert!(first.succeeded[0].unregistered);
-
-        let retry = unregister_events_with(&first.succeeded, |_registration| {
-            panic!("an applied unregister must not be repeated")
-        });
-        assert_eq!(retry.succeeded.len(), 1);
-    }
-
-    #[test]
     fn pending_registration_cleanup_severity_matches_state() {
         let mut registration = PendingRegistration::from(RegistrationId {
             id: 1.0,
@@ -879,67 +689,5 @@ mod tests {
             assert_eq!(outcome.cleanup_issues.len(), 1);
             script.assert_calls(&[XLF_UNREGISTER, XLF_EVALUATE, XLF_SET_NAME]);
         }
-    }
-
-    #[test]
-    fn synchronous_functions_register_calculation_end_without_async_events() {
-        let callbacks = HostCallbackSession::new();
-        let host = RegistrationHost::new(&callbacks);
-        let registered = register_calculation_events_transaction(
-            &host,
-            false,
-            |_host, procedure, event| {
-                Ok(EventRegistration {
-                    procedure,
-                    event,
-                    registration_id: 1,
-                    unregistered: false,
-                })
-            },
-            |_host, _registrations| panic!("successful event registration does not roll back"),
-        )
-        .unwrap_or_else(|_| panic!("calculation end event must register"));
-        assert_eq!(registered.len(), 1);
-        assert_eq!(registered[0].procedure, "__xlfn_calculation_ended");
-        assert_eq!(registered[0].event, CALCULATION_ENDED_EVENT);
-    }
-
-    #[cfg(feature = "async")]
-    #[test]
-    fn second_async_event_failure_rolls_back_the_first_event() {
-        let callbacks = HostCallbackSession::new();
-        let host = RegistrationHost::new(&callbacks);
-        let attempts = Cell::new(0);
-        let rolled_back = RefCell::new(Vec::new());
-
-        let result = register_calculation_events_transaction(
-            &host,
-            true,
-            |_host, procedure, event| {
-                let attempt = attempts.get() + 1;
-                attempts.set(attempt);
-                if attempt == 2 {
-                    Err(RegistrationTransactionError::new(XllError::Closing))
-                } else {
-                    Ok(EventRegistration {
-                        procedure,
-                        event,
-                        registration_id: attempt,
-                        unregistered: false,
-                    })
-                }
-            },
-            |_host, registrations| {
-                rolled_back.borrow_mut().extend_from_slice(registrations);
-                let mut result = UnregisterResult::new(registrations.len());
-                result.succeeded.extend_from_slice(registrations);
-                result
-            },
-        )
-        .unwrap_err();
-
-        assert_eq!(rolled_back.borrow().len(), 1);
-        assert_eq!(rolled_back.borrow()[0].registration_id, 1);
-        assert!(result.journal.pending_events.is_empty());
     }
 }

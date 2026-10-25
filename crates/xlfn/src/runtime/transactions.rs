@@ -78,14 +78,11 @@ where
     if !prepared_set.as_slice().is_empty() {
         let event_result = {
             let host = RegistrationHost::new(transaction.callbacks_mut());
-            registrar.register_calculation_events(&host, has_async_functions)
+            runtime.ensure_calculation_events(&host, has_async_functions)
         };
         match event_result {
-            Ok(events) => transaction.stage_events(events),
-            Err(error) => {
-                let error = retain_transaction_error(&mut transaction, error);
-                return Err(transaction.failure(error));
-            }
+            Ok(()) => {}
+            Err(error) => return Err(transaction.failure(error)),
         }
     }
     let registration_result = {
@@ -149,7 +146,7 @@ pub(crate) fn rollback_active_open<'runtime, A, S>(
         match catch_no_unwind(AssertUnwindSafe(|| {
             rollback_open::<A>(runtime, lifecycle, &mut callbacks, generation)
         })) {
-            Ok(outcome) if outcome.unload_safe() || outcome.cleanup_owned_elsewhere() => {}
+            Ok(outcome) if outcome.is_finalized() || outcome.cleanup_owned_elsewhere() => {}
             Ok(outcome) => {
                 let error = XllError::Internal {
                     diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_ROLLBACK_FAILURE,
@@ -319,10 +316,6 @@ impl<'runtime, 'call, A: Addin> RemovalTransaction<'runtime, 'call, A> {
 
     fn deps(&self) -> ShutdownDeps<'runtime, A> {
         self.deps
-    }
-
-    fn callbacks(&self) -> &HostCallbackSession {
-        self.callbacks
     }
 
     fn callbacks_mut(&mut self) -> &mut HostCallbackSession {
@@ -499,71 +492,10 @@ where
         ));
     }
 
-    let event_registrations = shutdown_deps.host().event_registrations_snapshot();
-    if !transaction.callbacks().permits_callbacks() {
-        if !event_registrations.is_empty() {
-            let error = transaction
-                .callbacks()
-                .terminal_status()
-                .map(|status| XllError::ExcelApi {
-                    function: crate::error::ExcelApiFunction::EventRegister,
-                    failure: crate::error::ExcelApiFailure::Suppressed(status),
-                })
-                .unwrap_or(XllError::Closing);
-            for _ in &event_registrations {
-                report_boundary_error("xlAutoRemove event unregister", &error);
-            }
-            shutdown_deps
-                .host()
-                .replace_event_registrations(event_registrations);
-            if unload_failure.is_none() {
-                unload_failure = Some((
-                    crate::shutdown::UnloadHazard::HostCallbackStillRegistered,
-                    "xlAutoRemove event unregister suppressed",
-                    error,
-                ));
-            }
-        }
-    } else if let Ok(event_outcome) = catch_no_unwind(AssertUnwindSafe(|| {
-        let host = RegistrationHost::new(transaction.callbacks_mut());
-        HostRegistrar::unregister_events_detailed(&host, &event_registrations)
-    })) {
-        for (_, error) in &event_outcome.failed {
-            report_boundary_error("xlAutoRemove event unregister", error);
-            if unload_failure.is_none() {
-                unload_failure = Some((
-                    crate::shutdown::UnloadHazard::HostCallbackStillRegistered,
-                    "xlAutoRemove event unregister",
-                    error.clone(),
-                ));
-            }
-        }
-        for error in event_outcome.cleanup_issues {
-            report.push(
-                "Excel event callback result",
-                crate::shutdown::CleanupIssueKind::HostMemoryLeak,
-                error,
-            );
-        }
-        for _ in &event_outcome.succeeded {
-            runtime.observer().unregister_event();
-        }
-        shutdown_deps.host().replace_event_registrations(
-            event_outcome
-                .failed
-                .into_iter()
-                .map(|(entry, _)| entry)
-                .collect(),
-        );
-    } else {
-        let error = XllError::Panic;
-        report_boundary_error("xlAutoRemove event unregister", &error);
-        unload_failure = Some((
-            crate::shutdown::UnloadHazard::HostCallbackStillRegistered,
-            "xlAutoRemove event unregister",
-            error,
-        ));
-    }
+    // Calculation event exports are module-owned. They remain registered while
+    // the DLL lease is retained; no undocumented host removal is attempted.
+    // Generation admission was sealed before draining, so late events cannot
+    // reach the state being reclaimed below.
 
     // Host callbacks are now the final direct Excel C API operations in this
     // lifecycle. A terminal result transitions the module gate immediately;
@@ -577,7 +509,7 @@ where
         return Err(handle_unload_hazard(runtime, hazard, boundary, &error));
     }
 
-    let host_callbacks = crate::shutdown::HostCallbacksDetached::issue();
+    let host_callbacks = crate::shutdown::GenerationCallbacksDetached::issue();
     runtime.observer().host_detached();
 
     let addin = if let Some(generation) = shutdown_deps.take_generation_for_shutdown() {

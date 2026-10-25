@@ -8,9 +8,13 @@ comparison.
 
 The separate [lifecycle terminal-status record](lifecycle-terminal.md) covers
 callback suppression during reload and rollback. The
-[async event qualification gate](event-qualification/README.md) records the
-remaining live-Excel check for nil-procedure event removal. Worksheet comparison
-results do not establish either native lifecycle behavior or event removal.
+[calculation-event qualification record](event-qualification/README.md) preserves
+the observed nil-procedure removal failure and the current module-lifetime
+registration design. Production keeps the native handlers and DLL resident;
+logical close drains and reclaims the generation behind closed admission.
+The revised close/reopen behavior still needs matching-build live-Excel
+qualification. Worksheet comparison results do not establish that behavior
+or physical DLL unload.
 
 ## Build in CI, run on the Windows Excel machine
 
@@ -496,7 +500,9 @@ attributing the differences to the frameworks.
 For interactive event removal observations, use the separate
 [event qualification probe](event-qualification/README.md#runnable-interactive-probe).
 It ships in the same CI artifact set and guides F9/Esc operations; the COM-only
-L02 runner cannot establish whether event callbacks stop after removal.
+L02 runner cannot establish whether event callbacks stop after removal. This
+probe preserves the historical removal experiment; current production retains
+native events and needs the separate logical-close/reopen qualification.
 
 L02 retains every measured iteration in `recalculation_samples`: total time,
 the `CalculateFull` COM call, completion-state polling, Excel RSS and, on
@@ -538,18 +544,20 @@ RSS alone cannot establish a leak; compare private commit, window balance and
 the shape of the repeated observations.
 
 With `--shutdown-diagnostics`, the xlfn lifecycle trace also contains
-`registration.removal` records for failed `xlfUnregister` calls and event
-removal attempts. Records identify the operation and numeric registration ID
-or event selector, callback status, inline scalar result type/value, decoder
+`registration.removal` records for failed `xlfUnregister` calls. Historical
+builds also emitted these records for event removal attempts; current production
+retains calculation-event registrations across logical close and does not
+attempt their removal. Records identify the operation and numeric registration
+ID (or historical event selector), callback status, inline scalar result type/value, decoder
 error and cleanup outcome. Suppressed callbacks are marked `invoked: false`;
 non-success callback statuses have no decoded raw result. Pointer payloads
 are never followed. This stream is capped at 64 records per loaded module,
 followed by one truncation marker. No record formatting occurs without an
 active trace sink.
 
-These records distinguish function removal rejection, event acknowledgement
-failure and callback suppression behind `Quarantine(UnregisterFailed)`.
-They do not change removal acceptance or prove unload safety: a successful
+These records distinguish function removal rejection and callback suppression,
+and preserve historical event acknowledgement failures behind
+`Quarantine(UnregisterFailed)`. They do not prove unload safety: a successful
 `xlAutoClose` return or natural Excel exit does not turn a quarantined phase
 into `Closed`. In particular, signed event registration tokens do not by
 themselves qualify the separate nil-procedure removal convention; see

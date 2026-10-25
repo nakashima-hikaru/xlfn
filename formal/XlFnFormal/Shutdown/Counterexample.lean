@@ -64,4 +64,36 @@ theorem outstanding_return_has_no_finish_certificate :
   simp [outstandingReturnPreFinalState, Resources.Quiescent,
     Resources.HostDetached, Resources.CallsDrained, Resources.ReturnsDrained]
 
+/-- A fully reclaimed generation with two native Excel event roots. The roots
+    are safe to invoke only because the resident module's ingress is closed. -/
+def residentEventClosedResources : Resources :=
+  { ingressOpen := false,
+    residentEventRegistrations := 2,
+    moduleResidencyHeld := true,
+    callbackGateOpen := false,
+    generationUnique := true,
+    addinQuiesced := true,
+    generationOwnedByRuntime := false }
+
+theorem resident_events_allow_logical_close :
+    residentEventClosedResources.Quiescent := by
+  simp [residentEventClosedResources, Resources.Quiescent,
+    Resources.HostDetached, Resources.CallsDrained, Resources.ReturnsDrained,
+    Resources.AsyncDrained, Resources.SubscriptionsDrained, Resources.RtdDrained,
+    Resources.HandlesDrained, Resources.GenerationReclaimed, Resources.DiagnosticsDrained]
+
+theorem resident_events_do_not_allow_physical_unload :
+    ¬ residentEventClosedResources.PhysicalUnloadSafe := by
+  simp [Resources.PhysicalUnloadSafe, residentEventClosedResources]
+
+theorem resident_events_without_lease_have_no_close_certificate :
+    ¬ ({ residentEventClosedResources with moduleResidencyHeld := false } :
+      Resources).Quiescent := by
+  simp [Resources.Quiescent, Resources.HostDetached, residentEventClosedResources]
+
+theorem resident_events_with_open_callback_gate_have_no_close_certificate :
+    ¬ ({ residentEventClosedResources with callbackGateOpen := true } :
+      Resources).Quiescent := by
+  simp [Resources.Quiescent, Resources.HostDetached, residentEventClosedResources]
+
 end XlFnFormal.Shutdown

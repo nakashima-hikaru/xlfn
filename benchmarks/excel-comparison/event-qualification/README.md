@@ -1,11 +1,51 @@
-# Async calculation-event qualification
+# Calculation-event lifetime and qualification
 
-Status on 2026-10-25: **nil-procedure removal failed on the observed Excel build;
-full production lifecycle qualification remains unverified**. No local macOS test, Windows
-cross-compilation, callback mock, or performance benchmark establishes native
-event registration or removal. The current evidence record is
+Status on 2026-10-25: **production uses module-lifetime event registrations;
+matching-build live qualification of the revised close/reopen behavior remains
+unverified**. The earlier nil-procedure removal experiment failed on the
+observed Excel build. No local macOS test, Windows cross-compilation, callback
+mock, formal trace, or performance benchmark establishes the new native Excel
+lifecycle behavior. The current evidence record is
 [records.json](records.json); it includes two partial shutdown observations and
 an interactive counterexample to nil-procedure removal.
+
+## Production lifetime contract
+
+Calculation-event registrations belong to the loaded module's static runtime,
+not to an individual open generation. The runtime acquires its DLL residency
+reference before the first native registration and records each selector in
+a bounded registration slot. Confirmed registrations are reused across logical
+close, rollback and reopen; they are not registered a second time for a new
+generation. A successful native registration remains recorded even if freeing
+its result fails. In-flight or indeterminate registration retains the slot and
+the lease, and prevents blind re-registration. A rejected operation may be
+retried only when the registration layer establishes that it was not applied.
+
+Production no longer calls nil-procedure removal or `xlfUnregister` on event
+tokens. Closing seals external ingress and generation admission before draining
+work. A later native notification can enter the resident trampoline, but cannot
+access the stopped executor or reclaimed generation. Logical close can therefore
+complete resource disposal and reach `Closed` while the native handlers and DLL
+reference remain. Reopen publishes a new generation behind the same handlers.
+
+`PhysicallyUnloadableAddin` is an opt-in to possible lease release, not a promise
+of physical unload. Release requires zero native event slots, including
+in-flight and indeterminate slots, in addition to the existing shutdown
+conditions. Registration reservation and lease-release checks use the same
+ownership lock. Retained events keep the DLL resident until process exit.
+Shutdown traces report `residentEventRegistrations` and `moduleResidencyHeld`;
+they do not emit an event-unregistration certificate for logical close.
+
+This design was informed by source review of
+[Excel-DNA's event subscriptions](https://github.com/Excel-DNA/ExcelDna/blob/f484749260d5cc43c35f7aea5f7a0b0f8f74a78f/Source/ExcelDna.Integration/ExcelAsyncUtil.cs#L223-L301)
+and [native loader](https://github.com/Excel-DNA/ExcelDna/blob/f484749260d5cc43c35f7aea5f7a0b0f8f74a78f/Source/ExcelDna/ExcelDna.cpp#L352-L367).
+Excel-DNA drops internal subscribers, ignores the removal call's returned value,
+and gates forwarding through its loader state. Its source does not establish
+that Excel detached the native handler. The reviewed
+[xlOil registration/close implementation](https://github.com/cunnane/xloil/blob/920c71f5e33e8b8ab715dc1d72d1216b16e6eacc/include/xloil/XllEntryPoint.h#L68-L114)
+also does not issue a corresponding native event-removal call. These are source
+observations that informed xlfn's lifetime design, not live qualification of
+either OSS or the revised xlfn implementation.
 
 ## Interactive removal counterexample, 2026-10-25
 
@@ -43,12 +83,15 @@ it records programmatic behavior separately and still rejects inconsistent
 counters, incomplete call sequences and missing workload observations. The
 programmatic observation does not by itself qualify interactive cancellation.
 
-The production zero-result rejection and unload hold remain justified by this
-counterexample. A candidate experiment now passes the signed registration ID
-returned by `xlEventRegister` to `xlfUnregister` as `xltypeNum`. Microsoft's
+The historical zero-result rejection and unload hold were justified by this
+counterexample. Current production keeps those event roots resident instead
+of attempting their removal. The standalone probe also retains an optional
+experiment that passes the signed registration ID returned by `xlEventRegister`
+to `xlfUnregister` as `xltypeNum`. Microsoft's
 [xlfUnregister documentation](https://learn.microsoft.com/en-us/office/client-developer/excel/xlfunregister-form-1)
 covers IDs from `xlfRegister`, so its applicability to event IDs is a hypothesis
-to test, not an established production contract.
+to test, not an established production contract. That experiment is not a
+prerequisite for the production lifetime fix and has no qualified live result.
 
 ## Live L02 observations, 2026-10-25
 
@@ -102,9 +145,10 @@ The measured runner used range calculation for warmup and `CalculateFull`
 for measurement. The updated runner warms `CalculateFull` as well and records
 `warmup_calculation`; its effect requires a fresh live run. The earlier large
 RSS increase occurred on a different Excel build and code revision, so its
-absence here is not evidence that a leak was fixed. Event removal still needs
-the interactive, pinned-module qualification below; accepting zero solely to
-eliminate Quarantine would assert host behavior not established by this run.
+absence here is not evidence that a leak was fixed. These records describe the
+old removal path; they do not validate resource reclamation or repeated opens
+under the new lifetime design. Accepting zero solely to eliminate Quarantine
+would have asserted host behavior that this run did not establish.
 
 ## Public contract and remaining uncertainty
 
@@ -125,13 +169,13 @@ known failure path; a new `#NAME?` report without its startup log does not prove
 that the same path caused it. Inspect the runner's `startup_log` and
 `registration_diagnostics` fields to distinguish other load/registration faults.
 
-The current removal operation passes `xltypeNil` as the procedure and the
+The historical removal operation passed `xltypeNil` as the procedure and the
 event selector as `xltypeInt`. That removal convention is **not specified by
 the public xlEventRegister page**. A positive acknowledgement alone therefore
 does not establish that Excel stopped calling the handler. The convention
-needs observed registration/removal behavior on each deployed configuration.
-The signed registration accommodation does not apply to removal: a negative
-removal acknowledgement still retains the pending event and unload hold.
+would need observed registration/removal behavior on each deployed
+configuration before any future physical-removal path could rely on it.
+Current production does not rely on this convention.
 
 Microsoft's [Handling Events documentation](https://learn.microsoft.com/en-us/office/client-developer/excel/handling-events)
 describes CalculationCanceled followed by CalculationEnded for user
@@ -139,20 +183,25 @@ interruption, and states that these events are not raised during programmatic
 recalculation. A COM-only calculation run cannot establish the interactive
 event sequence. Cancellation remains best effort.
 
-If removal has a malformed or nonpositive acknowledgement after a successful
-callback transport, xlfn treats the host mutation as indeterminate. The
-registration remains pending in the cleanup ledger, so it cannot serve as a
-completed removal certificate. This preserves the unload hold rather than
-claiming an unobserved host state.
+An indeterminate registration result still cannot certify a usable event
+subscription. The module keeps the possible native callback root and DLL
+lease, logical cleanup can reclaim the uncommitted generation behind closed
+admission, and a later open must not blindly repeat that registration. This
+separates host registration uncertainty from generation-resource reclamation.
 
 ## Qualification gate
 
 ### Runnable interactive probe
 
+This standalone probe reproduces and investigates native **removal** semantics.
+It is retained for research and comparison with historical evidence. It does
+not exercise production's module-lifetime registry and is not required to
+qualify that registry's logical close/reopen behavior.
+
 The CI artifact set now includes `event_probe/event-probe.xll`, built from
 [`probe/`](probe/). It uses the repository's physical Excel ABI, but has its own
-handlers, async delay workload and raw C API logging. It does not change the
-production `RegistrationHost` decoder or discard production cleanup debt.
+handlers, async delay workload and raw C API logging. Its deliberately changing
+handler generations are independent of production's persistent handlers.
 Windows pins the probe DLL until process exit **before** any handler is
 registered. Each registration cycle uses different exported handler addresses,
 so an old handler cannot be mistaken for the current generation.
@@ -169,8 +218,8 @@ From `benchmarks/excel-comparison` on Windows with 64-bit desktop Excel:
 python .\event_probe.py --artifacts C:\path\to\verified-artifacts --out event-probe-results
 ```
 
-To test the registration-ID candidate, use an artifact containing the new
-method and a fresh process/output directory:
+For an optional investigation of the unqualified registration-ID hypothesis,
+use an artifact containing that method and a fresh process/output directory:
 
 ```powershell
 python .\event_probe.py --artifacts C:\path\to\verified-artifacts --removal-method unregister-id --out event-probe-id-results
@@ -193,8 +242,8 @@ Excel process. It guides the following sequence (two removal cycles by default):
 3. Press **F9**, then **Esc** while the 10-second async calculation is pending;
    return to the terminal and press Enter. This must produce CalculationCanceled
    followed by CalculationEnded.
-4. The runner calls nil-procedure removal from a registered XLL command, captures
-   both raw acknowledgements, then asks for the same normal/cancel operations.
+4. The runner calls the selected removal method from a registered XLL command,
+   captures both raw acknowledgements, then asks for the same normal/cancel operations.
 5. It re-registers new handler addresses and repeats both positive controls,
    then repeats steps 4–5 once more.
 
@@ -225,8 +274,8 @@ as observations rather than masking an interactive counterexample.
 Even a complete pass establishes only the observed **command-context**
 removal behavior on this build. Production `xlAutoClose` ordering, module unload,
 task/ledger reclamation and close/reopen remain separate qualification cases.
-Use this result to choose the next production change; do not infer that raw
-integer zero always means successful removal.
+Do not infer that raw integer zero always means successful removal or use
+this standalone probe to certify production generation reclamation.
 
 ### Full production qualification
 
@@ -237,65 +286,82 @@ are distribution targets; each needs its matching native XLL. Identify Excel
 bitness from Excel's About dialog and the running EXCEL.EXE architecture,
 rather than the operating-system or Python bitness.
 
-Use a fresh interactive Windows Excel process and a trusted instrumented XLL
-from the candidate commit. Retain the XLL's SHA-256 and the instrumented
-source/build diff. The existing comparison runner's version/build and XLL
-metadata can accompany the record. With `--shutdown-diagnostics`, failed or
-indeterminate removals include raw results; successful registration results
-and interactive callback counters still need a dedicated probe. Worksheet
-results alone do not prove nil-procedure removal.
+Use a fresh interactive Windows Excel process and a trusted instrumented
+**production** XLL from the candidate commit. Retain the XLL's SHA-256 and the
+instrumented source/build diff. The existing comparison runner's version/build
+and XLL metadata can accompany the record. Its shutdown diagnostics alone do
+not capture every native registration and event entry; add the instrumentation
+needed to observe the following cases. A standalone removal probe, worksheet
+results, or natural process exit cannot substitute for this evidence.
 
 1. Capture the actual `xlEventRegister` arguments, callback transport status,
-   raw result `xltype`, signed integer value, and raw integer bits for both
-   exported handlers: `__xlfn_calculation_canceled` and
-   `__xlfn_calculation_ended`. Capture signed values and their complete raw bits;
-   distinguish the documented positive result from the signed accommodation.
-2. Observe handler entry with invocation/generation identifiers. Exercise
-   normal interactive calculation, user cancellation while async calls are
-   pending, and completion after cancellation. Record ordering, outstanding
-   tasks, and whether late results reached worksheet cells. Use programmatic
-   recalculation as a separately recorded control.
-3. Drain framework tasks while keeping the probe XLL loaded. Issue removal
-   for each event using the actual nil-procedure convention. Capture the same
-   raw arguments, transport status, result type/value/bits, and cleanup result.
-   A transport success or positive integer alone is insufficient.
-4. With the probe XLL still loaded and its counters available, repeat the same
-   interactive calculation/cancellation sequences. Record counters before
-   removal and after each sequence, and verify that the removed handlers
-   receive no further calls. Keep logs for the complete observation interval.
-5. Exercise repeated registration/removal and add-in close/reopen cycles.
-   Verify exactly one callback per expected event after re-registration, no
-   callbacks to a removed generation, and no retained event cleanup debt before
-   approving unload. Preserve error and failure logs as well as successes.
+   raw result `xltype`, signed integer value, and raw integer bits for each
+   registered handler. Record residency acquisition before registration and
+   the module registry's confirmed, in-flight, or indeterminate state. Capture
+   signed values and their complete raw bits; distinguish the documented
+   positive result from the signed accommodation.
+2. Observe both native handler entry and admitted generation work, with
+   invocation/generation identifiers. Exercise normal interactive calculation,
+   user cancellation while async calls are pending, and completion after
+   cancellation. Record ordering, outstanding tasks, and whether late results
+   reached worksheet cells. Use programmatic recalculation as a separately
+   recorded control.
+3. Close or explicitly remove the add-in while Excel remains running. Check
+   admission closure, task/callback drain, generation-state disposal, and
+   `Closed` publication. Confirm that no event-removal API is called and that
+   resident native event slots retain the DLL reference. Late native handler
+   entries are allowed; accessing the closed generation or restarting its
+   executor is a failure.
+4. Reopen the same loaded module and repeat normal/canceled calculations across
+   multiple close/reopen cycles. Confirm that each confirmed selector has only
+   one native registration call for this static runtime, that each expected
+   event reaches the current generation once, and that no work reaches disposed
+   generations. Preserve the registration counts rather than inferring reuse
+   solely from worksheet values.
+5. Exercise partial-open failure, registration-result cleanup failure, and
+   indeterminate registration where an instrumented test can produce them.
+   Confirm that known registrations survive rollback without duplicate calls,
+   indeterminate slots prevent blind retry, generation resources can be
+   disposed behind closed admission, and the module remains resident.
+6. With `PhysicallyUnloadableAddin`, confirm that a retained native event slot
+   still blocks lease release after successful logical close. A zero-event
+   configuration must separately satisfy all existing teardown and user-code
+   quiescence obligations before lease release is eligible. Do not infer
+   physical unload from `Closed`, an `xlAutoClose` return, or Excel process exit.
 
-Keep the probe XLL loaded, or end the whole test Excel process, when removal
-cannot be established. Do not unload code merely to test whether Excel might
-still retain its handler address. Any required case without evidence keeps
-that configuration **unverified**; a contradictory observation marks it
-**failed**. Record the exact observed value before considering a documented
-compatibility decision.
+Any required case without evidence keeps that configuration **unverified**;
+a contradictory observation marks its tested scope **failed**. Keep the XLL
+resident, or end the whole test Excel process, whenever a native callback root
+may remain. Record actual observations before making any host-compatibility
+claim. The current production implementation's new native qualification is
+pending; the historical failed-removal records remain valid for their original
+commit and scope.
 
 ## Record contents
 
 Append real runs to `observations` in [records.json](records.json), preserving
-earlier runs. Every observation must contain:
+earlier runs. Every observation must identify its scope and contain:
 
 - UTC timestamp, operator, Windows version, Excel product/version/build/channel,
   explicit Excel process bitness, and process executable identity;
 - candidate commit, XLL target architecture and SHA-256, instrumentation diff,
   calculation mode, multithreaded calculation settings, and test inputs;
-- both registration and removal calls with procedure/event arguments, transport
-  status, raw result type, signed integer and raw bits, and result cleanup;
-- normal/canceled/programmatic event traces, post-removal counter observations,
-  repeated-cycle traces, task/ledger state, and late-result checks;
-- evidence-file paths and SHA-256 values, tested scope, failed or omitted cases,
-  and a final `verified`, `failed`, or `unverified` verdict.
+- native registration calls with procedure/event arguments, transport status,
+  raw result type, signed integer and raw bits, and result cleanup;
+- normal/canceled/programmatic event traces, generation identifiers, repeated
+  close/reopen registration counts, task/state disposal, residency observations,
+  and late-result checks for production-lifetime qualification;
+- actual removal calls and post-removal counter observations when the declared
+  scope is the standalone removal experiment; these are not required events
+  in a production logical-close trace;
+- evidence-file paths and SHA-256 values, failed or omitted cases, and a final
+  `verified`, `failed`, or `unverified` verdict for that scope.
 
-Use `verified` only after all required observations for that exact
-configuration pass. Leave unavailable values absent or null. Missing required
+Use `verified` only after all required observations for that exact configuration
+and scope pass. Leave unavailable values absent or null. Missing required
 evidence prevents `verified`, but does not erase a directly observed failure;
 record a counterexample as `failed` with its actual tested scope. Do not turn
-a planned configuration into an observed run.
-The following test coverage is local mock evidence only: signed nonzero
-registration acceptance, zero/wrong-type rejection, indeterminate event
-mutations, and retention/retry after a negative removal acknowledgement.
+a planned configuration into an observed run. Mock ABI tests, lifecycle tests,
+and formal trace checks establish local implementation properties only; they
+do not qualify native Excel registration, cancellation, close/reopen, memory
+reclamation, or physical unload on a deployed build.

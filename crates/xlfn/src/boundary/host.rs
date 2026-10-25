@@ -524,7 +524,8 @@ mod tests {
 
             assert_eq!(host_auto_close(&runtime), 1);
             assert_eq!(runtime.phase(), LifecyclePhase::Closed);
-            assert!(!runtime.module_residency_held());
+            assert_eq!(runtime.resident_event_count(), 1);
+            assert!(runtime.module_residency_held());
             SCRIPT.with_borrow(|script| {
                 assert_eq!(script.quiesces, 2);
                 assert_eq!(script.registrations, 2);
@@ -543,14 +544,11 @@ mod tests {
                         XLF_REGISTER,
                         XLF_UNREGISTER,
                         XLF_EVALUATE,
-                        XL_EVENT_REGISTER,
                         XL_GET_NAME,
-                        XL_EVENT_REGISTER,
                         XLF_EVALUATE,
                         XLF_REGISTER,
                         XLF_UNREGISTER,
                         XLF_EVALUATE,
-                        XL_EVENT_REGISTER,
                     ]
                 );
                 assert_eq!(

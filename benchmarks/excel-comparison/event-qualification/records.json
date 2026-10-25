@@ -7,15 +7,30 @@
   ],
   "registration_acknowledgement_contract": "xltypeInt with signed value greater than zero",
   "removal_convention": {
+    "scope": "Historical production path and standalone nil-removal experiment; not used by current production logical close",
     "procedure_argument_type": "xltypeNil",
     "event_argument_type": "xltypeInt",
     "public_documentation": "not specified by the referenced xlEventRegister page",
     "live_excel_status": "failed_on_observed_build",
-    "acknowledgement_policy": "Require a positive xltypeInt; negative removal results remain indeterminate and retain pending cleanup."
+    "acknowledgement_policy": "Historical policy required a positive xltypeInt; negative removal results remained indeterminate and retained pending cleanup."
+  },
+  "production_policy_reviewed_on": "2026-10-25",
+  "production_event_lifetime": {
+    "scope": "One loaded-module static runtime across generation close, rollback and reopen",
+    "registration_policy": "Acquire and retain the DLL self-reference before native registration; reuse confirmed selector registrations across opens; retain in-flight and indeterminate slots and prevent blind retry.",
+    "close_policy": "Close ingress and generation admission, drain work and reclaim generation resources without an event-removal call; keep native handler entry points and their DLL reference resident.",
+    "physical_release_policy": "PhysicallyUnloadableAddin permits release only when all native event slots are empty and existing shutdown obligations are satisfied; it does not guarantee physical DLL unload.",
+    "unregister_id_experiment": "Retained as an optional standalone research hypothesis; not used or required by the production lifetime fix and not live-qualified.",
+    "live_excel_status": "unverified",
+    "source_review": [
+      "https://github.com/Excel-DNA/ExcelDna/blob/f484749260d5cc43c35f7aea5f7a0b0f8f74a78f/Source/ExcelDna.Integration/ExcelAsyncUtil.cs#L223-L301",
+      "https://github.com/Excel-DNA/ExcelDna/blob/f484749260d5cc43c35f7aea5f7a0b0f8f74a78f/Source/ExcelDna/ExcelDna.cpp#L352-L367",
+      "https://github.com/cunnane/xloil/blob/920c71f5e33e8b8ab715dc1d72d1216b16e6eacc/include/xloil/XllEntryPoint.h#L68-L114"
+    ]
   },
   "qualification_status": "unverified",
-  "qualification_scope": "one exact Excel product/version/build/channel and process bitness per real run",
-  "unverified_reason": "The standalone pinned probe demonstrated callbacks after nil-procedure removal on Excel 16.0 build 20527.0 (64-bit); this convention failed. Production xlAutoClose ordering, alternative removal APIs and physical unload remain unqualified.",
+  "qualification_scope": "One exact Excel product/version/build/channel, process bitness, candidate commit and declared test scope per real run",
+  "unverified_reason": "The historical standalone probe demonstrated failed nil-procedure removal on Excel 16.0 build 20527.0 (64-bit). Matching-build live qualification of the revised production module-lifetime registry, cancellation, logical close/reopen, generation reclamation and residency hold remains pending; the historical observations do not qualify the new implementation.",
   "observations": [
     {
       "timestamp_utc": "2026-10-25T09:39:57Z",

@@ -117,8 +117,9 @@ pub(crate) fn registration_removal<T>(
 ) {
     use crate::host_api::HostInvocation;
     let Some(Some(sink)) = SINK.get() else { return };
-    // Successful function removals can number in the thousands. Event removal
-    // acknowledgements are useful even on success (the convention needs qualification).
+    // Successful function removals can number in the thousands. Keep the
+    // operation field open for historical event-removal evidence; production
+    // calculation events now remain registered for the DLL lifetime.
     if operation == "xlfUnregister"
         && matches!(
             invocation,
@@ -202,13 +203,23 @@ impl Boundary {
         }
     }
 
-    pub(crate) fn finish(mut self, status: i32, phase: LifecyclePhase) {
+    pub(crate) fn finish<A: crate::Addin>(
+        mut self,
+        status: i32,
+        runtime: &crate::runtime::Runtime<A>,
+    ) {
         if self.finished {
             return;
         }
         record(
             &format!("{}.return", self.name),
-            json!({"status": status, "phase": format!("{phase:?}"), "invocation": self.invocation}),
+            json!({
+                "status": status,
+                "phase": format!("{:?}", runtime.phase()),
+                "invocation": self.invocation,
+                "resident_event_registrations": runtime.resident_event_count(),
+                "module_residency_held": runtime.module_residency_held(),
+            }),
         );
         self.finished = true;
     }

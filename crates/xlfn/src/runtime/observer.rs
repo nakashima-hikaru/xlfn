@@ -227,7 +227,8 @@ impl RuntimeObserver {
             let trace = self.trace_handle();
             let mut resources = crate::shutdown_trace::ShutdownResources::opened(
                 deps.host().registrations_snapshot().len() as u64,
-                deps.host().event_registrations_snapshot().len() as u64,
+                deps.residency().resident_event_count() as u64,
+                deps.residency().is_held(),
             );
             #[cfg(feature = "async")]
             {
@@ -393,7 +394,6 @@ runtime_shutdown_events! {
     async_drained => AsyncDrained,
     subscriptions_drained => SubscriptionsDrained,
     unregister_function => UnregisterFunction,
-    unregister_event => UnregisterEvent,
     callback_admission_closed => CloseCallbackGate,
     host_detached => HostDetached,
     generation_unique => ProveGenerationUnique,

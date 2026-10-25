@@ -69,8 +69,6 @@ private def parseStage : Json → Except String Shutdown.CloseStage
 private def simpleShutdownEvent : String → Option Shutdown.Event
   | "registerFunction" => some .registerFunction
   | "unregisterFunction" => some .unregisterFunction
-  | "registerEvent" => some .registerEvent
-  | "unregisterEvent" => some .unregisterEvent
   | "enterExternal" => some .enterExternal
   | "leaveExternal" => some .leaveExternal
   | "enterCall" => some .enterCall
@@ -142,7 +140,8 @@ private def parseResources (json : Json) : Except String Shutdown.Resources := d
   let ingressOpen : Bool ← field json "ingressOpen"
   let externalEntries : Nat ← field json "externalEntries"
   let registrations : Nat ← field json "registrations"
-  let eventRegistrations : Nat ← field json "eventRegistrations"
+  let residentEventRegistrations : Nat ← field json "residentEventRegistrations"
+  let moduleResidencyHeld : Bool ← field json "moduleResidencyHeld"
   let registrationStateKnown : Bool ← field json "registrationStateKnown"
   let callbackGateOpen : Bool ← field json "callbackGateOpen"
   let activeCalls : Nat ← field json "activeCalls"
@@ -170,7 +169,8 @@ private def parseResources (json : Json) : Except String Shutdown.Resources := d
     ingressOpen,
     externalEntries,
     registrations,
-    eventRegistrations,
+    residentEventRegistrations,
+    moduleResidencyHeld,
     registrationStateKnown,
     callbackGateOpen,
     activeCalls,

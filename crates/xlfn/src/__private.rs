@@ -466,7 +466,7 @@ pub mod v1 {
             release_open_residency_after_failure(runtime, true);
         }
         #[cfg(feature = "lifecycle-diagnostics")]
-        diagnostic.finish(result, runtime.runtime().phase());
+        diagnostic.finish(result, runtime.runtime());
         result
     }
 
@@ -487,7 +487,7 @@ pub mod v1 {
             crate::lifecycle_diagnostics::Boundary::enter("xlAutoClose", runtime.runtime().phase());
         let result = host_auto_close::<A>(runtime.runtime());
         #[cfg(feature = "lifecycle-diagnostics")]
-        diagnostic.finish(result, runtime.runtime().phase());
+        diagnostic.finish(result, runtime.runtime());
         result
     }
 
@@ -510,7 +510,7 @@ pub mod v1 {
         );
         let result = host_auto_remove::<A>(runtime.runtime());
         #[cfg(feature = "lifecycle-diagnostics")]
-        diagnostic.finish(result, runtime.runtime().phase());
+        diagnostic.finish(result, runtime.runtime());
         result
     }
 
@@ -1096,6 +1096,9 @@ pub mod v1 {
     #[cfg(feature = "async")]
     #[doc(hidden)]
     pub fn cancel_async_calculation<A: Addin>(runtime: &'static MacroRuntime<A>) {
+        // Excel can retain this export for the DLL lifetime. The common
+        // boundary admits it only while a generation is published and keeps
+        // that generation alive until cancellation returns.
         ffi_boundary_void(runtime.runtime(), || {
             crate::async_udf::cancel_async_calculation(runtime.runtime());
         });
@@ -1104,6 +1107,8 @@ pub mod v1 {
     /// Advances diagnostic calculation identity and async completion state.
     #[doc(hidden)]
     pub fn end_calculation<A: Addin>(runtime: &'static MacroRuntime<A>) {
+        // Inactive generations must not advance calculation identity merely
+        // because Excel still holds the module's event registration.
         ffi_boundary_void(runtime.runtime(), || {
             runtime.runtime().finish_calculation();
         });
@@ -1200,6 +1205,119 @@ pub mod v1 {
     }
 
     #[cfg(test)]
+    mod calculation_event_tests {
+        use super::{MacroRuntime, end_calculation};
+        use crate::boundary::host::host_auto_close;
+        use crate::lifecycle::LifecyclePhase;
+
+        struct CallbackAddin;
+
+        impl crate::Addin for CallbackAddin {
+            type SharedState = &'static MacroRuntime<Self>;
+            type LifecycleState = ();
+            type Error = crate::XllError;
+            type Layers = ();
+            #[cfg(all(feature = "async", not(feature = "async-builtin")))]
+            type AsyncExecutor = crate::NoAsyncExecutor;
+            #[cfg(feature = "async-builtin")]
+            type AsyncExecutor = crate::BuiltinAsyncExecutor;
+
+            fn open(_: &crate::OpenContext) -> crate::OpenResult<Self> {
+                unreachable!("the test publishes its runtime reference directly")
+            }
+
+            fn quiesce(shared: &mut Self::SharedState, _: &mut ()) -> crate::XllResult<()> {
+                assert_eq!(shared.runtime().phase(), LifecyclePhase::Closing);
+                assert_inactive_events(shared);
+                Ok(())
+            }
+        }
+
+        fn assert_inactive_events(runtime: &'static MacroRuntime<CallbackAddin>) {
+            let calculation = runtime.runtime().calculation_id();
+            let phase = runtime.runtime().phase();
+            end_calculation(runtime);
+            #[cfg(feature = "async")]
+            super::cancel_async_calculation(runtime);
+            assert_eq!(runtime.runtime().calculation_id(), calculation);
+            assert_eq!(runtime.runtime().phase(), phase);
+        }
+
+        #[test]
+        fn resident_calculation_callbacks_only_reach_the_published_generation() {
+            let runtime = Box::leak(Box::new(MacroRuntime::<CallbackAddin>::new()));
+            let _fixture = crate::runtime::StaticTestRuntime::from_static(runtime.runtime());
+            assert_inactive_events(runtime);
+            assert!(!runtime.runtime().has_current_generation());
+
+            for _ in 0..2 {
+                let opening = runtime.runtime().begin_open().unwrap();
+                #[cfg(all(feature = "async", not(feature = "async-builtin")))]
+                runtime
+                    .runtime()
+                    .start_async(crate::NoAsyncExecutor, crate::AsyncTaskLimit::DEFAULT)
+                    .unwrap();
+                #[cfg(feature = "async-builtin")]
+                runtime
+                    .runtime()
+                    .start_async(
+                        crate::BuiltinAsyncExecutor::new(
+                            crate::BuiltinExecutorConfig::new()
+                                .with_poller_count(crate::AsyncPollerCount::new(1).unwrap()),
+                        ),
+                        crate::AsyncTaskLimit::DEFAULT,
+                    )
+                    .unwrap();
+                #[cfg(feature = "async-builtin")]
+                let cancellation = {
+                    let (source, token) = crate::cancellation::CancellationSource::new(
+                        crate::cancellation::CancellationGuarantee::CalculationScoped,
+                    );
+                    let asynchronous = runtime.runtime().async_runtime();
+                    asynchronous
+                        .submit(asynchronous.current_epoch(), std::future::pending(), source)
+                        .unwrap();
+                    token
+                };
+                assert_inactive_events(runtime);
+                #[cfg(feature = "async-builtin")]
+                assert!(!cancellation.is_cancelled());
+                let mut opening = runtime.runtime().publish(opening, &*runtime, ());
+                assert_inactive_events(runtime);
+                #[cfg(feature = "async-builtin")]
+                assert!(!cancellation.is_cancelled());
+                runtime
+                    .runtime()
+                    .finish_open(&mut opening, Vec::new())
+                    .unwrap();
+                drop(opening);
+
+                #[cfg(feature = "async-builtin")]
+                {
+                    super::cancel_async_calculation(runtime);
+                    assert!(cancellation.is_cancelled());
+                }
+
+                let calculation = runtime.runtime().calculation_id();
+                end_calculation(runtime);
+                assert_eq!(
+                    runtime.runtime().calculation_id().get(),
+                    calculation.get() + 1
+                );
+
+                assert_eq!(host_auto_close(runtime.runtime()), 1);
+                assert_eq!(runtime.runtime().phase(), LifecyclePhase::Closed);
+                assert!(!runtime.runtime().has_current_generation());
+                assert_inactive_events(runtime);
+            }
+
+            runtime.runtime().quarantine_runtime();
+            assert_eq!(runtime.runtime().phase(), LifecyclePhase::Quarantined);
+            assert_inactive_events(runtime);
+        }
+    }
+
+    #[cfg(test)]
     #[allow(
         unsafe_code,
         reason = "Tests opt into the audited physical-unload contract"
@@ -1241,6 +1359,28 @@ pub mod v1 {
         // SAFETY: This test add-in has no external execution sources. Its
         // failing open exercises the framework's conservative residency rule.
         unsafe impl PhysicallyUnloadableAddin for ErrorBeforeState {}
+
+        #[cfg(any(not(target_os = "windows"), feature = "async", feature = "handles"))]
+        struct ErrorAfterEventRegistration;
+
+        #[cfg(any(not(target_os = "windows"), feature = "async", feature = "handles"))]
+        impl Addin for ErrorAfterEventRegistration {
+            type SharedState = ();
+            type LifecycleState = ();
+            type Layers = ();
+            #[cfg(feature = "async")]
+            type AsyncExecutor = crate::NoAsyncExecutor;
+            type Error = XllError;
+
+            fn open(_: &OpenContext) -> Result<Opened<()>, XllError> {
+                Ok(Opened::new(()))
+            }
+        }
+
+        // SAFETY: This fixture owns no external execution sources. Native
+        // event residency remains a framework obligation despite this opt-in.
+        #[cfg(any(not(target_os = "windows"), feature = "async", feature = "handles"))]
+        unsafe impl PhysicallyUnloadableAddin for ErrorAfterEventRegistration {}
 
         #[inline(never)]
         fn residency_anchor() {}
@@ -1320,6 +1460,85 @@ pub mod v1 {
             assert_eq!(runtime.phase(), LifecyclePhase::Closed);
             release_open_residency_after_failure(&macro_runtime, newly_acquired);
             assert!(!runtime.module_residency_held());
+        }
+
+        #[test]
+        #[cfg(any(not(target_os = "windows"), feature = "async", feature = "handles"))]
+        fn failed_open_keeps_residency_after_native_event_registration() {
+            use crate::registration::host::test_support::{CallbackScript, Reply};
+            use crate::registration::{RegistrationDescriptor, RegistrationSignature};
+            use xlfn_common::{ExecutionKind, FunctionVisibility, ReturnAbi};
+            use xlfn_sys::{
+                XL_EVENT_REGISTER, XL_GET_NAME, XLERR_NAME, XLF_EVALUATE, XLF_REGISTER, XLOPER12,
+                XLOPER12Value, XLRET_FAILED, XLTYPE_STR,
+            };
+
+            let macro_runtime =
+                MacroRuntime::<ErrorAfterEventRegistration>::new_with_physical_unload();
+            let runtime = macro_runtime.runtime();
+            let newly_acquired = runtime
+                .ensure_module_residency(residency_anchor as *const ())
+                .unwrap();
+            assert!(newly_acquired);
+            let path = if cfg!(target_os = "windows") {
+                "C:\\test.xll"
+            } else {
+                "/test.xll"
+            };
+            let mut module_name: Vec<u16> = path.encode_utf16().collect();
+            module_name.insert(0, u16::try_from(module_name.len()).unwrap());
+            let script = CallbackScript::install([
+                Reply::success(
+                    XL_GET_NAME,
+                    XLOPER12 {
+                        value: XLOPER12Value {
+                            string: module_name.as_mut_ptr(),
+                        },
+                        xltype: XLTYPE_STR,
+                    },
+                ),
+                Reply::success(XL_EVENT_REGISTER, XLOPER12::integer(17)),
+                Reply::success(XLF_EVALUATE, XLOPER12::error(XLERR_NAME)),
+                Reply::success(XLF_REGISTER, XLOPER12::nil()).status(XLRET_FAILED),
+            ]);
+            let descriptor = RegistrationDescriptor {
+                export_name: "test_failed_open_export",
+                excel_name: "TEST.FAILED.OPEN",
+                signature: RegistrationSignature {
+                    execution: ExecutionKind::MainThread,
+                    return_abi: ReturnAbi::Value12,
+                    arguments: &[],
+                    volatile: false,
+                },
+                category: "Test",
+                description: "failed open event residency regression",
+                help_topic: "",
+                visibility: FunctionVisibility::Public,
+                arguments: &[],
+            };
+            assert_eq!(
+                host_auto_open(
+                    runtime,
+                    &AddinId::parse("event-residency").unwrap(),
+                    "0",
+                    "test",
+                    &[descriptor],
+                ),
+                0
+            );
+            assert_eq!(runtime.phase(), LifecyclePhase::Closed);
+            assert!(!runtime.has_current_generation());
+            assert_eq!(runtime.resident_event_count(), 1);
+
+            // This is the generated xlAutoOpen failure epilogue. A fully
+            // rolled-back generation does not mean its native export is gone.
+            release_open_residency_after_failure(&macro_runtime, newly_acquired);
+            assert!(runtime.module_residency_held());
+            assert_eq!(host_auto_remove(runtime), 1);
+            assert_eq!(host_auto_close(runtime), 1);
+            assert!(runtime.module_residency_held());
+            assert_eq!(runtime.resident_event_count(), 1);
+            script.assert_calls(&[XL_GET_NAME, XL_EVENT_REGISTER, XLF_EVALUATE, XLF_REGISTER]);
         }
     }
 }

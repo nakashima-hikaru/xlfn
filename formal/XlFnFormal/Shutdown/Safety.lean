@@ -5,6 +5,15 @@ set_option autoImplicit false
 
 namespace XlFnFormal.Shutdown
 
+/-- Native event roots belong to the loaded module, outside generation teardown.
+    No successful close trace may manufacture an event-removal observation. -/
+theorem Step.resident_event_roots_preserved
+    {s t : State} {event : Event}
+    (hStep : Step s event t) :
+    t.resources.residentEventRegistrations = s.resources.residentEventRegistrations ∧
+    t.resources.moduleResidencyHeld = s.resources.moduleResidencyHeld := by
+  cases hStep <;> exact ⟨rfl, rfl⟩
+
 theorem Step.phaseRank_mono
     {s t : State} {event : Event}
     (hStep : Step s event t) :
@@ -139,13 +148,14 @@ theorem reachable_closed_has_no_executable_work
     hSubscriptions, hCallbacks, hOperations, hFactories, hServers, hLocks,
     hHandles.1, hHandles.2.1, hHandles.2.2⟩
 
-theorem reachable_closed_has_no_host_or_dispatcher
+theorem reachable_closed_has_isolated_host_and_no_dispatcher
     {initial current : State}
     (hInitialOpen : initial.phase = .open)
     (hReachable : Reachable initial current)
     (hClosed : current.phase = .closed) :
     current.resources.registrations = 0 ∧
-    current.resources.eventRegistrations = 0 ∧
+    (current.resources.residentEventRegistrations = 0 ∨
+      current.resources.moduleResidencyHeld = true) ∧
     current.resources.registrationStateKnown = true ∧
     current.resources.callbackGateOpen = false ∧
     current.resources.generationUnique = true ∧
@@ -163,6 +173,19 @@ theorem reachable_closed_has_no_host_or_dispatcher
     ⟨hPending, hRunning⟩
   exact ⟨hRegistrations, hEvents, hKnown, hGate, hUnique, hQuiesced,
     hStateOwned, hPending, hRunning⟩
+
+theorem reachable_closed_with_resident_events_retains_module
+    {initial current : State}
+    (hInitialOpen : initial.phase = .open)
+    (hReachable : Reachable initial current)
+    (hClosed : current.phase = .closed)
+    (hEvents : current.resources.residentEventRegistrations > 0) :
+    current.resources.moduleResidencyHeld = true := by
+  have hHost := Resources.quiescent_hostDetached
+    (reachable_closed_is_quiescent hInitialOpen hReachable hClosed)
+  rcases hHost.2.2.1 with hZero | hHeld
+  · omega
+  · exact hHeld
 
 theorem Steps.phaseRank_mono
     {s t : State} {events : List Event}

@@ -63,18 +63,26 @@ are not native Windows or real Excel observations. Existing formal certificates
 cover lifecycle/resource protocols; they do not establish this Excel callback
 contract. No live Excel version/build/bitness is claimed by this record.
 
-## Event qualification
+## Event lifetime update, 2026-10-25
 
-`xlEventRegister` now accepts only positive `xltypeInt` acknowledgements, in
-accordance with [Microsoft's public contract](https://learn.microsoft.com/en-us/office/client-developer/excel/xleventregister).
-Malformed or nonpositive removal acknowledgements leave the event mutation
-indeterminate and the pending registration retained, rather than certifying
-detachment.
+The September validation above predates the current event policy. Historical
+registration evidence included a signed-negative, nonzero `xltypeInt` token;
+registration now preserves and accepts nonzero integer tokens. A later native
+interactive probe observed both handlers still firing after nil-procedure
+removal, with re-registration accumulating handler generations. That failure
+is preserved in the [event qualification record](event-qualification/README.md).
 
-The nil-procedure removal convention remains undocumented by that page and
-has no new real-Excel observation. The separate
-[event qualification protocol](event-qualification/README.md) requires exact
-Excel version/build/channel, process bitness, raw results and interactive
-post-removal event observations. Its [record](event-qualification/records.json)
-is explicitly `unverified`, with no fabricated observations. The current COM
-comparison runner does not supply that evidence.
+Production now gives calculation-event registrations loaded-module lifetime.
+Each static runtime reuses its confirmed registrations across logical close
+and reopen. Closed generation admission prevents late native notifications
+from accessing reclaimed state, while a retained DLL reference keeps the
+native entry points executable. No event-removal call or successful-removal
+certificate is needed for logical close. In-flight or indeterminate event
+registration also retains residency and prevents blind re-registration.
+
+This changes neither the terminal `HostCallbackSession` rule above nor the
+function/metadata cleanup obligations. `PhysicallyUnloadableAddin` can permit
+lease release only with zero retained native event slots; successful logical
+close with retained events is not physical-unload evidence. Matching-build
+interactive close/reopen and cancellation qualification of this implementation
+remains pending; the earlier observations are not validation of the new code.

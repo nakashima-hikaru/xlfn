@@ -125,8 +125,6 @@ private def parseCompletion : Json → Except String Completion
 private def simpleCertificateEvent : String → Option Event
   | "registerFunction" => some .registerFunction
   | "unregisterFunction" => some .unregisterFunction
-  | "registerEvent" => some .registerEvent
-  | "unregisterEvent" => some .unregisterEvent
   | "startAsyncExecutor" => some .startAsyncExecutor
   | "stopAsyncExecutor" => some .stopAsyncExecutor
   | "startDiagnostics" => some .startDiagnostics
@@ -220,7 +218,8 @@ private def parseResources (json : Json) : Except String Resources := do
   let ingressOpen : Bool ← field json "ingressOpen"
   let externalEntries : Nat ← field json "externalEntries"
   let registrations : Nat ← field json "registrations"
-  let eventRegistrations : Nat ← field json "eventRegistrations"
+  let residentEventRegistrations : Nat ← field json "residentEventRegistrations"
+  let moduleResidencyHeld : Bool ← field json "moduleResidencyHeld"
   let registrationStateKnown : Bool ← field json "registrationStateKnown"
   let callbackGateOpen : Bool ← field json "callbackGateOpen"
   let activeCalls : Nat ← field json "activeCalls"
@@ -248,7 +247,8 @@ private def parseResources (json : Json) : Except String Resources := do
     ingressOpen,
     externalEntries,
     registrations,
-    eventRegistrations,
+    residentEventRegistrations,
+    moduleResidencyHeld,
     registrationStateKnown,
     callbackGateOpen,
     activeCalls,

@@ -22,29 +22,38 @@ fn with_terminal_context(
 }
 
 #[test]
+#[cfg(any(not(target_os = "windows"), feature = "async", feature = "handles"))]
 fn terminal_snapshot_observes_host_and_return_obligations() {
     with_terminal_context(
         || {},
         |runtime, proof| {
             let deps = runtime.shutdown_deps();
-            deps.host()
-                .replace_event_registrations(vec![crate::registration::EventRegistration {
-                    procedure: "observer_test",
-                    event: 1,
-                    registration_id: 1,
-                    unregistered: false,
-                }]);
+            let script = crate::registration::host::test_support::CallbackScript::install([
+                crate::registration::host::test_support::Reply::success(
+                    xlfn_sys::XL_EVENT_REGISTER,
+                    xlfn_sys::XLOPER12::integer(7),
+                ),
+            ]);
+            let callbacks = crate::host_callback::HostCallbackSession::new();
+            runtime
+                .ensure_calculation_events(
+                    &crate::registration::RegistrationHost::new(&callbacks),
+                    false,
+                )
+                .unwrap();
+            script.assert_calls(&[xlfn_sys::XL_EVENT_REGISTER]);
             let open = runtime.open_deps();
             open.returns().returns.reopen_admission().unwrap();
             let producer = open.returns().returns.try_enter_producer().unwrap();
             let control = runtime.lifecycle.access();
             let resources = deps.terminal_resources(&control, proof);
-            assert_eq!(resources.event_registrations, 1);
+            assert_eq!(resources.resident_event_registrations, 1);
             assert_eq!(resources.return_blocks, 1);
             drop(control);
             drop(producer);
             open.returns().returns.close_admission();
-            deps.host().replace_event_registrations(Vec::new());
+            assert!(resources.module_residency_held);
+            assert!(!runtime.release_module_residency().unwrap());
         },
     );
 }

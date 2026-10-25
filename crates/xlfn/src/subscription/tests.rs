@@ -4000,7 +4000,9 @@ fn uncommitted_subscription_trace_balances_each_cleanup_path() {
         let (arena, source, _, disconnected) = publishing_source::<i32>(None);
         let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
         let trace = triomphe::Arc::new(ShutdownTraceRecorder::new());
-        trace.begin(1, ShutdownResources::opened(0, 0)).unwrap();
+        trace
+            .begin(1, ShutdownResources::opened(0, 0, false))
+            .unwrap();
         runtime.set_trace_sink(triomphe::Arc::clone(&trace));
         let subscription_events = || {
             trace

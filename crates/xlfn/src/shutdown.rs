@@ -48,9 +48,11 @@ mod certificate_tokens {
 
     shutdown_token!(AddinQuiesced);
     shutdown_token!(GenerationReclaimed);
-    shutdown_token!(HostCallbacksDetached);
+    shutdown_token!(GenerationCallbacksDetached);
 }
-pub(crate) use certificate_tokens::{AddinQuiesced, GenerationReclaimed, HostCallbacksDetached};
+pub(crate) use certificate_tokens::{
+    AddinQuiesced, GenerationCallbacksDetached, GenerationReclaimed,
+};
 
 /// Teardown work owned by the handle implementation after its public
 /// bindings have been sealed.  The lifecycle core only sees this narrow

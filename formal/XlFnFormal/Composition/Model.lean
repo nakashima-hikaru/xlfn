@@ -25,7 +25,7 @@ end ShutdownSession
 structure State where
   lifecycle : Lifecycle.State
   currentShutdown : Option ShutdownSession
-  /-- Ghost evidence that the runtime has established unload safety for the
+  /-- Ghost evidence that the runtime has established logical quiescence for the
       current lifecycle publication.  It is intentionally retained after a
       successful close so the return theorem does not depend on a retired
       Shutdown session remaining in memory. -/
@@ -81,7 +81,7 @@ def Valid (s : State) : Prop :=
   s.SessionConsistent ∧
   s.CurrentShutdownCertified
 
-def UnloadCertificationConsistent (s : State) : Prop :=
+def LogicalCloseCertificationConsistent (s : State) : Prop :=
   s.logicalQuiescenceCertified = true ↔ s.lifecycle.phase = .closed
 
 def initialState : State :=
@@ -99,9 +99,9 @@ theorem initialState_valid : initialState.Valid := by
     simp [initialState, SessionConsistent, Lifecycle.State.initialState], by
     simp [initialState, CurrentShutdownCertified]⟩
 
-theorem initialState_unloadCertificationConsistent :
-    initialState.UnloadCertificationConsistent := by
-  simp [initialState, UnloadCertificationConsistent, Lifecycle.State.initialState]
+theorem initialState_logicalCloseCertificationConsistent :
+    initialState.LogicalCloseCertificationConsistent := by
+  simp [initialState, LogicalCloseCertificationConsistent, Lifecycle.State.initialState]
 
 theorem initialState_logicalQuiescenceCertified : initialState.logicalQuiescenceCertified = true := by
   rfl

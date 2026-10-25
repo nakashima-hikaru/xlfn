@@ -287,7 +287,7 @@ pub(crate) struct ServicesQuiescent {
 pub(crate) struct ResourcesReclaimed {
     services: ServicesQuiescent,
     rtd: crate::excel_rtd_protocol::RtdQuiescent,
-    host_callbacks: crate::shutdown::HostCallbacksDetached,
+    host_callbacks: crate::shutdown::GenerationCallbacksDetached,
     diagnostics: crate::diagnostics::DiagnosticsStopped,
 }
 
@@ -547,7 +547,7 @@ impl ResourcesReclaimed {
     pub(crate) fn new(
         services: ServicesQuiescent,
         rtd: crate::excel_rtd_protocol::RtdQuiescent,
-        host_callbacks: crate::shutdown::HostCallbacksDetached,
+        host_callbacks: crate::shutdown::GenerationCallbacksDetached,
         diagnostics: crate::diagnostics::DiagnosticsStopped,
     ) -> Self {
         Self {
@@ -849,7 +849,7 @@ impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ServicesQuiescent> {
     pub(crate) fn reclaim(
         self,
         rtd: crate::excel_rtd_protocol::RtdQuiescent,
-        host_callbacks: crate::shutdown::HostCallbacksDetached,
+        host_callbacks: crate::shutdown::GenerationCallbacksDetached,
         diagnostics: crate::diagnostics::DiagnosticsStopped,
     ) -> TeardownTxn<'runtime, A, K, ResourcesReclaimed> {
         let (owner, services) = self.split();

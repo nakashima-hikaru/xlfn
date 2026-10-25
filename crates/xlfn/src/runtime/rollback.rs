@@ -20,7 +20,8 @@ use crate::lifecycle::lifecycle_access_error;
 
 pub(crate) enum OpenRollbackStatus {
     /// Every terminal certificate was issued and the lifecycle binding was
-    /// released. A later open may safely reuse the runtime.
+    /// released. Confirmed module events can be reused by a later open; an
+    /// indeterminate event slot still prevents a blind registration retry.
     Finalized,
     /// A final removal owner took over between failed-open publication and
     /// rollback acquisition. That owner alone decides cleanup failure policy.
@@ -41,7 +42,7 @@ pub(crate) fn active_runtime_generation<A: Addin>(
 }
 
 impl OpenRollbackOutcome {
-    pub(crate) fn unload_safe(&self) -> bool {
+    pub(crate) fn is_finalized(&self) -> bool {
         matches!(self.status, OpenRollbackStatus::Finalized)
     }
 
@@ -54,11 +55,6 @@ impl OpenRollbackOutcome {
             OpenRollbackStatus::Incomplete(hazard) => Some(hazard),
             OpenRollbackStatus::Finalized | OpenRollbackStatus::ClosingOwnsCleanup => None,
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_finalized(&self) -> bool {
-        self.unload_safe()
     }
 }
 
@@ -90,8 +86,9 @@ where
         crate::runtime::orchestration::OpenRollbackAcquisition::Acquired(attempt) => attempt,
         crate::runtime::orchestration::OpenRollbackAcquisition::ClosingOwnsCleanup => {
             let finalized = runtime.phase() == crate::lifecycle::LifecyclePhase::Closed
-                && runtime.host.callbacks_detached()
+                && runtime.host.generation_callbacks_detached()
                 && !runtime.host.registration_state_unknown()
+                && runtime.residency.callbacks_retained_safely()
                 && crate::excel_rtd_protocol::logical_quiescence_certified();
             return OpenRollbackOutcome {
                 status: if finalized {
@@ -179,43 +176,9 @@ where
         .host()
         .retain_metadata_debt(outcome.metadata_debt);
 
-    let events = shutdown_deps.host().event_registrations_snapshot();
-    if callbacks.permits_callbacks() {
-        let event_outcome = {
-            let host = RegistrationHost::new(callbacks);
-            HostRegistrar::unregister_events_detailed(&host, &events)
-        };
-        for (_, error) in &event_outcome.failed {
-            report_boundary_error("xlAutoOpen event rollback", error);
-        }
-        for error in &event_outcome.cleanup_issues {
-            report_cleanup_issue(&crate::shutdown::CleanupIssue {
-                component: "Excel event callback result",
-                kind: crate::shutdown::CleanupIssueKind::HostMemoryLeak,
-                error: error.clone(),
-            });
-        }
-        shutdown_deps.host().replace_event_registrations(
-            event_outcome
-                .failed
-                .into_iter()
-                .map(|(entry, _)| entry)
-                .collect(),
-        );
-    } else if !events.is_empty() {
-        let error = callbacks
-            .terminal_status()
-            .map(|status| XllError::ExcelApi {
-                function: crate::error::ExcelApiFunction::EventRegister,
-                failure: crate::error::ExcelApiFailure::Suppressed(status),
-            })
-            .unwrap_or(XllError::Closing);
-        report_boundary_error("xlAutoOpen event rollback", &error);
-        shutdown_deps.host().replace_event_registrations(events);
-    } else {
-        shutdown_deps.host().replace_event_registrations(Vec::new());
-    }
-
+    // Native calculation exports survive a failed open, including a partial
+    // event-registration sequence. Their module slots prevent duplicate retry
+    // and retain residency independently of this generation's rollback.
     teardown.close_module_callbacks();
 
     if runtime.host.registration_state_unknown() {
@@ -228,7 +191,7 @@ where
             crate::shutdown::UnloadHazard::RegistrationStateUnknown,
         );
     }
-    if !runtime.host.callbacks_detached() {
+    if !runtime.host.generation_callbacks_detached() {
         let error = XllError::Internal {
             diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRATION_UNKNOWN,
         };
@@ -238,7 +201,7 @@ where
             crate::shutdown::UnloadHazard::HostCallbackStillRegistered,
         );
     }
-    let host_callbacks = crate::shutdown::HostCallbacksDetached::issue();
+    let host_callbacks = crate::shutdown::GenerationCallbacksDetached::issue();
 
     // Remove and quiesce Add-in state before the registry drops its published
     // object roots, matching the terminal removal ordering. Public Handle values

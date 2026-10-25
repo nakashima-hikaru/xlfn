@@ -72,7 +72,9 @@ pub(crate) struct ShutdownResources {
     pub(crate) ingress_open: bool,
     pub(crate) external_entries: u64,
     pub(crate) registrations: u64,
-    pub(crate) event_registrations: u64,
+    /// Native event entry points retained for this loaded module instance.
+    pub(crate) resident_event_registrations: u64,
+    pub(crate) module_residency_held: bool,
     pub(crate) registration_state_known: bool,
     pub(crate) callback_gate_open: bool,
     pub(crate) active_calls: u64,
@@ -99,12 +101,17 @@ pub(crate) struct ShutdownResources {
 }
 
 impl ShutdownResources {
-    pub(crate) const fn opened(registrations: u64, event_registrations: u64) -> Self {
+    pub(crate) const fn opened(
+        registrations: u64,
+        resident_event_registrations: u64,
+        module_residency_held: bool,
+    ) -> Self {
         Self {
             ingress_open: true,
             external_entries: 0,
             registrations,
-            event_registrations,
+            resident_event_registrations,
+            module_residency_held,
             registration_state_known: true,
             callback_gate_open: true,
             active_calls: 0,
@@ -137,7 +144,8 @@ impl ShutdownResources {
             ingress_open: false,
             external_entries: 0,
             registrations: 0,
-            event_registrations: 0,
+            resident_event_registrations: 0,
+            module_residency_held: false,
             registration_state_known: true,
             callback_gate_open: false,
             active_calls: 0,
@@ -171,8 +179,6 @@ impl ShutdownResources {
 pub(crate) enum ShutdownEvent {
     RegisterFunction,
     UnregisterFunction,
-    RegisterEvent,
-    UnregisterEvent,
     EnterExternal { id: ActivityId },
     LeaveExternal { id: ActivityId },
     EnterCall { id: ActivityId },
@@ -323,8 +329,6 @@ pub(crate) enum ActivityEvent {
 pub(crate) enum CertificateEvent {
     RegisterFunction,
     UnregisterFunction,
-    RegisterEvent,
-    UnregisterEvent,
     StartAsyncExecutor,
     StopAsyncExecutor,
     StartDiagnostics,
@@ -373,12 +377,6 @@ impl ShutdownEvent {
             }
             Self::UnregisterFunction => {
                 ShutdownObservation::Certificate(CertificateEvent::UnregisterFunction)
-            }
-            Self::RegisterEvent => {
-                ShutdownObservation::Certificate(CertificateEvent::RegisterEvent)
-            }
-            Self::UnregisterEvent => {
-                ShutdownObservation::Certificate(CertificateEvent::UnregisterEvent)
             }
             Self::StartAsyncExecutor => {
                 ShutdownObservation::Certificate(CertificateEvent::StartAsyncExecutor)
@@ -508,7 +506,7 @@ impl TraceOutcome {
 pub(crate) enum ShutdownTrace {
     Committed {
         generation: u64,
-        initial: ShutdownResources,
+        initial: Box<ShutdownResources>,
         activities: Vec<ActivityEvent>,
         certificates: Vec<CertificateEvent>,
         trace_truncated: bool,
@@ -710,7 +708,7 @@ impl ShutdownTraceRecorder {
         };
         Some(ShutdownTrace::Committed {
             generation: session.generation,
-            initial: session.initial.clone(),
+            initial: Box::new(session.initial.clone()),
             activities: session.activities.clone(),
             certificates: session.certificates.clone(),
             trace_truncated: session.trace_truncated,
@@ -766,7 +764,9 @@ mod tests {
     #[test]
     fn recorder_preserves_wire_events_without_replaying_semantics() {
         let recorder = recorder();
-        recorder.begin(42, ShutdownResources::opened(0, 0)).unwrap();
+        recorder
+            .begin(42, ShutdownResources::opened(0, 0, false))
+            .unwrap();
         recorder.record(ShutdownEvent::BeginClose);
         recorder.record(ShutdownEvent::FinishClose);
         assert_eq!(
@@ -779,7 +779,9 @@ mod tests {
     #[test]
     fn terminal_observation_stops_recording() {
         let recorder = recorder();
-        recorder.begin(42, ShutdownResources::opened(0, 0)).unwrap();
+        recorder
+            .begin(42, ShutdownResources::opened(0, 0, false))
+            .unwrap();
         recorder.record(ShutdownEvent::Quarantine(ShutdownFailure::BoundaryPanic));
         recorder.record(ShutdownEvent::LeaveExternal {
             id: ActivityId::fresh(),
@@ -796,7 +798,9 @@ mod tests {
     fn activity_observations_do_not_require_append_order() {
         let recorder = recorder();
         let id = ActivityId::fresh();
-        recorder.begin(42, ShutdownResources::opened(0, 0)).unwrap();
+        recorder
+            .begin(42, ShutdownResources::opened(0, 0, false))
+            .unwrap();
         recorder.record(ShutdownEvent::LeaveCall { id });
         recorder.record(ShutdownEvent::EnterCall { id });
 
@@ -812,7 +816,9 @@ mod tests {
     #[test]
     fn success_is_an_observed_recorder_outcome() {
         let recorder = recorder();
-        recorder.begin(42, ShutdownResources::opened(0, 0)).unwrap();
+        recorder
+            .begin(42, ShutdownResources::opened(0, 0, false))
+            .unwrap();
         recorder.record(ShutdownEvent::FinishClose);
         recorder.mark_returned_success();
         assert!(!recorder.active());
@@ -826,12 +832,14 @@ mod tests {
     fn recorder_rejects_zero_generation_and_overlapping_sessions() {
         let recorder = recorder();
         assert_eq!(
-            recorder.begin(0, ShutdownResources::opened(0, 0)),
+            recorder.begin(0, ShutdownResources::opened(0, 0, false)),
             Err(TraceError::InvalidGeneration)
         );
-        recorder.begin(1, ShutdownResources::opened(0, 0)).unwrap();
+        recorder
+            .begin(1, ShutdownResources::opened(0, 0, false))
+            .unwrap();
         assert_eq!(
-            recorder.begin(2, ShutdownResources::opened(0, 0)),
+            recorder.begin(2, ShutdownResources::opened(0, 0, false)),
             Err(TraceError::SessionAlreadyActive)
         );
     }

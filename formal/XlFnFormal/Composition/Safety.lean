@@ -38,7 +38,7 @@ theorem successful_open_rollback_is_quiescent
 
 /-- Initialization quarantine retains residency; it does not manufacture the
     resource certificate required by either successful close path. -/
-theorem quarantined_open_has_no_unload_certificate
+theorem quarantined_open_has_no_close_certificate
     {s t : State} {attempt : Lifecycle.AttemptId} {reason : Shutdown.Failure}
     (hStep : Step s (.quarantineOpen attempt reason) t) :
     t.lifecycle.phase = .quarantined ∧ t.currentShutdown = none ∧
@@ -92,11 +92,11 @@ theorem reachable_returnSafe_is_logicalQuiescenceCertified
     (hReachable : Reachable State.initialState final)
     (hSafe : final.lifecycle.ReturnSafe) :
     final.logicalQuiescenceCertified = true := by
-  have hConsistent := Reachable.unloadCertificationConsistent
-    State.initialState_unloadCertificationConsistent hReachable
+  have hConsistent := Reachable.logicalCloseCertificationConsistent
+    State.initialState_logicalCloseCertificationConsistent hReachable
   have hPhase := hSafe.1
   have h := hConsistent
-  simp [State.UnloadCertificationConsistent, hPhase] at h
+  simp [State.LogicalCloseCertificationConsistent, hPhase] at h
   exact h
 
 /-- A successful abstract `xlAutoRemove` return is represented by a reachable

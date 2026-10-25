@@ -11,7 +11,7 @@ concurrency protocols implemented in `xlfn`:
 
 - **Lifecycle synchronization**: Opening, explicit removal, controlled reload, open-rollback, and terminal coordination.
 - **Resource shutdown**: Deterministic staged teardown, quarantine, and certificate-based quiescence, including separate registry-sealed and pin-drained milestones.
-- **Physical residency**: A separate module self-reference that remains held across logical `closed` and is releasable only after the quiescence certificate.
+- **Physical residency**: A separate module self-reference that remains held across logical `closed` and is releasable only after logical quiescence with no retained native event roots.
 - **Composition**: Verified composition of lifecycle states and resource shutdown sessions.
 - **Handle safety**:
   - Handle registry slot allocation, generation monotonicity, and ABA protection.
@@ -132,9 +132,29 @@ an explicit Add-in contract:
 - async tasks and executor state;
 - subscriptions, callbacks, RTD operations, factories, servers and locks;
 - call-scoped handle borrows, published handles, and pins owned by scoped async handle tasks;
-- registration state and callback-gate state;
+- function registration state, resident native event roots, module residency,
+  and callback-gate state;
 - `generationUnique`, `addinQuiesced`, and `generationOwnedByRuntime` for open generation reclamation;
 - diagnostics and cleanup-issue accounting.
+
+Native calculation events have loaded-module lifetime. `residentEventRegistrations`
+includes both confirmed and indeterminate registrations; `moduleResidencyHeld`
+records the self-reference that keeps those native entry points executable.
+The fields are stable throughout one generation's shutdown trace. No
+`registerEvent` or `unregisterEvent` certificate exists in this protocol:
+logical close does not claim that Excel detached the event entry points.
+`HostDetached` certifies isolation of the generation through closed ingress
+and callback admission. It permits retained native events only while module
+residency remains held, with every other drain/reclamation obligation unchanged.
+
+`Resources.Quiescent` and Composition's `logicalQuiescenceCertified` therefore
+certify logical close. `Resources.PhysicalUnloadSafe` additionally requires zero
+resident event roots. The separate Residency model requires this zero-event
+condition before releasing the DLL lease and proves that retained event roots
+prevent release. A successful shutdown trace with retained roots is not
+physical-unload evidence. Counterexamples cover a missing residency lease and
+an open callback gate, while preserving a valid logical-close case with two
+retained event roots.
 
 Arbitrary user threads and native callbacks are not represented by unverifiable
 ghost counters. Draining publication readers before recovering the uniquely
@@ -374,7 +394,7 @@ lake exe composition_trace_checker < composition-trace.json
 
 Replays lifecycle and shutdown composition traces across open/close generations.
 An uncommitted `quarantineOpen` ends the active attempt in `quarantined`, clears
-prior successful-return status, and cannot admit a new open or certify unloading.
+prior successful-return status, and cannot admit a new open or certify logical close.
 This terminal transition is distinct from `failOpen`, whose rollback can prove
 quiescence and return the runtime to `closed`. Rust replay tests cover both
 initialization errors and panics, including attempts after successful removal,

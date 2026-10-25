@@ -60,7 +60,8 @@ private def allowsDiagnosticCreation (phase : Phase) : Bool :=
   | _ => false
 
 private def hostDetached (r : Resources) : Bool :=
-  r.ingressOpen == false && r.registrations == 0 && r.eventRegistrations == 0 &&
+  r.ingressOpen == false && r.registrations == 0 &&
+    (r.residentEventRegistrations == 0 || r.moduleResidencyHeld == true) &&
     r.registrationStateKnown == true && r.callbackGateOpen == false
 
 private def callsDrained (r : Resources) : Bool :=
@@ -203,16 +204,6 @@ def apply? (s : State) (event : Event) : Option State :=
       if live s.phase && s.resources.registrations > 0 then
         some { s with resources :=
           { s.resources with registrations := decrement s.resources.registrations } }
-      else none
-  | .registerEvent =>
-      if s.phase = .open ∧ s.resources.ingressOpen = true then
-        some { s with resources :=
-          { s.resources with eventRegistrations := s.resources.eventRegistrations + 1 } }
-      else none
-  | .unregisterEvent =>
-      if live s.phase && s.resources.eventRegistrations > 0 then
-        some { s with resources :=
-          { s.resources with eventRegistrations := decrement s.resources.eventRegistrations } }
       else none
   | .enterExternal =>
       if s.phase = .open ∧ s.resources.ingressOpen = true then
@@ -493,8 +484,6 @@ theorem apply?_sound
     first
     | apply Step.registerFunction
     | apply Step.unregisterFunction
-    | apply Step.registerEvent
-    | apply Step.unregisterEvent
     | apply Step.enterExternal
     | apply Step.leaveExternal
     | apply Step.enterCall

@@ -142,7 +142,7 @@ where
             if outcome.cleanup_owned_elsewhere() {
                 return Err(XllError::Closing);
             }
-            if !outcome.unload_safe() {
+            if !outcome.is_finalized() {
                 let error = XllError::Internal {
                     diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_ROLLBACK_PENDING,
                 };

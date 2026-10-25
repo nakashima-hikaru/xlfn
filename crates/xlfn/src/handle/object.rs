@@ -1007,7 +1007,10 @@ mod tests {
         let arena = PublishedOwner::new(ObjectArena::new());
         let trace = triomphe::Arc::new(crate::shutdown_trace::ShutdownTraceRecorder::new());
         trace
-            .begin(1, crate::shutdown_trace::ShutdownResources::opened(0, 0))
+            .begin(
+                1,
+                crate::shutdown_trace::ShutdownResources::opened(0, 0, false),
+            )
             .unwrap();
         arena.set_trace_sink(triomphe::Arc::clone(&trace));
         // SAFETY: the owner remains published through all capabilities/tails.

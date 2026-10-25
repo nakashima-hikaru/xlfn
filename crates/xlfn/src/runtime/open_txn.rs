@@ -622,18 +622,6 @@ where
             .callbacks
     }
 
-    pub(crate) fn stage_events(
-        &mut self,
-        registrations: Vec<crate::registration::EventRegistration>,
-    ) {
-        self.state
-            .as_mut()
-            .expect("opening transaction state already consumed")
-            .host_mut()
-            .journal
-            .pending_events = registrations;
-    }
-
     pub(crate) fn retain_journal(&mut self, journal: HostMutationJournal) {
         self.state
             .as_mut()

@@ -154,7 +154,10 @@ structure Resources where
   ingressOpen : Bool := true
   externalEntries : Nat := 0
   registrations : Nat := 0
-  eventRegistrations : Nat := 0
+  /-- Native event entry points survive logical generation teardown. This
+      count includes registrations whose host outcome remains indeterminate. -/
+  residentEventRegistrations : Nat := 0
+  moduleResidencyHeld : Bool := false
   registrationStateKnown : Bool := true
   callbackGateOpen : Bool := true
   activeCalls : Nat := 0
@@ -185,10 +188,12 @@ structure Resources where
 
 namespace Resources
 
+/-- No host entry can reach a closed generation. Native event trampolines may
+    remain registered only while their module residency lease is retained. -/
 def HostDetached (r : Resources) : Prop :=
   r.ingressOpen = false ∧
   r.registrations = 0 ∧
-  r.eventRegistrations = 0 ∧
+  (r.residentEventRegistrations = 0 ∨ r.moduleResidencyHeld = true) ∧
   r.registrationStateKnown = true ∧
   r.callbackGateOpen = false
 
@@ -233,6 +238,20 @@ def Quiescent (r : Resources) : Prop :=
   r.HandlesDrained ∧
   r.GenerationReclaimed ∧
   r.DiagnosticsDrained
+
+/-- Logical quiescence alone does not permit releasing the module. An event
+    registration still lets Excel call its native trampoline after close. -/
+def PhysicalUnloadSafe (r : Resources) : Prop :=
+  r.Quiescent ∧ r.residentEventRegistrations = 0
+
+theorem physicalUnloadSafe_has_no_resident_events {r : Resources}
+    (h : r.PhysicalUnloadSafe) : r.residentEventRegistrations = 0 := h.2
+
+theorem resident_events_prevent_physical_unload {r : Resources}
+    (h : r.residentEventRegistrations > 0) : ¬ r.PhysicalUnloadSafe := by
+  intro hSafe
+  have hZero := hSafe.2
+  omega
 
 def CleanupComplete (r : Resources) : Prop :=
   r.cleanupIssues = 0

@@ -604,7 +604,7 @@ mod tests {
             &mut callbacks,
             active_runtime_generation(&runtime),
         );
-        assert!(outcome.unload_safe());
+        assert!(outcome.is_finalized());
         assert!(outcome.is_finalized());
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
         assert_eq!(attempts.load(std::sync::atomic::Ordering::Acquire), 1);
@@ -629,7 +629,7 @@ mod tests {
             active_runtime_generation(&runtime),
         );
         assert!(outcome.cleanup_owned_elsewhere());
-        assert!(!outcome.unload_safe());
+        assert!(!outcome.is_finalized());
         assert_eq!(outcome.failure_hazard(), None);
         assert_eq!(runtime.phase(), LifecyclePhase::Closing);
 
@@ -1465,7 +1465,7 @@ mod tests {
             &mut callbacks,
             active_runtime_generation(&rollback),
         );
-        assert!(outcome.unload_safe());
+        assert!(outcome.is_finalized());
         check(
             "open rollback",
             rollback.composition_trace_json(),
@@ -1549,7 +1549,7 @@ mod tests {
                 &mut callbacks,
                 active_runtime_generation(&runtime),
             )
-            .unload_safe()
+            .is_finalized()
         );
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
 
@@ -2136,7 +2136,7 @@ mod tests {
             &mut callbacks,
             active_runtime_generation(&runtime),
         );
-        assert!(outcome.unload_safe());
+        assert!(outcome.is_finalized());
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
 
         assert_eq!(quiesced.load(Ordering::SeqCst), 1);

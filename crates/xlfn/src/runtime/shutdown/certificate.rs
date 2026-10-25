@@ -143,6 +143,7 @@ impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
                 if proof.services_generation() != Some(generation)
                     || proof.module_epoch() != module_epoch
                     || !deps.host().is_quiescent()
+                    || !deps.residency().callbacks_retained_safely()
                 {
                     return Err((close_certificate_error(), self));
                 }
@@ -161,7 +162,7 @@ impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
                 })
             }
             FinalRemovalReady::Uncommitted => {
-                if !deps.host().is_quiescent() {
+                if !deps.host().is_quiescent() || !deps.residency().callbacks_retained_safely() {
                     return Err((close_certificate_error(), self));
                 }
                 if self.has_module_closing() {
@@ -185,7 +186,10 @@ impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
         let control = lifecycle.access();
         let ready = lifecycle.open_rollback_ready(&control, self.attempt());
         drop(control);
-        if ready.is_none() || !deps.host().is_quiescent() {
+        if ready.is_none()
+            || !deps.host().is_quiescent()
+            || !deps.residency().callbacks_retained_safely()
+        {
             return Err((
                 XllError::Internal {
                     diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_ROLLBACK_CERTIFICATE,

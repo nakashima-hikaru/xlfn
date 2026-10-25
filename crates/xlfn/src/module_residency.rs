@@ -3,8 +3,12 @@
 //! The logical lifecycle is allowed to reach `Closed` while this lease is
 //! still held. Safe Add-ins retain it after terminal removal because the
 //! framework cannot account for arbitrary user-created executable sources.
-//! Only an explicit `PhysicallyUnloadableAddin` opt-in releases it once
-//! `xlAutoClose` has completed logical teardown.
+//! An explicit `PhysicallyUnloadableAddin` opt-in permits release after
+//! `xlAutoClose` completes logical teardown only when no native calculation
+//! event registration slot remains. Confirmed, in-flight, and indeterminate
+//! registrations all keep their native entry points resident across close
+//! and reopen. Logical close can reclaim generation resources with this
+//! reference retained; it does not certify physical DLL unload.
 
 use crate::XllResult;
 #[cfg(target_os = "windows")]

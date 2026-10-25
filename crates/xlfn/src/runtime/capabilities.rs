@@ -8,7 +8,9 @@ use super::{AddinLifecycleAccess, Runtime};
 use crate::addin::Addin;
 use crate::lifecycle::{LifecycleAccess, LifecycleControl, LifecycleCoordinator};
 use crate::runtime::observer::RuntimeObserver;
-use crate::runtime_components::{GenerationServices, HostLedger, QuarantineVault, ReturnProtocol};
+use crate::runtime_components::{
+    GenerationServices, HostLedger, ModuleResidency, QuarantineVault, ReturnProtocol,
+};
 use xlfn_kernel::thread_affine::{ThreadAffineInstallError, ThreadAffineSlot};
 
 /// Facilities needed by one open transaction.
@@ -20,6 +22,8 @@ pub(crate) struct OpenDeps<'a, A: Addin> {
     lifecycle: &'a LifecycleCoordinator<A>,
     addin_lifecycle: &'a ThreadAffineSlot<A::LifecycleState>,
     host: &'a HostLedger,
+    #[cfg(any(test, feature = "refinement"))]
+    residency: &'a ModuleResidency,
     returns: &'a ReturnProtocol,
     #[cfg(feature = "async")]
     async_runtime: &'a crate::async_udf::AsyncRuntime<A::AsyncExecutor>,
@@ -41,6 +45,8 @@ impl<'a, A: Addin> OpenDeps<'a, A> {
             lifecycle: &runtime.lifecycle,
             addin_lifecycle: &runtime.addin_lifecycle,
             host: &runtime.host,
+            #[cfg(any(test, feature = "refinement"))]
+            residency: &runtime.residency,
             returns: &runtime.return_protocol,
             #[cfg(feature = "async")]
             async_runtime: &runtime.async_runtime,
@@ -109,6 +115,11 @@ impl<'a, A: Addin> OpenDeps<'a, A> {
         }
     }
 
+    #[cfg(any(test, feature = "refinement"))]
+    pub(in crate::runtime) fn residency(&self) -> &'a ModuleResidency {
+        self.residency
+    }
+
     pub(in crate::runtime) fn observer(&self) -> &'a RuntimeObserver {
         self.observer
     }
@@ -150,6 +161,7 @@ pub(crate) struct ShutdownDeps<'a, A: Addin> {
     lifecycle: &'a LifecycleCoordinator<A>,
     addin_lifecycle: &'a ThreadAffineSlot<A::LifecycleState>,
     host: &'a HostLedger,
+    residency: &'a ModuleResidency,
     returns: &'a ReturnProtocol,
     #[cfg(feature = "async")]
     async_runtime: &'a crate::async_udf::AsyncRuntime<A::AsyncExecutor>,
@@ -171,6 +183,7 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
             lifecycle: &runtime.lifecycle,
             addin_lifecycle: &runtime.addin_lifecycle,
             host: &runtime.host,
+            residency: &runtime.residency,
             returns: &runtime.return_protocol,
             #[cfg(feature = "async")]
             async_runtime: &runtime.async_runtime,
@@ -202,6 +215,10 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
         self.quarantine
     }
 
+    pub(in crate::runtime) fn residency(&self) -> &'a ModuleResidency {
+        self.residency
+    }
+
     pub(in crate::runtime) fn observer(&self) -> &'a RuntimeObserver {
         self.observer
     }
@@ -223,7 +240,8 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
         // raw export reservations can include the current removal boundary,
         // rather than another generation-owned activity awaiting teardown.
         resources.registrations = self.host.registrations_snapshot().len() as u64;
-        resources.event_registrations = self.host.event_registrations_snapshot().len() as u64;
+        resources.resident_event_registrations = self.residency.resident_event_count() as u64;
+        resources.module_residency_held = self.residency.is_held();
         resources.registration_state_known = !self.host.registration_state_unknown();
         let callbacks = crate::module_runtime::global().callback_admission();
         resources.callback_gate_open =

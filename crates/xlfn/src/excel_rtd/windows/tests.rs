@@ -650,7 +650,10 @@ fn com_module_lifetime_emits_rtd_resource_trace_events() {
 
     let trace = triomphe::Arc::new(crate::shutdown_trace::ShutdownTraceRecorder::new());
     trace
-        .begin(1, crate::shutdown_trace::ShutdownResources::opened(0, 0))
+        .begin(
+            1,
+            crate::shutdown_trace::ShutdownResources::opened(0, 0, false),
+        )
         .unwrap();
     module_lifetime().set_trace_sink(triomphe::Arc::clone(&trace));
 
