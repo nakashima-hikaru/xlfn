@@ -62,8 +62,7 @@ use automation::{
 pub(super) use class_factory::dll_get_class_object;
 #[cfg(test)]
 use class_factory::{
-    CLASS_FACTORY_VTABLE, ClassFactory, ClassFactoryVtable, IID_ICLASS_FACTORY,
-    factory_lock_server, factory_release,
+    CLASS_FACTORY_VTABLE, ClassFactory, ClassFactoryVtable, IID_ICLASS_FACTORY, factory_lock_server,
 };
 #[cfg(test)]
 use com_abi::IUnknown_Vtbl;

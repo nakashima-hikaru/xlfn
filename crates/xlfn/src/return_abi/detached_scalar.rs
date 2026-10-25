@@ -35,7 +35,8 @@ pub(super) fn publish(value: XLOPER12) -> *mut XLOPER12 {
         }
         // SAFETY: Each thread owns its own process-lifetime root. Excel has
         // consumed the previous result before its next call on this thread,
-        // and publication happens only after all nested UDF work has returned.
+        // and publication happens only after all nested UDF work, layer exits,
+        // tracing, and potentially reentrant call teardown have returned.
         unsafe { pointer.write(value) };
         pointer
     })

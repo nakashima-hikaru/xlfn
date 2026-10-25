@@ -28,6 +28,7 @@ pub(super) static CLASS_FACTORY_VTABLE: ClassFactoryVtable = ClassFactoryVtable 
     lock_server: factory_lock_server,
 };
 
+#[repr(C)]
 pub(super) struct ClassFactory {
     // The COM caller reads this first slot through the published object ABI.
     #[allow(dead_code, reason = "read by the external COM vtable ABI")]
@@ -37,6 +38,8 @@ pub(super) struct ClassFactory {
     // Keep the module hold until every other field has been destroyed.
     pub(super) _module_lease: ComObjectLease,
 }
+
+const _: () = assert!(std::mem::offset_of!(ClassFactory, vtable) == 0);
 
 #[repr(C)]
 pub(super) struct ClassFactoryVtable {

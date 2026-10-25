@@ -426,7 +426,7 @@ impl TestClassFactory {
         // SAFETY: `get_test_class_factory` constructs this wrapper only
         // from a successful COM class-factory result with the static
         // implementation vtable.
-        unsafe { &*self.0.as_ref().vtable }
+        unsafe { &**self.as_ptr().cast::<*const ClassFactoryVtable>() }
     }
 }
 
@@ -434,7 +434,7 @@ impl Drop for TestClassFactory {
     fn drop(&mut self) {
         // SAFETY: the wrapper owns exactly the factory reference returned
         // by DllGetClassObject.
-        unsafe { factory_release(self.as_ptr()) };
+        unsafe { (self.vtable().release)(self.as_ptr()) };
     }
 }
 
@@ -2250,6 +2250,20 @@ fn standard_com_activation_exposes_unknown_dispatch_and_rtd_server() {
     // SAFETY: ACTIVE_SERVER and `ensured` retain the RTD server while the
     // factory and queried interfaces are exercised and released.
     let factory = get_test_class_factory(&ensured.active);
+    // Read the first pointer-sized slot, not a Rust field projection, for
+    // every factory dispatch. The Windows CI matrix runs this on x86 and x64.
+    for iid in [iid_iunknown_from_fields(), iid_iclass_factory_from_fields()] {
+        let mut queried = ptr::null_mut();
+        // SAFETY: the factory and the independent IID/output slots are live.
+        let status =
+            unsafe { (factory.vtable().query_interface)(factory.as_ptr(), &iid, &mut queried) };
+        assert_eq!(status, S_OK);
+        let queried = TestUnknownReference::new(queried);
+        assert_eq!(queried.as_ptr(), factory.as_ptr().cast());
+        // The wrapper releases the QueryInterface reference through the
+        // returned interface's first-slot IUnknown vtable.
+        drop(queried);
+    }
     let unknown_iid = iid_iunknown_from_fields();
     let mut server_unknown = ptr::null_mut();
 

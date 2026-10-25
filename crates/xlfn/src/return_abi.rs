@@ -198,7 +198,7 @@ impl PreparedReturn {
         }
     }
 
-    fn publish_excel(self, producer: &mut ReturnProducerGuard<'static>) -> *mut XLOPER12 {
+    fn publish_excel(self, producer: &mut ReturnProducerGuard<'static>) -> ValuePublication {
         if self.storage.is_none()
             && self.array.is_none()
             && matches!(
@@ -206,12 +206,11 @@ impl PreparedReturn {
                 xlfn_sys::XLTYPE_NUM | xlfn_sys::XLTYPE_BOOL | xlfn_sys::XLTYPE_ERR
             )
         {
-            // Excel consumes a thread-local primitive before evaluating the
-            // next cell on that thread. Its process-owned root has no payload
-            // or destructor and remains valid across physical XLL unload.
-            return detached_scalar::publish(self.oper);
+            // Layer exits, tracing, and call teardown may reenter a UDF. Keep
+            // the primitive private until those callbacks have completed.
+            return ValuePublication::Scalar(self.oper);
         }
-        self.publish_owned_excel(producer)
+        ValuePublication::Owned(self.publish_owned_excel(producer))
     }
 
     fn publish_owned_excel(mut self, producer: &mut ReturnProducerGuard<'static>) -> *mut XLOPER12 {
@@ -428,20 +427,29 @@ pub(crate) fn ffi_boundary_void<A: crate::Addin>(runtime: &Runtime<A>, operation
 trait SyncReturnAbi {
     type Payload;
     type Pointer: Copy;
+    type Publication;
     const INCLUDE_EXCEL_VALUE: bool;
     fn rejected() -> Self::Pointer;
     fn publish(
         payload: Self::Payload,
         producer: &mut ReturnProducerGuard<'static>,
         numeric: &numeric::Fp12CallGuard,
-    ) -> XllResult<Self::Pointer>;
-    fn error(error: &XllError, producer: &mut ReturnProducerGuard<'static>) -> Self::Pointer;
+    ) -> XllResult<Self::Publication>;
+    fn error(error: &XllError, producer: &mut ReturnProducerGuard<'static>) -> Self::Publication;
+    /// Final ABI handoff after all potentially reentrant call cleanup.
+    fn finish(publication: Self::Publication) -> Self::Pointer;
+}
+
+enum ValuePublication {
+    Scalar(XLOPER12),
+    Owned(*mut XLOPER12),
 }
 
 struct ValueReturnAbi;
 impl SyncReturnAbi for ValueReturnAbi {
     type Payload = ReturnPayload;
     type Pointer = *mut XLOPER12;
+    type Publication = ValuePublication;
     const INCLUDE_EXCEL_VALUE: bool = false;
     fn rejected() -> Self::Pointer {
         closing_error_pointer()
@@ -450,11 +458,17 @@ impl SyncReturnAbi for ValueReturnAbi {
         payload: ReturnPayload,
         producer: &mut ReturnProducerGuard<'static>,
         _: &numeric::Fp12CallGuard,
-    ) -> XllResult<Self::Pointer> {
+    ) -> XllResult<Self::Publication> {
         Ok(PreparedReturn::encode(payload)?.publish_excel(producer))
     }
-    fn error(error: &XllError, producer: &mut ReturnProducerGuard<'static>) -> Self::Pointer {
+    fn error(error: &XllError, producer: &mut ReturnProducerGuard<'static>) -> Self::Publication {
         PreparedReturn::error(error).publish_excel(producer)
+    }
+    fn finish(publication: Self::Publication) -> Self::Pointer {
+        match publication {
+            ValuePublication::Scalar(value) => detached_scalar::publish(value),
+            ValuePublication::Owned(pointer) => pointer,
+        }
     }
 }
 
@@ -462,6 +476,7 @@ struct NumericReturnAbi;
 impl SyncReturnAbi for NumericReturnAbi {
     type Payload = numeric::NumericArrayOutput;
     type Pointer = *mut xlfn_sys::FP12;
+    type Publication = Self::Pointer;
     const INCLUDE_EXCEL_VALUE: bool = true;
     fn rejected() -> Self::Pointer {
         std::ptr::null_mut()
@@ -475,6 +490,9 @@ impl SyncReturnAbi for NumericReturnAbi {
     }
     fn error(_: &XllError, _: &mut ReturnProducerGuard<'static>) -> Self::Pointer {
         std::ptr::null_mut()
+    }
+    fn finish(publication: Self::Publication) -> Self::Pointer {
+        publication
     }
 }
 
@@ -613,7 +631,10 @@ where
     };
     drop(producer);
     drop(call);
-    result
+    drop(_external);
+    // Only the ingress counter and numeric nesting guards remain; their
+    // destructors do not invoke application code. Retain both across handoff.
+    B::finish(result)
 }
 
 #[allow(
@@ -630,7 +651,7 @@ fn sync_boundary_inner<A, B, F>(
     call_id: CallId,
     calculation_id: crate::execution::CalculationId,
     operation: F,
-) -> B::Pointer
+) -> B::Publication
 where
     A: crate::Addin,
     B: SyncReturnAbi,
@@ -1045,6 +1066,152 @@ mod tests {
         assert_eq!(unsafe { value.value.number }, 42.0);
         assert!(runtime.returns_are_quiescent());
         assert_eq!(crate::boundary::host::host_auto_remove(runtime), 1);
+    }
+
+    #[test]
+    fn scalar_publication_survives_layer_exit_reentry() {
+        struct ReentrantAddin;
+        struct ReentrantLayer;
+        struct ReentrantGuard(bool);
+        static RUNTIME: Runtime<ReentrantAddin> = Runtime::new();
+        static REENTRIES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+        impl crate::execution::UdfLayer for ReentrantLayer {
+            type Guard = ReentrantGuard;
+            fn enter(&self, metadata: &CallMetadata) -> XllResult<Self::Guard> {
+                Ok(ReentrantGuard(metadata.udf_id == "outer"))
+            }
+        }
+        impl crate::execution::UdfLayerGuard for ReentrantGuard {
+            fn exit(self, _: &CallOutcome<'_>) {
+                if self.0 {
+                    let inner = udf_boundary_named(&RUNTIME, "inner", "INNER", |_, _| {
+                        ReturnPayload::scalar(17.0)
+                    });
+                    // SAFETY: consume the inner numeric result before another UDF call.
+                    let inner = unsafe { &*inner };
+                    assert_eq!(inner.xltype, XLTYPE_NUM);
+                    // SAFETY: the checked tag selects the numeric field.
+                    assert_eq!(unsafe { inner.value.number }, 17.0);
+                    REENTRIES.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+        impl Addin for ReentrantAddin {
+            type SharedState = ();
+            type LifecycleState = ();
+            type Error = XllError;
+            type Layers = (ReentrantLayer,);
+            #[cfg(feature = "async")]
+            type AsyncExecutor = crate::NoAsyncExecutor;
+
+            fn open(_: &OpenContext) -> XllResult<crate::addin::Opened<(), (), Self::Layers>> {
+                unreachable!()
+            }
+        }
+
+        let _test = test_lock();
+        let fixture = crate::runtime::StaticTestRuntime::from_static(&RUNTIME);
+        let runtime = fixture.runtime();
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish(opening, (), (ReentrantLayer,));
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        drop(opening);
+        REENTRIES.store(0, Ordering::Relaxed);
+
+        for value in [
+            ExcelCellOutput::Number(42.0),
+            ExcelCellOutput::Boolean(true),
+            ExcelCellOutput::Error(ExcelError::NotAvailable),
+        ] {
+            let outer = udf_boundary_named(runtime, "outer", "OUTER", |_, _| {
+                ReturnPayload::scalar(value.clone())
+            });
+            // SAFETY: the boundary returned this live, initialized scalar root.
+            let oper = unsafe { &*outer };
+            assert_eq!(oper.xltype & XLBIT_DLL_FREE, 0);
+            match value {
+                ExcelCellOutput::Number(number) => {
+                    assert_eq!(oper.xltype, XLTYPE_NUM);
+                    // SAFETY: the checked tag selects the numeric field.
+                    assert_eq!(unsafe { oper.value.number }, number);
+                }
+                ExcelCellOutput::Boolean(boolean) => {
+                    assert_eq!(oper.xltype, xlfn_sys::XLTYPE_BOOL);
+                    // SAFETY: the checked tag selects the Boolean field.
+                    assert_eq!(unsafe { oper.value.boolean }, i32::from(boolean));
+                }
+                ExcelCellOutput::Error(error) => {
+                    assert_eq!(oper.xltype, XLTYPE_ERR);
+                    // SAFETY: the checked tag selects the error field.
+                    assert_eq!(unsafe { oper.value.error }, error.code());
+                }
+                _ => unreachable!(),
+            }
+        }
+        assert_eq!(REENTRIES.load(Ordering::Relaxed), 3);
+        assert!(runtime.returns_are_quiescent());
+        assert_eq!(crate::boundary::host::host_auto_remove(runtime), 1);
+    }
+
+    #[test]
+    fn scalar_publication_survives_tracing_reentry() {
+        static RUNTIME: Runtime<()> = Runtime::new();
+        struct ReentrantSubscriber(Arc<std::sync::atomic::AtomicUsize>);
+        impl tracing::Subscriber for ReentrantSubscriber {
+            fn register_callsite(
+                &self,
+                _: &'static tracing::Metadata<'static>,
+            ) -> tracing::subscriber::Interest {
+                tracing::subscriber::Interest::sometimes()
+            }
+            fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+                metadata.target() == crate::execution::UDF_TRACE_TARGET
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+            fn event(&self, _: &tracing::Event<'_>) {
+                if self.0.load(Ordering::Relaxed) != 0 {
+                    return;
+                }
+                self.0.store(1, Ordering::Relaxed);
+                let inner = udf_boundary_named(&RUNTIME, "inner", "INNER", |_, _| {
+                    ReturnPayload::scalar(17.0)
+                });
+                // SAFETY: consume the inner numeric result before another UDF call.
+                let inner = unsafe { &*inner };
+                assert_eq!(inner.xltype, XLTYPE_NUM);
+                // SAFETY: the checked tag selects the numeric field.
+                assert_eq!(unsafe { inner.value.number }, 17.0);
+                self.0.store(2, Ordering::Relaxed);
+            }
+        }
+
+        let _test = test_lock();
+        let fixture = open_test_runtime(crate::runtime::StaticTestRuntime::from_static(&RUNTIME));
+        let reentries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let outer =
+            tracing::subscriber::with_default(ReentrantSubscriber(Arc::clone(&reentries)), || {
+                udf_boundary_named(fixture.runtime(), "outer", "OUTER", |_, _| {
+                    ReturnPayload::scalar(42.0)
+                })
+            });
+        assert_eq!(reentries.load(Ordering::Relaxed), 2);
+        // SAFETY: the boundary returned a live, initialized numeric root.
+        let outer = unsafe { &*outer };
+        assert_eq!(outer.xltype, XLTYPE_NUM);
+        // SAFETY: the checked tag selects the numeric field.
+        assert_eq!(unsafe { outer.value.number }, 42.0);
+        assert!(fixture.runtime().returns_are_quiescent());
+        assert_eq!(
+            crate::boundary::host::host_auto_remove(fixture.runtime()),
+            1
+        );
     }
 
     #[test]
