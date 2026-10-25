@@ -244,6 +244,7 @@ bench-ci:
     just bench-one-filter cache_miss_concurrency "^cache_miss_concurrency/(distinct_keys/(cheap_u64|numeric_reduce_4096)/cache/workers_(1|4)|same_key/cheap_u64/cache/workers_4)\z" "bench-internals cache"
     just bench-one-filter cache_reclamation "^(cache_nonresident/roundtrip|cache_deferred_queue/u64_churn)\z" "cache"
     just bench-one-filter array_string_output "^(array_string_output/borrowed_str/16384|scalar_output/(ascii_short|ascii_1k|unicode_1k|japanese_4k)/(borrowed|owned)|scalar_output/(ascii_8|ascii_64|japanese_8|japanese_64)/(owned|copy)|scalar_output/(ascii_4k|japanese_4k|mixed)/copy|scalar_output/(enum|number))\z"
+    just bench-one-filter registration "^registration/(preflight|host|total)/(10|5000)\z"
     just bench-one-filter rtd_prepare "^rtd_admission/(pending_full|existing_reuse|admitted)/1048576\z" "bench-internals rtd"
     just bench-one rtd_prepare_allocations "bench-internals rtd"
     just bench-one-filter rtd_publish "^rtd_publish/(number|string|string_8k)/(changing|same_value)\z" "bench-internals rtd"
@@ -287,6 +288,7 @@ bench-full:
     just bench-one formula_caller
     just bench-one argument_ingress
     just bench-one array_string_output
+    just bench-one registration
     just bench-one rtd_prepare "bench-internals rtd"
     just bench-one rtd_prepare_allocations "bench-internals rtd"
     just bench-one rtd_publish "bench-internals rtd"

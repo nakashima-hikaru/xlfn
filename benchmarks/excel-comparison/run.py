@@ -745,14 +745,29 @@ def run_text(session: ExcelSession, case: Case, repeat: int) -> dict[str, Any]:
     if case.id != "T02":
         sheet.Range(f"B1:B{count}").Value2 = tuple((value,) for _ in range(count))
     target = session.add_formulas(sheet, count, lambda row: formula(case.id, row, case.params))
+    expected = case.params["length"] if case.id == "T01" else value
+    expected_types = (int, float) if case.id == "T01" else (str,)
+
+    def check() -> None:
+        check_final_values(target, count,
+            lambda actual, _: type(actual) in expected_types and actual == expected)
+
     session.calculate(target)
-    actual = flatten(target.Value2)
-    if actual[0] != (case.params["length"] if case.id == "T01" else value):
-        raise AssertionError("text result mismatch")
-    samples = [session.calculate(target) for _ in range(repeat)]
+    check()
+    samples = []
+    observations = []
+    for index in range(repeat):
+        samples.append(session.calculate(target))
+        observations.append({"iteration": index + 1, **session.last_calculation_timing})
+    check()
     return interval(samples, sum(samples), "recalculation") | {
+        "formula_count": count,
         "characters": count * case.params["length"],
+        "character_unit": "Unicode code points",
         "ns_per_char": statistics.median(samples) * 1e9 / (count * case.params["length"]),
+        "recalculation_samples": observations,
+        "validated_cells": count,
+        "timing_note": "Calculate plus COM dispatch and CalculationState polling; complete output validation after warmup and the final measured iteration is outside the timer; ns_per_char is whole recalculation time per requested Unicode code point, not isolated UDF time",
     }
 
 

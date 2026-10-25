@@ -55,12 +55,20 @@ enum ReturnBlockBacking {
     Heap,
 }
 
+/// String ownership is selected once when a completed scalar or array is
+/// published. Array builders retain their untagged arena on the per-cell path.
+#[derive(Debug)]
+enum ReturnStringStorage {
+    Array(ReturnStorage),
+    Scalar(storage::ScalarStringStorage),
+}
+
 #[repr(C)]
 struct ReturnBlock {
     // This must remain first: Excel receives a pointer to this field and
     // xlAutoFree12 casts it back to ReturnBlock.
     oper: XLOPER12,
-    storage: Option<ReturnStorage>,
+    storage: Option<ReturnStringStorage>,
     array: Option<PublishedOwner<[XLOPER12]>>,
     obligation: Option<ReturnObligation<'static>>,
     magic: u64,
@@ -134,7 +142,7 @@ thread_local! {
 #[derive(Debug)]
 struct PreparedReturn {
     oper: XLOPER12,
-    storage: Option<ReturnStorage>,
+    storage: Option<ReturnStringStorage>,
     array: Option<PublishedOwner<[XLOPER12]>>,
 }
 
@@ -144,7 +152,7 @@ impl PreparedReturn {
             ReturnPayload::Array(encoded) => Self::from_array_output(encoded),
             ReturnPayload::Scalar(encoded) => Ok(Self {
                 oper: encoded.oper,
-                storage: encoded.storage,
+                storage: encoded.storage.map(ReturnStringStorage::Scalar),
                 array: None,
             }),
         }
@@ -171,7 +179,7 @@ impl PreparedReturn {
         // Establish the non-retagging owner before deriving the ABI pointer:
         // PreparedReturn and ReturnBlock both move after cells are published.
         let cells = PublishedOwner::from_box(encoded.cells);
-        let storage = encoded.storage;
+        let storage = encoded.storage.map(ReturnStringStorage::Array);
         let pointer = cells.as_ptr().cast::<XLOPER12>();
 
         Ok(Self {
@@ -251,7 +259,7 @@ impl ReturnBlock {
 }
 
 /// Total payload requested from the allocator before UTF-16 buffers are added.
-/// `ReturnBlock` includes the root XLOPER12, arena handle, and collection
+/// `ReturnBlock` includes the root XLOPER12, string owner, and collection
 /// control structures; the other terms cover the separately allocated array
 /// slots.
 fn base_allocation_payload_bytes(array_cells: usize) -> XllResult<usize> {
@@ -1446,7 +1454,7 @@ mod tests {
 
         assert!(
             RETURN_BLOCKS_WITH_STORAGE.load(Ordering::Relaxed) > storage_before,
-            "TLS return cleanup must drop ReturnStorage"
+            "TLS return cleanup must drop its string owner"
         );
         assert!(
             RETURN_BLOCKS_WITH_ARRAY.load(Ordering::Relaxed) > array_before,
@@ -1578,6 +1586,82 @@ mod tests {
         assert!(tracker.is_quiescent());
         // SAFETY: the worker has joined and no return block or producer
         // retains the tracker; reclaim its original allocation exactly once.
+        unsafe { drop(Box::from_raw(tracker_owner)) };
+    }
+
+    #[test]
+    fn miri_scalar_strings_remain_readable_in_tls_and_heap_returns() {
+        let _test = test_lock();
+        let tracker_owner = Box::into_raw(Box::new(ReturnTracker::new_closed()));
+        // SAFETY: retain this tracker until the worker joins and every
+        // published return obligation has been released below.
+        let tracker: &'static ReturnTracker = unsafe { &*tracker_owner };
+        tracker.reopen_admission().unwrap();
+        std::thread::spawn(move || {
+            let publish = |source: String, borrowed: bool| {
+                let payload = if borrowed {
+                    let payload = ReturnPayload::scalar(source.as_str()).unwrap();
+                    drop(source);
+                    payload
+                } else {
+                    // Scalar conversion consumes and drops the UTF-8 String
+                    // before returning its separate UTF-16 payload owner.
+                    ReturnPayload::scalar(source).unwrap()
+                };
+                let mut producer = tracker.try_enter_producer().unwrap();
+                allocate_excel_owned(payload, &mut producer).unwrap()
+            };
+            let read = |pointer: *mut XLOPER12, expected: &str| {
+                // SAFETY: each call below precedes this root's single free.
+                let root = unsafe { &*pointer };
+                assert_eq!(root.base_type(), XLTYPE_STR);
+                assert_ne!(root.xltype & XLBIT_DLL_FREE, 0);
+                // SAFETY: the checked type selects this counted UTF-16 buffer.
+                let text = unsafe { root.value.string };
+                // SAFETY: the live scalar owner retains the initialized prefix.
+                let length = usize::from(unsafe { *text });
+                // SAFETY: the counted allocation includes its prefix; the
+                // payload starts immediately after it, including when empty.
+                let payload = unsafe { text.add(1) };
+                // SAFETY: the same owner retains every counted payload unit.
+                let units = unsafe { std::slice::from_raw_parts(payload, length) };
+                assert_eq!(units, expected.encode_utf16().collect::<Vec<_>>());
+            };
+            let mut previous_tls = None;
+            for (first_text, second_text) in [
+                ("", "a\0z"),
+                ("日本語💡", "ASCII second"),
+                ("\u{800}\u{d7ff}\u{e000}\u{ffff}", "aé日💡"),
+            ] {
+                let first = publish(first_text.to_owned(), true);
+                let second = publish(second_text.to_owned(), false);
+                assert_eq!(backing_of(first), ReturnBlockBacking::ThreadLocal);
+                assert_eq!(backing_of(second), ReturnBlockBacking::Heap);
+                assert_ne!(first, second);
+                if let Some(previous) = previous_tls {
+                    assert_eq!(first, previous, "the freed TLS slot must be reused");
+                }
+                assert_eq!(tracker.outstanding_obligations(), 2);
+                // Both source Strings have already been destroyed. Read both
+                // allocations while simultaneously published, then free in
+                // reverse order and verify the first allocation again.
+                read(first, first_text);
+                read(second, second_text);
+                // SAFETY: second is the live heap root, freed exactly once.
+                unsafe { free_return(second) };
+                assert_eq!(tracker.outstanding_obligations(), 1);
+                read(first, first_text);
+                // SAFETY: first is the live TLS root, freed exactly once.
+                unsafe { free_return(first) };
+                assert!(tracker.is_quiescent());
+                previous_tls = Some(first);
+            }
+        })
+        .join()
+        .unwrap();
+        assert!(tracker.is_quiescent());
+        // SAFETY: the worker has joined and all producers/blocks have drained;
+        // reclaim the tracker allocation exactly once without a Runtime leak.
         unsafe { drop(Box::from_raw(tracker_owner)) };
     }
 

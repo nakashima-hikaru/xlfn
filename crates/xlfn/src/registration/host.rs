@@ -452,7 +452,7 @@ pub(crate) fn valid_registration_id(id: f64) -> bool {
 
 fn prepared_argument_help_strings(
     arguments: &[super::preflight::PreparedExcelString],
-) -> XllResult<Vec<TemporaryString>> {
+) -> XllResult<SmallVec<[TemporaryString; 4]>> {
     arguments
         .iter()
         .map(|argument| TemporaryString::new(argument.as_str()))
@@ -843,8 +843,8 @@ mod tests {
         let module_units = module.encode_utf16().collect::<Vec<_>>();
 
         // Ten fixed operands plus n help strings and their blank trailer
-        // exercise empty, inline-full, and heap-spilled pointer storage.
-        for count in [0, 5, 6] {
+        // exercise empty, inline-full, and spilled help and pointer storage.
+        for count in [0, 1, 3, 4, 5, 6] {
             let descriptor = RegistrationDescriptor {
                 export_name: "xll_test",
                 excel_name: "TEST.REGISTER",

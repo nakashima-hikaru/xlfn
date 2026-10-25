@@ -4,7 +4,8 @@ use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use xlfn::benchmark_support::{
     BenchHandleObject, NumericArrayOutputBenchmark, RawArgumentIngressBenchmark,
-    ScalarOutputBenchmark, SemanticIdentityBenchmark, Utf16IdentityBenchmark,
+    RegistrationBenchmark, ScalarOutputBenchmark, SemanticIdentityBenchmark,
+    Utf16IdentityBenchmark,
 };
 use xlfn::output::XlArrayBuilder;
 
@@ -138,8 +139,14 @@ fn main() {
     }
     for (label, payload) in [
         ("ascii_short", "Ready".to_owned()),
+        ("ascii_8", "a".repeat(8)),
+        ("ascii_64", "a".repeat(64)),
+        ("ascii_512", "a".repeat(512)),
         ("ascii_limit", "x".repeat(32_767)),
         ("unicode_short", "日本語💡".to_owned()),
+        ("japanese_8", "日".repeat(8)),
+        ("japanese_64", "日".repeat(64)),
+        ("japanese_512", "日".repeat(512)),
         ("unicode_limit", "日".repeat(32_767)),
         ("empty", String::new()),
     ] {
@@ -155,7 +162,16 @@ fn main() {
             ARRAY_OUTPUT_CALLS,
             || benchmark.run_owned(),
         );
+        let copied = measure_calls(
+            &format!("scalar_output/{label}/copy"),
+            ARRAY_OUTPUT_CALLS,
+            || benchmark.run_copy(),
+        );
         if !cfg!(feature = "refinement") {
+            assert_eq!(
+                copied, owned,
+                "strict UTF-16 copy must allocate only its owned UTF-8 input and the return"
+            );
             let clones = usize::from(length != 0) * ARRAY_OUTPUT_CALLS;
             assert_eq!(owned.allocations, borrowed.allocations + clones);
             assert_eq!(owned.deallocations, borrowed.deallocations + clones);
@@ -335,5 +351,26 @@ fn main() {
             handle.run_handle_pending::<BenchHandleObject>()
         });
         assert_runtime_allocation_free("handle/async_pending", pending);
+    }
+
+    // This fixture installs its own deterministic host callback. Keep it after
+    // every value-boundary case, whose benchmark runtime uses another callback.
+    for count in [10, 5_000] {
+        let registration = RegistrationBenchmark::new(count);
+        for (phase, operation) in [
+            (
+                "preflight",
+                RegistrationBenchmark::run_preflight as fn(&RegistrationBenchmark),
+            ),
+            ("total", RegistrationBenchmark::run_total),
+        ] {
+            let counts = measure_calls(&format!("registration/{phase}/{count}"), 10, || {
+                operation(&registration);
+            });
+            assert_eq!(
+                counts.allocations, counts.deallocations,
+                "registration preparation and callback temporaries must be released"
+            );
+        }
     }
 }

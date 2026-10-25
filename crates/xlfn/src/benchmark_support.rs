@@ -57,6 +57,7 @@ mod lookup;
 mod native_ingress;
 mod numeric_ingress;
 mod output;
+mod registration;
 #[cfg(feature = "rtd")]
 mod rtd;
 mod sync_boundary;
@@ -109,6 +110,7 @@ pub use numeric_ingress::NumericMatrixIngressBenchmark;
 pub use output::{
     BorrowedStringArrayOutputBenchmark, NumericArrayOutputBenchmark, ScalarOutputBenchmark,
 };
+pub use registration::RegistrationBenchmark;
 #[cfg(feature = "rtd")]
 pub use rtd::{
     RTD_REFRESH_SCALING_CASES, RtdChannelPipelineBenchmark, RtdPrepareBenchmark,

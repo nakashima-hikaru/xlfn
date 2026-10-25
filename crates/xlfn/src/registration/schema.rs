@@ -30,7 +30,7 @@ pub(crate) struct RegistrationSignature {
 }
 
 impl RegistrationSignature {
-    pub(crate) fn encode(self) -> XllResult<String> {
+    pub(crate) fn validate(self) -> XllResult<()> {
         if self.arguments.len() > xlfn_common::max_excel_function_arguments(self.execution)
             || (self.arguments.contains(&ArgumentAbi::Reference12)
                 && !self.execution.allows_reference_arguments())
@@ -41,6 +41,11 @@ impl RegistrationSignature {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRATION_SIGNATURE,
             });
         }
+        Ok(())
+    }
+
+    pub(crate) fn encode(self) -> XllResult<String> {
+        self.validate()?;
         let mut text = String::with_capacity(self.arguments.len() + 4);
         if self.execution.is_async() {
             text.push('>');

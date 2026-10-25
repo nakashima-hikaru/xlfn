@@ -2,6 +2,7 @@ use std::panic::AssertUnwindSafe;
 
 use crate::error::InputError;
 use crate::{XllError, XllResult};
+use xlfn_kernel::published_owner::PublishedOwner;
 
 /// Allocation storage shared by one encoded Excel return value.
 ///
@@ -84,6 +85,84 @@ impl ReturnStorage {
     }
 }
 
+/// Owns one exactly sized counted scalar string. Its pointer remains valid
+/// while this owner moves through scalar conversion and return publication.
+#[derive(Debug)]
+pub(crate) struct ScalarStringStorage {
+    units: PublishedOwner<[u16]>,
+}
+
+impl ScalarStringStorage {
+    /// Allocates exactly the counted scalar payload, before publishing a
+    /// pointer through the non-retagging owner.
+    #[allow(
+        unsafe_code,
+        reason = "initializes every counted UTF-16 unit before publishing its owner"
+    )]
+    pub(crate) fn new(
+        text: &str,
+        argument: &'static str,
+        limit: usize,
+        length: usize,
+    ) -> XllResult<(Self, *mut u16)> {
+        let length = u16::try_from(length).map_err(|_| {
+            XllError::input(
+                argument,
+                InputError::TooLarge {
+                    limit,
+                    actual: length,
+                },
+            )
+        })?;
+        let mut units = Box::<[u16]>::new_uninit_slice(usize::from(length) + 1);
+        units[0].write(length);
+        let payload = &mut units[1..];
+        if text.len() == usize::from(length) {
+            // Equality also proves equal loop lengths independently of the
+            // supplied Unicode count: zip initializes every payload unit.
+            for (unit, &byte) in payload.iter_mut().zip(text.as_bytes()) {
+                unit.write(u16::from(byte));
+            }
+        } else if text.len() == usize::from(length) * 3 {
+            // The u16-bound count cannot overflow usize when tripled. Exact
+            // byte equality gives exactly one complete chunk per destination,
+            // even if an internal caller supplied an incorrect Unicode count.
+            for (unit, &[first, second, third]) in
+                payload.iter_mut().zip(text.as_bytes().as_chunks::<3>().0)
+            {
+                unit.write(
+                    (u16::from(first & 0x0f) << 12)
+                        | (u16::from(second & 0x3f) << 6)
+                        | u16::from(third & 0x3f),
+                );
+            }
+        } else {
+            let mut encoded = text.encode_utf16();
+            for unit in payload {
+                unit.write(
+                    encoded
+                        .next()
+                        .expect("the UTF-16 length was counted before allocation"),
+                );
+            }
+            debug_assert!(encoded.next().is_none());
+        }
+        // SAFETY: the prefix was initialized first. Each fixed-width branch
+        // proves equal source/destination lengths; the general branch writes
+        // every destination or panics before reaching this point. Thus full
+        // initialization does not depend on the caller's Unicode count being
+        // correct (that count is needed for the string's semantic accuracy).
+        let owner = PublishedOwner::from_box(unsafe { units.assume_init() });
+        let pointer = owner.as_ptr().cast::<u16>();
+        Ok((Self { units: owner }, pointer))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        std::mem::size_of_val(self.units.as_ref())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,7 +182,71 @@ mod tests {
             // units and remains live for the whole comparison.
             let actual = unsafe { std::slice::from_raw_parts(pointer, expected.len() + 1) };
             proptest::prop_assert_eq!(usize::from(actual[0]), expected.len());
+            proptest::prop_assert_eq!(&actual[1..], &expected);
+
+            let (scalar, pointer) = ScalarStringStorage::new(
+                &text,
+                "test",
+                crate::utf16::EXCEL_STRING_LIMIT,
+                expected.len(),
+            ).unwrap();
+            // SAFETY: scalar retains every initialized unit through the read.
+            let actual = unsafe { std::slice::from_raw_parts(pointer, expected.len() + 1) };
+            proptest::prop_assert_eq!(usize::from(actual[0]), expected.len());
             proptest::prop_assert_eq!(&actual[1..], expected);
+            proptest::prop_assert_eq!(scalar.allocated_bytes(), 2 * actual.len());
+        }
+    }
+
+    #[test]
+    fn miri_scalar_payload_pointer_survives_owner_moves() {
+        for text in ["", "a\0z", "日", "aé日💡", &"日💡".repeat(100)] {
+            let expected: Vec<_> = text.encode_utf16().collect();
+            let (storage, pointer) = ScalarStringStorage::new(
+                text,
+                "test",
+                crate::utf16::EXCEL_STRING_LIMIT,
+                expected.len(),
+            )
+            .unwrap();
+            let mut owners = vec![storage];
+            for _ in 0..64 {
+                owners.push(
+                    ScalarStringStorage::new("", "test", crate::utf16::EXCEL_STRING_LIMIT, 0)
+                        .unwrap()
+                        .0,
+                );
+            }
+            let original = owners.remove(0);
+            owners.push(original);
+            // SAFETY: the last owner retains the counted payload after every
+            // move; the published raw pointer does not borrow owner storage.
+            let actual = unsafe { std::slice::from_raw_parts(pointer, expected.len() + 1) };
+            assert_eq!(usize::from(actual[0]), expected.len());
+            assert_eq!(&actual[1..], expected);
+            assert_eq!(owners.last().unwrap().allocated_bytes(), 2 * actual.len());
+        }
+    }
+
+    #[test]
+    fn miri_scalar_initialization_does_not_trust_the_supplied_count() {
+        for text in ["", "abc", "é", "日", "aé日💡"] {
+            for length in 0..=text.len() + 1 {
+                let result = crate::panic_boundary::catch_no_unwind(|| {
+                    ScalarStringStorage::new(text, "test", crate::utf16::EXCEL_STRING_LIMIT, length)
+                });
+                // A malformed internal count may panic or encode incorrect
+                // text; it must never expose an uninitialized allocation.
+                if let Ok(Ok((owner, pointer))) = result {
+                    // SAFETY: a successful safe constructor promises all
+                    // units are initialized, even for these negative controls.
+                    let units = unsafe { std::slice::from_raw_parts(pointer, length + 1) };
+                    assert_eq!(usize::from(units[0]), length);
+                    let checksum: usize = units.iter().map(|&unit| usize::from(unit)).sum();
+                    assert!(checksum <= (length + 1) * usize::from(u16::MAX));
+                    drop(owner);
+                }
+            }
         }
     }
     #[test]
@@ -149,6 +292,19 @@ mod tests {
             let actual = unsafe { std::slice::from_raw_parts(pointer, expected.len() + 1) };
             assert_eq!(usize::from(actual[0]), expected.len());
             assert_eq!(&actual[1..], expected);
+
+            let (scalar, pointer) = ScalarStringStorage::new(
+                text,
+                "test",
+                crate::utf16::EXCEL_STRING_LIMIT,
+                expected.len(),
+            )
+            .unwrap();
+            // SAFETY: this scalar owner retains the initialized allocation.
+            let actual = unsafe { std::slice::from_raw_parts(pointer, expected.len() + 1) };
+            assert_eq!(usize::from(actual[0]), expected.len());
+            assert_eq!(&actual[1..], expected);
+            assert_eq!(scalar.allocated_bytes(), 2 * actual.len());
         }
     }
 }

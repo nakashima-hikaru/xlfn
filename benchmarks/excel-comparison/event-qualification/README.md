@@ -1,13 +1,14 @@
 # Calculation-event lifetime and qualification
 
 Status on 2026-10-25: **production uses module-lifetime event registrations;
-matching-build live qualification of the revised close/reopen behavior remains
-unverified**. The earlier nil-procedure removal experiment failed on the
-observed Excel build. No local macOS test, Windows cross-compilation, callback
-mock, formal trace, or performance benchmark establishes the new native Excel
-lifecycle behavior. The current evidence record is
-[records.json](records.json); it includes two partial shutdown observations and
-an interactive counterexample to nil-procedure removal.
+single-generation close with retained events was observed on Excel 16.0 build
+20527.0 (64-bit). Same-process close/reopen remains unverified**. The earlier
+nil-procedure removal experiment failed on this Excel build. Local tests,
+cross-compilation and formal traces do not replace the remaining live cases.
+The current evidence record is [records.json](records.json); it includes the
+historical shutdown observations and removal counterexample, plus four scoped
+production-close observations from the revised build with and without
+allocation counters.
 
 ## Production lifetime contract
 
@@ -93,7 +94,108 @@ covers IDs from `xlfRegister`, so its applicability to event IDs is a hypothesis
 to test, not an established production contract. That experiment is not a
 prerequisite for the production lifetime fix and has no qualified live result.
 
-## Live L02 observations, 2026-10-25
+## Revised production L02 observations, 2026-10-25
+
+[Selected evidence](l02-resident-events-2026-10-25.json) preserves summaries,
+memory segments, block endpoints and all lifecycle event details from four
+supplied records. Both runner and XLLs report commit
+`9c72a05f97f9c27a8b2ec364ed12daa2ad596ff3`, CI run `40190045107`, attempt 1.
+The xlfn XLL SHA-256 is
+`4a29603f668740ed538a5a371e050d2779395605a229b2f4e378c50cfd5a11c2`.
+Excel reports version 16.0, build 20527.0, 64-bit, with 1,000 cells, one
+calculation thread and manual calculation. The update channel is unavailable.
+All four runs record `CalculateFull` warmup and allocation diagnostics.
+
+Both xlfn cases record `GenerationReclaimed`, `FinishClose`, then
+`xlAutoClose.return` with phase `Closed`, status 1,
+`resident_event_registrations: 2` and `module_residency_held: true`.
+Neither contains a Quarantine checkpoint or registration-removal failure
+record. Close-body durations were 13.15 ms (100 repetitions) and 13.44 ms
+(1,000 repetitions). All four Excel processes exited naturally with code 0
+and no forced kill; xlfn's Quit-to-exit intervals were 4.07 s and 2.39 s.
+This establishes the observed terminal path and the runtime's reclamation and
+residency diagnostics for these cases. It does not establish physical DLL
+unload, late-handler behavior, cancellation, or reuse across same-process opens.
+The Excel-DNA managed AutoClose callback was not observed; that alone says
+nothing about native teardown completeness.
+
+| Implementation / repetitions | Rust allocated / freed bytes | RSS growth (MiB) | Private bytes growth (MiB) | p50 / p99 (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| xlfn / 100 | 415,200 / 415,200 | 4.12 | 1.54 | 3.846 / 6.226 |
+| Excel-DNA / 100 | Not supplied | 7.49 | 3.57 | 4.873 / 7.124 |
+| xlfn / 1000 | 4,152,000 / 4,152,000 | 45.18 | 30.12 | 4.026 / 6.411 |
+| Excel-DNA / 1000 | Not supplied | 23.73 | 11.73 | 4.662 / 7.692 |
+
+Growth is from the post-warmup baseline to the final measured iteration;
+1 MiB = 1,048,576 bytes. Instrumented timings do not establish performance
+ratios. Balanced Rust requested-byte counters exclude native process-heap
+allocations, Excel retention and allocator overhead; they are not a live-heap
+measurement or proof that no leak exists.
+
+Memory growth remains unresolved. In the xlfn 1,000-iteration case, iterations
+501–1000 added 28.75 MiB RSS and 16.98 MiB private bytes. The first and last
+100-iteration median times were 3.871 and 4.617 ms; the final iteration alone
+was faster than the first, so the endpoint ratio hides the block-level drift.
+Excel-DNA added 17.60 MiB RSS and 7.28 MiB private bytes in its latter half.
+The slowest xlfn iteration took 19.886 ms, of which 16.204 ms was the single
+completion-state COM query. Every iteration in every case used one poll.
+
+The prior xlfn 1,000-iteration observation grew by 21.40 MiB RSS and 9.69 MiB
+private bytes. The new run therefore does not support a memory-growth fix.
+Code, warmup and process baselines differ, so these single observations also
+do not isolate a regression caused by the event-lifetime change. The next
+lifecycle qualification requires interactive normal/canceled calculations and
+close/reopen cycles while one Excel process remains alive, with native
+registration and admitted-generation observations. L02 does not provide them.
+
+## L02 with allocation counters disabled, 2026-10-25
+
+[Selected evidence](l02-no-allocation-counters-2026-10-25.json) records the
+follow-up without `--repeat-diagnostics`. All four cases have
+`repeat_diagnostics: false` and no allocation-window metrics. They match the
+previous run's reported host, Excel version/build, CI run, runner commit,
+per-implementation XLL hashes, case parameters, calculation mode and thread
+count. `CalculateFull` warmup and shutdown diagnostics remain enabled. These
+are separate process runs about 30 minutes later, not randomized paired trials;
+differences in their timings cannot measure counter overhead precisely.
+
+| Implementation / repetitions | RSS growth (MiB) | Private bytes growth (MiB) | p50 / p99 (ms) |
+| --- | ---: | ---: | ---: |
+| xlfn / 100 | 13.41 | 8.20 | 3.643 / 7.740 |
+| Excel-DNA / 100 | 4.72 | 3.34 | 4.075 / 5.440 |
+| xlfn / 1000 | 42.27 | 31.18 | 4.061 / 5.856 |
+| Excel-DNA / 1000 | 21.02 | 11.58 | 4.448 / 8.031 |
+
+Growth is from the post-warmup baseline. The xlfn 1,000-iteration growth is
+similar with counters enabled (45.18 MiB RSS, 30.12 MiB private bytes) and
+disabled (42.27 MiB RSS, 31.18 MiB private bytes). Its latter 500 iterations
+still add 26.24 MiB RSS and 16.48 MiB private bytes. The accumulation therefore
+does not require enabled allocation counters. The counts from the earlier
+instrumented run do not become a live-allocation measurement for this run.
+
+Absolute baselines matter when comparing implementations: xlfn private bytes
+start at 112.98 MiB and end at 144.16 MiB; Excel-DNA starts at 127.76 MiB and
+ends at 139.34 MiB. The 19.60 MiB difference between their growth figures is
+not a 19.60 MiB difference between final private footprints (which differ by
+4.81 MiB). Final RSS is 255.07 MiB for xlfn and 261.07 MiB for Excel-DNA.
+These observations neither identify allocation owners nor establish a leak.
+
+The first/last 100-iteration medians increase from 3.647 to 4.225 ms for xlfn
+(15.8%) and 4.165 to 4.739 ms for Excel-DNA (13.8%). Drift is present in both
+implementations in this run; these data do not isolate its cause. The slowest
+xlfn 1,000-iteration sample takes 19.755 ms, including 15.449 ms in its single
+completion-state COM query. All iterations in all four cases use one poll.
+
+Both xlfn cases again record `GenerationReclaimed`, `FinishClose` and `Closed`,
+with two resident event registrations and the module lease held. Close bodies
+take 13.23 and 14.38 ms. All four Excel processes exit naturally with code 0,
+without forced termination or COM retries. Same-process close/reopen and
+interactive cancellation remain outside this test's scope. Further memory
+attribution needs observations of outstanding native allocations and their
+call sites, including a control for Excel/COM activity, rather than interpreting
+process totals as xlfn-owned allocations.
+
+## Historical L02 observations, 2026-10-25
 
 [Selected evidence](l02-2026-10-25.json) retains provenance, metric summaries,
 consecutive-block timings, memory segments, slowest iterations and lifecycle

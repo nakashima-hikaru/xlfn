@@ -53,6 +53,23 @@ have different scopes, described below. For A/B comparisons, use identical
 fixtures and feature selections, separate source/target directories, frozen
 executable hashes, and repeated ABBA/BAAB ordering.
 
+## Registration preparation and host-call overhead
+
+`registration` measures descriptor validation/preparation, a prepared registration
+loop, and their combined cost at 10, 100, 1,000 and 5,000 functions. The host stub
+returns an unbound name followed by a registration ID. Setup verifies one module
+lookup, one conflict check and one registration per function, and cleanup of
+every callback result. The timed loop preserves these production operations.
+Real Excel name lookup/registration latency, DLL loading and add-in initialization
+are outside this benchmark; use C02 in the Excel comparison suite for those costs.
+`value_boundary_allocations` additionally reports preparation and combined
+registration allocation counts at 10 and 5,000 functions.
+
+The same allocation probe covers short ASCII/Japanese scalar returns and copies,
+including the owned UTF-8 input and the retained UTF-16 return payload. It warms
+the return-block slot before counting and immediately frees each owning return.
+It does not measure multiple simultaneously outstanding returns or process RSS.
+
 ## Handle object working sets
 
 `handle_lookup` covers one shared token, one fixed token per worker, and

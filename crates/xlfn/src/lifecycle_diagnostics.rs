@@ -9,6 +9,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 struct Sink {
     path: PathBuf,
@@ -81,6 +82,149 @@ impl Sink {
 static SINK: OnceLock<Option<Sink>> = OnceLock::new();
 static INVOCATION: AtomicU64 = AtomicU64::new(1);
 static REGISTRATION_RECORDS: AtomicU64 = AtomicU64::new(0);
+
+/// Measure pure preparation only when the entrypoint already enabled its
+/// diagnostic sink. The operation and its error are forwarded unchanged.
+pub(crate) fn registration_preflight<T, E>(
+    descriptors: usize,
+    operation: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    let Some(Some(sink)) = SINK.get() else {
+        return operation();
+    };
+    let started = Instant::now();
+    let result = operation();
+    let elapsed = started.elapsed();
+    sink.write(
+        "registration.preflight",
+        json!({
+            "descriptor_count": descriptors,
+            "outcome": if result.is_ok() { "success" } else { "error" },
+            "preflight_elapsed_s": elapsed.as_secs_f64(),
+        }),
+    );
+    result
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum RegistrationTimingPhase {
+    ConflictCheck,
+    Register,
+}
+
+/// Aggregate function registration work without logging individual names or
+/// calls. Timings include Rust encoding/decoding, callback result release and
+/// synchronous reentry. They do not measure only Excel's own processing time.
+pub(crate) struct RegistrationTiming {
+    started: Instant,
+    descriptor_count: usize,
+    function_attempts: usize,
+    completed_functions: usize,
+    conflict_checks: usize,
+    register_operations: usize,
+    conflict_check_elapsed: Duration,
+    register_elapsed: Duration,
+}
+
+impl RegistrationTiming {
+    pub(crate) fn begin(descriptor_count: usize) -> Option<Self> {
+        matches!(SINK.get(), Some(Some(_))).then(|| Self::new(descriptor_count))
+    }
+
+    fn new(descriptor_count: usize) -> Self {
+        Self {
+            started: Instant::now(),
+            descriptor_count,
+            function_attempts: 0,
+            completed_functions: 0,
+            conflict_checks: 0,
+            register_operations: 0,
+            conflict_check_elapsed: Duration::ZERO,
+            register_elapsed: Duration::ZERO,
+        }
+    }
+
+    /// Disabled observations perform no clock reads and invoke the operation
+    /// exactly once. Panics leave no completed timing record; nothing logs from
+    /// a destructor while a registration operation is unwinding.
+    pub(crate) fn measure<T>(
+        timing: &mut Option<Self>,
+        phase: RegistrationTimingPhase,
+        operation: impl FnOnce() -> T,
+    ) -> T {
+        let Some(timing) = timing else {
+            return operation();
+        };
+        match phase {
+            RegistrationTimingPhase::ConflictCheck => timing.conflict_checks += 1,
+            RegistrationTimingPhase::Register => timing.register_operations += 1,
+        }
+        let started = Instant::now();
+        let result = operation();
+        let elapsed = started.elapsed();
+        match phase {
+            RegistrationTimingPhase::ConflictCheck => timing.conflict_check_elapsed += elapsed,
+            RegistrationTimingPhase::Register => timing.register_elapsed += elapsed,
+        }
+        result
+    }
+
+    pub(crate) fn function_completed(&mut self, success: bool) {
+        self.function_attempts += 1;
+        self.completed_functions += usize::from(success);
+    }
+
+    pub(crate) fn finish(
+        self,
+        result: &Result<
+            Vec<crate::registration::RegistrationId>,
+            crate::registration::RegistrationTransactionError,
+        >,
+        terminal: Option<crate::return_abi::ExcelCallbackStatus>,
+    ) {
+        let elapsed = self.started.elapsed();
+        let Some(Some(sink)) = SINK.get() else {
+            return;
+        };
+        sink.write(
+            "registration.transaction",
+            self.details(elapsed, result, terminal),
+        );
+    }
+
+    fn details(
+        &self,
+        elapsed: Duration,
+        result: &Result<
+            Vec<crate::registration::RegistrationId>,
+            crate::registration::RegistrationTransactionError,
+        >,
+        terminal: Option<crate::return_abi::ExcelCallbackStatus>,
+    ) -> Value {
+        json!({
+            "descriptor_count": self.descriptor_count,
+            "function_attempts": self.function_attempts,
+            "completed_functions_before_rollback": self.completed_functions,
+            "conflict_check_operations": self.conflict_checks,
+            "register_operations": self.register_operations,
+            "outcome": if result.is_ok() { "success" } else { "error" },
+            "terminal_callback_status": terminal.map(|status| format!("{status:?}")),
+            "transaction_elapsed_s": elapsed.as_secs_f64(),
+            "conflict_check_elapsed_s": self.conflict_check_elapsed.as_secs_f64(),
+            "register_encode_invoke_release_elapsed_s": self.register_elapsed.as_secs_f64(),
+            "remaining_transaction_elapsed_s": elapsed
+                .saturating_sub(self.conflict_check_elapsed)
+                .saturating_sub(self.register_elapsed)
+                .as_secs_f64(),
+            "retained_registration_count": result.as_ref().err()
+                .map_or(0, |error| error.journal.pending_registrations.len()),
+            "metadata_debt_count": result.as_ref().err()
+                .map_or(0, |error| error.journal.metadata_debt.len()),
+            "host_state_unknown": result.as_ref().err()
+                .is_some_and(|error| error.journal.is_unknown()),
+        })
+    }
+}
 
 /// Copy only inline scalar fields while the callback result is readable. Never
 /// retain host pointers or inspect strings/arrays for diagnostic purposes.
@@ -336,6 +480,104 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registration_timing_preserves_operation_order_results_and_partial_counts() {
+        use crate::registration::{
+            PendingRegistration, RegistrationId, RegistrationTransactionError,
+            UnknownRegistrationState,
+        };
+        use crate::return_abi::ExcelCallbackStatus;
+        use crate::{XllError, XllResult};
+
+        let mut timing = Some(RegistrationTiming::new(5_000));
+        let mut operations = Vec::new();
+        let conflict: XllResult<bool> = RegistrationTiming::measure(
+            &mut timing,
+            RegistrationTimingPhase::ConflictCheck,
+            || {
+                operations.push("first_conflict_check");
+                Ok(false)
+            },
+        );
+        assert!(matches!(conflict, Ok(false)));
+        let registration: XllResult<i32> =
+            RegistrationTiming::measure(&mut timing, RegistrationTimingPhase::Register, || {
+                operations.push("first_registration");
+                Ok(42)
+            });
+        assert!(matches!(registration, Ok(42)));
+        timing.as_mut().unwrap().function_completed(true);
+        let conflict: XllResult<bool> = RegistrationTiming::measure(
+            &mut timing,
+            RegistrationTimingPhase::ConflictCheck,
+            || {
+                operations.push("second_conflict_check");
+                Err(XllError::Closing)
+            },
+        );
+        assert!(matches!(conflict, Err(XllError::Closing)));
+        timing.as_mut().unwrap().function_completed(false);
+        assert_eq!(
+            operations,
+            [
+                "first_conflict_check",
+                "first_registration",
+                "second_conflict_check"
+            ]
+        );
+
+        let mut error = RegistrationTransactionError::new(XllError::Closing);
+        error
+            .journal
+            .pending_registrations
+            .push(PendingRegistration::from(RegistrationId {
+                id: 42.0,
+                excel_name: "TEST.FIRST",
+            }));
+        error.journal.mark_unknown(UnknownRegistrationState {
+            export_name: "second_export",
+            excel_name: "TEST.SECOND",
+            recovery_error: XllError::Closing,
+        });
+        let mut timing = timing.unwrap();
+        // Fixed durations validate the serialized scopes without asserting
+        // wall-clock speed or scheduler behavior in a unit test.
+        timing.conflict_check_elapsed = Duration::from_millis(20);
+        timing.register_elapsed = Duration::from_millis(30);
+        let details = timing.details(
+            Duration::from_millis(100),
+            &Err(error),
+            Some(ExcelCallbackStatus::Abort),
+        );
+        assert_eq!(details["descriptor_count"], 5_000);
+        assert_eq!(details["function_attempts"], 2);
+        assert_eq!(details["completed_functions_before_rollback"], 1);
+        assert_eq!(details["conflict_check_operations"], 2);
+        assert_eq!(details["register_operations"], 1);
+        assert_eq!(details["outcome"], "error");
+        assert_eq!(details["terminal_callback_status"], "Abort");
+        assert_eq!(details["conflict_check_elapsed_s"], 0.02);
+        assert_eq!(details["register_encode_invoke_release_elapsed_s"], 0.03);
+        assert_eq!(details["remaining_transaction_elapsed_s"], 0.05);
+        assert_eq!(details["retained_registration_count"], 1);
+        assert_eq!(details["metadata_debt_count"], 0);
+        assert_eq!(details["host_state_unknown"], true);
+        assert!(!details.to_string().contains("TEST.FIRST"));
+        assert!(!details.to_string().contains("TEST.SECOND"));
+    }
+
+    #[test]
+    fn disabled_registration_timing_forwards_the_operation_once() {
+        let mut calls = 0;
+        let result =
+            RegistrationTiming::measure(&mut None, RegistrationTimingPhase::ConflictCheck, || {
+                calls += 1;
+                Err::<(), _>("original error")
+            });
+        assert_eq!(calls, 1);
+        assert_eq!(result, Err("original error"));
+    }
 
     #[test]
     fn removal_evidence_preserves_signed_acknowledgements_and_callback_status() {

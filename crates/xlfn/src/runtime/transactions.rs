@@ -48,7 +48,13 @@ where
     if let Err(error) = crate::diagnostics::reset_diagnostic_router() {
         return Err(transaction.failure(error));
     }
-    let prepared_set = match crate::registration::preflight_registration(descriptors) {
+    let prepare = || crate::registration::preflight_registration(descriptors);
+    #[cfg(feature = "lifecycle-diagnostics")]
+    let prepared_result =
+        crate::lifecycle_diagnostics::registration_preflight(descriptors.len(), prepare);
+    #[cfg(not(feature = "lifecycle-diagnostics"))]
+    let prepared_result = prepare();
+    let prepared_set = match prepared_result {
         Ok(prepared_set) => prepared_set,
         Err(error) => return Err(transaction.failure(error)),
     };

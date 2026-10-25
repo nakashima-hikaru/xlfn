@@ -1,0 +1,1336 @@
+{
+  "schema_version": 1,
+  "source": {
+    "description": "User-supplied l02-resident-events.jsonl, four records; selected-field extract, not the complete input",
+    "sha256": "ccddaeec40178063c342eea2e7e153b8b9f2493e043309bbbb2663210512df66",
+    "bytes": 511534
+  },
+  "observations": [
+    {
+      "id": "L02",
+      "variant": "100",
+      "implementation": "xlfn",
+      "params": {
+        "cells": 1000,
+        "repetitions": 100
+      },
+      "profile": "full",
+      "timestamp_utc": "2026-10-25T12:03:17Z",
+      "os": "Windows-11-10.0.26200-SP0",
+      "xll_sha256": "4a29603f668740ed538a5a371e050d2779395605a229b2f4e378c50cfd5a11c2",
+      "threads": 1,
+      "artifact_source": "github-actions",
+      "artifact_architecture": "x86_64",
+      "ci_commit": "9c72a05f97f9c27a8b2ec364ed12daa2ad596ff3",
+      "ci_run_id": "40190045107",
+      "ci_run_attempt": "1",
+      "runner_commit": "9c72a05f97f9c27a8b2ec364ed12daa2ad596ff3",
+      "excel_version": "16.0",
+      "excel_build": "20527.0",
+      "excel_bitness": "Windows (64-bit) NT 10.00",
+      "calculation_mode": "manual",
+      "status": "ok",
+      "com_retry": {
+        "rejected_calls": 0,
+        "retry_wait_s": 0.0,
+        "retry_timeout_s": 10
+      },
+      "metrics": {
+        "elapsed_s": 0.4040034990757704,
+        "observations": 100,
+        "p50_s": 0.0038463000673800707,
+        "p95_s": 0.004810540052130818,
+        "p99_s": 0.006225887783803077,
+        "max_s": 0.012402299791574478,
+        "observation_unit": "recalculation",
+        "formula_count": 1000,
+        "calls_per_s": 259990.11582087917,
+        "ns_per_call": 3846.3000673800707,
+        "warmup_calculation": "CalculateFull",
+        "first_recalc_s": 0.012402299791574478,
+        "last_recalc_s": 0.003918000031262636,
+        "latency_drift_ratio": 0.3159091537139213,
+        "rss_growth_bytes": 1429504,
+        "post_warmup_memory": {
+          "rss_bytes": 232210432,
+          "private_bytes": 127438848
+        },
+        "post_warmup_rss_bytes_growth": 4317184,
+        "post_warmup_private_bytes_growth": 1617920,
+        "recalculation_blocks": [
+          {
+            "first_iteration": 1,
+            "last_iteration": 10,
+            "p50_s": 0.00426065013743937,
+            "p99_s": 0.01183447178453207
+          },
+          {
+            "first_iteration": 11,
+            "last_iteration": 20,
+            "p50_s": 0.004185250028967857,
+            "p99_s": 0.004893486071377993
+          },
+          {
+            "first_iteration": 21,
+            "last_iteration": 30,
+            "p50_s": 0.003950699931010604,
+            "p99_s": 0.0047164620133116845
+          },
+          {
+            "first_iteration": 31,
+            "last_iteration": 40,
+            "p50_s": 0.0037632000166922808,
+            "p99_s": 0.003892366164363921
+          },
+          {
+            "first_iteration": 41,
+            "last_iteration": 50,
+            "p50_s": 0.0037455998826771975,
+            "p99_s": 0.003880718778818846
+          },
+          {
+            "first_iteration": 51,
+            "last_iteration": 60,
+            "p50_s": 0.0037640498485416174,
+            "p99_s": 0.004609337137080729
+          },
+          {
+            "first_iteration": 61,
+            "last_iteration": 70,
+            "p50_s": 0.003682649927213788,
+            "p99_s": 0.004040471925400198
+          },
+          {
+            "first_iteration": 71,
+            "last_iteration": 80,
+            "p50_s": 0.0037080999463796616,
+            "p99_s": 0.004406282966956497
+          },
+          {
+            "first_iteration": 81,
+            "last_iteration": 90,
+            "p50_s": 0.003844799939543009,
+            "p99_s": 0.006006647804751993
+          },
+          {
+            "first_iteration": 91,
+            "last_iteration": 100,
+            "p50_s": 0.003918200032785535,
+            "p99_s": 0.003974938988685608
+          }
+        ],
+        "repeat_diagnostics": true,
+        "timing_note": "CalculateFull plus COM dispatch and CalculationState polling; memory reads are outside the timer; block p99 uses only that block's samples",
+        "fixture_allocation_window": {
+          "allocated_bytes": 415200.0,
+          "freed_bytes": 415200.0,
+          "net_requested_bytes": 0.0
+        },
+        "allocation_note": "Diagnostic run includes counter overhead and boundary Evaluate calls; Rust requested bytes exclude native process-heap/Excel allocations; frees can belong to allocations before the window, so net is not live heap size. .NET reports cumulative managed allocations only. Do not compare ratios or mix with normal timings.",
+        "peak_excel_rss_bytes": 236568576,
+        "excel_cpu_s": 1.484375
+      },
+      "slowest_recalculation": {
+        "iteration": 1,
+        "total_s": 0.012402299791574478,
+        "calculate_call_s": 0.010510799940675497,
+        "completion_wait_s": 0.001891499850898981,
+        "completion_polls": 1,
+        "rss_bytes": 235098112,
+        "private_bytes": 127627264
+      },
+      "completion_poll_counts": [
+        1
+      ],
+      "memory_segments": [
+        {
+          "first_iteration": 1,
+          "last_iteration": 10,
+          "rss_bytes_growth": 3309568,
+          "private_bytes_growth": 684032
+        },
+        {
+          "first_iteration": 11,
+          "last_iteration": 50,
+          "rss_bytes_growth": 364544,
+          "private_bytes_growth": 335872
+        },
+        {
+          "first_iteration": 51,
+          "last_iteration": 100,
+          "rss_bytes_growth": 643072,
+          "private_bytes_growth": 598016
+        }
+      ],
+      "memory_block_endpoints": [
+        {
+          "iteration": 10,
+          "rss_bytes": 235520000,
+          "private_bytes": 128122880
+        },
+        {
+          "iteration": 20,
+          "rss_bytes": 235524096,
+          "private_bytes": 128122880
+        },
+        {
+          "iteration": 30,
+          "rss_bytes": 235528192,
+          "private_bytes": 128122880
+        },
+        {
+          "iteration": 40,
+          "rss_bytes": 235806720,
+          "private_bytes": 128385024
+        },
+        {
+          "iteration": 50,
+          "rss_bytes": 235884544,
+          "private_bytes": 128458752
+        },
+        {
+          "iteration": 60,
+          "rss_bytes": 235909120,
+          "private_bytes": 128462848
+        },
+        {
+          "iteration": 70,
+          "rss_bytes": 236240896,
+          "private_bytes": 128794624
+        },
+        {
+          "iteration": 80,
+          "rss_bytes": 236257280,
+          "private_bytes": 128794624
+        },
+        {
+          "iteration": 90,
+          "rss_bytes": 236261376,
+          "private_bytes": 128794624
+        },
+        {
+          "iteration": 100,
+          "rss_bytes": 236527616,
+          "private_bytes": 129056768
+        }
+      ],
+      "lifecycle_events": [
+        {
+          "event": "xlAutoOpen.enter",
+          "details": {
+            "invocation": 1,
+            "phase": "Closed"
+          },
+          "since_quit_s": -1.1081632,
+          "qpc_ticks": 23975601986065,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "xlAutoOpen.return",
+          "details": {
+            "invocation": 1,
+            "module_residency_held": true,
+            "phase": "Open",
+            "resident_event_registrations": 2,
+            "status": 1
+          },
+          "since_quit_s": -1.0922159,
+          "qpc_ticks": 23975602145538,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "xlAutoClose.enter",
+          "details": {
+            "invocation": 2,
+            "phase": "Open"
+          },
+          "since_quit_s": 0.0047146,
+          "qpc_ticks": 23975613114843,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "BeginClose"
+          },
+          "since_quit_s": 0.0050233,
+          "qpc_ticks": 23975613117930,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "CallsDrained"
+          },
+          "since_quit_s": 0.0067623,
+          "qpc_ticks": 23975613135320,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "ReturnsDrained"
+          },
+          "since_quit_s": 0.0069984,
+          "qpc_ticks": 23975613137681,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "StopAsyncExecutor"
+          },
+          "since_quit_s": 0.0137745,
+          "qpc_ticks": 23975613205442,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "AsyncDrained"
+          },
+          "since_quit_s": 0.014011,
+          "qpc_ticks": 23975613207807,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "SubscriptionsDrained"
+          },
+          "since_quit_s": 0.0141466,
+          "qpc_ticks": 23975613209163,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "CloseCallbackGate"
+          },
+          "since_quit_s": 0.0167397,
+          "qpc_ticks": 23975613235094,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "HostDetached"
+          },
+          "since_quit_s": 0.0169286,
+          "qpc_ticks": 23975613236983,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "ProveGenerationUnique"
+          },
+          "since_quit_s": 0.0170528,
+          "qpc_ticks": 23975613238225,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "ProveAddinQuiesced"
+          },
+          "since_quit_s": 0.0171499,
+          "qpc_ticks": 23975613239196,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "GenerationReclaimed"
+          },
+          "since_quit_s": 0.017261,
+          "qpc_ticks": 23975613240307,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "HandlesDrained"
+          },
+          "since_quit_s": 0.0174198,
+          "qpc_ticks": 23975613241895,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "DiagnosticsDrained"
+          },
+          "since_quit_s": 0.0175279,
+          "qpc_ticks": 23975613242976,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "RtdDrained"
+          },
+          "since_quit_s": 0.0176317,
+          "qpc_ticks": 23975613244014,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "FinishClose"
+          },
+          "since_quit_s": 0.0177427,
+          "qpc_ticks": 23975613245124,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "xlAutoClose.return",
+          "details": {
+            "invocation": 2,
+            "module_residency_held": true,
+            "phase": "Closed",
+            "resident_event_registrations": 2,
+            "status": 1
+          },
+          "since_quit_s": 0.0178628,
+          "qpc_ticks": 23975613246325,
+          "qpc_frequency": 10000000
+        }
+      ],
+      "lifecycle_observation": {
+        "status": "ok",
+        "boundary": "xlAutoClose",
+        "boundary_scope": "generated_native_body",
+        "unreturned_invocations": [],
+        "auto_close": "returned"
+      },
+      "process_exit_observation": {
+        "status": "exited",
+        "exit_filetime_ticks": 134374034039141196,
+        "exit_observed": {
+          "filetime_ticks": 134374034039606134,
+          "qpc_ticks": 23975654203860,
+          "qpc_frequency": 10000000
+        },
+        "exit_code": 0,
+        "termination": "natural",
+        "quit_to_exit_s": 4.0671213,
+        "quit_to_exit_observed_s": 4.1136163,
+        "quit_to_natural_exit_s": 4.0671213
+      },
+      "forced_kill": false
+    },
+    {
+      "id": "L02",
+      "variant": "100",
+      "implementation": "excel_dna",
+      "params": {
+        "cells": 1000,
+        "repetitions": 100
+      },
+      "profile": "full",
+      "timestamp_utc": "2026-10-25T12:03:24Z",
+      "os": "Windows-11-10.0.26200-SP0",
+      "xll_sha256": "b90e39c0dd3be8d625d08f6e3a215764522f8bc8720faa614c08204df1eff0ed",
+      "threads": 1,
+      "artifact_source": "github-actions",
+      "artifact_architecture": "x86_64",
+      "ci_commit": "9c72a05f97f9c27a8b2ec364ed12daa2ad596ff3",
+      "ci_run_id": "40190045107",
+      "ci_run_attempt": "1",
+      "runner_commit": "9c72a05f97f9c27a8b2ec364ed12daa2ad596ff3",
+      "excel_version": "16.0",
+      "excel_build": "20527.0",
+      "excel_bitness": "Windows (64-bit) NT 10.00",
+      "calculation_mode": "manual",
+      "status": "ok",
+      "com_retry": {
+        "rejected_calls": 0,
+        "retry_wait_s": 0.0,
+        "retry_timeout_s": 10
+      },
+      "metrics": {
+        "elapsed_s": 0.49771860148757696,
+        "observations": 100,
+        "p50_s": 0.004872750258073211,
+        "p95_s": 0.0062643797136843204,
+        "p99_s": 0.007124154996126891,
+        "max_s": 0.007159300148487091,
+        "observation_unit": "recalculation",
+        "formula_count": 1000,
+        "calls_per_s": 205222.9125314174,
+        "ns_per_call": 4872.750258073211,
+        "warmup_calculation": "CalculateFull",
+        "first_recalc_s": 0.007159300148487091,
+        "last_recalc_s": 0.0053495001047849655,
+        "latency_drift_ratio": 0.7472099218965454,
+        "rss_growth_bytes": 5718016,
+        "post_warmup_memory": {
+          "rss_bytes": 248840192,
+          "private_bytes": 132571136
+        },
+        "post_warmup_rss_bytes_growth": 7852032,
+        "post_warmup_private_bytes_growth": 3747840,
+        "recalculation_blocks": [
+          {
+            "first_iteration": 1,
+            "last_iteration": 10,
+            "p50_s": 0.004855149891227484,
+            "p99_s": 0.007113607125356794
+          },
+          {
+            "first_iteration": 11,
+            "last_iteration": 20,
+            "p50_s": 0.004777499940246344,
+            "p99_s": 0.005222258758731186
+          },
+          {
+            "first_iteration": 21,
+            "last_iteration": 30,
+            "p50_s": 0.00452840025536716,
+            "p99_s": 0.005415784898214042
+          },
+          {
+            "first_iteration": 31,
+            "last_iteration": 40,
+            "p50_s": 0.004567600088194013,
+            "p99_s": 0.005585470907390117
+          },
+          {
+            "first_iteration": 41,
+            "last_iteration": 50,
+            "p50_s": 0.004494499880820513,
+            "p99_s": 0.0060562332579866054
+          },
+          {
+            "first_iteration": 51,
+            "last_iteration": 60,
+            "p50_s": 0.0050627500750124454,
+            "p99_s": 0.006295736054889858
+          },
+          {
+            "first_iteration": 61,
+            "last_iteration": 70,
+            "p50_s": 0.004708300111815333,
+            "p99_s": 0.005310970074497164
+          },
+          {
+            "first_iteration": 71,
+            "last_iteration": 80,
+            "p50_s": 0.005065049743279815,
+            "p99_s": 0.005959573932923377
+          },
+          {
+            "first_iteration": 81,
+            "last_iteration": 90,
+            "p50_s": 0.004909200128167868,
+            "p99_s": 0.006730514811351895
+          },
+          {
+            "first_iteration": 91,
+            "last_iteration": 100,
+            "p50_s": 0.005121999885886908,
+            "p99_s": 0.006964113004505635
+          }
+        ],
+        "repeat_diagnostics": true,
+        "timing_note": "CalculateFull plus COM dispatch and CalculationState polling; memory reads are outside the timer; block p99 uses only that block's samples",
+        "fixture_allocation_window": {
+          "allocated_bytes": 125605776.0
+        },
+        "allocation_note": "Diagnostic run includes counter overhead and boundary Evaluate calls; Rust requested bytes exclude native process-heap/Excel allocations; frees can belong to allocations before the window, so net is not live heap size. .NET reports cumulative managed allocations only. Do not compare ratios or mix with normal timings.",
+        "peak_excel_rss_bytes": 256692224,
+        "excel_cpu_s": 1.34375
+      },
+      "slowest_recalculation": {
+        "iteration": 1,
+        "total_s": 0.007159300148487091,
+        "calculate_call_s": 0.006824500393122435,
+        "completion_wait_s": 0.00033479975536465645,
+        "completion_polls": 1,
+        "rss_bytes": 250974208,
+        "private_bytes": 133742592
+      },
+      "completion_poll_counts": [
+        1
+      ],
+      "memory_segments": [
+        {
+          "first_iteration": 1,
+          "last_iteration": 10,
+          "rss_bytes_growth": 4345856,
+          "private_bytes_growth": 2859008
+        },
+        {
+          "first_iteration": 11,
+          "last_iteration": 50,
+          "rss_bytes_growth": 1957888,
+          "private_bytes_growth": 954368
+        },
+        {
+          "first_iteration": 51,
+          "last_iteration": 100,
+          "rss_bytes_growth": 1548288,
+          "private_bytes_growth": -65536
+        }
+      ],
+      "memory_block_endpoints": [
+        {
+          "iteration": 10,
+          "rss_bytes": 253186048,
+          "private_bytes": 135430144
+        },
+        {
+          "iteration": 20,
+          "rss_bytes": 254038016,
+          "private_bytes": 135720960
+        },
+        {
+          "iteration": 30,
+          "rss_bytes": 254488576,
+          "private_bytes": 135860224
+        },
+        {
+          "iteration": 40,
+          "rss_bytes": 254746624,
+          "private_bytes": 135860224
+        },
+        {
+          "iteration": 50,
+          "rss_bytes": 255143936,
+          "private_bytes": 136384512
+        },
+        {
+          "iteration": 60,
+          "rss_bytes": 255328256,
+          "private_bytes": 136384512
+        },
+        {
+          "iteration": 70,
+          "rss_bytes": 255279104,
+          "private_bytes": 136318976
+        },
+        {
+          "iteration": 80,
+          "rss_bytes": 255361024,
+          "private_bytes": 136318976
+        },
+        {
+          "iteration": 90,
+          "rss_bytes": 256626688,
+          "private_bytes": 136318976
+        },
+        {
+          "iteration": 100,
+          "rss_bytes": 256692224,
+          "private_bytes": 136318976
+        }
+      ],
+      "lifecycle_events": [
+        {
+          "event": "IExcelAddIn.AutoOpen.enter",
+          "details": {
+            "invocation": 1
+          },
+          "since_quit_s": -1.0993162,
+          "qpc_ticks": 23975669961808,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "IExcelAddIn.AutoOpen.return",
+          "details": {
+            "invocation": 1
+          },
+          "since_quit_s": -1.0987012,
+          "qpc_ticks": 23975669967958,
+          "qpc_frequency": 10000000
+        }
+      ],
+      "lifecycle_observation": {
+        "status": "ok",
+        "boundary": "IExcelAddIn.AutoClose",
+        "boundary_scope": "managed_callback_only",
+        "unreturned_invocations": [],
+        "auto_close": "not_observed"
+      },
+      "process_exit_observation": {
+        "status": "exited",
+        "exit_filetime_ticks": 134374034089771392,
+        "exit_observed": {
+          "filetime_ticks": 134374034090218909,
+          "qpc_ticks": 23975704816625,
+          "qpc_frequency": 10000000
+        },
+        "exit_code": 0,
+        "termination": "natural",
+        "quit_to_exit_s": 2.341414,
+        "quit_to_exit_observed_s": 2.3861655,
+        "quit_to_natural_exit_s": 2.341414
+      },
+      "forced_kill": false
+    },
+    {
+      "id": "L02",
+      "variant": "1000",
+      "implementation": "xlfn",
+      "params": {
+        "cells": 1000,
+        "repetitions": 1000
+      },
+      "profile": "full",
+      "timestamp_utc": "2026-10-25T12:03:29Z",
+      "os": "Windows-11-10.0.26200-SP0",
+      "xll_sha256": "4a29603f668740ed538a5a371e050d2779395605a229b2f4e378c50cfd5a11c2",
+      "threads": 1,
+      "artifact_source": "github-actions",
+      "artifact_architecture": "x86_64",
+      "ci_commit": "9c72a05f97f9c27a8b2ec364ed12daa2ad596ff3",
+      "ci_run_id": "40190045107",
+      "ci_run_attempt": "1",
+      "runner_commit": "9c72a05f97f9c27a8b2ec364ed12daa2ad596ff3",
+      "excel_version": "16.0",
+      "excel_build": "20527.0",
+      "excel_bitness": "Windows (64-bit) NT 10.00",
+      "calculation_mode": "manual",
+      "status": "ok",
+      "com_retry": {
+        "rejected_calls": 0,
+        "retry_wait_s": 0.0,
+        "retry_timeout_s": 10
+      },
+      "metrics": {
+        "elapsed_s": 4.2310377969406545,
+        "observations": 1000,
+        "p50_s": 0.004026150098070502,
+        "p95_s": 0.005462254909798503,
+        "p99_s": 0.006411065692082048,
+        "max_s": 0.01988640008494258,
+        "observation_unit": "recalculation",
+        "formula_count": 1000,
+        "calls_per_s": 248376.23427880678,
+        "ns_per_call": 4026.1500980705023,
+        "warmup_calculation": "CalculateFull",
+        "first_recalc_s": 0.004397199954837561,
+        "last_recalc_s": 0.004054200369864702,
+        "latency_drift_ratio": 0.9219959091022211,
+        "rss_growth_bytes": 45064192,
+        "post_warmup_memory": {
+          "rss_bytes": 222138368,
+          "private_bytes": 118378496
+        },
+        "post_warmup_rss_bytes_growth": 47374336,
+        "post_warmup_private_bytes_growth": 31580160,
+        "recalculation_blocks": [
+          {
+            "first_iteration": 1,
+            "last_iteration": 100,
+            "p50_s": 0.0038712499663233757,
+            "p99_s": 0.007084314106032319
+          },
+          {
+            "first_iteration": 101,
+            "last_iteration": 200,
+            "p50_s": 0.004183649783954024,
+            "p99_s": 0.006423420971259477
+          },
+          {
+            "first_iteration": 201,
+            "last_iteration": 300,
+            "p50_s": 0.003903049975633621,
+            "p99_s": 0.004712910898961128
+          },
+          {
+            "first_iteration": 301,
+            "last_iteration": 400,
+            "p50_s": 0.003764699911698699,
+            "p99_s": 0.004226110121235254
+          },
+          {
+            "first_iteration": 401,
+            "last_iteration": 500,
+            "p50_s": 0.0037980498746037483,
+            "p99_s": 0.006355279814451935
+          },
+          {
+            "first_iteration": 501,
+            "last_iteration": 600,
+            "p50_s": 0.003953099949285388,
+            "p99_s": 0.005739275040104986
+          },
+          {
+            "first_iteration": 601,
+            "last_iteration": 700,
+            "p50_s": 0.004074399825185537,
+            "p99_s": 0.006159991719760003
+          },
+          {
+            "first_iteration": 701,
+            "last_iteration": 800,
+            "p50_s": 0.004053650191053748,
+            "p99_s": 0.006769639626145363
+          },
+          {
+            "first_iteration": 801,
+            "last_iteration": 900,
+            "p50_s": 0.004359949845820665,
+            "p99_s": 0.00616636411752552
+          },
+          {
+            "first_iteration": 901,
+            "last_iteration": 1000,
+            "p50_s": 0.004616849822923541,
+            "p99_s": 0.006291499990038587
+          }
+        ],
+        "repeat_diagnostics": true,
+        "timing_note": "CalculateFull plus COM dispatch and CalculationState polling; memory reads are outside the timer; block p99 uses only that block's samples",
+        "fixture_allocation_window": {
+          "allocated_bytes": 4152000.0,
+          "freed_bytes": 4152000.0,
+          "net_requested_bytes": 0.0
+        },
+        "allocation_note": "Diagnostic run includes counter overhead and boundary Evaluate calls; Rust requested bytes exclude native process-heap/Excel allocations; frees can belong to allocations before the window, so net is not live heap size. .NET reports cumulative managed allocations only. Do not compare ratios or mix with normal timings.",
+        "peak_excel_rss_bytes": 269819904,
+        "excel_cpu_s": 7.640625
+      },
+      "slowest_recalculation": {
+        "iteration": 11,
+        "total_s": 0.01988640008494258,
+        "calculate_call_s": 0.0036828001029789448,
+        "completion_wait_s": 0.016203599981963634,
+        "completion_polls": 1,
+        "rss_bytes": 232574976,
+        "private_bytes": 124153856
+      },
+      "completion_poll_counts": [
+        1
+      ],
+      "memory_segments": [
+        {
+          "first_iteration": 1,
+          "last_iteration": 100,
+          "rss_bytes_growth": 14778368,
+          "private_bytes_growth": 7462912
+        },
+        {
+          "first_iteration": 101,
+          "last_iteration": 500,
+          "rss_bytes_growth": 2453504,
+          "private_bytes_growth": 6307840
+        },
+        {
+          "first_iteration": 501,
+          "last_iteration": 1000,
+          "rss_bytes_growth": 30142464,
+          "private_bytes_growth": 17809408
+        }
+      ],
+      "memory_block_endpoints": [
+        {
+          "iteration": 100,
+          "rss_bytes": 236916736,
+          "private_bytes": 125841408
+        },
+        {
+          "iteration": 200,
+          "rss_bytes": 235048960,
+          "private_bytes": 123863040
+        },
+        {
+          "iteration": 300,
+          "rss_bytes": 237355008,
+          "private_bytes": 125915136
+        },
+        {
+          "iteration": 400,
+          "rss_bytes": 239411200,
+          "private_bytes": 132595712
+        },
+        {
+          "iteration": 500,
+          "rss_bytes": 239370240,
+          "private_bytes": 132149248
+        },
+        {
+          "iteration": 600,
+          "rss_bytes": 242032640,
+          "private_bytes": 133623808
+        },
+        {
+          "iteration": 700,
+          "rss_bytes": 246370304,
+          "private_bytes": 135835648
+        },
+        {
+          "iteration": 800,
+          "rss_bytes": 249528320,
+          "private_bytes": 137752576
+        },
+        {
+          "iteration": 900,
+          "rss_bytes": 254492672,
+          "private_bytes": 142434304
+        },
+        {
+          "iteration": 1000,
+          "rss_bytes": 269512704,
+          "private_bytes": 149958656
+        }
+      ],
+      "lifecycle_events": [
+        {
+          "event": "xlAutoOpen.enter",
+          "details": {
+            "invocation": 1,
+            "phase": "Closed"
+          },
+          "since_quit_s": -5.1396908,
+          "qpc_ticks": 23975717389590,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "xlAutoOpen.return",
+          "details": {
+            "invocation": 1,
+            "module_residency_held": true,
+            "phase": "Open",
+            "resident_event_registrations": 2,
+            "status": 1
+          },
+          "since_quit_s": -5.132898,
+          "qpc_ticks": 23975717457518,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "xlAutoClose.enter",
+          "details": {
+            "invocation": 2,
+            "phase": "Open"
+          },
+          "since_quit_s": 0.007595,
+          "qpc_ticks": 23975768862448,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "BeginClose"
+          },
+          "since_quit_s": 0.0080065,
+          "qpc_ticks": 23975768866563,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "CallsDrained"
+          },
+          "since_quit_s": 0.0098372,
+          "qpc_ticks": 23975768884870,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "ReturnsDrained"
+          },
+          "since_quit_s": 0.0100341,
+          "qpc_ticks": 23975768886839,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "StopAsyncExecutor"
+          },
+          "since_quit_s": 0.0173025,
+          "qpc_ticks": 23975768959523,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "AsyncDrained"
+          },
+          "since_quit_s": 0.0175302,
+          "qpc_ticks": 23975768961800,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "SubscriptionsDrained"
+          },
+          "since_quit_s": 0.0177128,
+          "qpc_ticks": 23975768963626,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "CloseCallbackGate"
+          },
+          "since_quit_s": 0.0194998,
+          "qpc_ticks": 23975768981496,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "HostDetached"
+          },
+          "since_quit_s": 0.0197018,
+          "qpc_ticks": 23975768983516,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "ProveGenerationUnique"
+          },
+          "since_quit_s": 0.0198478,
+          "qpc_ticks": 23975768984976,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "ProveAddinQuiesced"
+          },
+          "since_quit_s": 0.0199736,
+          "qpc_ticks": 23975768986234,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "GenerationReclaimed"
+          },
+          "since_quit_s": 0.0201399,
+          "qpc_ticks": 23975768987897,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "HandlesDrained"
+          },
+          "since_quit_s": 0.0203232,
+          "qpc_ticks": 23975768989730,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "DiagnosticsDrained"
+          },
+          "since_quit_s": 0.020467,
+          "qpc_ticks": 23975768991168,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "RtdDrained"
+          },
+          "since_quit_s": 0.0206569,
+          "qpc_ticks": 23975768993067,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "shutdown.checkpoint",
+          "details": {
+            "checkpoint": "FinishClose"
+          },
+          "since_quit_s": 0.0208416,
+          "qpc_ticks": 23975768994914,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "xlAutoClose.return",
+          "details": {
+            "invocation": 2,
+            "module_residency_held": true,
+            "phase": "Closed",
+            "resident_event_registrations": 2,
+            "status": 1
+          },
+          "since_quit_s": 0.0210307,
+          "qpc_ticks": 23975768996805,
+          "qpc_frequency": 10000000
+        }
+      ],
+      "lifecycle_observation": {
+        "status": "ok",
+        "boundary": "xlAutoClose",
+        "boundary_scope": "generated_native_body",
+        "unreturned_invocations": [],
+        "auto_close": "returned"
+      },
+      "process_exit_observation": {
+        "status": "exited",
+        "exit_filetime_ticks": 134374034178124517,
+        "exit_observed": {
+          "filetime_ticks": 134374034178598471,
+          "qpc_ticks": 23975793196176,
+          "qpc_frequency": 10000000
+        },
+        "exit_code": 0,
+        "termination": "natural",
+        "quit_to_exit_s": 2.3935732,
+        "quit_to_exit_observed_s": 2.4409678,
+        "quit_to_natural_exit_s": 2.3935732
+      },
+      "forced_kill": false
+    },
+    {
+      "id": "L02",
+      "variant": "1000",
+      "implementation": "excel_dna",
+      "params": {
+        "cells": 1000,
+        "repetitions": 1000
+      },
+      "profile": "full",
+      "timestamp_utc": "2026-10-25T12:03:38Z",
+      "os": "Windows-11-10.0.26200-SP0",
+      "xll_sha256": "b90e39c0dd3be8d625d08f6e3a215764522f8bc8720faa614c08204df1eff0ed",
+      "threads": 1,
+      "artifact_source": "github-actions",
+      "artifact_architecture": "x86_64",
+      "ci_commit": "9c72a05f97f9c27a8b2ec364ed12daa2ad596ff3",
+      "ci_run_id": "40190045107",
+      "ci_run_attempt": "1",
+      "runner_commit": "9c72a05f97f9c27a8b2ec364ed12daa2ad596ff3",
+      "excel_version": "16.0",
+      "excel_build": "20527.0",
+      "excel_bitness": "Windows (64-bit) NT 10.00",
+      "calculation_mode": "manual",
+      "status": "ok",
+      "com_retry": {
+        "rejected_calls": 0,
+        "retry_wait_s": 0.0,
+        "retry_timeout_s": 10
+      },
+      "metrics": {
+        "elapsed_s": 4.829170293640345,
+        "observations": 1000,
+        "p50_s": 0.00466195004992187,
+        "p95_s": 0.006891214870847762,
+        "p99_s": 0.007692285892553627,
+        "max_s": 0.008901599794626236,
+        "observation_unit": "recalculation",
+        "formula_count": 1000,
+        "calls_per_s": 214502.5127450173,
+        "ns_per_call": 4661.95004992187,
+        "warmup_calculation": "CalculateFull",
+        "first_recalc_s": 0.0045854998752474785,
+        "last_recalc_s": 0.004783800337463617,
+        "latency_drift_ratio": 1.043245113425161,
+        "rss_growth_bytes": 22134784,
+        "post_warmup_memory": {
+          "rss_bytes": 249647104,
+          "private_bytes": 133496832
+        },
+        "post_warmup_rss_bytes_growth": 24887296,
+        "post_warmup_private_bytes_growth": 12296192,
+        "recalculation_blocks": [
+          {
+            "first_iteration": 1,
+            "last_iteration": 100,
+            "p50_s": 0.004729199921712279,
+            "p99_s": 0.006876116930507127
+          },
+          {
+            "first_iteration": 101,
+            "last_iteration": 200,
+            "p50_s": 0.004301450215280056,
+            "p99_s": 0.00646695808041841
+          },
+          {
+            "first_iteration": 201,
+            "last_iteration": 300,
+            "p50_s": 0.004287400050088763,
+            "p99_s": 0.005354783027432859
+          },
+          {
+            "first_iteration": 301,
+            "last_iteration": 400,
+            "p50_s": 0.0043657999485731125,
+            "p99_s": 0.0052144201565533935
+          },
+          {
+            "first_iteration": 401,
+            "last_iteration": 500,
+            "p50_s": 0.00457045016810298,
+            "p99_s": 0.006296615591272715
+          },
+          {
+            "first_iteration": 501,
+            "last_iteration": 600,
+            "p50_s": 0.004386150045320392,
+            "p99_s": 0.007537750336341561
+          },
+          {
+            "first_iteration": 601,
+            "last_iteration": 700,
+            "p50_s": 0.004799050046131015,
+            "p99_s": 0.006748332898132505
+          },
+          {
+            "first_iteration": 701,
+            "last_iteration": 800,
+            "p50_s": 0.004840049892663956,
+            "p99_s": 0.008064326047897339
+          },
+          {
+            "first_iteration": 801,
+            "last_iteration": 900,
+            "p50_s": 0.0051062002312392,
+            "p99_s": 0.008820123211480678
+          },
+          {
+            "first_iteration": 901,
+            "last_iteration": 1000,
+            "p50_s": 0.0048350500874221325,
+            "p99_s": 0.006702711903490128
+          }
+        ],
+        "repeat_diagnostics": true,
+        "timing_note": "CalculateFull plus COM dispatch and CalculationState polling; memory reads are outside the timer; block p99 uses only that block's samples",
+        "fixture_allocation_window": {
+          "allocated_bytes": 1256005776.0
+        },
+        "allocation_note": "Diagnostic run includes counter overhead and boundary Evaluate calls; Rust requested bytes exclude native process-heap/Excel allocations; frees can belong to allocations before the window, so net is not live heap size. .NET reports cumulative managed allocations only. Do not compare ratios or mix with normal timings.",
+        "peak_excel_rss_bytes": 278065152,
+        "excel_cpu_s": 7.75
+      },
+      "slowest_recalculation": {
+        "iteration": 839,
+        "total_s": 0.008901599794626236,
+        "calculate_call_s": 0.008574199862778187,
+        "completion_wait_s": 0.00032739993184804916,
+        "completion_polls": 1,
+        "rss_bytes": 277495808,
+        "private_bytes": 149274624
+      },
+      "completion_poll_counts": [
+        1
+      ],
+      "memory_segments": [
+        {
+          "first_iteration": 1,
+          "last_iteration": 100,
+          "rss_bytes_growth": 7503872,
+          "private_bytes_growth": 3981312
+        },
+        {
+          "first_iteration": 101,
+          "last_iteration": 500,
+          "rss_bytes_growth": -1069056,
+          "private_bytes_growth": 684032
+        },
+        {
+          "first_iteration": 501,
+          "last_iteration": 1000,
+          "rss_bytes_growth": 18452480,
+          "private_bytes_growth": 7630848
+        }
+      ],
+      "memory_block_endpoints": [
+        {
+          "iteration": 100,
+          "rss_bytes": 257150976,
+          "private_bytes": 137478144
+        },
+        {
+          "iteration": 200,
+          "rss_bytes": 253136896,
+          "private_bytes": 132927488
+        },
+        {
+          "iteration": 300,
+          "rss_bytes": 255016960,
+          "private_bytes": 139227136
+        },
+        {
+          "iteration": 400,
+          "rss_bytes": 254382080,
+          "private_bytes": 137756672
+        },
+        {
+          "iteration": 500,
+          "rss_bytes": 256081920,
+          "private_bytes": 138162176
+        },
+        {
+          "iteration": 600,
+          "rss_bytes": 262287360,
+          "private_bytes": 142811136
+        },
+        {
+          "iteration": 700,
+          "rss_bytes": 263483392,
+          "private_bytes": 143904768
+        },
+        {
+          "iteration": 800,
+          "rss_bytes": 277164032,
+          "private_bytes": 149012480
+        },
+        {
+          "iteration": 900,
+          "rss_bytes": 270311424,
+          "private_bytes": 141578240
+        },
+        {
+          "iteration": 1000,
+          "rss_bytes": 274534400,
+          "private_bytes": 145793024
+        }
+      ],
+      "lifecycle_events": [
+        {
+          "event": "IExcelAddIn.AutoOpen.enter",
+          "details": {
+            "invocation": 1
+          },
+          "since_quit_s": -5.7729466,
+          "qpc_ticks": 23975808628300,
+          "qpc_frequency": 10000000
+        },
+        {
+          "event": "IExcelAddIn.AutoOpen.return",
+          "details": {
+            "invocation": 1
+          },
+          "since_quit_s": -5.7723725,
+          "qpc_ticks": 23975808634041,
+          "qpc_frequency": 10000000
+        }
+      ],
+      "lifecycle_observation": {
+        "status": "ok",
+        "boundary": "IExcelAddIn.AutoClose",
+        "boundary_scope": "managed_callback_only",
+        "unreturned_invocations": [],
+        "auto_close": "not_observed"
+      },
+      "process_exit_observation": {
+        "status": "exited",
+        "exit_filetime_ticks": 134374034274809312,
+        "exit_observed": {
+          "filetime_ticks": 134374034275222925,
+          "qpc_ticks": 23975889820644,
+          "qpc_frequency": 10000000
+        },
+        "exit_code": 0,
+        "termination": "natural",
+        "quit_to_exit_s": 2.3049293,
+        "quit_to_exit_observed_s": 2.3462878,
+        "quit_to_natural_exit_s": 2.3049293
+      },
+      "forced_kill": false
+    }
+  ]
+}

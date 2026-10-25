@@ -143,6 +143,24 @@ useful check for session variability. For a performance comparison, repeat
 independent Excel sessions and reverse the implementation order; five
 recalculations in one session do not establish statistical significance.
 
+T01–T03 likewise retain each measured Calculate/completion-query breakdown and
+validate every output cell after warmup and after the final measured iteration,
+outside the timer. Their `ns_per_char` divides whole recalculation time by the
+requested Unicode code-point count, including all formulas. C02 measures one
+fresh `RegisterXLL` operation per process; `--repeat` does not repeat DLL loading.
+Compare startup using multiple fresh sessions and reverse implementation order.
+
+For C02 attribution, `--shutdown-diagnostics` also captures
+`registration.preflight` and `registration.transaction` during startup. They
+report descriptor preparation, conflict checks, registration argument encoding
+plus callback/result cleanup, and remaining transaction work. Counts and outcomes
+remain available on failed transactions. The transaction scope excludes DLL
+loading, module-name lookup, user `Addin::open`, and native event registration.
+These are aggregate Rust/host-operation timings, including synchronous reentry;
+they do not isolate Excel's internal processing time. Each phase excludes its
+own diagnostic write, but `registration_load_s` includes those writes. Collect
+separate runs without diagnostics for startup performance comparisons.
+
 | IDs | What the harness does | Main observed value |
 | --- | --- | --- |
 | S01–S04 | Identity, 2/4/8 args, timed busy loop, periodic `#NUM!` | Dirty-range recalculation distribution and throughput; S03 has a 0-µs baseline |

@@ -158,6 +158,11 @@ harness = false
 required-features = ["bench-internals"]
 
 [[bench]]
+name = "registration"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
 name = "handle_call_resolution"
 harness = false
 required-features = ["bench-internals"]

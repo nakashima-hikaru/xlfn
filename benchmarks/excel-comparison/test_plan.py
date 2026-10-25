@@ -21,7 +21,7 @@ from generate_registration import source
 from run import (XL_AUTOMATIC, XL_MANUAL, XL_ERR_NUM, AsyncControl, ComObject, ComRetry,
                  ExcelSession, UnsupportedCase, WorkerProgress, apply_excel_cleanup, calculation_mode,
                  check_final_values, check_scalar, close_worker_session, formula, register_xll,
-                 registration_diagnostics, run_async, reap_excel_process, run_scalar, allocation_snapshot,
+                 registration_diagnostics, run_async, reap_excel_process, run_scalar, run_text, allocation_snapshot,
                  recover_worker_record, run_async_cancel, run_async_gate, run_async_repeated, run_matrix, run_numeric_output_pair,
                  native_abi_formula, run_native_abi_pair, classify_abi_semantics, run_native_abi_semantics, artifact)
 from summarize import PRIMARY, summarize
@@ -780,6 +780,81 @@ class PlanTest(unittest.TestCase):
                          '=BENCH.RTD("topic-0",0)')
         self.assertEqual(formula("T02", 1, {"length": 8, "kind": "ja"}),
                          "=BENCH.STR.OUT(8,TRUE)")
+
+    def test_text_retains_each_calculation_timing_and_validates_outside_measurement(self):
+        for id in ("T01", "T02", "T03"):
+            with self.subTest(id=id):
+                events = []
+                expected = 8.0 if id == "T01" else "日" * 8
+
+                class Target:
+                    @property
+                    def Value2(self):
+                        events.append("validate")
+                        return ((expected,), (expected,))
+
+                target = Target()
+                session = Mock()
+                session.add_formulas.return_value = target
+                session.last_calculation_timing = {}
+                durations = iter((10.0, 0.25, 0.5))
+
+                def calculate(actual_target):
+                    self.assertIs(actual_target, target)
+                    events.append("calculate")
+                    duration = next(durations)
+                    # Reuse the map to catch records that retain a mutable view.
+                    session.last_calculation_timing.clear()
+                    session.last_calculation_timing.update({
+                        "total_s": duration, "calculate_call_s": duration * 0.8,
+                        "completion_wait_s": duration * 0.2, "completion_polls": 1,
+                    })
+                    return duration
+
+                session.calculate.side_effect = calculate
+                result = run_text(session, Case(id, "ja-8", {"cells": 2, "length": 8, "kind": "ja"}), 2)
+                self.assertEqual(events, ["calculate", "validate", "calculate", "calculate", "validate"])
+                self.assertEqual(result["recalculation_samples"], [
+                    {"iteration": 1, "total_s": 0.25, "calculate_call_s": 0.2,
+                     "completion_wait_s": 0.05, "completion_polls": 1},
+                    {"iteration": 2, "total_s": 0.5, "calculate_call_s": 0.4,
+                     "completion_wait_s": 0.1, "completion_polls": 1},
+                ])
+                self.assertEqual(result["elapsed_s"], 0.75)
+                self.assertEqual(result["p50_s"], 0.375)
+                self.assertEqual(result["ns_per_char"], 0.375 * 1e9 / 16)
+                self.assertEqual(result["characters"], 16)
+                self.assertEqual(result["character_unit"], "Unicode code points")
+                self.assertEqual(result["formula_count"], 2)
+                self.assertEqual(result["validated_cells"], 2)
+
+    def test_text_rejects_later_wrong_or_missing_cells_after_warmup_and_measurement(self):
+        for id in ("T01", "T02", "T03"):
+            for phase in ("warmup", "final"):
+                for failure in ("wrong", "missing", "wrong_type"):
+                    with self.subTest(id=id, phase=phase, failure=failure):
+                        expected = 1.0 if id == "T01" else "a"
+                        target = SimpleNamespace(Value2=((expected,), (expected,)))
+                        session = Mock(last_calculation_timing={})
+                        session.add_formulas.return_value = target
+                        calls = 0
+
+                        def calculate(_):
+                            nonlocal calls
+                            calls += 1
+                            if calls == (1 if phase == "warmup" else 2):
+                                if failure == "missing":
+                                    target.Value2 = ((expected,),)
+                                else:
+                                    wrong = (True if id == "T01" else None) if failure == "wrong_type" else "incorrect"
+                                    target.Value2 = ((expected,), (wrong,))
+                            return 0.1
+
+                        session.calculate.side_effect = calculate
+                        message = "1/2 cells" if failure == "missing" else "row 2"
+                        with self.assertRaisesRegex(AssertionError, message):
+                            run_text(session, Case(id, "ascii-1", {"cells": 2, "length": 1, "kind": "ascii"}), 1)
+                        self.assertEqual(calls, 1 if phase == "warmup" else 2)
 
     def test_native_abi_pair_uses_alternating_balanced_blocks(self):
         session = Mock(implementation="xlfn")

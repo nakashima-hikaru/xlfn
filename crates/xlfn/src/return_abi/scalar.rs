@@ -1,6 +1,6 @@
 //! Owned scalar encoding completed while the Rust return value is live.
 
-use super::storage::ReturnStorage;
+use super::storage::ScalarStringStorage;
 use crate::error::InputError;
 use crate::value::output::ExcelCellSink;
 use crate::value::{ExcelCellOutput, IntoExcel};
@@ -14,7 +14,7 @@ use xlfn_sys::{XLOPER12, XLOPER12Value, XLTYPE_STR};
 #[doc(hidden)]
 pub struct XlScalarOutput {
     pub(super) oper: XLOPER12,
-    pub(super) storage: Option<ReturnStorage>,
+    pub(super) storage: Option<ScalarStringStorage>,
 }
 
 impl XlScalarOutput {
@@ -64,8 +64,7 @@ impl XlScalarOutput {
             });
         };
         super::enforce_return_limit(allocation_bytes)?;
-        let storage = ReturnStorage::new();
-        let pointer = storage.alloc_counted_utf16_with_length(
+        let (storage, pointer) = ScalarStringStorage::new(
             text,
             "<return>",
             crate::utf16::EXCEL_STRING_LIMIT,
@@ -270,7 +269,6 @@ mod tests {
             .storage
             .as_ref()
             .unwrap()
-            .arena
             .allocated_bytes();
         assert!(matches!(
             sink.push_str(&"x".repeat(crate::utf16::EXCEL_STRING_LIMIT)),
@@ -286,7 +284,6 @@ mod tests {
                 .storage
                 .as_ref()
                 .unwrap()
-                .arena
                 .allocated_bytes(),
             before
         );
