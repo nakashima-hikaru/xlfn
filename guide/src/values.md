@@ -264,9 +264,14 @@ Exceeding a limit on the FP12 return path produces `#NUM!` and a diagnostic.
 
 On Windows, process accounting uses shared state that survives physical DLL
 unload. All module images using the same accounting protocol share the 512 MiB
-budget, including final buffers retained by unloaded images. One shared-state
-mapping and handle are retained per process; reloads do not retain additional
-mappings or handles. An incompatible accounting header or limit is an error;
+budget, including final buffers retained by unloaded images. Each loaded image
+retains its own view of the same shared physical counters until process exit;
+each physical reload retains one more view, while mapping handles are closed
+after attachment. Shared memory contains counters and protocol metadata, with
+no virtual addresses. A protected current-user/SYSTEM DACL is validated when
+attaching to either new or existing mappings. Processes with the same user
+authority are trusted; the DACL does not provide isolation from that user.
+An incompatible accounting header, limit, or out-of-range counter is an error;
 loading another DLL never creates a separate budget. Allocations made by older
 xlfn versions without this protocol cannot be counted retrospectively. Published buffers left by an
 unloaded image remain retained until process exit; the shared budget bounds

@@ -79,7 +79,7 @@ pub use date::{ExcelDateSystem, ExcelSerialDate};
 pub(crate) use matrix::validate_matrix_dimensions;
 pub use matrix::{BoundedVarArgs, Column, Matrix, MatrixRef, Row};
 pub use numeric::NumericMatrixRef;
-pub(crate) use raw::{GridView, encode_raw_value};
+pub(crate) use raw::GridView;
 pub use raw::{XlArrayRef, XlStrRef, XlValueRef, XlValueType};
 
 const EXCEL_MAX_ROWS: usize = 1_048_576;
@@ -657,6 +657,24 @@ struct ArrayInputBudget {
 }
 
 impl ArrayInputBudget {
+    /// Raw identity reads host storage only, and never allocates decoded text.
+    fn include_raw(&mut self, element: XlValueRef<'_>) -> XllResult<()> {
+        if element.value_type() == XlValueType::String {
+            let bytes = (element.utf16(self.argument)?.len() + 1)
+                .checked_mul(std::mem::size_of::<u16>())
+                .and_then(|bytes| self.referenced_bytes.checked_add(bytes))
+                .ok_or_else(|| {
+                    XllError::input(
+                        self.argument,
+                        InputError::Malformed("array byte-size overflow"),
+                    )
+                })?;
+            self.referenced_bytes = bytes;
+            self.check_limit()?;
+        }
+        Ok(())
+    }
+
     fn new<T>(element_count: usize, argument: &'static str) -> XllResult<Self> {
         let output_bytes = element_count
             .checked_mul(std::mem::size_of::<T>())
@@ -1805,9 +1823,7 @@ impl<'call> ExcelInputIdentity for XlArrayRef<'call> {
     fn encode_input_identity(&self, encoder: &mut InputIdentityEncoder) {
         encoder.u64(self.rows() as u64);
         encoder.u64(self.columns() as u64);
-        for cell in self.cells() {
-            encode_raw_value(cell, true, encoder);
-        }
+        self.encode_cells(encoder);
     }
 }
 
@@ -2499,6 +2515,34 @@ mod tests {
                 argument: "values",
                 reason: InputError::TooLarge { limit: MAX_ARRAY_BYTES, actual },
             }) if actual == MAX_ARRAY_BYTES + 5
+        ));
+    }
+
+    #[test]
+    fn raw_identity_budget_counts_headers_and_counted_utf16_at_the_limit() {
+        let header_bytes = std::mem::size_of::<XLOPER12>();
+        let mut budget = ArrayInputBudget::new::<()>(3, "raw_values").unwrap();
+        assert_eq!(budget.referenced_bytes, 3 * header_bytes);
+        // Raw views preserve malformed surrogate units without decoding them.
+        let mut text = [2_u16, 0xd800, 0xdc00];
+        let raw = XLOPER12 {
+            value: XLOPER12Value {
+                string: text.as_mut_ptr(),
+            },
+            xltype: XLTYPE_STR,
+        };
+        let value = XlValueRef::from_array_cell(&raw).unwrap();
+        budget.include_raw(value).unwrap();
+        assert_eq!(budget.referenced_bytes, 3 * header_bytes + 6);
+        budget.referenced_bytes = MAX_ARRAY_BYTES - 6;
+        budget.include_raw(value).unwrap();
+        assert_eq!(budget.referenced_bytes, MAX_ARRAY_BYTES);
+        assert!(matches!(
+            budget.include_raw(value),
+            Err(XllError::Input {
+                argument: "raw_values",
+                reason: InputError::TooLarge { limit: MAX_ARRAY_BYTES, actual },
+            }) if actual == MAX_ARRAY_BYTES + 6
         ));
     }
 

@@ -14,11 +14,19 @@ windows_link::link!("ole32.dll" "system" fn CoCreateInstance(rclsid : *const GUI
 windows_link::link!("ole32.dll" "system" fn CoInitializeEx(pvreserved : *const core::ffi::c_void, dwcoinit : u32) -> HRESULT);
 windows_link::link!("ole32.dll" "system" fn CoUninitialize());
 windows_link::link!("ole32.dll" "system" fn CoWaitForMultipleHandles(dwflags : u32, dwtimeout : u32, chandles : u32, phandles : *const HANDLE, lpdwindex : *mut u32) -> HRESULT);
+windows_link::link!("advapi32.dll" "system" fn ConvertSecurityDescriptorToStringSecurityDescriptorW(securitydescriptor : PSECURITY_DESCRIPTOR, requestedstringsdrevision : u32, securityinformation : SECURITY_INFORMATION, stringsecuritydescriptor : *mut PWSTR, stringsecuritydescriptorlen : *mut u32) -> BOOL);
+windows_link::link!("advapi32.dll" "system" fn ConvertSidToStringSidW(sid : PSID, stringsid : *mut PWSTR) -> BOOL);
+windows_link::link!("advapi32.dll" "system" fn ConvertStringSecurityDescriptorToSecurityDescriptorW(stringsecuritydescriptor : PCWSTR, stringsdrevision : u32, securitydescriptor : *mut PSECURITY_DESCRIPTOR, securitydescriptorsize : *mut u32) -> BOOL);
 windows_link::link!("kernel32.dll" "system" fn CreateEventW(lpeventattributes : *const SECURITY_ATTRIBUTES, bmanualreset : BOOL, binitialstate : BOOL, lpname : PCWSTR) -> HANDLE);
 windows_link::link!("kernel32.dll" "system" fn CreateMutexW(lpmutexattributes : *const SECURITY_ATTRIBUTES, binitialowner : BOOL, lpname : PCWSTR) -> HANDLE);
 windows_link::link!("kernel32.dll" "system" fn FreeLibrary(hlibmodule : HMODULE) -> BOOL);
+windows_link::link!("kernel32.dll" "system" fn GetCurrentProcess() -> HANDLE);
 windows_link::link!("kernel32.dll" "system" fn GetLastError() -> u32);
 windows_link::link!("kernel32.dll" "system" fn GetModuleHandleExW(dwflags : u32, lpmodulename : PCWSTR, phmodule : *mut HMODULE) -> BOOL);
+windows_link::link!("advapi32.dll" "system" fn GetSecurityInfo(handle : HANDLE, objecttype : SE_OBJECT_TYPE, securityinfo : SECURITY_INFORMATION, ppsidowner : *mut PSID, ppsidgroup : *mut PSID, ppdacl : *mut PACL, ppsacl : *mut PACL, ppsecuritydescriptor : *mut PSECURITY_DESCRIPTOR) -> u32);
+windows_link::link!("advapi32.dll" "system" fn GetTokenInformation(tokenhandle : HANDLE, tokeninformationclass : TOKEN_INFORMATION_CLASS, tokeninformation : *mut core::ffi::c_void, tokeninformationlength : u32, returnlength : *mut u32) -> BOOL);
+windows_link::link!("kernel32.dll" "system" fn LocalFree(hmem : HLOCAL) -> HLOCAL);
+windows_link::link!("advapi32.dll" "system" fn OpenProcessToken(processhandle : HANDLE, desiredaccess : u32, tokenhandle : *mut HANDLE) -> BOOL);
 windows_link::link!("kernel32.dll" "system" fn OutputDebugStringW(lpoutputstring : PCWSTR));
 windows_link::link!("advapi32.dll" "system" fn RegCloseKey(hkey : HKEY) -> LSTATUS);
 windows_link::link!("advapi32.dll" "system" fn RegCreateKeyExW(hkey : HKEY, lpsubkey : PCWSTR, reserved : u32, lpclass : PCWSTR, dwoptions : u32, samdesired : REGSAM, lpsecurityattributes : *const SECURITY_ATTRIBUTES, phkresult : *mut HKEY, lpdwdisposition : *mut u32) -> LSTATUS);
@@ -46,6 +54,15 @@ windows_link::link!("oleaut32.dll" "system" fn SysStringLen(pbstr : BSTR) -> u32
 windows_link::link!("oleaut32.dll" "system" fn VariantClear(pvarg : *mut VARIANTARG) -> HRESULT);
 windows_link::link!("kernel32.dll" "system" fn WaitForSingleObject(hhandle : HANDLE, dwmilliseconds : u32) -> u32);
 pub type ACCESS_MASK = u32;
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct ACL {
+    pub AclRevision: u8,
+    pub Sbz1: u8,
+    pub AclSize: u16,
+    pub AceCount: u16,
+    pub Sbz2: u16,
+}
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ARRAYDESC {
@@ -110,6 +127,7 @@ pub struct CY_0 {
     pub Lo: u32,
     pub Hi: i32,
 }
+pub const DACL_SECURITY_INFORMATION: i32 = 4;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct DECIMAL {
@@ -287,6 +305,7 @@ pub type HANDLE = *mut core::ffi::c_void;
 pub type HINSTANCE = *mut core::ffi::c_void;
 pub type HKEY = *mut core::ffi::c_void;
 pub const HKEY_CURRENT_USER: HKEY = -2147483647 as _;
+pub type HLOCAL = HANDLE;
 pub type HMODULE = HINSTANCE;
 pub type HREFTYPE = u32;
 pub type HRESULT = i32;
@@ -523,6 +542,8 @@ pub type LPPARAMDESCEX = *mut PARAMDESCEX;
 pub type LSTATUS = i32;
 pub type MEMBERID = DISPID;
 pub type OLECHAR = u16;
+pub const OWNER_SECURITY_INFORMATION: i32 = 1;
+pub type PACL = *mut ACL;
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct PARAMDESC {
@@ -541,6 +562,8 @@ impl Default for PARAMDESCEX {
     }
 }
 pub type PCWSTR = *const u16;
+pub type PSECURITY_DESCRIPTOR = *mut core::ffi::c_void;
+pub type PSID = *mut core::ffi::c_void;
 pub type PWSTR = *mut u16;
 pub type REGSAM = ACCESS_MASK;
 pub const REG_OPTION_NON_VOLATILE: i32 = 0;
@@ -568,12 +591,22 @@ pub struct SAFEARRAYBOUND {
     pub lLbound: i32,
 }
 pub type SCODE = i32;
+pub const SDDL_REVISION_1: i32 = 1;
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct SECURITY_ATTRIBUTES {
     pub nLength: u32,
     pub lpSecurityDescriptor: *mut core::ffi::c_void,
     pub bInheritHandle: BOOL,
+}
+pub type SECURITY_INFORMATION = u32;
+pub const SE_KERNEL_OBJECT: SE_OBJECT_TYPE = 6;
+pub type SE_OBJECT_TYPE = i32;
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct SID_AND_ATTRIBUTES {
+    pub Sid: PSID,
+    pub Attributes: u32,
 }
 pub type SYSKIND = i32;
 pub const SYS_MAC: SYSKIND = 2;
@@ -600,6 +633,13 @@ pub struct TLIBATTR {
     pub wMajorVerNum: u16,
     pub wMinorVerNum: u16,
     pub wLibFlags: u16,
+}
+pub type TOKEN_INFORMATION_CLASS = i32;
+pub const TOKEN_QUERY: i32 = 8;
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct TOKEN_USER {
+    pub User: SID_AND_ATTRIBUTES,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -652,6 +692,7 @@ impl Default for TYPEDESC_0 {
     }
 }
 pub type TYPEKIND = i32;
+pub const TokenUser: TOKEN_INFORMATION_CLASS = 1;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct VARDESC {

@@ -673,10 +673,76 @@ pub(crate) fn normalize_forwarder_library(library: &str) -> PackageResult<String
     Ok(normalized)
 }
 
+struct MappedSection {
+    start: u32,
+    content_end: u32,
+    executable: bool,
+}
+
+fn validate_mapped_sections<Pe: ImageNtHeaders>(
+    pe: &PeFile<'_, Pe>,
+) -> PackageResult<Vec<MappedSection>> {
+    use object::read::pe::ImageOptionalHeader;
+
+    let optional = pe.nt_headers().optional_header();
+    let alignment = optional.section_alignment();
+    let file_alignment = optional.file_alignment();
+    let image_size = optional.size_of_image();
+    let headers_size = optional.size_of_headers();
+    if !alignment.is_power_of_two()
+        || !file_alignment.is_power_of_two()
+        || alignment < file_alignment
+        || (alignment < 4096 && alignment != file_alignment)
+        || image_size % alignment != 0
+        || headers_size > image_size
+    {
+        return Err("PE image has inconsistent section alignment or image bounds".into());
+    }
+    let align_end = |end: u32| {
+        end.checked_add(alignment - 1)
+            .map(|end| end & !(alignment - 1))
+            .ok_or_else(|| PackageError::Message("PE mapped section range overflows".into()))
+    };
+    let mut previous_end = align_end(headers_size)?;
+    let mut sections = Vec::new();
+    for section in pe.section_table().iter() {
+        let start = section.virtual_address.get(LE);
+        // SizeOfRawData includes file-alignment padding and may exceed
+        // VirtualSize in ordinary LLVM/MSVC images. Preserve that initialized
+        // extent; use SectionAlignment for overlap and SizeOfImage checks.
+        // https://learn.microsoft.com/windows/win32/debug/pe-format
+        let size = section
+            .virtual_size
+            .get(LE)
+            .max(section.size_of_raw_data.get(LE));
+        if size == 0 {
+            continue;
+        }
+        let content_end = start
+            .checked_add(size)
+            .ok_or_else(|| PackageError::Message("PE mapped section range overflows".into()))?;
+        let mapped_end = align_end(content_end)?;
+        if start % alignment != 0 || start < previous_end || mapped_end > image_size {
+            return Err(
+                "PE mapped sections overlap, are out of order, or exceed image bounds".into(),
+            );
+        }
+        previous_end = mapped_end;
+        sections.push(MappedSection {
+            start,
+            content_end,
+            executable: (section.characteristics.get(LE) & IMAGE_SCN_MEM_EXECUTE)
+                != object::pe::SectionFlags::default(),
+        });
+    }
+    Ok(sections)
+}
+
 pub(crate) fn parse_pe_file<Pe>(pe: PeFile<'_, Pe>) -> PackageResult<PeInfo>
 where
     Pe: ImageNtHeaders,
 {
+    let mapped_sections = validate_mapped_sections(&pe)?;
     let file_header = pe.nt_headers().file_header();
     let machine = file_header.machine.get(LE);
     let characteristics = file_header.characteristics.get(LE);
@@ -698,24 +764,15 @@ where
             exported_ordinals.insert(exported_ordinal);
             let executable = match table.target_from_address(address)? {
                 ExportTarget::Address(address) => {
-                    let section = pe
-                        .section_table()
+                    let section = mapped_sections
                         .iter()
-                        .find(|section| {
-                            let start = section.virtual_address.get(LE);
-                            let size = section
-                                .virtual_size
-                                .get(LE)
-                                .max(section.size_of_raw_data.get(LE));
-                            address >= start && address < start.saturating_add(size)
-                        })
+                        .find(|section| address >= section.start && address < section.content_end)
                         .ok_or_else(|| {
                             PackageError::Message(format!(
                                 "PE export ordinal {exported_ordinal} points outside every mapped section"
                             ))
                         })?;
-                    (section.characteristics.get(LE) & IMAGE_SCN_MEM_EXECUTE)
-                        != object::pe::SectionFlags::default()
+                    section.executable
                 }
                 ExportTarget::ForwardByOrdinal(library, target_ordinal) => {
                     let forwarded = ForwardedExport {
@@ -775,13 +832,20 @@ where
             .trim_matches('\0');
         let is_export_manifest = name_str == ".xllexp" || name_str.ends_with(".xllexp");
         if is_export_manifest {
+            if has_export_manifest {
+                return Err("PE image contains multiple .xllexp export manifests".into());
+            }
             has_export_manifest = true;
-        }
-        if is_export_manifest && let Ok(data) = section.pe_data(pe.data()) {
+            let data = section.pe_data(pe.data()).map_err(|error| {
+                PackageError::Message(format!("failed to read .xllexp section: {error}"))
+            })?;
             for part in data.split(|&b| b == 0) {
-                if !part.is_empty()
-                    && let Ok(export_name) = std::str::from_utf8(part)
-                {
+                if !part.is_empty() {
+                    let export_name = std::str::from_utf8(part).map_err(|error| {
+                        PackageError::Message(format!(
+                            "invalid UTF-8 in .xllexp export manifest: {error}"
+                        ))
+                    })?;
                     let trimmed = export_name.trim();
                     if !trimmed.is_empty() {
                         expected_exports.insert(trimmed.to_owned());

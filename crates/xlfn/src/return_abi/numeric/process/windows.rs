@@ -1,49 +1,34 @@
 //! One process-owned mapping for all loaded copies of the accounting protocol.
 //!
-//! The canonical view and its mapping handle are deliberately retained until
-//! process exit. Neither the view nor its atomic contents points into an XLL.
-//! Later attachments discard their temporary view and handle after finding the
-//! canonical address, so physical reloads do not add retained metadata.
+//! Each loaded image keeps its own view of the same physical atomic counters.
+//! Views remain until process exit because published FP12 allocations may
+//! outlive an image. One page of virtual metadata per physical image load is
+//! deliberate; no address from shared memory is ever dereferenced.
+//!
+//! A protected owner/SYSTEM DACL excludes other users and is checked even on
+//! pre-existing objects. Cooperating modules and processes with the same user
+//! authority are trusted: a DACL cannot authenticate a PID against an adversary
+//! with that user's process-memory/handle rights. Corrupt headers and counters
+//! fail closed, but this protocol is not isolation from an equal-authority user.
 
 use super::ProcessState;
 use crate::{ExcelError, XllError, XllResult};
 use core::ffi::c_void;
-use std::mem::{MaybeUninit, align_of, size_of};
+use std::mem::{align_of, size_of};
 use std::ptr::NonNull;
+#[cfg(test)]
 use std::sync::atomic::Ordering;
+
+mod security;
 
 const PAGE_READWRITE: u32 = 0x04;
 const FILE_MAP_WRITE: u32 = 0x0002;
-const MEM_COMMIT: u32 = 0x1000;
-const MEM_MAPPED: u32 = 0x40000;
-
 #[repr(C)]
 #[derive(Default)]
 struct FileTime {
     low: u32,
     high: u32,
 }
-
-// The native SDK structure has no PartitionId member on x86. On 64-bit
-// Windows its u16 member occupies part of the padding before RegionSize.
-// https://learn.microsoft.com/windows/win32/api/winnt/ns-winnt-memory_basic_information
-#[repr(C)]
-struct MemoryBasicInformation {
-    base_address: *mut c_void,
-    allocation_base: *mut c_void,
-    allocation_protect: u32,
-    #[cfg(target_pointer_width = "64")]
-    partition_id: u16,
-    region_size: usize,
-    state: u32,
-    protect: u32,
-    kind: u32,
-}
-
-#[cfg(target_pointer_width = "32")]
-const _: () = assert!(size_of::<MemoryBasicInformation>() == 28);
-#[cfg(target_pointer_width = "64")]
-const _: () = assert!(size_of::<MemoryBasicInformation>() == 48);
 
 windows_link::link!("kernel32.dll" "system" fn CreateFileMappingW(file: *mut c_void, attributes: *const c_void, protect: u32, maximum_high: u32, maximum_low: u32, name: *const u16) -> *mut c_void);
 windows_link::link!("kernel32.dll" "system" fn MapViewOfFile(mapping: *mut c_void, access: u32, offset_high: u32, offset_low: u32, bytes: usize) -> *mut c_void);
@@ -53,7 +38,6 @@ windows_link::link!("kernel32.dll" "system" fn GetCurrentProcess() -> *mut c_voi
 windows_link::link!("kernel32.dll" "system" fn GetCurrentProcessId() -> u32);
 windows_link::link!("kernel32.dll" "system" fn GetProcessTimes(process: *mut c_void, creation: *mut FileTime, exit: *mut FileTime, kernel: *mut FileTime, user: *mut FileTime) -> i32);
 windows_link::link!("kernel32.dll" "system" fn GetLastError() -> u32);
-windows_link::link!("kernel32.dll" "system" fn VirtualQuery(address: *const c_void, information: *mut MemoryBasicInformation, bytes: usize) -> usize);
 
 pub(super) fn attach() -> XllResult<&'static ProcessState> {
     let name = mapping_name()?;
@@ -71,25 +55,12 @@ pub(super) fn attach() -> XllResult<&'static ProcessState> {
     // valid; initialize uses only atomics, including on concurrent attachments.
     let state = unsafe { pointer.as_ref() };
     state.initialize()?;
-    let address = pointer.as_ptr().expose_provenance() as u64;
-    match state
-        .canonical_view
-        .compare_exchange(0, address, Ordering::AcqRel, Ordering::Acquire)
-    {
-        Ok(_) => {
-            // Publish before forgetting ownership: any concurrent attachment
-            // sees this still-live mapping, and this branch cannot fail.
-            mapping.retain();
-            // SAFETY: The canonical view and its handle now remain allocated
-            // until process exit; the mapping contains atomics and no XLL data.
-            Ok(unsafe { pointer.as_ref() })
-        }
-        Err(canonical) => {
-            let canonical = validate_canonical(canonical, state)?;
-            mapping.close()?;
-            Ok(canonical)
-        }
-    }
+    // Only this image's MapViewOfFile result is turned into a reference.
+    // Close the handle, then retain the view for outstanding process-owned
+    // return buffers even if this image is later unloaded.
+    mapping.retain_view()?;
+    // SAFETY: The owned view has just been retained until process exit.
+    Ok(unsafe { pointer.as_ref() })
 }
 
 fn mapping_name() -> XllResult<Vec<u16>> {
@@ -116,62 +87,6 @@ fn mapping_name() -> XllResult<Vec<u16>> {
         .collect())
 }
 
-fn validate_canonical(address: u64, attached: &ProcessState) -> XllResult<&'static ProcessState> {
-    let address = usize::try_from(address)
-        .map_err(|_| invalid_state("accounting address exceeds pointer width"))?;
-    if address == 0 || !address.is_multiple_of(align_of::<ProcessState>()) {
-        return Err(invalid_state("invalid canonical accounting address"));
-    }
-    let pointer = std::ptr::with_exposed_provenance_mut::<ProcessState>(address);
-    let mut information = MaybeUninit::<MemoryBasicInformation>::uninit();
-    // SAFETY: VirtualQuery inspects an address without dereferencing it in Rust;
-    // information provides exactly the native structure's writable extent.
-    let written = unsafe {
-        VirtualQuery(
-            pointer.cast(),
-            information.as_mut_ptr(),
-            size_of::<MemoryBasicInformation>(),
-        )
-    };
-    if written != size_of::<MemoryBasicInformation>() {
-        return Err(os_error("VirtualQuery"));
-    }
-    // SAFETY: VirtualQuery reported that it initialized the complete structure.
-    let information = unsafe { information.assume_init() };
-    let end = address
-        .checked_add(size_of::<ProcessState>())
-        .ok_or_else(|| invalid_state("canonical accounting extent overflow"))?;
-    let region_end = information
-        .base_address
-        .addr()
-        .checked_add(information.region_size)
-        .ok_or_else(|| invalid_state("canonical accounting region overflow"))?;
-    if information.state != MEM_COMMIT
-        || information.kind != MEM_MAPPED
-        || information.protect != PAGE_READWRITE
-        || information.allocation_protect != PAGE_READWRITE
-        || information.allocation_base.addr() != address
-        || information.base_address.addr() > address
-        || end > region_end
-    {
-        return Err(invalid_state(
-            "canonical accounting view is not writable mapped memory",
-        ));
-    }
-    // SAFETY: The canonical winner retains this aligned, committed writable
-    // mapping until process exit. Its fixed ProcessState layout consists only
-    // of AtomicU64 fields. Validate protocol identity before using the counters.
-    let canonical = unsafe { &*pointer };
-    if canonical.schema.load(Ordering::Acquire) != attached.schema.load(Ordering::Acquire)
-        || canonical.limit_bytes.load(Ordering::Acquire)
-            != attached.limit_bytes.load(Ordering::Acquire)
-        || canonical.canonical_view.load(Ordering::Acquire) != address as u64
-    {
-        return Err(invalid_state("canonical accounting header does not match"));
-    }
-    Ok(canonical)
-}
-
 struct Mapping {
     handle: Option<NonNull<c_void>>,
     view: Option<NonNull<c_void>>,
@@ -182,13 +97,15 @@ impl Mapping {
         let bytes = u32::try_from(size_of::<ProcessState>())
             .map_err(|_| invalid_state("accounting mapping size exceeds Win32 range"))?;
         let invalid_handle = std::ptr::without_provenance_mut::<c_void>(usize::MAX);
+        let security = security::Descriptor::private()?;
+        let attributes = security.attributes();
         // SAFETY: INVALID_HANDLE_VALUE selects pagefile-backed memory. The name
-        // is NUL-terminated and remains live during the call; no attributes are
-        // supplied, and bytes covers the fixed shared structure.
+        // is NUL-terminated and remains live during the call; attributes and its
+        // descriptor remain live, and bytes covers the fixed shared structure.
         let handle = unsafe {
             CreateFileMappingW(
                 invalid_handle,
-                std::ptr::null(),
+                (&raw const attributes).cast(),
                 PAGE_READWRITE,
                 0,
                 bytes,
@@ -200,6 +117,7 @@ impl Mapping {
             handle: Some(handle),
             view: None,
         };
+        security.validate_mapping(handle.as_ptr())?;
         // SAFETY: handle is an owned mapping handle. Offset zero maps exactly
         // ProcessState bytes with coherent read/write access.
         let view = unsafe {
@@ -219,16 +137,24 @@ impl Mapping {
         self.view.expect("an opened accounting mapping has a view")
     }
 
-    fn retain(&mut self) {
+    fn retain_view(&mut self) -> XllResult<()> {
+        if let Some(handle) = self.handle {
+            // SAFETY: The mapped view keeps the section alive after closing
+            // this owned handle. No other code can close this handle.
+            if unsafe { CloseHandle(handle.as_ptr()) } == 0 {
+                return Err(os_error("CloseHandle"));
+            }
+            self.handle = None;
+        }
         self.view = None;
-        self.handle = None;
+        Ok(())
     }
 
     fn close(&mut self) -> XllResult<()> {
         let mut failure = None;
         if let Some(view) = self.view {
-            // SAFETY: This temporary mapping owns this view, and no reference
-            // to it escapes once the distinct canonical view has been selected.
+            // SAFETY: This owner still holds the view, and no reference escapes
+            // on an error path. Successful attachments retain their own view.
             if unsafe { UnmapViewOfFile(view.as_ptr()) } == 0 {
                 failure = Some(os_error("UnmapViewOfFile"));
             } else {
@@ -236,8 +162,8 @@ impl Mapping {
             }
         }
         if let Some(handle) = self.handle {
-            // SAFETY: This is the owned temporary mapping handle; closing it
-            // does not unmap any view or affect the retained canonical handle.
+            // SAFETY: This is the owned mapping handle; closing it does not
+            // unmap any view or affect other images' handles.
             if unsafe { CloseHandle(handle.as_ptr()) } == 0 {
                 let error = os_error("CloseHandle");
                 if failure.is_none() {
@@ -278,29 +204,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn repeated_attachments_reuse_the_canonical_mapping() {
-        let first = attach().expect("first Windows accounting attachment");
-        let second = attach().expect("second Windows accounting attachment");
-        assert!(std::ptr::eq(first, second));
-        assert_eq!(
-            first.canonical_view.load(Ordering::Acquire),
-            first as *const ProcessState as usize as u64,
-        );
-        assert_eq!(
-            first.schema.load(Ordering::Acquire),
-            second.schema.load(Ordering::Acquire),
-        );
-        assert_eq!(
-            first.limit_bytes.load(Ordering::Acquire),
-            super::super::MAX_PROCESS_NUMERIC_RETURN_BYTES as u64,
-        );
+    fn separate_views_share_physical_counters_and_survive_detach() {
+        let name = format!(
+            "Local\\xlfn.numeric-test.{}.{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )
+        .encode_utf16()
+        .chain([0])
+        .collect::<Vec<_>>();
+        let first = Mapping::open(&name).unwrap();
+        let second = Mapping::open(&name).unwrap();
+        assert_ne!(first.view(), second.view());
+        // SAFETY: Both owned, aligned views cover a full ProcessState of atomics.
+        let a = unsafe { first.view().cast::<ProcessState>().as_ref() };
+        // SAFETY: The independent second view remains live through this scope.
+        let b = unsafe { second.view().cast::<ProcessState>().as_ref() };
+        a.initialize().unwrap();
+        b.initialize().unwrap();
+        a.reserve(48, 80).unwrap();
+        a.publish(48);
+        assert_eq!(b.published_bytes.load(Ordering::Relaxed), 48);
+        assert!(b.reserve(33, 80).is_err());
+        drop(second);
+        let reloaded = Mapping::open(&name).unwrap();
+        // SAFETY: reloaded owns a complete writable view until scope exit.
+        let c = unsafe { reloaded.view().cast::<ProcessState>().as_ref() };
+        c.initialize().unwrap();
+        assert_eq!(c.reserved_bytes.load(Ordering::Relaxed), 48);
+        c.release_published(48);
+        c.reserve(80, 80).unwrap();
+        c.release_reserved(80);
+        assert_eq!(a.reserved_bytes.load(Ordering::Relaxed), 0);
     }
 
     #[test]
-    fn canonical_validation_rejects_invalid_addresses() {
-        let state = attach().expect("Windows accounting attachment");
-        assert!(validate_canonical(0, state).is_err());
-        assert!(validate_canonical(1, state).is_err());
-        assert!(validate_canonical(u64::MAX, state).is_err());
+    fn concurrent_attachments_share_the_same_header() {
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    attach().unwrap().validate().unwrap();
+                });
+            }
+        });
     }
 }

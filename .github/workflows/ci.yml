@@ -347,7 +347,9 @@ jobs:
                   python-version: "3.13"
 
             - name: Install Verus
-              run: ./tools/install_verus.sh /usr/local/bin
+              run: |
+                  ./tools/install_verus.sh "${RUNNER_TEMP}/xlfn-verus"
+                  echo "${RUNNER_TEMP}/xlfn-verus" >> "$GITHUB_PATH"
 
             - name: Test verification runner
               run: python3 -B -m unittest discover -s tools -p 'test*refinement*.py'
@@ -385,7 +387,9 @@ jobs:
                   fallback: none
 
             - name: Install Verus
-              run: ./tools/install_verus.sh /usr/local/bin
+              run: |
+                  ./tools/install_verus.sh "${RUNNER_TEMP}/xlfn-verus"
+                  echo "${RUNNER_TEMP}/xlfn-verus" >> "$GITHUB_PATH"
 
             - name: Audit Verus TCB compliance (assumes and unapproved external_body)
               run: just verus-audit

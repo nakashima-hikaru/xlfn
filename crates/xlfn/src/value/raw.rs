@@ -365,6 +365,25 @@ impl std::fmt::Debug for XlArrayRef<'_> {
 }
 
 impl<'call> XlArrayRef<'call> {
+    pub(super) fn encode_cells(self, encoder: &mut InputIdentityEncoder) {
+        let budget = (|| {
+            let mut budget = super::ArrayInputBudget::new::<()>(self.len(), encoder.argument())?;
+            // Preflight counted lengths without decoding or hashing payloads.
+            // Over-budget arrays fail before any potentially large hash work.
+            for cell in self.cells() {
+                budget.include_raw(cell)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = budget {
+            encoder.fail(error);
+            return;
+        }
+        for cell in self.cells() {
+            encode_raw_value(cell, true, encoder);
+        }
+    }
+
     fn from_value(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
         let array = value.array(argument)?;
         let rows = array.rows as usize;
@@ -467,11 +486,7 @@ enum RawValueKind {
     Integer = 8,
 }
 
-pub(crate) fn encode_raw_value(
-    value: XlValueRef<'_>,
-    nested: bool,
-    encoder: &mut InputIdentityEncoder,
-) {
+fn encode_raw_value(value: XlValueRef<'_>, nested: bool, encoder: &mut InputIdentityEncoder) {
     match value.value_type() {
         XlValueType::Number => {
             encoder.tag(RawValueKind::Number as u8);
@@ -504,22 +519,12 @@ pub(crate) fn encode_raw_value(
         }
         XlValueType::Missing => encoder.tag(RawValueKind::Missing as u8),
         XlValueType::Nil => encoder.tag(RawValueKind::Blank as u8),
-        XlValueType::Multi if !nested => match value.array(encoder.argument()) {
+        XlValueType::Multi if !nested => match XlArrayRef::from_value(value, encoder.argument()) {
             Ok(array) => {
                 encoder.tag(RawValueKind::Array as u8);
-                encoder.u64(array.rows as u64);
-                encoder.u64(array.columns as u64);
-                let elements = (array.rows as usize) * (array.columns as usize);
-                for index in 0..elements {
-                    // SAFETY: XlValueRef::array validated the contiguous
-                    // element range and index is within its dimensions.
-                    let elem_ptr = unsafe { array.values.add(index) };
-                    // SAFETY: elem_ptr is a valid pointer within the array allocation.
-                    match unsafe { XlValueRef::from_raw(elem_ptr) } {
-                        Ok(element) => encode_raw_value(element, true, encoder),
-                        Err(error) => encoder.fail(error),
-                    }
-                }
+                encoder.u64(array.rows() as u64);
+                encoder.u64(array.columns() as u64);
+                array.encode_cells(encoder);
             }
             Err(error) => encoder.fail(error),
         },
@@ -536,11 +541,124 @@ pub(crate) fn encode_raw_value(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input_identity::InputFingerprintBuilder;
+    use crate::value::{ExcelInputIdentity, PrepareExcel};
     use xlfn_sys::{
         XLBIT_DLL_FREE, XLBIT_XL_FREE, XLOPER12Value, XLTYPE_BIG_DATA, XLTYPE_BOOL, XLTYPE_ERR,
         XLTYPE_FLOW, XLTYPE_INT, XLTYPE_MISSING, XLTYPE_MULTI, XLTYPE_NIL, XLTYPE_NUM, XLTYPE_REF,
         XLTYPE_SREF, XLTYPE_STR,
     };
+
+    #[test]
+    fn raw_array_identity_budget_preserves_existing_framing_for_small_and_long_text() {
+        for (count, units) in [
+            (2048, vec![0x61_u16, 0x62]),
+            (2, vec![0x65e5_u16; 32_767]),
+            (1, vec![0xd800_u16]),
+        ] {
+            let mut text = std::iter::once(units.len() as u16)
+                .chain(units.iter().copied())
+                .collect::<Vec<_>>();
+            let mut cells = (0..count)
+                .map(|_| XLOPER12 {
+                    value: XLOPER12Value {
+                        string: text.as_mut_ptr(),
+                    },
+                    xltype: XLTYPE_STR,
+                })
+                .collect::<Vec<_>>();
+            let raw = XLOPER12 {
+                value: XLOPER12Value {
+                    array: XLOPER12Array {
+                        values: cells.as_mut_ptr(),
+                        rows: 1,
+                        columns: count,
+                    },
+                },
+                xltype: XLTYPE_MULTI,
+            };
+            let value = XlValueRef::from_array_cell(&raw).unwrap();
+            let array = XlArrayRef::from_excel(value, "values").unwrap();
+            let fingerprint = |encode: &mut dyn FnMut(&mut InputIdentityEncoder)| {
+                let mut builder = InputFingerprintBuilder::new(1);
+                builder
+                    .with_argument(0, "values", |encoder| {
+                        encode(encoder);
+                        Ok(())
+                    })
+                    .unwrap();
+                builder.finish().unwrap()
+            };
+            // Independent encoding of the established raw cell framing.
+            let expected = fingerprint(&mut |encoder| {
+                encoder.u64(1);
+                encoder.u64(count as u64);
+                for _ in 0..count {
+                    encoder.tag(RawValueKind::String as u8);
+                    encoder.utf16(&units);
+                }
+            });
+            assert_eq!(
+                fingerprint(&mut |encoder| array.encode_input_identity(encoder)),
+                expected
+            );
+            assert_eq!(
+                fingerprint(&mut |encoder| encode_raw_value(value, false, encoder)),
+                fingerprint(&mut |encoder| {
+                    encoder.tag(RawValueKind::Array as u8);
+                    array.encode_input_identity(encoder);
+                }),
+            );
+        }
+    }
+
+    #[test]
+    fn raw_array_identity_rejects_aggregate_text_budget_while_plain_view_stays_lazy() {
+        let mut text = vec![0x61_u16; crate::utf16::EXCEL_STRING_LIMIT + 1];
+        text[0] = crate::utf16::EXCEL_STRING_LIMIT as u16;
+        let per_cell = std::mem::size_of::<XLOPER12>() + text.len() * 2;
+        let count = super::super::MAX_ARRAY_BYTES / per_cell + 1;
+        // Aliasing one live source buffer models repeated host text without a
+        // 256 MiB test allocation. Each cell still costs a full logical read.
+        let mut cells = (0..count)
+            .map(|_| XLOPER12 {
+                value: XLOPER12Value {
+                    string: text.as_mut_ptr(),
+                },
+                xltype: XLTYPE_STR,
+            })
+            .collect::<Vec<_>>();
+        let raw = XLOPER12 {
+            value: XLOPER12Value {
+                array: XLOPER12Array {
+                    values: cells.as_mut_ptr(),
+                    rows: count as i32,
+                    columns: 1,
+                },
+            },
+            xltype: XLTYPE_MULTI,
+        };
+        let value = XlValueRef::from_array_cell(&raw).unwrap();
+        assert_eq!(
+            XlArrayRef::from_excel(value, "values").unwrap().len(),
+            count
+        );
+        for prepared in [false, true] {
+            let mut builder = InputFingerprintBuilder::new(1);
+            let result = builder.with_argument(0, "values", |encoder| {
+                if prepared {
+                    <XlArrayRef<'_> as PrepareExcel>::prepare(value, "values", encoder).map(drop)
+                } else {
+                    XlArrayRef::from_excel_with_identity(value, "values", encoder).map(drop)
+                }
+            });
+            assert!(matches!(result, Err(XllError::Input {
+                argument: "values",
+                reason: InputError::TooLarge { limit: super::super::MAX_ARRAY_BYTES, actual },
+            }) if actual > super::super::MAX_ARRAY_BYTES));
+            assert!(builder.finish().is_err());
+        }
+    }
 
     #[test]
     fn borrowed_string_equality_compares_content_across_argument_names() {

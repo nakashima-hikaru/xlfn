@@ -121,3 +121,18 @@
     Windows.Win32.VT_UNKNOWN
     Windows.Win32.VT_VARIANT
     Windows.Win32.VariantClear
+    Windows.Win32.ConvertStringSecurityDescriptorToSecurityDescriptorW
+    Windows.Win32.ConvertSecurityDescriptorToStringSecurityDescriptorW
+    Windows.Win32.ConvertSidToStringSidW
+    Windows.Win32.GetSecurityInfo
+    Windows.Win32.GetCurrentProcess
+    Windows.Win32.GetTokenInformation
+    Windows.Win32.OpenProcessToken
+    Windows.Win32.TOKEN_QUERY
+    Windows.Win32.TOKEN_USER
+    Windows.Win32.TokenUser
+    Windows.Win32.DACL_SECURITY_INFORMATION
+    Windows.Win32.OWNER_SECURITY_INFORMATION
+    Windows.Win32.SE_KERNEL_OBJECT
+    Windows.Win32.SDDL_REVISION_1
+    Windows.Win32.LocalFree

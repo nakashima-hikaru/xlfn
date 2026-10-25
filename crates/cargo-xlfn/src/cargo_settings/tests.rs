@@ -123,6 +123,71 @@ fn initial_include_path_is_normalized_before_cycle_detection() {
     assert_eq!(seen, vec![root.join(".cargo/config.toml")]);
 }
 
+#[cfg(unix)]
+#[test]
+fn symlink_alias_cycle_is_rejected_without_changing_path_origins() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(directory.path()).unwrap();
+    write(
+        &root,
+        ".cargo/config.toml",
+        "include = ['alias/config.toml']\n",
+    );
+    symlink(root.join(".cargo"), root.join(".cargo/alias")).unwrap();
+    let error = CargoSettings::load_with(&root, None, |_| None)
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("filesystem alias"), "{error}");
+
+    write(
+        &root,
+        ".cargo/config.toml",
+        "include = ['alias/value.toml']\n",
+    );
+    write(
+        &root,
+        ".cargo/value.toml",
+        "[build]\nrustc-wrapper = './wrapper'\n",
+    );
+    let settings = CargoSettings::load_with(&root, None, |_| None).unwrap();
+    assert_eq!(settings.rustc_wrapper, Some(root.join(".cargo/./wrapper")));
+}
+
+#[test]
+fn include_depth_is_bounded_and_boundary_is_accepted() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(directory.path()).unwrap();
+    write(&root, ".cargo/config.toml", "include = ['1.toml']\n");
+    for index in 1..MAX_CONFIG_INCLUDE_DEPTH {
+        let contents = if index + 1 == MAX_CONFIG_INCLUDE_DEPTH {
+            "[build]\nrustc-wrapper = 'deep-wrapper'\n".to_owned()
+        } else {
+            format!("include = ['{}.toml']\n", index + 1)
+        };
+        write(&root, &format!(".cargo/{index}.toml"), &contents);
+    }
+    assert!(CargoSettings::load_with(&root, None, |_| None).is_ok());
+    write(
+        &root,
+        &format!(".cargo/{}.toml", MAX_CONFIG_INCLUDE_DEPTH - 1),
+        &format!("include = ['{MAX_CONFIG_INCLUDE_DEPTH}.toml']\n"),
+    );
+    write(
+        &root,
+        &format!(".cargo/{MAX_CONFIG_INCLUDE_DEPTH}.toml"),
+        "",
+    );
+    let error = CargoSettings::load_with(&root, None, |_| None)
+        .err()
+        .unwrap();
+    assert!(
+        error.to_string().contains("include depth exceeds"),
+        "{error}"
+    );
+}
+
 #[test]
 fn environment_paths_and_empty_wrapper_follow_cargo_precedence() {
     let directory = tempfile::tempdir().unwrap();

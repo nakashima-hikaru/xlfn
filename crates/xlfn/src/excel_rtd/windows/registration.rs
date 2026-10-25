@@ -2,10 +2,10 @@ use super::ActiveServer;
 use crate::sync::{Mutex, MutexGuard};
 use crate::win32::{
     CloseHandle, CreateMutexW, ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, GUID,
-    GetLastError, HANDLE, HKEY, HKEY_CURRENT_USER, INFINITE, KEY_READ, KEY_WRITE,
-    REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegEnumKeyExW,
-    RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, ReleaseMutex, WAIT_ABANDONED, WAIT_FAILED,
-    WAIT_OBJECT_0, WaitForSingleObject,
+    GetLastError, HANDLE, HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE,
+    REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegEnumKeyExW, RegOpenKeyExW,
+    RegQueryValueExW, RegSetValueExW, ReleaseMutex, WAIT_ABANDONED, WAIT_FAILED, WAIT_OBJECT_0,
+    WaitForSingleObject,
 };
 use crate::{XllError, XllResult};
 use std::ptr;
@@ -18,6 +18,7 @@ pub(super) const RTD_REGISTRATION_OWNER: &str = "xlfn";
 pub(super) const RTD_REGISTRATION_SCHEMA: &str = "2";
 pub(super) const RTD_PROG_ID_PREFIX: &str = "XlFnRtd_";
 pub(super) static REGISTRATION_MAINTENANCE: Mutex<()> = Mutex::new(());
+const REGISTRATION_MUTEX_TIMEOUT_MS: u32 = 1_000;
 
 pub(super) struct TemporaryRegistration {
     prog_key: Vec<u16>,
@@ -129,6 +130,10 @@ impl CrossProcessRegistrationGuard {
     }
 
     pub(super) fn acquire_named(name: &str) -> XllResult<Self> {
+        Self::acquire_named_with_timeout(name, REGISTRATION_MUTEX_TIMEOUT_MS)
+    }
+
+    pub(super) fn acquire_named_with_timeout(name: &str, timeout_ms: u32) -> XllResult<Self> {
         let name = wide_nul(name);
 
         // SAFETY: the security attributes are optional, initial ownership is
@@ -145,18 +150,19 @@ impl CrossProcessRegistrationGuard {
         }
 
         // SAFETY: `handle` is a live mutex handle returned by CreateMutexW.
-        let wait = unsafe { WaitForSingleObject(handle, INFINITE) };
+        let wait = unsafe { WaitForSingleObject(handle, timeout_ms) };
         if wait != (WAIT_OBJECT_0 as u32) && wait != (WAIT_ABANDONED as u32) {
-            // SAFETY: `handle` is owned by this function and has not been closed.
+            let code = if wait == WAIT_FAILED {
+                // SAFETY: GetLastError is read immediately after WAIT_FAILED.
+                (unsafe { GetLastError() }) as i32
+            } else {
+                wait as i32
+            };
+            // SAFETY: this function owns the handle but acquired no mutex ownership.
             unsafe { CloseHandle(handle) };
             return Err(XllError::WindowsApi {
                 function: "WaitForSingleObject(RTD registration mutex)",
-                code: if wait == WAIT_FAILED {
-                    // SAFETY: GetLastError is read immediately after WAIT_FAILED.
-                    (unsafe { GetLastError() }) as i32
-                } else {
-                    wait as i32
-                },
+                code,
             });
         }
 
@@ -199,9 +205,32 @@ pub(super) fn scavenge_owned_registrations(
             continue;
         }
 
-        let Some(class_id) = class_id.filter(|value| is_braced_guid(value)) else {
+        let expected_class = class_id_from_prog_id(&prog_id);
+        let Some(class_id) = class_id.filter(|value| {
+            expected_class
+                .as_deref()
+                .is_some_and(|expected| value.eq_ignore_ascii_case(expected))
+        }) else {
+            report_unowned_registration();
             continue;
         };
+        let class_key = format!("Software\\Classes\\CLSID\\{class_id}");
+        let prog_class = read_registry_string(&format!("{prog_key}\\CLSID"), "")?;
+        let class_prog = read_registry_string(&format!("{class_key}\\ProgID"), "")?;
+        let class_module = read_registry_string(&format!("{class_key}\\InProcServer32"), "")?;
+        if !prog_class
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case(&class_id))
+            || !class_prog
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case(&prog_id))
+            || !class_module
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case(module_path))
+        {
+            report_unowned_registration();
+            continue;
+        }
 
         // Delete the CLSID first. If it fails, the marked ProgID remains so a
         // later startup can retry instead of orphaning an undiscoverable CLSID.
@@ -395,16 +424,29 @@ fn registry_error(function: &'static str, status: i32) -> XllError {
     }
 }
 
-fn is_braced_guid(value: &str) -> bool {
-    value.len() == 38
-        && value.as_bytes()[0] == b'{'
-        && value.as_bytes()[37] == b'}'
-        && [9, 14, 19, 24]
-            .into_iter()
-            .all(|index| value.as_bytes()[index] == b'-')
-        && value.bytes().enumerate().all(|(index, byte)| {
-            matches!(index, 0 | 9 | 14 | 19 | 24 | 37) || byte.is_ascii_hexdigit()
-        })
+fn report_unowned_registration() {
+    crate::diagnostics::report_no_unwind(
+        "RTD registration ownership mismatch; preserving registration",
+        &XllError::WindowsApi {
+            function: "RTD registration ownership validation",
+            code: crate::win32::E_INVALIDARG,
+        },
+    );
+}
+
+fn class_id_from_prog_id(prog_id: &str) -> Option<String> {
+    let compact = prog_id.strip_prefix(RTD_PROG_ID_PREFIX)?;
+    if compact.len() != 32 || !compact.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!(
+        "{{{}-{}-{}-{}-{}}}",
+        &compact[..8],
+        &compact[8..12],
+        &compact[12..16],
+        &compact[16..20],
+        &compact[20..]
+    ))
 }
 
 pub(super) fn set_registry_value(path: &str, name: Option<&str>, value: &str) -> XllResult<()> {

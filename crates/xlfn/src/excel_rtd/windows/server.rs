@@ -8,8 +8,8 @@ use super::global_interface_table::get_git;
 use super::module_state::{ComObjectKind, ComObjectLease};
 use super::registration::guid_compact;
 use super::server_gate::{
-    OwnedServerCall, ServerCloseError, ServerOperationBarrier, ServerPhase,
-    ServerTerminationRequest, TerminationWorker,
+    OwnedServerCall, OwnedServerObservationCall, ServerCloseError, ServerOperationBarrier,
+    ServerPhase, ServerTerminationRequest, TerminationWorker,
 };
 use super::update_event::{
     CallbackPtr, GitCookieLease, RetainedUpdateCallback, RtdNotifier, RtdUpdateEvent,
@@ -95,6 +95,7 @@ pub(super) static PANIC_DEFERRED_TERMINATION_CLEANUP: AtomicBool = AtomicBool::n
 
 pub(super) struct EnsuredServer {
     pub(super) active: ActiveServer,
+    #[cfg(test)]
     pub(super) newly_created: bool,
     pub(super) subscription_server: Option<crate::subscription::SubscriptionServerHandle>,
 }
@@ -107,11 +108,113 @@ impl Drop for EnsuredServer {
     }
 }
 
+/// Owns one observation's temporary COM reference and operation admission.
+/// Every fallible preparation and host invocation is inside this transaction.
+/// A successful ServerStart is the COM publication boundary, independently of
+/// Excel's later return status. Otherwise the last failed observation retires
+/// the unused server through the normal terminal protocol.
+pub(super) struct ServerObservation {
+    ensured: EnsuredServer,
+    operation: Option<OwnedServerObservationCall>,
+    committed: bool,
+}
+
+#[derive(Default)]
+struct ObservationState {
+    active: usize,
+    committed: bool,
+}
+
+impl ServerObservation {
+    pub(super) fn begin(ensured: EnsuredServer) -> XllResult<Self> {
+        let pointer = ensured.active.pointer as *mut RtdServer;
+        let active = ACTIVE_SERVER.lock();
+        if !active
+            .as_ref()
+            .is_some_and(|entry| entry.pointer == pointer as usize)
+        {
+            return Err(XllError::Closing);
+        }
+        // SAFETY: ensured owns a live COM reference through the guard's drop;
+        // the owned admission is dropped before that reference.
+        let operation =
+            unsafe { (*pointer).operations.enter_observation() }.ok_or(XllError::Closing)?;
+        // SAFETY: ensured retains the server and ACTIVE_SERVER serializes
+        // observation admission with the last observer's retirement decision.
+        unsafe {
+            let mut observations = (*pointer).observations.lock();
+            observations.active = observations
+                .active
+                .checked_add(1)
+                .expect("RTD observation count cannot overflow");
+        };
+        drop(active);
+        Ok(Self {
+            ensured,
+            operation: Some(operation),
+            committed: false,
+        })
+    }
+
+    pub(super) fn server(&self) -> &EnsuredServer {
+        &self.ensured
+    }
+
+    pub(super) fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for ServerObservation {
+    fn drop(&mut self) {
+        // Release observation admission before requesting termination. An
+        // in-flight COM ServerStart still owns its separate admission.
+        drop(self.operation.take());
+        let pointer = self.ensured.active.pointer as *mut RtdServer;
+        let active = ACTIVE_SERVER.lock();
+        // SAFETY: self.ensured retains the server throughout this destructor.
+        let server = unsafe { &*pointer };
+        let mut observations = server.observations.lock();
+        observations.active -= 1;
+        observations.committed |= self.committed;
+        let retire = observations.active == 0
+            && !observations.committed
+            && server.start_state.load(Ordering::Acquire) != SERVER_STARTED
+            && active
+                .as_ref()
+                .is_some_and(|entry| entry.pointer == pointer as usize);
+        drop(observations);
+        // Make retirement atomic with observation admission and ensure_server.
+        // STARTING defers disposal until its admitted COM method has exited;
+        // NOT_STARTED/START_FAILED normally permit synchronous disposal.
+        let request = retire.then(|| server.operations.request_termination());
+        drop(active);
+        if let Some(request) = request {
+            let status = match request {
+                // SAFETY: ensured retains the server through completion and
+                // the request owns its terminal barrier reservation.
+                Ok(request) => unsafe { finish_termination_request(pointer, request) },
+                Err(_) => E_FAIL,
+            };
+            if status != S_OK {
+                crate::diagnostics::report_no_unwind(
+                    "RTD failed observation teardown",
+                    &XllError::WindowsApi {
+                        function: "IRtdServer::ServerTerminate",
+                        code: status,
+                    },
+                );
+            }
+        }
+    }
+}
+
 #[repr(C)]
 pub(super) struct RtdServer {
     pub(super) vtable: *const RtdServerVtable,
     pub(super) references: AtomicU32,
     pub(super) start_state: AtomicU8,
+    observations: Mutex<ObservationState>,
     pub(super) generation: ServerGeneration,
     // Notification workers own a clone so the barrier stays independently
     // allocated through their final rejected entry and thread exit.
@@ -359,6 +462,7 @@ pub(super) static RTD_SERVER_VTABLE: RtdServerVtable = RtdServerVtable {
     heartbeat,
     server_terminate,
 };
+#[cfg(test)]
 pub(super) fn discard_unpublished_server(pointer: usize, newly_created: bool) {
     if !newly_created {
         return;
@@ -768,6 +872,7 @@ fn ensure_server_impl(
 
             return Ok(EnsuredServer {
                 active: existing.clone(),
+                #[cfg(test)]
                 newly_created: false,
                 subscription_server: subscription_handle,
             });
@@ -807,6 +912,7 @@ fn ensure_server_impl(
             vtable: &RTD_SERVER_VTABLE,
             references: AtomicU32::new(1),
             start_state: AtomicU8::new(SERVER_NOT_STARTED),
+            observations: Mutex::new(ObservationState::default()),
             generation,
             operations: Arc::new(operations),
             termination_worker: TerminationWorker::default(),
@@ -835,6 +941,7 @@ fn ensure_server_impl(
 
         return Ok(EnsuredServer {
             active: entry,
+            #[cfg(test)]
             newly_created: true,
             subscription_server: subscription_handle,
         });
@@ -1446,6 +1553,14 @@ unsafe fn server_terminate_inner(this: *mut RtdServer) -> i32 {
         Err(_) => return E_FAIL,
     };
 
+    // SAFETY: COM retains this server through the complete terminal request.
+    unsafe { finish_termination_request(this, request) }
+}
+
+unsafe fn finish_termination_request(
+    this: *mut RtdServer,
+    request: ServerTerminationRequest<'_>,
+) -> i32 {
     match request {
         ServerTerminationRequest::Complete | ServerTerminationRequest::InProgress => S_OK,
         ServerTerminationRequest::Synchronous(termination) => {

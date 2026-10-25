@@ -176,7 +176,12 @@ The default path is:
 %LOCALAPPDATA%/<addin-id>/logs/diagnostics.log
 ```
 
-When `LOCALAPPDATA` is unavailable, the implementation uses a temporary-directory fallback. The file rotates at 4 MiB and retains three generations.
+`LOCALAPPDATA` must be an absolute path. If it is missing, empty, or relative,
+file-sink initialization fails; startup logging is skipped. There is no
+temporary-directory fallback. The user profile is the filesystem trust boundary.
+The file rotates at 4 MiB and retains three generations. Cross-process lock
+contention fails the write immediately and increments the file-write failure
+counter, allowing the diagnostic worker to continue processing later events.
 
 The sink is process-wide. Installing a new sink flushes and joins the previous sink worker before replacement, and the framework stops the active sink during XLL shutdown. Make ownership explicit when multiple add-ins or test harnesses share a process; one add-in must not silently take telemetry ownership from another.
 

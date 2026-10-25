@@ -147,10 +147,21 @@ Initial DrainGate validation snapshot (2026-09-21, macOS aarch64; subsequent cha
 
 ## 5. TCB & Quality Rules
 
-1. **Zero Assumes**: Project-local `assume(...)`, `assume_specification`, and `axiom fn` declarations are strictly rejected in CI (`just verus-audit`).
-2. **Controlled External Bodies**: External bodies and external type/function specifications must be registered in `tools/verus_external_allowlist.json`.
+1. **Zero Assumes**: Project-local `assume(...)`, `admit()`, explicit imports of these primitives (including aliases), `assume_specification`, and `axiom fn` declarations are strictly rejected in CI (`just verus-audit`).
+2. **Controlled External Boundaries**: External bodies, `#[verifier::external]`, external type/function/trait specifications, trait extensions/private bounds, external derives and explicit trusted annotations must be registered by exact repository-relative `path:line` in `tools/verus_external_allowlist.json`. Basename-only entries do not authorize a boundary. The audit also checks equivalent `verus::internal(...)` attributes and rejects termination assumptions or unchecked external availability. This inventory follows the pinned verifier's [attribute parser](https://github.com/verus-lang/verus/blob/671956ec527d3b7164779f767bdbfe769bedce6c/source/rust_verify/src/attributes.rs).
 3. **Shared Kernels Where Present**: Directly verified transition and control expressions are shared with production. Independent protocol models and their remaining native refinement obligations are identified explicitly in the worklist.
 4. **Zero Fast-Path Overhead**: All ghost specifications and proofs are completely erased at compilation time.
+
+The source audit resolves both `use` and `extern crate ... as ...` aliases
+before checking qualified primitive calls and function-value references.
+It tracks inline module namespaces and `crate::`, `self::`, `super::` and
+absolute external-crate paths. Conditional declarations retain every target
+of a binding so declaration order cannot hide a trust primitive.
+It reserves bare `assume(...)` and `admit()` calls, including when
+a local Rust function shadows the name. It does not perform full Rust/Verus name
+resolution; qualified unrelated functions such as `ordinary::assume(...)`,
+methods, declarations, comments and string literals are permitted. Use an
+unambiguous qualified path for an unrelated function with one of these names.
 
 ---
 
@@ -162,6 +173,21 @@ Install the pinned Verus release with `bash`, `curl`, `unzip`, Python 3 and
 ```bash
 ./tools/install_verus.sh
 ```
+
+The installer verifies the archive against `tools/verus_release_sha256.json`
+before extraction. These SHA-256 values were recorded from the official
+[release asset metadata](https://api.github.com/repos/verus-lang/verus/releases/tags/release%2F0.2026.09.13.671956e)
+on 2026-10-25. Updating `VERUS_VERSION` also requires reviewing and committing
+that release's platform hashes; an unlisted version is rejected before download.
+
+The runtime is installed into a new dedicated directory at
+`~/.local/share/xlfn/verus/<version>/<platform>` by default. Add that directory to
+`PATH`, or pass a new dedicated directory as the installer's first argument.
+Existing destinations are refused. Only the upstream required runtime components,
+Z3 and `version.json` are copied; archive build files and other binaries are
+excluded. macOS quarantine removal applies only to these newly installed files.
+The required component list follows
+[upstream's installation check](https://github.com/verus-lang/verus/blob/671956ec527d3b7164779f767bdbfe769bedce6c/source/cargo-verus-toolchains/src/installed.rs).
 
 The installer reads the release's `version.json` and installs its required Rust
 toolchain before checking that Verus starts. The pinned Verus release uses Rust

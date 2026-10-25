@@ -168,7 +168,9 @@ impl LogLock {
             .create(true)
             .truncate(false)
             .open(&lock_path)?;
-        file.lock()?;
+        // Logging is best effort: contention must never stall the worker or
+        // startup. report() accounts this WouldBlock as a failed write.
+        file.try_lock().map_err(io::Error::from)?;
         Ok(Self(file))
     }
 }
@@ -283,12 +285,27 @@ pub(crate) fn append_startup_log(path: &Path, message: &str) -> io::Result<()> {
 pub(crate) fn install_file_diagnostic_sink(
     addin_id: &super::AddinId,
 ) -> Result<PathBuf, DiagnosticInitError> {
-    let base = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
+    let directory = log_directory(addin_id)?;
+    install_file_diagnostic_sink_at(directory.join("diagnostics.log"))
+}
+
+fn validated_log_base(base: Option<std::ffi::OsString>) -> io::Result<PathBuf> {
+    let base = base.map(PathBuf::from).filter(|path| path.is_absolute());
+    base.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "LOCALAPPDATA must be an absolute path",
+        )
+    })
+}
+
+pub(crate) fn log_directory(addin_id: &super::AddinId) -> io::Result<PathBuf> {
+    // The user profile is the trust boundary. Never fall back to the current
+    // directory or a shared temporary directory when its location is missing.
+    let base = validated_log_base(std::env::var_os("LOCALAPPDATA"))?;
     let directory = base.join(addin_id.as_str()).join("logs");
     fs::create_dir_all(&directory)?;
-    install_file_diagnostic_sink_at(directory.join("diagnostics.log"))
+    Ok(directory)
 }
 
 pub(crate) fn install_file_diagnostic_sink_at(
@@ -306,6 +323,78 @@ pub(crate) fn install_file_diagnostic_sink_at(
 #[cfg(test)]
 mod bounded_text_tests {
     use super::*;
+
+    #[test]
+    fn log_base_requires_an_explicit_absolute_path() {
+        for value in [
+            None,
+            Some(""),
+            Some("relative"),
+            Some("C:relative"),
+            Some("C:"),
+        ] {
+            assert!(validated_log_base(value.map(Into::into)).is_err());
+        }
+        let absolute = std::env::temp_dir();
+        assert_eq!(
+            validated_log_base(Some(absolute.clone().into_os_string())).unwrap(),
+            absolute
+        );
+        #[cfg(target_os = "windows")]
+        {
+            assert!(validated_log_base(Some(r"\relative".into())).is_err());
+            assert!(validated_log_base(Some(r"C:\Users\example\AppData\Local".into())).is_ok());
+        }
+    }
+
+    #[test]
+    fn log_contention_fails_promptly_and_recovery_preserves_rotation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("diagnostics.log");
+        let mut log = RotatingLog::open_with_policy(path.clone(), 8, 1).unwrap();
+        log.write_line("first").unwrap();
+        let held = LogLock::acquire(&path).unwrap();
+        assert_eq!(
+            log.write_line("lost").unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(held);
+        log.write_line("next").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "next\n");
+        assert_eq!(
+            fs::read_to_string(path.with_file_name("diagnostics.log.1")).unwrap(),
+            "first\n"
+        );
+    }
+
+    #[test]
+    fn contended_diagnostic_event_is_counted_and_following_event_is_written() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("diagnostics.log");
+        let sink = FileDiagnosticSink {
+            log: Mutex::new(RotatingLog::open(path.clone()).unwrap()),
+        };
+        let error = crate::XllError::Panic;
+        let event = DiagnosticEvent {
+            udf_id: "contended_event",
+            argument: None,
+            error: &error,
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::from_u64(7),
+            timestamp: std::time::SystemTime::UNIX_EPOCH,
+        };
+        let held = LogLock::acquire(&path).unwrap();
+        let before = FAILED_WRITES.load(Ordering::Relaxed);
+        sink.report(&event);
+        assert!(FAILED_WRITES.load(Ordering::Relaxed) > before);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "");
+        drop(held);
+        sink.report(&event);
+        let contents = fs::read_to_string(&path).unwrap();
+        assert_eq!(contents.lines().count(), 1);
+        let record: serde_json::Value = serde_json::from_str(contents.trim_end()).unwrap();
+        assert_eq!(record["udf"], "contended_event");
+        assert_eq!(record["diagnostic_id"], 7);
+    }
 
     #[test]
     fn diagnostic_json_preserves_schema_escaping_and_null_arguments() {

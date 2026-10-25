@@ -89,6 +89,94 @@ fn synthetic_xll() -> Vec<u8> {
 }
 
 #[test]
+fn export_manifest_rejects_corrupt_data_and_duplicate_sections() {
+    let baseline = synthetic_xll();
+    let manifest_section = 0x98 + 0xf0 + 2 * 40;
+    let mut unreadable = baseline.clone();
+    unreadable[manifest_section + 20..manifest_section + 24]
+        .copy_from_slice(&0x1000_u32.to_le_bytes());
+    let error = parse_pe_bytes(&unreadable).unwrap_err();
+    assert!(
+        error.to_string().contains("failed to read .xllexp"),
+        "{error}"
+    );
+
+    let mut invalid_utf8 = baseline.clone();
+    invalid_utf8[0x800] = 0xff;
+    let error = parse_pe_bytes(&invalid_utf8).unwrap_err();
+    assert!(
+        error.to_string().contains("invalid UTF-8 in .xllexp"),
+        "{error}"
+    );
+
+    let mut duplicate = baseline.clone();
+    let other_section = manifest_section + 40;
+    duplicate[other_section..other_section + 8].copy_from_slice(b".xllexp\0");
+    let error = parse_pe_bytes(&duplicate).unwrap_err();
+    assert!(error.to_string().contains("multiple .xllexp"), "{error}");
+
+    let mut empty = baseline.clone();
+    empty[0x800..0xa00].fill(0);
+    let info = parse_pe_bytes(&empty).unwrap();
+    assert!(info.has_export_manifest);
+    assert!(info.expected_exports.is_empty());
+    assert!(verify_xll_exports(&info, Path::new("empty.xll"), &[]).is_err());
+    let info = parse_pe_bytes(&baseline).unwrap();
+    verify_xll_exports(&info, Path::new("valid.xll"), &[]).unwrap();
+}
+
+#[test]
+fn executable_section_bounds_accept_raw_padding_and_virtual_zero_fill() {
+    let baseline = synthetic_xll();
+    let text_section = 0x98 + 0xf0 + 40;
+    for virtual_size in [0_u32, 1, 0x200, 0x800] {
+        let mut bytes = baseline.clone();
+        bytes[text_section + 8..text_section + 12].copy_from_slice(&virtual_size.to_le_bytes());
+        let info = parse_pe_bytes(&bytes).unwrap();
+        verify_xll_exports(&info, Path::new("valid.xll"), &[]).unwrap();
+    }
+    for (virtual_size, target, accepted) in [
+        (1_u32, 0x21ff_u32, true),
+        (1, 0x2200, false),
+        (0x800, 0x27ff, true),
+        (0x800, 0x2800, false),
+        (0x800, 0x2fff, false),
+    ] {
+        let mut bytes = baseline.clone();
+        bytes[text_section + 8..text_section + 12].copy_from_slice(&virtual_size.to_le_bytes());
+        bytes[0x430..0x434].copy_from_slice(&target.to_le_bytes());
+        assert_eq!(
+            parse_pe_bytes(&bytes).is_ok(),
+            accepted,
+            "{virtual_size:#x}, {target:#x}"
+        );
+    }
+}
+
+#[test]
+fn mapped_section_layout_rejects_ambiguous_ranges_before_export_lookup() {
+    let baseline = synthetic_xll();
+    let sections = 0x98 + 0xf0;
+    for (offset, value) in [
+        (sections + 2 * 40 + 12, 0x2000_u32), // overlaps executable section
+        (sections + 40 + 12, 0x1000),         // identical non-executable and code ranges
+        (sections + 40 + 12, 0x2100),         // unaligned mapping
+        (sections + 40 + 8, 0x1001),          // aligned extent overlaps next section
+        (sections + 3 * 40 + 8, 0x1001),      // mapping exceeds SizeOfImage
+        (sections + 3 * 40 + 8, u32::MAX),    // arithmetic overflow
+        (0x98 + 56, 0x4000),                  // final section outside image
+        (0x98 + 32, 0),                       // invalid SectionAlignment
+    ] {
+        let mut bytes = baseline.clone();
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        assert!(
+            parse_pe_bytes(&bytes).is_err(),
+            "accepted {offset:#x} = {value:#x}"
+        );
+    }
+}
+
+#[test]
 fn parsed_snapshot_is_transferred_without_replacing_its_bytes() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("addin.xll");

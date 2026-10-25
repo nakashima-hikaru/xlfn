@@ -14,16 +14,9 @@ use std::panic::AssertUnwindSafe;
 pub(crate) fn write_startup_log(addin_id: &AddinId, message: &str) {
     #[cfg(target_os = "windows")]
     {
-        use std::fs;
-        let Some(local) = std::env::var_os("LOCALAPPDATA") else {
+        let Ok(directory) = crate::diagnostics::file::log_directory(addin_id) else {
             return;
         };
-        let directory = std::path::PathBuf::from(local)
-            .join(addin_id.as_str())
-            .join("logs");
-        if fs::create_dir_all(&directory).is_err() {
-            return;
-        }
         let _ = crate::diagnostics::append_startup_log(&directory.join("startup.log"), message);
     }
     #[cfg(not(target_os = "windows"))]

@@ -653,8 +653,7 @@ pub(crate) fn validate_private_windows_directory(path: &Path) -> PackageResult {
         if converted == 0 || system_sid.is_null() {
             return Err(io::Error::last_os_error().into());
         }
-        let mut owner_ace = false;
-        let mut system_ace = false;
+        let mut principals = PrivateAclPrincipals::default();
         for index in 0..size_information.AceCount {
             let mut ace = std::ptr::null_mut::<std::ffi::c_void>();
             // SAFETY: `index` is bounded by the ACE count returned for the
@@ -719,15 +718,13 @@ pub(crate) fn validate_private_windows_directory(path: &Path) -> PackageResult {
             }
             // SAFETY: `ace_sid`, `owner`, and `system_sid` have all passed SID
             // validation before comparison.
-            owner_ace |= unsafe { EqualSid(ace_sid, owner) != 0 };
+            let is_owner = unsafe { EqualSid(ace_sid, owner) != 0 };
             // SAFETY: `ace_sid` and `system_sid` have both passed SID validation
             // before comparison.
-            system_ace |= unsafe { EqualSid(ace_sid, system_sid) != 0 };
+            let is_system = unsafe { EqualSid(ace_sid, system_sid) != 0 };
+            principals.include(is_owner, is_system)?;
         }
-        if !owner_ace || !system_ace {
-            return Err("private staging directory DACL does not match the private policy".into());
-        }
-        Ok(())
+        principals.finish()
     })();
 
     if !token.is_null() {
@@ -744,6 +741,34 @@ pub(crate) fn validate_private_windows_directory(path: &Path) -> PackageResult {
         let _ = unsafe { LocalFree(security_descriptor as HLOCAL) };
     }
     result
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Default)]
+struct PrivateAclPrincipals {
+    owner: bool,
+    system: bool,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl PrivateAclPrincipals {
+    fn include(&mut self, is_owner: bool, is_system: bool) -> PackageResult {
+        // Owner and SYSTEM can be the same SID. Require every ACE to match
+        // the policy before aggregating coverage, even in that case.
+        if !is_owner && !is_system {
+            return Err("private staging directory DACL contains an unexpected principal".into());
+        }
+        self.owner |= is_owner;
+        self.system |= is_system;
+        Ok(())
+    }
+
+    fn finish(self) -> PackageResult {
+        if !self.owner || !self.system {
+            return Err("private staging directory DACL does not match the private policy".into());
+        }
+        Ok(())
+    }
 }
 
 #[allow(
@@ -940,4 +965,96 @@ pub(crate) fn verify_snapshot_against_second_read(
         return Err(unstable_bundle_source(target, path));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod acl_tests {
+    use super::*;
+
+    #[test]
+    fn private_acl_requires_each_principal_even_when_owner_is_system() {
+        for entries in [
+            [(true, false), (false, true)],
+            [(false, true), (true, false)],
+            [(true, true), (true, true)],
+        ] {
+            let mut principals = PrivateAclPrincipals::default();
+            for (owner, system) in entries {
+                principals.include(owner, system).unwrap();
+            }
+            principals.finish().unwrap();
+        }
+        for entries in [
+            [(true, true), (false, false)],
+            [(false, false), (true, true)],
+            [(true, false), (false, false)],
+            [(false, false), (false, true)],
+        ] {
+            let mut principals = PrivateAclPrincipals::default();
+            assert!(
+                entries
+                    .into_iter()
+                    .any(|(owner, system)| principals.include(owner, system).is_err())
+            );
+        }
+        let mut missing_system = PrivateAclPrincipals::default();
+        missing_system.include(true, false).unwrap();
+        assert!(missing_system.finish().is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[allow(
+        unsafe_code,
+        reason = "Exercise the policy with Windows SID comparisons"
+    )]
+    fn system_owner_rejects_everyone_and_third_party_sids_in_either_order() {
+        use crate::win32::{ConvertStringSidToSidW, EqualSid, HLOCAL, LocalFree};
+        struct Sid(*mut std::ffi::c_void);
+        impl Sid {
+            fn new(text: &str) -> Self {
+                let mut sid = std::ptr::null_mut();
+                let text = wide_nul(text);
+                // SAFETY: text is NUL-terminated and sid is writable output storage.
+                let converted = unsafe { ConvertStringSidToSidW(text.as_ptr(), &mut sid) };
+                assert_ne!(converted, 0);
+                Self(sid)
+            }
+            fn equals(&self, other: &Self) -> bool {
+                // SAFETY: both pointers are valid SIDs owned by these wrappers.
+                unsafe { EqualSid(self.0, other.0) != 0 }
+            }
+        }
+        impl Drop for Sid {
+            fn drop(&mut self) {
+                // SAFETY: ConvertStringSidToSidW allocated this pointer once.
+                let _ = unsafe { LocalFree(self.0 as HLOCAL) };
+            }
+        }
+        let system = Sid::new("S-1-5-18");
+        let user = Sid::new("S-1-5-21-1-2-3-1001");
+        let everyone = Sid::new("S-1-1-0");
+        let third_party = Sid::new("S-1-5-21-1-2-3-1002");
+        for owner in [&system, &user] {
+            for entries in [[owner, &system], [&system, owner]] {
+                let mut principals = PrivateAclPrincipals::default();
+                for sid in entries {
+                    principals
+                        .include(sid.equals(owner), sid.equals(&system))
+                        .unwrap();
+                }
+                principals.finish().unwrap();
+            }
+            for unexpected in [&everyone, &third_party] {
+                for entries in [[&system, unexpected], [unexpected, &system]] {
+                    let mut principals = PrivateAclPrincipals::default();
+                    assert!(entries.into_iter().any(|sid| {
+                        principals
+                            .include(sid.equals(owner), sid.equals(&system))
+                            .is_err()
+                    }));
+                }
+            }
+        }
+    }
 }

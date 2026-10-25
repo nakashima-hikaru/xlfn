@@ -1,7 +1,7 @@
 //! Fixed-layout process accounting shared by cooperating XLL images.
 //!
-//! Windows uses a pagefile mapping independent of any DLL image. The canonical
-//! view and one handle deliberately remain until process exit. No destructor,
+//! Windows uses a pagefile mapping independent of any DLL image. Each image
+//! retains its own view until process exit. No destructor,
 //! allocator handle, or executable address is stored in the shared protocol.
 use crate::error::InputError;
 use crate::{ExcelError, XllError, XllResult};
@@ -12,7 +12,7 @@ mod windows;
 
 /// Provisional limit for all participating xlfn FP12 allocations in a process.
 pub const MAX_PROCESS_NUMERIC_RETURN_BYTES: usize = 512 * 1024 * 1024;
-const SCHEMA: u64 = 0x584c_4650_0001_0048;
+const SCHEMA: u64 = 0x584c_4650_0002_0040;
 
 // This is a cross-image protocol, not a Rust-owned object. Keep every field
 // fixed-width and naturally aligned; never reset an existing mapping. Changing
@@ -20,7 +20,6 @@ const SCHEMA: u64 = 0x584c_4650_0001_0048;
 #[repr(C, align(8))]
 pub(super) struct ProcessState {
     schema: AtomicU64,
-    canonical_view: AtomicU64,
     limit_bytes: AtomicU64,
     reserved_bytes: AtomicU64,
     reserved_buffers: AtomicU64,
@@ -30,16 +29,15 @@ pub(super) struct ProcessState {
     peak_published_bytes: AtomicU64,
 }
 
-const _: () = assert!(size_of::<ProcessState>() == 72);
+const _: () = assert!(size_of::<ProcessState>() == 64);
 const _: () = assert!(align_of::<ProcessState>() == 8);
-const _: () = assert!(std::mem::offset_of!(ProcessState, peak_published_bytes) == 64);
+const _: () = assert!(std::mem::offset_of!(ProcessState, peak_published_bytes) == 56);
 
 impl ProcessState {
     #[cfg(any(not(target_os = "windows"), test))]
     const fn new() -> Self {
         Self {
             schema: AtomicU64::new(0),
-            canonical_view: AtomicU64::new(0),
             limit_bytes: AtomicU64::new(0),
             reserved_bytes: AtomicU64::new(0),
             reserved_buffers: AtomicU64::new(0),
@@ -70,10 +68,34 @@ impl ProcessState {
         if limit != 0 && limit != MAX_PROCESS_NUMERIC_RETURN_BYTES as u64 {
             return Err(protocol_error());
         }
+        self.validate()
+    }
+
+    fn validate(&self) -> XllResult<()> {
+        let limit = MAX_PROCESS_NUMERIC_RETURN_BYTES as u64;
+        if self.schema.load(Ordering::Acquire) != SCHEMA
+            || self.limit_bytes.load(Ordering::Acquire) != limit
+            || [
+                &self.reserved_bytes,
+                &self.reserved_buffers,
+                &self.peak_reserved_bytes,
+                &self.published_bytes,
+                &self.published_buffers,
+                &self.peak_published_bytes,
+            ]
+            .iter()
+            .any(|counter| counter.load(Ordering::Relaxed) > limit)
+        {
+            return Err(protocol_error());
+        }
         Ok(())
     }
 
     fn reserve(&self, bytes: usize, limit: usize) -> XllResult<()> {
+        self.validate()?;
+        if bytes == 0 {
+            return Err(protocol_error());
+        }
         let mut current = self.reserved_bytes.load(Ordering::Relaxed);
         loop {
             let next = current
@@ -132,9 +154,16 @@ static PROCESS_STATE: ProcessState = ProcessState::new();
 #[cfg(target_os = "windows")]
 static PROCESS_STATE: std::sync::OnceLock<&'static ProcessState> = std::sync::OnceLock::new();
 
+#[cfg(target_os = "windows")]
+static ATTACH_LOCK: crate::sync::Mutex<()> = crate::sync::Mutex::new(());
+
 fn shared() -> XllResult<&'static ProcessState> {
     #[cfg(target_os = "windows")]
     {
+        if let Some(state) = PROCESS_STATE.get() {
+            return Ok(state);
+        }
+        let _attach = ATTACH_LOCK.lock();
         if let Some(state) = PROCESS_STATE.get() {
             return Ok(state);
         }
@@ -181,6 +210,7 @@ impl Drop for Reservation {
 
 pub(super) fn read_metrics(metrics: &mut super::NumericReturnMemoryMetrics) -> XllResult<()> {
     let state = shared()?;
+    state.validate()?;
     metrics.process_reserved_bytes = state.reserved_bytes.load(Ordering::Relaxed) as usize;
     metrics.process_reserved_buffers = state.reserved_buffers.load(Ordering::Relaxed) as usize;
     metrics.process_peak_reserved_bytes =
@@ -195,6 +225,43 @@ pub(super) fn read_metrics(metrics: &mut super::NumericReturnMemoryMetrics) -> X
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn invalid_shared_counters_fail_without_resetting_live_accounting() {
+        for counter_index in 0..6 {
+            let state = ProcessState::new();
+            state.initialize().unwrap();
+            state.reserve(17, 128).unwrap();
+            let counters = [
+                &state.reserved_bytes,
+                &state.reserved_buffers,
+                &state.peak_reserved_bytes,
+                &state.published_bytes,
+                &state.published_buffers,
+                &state.peak_published_bytes,
+            ];
+            counters[counter_index].store(u64::MAX, Ordering::Relaxed);
+            let before = counters.map(|counter| counter.load(Ordering::Relaxed));
+            assert!(state.initialize().is_err());
+            assert!(state.reserve(1, 128).is_err());
+            assert_eq!(
+                before,
+                counters.map(|counter| counter.load(Ordering::Relaxed))
+            );
+        }
+    }
+
+    #[test]
+    fn reservation_revalidates_a_changed_shared_header() {
+        let state = ProcessState::new();
+        state.initialize().unwrap();
+        state.reserve(17, 128).unwrap();
+        state.schema.store(SCHEMA - 1, Ordering::Release);
+        assert!(state.reserve(1, 128).is_err());
+        assert_eq!(state.reserved_bytes.load(Ordering::Relaxed), 17);
+        let empty = ProcessState::new();
+        empty.initialize().unwrap();
+        assert!(empty.reserve(0, 128).is_err());
+    }
     #[test]
     fn reservations_are_bounded_and_rollback_before_publication() {
         let state = ProcessState::new();

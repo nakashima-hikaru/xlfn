@@ -6,6 +6,8 @@ use super::*;
 use serde::Deserialize;
 use std::ffi::{OsStr, OsString};
 
+const MAX_CONFIG_INCLUDE_DEPTH: usize = 64;
+
 #[derive(Default)]
 pub(crate) struct CargoSettings {
     pub(crate) rustc_wrapper: Option<PathBuf>,
@@ -68,14 +70,44 @@ impl CargoSettings {
     }
 
     fn read_file(path: &Path, seen: &mut Vec<PathBuf>) -> Result<Self> {
+        Self::read_file_at_depth(path, seen, &mut Vec::new())
+    }
+
+    fn read_file_at_depth(
+        path: &Path,
+        seen: &mut Vec<PathBuf>,
+        active: &mut Vec<PathBuf>,
+    ) -> Result<Self> {
         // Cargo tracks every included lexical path for this top-level file,
-        // including repeated siblings. Symlink targets keep distinct origins.
+        // including repeated siblings. Resolve physical identity separately:
+        // lexical paths still determine relative includes and wrapper origins.
         let path = normalize_path(path);
         if seen.iter().any(|previous| previous == &path) {
             bail!("Cargo configuration include cycle at {path:?}");
         }
+        if active.len() >= MAX_CONFIG_INCLUDE_DEPTH {
+            bail!(
+                "Cargo configuration include depth exceeds {MAX_CONFIG_INCLUDE_DEPTH} at {path:?}"
+            );
+        }
+        let identity = fs::canonicalize(&path)
+            .with_context(|| format!("could not resolve Cargo configuration {path:?}"))?;
+        if active.contains(&identity) {
+            bail!("Cargo configuration include cycle through a filesystem alias at {path:?}");
+        }
         seen.push(path.clone());
-        let config: ConfigFile = toml::from_str(&fs::read_to_string(&path)?)
+        active.push(identity);
+        let result = Self::read_active_file(&path, seen, active);
+        active.pop();
+        result
+    }
+
+    fn read_active_file(
+        path: &Path,
+        seen: &mut Vec<PathBuf>,
+        active: &mut Vec<PathBuf>,
+    ) -> Result<Self> {
+        let config: ConfigFile = toml::from_str(&fs::read_to_string(path)?)
             .with_context(|| format!("could not parse Cargo configuration {path:?}"))?;
         let directory = path.parent().context("Cargo configuration has no parent")?;
         let root = directory
@@ -94,7 +126,7 @@ impl CargoSettings {
             if optional && !included.try_exists()? {
                 continue;
             }
-            settings.merge(Self::read_file(&included, seen)?);
+            settings.merge(Self::read_file_at_depth(&included, seen, active)?);
         }
         settings.merge(Self {
             rustc_wrapper: config

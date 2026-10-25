@@ -1,9 +1,7 @@
 use super::registration::TemporaryRegistration;
 #[cfg(feature = "handles")]
 use super::server::ensure_server;
-use super::server::{
-    RtdServer, SERVER_STARTED, discard_unpublished_server, ensure_server_without_handles,
-};
+use super::server::{RtdServer, SERVER_STARTED, ServerObservation, ensure_server_without_handles};
 #[cfg(feature = "handles")]
 use crate::XllError;
 use crate::XllResult;
@@ -28,7 +26,8 @@ pub(crate) fn observe<H: FormulaLifetimeBackend + 'static>(
     host: ExcelHost<'_>,
 ) -> XllResult<()> {
     let _rtd_operation = crate::excel_rtd::begin_operation(handles, ingress)?;
-    let ensured = ensure_server(Some(handles), None)?;
+    let mut observation = ServerObservation::begin(ensure_server(Some(handles), None)?)?;
+    let ensured = observation.server();
     let active = &ensured.active;
     let server = active.pointer as *mut RtdServer;
 
@@ -38,45 +37,16 @@ pub(crate) fn observe<H: FormulaLifetimeBackend + 'static>(
     {
         None
     } else {
-        let module_path = match module_path(host) {
-            Ok(path) => path,
-            Err(error) => {
-                discard_unpublished_server(active.pointer, ensured.newly_created);
-                return Err(error);
-            }
-        };
-
-        match TemporaryRegistration::new(active, &module_path) {
-            Ok(registration) => Some(registration),
-            Err(error) => {
-                discard_unpublished_server(active.pointer, ensured.newly_created);
-                return Err(error);
-            }
-        }
+        let module_path = module_path(host)?;
+        Some(TemporaryRegistration::new(active, &module_path)?)
     };
 
-    let mut prog_id = match CountedString::new(&active.prog_id) {
-        Ok(value) => value,
-        Err(error) => {
-            discard_unpublished_server(active.pointer, ensured.newly_created);
-            return Err(error);
-        }
-    };
-
-    let mut topic = match CountedString::new(&format!("handle:{rtd_key}")) {
-        Ok(value) => value,
-        Err(error) => {
-            discard_unpublished_server(active.pointer, ensured.newly_created);
-            return Err(error);
-        }
-    };
+    let mut prog_id = CountedString::new(&active.prog_id)?;
+    let mut topic = CountedString::new(&format!("handle:{rtd_key}"))?;
 
     let lifetime_generation = FormulaLifetimeGeneration::new(active.generation.get())
         .expect("an active Excel RTD server has a non-zero lifetime generation");
-    if let Err(error) = handles.claim_lifetime(rtd_key, lifetime_generation) {
-        discard_unpublished_server(active.pointer, ensured.newly_created);
-        return Err(error);
-    }
+    handles.claim_lifetime(rtd_key, lifetime_generation)?;
 
     let mut server_name = XLOPER12::missing();
     let arguments = [
@@ -100,6 +70,7 @@ pub(crate) fn observe<H: FormulaLifetimeBackend + 'static>(
         });
     }
 
+    observation.commit();
     Ok(())
 }
 
@@ -109,7 +80,11 @@ pub(crate) fn observe_subscription(
     host: ExcelHost<'_>,
 ) -> XllResult<RtdValue> {
     let _rtd_operation = subscriptions.enter_external_operation()?;
-    let ensured = ensure_server_without_handles(Some(subscriptions))?;
+    // Reject a key from another runtime before allocating or attaching a server.
+    let id = subscriptions.resolve_transport_key(*key)?;
+    let mut observation =
+        ServerObservation::begin(ensure_server_without_handles(Some(subscriptions))?)?;
+    let ensured = observation.server();
     let active = &ensured.active;
     let server = active.pointer as *mut RtdServer;
 
@@ -119,46 +94,15 @@ pub(crate) fn observe_subscription(
     {
         None
     } else {
-        let module_path = match module_path(host) {
-            Ok(path) => path,
-            Err(error) => {
-                discard_unpublished_server(active.pointer, ensured.newly_created);
-                return Err(error);
-            }
-        };
-
-        match TemporaryRegistration::new(active, &module_path) {
-            Ok(registration) => Some(registration),
-            Err(error) => {
-                discard_unpublished_server(active.pointer, ensured.newly_created);
-                return Err(error);
-            }
-        }
+        let module_path = module_path(host)?;
+        Some(TemporaryRegistration::new(active, &module_path)?)
     };
 
-    let mut prog_id = match CountedString::new(&active.prog_id) {
-        Ok(value) => value,
-        Err(error) => {
-            discard_unpublished_server(active.pointer, ensured.newly_created);
-            return Err(error);
-        }
-    };
-
+    let mut prog_id = CountedString::new(&active.prog_id)?;
     let key_transport = key.to_transport();
-    let mut topic = match CountedString::new(key_transport.as_str()) {
-        Ok(value) => value,
-        Err(error) => {
-            discard_unpublished_server(active.pointer, ensured.newly_created);
-            return Err(error);
-        }
-    };
-
-    let id = subscriptions.resolve_transport_key(*key)?;
-    if let Some(subscription_server) = &ensured.subscription_server
-        && let Err(error) = subscription_server.claim(id)
-    {
-        discard_unpublished_server(active.pointer, ensured.newly_created);
-        return Err(error);
+    let mut topic = CountedString::new(key_transport.as_str())?;
+    if let Some(subscription_server) = &ensured.subscription_server {
+        subscription_server.claim(id)?;
     }
 
     let mut server_name = XLOPER12::missing();
@@ -177,7 +121,9 @@ pub(crate) fn observe_subscription(
 
     drop(registration);
 
-    RtdValue::try_from(value)
+    let value = RtdValue::try_from(value)?;
+    observation.commit();
+    Ok(value)
 }
 
 fn module_path(host: ExcelHost<'_>) -> XllResult<String> {

@@ -41,6 +41,14 @@ pub(super) struct ServerOperation<'a> {
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
+/// Thread-affine observation admission anchored by an owned COM reference.
+/// Unlike transferred disconnect work, this participates in reentrancy checks.
+pub(super) struct OwnedServerObservationCall {
+    barrier: NonNull<ServerOperationBarrier>,
+    thread_id: ThreadId,
+    _not_send_or_sync: PhantomData<Rc<()>>,
+}
+
 /// An admitted COM operation transferred to the generation cleanup worker.
 /// Its owner must retain a server COM reference until this guard is dropped.
 pub(super) struct OwnedServerCall {
@@ -141,6 +149,30 @@ impl ServerOperationBarrier {
             .expect("per-thread RTD COM operation count cannot overflow");
         Some(ServerOperation {
             barrier: self,
+            thread_id,
+            _not_send_or_sync: PhantomData,
+        })
+    }
+
+    /// # Safety
+    /// The caller must retain the server owning this barrier until the
+    /// returned thread-affine admission has been dropped.
+    pub(super) unsafe fn enter_observation(&self) -> Option<OwnedServerObservationCall> {
+        let thread_id = std::thread::current().id();
+        let mut state = self.state.lock();
+        if state.phase != ServerPhase::Open {
+            return None;
+        }
+        state.in_flight = state
+            .in_flight
+            .checked_add(1)
+            .expect("RTD observation operation count cannot overflow");
+        let per_thread = state.in_flight_by_thread.entry(thread_id).or_default();
+        *per_thread = per_thread
+            .checked_add(1)
+            .expect("per-thread RTD observation operation count cannot overflow");
+        Some(OwnedServerObservationCall {
+            barrier: NonNull::from(self),
             thread_id,
             _not_send_or_sync: PhantomData,
         })
@@ -458,6 +490,19 @@ impl Drop for ServerOperation<'_> {
                 .set()
                 .unwrap_or_else(|_| std::process::abort());
         }
+    }
+}
+
+impl Drop for OwnedServerObservationCall {
+    fn drop(&mut self) {
+        // SAFETY: the owning observation retains its server reference until
+        // this admission has been released. Reuse the thread-affine exit path.
+        let barrier = unsafe { self.barrier.as_ref() };
+        drop(ServerOperation {
+            barrier,
+            thread_id: self.thread_id,
+            _not_send_or_sync: PhantomData,
+        });
     }
 }
 

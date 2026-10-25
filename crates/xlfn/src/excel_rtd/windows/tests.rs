@@ -3627,6 +3627,11 @@ fn scavenger_deletes_only_fully_marked_registration_for_same_module() {
         set_registry_value(key, Some("XlFnClassId"), class).unwrap();
     }
 
+    let owned_class_key = format!("Software\\Classes\\CLSID\\{owned_class}");
+    set_registry_value(&format!("{owned_key}\\CLSID"), None, &owned_class).unwrap();
+    set_registry_value(&format!("{owned_class_key}\\ProgID"), None, &owned_prog_id).unwrap();
+    set_registry_value(&format!("{owned_class_key}\\InProcServer32"), None, module).unwrap();
+
     scavenge_owned_registrations(module, None).unwrap();
 
     assert!(
@@ -3696,4 +3701,403 @@ fn unwrap_dispatch_variant_enforces_single_level_indirection() {
     // SAFETY: all VARIANTs are readable on the stack.
     let unwrapped = unsafe { unwrap_dispatch_variant(&mut byref_nested) };
     assert_eq!(unwrapped, None);
+}
+
+#[test]
+fn registration_mutex_timeout_is_bounded_and_does_not_release_other_owner() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let name = format!(
+        "Local\\XlFnRtdRegistrationTimeoutTest_{}",
+        std::process::id()
+    );
+    let first = CrossProcessRegistrationGuard::acquire_named(&name).unwrap();
+    let waiter_name = name.clone();
+    let waiter = thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let result = CrossProcessRegistrationGuard::acquire_named_with_timeout(&waiter_name, 20);
+        assert!(matches!(
+            result,
+            Err(XllError::WindowsApi { code: 258, .. })
+        ));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        // A timed-out acquisition must neither release the other owner's
+        // mutex nor leave an extra owned/locked guard behind.
+        assert!(
+            CrossProcessRegistrationGuard::acquire_named_with_timeout(&waiter_name, 0).is_err()
+        );
+    });
+    waiter.join().unwrap();
+    drop(first);
+    let name_again = name;
+    thread::spawn(move || {
+        CrossProcessRegistrationGuard::acquire_named_with_timeout(&name_again, 100).unwrap();
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn scavenger_preserves_registrations_with_inconsistent_ownership_links() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let _maintenance = REGISTRATION_MAINTENANCE.lock();
+    let module = r"C:\xlfn-tests\ownership-links.xll";
+    for mismatch in 0..5 {
+        let mut owned_id = GUID::default();
+        let mut foreign_id = GUID::default();
+        // SAFETY: both GUID outputs are distinct writable stack storage.
+        unsafe {
+            assert!(CoCreateGuid(&mut owned_id) >= 0);
+            assert!(CoCreateGuid(&mut foreign_id) >= 0);
+        }
+        let class = guid_braced(owned_id);
+        let foreign_class = guid_braced(foreign_id);
+        let prog_id = format!("{RTD_PROG_ID_PREFIX}{}", guid_compact(owned_id));
+        let prog_key = format!("Software\\Classes\\{prog_id}");
+        let class_key = format!("Software\\Classes\\CLSID\\{class}");
+        let foreign_key = format!("Software\\Classes\\CLSID\\{foreign_class}");
+        set_registry_value(&foreign_key, None, "unrelated-class").unwrap();
+        set_registry_value(&prog_key, Some("XlFnOwner"), RTD_REGISTRATION_OWNER).unwrap();
+        set_registry_value(
+            &prog_key,
+            Some("XlFnRegistrationSchema"),
+            RTD_REGISTRATION_SCHEMA,
+        )
+        .unwrap();
+        set_registry_value(&prog_key, Some("XlFnOwnerModule"), module).unwrap();
+        set_registry_value(
+            &prog_key,
+            Some("XlFnClassId"),
+            if mismatch == 0 {
+                &foreign_class
+            } else {
+                &class
+            },
+        )
+        .unwrap();
+        if mismatch != 4 {
+            set_registry_value(
+                &format!("{prog_key}\\CLSID"),
+                None,
+                if mismatch == 1 {
+                    &foreign_class
+                } else {
+                    &class
+                },
+            )
+            .unwrap();
+            set_registry_value(
+                &format!("{class_key}\\ProgID"),
+                None,
+                if mismatch == 2 {
+                    "Foreign.ProgID"
+                } else {
+                    &prog_id
+                },
+            )
+            .unwrap();
+            set_registry_value(
+                &format!("{class_key}\\InProcServer32"),
+                None,
+                if mismatch == 3 {
+                    r"C:\other.xll"
+                } else {
+                    module
+                },
+            )
+            .unwrap();
+        }
+        scavenge_owned_registrations(module, None).unwrap();
+        assert_eq!(
+            read_registry_string(&prog_key, "XlFnOwner")
+                .unwrap()
+                .as_deref(),
+            Some(RTD_REGISTRATION_OWNER)
+        );
+        assert_eq!(
+            read_registry_string(&foreign_key, "").unwrap().as_deref(),
+            Some("unrelated-class")
+        );
+        for key in [prog_key, class_key, foreign_key] {
+            let key = wide_nul(&key);
+            // SAFETY: these exact GUID-derived keys were created by this test.
+            unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, key.as_ptr()) };
+        }
+    }
+}
+
+#[test]
+fn failed_observation_before_server_start_releases_global_owner_and_backends() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let subscriptions = SubscriptionRuntime::new();
+    let retained = ensure_server_without_handles(Some(&subscriptions)).unwrap();
+    let observation = super::server::ServerObservation::begin(
+        ensure_server_without_handles(Some(&subscriptions)).unwrap(),
+    )
+    .unwrap();
+    drop(observation); // models any preparation/host.invoke/decoder error
+    assert!(ACTIVE_SERVER.lock().is_none());
+    // SAFETY: retained owns the last COM reference after rollback.
+    let server = unsafe { &*(retained.active.pointer as *mut RtdServer) };
+    assert_eq!(server.references.load(Ordering::Acquire), 1);
+    assert_eq!(
+        server.operations.state.lock().phase,
+        ServerPhase::Terminated
+    );
+    assert!(server.backends.lock().subscriptions.is_none());
+    let replacement = ensure_server_without_handles(Some(&subscriptions)).unwrap();
+    assert_ne!(replacement.active.generation, retained.active.generation);
+    shutdown_subscriptions(&subscriptions).unwrap();
+}
+
+#[test]
+fn failed_observation_after_failed_start_disposes_callback_exactly_once() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let subscriptions = SubscriptionRuntime::new();
+    let retained = ensure_server_without_handles(Some(&subscriptions)).unwrap();
+    let observation = super::server::ServerObservation::begin(
+        ensure_server_without_handles(Some(&subscriptions)).unwrap(),
+    )
+    .unwrap();
+    // SAFETY: retained keeps the server live through the final assertions.
+    let server = unsafe { &*(retained.active.pointer as *mut RtdServer) };
+    let drops = Arc::new(AtomicUsize::new(0));
+    let tracked = Arc::clone(&drops);
+    install_callback(
+        &server.callbacks,
+        Box::new(RetainedUpdateCallback {
+            cookie: None,
+            pump: None,
+            drop_hook: Some(Arc::new(move || {
+                tracked.fetch_add(1, Ordering::AcqRel);
+            })),
+        }),
+    );
+    let mut start = ServerStartReservation::acquire(&server.start_state).unwrap();
+    start.callback_published();
+    drop(start);
+    drop(observation);
+    assert!(ACTIVE_SERVER.lock().is_none());
+    assert_eq!(server.references.load(Ordering::Acquire), 1);
+    assert_eq!(drops.load(Ordering::Acquire), 1);
+    shutdown_subscriptions(&subscriptions).unwrap();
+    assert_eq!(drops.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn failed_observation_during_server_start_defers_teardown_until_com_call_exits() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let subscriptions = SubscriptionRuntime::new();
+    let retained = ensure_server_without_handles(Some(&subscriptions)).unwrap();
+    let observation = super::server::ServerObservation::begin(
+        ensure_server_without_handles(Some(&subscriptions)).unwrap(),
+    )
+    .unwrap();
+    // SAFETY: retained keeps the server live while its admitted COM method runs.
+    let server = unsafe { &*(retained.active.pointer as *mut RtdServer) };
+    let operation = server.operations.enter().unwrap();
+    let start = ServerStartReservation::acquire(&server.start_state).unwrap();
+    drop(observation);
+    assert!(ACTIVE_SERVER.lock().is_some());
+    assert!(matches!(
+        server.operations.state.lock().phase,
+        ServerPhase::Terminating { .. }
+    ));
+    assert!(server.backends.lock().subscriptions.is_some());
+    drop(start);
+    drop(operation);
+    let replacement = ensure_server_without_handles(Some(&subscriptions)).unwrap();
+    assert_ne!(replacement.active.generation, retained.active.generation);
+    assert_eq!(server.references.load(Ordering::Acquire), 1);
+    assert!(server.backends.lock().subscriptions.is_none());
+    shutdown_subscriptions(&subscriptions).unwrap();
+}
+
+#[test]
+fn failed_observation_after_successful_start_preserves_com_publication_until_shutdown() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let subscriptions = SubscriptionRuntime::new();
+    let retained = ensure_server_without_handles(Some(&subscriptions)).unwrap();
+    let observation = super::server::ServerObservation::begin(
+        ensure_server_without_handles(Some(&subscriptions)).unwrap(),
+    )
+    .unwrap();
+    // SAFETY: retained keeps the server live through observation and shutdown.
+    let server = unsafe { &*(retained.active.pointer as *mut RtdServer) };
+    ServerStartReservation::acquire(&server.start_state)
+        .unwrap()
+        .commit();
+    drop(observation); // Excel can return failure after a successful ServerStart.
+    assert_eq!(
+        ACTIVE_SERVER.lock().as_ref().unwrap().pointer,
+        retained.active.pointer
+    );
+    assert_eq!(server.references.load(Ordering::Acquire), 2);
+    let retry = ensure_server_without_handles(Some(&subscriptions)).unwrap();
+    assert!(!retry.newly_created);
+    drop(retry);
+    shutdown_subscriptions(&subscriptions).unwrap();
+    assert!(ACTIVE_SERVER.lock().is_none());
+    assert_eq!(server.references.load(Ordering::Acquire), 1);
+    assert!(server.backends.lock().subscriptions.is_none());
+}
+
+#[test]
+fn concurrent_observations_keep_server_until_last_failure_and_preserve_success() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let subscriptions = SubscriptionRuntime::new();
+    for commit_second in [false, true] {
+        let first = super::server::ServerObservation::begin(
+            ensure_server_without_handles(Some(&subscriptions)).unwrap(),
+        )
+        .unwrap();
+        let mut second = super::server::ServerObservation::begin(
+            ensure_server_without_handles(Some(&subscriptions)).unwrap(),
+        )
+        .unwrap();
+        drop(first);
+        assert!(ACTIVE_SERVER.lock().is_some());
+        if commit_second {
+            second.commit();
+        }
+        drop(second);
+        assert_eq!(ACTIVE_SERVER.lock().is_some(), commit_second);
+        cleanup_test_active_server();
+    }
+    shutdown_subscriptions(&subscriptions).unwrap();
+}
+
+#[test]
+fn observation_rollback_racing_shutdown_releases_server_reference_once() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let subscriptions = SubscriptionRuntime::new();
+    let retained = ensure_server_without_handles(Some(&subscriptions)).unwrap();
+    let observation = super::server::ServerObservation::begin(
+        ensure_server_without_handles(Some(&subscriptions)).unwrap(),
+    )
+    .unwrap();
+    // SAFETY: retained outlives the scoped shutdown and rollback.
+    let server = unsafe { &*(retained.active.pointer as *mut RtdServer) };
+    thread::scope(|scope| {
+        let worker = scope.spawn(|| shutdown_subscriptions(&subscriptions));
+        while server.operations.state.lock().phase == ServerPhase::Open {
+            thread::yield_now();
+        }
+        drop(observation);
+        worker.join().unwrap().unwrap();
+    });
+    assert!(ACTIVE_SERVER.lock().is_none());
+    assert_eq!(server.references.load(Ordering::Acquire), 1);
+    assert!(server.backends.lock().subscriptions.is_none());
+}
+
+#[test]
+fn foreign_subscription_key_is_rejected_before_server_allocation() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let subscriptions = SubscriptionRuntime::new();
+    let foreign_key = crate::subscription::SubscriptionKey::from_allocated_id(0, 1);
+    let callbacks = crate::host_callback::HostCallbackSession::new();
+    let host = crate::host_api::ExcelHost::new(&callbacks);
+    assert!(matches!(
+        super::excel_rtd::observe_subscription(&subscriptions, &foreign_key, host),
+        Err(XllError::StaleHandle)
+    ));
+    assert!(ACTIVE_SERVER.lock().is_none());
+    shutdown_subscriptions(&subscriptions).unwrap();
+}
+
+#[test]
+fn observation_admission_detects_reentrant_failed_start_recovery() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let subscriptions = SubscriptionRuntime::new();
+    let observation = super::server::ServerObservation::begin(
+        ensure_server_without_handles(Some(&subscriptions)).unwrap(),
+    )
+    .unwrap();
+    let pointer = observation.server().active.pointer as *mut RtdServer;
+    // SAFETY: observation owns a live reference and operation admission.
+    let server = unsafe { &*pointer };
+    let mut start = ServerStartReservation::acquire(&server.start_state).unwrap();
+    start.callback_published();
+    drop(start);
+    assert!(matches!(
+        ensure_server_without_handles(Some(&subscriptions)),
+        Err(XllError::Closing)
+    ));
+    // Recovery must return rather than wait for this same thread's observation.
+    drop(observation);
+    assert!(ACTIVE_SERVER.lock().is_none());
+    shutdown_subscriptions(&subscriptions).unwrap();
+}
+
+#[test]
+fn observations_on_different_threads_retire_only_after_last_failure() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let subscriptions = SubscriptionRuntime::new();
+    let first = super::server::ServerObservation::begin(
+        ensure_server_without_handles(Some(&subscriptions)).unwrap(),
+    )
+    .unwrap();
+    thread::scope(|scope| {
+        let (admitted_tx, admitted_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let subscriptions = &subscriptions;
+        let worker = scope.spawn(move || {
+            let second = super::server::ServerObservation::begin(
+                ensure_server_without_handles(Some(subscriptions)).unwrap(),
+            )
+            .unwrap();
+            admitted_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            drop(second);
+        });
+        admitted_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        drop(first);
+        assert!(ACTIVE_SERVER.lock().is_some());
+        release_tx.send(()).unwrap();
+        worker.join().unwrap();
+    });
+    assert!(ACTIVE_SERVER.lock().is_none());
+    shutdown_subscriptions(&subscriptions).unwrap();
+}
+
+#[cfg(feature = "rtd")]
+#[test]
+fn failed_excel_rtd_invocation_rolls_back_subscription_observation() {
+    use crate::registration::host::test_support::{CallbackScript, Reply};
+    use xlfn_sys::{XL_GET_NAME, XLF_RTD, XLOPER12, XLOPER12Value, XLRET_FAILED, XLTYPE_STR};
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    let source = DispatchTestSource::new(Arc::new(AtomicBool::new(false)));
+    let (arena, source_handle) = crate::subscription::SourceArena::with_source(
+        crate::generation::RuntimeGeneration::new(1).unwrap(),
+        source,
+    )
+    .unwrap();
+    let subscriptions = SubscriptionRuntime::with_sources_for_internal(arena);
+    let prepared = subscriptions
+        .prepare(
+            &source_handle,
+            RtdTopic::single("failed-excel-rtd").unwrap().borrowed(),
+        )
+        .unwrap();
+    static MODULE: [u16; 9] = [8, 67, 58, 92, 116, 46, 120, 108, 108];
+    let script = CallbackScript::install([
+        Reply::success(
+            XL_GET_NAME,
+            XLOPER12 {
+                value: XLOPER12Value {
+                    string: MODULE.as_ptr().cast_mut(),
+                },
+                xltype: XLTYPE_STR,
+            },
+        ),
+        Reply::success(XLF_RTD, XLOPER12::nil()).status(XLRET_FAILED),
+    ]);
+    let callbacks = crate::host_callback::HostCallbackSession::new();
+    let host = crate::host_api::ExcelHost::new(&callbacks);
+    assert!(super::excel_rtd::observe_subscription(&subscriptions, prepared.key(), host).is_err());
+    assert!(ACTIVE_SERVER.lock().is_none());
+    script.assert_calls(&[XL_GET_NAME, XLF_RTD]);
+    drop(prepared);
+    shutdown_subscriptions(&subscriptions).unwrap();
 }
