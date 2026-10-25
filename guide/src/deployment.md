@@ -52,6 +52,12 @@ previous-package location. Keep any retained transaction and backup directories
 in place, and retry the same packaging command. Its commit step recovers retained
 transactions before replacing the output again.
 
+Recovery verifies the transaction directory's owner and private permissions
+before reading its contents. Both `journal` and `journal.next` have a 64 KiB
+size limit; oversized files follow the invalid-journal recovery path. A rejected
+directory or journal does not authorize replacing the installed package with
+an unverified backup.
+
 Follow the transaction journal when recovering an interrupted update. A backup
 left after a committed update is only pending cleanup; the newly installed
 package remains authoritative.

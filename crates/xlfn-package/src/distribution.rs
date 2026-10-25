@@ -13,8 +13,11 @@
 use crate::{DirectoryIdentity, PackageResult, PrivateStagingDirectory};
 use fs_err as fs;
 use serde::{Deserialize, Serialize};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+
+#[cfg(test)]
+mod journal_tests;
 
 /// File-system operations used by the distribution transaction.
 ///
@@ -354,6 +357,9 @@ fn move_file_ex_with_retry(from: &Path, to: &Path, flags: u32) -> io::Result<()>
 pub const TRANSACTION_JOURNAL: &str = "journal";
 // Schema 2 uses BLAKE3 over the serialized journal with an empty checksum.
 pub const TRANSACTION_SCHEMA: u32 = 2;
+// Journals contain only transaction metadata, never package contents. Leave
+// ample room for escaped filenames and both platform identity representations.
+const MAX_TRANSACTION_JOURNAL_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -420,9 +426,44 @@ impl TransactionJournal {
     }
 }
 
-/// Reads and validates a durable transaction journal.
+/// Reads and validates a regular, non-symlink transaction journal of at most 64 KiB.
 pub fn read_transaction_journal(path: &Path) -> PackageResult<TransactionJournal> {
-    let bytes = fs::read(path)?;
+    crate::validate_path_components(path)?;
+    let file = crate::open_staged_file_no_follow(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || crate::is_reparse_point(&metadata) {
+        return Err(format!(
+            "transaction journal is not a regular file: {}",
+            path.display()
+        )
+        .into());
+    }
+    check_transaction_journal_size(path, metadata.len())?;
+    read_transaction_journal_contents(path, file)
+}
+
+fn check_transaction_journal_size(path: &Path, bytes: u64) -> PackageResult {
+    if bytes > MAX_TRANSACTION_JOURNAL_BYTES as u64 {
+        return Err(format!(
+            "distribution transaction journal exceeds the {MAX_TRANSACTION_JOURNAL_BYTES}-byte limit: {}",
+            path.display()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn read_transaction_journal_contents(
+    path: &Path,
+    reader: impl Read,
+) -> PackageResult<TransactionJournal> {
+    // The streaming bound also covers a file growing after metadata was read.
+    // Read one extra byte to distinguish an exact-limit journal from truncation.
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_TRANSACTION_JOURNAL_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    check_transaction_journal_size(path, bytes.len() as u64)?;
     let journal: TransactionJournal = serde_json::from_slice(&bytes).map_err(|error| {
         format!(
             "distribution transaction journal is invalid: {}: {error}",
@@ -455,6 +496,8 @@ pub fn read_transaction_journal(path: &Path) -> PackageResult<TransactionJournal
 }
 
 /// Writes the next journal state with the transaction's durability protocol.
+///
+/// Rejects encoded journals larger than 64 KiB before creating `journal.next`.
 pub fn write_transaction_state(
     journal: &Path,
     parent: &Path,
@@ -472,6 +515,7 @@ pub fn write_transaction_state(
         .ok_or_else(|| "distribution transaction journal sequence overflow".to_owned())?;
     transaction.refresh_checksum()?;
     let encoded = serde_json::to_vec_pretty(transaction)?;
+    check_transaction_journal_size(journal, encoded.len() as u64)?;
     let next = journal.with_file_name(format!("{}.next", TRANSACTION_JOURNAL));
     let mut next_file = std::fs::OpenOptions::new()
         .write(true)
@@ -1525,7 +1569,10 @@ fn recover_distribution_transaction(
     let mut previous_path = Some(transaction.join("previous"));
     let result = (|| {
         commit_guard.ensure_held()?;
-        crate::validate_path_components(transaction)?;
+        // Directory names in the output parent are untrusted. Establish owner
+        // and private permissions before enumerating payloads or reading either
+        // journal, including invalid-journal cleanup and quarantine paths.
+        PrivateStagingDirectory::open(transaction)?.verify()?;
         let private_transaction = is_private_transaction(transaction, prefix)?;
         let payloads = transaction_payloads(transaction)?;
         let journal = transaction.join(TRANSACTION_JOURNAL);
