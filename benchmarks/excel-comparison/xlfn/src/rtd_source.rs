@@ -228,21 +228,34 @@ impl BenchRtdSource {
         )
     }
 
-    fn ensure_worker(&self) {
+    fn ensure_worker(&self) -> XllResult<()> {
         let mut worker = self.worker.lock().unwrap_or_else(|p| p.into_inner());
+        if self.shared.stop.load(Ordering::Acquire) {
+            return Err(XllError::Closing);
+        }
         if worker.is_none() {
             let shared = self.shared.clone();
             *worker = Some(thread::spawn(move || run_worker(shared)));
         }
+        Ok(())
+    }
+
+    fn finish(&self) -> XllResult<()> {
+        self.shared.request_stop();
+        // Serialize setup and all shutdown callers through the join. The
+        // worker never takes this mutex; publication only uses shared/entry
+        // locks. No caller may observe an empty slot before the join finishes.
+        let mut worker = self.worker.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(worker) = worker.take() {
+            worker.join().map_err(|_| XllError::Panic)?;
+        }
+        Ok(())
     }
 }
 
 impl Drop for BenchRtdSource {
     fn drop(&mut self) {
-        self.shared.request_stop();
-        if let Some(worker) = self.worker.lock().unwrap_or_else(|p| p.into_inner()).take() {
-            let _ = worker.join();
-        }
+        let _ = self.finish();
     }
 }
 
@@ -270,6 +283,8 @@ unsafe impl RtdSubscription for BenchSubscription {
 
 // SAFETY: the returned subscription owns the terminal barrier for every sink
 // user. A spawn failure occurs before sink transfer into the shared map.
+// Source shutdown stops and joins the shared worker independently of Drop;
+// the worker mutex serializes setup/join and the stop flag prevents restart.
 unsafe impl RtdSource for BenchRtdSource {
     type Value = RtdValue;
     type Subscription = BenchSubscription;
@@ -284,13 +299,21 @@ unsafe impl RtdSource for BenchRtdSource {
             return Err(XllError::input("period_ms", InputError::OutOfRange));
         }
         let interval = (period_ms > 0.0).then(|| Duration::from_secs_f64(period_ms / 1000.0));
-        self.ensure_worker();
+        self.ensure_worker()?;
         let (id, entry) = self.shared.insert(sink, interval);
         Ok(BenchSubscription {
             shared: self.shared.clone(),
             id,
             entry,
         })
+    }
+
+    fn request_stop(&self) {
+        self.shared.request_stop();
+    }
+
+    fn shutdown_and_wait(&self) -> XllResult<()> {
+        self.finish()
     }
 }
 
@@ -300,6 +323,47 @@ mod tests {
     use std::sync::mpsc;
 
     const DEADLINE: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn runtime_shutdown_joins_worker_while_source_is_retained() {
+        let (source, shared) = BenchRtdSource::new();
+        source.ensure_worker().unwrap();
+        let source = Arc::new(source);
+        let closing_source = source.clone();
+        let (finished, receiver) = mpsc::channel();
+        let closer = thread::spawn(move || {
+            RtdSource::request_stop(closing_source.as_ref());
+            RtdSource::shutdown_and_wait(closing_source.as_ref()).unwrap();
+            finished.send(()).unwrap();
+        });
+        receiver
+            .recv_timeout(DEADLINE)
+            .expect("shutdown must join the idle worker");
+        closer.join().unwrap();
+        // Keeping the source alive must not defer the barrier until Drop.
+        assert!(shared.stop.load(Ordering::Acquire));
+        assert!(source.worker.lock().unwrap().is_none());
+        assert_eq!(Arc::strong_count(&shared), 2);
+        RtdSource::request_stop(source.as_ref());
+        RtdSource::shutdown_and_wait(source.as_ref()).unwrap();
+        assert!(matches!(source.ensure_worker(), Err(XllError::Closing)));
+        assert!(source.worker.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn shutdown_without_stop_handles_unstarted_and_started_sources() {
+        for started in [false, true] {
+            let (source, shared) = BenchRtdSource::new();
+            if started {
+                source.ensure_worker().unwrap();
+            }
+            RtdSource::shutdown_and_wait(&source).unwrap();
+            RtdSource::shutdown_and_wait(&source).unwrap();
+            assert!(shared.stop.load(Ordering::Acquire));
+            assert!(source.worker.lock().unwrap().is_none());
+            assert!(matches!(source.ensure_worker(), Err(XllError::Closing)));
+        }
+    }
 
     struct MockSink(Box<dyn Fn(RtdValue) + Send>);
 
@@ -328,7 +392,7 @@ mod tests {
             .map(|_| {
                 let source = source.clone();
                 thread::spawn(move || {
-                    source.ensure_worker();
+                    source.ensure_worker().unwrap();
                     source
                         .worker
                         .lock()
