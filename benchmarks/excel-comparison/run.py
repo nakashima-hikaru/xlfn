@@ -1911,7 +1911,10 @@ def main() -> int:
                         record = json.loads(rows[-1])
                     except (subprocess.TimeoutExpired, RuntimeError, OSError, ValueError) as error:
                         record = recover_worker_record(progress_file, case, implementation, error)
-                    cleanup = reap_excel_process(pid_file, grace_s=5 if record["status"] == "ok" else 0,
+                    # Unsupported execution still completed ordinary worker
+                    # teardown; give Excel the same exit grace as an ok case.
+                    cleanup = reap_excel_process(pid_file,
+                        grace_s=5 if record["status"] in ("ok", "unsupported") else 0,
                         dump_directory=out.with_suffix(".diagnostics")
                         if args.shutdown_diagnostics or args.dump_on_failure else None)
                 finally:
@@ -1928,6 +1931,8 @@ def main() -> int:
                 print(f"{case.key} {implementation}: {record['status']}", flush=True)
                 if record["status"] != "ok":
                     print(record.get("error", "unknown error"), flush=True)
+                    if record.get("cleanup_error") and record["cleanup_error"] != record.get("error"):
+                        print(f"cleanup: {record['cleanup_error']}", flush=True)
                     if "registration_diagnostics" in record:
                         print(json.dumps(record["registration_diagnostics"], ensure_ascii=False), flush=True)
                 errors += record["status"] != "ok"

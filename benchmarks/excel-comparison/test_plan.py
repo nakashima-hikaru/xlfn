@@ -107,6 +107,43 @@ class PlanTest(unittest.TestCase):
                         self.assertEqual(record["execution_status"], "ok")
                         self.assertEqual(record["failure_phase"], "close")
 
+    def test_unsupported_case_gets_normal_exit_grace_and_reports_cleanup_failure(self):
+        for survives_deadline in (False, True):
+            with self.subTest(survives_deadline=survives_deadline), \
+                    tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                xll = root / "xlfn" / "benchmark.xll"
+                xll.parent.mkdir()
+                xll.touch()
+                output = root / "result.jsonl"
+                args = ["run.py", "--profile", "smoke", "--id", "A05", "--variant", "recalc",
+                        "--implementation", "xlfn", "--allow-local-artifacts",
+                        "--artifacts", str(root), "--out", str(output), "--dump-on-failure"]
+                reason = "interactive cancellation required"
+                child = SimpleNamespace(stdout=json.dumps({"status": "unsupported", "id": "A05",
+                    "unsupported_reason": reason, "error": reason}), stderr="")
+                cleanup = {"forced_kill": survives_deadline, "original_process_exited": True}
+                if survives_deadline:
+                    cleanup["exit_timeout_s"] = 5
+                with patch("run.sys.argv", args), patch("run.sys.platform", "win32"), \
+                        patch("run.subprocess.run", return_value=child), \
+                        patch("run.reap_excel_process", return_value=cleanup) as reap, \
+                        patch("builtins.print") as printed:
+                    # Unsupported coverage still produces a nonzero exit code.
+                    self.assertEqual(benchmark_main(), 1)
+                self.assertEqual(reap.call_args.kwargs["grace_s"], 5)
+                self.assertEqual(reap.call_args.kwargs["dump_directory"],
+                                 output.with_suffix(".diagnostics"))
+                record = json.loads(output.read_text())
+                self.assertEqual(record["unsupported_reason"], reason)
+                self.assertEqual(record["status"], "error" if survives_deadline else "unsupported")
+                if survives_deadline:
+                    self.assertEqual(record["execution_status"], "unsupported")
+                    self.assertEqual(record["failure_phase"], "close")
+                    printed.assert_any_call("cleanup: " + record["cleanup_error"], flush=True)
+                else:
+                    self.assertNotIn("cleanup_error", record)
+
     def test_numeric_output_pair_verifies_every_cell_and_uses_balanced_order(self):
         anchors = {}
         areas = []

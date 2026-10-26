@@ -40,21 +40,29 @@ fn connect<S: RtdSource>(
     source: &RtdSourceHandle<S>,
     topic_id: i32,
     topic: &str,
-) -> XllResult<()> {
+) -> XllResult<StoredRtdValue> {
     let prepared = runtime.prepare(source, RtdTopic::single(topic)?.borrowed())?;
     let id = prepared.id();
     prepared.commit();
-    runtime
-        .connect_transaction(server, TopicId(topic_id), id)?
-        .commit()
+    let connection = runtime.connect_transaction(server, TopicId(topic_id), id)?;
+    let value = connection.value().clone();
+    connection.commit()?;
+    Ok(value)
 }
 
 fn refresh_until(
     server: &SubscriptionServerHandle,
     done: impl Fn(&BTreeMap<i32, StoredRtdValue>) -> bool,
 ) -> BTreeMap<i32, StoredRtdValue> {
+    refresh_from(server, BTreeMap::new(), done)
+}
+
+fn refresh_from(
+    server: &SubscriptionServerHandle,
+    mut observed: BTreeMap<i32, StoredRtdValue>,
+    done: impl Fn(&BTreeMap<i32, StoredRtdValue>) -> bool,
+) -> BTreeMap<i32, StoredRtdValue> {
     let deadline = Instant::now() + DEADLINE;
-    let mut observed = BTreeMap::new();
     loop {
         let batch = server.begin_refresh().unwrap();
         for update in &batch.updates {
@@ -101,6 +109,28 @@ fn construction_is_lazy_and_unstarted_shutdown_is_idempotent() {
 }
 
 #[test]
+fn connect_and_refresh_collect_initial_and_later_values() {
+    // This source publishes synchronously in subscribe, before installation
+    // snapshots the initial value returned by ConnectData.
+    let (arena, source, sink, _) = crate::subscription::tests::publishing_source(Some(7_i32));
+    let runtime = SubscriptionRuntime::with_sources_for_internal(arena);
+    let server = runtime.register_test_server(1);
+    let initial = connect(&runtime, &server, &source, 1, "initial").unwrap();
+    assert_eq!(initial, StoredRtdValue::Integer(7));
+
+    let batch = server.begin_refresh().unwrap();
+    assert!(batch.updates.is_empty());
+    batch.complete(RefreshOutcome::Delivered).unwrap();
+
+    sink.lock().clone().unwrap().publish(8).unwrap();
+    let values = refresh_from(&server, BTreeMap::from([(1, initial)]), |values| {
+        values.get(&1) == Some(&StoredRtdValue::Integer(8))
+    });
+    assert_eq!(values[&1], StoredRtdValue::Integer(8));
+    runtime.close().unwrap();
+}
+
+#[test]
 #[cfg(not(miri))]
 fn one_source_worker_delivers_updates_to_2048_subscriptions() {
     const TOPICS: i32 = 2048;
@@ -126,10 +156,16 @@ fn one_source_worker_delivers_updates_to_2048_subscriptions() {
         RtdLimits::standard().with_max_workers(RtdCapacity::disabled_if_zero(1)),
     );
     let server = runtime.register_test_server(1);
+    let mut initial = BTreeMap::new();
     for id in 1..=TOPICS {
-        connect(&runtime, &server, &source, id, &id.to_string()).unwrap();
+        initial.insert(
+            id,
+            connect(&runtime, &server, &source, id, &id.to_string()).unwrap(),
+        );
     }
-    let values = refresh_until(&server, |values| values.len() == TOPICS as usize);
+    let values = refresh_from(&server, initial, |values| {
+        (1..=TOPICS).all(|id| values.get(&id) == Some(&StoredRtdValue::Integer(id)))
+    });
     for id in 1..=TOPICS {
         assert_eq!(values[&id], StoredRtdValue::Integer(id));
     }
@@ -255,8 +291,10 @@ fn completion_and_failures_close_all_topics_and_apply_terminal_policy() {
         let shared = Arc::clone(&source.shared);
         let (runtime, source) = runtime_with_source(source, RtdLimits::standard());
         let server = runtime.register_test_server(1);
-        connect(&runtime, &server, &source, 1, "one").unwrap();
-        connect(&runtime, &server, &source, 2, "two").unwrap();
+        let initial = BTreeMap::from([
+            (1, connect(&runtime, &server, &source, 1, "one").unwrap()),
+            (2, connect(&runtime, &server, &source, 2, "two").unwrap()),
+        ]);
         let senders = senders_rx.recv_timeout(DEADLINE).unwrap();
         finish.store(true, Ordering::Release);
         for sender in &senders {
@@ -268,7 +306,7 @@ fn completion_and_failures_close_all_topics_and_apply_terminal_policy() {
         } else {
             StoredRtdValue::Error(crate::ExcelError::NotAvailable)
         };
-        refresh_until(&server, |values| {
+        refresh_from(&server, initial, |values| {
             values.get(&1) == Some(&expected) && values.get(&2) == Some(&expected)
         });
         assert!(shared.closed.load(Ordering::Acquire));

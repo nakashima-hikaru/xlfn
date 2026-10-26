@@ -380,6 +380,15 @@ forced termination cannot preserve an `ok` result; PID reuse never authorizes
 terminating a different process. Execution and cleanup errors are retained
 separately when both occur.
 
+Cases classified as `unsupported` also receive the normal five-second
+post-worker exit grace. If teardown fails, their final status is `error` while
+`execution_status: "unsupported"` and `unsupported_reason` retain the original
+classification. Inspect `cleanup_error` and `excel_process_cleanup`; the console
+prints a distinct cleanup error alongside the execution explanation. Runner
+revisions through `84817da` instead used zero exit grace for unsupported cases,
+so an A05 `error` with only the interactive-cancellation explanation on screen
+requires checking its raw JSONL cleanup fields.
+
 For intermittent exit failures, `--dump-on-failure` keeps lifecycle tracing and
 the passive exit observer disabled. It records native process identity once at
 startup, then captures the surviving Excel process only after worker failure or
