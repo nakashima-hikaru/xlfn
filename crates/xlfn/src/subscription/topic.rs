@@ -72,6 +72,9 @@ pub struct RtdLimits {
     pub(crate) max_queued_updates: RtdCapacity,
     pub(crate) max_source_ids: RtdCapacity,
     pub(crate) max_total_topic_bytes: RtdCapacity,
+    pub(crate) max_buffered_values: RtdCapacity,
+    pub(crate) max_buffered_bytes: RtdCapacity,
+    pub(crate) max_workers: RtdCapacity,
 }
 
 impl RtdLimits {
@@ -84,6 +87,9 @@ impl RtdLimits {
             max_queued_updates: RtdCapacity::disabled_if_zero(DEFAULT_MAX_RTD_QUEUED_UPDATES),
             max_source_ids: RtdCapacity::disabled_if_zero(DEFAULT_MAX_RTD_SOURCE_IDS),
             max_total_topic_bytes: RtdCapacity::disabled_if_zero(DEFAULT_MAX_RTD_TOTAL_TOPIC_BYTES),
+            max_buffered_values: RtdCapacity::disabled_if_zero(4096),
+            max_buffered_bytes: RtdCapacity::disabled_if_zero(64 * 1024 * 1024),
+            max_workers: RtdCapacity::disabled_if_zero(64),
         }
     }
 
@@ -122,6 +128,51 @@ impl RtdLimits {
     pub const fn with_max_total_topic_bytes(mut self, value: RtdCapacity) -> Self {
         self.max_total_topic_bytes = value;
         self
+    }
+
+    /// Sets the count of adapter values queued or currently publishing across all sources.
+    /// This is separate from the number of dirty Excel topic updates.
+    #[must_use]
+    pub const fn with_max_buffered_values(mut self, value: RtdCapacity) -> Self {
+        self.max_buffered_values = value;
+        self
+    }
+
+    /// Sets adapter buffering's aggregate retained-value byte charge. Each value
+    /// charges its stored representation plus owned UTF-8 string bytes. This
+    /// excludes allocator overhead, queue spare capacity, upstream buffers and
+    /// Excel delivery storage. Terminal errors use a separate fixed slot.
+    #[must_use]
+    pub const fn with_max_buffered_bytes(mut self, value: RtdCapacity) -> Self {
+        self.max_buffered_bytes = value;
+        self
+    }
+
+    /// Sets the global number of adapter producer workers, including completed
+    /// workers until joined. Publisher, cleanup and COM notification workers
+    /// are separate fixed infrastructure. The default producer limit is 64.
+    #[must_use]
+    pub const fn with_max_workers(mut self, value: RtdCapacity) -> Self {
+        self.max_workers = value;
+        self
+    }
+
+    /// Returns the aggregate adapter value count bound.
+    #[must_use]
+    pub const fn max_buffered_values(self) -> RtdCapacity {
+        self.max_buffered_values
+    }
+
+    /// Returns the aggregate adapter retained-value byte charge bound.
+    #[must_use]
+    pub const fn max_buffered_bytes(self) -> RtdCapacity {
+        self.max_buffered_bytes
+    }
+
+    /// Returns the adapter producer worker bound.
+    #[must_use]
+    pub const fn max_workers(self) -> RtdCapacity {
+        self.max_workers
     }
 
     #[must_use]

@@ -869,3 +869,197 @@ pub fn rtd_pipeline_probe(
         "updates_per_producer": operations, "rounds_ns": elapsed,
         "median_ns": elapsed[elapsed.len()/2], "overloaded_retries": retries })
 }
+
+#[derive(Default)]
+struct TopologyCounters {
+    started: AtomicUsize,
+    finished: AtomicUsize,
+    live: AtomicUsize,
+    subscribed: AtomicUsize,
+    unsubscribed: AtomicUsize,
+}
+
+struct TopologyWorkerExit(Arc<TopologyCounters>);
+
+impl TopologyWorkerExit {
+    fn start(counters: Arc<TopologyCounters>) -> Self {
+        counters.live.fetch_add(1, Ordering::AcqRel);
+        counters.started.fetch_add(1, Ordering::Release);
+        Self(counters)
+    }
+}
+
+impl Drop for TopologyWorkerExit {
+    fn drop(&mut self) {
+        self.0.live.fetch_sub(1, Ordering::AcqRel);
+        self.0.finished.fetch_add(1, Ordering::Release);
+    }
+}
+
+/// Measures one source's idle subscription lifecycle through the real RTD
+/// runtime, including producer startup and cancellation/join barriers.
+///
+/// `multiplexed` selects one shared job; otherwise each subscription owns a
+/// blocking job. This probe publishes no values and does not call Excel/COM.
+/// Worker counts are instrumented producer jobs, excluding infrastructure.
+/// Connect and disconnect timings include only synchronous runtime calls;
+/// separate readiness/removal waits expose asynchronous completion time.
+pub fn rtd_topology_probe(multiplexed: bool, subscriptions: usize) -> serde_json::Value {
+    use crate::rtd::{
+        RtdCapacity, RtdChannelSource, RtdDelivery, RtdMultiplexedSource, RtdSourceEvent,
+        RtdSourceLimits,
+    };
+    use std::num::NonZeroUsize;
+
+    assert!((1..=4096).contains(&subscriptions));
+    assert!(multiplexed || subscriptions <= 64);
+    let counters = Arc::new(TopologyCounters::default());
+    let worker_counters = Arc::clone(&counters);
+    let limits = RtdSourceLimits::standard()
+        .with_max_subscriptions(RtdCapacity::disabled_if_zero(subscriptions));
+    if multiplexed {
+        let source = RtdMultiplexedSource::<i32>::new(RtdDelivery::Latest, move |context| {
+            let _exit = TopologyWorkerExit::start(worker_counters);
+            loop {
+                match context.recv_timeout(Duration::from_secs(1)) {
+                    Ok(Some(RtdSourceEvent::Subscribe { .. })) => {
+                        _exit.0.subscribed.fetch_add(1, Ordering::Release);
+                    }
+                    Ok(Some(RtdSourceEvent::Unsubscribe { .. })) => {
+                        _exit.0.unsubscribed.fetch_add(1, Ordering::Release);
+                    }
+                    Ok(None) => {}
+                    Err(crate::XllError::Closing) if context.is_closed() => return Ok(()),
+                    Err(error) => return Err(error),
+                }
+            }
+        })
+        .with_limits(limits);
+        run_rtd_topology(source, counters, true, subscriptions)
+    } else {
+        let source = RtdChannelSource::<i32>::new(NonZeroUsize::new(1).unwrap(), move |_| {
+            let counters = Arc::clone(&worker_counters);
+            Ok(move |sender: crate::rtd::RtdSender<i32>| {
+                let _exit = TopologyWorkerExit::start(counters);
+                while !sender.wait_closed(Duration::from_secs(1)) {}
+                Ok(())
+            })
+        })
+        .with_max_producers(NonZeroUsize::new(subscriptions).unwrap())
+        .with_limits(limits);
+        run_rtd_topology(source, counters, false, subscriptions)
+    }
+}
+
+fn topology_wait(counter: &AtomicUsize, expected: usize, what: &str) -> u64 {
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(30);
+    while counter.load(Ordering::Acquire) != expected {
+        assert!(
+            Instant::now() < deadline,
+            "topology probe timed out: {what}"
+        );
+        std::thread::yield_now();
+    }
+    started.elapsed().as_nanos() as u64
+}
+
+fn run_rtd_topology<S: crate::rtd::RtdSource<Value = i32>>(
+    source: S,
+    counters: Arc<TopologyCounters>,
+    multiplexed: bool,
+    subscriptions: usize,
+) -> serde_json::Value {
+    use crate::rtd::{RtdCapacity, RtdLimits, RtdTopic};
+
+    let generation = crate::generation::RuntimeGeneration::new(1).unwrap();
+    let registration = crate::subscription::SourceRegistration::new(generation);
+    let source = registration.register(source).unwrap();
+    let limits =
+        RtdLimits::standard().with_max_active(RtdCapacity::disabled_if_zero(subscriptions));
+    let runtime = Box::new(crate::subscription::SubscriptionRuntime::with_host(
+        generation,
+        limits,
+        crate::excel_rtd::RtdSubscriptionHost::default(),
+        registration.finish(),
+    ));
+    // SAFETY: the boxed runtime stays at a stable address and outlives the
+    // server handle and all operations, including its explicit final close.
+    let server = unsafe {
+        runtime
+            .register_server(crate::subscription::ServerGeneration::new(1).unwrap())
+            .unwrap()
+    };
+    let topics: Vec<_> = (0..subscriptions)
+        .map(|index| RtdTopic::single(format!("topology-{index}")).unwrap())
+        .collect();
+
+    let started = Instant::now();
+    for (index, topic) in topics.iter().enumerate() {
+        let prepared = runtime.prepare(&source, topic.borrowed()).unwrap();
+        runtime
+            .connect_transaction(
+                &server,
+                crate::subscription::TopicId(index as i32 + 1),
+                prepared.id(),
+            )
+            .unwrap()
+            .commit()
+            .unwrap();
+        prepared.commit();
+    }
+    let connect_ns = started.elapsed().as_nanos() as u64;
+    let expected_jobs = if multiplexed { 1 } else { subscriptions };
+    let start_wait_ns = topology_wait(&counters.started, expected_jobs, "producer startup");
+    let subscribe_wait_ns = if multiplexed {
+        topology_wait(&counters.subscribed, subscriptions, "subscribe consumption")
+    } else {
+        0
+    };
+    assert_eq!(counters.live.load(Ordering::Acquire), expected_jobs);
+
+    let started = Instant::now();
+    for index in 0..subscriptions {
+        server
+            .disconnect(crate::subscription::TopicId(index as i32 + 1))
+            .unwrap();
+    }
+    let disconnect_ns = started.elapsed().as_nanos() as u64;
+    let unsubscribe_wait_ns = if multiplexed {
+        topology_wait(
+            &counters.unsubscribed,
+            subscriptions,
+            "unsubscribe consumption",
+        )
+    } else {
+        0
+    };
+    let live_after_disconnect = counters.live.load(Ordering::Acquire);
+    assert_eq!(live_after_disconnect, usize::from(multiplexed));
+
+    let started = Instant::now();
+    runtime.close().unwrap();
+    let close_ns = started.elapsed().as_nanos() as u64;
+    assert_eq!(counters.finished.load(Ordering::Acquire), expected_jobs);
+    assert_eq!(counters.live.load(Ordering::Acquire), 0);
+
+    serde_json::json!({
+        "schema": 1,
+        "scope": "local_idle_subscription_lifecycle_without_excel",
+        "topology": if multiplexed { "multiplexed" } else { "blocking" },
+        "sources": 1,
+        "subscriptions": subscriptions,
+        "producer_jobs_started": counters.started.load(Ordering::Acquire),
+        "producer_jobs_finished": counters.finished.load(Ordering::Acquire),
+        "producer_jobs_live_after_disconnect": live_after_disconnect,
+        "producer_jobs_live_after_close": counters.live.load(Ordering::Acquire),
+        "subscribe_events_consumed": counters.subscribed.load(Ordering::Acquire),
+        "unsubscribe_events_consumed": counters.unsubscribed.load(Ordering::Acquire),
+        "connect_ns": connect_ns,
+        "start_wait_ns": start_wait_ns,
+        "subscribe_wait_ns": subscribe_wait_ns,
+        "disconnect_ns": disconnect_ns,
+        "unsubscribe_wait_ns": unsubscribe_wait_ns,
+        "close_ns": close_ns,
+    })
+}

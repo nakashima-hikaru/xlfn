@@ -1330,7 +1330,7 @@ actual `CacheNode.pins` field, and its SeqCst contracts do not establish the
 native Relaxed/Release/Acquire history. Index, queue and Box ownership identity
 remain separate obligations. No project-owned trusted adapter, assumption or
 external specification was added. The underlying invariant interface is part of
-[vstd at the pinned Verus revision](https://github.com/verus-lang/verus/blob/671956e/source/vstd/invariant.rs).
+[vstd at the recorded Verus revision](https://github.com/verus-lang/verus/blob/671956e/source/vstd/invariant.rs).
 
 ### Idle callback and recovery composition
 

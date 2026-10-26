@@ -671,6 +671,7 @@ pub(crate) mod test_support {
         registration_arguments_at_release: Vec<RegisterArgument>,
         registration_pointers: Vec<*mut XLOPER12>,
         registration_hook: Option<RegisterHook>,
+        call_hook: Option<(i32, Box<dyn FnOnce()>)>,
     }
 
     thread_local! {
@@ -731,6 +732,13 @@ pub(crate) mod test_support {
         pub(super) fn on_register(&self, hook: impl FnOnce(&[*mut XLOPER12]) + 'static) {
             SCRIPT.with_borrow_mut(|script| script.registration_hook = Some(Box::new(hook)));
         }
+
+        pub(crate) fn on_call(&self, function: i32, hook: impl FnOnce() + 'static) {
+            SCRIPT.with_borrow_mut(|script| {
+                assert!(script.call_hook.is_none());
+                script.call_hook = Some((function, Box::new(hook)));
+            });
+        }
     }
 
     impl Drop for CallbackScript {
@@ -747,6 +755,21 @@ pub(crate) mod test_support {
         arguments: *mut *mut XLOPER12,
         result: *mut XLOPER12,
     ) -> i32 {
+        let hook = SCRIPT.with_borrow_mut(|script| {
+            if script
+                .call_hook
+                .as_ref()
+                .is_some_and(|(target, _)| *target == function)
+            {
+                script.call_hook.take().map(|(_, hook)| hook)
+            } else {
+                None
+            }
+        });
+        // Release the script borrow before simulating host reentry.
+        if let Some(hook) = hook {
+            hook();
+        }
         if function == XLF_REGISTER {
             let hook = SCRIPT.with_borrow_mut(|script| script.registration_hook.take());
             if let Some(hook) = hook {

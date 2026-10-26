@@ -2100,6 +2100,10 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         });
     }
 
+    #[allow(
+        clippy::result_large_err,
+        reason = "Rollback returns the complete affine generation, including RTD limits, without a new allocation"
+    )]
     pub(in crate::lifecycle) fn stage_opening_generation_locked(
         &self,
         core: &mut LifecycleAccess<'_, A>,

@@ -19,9 +19,9 @@ thread_local! {
 
 /// Excel callbacks made by open/cleanup can reenter a lifecycle export. The
 /// outer boundary already owns the transition; waiting for it on this thread
-/// would deadlock. Coalesce nested deactivation into that operation without
-/// leaving a removal intent for its replacement generation. Track runtime
-/// identity so another add-in is still handled.
+/// would deadlock. Coalesce deactivation while closing, but remember it while
+/// opening so that the outer transaction rolls back instead of publishing.
+/// Track runtime identity so another add-in is still handled.
 struct HostLifecycleGuard {
     runtime: *const (),
 }
@@ -45,6 +45,15 @@ impl Drop for HostLifecycleGuard {
         ACTIVE_LIFECYCLES.with_borrow_mut(|active| {
             assert_eq!(active.pop(), Some(self.runtime));
         });
+    }
+}
+
+fn defer_opening_deactivation<A: Addin>(runtime: &Runtime<A>) {
+    if runtime.phase() == LifecyclePhase::Opening {
+        // Do not wait for our own opening transaction or take its cleanup
+        // authority. It will observe this intent after returning from the
+        // current host/application callback and roll back with its session.
+        runtime.request_explicit_removal();
     }
 }
 
@@ -138,6 +147,7 @@ where
     A: Addin,
 {
     let Some(_boundary) = HostLifecycleGuard::enter(runtime) else {
+        defer_opening_deactivation(runtime);
         return 1;
     };
     let mut callbacks = HostCallbackSession::new();
@@ -168,6 +178,7 @@ where
     A: Addin,
 {
     let Some(_boundary) = HostLifecycleGuard::enter(runtime) else {
+        defer_opening_deactivation(runtime);
         return 1;
     };
     let mut callbacks = HostCallbackSession::new();
@@ -337,12 +348,20 @@ mod tests {
             type LifecycleState = ();
             type Error = XllError;
             type Layers = ();
-            #[cfg(feature = "async")]
+            #[cfg(feature = "async-builtin")]
+            type AsyncExecutor = crate::BuiltinAsyncExecutor;
+            #[cfg(all(feature = "async", not(feature = "async-builtin")))]
             type AsyncExecutor = crate::NoAsyncExecutor;
 
-            fn open(_: &OpenContext) -> Result<Opened<()>, XllError> {
+            fn open(_: &OpenContext) -> crate::addin::OpenResult<Self> {
                 SCRIPT.with_borrow_mut(|script| script.opens += 1);
-                Ok(Opened::new(()))
+                let opened = Opened::new(());
+                #[cfg(feature = "async-builtin")]
+                let opened = opened.with_async_executor(crate::BuiltinAsyncExecutor::new(
+                    crate::BuiltinExecutorConfig::new()
+                        .with_poller_count(crate::AsyncPollerCount::new(32).unwrap()),
+                ));
+                Ok(opened)
             }
 
             fn quiesce(_: &mut (), _: &mut ()) -> Result<(), XllError> {
@@ -351,8 +370,9 @@ mod tests {
             }
         }
 
-        // SAFETY: this test add-in creates no threads, callbacks, or other
-        // application execution sources; its state consists only of ().
+        // SAFETY: its state consists only of (). With async-builtin enabled,
+        // every poller is owned and stopped by the framework executor protocol.
+        // There are no application-owned execution sources.
         unsafe impl PhysicallyUnloadableAddin for ReloadAddin {}
 
         #[derive(Default)]
@@ -363,6 +383,9 @@ mod tests {
             quiesces: usize,
             registrations: usize,
             reenter_on_unregister: bool,
+            reenter_on_open_callback: Option<i32>,
+            reenter_with_remove: bool,
+            reentry_status: i32,
             reentries: usize,
             reentry_preserved_owner: bool,
         }
@@ -416,7 +439,10 @@ mod tests {
         ) -> i32 {
             let reentry = SCRIPT.with_borrow_mut(|script| {
                 script.calls.push(function);
-                if function == XLF_UNREGISTER && script.reenter_on_unregister {
+                if script.reenter_on_open_callback == Some(function) {
+                    script.reenter_on_open_callback = None;
+                    Some(script.runtime)
+                } else if function == XLF_UNREGISTER && script.reenter_on_unregister {
                     script.reenter_on_unregister = false;
                     Some(script.runtime)
                 } else {
@@ -429,7 +455,12 @@ mod tests {
                 let runtime = unsafe { &*runtime };
                 let intent = runtime.host_intent();
                 let epoch = runtime.removal_epoch();
-                let status = host_auto_close(runtime);
+                let remove = SCRIPT.with_borrow(|script| script.reenter_with_remove);
+                let status = if remove {
+                    host_auto_remove(runtime)
+                } else {
+                    host_auto_close(runtime)
+                };
                 let preserved = status == 1
                     && runtime.host_intent() == intent
                     && runtime.removal_epoch() == epoch
@@ -474,7 +505,114 @@ mod tests {
             // SAFETY: Excel's callback contract supplies writable result
             // storage; any referenced test data remains process-live.
             unsafe { *result = value };
-            XLRET_SUCCESS
+            if reentry.is_some() {
+                SCRIPT.with_borrow(|script| script.reentry_status)
+            } else {
+                XLRET_SUCCESS
+            }
+        }
+
+        fn open_for_reentry_test(runtime: &Runtime<ReloadAddin>) -> i32 {
+            host_auto_open(
+                runtime,
+                &AddinId::parse("opening-close").unwrap(),
+                "0",
+                "test",
+                &[RegistrationDescriptor {
+                    export_name: "test_opening_close_export",
+                    excel_name: "TEST.OPENING.CLOSE",
+                    signature: RegistrationSignature {
+                        return_abi: xlfn_common::ReturnAbi::Value12,
+                        execution: ExecutionKind::MainThread,
+                        arguments: &[],
+                        volatile: false,
+                    },
+                    category: "Test",
+                    description: "reentrant close during opening",
+                    help_topic: "",
+                    visibility: FunctionVisibility::Public,
+                    arguments: &[],
+                }],
+            )
+        }
+
+        #[test]
+        fn opening_deactivation_is_not_lost_after_host_callback_returns() {
+            for remove in [false, true] {
+                for callback in [XL_GET_NAME, XL_EVENT_REGISTER, XLF_EVALUATE, XLF_REGISTER] {
+                    let runtime = Runtime::<ReloadAddin>::new();
+                    let _callbacks = ReloadCallbacks::install(&runtime);
+                    runtime
+                        .ensure_module_residency(host_auto_close::<ReloadAddin> as *const ())
+                        .unwrap();
+                    SCRIPT.with_borrow_mut(|script| {
+                        script.reenter_on_open_callback = Some(callback);
+                        script.reenter_with_remove = remove;
+                    });
+                    let result = open_for_reentry_test(&runtime);
+                    let phase = runtime.phase();
+                    // Recover the old broken path before asserting, so a
+                    // failure cannot strand the process-global test epoch.
+                    if phase == LifecyclePhase::Open {
+                        host_auto_close(&runtime);
+                    }
+                    assert_eq!(result, 0, "remove={remove}, callback={callback}");
+                    assert_eq!(phase, LifecyclePhase::Closed);
+                    #[cfg(feature = "async")]
+                    assert!(runtime.async_runtime().is_stopped());
+                    SCRIPT.with_borrow(|script| {
+                        assert_eq!(script.reentries, 1);
+                        assert_eq!(script.opens, script.quiesces);
+                        assert_eq!(
+                            script
+                                .calls
+                                .iter()
+                                .filter(|&&call| call == XLF_UNREGISTER)
+                                .count(),
+                            script.registrations,
+                        );
+                    });
+                    // The deferred request belongs only to the canceled open.
+                    // A fresh host invocation may open and close normally.
+                    assert_eq!(open_for_reentry_test(&runtime), 1);
+                    assert_eq!(host_auto_close(&runtime), 1);
+                    assert_eq!(runtime.phase(), LifecyclePhase::Closed);
+                }
+            }
+        }
+
+        #[test]
+        fn opening_deactivation_does_not_renew_a_terminal_callback_session() {
+            for status in [xlfn_sys::XLRET_ABORT, xlfn_sys::XLRET_UNCALCED] {
+                let runtime = Runtime::<ReloadAddin>::new();
+                let _callbacks = ReloadCallbacks::install(&runtime);
+                // Quarantine deliberately retains the production router.
+                // This fixture must release that global test state itself.
+                let _diagnostics = scopeguard::guard((), |_| {
+                    let _ = crate::diagnostics::close_diagnostic_router();
+                });
+                runtime
+                    .ensure_module_residency(host_auto_close::<ReloadAddin> as *const ())
+                    .unwrap();
+                SCRIPT.with_borrow_mut(|script| {
+                    script.reenter_on_open_callback = Some(XLF_REGISTER);
+                    script.reentry_status = status;
+                });
+                assert_eq!(open_for_reentry_test(&runtime), 0);
+                assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
+                #[cfg(feature = "async")]
+                assert!(runtime.async_runtime().is_stopped());
+                assert!(runtime.module_residency_held());
+                SCRIPT.with_borrow(|script| {
+                    assert_eq!(script.reentries, 1);
+                    assert_eq!(
+                        script.calls.iter().rfind(|&&call| call != XL_FREE),
+                        Some(&XLF_REGISTER),
+                    );
+                });
+                assert_eq!(host_auto_close(&runtime), 1);
+                assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
+            }
         }
 
         #[test]

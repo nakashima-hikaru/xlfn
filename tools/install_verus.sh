@@ -6,7 +6,7 @@ set -euo pipefail
 # INSTALL_DIR must be a new dedicated directory. Existing paths are never changed.
 # Default: ~/.local/share/xlfn/verus/<version>/<platform>
 
-VERUS_VERSION="${VERUS_VERSION:-0.2026.09.13.671956e}"
+VERUS_VERSION="${VERUS_VERSION:-0.2026.10.26.d17fbd0}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 OS="$(uname -s)"

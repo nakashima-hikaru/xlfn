@@ -48,6 +48,11 @@ also does not issue a corresponding native event-removal call. These are source
 observations that informed xlfn's lifetime design, not live qualification of
 either OSS or the revised xlfn implementation.
 
+The [2026-10-26 shutdown comparison](../shutdown-comparison.md) separately
+traces the benchmark's NativeAOT 1.10.0-preview5 source revision. It distinguishes
+ordinary close from explicit removal and records the unresolved process-exit
+failure; the event-policy comparison above does not establish identical teardown.
+
 ## Interactive removal counterexample, 2026-10-25
 
 [Selected native evidence](probe-2026-10-25-nil.json) preserves all 98 native

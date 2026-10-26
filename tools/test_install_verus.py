@@ -13,7 +13,8 @@ import zipfile
 
 
 INSTALLER = Path(__file__).with_name("install_verus.sh")
-VERSION = "0.2026.09.13.671956e"
+VERSION = "0.2026.10.26.d17fbd0"
+# Keep the fixture compiler older than the workspace to exercise independent selection.
 TOOLCHAIN = "1.98.1-x86_64-unknown-linux-gnu"
 
 MOCK_COMMAND = """

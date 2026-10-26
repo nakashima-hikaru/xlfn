@@ -22,7 +22,7 @@ RAW_STRING = re.compile(r'(?:br|cr|r)(#*)"')
 CHARACTER = re.compile(r"(?:b)?'(?:[^'\\\n]|\\(?:u\{[0-9a-fA-F_]+\}|x[0-9a-fA-F]{2}|.))'")
 TOKEN = re.compile(r"r#[A-Za-z_][A-Za-z_0-9]*|[A-Za-z_][A-Za-z_0-9]*|::|[^\s]")
 ASSUMPTIONS = {"assume", "admit", "assume_specification"}
-# Audited against rust_verify/src/attributes.rs at the pinned 671956ec commit.
+# Audited against rust_verify/src/attributes.rs at the pinned d17fbd0 commit.
 # Trait adapters and ignored private bounds are trust boundaries too, even
 # when a particular annotation does not by itself assert a new axiom.
 EXTERNALS = {

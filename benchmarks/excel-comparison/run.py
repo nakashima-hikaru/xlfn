@@ -198,6 +198,13 @@ def checkout_commit() -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
+def runner_sources() -> dict[str, str]:
+    """Identify runner-only diagnostic changes even in an uncommitted checkout."""
+    names = ("run.py", "workloads.py", "artifact_manifest.py", "shutdown_diagnostics.py",
+             "shutdown_observation.py", "startup_diagnostics.py")
+    return {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in names}
+
+
 def percentile(values: list[float], pct: float) -> float | None:
     if not values:
         return None
@@ -264,7 +271,8 @@ class ExcelSession:
     def __init__(self, xll: Path | None, threads: int, throttle_ms: int, pid_file: Path,
                  progress: WorkerProgress | None = None, shutdown_diagnostics: bool = False,
                  lifecycle_trace_file: Path | None = None,
-                 process_ready: Callable[[dict[str, Any]], None] | None = None):
+                 process_ready: Callable[[dict[str, Any]], None] | None = None,
+                 dump_on_failure: bool = False):
         import psutil
         import win32com.client
 
@@ -285,7 +293,7 @@ class ExcelSession:
         _, self.pid = win32process.GetWindowThreadProcessId(self.hwnd)
         self.process = psutil.Process(self.pid)
         identity = {"pid": self.pid, "create_time": self.process.create_time()}
-        if shutdown_diagnostics:
+        if shutdown_diagnostics or dump_on_failure:
             try:
                 ticks = process_creation_ticks(self.pid)
                 if psutil.Process(self.pid).create_time() != identity["create_time"]:
@@ -1733,6 +1741,8 @@ def worker(args: argparse.Namespace, case: Case) -> int:
         "id": case.id, "variant": case.variant, "implementation": args.implementation,
         "params": case.params, "profile": args.profile, "repeat": args.repeat,
         "repeat_diagnostics": args.repeat_diagnostics and case.id == "L02",
+        "shutdown_diagnostics": args.shutdown_diagnostics,
+        "dump_on_failure": args.dump_on_failure or args.shutdown_diagnostics,
         "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "host": platform.node(), "os": platform.platform(),
         "xll": str(xll.resolve()), "xll_sha256": hashlib.sha256(xll.read_bytes()).hexdigest(),
@@ -1743,6 +1753,7 @@ def worker(args: argparse.Namespace, case: Case) -> int:
         "ci_run_id": manifest["run_id"] if manifest else None,
         "ci_run_attempt": manifest["run_attempt"] if manifest else None,
         "runner_commit": checkout_commit(),
+        "runner_sources": runner_sources(),
     }
     progress = WorkerProgress(Path(args.progress_file), record)
     startup_log = snapshot_startup_log()
@@ -1756,7 +1767,8 @@ def worker(args: argparse.Namespace, case: Case) -> int:
         progress.stage("load_begin")
         session = ExcelSession(xll, record["threads"], args.throttle_ms, Path(args.pid_file),
                                progress, shutdown_diagnostics=args.shutdown_diagnostics,
-                               lifecycle_trace_file=Path(args.lifecycle_trace_file) if args.lifecycle_trace_file else None)
+                               lifecycle_trace_file=Path(args.lifecycle_trace_file) if args.lifecycle_trace_file else None,
+                               dump_on_failure=args.dump_on_failure)
         session.implementation = args.implementation
         session.repeat_diagnostics = args.repeat_diagnostics
         progress.update(excel_version=str(session.app.Version), excel_build=str(session.app.Build),
@@ -1813,6 +1825,9 @@ def main() -> int:
                         help="L02 only: enable fixture allocation counters; diagnostic timings include counting overhead")
     parser.add_argument("--shutdown-diagnostics", action="store_true",
                         help="record native lifecycle events and save a dump before forced termination (up to 15s extra)")
+    parser.add_argument("--dump-on-failure", action="store_true",
+                        help="save a dump only when Excel survives worker failure or its exit deadline; "
+                             "no lifecycle tracing or exit observer (up to 15s extra on failure)")
     parser.add_argument("--plan", action="store_true")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--case-key", help=argparse.SUPPRESS)
@@ -1877,6 +1892,8 @@ def main() -> int:
                     cmd.append("--allow-commit-mismatch")
                 if args.repeat_diagnostics:
                     cmd.append("--repeat-diagnostics")
+                if args.dump_on_failure:
+                    cmd.append("--dump-on-failure")
                 if args.shutdown_diagnostics:
                     cmd.append("--shutdown-diagnostics")
                     diagnostic_root = out.with_suffix(".diagnostics")
@@ -1895,7 +1912,8 @@ def main() -> int:
                     except (subprocess.TimeoutExpired, RuntimeError, OSError, ValueError) as error:
                         record = recover_worker_record(progress_file, case, implementation, error)
                     cleanup = reap_excel_process(pid_file, grace_s=5 if record["status"] == "ok" else 0,
-                        dump_directory=out.with_suffix(".diagnostics") if args.shutdown_diagnostics else None)
+                        dump_directory=out.with_suffix(".diagnostics")
+                        if args.shutdown_diagnostics or args.dump_on_failure else None)
                 finally:
                     observation = observer.finish() if observer is not None else None
                 if observation is not None:

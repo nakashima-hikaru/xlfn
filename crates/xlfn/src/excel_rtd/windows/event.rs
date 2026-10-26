@@ -39,8 +39,8 @@ fn injected_preparation_error(stage: DrainPreparationStage) -> crate::XllError {
 }
 
 /// Keeps the caller's STA dispatchable while the existing drain protocol
-/// blocks. The scoped worker only waits for the gate; it runs no application
-/// callbacks and cannot outlive either the gate or its completion event.
+/// blocks. The scoped worker runs the supplied drain or source-shutdown
+/// closure and cannot outlive its borrowed resources or completion event.
 /// Preparation failures return the unexecuted closure with its affine owners.
 /// Failures after worker startup remain fail-stop because completion cannot
 /// then be certified and the worker may still borrow closing resources.

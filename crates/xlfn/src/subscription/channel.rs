@@ -3,6 +3,10 @@
     reason = "The channel adapter owns and joins the only worker allowed to use an RTD sink"
 )]
 
+use super::budget::{
+    BudgetPair, BufferPermit, ChannelBudget, RtdDelivery, RtdSourceLimits, SubscriptionPermit,
+    WorkerPermit,
+};
 use super::source::{RtdSink, RtdSource, RtdSubscription};
 use super::topic::RtdTopic;
 use super::value::{IntoRtdValue, StoredRtdValue};
@@ -80,7 +84,9 @@ impl Drop for ProducerPermit {
 /// never returns delays disconnect and add-in unload. Join any additional
 /// threads or callbacks before returning from the producer.
 pub struct RtdChannelSource<T> {
-    capacity: NonZeroUsize,
+    delivery: RtdDelivery,
+    limits: RtdSourceLimits,
+    budget: Arc<ChannelBudget>,
     factory: Box<ProducerFactory<T>>,
     producers: Arc<ProducerSlots>,
     error_policy: RtdProducerErrorPolicy,
@@ -105,7 +111,9 @@ impl<T: IntoRtdValue + Send + 'static> RtdChannelSource<T> {
         P: FnOnce(RtdSender<T>) -> XllResult<()> + Send + 'static,
     {
         Self {
-            capacity,
+            delivery: RtdDelivery::Fifo(capacity),
+            limits: RtdSourceLimits::standard(),
+            budget: Arc::new(ChannelBudget::source(RtdSourceLimits::standard())),
             factory: Box::new(move |topic| {
                 factory(topic).map(|job| Box::new(job) as Box<Producer<T>>)
             }),
@@ -119,6 +127,34 @@ impl<T: IntoRtdValue + Send + 'static> RtdChannelSource<T> {
         }
     }
 
+    /// Selects FIFO buffering or replacement of the unconsumed latest value.
+    #[must_use]
+    pub fn with_delivery(mut self, delivery: RtdDelivery) -> Self {
+        self.delivery = delivery;
+        self
+    }
+
+    /// Sets aggregate source bounds while retaining existing reservations.
+    /// Lowering a bound rejects additional admission until usage permits it.
+    #[must_use]
+    pub fn with_limits(mut self, limits: RtdSourceLimits) -> Self {
+        self.budget.configure_source(limits);
+        self.limits = limits;
+        self
+    }
+
+    /// Returns the buffering policy for new subscriptions.
+    #[must_use]
+    pub const fn delivery(&self) -> RtdDelivery {
+        self.delivery
+    }
+
+    /// Returns the aggregate source limits.
+    #[must_use]
+    pub const fn limits(&self) -> RtdSourceLimits {
+        self.limits
+    }
+
     /// Limits producer threads owned by this source, including exited workers
     /// that have not been joined. The default is 64. At capacity, subscription
     /// setup returns [`XllError::Overloaded`] before invoking the factory.
@@ -127,7 +163,8 @@ impl<T: IntoRtdValue + Send + 'static> RtdChannelSource<T> {
     /// Changing this limit preserves existing reservations; lowering it below
     /// the retained worker count rejects setup until enough workers are joined.
     /// This adapter is intended for tens of independent blocking producers;
-    /// thousands of topics should use a custom multiplexed source instead.
+    /// thousands of topics should use [`super::multiplex::RtdMultiplexedSource`].
+    /// The runtime's producer-worker limit additionally applies across sources.
     /// All sources in a generation additionally share one publisher thread.
     #[must_use]
     pub fn with_max_producers(self, limit: NonZeroUsize) -> Self {
@@ -182,6 +219,19 @@ impl<T> Clone for RtdSender<T> {
 }
 
 impl<T> RtdSender<T> {
+    pub(super) fn cancel(&self) {
+        self.channel.close();
+    }
+
+    pub(super) fn complete(
+        &self,
+        topic: &RtdTopic,
+        result: XllResult<()>,
+        policy: RtdProducerErrorPolicy,
+    ) {
+        Channel::producer_completed(&self.channel, topic, result, policy);
+    }
+
     /// Returns whether this subscription has stopped accepting values.
     pub fn is_closed(&self) -> bool {
         !self.channel.accepting.load(Ordering::Acquire)
@@ -271,7 +321,10 @@ impl<T> RtdSendError<T> {
 }
 
 impl<T: IntoRtdValue> RtdSender<T> {
-    /// Converts once, validates, then tries bounded admission. Full/Closed
+    /// Converts once, validates, then tries bounded admission. Source and
+    /// runtime count/byte limits include queued and currently publishing values.
+    /// Latest-value buffering replaces only an unconsumed value; insufficient
+    /// replacement budget leaves that previous value intact. Full/Closed
     /// return the converted value for `try_send_pending`; conversion runs even
     /// on a closed channel so a valid rejected payload remains recoverable.
     pub fn try_send(&self, value: T) -> Result<(), RtdSendError<T>> {
@@ -290,12 +343,35 @@ impl<T> RtdSender<T> {
     /// The pending value must have the same input type as this sender; it need
     /// not originate from this subscription. Full/Closed return it again.
     pub fn try_send_pending(&self, value: RtdPendingValue<T>) -> Result<(), RtdSendError<T>> {
+        if !self.channel.accepting.load(Ordering::Acquire) {
+            return Err(RtdSendError::Closed(value));
+        }
         let wake_publisher = {
             let mut state = self.channel.state.lock();
             if !state.accepting {
                 return Err(RtdSendError::Closed(value));
             }
-            if state.values.len() >= self.channel.capacity.get() {
+            let bytes = value_bytes(&value.value);
+            if self.channel.delivery == RtdDelivery::Latest && !state.values.is_empty() {
+                let previous_bytes = state.buffered.bytes();
+                if bytes > previous_bytes && !state.buffered.resize(bytes) {
+                    return Err(RtdSendError::Full(value));
+                }
+                // Drop the previous payload before returning any shrinking
+                // reservation to other channels sharing these budgets.
+                *state.values.back_mut().expect("latest queue is nonempty") = value.value;
+                if bytes < previous_bytes {
+                    let resized = state.buffered.resize(bytes);
+                    debug_assert!(resized);
+                }
+                return Ok(());
+            }
+            if let RtdDelivery::Fifo(capacity) = self.channel.delivery
+                && state.values.len() >= capacity.get()
+            {
+                return Err(RtdSendError::Full(value));
+            }
+            if !state.buffered.try_push(bytes) {
                 return Err(RtdSendError::Full(value));
             }
             let was_empty = state.values.is_empty();
@@ -418,8 +494,18 @@ impl Drop for PublisherPool {
     }
 }
 
+fn value_bytes(value: &StoredRtdValue) -> usize {
+    std::mem::size_of::<StoredRtdValue>()
+        + match value {
+            StoredRtdValue::String(text) => text.len(),
+            _ => 0,
+        }
+}
+
 struct ChannelState {
+    // Declaration order drops payloads before returning their capacity.
     values: VecDeque<StoredRtdValue>,
+    buffered: BufferPermit,
     terminal_error: Option<ExcelError>,
     accepting: bool,
     stopping: bool,
@@ -427,7 +513,7 @@ struct ChannelState {
 }
 
 struct Channel {
-    capacity: NonZeroUsize,
+    delivery: RtdDelivery,
     publication: Mutex<Publication>,
     #[cfg(test)]
     panic_publish: AtomicBool,
@@ -442,9 +528,20 @@ struct Channel {
 }
 
 impl Channel {
+    #[cfg(any(test, feature = "bench-internals"))]
     fn new(capacity: NonZeroUsize) -> Self {
+        Self::with_budgets(
+            RtdDelivery::Fifo(capacity),
+            BudgetPair::new(
+                Arc::new(ChannelBudget::source(RtdSourceLimits::standard())),
+                Arc::new(ChannelBudget::runtime(super::topic::RtdLimits::standard())),
+            ),
+        )
+    }
+
+    fn with_budgets(delivery: RtdDelivery, budgets: BudgetPair) -> Self {
         Self {
-            capacity,
+            delivery,
             #[cfg(test)]
             panic_publish: AtomicBool::new(false),
             publication: Mutex::new(Publication {
@@ -454,6 +551,7 @@ impl Channel {
             scheduler: Mutex::new(None),
             state: Mutex::new(ChannelState {
                 values: VecDeque::new(),
+                buffered: budgets.ledger(),
                 terminal_error: None,
                 accepting: true,
                 stopping: false,
@@ -495,30 +593,41 @@ impl Channel {
         if let Some(sink) = publication.sink {
             // Catch within the publication lock: disconnect observes the error
             // and the worker remains available to unrelated subscriptions.
-            let result =
-                crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
-                    #[cfg(test)]
-                    assert!(
-                        !this.panic_publish.swap(false, Ordering::Relaxed),
-                        "injected publisher panic"
-                    );
-                    let mut batch = super::delivery::PublishBatch::new();
-                    {
-                        let mut state = this.state.lock();
-                        if !state.stopping {
-                            for _ in 0..32 {
-                                let Some(value) = state.values.pop_front().or_else(|| {
-                                    state.terminal_error.take().map(StoredRtdValue::Error)
-                                }) else {
-                                    break;
-                                };
+            let result = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
+                #[cfg(test)]
+                assert!(
+                    !this.panic_publish.swap(false, Ordering::Relaxed),
+                    "injected publisher panic"
+                );
+                // Declare the ledger first so a panic before the call drops
+                // the local values before returning their reserved capacity.
+                let _permit;
+                let mut batch = super::delivery::PublishBatch::new();
+                // Transfer one aggregate ledger without releasing capacity.
+                // It remains live until the publication call has consumed or
+                // discarded the values, including cancellation and unwinding.
+                _permit = {
+                    let mut state = this.state.lock();
+                    let mut values = 0;
+                    let mut bytes = 0;
+                    if !state.stopping {
+                        for _ in 0..32 {
+                            if let Some(value) = state.values.pop_front() {
+                                values += 1;
+                                bytes += value_bytes(&value);
                                 batch.push(value);
+                            } else if let Some(error) = state.terminal_error.take() {
+                                batch.push(StoredRtdValue::Error(error));
+                            } else {
+                                break;
                             }
                         }
                     }
-                    sink.publish_batch(batch, &this.stopping)
-                }))
-                .unwrap_or(Err(XllError::Panic));
+                    state.buffered.split(values, bytes)
+                };
+                sink.publish_batch(batch, &this.stopping)
+            }))
+            .unwrap_or(Err(XllError::Panic));
             if result.is_err() {
                 publication.result = result;
                 publication.sink = None;
@@ -590,7 +699,9 @@ impl Channel {
             state.stopping = true;
             self.stopping.store(true, Ordering::Release);
             state.terminal_error = None;
-            std::mem::take(&mut state.values)
+            let values = std::mem::take(&mut state.values);
+            let permit = state.buffered.take_all();
+            (values, permit)
         };
         #[cfg(any(test, feature = "bench-internals"))]
         self.changed.notify_all();
@@ -607,12 +718,15 @@ impl Channel {
                 return false;
             }
             if !state.values.is_empty() {
+                let mut bytes = 0;
                 for _ in 0..32 {
                     let Some(value) = state.values.pop_front() else {
                         break;
                     };
+                    bytes += value_bytes(&value);
                     batch.push(value);
                 }
+                drop(state.buffered.split(batch.len(), bytes));
                 return true;
             }
             if !state.accepting {
@@ -630,6 +744,7 @@ impl Channel {
                 return None;
             }
             if let Some(value) = state.values.pop_front() {
+                drop(state.buffered.split(1, value_bytes(&value)));
                 return Some(value);
             }
             if !state.accepting {
@@ -651,9 +766,37 @@ pub struct RtdChannelSubscription {
     channel: Arc<Channel>,
     producer: Option<JoinHandle<()>>,
     producer_permit: Option<ProducerPermit>,
+    worker_permit: Option<WorkerPermit>,
+    subscription_permit: Option<SubscriptionPermit>,
 }
 
 impl RtdChannelSubscription {
+    pub(super) fn take_subscription_permit(&mut self) -> SubscriptionPermit {
+        self.subscription_permit
+            .take()
+            .expect("attached channel owns its subscription reservation")
+    }
+
+    pub(super) fn attach<T: IntoRtdValue + Send + 'static>(
+        delivery: RtdDelivery,
+        source_budget: Arc<ChannelBudget>,
+        runtime_budget: Arc<ChannelBudget>,
+        sink: RtdSink<T>,
+    ) -> XllResult<Self> {
+        let permit = ChannelBudget::try_subscription(&source_budget)?;
+        let channel = Arc::new(Channel::with_budgets(
+            delivery,
+            BudgetPair::new(source_budget, runtime_budget),
+        ));
+        let mut subscription = Self::start_publisher(channel, sink)?;
+        subscription.subscription_permit = Some(permit);
+        Ok(subscription)
+    }
+
+    pub(super) fn sender<T>(&self) -> RtdSender<T> {
+        Channel::sender(&self.channel)
+    }
+
     fn start_publisher<T: IntoRtdValue + Send + 'static>(
         channel: Arc<Channel>,
         sink: RtdSink<T>,
@@ -666,10 +809,12 @@ impl RtdChannelSubscription {
             channel,
             producer: None,
             producer_permit: None,
+            worker_permit: None,
+            subscription_permit: None,
         })
     }
 
-    fn finish(&mut self) -> XllResult<()> {
+    pub(super) fn finish(&mut self) -> XllResult<()> {
         self.channel.close();
         // Complete both barriers before reporting errors. Consume producer
         // panic payloads without running arbitrary destructors in Drop.
@@ -686,6 +831,8 @@ impl RtdChannelSubscription {
             .take()
             .map(|worker| crate::panic_boundary::contain_panic(worker.join()).map(|()| Ok(())));
         self.producer_permit.take();
+        self.worker_permit.take();
+        self.subscription_permit.take();
         for result in [publisher, producer].into_iter().flatten() {
             match result {
                 Ok(Ok(()) | Err(XllError::Closing)) => {}
@@ -726,10 +873,18 @@ unsafe impl<T: IntoRtdValue + Send + 'static> RtdSource for RtdChannelSource<T> 
 
     fn subscribe(&self, topic: &RtdTopic, sink: RtdSink<T>) -> XllResult<Self::Subscription> {
         let permit = ProducerSlots::reserve(&self.producers)?;
-        let producer = (self.factory)(topic.clone())?;
-        let channel = Arc::new(Channel::new(self.capacity));
-        let mut subscription = RtdChannelSubscription::start_publisher(Arc::clone(&channel), sink)?;
+        let runtime_budget = sink.channel_budget();
+        let worker_permit = ChannelBudget::try_worker(&runtime_budget)?;
+        let mut subscription = RtdChannelSubscription::attach(
+            self.delivery,
+            Arc::clone(&self.budget),
+            runtime_budget,
+            sink,
+        )?;
         subscription.producer_permit = Some(permit);
+        subscription.worker_permit = Some(worker_permit);
+        let producer = (self.factory)(topic.clone())?;
+        let channel = Arc::clone(&subscription.channel);
         let topic = topic.clone();
         let error_policy = self.error_policy;
         subscription.producer = Some(
@@ -841,6 +996,78 @@ mod tests {
 
     const DEADLINE: Duration = Duration::from_secs(5);
 
+    fn latest_with_bytes(bytes: usize) -> Arc<Channel> {
+        let limits = RtdSourceLimits::standard()
+            .with_max_buffered_values(super::super::topic::RtdCapacity::disabled_if_zero(1))
+            .with_max_buffered_bytes(super::super::topic::RtdCapacity::disabled_if_zero(bytes));
+        Arc::new(Channel::with_budgets(
+            RtdDelivery::Latest,
+            BudgetPair::new(
+                Arc::new(ChannelBudget::source(limits)),
+                Arc::new(ChannelBudget::runtime(
+                    super::super::topic::RtdLimits::standard(),
+                )),
+            ),
+        ))
+    }
+
+    #[test]
+    fn latest_replaces_pending_value_and_preserves_old_value_when_growth_is_full() {
+        let channel = latest_with_bytes(std::mem::size_of::<StoredRtdValue>() + 3);
+        let sender = Channel::sender::<String>(&channel);
+        sender.try_send("abc".to_owned()).unwrap();
+        sender.try_send("xy".to_owned()).unwrap();
+        assert_eq!(channel.state.lock().values.len(), 1);
+        let rejected = sender.try_send("long".to_owned()).unwrap_err();
+        assert!(matches!(rejected, RtdSendError::Full(_)));
+        assert_eq!(channel.receive(), Some(StoredRtdValue::String("xy".into())));
+        let pending = rejected.into_pending().unwrap();
+        assert!(matches!(
+            sender.try_send_pending(pending),
+            Err(RtdSendError::Full(_))
+        ));
+        sender.try_send("z".to_owned()).unwrap();
+        assert_eq!(channel.receive(), Some(StoredRtdValue::String("z".into())));
+    }
+
+    #[test]
+    fn miri_latest_in_flight_value_remains_charged_after_dequeue() {
+        let channel = latest_with_bytes(1024);
+        let sender = Channel::sender::<i32>(&channel);
+        sender.try_send(1).unwrap();
+        let in_flight = {
+            let mut state = channel.state.lock();
+            let value = state.values.pop_front().unwrap();
+            let permit = state.buffered.split(1, value_bytes(&value));
+            (value, permit)
+        };
+        assert!(matches!(sender.try_send(2), Err(RtdSendError::Full(_))));
+        channel.close();
+        drop(channel);
+        assert!(matches!(sender.try_send(3), Err(RtdSendError::Closed(_))));
+        drop(sender);
+        drop(in_flight);
+    }
+
+    #[test]
+    fn latest_terminal_error_is_reserved_outside_exhausted_data_budget() {
+        let channel = latest_with_bytes(std::mem::size_of::<StoredRtdValue>());
+        let sender = Channel::sender::<i32>(&channel);
+        sender.try_send(1).unwrap();
+        sender.try_send(2).unwrap();
+        Channel::producer_completed(
+            &channel,
+            &RtdTopic::single("latest-terminal").unwrap(),
+            Err(XllError::Overloaded),
+            RtdProducerErrorPolicy::PublishError(ExcelError::NotAvailable),
+        );
+        let state = channel.state.lock();
+        assert_eq!(state.values.len(), 1);
+        assert_eq!(state.values.front(), Some(&StoredRtdValue::Integer(2)));
+        assert_eq!(state.terminal_error, Some(ExcelError::NotAvailable));
+        assert!(!state.accepting);
+    }
+
     fn capacity() -> NonZeroUsize {
         NonZeroUsize::new(2).unwrap()
     }
@@ -851,9 +1078,24 @@ mod tests {
         SubscriptionServerHandle,
         RtdSink<i32>,
     ) {
+        sink_with_limits(super::super::topic::RtdLimits::standard())
+    }
+
+    fn sink_with_limits(
+        limits: super::super::topic::RtdLimits,
+    ) -> (
+        Arc<SubscriptionRuntime>,
+        SubscriptionServerHandle,
+        RtdSink<i32>,
+    ) {
         let (arena, source, captured, _) =
             crate::subscription::tests::publishing_source::<i32>(None);
-        let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
+        let runtime = Arc::new(SubscriptionRuntime::with_host(
+            crate::generation::RuntimeGeneration::new(1).unwrap(),
+            limits,
+            Default::default(),
+            arena,
+        ));
         let server = runtime.register_test_server(1);
         let prepared = runtime
             .prepare(
@@ -870,6 +1112,61 @@ mod tests {
             .unwrap();
         let sink = captured.lock().clone().unwrap();
         (runtime, server, sink)
+    }
+
+    #[test]
+    fn global_worker_limit_applies_across_sources_until_completed_worker_is_joined() {
+        let (_runtime, _server, sink) = sink_with_limits(
+            super::super::topic::RtdLimits::standard()
+                .with_max_workers(super::super::topic::RtdCapacity::disabled_if_zero(1)),
+        );
+        let first = RtdChannelSource::new(capacity(), |_| Ok(|_: RtdSender<i32>| Ok(())));
+        let second_calls = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls = StdArc::clone(&second_calls);
+        let second = RtdChannelSource::new(capacity(), move |_| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Ok(|_: RtdSender<i32>| Ok(()))
+        });
+        let topic = RtdTopic::single("worker-budget").unwrap();
+        let mut first_subscription = first.subscribe(&topic, sink.clone()).unwrap();
+        assert!(first_subscription.sender::<i32>().wait_closed(DEADLINE));
+        assert!(matches!(
+            second.subscribe(&topic, sink.clone()),
+            Err(XllError::Overloaded)
+        ));
+        assert_eq!(second_calls.load(Ordering::Relaxed), 0);
+        first_subscription.finish().unwrap();
+        let mut second_subscription = second.subscribe(&topic, sink).unwrap();
+        second_subscription.finish().unwrap();
+        assert_eq!(second_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn source_subscription_and_runtime_worker_reservations_return_after_factory_error() {
+        let (_runtime, _server, sink) = sink_with_limits(
+            super::super::topic::RtdLimits::standard()
+                .with_max_workers(super::super::topic::RtdCapacity::disabled_if_zero(1)),
+        );
+        let calls = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
+        let source_calls = StdArc::clone(&calls);
+        let source = RtdChannelSource::new(capacity(), move |_| {
+            if source_calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                return Err(XllError::Overloaded);
+            }
+            Ok(|_: RtdSender<i32>| Ok(()))
+        })
+        .with_limits(
+            RtdSourceLimits::standard()
+                .with_max_subscriptions(super::super::topic::RtdCapacity::disabled_if_zero(1)),
+        );
+        let topic = RtdTopic::single("factory-error-budget").unwrap();
+        assert!(matches!(
+            source.subscribe(&topic, sink.clone()),
+            Err(XllError::Overloaded)
+        ));
+        let mut subscription = source.subscribe(&topic, sink).unwrap();
+        subscription.finish().unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
     }
 
     fn wait_drained(channel: &Channel) {
@@ -1678,12 +1975,19 @@ mod tests {
                 assert!(sender.wait_closed(DEADLINE));
                 Ok(())
             })
-        });
+        })
+        .with_limits(
+            RtdSourceLimits::standard()
+                .with_max_buffered_values(super::super::topic::RtdCapacity::disabled_if_zero(1)),
+        );
         let subscription = source
             .subscribe(&RtdTopic::single("blocked-publisher").unwrap(), sink)
             .unwrap();
         let sender = sender_rx.recv_timeout(DEADLINE).unwrap();
         entered_rx.recv_timeout(DEADLINE).unwrap();
+        // The value has left the FIFO, but its publication has not returned.
+        // It must still consume the source's only buffered-value reservation.
+        assert!(matches!(sender.try_send(2), Err(RtdSendError::Full(_))));
         let (done_tx, done_rx) = mpsc::channel();
         let disconnect = std::thread::spawn(move || {
             done_tx

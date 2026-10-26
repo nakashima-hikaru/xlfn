@@ -131,6 +131,20 @@ class RunnerTests(unittest.TestCase):
                 with self.assertRaisesRegex(SystemExit, "did not fail verification"):
                     self.run_plan(plan, invoke)
 
+    def test_invariant_diagnostic_casing_still_requires_failed_proof_summary(self):
+        # Verus 0.2026.10.26 lowercases this diagnostic; the previous pin did not.
+        summary = "verification results:: 316 verified, 2 errors"
+        for diagnostic in ("Cannot show invariant holds at end of block",
+                           "cannot show invariant holds at end of block"):
+            with self.subTest(diagnostic=diagnostic):
+                output = summary + "\nerror: " + diagnostic
+                self.assertTrue(gate.is_verification_failure(1, output))
+                self.assertFalse(gate.is_verification_failure(0, output))
+                self.assertFalse(gate.is_verification_failure(1, diagnostic))
+                self.assertFalse(gate.is_verification_failure(1, GOOD + "\n" + diagnostic))
+        self.assertFalse(gate.is_verification_failure(
+            1, summary + "\nerror[E0308]: mismatched types"))
+
     def test_timeout_cannot_pass(self):
         plan = gate.MutationPlan()
         self.group(plan)

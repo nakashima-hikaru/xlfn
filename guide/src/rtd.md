@@ -6,51 +6,67 @@ Subscribe from a main-thread UDF and provide scalar values. See
 [Choosing a pattern](choosing-pattern.md) if the formula needs only one future
 result or a reusable Rust object.
 
-## Create a producer
+## Share a connection across topics
 
-Use `RtdChannelSource` for ordinary producers. The source owns a factory that
-runs synchronously during subscription setup and returns an owned producer
-job for the topic. Each job runs once on a framework-owned thread and receives
-only a typed, bounded `RtdSender`. Its captures may include resources that are
-neither `Clone` nor `Sync`. A generation-owned shared publisher forwards accepted values to Excel.
-The capacity passed to `RtdChannelSource::new` limits queued values per subscription.
+Use `RtdMultiplexedSource` when one connection or event loop serves many
+topics. Its owned job starts on one framework-owned worker when the first
+subscription connects. Further subscriptions receive their own typed,
+bounded `RtdSender` without starting more producer threads. The job can own
+resources that are neither `Clone` nor `Sync`.
+
+The context receives `Subscribe { id, topic, sender }` and `Unsubscribe { id }`
+events. Track subscriptions by their opaque `RtdSubscriptionId`: reconnecting
+the same topic creates a new ID, so an old removal cannot remove a new
+subscription. Multiple functions can share the same registered source handle.
+
+```rust
+{{#include ../../examples/rtd-source/src/multiplexed_metric_source.rs}}
+```
+
+`Client` is a placeholder for a shared connection. Its operations must be
+bounded or cancellation-aware; `try_next_update` is non-blocking. The loop
+bounds both control-event and data processing per turn. Updates are routed
+by symbol without scanning idle topics. Its explicit overload policy drops
+a sampled update when the shared buffering budget is exhausted.
+
+The optional topic validator runs synchronously during subscription setup.
+Use it for inexpensive validation, with network initialization in the worker.
+A validation failure rejects that subscription without stopping the source.
+
+The source worker stays available when its last topic disconnects and is
+joined at runtime shutdown. A completed source is terminal: a successful
+return closes sender admission and drains accepted values; it does not
+restart on a later subscription. Errors and panics apply the configured
+producer error policy to connected topics. `RetainLastValue` is the default;
+`PublishError` drains accepted data, then publishes an Excel error using one
+reserved terminal slot per subscription. A successful return adds no error.
+A completed source retains its runtime worker reservation until shutdown
+joins the exited worker.
+
+## Independent blocking producers
+
+Use `RtdChannelSource` when each topic needs its own blocking job. Its factory
+runs synchronously during subscription setup and returns an owned job that
+runs once on its own worker. The factory should validate and prepare captures;
+perform bounded or cancellation-aware I/O in the job.
 
 ```rust
 {{#include ../../examples/rtd-source/src/metric_source.rs}}
 ```
 
-In this illustrative loop, `try_next_metric` is a non-blocking poll and
-`wait_closed` makes the polling delay interruptible. Use bounded or
-cancellation-aware I/O so the callback returns promptly after admission
-closes. The factory validates the topic before any worker starts. Producer
-errors and panics close sender admission and are diagnosed immediately, even
-while the subscription remains connected. Diagnostics include the topic and
-the original failure. `RetainLastValue` is the default producer error policy:
-accepted values drain and the cell keeps the final value. Configure
-`.with_error_policy(RtdProducerErrorPolicy::PublishError(ExcelError::NotAvailable))`
-to replace it with an Excel error after accepted updates drain. The adapter
-reserves one terminal error slot in addition to the bounded data queue, so even
-a full queue cannot hide a producer failure. A successful producer return
-does not publish an error.
+This adapter creates one producer thread per active subscription. It admits
+at most 64 retained producer workers per source by default; set a different
+nonzero bound with `.with_max_producers(limit)`. A reservation lasts until
+disconnect joins the worker, even if the job has already exited. Lowering the
+bound preserves existing reservations and rejects new subscriptions until
+enough workers are joined. The runtime's worker limit additionally applies
+across all blocking and multiplexed sources.
 
-Each active subscription uses one producer thread. All channel subscriptions in
-a runtime generation share one publisher and one cleanup worker, for N+2
-threads during streaming, plus one notification worker per started Excel RTD
-server on Windows. The first connection prepares the cleanup worker,
-which remains until close. Each source
-admits at most 64 producer workers by default; configure a lower or higher
-nonzero bound with `.with_max_producers(limit)`. A worker retains its reservation
-until disconnect joins it, including when it has already exited. Reconfiguring
-the bound preserves existing reservations; reducing it below the retained
-worker count rejects new subscriptions until enough workers are joined.
-At capacity, setup returns `XllError::Overloaded` before invoking the factory.
-This source-local bound is independent of the runtime's active-stream limit.
-The adapter is intended for tens of independent blocking feeds. For thousands
-of topics, use a custom `RtdSource` that multiplexes them onto shared I/O workers;
-a framework async or multiplexed adapter can be added when that scale is needed.
-The publisher
-processes at most 32 values per topic turn before yielding to another ready
-topic. A stalled publication can delay other topics on the shared worker.
+Both adapters share one publisher and one cleanup worker per runtime
+generation, plus one notification worker per started Excel RTD server on
+Windows. The publisher processes at most 32 values per topic turn before
+yielding to another ready topic. A stalled publication can delay other topics
+on that worker.
 
 ## Register and subscribe
 
@@ -135,7 +151,44 @@ and `topic.parts()` to iterate over all parts.
 
 A topic must contain at least one non-empty part. Each part must fit Excel's 32,767 UTF-16-unit counted-string representation.
 
-The runtime also applies bounded admission limits. The standard limits are 253 topic parts, 1 MiB of UTF-8 text per topic, 64 MiB of pending-topic text in aggregate, 4,096 pending preparations, 4,096 active streams, 4,096 queued updates, and 4,096 distinct live source identities. Configure limits during `Addin::open` with `RuntimeConfig::new().with_rtd(RtdConfig::new().with_limits(limits))`; use `RtdCapacity::bounded` or `RtdCapacity::disabled` for each resource class so a disabled limit is explicit rather than an untyped zero. Exceeding a limit returns `XllError::Overloaded` (or a topic input error for an invalid topic).
+The runtime also applies bounded admission limits. The standard limits are
+253 topic parts, 1 MiB of UTF-8 text per topic, 64 MiB of pending-topic text
+in aggregate, 4,096 pending preparations, 4,096 active streams, 4,096 dirty
+topic updates awaiting refresh, and 4,096 distinct live source identities.
+Configure limits during `Addin::open` with
+`RuntimeConfig::new().with_rtd(RtdConfig::new().with_limits(limits))`.
+Use `RtdCapacity::bounded` or `RtdCapacity::disabled` for each resource class;
+zero never means unlimited. Exceeding a limit returns `XllError::Overloaded`
+(or a topic input error for an invalid topic).
+
+Adapter buffering and worker limits are separate from dirty refresh topics:
+
+| Resource | Default | Configuration |
+| --- | --- | --- |
+| Subscriptions and retained lifecycle reservations per source | 4,096 | `RtdSourceLimits::with_max_subscriptions` |
+| Buffered data values per source | 4,096 | `RtdSourceLimits::with_max_buffered_values` |
+| Buffered data bytes per source | 64 MiB | `RtdSourceLimits::with_max_buffered_bytes` |
+| Buffered data values across the runtime | 4,096 | `RtdLimits::with_max_buffered_values` |
+| Buffered data bytes across the runtime | 64 MiB | `RtdLimits::with_max_buffered_bytes` |
+| Retained producer workers across the runtime | 64 | `RtdLimits::with_max_workers` |
+
+Set source limits with `.with_limits(RtdSourceLimits::standard()...)`.
+Buffered values remain charged while a publication batch is in flight. Byte
+accounting covers each stored value representation and its owned UTF-8 string
+payload; it excludes spare queue capacity, allocator overhead, conversion
+temporaries, upstream buffers, and Excel-side storage. Each subscription has
+one additional fixed terminal-error slot. Worker admission counts a shared
+source once and a blocking source once per producer, including exited workers
+not yet joined. Publisher, cleanup, and COM notification workers are separate
+fixed infrastructure.
+
+A multiplexed subscription retains its source reservation through channel
+revocation and then until the worker dequeues its `Unsubscribe` event. When
+the source stops, queued removals release their reservations; live
+subscriptions release theirs when disconnected. This also bounds control
+backlog when a worker is slow. Disconnect can enqueue its terminal event
+without competing for another slot; repeated connect/disconnect cannot bypass
+the source limit.
 
 The active-stream limit includes disconnected subscriptions until their source
 cleanup finishes. Each connection reserves its terminal cleanup capacity and
@@ -144,6 +197,16 @@ slot, a new connection returns `Overloaded`; an admitted subscription's
 `DisconnectData` can always revoke its topic and transfer its cleanup.
 
 ## Backpressure and errors
+
+`RtdDelivery::Fifo(capacity)` queues accepted data in order up to the
+per-subscription capacity. `RtdDelivery::Latest` keeps at most one pending
+data value, replacing it with newer accepted data. It does not retract a
+publication already in flight. Both modes also enforce source and runtime
+buffer budgets. A rejected replacement preserves the old pending value and
+returns the new value in `RtdSendError::Full`. Terminal errors remain separate
+from data and cannot be replaced by later samples. Set the blocking adapter's
+mode with `.with_delivery(...)`; its constructor otherwise retains FIFO
+behavior.
 
 `RtdSender::try_send` validates values before enqueueing and never waits for
 queue capacity. `RtdSendError::Full` and `RtdSendError::Closed` retain the
@@ -162,9 +225,10 @@ and reports that error during disconnect. `Closing` is treated as normal
 shutdown when it follows cancellation. Returning `Closing` from a producer
 before cancellation is diagnosed as a producer failure.
 
-Producer errors and panics are reported once at completion and are not repeated
-as disconnect errors. Disconnect still returns publication or worker-join
-failures; it remains the lifetime barrier for workers and sinks.
+Producer errors and panics are diagnosed at completion. Publication or
+worker-join failures can also be returned by shutdown. The framework revokes
+each topic's publication capability before its subscription is reclaimed;
+source-wide shutdown joins shared workers.
 
 Publishing validates and queues a value; xlfn notifies Excel and handles
 `RefreshData`. On Windows, a dedicated worker coalesces notices so a blocked
@@ -179,24 +243,29 @@ does not guarantee an Excel recalculation deadline while Excel is busy.
 ## Stop a producer
 
 During disconnect, the channel stops accepting values, discards queued
-updates, waits for in-flight publication, revokes its sink, and joins its
-producer. The generation joins the shared publisher after all subscriptions
-have disconnected. Excel's `DisconnectData` first revokes the topic, then
+updates, waits for in-flight publication, and revokes its sink. A blocking
+subscription then joins its producer; a multiplexed subscription enqueues
+`Unsubscribe` and leaves its shared source worker serving other topics.
+Excel's `DisconnectData` first revokes the topic, then
 transfers this cleanup to the generation-owned worker so Excel's thread can
 service an outstanding COM callback. The Windows cleanup worker initializes
 COM as an MTA. Sender cancellation follows when the
 worker reaches this subscription; `DisconnectData` does not wait for its
 producer to exit. Live subscriptions and queued or running cleanups together
 are bounded by the runtime's active-stream limit; a stalled cleanup delays later
-cleanups. Close drains and joins this worker before reclaiming the server or
-source. Cleanup failures are diagnosed and retained for shutdown. The
+cleanups. Runtime close requests every shared source to stop, finishes
+subscription cleanup, and joins shared source workers before stopping the
+publisher or reclaiming sources. A source context's `recv_timeout` wakes with
+`XllError::Closing` after stop. Shared jobs must observe cancellation and return;
+arbitrarily blocked user I/O cannot be forcibly terminated safely.
+Cleanup failures are diagnosed and retained for shutdown. The
 `RtdSubscription::disconnect_and_wait` lifetime barrier remains synchronous.
 Sender clones may outlive the
 subscription, but valid sends return `RtdSendError::Closed`; conversion errors
 can still return `RtdSendError::Invalid`. They retain no live RTD capability or
-queued payloads. Producer captures belong to that job and are
-dropped before its worker is joined. Dropping the source configuration does
-not stop or destroy a running job.
+queued payloads. Producer captures belong to that job and are dropped before
+its worker is joined. Dropping a multiplexed source also requests stop and
+joins its worker as a fallback.
 
 A producer that finishes successfully closes sender admission and drains
 accepted values. The shared publisher remains available to other topics.
@@ -206,9 +275,12 @@ own removal through Excel: removal waits for those same workers to stop.
 
 ## Custom sources
 
-If `RtdChannelSource` cannot represent your producer, the unsafe `RtdSource`
-and `RtdSubscription` traits offer a custom integration path. Read their
-complete safety contracts in the API documentation before implementing them.
+`RtdMultiplexedSource` and `RtdChannelSource` keep sink lifetime management
+inside the framework. The unsafe `RtdSource` and `RtdSubscription` traits
+remain available for integrations requiring direct publication. Read their
+complete safety contracts before implementing them, including error and
+panic paths. Source-wide `request_stop` and `shutdown_and_wait` hooks are
+separate from per-topic cancellation and disconnection.
 
 ## Temporary COM registration
 

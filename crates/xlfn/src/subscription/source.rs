@@ -7,9 +7,14 @@ use super::ErasedSink;
 use super::topic::RtdTopic;
 use super::value::IntoRtdValue;
 use crate::generation::RuntimeGeneration;
+use crate::panic_boundary::catch_no_unwind;
 use crate::sync::Mutex;
 use crate::{XllError, XllResult};
 use std::marker::PhantomData;
+use std::panic::AssertUnwindSafe;
+
+#[cfg(all(test, feature = "rtd"))]
+mod lifecycle_tests;
 
 /// A subscription whose cancellation and disconnection protocol is explicit.
 ///
@@ -104,6 +109,10 @@ pub(crate) struct SourceArena {
 }
 
 impl SourceArena {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.sources.is_empty()
+    }
+
     #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn empty(generation: RuntimeGeneration) -> Self {
         Self {
@@ -118,6 +127,36 @@ impl SourceArena {
         }
         let index = usize::try_from(id.sequence - 1).ok()?;
         self.sources.get(index).map(Box::as_ref)
+    }
+
+    /// Request every source to stop before waiting for any source worker.
+    /// A failing source must not prevent cancellation of unrelated sources.
+    pub(crate) fn request_stop(&self) -> XllResult<()> {
+        let mut first_error = None;
+        for source in &self.sources {
+            if catch_no_unwind(AssertUnwindSafe(|| source.request_stop())).is_err()
+                && first_error.is_none()
+            {
+                first_error = Some(XllError::Panic);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
+    /// Join every source after its subscriptions have relinquished their sinks.
+    /// Hooks uphold their barrier on errors and unwinding as well as success.
+    pub(crate) fn shutdown_and_wait(&self) -> XllResult<()> {
+        let mut first_error = None;
+        for source in &self.sources {
+            let result = catch_no_unwind(AssertUnwindSafe(|| source.shutdown_and_wait()))
+                .unwrap_or(Err(XllError::Panic));
+            if let Err(error) = result
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 
     #[cfg(test)]
@@ -143,8 +182,9 @@ impl std::fmt::Debug for SourceArena {
 
 /// A source that can issue non-owning sinks into its subscription workers.
 ///
-/// Prefer [`super::channel::RtdChannelSource`] for ordinary producers. It
-/// contains the sink lifetime proof within the framework.
+/// Prefer [`super::multiplex::RtdMultiplexedSource`] for shared connections or
+/// [`super::channel::RtdChannelSource`] for independent blocking producers.
+/// Both keep the sink lifetime proof within the framework.
 ///
 /// # Safety
 ///
@@ -161,6 +201,9 @@ impl std::fmt::Debug for SourceArena {
 ///
 /// This contract is required because [`RtdSink`] is a lifetime-less,
 /// non-owning capability into a runtime-owned publish core.
+/// Source-owned workers and callbacks must also stop before
+/// [`RtdSource::shutdown_and_wait`] returns or unwinds. Source shutdown does
+/// not extend any subscription's sink lifetime.
 pub unsafe trait RtdSource: Send + Sync + 'static {
     /// Owned values accepted by this source's publication capability.
     type Value: IntoRtdValue + Send + 'static;
@@ -173,6 +216,33 @@ pub unsafe trait RtdSource: Send + Sync + 'static {
         topic: &RtdTopic,
         sink: RtdSink<Self::Value>,
     ) -> XllResult<Self::Subscription>;
+
+    /// Requests that shared source work stop without waiting for it to exit.
+    ///
+    /// The runtime calls this for every source after new subscription admission
+    /// closes, before waiting for already admitted operations or any source.
+    /// It may race an in-flight `subscribe`: synchronize shutdown with setup
+    /// so no new worker can escape the eventual source shutdown barrier.
+    /// Implementations must return promptly, tolerate repeated calls, and
+    /// must not initiate removal of this add-in.
+    /// Sources whose workers belong entirely to subscriptions need no hook.
+    fn request_stop(&self) {}
+
+    /// Stops and joins source-owned workers after all subscriptions disconnect.
+    ///
+    /// This must complete the worker/callback barrier even when returning an
+    /// error or unwinding, and must work without an earlier `request_stop`.
+    /// Repeated calls must remain valid. Use a cleanup guard for panicking
+    /// shutdown paths, and implement equivalent cleanup when the source drops
+    /// without ever being installed in a runtime.
+    ///
+    /// Lifecycle hooks may run on framework-owned threads. They must not rely
+    /// on the opening or subscribing thread's affinity; apartment-bound COM
+    /// interfaces require marshaling. Shutdown must not synchronously initiate
+    /// removal of this add-in, which waits for these same workers.
+    fn shutdown_and_wait(&self) -> XllResult<()> {
+        Ok(())
+    }
 }
 
 /// Non-owning identity for a runtime-owned RTD source.
@@ -231,6 +301,11 @@ pub struct RtdSink<T> {
 
 impl<T> RtdSink<T> {
     #[cfg(feature = "rtd")]
+    pub(super) fn channel_budget(&self) -> triomphe::Arc<super::budget::ChannelBudget> {
+        self.sink.channel_budget()
+    }
+
+    #[cfg(feature = "rtd")]
     pub(super) fn erased(&self) -> ErasedSink {
         self.sink
     }
@@ -270,6 +345,8 @@ where
 
 pub(crate) trait ErasedRtdSource: Send + Sync {
     fn subscribe(&self, topic: &RtdTopic, sink: ErasedSink) -> XllResult<Box<dyn RtdSubscription>>;
+    fn request_stop(&self);
+    fn shutdown_and_wait(&self) -> XllResult<()>;
 }
 
 impl<S> ErasedRtdSource for S
@@ -286,5 +363,13 @@ where
             },
         )?;
         Ok(Box::new(sub))
+    }
+
+    fn request_stop(&self) {
+        RtdSource::request_stop(self);
+    }
+
+    fn shutdown_and_wait(&self) -> XllResult<()> {
+        RtdSource::shutdown_and_wait(self)
     }
 }

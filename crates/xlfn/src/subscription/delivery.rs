@@ -85,6 +85,13 @@ impl ErasedSink {
     }
 
     #[cfg(feature = "rtd")]
+    pub(super) fn channel_budget(&self) -> triomphe::Arc<super::budget::ChannelBudget> {
+        // SAFETY: the subscription's sink-transfer contract keeps services
+        // alive while attaching its channel. Only owned accounting escapes.
+        triomphe::Arc::clone(&unsafe { self.services.as_ref() }.channel_budget)
+    }
+
+    #[cfg(feature = "rtd")]
     pub(super) fn publisher_queue(
         &self,
     ) -> XllResult<triomphe::Arc<super::channel::PublisherQueue>> {

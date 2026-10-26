@@ -54,6 +54,12 @@ def summarize(records: list[dict]) -> list[dict]:
                "excel_dna_status": dna["status"] if dna else "missing",
                "xlfn_value": None, "excel_dna_value": None, "xlfn_advantage_ratio": None,
                "comparable": False, "reason": "missing or failed run"}
+        if any(record and (record.get("shutdown_diagnostics", False)
+                           or "lifecycle_trace" in record or "process_exit_observation" in record)
+               for record in (xlfn, dna)):
+            row["reason"] = "lifecycle-instrumented shutdown diagnostic run"
+            pairs.append(row)
+            continue
         if id == "L02" and any(record and record.get("repeat_diagnostics", False)
                                for record in (xlfn, dna)):
             row["reason"] = "allocation-instrumented L02 diagnostic run"
@@ -89,7 +95,8 @@ def summarize(records: list[dict]) -> list[dict]:
             conditions = ("profile", "params", "threads", "rtd_throttle_ms",
                           "excel_version", "excel_build", "excel_bitness", "host", "os",
                           "artifact_source", "artifact_architecture", "ci_commit", "ci_run_id")
-            conditions += ("runner_commit", "calculation_mode")
+            conditions += ("runner_commit", "runner_sources", "calculation_mode",
+                           "dump_on_failure", "shutdown_diagnostics")
             if all(xlfn.get(key) == dna.get(key) for key in conditions):
                 left = xlfn["metrics"].get(metric)
                 right = dna["metrics"].get(metric)

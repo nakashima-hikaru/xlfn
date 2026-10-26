@@ -380,6 +380,34 @@ forced termination cannot preserve an `ok` result; PID reuse never authorizes
 terminating a different process. Execution and cleanup errors are retained
 separately when both occur.
 
+For intermittent exit failures, `--dump-on-failure` keeps lifecycle tracing and
+the passive exit observer disabled. It records native process identity once at
+startup, then captures the surviving Excel process only after worker failure or
+the existing five-second post-worker exit deadline, before forced termination.
+Use the same option for both implementations. The extra identity lookup is part
+of startup time; this mode does not claim zero overhead. It adds no UDF tracing
+or allocation counters. A failed capture is recorded and cannot prevent reaping
+or turn the failed case into a success.
+
+```powershell
+python .\run.py --profile smoke --id S01 --id M01 --id T01 `
+  --artifacts .\artifacts --repeat 3 --threads 1 `
+  --dump-on-failure --out smoke-exit-repro.jsonl
+```
+
+Preserve the original case order when repeating a flaky batch. Keep every JSONL
+and its matching `.diagnostics` directory, including unsuccessful dump attempts.
+A successful repeat does not resolve an earlier exit failure. This mode can
+capture blocking stacks without the opt-in lifecycle trace, but it does not
+guarantee that one dump identifies the root cause. A later diagnostic run may
+still be needed after inspecting it. `--shutdown-diagnostics` remains the option
+for full lifecycle and common-clock exit observations below.
+
+Records include both diagnostic flags and SHA-256 hashes of the runner sources.
+The paired summarizer requires matching modes and source hashes and excludes
+full lifecycle-instrumented shutdown runs from performance ratios. No XLL
+rebuild is needed for the dump-only runner option.
+
 For a result with `execution_status: "ok"`, `stage: "closed"`, and
 `excel_process_cleanup.forced_kill: true`, the worker completed its Python
 cleanup but Excel did not exit within the parent's five-second deadline.

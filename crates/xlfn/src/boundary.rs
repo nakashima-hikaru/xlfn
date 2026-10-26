@@ -9,6 +9,9 @@ pub(crate) mod host;
 #[cfg(test)]
 mod event_lifecycle_tests;
 
+#[cfg(test)]
+mod event_shutdown_tests;
+
 use crate::diagnostics::AddinId;
 use crate::error::XllError;
 use crate::panic_boundary::catch_no_unwind;

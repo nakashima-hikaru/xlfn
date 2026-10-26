@@ -11,6 +11,8 @@
     )
 )]
 
+#[cfg(feature = "rtd")]
+mod budget;
 mod catalog;
 #[cfg(feature = "rtd")]
 mod channel;
@@ -19,6 +21,8 @@ mod delivery;
 mod disconnect;
 mod host;
 mod identity;
+#[cfg(feature = "rtd")]
+mod multiplex;
 mod runtime;
 mod runtime_services;
 mod server;
@@ -34,12 +38,19 @@ pub(crate) type SubscriptionConnection =
 pub(crate) type SubscriptionServerHandle =
     server::SubscriptionServerHandle<crate::excel_rtd::RtdSubscriptionHost>;
 
+#[cfg(feature = "rtd")]
+pub use budget::{RtdDelivery, RtdSourceLimits};
 #[cfg(all(feature = "rtd", feature = "bench-internals"))]
 pub use channel::channel_protocol_probe;
 #[cfg(feature = "rtd")]
 pub use channel::{
     RtdChannelSource, RtdChannelSubscription, RtdPendingValue, RtdProducerErrorPolicy,
     RtdSendError, RtdSender,
+};
+#[cfg(feature = "rtd")]
+pub use multiplex::{
+    RtdMultiplexedSource, RtdMultiplexedSubscription, RtdSourceContext, RtdSourceEvent,
+    RtdSubscriptionId,
 };
 #[cfg(feature = "rtd")]
 pub use source::{RtdSink, RtdSource, RtdSourceHandle, RtdSubscription};

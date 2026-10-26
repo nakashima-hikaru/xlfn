@@ -60,6 +60,8 @@ pub(crate) struct SubscriptionRuntime<H: SubscriptionHost> {
     pub(crate) services: PublishedOwner<RuntimeServices>,
     #[cfg(test)]
     pub(crate) test_enter_hook: Mutex<Option<OperationEnterHook>>,
+    #[cfg(test)]
+    pub(crate) fail_source_shutdown_preflight: std::sync::atomic::AtomicBool,
 }
 
 impl<H: SubscriptionHost> SubscriptionRuntime<H> {
@@ -112,6 +114,8 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             disconnects: super::disconnect::DisconnectPool::new(limits.max_active.get()),
             #[cfg(test)]
             test_enter_hook: Mutex::new(None),
+            #[cfg(test)]
+            fail_source_shutdown_preflight: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -646,6 +650,13 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         }
 
         let runtime_wait = self.services.runtime_gate.close_and_wait_begin();
+
+        // Shared source workers are independent of individual subscriptions.
+        // Cancel every source before waiting for admission: a deferred
+        // disconnect may hold admission while waiting for shared work to stop.
+        // In-flight setup must synchronize with this cancellation and roll
+        // back when necessary. A panic must not skip other source callbacks.
+        self.record_cleanup_result(self.sources.request_stop());
         runtime_wait.wait();
 
         let server_pointers = {
@@ -695,6 +706,21 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             self.record_cleanup_result(Err(err));
         }
 
+        // Every subscription has relinquished its raw sink. Join the shared
+        // source jobs before any source/service/module can be reclaimed. On
+        // Windows keep Excel's STA dispatchable while a source finishes COM
+        // work. Preparation failure leaves all join owners in their sources.
+        match self.join_sources_with_dispatch() {
+            Ok(result) => self.record_cleanup_result(result),
+            Err(error) => {
+                self.record_cleanup_result(Err(error));
+                let mut term_state = self.termination_coordinator.state.lock();
+                term_state.phase = ServerTerminationPhase::Failed;
+                self.termination_coordinator.completed.notify_all();
+                return self.cleanup_result();
+            }
+        }
+
         // Deferred jobs have drained admission and live owners have now
         // finished their barriers. Join the worker's COM apartment teardown
         // before any server, source, service, or module can be reclaimed.
@@ -727,6 +753,33 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         }
 
         self.cleanup_result()
+    }
+
+    /// The outer result distinguishes failed dispatch preparation (no hook
+    /// executed) from source errors after every shutdown barrier completed.
+    fn join_sources_with_dispatch(&self) -> XllResult<XllResult<()>> {
+        if self.sources.is_empty() {
+            return Ok(Ok(()));
+        }
+        #[cfg(test)]
+        if self
+            .fail_source_shutdown_preflight
+            .swap(false, Ordering::Relaxed)
+        {
+            return Err(XllError::Overloaded);
+        }
+        let mut source_result = Ok(());
+        let sources = &self.sources;
+        let join_sources = || source_result = sources.shutdown_and_wait();
+        #[cfg(all(windows, any(feature = "rtd", feature = "handles")))]
+        crate::excel_rtd::drain_with_com_dispatch(join_sources)
+            .map_err(|(error, _unused_join)| error)?;
+        #[cfg(not(all(windows, any(feature = "rtd", feature = "handles"))))]
+        {
+            let mut join_sources = join_sources;
+            join_sources();
+        }
+        Ok(source_result)
     }
 
     pub(crate) fn terminate_server(&self, generation: ServerGeneration) -> XllResult<()> {

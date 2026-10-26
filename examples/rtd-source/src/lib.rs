@@ -3,14 +3,33 @@
 use xlfn::prelude::*;
 use xlfn::rtd::{RtdSourceHandle, RtdValue};
 
+#[allow(
+    dead_code,
+    reason = "Compile the independent blocking-producer alternative"
+)]
 mod metric_source;
+mod multiplexed_metric_source;
 
-use metric_source::{MetricSource, metric_source};
+use multiplexed_metric_source::{MetricSource, metric_source};
 
 #[derive(Default)]
 pub(crate) struct Client;
 
 impl Client {
+    // These placeholders stand for one bounded, cancellation-aware connection.
+    fn subscribe(&mut self, _symbol: &str) -> Result<(), std::io::Error> {
+        Ok(())
+    }
+
+    fn unsubscribe(&mut self, _symbol: &str) -> Result<(), std::io::Error> {
+        Ok(())
+    }
+
+    fn try_next_update(&mut self) -> Result<Option<(String, f64)>, std::io::Error> {
+        Ok(None)
+    }
+
+    #[allow(dead_code, reason = "Used by the blocking-producer alternative")]
     fn try_next_metric(&self, _symbol: &str) -> Result<Option<f64>, std::io::Error> {
         Ok(None)
     }

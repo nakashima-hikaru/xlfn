@@ -24,6 +24,7 @@ from run import (XL_AUTOMATIC, XL_MANUAL, XL_ERR_NUM, AsyncControl, ComObject, C
                  registration_diagnostics, run_async, reap_excel_process, run_scalar, run_text, allocation_snapshot,
                  recover_worker_record, run_async_cancel, run_async_gate, run_async_repeated, run_matrix, run_numeric_output_pair,
                  native_abi_formula, run_native_abi_pair, classify_abi_semantics, run_native_abi_semantics, artifact)
+from run import main as benchmark_main
 from summarize import PRIMARY, summarize
 from workloads import IDS, Case, cases
 
@@ -35,6 +36,77 @@ def atomic_write_json(path: Path, payload: Any) -> None:
 
 
 class PlanTest(unittest.TestCase):
+    def test_dump_only_records_native_identity_without_enabling_lifecycle_observation(self):
+        for dump_only, full_diagnostics in ((False, False), (True, False), (False, True), (True, True)):
+            with self.subTest(dump_only=dump_only, full_diagnostics=full_diagnostics), \
+                    tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                pid_file = root / "excel.pid"
+                progress = WorkerProgress(root / "progress.json", {})
+                app = SimpleNamespace(Hwnd=99, Calculation=XL_AUTOMATIC,
+                    Workbooks=SimpleNamespace(Add=lambda: object()),
+                    RTD=SimpleNamespace(ThrottleInterval=100),
+                    MultiThreadedCalculation=SimpleNamespace(Enabled=True, ThreadMode=0, ThreadCount=1))
+                process = Mock()
+                process.create_time.return_value = 42.0
+                process.memory_info.return_value = SimpleNamespace(rss=1024)
+                client = SimpleNamespace(DispatchEx=Mock(return_value=app))
+                modules = {"psutil": SimpleNamespace(Process=Mock(return_value=process)),
+                           "win32com": SimpleNamespace(client=client), "win32com.client": client,
+                           "win32process": SimpleNamespace(GetWindowThreadProcessId=lambda hwnd: (1, 123))}
+                with patch.dict("sys.modules", modules), \
+                        patch("run.process_creation_ticks", return_value=123456) as ticks, \
+                        patch("run.await_observer", return_value={"status": "watching"}) as observe, \
+                        patch("run.prepare_lifecycle_trace", return_value={"path": "trace"}) as trace, \
+                        patch("run.threading.Thread"):
+                    session = ExcelSession(None, 1, 100, pid_file, progress,
+                        shutdown_diagnostics=full_diagnostics, lifecycle_trace_file=root / "trace.jsonl",
+                        dump_on_failure=dump_only)
+                identity = json.loads(pid_file.read_text())
+                self.assertEqual(identity["pid"], 123)
+                self.assertEqual("creation_ticks" in identity, dump_only or full_diagnostics)
+                self.assertEqual(ticks.call_count, int(dump_only or full_diagnostics))
+                self.assertEqual(observe.call_count, int(full_diagnostics))
+                self.assertEqual(trace.call_count, int(full_diagnostics))
+                self.assertEqual(session.shutdown_diagnostics, full_diagnostics)
+                self.assertEqual("lifecycle_trace_config" in progress.record, full_diagnostics)
+
+    def test_dump_only_cli_passes_mode_to_worker_and_capture_to_reaper_without_observer(self):
+        for dump_only in (False, True):
+            for failed in (False, True):
+                with self.subTest(dump_only=dump_only, failed=failed), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    xll = root / "xlfn" / "benchmark.xll"
+                    xll.parent.mkdir()
+                    xll.touch()
+                    output = root / "result.jsonl"
+                    args = ["run.py", "--profile", "smoke", "--id", "S01", "--implementation", "xlfn",
+                            "--allow-local-artifacts", "--artifacts", str(root), "--out", str(output)]
+                    if dump_only:
+                        args.append("--dump-on-failure")
+                    cleanup = {"forced_kill": failed}
+                    if failed:
+                        cleanup["exit_timeout_s"] = 5
+                    child = SimpleNamespace(stdout=json.dumps({"status": "ok", "id": "S01"}), stderr="")
+                    with patch("run.sys.argv", args), patch("run.sys.platform", "win32"), \
+                            patch("run.subprocess.run", return_value=child) as launch, \
+                            patch("run.reap_excel_process", return_value=cleanup) as reap, \
+                            patch("run.ProcessExitObserver") as observer, patch("builtins.print"):
+                        self.assertEqual(benchmark_main(), int(failed))
+                    cmd = launch.call_args.args[0]
+                    self.assertEqual("--dump-on-failure" in cmd, dump_only)
+                    self.assertNotIn("--shutdown-diagnostics", cmd)
+                    self.assertNotIn("--lifecycle-trace-file", cmd)
+                    observer.assert_not_called()
+                    self.assertEqual(reap.call_args.kwargs["grace_s"], 5)
+                    self.assertEqual(reap.call_args.kwargs["dump_directory"],
+                                     output.with_suffix(".diagnostics") if dump_only else None)
+                    record = json.loads(output.read_text())
+                    self.assertEqual(record["status"], "error" if failed else "ok")
+                    if failed:
+                        self.assertEqual(record["execution_status"], "ok")
+                        self.assertEqual(record["failure_phase"], "close")
+
     def test_numeric_output_pair_verifies_every_cell_and_uses_balanced_order(self):
         anchors = {}
         areas = []
@@ -1191,6 +1263,24 @@ class PlanTest(unittest.TestCase):
         right["excel_build"] = "1"
         right["ci_run_id"] = "43"
         self.assertFalse(summarize([left, right])[0]["comparable"])
+
+    def test_summary_rejects_mixed_capture_modes_sources_and_full_lifecycle_tracing(self):
+        common = {"id": "S01", "variant": "1000", "status": "ok", "dump_on_failure": True,
+                  "shutdown_diagnostics": False, "runner_sources": {"run.py": "same-hash"}}
+        left = common | {"implementation": "xlfn", "metrics": {"p50_s": 1.0}}
+        right = common | {"implementation": "excel_dna", "metrics": {"p50_s": 2.0}}
+        self.assertTrue(summarize([left, right])[0]["comparable"])
+        for change in ({"dump_on_failure": False}, {"runner_sources": {"run.py": "different-hash"}},
+                       {"shutdown_diagnostics": True}, {"status": "error", "execution_status": "ok"}):
+            with self.subTest(change=change):
+                self.assertFalse(summarize([left, right | change])[0]["comparable"])
+        traced = [r | {"shutdown_diagnostics": True} for r in (left, right)]
+        self.assertIn("lifecycle-instrumented", summarize(traced)[0]["reason"])
+        # Older diagnostic records lacked the explicit mode flag.
+        for field in ("lifecycle_trace", "process_exit_observation"):
+            legacy = [{k: v for k, v in r.items() if k != "shutdown_diagnostics"} | {field: {}}
+                      for r in (left, right)]
+            self.assertFalse(summarize(legacy)[0]["comparable"])
 
     def test_unsupported_cancellation_cannot_produce_a_comparison(self):
         native = {"id": "A05", "variant": "clear", "implementation": "xlfn",

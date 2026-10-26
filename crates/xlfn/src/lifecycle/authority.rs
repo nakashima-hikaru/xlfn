@@ -136,6 +136,10 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
         self.coordinator.complete_open_abort(closing);
     }
 
+    #[allow(
+        clippy::result_large_err,
+        reason = "Rollback returns the complete affine generation, including RTD limits, without a new allocation"
+    )]
     pub(crate) fn stage_opening_generation(
         &self,
         attempt_id: OpenAttemptId,

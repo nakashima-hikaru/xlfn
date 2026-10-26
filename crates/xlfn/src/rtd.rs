@@ -11,9 +11,11 @@ use crate::XllResult;
 use crate::host_api::ExcelHost;
 #[cfg(feature = "rtd")]
 pub use crate::subscription::{
-    IntoRtdValue, RtdCapacity, RtdChannelSource, RtdChannelSubscription, RtdLimits,
-    RtdPendingValue, RtdProducerErrorPolicy, RtdSendError, RtdSender, RtdSink, RtdSource,
-    RtdSourceHandle, RtdSubscription, RtdTopic, RtdTopicInput, RtdTopicParts, RtdValue,
+    IntoRtdValue, RtdCapacity, RtdChannelSource, RtdChannelSubscription, RtdDelivery, RtdLimits,
+    RtdMultiplexedSource, RtdMultiplexedSubscription, RtdPendingValue, RtdProducerErrorPolicy,
+    RtdSendError, RtdSender, RtdSink, RtdSource, RtdSourceContext, RtdSourceEvent, RtdSourceHandle,
+    RtdSourceLimits, RtdSubscription, RtdSubscriptionId, RtdTopic, RtdTopicInput, RtdTopicParts,
+    RtdValue,
 };
 
 #[cfg(test)]

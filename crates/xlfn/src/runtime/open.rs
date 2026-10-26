@@ -178,6 +178,11 @@ where
                 return Err(error);
             }
         };
+        if runtime.host_intent() == crate::lifecycle::HostLifecycleIntent::ExplicitRemovalRequested
+        {
+            rollback_active_open(runtime, lifecycle, Some(transaction));
+            return Err(XllError::Closing);
+        }
         let (transaction, registrations) = open_addin_inner::<A>(
             runtime,
             BuildInfo::new(addin_id.clone(), version, target),

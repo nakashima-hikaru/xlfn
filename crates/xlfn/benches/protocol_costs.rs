@@ -1,6 +1,24 @@
 use std::time::Duration;
 
 fn main() {
+    if std::env::args().any(|arg| arg == "--rtd-topology") {
+        for subscriptions in [1, 32, 64] {
+            for multiplexed in [false, true] {
+                println!(
+                    "rtd_topology_probe {}",
+                    xlfn::benchmark_support::rtd_topology_probe(multiplexed, subscriptions)
+                );
+            }
+        }
+        for subscriptions in [512, 2048, 4096] {
+            println!(
+                "rtd_topology_probe {}",
+                xlfn::benchmark_support::rtd_topology_probe(true, subscriptions)
+            );
+        }
+        return;
+    }
+
     if std::env::args().any(|arg| arg == "--token-cache") {
         println!(
             "token_cache_probe {}",

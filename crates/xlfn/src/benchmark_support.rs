@@ -115,7 +115,7 @@ pub use registration::RegistrationBenchmark;
 pub use rtd::{
     RTD_REFRESH_SCALING_CASES, RtdChannelPipelineBenchmark, RtdPrepareBenchmark,
     RtdPublishNumberBenchmark, RtdPublishStringBenchmark, RtdRefreshScalingBenchmark,
-    RtdRefreshScalingCase, RtdRefreshValueKind, rtd_pipeline_probe,
+    RtdRefreshScalingCase, RtdRefreshValueKind, rtd_pipeline_probe, rtd_topology_probe,
 };
 pub use sync_boundary::{SyncBenchKind, SyncBoundaryWorkerPool};
 

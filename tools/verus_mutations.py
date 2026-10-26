@@ -21,6 +21,7 @@ def is_verification_failure(returncode: int, output: str) -> bool:
         "precondition not satisfied", "postcondition not satisfied",
         "invariant not satisfied", "assertion failed", "bitvector assertion not satisfied",
         "could not show invariant", "Cannot show invariant holds at end of block",
+        "cannot show invariant holds at end of block",
         "constructed value may fail to meet its declared type invariant",
         "unable to prove assertion safety condition",
     ))

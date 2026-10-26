@@ -69,6 +69,9 @@ where
             return Err(transaction.failure(error));
         }
     };
+    if runtime.host_intent() == crate::lifecycle::HostLifecycleIntent::ExplicitRemovalRequested {
+        return Err(transaction.failure(XllError::Closing));
+    }
     let generation = runtime.protocol_generation().ok_or(XllError::Internal {
         diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
     });
@@ -78,6 +81,9 @@ where
     };
     let context = OpenContext::new(registrar.module_path().clone(), build_info, generation);
     let (mut transaction, _runtime_config) = initialize_addin::<A>(context, transaction)?;
+    if runtime.host_intent() == crate::lifecycle::HostLifecycleIntent::ExplicitRemovalRequested {
+        return Err(transaction.failure(XllError::Closing));
+    }
     let has_async_functions = prepared_set
         .iter()
         .any(|descriptor| descriptor.signature.execution.is_async());
@@ -91,6 +97,9 @@ where
             Err(error) => return Err(transaction.failure(error)),
         }
     }
+    if runtime.host_intent() == crate::lifecycle::HostLifecycleIntent::ExplicitRemovalRequested {
+        return Err(transaction.failure(XllError::Closing));
+    }
     let registration_result = {
         let host = RegistrationHost::new(transaction.callbacks_mut());
         registrar.register_all(&host, &prepared_set)
@@ -102,6 +111,16 @@ where
             return Err(transaction.failure(error));
         }
     };
+    if runtime.host_intent() == crate::lifecycle::HostLifecycleIntent::ExplicitRemovalRequested {
+        // A successful Excel mutation still belongs to this transaction when
+        // a nested close requested rollback. Preserve every ID so recovery
+        // unregisters it using the original callback session.
+        transaction.retain_journal(crate::registration::HostMutationJournal {
+            pending_registrations: registrations.into_iter().map(Into::into).collect(),
+            ..Default::default()
+        });
+        return Err(transaction.failure(XllError::Closing));
+    }
     Ok((transaction, registrations))
 }
 
