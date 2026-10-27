@@ -23,6 +23,18 @@ fn cache_registry_benchmarks(c: &mut Criterion) {
         });
     }
 
+    for workers in [1, 8, 32] {
+        for endpoints in [16, 64, 256] {
+            let benchmark =
+                RegistryCacheBenchmark::endpoint_cycles(workers, endpoints, ITERATIONS_PER_WORKER);
+            group.throughput(Throughput::Elements(benchmark.total_iterations() as u64));
+            group.bench_function(
+                BenchmarkId::new(format!("endpoint_cycles/{endpoints}"), workers),
+                |b| b.iter(|| benchmark.run()),
+            );
+        }
+    }
+
     for markers in [3, 8] {
         let iterations = ITERATIONS_PER_WORKER / markers * markers;
         let benchmark = RegistryCacheBenchmark::same_id_marker_cycle(markers, iterations);

@@ -52,3 +52,27 @@ help: the trait `PrepareExcel<'_>` is not implemented for `CustomRate`
            and $N others
    = note: required for `CustomRate` to implement `xlfn::__private::v1::ExcelParameter<'_, xlfn::__private::v1::FormulaInputMode>`
    = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: the method `materialize` exists for enum `xlfn::__private::v1::PreparedArgument<CustomRate, _, value::input::ParameterMaterializer<'_, CustomRate, xlfn::__private::v1::FormulaInputMode>>`, but its trait bounds were not satisfied
+  --> tests/ui/fail/formula_identity_missing.rs:21:1
+   |
+ 4 | struct CustomRate(f64);
+   | ----------------- doesn't satisfy `CustomRate: PrepareExcel<'_>`
+...
+21 | #[excel_function(name = "FAIL.FORMULA.IDENTITY")]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method cannot be called due to unsatisfied trait bounds
+   |
+  ::: src/value/input.rs
+   |
+   | pub struct ParameterMaterializer<'call, T, M>(MaterializerMarker<'call, T, M>);
+   | --------------------------------------------- doesn't satisfy `_: ArgumentMaterializer<CustomRate, _>`
+   |
+   = note: the following trait bounds were not satisfied:
+           `CustomRate: PrepareExcel<'_>`
+           which is required by `value::input::ParameterMaterializer<'_, CustomRate, xlfn::__private::v1::FormulaInputMode>: xlfn::__private::v1::ArgumentMaterializer<CustomRate, _>`
+note: the trait `PrepareExcel` must be implemented
+  --> src/value/input.rs
+   |
+   | pub trait PrepareExcel<'call>: FromExcel<'call> + ExcelInputIdentity {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)

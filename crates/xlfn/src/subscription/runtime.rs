@@ -4,17 +4,17 @@
 )]
 
 use super::RuntimeServices;
-use super::catalog::{PreparationFinish, SubscriptionCatalog, SubscriptionEntry};
+use super::catalog::{ConnectionTicket, PreparationFinish, SubscriptionCatalog, SubscriptionEntry};
 use super::data_plane::PublishCore;
-use super::delivery::ErasedSink;
 use super::disconnect::OwnedSubscription;
 use super::host::SubscriptionHost;
 use super::identity::allocate_runtime_id;
 use super::server::{
-    OwnedServerOperation, ServerTerminationPhase, SubscriptionServer, SubscriptionServerHandle,
-    TerminationAdmission, TerminationCoordinator, cleanup_catalog_binding_and_pending,
+    OwnedServerOperation, SubscriptionServer, SubscriptionServerHandle, TerminationAdmission,
+    cleanup_catalog_binding_and_pending,
 };
-use super::source::{RtdSource, RtdSourceHandle, SourceArena};
+use super::source::{RtdSource, RtdSourceHandle, SourceArena, SourceSubscription};
+use super::termination::{TerminationClaim, TerminationCoordinator};
 use super::topic::{
     BorrowedTopicParts, RtdLimits, SourceId, SubscriptionId, SubscriptionKey, TopicId,
 };
@@ -54,7 +54,7 @@ pub(crate) struct SubscriptionRuntime<H: SubscriptionHost> {
     pub(crate) catalog: Mutex<SubscriptionCatalog>,
     pub(crate) sources: SourceArena,
     pub(crate) next_connection_generation: AtomicU64,
-    pub(crate) termination_coordinator: TerminationCoordinator,
+    pub(super) termination_coordinator: TerminationCoordinator,
     // Every raw publish capability targets this independent allocation, so
     // final Drop can drain producers without invalidating their references.
     pub(crate) services: PublishedOwner<RuntimeServices>,
@@ -305,16 +305,16 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         Ok(())
     }
 
-    pub(crate) fn rollback_catalog_connection_reservation(
+    fn rollback_catalog_connection_reservation(
         &self,
         id: SubscriptionId,
-        generation: ConnectionGeneration,
+        ticket: &ConnectionTicket,
     ) {
         let mut catalog = self.catalog.lock();
 
         let should_remove = catalog
             .with_entry(id, |entry| {
-                entry.rollback_connection(generation);
+                entry.rollback_connection(ticket);
                 entry.can_remove()
             })
             .unwrap_or(false);
@@ -351,7 +351,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_SUBSCRIPTION_OVERFLOW,
         })?;
 
-        let (source, topic) = {
+        let (source, topic, ticket) = {
             let mut catalog = self.catalog.lock();
             let Some(result) = catalog.with_entry(id, |entry| -> XllResult<_> {
                 // Resolve the immutable arena entry before acquiring any
@@ -361,41 +361,46 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
                     .sources
                     .resolve(entry.source_id.0)
                     .ok_or(XllError::StaleHandle)?;
-                entry.begin_connection(server.generation, conn_gen)?;
-                Ok((source, entry.topic.clone()))
+                let topic = entry.topic.clone();
+                let ticket = entry.begin_connection(server.generation, conn_gen)?;
+                Ok((source, topic, ticket))
             }) else {
                 return Err(XllError::Closing);
             };
             result?
         };
-        if let Err(error) = server.publish.reserve_connection(topic_id, id, conn_gen) {
-            self.rollback_catalog_connection_reservation(id, conn_gen);
-            return Err(error);
+        let transaction = ConnectionTransaction {
+            reservation: Some(ConnectionReservation {
+                runtime: NonNull::from(self),
+                operation,
+                topic_id,
+                id,
+                ticket,
+            }),
+            state: CatalogReserved,
         }
+        .reserve_publication()?;
 
         // Prepare worker startup and terminal cleanup capacity before any
         // source receives a sink. Existing owners keep this capacity until
         // their sink-user barrier finishes, including deferred disconnection.
-        let cleanup = match self.disconnects.reserve() {
-            Ok(reservation) => reservation,
-            Err(error) => {
-                let _ = self.rollback_connection(server, topic_id, conn_gen, id);
-                return Err(error);
-            }
-        };
+        let cleanup = self.disconnects.reserve()?;
 
-        let erased_sink = ErasedSink::for_publish(server.publish.as_ref(), topic_id, conn_gen);
+        let publish_sink = H::publish_sink(server.publish.as_ref(), topic_id, conn_gen);
 
-        let sub_res = catch_unwind(AssertUnwindSafe(|| source.subscribe(&topic, erased_sink)));
+        let sub_res = catch_unwind(AssertUnwindSafe(|| {
+            // SAFETY: transaction holds server/runtime admission. On success
+            // the owner is installed or synchronously disconnected before it
+            // releases admission. Deferred cleanup retains its own admission;
+            // runtime drop drains servers before reclaiming the source arena.
+            unsafe { SourceSubscription::subscribe(source, &topic, publish_sink) }
+        }));
 
         let subscription = match sub_res {
             Ok(Ok(sub)) => OwnedSubscription::new(sub, cleanup),
-            Ok(Err(err)) => {
-                let _ = self.rollback_connection(server, topic_id, conn_gen, id);
-                return Err(err);
-            }
+            Ok(Err(err)) => return Err(err),
             Err(panic_payload) => {
-                let _ = self.rollback_connection(server, topic_id, conn_gen, id);
+                let _ = transaction.rollback_with_result();
                 self.record_cleanup_result(Err(XllError::Internal {
                     diagnostic_id: crate::diagnostics::id::DiagnosticId::PANIC_SUBSCRIPTION,
                 }));
@@ -403,56 +408,18 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             }
         };
 
-        let install_result = {
-            // Keep the owned subscription aligned with its published generation.
-            // Disconnect and rollback use this same lock before changing either.
-            let mut subscriptions = server.subscriptions.lock();
-            match server.publish.install_connection(topic_id, conn_gen) {
-                Ok(installed) => {
-                    subscriptions.insert(topic_id, subscription);
-                    // Installation owns a shutdown obligation before Excel commits.
-                    self.record_shutdown_event(
-                        crate::shutdown_trace::ShutdownEvent::AddSubscription,
-                    );
-                    Ok((installed.latest, installed.observed_sequence))
-                }
-                Err(_) => Err(subscription),
-            }
-        };
-
-        let (latest_value, observed_sequence) = match install_result {
-            Ok(res) => res,
-            Err(sub) => {
-                let cleanup_res = sub.disconnect_and_wait();
-                let rollback_res = self.rollback_connection(server, topic_id, conn_gen, id);
-                let first_error = cleanup_res.err().or_else(|| rollback_res.err());
-                if let Some(error) = first_error {
-                    self.record_cleanup_result(Err(error.clone()));
-                    return Err(error);
-                }
-                return Err(XllError::Closing);
-            }
-        };
-
-        Ok(SubscriptionConnection {
-            runtime: NonNull::from(self),
-            operation: Some(operation),
-            topic_id,
-            generation: conn_gen,
-            id,
-            value: latest_value,
-            observed_sequence,
-        })
+        transaction.install(subscription)
     }
 
-    pub(crate) fn commit_connection(
+    fn commit_connection(
         &self,
         server: &SubscriptionServer<H>,
         topic_id: TopicId,
-        generation: ConnectionGeneration,
+        ticket: &ConnectionTicket,
         id: SubscriptionId,
         observed_sequence: Option<u64>,
     ) -> XllResult<()> {
+        let generation = ticket.generation();
         let attempt = server
             .publish
             .commit_connection(topic_id, generation, observed_sequence)?;
@@ -460,7 +427,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         {
             let mut catalog = self.catalog.lock();
             if !catalog
-                .with_entry(id, |entry| entry.finish_connection(generation))
+                .with_entry(id, |entry| entry.finish_connection(ticket))
                 .unwrap_or(false)
             {
                 return Err(XllError::Closing);
@@ -474,13 +441,14 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         Ok(())
     }
 
-    pub(crate) fn rollback_connection(
+    fn rollback_connection(
         &self,
         server: &SubscriptionServer<H>,
         topic_id: TopicId,
-        generation: ConnectionGeneration,
+        ticket: &ConnectionTicket,
         id: SubscriptionId,
     ) -> XllResult<()> {
+        let generation = ticket.generation();
         let subscription = {
             let mut subscriptions = server.subscriptions.lock();
             let subscription = server
@@ -499,7 +467,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         {
             let mut catalog = self.catalog.lock();
             let transitioned = catalog
-                .with_entry(id, |entry| entry.rollback_connection(generation))
+                .with_entry(id, |entry| entry.rollback_connection(ticket))
                 .unwrap_or(false);
 
             if transitioned
@@ -593,7 +561,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         &self,
         server_handle: &SubscriptionServerHandle<H>,
         topic_id: TopicId,
-        completion: Box<dyn Send>,
+        completion: H::DisconnectCompletion,
     ) -> XllResult<()> {
         if !server_handle.belongs_to(self) {
             return Err(XllError::StaleHandle);
@@ -631,23 +599,11 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
     }
 
     pub(crate) fn close(&self) -> XllResult<()> {
-        {
-            let mut term_state = self.termination_coordinator.state.lock();
-            match term_state.phase {
-                ServerTerminationPhase::Terminated | ServerTerminationPhase::Failed => {
-                    return self.cleanup_result();
-                }
-                ServerTerminationPhase::Terminating => {
-                    while term_state.phase == ServerTerminationPhase::Terminating {
-                        self.termination_coordinator.completed.wait(&mut term_state);
-                    }
-                    return self.cleanup_result();
-                }
-                ServerTerminationPhase::Open => {
-                    term_state.phase = ServerTerminationPhase::Terminating;
-                }
-            }
-        }
+        let owner = match self.termination_coordinator.begin() {
+            TerminationClaim::Owner(owner) => owner,
+            TerminationClaim::Waiter(waiter) => return waiter.wait(),
+            TerminationClaim::Complete(completed) => return completed.result(),
+        };
 
         let runtime_wait = self.services.runtime_gate.close_and_wait_begin();
 
@@ -676,25 +632,16 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             })
             .collect::<Vec<_>>();
 
-        let cancel_results = admissions
-            .iter()
-            .map(|admission| match admission {
-                TerminationAdmission::Owner(owner) => owner.request_cancel(),
-                _ => Ok(()),
-            })
+        // Consuming transitions retain each cancellation result with its owner.
+        // Complete every notification before waiting for any server.
+        let canceled = admissions
+            .into_iter()
+            .map(TerminationAdmission::request_cancel)
             .collect::<Vec<_>>();
 
         let mut first_error = None;
-        for ((server, admission), cancel_res) in
-            server_pointers.iter().zip(admissions).zip(cancel_results)
-        {
-            // SAFETY: same arena-retention proof as admission creation.
-            let server = unsafe { server.as_ref() };
-            let res = match admission {
-                TerminationAdmission::Owner(owner) => owner.finish(cancel_res),
-                TerminationAdmission::Waiter(waiter) => waiter.wait(),
-                TerminationAdmission::Complete => server.termination_result(),
-            };
+        for admission in canceled {
+            let res = admission.finish();
             if let Err(err) = res
                 && first_error.is_none()
             {
@@ -714,10 +661,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             Ok(result) => self.record_cleanup_result(result),
             Err(error) => {
                 self.record_cleanup_result(Err(error));
-                let mut term_state = self.termination_coordinator.state.lock();
-                term_state.phase = ServerTerminationPhase::Failed;
-                self.termination_coordinator.completed.notify_all();
-                return self.cleanup_result();
+                return owner.fail(self.cleanup_result().expect_err("cleanup failure recorded"));
             }
         }
 
@@ -729,10 +673,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             // the runtime's worker owner intact for caller quarantine, and
             // wake close waiters with the same terminal cleanup failure.
             self.record_cleanup_result(Err(error));
-            let mut term_state = self.termination_coordinator.state.lock();
-            term_state.phase = ServerTerminationPhase::Failed;
-            self.termination_coordinator.completed.notify_all();
-            return self.cleanup_result();
+            return owner.fail(self.cleanup_result().expect_err("cleanup failure recorded"));
         }
 
         #[cfg(feature = "rtd")]
@@ -746,13 +687,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             catalog.entries.clear();
         }
 
-        {
-            let mut term_state = self.termination_coordinator.state.lock();
-            term_state.phase = ServerTerminationPhase::Terminated;
-            self.termination_coordinator.completed.notify_all();
-        }
-
-        self.cleanup_result()
+        owner.complete(self.cleanup_result())
     }
 
     /// The outer result distinguishes failed dispatch preparation (no hook
@@ -784,14 +719,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
 
     pub(crate) fn terminate_server(&self, generation: ServerGeneration) -> XllResult<()> {
         let server = self.resolve_server(generation).ok_or(XllError::Closing)?;
-        match server.begin_termination(self) {
-            TerminationAdmission::Owner(owner) => {
-                let cancel_result = owner.request_cancel();
-                owner.finish(cancel_result)
-            }
-            TerminationAdmission::Waiter(waiter) => waiter.wait(),
-            TerminationAdmission::Complete => server.termination_result(),
-        }
+        server.begin_termination(self).request_cancel().finish()
     }
 }
 
@@ -844,69 +772,185 @@ impl<H: SubscriptionHost> Drop for PreparedSubscription<'_, H> {
     }
 }
 
-pub(crate) struct SubscriptionConnection<H: SubscriptionHost> {
-    runtime: NonNull<SubscriptionRuntime<H>>,
-    // This permit is the transaction's sole completion state. Taking it
-    // discharges the rollback obligation exactly once; no independent flags
-    // can claim completion while a live operation remains retained.
-    operation: Option<OwnedServerOperation<H>>,
-    topic_id: TopicId,
-    generation: ConnectionGeneration,
-    id: SubscriptionId,
+/// A connection can reach commit only after catalog admission, publication
+/// reservation, source subscription, and installation have all succeeded.
+/// Each transition consumes its predecessor; every incomplete stage rolls back.
+pub(crate) type SubscriptionConnection<H> = ConnectionTransaction<H, InstalledConnection>;
+
+pub(crate) trait ConnectionStage {
+    const HAS_PUBLICATION: bool;
+}
+
+struct CatalogReserved;
+struct PublishReserved;
+pub(crate) struct InstalledConnection {
     value: StoredRtdValue,
     observed_sequence: Option<u64>,
 }
 
-// SAFETY: the connection carries an OwnedServerOperation with runtime/server
-// operation permits, ensuring liveness across threads until finished or dropped.
-unsafe impl<H: SubscriptionHost> Send for SubscriptionConnection<H> {}
+impl ConnectionStage for CatalogReserved {
+    const HAS_PUBLICATION: bool = false;
+}
+impl ConnectionStage for PublishReserved {
+    const HAS_PUBLICATION: bool = true;
+}
+impl ConnectionStage for InstalledConnection {
+    const HAS_PUBLICATION: bool = true;
+}
 
-impl<H: SubscriptionHost> SubscriptionConnection<H> {
-    #[inline]
+struct ConnectionReservation<H: SubscriptionHost> {
+    runtime: NonNull<SubscriptionRuntime<H>>,
+    operation: OwnedServerOperation<H>,
+    topic_id: TopicId,
+    id: SubscriptionId,
+    ticket: ConnectionTicket,
+}
+
+impl<H: SubscriptionHost> ConnectionReservation<H> {
     fn runtime(&self) -> &SubscriptionRuntime<H> {
-        // SAFETY: the owned operation contains a runtime-gate permit, so the
-        // runtime cannot be reclaimed before the connection completes.
+        // SAFETY: the owned operation retains the runtime and server until
+        // the transaction finishes, including all rollback callbacks.
         unsafe { self.runtime.as_ref() }
     }
 
-    pub(crate) fn value(&self) -> &StoredRtdValue {
-        &self.value
-    }
-
-    pub(crate) fn commit(mut self) -> XllResult<()> {
-        let Some(operation) = &self.operation else {
-            return Ok(());
-        };
-        let result = self.runtime().commit_connection(
-            operation.server(),
-            self.topic_id,
-            self.generation,
-            self.id,
-            self.observed_sequence,
-        );
-
-        if result.is_ok() {
-            self.operation.take();
+    fn rollback(self, published: bool) -> XllResult<()> {
+        if published {
+            self.runtime().rollback_connection(
+                self.operation.server(),
+                self.topic_id,
+                &self.ticket,
+                self.id,
+            )
+        } else {
+            self.runtime()
+                .rollback_catalog_connection_reservation(self.id, &self.ticket);
+            Ok(())
         }
-        result
-    }
-
-    pub(crate) fn rollback(&mut self) {
-        let Some(operation) = self.operation.take() else {
-            return;
-        };
-        let _ = self.runtime().rollback_connection(
-            operation.server(),
-            self.topic_id,
-            self.generation,
-            self.id,
-        );
     }
 }
 
-impl<H: SubscriptionHost> Drop for SubscriptionConnection<H> {
+#[must_use = "dropping a connection transaction rolls it back"]
+pub(crate) struct ConnectionTransaction<H: SubscriptionHost, S: ConnectionStage> {
+    // None exists only while a consuming transition or completion transfers
+    // the sole obligation; callers cannot construct a disarmed transaction.
+    reservation: Option<ConnectionReservation<H>>,
+    state: S,
+}
+
+// SAFETY: the owned operation retains runtime/server allocations across threads;
+// stage data must itself be transferable.
+unsafe impl<H: SubscriptionHost, S: ConnectionStage + Send> Send for ConnectionTransaction<H, S> {}
+
+impl<H: SubscriptionHost, S: ConnectionStage> ConnectionTransaction<H, S> {
+    fn transition<N: ConnectionStage>(mut self, state: N) -> ConnectionTransaction<H, N> {
+        ConnectionTransaction {
+            reservation: self.reservation.take(),
+            state,
+        }
+    }
+
+    fn reservation(&self) -> &ConnectionReservation<H> {
+        self.reservation
+            .as_ref()
+            .expect("live connection transaction")
+    }
+
+    fn rollback_with_result(mut self) -> XllResult<()> {
+        self.reservation
+            .take()
+            .expect("live connection transaction")
+            .rollback(S::HAS_PUBLICATION)
+    }
+}
+
+impl<H: SubscriptionHost> ConnectionTransaction<H, CatalogReserved> {
+    fn reserve_publication(self) -> XllResult<ConnectionTransaction<H, PublishReserved>> {
+        let reservation = self.reservation();
+        reservation.operation.server().publish.reserve_connection(
+            reservation.topic_id,
+            reservation.id,
+            reservation.ticket.generation(),
+        )?;
+        Ok(self.transition(PublishReserved))
+    }
+}
+
+impl<H: SubscriptionHost> ConnectionTransaction<H, PublishReserved> {
+    fn install(self, subscription: OwnedSubscription<H>) -> XllResult<SubscriptionConnection<H>> {
+        let reservation = self.reservation();
+        let server = reservation.operation.server();
+        let install_result = {
+            // Installation, disconnect, and rollback hold the same lock so the
+            // owned source obligation stays aligned with its generation.
+            let mut subscriptions = server.subscriptions.lock();
+            match server
+                .publish
+                .install_connection(reservation.topic_id, reservation.ticket.generation())
+            {
+                Ok(installed) => {
+                    subscriptions.insert(reservation.topic_id, subscription);
+                    reservation.runtime().record_shutdown_event(
+                        crate::shutdown_trace::ShutdownEvent::AddSubscription,
+                    );
+                    Ok((installed.latest, installed.observed_sequence))
+                }
+                Err(_) => Err(subscription),
+            }
+        };
+        let (value, observed_sequence) = match install_result {
+            Ok(installed) => installed,
+            Err(subscription) => {
+                let cleanup_result = subscription.disconnect_and_wait();
+                if let Err(error) = &cleanup_result {
+                    reservation
+                        .runtime()
+                        .record_cleanup_result(Err(error.clone()));
+                }
+                let rollback_result = self.rollback_with_result();
+                if let Some(error) = cleanup_result.err().or_else(|| rollback_result.err()) {
+                    return Err(error);
+                }
+                return Err(XllError::Closing);
+            }
+        };
+        Ok(self.transition(InstalledConnection {
+            value,
+            observed_sequence,
+        }))
+    }
+}
+
+impl<H: SubscriptionHost> ConnectionTransaction<H, InstalledConnection> {
+    pub(crate) fn value(&self) -> &StoredRtdValue {
+        &self.state.value
+    }
+
+    pub(crate) fn commit(mut self) -> XllResult<()> {
+        let reservation = self.reservation();
+        if let Err(error) = reservation.runtime().commit_connection(
+            reservation.operation.server(),
+            reservation.topic_id,
+            &reservation.ticket,
+            reservation.id,
+            self.state.observed_sequence,
+        ) {
+            self.rollback();
+            return Err(error);
+        }
+        self.reservation.take();
+        Ok(())
+    }
+
+    pub(crate) fn rollback(self) {
+        let _ = self.rollback_with_result();
+    }
+}
+
+impl<H: SubscriptionHost, S: ConnectionStage> Drop for ConnectionTransaction<H, S> {
     fn drop(&mut self) {
-        self.rollback();
+        if let Some(reservation) = self.reservation.take() {
+            let _ = reservation.rollback(S::HAS_PUBLICATION);
+        }
     }
 }
 
@@ -916,5 +960,65 @@ impl<H: SubscriptionHost> Drop for SubscriptionRuntime<H> {
         // Dropping only the operation gates would leave idle producers able to
         // access reclaimed publish cores after the server arena is destroyed.
         let _ = self.close();
+    }
+}
+
+#[cfg(all(test, feature = "rtd"))]
+mod typestate_tests {
+    use super::super::tests::SourceFixture;
+    use super::super::topic::RtdTopic;
+    use super::*;
+    use crate::excel_rtd::RtdSubscriptionHost;
+
+    #[test]
+    fn miri_connection_typestate_early_stage_drop_releases_each_obligation() {
+        for reserve_publication in [false, true] {
+            let fixture = SourceFixture::new();
+            let (source, _, _) = fixture.add::<i32>(None);
+            let runtime = SubscriptionRuntime::<RtdSubscriptionHost>::with_sources_for_internal(
+                fixture.finish(),
+            );
+            let server = runtime.register_test_server(1);
+            let prepared = runtime
+                .prepare(
+                    &source,
+                    RtdTopic::single("early-stage-drop").unwrap().borrowed(),
+                )
+                .unwrap();
+            let id = prepared.id();
+            let generation = ConnectionGeneration::new(1).unwrap();
+            let ticket = runtime
+                .catalog
+                .lock()
+                .with_entry(id, |entry| {
+                    entry.begin_connection(server.generation(), generation)
+                })
+                .unwrap()
+                .unwrap();
+            let transaction = ConnectionTransaction {
+                reservation: Some(ConnectionReservation {
+                    runtime: NonNull::from(&runtime),
+                    // SAFETY: runtime is local and retains this stage until drop.
+                    operation: unsafe { server.test_server().enter_owned_operation().unwrap() },
+                    topic_id: TopicId(1),
+                    id,
+                    ticket,
+                }),
+                state: CatalogReserved,
+            };
+            if reserve_publication {
+                let transaction = transaction.reserve_publication().unwrap();
+                assert_eq!(runtime.services.active_quota.used(), 1);
+                drop(transaction);
+            } else {
+                drop(transaction);
+            }
+            assert_eq!(runtime.services.active_quota.used(), 0);
+            assert!(server.test_server().subscriptions.lock().is_empty());
+            assert!(!runtime.catalog.lock().entries[&id].is_connected());
+            prepared.rollback();
+            assert!(runtime.catalog.lock().entries.is_empty());
+            runtime.catalog.lock().assert_identity_invariants();
+        }
     }
 }

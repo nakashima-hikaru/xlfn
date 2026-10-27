@@ -3,8 +3,8 @@ use async_task::Runnable;
 use crossbeam_deque::Worker;
 use crossbeam_utils::sync::Parker;
 use std::cell::Cell;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use triomphe::Arc;
 
 thread_local! {
     static POLLER_POOL: Cell<usize> = const { Cell::new(0) };

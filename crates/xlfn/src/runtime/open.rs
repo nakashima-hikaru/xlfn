@@ -36,7 +36,7 @@ pub(crate) enum OpenFailure<'runtime, A: Addin> {
 impl<'runtime, A: Addin> OpenFailure<'runtime, A> {
     pub(crate) fn recover(
         self,
-        runtime: &'runtime Runtime<A>,
+        runtime: &'runtime Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
         lifecycle: &AddinLifecycleAccess<'_, A>,
     ) -> XllError {
         match self {
@@ -118,7 +118,7 @@ impl<'runtime, A: Addin> OpeningTxn<'runtime, A, GenerationStaged<A>> {
 }
 
 pub(super) fn open_addin_boundary<A>(
-    runtime: &Runtime<A>,
+    runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     lifecycle: &AddinLifecycleAccess<'_, A>,
     mut callbacks: HostCallbackSession,
     addin_id: &AddinId,

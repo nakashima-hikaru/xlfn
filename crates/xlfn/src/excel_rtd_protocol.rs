@@ -57,24 +57,76 @@ impl RtdModuleState {
 }
 
 #[derive(Debug)]
+/// Generation teardown is complete; this does not certify physical DLL unload.
 pub(crate) struct RtdQuiescent(());
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct RtdQuiescenceError {
     pub(crate) outstanding_git_cookies: usize,
     pub(crate) revocation_debt: usize,
+    pub(crate) missing_module_residency: bool,
+}
+
+/// Physical COM ownership survives a logical close and must seed the next
+/// generation's trace before late releases can be recorded into that trace.
+#[cfg(any(test, feature = "refinement"))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct RtdTraceSnapshot {
+    pub(crate) rtd_class_factories: u64,
+    pub(crate) rtd_servers: u64,
+    pub(crate) rtd_server_locks: u64,
 }
 
 #[cfg(any(test, feature = "refinement"))]
-pub(crate) fn set_trace_sink(trace: crate::shutdown_trace::ShutdownTraceHandle) {
+pub(crate) fn connect_trace<F>(
+    trace: crate::shutdown_trace::ShutdownTraceHandle,
+    initialize: F,
+) -> crate::XllResult<()>
+where
+    F: FnOnce(RtdTraceSnapshot) -> crate::XllResult<()>,
+{
     #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
-    crate::excel_rtd::set_trace_sink(trace);
+    {
+        crate::excel_rtd::connect_trace(trace, initialize)
+    }
     #[cfg(not(all(target_os = "windows", any(feature = "rtd", feature = "handles"))))]
-    let _ = trace;
+    {
+        let _ = trace;
+        initialize(RtdTraceSnapshot::default())
+    }
 }
 
-pub(crate) fn wait_for_module_quiescence() -> Result<RtdQuiescent, RtdQuiescenceError> {
+#[cfg(any(test, feature = "refinement"))]
+pub(crate) fn trace_snapshot() -> RtdTraceSnapshot {
     #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
-    crate::excel_rtd::wait_for_transport_quiescence()?;
+    {
+        crate::excel_rtd::trace_snapshot()
+    }
+    #[cfg(not(all(target_os = "windows", any(feature = "rtd", feature = "handles"))))]
+    {
+        RtdTraceSnapshot::default()
+    }
+}
+
+/// Physical unloading requires every COM reference, lock, call and GIT
+/// registration to be gone even after logical teardown has completed.
+pub(crate) fn physical_unload_ready() -> bool {
+    #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
+    {
+        crate::excel_rtd::physical_unload_ready()
+    }
+    #[cfg(not(all(target_os = "windows", any(feature = "rtd", feature = "handles"))))]
+    {
+        true
+    }
+}
+
+pub(crate) fn wait_for_module_quiescence(
+    module_residency_held: bool,
+) -> Result<RtdQuiescent, RtdQuiescenceError> {
+    #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
+    crate::excel_rtd::wait_for_transport_quiescence(module_residency_held)?;
+    #[cfg(not(all(target_os = "windows", any(feature = "rtd", feature = "handles"))))]
+    let _ = module_residency_held;
     Ok(RtdQuiescent(()))
 }

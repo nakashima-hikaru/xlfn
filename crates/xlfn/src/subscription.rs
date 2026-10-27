@@ -27,10 +27,13 @@ mod runtime;
 mod runtime_services;
 mod server;
 mod source;
+mod termination;
 mod topic;
 mod value;
 
-pub(crate) type ErasedSink = delivery::ErasedSink;
+pub(crate) type PublishSink = delivery::PublishSink;
+pub(crate) use data_plane::PublishCore;
+pub(crate) use topic::TopicId as SinkTopicId;
 pub(crate) type SubscriptionRuntime =
     runtime::SubscriptionRuntime<crate::excel_rtd::RtdSubscriptionHost>;
 pub(crate) type SubscriptionConnection =
@@ -94,7 +97,11 @@ pub(crate) use host::SubscriptionHost;
 pub(crate) use identity::SubscriptionIdentityIndex;
 pub(crate) use runtime_services::RuntimeServices;
 #[cfg(all(test, feature = "rtd"))]
-pub(crate) use server::{PANIC_AFTER_TERMINATION_GUARD, TerminationAdmission};
+pub(crate) use server::PANIC_AFTER_TERMINATION_GUARD;
+#[cfg(all(test, feature = "rtd"))]
+use server::TerminationAdmission;
+#[cfg(all(feature = "rtd", feature = "bench-internals"))]
+pub(crate) use source::SourceSubscription;
 #[cfg(feature = "rtd")]
 pub(crate) use source::{SourceArena, SourceRegistration};
 #[cfg(all(feature = "rtd", any(test, feature = "bench-internals")))]

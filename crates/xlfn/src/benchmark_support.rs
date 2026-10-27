@@ -75,6 +75,8 @@ pub use crate::subscription::channel_protocol_probe;
 #[cfg(feature = "async")]
 pub use crate::handle::{ObjectFinalPinRelease, ObjectLeaseBenchCase, ObjectLeaseBenchmark};
 
+#[cfg(feature = "async-builtin")]
+pub use crate::async_udf::AsyncPendingTaskBenchmark;
 #[cfg(feature = "async")]
 pub use crate::async_udf::AsyncTaskDrainBenchmark;
 #[cfg(all(feature = "async-builtin", feature = "handles"))]
@@ -116,6 +118,7 @@ pub use rtd::{
     RTD_REFRESH_SCALING_CASES, RtdChannelPipelineBenchmark, RtdPrepareBenchmark,
     RtdPublishNumberBenchmark, RtdPublishStringBenchmark, RtdRefreshScalingBenchmark,
     RtdRefreshScalingCase, RtdRefreshValueKind, rtd_pipeline_probe, rtd_topology_probe,
+    with_rtd_connection_benchmark,
 };
 pub use sync_boundary::{SyncBenchKind, SyncBoundaryWorkerPool};
 

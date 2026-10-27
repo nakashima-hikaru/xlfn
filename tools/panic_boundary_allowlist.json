@@ -258,7 +258,7 @@
   {
     "path": "crates/xlfn/src/subscription/runtime.rs",
     "context": "fn connect_transaction",
-    "code": "let sub_res = catch_unwind(AssertUnwindSafe(|| source.subscribe(&topic, erased_sink)));",
+    "code": "let sub_res = catch_unwind(AssertUnwindSafe(|| {",
     "count": 1,
     "category": "resume",
     "reason": "connect_transaction rolls back the connection reservation and resumes the original subscribe payload to the enclosing caller boundary."
@@ -290,7 +290,7 @@
   {
     "path": "crates/xlfn/src/subscription/tests.rs",
     "context": "# [ test ] fn server_terminate_owner_unwind_notifies_waiter",
-    "code": "let res_owner = catch_unwind(AssertUnwindSafe(|| owner.finish(cancel_res)));",
+    "code": "let res_owner = catch_unwind(AssertUnwindSafe(|| owner.finish()));",
     "count": 1,
     "category": "test",
     "reason": "Observes a fixed string termination test-hook panic and verifies waiter completion."

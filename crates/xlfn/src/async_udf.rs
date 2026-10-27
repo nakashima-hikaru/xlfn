@@ -28,12 +28,15 @@ mod boundary;
 mod builtin;
 mod calculation;
 mod completion;
+mod control;
 mod executor;
 mod future;
 mod instrumentation;
 mod registry;
 mod runtime;
 mod task;
+#[cfg(all(feature = "bench-internals", feature = "async-builtin"))]
+mod task_bench;
 #[cfg(feature = "handles")]
 mod task_scope;
 mod transport;
@@ -48,10 +51,12 @@ pub(crate) use calculation::CalculationEpoch;
 pub use executor::AsyncExecutor;
 pub(crate) use runtime::{AsyncRuntime, AsyncStopped};
 pub use task::AsyncTask;
+#[cfg(all(feature = "bench-internals", feature = "async-builtin"))]
+pub use task_bench::AsyncPendingTaskBenchmark;
+#[cfg(all(test, feature = "handles", feature = "async-builtin"))]
+pub(crate) use task_scope::HandleScopedTaskBuilder;
 #[cfg(feature = "handles")]
 pub use task_scope::{AsyncTaskScope, HandleScopedBuilder};
-#[cfg(all(test, feature = "handles", feature = "async-builtin"))]
-pub(crate) use task_scope::{HandleScopedTaskBuilder, ScopedTaskFuture};
 
 #[cfg(all(
     feature = "bench-internals",

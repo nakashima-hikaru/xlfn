@@ -192,6 +192,28 @@ const REGISTRY_ENDPOINT_IDS: [&str; 32] = [
     "registry-31",
 ];
 
+#[allow(
+    clippy::large_stack_arrays,
+    reason = "evaluated only at compile time to initialize static benchmark endpoint names"
+)]
+const fn registry_cycle_names() -> [[u8; 13]; 8192] {
+    let mut names = [*b"registry-0000"; 8192];
+    let mut index = 0;
+    while index < names.len() {
+        let mut value = index;
+        let mut digit = 13;
+        while digit > 9 {
+            digit -= 1;
+            names[index][digit] = b'0' + (value % 10) as u8;
+            value /= 10;
+        }
+        index += 1;
+    }
+    names
+}
+
+static REGISTRY_CYCLE_NAMES: [[u8; 13]; 8192] = registry_cycle_names();
+
 struct RegistryEndpointMarker<const INDEX: usize>;
 static REGISTRY_SHARED_ID: &str = "registry-shared-id";
 
@@ -254,6 +276,30 @@ impl RegistryCacheBenchmark {
     /// One worker cycles through endpoints to exercise resolution-cache capacity.
     pub fn endpoint_cycle(endpoint_count: usize, iterations: usize) -> Self {
         Self::new(1, endpoint_count, iterations)
+    }
+
+    /// Persistent workers cycle through disjoint endpoints in one registry.
+    /// More than 64 endpoints per worker exceeds the TLS resolution capacity,
+    /// so this also measures the shared index rather than only warm TLS hits.
+    pub fn endpoint_cycles(
+        worker_count: usize,
+        endpoints_per_worker: usize,
+        iterations_per_worker: usize,
+    ) -> Self {
+        let endpoint_count = worker_count
+            .checked_mul(endpoints_per_worker)
+            .expect("registry benchmark endpoint count fits usize");
+        assert!(endpoint_count <= REGISTRY_CYCLE_NAMES.len());
+        let ids: Vec<_> = REGISTRY_CYCLE_NAMES[..endpoint_count]
+            .iter()
+            .map(|name| std::str::from_utf8(name).expect("generated names are ASCII"))
+            .collect();
+        Self::with_ids(
+            worker_count,
+            endpoints_per_worker,
+            iterations_per_worker,
+            &ids,
+        )
     }
 
     /// One worker cycles through three or eight marker types sharing one ID.

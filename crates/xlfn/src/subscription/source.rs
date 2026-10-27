@@ -3,7 +3,7 @@
     reason = "RTD sinks are audited non-owning capabilities over a runtime-owned publish core"
 )]
 
-use super::ErasedSink;
+use super::PublishSink;
 use super::topic::RtdTopic;
 use super::value::IntoRtdValue;
 use crate::generation::RuntimeGeneration;
@@ -11,19 +11,28 @@ use crate::panic_boundary::catch_no_unwind;
 use crate::sync::Mutex;
 use crate::{XllError, XllResult};
 use std::marker::PhantomData;
+use std::ptr::NonNull;
+
+mod storage;
 use std::panic::AssertUnwindSafe;
+use storage::{SlotKey, SubscriptionStorage};
 
 #[cfg(all(test, feature = "rtd"))]
 mod lifecycle_tests;
+#[cfg(all(test, feature = "rtd"))]
+mod ticket_tests;
 
 /// A subscription whose cancellation and disconnection protocol is explicit.
 ///
-/// The subscription object has one owner: its server, or the generation's
-/// bounded cleanup queue after COM disconnection revokes the connection.
+/// The subscription value lives in its source's typed storage. One affine
+/// ticket belongs to its server, or the generation's bounded cleanup queue
+/// after COM disconnection revokes the connection.
 /// Deferred COM cleanup and shutdown invoke `request_cancel`, then consume
 /// the object through `disconnect_and_wait`. Shutdown drains this work before
 /// reclaiming its server or source. No detached shared cancellation object
 /// participates in the ownership graph.
+/// The framework may move the value between storage and callback invocation;
+/// it provides no pinning guarantee for the subscription itself.
 /// # Safety
 ///
 /// `disconnect_and_wait` must stop every callback and worker that can use any
@@ -40,11 +49,11 @@ mod lifecycle_tests;
 ///
 /// The framework contains cleanup panics and may reclaim the publish core
 /// afterward. Neither an error nor a panic extends the lifetime of a sink.
-pub unsafe trait RtdSubscription: Send + 'static {
+pub unsafe trait RtdSubscription: Sized + Send + 'static {
     /// Requests that subscription work stop without transferring ownership.
     fn request_cancel(&self);
     /// Consumes the subscription and stops all sink users before returning.
-    fn disconnect_and_wait(self: Box<Self>) -> XllResult<()>;
+    fn disconnect_and_wait(self) -> XllResult<()>;
 }
 
 /// Mutable source-registration authority available only during add-in open.
@@ -82,7 +91,10 @@ impl SourceRegistration {
             .ok_or(XllError::Internal {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_SUBSCRIPTION_ID_OVERFLOW,
             })?;
-        sources.push(Box::new(source));
+        sources.push(Box::new(SourceAdapter {
+            subscriptions: SubscriptionStorage::new(),
+            source,
+        }));
         Ok(RtdSourceHandle::from_id(SourceHandleId {
             generation: self.generation,
             sequence,
@@ -295,7 +307,7 @@ impl<S: RtdSource> RtdSourceHandle<S> {
 
 /// Typed non-owning publication capability issued by an active RTD server.
 pub struct RtdSink<T> {
-    sink: ErasedSink,
+    sink: PublishSink,
     _value: PhantomData<fn(T)>,
 }
 
@@ -306,7 +318,7 @@ impl<T> RtdSink<T> {
     }
 
     #[cfg(feature = "rtd")]
-    pub(super) fn erased(&self) -> ErasedSink {
+    pub(super) fn erased(&self) -> PublishSink {
         self.sink
     }
 
@@ -343,33 +355,133 @@ where
     }
 }
 
-pub(crate) trait ErasedRtdSource: Send + Sync {
-    fn subscribe(&self, topic: &RtdTopic, sink: ErasedSink) -> XllResult<Box<dyn RtdSubscription>>;
+/// One erased adapter per registered source; connections remain typed inside it.
+pub(crate) trait ErasedRtdSource: Send + Sync + 'static {
+    fn subscribe(&self, topic: &RtdTopic, sink: PublishSink) -> XllResult<SlotKey>;
+    fn request_cancel(&self, key: SlotKey);
+    fn disconnect_and_wait(&self, key: SlotKey) -> XllResult<()>;
     fn request_stop(&self);
     fn shutdown_and_wait(&self) -> XllResult<()>;
 }
 
-impl<S> ErasedRtdSource for S
-where
-    S: RtdSource,
-{
-    fn subscribe(&self, topic: &RtdTopic, sink: ErasedSink) -> XllResult<Box<dyn RtdSubscription>> {
-        let sub = RtdSource::subscribe(
-            self,
+struct SourceAdapter<S: RtdSource> {
+    // Connection owners must drain before source reclamation. Storage is
+    // declared first as an additional drop-order safeguard.
+    subscriptions: SubscriptionStorage<S::Subscription>,
+    source: S,
+}
+
+impl<S: RtdSource> ErasedRtdSource for SourceAdapter<S> {
+    fn subscribe(&self, topic: &RtdTopic, sink: PublishSink) -> XllResult<SlotKey> {
+        let reservation = self.subscriptions.reserve()?;
+        let subscription = self.source.subscribe(
             topic,
             RtdSink {
                 sink,
                 _value: PhantomData,
             },
         )?;
-        Ok(Box::new(sub))
+        // No fallible operation, allocation or application callback remains
+        // between successful sink transfer and publication of its owner.
+        Ok(reservation.publish(subscription))
+    }
+
+    fn request_cancel(&self, key: SlotKey) {
+        let subscription = self
+            .subscriptions
+            .checkout(key)
+            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+        subscription.value().request_cancel();
+        // Checkout restores the value even if cancellation unwinds.
+    }
+
+    fn disconnect_and_wait(&self, key: SlotKey) -> XllResult<()> {
+        let mut subscription = self
+            .subscriptions
+            .checkout(key)
+            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+        subscription.take().disconnect_and_wait()
+        // Checkout releases the slot after the callback's barrier, including
+        // errors and unwinding. Neither the callback nor T::drop holds a lock.
     }
 
     fn request_stop(&self) {
-        RtdSource::request_stop(self);
+        self.source.request_stop();
     }
 
     fn shutdown_and_wait(&self) -> XllResult<()> {
-        RtdSource::shutdown_and_wait(self)
+        self.source.shutdown_and_wait()
+    }
+}
+
+impl<S: RtdSource> Drop for SourceAdapter<S> {
+    fn drop(&mut self) {
+        if !self.subscriptions.is_empty() {
+            // A lost ticket would strand sink users. Dropping their values is
+            // insufficient: only disconnect_and_wait establishes the barrier.
+            xlfn_kernel::invariant::fail_stop();
+        }
+    }
+}
+
+/// Affine connection owner in a runtime-owned source adapter. The source's
+/// allocation is stable, while its typed values can move as the slot Vec grows.
+/// No pointer into that Vec escapes a storage lock.
+pub(crate) struct SourceSubscription {
+    source: NonNull<dyn ErasedRtdSource>,
+    key: Option<SlotKey>,
+    // The underlying subscription is Send but need not be Sync. Cancellation
+    // requires mutable access to this unique ticket, not shared access to T.
+    _not_sync: PhantomData<std::cell::Cell<()>>,
+}
+
+// SAFETY: every erased adapter is Sync and its typed subscriptions are Send.
+// Moving the affine ticket transfers the sole checkout authority; construction
+// requires the source arena and its sink roots to outlive the entire ticket.
+unsafe impl Send for SourceSubscription {}
+
+impl SourceSubscription {
+    /// # Safety
+    /// The source allocation and all sink roots must remain valid until this
+    /// owner is consumed or dropped. Runtime/server admissions and declaration
+    /// order provide that lifetime across rollback, deferred jobs and shutdown.
+    pub(crate) unsafe fn subscribe(
+        source: &dyn ErasedRtdSource,
+        topic: &RtdTopic,
+        sink: PublishSink,
+    ) -> XllResult<Self> {
+        let key = source.subscribe(topic, sink)?;
+        Ok(Self {
+            source: NonNull::from(source),
+            key: Some(key),
+            _not_sync: PhantomData,
+        })
+    }
+
+    pub(crate) fn request_cancel(&mut self) {
+        let key = self.key.expect("live source subscription");
+        // SAFETY: the constructor's caller keeps the arena alive through this owner.
+        unsafe { self.source.as_ref() }.request_cancel(key);
+    }
+
+    pub(crate) fn disconnect_and_wait(mut self) -> XllResult<()> {
+        let key = self.key.take().expect("live source subscription");
+        // SAFETY: the source outlives this owner and its consuming barrier.
+        unsafe { self.source.as_ref() }.disconnect_and_wait(key)
+    }
+}
+
+impl Drop for SourceSubscription {
+    fn drop(&mut self) {
+        if let Some(key) = self.key.take() {
+            let result = catch_no_unwind(AssertUnwindSafe(|| {
+                // SAFETY: the arena lifetime includes this fallback barrier.
+                unsafe { self.source.as_ref() }.disconnect_and_wait(key)
+            }))
+            .unwrap_or(Err(XllError::Panic));
+            if let Err(error) = result {
+                crate::diagnostics::report_no_unwind("RTD source ticket drop", &error);
+            }
+        }
     }
 }

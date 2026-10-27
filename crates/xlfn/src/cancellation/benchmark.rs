@@ -12,6 +12,12 @@ pub struct CancellationLifecycleBenchmark {
 }
 
 impl CancellationLifecycleBenchmark {
+    /// Retained size of one reusable cancellation slot, excluding allocator
+    /// metadata, registry vectors, and any public waiter's map capacity.
+    pub const fn slot_bytes() -> usize {
+        std::mem::size_of::<super::CancellationSlot>()
+    }
+
     /// Creates a cancellation fixture with the requested worker count and dispatch mode.
     pub fn new(workers: usize, dispatch_only: bool) -> Self {
         assert!(workers != 0);

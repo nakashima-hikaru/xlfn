@@ -75,7 +75,7 @@ def process_creation_ticks(pid: int) -> int:
         return process.creation_ticks()
 
 
-def write_dump(pid: int, creation_ticks: int, path: Path) -> None:
+def write_dump(pid: int, creation_ticks: int, path: Path, *, full_memory: bool = False) -> None:
     import msvcrt
     from ctypes import wintypes
 
@@ -91,16 +91,24 @@ def write_dump(pid: int, creation_ticks: int, path: Path) -> None:
         dump.restype = wintypes.BOOL
         # Stacks/modules, thread metadata, unloaded modules and handle data.
         # Handle data helps identify the thread behind an Office shutdown wait.
-        # Do not capture the entire Excel heap.
+        # Full memory is opt-in: ordinary stack dumps omit lock objects in
+        # module data/heap pages. Include memory-region metadata in that mode.
+        flags = 0x1000 | 0x0020 | 0x0004
+        if full_memory:
+            flags |= 0x0002 | 0x0800
         with path.open("xb") as output:
             if not dump(process.handle, pid, msvcrt.get_osfhandle(output.fileno()),
-                        0x1000 | 0x0020 | 0x0004, None, None, None):
+                        flags, None, None, None):
                 raise ctypes.WinError(ctypes.get_last_error())
 
 
-def capture_shutdown_dump(identity: dict, directory: Path, timeout_s: float = 15) -> dict:
+def capture_shutdown_dump(identity: dict, directory: Path, timeout_s: float | None = None,
+                          *, full_memory: bool = False) -> dict:
     """Bound DbgHelp in a helper so a dump failure cannot prevent reaping."""
-    result = {"status": "error"}
+    if timeout_s is None:
+        timeout_s = 60 if full_memory else 15
+    result = {"status": "error", "mode": "full_memory" if full_memory else "stacks",
+              "capture_timeout_s": timeout_s}
     try:
         ticks = identity.get("creation_ticks")
         if ticks is None:
@@ -110,9 +118,12 @@ def capture_shutdown_dump(identity: dict, directory: Path, timeout_s: float = 15
         folder = Path(tempfile.mkdtemp(prefix=f"excel-{identity['pid']}-", dir=directory))
         path = folder / "shutdown.dmp"
         result["directory"] = str(folder.resolve())
-        child = subprocess.run(
-            [sys.executable, str(Path(__file__).resolve()), "--pid", str(identity["pid"]),
-             "--creation-ticks", str(ticks), "--out", str(path.resolve())],
+        cmd = [sys.executable, str(Path(__file__).resolve()), "--pid", str(identity["pid"]),
+               "--creation-ticks", str(ticks)]
+        if full_memory:
+            cmd.append("--full-memory")
+        cmd.extend(["--out", str(path.resolve())])
+        child = subprocess.run(cmd,
             capture_output=True, text=True, timeout=timeout_s, check=False)
         if child.returncode != 0:
             raise RuntimeError(child.stderr.strip() or f"dump helper exited {child.returncode}")
@@ -129,9 +140,10 @@ def main() -> int:
     parser.add_argument("--pid", required=True, type=int)
     parser.add_argument("--creation-ticks", required=True, type=int)
     parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument("--full-memory", action="store_true")
     args = parser.parse_args()
     try:
-        write_dump(args.pid, args.creation_ticks, args.out)
+        write_dump(args.pid, args.creation_ticks, args.out, full_memory=args.full_memory)
     except Exception as error:
         print(json.dumps({"error": f"{type(error).__name__}: {error}"}), file=sys.stderr)
         return 1

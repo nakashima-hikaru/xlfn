@@ -412,7 +412,31 @@ guarantee that one dump identifies the root cause. A later diagnostic run may
 still be needed after inspecting it. `--shutdown-diagnostics` remains the option
 for full lifecycle and common-clock exit observations below.
 
-Records include both diagnostic flags and SHA-256 hashes of the runner sources.
+When an ordinary dump locates a wait but omits the lock object's memory, add
+`--full-memory-dumps` to either diagnostic mode. It requests
+[`MiniDumpWithFullMemory` and `MiniDumpWithFullMemoryInfo`](https://learn.microsoft.com/en-us/windows/win32/api/minidumpapiset/ne-minidumpapiset-minidump_type),
+including readable Excel memory (and workbook data). Files can be large. Capture
+is still restricted to the worker's creation-time-verified Excel process and
+only starts when the existing teardown deadline has failed. The helper has a
+60-second limit in this mode (15 seconds for ordinary dumps); capture failure
+does not suppress process cleanup or change the failed result. JSONL dump
+metadata records the mode and capture limit. No XLL rebuild is needed.
+
+For a flaky full batch, keep the case order and paired implementations:
+
+```powershell
+python .\run.py --profile full --artifacts .\artifacts `
+  --shutdown-diagnostics --full-memory-dumps --out full-lock-diagnostic.jsonl
+```
+
+Repeat with distinct output paths as needed. This captures a single snapshot,
+not lock ownership history, and does not guarantee owner attribution for every
+lock type. It also does not capture a slow COM release that eventually exits
+before the parent starts its post-worker grace period; use the lifecycle and
+process-exit timing fields to distinguish that case. A `Closed` lifecycle return
+and a long `quit_to_natural_exit_s` must not be reported as a stuck XLL callback.
+
+Records include the diagnostic mode flags and SHA-256 hashes of the runner sources.
 The paired summarizer requires matching modes and source hashes and excludes
 full lifecycle-instrumented shutdown runs from performance ratios. No XLL
 rebuild is needed for the dump-only runner option.

@@ -14,6 +14,7 @@ use crossbeam_utils::CachePadded;
 use rustc_hash::FxHashMap;
 use std::any::{Any, TypeId, type_name};
 use std::collections::hash_map::Entry;
+use std::marker::PhantomData;
 use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 use xlfn_kernel::published_owner::PublishedOwner;
@@ -21,6 +22,8 @@ use xlfn_kernel::published_owner::PublishedOwner;
 /// A type-checked, non-owning projection into an [`ObjectCell`].
 pub(crate) struct TypedObjectProjection<T: 'static> {
     pointer: NonNull<T>,
+    // The cached TypeId denotes the exact T, even for covariant payloads.
+    _type: PhantomData<fn(T) -> T>,
 }
 
 impl<T: 'static> Copy for TypedObjectProjection<T> {}
@@ -446,6 +449,7 @@ impl ObjectCell {
         self.id
     }
 
+    #[cfg(test)]
     pub(crate) fn type_id(&self) -> TypeId {
         self.type_id
     }
@@ -468,6 +472,7 @@ impl ObjectCell {
                     .expect("published object cell retains its owner"),
             )
             .cast(),
+            _type: PhantomData,
         })
     }
 }
@@ -513,39 +518,63 @@ impl ObjectBinding {
     }
 }
 
-/// An un-published object binding capability anchored to the borrow of its
-/// owning [`HandleRegistry`].
-pub(crate) struct PendingObjectBinding<'registry> {
+/// An unpublished binding retaining its exact payload type and registry borrow.
+/// Only allocation of an actual `T` or a checked `HandleAlias<T>` can create it.
+/// Type invariance prevents subtyping from changing the cached TypeId authority.
+pub(crate) struct PendingObjectBinding<'registry, T: Send + Sync + 'static> {
     binding: ObjectBinding,
-    _registry: std::marker::PhantomData<&'registry super::registry::HandleRegistry>,
+    _registry: PhantomData<&'registry super::registry::HandleRegistry>,
+    _type: PhantomData<fn(T) -> T>,
 }
 
-impl<'registry> PendingObjectBinding<'registry> {
-    #[inline]
+impl<'registry, T: Send + Sync + 'static> PendingObjectBinding<'registry, T> {
     pub(super) fn new(
         registry: &'registry super::registry::HandleRegistry,
-        binding: ObjectBinding,
+        id: ObjectId,
+        value: T,
     ) -> XllResult<Self> {
+        // SAFETY: the registry retains the fixed arena allocation. This
+        // pending binding borrows it, publication transfers the count into
+        // its table, and registry reclamation drains every count and pin.
+        let binding = unsafe { ObjectArena::insert(&registry.objects, id, value) }?;
+        Ok(Self {
+            binding,
+            _registry: PhantomData,
+            _type: PhantomData,
+        })
+    }
+
+    pub(super) fn from_alias(
+        registry: &'registry super::registry::HandleRegistry,
+        alias: super::typed::HandleAlias<'_, T>,
+    ) -> XllResult<Self>
+    where
+        T: super::typed::ExcelHandleObject,
+    {
+        // HandleAlias<T> can only originate from the checked Handle<T>
+        // projection. Its invariant T and live snapshot retain that proof
+        // while duplicating the binding count.
+        let binding = alias.binding().duplicate_object_binding()?;
         if !registry.owns_object_arena(binding.arena()) {
             return Err(XllError::StaleHandle);
         }
         Ok(Self {
             binding,
-            _registry: std::marker::PhantomData,
+            _registry: PhantomData,
+            _type: PhantomData,
         })
     }
 
-    /// Publishes this capability directly into its registry owner.
-    ///
-    /// The lifetime anchor is consumed together with the binding; no
-    /// lifetime-less `ObjectBinding` is returned to the caller.
+    /// Publishes the exact typed capability, consuming its registry anchor.
     #[inline]
-    pub(super) fn publish<T: Send + Sync + 'static>(
+    pub(super) fn publish(
         self,
         registry: &'registry super::registry::HandleRegistry,
     ) -> XllResult<(String, super::token::HandleId, ObjectId, bool)> {
+        // Erase only at the final binding-table insertion. The registry borrow
+        // remains live for the entire call; no bare binding escapes this method.
         let mut binding = Some(self.binding);
-        registry.insert_pending_object_with_kind::<T>(&mut binding)
+        registry.insert_pending_object(&mut binding)
     }
 
     #[cfg(test)]

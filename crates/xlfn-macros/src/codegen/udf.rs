@@ -168,8 +168,8 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
             let converted = &argument.local_ident;
             let raw = &argument.raw_ident;
             let argument_name = &argument.excel_name;
-            let binding_type = if !is_async && matches!(argument.conversion, model::ArgumentConversion::Reference | model::ArgumentConversion::NumericMatrix) { quote!(#krate::__private::v1::PreparedArgument<#ty, ()>) } else if is_async { quote!(#ty) } else {
-                quote!(#krate::__private::v1::PreparedArgument<#ty, _>)
+            let binding_type = if !is_async && matches!(argument.conversion, model::ArgumentConversion::Reference | model::ArgumentConversion::NumericMatrix) { quote!(#krate::__private::v1::ReadyArgument<#ty>) } else if is_async { quote!(#ty) } else {
+                quote!(#krate::__private::v1::PreparedArgument<#ty, _, _>)
             };
             let default_method = if is_async { quote!(default_argument) } else { quote!(prepare_default) };
             let conversion = match &argument.conversion {
@@ -426,23 +426,18 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                 fn build<'generation>(
                     self,
                     __scope: #krate::__private::v1::AsyncTaskScope<'generation>,
-                ) -> ::std::pin::Pin<
-                    ::std::boxed::Box<
-                        dyn ::std::future::Future<
-                                Output = #krate::error::XllResult<#return_type>,
-                            > + Send
-                            + 'generation,
-                    >,
-                > {
+                ) -> impl ::std::future::Future<
+                    Output = #krate::error::XllResult<#return_type>,
+                > + Send + 'generation {
                     #(#builder_argument_moves)*
                     #builder_lease_move
                     #builder_cancellation_move
                     #(#handle_bindings)*
-                    #krate::__private::v1::box_scoped_future(__scope, async move {
+                    async move {
                         #builder_context_setup
                         #return_assertion
                         #async_result_expression
-                    })
+                    }
                 }
             }
         }

@@ -18,8 +18,8 @@ use std::sync::atomic::Ordering;
 use xlfn_sys::{XLF_RTD, XLOPER12};
 
 #[cfg(feature = "handles")]
-pub(crate) fn observe<H: FormulaLifetimeBackend + 'static>(
-    handles: &H,
+pub(crate) fn observe(
+    handles: &FormulaLifetimeBackend,
     ingress: &'static ExportIngress,
     rtd_key: &str,
     token: &str,

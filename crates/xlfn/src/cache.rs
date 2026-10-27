@@ -19,11 +19,11 @@ use node_layout::verus;
 mod resident_index;
 #[cfg(test)]
 mod singleflight_tests;
-use crate::sync::{Condvar, Mutex, RwLock};
+use crate::sync::{Condvar, Mutex};
 use crossbeam_utils::CachePadded;
 use indexmap::map::{RawEntryApiV1, raw_entry_v1::RawEntryMut};
 use resident_index::{ResidentEntry, ResidentIndex};
-use rustc_hash::{FxHashMap, FxHasher};
+use rustc_hash::{FxBuildHasher, FxHasher};
 use smallvec::SmallVec;
 use std::any::{Any, TypeId};
 use std::cell::{Cell, RefCell};
@@ -148,16 +148,19 @@ fn destruction_deferred() -> bool {
     ACTIVE_CACHE_INITIALIZATION_DEPTH.get() != 0 || CACHE_OPERATION_DEPTH.get() != 0
 }
 
+type Invariant<T> = PhantomData<fn(T) -> T>;
+
 /// A reusable typed descriptor for one cache in a [`CacheRegistry`].
 ///
 /// Identity includes `K`, `V`, `Marker`, and the static ID. Descriptors with
 /// the same identity share cached values within one registry. Key operations
-/// and callbacks follow the contract of [`CalculationCache`].
+/// and callbacks follow the contract of [`CalculationCache`]. Type parameters
+/// are invariant because endpoint memoization pairs them with concrete caches.
 pub struct CacheEndpoint<K, V, Marker = ()> {
     id: &'static str,
-    _key: PhantomData<fn() -> K>,
-    _value: PhantomData<fn() -> V>,
-    _marker: PhantomData<fn() -> Marker>,
+    _key: Invariant<K>,
+    _value: Invariant<V>,
+    _marker: Invariant<Marker>,
 }
 
 impl<K, V, Marker> Clone for CacheEndpoint<K, V, Marker> {
@@ -355,63 +358,43 @@ impl<K: 'static, V: 'static, Marker: 'static> CacheEndpoint<K, V, Marker> {
     }
 }
 
-struct StoredCache<Marker, K, V> {
+struct StoredCache<Marker, K, V>
+where
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
     cache: CalculationCache<K, V>,
-    _marker: PhantomData<fn() -> Marker>,
+    _marker: Invariant<(Marker, K, V)>,
 }
 
-type ErasedCache = dyn Any + Send + Sync;
-
-#[derive(Clone, Copy)]
-struct CacheOps {
-    advance_generation: fn(&ErasedCache) -> u64,
-    invalidate_before: fn(&ErasedCache, u64),
+/// The heterogeneous registry owns one object-safe cache capability. Its
+/// concrete implementation carries cleanup operations in the shared vtable;
+/// entries cannot pair an owner with callbacks for a different cache type.
+trait ErasedCache: Any + Send + Sync {
+    fn advance_generation(&self) -> u64;
+    fn invalidate_before(&self, epoch: u64);
 }
 
-fn advance_generation<Marker, K, V>(erased: &ErasedCache) -> u64
+impl<Marker, K, V> ErasedCache for StoredCache<Marker, K, V>
 where
     Marker: 'static,
     K: Clone + Eq + Hash + Send + Sync + 'static,
     V: Send + Sync + 'static,
 {
-    let stored = erased
-        .downcast_ref::<StoredCache<Marker, K, V>>()
-        .expect("cache entry type invariant violated");
-    stored.cache.generation.advance()
-}
+    fn advance_generation(&self) -> u64 {
+        self.cache.generation.advance()
+    }
 
-fn invalidate_before<Marker, K, V>(erased: &ErasedCache, epoch: u64)
-where
-    Marker: 'static,
-    K: Clone + Eq + Hash + Send + Sync + 'static,
-    V: Send + Sync + 'static,
-{
-    let stored = erased
-        .downcast_ref::<StoredCache<Marker, K, V>>()
-        .expect("cache entry type invariant violated");
-    stored.cache.invalidate_before(epoch);
-}
-
-impl CacheOps {
-    fn of<Marker, K, V>() -> Self
-    where
-        Marker: 'static,
-        K: Clone + Eq + Hash + Send + Sync + 'static,
-        V: Send + Sync + 'static,
-    {
-        Self {
-            advance_generation: advance_generation::<Marker, K, V>,
-            invalidate_before: invalidate_before::<Marker, K, V>,
-        }
+    fn invalidate_before(&self, epoch: u64) {
+        self.cache.invalidate_before(epoch);
     }
 }
 
 struct CacheEntry {
-    cache: xlfn_kernel::published_owner::PublishedOwner<ErasedCache>,
-    ops: CacheOps,
+    cache: xlfn_kernel::published_owner::PublishedOwner<dyn ErasedCache>,
 }
 
-type CacheMap = FxHashMap<(TypeId, &'static str), CacheEntry>;
+type CacheMap = papaya::HashMap<(TypeId, &'static str), CacheEntry, FxBuildHasher>;
 
 /// Owns lazily created endpoint caches for its lifetime.
 ///
@@ -419,7 +402,11 @@ type CacheMap = FxHashMap<(TypeId, &'static str), CacheEntry>;
 pub struct CacheRegistry {
     identity: endpoint_cache::RegistryIdentity,
     weight_budget_per_endpoint: usize,
-    caches: RwLock<CacheMap>,
+    caches: CacheMap,
+    // Readers only copy stable allocation pointers from the append-only map.
+    // Serialize first publication and clear snapshots so initialization is
+    // unique and iteration sees a fixed endpoint set.
+    insertions: Mutex<()>,
 }
 
 impl CacheRegistry {
@@ -429,7 +416,8 @@ impl CacheRegistry {
         Self {
             identity: endpoint_cache::RegistryIdentity::fresh(),
             weight_budget_per_endpoint,
-            caches: RwLock::new(FxHashMap::default()),
+            caches: CacheMap::with_hasher(FxBuildHasher),
+            insertions: Mutex::new(()),
         }
     }
 
@@ -442,46 +430,53 @@ impl CacheRegistry {
         K: Clone + Eq + Hash + Send + Sync + 'static,
         V: Send + Sync + 'static,
     {
-        let cache_key = endpoint.key();
-        if let Some(cache) = endpoint_cache::lookup(self.identity, cache_key) {
+        if let Some(cache) = endpoint_cache::lookup(self.identity, endpoint) {
             // The memoized pointer was downcast with this exact endpoint type
             // and belongs to this live registry's never-removed allocation.
             // Registry identities are never reused, including after a move/drop.
-            return Ok(cache.cast());
+            return Ok(cache);
         }
-        let cache = self.resolve_cache_uncached::<Marker, K, V>(cache_key)?;
-        endpoint_cache::remember(self.identity, cache_key, cache.cast());
+        let cache = self.resolve_cache_uncached(endpoint)?;
+        endpoint_cache::remember(self.identity, endpoint, cache);
         Ok(cache)
     }
 
     fn resolve_cache_uncached<Marker, K, V>(
         &self,
-        cache_key: (TypeId, &'static str),
+        endpoint: &CacheEndpoint<K, V, Marker>,
     ) -> XllResult<NonNull<StoredCache<Marker, K, V>>>
     where
         Marker: 'static,
         K: Clone + Eq + Hash + Send + Sync + 'static,
         V: Send + Sync + 'static,
     {
-        let caches = self.caches.read();
-        if let Some(entry) = caches.get(&cache_key) {
-            Self::downcast_cache::<Marker, K, V>(entry)
-        } else {
-            drop(caches);
-            let mut caches = self.caches.write();
-            let entry = caches.entry(cache_key).or_insert_with(|| {
-                let cache = Box::new(StoredCache::<Marker, K, V> {
-                    cache: CalculationCache::new(self.weight_budget_per_endpoint),
-                    _marker: PhantomData,
-                });
-                let erased: Box<ErasedCache> = cache;
-                CacheEntry {
-                    cache: xlfn_kernel::published_owner::PublishedOwner::from_box(erased),
-                    ops: CacheOps::of::<Marker, K, V>(),
-                }
-            });
-            Self::downcast_cache::<Marker, K, V>(entry)
+        let cache_key = endpoint.key();
+        {
+            let caches = self.caches.pin();
+            if let Some(entry) = caches.get(&cache_key) {
+                // The guard protects the map slot only. The registry retains
+                // its separately allocated cache until the &self borrow ends.
+                return Self::downcast_cache::<Marker, K, V>(entry);
+            }
         }
+        let _insertions = self.insertions.lock();
+        let caches = self.caches.pin();
+        // Another initializer may have published while this thread waited.
+        if let Some(entry) = caches.get(&cache_key) {
+            return Self::downcast_cache::<Marker, K, V>(entry);
+        }
+        let cache = Box::new(StoredCache::<Marker, K, V> {
+            cache: CalculationCache::new(self.weight_budget_per_endpoint),
+            _marker: PhantomData,
+        });
+        let erased: Box<dyn ErasedCache> = cache;
+        let entry = CacheEntry {
+            cache: xlfn_kernel::published_owner::PublishedOwner::from_box(erased),
+        };
+        let entry = caches
+            .try_insert(cache_key, entry)
+            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+        Self::downcast_cache::<Marker, K, V>(entry)
     }
 
     /// Resolves an endpoint and returns or initializes a pinned value.
@@ -536,7 +531,9 @@ impl CacheRegistry {
         K: Clone + Eq + Hash + Send + Sync + 'static,
         V: Send + Sync + 'static,
     {
-        let erased_ref: &ErasedCache = &*entry.cache;
+        // Trait upcasting preserves the owner while the exact endpoint type is
+        // checked. The warm TLS path already retains this typed projection.
+        let erased_ref: &dyn Any = &*entry.cache;
         let stored = erased_ref
             .downcast_ref::<StoredCache<Marker, K, V>>()
             .ok_or(XllError::Internal {
@@ -549,28 +546,30 @@ impl CacheRegistry {
     pub fn clear(&self) {
         // Entries are never removed during the registry's lifetime. Snapshot
         // pointers to their Box allocations, not to the movable map entries.
+        // Excluding insertions gives Papaya iteration a stable endpoint set.
         // All invalidation, waiting and user value destruction happen after
         // releasing the registry lock, so destructors can bind new endpoints.
         let snapshot: Vec<_> = {
-            let caches = self.caches.read();
+            let _insertions = self.insertions.lock();
+            let caches = self.caches.pin();
             caches
                 .values()
-                .map(|entry| (NonNull::from(&*entry.cache), entry.ops))
+                .map(|entry| NonNull::from(&*entry.cache))
                 .collect()
         };
-        for (cache, ops) in snapshot {
+        for cache in snapshot {
             // SAFETY: the registry retains every boxed cache until its own
             // destruction, and this snapshot cannot outlive the &self borrow.
             let cache = unsafe { cache.as_ref() };
-            let epoch = (ops.advance_generation)(cache);
-            (ops.invalidate_before)(cache, epoch);
+            let epoch = cache.advance_generation();
+            cache.invalidate_before(epoch);
         }
     }
 
     #[cfg(test)]
     #[must_use]
     pub(crate) fn endpoint_count(&self) -> usize {
-        self.caches.read().len()
+        self.caches.len()
     }
 }
 
@@ -840,13 +839,21 @@ impl<K, V> FlightRegistry<K, V> {
     }
 }
 
-struct LeaderGuard<'a, K: Clone + Eq + Hash, V> {
+struct LeaderGuard<'a, K, V>
+where
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
     cache: &'a CalculationCache<K, V>,
     flight: &'a Arc<Flight<K, V>>,
     registered: bool,
 }
 
-impl<K: Clone + Eq + Hash, V> LeaderGuard<'_, K, V> {
+impl<K, V> LeaderGuard<'_, K, V>
+where
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
     fn unregister(&mut self) {
         let removed = self
             .cache
@@ -862,7 +869,11 @@ impl<K: Clone + Eq + Hash, V> LeaderGuard<'_, K, V> {
     }
 }
 
-impl<K: Clone + Eq + Hash, V> Drop for LeaderGuard<'_, K, V> {
+impl<K, V> Drop for LeaderGuard<'_, K, V>
+where
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
     fn drop(&mut self) {
         if self.registered {
             self.unregister();
@@ -1382,14 +1393,17 @@ pub struct CacheResidentStats {
 /// locks. Ordinary maintenance also defers their destruction while an
 /// initializer is active. Destructors may call a still-live cache, subject to
 /// the restrictions of any surrounding key, compute, or weight callback.
-pub struct CalculationCache<K, V> {
+pub struct CalculationCache<K, V>
+where
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
     weight_budget: usize,
     generation: CacheGeneration,
     flights: FlightRegistry<K, V>,
     domain: xlfn_kernel::published_owner::PublishedOwner<CacheLookupDomain<V>>,
     clear_lock: Mutex<()>,
     index: ResidentIndex<K, V>,
-    clear_fn: Option<fn(*const ())>,
     #[cfg(test)]
     follower_hook: Option<Box<dyn Fn() + Send + Sync>>,
 }
@@ -1416,18 +1430,6 @@ where
             domain: xlfn_kernel::published_owner::PublishedOwner::new(CacheLookupDomain::new()),
             clear_lock: Mutex::new(()),
             index: ResidentIndex::new(capacity),
-            clear_fn: Some(|ptr| {
-                // SAFETY: [TR-RECLAIM-1] ptr points to a valid CalculationCache<K, V> during Drop.
-                let cache = unsafe { &*(ptr as *const Self) };
-                cache.flights.clear();
-                let closed = cache.domain.seal();
-                // Drop has exclusive access. Clear synchronously releases
-                // all residency pins before the final node drain.
-                cache.index.clear();
-                cache.maintain_keys();
-                let retired = cache.domain.drain_all(closed);
-                reclaim_cache_entries::<V>(retired);
-            }),
             #[cfg(test)]
             follower_hook: None,
         }
@@ -1845,11 +1847,20 @@ where
     }
 }
 
-impl<K, V> Drop for CalculationCache<K, V> {
+impl<K, V> Drop for CalculationCache<K, V>
+where
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
     fn drop(&mut self) {
-        if let Some(clean) = self.clear_fn {
-            clean(self as *const Self as *const ());
-        }
+        self.flights.clear();
+        let closed = self.domain.seal();
+        // Drop has exclusive access. Clear synchronously releases all
+        // residency pins before key maintenance and the final node drain.
+        self.index.clear();
+        self.maintain_keys();
+        let retired = self.domain.drain_all(closed);
+        reclaim_cache_entries::<V>(retired);
     }
 }
 
@@ -2495,6 +2506,87 @@ mod tests {
             registry.get(&SECOND, &1).unwrap().unwrap().as_str(),
             "seven"
         );
+    }
+
+    #[test]
+    fn miri_erased_registry_clear_preserves_heterogeneous_leases_and_type_checks() {
+        enum Numbers {}
+        enum Text {}
+        struct TrackedValue {
+            value: u64,
+            drops: Arc<AtomicUsize>,
+        }
+        impl Drop for TrackedValue {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let registry = CacheRegistry::new(64);
+        let numbers = CacheEndpoint::<u64, u64, Numbers>::new("shared-name");
+        let text = CacheEndpoint::<String, String, Text>::new("shared-name");
+        let tracked = CacheEndpoint::<u32, TrackedValue, Numbers>::new("shared-name");
+        let drops = Arc::new(AtomicUsize::new(0));
+        let number_lease = registry
+            .get_or_try_insert(&numbers, 1, |_| 1, || Ok(7))
+            .unwrap();
+        let text_lease = registry
+            .get_or_try_insert(&text, "key".into(), String::len, || Ok("old".into()))
+            .unwrap();
+        let tracked_lease = registry
+            .get_or_try_insert(
+                &tracked,
+                1,
+                |_| 1,
+                || {
+                    Ok(TrackedValue {
+                        value: 17,
+                        drops: Arc::clone(&drops),
+                    })
+                },
+            )
+            .unwrap();
+        {
+            let caches = registry.caches.pin();
+            let entry = caches.get(&numbers.key()).unwrap();
+            // Typed endpoint resolution still rejects an owner of another
+            // key, value, or marker type after its erased vtable is unified.
+            assert!(CacheRegistry::downcast_cache::<Numbers, u64, u64>(entry).is_ok());
+            for rejected in [
+                CacheRegistry::downcast_cache::<Numbers, u32, u64>(entry).map(|_| ()),
+                CacheRegistry::downcast_cache::<Numbers, u64, String>(entry).map(|_| ()),
+                CacheRegistry::downcast_cache::<Text, u64, u64>(entry).map(|_| ()),
+            ] {
+                assert!(matches!(rejected, Err(XllError::Internal { diagnostic_id })
+                    if diagnostic_id == crate::diagnostics::id::DiagnosticId::CACHE_TYPE));
+            }
+        }
+
+        registry.clear();
+        assert!(registry.get(&numbers, &1).unwrap().is_none());
+        assert!(registry.get(&text, &"key".into()).unwrap().is_none());
+        assert!(registry.get(&tracked, &1).unwrap().is_none());
+        assert_eq!(*number_lease, 7);
+        assert_eq!(&*text_lease, "old");
+        assert_eq!(tracked_lease.value, 17);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            *registry
+                .get_or_try_insert(&numbers, 1, |_| 1, || Ok(9))
+                .unwrap(),
+            9
+        );
+        assert_eq!(
+            &*registry
+                .get_or_try_insert(&text, "key".into(), String::len, || Ok("new".into()))
+                .unwrap(),
+            "new"
+        );
+        drop((number_lease, text_lease, tracked_lease));
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        registry.clear();
+        drop(registry);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -3858,6 +3950,64 @@ mod tests {
     }
 
     #[test]
+    fn registry_concurrent_growth_and_clear_keep_endpoint_owners_live() {
+        struct DropProbe {
+            value: usize,
+            drops: Arc<AtomicUsize>,
+        }
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        const NAMES: &str = "registry-concurrent-growth-abcdefghijklmnopqrstuvwxyz-0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let registry = CacheRegistry::new(64);
+        let drops = Arc::new(AtomicUsize::new(0));
+        let start = std::sync::Barrier::new(4);
+        std::thread::scope(|scope| {
+            for worker in 0..3 {
+                let registry = &registry;
+                let drops = &drops;
+                let start = &start;
+                scope.spawn(move || {
+                    start.wait();
+                    for offset in 0..16 {
+                        let value = worker * 16 + offset;
+                        let endpoint = CacheEndpoint::<u64, DropProbe>::new(&NAMES[..value + 1]);
+                        let lease = registry
+                            .get_or_try_insert(
+                                &endpoint,
+                                1,
+                                |_| 1,
+                                || {
+                                    Ok(DropProbe {
+                                        value,
+                                        drops: Arc::clone(drops),
+                                    })
+                                },
+                            )
+                            .unwrap();
+                        // A concurrent clear may retire this value, but not
+                        // reclaim it or its endpoint while the lease is live.
+                        std::thread::yield_now();
+                        assert_eq!(lease.value, value);
+                    }
+                });
+            }
+            start.wait();
+            for _ in 0..64 {
+                registry.clear();
+                std::thread::yield_now();
+            }
+        });
+        assert_eq!(registry.endpoint_count(), 48);
+        registry.clear();
+        assert_eq!(drops.load(Ordering::Relaxed), 48);
+        drop(registry);
+        assert_eq!(drops.load(Ordering::Relaxed), 48);
+    }
+
+    #[test]
     fn registry_callback_can_bind_another_endpoint_without_nested_initialization() {
         let registry = CacheRegistry::new(64);
         let first = CacheEndpoint::<u64, u64>::new("registry-reentrant-first");
@@ -3901,7 +4051,7 @@ mod tests {
             fn drop(&mut self) {
                 let registry = self.registry.upgrade().unwrap();
                 // Detect the lock regression without hanging the test suite.
-                assert!(registry.caches.try_write().is_some());
+                assert!(registry.insertions.try_lock().is_some());
                 drop(
                     registry
                         .get_or_try_insert(&NEW, 2, |_| 1, || Ok(9))

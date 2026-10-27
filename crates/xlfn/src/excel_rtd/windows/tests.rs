@@ -8,8 +8,6 @@ use super::*;
 
 #[cfg(feature = "rtd")]
 use crate::XllResult;
-#[cfg(feature = "handles")]
-use crate::formula_lifetime::FormulaLifetimeBackend;
 #[cfg(feature = "rtd")]
 use crate::subscription::{RtdSink, RtdSource, RtdSubscription, RtdTopic};
 use crate::subscription::{RtdUpdate, StoredRtdValue};
@@ -636,6 +634,169 @@ fn com_module_lifetime_tracks_calls_factories_and_server_locks() {
 }
 
 #[test]
+fn logical_rtd_close_requires_residency_and_still_rejects_git_debt() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let retained = ComObjectLease::new(ComObjectKind::Server);
+    close_test_ingress();
+    let error = crate::excel_rtd_protocol::wait_for_module_quiescence(false).unwrap_err();
+    assert!(error.missing_module_residency);
+    assert_eq!(error.outstanding_git_cookies, 0);
+    assert_eq!(error.revocation_debt, 0);
+
+    // A residency lease permits the shell, but never a registered callback.
+    module_lifetime().git_cookie_registered();
+    let error = crate::excel_rtd_protocol::wait_for_module_quiescence(true).unwrap_err();
+    assert!(!error.missing_module_residency);
+    assert_eq!(error.outstanding_git_cookies, 1);
+    module_lifetime().git_cookie_revoked();
+    let cookie = NonZeroU32::new(41).unwrap();
+    module_lifetime().git_cookie_registered();
+    module_lifetime().git_cookie_revocation_deferred(cookie);
+    let claims = module_lifetime().claim_git_revocation_debt_batch();
+    let error = crate::excel_rtd_protocol::wait_for_module_quiescence(true).unwrap_err();
+    assert_eq!(error.revocation_debt, 1);
+    drop(claims);
+    retry_git_revocation_debt_with(|_| Ok(()));
+    drop(retained);
+    crate::excel_rtd_protocol::wait_for_module_quiescence(false).unwrap();
+}
+
+#[test]
+#[cfg(all(feature = "rtd", feature = "handles"))]
+fn final_remove_retains_com_shells_without_blocking_close_or_reviving_on_reopen() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let _apartment = TestComApartment::enter();
+    close_test_ingress();
+    let fixture = crate::runtime::StaticTestRuntime::<()>::new();
+    let runtime = fixture.runtime();
+    runtime
+        .ensure_module_residency(
+            crate::boundary::host::host_auto_remove::<()> as fn(&crate::runtime::Runtime<()>) -> i32
+                as *const (),
+        )
+        .unwrap();
+    let open = || {
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish(opening, (), ());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+    };
+    open();
+    let ensured = runtime
+        .with_subscriptions(|subscriptions| ensure_server_without_handles(Some(subscriptions)))
+        .unwrap()
+        .unwrap();
+    let server = ensured.active.pointer as *mut RtdServer;
+    let mut factory_pointer = ptr::null_mut();
+    assert_eq!(
+        // SAFETY: the active server owns the class identity; output is writable.
+        unsafe {
+            dll_get_class_object(
+                (&raw const ensured.active.class_id).cast(),
+                (&IID_ICLASS_FACTORY as *const GUID).cast(),
+                &mut factory_pointer,
+            )
+        },
+        S_OK
+    );
+    let factory = TestUnknownReference::new(factory_pointer);
+    let factory_pointer = factory_pointer.cast::<ClassFactory>();
+    // SAFETY: the reference above retains the factory through both epochs.
+    assert_eq!(unsafe { factory_lock_server(factory_pointer, 1) }, S_OK);
+    let server_lock = TestServerLock(factory_pointer);
+
+    // Keep the host's server/factory/lock references until AFTER close returns.
+    // The old physical drain times out under cfg(test), so this regression
+    // fails rather than hanging the test process indefinitely.
+    assert_eq!(crate::boundary::host::host_auto_remove(runtime), 1);
+    assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
+    assert!(ACTIVE_SERVER.lock().is_none());
+    assert_eq!(
+        // SAFETY: `ensured` retains the terminal server throughout inspection.
+        unsafe { (*server).operations.as_ref().state.lock().phase },
+        ServerPhase::Terminated
+    );
+    assert_eq!(runtime.resident_event_count(), 0);
+    assert!(!runtime.release_module_residency().unwrap());
+    assert!(runtime.module_residency_held());
+    assert_eq!(dll_can_unload_now(), S_FALSE);
+    let mut heartbeat_result = 0;
+    assert_eq!(
+        // SAFETY: server and result are valid; closed ingress rejects new work.
+        unsafe { heartbeat(server, &mut heartbeat_result) },
+        CO_E_SERVER_STOPPING
+    );
+    let first_trace = runtime.shutdown_trace_json();
+    assert!(first_trace.contains("returned_success"));
+
+    open();
+    let trace: serde_json::Value = serde_json::from_str(&runtime.shutdown_trace_json()).unwrap();
+    assert_eq!(trace["initial"]["rtdServers"], 1);
+    assert_eq!(trace["initial"]["rtdClassFactories"], 1);
+    assert_eq!(trace["initial"]["rtdServerLocks"], 1);
+    // SAFETY: old references remain live, but their per-server gate is terminal.
+    assert_eq!(unsafe { heartbeat(server, &mut heartbeat_result) }, E_FAIL);
+    let mut instance = ptr::null_mut();
+    assert_eq!(
+        // SAFETY: the live factory vtable and output/IID obey the COM ABI.
+        unsafe {
+            ((*(*factory_pointer).vtable).create_instance)(
+                factory_pointer,
+                ptr::null_mut(),
+                &IID_IRTD_SERVER,
+                &mut instance,
+            )
+        },
+        E_FAIL
+    );
+    assert!(instance.is_null());
+
+    let current = runtime
+        .with_subscriptions(|subscriptions| ensure_server_without_handles(Some(subscriptions)))
+        .unwrap()
+        .unwrap();
+    assert_ne!(current.active.generation, ensured.active.generation);
+    assert_eq!(
+        // SAFETY: the current reference retains its newly opened server.
+        unsafe {
+            heartbeat(
+                current.active.pointer as *mut RtdServer,
+                &mut heartbeat_result,
+            )
+        },
+        S_OK
+    );
+    drop(server_lock);
+    drop(factory);
+    drop(ensured);
+    assert_eq!(crate::boundary::host::host_auto_remove(runtime), 1);
+    assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Closed);
+    assert_eq!(dll_can_unload_now(), S_FALSE);
+    // Final Release is legal after logical close, but must not release the
+    // DLL self-reference while its own COM return path is still executing.
+    drop(current);
+    assert!(runtime.module_residency_held());
+    assert!(module_lifetime().snapshot().is_quiescent());
+    assert_eq!(dll_can_unload_now(), S_OK);
+    assert!(runtime.release_module_residency().unwrap());
+    assert!(!runtime.module_residency_held());
+    let second_trace = runtime.shutdown_trace_json();
+    assert!(second_trace.contains("returned_success"));
+    if let Some(directory) = std::env::var_os("XLFN_WINDOWS_RTD_RETAINED_TRACE_DIR") {
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            std::path::Path::new(&directory).join("close.json"),
+            first_trace,
+        )
+        .unwrap();
+        std::fs::write(
+            std::path::Path::new(&directory).join("reopen.json"),
+            second_trace,
+        )
+        .unwrap();
+    }
+}
+
+#[test]
 fn com_module_lifetime_emits_rtd_resource_trace_events() {
     let _guard = TEST_LOCK.lock().unwrap();
     let ingress = crate::module_runtime::ingress();
@@ -777,7 +938,7 @@ fn module_quiescence_refuses_debt_claim_in_flight() {
     assert_eq!(claims.len(), 1);
     assert!(module_lifetime().queued_git_revocation_debt().is_empty());
 
-    let error = crate::excel_rtd_protocol::wait_for_module_quiescence().unwrap_err();
+    let error = crate::excel_rtd_protocol::wait_for_module_quiescence(false).unwrap_err();
     assert_eq!(error.outstanding_git_cookies, 0);
     assert_eq!(error.revocation_debt, 1);
     assert!(!module_lifetime().can_unload_now());
@@ -1559,7 +1720,7 @@ struct DispatchTestSubscription {
 unsafe impl RtdSubscription for DispatchTestSubscription {
     fn request_cancel(&self) {}
 
-    fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
+    fn disconnect_and_wait(self) -> XllResult<()> {
         self.sink.lock().take();
         self.disconnected.store(true, Ordering::Release);
         Ok(())
@@ -3321,7 +3482,10 @@ fn sta_final_remove_dispatches_com_before_ingress_drain_and_coalesces_reentry() 
         let fixture = crate::runtime::StaticTestRuntime::<()>::new();
         let runtime = fixture.runtime();
         runtime
-            .ensure_module_residency(crate::boundary::host::host_auto_remove::<()> as *const ())
+            .ensure_module_residency(
+                crate::boundary::host::host_auto_remove::<()>
+                    as fn(&crate::runtime::Runtime<()>) -> i32 as *const (),
+            )
             .unwrap();
         let registration = crate::subscription::SourceRegistration::new(
             crate::generation::RuntimeGeneration::new(1).unwrap(),

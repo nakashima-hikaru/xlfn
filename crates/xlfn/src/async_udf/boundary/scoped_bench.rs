@@ -1,4 +1,4 @@
-//! Production scoped-builder, lifetime erasure, delivery, and executor fixture.
+//! Production scoped-builder, delivery, and executor fixture.
 //! Worker startup and seed object publication are outside measured cycles.
 
 use super::{InstrumentedHandleTask, UninstrumentedHandleTask};
@@ -22,7 +22,6 @@ use crate::handle::{
 };
 use crate::input_identity::InputFingerprint;
 use std::future::Future;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 use xlfn_sys::{
@@ -44,9 +43,9 @@ impl HandleScopedBuilder<f64> for Builder {
     fn build<'generation>(
         self,
         scope: AsyncTaskScope<'generation>,
-    ) -> Pin<Box<dyn Future<Output = XllResult<f64>> + Send + 'generation>> {
+    ) -> impl Future<Output = XllResult<f64>> + Send + 'generation {
         let lease = self.pending.bind(scope);
-        Box::pin(async move { Ok(std::hint::black_box(lease.0)) })
+        async move { Ok(std::hint::black_box(lease.0)) }
     }
 }
 

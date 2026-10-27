@@ -12,16 +12,16 @@ use std::num::NonZeroUsize;
 use xlfn_kernel::invariant::checked_sub_or_abort;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PendingCommitment {
+enum PendingCommitment {
     Uncommitted,
     Committed,
 }
 
-pub(crate) struct ActiveReservation {
+struct ActiveReservation {
     reservations: NonZeroUsize,
 }
 
-pub(crate) enum SubscriptionPhase {
+enum SubscriptionPhase {
     Pending {
         reservations: Option<NonZeroUsize>,
         server: Option<ServerGeneration>,
@@ -40,6 +40,20 @@ pub(crate) enum SubscriptionPhase {
     },
 }
 
+/// Affine authority issued only when a pending entry begins a connection.
+/// The transaction owns this ticket until commit or rollback; the generations
+/// still have to match because server termination can invalidate the entry.
+pub(super) struct ConnectionTicket {
+    server: ServerGeneration,
+    connection: ConnectionGeneration,
+}
+
+impl ConnectionTicket {
+    pub(super) fn generation(&self) -> ConnectionGeneration {
+        self.connection
+    }
+}
+
 pub(crate) enum PreparationFinish {
     Keep,
     Remove,
@@ -48,7 +62,7 @@ pub(crate) enum PreparationFinish {
 pub(crate) struct SubscriptionEntry {
     pub(crate) source_id: SourceId,
     pub(crate) topic: RtdTopic,
-    pub(crate) phase: SubscriptionPhase,
+    phase: SubscriptionPhase,
 }
 
 impl SubscriptionEntry {
@@ -191,11 +205,11 @@ impl SubscriptionEntry {
         Ok(())
     }
 
-    pub(crate) fn begin_connection(
+    pub(super) fn begin_connection(
         &mut self,
         server: ServerGeneration,
         connection: ConnectionGeneration,
-    ) -> XllResult<()> {
+    ) -> XllResult<ConnectionTicket> {
         let (reservations, commitment, existing_server) = match &self.phase {
             SubscriptionPhase::Pending {
                 reservations,
@@ -226,17 +240,19 @@ impl SubscriptionEntry {
             connection,
             commitment,
         };
-        Ok(())
+        Ok(ConnectionTicket { server, connection })
     }
 
-    pub(crate) fn rollback_connection(&mut self, connection: ConnectionGeneration) -> bool {
+    pub(super) fn rollback_connection(&mut self, ticket: &ConnectionTicket) -> bool {
         let (reservations, server, commitment) = match &self.phase {
             SubscriptionPhase::Connecting {
                 reservations,
                 server,
                 connection: current,
                 commitment,
-            } if *current == connection => (*reservations, *server, *commitment),
+            } if *current == ticket.connection && *server == ticket.server => {
+                (*reservations, *server, *commitment)
+            }
             _ => return false,
         };
         self.phase = SubscriptionPhase::Pending {
@@ -247,20 +263,22 @@ impl SubscriptionEntry {
         true
     }
 
-    pub(crate) fn finish_connection(&mut self, connection: ConnectionGeneration) -> bool {
+    pub(super) fn finish_connection(&mut self, ticket: &ConnectionTicket) -> bool {
         let (reservations, server) = match &self.phase {
             SubscriptionPhase::Connecting {
                 reservations,
                 server,
                 connection: current,
                 ..
-            } if *current == connection => (*reservations, *server),
+            } if *current == ticket.connection && *server == ticket.server => {
+                (*reservations, *server)
+            }
             _ => return false,
         };
         let reservation = reservations.map(|reservations| ActiveReservation { reservations });
         self.phase = SubscriptionPhase::Active {
             server,
-            connection,
+            connection: ticket.connection,
             reservation,
         };
         true
@@ -585,5 +603,41 @@ impl SubscriptionCatalog {
                 }
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "rtd"))]
+mod typestate_tests {
+    use super::*;
+    use crate::generation::RuntimeGeneration;
+
+    #[test]
+    fn connection_ticket_cannot_finish_or_rollback_a_new_server_attempt() {
+        let server = ServerGeneration::new(1).unwrap();
+        let next_server = ServerGeneration::new(2).unwrap();
+        // Reusing a connection generation here deliberately isolates the server
+        // identity check in addition to the normal connection-generation check.
+        let connection = ConnectionGeneration::new(1).unwrap();
+        let mut entry = SubscriptionEntry {
+            source_id: SourceId(SourceHandleId {
+                generation: RuntimeGeneration::new(1).unwrap(),
+                sequence: 1,
+            }),
+            topic: RtdTopic::single("ticket-generation").unwrap(),
+            phase: SubscriptionPhase::Pending {
+                reservations: NonZeroUsize::new(1),
+                server: None,
+                commitment: PendingCommitment::Uncommitted,
+            },
+        };
+        let old = entry.begin_connection(server, connection).unwrap();
+        assert!(entry.reset_for_server_termination(server));
+        let current = entry.begin_connection(next_server, connection).unwrap();
+        assert!(!entry.finish_connection(&old));
+        assert!(!entry.rollback_connection(&old));
+        assert!(!entry.is_active());
+        assert_eq!(entry.server_generation(), Some(next_server));
+        assert!(entry.finish_connection(&current));
+        assert!(entry.is_active());
     }
 }

@@ -1683,7 +1683,8 @@ def close_worker_session(session: ExcelSession, progress: WorkerProgress) -> Non
 
 
 def reap_excel_process(pid_file: Path, grace_s: float,
-                       dump_directory: Path | None = None) -> dict[str, Any]:
+                       dump_directory: Path | None = None, *,
+                       full_memory_dumps: bool = False) -> dict[str, Any]:
     """Reap only the exact Excel process created by this worker, including on success."""
     if not pid_file.is_file():
         return {"pid_recorded": False}
@@ -1704,7 +1705,8 @@ def reap_excel_process(pid_file: Path, grace_s: float,
             result["exit_timeout_s"] = grace_s
             if dump_directory is not None:
                 try:
-                    result["shutdown_dump"] = capture_shutdown_dump(identity, dump_directory)
+                    result["shutdown_dump"] = capture_shutdown_dump(identity, dump_directory,
+                        full_memory=full_memory_dumps)
                 except Exception as error:
                     result["shutdown_dump"] = {"status": "error",
                         "error": f"{type(error).__name__}: {error}"}
@@ -1743,6 +1745,7 @@ def worker(args: argparse.Namespace, case: Case) -> int:
         "repeat_diagnostics": args.repeat_diagnostics and case.id == "L02",
         "shutdown_diagnostics": args.shutdown_diagnostics,
         "dump_on_failure": args.dump_on_failure or args.shutdown_diagnostics,
+        "full_memory_dumps": args.full_memory_dumps,
         "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "host": platform.node(), "os": platform.platform(),
         "xll": str(xll.resolve()), "xll_sha256": hashlib.sha256(xll.read_bytes()).hexdigest(),
@@ -1829,12 +1832,17 @@ def main() -> int:
                         help="save a dump only when Excel survives worker failure or its exit deadline; "
                              "no lifecycle tracing or exit observer (up to 15s extra on failure)")
     parser.add_argument("--plan", action="store_true")
+    parser.add_argument("--full-memory-dumps", action="store_true",
+                        help="with a dump diagnostic mode, capture Excel memory on teardown failure "
+                             "for lock inspection (large files; up to 60s extra per failure)")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--case-key", help=argparse.SUPPRESS)
     parser.add_argument("--pid-file", help=argparse.SUPPRESS)
     parser.add_argument("--progress-file", help=argparse.SUPPRESS)
     parser.add_argument("--lifecycle-trace-file", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.full_memory_dumps and not (args.shutdown_diagnostics or args.dump_on_failure):
+        parser.error("--full-memory-dumps requires --shutdown-diagnostics or --dump-on-failure")
     selected = [case for case in cases(args.profile)
                 if (not args.id or case.id in args.id) and (not args.variant or case.variant == args.variant)]
     if not selected:
@@ -1894,6 +1902,8 @@ def main() -> int:
                     cmd.append("--repeat-diagnostics")
                 if args.dump_on_failure:
                     cmd.append("--dump-on-failure")
+                if args.full_memory_dumps:
+                    cmd.append("--full-memory-dumps")
                 if args.shutdown_diagnostics:
                     cmd.append("--shutdown-diagnostics")
                     diagnostic_root = out.with_suffix(".diagnostics")
@@ -1916,7 +1926,8 @@ def main() -> int:
                     cleanup = reap_excel_process(pid_file,
                         grace_s=5 if record["status"] in ("ok", "unsupported") else 0,
                         dump_directory=out.with_suffix(".diagnostics")
-                        if args.shutdown_diagnostics or args.dump_on_failure else None)
+                        if args.shutdown_diagnostics or args.dump_on_failure else None,
+                        full_memory_dumps=args.full_memory_dumps)
                 finally:
                     observation = observer.finish() if observer is not None else None
                 if observation is not None:

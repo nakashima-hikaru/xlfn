@@ -14,9 +14,10 @@ use queue::RunnableQueue;
 use std::cell::Cell;
 use std::future::Future;
 use std::num::NonZeroUsize;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
 use std::thread::{self, JoinHandle};
+use triomphe::Arc;
 use xlfn_kernel::operation_gate::OperationGate;
 
 thread_local! {
@@ -123,7 +124,8 @@ impl Default for BuiltinExecutorConfig {
 pub struct BuiltinAsyncExecutor {
     config: BuiltinExecutorConfig,
     // Published once after successful startup. Reservations and scheduler
-    // callbacks own Arc copies, independent from runtime publication.
+    // callbacks own Arc copies, independent from runtime publication. These
+    // owners never create weak references, so no weak count is needed.
     shared: OnceLock<Arc<PoolShared>>,
     lifecycle: Mutex<Lifecycle>,
     stopped: Condvar,
@@ -366,9 +368,9 @@ struct PoolShared {
     failed: AtomicBool,
     closing: AtomicBool,
     #[cfg(test)]
-    before_poll_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    before_poll_hook: Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
-    after_scheduler_drop_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    after_scheduler_drop_hook: Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl PoolShared {

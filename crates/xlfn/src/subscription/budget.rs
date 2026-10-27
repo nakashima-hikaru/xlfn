@@ -135,6 +135,15 @@ impl ChannelBudget {
         state.limit.bytes = limits.bytes.get();
     }
 
+    pub(super) fn configure_worker_limit(&self, limit: NonZeroUsize) {
+        self.state.lock().limit.workers = limit.get();
+    }
+
+    pub(super) fn worker_limit(&self) -> NonZeroUsize {
+        NonZeroUsize::new(self.state.lock().limit.workers)
+            .expect("source producer limits are nonzero")
+    }
+
     fn acquire(&self, amount: Usage) -> bool {
         let mut state = self.state.lock();
         let add = |used: usize, amount: usize, limit: usize| {
@@ -248,7 +257,6 @@ impl Drop for WorkerPermit {
     }
 }
 
-#[derive(Clone)]
 pub(super) struct BudgetPair {
     source: Arc<ChannelBudget>,
     runtime: Arc<ChannelBudget>,
@@ -277,41 +285,33 @@ impl BudgetPair {
         self.runtime.release_buffered(values, bytes);
     }
 
-    pub(super) fn ledger(self) -> BufferPermit {
-        BufferPermit {
-            budgets: self,
-            values: 0,
-            bytes: 0,
-        }
-    }
-
     #[cfg(test)]
-    pub(super) fn try_value(&self, bytes: usize) -> Option<BufferPermit> {
+    pub(super) fn try_value(&self, bytes: usize) -> Option<BufferPermit<'_>> {
         self.acquire(1, bytes).then(|| BufferPermit {
-            budgets: self.clone(),
+            budgets: self,
             values: 1,
             bytes,
         })
     }
 }
 
-// One ledger for an entire queue or dequeued batch. Values carry no reference
-// counts or permit objects; ownership transfer splits the ledger without
-// releasing capacity until the batch is published or discarded.
-pub(super) struct BufferPermit {
-    budgets: BudgetPair,
+// The channel owns both budgets outside its state mutex. Queue accounting is
+// count-only, so splitting a batch borrows those budgets without cloning Arc.
+// Channel::drop drains this ledger before its budget owners are reclaimed.
+#[derive(Default)]
+pub(super) struct BufferLedger {
     values: usize,
     bytes: usize,
 }
 
-impl BufferPermit {
+impl BufferLedger {
     pub(super) const fn bytes(&self) -> usize {
         self.bytes
     }
 
     #[inline]
-    pub(super) fn try_push(&mut self, bytes: usize) -> bool {
-        if !self.budgets.acquire(1, bytes) {
+    pub(super) fn try_push(&mut self, budgets: &BudgetPair, bytes: usize) -> bool {
+        if !budgets.acquire(1, bytes) {
             return false;
         }
         self.values += 1;
@@ -319,7 +319,12 @@ impl BufferPermit {
         true
     }
 
-    pub(super) fn split(&mut self, values: usize, bytes: usize) -> Option<Self> {
+    pub(super) fn split<'a>(
+        &mut self,
+        budgets: &'a BudgetPair,
+        values: usize,
+        bytes: usize,
+    ) -> Option<BufferPermit<'a>> {
         if values == 0 {
             debug_assert_eq!(bytes, 0);
             return None;
@@ -327,34 +332,57 @@ impl BufferPermit {
         assert!(values <= self.values && bytes <= self.bytes);
         self.values -= values;
         self.bytes -= bytes;
-        Some(Self {
-            budgets: self.budgets.clone(),
+        Some(BufferPermit {
+            budgets,
             values,
             bytes,
         })
     }
 
-    pub(super) fn take_all(&mut self) -> Option<Self> {
-        self.split(self.values, self.bytes)
+    pub(super) fn take_all<'a>(&mut self, budgets: &'a BudgetPair) -> Option<BufferPermit<'a>> {
+        self.split(budgets, self.values, self.bytes)
     }
 
-    pub(super) fn resize(&mut self, bytes: usize) -> bool {
-        if bytes == self.bytes {
-            return true;
-        }
-        if bytes > self.bytes {
-            if !self.budgets.acquire(0, bytes - self.bytes) {
-                return false;
-            }
-        } else {
-            self.budgets.release(0, self.bytes - bytes);
+    pub(super) fn resize(&mut self, budgets: &BudgetPair, bytes: usize) -> bool {
+        if !resize_charge(budgets, self.bytes, bytes) {
+            return false;
         }
         self.bytes = bytes;
         true
     }
 }
 
-impl Drop for BufferPermit {
+fn resize_charge(budgets: &BudgetPair, current: usize, requested: usize) -> bool {
+    if requested > current {
+        budgets.acquire(0, requested - current)
+    } else {
+        if requested < current {
+            budgets.release(0, current - requested);
+        }
+        true
+    }
+}
+
+// A batch can outlive the queue lock, but never the channel that owns its
+// budgets. It returns capacity after the batch values have been destroyed.
+pub(super) struct BufferPermit<'a> {
+    budgets: &'a BudgetPair,
+    values: usize,
+    bytes: usize,
+}
+
+#[cfg(test)]
+impl BufferPermit<'_> {
+    fn resize(&mut self, bytes: usize) -> bool {
+        if !resize_charge(self.budgets, self.bytes, bytes) {
+            return false;
+        }
+        self.bytes = bytes;
+        true
+    }
+}
+
+impl Drop for BufferPermit<'_> {
     fn drop(&mut self) {
         if self.values != 0 || self.bytes != 0 {
             self.budgets.release(self.values, self.bytes);
@@ -379,29 +407,29 @@ mod tests {
         ));
         let runtime = Arc::new(ChannelBudget::runtime(RtdLimits::standard()));
         let pair = BudgetPair::new(Arc::clone(&source), Arc::clone(&runtime));
-        let mut queue = pair.clone().ledger();
-        assert!(queue.try_push(1));
-        assert!(queue.try_push(2));
-        assert!(queue.try_push(3));
-        let batch = queue.split(2, 3).unwrap();
-        assert!(!queue.try_push(1));
+        let mut queue = BufferLedger::default();
+        assert!(queue.try_push(&pair, 1));
+        assert!(queue.try_push(&pair, 2));
+        assert!(queue.try_push(&pair, 3));
+        let batch = queue.split(&pair, 2, 3).unwrap();
+        assert!(!queue.try_push(&pair, 1));
         assert!(pair.try_value(1).is_none());
         assert_eq!(source.state.lock().used.values, 3);
         assert_eq!(source.state.lock().used.bytes, 6);
         // Discarding the remaining queue cannot release in-flight capacity.
-        drop(queue.take_all());
+        drop(queue.take_all(&pair));
         assert_eq!(runtime.state.lock().used.values, 2);
         assert_eq!(runtime.state.lock().used.bytes, 3);
-        assert!(queue.try_push(3));
-        drop(queue);
+        assert!(queue.try_push(&pair, 3));
+        drop(queue.take_all(&pair));
         assert_eq!(runtime.state.lock().used.values, 2);
         drop(batch);
         assert_eq!(source.state.lock().used, Usage::default());
-        // A batch's owned accounting may survive all original budget owners.
-        let mut queue = pair.ledger();
-        assert!(queue.try_push(6));
-        let batch = queue.take_all();
-        drop(queue);
+        // The pair owns accounting even after the original source/runtime owners drop.
+        let mut queue = BufferLedger::default();
+        assert!(queue.try_push(&pair, 6));
+        let batch = queue.take_all(&pair);
+        drop(queue.take_all(&pair));
         drop(source);
         drop(runtime);
         drop(batch);
@@ -414,11 +442,11 @@ mod tests {
             RtdLimits::standard().with_max_buffered_values(bounded(2)),
         ));
         let pair = BudgetPair::new(Arc::clone(&source), Arc::clone(&runtime));
-        let mut queue = pair.clone().ledger();
-        assert!(queue.try_push(10));
-        assert!(queue.try_push(20));
+        let mut queue = BufferLedger::default();
+        assert!(queue.try_push(&pair, 10));
+        assert!(queue.try_push(&pair, 20));
         let result = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
-            let _batch = queue.split(1, 10);
+            let _batch = queue.split(&pair, 1, 10);
             assert!(pair.try_value(1).is_none());
             panic!("injected publication unwind after batch transfer");
         }));
@@ -426,7 +454,7 @@ mod tests {
         assert_eq!(runtime.state.lock().used.values, 1);
         assert_eq!(runtime.state.lock().used.bytes, 20);
         drop(pair.try_value(1).unwrap());
-        drop(queue);
+        drop(queue.take_all(&pair));
         assert_eq!(source.state.lock().used, Usage::default());
         assert_eq!(runtime.state.lock().used, Usage::default());
     }

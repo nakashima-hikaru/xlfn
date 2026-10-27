@@ -282,6 +282,16 @@ complete safety contracts before implementing them, including error and
 panic paths. Source-wide `request_stop` and `shutdown_and_wait` hooks are
 separate from per-topic cancellation and disconnection.
 
+`RtdSubscription::disconnect_and_wait(self)` consumes the concrete subscription
+by value. The framework stores these values in reusable slots belonging to each
+registered source; it does not allocate a `Box` for each connection. A unique
+ticket carries the source, slot and generation through connection rollback,
+deferred cleanup and shutdown. Cancellation temporarily takes the value out of
+storage, and disconnection releases its slot only after the sink-user barrier
+finishes, including errors and panics. User callbacks run outside the storage
+lock. Slot capacity is retained until the source is reclaimed, so this removes
+repeated allocation at the cost of retaining each source's high-water capacity.
+
 ## Temporary COM registration
 
 The XLL registers its RTD COM server temporarily. On a later start after an

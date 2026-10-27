@@ -54,48 +54,40 @@ pub(crate) use certificate_tokens::{
     AddinQuiesced, GenerationCallbacksDetached, GenerationReclaimed,
 };
 
-/// Teardown work owned by the handle implementation after its public
-/// bindings have been sealed.  The lifecycle core only sees this narrow
-/// protocol and never names a handle implementation type.
-pub(crate) trait HandleStoreTeardown {
-    fn finish(self: Box<Self>) -> crate::XllResult<HandlesQuiescent>;
-}
-
 /// Feature-neutral handle shutdown token used by the generation teardown.
-///
-/// The concrete handle implementation is type-erased behind
-/// [`HandleStoreTeardown`].  This keeps the core lifecycle protocol
-/// independent from the optional handle subsystem without adding any work to
-/// the call or lookup hot paths.
+/// RTD-only builds contain no handle implementation state.
 pub(crate) struct HandlesSealed {
     generation: Option<RuntimeGeneration>,
-    teardown: Option<Box<dyn HandleStoreTeardown>>,
+    #[cfg(feature = "handles")]
+    teardown: Option<crate::handle::FormulaHandleServiceSealed>,
 }
 
 impl HandlesSealed {
     pub(crate) fn empty(generation: Option<RuntimeGeneration>) -> Self {
         Self {
             generation,
+            #[cfg(feature = "handles")]
             teardown: None,
         }
     }
 
     #[cfg(feature = "handles")]
-    pub(crate) fn from_teardown<T>(generation: Option<RuntimeGeneration>, teardown: T) -> Self
-    where
-        T: HandleStoreTeardown + 'static,
-    {
+    pub(crate) fn from_teardown(
+        generation: Option<RuntimeGeneration>,
+        teardown: crate::handle::FormulaHandleServiceSealed,
+    ) -> Self {
         Self {
             generation,
-            teardown: Some(Box::new(teardown)),
+            teardown: Some(teardown),
         }
     }
 
-    pub(crate) fn finish(mut self) -> crate::XllResult<HandlesQuiescent> {
-        match self.teardown.take() {
-            Some(teardown) => teardown.finish(),
-            None => Ok(HandlesQuiescent::new(self.generation)),
+    pub(crate) fn finish(self) -> crate::XllResult<HandlesQuiescent> {
+        #[cfg(feature = "handles")]
+        if let Some(teardown) = self.teardown {
+            return teardown.finish();
         }
+        Ok(HandlesQuiescent::new(self.generation))
     }
 }
 
@@ -254,6 +246,7 @@ pub(crate) enum UnloadHazard {
     ExportDrainPreparationFailed,
     RtdGitCallbackStillRegistered,
     RtdGitRevocationDebt,
+    RtdComObjectsWithoutResidency,
 }
 
 impl UnloadHazard {
@@ -268,7 +261,8 @@ impl UnloadHazard {
             Self::SubscriptionProducerStillRunning
             | Self::ExportDrainPreparationFailed
             | Self::RtdGitCallbackStillRegistered
-            | Self::RtdGitRevocationDebt => {
+            | Self::RtdGitRevocationDebt
+            | Self::RtdComObjectsWithoutResidency => {
                 crate::shutdown_trace::ShutdownFailure::RtdShutdownFailed
             }
             Self::HandleStoreNotQuiescent => {

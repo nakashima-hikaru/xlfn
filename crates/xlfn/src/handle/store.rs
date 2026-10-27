@@ -5,7 +5,6 @@
 //! [`super::runtime::FormulaHandleService`]; they use this façade instead of
 //! reaching into the registry lifecycle directly.
 
-use super::binding::BindingReadLease;
 use super::object::PendingObjectBinding;
 use super::registry::{HandleRegistry, HandleRegistrySealed};
 use super::{ExcelHandleObject, Handle, HandleId, ObjectId};
@@ -32,16 +31,15 @@ impl HandleStore {
     pub(crate) fn erase<'store, T: ExcelHandleObject>(
         &'store self,
         value: T,
-    ) -> XllResult<PendingObjectBinding<'store>> {
+    ) -> XllResult<PendingObjectBinding<'store, T>> {
         self.registry.new_object(value)
     }
 
-    pub(crate) fn duplicate_binding<'store>(
+    pub(crate) fn duplicate_binding<'store, T: ExcelHandleObject>(
         &'store self,
-        source: &BindingReadLease<'_>,
-    ) -> XllResult<PendingObjectBinding<'store>> {
-        let binding = source.duplicate_object_binding()?;
-        PendingObjectBinding::new(&self.registry, binding)
+        source: super::typed::HandleAlias<'_, T>,
+    ) -> XllResult<PendingObjectBinding<'store, T>> {
+        PendingObjectBinding::from_alias(&self.registry, source)
     }
 
     pub(crate) const fn session(&self) -> u64 {
@@ -50,9 +48,9 @@ impl HandleStore {
 
     pub(crate) fn insert_pending<'store, T: ExcelHandleObject>(
         &'store self,
-        value: PendingObjectBinding<'store>,
+        value: PendingObjectBinding<'store, T>,
     ) -> XllResult<(String, HandleId, ObjectId, bool)> {
-        value.publish::<T>(&self.registry)
+        value.publish(&self.registry)
     }
 
     pub(crate) fn lookup<'call, T: ExcelHandleObject>(

@@ -1,10 +1,10 @@
-//! Formula-handle lifetime capability exposed to the private Excel transport.
+//! Formula-handle lifetime identity and concrete private transport types.
 //!
 //! The handle subsystem owns formula bindings and their lifetime state. This
-//! small protocol is shared independently of the handle implementation, so
+//! boundary names its concrete implementation only when handles are enabled;
 //! RTD-only builds do not compile formula-handle state or token machinery.
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", not(feature = "handles")))]
 use crate::XllResult;
 use std::num::NonZeroU64;
 
@@ -33,45 +33,54 @@ impl FormulaLifetimeGeneration {
     }
 }
 
-pub(crate) trait FormulaLifetimeBackend: Send + Sync {
-    #[cfg(target_os = "windows")]
-    fn identity(&self) -> usize;
+// The transport has exactly one formula-handle implementation. Keep its
+// concrete types behind this private boundary; RTD-only builds use uninhabited
+// placeholders and do not compile any formula-handle state.
+#[cfg(feature = "handles")]
+pub(crate) use crate::handle::FormulaHandleService as FormulaLifetimeBackend;
+#[cfg(all(target_os = "windows", feature = "handles"))]
+pub(crate) use crate::handle::HandleConnection as FormulaLifetimeConnection;
 
-    #[cfg(feature = "handles")]
-    fn terminate_all_topics(&self);
+#[cfg(all(target_os = "windows", not(feature = "handles")))]
+pub(crate) enum FormulaLifetimeBackend {}
 
-    #[cfg(all(
-        target_os = "windows",
-        feature = "handles",
-        any(test, feature = "refinement")
-    ))]
-    fn lifetime_trace(&self) -> Option<crate::shutdown_trace::ShutdownTraceHandle>;
+#[cfg(all(target_os = "windows", not(feature = "handles")))]
+impl FormulaLifetimeBackend {
+    pub(crate) fn identity(&self) -> usize {
+        match *self {}
+    }
 
-    #[cfg(all(target_os = "windows", feature = "handles"))]
-    fn claim_lifetime(
+    pub(crate) fn connect_transaction(
         &self,
-        lifetime_key: &str,
-        generation: FormulaLifetimeGeneration,
-    ) -> XllResult<()>;
+        _: FormulaLifetimeGeneration,
+        _: i32,
+        _: &str,
+    ) -> XllResult<FormulaLifetimeConnection<'_>> {
+        match *self {}
+    }
 
-    #[cfg(target_os = "windows")]
-    fn connect_lifetime<'a>(
-        &'a self,
-        generation: FormulaLifetimeGeneration,
-        topic_id: i32,
-        lifetime_key: &str,
-    ) -> XllResult<Box<dyn FormulaLifetimeConnection + 'a>>;
+    pub(crate) fn disconnect(&self, _: FormulaLifetimeGeneration, _: i32) {
+        match *self {}
+    }
 
-    #[cfg(target_os = "windows")]
-    fn disconnect(&self, generation: FormulaLifetimeGeneration, topic_id: i32);
-
-    #[cfg(target_os = "windows")]
-    fn terminate_topics(&self, generation: FormulaLifetimeGeneration);
+    pub(crate) fn terminate_topics(&self, _: FormulaLifetimeGeneration) {
+        match *self {}
+    }
 }
 
-/// One provisional formula-lifetime connection owned by a COM call.
-#[cfg(target_os = "windows")]
-pub(crate) trait FormulaLifetimeConnection {
-    fn token(&self) -> &str;
-    fn commit(self: Box<Self>) -> XllResult<()>;
+#[cfg(all(target_os = "windows", not(feature = "handles")))]
+pub(crate) struct FormulaLifetimeConnection<'runtime> {
+    never: std::convert::Infallible,
+    _runtime: std::marker::PhantomData<&'runtime ()>,
+}
+
+#[cfg(all(target_os = "windows", not(feature = "handles")))]
+impl FormulaLifetimeConnection<'_> {
+    pub(crate) fn token(&self) -> &str {
+        match self.never {}
+    }
+
+    pub(crate) fn commit(self) -> XllResult<()> {
+        match self.never {}
+    }
 }

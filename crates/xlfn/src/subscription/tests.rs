@@ -27,7 +27,7 @@ unsafe impl RtdSubscription for TestSubscription {
         self.canceled.store(true, Ordering::Release);
     }
 
-    fn disconnect_and_wait(mut self: Box<Self>) -> XllResult<()> {
+    fn disconnect_and_wait(mut self) -> XllResult<()> {
         if let Some(on_disconnect) = self.on_disconnect.take() {
             on_disconnect();
         }
@@ -1634,16 +1634,33 @@ pub(crate) struct FailingDisconnectSubscription;
 unsafe impl RtdSubscription for FailingDisconnectSubscription {
     fn request_cancel(&self) {}
 
-    fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
+    fn disconnect_and_wait(self) -> XllResult<()> {
         Err(XllError::Internal {
             diagnostic_id: crate::diagnostics::id::DiagnosticId::TEST_SENTINEL,
         })
     }
 }
 
+struct FailingDisconnectSource;
+
+// SAFETY: this fixture does not retain its sink or start any work; its typed
+// subscription only supplies the injected terminal cleanup error.
+unsafe impl RtdSource for FailingDisconnectSource {
+    type Value = f64;
+    type Subscription = FailingDisconnectSubscription;
+
+    fn subscribe(&self, _: &RtdTopic, _: RtdSink<f64>) -> XllResult<Self::Subscription> {
+        Ok(FailingDisconnectSubscription)
+    }
+}
+
 #[test]
 fn server_terminate_returns_cleanup_error_to_caller_and_waiter() {
-    let (arena, source, _, _) = publishing_source(Some(0.0f64));
+    let (arena, source) = SourceArena::with_source(
+        crate::generation::RuntimeGeneration::new(1).unwrap(),
+        FailingDisconnectSource,
+    )
+    .unwrap();
     let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime.register_test_server(1);
 
@@ -1657,24 +1674,6 @@ fn server_terminate_returns_cleanup_error_to_caller_and_waiter() {
         .connect_transaction(&server, TopicId(1), id)
         .unwrap();
     conn.commit().unwrap();
-
-    {
-        let subscription = server
-            .test_server()
-            .subscriptions
-            .lock()
-            .remove(&TopicId(1))
-            .unwrap();
-        let subscription = subscription.map_subscription_for_test(|inner| {
-            super::server::disconnect_one_no_unwind(inner).unwrap();
-            Box::new(FailingDisconnectSubscription)
-        });
-        server
-            .test_server()
-            .subscriptions
-            .lock()
-            .insert(TopicId(1), subscription);
-    }
 
     let server_clone = server;
     let handle = std::thread::spawn(move || server_clone.terminate());
@@ -1714,8 +1713,8 @@ fn server_terminate_callback_drop_failure_reaches_waiter() {
 
     let handle = std::thread::spawn(move || server.terminate());
 
-    let cancel_res = owner.request_cancel();
-    let res_owner = owner.finish(cancel_res);
+    let owner = owner.request_cancel();
+    let res_owner = owner.finish();
     assert!(matches!(res_owner, Err(XllError::Panic)));
 
     let res_waiter = handle.join().unwrap();
@@ -1736,8 +1735,8 @@ fn server_terminate_owner_unwind_notifies_waiter() {
 
     PANIC_AFTER_TERMINATION_GUARD.set(true);
 
-    let cancel_res = owner.request_cancel();
-    let res_owner = catch_unwind(AssertUnwindSafe(|| owner.finish(cancel_res)));
+    let owner = owner.request_cancel();
+    let res_owner = catch_unwind(AssertUnwindSafe(|| owner.finish()));
     assert!(res_owner.is_err(), "owner finish should have panicked");
 
     let res_waiter = handle.join().unwrap();
@@ -1746,7 +1745,11 @@ fn server_terminate_owner_unwind_notifies_waiter() {
 
 #[test]
 fn disconnect_propagates_subscription_cleanup_error() {
-    let (arena, source, _, _) = publishing_source(Some(0.0f64));
+    let (arena, source) = SourceArena::with_source(
+        crate::generation::RuntimeGeneration::new(1).unwrap(),
+        FailingDisconnectSource,
+    )
+    .unwrap();
     let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime.register_test_server(1);
 
@@ -1761,24 +1764,6 @@ fn disconnect_propagates_subscription_cleanup_error() {
         .unwrap();
     conn.commit().unwrap();
 
-    {
-        let subscription = server
-            .test_server()
-            .subscriptions
-            .lock()
-            .remove(&TopicId(1))
-            .unwrap();
-        let subscription = subscription.map_subscription_for_test(|inner| {
-            super::server::disconnect_one_no_unwind(inner).unwrap();
-            Box::new(FailingDisconnectSubscription)
-        });
-        server
-            .test_server()
-            .subscriptions
-            .lock()
-            .insert(TopicId(1), subscription);
-    }
-
     let error = server.disconnect(TopicId(1)).unwrap_err();
     assert!(matches!(
         error,
@@ -1790,7 +1775,11 @@ fn disconnect_propagates_subscription_cleanup_error() {
 
 #[test]
 fn rollback_records_subscription_cleanup_error() {
-    let (arena, source, _, _) = publishing_source(Some(0.0f64));
+    let (arena, source) = SourceArena::with_source(
+        crate::generation::RuntimeGeneration::new(1).unwrap(),
+        FailingDisconnectSource,
+    )
+    .unwrap();
     let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime.register_test_server(1);
 
@@ -1800,27 +1789,9 @@ fn rollback_records_subscription_cleanup_error() {
     let id = prep.id();
     prep.commit();
 
-    let mut conn = runtime
+    let conn = runtime
         .connect_transaction(&server, TopicId(1), id)
         .unwrap();
-
-    {
-        let subscription = server
-            .test_server()
-            .subscriptions
-            .lock()
-            .remove(&TopicId(1))
-            .unwrap();
-        let subscription = subscription.map_subscription_for_test(|inner| {
-            super::server::disconnect_one_no_unwind(inner).unwrap();
-            Box::new(FailingDisconnectSubscription)
-        });
-        server
-            .test_server()
-            .subscriptions
-            .lock()
-            .insert(TopicId(1), subscription);
-    }
 
     conn.rollback();
 
@@ -1844,7 +1815,7 @@ unsafe impl RtdSubscription for PanickingCancelSubscription {
             &self.payload_drops,
         )));
     }
-    fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
+    fn disconnect_and_wait(self) -> XllResult<()> {
         self.phases.fetch_add(1, Ordering::AcqRel);
         std::panic::panic_any(crate::panic_boundary::tests::PanickingPayload(Arc::clone(
             &self.payload_drops,
@@ -1852,58 +1823,55 @@ unsafe impl RtdSubscription for PanickingCancelSubscription {
     }
 }
 
+struct PanickingCancelSource {
+    payload_drops: Arc<AtomicUsize>,
+    phases: Arc<AtomicUsize>,
+}
+
+// SAFETY: this fixture discards its sink and owns no worker or callback. Its
+// cancellation/disconnect panics cannot leave a runtime capability alive.
+unsafe impl RtdSource for PanickingCancelSource {
+    type Value = f64;
+    type Subscription = PanickingCancelSubscription;
+
+    fn subscribe(&self, _: &RtdTopic, _: RtdSink<f64>) -> XllResult<Self::Subscription> {
+        Ok(PanickingCancelSubscription {
+            payload_drops: Arc::clone(&self.payload_drops),
+            phases: Arc::clone(&self.phases),
+        })
+    }
+}
+
 #[test]
 fn request_cancel_panic_propagates_to_termination() {
-    let (arena, source, _, _) = publishing_source(Some(0.0f64));
+    let payload_drops = Arc::new(AtomicUsize::new(0));
+    let phases = Arc::new(AtomicUsize::new(0));
+    let (arena, source) = SourceArena::with_source(
+        crate::generation::RuntimeGeneration::new(1).unwrap(),
+        PanickingCancelSource {
+            payload_drops: Arc::clone(&payload_drops),
+            phases: Arc::clone(&phases),
+        },
+    )
+    .unwrap();
     let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime.register_test_server(1);
 
-    let payload_drops = Arc::new(AtomicUsize::new(0));
-    let phases = Arc::new(AtomicUsize::new(0));
-
-    let prep = runtime
-        .prepare(
-            &source,
-            RtdTopic::single("cancel_panic").unwrap().borrowed(),
-        )
-        .unwrap();
-    let id = prep.id();
-    prep.commit();
-
-    let conn = runtime
-        .connect_transaction(&server, TopicId(1), id)
-        .unwrap();
-    conn.commit().unwrap();
-
-    {
-        let subscription = server
-            .test_server()
-            .subscriptions
-            .lock()
-            .remove(&TopicId(1))
+    for index in 1..=2 {
+        let prepared = runtime
+            .prepare(
+                &source,
+                RtdTopic::single(format!("cancel_panic_{index}"))
+                    .unwrap()
+                    .borrowed(),
+            )
             .unwrap();
-        let subscription = subscription.map_subscription_for_test(|inner| {
-            super::server::disconnect_one_no_unwind(inner).unwrap();
-            Box::new(PanickingCancelSubscription {
-                payload_drops: Arc::clone(&payload_drops),
-                phases: Arc::clone(&phases),
-            })
-        });
         server
-            .test_server()
-            .subscriptions
-            .lock()
-            .insert(TopicId(1), subscription);
-        server.test_server().subscriptions.lock().insert(
-            TopicId(2),
-            super::disconnect::OwnedSubscription::new(
-                Box::new(PanickingCancelSubscription {
-                    payload_drops: Arc::clone(&payload_drops),
-                    phases: Arc::clone(&phases),
-                }),
-                runtime.disconnects.reserve().unwrap(),
-            ),
-        );
+            .connect_transaction(TopicId(index), prepared.id())
+            .unwrap()
+            .commit()
+            .unwrap();
+        prepared.commit();
     }
 
     let res = server.terminate();
@@ -3240,7 +3208,7 @@ pub(crate) struct SinkHoldingSubscription<T> {
 unsafe impl<T: Send + 'static> RtdSubscription for SinkHoldingSubscription<T> {
     fn request_cancel(&self) {}
 
-    fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
+    fn disconnect_and_wait(self) -> XllResult<()> {
         Ok(())
     }
 }
@@ -3784,7 +3752,7 @@ fn dropped_refresh_batch_notifies_excel_to_retry() {
 #[test]
 fn miri_runtime_drop_disconnects_subscriptions_before_reclaiming_sources() {
     struct PublishOnCancel {
-        inner: Box<dyn RtdSubscription>,
+        inner: TestSubscription,
         sink: RtdSink<i32>,
         rejected: Arc<AtomicBool>,
     }
@@ -3800,12 +3768,49 @@ fn miri_runtime_drop_disconnects_subscriptions_before_reclaiming_sources() {
             self.inner.request_cancel();
         }
 
-        fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
+        fn disconnect_and_wait(self) -> XllResult<()> {
             self.inner.disconnect_and_wait()
         }
     }
 
-    let (arena, source, sink_slot, disconnected) = publishing_source::<i32>(None);
+    struct PublishOnCancelSource {
+        inner: PublishingSource<i32>,
+        rejected: Arc<AtomicBool>,
+    }
+
+    // SAFETY: the inner source transfers its sink to TestSubscription. The
+    // wrapper owns its extra sink and only publishes synchronously on cancel.
+    unsafe impl RtdSource for PublishOnCancelSource {
+        type Value = i32;
+        type Subscription = PublishOnCancel;
+
+        fn subscribe(&self, topic: &RtdTopic, sink: RtdSink<i32>) -> XllResult<Self::Subscription> {
+            let inner = self.inner.subscribe(topic, sink.clone())?;
+            Ok(PublishOnCancel {
+                inner,
+                sink,
+                rejected: Arc::clone(&self.rejected),
+            })
+        }
+    }
+
+    let sink_slot = Arc::new(Mutex::new(None));
+    let disconnected = Arc::new(AtomicBool::new(false));
+    let rejected = Arc::new(AtomicBool::new(false));
+    let (arena, source) = SourceArena::with_source(
+        crate::generation::RuntimeGeneration::new(1).unwrap(),
+        PublishOnCancelSource {
+            inner: PublishingSource {
+                initial: None,
+                sink_slot: Arc::clone(&sink_slot),
+                canceled: Arc::new(AtomicBool::new(false)),
+                disconnected: Arc::clone(&disconnected),
+                on_subscribe: None,
+            },
+            rejected: Arc::clone(&rejected),
+        },
+    )
+    .unwrap();
     let runtime = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
     let server = runtime.register_test_server(1);
     let prepared = runtime
@@ -3824,21 +3829,6 @@ fn miri_runtime_drop_disconnects_subscriptions_before_reclaiming_sources() {
     sink_slot.lock().as_ref().unwrap().publish(42).unwrap();
     assert_eq!(runtime.services.active_quota.used(), 1);
     assert_eq!(runtime.services.queued_update_quota.used(), 1);
-    let rejected = Arc::new(AtomicBool::new(false));
-    {
-        let mut subscriptions = server.test_server().subscriptions.lock();
-        let subscription = subscriptions.remove(&TopicId(1)).unwrap();
-        subscriptions.insert(
-            TopicId(1),
-            subscription.map_subscription_for_test(|inner| {
-                Box::new(PublishOnCancel {
-                    inner,
-                    sink: sink_slot.lock().as_ref().unwrap().clone(),
-                    rejected: Arc::clone(&rejected),
-                })
-            }),
-        );
-    }
 
     drop(runtime);
     assert!(rejected.load(Ordering::Acquire));
@@ -3848,44 +3838,18 @@ fn miri_runtime_drop_disconnects_subscriptions_before_reclaiming_sources() {
 
 #[test]
 fn refresh_drop_contains_hostile_notifier_panic_during_unwind() {
-    #[derive(Clone)]
-    struct PanicNotifyHost {
-        calls: Arc<std::sync::atomic::AtomicUsize>,
-        payload_drops: Arc<std::sync::atomic::AtomicUsize>,
-    }
-
-    impl super::host::SubscriptionHost for PanicNotifyHost {
-        type AdmissionGuard = ();
-        type Notifier = ();
-
-        fn enter_with<F>(&self, operation: F) -> XllResult<()>
-        where
-            F: FnOnce() -> XllResult<()>,
-        {
-            operation()
-        }
-
-        fn notify(&self, _: &()) -> XllResult<()> {
-            if self.calls.fetch_add(1, Ordering::AcqRel) == 1 {
-                std::panic::panic_any(crate::panic_boundary::tests::PanickingPayload(Arc::clone(
-                    &self.payload_drops,
-                )));
-            }
-            Ok(())
-        }
-    }
-
     for collect in [false, true] {
         let (arena, source, sink_slot, _) = publishing_source::<i32>(None);
-        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let notifier = Arc::new(TestNotifierState::new());
         let payload_drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        notifier.outcomes.lock().extend([
+            TestNotifyOutcome::Success,
+            TestNotifyOutcome::PanicPayload(Arc::clone(&payload_drops)),
+        ]);
         let runtime = super::runtime::SubscriptionRuntime::with_host(
             crate::generation::RuntimeGeneration::new(1).unwrap(),
             RtdLimits::standard(),
-            PanicNotifyHost {
-                calls: Arc::clone(&calls),
-                payload_drops: Arc::clone(&payload_drops),
-            },
+            crate::excel_rtd::RtdSubscriptionHost::detached(),
             arena,
         );
         let server = runtime.register_test_server(1);
@@ -3902,7 +3866,9 @@ fn refresh_drop_contains_hostile_notifier_panic_during_unwind() {
             .unwrap()
             .commit()
             .unwrap();
-        server.attach_update_notifier(()).unwrap();
+        server
+            .attach_update_notifier(RtdNotifier::for_test(Arc::clone(&notifier)))
+            .unwrap();
         sink_slot.lock().as_ref().unwrap().publish(42).unwrap();
 
         let result = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
@@ -3915,7 +3881,7 @@ fn refresh_drop_contains_hostile_notifier_panic_during_unwind() {
             panic!("caller failed before collecting the refresh");
         }));
         assert!(result.is_err());
-        assert_eq!(calls.load(Ordering::Acquire), 2);
+        assert_eq!(notifier.calls.load(Ordering::Acquire), 2);
         assert_eq!(payload_drops.load(Ordering::Acquire), 0);
         assert!(runtime.cleanup_result().is_err());
         let retry = server.begin_refresh().unwrap();
@@ -4038,9 +4004,9 @@ fn uncommitted_subscription_trace_balances_each_cleanup_path() {
                 else {
                     panic!("first termination caller must own cleanup");
                 };
-                let canceled = owner.request_cancel();
+                let owner = owner.request_cancel();
                 drop(connection);
-                owner.finish(canceled).unwrap();
+                owner.finish().unwrap();
             }
             "runtime-close" => std::thread::scope(|scope| {
                 let closing = scope.spawn(|| runtime.close());

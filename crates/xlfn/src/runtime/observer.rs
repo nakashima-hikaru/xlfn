@@ -237,13 +237,17 @@ impl RuntimeObserver {
             crate::diagnostics::connect_trace(Arc::clone(&trace), |snapshot| {
                 resources.diagnostics_running = snapshot.running;
                 resources.diagnostics_pending = snapshot.pending;
-                trace
-                    .begin(attempt.get(), resources.clone())
-                    .expect("open trace begins before ingress publication");
-                Ok(())
+                crate::excel_rtd_protocol::connect_trace(Arc::clone(&trace), |snapshot| {
+                    resources.rtd_class_factories = snapshot.rtd_class_factories;
+                    resources.rtd_servers = snapshot.rtd_servers;
+                    resources.rtd_server_locks = snapshot.rtd_server_locks;
+                    trace
+                        .begin(attempt.get(), resources.clone())
+                        .expect("open trace begins before ingress publication");
+                    Ok(())
+                })
             })
-            .expect("diagnostic trace initialization succeeds");
-            crate::excel_rtd_protocol::set_trace_sink(Arc::clone(&trace));
+            .expect("diagnostic and RTD trace initialization succeeds");
             deps.returns().returns.set_trace_sink(Arc::clone(&trace));
             #[cfg(any(feature = "handles", feature = "rtd"))]
             _control

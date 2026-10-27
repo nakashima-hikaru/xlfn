@@ -1,28 +1,12 @@
 //! Raw ingress + real formula publication. No Excel/COM calls are timed.
 use super::*;
-use crate::value::input::PreparedArgument;
+use crate::value::input::PreparedParameter;
 use crate::value::prepared_probe::{InputKind, Owned};
 
 enum Prepared<'call> {
-    Number(PreparedArgument<f64, f64>),
-    Numbers(
-        PreparedArgument<
-            Matrix<f64>,
-            <Matrix<f64> as crate::value::input::ExcelParameter<
-                'call,
-                crate::value::FormulaInputMode,
-            >>::Prepared,
-        >,
-    ),
-    Strings(
-        PreparedArgument<
-            Matrix<String>,
-            <Matrix<String> as crate::value::input::ExcelParameter<
-                'call,
-                crate::value::FormulaInputMode,
-            >>::Prepared,
-        >,
-    ),
+    Number(PreparedParameter<'call, f64, crate::value::FormulaInputMode>),
+    Numbers(PreparedParameter<'call, Matrix<f64>, crate::value::FormulaInputMode>),
+    Strings(PreparedParameter<'call, Matrix<String>, crate::value::FormulaInputMode>),
 }
 impl Prepared<'_> {
     fn materialize(self) -> crate::XllResult<Owned> {

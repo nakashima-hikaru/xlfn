@@ -85,6 +85,24 @@ cover calculation-pin reclamation separately. They do not qualify the full
 blocking shutdown path, because the current `parking_lot` dependency reconstructs
 pointers from integers in its lock wait implementation.
 
+`just typestate` compiles valid and invalid internal lifecycle callers against a
+temporary copy of the current sources. It checks that calculation drain requires
+closed, drained admission; registry close requires cancellation and task drain;
+and connection commit requires installation. Server termination requires a
+cancellation request before finishing and retains that request's result in its
+owner. The termination coordinator grants one consuming completion authority;
+abandonment publishes failure to its waiters. Consumed capabilities cannot be
+reused, and sibling modules cannot directly mutate lifecycle state. Typed pending
+handles retain their exact payload type through publication, including function
+type subtyping; ready input arguments cannot forge a deferred value. Teardown
+stages must carry their recovery authority. Cache endpoint memoization requires
+matching endpoint and pointer types. Unload policy is fixed in the runtime type;
+the physical policy requires the add-in's physical-unload contract and cannot
+be substituted for the logical policy. Each invalid fixture must produce its
+specified diagnostic at the marked source line. The checks keep these APIs
+private and cover async, RTD, handles, and cache features. Fetch the workspace
+dependencies before running this offline check on a fresh checkout.
+
 ## Test in Excel
 
 Artifact checks verify binary structure, but end-to-end worksheet behavior

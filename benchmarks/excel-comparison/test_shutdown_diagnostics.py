@@ -12,6 +12,26 @@ from shutdown_diagnostics import capture_shutdown_dump, process_creation_ticks, 
 
 
 class ShutdownDiagnosticsTest(unittest.TestCase):
+    def test_full_memory_capture_is_explicit_and_bounded(self):
+        def helper(cmd, **kwargs):
+            self.assertIn("--full-memory", cmd)
+            self.assertEqual(kwargs["timeout"], 60)
+            Path(cmd[cmd.index("--out") + 1]).write_bytes(b"MDMP")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("shutdown_diagnostics.subprocess.run", side_effect=helper):
+                result = capture_shutdown_dump({"pid": 123, "creation_ticks": 456},
+                                               Path(directory), full_memory=True)
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["mode"], "full_memory")
+            with patch("shutdown_diagnostics.subprocess.run",
+                       side_effect=subprocess.TimeoutExpired("dump helper", 60)):
+                result = capture_shutdown_dump({"pid": 123, "creation_ticks": 456},
+                                               Path(directory), full_memory=True)
+            self.assertEqual(result["status"], "error")
+            self.assertIn("TimeoutExpired", result["error"])
+
     def test_capture_timeout_and_helper_failure_are_reported(self):
         identity = {"pid": 123, "creation_ticks": 456}
         for error in (subprocess.TimeoutExpired("dump helper", 15), OSError("cannot spawn")):
@@ -72,15 +92,21 @@ class ShutdownDiagnosticsTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "PID was reused"):
                     write_dump(child.pid, ticks + 1, path)
                 self.assertFalse(path.exists())
-                result = capture_shutdown_dump(
-                    {"pid": child.pid, "creation_ticks": ticks}, Path(directory))
-                self.assertEqual(result["status"], "ok", result)
-                data = Path(result["path"]).read_bytes()
-                self.assertEqual(data[:4], b"MDMP")
-                count, offset = struct.unpack_from("<II", data, 8)
-                streams = {struct.unpack_from("<I", data, offset + 12 * i)[0]
-                           for i in range(count)}
-                self.assertTrue({3, 4, 12, 17}.issubset(streams), streams)
+                for full_memory in (False, True):
+                    result = capture_shutdown_dump(
+                        {"pid": child.pid, "creation_ticks": ticks}, Path(directory),
+                        full_memory=full_memory)
+                    self.assertEqual(result["status"], "ok", result)
+                    data = Path(result["path"]).read_bytes()
+                    self.assertEqual(data[:4], b"MDMP")
+                    count, offset = struct.unpack_from("<II", data, 8)
+                    streams = {struct.unpack_from("<I", data, offset + 12 * i)[0]
+                               for i in range(count)}
+                    self.assertTrue({3, 4, 12, 17}.issubset(streams), streams)
+                    flags = struct.unpack_from("<Q", data, 24)[0]
+                    self.assertEqual(bool(flags & 2), full_memory)
+                    if full_memory:
+                        self.assertTrue({9, 16}.issubset(streams), streams)
         finally:
             child.stdin.close()
             try:

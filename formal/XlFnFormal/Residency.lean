@@ -9,8 +9,9 @@ namespace XlFnFormal
     `leaseHeld` is the self-reference acquired from the generated
     `xlAutoOpen` address. Logical terminal removal may publish `closed` while
     that lease remains held; release is admitted only after logical quiescence
-    and the absence of retained native event entry points have both been
-    established. A quarantine keeps the lease by construction. -/
+    and the absence of retained native event and COM entry points have both
+    been established. A quarantine keeps the lease by construction. Late COM
+    releases are physical-lifetime steps, outside the terminal generation trace. -/
 
 structure ResidencyState where
   logicalPhase : Shutdown.Phase
@@ -18,6 +19,8 @@ structure ResidencyState where
   removalComplete : Bool
   callbacksQuiescent : Bool
   residentEventRegistrations : Nat
+  /-- Sum of retained RTD servers, class factories, and LockServer holds. -/
+  rtdComRoots : Nat := 0
   generationQuiescent : Bool
   runtimeQuiescent : Bool
   deriving DecidableEq, Repr
@@ -27,6 +30,7 @@ def ResidencyState.Safe (s : ResidencyState) : Prop :=
   (s.logicalPhase = .closed ∧
     s.callbacksQuiescent = true ∧
     s.residentEventRegistrations = 0 ∧
+    s.rtdComRoots = 0 ∧
     s.generationQuiescent = true ∧
     s.runtimeQuiescent = true)
 
@@ -35,6 +39,7 @@ inductive ResidencyEvent where
   | terminalRemoval
   | quarantine (reason : Shutdown.Failure)
   | autoCloseAfterRemoval
+  | releaseRtdComRoot
   deriving DecidableEq, Repr
 
 inductive ResidencyStep : ResidencyState → ResidencyEvent → ResidencyState → Prop where
@@ -63,10 +68,17 @@ inductive ResidencyStep : ResidencyState → ResidencyEvent → ResidencyState �
       (hLease : s.leaseHeld = true)
       (hCallbacks : s.callbacksQuiescent = true)
       (hEvents : s.residentEventRegistrations = 0)
+      (hCom : s.rtdComRoots = 0)
       (hGeneration : s.generationQuiescent = true)
       (hRuntime : s.runtimeQuiescent = true) :
       ResidencyStep s .autoCloseAfterRemoval
         { s with leaseHeld := false, removalComplete := false }
+
+  | releaseRtdComRoot {s : ResidencyState} {n : Nat}
+      (hClosed : s.logicalPhase = .closed)
+      (hLease : s.leaseHeld = true)
+      (hRoot : s.rtdComRoots = n + 1) :
+      ResidencyStep s .releaseRtdComRoot { s with rtdComRoots := n }
 
 theorem autoCloseHint_is_noop
     {s t : ResidencyState}
@@ -96,8 +108,10 @@ theorem ResidencyStep.safe_preserved
       simp [ResidencyState.Safe, hLease]
   | quarantine hLive hLease =>
       simp [ResidencyState.Safe, hLease]
-  | autoCloseAfterRemoval hClosed hRemoval hLease hCallbacks hEvents hGeneration hRuntime =>
-      simp [ResidencyState.Safe, hClosed, hCallbacks, hEvents, hGeneration, hRuntime]
+  | autoCloseAfterRemoval hClosed hRemoval hLease hCallbacks hEvents hCom hGeneration hRuntime =>
+      simp [ResidencyState.Safe, hClosed, hCallbacks, hEvents, hCom, hGeneration, hRuntime]
+  | releaseRtdComRoot hClosed hLease hRoot =>
+      simp [ResidencyState.Safe, hLease]
 
 theorem autoCloseAfterRemoval_requires_quiescence
     {s t : ResidencyState}
@@ -106,11 +120,12 @@ theorem autoCloseAfterRemoval_requires_quiescence
     s.removalComplete = true ∧
     s.callbacksQuiescent = true ∧
     s.residentEventRegistrations = 0 ∧
+    s.rtdComRoots = 0 ∧
     s.generationQuiescent = true ∧
     s.runtimeQuiescent = true := by
   cases hStep with
-  | autoCloseAfterRemoval hClosed hRemoval hLease hCallbacks hEvents hGeneration hRuntime =>
-      exact ⟨hClosed, hRemoval, hCallbacks, hEvents, hGeneration, hRuntime⟩
+  | autoCloseAfterRemoval hClosed hRemoval hLease hCallbacks hEvents hCom hGeneration hRuntime =>
+      exact ⟨hClosed, hRemoval, hCallbacks, hEvents, hCom, hGeneration, hRuntime⟩
 
 /-- Closing generation admission cannot erase Excel's native callback roots. -/
 theorem resident_events_prevent_lease_release
@@ -129,6 +144,32 @@ theorem safe_with_resident_events_retains_lease
   rcases hSafe with hHeld | hClosed
   · exact hHeld
   · have hZero := hClosed.2.2.1
+    omega
+
+theorem retained_com_roots_prevent_lease_release
+    {s t : ResidencyState}
+    (hRoots : s.rtdComRoots > 0) :
+    ¬ ResidencyStep s .autoCloseAfterRemoval t := by
+  intro hStep
+  have hZero := (autoCloseAfterRemoval_requires_quiescence hStep).2.2.2.2.1
+  omega
+
+theorem late_com_release_keeps_closed_module_resident
+    {s t : ResidencyState}
+    (hStep : ResidencyStep s .releaseRtdComRoot t) :
+    t.logicalPhase = .closed ∧ t.leaseHeld = true ∧ t.rtdComRoots < s.rtdComRoots := by
+  cases hStep with
+  | releaseRtdComRoot hClosed hLease hRoot =>
+      exact ⟨hClosed, hLease, by simp [hRoot]⟩
+
+theorem safe_with_retained_com_roots_retains_lease
+    {s : ResidencyState}
+    (hSafe : s.Safe)
+    (hRoots : s.rtdComRoots > 0) :
+    s.leaseHeld = true := by
+  rcases hSafe with hHeld | hClosed
+  · exact hHeld
+  · have hZero := hClosed.2.2.2.1
     omega
 
 theorem quarantine_retains_lease

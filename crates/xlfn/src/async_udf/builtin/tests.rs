@@ -3,7 +3,7 @@ use crate::async_udf::future::NoUnwindFuture;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -101,7 +101,7 @@ fn miri_reservation_survives_shutdown_and_destroys_late_task_once() {
     let executor = executor(1);
     executor.start().unwrap();
     let reservation = executor.reserve().unwrap();
-    let shared = Arc::clone(&reservation.shared);
+    let shared = triomphe::Arc::clone(&reservation.shared);
     executor.shutdown().unwrap();
     let drops = Arc::new(AtomicUsize::new(0));
     executor.submit(reservation, pending_task(&drops));
@@ -114,7 +114,7 @@ fn miri_reservation_survives_shutdown_and_destroys_late_task_once() {
 fn last_poller_panic_drops_queued_tasks_and_retains_arbitrary_payload() {
     let executor = executor(1);
     executor.start().unwrap();
-    let shared = Arc::clone(executor.shared.get().unwrap());
+    let shared = triomphe::Arc::clone(executor.shared.get().unwrap());
     let payload_drops = Arc::new(AtomicUsize::new(0));
     let payload = crate::panic_boundary::tests::PanickingPayload(Arc::clone(&payload_drops));
     let (entered_tx, entered_rx) = mpsc::channel();
@@ -148,12 +148,12 @@ fn last_poller_panic_drops_queued_tasks_and_retains_arbitrary_payload() {
 fn failed_poller_recovers_local_runnables_for_surviving_pollers() {
     let executor = executor(1);
     executor.start().unwrap();
-    let shared = Arc::clone(executor.shared.get().unwrap());
+    let shared = triomphe::Arc::clone(executor.shared.get().unwrap());
     let local = crossbeam_deque::Worker::new_fifo();
     let completed = Arc::new(AtomicUsize::new(0));
     for _ in 0..3 {
         let completed = Arc::clone(&completed);
-        let scheduling = Arc::clone(&shared);
+        let scheduling = triomphe::Arc::clone(&shared);
         let (runnable, handle) = async_task::spawn(
             async move {
                 completed.fetch_add(1, Ordering::Release);
@@ -164,7 +164,7 @@ fn failed_poller_recovers_local_runnables_for_surviving_pollers() {
         local.push(runnable);
     }
     shared.live_pollers.fetch_add(1, Ordering::Relaxed);
-    let failed_shared = Arc::clone(&shared);
+    let failed_shared = triomphe::Arc::clone(&shared);
     assert!(
         crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(move || {
             let _guard = worker::PollerExitGuard {
@@ -185,7 +185,7 @@ fn failed_poller_recovers_local_runnables_for_surviving_pollers() {
 fn shutdown_waits_for_scheduler_task_destruction_and_final_callback_release() {
     let executor = Arc::new(executor(1));
     executor.start().unwrap();
-    let shared = Arc::clone(executor.shared.get().unwrap());
+    let shared = triomphe::Arc::clone(executor.shared.get().unwrap());
     let (entered_tx, entered_rx) = mpsc::channel();
     let (resume_tx, resume_rx) = mpsc::channel();
     executor.submit(
@@ -208,7 +208,7 @@ fn shutdown_waits_for_scheduler_task_destruction_and_final_callback_release() {
         entered_hook.wait();
         resume_hook.wait();
     }));
-    let scheduling = Arc::clone(&shared);
+    let scheduling = triomphe::Arc::clone(&shared);
     let (runnable, handle) = async_task::spawn(pending_task(&drops), move |runnable| {
         scheduling.schedule(runnable)
     });
@@ -240,7 +240,7 @@ fn miri_executor_drop_seals_and_joins_pollers() {
     // collector. Native pool tests separately exercise peer stealing.
     let executor = executor(1);
     executor.start().unwrap();
-    let shared = Arc::clone(executor.shared.get().unwrap());
+    let shared = triomphe::Arc::clone(executor.shared.get().unwrap());
     drop(executor);
     assert_eq!(shared.live_pollers.load(Ordering::Acquire), 0);
     assert!(shared.queue.is_sealed());
@@ -277,7 +277,7 @@ fn miri_retained_completed_task_waker_can_be_used_after_executor_drop() {
 fn last_executor_owner_can_be_destroyed_by_its_own_poller() {
     let executor = Arc::new(executor(2));
     executor.start().unwrap();
-    let shared = Arc::clone(executor.shared.get().unwrap());
+    let shared = triomphe::Arc::clone(executor.shared.get().unwrap());
     let owned = Arc::clone(&executor);
     let (resume_tx, resume_rx) = mpsc::channel();
     let (dropped_tx, dropped_rx) = mpsc::channel();
@@ -300,7 +300,7 @@ fn last_executor_owner_can_be_destroyed_by_its_own_poller() {
 fn last_executor_owner_can_be_destroyed_by_its_scheduler_callback() {
     let executor = Arc::new(executor(1));
     executor.start().unwrap();
-    let shared = Arc::clone(executor.shared.get().unwrap());
+    let shared = triomphe::Arc::clone(executor.shared.get().unwrap());
     executor.submit(
         executor.reserve().unwrap(),
         task(async { panic!("injected poller failure before scheduler drop") }),
@@ -321,7 +321,7 @@ fn last_executor_owner_can_be_destroyed_by_its_scheduler_callback() {
         }
     }
     let future = ExecutorOnDrop(Some(Arc::clone(&executor)), dropped_tx);
-    let scheduling = Arc::clone(&shared);
+    let scheduling = triomphe::Arc::clone(&shared);
     let (runnable, handle) =
         async_task::spawn(task(future), move |runnable| scheduling.schedule(runnable));
     handle.detach();

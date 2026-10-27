@@ -74,7 +74,10 @@ fn opening_calls() -> Vec<i32> {
 fn open(runtime: &'static MacroRuntime<EventAddin>) {
     runtime
         .runtime()
-        .ensure_module_residency(host_auto_close::<EventAddin> as *const ())
+        .ensure_module_residency(
+            host_auto_close::<EventAddin> as fn(&crate::runtime::Runtime<EventAddin>) -> i32
+                as *const (),
+        )
         .unwrap();
     assert_eq!(
         host_auto_open(

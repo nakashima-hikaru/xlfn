@@ -59,10 +59,14 @@ struct Inner<'generation> {
 }
 
 impl HandleScopedBuilder<f64> for Builder {
+    #[expect(
+        clippy::redundant_async_block,
+        reason = "exercise a concrete !Unpin generated-style future across suspension and destruction"
+    )]
     fn build<'generation>(
         self,
         scope: AsyncTaskScope<'generation>,
-    ) -> Pin<Box<dyn Future<Output = XllResult<f64>> + Send + 'generation>> {
+    ) -> impl Future<Output = XllResult<f64>> + Send + 'generation {
         if self.mode == Mode::BuildPanic
             && let Some(runtime) = self.reenter.as_ref().and_then(|weak| weak.upgrade())
         {
@@ -72,14 +76,17 @@ impl HandleScopedBuilder<f64> for Builder {
             );
         }
         assert_ne!(self.mode, Mode::BuildPanic, "injected scoped builder panic");
-        Box::pin(Inner {
+        let inner = Inner {
             lease: Some(self.pending.bind(scope)),
             mode: self.mode,
             polls: self.polls,
             drops: self.drops,
             started: Some(self.started),
             reenter: self.reenter,
-        })
+        };
+        // Match generated UDFs: the concrete async future is !Unpin and owns a
+        // generation-branded lease across suspension, without an inner box.
+        async move { inner.await }
     }
 }
 

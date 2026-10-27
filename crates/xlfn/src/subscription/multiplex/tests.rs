@@ -13,13 +13,10 @@ use std::time::Instant;
 
 const DEADLINE: Duration = Duration::from_secs(10);
 
-fn runtime_with_source<T: IntoRtdValue + Send + 'static>(
-    source: RtdMultiplexedSource<T>,
+fn runtime_with_source<S: RtdSource>(
+    source: S,
     limits: RtdLimits,
-) -> (
-    SubscriptionRuntime,
-    RtdSourceHandle<RtdMultiplexedSource<T>>,
-) {
+) -> (SubscriptionRuntime, RtdSourceHandle<S>) {
     let generation = RuntimeGeneration::new(1).unwrap();
     let registration = SourceRegistration::new(generation);
     let handle = registration.register(source).unwrap();
@@ -98,7 +95,7 @@ fn run_forwarder(
 fn construction_is_lazy_and_unstarted_shutdown_is_idempotent() {
     let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let worker_started = std::sync::Arc::clone(&started);
-    let source = RtdMultiplexedSource::<i32>::new(RtdDelivery::Latest, move |_| {
+    let source = RtdMultiplexedSource::<i32, _>::new(RtdDelivery::Latest, move |_| {
         worker_started.fetch_add(1, Ordering::SeqCst);
         Ok(())
     });
@@ -106,6 +103,36 @@ fn construction_is_lazy_and_unstarted_shutdown_is_idempotent() {
     source.shutdown_and_wait().unwrap();
     source.shutdown_and_wait().unwrap();
     assert_eq!(started.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn replacing_validator_preserves_unstarted_job_and_its_shutdown_barrier() {
+    struct Capture(StdArc<AtomicUsize>);
+    impl Drop for Capture {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let job_drops = StdArc::new(AtomicUsize::new(0));
+    let validator_drops = StdArc::new(AtomicUsize::new(0));
+    let job = Capture(StdArc::clone(&job_drops));
+    let first_validator = Capture(StdArc::clone(&validator_drops));
+    let source = RtdMultiplexedSource::<i32, _>::new(RtdDelivery::Latest, move |_| {
+        drop(job);
+        Ok(())
+    })
+    .with_topic_validator(move |_| {
+        let _capture = &first_validator;
+        Ok(())
+    });
+    let source = source.with_topic_validator(|_| Ok(()));
+    assert_eq!(validator_drops.load(Ordering::SeqCst), 1);
+    assert_eq!(job_drops.load(Ordering::SeqCst), 0);
+    source.shutdown_and_wait().unwrap();
+    assert_eq!(job_drops.load(Ordering::SeqCst), 1);
+    drop(source);
+    assert_eq!(job_drops.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -136,7 +163,7 @@ fn one_source_worker_delivers_updates_to_2048_subscriptions() {
     const TOPICS: i32 = 2048;
     let starts = StdArc::new(AtomicUsize::new(0));
     let worker_starts = StdArc::clone(&starts);
-    let source = RtdMultiplexedSource::<i32>::new(RtdDelivery::Latest, move |context| {
+    let source = RtdMultiplexedSource::<i32, _>::new(RtdDelivery::Latest, move |context| {
         worker_starts.fetch_add(1, Ordering::SeqCst);
         loop {
             match context.recv_timeout(DEADLINE) {
@@ -150,7 +177,7 @@ fn one_source_worker_delivers_updates_to_2048_subscriptions() {
         }
     });
     assert_eq!(starts.load(Ordering::SeqCst), 0);
-    let shared = Arc::clone(&source.shared);
+    let shared = Arc::clone(&source.worker.shared);
     let (runtime, source) = runtime_with_source(
         source,
         RtdLimits::standard().with_max_workers(RtdCapacity::disabled_if_zero(1)),
@@ -181,7 +208,7 @@ fn stalled_source_does_not_block_disconnect_and_retains_control_capacity_until_c
     let read_events = StdArc::new(AtomicBool::new(false));
     let worker_read_events = StdArc::clone(&read_events);
     let (event_tx, event_rx) = mpsc::channel();
-    let source = RtdMultiplexedSource::<i32>::new(RtdDelivery::Latest, move |context| {
+    let source = RtdMultiplexedSource::<i32, _>::new(RtdDelivery::Latest, move |context| {
         while !worker_read_events.load(Ordering::Acquire) {
             if context.is_closed() {
                 return Ok(());
@@ -193,7 +220,7 @@ fn stalled_source_does_not_block_disconnect_and_retains_control_capacity_until_c
     .with_limits(
         RtdSourceLimits::standard().with_max_subscriptions(RtdCapacity::disabled_if_zero(1)),
     );
-    let shared = Arc::clone(&source.shared);
+    let shared = Arc::clone(&source.worker.shared);
     let (runtime, source) = runtime_with_source(source, RtdLimits::standard());
     let runtime = StdArc::new(runtime);
     let server = runtime.register_test_server(1);
@@ -262,7 +289,7 @@ fn completion_and_failures_close_all_topics_and_apply_terminal_policy() {
         let finish = StdArc::new(AtomicBool::new(false));
         let worker_finish = StdArc::clone(&finish);
         let (senders_tx, senders_rx) = mpsc::channel();
-        let source = RtdMultiplexedSource::<i32>::new(RtdDelivery::Latest, move |context| {
+        let source = RtdMultiplexedSource::<i32, _>::new(RtdDelivery::Latest, move |context| {
             let mut senders = Vec::new();
             while senders.len() != 2 {
                 if let Some(RtdSourceEvent::Subscribe { sender, .. }) =
@@ -288,7 +315,7 @@ fn completion_and_failures_close_all_topics_and_apply_terminal_policy() {
         .with_error_policy(RtdProducerErrorPolicy::PublishError(
             crate::ExcelError::NotAvailable,
         ));
-        let shared = Arc::clone(&source.shared);
+        let shared = Arc::clone(&source.worker.shared);
         let (runtime, source) = runtime_with_source(source, RtdLimits::standard());
         let server = runtime.register_test_server(1);
         let initial = BTreeMap::from([
@@ -323,7 +350,7 @@ fn rejected_topic_validation_does_not_start_worker_or_consume_source_slot() {
     let starts = StdArc::new(AtomicUsize::new(0));
     let worker_starts = StdArc::clone(&starts);
     let (events_tx, events_rx) = mpsc::channel();
-    let source = RtdMultiplexedSource::<i32>::new(RtdDelivery::Latest, move |context| {
+    let source = RtdMultiplexedSource::<i32, _>::new(RtdDelivery::Latest, move |context| {
         worker_starts.fetch_add(1, Ordering::SeqCst);
         run_forwarder(context, events_tx)
     })
@@ -359,7 +386,7 @@ fn rejected_topic_validation_does_not_start_worker_or_consume_source_slot() {
 #[test]
 fn miri_sender_survives_runtime_drop_without_live_publication_capability() {
     let (events_tx, events_rx) = mpsc::channel();
-    let source = RtdMultiplexedSource::<i32>::new(RtdDelivery::Latest, move |context| {
+    let source = RtdMultiplexedSource::<i32, _>::new(RtdDelivery::Latest, move |context| {
         run_forwarder(context, events_tx)
     });
     let (runtime, source) = runtime_with_source(source, RtdLimits::standard());
@@ -380,7 +407,7 @@ fn runtime_worker_limit_is_shared_by_sources_and_released_only_after_join() {
     let registration = SourceRegistration::new(generation);
     let (first_events_tx, first_events_rx) = mpsc::channel();
     let first = registration
-        .register(RtdMultiplexedSource::<i32>::new(
+        .register(RtdMultiplexedSource::<i32, _>::new(
             RtdDelivery::Latest,
             move |context| run_forwarder(context, first_events_tx),
         ))
@@ -389,7 +416,7 @@ fn runtime_worker_limit_is_shared_by_sources_and_released_only_after_join() {
     let worker_starts = StdArc::clone(&starts);
     let (second_events_tx, second_events_rx) = mpsc::channel();
     let second = registration
-        .register(RtdMultiplexedSource::<i32>::new(
+        .register(RtdMultiplexedSource::<i32, _>::new(
             RtdDelivery::Latest,
             move |context| {
                 worker_starts.fetch_add(1, Ordering::SeqCst);
@@ -435,7 +462,7 @@ fn runtime_worker_limit_is_shared_by_sources_and_released_only_after_join() {
 #[test]
 fn source_join_preflight_failure_retains_worker_owner_and_is_terminal_for_close() {
     let (events_tx, events_rx) = mpsc::channel();
-    let source = RtdMultiplexedSource::<i32>::new(RtdDelivery::Latest, move |context| {
+    let source = RtdMultiplexedSource::<i32, _>::new(RtdDelivery::Latest, move |context| {
         run_forwarder(context, events_tx)
     });
     let (runtime, source) = runtime_with_source(
@@ -453,8 +480,8 @@ fn source_join_preflight_failure_retains_worker_owner_and_is_terminal_for_close(
     assert!(matches!(runtime.close(), Err(XllError::Overloaded)));
     assert!(sender.is_closed());
     assert!(matches!(
-        runtime.termination_coordinator.state.lock().phase,
-        crate::subscription::server::ServerTerminationPhase::Failed,
+        runtime.termination_coordinator.phase(),
+        crate::subscription::termination::TerminationPhase::Failed,
     ));
     assert!(ChannelBudget::try_worker(&runtime.services.channel_budget).is_err());
     assert!(matches!(runtime.close(), Err(XllError::Overloaded)));
@@ -470,11 +497,11 @@ fn source_join_preflight_failure_retains_worker_owner_and_is_terminal_for_close(
 fn close_racing_admitted_setup_prevents_late_worker_start_and_revokes_partial_channel() {
     let starts = StdArc::new(AtomicUsize::new(0));
     let worker_starts = StdArc::clone(&starts);
-    let source = RtdMultiplexedSource::<i32>::new(RtdDelivery::Latest, move |_| {
+    let source = RtdMultiplexedSource::<i32, _>::new(RtdDelivery::Latest, move |_| {
         worker_starts.fetch_add(1, Ordering::SeqCst);
         Ok(())
     });
-    let shared = Arc::clone(&source.shared);
+    let shared = Arc::clone(&source.worker.shared);
     let (entered_tx, entered_rx) = mpsc::channel();
     let (stopped_tx, stopped_rx) = mpsc::channel();
     let source = source.with_topic_validator(move |_| {
@@ -525,7 +552,7 @@ fn blocking_and_multiplexed_adapters_share_the_runtime_worker_budget() {
         .unwrap();
     let (events_tx, events_rx) = mpsc::channel();
     let multiplexed = registration
-        .register(RtdMultiplexedSource::<i32>::new(
+        .register(RtdMultiplexedSource::<i32, _>::new(
             RtdDelivery::Latest,
             move |context| run_forwarder(context, events_tx),
         ))
@@ -560,7 +587,7 @@ fn first_registration_exists_before_an_immediately_completing_producer_runs() {
         let (_runtime, server, sink) =
             crate::subscription::tests::connected_sink::<i32>(None, "immediate");
         let (observed_tx, observed_rx) = mpsc::channel();
-        let source = RtdMultiplexedSource::<i32>::new(RtdDelivery::Latest, move |context| {
+        let source = RtdMultiplexedSource::<i32, _>::new(RtdDelivery::Latest, move |context| {
             let state = context.shared.state.lock();
             let registered = state.active.len() == 1
                 && matches!(state.events.front(), Some(ControlEvent::Subscribe { .. }));
@@ -589,7 +616,7 @@ fn first_registration_exists_before_an_immediately_completing_producer_runs() {
         } else {
             assert_eq!(server.pending_update_count(), 0);
         }
-        Box::new(subscription).disconnect_and_wait().unwrap();
+        subscription.disconnect_and_wait().unwrap();
         source.shutdown_and_wait().unwrap();
     }
 }
@@ -600,19 +627,19 @@ fn initial_worker_budget_rejection_returns_the_only_source_slot_for_retry() {
     let registration = SourceRegistration::new(generation);
     let (first_events_tx, first_events_rx) = mpsc::channel();
     let first = registration
-        .register(RtdMultiplexedSource::<i32>::new(
+        .register(RtdMultiplexedSource::<i32, _>::new(
             RtdDelivery::Latest,
             move |context| run_forwarder(context, first_events_tx),
         ))
         .unwrap();
     let (second_events_tx, second_events_rx) = mpsc::channel();
-    let second_source = RtdMultiplexedSource::<i32>::new(RtdDelivery::Latest, move |context| {
+    let second_source = RtdMultiplexedSource::<i32, _>::new(RtdDelivery::Latest, move |context| {
         run_forwarder(context, second_events_tx)
     })
     .with_limits(
         RtdSourceLimits::standard().with_max_subscriptions(RtdCapacity::disabled_if_zero(1)),
     );
-    let second_shared = Arc::clone(&second_source.shared);
+    let second_shared = Arc::clone(&second_source.worker.shared);
     let second = registration.register(second_source).unwrap();
     let runtime = SubscriptionRuntime::with_host(
         generation,
@@ -645,16 +672,16 @@ fn initial_worker_budget_rejection_returns_the_only_source_slot_for_retry() {
 
 #[test]
 fn spawn_failure_preserves_capture_until_disposal_outside_source_mutexes() {
+    type LockProbe = StdArc<crate::sync::Mutex<Option<Box<dyn Fn() -> bool + Send>>>>;
     struct Capture {
-        source: std::sync::Weak<RtdMultiplexedSource<i32>>,
+        lock_probe: LockProbe,
         drops: StdArc<AtomicUsize>,
         locks_available: StdArc<AtomicBool>,
     }
     impl Drop for Capture {
         fn drop(&mut self) {
-            let source = self.source.upgrade().expect("test source remains owned");
             self.locks_available.store(
-                source.worker.try_lock().is_some() && source.shared.state.try_lock().is_some(),
+                self.lock_probe.lock().as_ref().expect("probe is installed")(),
                 Ordering::Release,
             );
             self.drops.fetch_add(1, Ordering::SeqCst);
@@ -663,26 +690,33 @@ fn spawn_failure_preserves_capture_until_disposal_outside_source_mutexes() {
 
     let drops = StdArc::new(AtomicUsize::new(0));
     let locks_available = StdArc::new(AtomicBool::new(false));
-    let source = StdArc::new_cyclic(|weak| {
-        let capture = Capture {
-            source: std::sync::Weak::clone(weak),
-            drops: StdArc::clone(&drops),
-            locks_available: StdArc::clone(&locks_available),
-        };
-        RtdMultiplexedSource::<i32>::new(RtdDelivery::Latest, move |_| {
+    let lock_probe = StdArc::new(crate::sync::Mutex::new(None));
+    let capture = Capture {
+        lock_probe: StdArc::clone(&lock_probe),
+        drops: StdArc::clone(&drops),
+        locks_available: StdArc::clone(&locks_available),
+    };
+    let source = StdArc::new(RtdMultiplexedSource::<i32, _>::new(
+        RtdDelivery::Latest,
+        move |_| {
             drop(capture);
             Ok(())
-        })
-    });
+        },
+    ));
+    let weak = StdArc::downgrade(&source);
+    *lock_probe.lock() = Some(Box::new(move || {
+        let source = weak.upgrade().expect("test source remains owned");
+        source.worker.state.try_lock().is_some() && source.worker.shared.state.try_lock().is_some()
+    }));
     let (_runtime, _server, sink) =
         crate::subscription::tests::connected_sink::<i32>(None, "spawn-failure");
     source.fail_spawn.store(true, Ordering::Release);
     let result = source.subscribe(&RtdTopic::single("spawn-failure").unwrap(), sink);
     assert!(matches!(result, Err(XllError::Native { .. })));
     assert_eq!(drops.load(Ordering::SeqCst), 0);
-    assert!(source.worker.lock().producer.is_some());
-    assert!(source.shared.state.lock().active.is_empty());
-    assert!(source.shared.state.lock().events.is_empty());
+    assert!(source.worker.state.lock().producer.is_some());
+    assert!(source.worker.shared.state.lock().active.is_empty());
+    assert!(source.worker.shared.state.lock().events.is_empty());
     source.shutdown_and_wait().unwrap();
     assert_eq!(drops.load(Ordering::SeqCst), 1);
     assert!(locks_available.load(Ordering::Acquire));

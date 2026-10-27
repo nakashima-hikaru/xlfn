@@ -35,7 +35,7 @@ type InitializedOpenResult<'runtime, A> = Result<
 >;
 
 pub(crate) fn open_addin_inner<'runtime, A>(
-    runtime: &'runtime Runtime<A>,
+    runtime: &'runtime Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     build_info: BuildInfo,
     descriptors: &[RegistrationDescriptor],
     mut transaction: OpeningTxn<'runtime, A, HostAttached>,
@@ -125,7 +125,7 @@ where
 }
 
 pub(crate) fn rollback_active_open<'runtime, A, S>(
-    runtime: &'runtime Runtime<A>,
+    runtime: &'runtime Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     lifecycle: &AddinLifecycleAccess<'_, A>,
     attempt: Option<OpeningTxn<'runtime, A, S>>,
 ) where
@@ -257,7 +257,7 @@ where
 
 #[must_use]
 pub(crate) fn remove_addin<A>(
-    runtime: &Runtime<A>,
+    runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     lifecycle: &AddinLifecycleAccess<'_, A>,
     callbacks: &mut HostCallbackSession,
 ) -> i32
@@ -327,7 +327,7 @@ struct RemovalTransaction<'runtime, 'call, A: Addin> {
 
 impl<'runtime, 'call, A: Addin> RemovalTransaction<'runtime, 'call, A> {
     fn begin(
-        runtime: &'runtime Runtime<A>,
+        runtime: &'runtime Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
         callbacks: &'call mut HostCallbackSession,
     ) -> Option<Self> {
         let deps = runtime.shutdown_deps();
@@ -366,7 +366,7 @@ impl<A: Addin> Drop for RemovalTransaction<'_, '_, A> {
 }
 
 pub(crate) fn remove_addin_inner<'runtime, A>(
-    runtime: &'runtime Runtime<A>,
+    runtime: &'runtime Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     lifecycle: &AddinLifecycleAccess<'_, A>,
     callbacks: &mut HostCallbackSession,
 ) -> RemovalSuccess<'runtime, A>
@@ -380,7 +380,7 @@ where
 }
 
 pub(crate) fn remove_addin_inner_unchecked<'runtime, A>(
-    runtime: &'runtime Runtime<A>,
+    runtime: &'runtime Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     lifecycle: &AddinLifecycleAccess<'_, A>,
     callbacks: &mut HostCallbackSession,
 ) -> Result<RemovalSuccess<'runtime, A>, RemovalControl>
@@ -714,10 +714,14 @@ where
     }
     runtime.observer().diagnostics_drained();
 
-    let rtd_quiescent = match crate::excel_rtd_protocol::wait_for_module_quiescence() {
+    let rtd_quiescent = match crate::excel_rtd_protocol::wait_for_module_quiescence(
+        runtime.module_residency_held(),
+    ) {
         Ok(certificate) => certificate,
         Err(error) => {
-            let hazard = if error.revocation_debt != 0 {
+            let hazard = if error.missing_module_residency {
+                crate::shutdown::UnloadHazard::RtdComObjectsWithoutResidency
+            } else if error.revocation_debt != 0 {
                 crate::shutdown::UnloadHazard::RtdGitRevocationDebt
             } else {
                 crate::shutdown::UnloadHazard::RtdGitCallbackStillRegistered
@@ -725,9 +729,13 @@ where
             return Err(handle_unload_hazard(
                 runtime,
                 hazard,
-                "xlAutoRemove RTD GIT quiescence",
+                "xlAutoRemove RTD logical quiescence",
                 &XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_GIT_QUIESCENCE,
+                    diagnostic_id: if error.missing_module_residency {
+                        crate::diagnostics::id::DiagnosticId::MODULE_RESIDENCY
+                    } else {
+                        crate::diagnostics::id::DiagnosticId::RTD_GIT_QUIESCENCE
+                    },
                 },
             ));
         }

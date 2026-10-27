@@ -16,7 +16,7 @@ use std::panic::AssertUnwindSafe;
 
 #[cold]
 pub(crate) fn handle_unload_hazard<A: Addin>(
-    _runtime: &Runtime<A>,
+    _runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     hazard: crate::shutdown::UnloadHazard,
     boundary: &'static str,
     error: &XllError,
@@ -38,7 +38,7 @@ pub(crate) fn handle_unload_hazard<A: Addin>(
 }
 
 pub(crate) fn commit_removal_control<A: Addin>(
-    runtime: &Runtime<A>,
+    runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     control: RemovalControl,
 ) -> RemovalSuccess<'_, A> {
     match control {
@@ -53,7 +53,9 @@ pub(crate) fn commit_removal_control<A: Addin>(
     }
 }
 
-pub(crate) fn quarantine_runtime<A: Addin>(runtime: &Runtime<A>) {
+pub(crate) fn quarantine_runtime<A: Addin>(
+    runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+) {
     runtime.lifecycle_orchestrator().quarantine();
     runtime
         .observer()
@@ -62,7 +64,7 @@ pub(crate) fn quarantine_runtime<A: Addin>(runtime: &Runtime<A>) {
 }
 
 pub(crate) fn quarantine_for_hazard<A: Addin>(
-    runtime: &Runtime<A>,
+    runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     _hazard: crate::shutdown::UnloadHazard,
 ) {
     runtime.lifecycle_orchestrator().quarantine();
@@ -70,7 +72,9 @@ pub(crate) fn quarantine_for_hazard<A: Addin>(
     quarantine_runtime_resources(runtime);
 }
 
-pub(crate) fn quarantine_runtime_resources<A: Addin>(runtime: &Runtime<A>) {
+pub(crate) fn quarantine_runtime_resources<A: Addin>(
+    runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+) {
     // Claiming the existing authority is itself an invariant boundary. Keep
     // it outside the best-effort cleanup catch so a missing authority cannot
     // be swallowed as an ordinary quarantine cleanup failure.

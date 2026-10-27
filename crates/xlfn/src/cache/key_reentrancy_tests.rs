@@ -87,7 +87,11 @@ impl Drop for KeyOwner {
         self.observed.workers.lock().push(worker);
         // The old implementation must fail without leaving a blocked thread:
         // returning after the deadline releases the offending outer lock.
-        if received.recv_timeout(Duration::from_secs(5)).is_ok() {
+        // Tree Borrows instrumentation can exceed the native deadline even
+        // after the worker makes progress. Keep the deadlock bound and final
+        // completion assertion, with a separate interpreter-only time budget.
+        let deadline = Duration::from_secs(if cfg!(miri) { 60 } else { 5 });
+        if received.recv_timeout(deadline).is_ok() {
             self.observed
                 .completed_during_drop
                 .fetch_add(1, Ordering::Release);

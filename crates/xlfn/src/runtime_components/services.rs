@@ -157,7 +157,7 @@ impl GenerationServices {
             let Some(handles) = self.formula_handles.read_if_ready() else {
                 return Ok(());
             };
-            crate::excel_rtd::shutdown_handle_topics(&*handles)
+            crate::excel_rtd::shutdown_handle_topics(&handles)
         }
         #[cfg(not(feature = "handles"))]
         Ok(())

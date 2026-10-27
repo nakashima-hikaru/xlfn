@@ -274,7 +274,7 @@ struct OwnedServerReference {
     pub(super) pointer: usize,
 }
 
-struct DeferredDisconnectLease {
+pub(crate) struct DeferredDisconnectLease {
     // Signal COM quiescence before releasing the reference that owns the
     // barrier. Shutdown pumps STA dispatch while waiting for this admission.
     _call: OwnedServerCall,
@@ -299,15 +299,15 @@ impl Drop for OwnedServerReference {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct BackendHandles(pub(super) NonNull<dyn FormulaLifetimeBackend>);
+pub(super) struct BackendHandles(pub(super) NonNull<FormulaLifetimeBackend>);
 
 // SAFETY: FormulaLifetimeBackend is Send + Sync and remains valid while attached to the server.
-unsafe impl Send for BackendHandles {}
+unsafe impl Send for BackendHandles where FormulaLifetimeBackend: Send + Sync {}
 // SAFETY: FormulaLifetimeBackend immutable operations are thread-safe.
-unsafe impl Sync for BackendHandles {}
+unsafe impl Sync for BackendHandles where FormulaLifetimeBackend: Send + Sync {}
 
 impl BackendHandles {
-    pub(super) fn new(handles: &(dyn FormulaLifetimeBackend + 'static)) -> Self {
+    pub(super) fn new(handles: &FormulaLifetimeBackend) -> Self {
         let raw = std::ptr::from_ref(handles).cast_mut();
         // SAFETY: `raw` originates from a valid reference and is non-null.
         unsafe { Self(NonNull::new_unchecked(raw)) }
@@ -319,7 +319,7 @@ impl BackendHandles {
     ///
     /// The caller must ensure that the backend remains alive (e.g., during
     /// active server callback execution before shutdown completion).
-    pub(super) unsafe fn as_ref(&self) -> &(dyn FormulaLifetimeBackend + 'static) {
+    pub(super) unsafe fn as_ref(&self) -> &FormulaLifetimeBackend {
         // SAFETY: guaranteed by caller contract.
         unsafe { self.0.as_ref() }
     }
@@ -524,7 +524,7 @@ pub(super) fn discard_unpublished_server(pointer: usize, newly_created: bool) {
 }
 
 #[cfg(feature = "handles")]
-pub(crate) fn shutdown<H: FormulaLifetimeBackend + 'static>(handles: &H) -> XllResult<()> {
+pub(crate) fn shutdown(handles: &FormulaLifetimeBackend) -> XllResult<()> {
     let mut shutdown_error = None;
     let retained = {
         let active = ACTIVE_SERVER.lock();
@@ -709,12 +709,11 @@ pub(crate) fn shutdown_subscriptions(subscriptions: &SubscriptionRuntime) -> Xll
 }
 
 #[cfg(feature = "handles")]
-pub(super) fn ensure_server<H: FormulaLifetimeBackend + 'static>(
-    handles: Option<&H>,
+pub(super) fn ensure_server(
+    handles: Option<&FormulaLifetimeBackend>,
     subscriptions: Option<&SubscriptionRuntime>,
 ) -> XllResult<EnsuredServer> {
-    let backend = handles.map(|h| -> &(dyn FormulaLifetimeBackend + 'static) { h });
-    ensure_server_impl(backend, subscriptions)
+    ensure_server_impl(handles, subscriptions)
 }
 
 pub(super) fn ensure_server_without_handles(
@@ -724,7 +723,7 @@ pub(super) fn ensure_server_without_handles(
 }
 
 fn ensure_server_impl(
-    handles: Option<&(dyn FormulaLifetimeBackend + 'static)>,
+    handles: Option<&FormulaLifetimeBackend>,
     subscriptions: Option<&SubscriptionRuntime>,
 ) -> XllResult<EnsuredServer> {
     loop {
@@ -1195,7 +1194,7 @@ pub(super) unsafe extern "system" fn connect_data(
     )
 )]
 enum ConnectDataTransaction<'runtime> {
-    Handle(Box<dyn FormulaLifetimeConnection + 'runtime>),
+    Handle(FormulaLifetimeConnection<'runtime>),
     Subscription(crate::subscription::SubscriptionConnection),
 }
 
@@ -1278,7 +1277,7 @@ unsafe fn connect_data_inner(
         // SAFETY: Excel RTD server outlives or is bounded by the lifecycle coordinator
         // which withdraws/shuts down the server before dropping the backend.
         let handles_ref = unsafe { handles.as_ref() };
-        match handles_ref.connect_lifetime(lifetime_generation(generation), topic_id, rtd_key) {
+        match handles_ref.connect_transaction(lifetime_generation(generation), topic_id, rtd_key) {
             Ok(connection) => ConnectDataTransaction::Handle(connection),
             Err(error) => {
                 crate::diagnostics::report_no_unwind("IRtdServer::ConnectData", &error);
@@ -1475,10 +1474,10 @@ unsafe fn disconnect_data_inner(this: *mut RtdServer, topic_id: i32) -> i32 {
             Some(call) => call,
             None => return E_FAIL,
         };
-        let lease = Box::new(DeferredDisconnectLease {
+        let lease = DeferredDisconnectLease {
             _call: call,
             _reference: reference,
-        });
+        };
         match subscription_server.disconnect_deferred(crate::subscription::TopicId(topic_id), lease)
         {
             Err(error) if !matches!(error, crate::XllError::Closing) => {

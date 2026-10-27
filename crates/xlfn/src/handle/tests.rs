@@ -1774,7 +1774,7 @@ fn handle_lease_keeps_payload_alive_after_binding_retirement() {
 #[cfg(all(feature = "async-builtin", feature = "handles"))]
 #[test]
 fn scoped_handle_task_drain_releases_pin_before_handle_quiescence() {
-    use crate::async_udf::{HandleScopedTaskBuilder, ScopedTaskFuture};
+    use crate::async_udf::HandleScopedTaskBuilder;
     use crate::cancellation::{CancellationGuarantee, CancellationSource};
     use std::sync::mpsc;
     use std::time::Duration;
@@ -1791,19 +1791,22 @@ fn scoped_handle_task_drain_releases_pin_before_handle_quiescence() {
         fn build_task<'generation>(
             self,
             scope: crate::async_udf::AsyncTaskScope<'generation>,
-        ) -> (ScopedTaskFuture<'generation>, ()) {
+        ) -> (impl Future<Output = ()> + Send + 'generation, ()) {
             let lease = self.pending.bind(scope);
             (
-                Box::pin(async move {
+                async move {
                     self.started.send(()).unwrap();
                     let _lease = lease;
                     std::future::pending::<()>().await;
-                }),
+                },
                 (),
             )
         }
 
-        fn deliver(_: (), future: ScopedTaskFuture<'static>) -> impl Future<Output = ()> + Send {
+        fn deliver<'generation>(
+            _: (),
+            future: impl Future<Output = ()> + Send + 'generation,
+        ) -> impl Future<Output = ()> + Send + 'generation {
             future
         }
     }
@@ -2946,7 +2949,7 @@ fn alias_preserves_pointer_and_object_identity() {
         crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
             let handle1 = runtime.lookup::<TrackedObj>(scope, &token1).unwrap();
             let object_id = handle1.object_id();
-            let ptr = handle1.value.addr();
+            let ptr = handle1.projection_addr();
             let alias = handle1.alias();
             let key2 = test_topic_key("alias_identity_2");
             let token2 = runtime
@@ -2961,7 +2964,7 @@ fn alias_preserves_pointer_and_object_identity() {
     crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
         let handle2 = runtime.lookup::<TrackedObj>(scope, &token2).unwrap();
         assert_eq!(handle2.object_id(), object_id1);
-        assert_eq!(handle2.value.addr(), ptr1);
+        assert_eq!(handle2.projection_addr(), ptr1);
         assert_eq!(*handle2, TrackedObj(12345));
     });
 }
@@ -3533,9 +3536,40 @@ fn rejects_object_binding_from_foreign_registry() {
         std::ptr::NonNull::from(first.objects.as_ref())
     );
     assert!(matches!(
-        pending.publish::<DataRecord>(&second),
+        pending.publish(&second),
         Err(XllError::StaleHandle)
     ));
+}
+
+#[test]
+fn miri_typed_pending_alias_rejects_foreign_store_and_keeps_source_live() {
+    let first = HandleStore::try_new(4).unwrap();
+    let second = HandleStore::try_new(4).unwrap();
+    let drops = Arc::new(AtomicUsize::new(0));
+    let pending = first.erase(CountedDataRecord(Arc::clone(&drops))).unwrap();
+    let source = first.insert_pending(pending).unwrap().0;
+
+    let alias = crate::call::with_excel_call_scope_and_state(&first, |first, scope| {
+        let handle = first.lookup::<CountedDataRecord>(scope, &source).unwrap();
+        assert!(matches!(
+            handle.alias().into_pending_object_binding(&second),
+            Err(XllError::StaleHandle)
+        ));
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        let handle = first.lookup::<CountedDataRecord>(scope, &source).unwrap();
+        let pending = handle.alias().into_pending_object_binding(first).unwrap();
+        first.insert_pending(pending).unwrap().0
+    });
+    assert_ne!(source, alias);
+    first.registry.remove::<CountedDataRecord>(&source).unwrap();
+    first.registry.bindings.read_domain().flush_for_test();
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+    crate::call::with_excel_call_scope_and_state(&first, |first, scope| {
+        first.lookup::<CountedDataRecord>(scope, &alias).unwrap();
+    });
+    first.registry.remove::<CountedDataRecord>(&alias).unwrap();
+    first.registry.bindings.read_domain().flush_for_test();
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
 }
 
 #[test]

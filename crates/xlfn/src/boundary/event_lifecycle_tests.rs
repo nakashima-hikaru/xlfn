@@ -12,7 +12,7 @@ use crate::diagnostics::AddinId;
 use crate::lifecycle::LifecyclePhase;
 use crate::registration::host::test_support::{CallbackScript, Reply};
 use crate::registration::{RegistrationDescriptor, RegistrationSignature};
-use crate::runtime::Runtime;
+use crate::runtime::{Runtime, UnloadPolicy};
 use std::cell::Cell;
 use xlfn_common::{ExecutionKind, FunctionVisibility};
 use xlfn_sys::{
@@ -90,20 +90,18 @@ impl Addin for ResidentEventAddin {
 // other executable sources. Host event registration remains framework-owned.
 unsafe impl PhysicallyUnloadableAddin for ResidentEventAddin {}
 
-fn runtime(physical_unload: bool) -> Runtime<ResidentEventAddin> {
+fn runtime<P: UnloadPolicy<ResidentEventAddin>>(
+    runtime: Runtime<ResidentEventAddin, P>,
+) -> Runtime<ResidentEventAddin, P> {
     COUNTS.set(Counts::default());
-    let runtime = if physical_unload {
-        Runtime::new_with_physical_unload()
-    } else {
-        Runtime::new()
-    };
+    fn residency_probe_anchor() {}
     runtime
-        .ensure_module_residency(host_auto_close::<ResidentEventAddin> as *const ())
+        .ensure_module_residency(residency_probe_anchor as *const ())
         .unwrap();
     runtime
 }
 
-fn open(runtime: &Runtime<ResidentEventAddin>) -> i32 {
+fn open(runtime: &Runtime<ResidentEventAddin, impl UnloadPolicy<ResidentEventAddin>>) -> i32 {
     host_auto_open(
         runtime,
         &AddinId::parse("resident-event-test").unwrap(),
@@ -154,7 +152,7 @@ fn expect_reclaimed(generations: usize) {
 }
 
 fn assert_resident_traces(
-    runtime: &Runtime<ResidentEventAddin>,
+    runtime: &Runtime<ResidentEventAddin, impl UnloadPolicy<ResidentEventAddin>>,
     generations: usize,
     physical_unload: bool,
 ) {
@@ -230,7 +228,8 @@ fn assert_resident_traces(
 
 #[test]
 fn close_and_reopen_reuse_resident_events_and_reclaim_each_generation() {
-    for physical_unload in [false, true] {
+    fn check(runtime: Runtime<ResidentEventAddin, impl UnloadPolicy<ResidentEventAddin>>) {
+        let physical_unload = runtime.physical_unload_enabled();
         let script = CallbackScript::install([
             Reply::success(XL_GET_NAME, module_name()),
             Reply::success(XL_EVENT_REGISTER, XLOPER12::integer(123)),
@@ -244,7 +243,7 @@ fn close_and_reopen_reuse_resident_events_and_reclaim_each_generation() {
             Reply::success(XLF_UNREGISTER, XLOPER12::boolean(true)),
             Reply::success(XLF_EVALUATE, XLOPER12::error(XLERR_NAME)),
         ]);
-        let runtime = runtime(physical_unload);
+        let runtime = self::runtime(runtime);
 
         assert_eq!(open(&runtime), 1);
         let first_generation = runtime.last_committed_generation();
@@ -283,11 +282,13 @@ fn close_and_reopen_reuse_resident_events_and_reclaim_each_generation() {
             XLF_EVALUATE,
         ]);
     }
+    check(Runtime::<ResidentEventAddin>::new());
+    check(Runtime::<ResidentEventAddin>::new_with_physical_unload());
 }
 
 #[test]
 fn failed_function_registration_retains_event_for_retry_without_retaining_state() {
-    for physical_unload in [false, true] {
+    fn check(runtime: Runtime<ResidentEventAddin, impl UnloadPolicy<ResidentEventAddin>>) {
         let script = CallbackScript::install([
             Reply::success(XL_GET_NAME, module_name()),
             Reply::success(XL_EVENT_REGISTER, XLOPER12::integer(123)),
@@ -299,7 +300,7 @@ fn failed_function_registration_retains_event_for_retry_without_retaining_state(
             Reply::success(XLF_UNREGISTER, XLOPER12::boolean(true)),
             Reply::success(XLF_EVALUATE, XLOPER12::error(XLERR_NAME)),
         ]);
-        let runtime = runtime(physical_unload);
+        let runtime = self::runtime(runtime);
 
         assert_eq!(open(&runtime), 0);
         assert_eq!(runtime.phase(), LifecyclePhase::Closed);
@@ -327,4 +328,6 @@ fn failed_function_registration_retains_event_for_retry_without_retaining_state(
             XLF_EVALUATE,
         ]);
     }
+    check(Runtime::<ResidentEventAddin>::new());
+    check(Runtime::<ResidentEventAddin>::new_with_physical_unload());
 }

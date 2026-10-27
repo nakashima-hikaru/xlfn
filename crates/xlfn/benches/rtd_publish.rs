@@ -63,7 +63,7 @@ fn rtd_publish_benchmarks(c: &mut Criterion) {
         },
     );
 
-    for producers in [1, 4] {
+    for producers in [1, 4, 16, 32] {
         for capacity in [64, 1024] {
             let mut pipeline =
                 xlfn::benchmark_support::RtdChannelPipelineBenchmark::new(capacity, producers);

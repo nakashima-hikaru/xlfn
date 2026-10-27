@@ -3,7 +3,7 @@ use xlfn::benchmark_support::{
     AsyncSpawnBenchmark, AsyncSpawnKind, CancellationLifecycleBenchmark, benchmark_measurement_time,
 };
 
-const WORKER_COUNTS: [usize; 4] = [1, 4, 8, 16];
+const WORKER_COUNTS: [usize; 5] = [1, 4, 8, 16, 32];
 const PRODUCER_COUNTS: [usize; 4] = [1, 4, 16, 32];
 const ITERATIONS_PER_THREAD: usize = 128;
 const MATRIX_ITERATIONS_PER_THREAD: usize = 64;

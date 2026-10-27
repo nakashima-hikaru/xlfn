@@ -1,5 +1,14 @@
 //! Quick Cache resident policy. Only stored values own a residency obligation.
 //! Cloned lookup/placeholder results are non-owning snapshots.
+//!
+//! This is the lifetime boundary for ResidentKey's non-owning retirement queue.
+//! Only get/insert/remove/retain/clear and scalar observations are exposed. get
+//! clones a ResidentEntry containing no key or queue pointer; remove results and
+//! insert's DefaultLifecycle request state are dropped before returning. No
+//! entry/placeholder/drain guard, callback-owned item, or backend handle escapes.
+//! ResidentKey intentionally has no Clone impl, also ruling out key-cloning
+//! iteration. The backend has no background eviction task. Any extension of
+//! this boundary must preserve destruction of all keys before the queue owner.
 
 use super::{Entry, ResidentEntry, ResidentKey, VersionedKey, VersionedKeyRef};
 use quick_cache::{

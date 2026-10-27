@@ -17,33 +17,35 @@ use std::cell::OnceCell;
 use std::cell::RefCell;
 use std::sync::atomic::AtomicBool;
 
-pub(crate) struct NewObject<'registry>(PendingObjectBinding<'registry>);
+pub(crate) struct NewObject<'registry, T: ExcelHandleObject>(PendingObjectBinding<'registry, T>);
 
-impl<'registry> NewObject<'registry> {
-    fn new(value: PendingObjectBinding<'registry>) -> Self {
+impl<'registry, T: ExcelHandleObject> NewObject<'registry, T> {
+    fn new(value: PendingObjectBinding<'registry, T>) -> Self {
         Self(value)
     }
 
-    pub(super) fn into_pending(self) -> PendingObjectBinding<'registry> {
+    pub(super) fn into_pending(self) -> PendingObjectBinding<'registry, T> {
         self.0
     }
 }
 
-pub(crate) struct ExistingObject<'registry>(PendingObjectBinding<'registry>);
+pub(crate) struct ExistingObject<'registry, T: ExcelHandleObject>(
+    PendingObjectBinding<'registry, T>,
+);
 
-impl<'registry> ExistingObject<'registry> {
-    fn new(object: PendingObjectBinding<'registry>) -> Self {
+impl<'registry, T: ExcelHandleObject> ExistingObject<'registry, T> {
+    fn new(object: PendingObjectBinding<'registry, T>) -> Self {
         Self(object)
     }
 
-    pub(super) fn into_pending(self) -> PendingObjectBinding<'registry> {
+    pub(super) fn into_pending(self) -> PendingObjectBinding<'registry, T> {
         self.0
     }
 }
 
-pub(crate) enum PreparedHandleObject<'registry> {
-    New(NewObject<'registry>),
-    Existing(ExistingObject<'registry>),
+pub(crate) enum PreparedHandleObject<'registry, T: ExcelHandleObject> {
+    New(NewObject<'registry, T>),
+    Existing(ExistingObject<'registry, T>),
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -174,7 +176,7 @@ impl FormulaHandleService {
         &self,
         key: HandleTopicKey,
         generation: TopicGeneration,
-        initialization: InitializationPtr,
+        initialization: &InitializationPtr,
         publication: PublishedTopicPtr,
         token: &str,
     ) -> XllResult<()> {
@@ -182,12 +184,8 @@ impl FormulaHandleService {
         // fall back to the canonical single-flight path. Make it Live only
         // after the initialization marker is removed.
         let token_wire = self.refinement_token(token);
-        self.topics.commit_publication(
-            key,
-            generation,
-            initialization.clone(),
-            publication,
-            || {
+        self.topics
+            .commit_publication(key, generation, initialization, publication, || {
                 self.refinement.observe_commit_and_activate(
                     &key,
                     initialization.refinement_id,
@@ -195,8 +193,7 @@ impl FormulaHandleService {
                 );
                 self.refinement
                     .observe_finish_initializer(initialization.refinement_id);
-            },
-        )?;
+            })?;
 
         initialization.complete();
         Ok(())
@@ -249,7 +246,7 @@ impl FormulaHandleService {
     fn prepare_observed_object<'runtime, T, K>(
         &'runtime self,
         key: K,
-        create: impl FnOnce() -> XllResult<PreparedHandleObject<'runtime>>,
+        create: impl FnOnce() -> XllResult<PreparedHandleObject<'runtime, T>>,
         observe: impl FnOnce(&str, &str) -> XllResult<()>,
     ) -> XllResult<HandlePreparation>
     where
@@ -326,8 +323,9 @@ impl FormulaHandleService {
         //
         // Cold path: no existing topic, invoke the factory.
         //
+        let initialization_id = initialization.refinement_id;
         let publication_reservation =
-            PublicationReservation::new(self, key, generation, initialization.clone());
+            PublicationReservation::new(self, key, generation, initialization);
         let prepared = create()?;
         let InsertedPublication {
             transaction: publication_txn,
@@ -338,13 +336,13 @@ impl FormulaHandleService {
         if allocation == ObjectAllocation::Reused {
             self.refinement.observe_insert_pending_reuse(
                 &key,
-                initialization.refinement_id,
+                initialization_id,
                 parsed.slot,
                 parsed.generation,
             );
         } else {
             self.refinement
-                .observe_insert_pending_fresh(&key, initialization.refinement_id);
+                .observe_insert_pending_fresh(&key, initialization_id);
         }
         let lifetime_key = key.format_lifetime_key();
         let publication = PublishedTopic::new(token.clone(), lifetime_key.clone());
@@ -357,7 +355,7 @@ impl FormulaHandleService {
             |_publication| {
                 self.refinement.observe_publish_and_install(
                     &key,
-                    initialization.refinement_id,
+                    initialization_id,
                     self.refinement_token(&token),
                     &lifetime_key,
                 );
@@ -638,67 +636,17 @@ impl FormulaHandleService {
     }
 }
 
-impl crate::formula_lifetime::FormulaLifetimeBackend for FormulaHandleService {
-    #[cfg(target_os = "windows")]
-    fn identity(&self) -> usize {
+#[cfg(target_os = "windows")]
+impl FormulaHandleService {
+    pub(crate) fn identity(&self) -> usize {
         self as *const Self as usize
-    }
-
-    fn terminate_all_topics(&self) {
-        FormulaHandleService::terminate_all_topics(self);
-    }
-
-    #[cfg(all(target_os = "windows", any(test, feature = "refinement")))]
-    fn lifetime_trace(&self) -> Option<crate::shutdown_trace::ShutdownTraceHandle> {
-        #[cfg(target_os = "windows")]
-        {
-            FormulaHandleService::lifetime_trace(self)
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            None
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    fn claim_lifetime(
-        &self,
-        lifetime_key: &str,
-        lifetime_generation: FormulaLifetimeGeneration,
-    ) -> XllResult<()> {
-        FormulaHandleService::claim_lifetime(self, lifetime_key, lifetime_generation)
-    }
-
-    #[cfg(target_os = "windows")]
-    fn connect_lifetime<'a>(
-        &'a self,
-        lifetime_generation: FormulaLifetimeGeneration,
-        topic_id: i32,
-        lifetime_key: &str,
-    ) -> XllResult<Box<dyn crate::formula_lifetime::FormulaLifetimeConnection + 'a>> {
-        Ok(Box::new(FormulaHandleService::connect_transaction(
-            self,
-            lifetime_generation,
-            topic_id,
-            lifetime_key,
-        )?))
-    }
-
-    #[cfg(target_os = "windows")]
-    fn disconnect(&self, lifetime_generation: FormulaLifetimeGeneration, topic_id: i32) {
-        FormulaHandleService::disconnect(self, lifetime_generation, topic_id);
-    }
-
-    #[cfg(target_os = "windows")]
-    fn terminate_topics(&self, lifetime_generation: FormulaLifetimeGeneration) {
-        FormulaHandleService::terminate_topics(self, lifetime_generation);
     }
 }
 
 /// The handle runtime has stopped accepting work and its registry has removed
 /// every live binding. The service keeps the generation alive until async
 /// scoped tasks have drained and object/pin quiescence is certified.
-enum FormulaHandleServiceSealed {
+pub(crate) enum FormulaHandleServiceSealed {
     Present {
         generation: RuntimeGeneration,
         service: Box<FormulaHandleService>,
@@ -720,12 +668,12 @@ impl FormulaHandleServiceSealed {
     }
 }
 
-impl crate::shutdown::HandleStoreTeardown for FormulaHandleServiceSealed {
-    fn finish(self: Box<Self>) -> XllResult<crate::shutdown::HandlesQuiescent> {
+impl FormulaHandleServiceSealed {
+    pub(crate) fn finish(self) -> XllResult<crate::shutdown::HandlesQuiescent> {
         // `stop_producers` closes and drains the async manager before this
         // service box can be consumed. Raw object pin guards therefore never
         // outlive the arena reached by this teardown path.
-        match *self {
+        match self {
             Self::Present {
                 generation,
                 service,

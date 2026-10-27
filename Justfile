@@ -21,6 +21,10 @@ panic-boundaries:
     python3 -B -m unittest discover -s tools -p test_check_panic_boundaries.py
     python3 -B tools/check_panic_boundaries.py
 
+# Compile valid and invalid callers against private lifecycle typestates.
+typestate:
+    python3 -B tools/check_typestate.py
+
 clippy:
     cargo clippy \
         --workspace \
@@ -212,7 +216,7 @@ release-metadata:
 # Retain the existing check name without calling `cargo publish`.
 publish-check: package-check
 
-quick: fmt panic-boundaries clippy test
+quick: fmt panic-boundaries typestate clippy test
 
 # Validate the published guide and compile its examples against this checkout.
 guide-check:
@@ -221,7 +225,7 @@ guide-check:
     python3 -B guide/check.py --html
     python3 -B guide/check_examples.py
 
-check: fmt panic-boundaries clippy features test test-features bench-check deny semver doc guide-check package-check
+check: fmt panic-boundaries typestate clippy features test test-features bench-check deny semver doc guide-check package-check
 
 # --- Benchmark recipes ---
 
@@ -242,17 +246,19 @@ bench-ci:
     just bench-one-filter array_numeric_output "^(array_numeric_output/(matrix_build_return|builder_build_return|matrix_build_return_q|builder_build_return_q|matrix_convert_return|numeric_slice_convert_return|numeric_slice_convert_return_q)/100000|array_numeric_output/numeric_slice_convert_return/100|array_numeric_producer/push_f64/(10000|100000))\z"
     just bench-one-filter object_lease "^object_lease/(pin_acquire_release_serial|final_pin_release|same_object/4|distinct_objects/4)\z" "bench-internals async"
     just bench-one-filter cache_miss_concurrency "^cache_miss_concurrency/(distinct_keys/(cheap_u64|numeric_reduce_4096)/cache/workers_(1|4)|same_key/cheap_u64/cache/workers_4)\z" "bench-internals cache"
-    just bench-one-filter cache_reclamation "^(cache_nonresident/roundtrip|cache_deferred_queue/u64_churn)\z" "cache"
+    just bench-one-filter cache_reclamation "^(cache_nonresident/roundtrip|cache_deferred_queue/(u64_churn|owned_key_churn))\z" "cache"
     just bench-one-filter array_string_output "^(array_string_output/borrowed_str/16384|scalar_output/(ascii_short|ascii_1k|unicode_1k|japanese_4k)/(borrowed|owned)|scalar_output/(ascii_8|ascii_64|japanese_8|japanese_64)/(owned|copy)|scalar_output/(ascii_4k|japanese_4k|mixed)/copy|scalar_output/(enum|number))\z"
     just bench-one-filter registration "^registration/(preflight|host|total)/(10|5000)\z"
     just bench-one-filter rtd_prepare "^rtd_admission/(pending_full|existing_reuse|admitted)/1048576\z" "bench-internals rtd"
     just bench-one rtd_prepare_allocations "bench-internals rtd"
+    just bench-one rtd_connection_allocations "bench-internals rtd"
     just bench-one-filter rtd_publish "^rtd_publish/(number|string|string_8k)/(changing|same_value)\z" "bench-internals rtd"
     just bench-one-filter rtd_refresh "^rtd_refresh/(number/end_to_end/dense|short_string/end_to_end/dense|string_8k/(collection|completion|end_to_end)/dense)\z" "bench-internals rtd"
     just bench-one-filter handle_call_resolution "^handle_call_resolution/handles/(1|8)\z"
     just bench-one cache_registry "bench-internals cache"
     just bench-one value_boundary_allocations "bench-internals async"
     just bench-one async_task_drain_allocations "bench-internals async"
+    just bench-one async_pending_allocations "bench-internals async-builtin"
 
 # Pull request benchmark gate (aliases bench-ci to ensure identical thresholds and history).
 bench-pr: bench-ci
@@ -277,6 +283,7 @@ bench-full:
     just bench-one cache_reclamation "cache"
     just bench-one async_task_drain "bench-internals async"
     just bench-one async_task_drain_allocations "bench-internals async"
+    just bench-one async_pending_allocations "bench-internals async-builtin"
     just bench-one array_numeric_output
     just bench-one object_lease "bench-internals async"
     just bench-one cache_miss_concurrency "bench-internals cache"
@@ -291,6 +298,7 @@ bench-full:
     just bench-one registration
     just bench-one rtd_prepare "bench-internals rtd"
     just bench-one rtd_prepare_allocations "bench-internals rtd"
+    just bench-one rtd_connection_allocations "bench-internals rtd"
     just bench-one rtd_publish "bench-internals rtd"
     just bench-one rtd_refresh "bench-internals rtd"
     just bench-one handle_call_resolution

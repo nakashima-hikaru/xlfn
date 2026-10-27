@@ -2,11 +2,14 @@ use super::binding::BindingReadLease;
 use super::object::{PendingObjectBinding, RawObjectLeaseGuard, TypedObjectProjection};
 use super::store::HandleStore;
 use super::token::ObjectId;
-use crate::XllResult;
 #[cfg(any(feature = "async", test))]
 use crate::generation::RuntimeGeneration;
+use crate::panic_boundary::catch_no_unwind;
+use crate::{XllError, XllResult};
+use std::any::type_name;
 use std::marker::PhantomData;
 use std::ops::Deref;
+use std::panic::AssertUnwindSafe;
 
 /// Marker implemented by `#[derive(ExcelHandleObject)]`.
 pub trait ExcelHandleObject: Send + Sync + 'static {}
@@ -15,7 +18,7 @@ pub trait ExcelHandleObject: Send + Sync + 'static {}
 /// task that acquired its raw object pin.
 pub(crate) struct GenerationLeaseBrand;
 
-type HandleAliasMarker<'call, T> = (&'call crate::call::CallScope<'call>, fn() -> T);
+type HandleAliasMarker<'call, T> = (&'call crate::call::CallScope<'call>, fn(T) -> T);
 
 /// Opaque identity of a registry-owned handle payload.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -58,18 +61,35 @@ impl HandleObjectId {
 /// `ObjectBinding` capability into the `ObjectArena`-owned `ObjectCell`.
 /// A warm lookup therefore only projects the registry-owned object.
 pub struct Handle<'call, T: ExcelHandleObject> {
-    pub(crate) binding: BindingReadLease<'call>,
-    pub(crate) value: TypedObjectProjection<T>,
-    pub(crate) _call: PhantomData<&'call crate::call::CallScope<'call>>,
+    binding: BindingReadLease<'call>,
+    value: TypedObjectProjection<T>,
+    _call: PhantomData<&'call crate::call::CallScope<'call>>,
 }
 
 impl<'call, T: ExcelHandleObject> Handle<'call, T> {
-    pub(crate) fn new(binding: BindingReadLease<'call>, value: TypedObjectProjection<T>) -> Self {
-        Self {
+    #[inline]
+    pub(super) fn new(binding: BindingReadLease<'call>) -> XllResult<Self> {
+        let Some(value) = binding.object().typed_projection::<T>() else {
+            let actual_type = binding.object().type_name();
+            let _ = catch_no_unwind(AssertUnwindSafe(|| {
+                tracing::warn!(
+                    expected_type = type_name::<T>(),
+                    actual_type,
+                    "Excel handle type mismatch"
+                );
+            }));
+            return Err(XllError::InvalidHandle);
+        };
+        Ok(Self {
             binding,
             value,
             _call: PhantomData,
-        }
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn projection_addr(&self) -> usize {
+        self.value.addr()
     }
 
     /// Returns the session-scoped identity used by formula input semantics.
@@ -200,16 +220,20 @@ unsafe impl<T: ExcelHandleObject> Sync for PendingHandleLease<T> {}
 /// object. It carries the source binding snapshot directly, so address-reuse
 /// and resurrection machinery are unnecessary.
 pub struct HandleAlias<'call, T: ExcelHandleObject> {
-    pub(crate) binding: BindingReadLease<'call>,
-    pub(crate) _call: PhantomData<HandleAliasMarker<'call, T>>,
+    binding: BindingReadLease<'call>,
+    _call: PhantomData<HandleAliasMarker<'call, T>>,
 }
 
-impl<T: ExcelHandleObject> HandleAlias<'_, T> {
+impl<'call, T: ExcelHandleObject> HandleAlias<'call, T> {
+    pub(super) fn binding(&self) -> &BindingReadLease<'call> {
+        &self.binding
+    }
+
     pub(crate) fn into_pending_object_binding<'store>(
         self,
         store: &'store HandleStore,
-    ) -> XllResult<PendingObjectBinding<'store>> {
-        store.duplicate_binding(&self.binding)
+    ) -> XllResult<PendingObjectBinding<'store, T>> {
+        store.duplicate_binding(self)
     }
 
     #[cfg(test)]

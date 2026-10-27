@@ -32,6 +32,9 @@ mod recovery;
 mod rollback;
 mod shutdown;
 mod transactions;
+mod unload;
+
+pub use unload::{LogicalUnload, PhysicalUnload, UnloadPolicy};
 
 #[cfg(any(feature = "bench-internals", test,))]
 use crate::runtime_components::GenerationServices;
@@ -50,51 +53,7 @@ use xlfn_kernel::thread_affine::{
     ThreadAffineAccess, ThreadAffineError, ThreadAffineInstallError, ThreadAffineSlot,
 };
 
-type QuiesceOperation<A> = fn(
-    &mut <A as crate::Addin>::SharedState,
-    &mut <A as crate::Addin>::LifecycleState,
-) -> Result<(), <A as crate::Addin>::Error>;
-
-fn logical_quiesce<A: crate::Addin>(
-    shared: &mut A::SharedState,
-    lifecycle: &mut A::LifecycleState,
-) -> Result<(), A::Error> {
-    A::quiesce(shared, lifecycle)
-}
-
-fn physical_quiesce<A: PhysicallyUnloadableAddin>(
-    shared: &mut A::SharedState,
-    lifecycle: &mut A::LifecycleState,
-) -> Result<(), A::Error> {
-    A::quiesce_for_physical_unload(shared, lifecycle)
-}
-
-/// Couples the quiesce operation with the residency policy that selected it.
-/// A runtime can therefore not contain a physical-unload flag that disagrees
-/// with the callback used to quiesce the add-in.
-enum UnloadPolicy<A: crate::Addin> {
-    Logical,
-    Physical(QuiesceOperation<A>),
-}
-
-impl<A: crate::Addin> UnloadPolicy<A> {
-    fn quiesce(
-        &self,
-        shared: &mut A::SharedState,
-        lifecycle: &mut A::LifecycleState,
-    ) -> Result<(), A::Error> {
-        match self {
-            Self::Logical => logical_quiesce::<A>(shared, lifecycle),
-            Self::Physical(operation) => operation(shared, lifecycle),
-        }
-    }
-
-    const fn is_physical(&self) -> bool {
-        matches!(self, Self::Physical(_))
-    }
-}
-
-pub struct Runtime<A: crate::Addin> {
+pub struct Runtime<A: crate::Addin, P: UnloadPolicy<A> = LogicalUnload> {
     lifecycle: LifecycleCoordinator<A>,
     addin_lifecycle: ThreadAffineSlot<A::LifecycleState>,
     host: HostLedger,
@@ -103,15 +62,33 @@ pub struct Runtime<A: crate::Addin> {
     #[cfg(feature = "async")]
     async_runtime: crate::async_udf::AsyncRuntime<A::AsyncExecutor>,
     residency: ModuleResidency,
-    unload_policy: UnloadPolicy<A>,
+    _unload_policy: std::marker::PhantomData<P>,
     quarantine: QuarantineVault<A>,
     observer: RuntimeObserver,
+}
+
+impl<A: crate::Addin> Runtime<A, LogicalUnload> {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self::with_policy()
+    }
+
+    /// Constructs a runtime whose terminal close may release the DLL's
+    /// physical residency lease. The unsafe contract is carried by the
+    /// `PhysicallyUnloadableAddin` implementation.
+    #[must_use]
+    pub const fn new_with_physical_unload() -> Runtime<A, PhysicalUnload>
+    where
+        A: PhysicallyUnloadableAddin,
+    {
+        Runtime::with_policy()
+    }
 }
 
 pub(crate) type AddinLifecycleAccess<'runtime, A> =
     ThreadAffineAccess<'runtime, <A as crate::Addin>::LifecycleState>;
 
-impl<A: crate::Addin> Runtime<A> {
+impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
     pub(in crate::runtime) fn lifecycle_control(
         &self,
     ) -> crate::lifecycle::LifecycleControl<'_, A> {
@@ -220,9 +197,9 @@ impl<A: crate::Addin> Runtime<A> {
     }
 }
 
-impl<A: crate::Addin> Runtime<A> {
-    #[must_use]
-    pub const fn new() -> Self {
+impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
+    /// Constructs the resources for a statically selected, sealed policy.
+    const fn with_policy() -> Self {
         Self {
             lifecycle: LifecycleCoordinator::new(),
             addin_lifecycle: ThreadAffineSlot::new(),
@@ -232,30 +209,7 @@ impl<A: crate::Addin> Runtime<A> {
             #[cfg(feature = "async")]
             async_runtime: crate::async_udf::AsyncRuntime::new(),
             residency: ModuleResidency::new(),
-            unload_policy: UnloadPolicy::Logical,
-            quarantine: QuarantineVault::new(),
-            observer: RuntimeObserver::new(),
-        }
-    }
-
-    /// Constructs a runtime whose terminal close may release the DLL's
-    /// physical residency lease. The unsafe contract is carried by the
-    /// `PhysicallyUnloadableAddin` implementation.
-    #[must_use]
-    pub const fn new_with_physical_unload() -> Self
-    where
-        A: PhysicallyUnloadableAddin,
-    {
-        Self {
-            lifecycle: LifecycleCoordinator::new(),
-            addin_lifecycle: ThreadAffineSlot::new(),
-            host: HostLedger::new(),
-            return_protocol: ReturnProtocol::new(),
-            diagnostics: crate::diagnostics::DiagnosticHistory::new(),
-            #[cfg(feature = "async")]
-            async_runtime: crate::async_udf::AsyncRuntime::new(),
-            residency: ModuleResidency::new(),
-            unload_policy: UnloadPolicy::Physical(physical_quiesce::<A>),
+            _unload_policy: std::marker::PhantomData,
             quarantine: QuarantineVault::new(),
             observer: RuntimeObserver::new(),
         }
@@ -303,8 +257,8 @@ impl<A: crate::Addin> Runtime<A> {
     }
 
     /// Attempts physical release after logical removal. Returns false while
-    /// a native event registration (including an uncertain one) requires the
-    /// DLL. Both normal close and failed-open cleanup use this same guard.
+    /// a native event registration (including an uncertain one) or COM hold
+    /// requires the DLL. Normal close and failed-open cleanup share this guard.
     pub(crate) fn release_module_residency(&self) -> XllResult<bool> {
         self.residency.release()
     }
@@ -324,7 +278,7 @@ impl<A: crate::Addin> Runtime<A> {
     }
 
     pub(crate) fn physical_unload_enabled(&self) -> bool {
-        self.unload_policy.is_physical()
+        P::PHYSICAL
     }
 
     pub(crate) fn quiesce_addin(
@@ -332,17 +286,9 @@ impl<A: crate::Addin> Runtime<A> {
         shared: &mut A::SharedState,
         lifecycle: &mut A::LifecycleState,
     ) -> XllResult<()> {
-        self.unload_policy
-            .quiesce(shared, lifecycle)
-            .map_err(crate::error::IntoXllError::into_xll_error)
+        P::quiesce(shared, lifecycle).map_err(crate::error::IntoXllError::into_xll_error)
     }
 
-    #[cfg(any(
-        test,
-        feature = "rtd",
-        feature = "handles",
-        feature = "lifecycle-diagnostics"
-    ))]
     pub(crate) fn module_residency_held(&self) -> bool {
         self.residency.is_held()
     }
@@ -684,7 +630,7 @@ impl<A: crate::Addin> Runtime<A> {
     }
 }
 
-impl<A: crate::Addin> Runtime<A> {
+impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
     pub(crate) fn next_call_id(&self) -> u64 {
         self.return_protocol.next_call_id()
     }
@@ -868,14 +814,14 @@ impl<A: crate::Addin> Runtime<A> {
     }
 }
 
-impl<A: crate::Addin> Default for Runtime<A> {
+impl<A: crate::Addin, P: UnloadPolicy<A>> Default for Runtime<A, P> {
     fn default() -> Self {
-        Self::new()
+        Self::with_policy()
     }
 }
 
 #[cfg(test)]
-impl<A: crate::Addin> Runtime<A> {
+impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
     pub(crate) fn cleanup_test_runtime(&self) {
         // A locally quarantined/unopened fixture does not own the global
         // module epoch and must not close another test's active ingress.
@@ -897,35 +843,35 @@ impl<A: crate::Addin> Runtime<A> {
 }
 
 #[cfg(test)]
-impl<A: crate::Addin> Drop for Runtime<A> {
+impl<A: crate::Addin, P: UnloadPolicy<A>> Drop for Runtime<A, P> {
     fn drop(&mut self) {
         self.cleanup_test_runtime();
     }
 }
 
 #[cfg(test)]
-pub(crate) struct StaticTestRuntime<A: crate::Addin> {
-    runtime: &'static Runtime<A>,
+pub(crate) struct StaticTestRuntime<A: crate::Addin, P: UnloadPolicy<A> = LogicalUnload> {
+    runtime: &'static Runtime<A, P>,
 }
 
 #[cfg(test)]
-impl<A: crate::Addin> StaticTestRuntime<A> {
+impl<A: crate::Addin, P: UnloadPolicy<A>> StaticTestRuntime<A, P> {
     pub(crate) fn new() -> Self {
-        let runtime = Box::leak(Box::new(Runtime::new()));
+        let runtime = Box::leak(Box::new(Runtime::with_policy()));
         Self { runtime }
     }
 
-    pub(crate) fn from_static(runtime: &'static Runtime<A>) -> Self {
+    pub(crate) fn from_static(runtime: &'static Runtime<A, P>) -> Self {
         Self { runtime }
     }
 
-    pub(crate) fn runtime(&self) -> &'static Runtime<A> {
+    pub(crate) fn runtime(&self) -> &'static Runtime<A, P> {
         self.runtime
     }
 }
 
 #[cfg(test)]
-impl<A: crate::Addin> Drop for StaticTestRuntime<A> {
+impl<A: crate::Addin, P: UnloadPolicy<A>> Drop for StaticTestRuntime<A, P> {
     fn drop(&mut self) {
         self.runtime.cleanup_test_runtime();
     }
@@ -1019,7 +965,7 @@ pub(crate) mod tests {
     }
 
     fn finish_test_close<A: crate::Addin>(
-        runtime: &Runtime<A>,
+        runtime: &Runtime<A, impl UnloadPolicy<A>>,
         mut removal_attempt: RemovalOwner<'_, A>,
     ) {
         let module_closing = removal_attempt.take_module_closing();
@@ -1039,7 +985,8 @@ pub(crate) mod tests {
         // are exercised by the real lifecycle close path.
         runtime.disable_trace_for_test();
         let _rtd =
-            crate::excel_rtd_protocol::wait_for_module_quiescence().expect("RTD module quiescence");
+            crate::excel_rtd_protocol::wait_for_module_quiescence(runtime.module_residency_held())
+                .expect("RTD module quiescence");
         let last_generation = runtime.lifecycle.access().last_committed_generation();
         let certificate = removal_attempt
             .certify::<FinalRemoval>(
@@ -1055,7 +1002,7 @@ pub(crate) mod tests {
     }
 
     fn finish_test_open_rollback<'a, A: crate::Addin>(
-        runtime: &'a Runtime<A>,
+        runtime: &'a Runtime<A, impl UnloadPolicy<A>>,
         mut rollback_attempt: RemovalOwner<'a, A>,
     ) -> RemovalOwner<'a, A> {
         let module_closing = rollback_attempt.take_module_closing();
@@ -1120,7 +1067,7 @@ pub(crate) mod tests {
     }
 
     fn assert_retained_drain<A: crate::Addin>(
-        runtime: &Runtime<A>,
+        runtime: &Runtime<A, impl UnloadPolicy<A>>,
         epoch: crate::module_runtime::ModuleEpochId,
     ) {
         assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
@@ -1540,7 +1487,8 @@ pub(crate) mod tests {
         let module_epoch = module_quiescent.id();
         runtime.disable_trace_for_test();
         let _rtd =
-            crate::excel_rtd_protocol::wait_for_module_quiescence().expect("RTD module quiescence");
+            crate::excel_rtd_protocol::wait_for_module_quiescence(runtime.module_residency_held())
+                .expect("RTD module quiescence");
         let certificate = removal_attempt
             .certify::<FinalRemoval>(
                 QuiescenceProof::for_test(
@@ -1662,7 +1610,8 @@ pub(crate) mod tests {
             .module_epoch_id()
             .expect("open module epoch");
         let _rtd =
-            crate::excel_rtd_protocol::wait_for_module_quiescence().expect("RTD module quiescence");
+            crate::excel_rtd_protocol::wait_for_module_quiescence(runtime.module_residency_held())
+                .expect("RTD module quiescence");
         let removal_attempt = match removal_attempt.certify::<FinalRemoval>(
             QuiescenceProof::for_test(
                 Some(crate::generation::RuntimeGeneration::new(1).unwrap()),

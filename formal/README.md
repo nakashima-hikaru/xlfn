@@ -149,9 +149,9 @@ residency remains held, with every other drain/reclamation obligation unchanged.
 
 `Resources.Quiescent` and Composition's `logicalQuiescenceCertified` therefore
 certify logical close. `Resources.PhysicalUnloadSafe` additionally requires zero
-resident event roots. The separate Residency model requires this zero-event
-condition before releasing the DLL lease and proves that retained event roots
-prevent release. A successful shutdown trace with retained roots is not
+resident event roots, RTD class factories, RTD servers, and server locks. The
+separate Residency model requires these roots to be absent before releasing the
+DLL lease and proves that retained event or COM roots prevent release. A successful shutdown trace with retained roots is not
 physical-unload evidence. Counterexamples cover a missing residency lease and
 an open callback gate, while preserving a valid logical-close case with two
 retained event roots.
@@ -162,9 +162,19 @@ owned generation establishes `generationUnique`; `Addin::quiesce` establishes
 `addinQuiesced`, and consuming the runtime root establishes
 `generationOwnedByRuntime = false`.
 
-`RtdDrained` is intentionally limited to RTD operations, class factories,
-servers, and server locks. `SubscriptionsDrained` owns the separate
-subscription/callback postcondition.
+`RtdDrained` requires zero executable RTD operations. Class factories, terminal
+servers, and server locks may remain after logical teardown only with a retained
+module residency lease. `SubscriptionsDrained` still owns the separate
+subscription/callback postcondition; retained COM roots do not excuse active
+operations or callbacks. This avoids requiring Excel to release its last COM
+reference before the `xlAutoClose` callback returns.
+
+The per-generation Shutdown trace ends at logical close. Late physical COM
+releases are modeled by the Residency machine's `releaseRtdComRoot` transition,
+which preserves the closed phase and DLL lease. A reopened generation starts
+with the remaining module COM counts; releases during that generation decrement
+that snapshot. `resident-com.json` and `reopen-resident-com.json` exercise retained
+COM roots and subsequent release without claiming physical DLL unload.
 
 Handle shutdown has three distinct obligations. `handles = 0` means that no
 formula binding roots remain; `handlePins = 0` means that no pending or

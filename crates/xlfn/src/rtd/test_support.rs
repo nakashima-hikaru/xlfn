@@ -9,6 +9,7 @@ pub(crate) enum TestNotifyOutcome {
     Success,
     Error(XllError),
     Panic,
+    PanicPayload(std::sync::Arc<AtomicUsize>),
 }
 
 pub(crate) struct TestNotifierState {
@@ -17,6 +18,7 @@ pub(crate) struct TestNotifierState {
     pub(crate) entered: Mutex<Option<Sender<()>>>,
     pub(crate) release: Mutex<Option<Receiver<()>>>,
     pub(crate) panicking_drop: bool,
+    pub(crate) callback: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Default for TestNotifierState {
@@ -27,6 +29,7 @@ impl Default for TestNotifierState {
             entered: Mutex::new(None),
             release: Mutex::new(None),
             panicking_drop: false,
+            callback: Mutex::new(None),
         }
     }
 }
@@ -52,6 +55,10 @@ impl TestNotifierState {
         if let Some(release) = self.release.lock().as_ref() {
             let _ = release.recv();
         }
+        let callback = self.callback.lock().take();
+        if let Some(callback) = callback {
+            callback();
+        }
         let outcome = self
             .outcomes
             .lock()
@@ -61,6 +68,9 @@ impl TestNotifierState {
             TestNotifyOutcome::Success => Ok(()),
             TestNotifyOutcome::Error(err) => Err(err),
             TestNotifyOutcome::Panic => panic!("injected test notifier panic"),
+            TestNotifyOutcome::PanicPayload(drops) => {
+                std::panic::panic_any(crate::panic_boundary::tests::PanickingPayload(drops));
+            }
         }
     }
 }

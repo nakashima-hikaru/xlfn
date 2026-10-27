@@ -1,0 +1,92 @@
+[
+  {
+    "case": "adapter",
+    "subscriptions": 1,
+    "baseline_ns_per_connection": 30.873312236874934,
+    "candidate_ns_per_connection": 52.850396086286594,
+    "change_percent": 71.18472964867806,
+    "baseline_connections_per_second": 32390434.571046926,
+    "candidate_connections_per_second": 18921334.068477795,
+    "trial_ns_per_connection": {
+      "baseline-1": 30.86724820337505,
+      "candidate-1": 52.82837849823729,
+      "candidate-2": 52.8724136743359,
+      "baseline-2": 30.87937627037482
+    }
+  },
+  {
+    "case": "adapter",
+    "subscriptions": 32,
+    "baseline_ns_per_connection": 20.96268688738433,
+    "candidate_ns_per_connection": 51.51546089765178,
+    "change_percent": 145.74836791868785,
+    "baseline_connections_per_second": 47703808.4560532,
+    "candidate_connections_per_second": 19411648.12611786,
+    "trial_ns_per_connection": {
+      "baseline-1": 20.97657931985099,
+      "candidate-1": 51.384691414897084,
+      "candidate-2": 51.646230380406465,
+      "baseline-2": 20.948794454917664
+    }
+  },
+  {
+    "case": "adapter",
+    "subscriptions": 256,
+    "baseline_ns_per_connection": 21.080095920693424,
+    "candidate_ns_per_connection": 51.814940938435385,
+    "change_percent": 145.8003091322316,
+    "baseline_connections_per_second": 47438114.31229509,
+    "candidate_connections_per_second": 19299452.665364675,
+    "trial_ns_per_connection": {
+      "baseline-1": 20.572621685826302,
+      "candidate-1": 52.14710370803825,
+      "candidate-2": 51.48277816883251,
+      "baseline-2": 21.587570155560545
+    }
+  },
+  {
+    "case": "runtime",
+    "subscriptions": 1,
+    "baseline_ns_per_connection": 248.07996999179656,
+    "candidate_ns_per_connection": 297.94370869071423,
+    "change_percent": 20.09986485429136,
+    "baseline_connections_per_second": 4030958.2431546883,
+    "candidate_connections_per_second": 3356338.7003350616,
+    "trial_ns_per_connection": {
+      "baseline-1": 248.52252968074757,
+      "candidate-1": 296.18784552149197,
+      "candidate-2": 299.6995718599365,
+      "baseline-2": 247.63741030284555
+    }
+  },
+  {
+    "case": "runtime",
+    "subscriptions": 32,
+    "baseline_ns_per_connection": 242.63346216194842,
+    "candidate_ns_per_connection": 272.6356205270398,
+    "change_percent": 12.36521875332517,
+    "baseline_connections_per_second": 4121443.0651471266,
+    "candidate_connections_per_second": 3667899.2938152067,
+    "trial_ns_per_connection": {
+      "baseline-1": 242.75692487976957,
+      "candidate-1": 273.17833971837393,
+      "candidate-2": 272.0929013357056,
+      "baseline-2": 242.50999944412726
+    }
+  },
+  {
+    "case": "runtime",
+    "subscriptions": 256,
+    "baseline_ns_per_connection": 251.033136388927,
+    "candidate_ns_per_connection": 272.88980988943683,
+    "change_percent": 8.706688612871872,
+    "baseline_connections_per_second": 3983537.848368729,
+    "candidate_connections_per_second": 3664482.7463698876,
+    "trial_ns_per_connection": {
+      "baseline-1": 241.80002146591215,
+      "candidate-1": 271.70817030700033,
+      "candidate-2": 274.07144947187334,
+      "baseline-2": 260.26625131194186
+    }
+  }
+]

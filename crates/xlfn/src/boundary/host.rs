@@ -27,7 +27,7 @@ struct HostLifecycleGuard {
 }
 
 impl HostLifecycleGuard {
-    fn enter<A: Addin>(runtime: &Runtime<A>) -> Option<Self> {
+    fn enter<A: Addin>(runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>) -> Option<Self> {
         let runtime = std::ptr::from_ref(runtime).cast::<()>();
         ACTIVE_LIFECYCLES.with_borrow_mut(|active| {
             if active.contains(&runtime) {
@@ -48,7 +48,9 @@ impl Drop for HostLifecycleGuard {
     }
 }
 
-fn defer_opening_deactivation<A: Addin>(runtime: &Runtime<A>) {
+fn defer_opening_deactivation<A: Addin>(
+    runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+) {
     if runtime.phase() == LifecyclePhase::Opening {
         // Do not wait for our own opening transaction or take its cleanup
         // authority. It will observe this intent after returning from the
@@ -59,7 +61,7 @@ fn defer_opening_deactivation<A: Addin>(runtime: &Runtime<A>) {
 
 /// Handles the generated `xlAutoOpen` boundary.
 pub(crate) fn host_auto_open<A>(
-    runtime: &Runtime<A>,
+    runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     addin_id: &AddinId,
     version: &'static str,
     target: &'static str,
@@ -142,7 +144,7 @@ where
 }
 
 /// Deactivates the add-in, including host paths that do not call xlAutoRemove.
-pub(crate) fn host_auto_close<A>(runtime: &Runtime<A>) -> i32
+pub(crate) fn host_auto_close<A>(runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>) -> i32
 where
     A: Addin,
 {
@@ -173,7 +175,7 @@ where
 }
 
 /// Handles the explicit terminal-removal boundary.
-pub(crate) fn host_auto_remove<A>(runtime: &Runtime<A>) -> i32
+pub(crate) fn host_auto_remove<A>(runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>) -> i32
 where
     A: Addin,
 {
@@ -187,7 +189,7 @@ where
 }
 
 fn deactivate_addin<A: Addin>(
-    runtime: &Runtime<A>,
+    runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     callbacks: &mut HostCallbackSession,
     boundary: &'static str,
 ) {
@@ -288,7 +290,10 @@ mod tests {
         let fixture = crate::runtime::StaticTestRuntime::<ReentrantClose>::new();
         let runtime = fixture.runtime();
         runtime
-            .ensure_module_residency(host_auto_close::<ReentrantClose> as *const ())
+            .ensure_module_residency(
+                host_auto_close::<ReentrantClose> as fn(&Runtime<ReentrantClose>) -> i32
+                    as *const (),
+            )
             .unwrap();
         let events = Arc::new(Mutex::new(Vec::new()));
         let opening = runtime.begin_open().unwrap();
@@ -377,7 +382,7 @@ mod tests {
 
         #[derive(Default)]
         struct ReloadScript {
-            runtime: *const Runtime<ReloadAddin>,
+            runtime: *const (),
             calls: Vec<i32>,
             opens: usize,
             quiesces: usize,
@@ -394,18 +399,18 @@ mod tests {
             static SCRIPT: RefCell<ReloadScript> = RefCell::new(ReloadScript::default());
         }
 
-        struct ReloadCallbacks<'runtime> {
-            _runtime: &'runtime Runtime<ReloadAddin>,
+        struct ReloadCallbacks<'runtime, P: crate::runtime::UnloadPolicy<ReloadAddin>> {
+            _runtime: &'runtime Runtime<ReloadAddin, P>,
             _guard: crate::test_callback::CallbackTestGuard,
         }
 
-        impl<'runtime> ReloadCallbacks<'runtime> {
-            fn install(runtime: &'runtime Runtime<ReloadAddin>) -> Self {
+        impl<'runtime, P: crate::runtime::UnloadPolicy<ReloadAddin>> ReloadCallbacks<'runtime, P> {
+            fn install(runtime: &'runtime Runtime<ReloadAddin, P>) -> Self {
                 let guard = crate::test_callback::lock();
                 crate::module_runtime::reset_callbacks_for_test();
                 SCRIPT.with_borrow_mut(|script| {
                     *script = ReloadScript {
-                        runtime: std::ptr::from_ref(runtime),
+                        runtime: std::ptr::from_ref(runtime).cast(),
                         ..ReloadScript::default()
                     };
                 });
@@ -413,7 +418,7 @@ mod tests {
                 // the shared test guard excludes other callback fixtures.
                 unsafe {
                     xlfn_sys::install_callback_for_abi_probe(
-                        callback as *const () as *mut std::ffi::c_void,
+                        callback::<P> as *const () as *mut std::ffi::c_void,
                     );
                 }
                 Self {
@@ -423,7 +428,7 @@ mod tests {
             }
         }
 
-        impl Drop for ReloadCallbacks<'_> {
+        impl<P: crate::runtime::UnloadPolicy<ReloadAddin>> Drop for ReloadCallbacks<'_, P> {
             fn drop(&mut self) {
                 crate::test_callback::install();
                 crate::module_runtime::reset_callbacks_for_test();
@@ -431,7 +436,7 @@ mod tests {
             }
         }
 
-        unsafe extern "system" fn callback(
+        unsafe extern "system" fn callback<P: crate::runtime::UnloadPolicy<ReloadAddin>>(
             function: i32,
             _argument_count: i32,
             _arguments: *mut *mut XLOPER12,
@@ -452,7 +457,7 @@ mod tests {
             if let Some(runtime) = reentry {
                 // SAFETY: ReloadCallbacks retains the runtime borrow until
                 // after this callback is uninstalled, on the same thread.
-                let runtime = unsafe { &*runtime };
+                let runtime = unsafe { &*runtime.cast::<Runtime<ReloadAddin, P>>() };
                 let intent = runtime.host_intent();
                 let epoch = runtime.removal_epoch();
                 let remove = SCRIPT.with_borrow(|script| script.reenter_with_remove);
@@ -512,7 +517,9 @@ mod tests {
             }
         }
 
-        fn open_for_reentry_test(runtime: &Runtime<ReloadAddin>) -> i32 {
+        fn open_for_reentry_test(
+            runtime: &Runtime<ReloadAddin, impl crate::runtime::UnloadPolicy<ReloadAddin>>,
+        ) -> i32 {
             host_auto_open(
                 runtime,
                 &AddinId::parse("opening-close").unwrap(),
@@ -543,7 +550,11 @@ mod tests {
                     let runtime = Runtime::<ReloadAddin>::new();
                     let _callbacks = ReloadCallbacks::install(&runtime);
                     runtime
-                        .ensure_module_residency(host_auto_close::<ReloadAddin> as *const ())
+                        .ensure_module_residency(
+                            host_auto_close::<ReloadAddin>
+                                as fn(&Runtime<ReloadAddin, crate::runtime::LogicalUnload>) -> i32
+                                as *const (),
+                        )
                         .unwrap();
                     SCRIPT.with_borrow_mut(|script| {
                         script.reenter_on_open_callback = Some(callback);
@@ -592,7 +603,11 @@ mod tests {
                     let _ = crate::diagnostics::close_diagnostic_router();
                 });
                 runtime
-                    .ensure_module_residency(host_auto_close::<ReloadAddin> as *const ())
+                    .ensure_module_residency(
+                        host_auto_close::<ReloadAddin>
+                            as fn(&Runtime<ReloadAddin, crate::runtime::LogicalUnload>) -> i32
+                            as *const (),
+                    )
                     .unwrap();
                 SCRIPT.with_borrow_mut(|script| {
                     script.reenter_on_open_callback = Some(XLF_REGISTER);
@@ -620,7 +635,11 @@ mod tests {
             let runtime = Runtime::<ReloadAddin>::new_with_physical_unload();
             let _callbacks = ReloadCallbacks::install(&runtime);
             runtime
-                .ensure_module_residency(host_auto_close::<ReloadAddin> as *const ())
+                .ensure_module_residency(
+                    host_auto_close::<ReloadAddin>
+                        as fn(&Runtime<ReloadAddin, crate::runtime::PhysicalUnload>) -> i32
+                        as *const (),
+                )
                 .unwrap();
             let descriptors = [RegistrationDescriptor {
                 export_name: "test_reload_export",

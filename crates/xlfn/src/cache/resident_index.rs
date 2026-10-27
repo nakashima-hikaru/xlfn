@@ -10,7 +10,7 @@ use quick_cache::Equivalent;
 use std::borrow::Borrow;
 use std::hash::{Hash, Hasher};
 use std::ptr::NonNull;
-use std::sync::Arc;
+use xlfn_kernel::published_owner::PublishedOwner;
 
 mod key_retirement;
 use key_retirement::RetiredKeys;
@@ -24,24 +24,24 @@ mod tests;
 type Entry<V> = (NodePtr<V>, u64);
 
 /// Index removal transfers the key to a queue; it never runs user Drop code.
-/// The queue owner outlives the backend, including backend destruction.
+/// The queue owner outlives the backend, including backend destruction. This
+/// private wrapper is neither cloned nor returned from the backend boundary.
 struct ResidentKey<K> {
     key: Option<VersionedKey<K>>,
-    retired: Option<Arc<RetiredKeys<K>>>,
+    retired: Option<NonNull<RetiredKeys<K>>>,
 }
+
+// SAFETY: the containing ResidentIndex retains the stable queue allocation until
+// its backend has dropped every key. Transferring K and enqueueing it into the
+// queue's mutex require K: Send; no reference to K escapes the wrapper.
+unsafe impl<K: Send> Send for ResidentKey<K> {}
+// SAFETY: shared access only reads K or the immutable queue pointer. The queue
+// synchronizes ownership transfer of K, and the backend cannot outlive its owner.
+unsafe impl<K: Send + Sync> Sync for ResidentKey<K> {}
 
 impl<K> ResidentKey<K> {
     fn get(&self) -> &VersionedKey<K> {
         self.key.as_ref().expect("resident key owns its payload")
-    }
-}
-
-impl<K: Clone> Clone for ResidentKey<K> {
-    fn clone(&self) -> Self {
-        Self {
-            key: Some(self.get().clone()),
-            retired: self.retired.clone(),
-        }
     }
 }
 
@@ -73,7 +73,13 @@ impl<K: Eq> Equivalent<ResidentKey<K>> for VersionedKeyRef<'_, K> {
 
 impl<K> Drop for ResidentKey<K> {
     fn drop(&mut self) {
-        if let Some(retired) = &self.retired {
+        if let Some(retired) = self.retired {
+            // SAFETY: insert_resident creates this pointer from the containing
+            // index's PublishedOwner. The private backend retains no keys after
+            // its destruction, which precedes queue-owner destruction. Removal
+            // and eviction only move this wrapper within a synchronous call;
+            // only the owned VersionedKey is passed to later deferred batches.
+            let retired = unsafe { retired.as_ref() };
             retired.push(self.key.take().expect("resident key owns its payload"));
         }
     }
@@ -160,9 +166,12 @@ impl<K: Eq> Equivalent<VersionedKey<K>> for VersionedKeyRef<'_, K> {
 
 /// Resident policy and deferred key destruction for the production cache.
 pub(super) struct ResidentIndex<K, V> {
-    // Field order keeps the key queue alive until the resident policy is dropped.
+    // Lifetime invariant: all non-owning ResidentKey queue pointers are confined
+    // to this private backend or its synchronous method frames. Field order
+    // destroys those keys before their unique queue owner. PublishedOwner keeps
+    // the queue address/provenance stable when this enclosing index is moved.
     index: QuickResidentIndex<K, V>,
-    retired_keys: Option<Arc<RetiredKeys<K>>>,
+    retired_keys: Option<PublishedOwner<RetiredKeys<K>>>,
 }
 
 impl<K, V> ResidentIndex<K, V>
@@ -173,7 +182,8 @@ where
     pub(super) fn new(capacity: u64) -> Self {
         Self {
             index: QuickResidentIndex::new(capacity),
-            retired_keys: std::mem::needs_drop::<K>().then(|| Arc::new(RetiredKeys::new())),
+            retired_keys: std::mem::needs_drop::<K>()
+                .then(|| PublishedOwner::new(RetiredKeys::new())),
         }
     }
 
@@ -189,14 +199,18 @@ where
 
     /// Stores an initialized entry in the resident index.
     pub(super) fn insert_resident(&self, key: &VersionedKey<K>, entry: ResidentEntry<V>) {
-        self.index.insert_resident(self.own_key(key.clone()), entry);
-    }
-
-    fn own_key(&self, key: VersionedKey<K>) -> ResidentKey<K> {
-        ResidentKey {
-            key: Some(key),
-            retired: self.retired_keys.clone(),
-        }
+        // Do not expose a constructor returning ResidentKey: its queue pointer
+        // is valid only inside this method or the containing backend. Cloning K
+        // happens before constructing the wrapper, so a panic cannot publish a
+        // partially initialized pointer-bearing key.
+        let key = ResidentKey {
+            key: Some(key.clone()),
+            retired: self
+                .retired_keys
+                .as_ref()
+                .map(|owner| NonNull::from(owner.as_ref())),
+        };
+        self.index.insert_resident(key, entry);
     }
 
     pub(super) fn invalidate(&self, key: &VersionedKey<K>) {

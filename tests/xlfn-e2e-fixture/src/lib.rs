@@ -176,7 +176,7 @@ unsafe impl RtdSubscription for RtdFixtureSubscription {
         // No background work to cancel in this fixture.
     }
 
-    fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
+    fn disconnect_and_wait(self) -> XllResult<()> {
         self.core()
             .sinks
             .lock()

@@ -12,21 +12,30 @@ pub(super) struct ComModuleState {
 }
 
 impl ComModuleState {
+    fn has_external_references(self) -> bool {
+        self.live_factories != 0 || self.live_servers != 0 || self.server_locks != 0
+    }
+
     pub(super) fn is_quiescent(self) -> bool {
-        self.live_factories == 0
-            && self.live_servers == 0
-            && self.server_locks == 0
-            && self.in_flight_calls == 0
-            && self.outstanding_git_cookies == 0
-            && self.revocation_debt == 0
+        !self.has_external_references() && self.is_logically_quiescent()
+    }
+
+    fn is_logically_quiescent(self) -> bool {
+        self.in_flight_calls == 0 && self.outstanding_git_cookies == 0 && self.revocation_debt == 0
     }
 
     fn has_only_git_blockers(self) -> bool {
-        self.live_factories == 0
-            && self.live_servers == 0
-            && self.server_locks == 0
-            && self.in_flight_calls == 0
+        self.in_flight_calls == 0
             && (self.outstanding_git_cookies != 0 || self.revocation_debt != 0)
+    }
+
+    #[cfg(any(test, feature = "refinement"))]
+    fn trace_snapshot(self) -> crate::excel_rtd_protocol::RtdTraceSnapshot {
+        crate::excel_rtd_protocol::RtdTraceSnapshot {
+            rtd_class_factories: self.live_factories as u64,
+            rtd_servers: self.live_servers as u64,
+            rtd_server_locks: self.server_locks as u64,
+        }
     }
 }
 
@@ -99,6 +108,25 @@ impl ComModuleLifetime {
     }
 
     #[cfg(any(test, feature = "refinement"))]
+    pub(super) fn trace_snapshot(&self) -> crate::excel_rtd_protocol::RtdTraceSnapshot {
+        self.inner.lock().state.trace_snapshot()
+    }
+
+    #[cfg(any(test, feature = "refinement"))]
+    pub(super) fn connect_trace(
+        &self,
+        trace: crate::shutdown_trace::ShutdownTraceHandle,
+        initialize: impl FnOnce(crate::excel_rtd_protocol::RtdTraceSnapshot) -> crate::XllResult<()>,
+    ) -> crate::XllResult<()> {
+        // Late COM releases belong either to the old trace or the new initial
+        // snapshot. Serialize the handoff with both the counters and events.
+        let inner = self.inner.lock();
+        initialize(inner.state.trace_snapshot())?;
+        self.observer.set_trace_sink(trace);
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub(super) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
         self.observer.set_trace_sink(trace);
     }
@@ -194,7 +222,6 @@ impl ComModuleLifetime {
             ComObjectKind::Factory => Self::increment(&mut inner.state.live_factories),
             ComObjectKind::Server => Self::increment(&mut inner.state.live_servers),
         }
-        drop(inner);
         self.record_shutdown_event(match kind {
             ComObjectKind::Factory => crate::shutdown_trace::ShutdownEvent::AddRtdClassFactory,
             ComObjectKind::Server => crate::shutdown_trace::ShutdownEvent::AddRtdServer,
@@ -207,7 +234,6 @@ impl ComModuleLifetime {
             ComObjectKind::Factory => Self::decrement(&mut inner.state.live_factories),
             ComObjectKind::Server => Self::decrement(&mut inner.state.live_servers),
         }
-        drop(inner);
         self.record_shutdown_event(match kind {
             ComObjectKind::Factory => crate::shutdown_trace::ShutdownEvent::RemoveRtdClassFactory,
             ComObjectKind::Server => crate::shutdown_trace::ShutdownEvent::RemoveRtdServer,
@@ -227,7 +253,6 @@ impl ComModuleLifetime {
             self.quiescent.notify_all();
             true
         };
-        drop(inner);
         if changed {
             self.record_shutdown_event(if lock {
                 crate::shutdown_trace::ShutdownEvent::LockRtdServer
@@ -242,9 +267,14 @@ impl ComModuleLifetime {
         self.inner.lock().state.is_quiescent()
     }
 
-    pub(super) fn wait_for_quiescence(
+    /// Called only after server shutdown has drained operations, detached
+    /// generation backends, and joined notification/termination workers.
+    /// Excel may retain terminal COM shells until xlAutoClose returns, so
+    /// external references require residency, not a blocking physical drain.
+    pub(super) fn wait_for_logical_quiescence(
         &self,
         retry_git_revocation_debt: fn(),
+        module_residency_held: bool,
     ) -> Result<(), ComModuleQuiescenceError> {
         #[cfg(test)]
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -253,8 +283,12 @@ impl ComModuleLifetime {
             retry_git_revocation_debt();
 
             let mut inner = self.inner.lock();
-            if inner.state.is_quiescent() {
-                return Ok(());
+            if inner.state.is_logically_quiescent() {
+                return if !inner.state.has_external_references() || module_residency_held {
+                    Ok(())
+                } else {
+                    Err(ComModuleQuiescenceError { state: inner.state })
+                };
             }
             if inner.state.has_only_git_blockers() {
                 return Err(ComModuleQuiescenceError { state: inner.state });

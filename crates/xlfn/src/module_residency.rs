@@ -5,9 +5,10 @@
 //! framework cannot account for arbitrary user-created executable sources.
 //! An explicit `PhysicallyUnloadableAddin` opt-in permits release after
 //! `xlAutoClose` completes logical teardown only when no native calculation
-//! event registration slot remains. Confirmed, in-flight, and indeterminate
-//! registrations all keep their native entry points resident across close
-//! and reopen. Logical close can reclaim generation resources with this
+//! event registration slot or COM lifetime hold remains. Confirmed, in-flight,
+//! and indeterminate registrations, as well as externally retained terminal
+//! RTD objects, keep native entry points resident across close and reopen.
+//! Logical close can reclaim generation resources with this
 //! reference retained; it does not certify physical DLL unload.
 
 use crate::XllResult;

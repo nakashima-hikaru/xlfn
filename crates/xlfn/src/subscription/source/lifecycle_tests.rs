@@ -41,7 +41,7 @@ unsafe impl RtdSubscription for LifecycleSubscription {
         self.events.lock().push(Event::Cancel(self.id));
     }
 
-    fn disconnect_and_wait(mut self: Box<Self>) -> XllResult<()> {
+    fn disconnect_and_wait(mut self) -> XllResult<()> {
         self.sink.take();
         self.events.lock().push(Event::Disconnect(self.id));
         Ok(())
@@ -189,7 +189,7 @@ struct StopDependentSubscription {
 unsafe impl RtdSubscription for StopDependentSubscription {
     fn request_cancel(&self) {}
 
-    fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
+    fn disconnect_and_wait(self) -> XllResult<()> {
         self.entered.send(()).unwrap();
         let mut stopped = self.signal.stopped.lock();
         self.signal.changed.wait_while_for(

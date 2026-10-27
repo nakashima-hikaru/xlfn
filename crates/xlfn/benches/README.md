@@ -17,12 +17,15 @@ Additional targets are available for focused investigations:
 | Targets | Measurement | Features for `bench-one` |
 | --- | --- | --- |
 | `async_admission`, `async_admission_concurrent`, `async_admission_allocations` | Admitted/saturated async calls, concurrent launch/drain, and caller allocations | `bench-internals async-builtin` |
-| `async_handle_scoped`, `async_handle_scoped_allocations` | Actual handle-scoped task delivery and caller allocations | `bench-internals async-builtin` |
+| `async_handle_scoped`, `async_handle_scoped_allocations` | Actual handle-scoped task delivery and caller/process-wide allocations | `bench-internals async-builtin` |
+| `async_pending_allocations` | Process-wide pending/reschedule/cancellation allocations and retained slot size | `bench-internals async-builtin` |
 | `cache_lookup`, `cache_workloads` | Warm lookup/live-lease retirement and deterministic weighted recalculation traces | `bench-internals cache` |
 | `diagnostics_queue`, `diagnostics_queue_allocations` | Reporting, backpressure, opt-in subscribers, and retained payloads | `bench-internals` |
 | `handle_memory` | Requested live bytes during sparse growth and publication churn | `bench-internals` |
 | `input_identity` | UTF-16 and scalar/matrix identity encoding | `bench-internals` |
 | `protocol_costs` | Handle retirement, token cache, queues, and RTD pipeline probes | `bench-internals rtd` |
+| `rtd_channel_allocations` | Public channel-source construction allocation counts, without subscriptions or workers | `rtd` |
+| `rtd_connection`, `rtd_connection_allocations` | Registered-source subscription storage and full connect/disconnect lifecycle | `bench-internals rtd` |
 | `two_phase_ingress` | Prepared/eager input through actual formula publication, with time and allocation JSON | `bench-internals` |
 
 For example:
@@ -105,6 +108,26 @@ rtk cargo bench -p xlfn --features bench-internals,async --bench async_task_drai
 rtk cargo bench -p xlfn --features bench-internals,async --bench async_task_drain_allocations --locked
 ```
 
+`async_handle_scoped_allocations` measures warmed scalar handle deliveries
+with and without instrumentation. It reports caller-thread and process-wide
+allocation requests for 1, 4, and 32 sequential tasks after 256 warmup tasks.
+The process counters include the worker and require zero additional worker
+allocations and zero reallocations. Requested bytes are cumulative allocation
+traffic, not live memory or RSS; the fixture uses an ABI-probe callback.
+
+`async_pending_allocations` covers the complementary pending path with one
+poller: each of 1/4/32 tasks returns `Pending` four times, then either completes
+or waits for calculation cancellation. It checks exact user poll and destructor
+counts and measures process-wide allocation traffic, including the worker.
+Pool/task-shard warmup, fixture creation, and final shutdown are outside counting.
+The 1/4-task cases require one executor allocation per task. The 32-task cases
+also include queue-block allocation and, on cancellation, one drained-control
+batch; their budget rejects an additional allocation per task while allowing
+those batch costs. No reallocations are allowed. The probe reports the reusable
+cancellation slot's retained size separately because
+embedding its task Waker changes pool memory independently of per-task traffic.
+`XLFN_BENCH_REPORT_ONLY=1` disables the allocation gate for historical baselines.
+
 ## `cache_lookup`
 
 This benchmark measures production `CalculationCache<u64, u64>` lookup and
@@ -136,6 +159,14 @@ The resident weight budget is 16 payloads in every case. Retained leases can
 keep evicted values alive intentionally; `held_lease_payload_bytes` reports
 that population separately from pending reclamation. It can overlap resident
 values and must not be added to resident weight as if the two were disjoint.
+
+`cache_reclamation_owned_key/churn` exercises the same production path with
+owned, fixed-width `String` keys, 64-byte payloads, and 1/4/16/32 persistent
+workers. Key construction, cloning, and destruction belong to each operation.
+The payload records the complete key serial so each lease verifies the lookup
+result. This group covers deferred key retirement, which the `u64` matrix does
+not exercise. `cache_owner_allocation_probe` separately reports constructor
+allocation requests for `u64` and `String` keys; owner destruction is excluded.
 
 Each case emits one machine-readable `cache_reclamation_probe` JSON line
 before Criterion's measurements. The probes use separate batches:
@@ -203,6 +234,63 @@ clock/statistics reads. Compare repeated full runs on the deployment host,
 with matching allocator, payloads, retention windows, and cache policy, before
 using the results for a design decision.
 
+## RTD channel source allocations
+
+`rtd_channel_allocations` separately constructs the public `RtdChannelSource`
+with only the ordinary `rtd` feature. It measures 1, 4, and 32 retained sources
+after 16 warmup constructions, both with default settings and after selecting
+latest-value delivery, a producer limit, and a subscription limit. Public getters
+verify these settings after construction. Retention-vector allocation, source
+destruction, configuration checks, and JSON reporting occur outside counting.
+The factory must remain uncalled; this probe creates no subscriptions or
+producer/publisher workers. Each source must request one allocation and no
+reallocations. Requested bytes are allocation traffic, not live memory or RSS.
+
+```sh
+cargo bench -p xlfn --no-default-features --features rtd --bench rtd_channel_allocations --locked
+```
+
+For a historical source tree, copy the same probe and bench declaration, then
+set `XLFN_BENCH_REPORT_ONLY=1` to report counts without the new allocation gate.
+Keep source code, feature selection, compiler, and executable hashes with the
+baseline and candidate output. The normal regression gate leaves it unset.
+
+## RTD subscription storage and connection lifecycle
+
+`rtd_connection` times warmed batches of 1, 32, and 256 subscriptions. Every
+batch connects all subscriptions before disconnecting any of them. `adapter`
+calls the actual registered-source adapter; `runtime` additionally includes
+connection publication, catalog transitions, and synchronous disconnection.
+Both use a nonallocating source returning a nonzero-sized subscription, so a
+per-subscription `Box` cannot disappear through zero-sized allocation elision.
+
+Fixture construction, source registration, canonical-topic preparation, driver
+storage, worker startup, and final runtime teardown stay outside timing. A
+preparation guard retains each canonical catalog entry across reconnects.
+The callback dispatch in the benchmark driver occurs once per whole batch.
+These measurements do not call Excel or COM or start producer workers.
+
+`rtd_connection_allocations` counts process-wide allocator requests separately
+from timing. Warm adapter batches must allocate nothing; warm runtime batches
+may allocate only one canonical-topic snapshot per connection. Reallocations
+are forbidden in both warmed cases. Cold batches report source-storage growth,
+map growth, and (for runtime mode) cleanup-worker startup without an allocation
+gate. Requested bytes are cumulative allocation traffic. The retained-byte
+delta subtracts deallocated layouts and replaced realloc layouts during the
+batch; it exposes reusable storage retained after a cold high-water mark.
+Neither measure is process RSS. Set `XLFN_BENCH_REPORT_ONLY=1` only to measure a
+historical implementation without the warmed allocation assertions.
+
+The `adapter_owner_lifecycle` cases count complete runtime/source construction,
+one batch and final destruction after warming process/TLS infrastructure. They
+require a zero requested-live-byte delta, including reclamation of all source
+slot capacity at owner teardown.
+
+```sh
+cargo bench -p xlfn --features bench-internals,rtd --bench rtd_connection --locked
+cargo bench -p xlfn --features bench-internals,rtd --bench rtd_connection_allocations --locked
+```
+
 ## `rtd_prepare`
 
 This benchmark times batches of 256 subscriptions on one source, with either
@@ -240,7 +328,12 @@ cargo bench -p xlfn --all-features --bench rtd_refresh -- channel_pipeline
 cargo bench -p xlfn --all-features --bench protocol_costs -- --token-cache
 ```
 
-The pipeline includes RtdSender, publisher, ErasedSink, PublishCore, and refresh
+`rtd_publish/channel_pipeline` covers 1, 4, 16, and 32 persistent sender
+threads with queue capacities of 64 and 1,024. Each cycle drains through the
+real shared publisher and verifies the final refresh marker and sequence count.
+Worker startup and subscription setup remain outside timing.
+
+The pipeline includes RtdSender, publisher, PublishSink, PublishCore, and refresh
 planning/completion with sequence checks. Excel/COM is not timed. The
 token-cache probe measures the production 16-set, four-way token cache with
 colliding tokens and registry switches.
@@ -348,6 +441,11 @@ improvements to either live M02 or M03.
 `cache_miss_concurrency` keeps one 1 MiB resident budget and reports cold batches at
 1, 4, 16, and 32 workers, plus compute/dispatch controls and untimed correctness
 probes. Same-key reuse combines pending followers and resident hits.
+
+`async_spawn` includes 1/4/8/16/32 executor workers and 1/4/16/32 producer
+threads in its spawn, reschedule, and spawn-and-drain matrices. Use matching
+worker/producer cases when comparing cancellation or scheduler changes; the
+spawn-and-drain group includes completion of the admitted tasks.
 
 Selected cases run in `just bench-ci`; full concurrency curves run in
 `just bench-scaling`. These are Excel-independent benchmarks.

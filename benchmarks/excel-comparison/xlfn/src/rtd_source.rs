@@ -275,7 +275,7 @@ unsafe impl RtdSubscription for BenchSubscription {
         self.entry.cancel();
     }
 
-    fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
+    fn disconnect_and_wait(self) -> XllResult<()> {
         self.shared.disconnect(self.id, &self.entry);
         Ok(())
     }

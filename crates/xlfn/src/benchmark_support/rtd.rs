@@ -3,6 +3,130 @@ use std::{cell::Cell, time::Instant};
 
 use crate::subscription::TOPIC_SHARDS;
 
+struct InlineBenchmarkSubscription(u64);
+
+// SAFETY: the subscription retains no sink and starts no background activity.
+unsafe impl crate::subscription::RtdSubscription for InlineBenchmarkSubscription {
+    fn request_cancel(&self) {
+        std::hint::black_box(self.0);
+    }
+
+    fn disconnect_and_wait(self) -> crate::XllResult<()> {
+        std::hint::black_box(self.0);
+        Ok(())
+    }
+}
+
+struct InlineBenchmarkSource;
+
+// SAFETY: subscribe discards its sink immediately and the source owns no workers.
+unsafe impl crate::subscription::RtdSource for InlineBenchmarkSource {
+    type Value = i32;
+    type Subscription = InlineBenchmarkSubscription;
+
+    fn subscribe(
+        &self,
+        _topic: &crate::subscription::RtdTopic,
+        _sink: crate::subscription::RtdSink<Self::Value>,
+    ) -> crate::XllResult<Self::Subscription> {
+        Ok(InlineBenchmarkSubscription(1))
+    }
+}
+
+/// Runs a measurement with fixture construction, preparation and driver storage
+/// outside its scope. Every invocation connects `count` subscriptions before
+/// disconnecting any of them, so it exercises the source's live high-water mark.
+///
+/// Adapter mode uses the actual registered-source adapter with a nonallocating,
+/// nonzero-sized subscription. Runtime mode additionally includes connection
+/// publication, catalog transitions and synchronous server disconnection. An
+/// outstanding preparation guard preserves each canonical topic between runs.
+/// `warm` recycles a complete batch before passing the operation to `measure`.
+pub fn with_rtd_connection_benchmark<R>(
+    count: usize,
+    adapter_only: bool,
+    warm: bool,
+    measure: impl FnOnce(&mut dyn FnMut()) -> R,
+) -> R {
+    use crate::subscription::SubscriptionHost;
+
+    assert!((1..=4096).contains(&count));
+    assert_ne!(std::mem::size_of::<InlineBenchmarkSubscription>(), 0);
+    let generation = crate::generation::RuntimeGeneration::new(1).unwrap();
+    let registration = crate::subscription::SourceRegistration::new(generation);
+    let source_handle = registration.register(InlineBenchmarkSource).unwrap();
+    let runtime = Box::new(
+        crate::subscription::SubscriptionRuntime::with_sources_for_internal(registration.finish()),
+    );
+    // SAFETY: the boxed runtime stays at a stable address and is reclaimed only
+    // after the callback, all subscriptions and the server handle are dropped.
+    let server_handle = unsafe {
+        runtime
+            .register_server(crate::subscription::ServerGeneration::new(1).unwrap())
+            .unwrap()
+    };
+    let topics: Vec<_> = (0..count)
+        .map(|index| crate::subscription::RtdTopic::single(format!("connection-{index}")).unwrap())
+        .collect();
+
+    if adapter_only {
+        let source = runtime.sources.resolve(source_handle.id).unwrap();
+        let server = runtime
+            .resolve_server(crate::subscription::ServerGeneration::new(1).unwrap())
+            .unwrap();
+        let sink = crate::excel_rtd::RtdSubscriptionHost::publish_sink(
+            server.publish.as_ref(),
+            crate::subscription::TopicId(1),
+            crate::generation::ConnectionGeneration::new(1).unwrap(),
+        );
+        let mut subscriptions = Vec::with_capacity(count);
+        let mut operation = || {
+            for topic in &topics {
+                // SAFETY: this scope owns the stable runtime/source arena and
+                // publish core until every ticket has finished or been dropped.
+                subscriptions.push(unsafe {
+                    crate::subscription::SourceSubscription::subscribe(source, topic, sink).unwrap()
+                });
+            }
+            for mut subscription in subscriptions.drain(..) {
+                subscription.request_cancel();
+                subscription.disconnect_and_wait().unwrap();
+            }
+        };
+        if warm {
+            operation();
+        }
+        measure(&mut operation)
+    } else {
+        let prepared: Vec<_> = topics
+            .iter()
+            .map(|topic| runtime.prepare(&source_handle, topic.borrowed()).unwrap())
+            .collect();
+        let mut operation = || {
+            for (index, prepared) in prepared.iter().enumerate() {
+                runtime
+                    .connect_transaction(
+                        &server_handle,
+                        crate::subscription::TopicId(index as i32 + 1),
+                        prepared.id(),
+                    )
+                    .unwrap()
+                    .commit()
+                    .unwrap();
+            }
+            for index in 0..count {
+                server_handle
+                    .disconnect(crate::subscription::TopicId(index as i32 + 1))
+                    .unwrap();
+            }
+        };
+        if warm {
+            operation();
+        }
+        measure(&mut operation)
+    }
+}
+
 struct BenchmarkSubscription;
 
 // SAFETY: the benchmark subscription owns no background activity or retained
@@ -10,7 +134,7 @@ struct BenchmarkSubscription;
 unsafe impl crate::subscription::RtdSubscription for BenchmarkSubscription {
     fn request_cancel(&self) {}
 
-    fn disconnect_and_wait(self: Box<Self>) -> crate::XllResult<()> {
+    fn disconnect_and_wait(self) -> crate::XllResult<()> {
         Ok(())
     }
 }
@@ -918,7 +1042,7 @@ pub fn rtd_topology_probe(multiplexed: bool, subscriptions: usize) -> serde_json
     let limits = RtdSourceLimits::standard()
         .with_max_subscriptions(RtdCapacity::disabled_if_zero(subscriptions));
     if multiplexed {
-        let source = RtdMultiplexedSource::<i32>::new(RtdDelivery::Latest, move |context| {
+        let source = RtdMultiplexedSource::<i32, _>::new(RtdDelivery::Latest, move |context| {
             let _exit = TopologyWorkerExit::start(worker_counters);
             loop {
                 match context.recv_timeout(Duration::from_secs(1)) {
@@ -937,7 +1061,7 @@ pub fn rtd_topology_probe(multiplexed: bool, subscriptions: usize) -> serde_json
         .with_limits(limits);
         run_rtd_topology(source, counters, true, subscriptions)
     } else {
-        let source = RtdChannelSource::<i32>::new(NonZeroUsize::new(1).unwrap(), move |_| {
+        let source = RtdChannelSource::<i32, _>::new(NonZeroUsize::new(1).unwrap(), move |_| {
             let counters = Arc::clone(&worker_counters);
             Ok(move |sender: crate::rtd::RtdSender<i32>| {
                 let _exit = TopologyWorkerExit::start(counters);

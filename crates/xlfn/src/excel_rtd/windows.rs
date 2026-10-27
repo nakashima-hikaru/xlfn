@@ -81,6 +81,7 @@ use registration::{
     RTD_REGISTRATION_OWNER, RTD_REGISTRATION_SCHEMA, guid_braced, guid_compact,
     read_registry_string, scavenge_owned_registrations, set_registry_value, wide_nul,
 };
+pub(crate) use server::DeferredDisconnectLease;
 #[cfg(all(test, feature = "handles"))]
 use server::ensure_server;
 #[cfg(feature = "handles")]
@@ -120,8 +121,23 @@ pub(super) fn module_lifetime() -> &'static ComModuleLifetime {
 }
 
 #[cfg(any(test, feature = "refinement"))]
-pub(super) fn set_trace_sink(trace: crate::shutdown_trace::ShutdownTraceHandle) {
-    module_lifetime().set_trace_sink(trace);
+pub(super) fn connect_trace<F>(
+    trace: crate::shutdown_trace::ShutdownTraceHandle,
+    initialize: F,
+) -> crate::XllResult<()>
+where
+    F: FnOnce(crate::excel_rtd_protocol::RtdTraceSnapshot) -> crate::XllResult<()>,
+{
+    module_lifetime().connect_trace(trace, initialize)
+}
+
+#[cfg(any(test, feature = "refinement"))]
+pub(super) fn trace_snapshot() -> crate::excel_rtd_protocol::RtdTraceSnapshot {
+    module_lifetime().trace_snapshot()
+}
+
+pub(super) fn physical_unload_ready() -> bool {
+    module_lifetime().can_unload_now()
 }
 
 pub(super) fn dll_can_unload_now() -> i32 {
@@ -134,13 +150,18 @@ pub(super) fn dll_can_unload_now() -> i32 {
     }
 }
 
-pub(super) fn wait_for_module_quiescence()
--> Result<(), crate::excel_rtd_protocol::RtdQuiescenceError> {
+pub(super) fn wait_for_module_quiescence(
+    module_residency_held: bool,
+) -> Result<(), crate::excel_rtd_protocol::RtdQuiescenceError> {
     module_lifetime()
-        .wait_for_quiescence(retry_git_revocation_debt)
+        .wait_for_logical_quiescence(retry_git_revocation_debt, module_residency_held)
         .map_err(|error| crate::excel_rtd_protocol::RtdQuiescenceError {
             outstanding_git_cookies: error.state.outstanding_git_cookies,
             revocation_debt: error.state.revocation_debt,
+            missing_module_residency: !module_residency_held
+                && (error.state.live_factories != 0
+                    || error.state.live_servers != 0
+                    || error.state.server_locks != 0),
         })
 }
 

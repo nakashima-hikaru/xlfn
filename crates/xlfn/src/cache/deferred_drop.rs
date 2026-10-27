@@ -30,19 +30,21 @@ thread_local! {
 /// Transfers a detached batch into the current thread's destruction queue.
 ///
 /// # Safety
-/// `value` must remain valid independently of the cache and operation until
-/// the outer operation and initialization guards exit. `destroy` must contain all user panics.
-pub(super) unsafe fn defer<T>(value: T, destroy: fn(T)) {
-    unsafe fn run<T>(allocation: NonNull<()>) {
+/// Both `value` and `destroy` must remain valid independently of the cache and
+/// operation until the outer operation and initialization guards exit.
+/// Invoking and consuming `destroy`, including its captures, must contain all
+/// user panics.
+pub(super) unsafe fn defer<T, F: FnOnce(T)>(value: T, destroy: F) {
+    unsafe fn run<T, F: FnOnce(T)>(allocation: NonNull<()>) {
         // SAFETY: defer allocated this exact pair and transferred unique ownership.
-        let (value, destroy) = *unsafe { Box::from_non_null(allocation.cast::<(T, fn(T))>()) };
+        let (value, destroy) = *unsafe { Box::from_non_null(allocation.cast::<(T, F)>()) };
         destroy(value);
     }
     let allocation = Box::into_non_null(Box::new((value, destroy))).cast();
     PENDING.with(|pending| {
         pending.borrow_mut().push(DeferredDrop {
             allocation,
-            destroy: run::<T>,
+            destroy: run::<T, F>,
         })
     });
     HAS_PENDING.set(true);
@@ -140,6 +142,44 @@ mod tests {
         fn drop(&mut self) {
             self.0.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    #[test]
+    fn miri_deferred_fn_once_retains_and_consumes_owned_captures() {
+        let value_drops = Arc::new(AtomicUsize::new(0));
+        let capture_drops = Arc::new(AtomicUsize::new(0));
+        let capture = Box::new(DropProbe(Arc::clone(&capture_drops)));
+        // SAFETY: the payload and non-Copy closure capture own their counters;
+        // consuming either cannot panic or borrow the originating operation.
+        unsafe {
+            defer(DropProbe(Arc::clone(&value_drops)), move |value| {
+                drop(value);
+                drop(capture);
+            });
+        }
+        assert_eq!(value_drops.load(Ordering::Relaxed), 0);
+        assert_eq!(capture_drops.load(Ordering::Relaxed), 0);
+        flush();
+        flush();
+        assert_eq!(value_drops.load(Ordering::Relaxed), 1);
+        assert_eq!(capture_drops.load(Ordering::Relaxed), 1);
+        assert_empty_inline_queue();
+    }
+
+    #[test]
+    fn miri_deferred_zero_sized_payload_and_function_item() {
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn destroy((): ()) {
+            CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+        // SAFETY: neither unit nor the function item carries a borrow, and
+        // the callback's atomic increment cannot unwind.
+        unsafe { defer((), destroy) };
+        assert_eq!(CALLS.load(Ordering::Relaxed), 0);
+        flush();
+        flush();
+        assert_eq!(CALLS.load(Ordering::Relaxed), 1);
+        assert_empty_inline_queue();
     }
 
     #[test]

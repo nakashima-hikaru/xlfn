@@ -119,7 +119,7 @@ impl NativeArgumentIngressBenchmark {
                                 std::hint::black_box(prepared);
                             }
                             Input::Text => {
-                                fn consume<T, P>(prepared: crate::__private::v1::PreparedArgument<T, P>, materialize: bool) {
+                                fn consume<T, P, D: crate::__private::v1::ArgumentMaterializer<T, P>>(prepared: crate::__private::v1::PreparedArgument<T, P, D>, materialize: bool) {
                                     if materialize {
                                         std::hint::black_box(prepared.materialize().unwrap());
                                     } else {

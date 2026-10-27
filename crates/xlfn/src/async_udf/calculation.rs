@@ -5,7 +5,7 @@ use rustc_hash::FxHashMap;
 use std::ptr::NonNull;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
-use xlfn_kernel::published_owner::PublishedOwner;
+use xlfn_kernel::operation_gate::{GateClosed, OperationGuard, TerminationWaitGuard};
 
 /// Identity of one calculation admission domain. Zero is never published.
 #[repr(transparent)]
@@ -37,35 +37,24 @@ impl From<CalculationEpoch> for crate::execution::CalculationId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ControlPhase {
-    Stopped,
-    Running,
-    Advancing {
-        from: CalculationEpoch,
-        to: CalculationEpoch,
-    },
-    Closing,
-}
+const TASK_SHARDS: usize = 32;
 
-pub(crate) const TASK_SHARDS: usize = 32;
-
-pub(crate) fn task_shard(id: u64) -> usize {
+fn task_shard(id: u64) -> usize {
     (id as usize) & (TASK_SHARDS - 1)
 }
 
-pub(crate) struct TaskShard {
-    pub(crate) tasks: Mutex<FxHashMap<u64, TaskControl>>,
+struct TaskShard {
+    tasks: Mutex<FxHashMap<u64, TaskControl>>,
 }
 
 pub(crate) struct CalculationState {
     pub(crate) epoch: CalculationEpoch,
-    pub(crate) admission: xlfn_kernel::operation_gate::OperationGate,
+    admission: xlfn_kernel::operation_gate::OperationGate,
     /// Preparation snapshots, reservations, and completion guards, including
     /// canceled tasks whose controls have already been drained. This is the
     /// calculation allocation's reclamation authority.
-    pub(crate) pins: AtomicUsize,
-    pub(crate) shards: Box<[CachePadded<TaskShard>]>,
+    pins: AtomicUsize,
+    shards: Box<[CachePadded<TaskShard>]>,
 }
 
 impl CalculationState {
@@ -90,19 +79,112 @@ impl CalculationState {
         let index = task_shard(id);
         let removed = self.shards[index].tasks.lock().remove(&id);
         let existed = removed.is_some();
-        // Both controls can destroy executor/user wakers. Contain their
+        // Source destruction can wake executor/user wakers. Contain their
         // destructors after releasing the shard lock.
         let _ =
             crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| drop(removed)));
         existed
     }
 
-    pub(crate) fn drain_tasks(&self) -> TaskControlBatch {
-        // Admission is drained before cancellation reaches this method, so
-        // controls can only disappear while the lengths are sampled. This
+    pub(crate) fn enter_admission(&self) -> Result<CalculationAdmission<'_>, GateClosed> {
+        Ok(CalculationAdmission {
+            state: self,
+            _guard: self.admission.enter()?,
+        })
+    }
+
+    pub(crate) fn seal_admission(&self) {
+        self.admission.begin_close();
+    }
+
+    /// Seals future admissions immediately. Waiting is a separate transition,
+    /// so callers can seal every calculation before waiting for any of them.
+    pub(crate) fn close_admission(&self) -> ClosingCalculation<'_> {
+        ClosingCalculation {
+            state: self,
+            wait: self.admission.close_and_wait_begin(),
+        }
+    }
+
+    pub(crate) fn pin_count(&self) -> usize {
+        self.pins.load(Ordering::Acquire)
+    }
+
+    #[cfg(all(test, feature = "async-builtin"))]
+    pub(crate) fn active_admissions(&self) -> usize {
+        self.admission.active()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tasks_are_empty(&self) -> bool {
+        self.shards
+            .iter()
+            .all(|shard| shard.tasks.lock().is_empty())
+    }
+
+    #[cfg(all(test, feature = "async-builtin"))]
+    pub(crate) fn task_shards_are_unlocked_and_empty(&self) -> bool {
+        self.shards
+            .iter()
+            .all(|shard| shard.tasks.try_lock().is_some_and(|tasks| tasks.is_empty()))
+    }
+
+    #[cfg(all(test, feature = "async-builtin"))]
+    pub(crate) fn task_shard_is_unlocked(&self, id: u64) -> bool {
+        self.shards[task_shard(id)].tasks.try_lock().is_some()
+    }
+}
+
+/// A live admission into exactly one calculation. Only this capability can
+/// publish task controls; dropping it releases the close/drain barrier.
+#[must_use = "retain calculation admission until task registration finishes"]
+pub(crate) struct CalculationAdmission<'a> {
+    state: &'a CalculationState,
+    _guard: OperationGuard<'a>,
+}
+
+impl CalculationAdmission<'_> {
+    pub(crate) fn insert_task(&self, id: u64, control: TaskControl) {
+        let previous = self.state.shards[task_shard(id)]
+            .tasks
+            .lock()
+            .insert(id, control);
+        if previous.is_some() {
+            xlfn_kernel::invariant::fail_stop();
+        }
+    }
+}
+
+/// Admission has been sealed, but existing reservations can still insert tasks.
+/// Dropping this capability keeps admission sealed and does not wait.
+#[must_use = "wait for existing admissions before draining task controls"]
+pub(crate) struct ClosingCalculation<'a> {
+    state: &'a CalculationState,
+    wait: TerminationWaitGuard<'a>,
+}
+
+impl<'a> ClosingCalculation<'a> {
+    pub(crate) fn wait(self) -> AdmissionDrainedCalculation<'a> {
+        self.wait.wait();
+        AdmissionDrainedCalculation { state: self.state }
+    }
+}
+
+/// Every admission has ended; task completions and allocation pins can remain.
+/// This capability neither certifies task completion nor permits reclamation.
+#[must_use = "use the drained-admission capability to drain task controls"]
+pub(crate) struct AdmissionDrainedCalculation<'a> {
+    state: &'a CalculationState,
+}
+
+impl AdmissionDrainedCalculation<'_> {
+    pub(crate) fn drain_tasks(self) -> TaskControlBatch {
+        // The consumed capability proves there can be no further insertions,
+        // so controls can only disappear while lengths are sampled. This
         // cold scan provides an upper bound without forcing every spawn and
         // completion to update a shared allocation-hint counter.
         let capacity = self
+            .state
             .shards
             .iter()
             .map(|shard| shard.tasks.lock().len())
@@ -110,7 +192,7 @@ impl CalculationState {
         // Callers drop/wake the controls after releasing the registry control
         // lock. No TaskControl destructor runs while a shard lock is held.
         let mut result = TaskControlBatch::with_capacity(capacity);
-        for shard in self.shards.iter() {
+        for shard in self.state.shards.iter() {
             let mut tasks = shard.tasks.lock();
             result.extend(tasks.drain().map(|(_, task)| task));
         }
@@ -160,13 +242,6 @@ impl Drop for CalculationPin {
 // SAFETY: CalculationState is Sync, and the pin follows its user across threads.
 unsafe impl Send for CalculationPin {}
 
-pub(crate) struct RegistryControl {
-    pub(crate) phase: ControlPhase,
-    /// Unique calculation owners. Moving hash-table entries never retags the
-    /// published allocations while reservations and task completions use them.
-    pub(crate) calculations: FxHashMap<CalculationEpoch, PublishedOwner<CalculationState>>,
-}
-
 #[cfg(feature = "bench-internals")]
 /// Benchmark fixture holding task controls in production calculation shards.
 pub struct AsyncTaskDrainBenchmark {
@@ -178,25 +253,20 @@ impl AsyncTaskDrainBenchmark {
     /// Seeds a calculation with the requested task-control count.
     pub fn new(count: usize) -> Self {
         let state = CalculationState::new(CalculationEpoch::INITIAL);
+        let admission = state.enter_admission().expect("new calculation is open");
         for id in 0..count as u64 {
-            let (abort, _) = futures_util::future::AbortHandle::new_pair();
             let (cancellation, _) = crate::cancellation::CancellationSource::new(
                 crate::cancellation::CancellationGuarantee::BestEffort,
             );
-            state.shards[task_shard(id)].tasks.lock().insert(
-                id,
-                TaskControl {
-                    abort,
-                    cancellation,
-                },
-            );
+            admission.insert_task(id, TaskControl { cancellation });
         }
+        drop(admission);
         Self { state }
     }
 
     /// Includes draining and dropping controls; excludes fixture construction.
     pub fn run(&self) -> usize {
-        let controls = self.state.drain_tasks();
+        let controls = self.state.close_admission().wait().drain_tasks();
         let count = controls.len();
         std::hint::black_box(controls);
         count
@@ -205,7 +275,7 @@ impl AsyncTaskDrainBenchmark {
     /// Returns the sizes in bytes of one control and an empty drained collection.
     pub fn sizes() -> (usize, usize) {
         let state = CalculationState::new(CalculationEpoch::INITIAL);
-        let controls = state.drain_tasks();
+        let controls = state.close_admission().wait().drain_tasks();
         (
             std::mem::size_of::<TaskControl>(),
             std::mem::size_of_val(&controls),
@@ -216,6 +286,47 @@ impl AsyncTaskDrainBenchmark {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xlfn_kernel::published_owner::PublishedOwner;
+
+    #[test]
+    fn miri_calculation_close_waits_for_admitted_insert_and_preserves_pins() {
+        let owner = PublishedOwner::new(CalculationState::new(CalculationEpoch::INITIAL));
+        // SAFETY: this private owner remains alive until after the pin drops.
+        let pin = unsafe { CalculationPin::acquire(&owner) };
+        let admission = owner.enter_admission().unwrap();
+        let closing = owner.close_admission();
+        assert!(owner.enter_admission().is_err());
+        let (cancellation, token) = crate::cancellation::CancellationSource::new(
+            crate::cancellation::CancellationGuarantee::BestEffort,
+        );
+        let (waiting_tx, waiting_rx) = std::sync::mpsc::sync_channel(1);
+        let (drained_tx, drained_rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::scope(|scope| {
+            let waiter = scope.spawn(move || {
+                waiting_tx.send(()).unwrap();
+                assert!(drained_tx.send(closing.wait().drain_tasks()).is_ok());
+            });
+            waiting_rx.recv().unwrap();
+            assert!(matches!(
+                drained_rx.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+            // An admission acquired before sealing can still publish its task.
+            admission.insert_task(1, TaskControl { cancellation });
+            drop(admission);
+            let controls = drained_rx.recv().unwrap();
+            assert_eq!(controls.len(), 1);
+            assert!(owner.tasks_are_empty());
+            assert!(!token.is_cancelled());
+            assert_eq!(owner.pins.load(Ordering::Acquire), 1);
+            drop(controls);
+            assert!(token.is_cancelled());
+            assert_eq!(owner.pins.load(Ordering::Acquire), 1);
+            waiter.join().unwrap();
+        });
+        drop(pin);
+        assert_eq!(owner.pins.load(Ordering::Acquire), 0);
+    }
 
     #[test]
     fn miri_calculation_final_pin_release_can_race_owner_reclamation() {

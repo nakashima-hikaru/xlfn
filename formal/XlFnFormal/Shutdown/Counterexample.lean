@@ -96,4 +96,37 @@ theorem resident_events_with_open_callback_gate_have_no_close_certificate :
       Resources).Quiescent := by
   simp [Resources.Quiescent, Resources.HostDetached, residentEventClosedResources]
 
+/-- The host can retain a terminal RTD server, class factory, and LockServer
+    hold after backend/callback teardown. None authorizes physical unload. -/
+def residentComClosedResources : Resources :=
+  { residentEventClosedResources with
+    residentEventRegistrations := 0,
+    rtdClassFactories := 1,
+    rtdServers := 1,
+    rtdServerLocks := 1 }
+
+theorem retained_com_roots_allow_logical_close :
+    residentComClosedResources.Quiescent := by
+  simp [residentComClosedResources, residentEventClosedResources, Resources.Quiescent,
+    Resources.HostDetached, Resources.CallsDrained, Resources.ReturnsDrained,
+    Resources.AsyncDrained, Resources.SubscriptionsDrained, Resources.RtdDrained,
+    Resources.HandlesDrained, Resources.GenerationReclaimed, Resources.DiagnosticsDrained]
+
+theorem retained_com_roots_do_not_allow_physical_unload :
+    ¬ residentComClosedResources.PhysicalUnloadSafe := by
+  simp [Resources.PhysicalUnloadSafe, residentComClosedResources]
+
+theorem retained_com_roots_without_lease_have_no_close_certificate :
+    ¬ ({ residentComClosedResources with moduleResidencyHeld := false } :
+      Resources).Quiescent := by
+  simp [Resources.Quiescent, Resources.RtdDrained, residentComClosedResources]
+
+theorem retained_com_roots_do_not_excuse_live_operations :
+    ¬ ({ residentComClosedResources with rtdOperations := 1 } : Resources).Quiescent := by
+  simp [Resources.Quiescent, Resources.RtdDrained]
+
+theorem retained_com_roots_do_not_excuse_live_callbacks :
+    ¬ ({ residentComClosedResources with callbacks := 1 } : Resources).Quiescent := by
+  simp [Resources.Quiescent, Resources.SubscriptionsDrained]
+
 end XlFnFormal.Shutdown

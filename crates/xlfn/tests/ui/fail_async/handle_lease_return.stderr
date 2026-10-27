@@ -1,42 +1,41 @@
-error: `impl` item signature doesn't match `trait` item signature
-  --> tests/ui/fail_async/handle_lease_return.rs:24:1
-   |
-24 |   #[excel_function(name = "TEST.RETURNED.HANDLE.LEASE")]
-   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ found `fn(__XlfnHandleTaskBuilder, xlfn::__private::v1::AsyncTaskScope<'1>) -> Pin<Box<(dyn Future<Output = Result<xlfn::handle::HandleLease<'1, Dataset>, xlfn::XllError>> + Send + '1)>>`
-   |
-  ::: src/async_udf/task_scope.rs
-   |
-   | /     fn build<'generation>(
-   | |         self,
-   | |         scope: AsyncTaskScope<'generation>,
-   | |     ) -> Pin<Box<dyn Future<Output = crate::XllResult<T>> + Send + 'generation>>;
-   | |_________________________________________________________________________________- expected `fn(__XlfnHandleTaskBuilder, xlfn::__private::v1::AsyncTaskScope<'generation>) -> Pin<Box<(dyn Future<Output = Result<xlfn::handle::HandleLease<'1, Dataset>, xlfn::XllError>> + Send + 'generation)>>`
-   |
-   = note: expected signature `fn(__XlfnHandleTaskBuilder, xlfn::__private::v1::AsyncTaskScope<'generation>) -> Pin<Box<(dyn Future<Output = Result<xlfn::handle::HandleLease<'1, Dataset>, xlfn::XllError>> + Send + 'generation)>>`
-              found signature `fn(__XlfnHandleTaskBuilder, xlfn::__private::v1::AsyncTaskScope<'1>) -> Pin<Box<(dyn Future<Output = Result<xlfn::handle::HandleLease<'1, Dataset>, xlfn::XllError>> + Send + '1)>>`
-   = help: the lifetime requirements from the `impl` do not correspond to the requirements in the `trait`
-   = help: verify the lifetime relationships in the `trait` and `impl` between the `self` argument, the other inputs and its output
-   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error[E0277]: `xlfn::handle::HandleLease<'_, Dataset>` cannot be converted into an Excel return value
+error[E0308]: mismatched types
   --> tests/ui/fail_async/handle_lease_return.rs:24:1
    |
 24 | #[excel_function(name = "TEST.RETURNED.HANDLE.LEASE")]
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `xlfn::handle::HandleLease<'_, Dataset>` does not implement `IntoExcel`
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ lifetime mismatch
    |
-   = help: the trait `IntoExcel` is not implemented for `xlfn::handle::HandleLease<'_, Dataset>`
-   = note: implement `IntoExcel` for `xlfn::handle::HandleLease<'_, Dataset>` or return a supported type (e.g. `f64`, `bool`, `String`, `ExcelError`, or a custom handle)
-   = help: the following other types implement trait `IntoExcel`:
-             &str
-             ExcelCellOutput
-             ExcelError
-             ExcelSerialDate
-             bool
-             f32
-             f64
-             i16
-           and $N others
-   = note: required for `xlfn::handle::HandleLease<'_, Dataset>` to implement `xlfn::__private::v1::ExcelReturn`
+   = note: expected enum `Result<HandleLease<'generation, Dataset>, XllError>`
+              found enum `Result<HandleLease<'_, Dataset>, XllError>`
+note: the anonymous lifetime as defined here...
+  --> tests/ui/fail_async/handle_lease_return.rs:25:82
+   |
+25 | async fn returned_handle_lease(dataset: HandleLease<'_, Dataset>) -> HandleLease<'_, Dataset> {
+   |                                                                                  ^^
+note: ...does not necessarily outlive the lifetime `'generation` as defined here
+  --> src/async_udf/task_scope.rs
+   |
+   |     fn build<'generation>(
+   |              ^^^^^^^^^^^
+   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0308]: mismatched types
+  --> tests/ui/fail_async/handle_lease_return.rs:24:1
+   |
+24 | #[excel_function(name = "TEST.RETURNED.HANDLE.LEASE")]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ lifetime mismatch
+   |
+   = note: expected enum `Result<HandleLease<'generation, Dataset>, XllError>`
+              found enum `Result<HandleLease<'_, Dataset>, XllError>`
+note: the lifetime `'generation` as defined here...
+  --> src/async_udf/task_scope.rs
+   |
+   |     fn build<'generation>(
+   |              ^^^^^^^^^^^
+note: ...does not necessarily outlive the anonymous lifetime as defined here
+  --> tests/ui/fail_async/handle_lease_return.rs:25:82
+   |
+25 | async fn returned_handle_lease(dataset: HandleLease<'_, Dataset>) -> HandleLease<'_, Dataset> {
+   |                                                                                  ^^
    = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: `xlfn::handle::HandleLease<'_, Dataset>` cannot be returned from an asynchronous Excel function
@@ -63,3 +62,24 @@ note: required by a bound in `xlfn::__private::v1::assert_async_return`
    |
    | pub fn assert_async_return<T: AsyncReturn>() {}
    |                               ^^^^^^^^^^^ required by this bound in `assert_async_return`
+
+error[E0277]: `xlfn::handle::HandleLease<'_, Dataset>` cannot be converted into an Excel return value
+  --> tests/ui/fail_async/handle_lease_return.rs:24:1
+   |
+24 | #[excel_function(name = "TEST.RETURNED.HANDLE.LEASE")]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `xlfn::handle::HandleLease<'_, Dataset>` does not implement `IntoExcel`
+   |
+   = help: the trait `IntoExcel` is not implemented for `xlfn::handle::HandleLease<'_, Dataset>`
+   = note: implement `IntoExcel` for `xlfn::handle::HandleLease<'_, Dataset>` or return a supported type (e.g. `f64`, `bool`, `String`, `ExcelError`, or a custom handle)
+   = help: the following other types implement trait `IntoExcel`:
+             &str
+             ExcelCellOutput
+             ExcelError
+             ExcelSerialDate
+             bool
+             f32
+             f64
+             i16
+           and $N others
+   = note: required for `xlfn::handle::HandleLease<'_, Dataset>` to implement `xlfn::__private::v1::ExcelReturn`
+   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)

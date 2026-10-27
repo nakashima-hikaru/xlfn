@@ -5,6 +5,8 @@ use crate::call::CallScope;
 use crate::input_identity::InputFingerprintBuilder;
 use crate::input_identity::InputIdentityEncoder;
 use crate::{XllError, XllResult};
+use std::convert::Infallible;
+use std::marker::PhantomData;
 use xlfn_sys::XLOPER12;
 
 use super::{XlValueRef, XlValueType};
@@ -62,13 +64,19 @@ pub trait InputMode: sealed::InputModeSealed + Sized {
         identity: &mut Self::Identity,
         units: &'call [u16],
         argument: &'static str,
-    ) -> XllResult<PreparedArgument<String, super::PreparedString<'call>>>;
+    ) -> XllResult<PreparedArgument<String, super::PreparedString<'call>, OwnedStringMaterializer>>;
 
     #[doc(hidden)]
     fn prepare_borrowed_string<'call>(
         identity: &mut Self::Identity,
         value: super::PreparedBorrowedString<'call>,
-    ) -> XllResult<PreparedArgument<&'call str, super::PreparedBorrowedString<'call>>>;
+    ) -> XllResult<
+        PreparedArgument<
+            &'call str,
+            super::PreparedBorrowedString<'call>,
+            BorrowedStringMaterializer,
+        >,
+    >;
 }
 
 /// Plain worksheet conversion, without formula-revision identity recording.
@@ -119,14 +127,21 @@ impl InputMode for PlainInputMode {
         _: &mut Self::Identity,
         units: &'call [u16],
         argument: &'static str,
-    ) -> XllResult<PreparedArgument<String, super::PreparedString<'call>>> {
+    ) -> XllResult<PreparedArgument<String, super::PreparedString<'call>, OwnedStringMaterializer>>
+    {
         crate::utf16::decode_owned(units, argument).map(PreparedArgument::Ready)
     }
 
     fn prepare_borrowed_string<'call>(
         _: &mut Self::Identity,
         value: super::PreparedBorrowedString<'call>,
-    ) -> XllResult<PreparedArgument<&'call str, super::PreparedBorrowedString<'call>>> {
+    ) -> XllResult<
+        PreparedArgument<
+            &'call str,
+            super::PreparedBorrowedString<'call>,
+            BorrowedStringMaterializer,
+        >,
+    > {
         value.materialize().map(PreparedArgument::Ready)
     }
 }
@@ -188,23 +203,27 @@ impl InputMode for FormulaInputMode {
         identity: &mut Self::Identity,
         units: &'call [u16],
         argument: &'static str,
-    ) -> XllResult<PreparedArgument<String, super::PreparedString<'call>>> {
+    ) -> XllResult<PreparedArgument<String, super::PreparedString<'call>, OwnedStringMaterializer>>
+    {
         identity.semantic_utf16(units)?;
-        Ok(PreparedArgument::Prepared {
-            value: super::PreparedString { units, argument },
-            materialize: <String as PrepareExcel>::materialize,
-        })
+        Ok(PreparedArgument::prepared(super::PreparedString {
+            units,
+            argument,
+        }))
     }
 
     fn prepare_borrowed_string<'call>(
         identity: &mut Self::Identity,
         value: super::PreparedBorrowedString<'call>,
-    ) -> XllResult<PreparedArgument<&'call str, super::PreparedBorrowedString<'call>>> {
+    ) -> XllResult<
+        PreparedArgument<
+            &'call str,
+            super::PreparedBorrowedString<'call>,
+            BorrowedStringMaterializer,
+        >,
+    > {
         identity.semantic_utf16(value.units)?;
-        Ok(PreparedArgument::Prepared {
-            value,
-            materialize: super::PreparedBorrowedString::materialize,
-        })
+        Ok(PreparedArgument::prepared(value))
     }
 }
 
@@ -228,6 +247,7 @@ pub trait FromExcel<'call>: Sized {
     /// avoiding a second traversal. An override must produce the same value,
     /// errors, and encoded identity as `from_excel` followed by
     /// [`ExcelInputIdentity::encode_input_identity`].
+    #[inline(always)]
     fn from_excel_with_identity(
         value: XlValueRef<'call>,
         argument: &'static str,
@@ -288,10 +308,7 @@ pub trait PrepareExcel<'call>: FromExcel<'call> + ExcelInputIdentity {
         cells: ExcelInputCells<'call>,
         identity: &mut InputIdentityEncoder,
     ) -> XllResult<PreparedExcelSequence<'call, Self, Self::Prepared>> {
-        cells.retain(
-            |value, argument| Self::prepare(value, argument, identity),
-            Self::materialize,
-        )
+        cells.retain(|value, argument| Self::prepare(value, argument, identity))
     }
 }
 
@@ -304,11 +321,10 @@ pub struct ExcelInputCells<'call> {
 }
 impl<'call> ExcelInputCells<'call> {
     /// Retains typed preparation results, including owned custom state.
-    pub fn retain<T, P>(
+    pub fn retain<T, P, D>(
         self,
         mut prepare: impl FnMut(XlValueRef<'call>, &'static str) -> XllResult<P>,
-        materialize: fn(P) -> XllResult<T>,
-    ) -> XllResult<PreparedExcelSequence<'call, T, P>> {
+    ) -> XllResult<PreparedExcelSequence<'call, T, P, D>> {
         let mut budget = super::ArrayInputBudget::new::<T>(self.grid.cells().len(), self.argument)?;
         let _prepared_budget =
             super::ArrayInputBudget::new::<P>(self.grid.cells().len(), self.argument)?;
@@ -319,7 +335,8 @@ impl<'call> ExcelInputCells<'call> {
             values.push(prepare(value, self.argument)?);
         }
         Ok(PreparedExcelSequence {
-            state: SequenceState::Retained(values, materialize),
+            state: SequenceState::Retained(values),
+            _materializer: PhantomData,
         })
     }
 
@@ -336,11 +353,11 @@ impl<'call> ExcelInputCells<'call> {
 
     // Owned preparation preserves its former prepared-size admission check;
     // MatrixRef preserves its eager path's output-only budget instead.
-    pub(super) fn borrowed_wrapped<T, P, const RETAINED_BUDGET: bool>(
+    #[inline(always)]
+    pub(super) fn borrowed_wrapped<T, P, D, const RETAINED_BUDGET: bool>(
         self,
         mut validate: impl FnMut(XlValueRef<'call>, &'static str) -> XllResult<()>,
-        materialize: fn(XlValueRef<'call>, &'static str) -> XllResult<T>,
-    ) -> XllResult<PreparedExcelSequence<'call, T, P>> {
+    ) -> XllResult<PreparedExcelSequence<'call, T, P, D>> {
         let mut budget =
             Self::wrapped_budget::<T, P, RETAINED_BUDGET>(self.grid.cells().len(), self.argument)?;
         for cell in self.grid.cells() {
@@ -349,7 +366,8 @@ impl<'call> ExcelInputCells<'call> {
             validate(value, self.argument)?;
         }
         Ok(PreparedExcelSequence {
-            state: SequenceState::Borrowed(self, materialize),
+            state: SequenceState::Borrowed(self),
+            _materializer: PhantomData,
         })
     }
 
@@ -365,10 +383,12 @@ impl<'call> ExcelInputCells<'call> {
             T::prepare(value, self.argument, identity)?;
         }
         Ok(PreparedExcelSequence {
-            state: SequenceState::Borrowed(self, T::from_excel),
+            state: SequenceState::Borrowed(self),
+            _materializer: PhantomData,
         })
     }
 
+    #[inline(always)]
     pub(crate) fn borrowed_f64(
         self,
         identity: &mut InputIdentityEncoder,
@@ -382,33 +402,139 @@ impl<'call> ExcelInputCells<'call> {
             f64::from_excel(value, argument)
         }))?;
         Ok(PreparedExcelSequence {
-            state: SequenceState::Borrowed(self, f64::from_excel),
+            state: SequenceState::Borrowed(self),
+            _materializer: PhantomData,
         })
+    }
+}
+
+/// A statically selected conversion for one owned preparation state.
+#[doc(hidden)]
+pub trait ArgumentMaterializer<T, P> {
+    fn materialize(value: P) -> XllResult<T>;
+}
+
+/// No deferred state can be constructed for an already converted argument.
+#[doc(hidden)]
+pub struct NoMaterialization;
+impl<T> ArgumentMaterializer<T, Infallible> for NoMaterialization {
+    fn materialize(value: Infallible) -> XllResult<T> {
+        match value {}
+    }
+}
+
+#[doc(hidden)]
+pub struct OwnedStringMaterializer;
+impl<'call> ArgumentMaterializer<String, super::PreparedString<'call>> for OwnedStringMaterializer {
+    fn materialize(value: super::PreparedString<'call>) -> XllResult<String> {
+        <String as PrepareExcel<'call>>::materialize(value)
+    }
+}
+
+#[doc(hidden)]
+pub struct BorrowedStringMaterializer;
+impl<'call> ArgumentMaterializer<&'call str, super::PreparedBorrowedString<'call>>
+    for BorrowedStringMaterializer
+{
+    fn materialize(value: super::PreparedBorrowedString<'call>) -> XllResult<&'call str> {
+        value.materialize()
+    }
+}
+
+// Conversion strategy identity must not change through payload subtyping.
+// The call borrow may still narrow without changing the payload or mode.
+type MaterializerMarker<'call, T, M = ()> = PhantomData<(&'call (), fn(T, M) -> (T, M))>;
+
+#[doc(hidden)]
+pub struct ParameterMaterializer<'call, T, M>(MaterializerMarker<'call, T, M>);
+impl<'call, T: ExcelParameter<'call, M>, M: InputMode> ArgumentMaterializer<T, T::Prepared>
+    for ParameterMaterializer<'call, T, M>
+{
+    fn materialize(value: T::Prepared) -> XllResult<T> {
+        T::materialize_prepared(value)
+    }
+}
+
+#[doc(hidden)]
+pub struct ElementMaterializer<'call, T, M>(MaterializerMarker<'call, T, M>);
+impl<'call, T: ExcelParameter<'call, M>, M: InputMode> ArgumentMaterializer<T, T::ElementPrepared>
+    for ElementMaterializer<'call, T, M>
+{
+    fn materialize(value: T::ElementPrepared) -> XllResult<T> {
+        T::materialize_element(value)
+    }
+}
+
+#[doc(hidden)]
+pub type PreparedParameter<'call, T, M> = PreparedArgument<
+    T,
+    <T as ExcelParameter<'call, M>>::Prepared,
+    ParameterMaterializer<'call, T, M>,
+>;
+#[doc(hidden)]
+pub type PreparedElement<'call, T, M> = PreparedArgument<
+    T,
+    <T as ExcelParameter<'call, M>>::ElementPrepared,
+    ElementMaterializer<'call, T, M>,
+>;
+#[doc(hidden)]
+pub type PreparedParameterSequence<'call, T, M> =
+    PreparedExcelSequence<'call, T, PreparedElement<'call, T, M>, ParameterSequence<'call, T, M>>;
+#[doc(hidden)]
+pub type ReadyArgument<T> = PreparedArgument<T, Infallible>;
+
+/// Static conversions for retained preparation and validated borrowed cells.
+#[doc(hidden)]
+pub trait SequenceMaterializer<'call, T, P> {
+    fn retained(value: P) -> XllResult<T>;
+    fn borrowed(value: XlValueRef<'call>, argument: &'static str) -> XllResult<T>;
+}
+#[doc(hidden)]
+pub struct PrepareSequence<'call, T>(MaterializerMarker<'call, T>);
+impl<'call, T: PrepareExcel<'call>> SequenceMaterializer<'call, T, T::Prepared>
+    for PrepareSequence<'call, T>
+{
+    fn retained(value: T::Prepared) -> XllResult<T> {
+        T::materialize(value)
+    }
+    fn borrowed(value: XlValueRef<'call>, argument: &'static str) -> XllResult<T> {
+        T::from_excel(value, argument)
+    }
+}
+#[doc(hidden)]
+pub struct ParameterSequence<'call, T, M>(MaterializerMarker<'call, T, M>);
+impl<'call, T: ExcelParameter<'call, M>, M: InputMode>
+    SequenceMaterializer<'call, T, PreparedElement<'call, T, M>>
+    for ParameterSequence<'call, T, M>
+{
+    fn retained(value: PreparedElement<'call, T, M>) -> XllResult<T> {
+        value.materialize()
+    }
+    fn borrowed(value: XlValueRef<'call>, argument: &'static str) -> XllResult<T> {
+        T::decode_borrowed_element(value, argument)
     }
 }
 
 /// Prepared collection with opaque storage; callers cannot forge validation.
 #[doc(hidden)]
-pub struct PreparedExcelSequence<'call, T, P> {
-    state: SequenceState<'call, T, P>,
+pub struct PreparedExcelSequence<'call, T, P, D = PrepareSequence<'call, T>> {
+    state: SequenceState<'call, P>,
+    _materializer: PhantomData<fn() -> (T, D)>,
 }
-enum SequenceState<'call, T, P> {
-    Retained(Vec<P>, fn(P) -> XllResult<T>),
-    Borrowed(
-        ExcelInputCells<'call>,
-        fn(XlValueRef<'call>, &'static str) -> XllResult<T>,
-    ),
+enum SequenceState<'call, P> {
+    Retained(Vec<P>),
+    Borrowed(ExcelInputCells<'call>),
 }
-impl<T, P> PreparedExcelSequence<'_, T, P> {
+impl<'source, T, P, D: SequenceMaterializer<'source, T, P>>
+    PreparedExcelSequence<'source, T, P, D>
+{
     pub fn materialize(self) -> XllResult<Vec<T>> {
         match self.state {
-            SequenceState::Retained(values, materialize) => {
-                values.into_iter().map(materialize).collect()
-            }
-            SequenceState::Borrowed(cells, materialize) => {
+            SequenceState::Retained(values) => values.into_iter().map(D::retained).collect(),
+            SequenceState::Borrowed(cells) => {
                 let mut values = Vec::with_capacity(cells.grid.cells().len());
                 for cell in cells.grid.cells() {
-                    values.push(materialize(
+                    values.push(D::borrowed(
                         XlValueRef::from_array_cell(cell)?,
                         cells.argument,
                     )?);
@@ -424,20 +550,21 @@ impl<T, P> PreparedExcelSequence<'_, T, P> {
     ) -> XllResult<&'call [T]>
     where
         T: Copy,
+        'source: 'call,
     {
         match self.state {
-            SequenceState::Retained(values, materialize) => {
+            SequenceState::Retained(values) => {
                 let length = values.len();
                 let mut values = values.into_iter();
                 scope.scratch().collect_copy(length, |_| {
-                    materialize(values.next().expect("prepared sequence keeps its length"))
+                    D::retained(values.next().expect("prepared sequence keeps its length"))
                 })
             }
-            SequenceState::Borrowed(cells, materialize) => {
+            SequenceState::Borrowed(cells) => {
                 scope
                     .scratch()
                     .collect_copy(cells.grid.cells().len(), |index| {
-                        materialize(
+                        D::borrowed(
                             XlValueRef::from_array_cell(&cells.grid.cells()[index])?,
                             cells.argument,
                         )
@@ -449,18 +576,32 @@ impl<T, P> PreparedExcelSequence<'_, T, P> {
 
 /// Internal wrapper also retaining explicitly supplied default values.
 #[doc(hidden)]
-pub enum PreparedArgument<T, P> {
+pub enum PreparedArgument<T, P = Infallible, D = NoMaterialization> {
     Ready(T),
     Prepared {
         value: P,
-        materialize: fn(P) -> XllResult<T>,
+        _materializer: PhantomData<fn() -> D>,
     },
 }
-impl<T, P> PreparedArgument<T, P> {
+impl<T, P, D> PreparedArgument<T, P, D> {
+    pub(super) fn prepared(value: P) -> Self {
+        Self::Prepared {
+            value,
+            _materializer: PhantomData,
+        }
+    }
+    pub(crate) fn with_materializer<N>(self) -> PreparedArgument<T, P, N> {
+        match self {
+            Self::Ready(value) => PreparedArgument::Ready(value),
+            Self::Prepared { value, .. } => PreparedArgument::prepared(value),
+        }
+    }
+}
+impl<T, P, D: ArgumentMaterializer<T, P>> PreparedArgument<T, P, D> {
     pub fn materialize(self) -> XllResult<T> {
         match self {
             Self::Ready(value) => Ok(value),
-            Self::Prepared { value, materialize } => materialize(value),
+            Self::Prepared { value, .. } => D::materialize(value),
         }
     }
 }
@@ -472,26 +613,30 @@ pub trait ExcelParameter<'call, M: InputMode>:
 {
     // Only context-free built-ins may be decoded again after lookup. Custom
     // prepared ownership and call-scoped resources must stay retained.
-    const BORROWED_ELEMENT_DECODER: Option<fn(XlValueRef<'call>, &'static str) -> XllResult<Self>> =
-        None;
+    const BORROWED_ELEMENTS: bool = false;
+    fn decode_borrowed_element(_: XlValueRef<'call>, _: &'static str) -> XllResult<Self> {
+        unreachable!("only context-free element strategies can decode borrowed cells")
+    }
     type Prepared;
+    fn materialize_prepared(value: Self::Prepared) -> XllResult<Self>;
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
         context: &CallContext<'call>,
         identity: &mut M::Identity,
-    ) -> XllResult<PreparedArgument<Self, Self::Prepared>> {
+    ) -> XllResult<PreparedParameter<'call, Self, M>> {
         Self::decode(value, argument, context, identity).map(PreparedArgument::Ready)
     }
     // Scalar preparation may carry state that is unnecessary for retained
     // collection cells. Keep their storage and admission budgets independent.
     type ElementPrepared;
+    fn materialize_element(value: Self::ElementPrepared) -> XllResult<Self>;
     fn prepare_element(
         value: XlValueRef<'call>,
         argument: &'static str,
         context: &CallContext<'call>,
         identity: &mut M::Identity,
-    ) -> XllResult<PreparedArgument<Self, Self::ElementPrepared>>;
+    ) -> XllResult<PreparedElement<'call, Self, M>>;
 
     type Elements;
     fn prepare_elements(
@@ -535,28 +680,31 @@ pub trait ExcelParameter<'call, M: InputMode>:
 impl<'call, T: FromExcel<'call>> sealed::ExcelParameterSealed<'call, PlainInputMode> for T {}
 
 impl<'call, T: FromExcel<'call>> ExcelParameter<'call, PlainInputMode> for T {
-    type Prepared = ();
+    type Prepared = Infallible;
+    fn materialize_prepared(value: Infallible) -> XllResult<Self> {
+        match value {}
+    }
     type ElementPrepared = Self::Prepared;
+    fn materialize_element(value: Infallible) -> XllResult<Self> {
+        match value {}
+    }
     fn prepare_element(
         value: XlValueRef<'call>,
         argument: &'static str,
         context: &CallContext<'call>,
         identity: &mut (),
-    ) -> XllResult<PreparedArgument<Self, Self::ElementPrepared>> {
+    ) -> XllResult<PreparedElement<'call, Self, PlainInputMode>> {
         <Self as ExcelParameter<'call, PlainInputMode>>::prepare(value, argument, context, identity)
+            .map(PreparedArgument::with_materializer)
     }
 
-    type Elements =
-        PreparedExcelSequence<'call, Self, PreparedArgument<Self, Self::ElementPrepared>>;
+    type Elements = PreparedParameterSequence<'call, Self, PlainInputMode>;
     fn prepare_elements(
         cells: ExcelInputCells<'call>,
         context: &CallContext<'call>,
         identity: &mut (),
     ) -> XllResult<Self::Elements> {
-        cells.retain(
-            |value, argument| Self::prepare_element(value, argument, context, identity),
-            PreparedArgument::materialize,
-        )
+        cells.retain(|value, argument| Self::prepare_element(value, argument, context, identity))
     }
     fn materialize_elements(elements: Self::Elements) -> XllResult<Vec<Self>> {
         elements.materialize()
@@ -588,34 +736,41 @@ impl<'call, T> ExcelParameter<'call, FormulaInputMode> for T
 where
     T: PrepareExcel<'call>,
 {
-    const BORROWED_ELEMENT_DECODER: Option<fn(XlValueRef<'call>, &'static str) -> XllResult<Self>> =
-        if T::__BORROWED_ELEMENTS {
-            Some(T::from_excel)
-        } else {
-            None
-        };
+    const BORROWED_ELEMENTS: bool = T::__BORROWED_ELEMENTS;
+    fn decode_borrowed_element(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+    ) -> XllResult<Self> {
+        T::from_excel(value, argument)
+    }
     type Prepared = T::Prepared;
+    fn materialize_prepared(value: T::Prepared) -> XllResult<Self> {
+        T::materialize(value)
+    }
     fn prepare(
         value: XlValueRef<'call>,
         argument: &'static str,
         _: &CallContext<'call>,
         identity: &mut InputIdentityEncoder,
-    ) -> XllResult<PreparedArgument<Self, Self::Prepared>> {
-        Ok(PreparedArgument::Prepared {
-            value: T::prepare(value, argument, identity)?,
-            materialize: T::materialize,
-        })
+    ) -> XllResult<PreparedParameter<'call, Self, FormulaInputMode>> {
+        Ok(PreparedArgument::prepared(T::prepare(
+            value, argument, identity,
+        )?))
     }
     type ElementPrepared = Self::Prepared;
+    fn materialize_element(value: Self::ElementPrepared) -> XllResult<Self> {
+        T::materialize(value)
+    }
     fn prepare_element(
         value: XlValueRef<'call>,
         argument: &'static str,
         context: &CallContext<'call>,
         identity: &mut InputIdentityEncoder,
-    ) -> XllResult<PreparedArgument<Self, Self::ElementPrepared>> {
+    ) -> XllResult<PreparedElement<'call, Self, FormulaInputMode>> {
         <Self as ExcelParameter<'call, FormulaInputMode>>::prepare(
             value, argument, context, identity,
         )
+        .map(PreparedArgument::with_materializer)
     }
 
     type Elements = PreparedExcelSequence<'call, T, T::Prepared>;
@@ -869,7 +1024,7 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
         index: usize,
         argument: &'static str,
         value: XlValueRef<'call>,
-    ) -> XllResult<PreparedArgument<T, T::Prepared>> {
+    ) -> XllResult<PreparedParameter<'call, T, M>> {
         // Construct the drop-bearing error only on failure. An eager `ok_or`
         // leaves an unnecessary XllError destructor call on each valid input.
         let Some(fingerprint) = self.inputs.as_mut() else {
@@ -1022,7 +1177,8 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
         index: usize,
         argument: &'static str,
         raw: *const u16,
-    ) -> XllResult<PreparedArgument<String, super::PreparedString<'call>>> {
+    ) -> XllResult<PreparedArgument<String, super::PreparedString<'call>, OwnedStringMaterializer>>
+    {
         self.with_native(index, argument, |identity| {
             // SAFETY: the generated wrapper retains Excel's live input for 'call.
             let units = unsafe { crate::utf16::borrow_counted(raw, argument) }?;
@@ -1058,7 +1214,13 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
         index: usize,
         argument: &'static str,
         raw: *const u16,
-    ) -> XllResult<PreparedArgument<&'call str, super::PreparedBorrowedString<'call>>> {
+    ) -> XllResult<
+        PreparedArgument<
+            &'call str,
+            super::PreparedBorrowedString<'call>,
+            BorrowedStringMaterializer,
+        >,
+    > {
         let scratch = self.call.scratch();
         self.with_native(index, argument, |identity| {
             // SAFETY: the generated wrapper retains Excel's live input for 'call.
@@ -1621,20 +1783,25 @@ mod preparation_tests {
                     'call,
                     FormulaInputMode,
                     ElementPrepared = P,
-                    Elements = PreparedExcelSequence<'call, T, PreparedArgument<T, P>>,
+                    Elements = PreparedParameterSequence<'call, T, FormulaInputMode>,
                 >,
         {
-            // The explicit P at each call below is the former retained-cell
-            // shape. Check the actual collection type and its admission limit
+            // The explicit P fixes the retained payload shape independently
+            // of the static materializer. Check the actual allocation budget
             // without constructing a matrix near the allocation ceiling.
-            let bytes_per_cell = size_of::<XLOPER12>() + size_of::<PreparedArgument<T, P>>();
+            let bytes_per_cell =
+                size_of::<XLOPER12>() + size_of::<PreparedElement<'call, T, FormulaInputMode>>();
             let maximum = crate::value::MAX_ARRAY_BYTES / bytes_per_cell;
             assert!(
-                ExcelInputCells::wrapped_budget::<T, PreparedArgument<T, P>, true>(maximum, "v")
-                    .is_ok()
+                ExcelInputCells::wrapped_budget::<
+                    T,
+                    PreparedElement<'call, T, FormulaInputMode>,
+                    true,
+                >(maximum, "v")
+                .is_ok()
             );
             assert!(matches!(
-                ExcelInputCells::wrapped_budget::<T, PreparedArgument<T, P>, true>(maximum + 1, "v"),
+                ExcelInputCells::wrapped_budget::<T, PreparedElement<'call, T, FormulaInputMode>, true>(maximum + 1, "v"),
                 Err(XllError::Input {
                     argument: "v",
                     reason: crate::error::InputError::TooLarge { limit, actual },
@@ -1643,18 +1810,19 @@ mod preparation_tests {
             ));
         }
 
-        type Text<'a> = PreparedArgument<&'a str, ()>;
-        check::<&str, ()>();
+        type Text<'a> = PreparedElement<'a, &'a str, FormulaInputMode>;
+        check::<&str, Infallible>();
         check::<Option<&str>, Option<Text<'_>>>();
         check::<OptionalExcelValue<&str>, OptionalExcelValue<Text<'_>>>();
-        check::<Option<Option<&str>>, Option<PreparedArgument<Option<&str>, Option<Text<'_>>>>>();
+        check::<Option<Option<&str>>, Option<PreparedElement<'_, Option<&str>, FormulaInputMode>>>(
+        );
         check::<
             Option<OptionalExcelValue<&str>>,
-            Option<PreparedArgument<OptionalExcelValue<&str>, OptionalExcelValue<Text<'_>>>>,
+            Option<PreparedElement<'_, OptionalExcelValue<&str>, FormulaInputMode>>,
         >();
         check::<
             OptionalExcelValue<Option<&str>>,
-            OptionalExcelValue<PreparedArgument<Option<&str>, Option<Text<'_>>>>,
+            OptionalExcelValue<PreparedElement<'_, Option<&str>, FormulaInputMode>>,
         >();
     }
 
@@ -1720,8 +1888,14 @@ mod preparation_tests {
                 self.drops.fetch_add(1, Ordering::Relaxed);
             }
         }
-        fn materialize(value: Resource) -> XllResult<f64> {
-            Ok(value.value)
+        struct ResourceMaterializer;
+        impl<'call> SequenceMaterializer<'call, f64, Resource> for ResourceMaterializer {
+            fn retained(value: Resource) -> XllResult<f64> {
+                Ok(value.value)
+            }
+            fn borrowed(_: XlValueRef<'call>, _: &'static str) -> XllResult<f64> {
+                unreachable!("retained-only fixture")
+            }
         }
         let drops = Arc::new(AtomicUsize::new(0));
         let mut cells = [
@@ -1741,16 +1915,13 @@ mod preparation_tests {
                     grid,
                     argument: "values",
                 }
-                .retain(
-                    |value, argument| {
-                        Ok(Resource {
-                            value: f64::from_excel(value, argument)?,
-                            drops: Arc::clone(&drops),
-                            _owned: Box::new([0; 32]),
-                        })
-                    },
-                    materialize,
-                )
+                .retain::<f64, Resource, ResourceMaterializer>(|value, argument| {
+                    Ok(Resource {
+                        value: f64::from_excel(value, argument)?,
+                        drops: Arc::clone(&drops),
+                        _owned: Box::new([0; 32]),
+                    })
+                })
                 .unwrap();
                 if cold {
                     assert_eq!(prepared.materialize().unwrap(), [1.0, 2.0, 3.0]);
@@ -1772,16 +1943,13 @@ mod preparation_tests {
                 grid,
                 argument: "values",
             }
-            .retain(
-                |value, argument| {
-                    Ok(Resource {
-                        value: f64::from_excel(value, argument)?,
-                        drops: Arc::clone(&drops),
-                        _owned: Box::new([0; 32]),
-                    })
-                },
-                materialize,
-            );
+            .retain::<f64, Resource, ResourceMaterializer>(|value, argument| {
+                Ok(Resource {
+                    value: f64::from_excel(value, argument)?,
+                    drops: Arc::clone(&drops),
+                    _owned: Box::new([0; 32]),
+                })
+            });
             assert!(result.is_err());
         });
         assert_eq!(drops.load(Ordering::Relaxed), 8);
@@ -1998,6 +2166,123 @@ mod preparation_tests {
                     ..
                 }
             ));
+        }
+    }
+
+    #[test]
+    fn miri_static_materializer_preserves_custom_state_through_discard_and_argument_error() {
+        static PREPARATIONS: AtomicUsize = AtomicUsize::new(0);
+        static MATERIALIZATIONS: AtomicUsize = AtomicUsize::new(0);
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+
+        struct Retained {
+            value: f64,
+            _owned: Box<[u8; 16]>,
+        }
+        impl Drop for Retained {
+            fn drop(&mut self) {
+                DROPS.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        #[derive(Clone, Copy)]
+        struct Observed(f64);
+        impl<'call> FromExcel<'call> for Observed {
+            fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
+                f64::from_excel(value, argument).map(Self)
+            }
+        }
+        impl ExcelInputIdentity for Observed {
+            fn encode_input_identity(&self, identity: &mut InputIdentityEncoder) {
+                identity.f64(self.0);
+            }
+        }
+        impl<'call> PrepareExcel<'call> for Observed {
+            type Prepared = Retained;
+            fn prepare(
+                value: XlValueRef<'call>,
+                argument: &'static str,
+                identity: &mut InputIdentityEncoder,
+            ) -> XllResult<Retained> {
+                let value = f64::from_excel(value, argument)?;
+                identity.f64(value);
+                PREPARATIONS.fetch_add(1, Ordering::Relaxed);
+                Ok(Retained {
+                    value,
+                    _owned: Box::new([0; 16]),
+                })
+            }
+            fn materialize(value: Retained) -> XllResult<Self> {
+                MATERIALIZATIONS.fetch_add(1, Ordering::Relaxed);
+                Ok(Self(value.value))
+            }
+        }
+        fn counts() -> (usize, usize, usize) {
+            (
+                PREPARATIONS.load(Ordering::Relaxed),
+                MATERIALIZATIONS.load(Ordering::Relaxed),
+                DROPS.load(Ordering::Relaxed),
+            )
+        }
+
+        let inputs = (
+            XLOPER12::number(7.0),
+            XLOPER12::error(crate::ExcelError::Value.code()),
+        );
+        crate::call::with_excel_call_scope_and_state(&inputs, |(raw, invalid), scope| {
+            let value = XlValueRef::from_array_cell(raw).unwrap();
+            let mut arguments = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+            let prepared = arguments.prepare::<Observed>(0, "first", value).unwrap();
+            assert!(arguments.finish().unwrap().is_some());
+            assert_eq!(counts(), (1, 0, 0));
+            drop(prepared); // A warm hit never materializes custom state.
+            assert_eq!(counts(), (1, 0, 1));
+
+            let mut arguments = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+            let prepared = arguments.prepare::<Observed>(0, "first", value).unwrap();
+            arguments.finish().unwrap();
+            assert_eq!(prepared.materialize().unwrap().0, 7.0);
+            assert_eq!(counts(), (2, 1, 2));
+
+            let mut arguments = ArgumentContext::<FormulaInputMode>::from_scope(scope, 2);
+            let first = arguments.prepare::<Observed>(0, "first", value).unwrap();
+            assert!(
+                arguments
+                    .prepare::<f64>(1, "second", XlValueRef::from_array_cell(invalid).unwrap())
+                    .is_err()
+            );
+            assert!(arguments.finish().is_err());
+            drop(first);
+            assert_eq!(counts(), (3, 1, 3));
+        });
+
+        let mut cells = [XLOPER12::number(7.0), XLOPER12::nil()];
+        let root = array_root(&mut cells);
+        for cold in [false, true] {
+            let before = counts();
+            crate::call::with_excel_call_scope_and_state(&root, |raw, scope| {
+                let value = XlValueRef::from_array_cell(raw).unwrap();
+                let mut arguments = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                let prepared = arguments.prepare::<Option<crate::value::Matrix<crate::value::OptionalExcelValue<Observed>>>>(0, "values", value).unwrap();
+                assert!(arguments.finish().unwrap().is_some());
+                assert_eq!(counts(), (before.0 + 1, before.1, before.2));
+                if cold {
+                    let matrix = prepared.materialize().unwrap().unwrap();
+                    assert!(matches!(
+                        matrix.as_slice()[0],
+                        crate::value::OptionalExcelValue::Value(Observed(7.0))
+                    ));
+                    assert!(matches!(
+                        matrix.as_slice()[1],
+                        crate::value::OptionalExcelValue::Blank
+                    ));
+                } else {
+                    drop(prepared);
+                }
+                assert_eq!(
+                    counts(),
+                    (before.0 + 1, before.1 + usize::from(cold), before.2 + 1)
+                );
+            });
         }
     }
 

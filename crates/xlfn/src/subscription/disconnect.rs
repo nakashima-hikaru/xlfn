@@ -3,7 +3,7 @@
 
 use super::host::SubscriptionHost;
 use super::server::{OwnedServerOperation, disconnect_one_no_unwind};
-use super::source::RtdSubscription;
+use super::source::SourceSubscription;
 use crate::panic_boundary::catch_no_unwind;
 use crate::sync::{Condvar, Mutex};
 use crate::{XllError, XllResult};
@@ -13,18 +13,18 @@ use std::thread::{Builder, JoinHandle};
 use triomphe::Arc;
 
 pub(super) struct DeferredDisconnect<H: SubscriptionHost> {
-    subscription: Option<Box<dyn RtdSubscription>>,
+    subscription: Option<SourceSubscription>,
     // The connection reserved this capacity before any source sink escaped.
     _reservation: DisconnectReservation<H>,
     // Drop the external server/module lease before releasing runtime admission.
-    _completion: Box<dyn Send>,
+    _completion: H::DisconnectCompletion,
     operation: OwnedServerOperation<H>,
 }
 
 impl<H: SubscriptionHost> DeferredDisconnect<H> {
     pub(super) fn new(
-        subscription: Box<dyn RtdSubscription>,
-        completion: Box<dyn Send>,
+        subscription: SourceSubscription,
+        completion: H::DisconnectCompletion,
         reservation: DisconnectReservation<H>,
         operation: OwnedServerOperation<H>,
     ) -> Self {
@@ -37,7 +37,7 @@ impl<H: SubscriptionHost> DeferredDisconnect<H> {
     }
 
     fn finish(mut self) {
-        let subscription = self
+        let mut subscription = self
             .subscription
             .take()
             .expect("cleanup owns a subscription");
@@ -319,8 +319,8 @@ pub(super) struct DisconnectReservation<H: SubscriptionHost> {
 impl<H: SubscriptionHost> DisconnectReservation<H> {
     fn commit(
         self,
-        subscription: Box<dyn RtdSubscription>,
-        completion: Box<dyn Send>,
+        subscription: SourceSubscription,
+        completion: H::DisconnectCompletion,
         operation: OwnedServerOperation<H>,
     ) {
         let queue = Arc::clone(&self.queue);
@@ -348,13 +348,13 @@ impl<H: SubscriptionHost> Drop for DisconnectReservation<H> {
 /// Keep the reservation through every synchronous and asynchronous barrier,
 /// including rollback, cleanup errors, and unwinding of a termination owner.
 pub(super) struct OwnedSubscription<H: SubscriptionHost> {
-    subscription: Option<Box<dyn RtdSubscription>>,
+    subscription: Option<SourceSubscription>,
     reservation: Option<DisconnectReservation<H>>,
 }
 
 impl<H: SubscriptionHost> OwnedSubscription<H> {
     pub(super) fn new(
-        subscription: Box<dyn RtdSubscription>,
+        subscription: SourceSubscription,
         reservation: DisconnectReservation<H>,
     ) -> Self {
         Self {
@@ -363,9 +363,9 @@ impl<H: SubscriptionHost> OwnedSubscription<H> {
         }
     }
 
-    pub(super) fn request_cancel(&self) {
+    pub(super) fn request_cancel(&mut self) {
         self.subscription
-            .as_ref()
+            .as_mut()
             .expect("owner retains its subscription")
             .request_cancel();
     }
@@ -378,7 +378,11 @@ impl<H: SubscriptionHost> OwnedSubscription<H> {
         )
     }
 
-    pub(super) fn defer(mut self, completion: Box<dyn Send>, operation: OwnedServerOperation<H>) {
+    pub(super) fn defer(
+        mut self,
+        completion: H::DisconnectCompletion,
+        operation: OwnedServerOperation<H>,
+    ) {
         self.reservation
             .take()
             .expect("owner retains its cleanup capacity")
@@ -389,15 +393,6 @@ impl<H: SubscriptionHost> OwnedSubscription<H> {
                 completion,
                 operation,
             );
-    }
-
-    #[cfg(test)]
-    pub(super) fn map_subscription_for_test(
-        mut self,
-        map: impl FnOnce(Box<dyn RtdSubscription>) -> Box<dyn RtdSubscription>,
-    ) -> Self {
-        self.subscription = Some(map(self.subscription.take().unwrap()));
-        self
     }
 }
 
@@ -422,6 +417,7 @@ mod tests {
     use crate::excel_rtd::{RtdNotifier, RtdSubscriptionHost};
     use crate::generation::{ConnectionGeneration, RuntimeGeneration};
     use crate::rtd::test_support::TestNotifierState;
+    use crate::subscription::RtdSubscription;
     use crate::subscription::runtime::SubscriptionRuntime;
     use crate::subscription::{
         RtdChannelSource, RtdSender, RtdSink, RtdSource, RtdTopic, SourceRegistration,
@@ -443,36 +439,11 @@ mod tests {
         }
     }
 
-    type NotifyCallback = Box<dyn FnOnce() + Send>;
-
-    #[derive(Clone)]
-    struct ReentrantHost(StdArc<Mutex<Option<NotifyCallback>>>);
-
-    impl SubscriptionHost for ReentrantHost {
-        type AdmissionGuard = ();
-        type Notifier = ();
-
-        fn enter_with<F>(&self, operation: F) -> XllResult<()>
-        where
-            F: FnOnce() -> XllResult<()>,
-        {
-            operation()
-        }
-
-        fn notify(&self, _: &()) -> XllResult<()> {
-            let callback = self.0.lock().take();
-            if let Some(callback) = callback {
-                callback();
-            }
-            Ok(())
-        }
-    }
-
-    fn channel_runtime<H: SubscriptionHost>(
-        host: H,
+    fn channel_runtime(
+        host: RtdSubscriptionHost,
     ) -> (
-        StdArc<SubscriptionRuntime<H>>,
-        crate::subscription::server::SubscriptionServerHandle<H>,
+        StdArc<SubscriptionRuntime<RtdSubscriptionHost>>,
+        crate::subscription::server::SubscriptionServerHandle<RtdSubscriptionHost>,
         RtdSender<i32>,
     ) {
         let registration = SourceRegistration::new(RuntimeGeneration::new(1).unwrap());
@@ -512,12 +483,12 @@ mod tests {
 
     #[test]
     fn deferred_disconnect_reenters_from_channel_notification_without_waiting_for_it() {
-        let callback = StdArc::new(Mutex::new(None));
-        let (runtime, server, sender) = channel_runtime(ReentrantHost(StdArc::clone(&callback)));
+        let notifier = StdArc::new(TestNotifierState::new());
+        let (runtime, server, sender) = channel_runtime(RtdSubscriptionHost::detached());
         let completed = StdArc::new(AtomicBool::new(false));
         let lease = StdArc::clone(&completed);
         let (returned_tx, returned_rx) = mpsc::sync_channel(1);
-        *callback.lock() = Some(Box::new(move || {
+        *notifier.callback.lock() = Some(Box::new(move || {
             // This executes while the real channel publisher holds its
             // publication mutex. A synchronous disconnect self-deadlocks.
             server
@@ -533,7 +504,9 @@ mod tests {
             ));
             returned_tx.send(()).unwrap();
         }));
-        server.attach_update_notifier(()).unwrap();
+        server
+            .attach_update_notifier(RtdNotifier::for_test(notifier))
+            .unwrap();
         sender.try_send(1).unwrap();
         returned_rx.recv_timeout(DEADLINE).unwrap();
         runtime.close().unwrap();
@@ -595,7 +568,7 @@ mod tests {
             assert!(!self.fail_cancel, "injected cancellation panic");
         }
 
-        fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
+        fn disconnect_and_wait(self) -> XllResult<()> {
             self.sink.lock().take();
             self.disconnected.store(true, Ordering::Release);
             if self.fail_disconnect {
@@ -982,8 +955,8 @@ mod tests {
         ));
         assert_eq!(runtime.disconnects.stop_attempts.load(Ordering::Relaxed), 1);
         assert!(matches!(
-            runtime.termination_coordinator.state.lock().phase,
-            super::super::server::ServerTerminationPhase::Failed
+            runtime.termination_coordinator.phase(),
+            super::super::termination::TerminationPhase::Failed
         ));
         // Explicit fixture cleanup discharges the retained worker owner. Real
         // teardown keeps the failed generation in its existing quarantine.

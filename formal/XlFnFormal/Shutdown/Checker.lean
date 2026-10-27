@@ -78,8 +78,9 @@ private def subscriptionsDrained (r : Resources) : Bool :=
   r.subscriptions == 0 && r.callbacks == 0
 
 private def rtdDrained (r : Resources) : Bool :=
-  r.rtdOperations == 0 && r.rtdClassFactories == 0 && r.rtdServers == 0 &&
-    r.rtdServerLocks == 0
+  r.rtdOperations == 0 &&
+    ((r.rtdClassFactories == 0 && r.rtdServers == 0 && r.rtdServerLocks == 0) ||
+      r.moduleResidencyHeld == true)
 
 private def handlesDrained (r : Resources) : Bool :=
   r.handles == 0 && r.handlePins == 0 && r.handleObjects == 0
@@ -555,7 +556,7 @@ theorem apply?_sound
         Resources.RtdDrained, Resources.HandlesDrained,
         Resources.DiagnosticsDrained, Resources.ProducerAlive,
         Resources.GenerationReclaimed, Resources.Quiescent] <;>
-      omega
+      (first | omega | grind)
 
 theorem apply?_complete
     {s t : State} {event : Event}
@@ -579,6 +580,6 @@ theorem apply?_complete
       Resources.RtdDrained, Resources.HandlesDrained,
       Resources.DiagnosticsDrained, Resources.ProducerAlive,
       Resources.GenerationReclaimed, Resources.Quiescent] <;>
-    omega
+    (first | omega | grind)
 
 end XlFnFormal.Shutdown

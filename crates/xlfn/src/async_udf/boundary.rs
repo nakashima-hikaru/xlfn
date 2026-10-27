@@ -3,7 +3,7 @@ use super::completion::{
 };
 use super::instrumentation::AsyncObservation;
 #[cfg(feature = "handles")]
-use super::task_scope::{HandleScopedBuilder, HandleScopedTaskBuilder, ScopedTaskFuture};
+use super::task_scope::{HandleScopedBuilder, HandleScopedTaskBuilder};
 use super::transport::ExcelAsyncResponder;
 use crate::call_return::ExcelReturn;
 use crate::cancellation::{CancellationGuarantee, CancellationSource, CancellationToken};
@@ -60,10 +60,15 @@ where
     fn build_task<'generation>(
         mut self,
         scope: super::task_scope::AsyncTaskScope<'generation>,
-    ) -> (ScopedTaskFuture<'generation, Self::Output>, Self::Delivery) {
+    ) -> (
+        impl Future<Output = Self::Output> + Send + 'generation,
+        Self::Delivery,
+    ) {
         let build = self.build.take().expect("task owns builder");
-        let future = catch_no_unwind(AssertUnwindSafe(|| build.build(scope)))
-            .unwrap_or_else(|_| Box::pin(std::future::ready(Err(XllError::Panic))));
+        let future = match catch_no_unwind(AssertUnwindSafe(|| build.build(scope))) {
+            Ok(future) => futures_util::future::Either::Left(future),
+            Err(_) => futures_util::future::Either::Right(std::future::ready(Err(XllError::Panic))),
+        };
         (
             future,
             (
@@ -75,10 +80,10 @@ where
         )
     }
 
-    fn deliver(
+    fn deliver<'generation>(
         delivery: Self::Delivery,
-        future: ScopedTaskFuture<'static, Self::Output>,
-    ) -> impl Future<Output = ()> + Send + 'static {
+        future: impl Future<Output = Self::Output> + Send + 'generation,
+    ) -> impl Future<Output = ()> + Send + 'generation {
         let (responder, token, observation, _) = delivery;
         AsyncDelivery::new(responder, token, Some(observation)).task(future)
     }
@@ -105,20 +110,25 @@ where
     fn build_task<'generation>(
         mut self,
         scope: super::task_scope::AsyncTaskScope<'generation>,
-    ) -> (ScopedTaskFuture<'generation, Self::Output>, Self::Delivery) {
+    ) -> (
+        impl Future<Output = Self::Output> + Send + 'generation,
+        Self::Delivery,
+    ) {
         let build = self.build.take().expect("task owns builder");
-        let future = catch_no_unwind(AssertUnwindSafe(|| build.build(scope)))
-            .unwrap_or_else(|_| Box::pin(std::future::ready(Err(XllError::Panic))));
+        let future = match catch_no_unwind(AssertUnwindSafe(|| build.build(scope))) {
+            Ok(future) => futures_util::future::Either::Left(future),
+            Err(_) => futures_util::future::Either::Right(std::future::ready(Err(XllError::Panic))),
+        };
         (
             future,
             (self.responder.take().unwrap(), self.token, self.udf_id),
         )
     }
 
-    fn deliver(
+    fn deliver<'generation>(
         delivery: Self::Delivery,
-        future: ScopedTaskFuture<'static, Self::Output>,
-    ) -> impl Future<Output = ()> + Send + 'static {
+        future: impl Future<Output = Self::Output> + Send + 'generation,
+    ) -> impl Future<Output = ()> + Send + 'generation {
         let (responder, token, _) = delivery;
         AsyncDelivery::<()>::new(responder, token, None).task(future)
     }
@@ -152,7 +162,7 @@ impl<Build, T> Drop for UninstrumentedHandleTask<Build, T> {
 /// handle that remains live for the duration of this call.
 #[doc(hidden)]
 pub(crate) unsafe fn async_udf_boundary_named<A, Start, Fut, T>(
-    runtime: &'static Runtime<A>,
+    runtime: &'static Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     udf_id: &'static str,
     excel_name: &'static str,
     raw_handle: *mut XLOPER12,
@@ -199,7 +209,7 @@ pub(crate) unsafe fn async_udf_boundary_named<A, Start, Fut, T>(
 }
 
 pub(crate) unsafe fn async_udf_boundary_named_inner<A, Start, Fut, T>(
-    runtime: &'static Runtime<A>,
+    runtime: &'static Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     guard: &crate::runtime::CallGuard<'_, A>,
     udf_id: &'static str,
     excel_name: &'static str,
@@ -238,7 +248,7 @@ pub(crate) unsafe fn async_udf_boundary_named_inner<A, Start, Fut, T>(
 }
 
 unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
-    runtime: &'static Runtime<A>,
+    runtime: &'static Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     guard: &crate::runtime::CallGuard<'_, A>,
     udf_id: &'static str,
     excel_name: &'static str,
@@ -355,7 +365,7 @@ unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
 }
 
 unsafe fn async_udf_boundary_uninstrumented<A, Start, Fut, T>(
-    runtime: &'static Runtime<A>,
+    runtime: &'static Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     guard: &crate::runtime::CallGuard<'_, A>,
     udf_id: &'static str,
     raw_handle: *mut XLOPER12,
@@ -433,7 +443,7 @@ unsafe fn async_udf_boundary_uninstrumented<A, Start, Fut, T>(
 #[doc(hidden)]
 #[cfg(feature = "handles")]
 pub(crate) unsafe fn async_udf_boundary_named_handle<A, Start, Build, T>(
-    runtime: &'static Runtime<A>,
+    runtime: &'static Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     udf_id: &'static str,
     excel_name: &'static str,
     raw_handle: *mut XLOPER12,
@@ -483,7 +493,7 @@ pub(crate) unsafe fn async_udf_boundary_named_handle<A, Start, Build, T>(
 
 #[cfg(feature = "handles")]
 unsafe fn async_udf_boundary_named_handle_inner<A, Start, Build, T>(
-    runtime: &'static Runtime<A>,
+    runtime: &'static Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     guard: &crate::runtime::CallGuard<'_, A>,
     udf_id: &'static str,
     excel_name: &'static str,
@@ -523,7 +533,7 @@ unsafe fn async_udf_boundary_named_handle_inner<A, Start, Build, T>(
 
 #[cfg(feature = "handles")]
 unsafe fn async_udf_boundary_instrumented_handle<A, Start, Build, T>(
-    runtime: &'static Runtime<A>,
+    runtime: &'static Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     guard: &crate::runtime::CallGuard<'_, A>,
     udf_id: &'static str,
     excel_name: &'static str,
@@ -652,7 +662,7 @@ unsafe fn async_udf_boundary_instrumented_handle<A, Start, Build, T>(
 
 #[cfg(feature = "handles")]
 unsafe fn async_udf_boundary_uninstrumented_handle<A, Start, Build, T>(
-    runtime: &'static Runtime<A>,
+    runtime: &'static Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     guard: &crate::runtime::CallGuard<'_, A>,
     udf_id: &'static str,
     raw_handle: *mut XLOPER12,
@@ -746,7 +756,9 @@ pub(super) fn report_completion(udf_id: &'static str, completion: &AsyncCompleti
 #[cfg(test)]
 pub(crate) static AFTER_ASYNC_EVALUATION_HOOK: Mutex<Option<fn()>> = Mutex::new(None);
 
-pub(crate) fn cancel_async_calculation<A: crate::Addin>(runtime: &Runtime<A>) {
+pub(crate) fn cancel_async_calculation<A: crate::Addin>(
+    runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+) {
     runtime.cancel_async();
 }
 
@@ -880,8 +892,10 @@ mod numeric_launch_tests {
         fn build<'generation>(
             self,
             _: super::super::task_scope::AsyncTaskScope<'generation>,
-        ) -> ScopedTaskFuture<'generation, XllResult<f64>> {
-            unreachable!("launch returns an error before building any async task")
+        ) -> impl Future<Output = XllResult<f64>> + Send + 'generation {
+            std::future::poll_fn(|_| {
+                unreachable!("launch returns an error before building any async task")
+            })
         }
     }
 

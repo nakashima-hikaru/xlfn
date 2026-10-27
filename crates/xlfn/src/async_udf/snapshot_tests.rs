@@ -96,7 +96,7 @@ fn assert_unregistered(runtime: &AsyncRuntime<HoldingExecutor>) {
 
 #[test]
 fn close_admission_during_advance_leaves_a_stable_control_state() {
-    use super::calculation::ControlPhase;
+    use super::control::ControlPhase;
     let (runtime, _) = start_runtime(AsyncTaskLimit::DEFAULT);
     let before = runtime.snapshot_calculation().epoch();
     let reservation = runtime.registry().reserve(before).unwrap();
@@ -104,7 +104,7 @@ fn close_admission_during_advance_leaves_a_stable_control_state() {
         let advancing = scope.spawn(|| runtime.advance_calculation());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while !matches!(
-            runtime.registry().control.lock().phase,
+            runtime.registry().control.lock().phase(),
             ControlPhase::Advancing { .. }
         ) {
             assert!(std::time::Instant::now() < deadline);
@@ -116,7 +116,7 @@ fn close_admission_during_advance_leaves_a_stable_control_state() {
     });
     assert_eq!(runtime.snapshot_calculation().epoch(), before);
     assert_eq!(
-        runtime.registry().control.lock().phase,
+        runtime.registry().control.lock().phase(),
         ControlPhase::Running
     );
     assert!(matches!(
@@ -138,7 +138,7 @@ fn stale_snapshot_retains_calculation_until_rejected_reservation_releases_it() {
     assert!(runtime.advance_calculation());
     {
         let control = runtime.registry().control.lock();
-        assert_eq!(control.calculations[&old].pins.load(Ordering::Acquire), 1);
+        assert_eq!(control.calculations[&old].pin_count(), 1);
     }
     assert_eq!(snapshot.epoch(), old);
     assert_cancelled(runtime.reserve_snapshot(snapshot));
@@ -146,9 +146,7 @@ fn stale_snapshot_retains_calculation_until_rejected_reservation_releases_it() {
     assert_eq!(state.reserves.load(Ordering::Relaxed), 1);
     assert_eq!(state.permit_drops.load(Ordering::Relaxed), 1);
     assert_eq!(
-        runtime.registry().control.lock().calculations[&old]
-            .pins
-            .load(Ordering::Acquire),
+        runtime.registry().control.lock().calculations[&old].pin_count(),
         0
     );
 

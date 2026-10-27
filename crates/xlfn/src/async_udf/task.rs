@@ -2,8 +2,7 @@ use super::calculation::CalculationPin;
 use super::future::NoUnwindFuture;
 use super::registry::{RegistryPtr, TaskRegistry};
 
-use crate::cancellation::CancellationSource;
-use futures_util::future::{AbortHandle, AbortRegistration, Abortable};
+use crate::cancellation::{CancellationSource, TaskCancellationRegistration};
 use smallvec::SmallVec;
 use std::future::Future;
 use std::pin::Pin;
@@ -40,23 +39,56 @@ impl<F: Future<Output = ()>> Future for AsyncTask<F> {
 /// captures. Even before the first poll, user cleanup precedes the release
 /// that permits generation and executor reclamation.
 pub(crate) struct TrackedFuture<F> {
-    future: NoUnwindFuture<Abortable<F>>,
+    future: NoUnwindFuture<CancellableTaskFuture<F>>,
     completion: CompletionGuard,
 }
 
 impl<F> TrackedFuture<F> {
     pub(crate) fn new(
         future: F,
-        registration: AbortRegistration,
+        registration: TaskCancellationRegistration,
         completion: CompletionGuard,
     ) -> Self {
         Self {
             future: NoUnwindFuture::new(
                 "async task destruction",
-                Abortable::new(future, registration),
+                CancellableTaskFuture {
+                    future,
+                    registration,
+                },
             ),
             completion,
         }
+    }
+}
+
+// Field order matters: user destruction precedes unregistering its task waker,
+// and both finish before TrackedFuture releases its completion/source/pins.
+struct CancellableTaskFuture<F> {
+    future: F,
+    registration: TaskCancellationRegistration,
+}
+
+impl<F: Future<Output = ()>> Future for CancellableTaskFuture<F> {
+    type Output = Result<(), ()>;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        // SAFETY: the user future stays at this address until in-place drop;
+        // registration is not structurally pinned and never exposes that field.
+        let this = unsafe { self.get_unchecked_mut() };
+        if this.registration.is_cancelled() {
+            return Poll::Ready(Err(()));
+        }
+        // SAFETY: the enclosing pin protects the field for every poll and drop.
+        if unsafe { Pin::new_unchecked(&mut this.future) }
+            .poll(context)
+            .is_ready()
+        {
+            return Poll::Ready(Ok(()));
+        }
+        // Registration rechecks cancellation after publishing the waker. A
+        // cancellation during the user poll cannot disappear without a wake.
+        this.registration.poll_cancelled(context).map(|()| Err(()))
     }
 }
 
@@ -81,7 +113,6 @@ impl<F: Future<Output = ()>> Future for TrackedFuture<F> {
 }
 
 pub(crate) struct TaskControl {
-    pub(crate) abort: AbortHandle,
     pub(crate) cancellation: CancellationSource,
 }
 

@@ -2,13 +2,12 @@ use crate::generation::RuntimeGeneration;
 use crate::handle::GenerationLeaseBrand;
 use std::future::Future;
 use std::marker::PhantomData;
-use std::pin::Pin;
 
 /// Narrow lifetime brand for the generated async handle path.
 ///
 /// The scope carries no runtime borrow. Its lifetime is a compile-time token
-/// that the runtime validates at the one point where the scoped task future
-/// is erased to the runtime's opaque `'static` task type.
+/// borrowed from a brand owned by the enclosing executor task. The generated
+/// future keeps that lifetime until it is destroyed inside the same task.
 #[cfg(feature = "handles")]
 #[doc(hidden)]
 #[derive(Clone, Copy)]
@@ -28,13 +27,13 @@ pub trait HandleScopedBuilder<T> {
     fn build<'generation>(
         self,
         scope: AsyncTaskScope<'generation>,
-    ) -> Pin<Box<dyn Future<Output = crate::XllResult<T>> + Send + 'generation>>;
+    ) -> impl Future<Output = crate::XllResult<T>> + Send + 'generation;
 }
 
 #[cfg(feature = "handles")]
-// Only the generated inner future carries the scope brand. Delivery state
-// remains owned and 'static, so its concrete future can live directly in the
-// task allocation after the inner future's single lifetime erasure.
+// The enclosing executor task owns the brand, generated future, and delivery.
+// Each future stays concrete and keeps its original scope lifetime throughout
+// delivery; only the enclosing, self-contained task must be 'static.
 pub(crate) trait HandleScopedTaskBuilder {
     type Output: Send + 'static;
     type Delivery: Send + 'static;
@@ -42,12 +41,15 @@ pub(crate) trait HandleScopedTaskBuilder {
     fn build_task<'generation>(
         self,
         scope: AsyncTaskScope<'generation>,
-    ) -> (ScopedTaskFuture<'generation, Self::Output>, Self::Delivery);
+    ) -> (
+        impl Future<Output = Self::Output> + Send + 'generation,
+        Self::Delivery,
+    );
 
-    fn deliver(
+    fn deliver<'generation>(
         delivery: Self::Delivery,
-        future: ScopedTaskFuture<'static, Self::Output>,
-    ) -> impl Future<Output = ()> + Send + 'static;
+        future: impl Future<Output = Self::Output> + Send + 'generation,
+    ) -> impl Future<Output = ()> + Send + 'generation;
 }
 
 #[cfg(feature = "handles")]
@@ -61,39 +63,5 @@ impl<'generation> AsyncTaskScope<'generation> {
 
     pub(crate) const fn generation(self) -> RuntimeGeneration {
         self.generation
-    }
-}
-
-#[cfg(feature = "handles")]
-pub(crate) type ScopedTaskFuture<'generation, Output = ()> =
-    Pin<Box<dyn Future<Output = Output> + Send + 'generation>>;
-
-/// Erases the compile-time handle-generation brand after the generated
-/// future has been constrained to contain only task-owned data.
-///
-/// # Safety
-///
-/// The caller must ensure that the future contains no borrow from the caller's
-/// stack whose validity depends on the scope brand. Generated async contexts
-/// may borrow the `ExecutionLease` and cancellation token moved into the same
-/// future; those references are therefore task-self-contained. The only
-/// external lifetime marker is the zero-sized `AsyncTaskScope`/`HandleLease`
-/// brand, while the object lifetime is protected independently by
-/// `RawObjectLeaseGuard`. The opaque `AsyncTask` owns a registry completion guard and calculation
-/// pin. Registry `active_tasks` retains all framework state until future
-/// destruction; `AsyncStopped` is issued only after that count reaches zero.
-/// Generation services cannot be sealed before that certificate, so this proof
-/// applies equally to builtin and external executors without poller assumptions.
-#[cfg(feature = "handles")]
-pub(crate) unsafe fn erase_scoped_task_future<'generation, Output: Send + 'static>(
-    future: ScopedTaskFuture<'generation, Output>,
-) -> ScopedTaskFuture<'static, Output> {
-    // SAFETY: upheld by `HandleScopedBuilder`'s late-bound method and the
-    // `'static` builder bound, plus the shutdown ordering documented above.
-    unsafe {
-        std::mem::transmute::<
-            ScopedTaskFuture<'generation, Output>,
-            ScopedTaskFuture<'static, Output>,
-        >(future)
     }
 }

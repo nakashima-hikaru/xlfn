@@ -12,7 +12,7 @@ use crate::registration::host::test_support::{CallbackScript, Reply};
 use crate::registration::{
     HostMutationJournal, RegistrationDescriptor, RegistrationId, RegistrationSignature,
 };
-use crate::runtime::Runtime;
+use crate::runtime::{PhysicalUnload, Runtime};
 use std::cell::Cell;
 use xlfn_common::{ExecutionKind, FunctionVisibility};
 use xlfn_sys::{
@@ -81,12 +81,14 @@ fn module_name() -> XLOPER12 {
     }
 }
 
-fn publish_old_generation() -> Runtime<ReloadAddin> {
+fn residency_probe_anchor() {}
+
+fn publish_old_generation() -> Runtime<ReloadAddin, PhysicalUnload> {
     OPENS.set(0);
     QUIESCES.set(0);
     let runtime = Runtime::<ReloadAddin>::new_with_physical_unload();
     runtime
-        .ensure_module_residency(host_auto_close::<ReloadAddin> as *const ())
+        .ensure_module_residency(residency_probe_anchor as *const ())
         .unwrap();
     let opening = runtime.begin_open().unwrap();
     let mut opening = runtime.publish(opening, (), ());
@@ -103,7 +105,7 @@ fn publish_old_generation() -> Runtime<ReloadAddin> {
     runtime
 }
 
-fn open(runtime: &Runtime<ReloadAddin>) -> i32 {
+fn open(runtime: &Runtime<ReloadAddin, PhysicalUnload>) -> i32 {
     host_auto_open(
         runtime,
         &AddinId::parse("terminal-reload").unwrap(),
@@ -122,7 +124,7 @@ fn replacement_replies() -> [Reply; 4] {
     ]
 }
 
-fn close_replacement(runtime: &Runtime<ReloadAddin>) {
+fn close_replacement(runtime: &Runtime<ReloadAddin, PhysicalUnload>) {
     let previous_quiesces = QUIESCES.get();
     let script = CallbackScript::install([
         Reply::success(XLF_UNREGISTER, XLOPER12::boolean(true)),
@@ -214,7 +216,7 @@ fn pending_rollback_terminal_cleanup_stops_before_a_replacement_open() {
             QUIESCES.set(0);
             let runtime = Runtime::<ReloadAddin>::new_with_physical_unload();
             runtime
-                .ensure_module_residency(host_auto_close::<ReloadAddin> as *const ())
+                .ensure_module_residency(residency_probe_anchor as *const ())
                 .unwrap();
             let opening = runtime.begin_open().unwrap();
             assert!(opening.fail_for_test().requires_rollback());

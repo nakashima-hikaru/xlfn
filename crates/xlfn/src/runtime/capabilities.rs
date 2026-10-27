@@ -40,7 +40,9 @@ impl<A: Addin> Clone for OpenDeps<'_, A> {
 }
 
 impl<'a, A: Addin> OpenDeps<'a, A> {
-    pub(in crate::runtime) const fn from_runtime(runtime: &'a Runtime<A>) -> Self {
+    pub(in crate::runtime) const fn from_runtime(
+        runtime: &'a Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+    ) -> Self {
         Self {
             lifecycle: &runtime.lifecycle,
             addin_lifecycle: &runtime.addin_lifecycle,
@@ -178,7 +180,9 @@ impl<A: Addin> Clone for ShutdownDeps<'_, A> {
 }
 
 impl<'a, A: Addin> ShutdownDeps<'a, A> {
-    pub(in crate::runtime) fn from_runtime(runtime: &'a Runtime<A>) -> Self {
+    pub(in crate::runtime) fn from_runtime(
+        runtime: &'a Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+    ) -> Self {
         Self {
             lifecycle: &runtime.lifecycle,
             addin_lifecycle: &runtime.addin_lifecycle,
@@ -257,6 +261,12 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
         resources.generation_owned_by_runtime =
             control.has_current_generation() || control.has_opening_generation();
         resources.generation_unique = !resources.generation_owned_by_runtime;
+        // A logical teardown certificate does not consume externally owned
+        // COM objects. Preserve their physical ownership in terminal evidence.
+        let rtd = crate::excel_rtd_protocol::trace_snapshot();
+        resources.rtd_class_factories = rtd.rtd_class_factories;
+        resources.rtd_servers = rtd.rtd_servers;
+        resources.rtd_server_locks = rtd.rtd_server_locks;
         let diagnostics = crate::diagnostics::trace_snapshot();
         resources.diagnostics_running = diagnostics.running;
         resources.diagnostics_pending = diagnostics.pending;

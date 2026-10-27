@@ -10,12 +10,13 @@ use crate::error::{ExcelApiFailure, ExcelApiFunction, InputError};
 use crate::host_api::{ExcelHost, HostInvocation};
 use crate::host_callback::HostCallbackSession;
 use crate::return_abi::ExcelCallbackStatus;
-use crate::value::input::PreparedArgument;
+use crate::value::ExcelInputCells;
 use crate::value::input::sealed::ExcelParameterSealed;
+use crate::value::input::{PreparedArgument, PreparedElement, PreparedParameterSequence};
 use crate::value::{CallContext, ExcelParameter, FromExcel, InputMode, XlValueRef, XlValueType};
-use crate::value::{ExcelInputCells, PreparedExcelSequence};
 use crate::{XllError, XllResult};
 use smallvec::SmallVec;
+use std::convert::Infallible;
 use std::path::PathBuf;
 use std::ptr::NonNull;
 
@@ -520,33 +521,33 @@ pub(crate) struct ModuleName {
 impl<'call, M: InputMode> ExcelParameterSealed<'call, M> for ModuleName {}
 
 impl<'call, M: InputMode> ExcelParameter<'call, M> for ModuleName {
-    type Prepared = ();
-
+    type Prepared = Infallible;
+    fn materialize_prepared(value: Infallible) -> XllResult<Self> {
+        match value {}
+    }
     type ElementPrepared = Self::Prepared;
+    fn materialize_element(value: Infallible) -> XllResult<Self> {
+        match value {}
+    }
     fn prepare_element(
         value: XlValueRef<'call>,
         argument: &'static str,
         context: &CallContext<'call>,
         identity: &mut M::Identity,
-    ) -> XllResult<PreparedArgument<Self, Self::ElementPrepared>> {
+    ) -> XllResult<PreparedElement<'call, Self, M>> {
         <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)
+            .map(PreparedArgument::with_materializer)
     }
 
-    type Elements =
-        PreparedExcelSequence<'call, Self, PreparedArgument<Self, Self::ElementPrepared>>;
+    type Elements = PreparedParameterSequence<'call, Self, M>;
     fn prepare_elements(
         cells: ExcelInputCells<'call>,
         context: &CallContext<'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self::Elements> {
-        cells.retain(
-            |value, argument| {
-                <Self as ExcelParameter<'call, M>>::prepare_element(
-                    value, argument, context, identity,
-                )
-            },
-            PreparedArgument::materialize,
-        )
+        cells.retain(|value, argument| {
+            <Self as ExcelParameter<'call, M>>::prepare_element(value, argument, context, identity)
+        })
     }
     fn materialize_elements(elements: Self::Elements) -> XllResult<Vec<Self>> {
         elements.materialize()

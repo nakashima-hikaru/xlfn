@@ -72,7 +72,7 @@ class PlanTest(unittest.TestCase):
                 self.assertEqual("lifecycle_trace_config" in progress.record, full_diagnostics)
 
     def test_dump_only_cli_passes_mode_to_worker_and_capture_to_reaper_without_observer(self):
-        for dump_only in (False, True):
+        for dump_only, full_memory in ((False, False), (True, False), (True, True)):
             for failed in (False, True):
                 with self.subTest(dump_only=dump_only, failed=failed), tempfile.TemporaryDirectory() as directory:
                     root = Path(directory)
@@ -84,6 +84,8 @@ class PlanTest(unittest.TestCase):
                             "--allow-local-artifacts", "--artifacts", str(root), "--out", str(output)]
                     if dump_only:
                         args.append("--dump-on-failure")
+                    if full_memory:
+                        args.append("--full-memory-dumps")
                     cleanup = {"forced_kill": failed}
                     if failed:
                         cleanup["exit_timeout_s"] = 5
@@ -95,6 +97,8 @@ class PlanTest(unittest.TestCase):
                         self.assertEqual(benchmark_main(), int(failed))
                     cmd = launch.call_args.args[0]
                     self.assertEqual("--dump-on-failure" in cmd, dump_only)
+                    self.assertEqual("--full-memory-dumps" in cmd, full_memory)
+                    self.assertEqual(reap.call_args.kwargs["full_memory_dumps"], full_memory)
                     self.assertNotIn("--shutdown-diagnostics", cmd)
                     self.assertNotIn("--lifecycle-trace-file", cmd)
                     observer.assert_not_called()
@@ -106,6 +110,13 @@ class PlanTest(unittest.TestCase):
                     if failed:
                         self.assertEqual(record["execution_status"], "ok")
                         self.assertEqual(record["failure_phase"], "close")
+
+    def test_full_memory_requires_dump_mode(self):
+        with patch("run.sys.argv", ["run.py", "--full-memory-dumps", "--plan"]), \
+                patch("sys.stderr"):
+            with self.assertRaises(SystemExit) as error:
+                benchmark_main()
+        self.assertEqual(error.exception.code, 2)
 
     def test_unsupported_case_gets_normal_exit_grace_and_reports_cleanup_failure(self):
         for survives_deadline in (False, True):
@@ -311,9 +322,11 @@ class PlanTest(unittest.TestCase):
             pass
 
         for capture_failure in (False, True):
-            for exits_during_capture in (False, True):
+            for exits_during_capture, full_memory in ((False, False), (True, False),
+                                                     (False, True), (True, True)):
                 with self.subTest(capture_failure=capture_failure,
-                                  exits_during_capture=exits_during_capture), \
+                                  exits_during_capture=exits_during_capture,
+                                  full_memory=full_memory), \
                         tempfile.TemporaryDirectory() as directory:
                     root = Path(directory)
                     path = root / "excel.pid"
@@ -324,9 +337,10 @@ class PlanTest(unittest.TestCase):
                     process.create_time.return_value = 42.0
                     process.wait.side_effect = [Timeout(), None]
 
-                    def capture(*args):
+                    def capture(*args, **kwargs):
                         events.append("capture")
                         self.assertEqual(args, (identity, root))
+                        self.assertEqual(kwargs, {"full_memory": full_memory})
                         if capture_failure:
                             raise RuntimeError("dump failed")
                         return {"status": "ok", "path": "shutdown.dmp"}
@@ -341,7 +355,8 @@ class PlanTest(unittest.TestCase):
                                              TimeoutExpired=Timeout, NoSuchProcess=Missing)
                     with patch.dict("sys.modules", {"psutil": module}), \
                             patch("run.capture_shutdown_dump", side_effect=capture):
-                        cleanup = reap_excel_process(path, grace_s=5, dump_directory=root)
+                        cleanup = reap_excel_process(path, grace_s=5, dump_directory=root,
+                                                     full_memory_dumps=full_memory)
                     self.assertEqual(events, ["capture", "kill"])
                     self.assertEqual(cleanup["exit_timeout_s"], 5)
                     self.assertEqual(cleanup["forced_kill"], not exits_during_capture)
@@ -1308,6 +1323,7 @@ class PlanTest(unittest.TestCase):
         right = common | {"implementation": "excel_dna", "metrics": {"p50_s": 2.0}}
         self.assertTrue(summarize([left, right])[0]["comparable"])
         for change in ({"dump_on_failure": False}, {"runner_sources": {"run.py": "different-hash"}},
+                       {"full_memory_dumps": True},
                        {"shutdown_diagnostics": True}, {"status": "error", "execution_status": "ok"}):
             with self.subTest(change=change):
                 self.assertFalse(summarize([left, right | change])[0]["comparable"])

@@ -44,3 +44,24 @@ error[E0277]: `xlfn::MainThreadContext<'_, ()>` cannot be converted from an Exce
           and $N others
   = note: required for `xlfn::MainThreadContext<'_, ()>` to implement `xlfn::__private::v1::ExcelParameter<'_, xlfn::__private::v1::PlainInputMode>`
   = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: the method `materialize` exists for enum `xlfn::__private::v1::PreparedArgument<xlfn::MainThreadContext<'_, ()>, Infallible, value::input::ParameterMaterializer<'_, xlfn::MainThreadContext<'_, ()>, xlfn::__private::v1::PlainInputMode>>`, but its trait bounds were not satisfied
+ --> tests/ui/fail/context_alias.rs:8:1
+  |
+8 | #[excel_function]
+  | ^^^^^^^^^^^^^^^^^ method cannot be called due to unsatisfied trait bounds
+  |
+ ::: src/addin.rs
+  |
+  | pub struct MainThreadContext<'call, A: Addin> {
+  | --------------------------------------------- doesn't satisfy `xlfn::MainThreadContext<'_, ()>: FromExcel<'_>`
+  |
+ ::: src/value/input.rs
+  |
+  | pub struct ParameterMaterializer<'call, T, M>(MaterializerMarker<'call, T, M>);
+  | --------------------------------------------- doesn't satisfy `_: ArgumentMaterializer<MainThreadContext<'_, ()>, Infallible>`
+  |
+  = note: the following trait bounds were not satisfied:
+          `xlfn::MainThreadContext<'_, ()>: FromExcel<'_>`
+          which is required by `value::input::ParameterMaterializer<'_, xlfn::MainThreadContext<'_, ()>, xlfn::__private::v1::PlainInputMode>: xlfn::__private::v1::ArgumentMaterializer<xlfn::MainThreadContext<'_, ()>, Infallible>`
+  = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)

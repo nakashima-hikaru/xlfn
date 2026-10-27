@@ -6,6 +6,7 @@
 //! caches until destruction; moving or clearing it does not move those boxes.
 //! No cache operation or application callback runs while TLS is borrowed.
 
+use super::{CacheEndpoint, StoredCache};
 use std::any::TypeId;
 use std::cell::RefCell;
 use std::hash::{Hash, Hasher};
@@ -42,11 +43,44 @@ struct EndpointCache {
     victims: [u8; SET_COUNT],
 }
 
+impl EndpointCache {
+    const fn new() -> Self {
+        Self {
+            sets: [[None; WAYS]; SET_COUNT],
+            victims: [0; SET_COUNT],
+        }
+    }
+
+    fn lookup(
+        &self,
+        registry: RegistryIdentity,
+        key: (TypeId, &'static str),
+    ) -> Option<NonNull<()>> {
+        let index = set_index(registry, key);
+        self.sets[index].iter().flatten().find_map(|entry| {
+            (entry.registry == registry && entry.key == key).then_some(entry.pointer)
+        })
+    }
+
+    fn remember(
+        &mut self,
+        registry: RegistryIdentity,
+        key: (TypeId, &'static str),
+        pointer: NonNull<()>,
+    ) {
+        let index = set_index(registry, key);
+        let victim = usize::from(self.victims[index]);
+        self.sets[index][victim] = Some(ResolvedEndpoint {
+            registry,
+            key,
+            pointer,
+        });
+        self.victims[index] = ((victim + 1) % WAYS) as u8;
+    }
+}
+
 thread_local! {
-    static ENDPOINTS: RefCell<EndpointCache> = const { RefCell::new(EndpointCache {
-        sets: [[None; WAYS]; SET_COUNT],
-        victims: [0; SET_COUNT],
-    }) };
+    static ENDPOINTS: RefCell<EndpointCache> = const { RefCell::new(EndpointCache::new()) };
 }
 
 #[inline]
@@ -66,40 +100,43 @@ fn set_index(registry: RegistryIdentity, key: (TypeId, &'static str)) -> usize {
     (hasher.finish() as usize) & (SET_COUNT - 1)
 }
 
-pub(super) fn lookup(
+/// Resolves only the concrete endpoint type selected by this descriptor.
+/// Erased key/pointer pairs never cross the private TLS storage boundary.
+pub(super) fn lookup<K, V, Marker>(
     registry: RegistryIdentity,
-    key: (TypeId, &'static str),
-) -> Option<NonNull<()>> {
-    let index = set_index(registry, key);
+    endpoint: &CacheEndpoint<K, V, Marker>,
+) -> Option<NonNull<StoredCache<Marker, K, V>>>
+where
+    Marker: 'static,
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
     ENDPOINTS
         .try_with(|cache| {
-            cache.borrow().sets[index]
-                .iter()
-                .flatten()
-                .find_map(|entry| {
-                    (entry.registry == registry && entry.key == key).then_some(entry.pointer)
-                })
+            cache
+                .borrow()
+                .lookup(registry, endpoint.key())
+                .map(NonNull::cast)
         })
         .ok()
         .flatten()
 }
 
-pub(super) fn remember(
+/// Records a pointer whose invariant type matches the endpoint descriptor.
+pub(super) fn remember<K, V, Marker>(
     registry: RegistryIdentity,
-    key: (TypeId, &'static str),
-    pointer: NonNull<()>,
-) {
-    let index = set_index(registry, key);
+    endpoint: &CacheEndpoint<K, V, Marker>,
+    pointer: NonNull<StoredCache<Marker, K, V>>,
+) where
+    Marker: 'static,
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
     // During TLS teardown, the ordinary registry lookup remains available.
     let _ = ENDPOINTS.try_with(|cache| {
-        let mut cache = cache.borrow_mut();
-        let victim = usize::from(cache.victims[index]);
-        cache.sets[index][victim] = Some(ResolvedEndpoint {
-            registry,
-            key,
-            pointer,
-        });
-        cache.victims[index] = ((victim + 1) % WAYS) as u8;
+        cache
+            .borrow_mut()
+            .remember(registry, endpoint.key(), pointer.cast());
     });
 }
 
@@ -139,12 +176,13 @@ mod tests {
 
         let backing = [7_u64, 11, 19];
         let pointers = backing.each_ref().map(|value| NonNull::from(value).cast());
+        let mut storage = super::EndpointCache::new();
         for (&key, &pointer) in keys.iter().zip(&pointers) {
-            super::remember(registry, key, pointer);
+            storage.remember(registry, key, pointer);
         }
         for _ in 0..100 {
             for (&key, &pointer) in keys.iter().zip(&pointers) {
-                assert_eq!(super::lookup(registry, key), Some(pointer));
+                assert_eq!(storage.lookup(registry, key), Some(pointer));
             }
         }
         // These entries are only inspected as pointers, never dereferenced.
@@ -208,13 +246,41 @@ mod tests {
                 done_tx.send(()).unwrap();
             });
             ready_rx.recv().unwrap();
-            let lock = registry.caches.write();
+            let lock = registry.insertions.lock();
             start_tx.send(()).unwrap();
             let completed = done_rx.recv_timeout(Duration::from_secs(5));
             // Release before checking so a regression cannot strand the worker.
             drop(lock);
             worker.join().unwrap();
             completed.expect("warm endpoint resolution must bypass the registry lock");
+        });
+    }
+
+    #[test]
+    fn uncached_endpoint_resolution_does_not_take_the_publication_lock() {
+        let registry = CacheRegistry::new(64);
+        let endpoint = CacheEndpoint::<u64, u64>::new("shared-index-lock-free-resolution");
+        let expected = registry.resolve_cache(&endpoint).unwrap().as_ptr().addr();
+        std::thread::scope(|scope| {
+            let (start_tx, start_rx) = std::sync::mpsc::channel();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let registry = &registry;
+            let worker = scope.spawn(move || {
+                start_rx.recv().unwrap();
+                // Bypass TLS explicitly: cold workers and TLS capacity misses
+                // must read an existing entry while publication is serialized.
+                for _ in 0..100 {
+                    let pointer = registry.resolve_cache_uncached(&endpoint).unwrap();
+                    assert_eq!(pointer.as_ptr().addr(), expected);
+                }
+                done_tx.send(()).unwrap();
+            });
+            let lock = registry.insertions.lock();
+            start_tx.send(()).unwrap();
+            let completed = done_rx.recv_timeout(Duration::from_secs(5));
+            drop(lock);
+            worker.join().unwrap();
+            completed.expect("existing endpoint resolution must bypass the publication lock");
         });
     }
 

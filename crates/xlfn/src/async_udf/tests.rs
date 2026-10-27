@@ -1,7 +1,7 @@
 use super::*;
 
 use super::boundary::AFTER_ASYNC_EVALUATION_HOOK;
-use super::calculation::{CalculationState, task_shard};
+use super::calculation::CalculationState;
 use super::runtime::ExecutorSlot;
 use super::transport::ExcelAsyncResponder;
 use crate::{AsyncPollerCount, AsyncTaskLimit, BuiltinExecutorConfig};
@@ -21,7 +21,6 @@ use crate::return_abi::AsyncReturnValue;
 use crate::runtime::Runtime;
 use crate::sync::Mutex;
 use crate::{Addin, OpenContext, XllError, XllResult};
-use futures_util::future::AbortHandle;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -941,7 +940,7 @@ fn timed_close_retains_executor_until_blocking_poll_returns() {
     assert!(lifecycle.registry().is_closing());
     assert!(lifecycle.snapshot_executor().is_none());
     {
-        let state = lifecycle.state.lock();
+        let state = lifecycle.executor_state();
         let ExecutorSlot::Closing(Some(executor)) = &*state else {
             panic!("timed close must retain the executor for retry");
         };
@@ -952,7 +951,7 @@ fn timed_close_retains_executor_until_blocking_poll_returns() {
     }
     release_tx.send(()).unwrap();
     assert!(lifecycle.close().unwrap().issues.is_empty());
-    assert!(matches!(*lifecycle.state.lock(), ExecutorSlot::Stopped));
+    assert!(matches!(*lifecycle.executor_state(), ExecutorSlot::Stopped));
     assert_eq!(lifecycle.registry().active_tasks.load(Ordering::Acquire), 0);
 }
 
@@ -1946,32 +1945,21 @@ fn rejection_priority_old_calculation_over_max_pending() {
 #[test]
 fn test_calculation_state_sharded_removal_and_drain() {
     let state = CalculationState::new(TEST_CALCULATION);
-    let (abort, _) = AbortHandle::new_pair();
+    let admission = state.enter_admission().unwrap();
     for id in 1..=100 {
-        let index = task_shard(id);
         let (cancellation, _) = CancellationSource::new(CancellationGuarantee::BestEffort);
-        state.shards[index].tasks.lock().insert(
-            id,
-            TaskControl {
-                abort: abort.clone(),
-                cancellation,
-            },
-        );
+        admission.insert_task(id, TaskControl { cancellation });
     }
+    drop(admission);
 
     // Remove 40 tasks via remove_task
     for id in 1..=40 {
         assert!(state.remove_task(id));
     }
     // Drain remaining 60 tasks
-    let drained = state.drain_tasks();
+    let drained = state.close_admission().wait().drain_tasks();
     assert_eq!(drained.len(), 60);
-    assert!(
-        state
-            .shards
-            .iter()
-            .all(|shard| shard.tasks.lock().is_empty())
-    );
+    assert!(state.tasks_are_empty());
 }
 
 #[test]
@@ -1979,37 +1967,21 @@ fn drained_batches_retain_cancellation_until_consumed_outside_locks() {
     for count in [0, 1, 4, 5, 33] {
         let state = CalculationState::new(TEST_CALCULATION);
         let mut observers = Vec::new();
+        let admission = state.enter_admission().unwrap();
         for id in 0..count {
-            let (abort, _) = AbortHandle::new_pair();
             let (cancellation, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
-            observers.push((abort.clone(), token));
-            state.shards[task_shard(id)].tasks.lock().insert(
-                id,
-                TaskControl {
-                    abort,
-                    cancellation,
-                },
-            );
+            observers.push(token);
+            admission.insert_task(id, TaskControl { cancellation });
         }
+        drop(admission);
 
-        let controls = state.drain_tasks();
+        let controls = state.close_admission().wait().drain_tasks();
         assert_eq!(controls.len(), count as usize);
-        assert!(state.shards.iter().all(|shard| {
-            let tasks = shard.tasks.try_lock().expect("drain releases shard locks");
-            tasks.is_empty()
-        }));
-        assert!(
-            observers
-                .iter()
-                .all(|(abort, token)| { !abort.is_aborted() && !token.is_cancelled() })
-        );
+        assert!(state.task_shards_are_unlocked_and_empty());
+        assert!(observers.iter().all(|token| !token.is_cancelled()));
 
         super::registry::cancel_tasks(controls);
-        assert!(
-            observers
-                .iter()
-                .all(|(abort, token)| { abort.is_aborted() && token.is_cancelled() })
-        );
+        assert!(observers.iter().all(|token| token.is_cancelled()));
     }
 }
 
@@ -2017,16 +1989,17 @@ fn drained_batches_retain_cancellation_until_consumed_outside_locks() {
 fn calculation_drain_racing_completions_claims_every_task_once() {
     for _ in 0..8 {
         let state = CalculationState::new(TEST_CALCULATION);
-        let (abort, _) = AbortHandle::new_pair();
+        let admission = state.enter_admission().unwrap();
         for id in 0..128 {
-            state.shards[task_shard(id)].tasks.lock().insert(
+            admission.insert_task(
                 id,
                 TaskControl {
-                    abort: abort.clone(),
                     cancellation: test_cancellation_source(),
                 },
             );
         }
+        drop(admission);
+        let drained_admission = state.close_admission().wait();
         // No new controls can be inserted after admission drains. Existing
         // completions may remove them before or during the capacity scan.
         let barrier = std::sync::Barrier::new(5);
@@ -2045,18 +2018,13 @@ fn calculation_drain_racing_completions_claims_every_task_once() {
                 })
                 .collect::<Vec<_>>();
             barrier.wait();
-            let drained = state.drain_tasks();
+            let drained = drained_admission.drain_tasks();
             let completed: usize = removers
                 .into_iter()
                 .map(|thread| thread.join().unwrap())
                 .sum();
             assert_eq!(completed + drained.len(), 128);
-            assert!(
-                state
-                    .shards
-                    .iter()
-                    .all(|shard| shard.tasks.lock().is_empty())
-            );
+            assert!(state.tasks_are_empty());
         });
     }
 }
@@ -2169,12 +2137,12 @@ fn miri_canceled_running_task_keeps_its_calculation_until_completion() {
             .calculations
             .get(&TEST_CALCULATION)
             .expect("canceling controls must not free a running task's generation");
-        assert!(old.shards.iter().all(|shard| shard.tasks.lock().is_empty()));
-        assert_eq!(old.pins.load(Ordering::Acquire), 1);
+        assert!(old.tasks_are_empty());
+        assert_eq!(old.pin_count(), 1);
     }
     release_tx.send(()).unwrap();
     {
-        let state = lifecycle.state.lock();
+        let state = lifecycle.executor_state();
         let ExecutorSlot::Running(_executor) = &*state else {
             unreachable!()
         };
@@ -2204,8 +2172,8 @@ fn task_id_exhaustion_releases_reservation_without_reusing_identity() {
         assert_eq!(reader.active_tasks.load(Ordering::Acquire), 0);
         let control = reader.control.lock();
         let generation = control.calculations.get(&TEST_CALCULATION).unwrap();
-        assert_eq!(generation.pins.load(Ordering::Acquire), 0);
-        assert_eq!(generation.admission.active(), 0);
+        assert_eq!(generation.pin_count(), 0);
+        assert_eq!(generation.active_admissions(), 0);
     }
     assert!(lifecycle.close().unwrap().issues.is_empty());
 }
@@ -2258,7 +2226,7 @@ fn removing_task_releases_cancellation_wakers_outside_task_lock() {
     struct ReentrantWake(Arc<CalculationState>, Arc<AtomicBool>);
     impl futures_util::task::ArcWake for ReentrantWake {
         fn wake_by_ref(this: &Arc<Self>) {
-            let unlocked = this.0.shards[0].tasks.try_lock().is_some();
+            let unlocked = this.0.task_shard_is_unlocked(0);
             this.1.store(unlocked, Ordering::Release);
             if unlocked {
                 assert!(!this.0.remove_task(0));
@@ -2279,22 +2247,15 @@ fn removing_task_releases_cancellation_wakers_outside_task_lock() {
             .poll(&mut std::task::Context::from_waker(&waker))
             .is_pending()
     );
-    let (abort, _) = futures_util::future::AbortHandle::new_pair();
-    generation.shards[0].tasks.lock().insert(
+    generation.enter_admission().unwrap().insert_task(
         0,
         TaskControl {
-            abort,
             cancellation: source,
         },
     );
     assert!(generation.remove_task(0));
     assert!(observed.load(Ordering::Acquire));
-    assert!(
-        generation
-            .shards
-            .iter()
-            .all(|shard| shard.tasks.lock().is_empty())
-    );
+    assert!(generation.tasks_are_empty());
 }
 
 #[test]
@@ -2490,7 +2451,7 @@ fn advance_does_not_hold_control_mutex_while_waiting_for_idle() {
     ));
 
     {
-        let state = lifecycle.state.lock();
+        let state = lifecycle.executor_state();
         let ExecutorSlot::Running(_executor) = &*state else {
             panic!("executor should be running");
         };
@@ -2518,8 +2479,8 @@ fn wait_for_advancing(lifecycle: &TestRuntime) {
     loop {
         if let Some(control) = lifecycle.registry().control.try_lock()
             && matches!(
-                control.phase,
-                super::calculation::ControlPhase::Advancing { .. }
+                control.phase(),
+                super::control::ControlPhase::Advancing { .. }
             )
         {
             return;
@@ -2584,7 +2545,7 @@ fn close_preempts_in_progress_advance_calculation() {
 
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
-        if let Some(state) = lifecycle.state.try_lock()
+        if let Some(state) = lifecycle.try_executor_state()
             && matches!(*state, ExecutorSlot::Closing(None))
         {
             break;
@@ -2778,7 +2739,7 @@ fn spawn_fast_path_does_not_wait_for_lifecycle_state() {
         .unwrap();
 
     // Deliberately hold the cold lifecycle mutex.
-    let state_guard = lifecycle.state.lock();
+    let state_guard = lifecycle.executor_state();
 
     let spawning_lifecycle = Arc::clone(&lifecycle);
     let (tx, rx) = std::sync::mpsc::sync_channel(1);

@@ -153,6 +153,11 @@ fn expand_excel_addin(
     } else {
         quote!(#krate::__private::v1::MacroRuntime::new())
     };
+    let unload_policy = if options.physical_unload {
+        quote!(#krate::__private::v1::PhysicalUnload)
+    } else {
+        quote!(#krate::__private::v1::LogicalUnload)
+    };
     validate_addin_metadata(&display_name, &id, &category, &item)?;
     let name_units: Vec<_> = display_name.encode_utf16().collect();
     let name_length =
@@ -164,6 +169,7 @@ fn expand_excel_addin(
         #[doc(hidden)]
         static __XLFN_RUNTIME: #krate::__private::v1::MacroRuntime<
             #ident,
+            #unload_policy,
         > = #runtime_constructor;
 
         #(#gating)*
@@ -1817,6 +1823,8 @@ mod tests {
         assert!(expanded.contains("__xlfn_async_exports"));
         assert!(expanded.contains("__xlfn_excel_rtd_exports"));
         assert!(!expanded.contains("fn __xlfn_calculation_canceled"));
+        assert!(expanded.contains("LogicalUnload"));
+        assert!(!expanded.contains("PhysicalUnload"));
     }
 
     #[test]
@@ -1829,6 +1837,8 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(expanded.contains("new_with_physical_unload"));
+        assert!(expanded.contains("PhysicalUnload"));
+        assert!(!expanded.contains("LogicalUnload"));
         assert!(!expanded.contains("MacroRuntime :: new ()"));
     }
 

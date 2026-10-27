@@ -211,11 +211,13 @@ def AsyncDrained (r : Resources) : Prop :=
 def SubscriptionsDrained (r : Resources) : Prop :=
   r.subscriptions = 0 ∧ r.callbacks = 0
 
+/-- Logical teardown drains executable RTD work. Externally retained COM shells
+    may outlive it only while their entry points remain resident. Backend and
+    callback drain obligations remain in the separate certificates. -/
 def RtdDrained (r : Resources) : Prop :=
   r.rtdOperations = 0 ∧
-  r.rtdClassFactories = 0 ∧
-  r.rtdServers = 0 ∧
-  r.rtdServerLocks = 0
+  ((r.rtdClassFactories = 0 ∧ r.rtdServers = 0 ∧ r.rtdServerLocks = 0) ∨
+    r.moduleResidencyHeld = true)
 
 def HandlesDrained (r : Resources) : Prop :=
   r.handles = 0 ∧ r.handlePins = 0 ∧ r.handleObjects = 0
@@ -239,19 +241,36 @@ def Quiescent (r : Resources) : Prop :=
   r.GenerationReclaimed ∧
   r.DiagnosticsDrained
 
-/-- Logical quiescence alone does not permit releasing the module. An event
-    registration still lets Excel call its native trampoline after close. -/
+/-- Logical quiescence alone does not permit releasing the module. Native event
+    roots and retained COM ownership still let Excel call module code. -/
 def PhysicalUnloadSafe (r : Resources) : Prop :=
-  r.Quiescent ∧ r.residentEventRegistrations = 0
+  r.Quiescent ∧ r.residentEventRegistrations = 0 ∧
+  r.rtdClassFactories = 0 ∧ r.rtdServers = 0 ∧ r.rtdServerLocks = 0
 
 theorem physicalUnloadSafe_has_no_resident_events {r : Resources}
-    (h : r.PhysicalUnloadSafe) : r.residentEventRegistrations = 0 := h.2
+    (h : r.PhysicalUnloadSafe) : r.residentEventRegistrations = 0 := h.2.1
 
 theorem resident_events_prevent_physical_unload {r : Resources}
     (h : r.residentEventRegistrations > 0) : ¬ r.PhysicalUnloadSafe := by
   intro hSafe
-  have hZero := hSafe.2
+  have hZero := hSafe.2.1
   omega
+
+theorem retained_com_roots_prevent_physical_unload {r : Resources}
+    (h : r.rtdClassFactories > 0 ∨ r.rtdServers > 0 ∨ r.rtdServerLocks > 0) :
+    ¬ r.PhysicalUnloadSafe := by
+  intro hSafe
+  rcases hSafe.2.2 with ⟨hFactories, hServers, hLocks⟩
+  omega
+
+theorem rtdDrained_with_retained_com_roots_requires_lease {r : Resources}
+    (hDrained : r.RtdDrained)
+    (hRoots : r.rtdClassFactories > 0 ∨ r.rtdServers > 0 ∨ r.rtdServerLocks > 0) :
+    r.moduleResidencyHeld = true := by
+  rcases hDrained.2 with hZero | hLease
+  · rcases hZero with ⟨hFactories, hServers, hLocks⟩
+    omega
+  · exact hLease
 
 def CleanupComplete (r : Resources) : Prop :=
   r.cleanupIssues = 0

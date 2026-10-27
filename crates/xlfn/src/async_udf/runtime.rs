@@ -1,6 +1,9 @@
 use super::calculation::CalculationEpoch;
 use super::executor::AsyncExecutor;
-use super::registry::{CalculationSnapshot, TaskRegistry, TaskReservation, cancel_tasks};
+use super::registry::{
+    CalculationSnapshot, RegistryClose, TaskRegistry, TaskReservation, TasksCancelled,
+    TasksDrained, cancel_tasks,
+};
 use crate::cancellation::CancellationSource;
 use crate::sync::{Condvar, Mutex};
 use crate::{XllError, XllResult};
@@ -28,7 +31,7 @@ impl AsyncStopped {
 /// certificate requires registry drain followed by successful executor stop.
 pub(crate) struct AsyncRuntime<E: AsyncExecutor> {
     registry: OnceLock<PublishedOwner<TaskRegistry>>,
-    pub(crate) state: Mutex<ExecutorSlot<E>>,
+    state: Mutex<ExecutorSlot<E>>,
     publication: AtomicPtr<E>,
     spawn_admission: DrainGate,
     state_changed: Condvar,
@@ -38,7 +41,7 @@ pub(crate) struct AsyncRuntime<E: AsyncExecutor> {
     before_submit: Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
 }
 
-pub(crate) enum ExecutorSlot<E> {
+pub(super) enum ExecutorSlot<E> {
     Stopped,
     Starting,
     Running(PublishedOwner<E>),
@@ -100,9 +103,9 @@ impl<E: AsyncExecutor> RuntimeReservation<'_, E> {
                 let brand = crate::handle::GenerationLeaseBrand;
                 let scope = super::task_scope::AsyncTaskScope::new(generation, &brand);
                 let (future, delivery) = build.build_task(scope);
-                // SAFETY: late-bound builders cannot borrow the caller stack. The
-                // committed task already owns its calculation pin and activity.
-                let future = unsafe { super::task_scope::erase_scoped_task_future(future) };
+                // The inner future borrows this task's brand until delivery and
+                // destruction finish. The enclosing task owns all captured data,
+                // so it remains 'static without erasing the inner lifetime.
                 B::deliver(delivery, future).await;
             },
             cancellation,
@@ -312,15 +315,14 @@ impl<E: AsyncExecutor> AsyncRuntime<E> {
     }
 
     pub(crate) fn close(&self) -> XllResult<crate::shutdown::StopOutcome<AsyncStopped>> {
-        self.close_with_task_drain(|registry| {
-            registry.wait_idle();
-            Ok(())
-        })
+        self.close_with_task_drain(|closing| Ok(closing.wait()))
     }
 
     fn close_with_task_drain(
         &self,
-        wait_for_tasks: impl FnOnce(&TaskRegistry) -> XllResult<()>,
+        wait_for_tasks: impl for<'a> FnOnce(
+            RegistryClose<'a, TasksCancelled>,
+        ) -> XllResult<RegistryClose<'a, TasksDrained>>,
     ) -> XllResult<crate::shutdown::StopOutcome<AsyncStopped>> {
         self.registry().close_admission();
         let Some(executor) = self.take_for_close() else {
@@ -330,26 +332,37 @@ impl<E: AsyncExecutor> AsyncRuntime<E> {
             });
         };
         // No publication reader can enter executor reserve/submit after this
-        // drain. Cancellation keeps executor alive to drive abort wakes.
+        // drain. Cancellation keeps executor alive to drive task wakes.
         self.registry().close_admission();
         self.spawn_admission.wait_until_idle();
-        let tasks = self.registry().request_close();
-        cancel_tasks(tasks);
-        if let Err(error) = wait_for_tasks(self.registry()) {
-            *self.state.lock() = ExecutorSlot::Closing(Some(executor));
-            self.state_changed.notify_all();
-            return Err(error);
-        }
+        let closing = match self.registry().request_close() {
+            Ok(closing) => closing.cancel(),
+            Err(error) => {
+                *self.state.lock() = ExecutorSlot::Closing(Some(executor));
+                self.state_changed.notify_all();
+                return Err(error);
+            }
+        };
+        let drained = match wait_for_tasks(closing) {
+            Ok(drained) => drained,
+            Err(error) => {
+                *self.state.lock() = ExecutorSlot::Closing(Some(executor));
+                self.state_changed.notify_all();
+                return Err(error);
+            }
+        };
         let stopped = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
             executor.shutdown()
         }))
         .unwrap_or(Err(XllError::Panic));
         if let Err(error) = stopped {
+            // Release this attempt before publishing the executor for a retry.
+            drop(drained);
             *self.state.lock() = ExecutorSlot::Closing(Some(executor));
             self.state_changed.notify_all();
             return Err(error);
         }
-        self.registry().finish_close();
+        drained.finish();
         let disposal =
             crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| drop(executor)));
         *self.state.lock() = ExecutorSlot::Stopped;
@@ -371,19 +384,11 @@ impl<E: AsyncExecutor> AsyncRuntime<E> {
 
     #[cfg(all(test, feature = "async-builtin"))]
     pub(crate) fn close_with_timeout(&self, timeout: std::time::Duration) -> XllResult<()> {
-        self.close_with_task_drain(|registry| {
-            if registry.wait_idle_timeout(timeout) {
-                Ok(())
-            } else {
-                Err(XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::ASYNC_TIME,
-                })
-            }
-        })?
-        .issues
-        .into_iter()
-        .next()
-        .map_or(Ok(()), |issue| Err(issue.error))
+        self.close_with_task_drain(|closing| closing.wait_timeout(timeout))?
+            .issues
+            .into_iter()
+            .next()
+            .map_or(Ok(()), |issue| Err(issue.error))
     }
 
     fn take_for_close(&self) -> Option<PublishedOwner<E>> {
@@ -423,6 +428,16 @@ impl<E: AsyncExecutor> AsyncRuntime<E> {
     #[cfg(test)]
     pub(crate) fn is_running(&self) -> bool {
         matches!(*self.state.lock(), ExecutorSlot::Running(_))
+    }
+
+    #[cfg(all(test, feature = "async-builtin"))]
+    pub(super) fn executor_state(&self) -> impl Deref<Target = ExecutorSlot<E>> + '_ {
+        self.state.lock()
+    }
+
+    #[cfg(all(test, feature = "async-builtin"))]
+    pub(super) fn try_executor_state(&self) -> Option<impl Deref<Target = ExecutorSlot<E>> + '_> {
+        self.state.try_lock()
     }
     pub(crate) fn is_stopped(&self) -> bool {
         matches!(*self.state.lock(), ExecutorSlot::Stopped)

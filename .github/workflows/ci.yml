@@ -78,6 +78,9 @@ jobs:
             - name: Build the public API reference without warnings
               run: just doc
 
+            - name: Check private lifecycle typestate contracts
+              run: just typestate
+
             - name: Verify release metadata and crate archives without publishing
               run: just package-check
 
@@ -186,6 +189,7 @@ jobs:
               shell: pwsh
               env:
                   XLFN_WINDOWS_RTD_TRACE: ${{ github.workspace }}\windows-rtd-shutdown-trace-${{ matrix.target }}.json
+                  XLFN_WINDOWS_RTD_RETAINED_TRACE_DIR: ${{ github.workspace }}\windows-rtd-retained-traces-${{ matrix.target }}
                   XLFN_HANDLE_REFINEMENT_TRACE_DIR: ${{ github.workspace }}\windows-handle-refinement-traces-${{ matrix.target }}
               run: |
                   cargo test `
@@ -201,6 +205,13 @@ jobs:
               with:
                   name: windows-rtd-shutdown-trace-${{ matrix.target }}
                   path: windows-rtd-shutdown-trace-${{ matrix.target }}.json
+                  if-no-files-found: error
+
+            - name: Upload Windows retained RTD close and reopen traces
+              uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+              with:
+                  name: windows-rtd-retained-traces-${{ matrix.target }}
+                  path: windows-rtd-retained-traces-${{ matrix.target }}
                   if-no-files-found: error
 
             - name: Upload Windows H4 handle refinement traces
@@ -449,6 +460,12 @@ jobs:
                   path: windows-rtd-shutdown-traces
                   merge-multiple: true
 
+            - name: Download Windows retained RTD close and reopen traces
+              uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+              with:
+                  pattern: windows-rtd-retained-traces-*
+                  path: windows-rtd-retained-traces
+
             - name: Download Windows H4 handle refinement traces
               uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
               with:
@@ -516,6 +533,26 @@ jobs:
                   fi
                   for trace in "${traces[@]}"; do
                     formal/.lake/build/bin/shutdown_trace_checker < "$trace"
+                  done
+
+            - name: Validate Windows retained RTD close and reopen traces
+              shell: bash
+              run: |
+                  trace_root=windows-rtd-retained-traces
+                  targets=(
+                    i686-pc-windows-msvc
+                    x86_64-pc-windows-msvc
+                  )
+                  for target in "${targets[@]}"; do
+                    directory="$trace_root/windows-rtd-retained-traces-$target"
+                    for scenario in close reopen; do
+                      trace="$directory/$scenario.json"
+                      if [ ! -f "$trace" ]; then
+                        echo "Missing Windows retained RTD trace: $trace" >&2
+                        exit 1
+                      fi
+                      formal/.lake/build/bin/shutdown_trace_checker < "$trace"
+                    done
                   done
 
             - name: Validate Windows H4 handle refinement traces

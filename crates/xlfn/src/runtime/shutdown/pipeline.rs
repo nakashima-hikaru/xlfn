@@ -645,19 +645,12 @@ impl ModuleAuthorityRecovery for ResourcesReclaimed {
     }
 }
 
-fn recover_stage<S: ModuleAuthorityRecovery>(
-    stage: S,
-) -> crate::module_runtime::ModuleCleanupAuthority {
-    stage.recover_module_authority()
-}
-
 /// A linear teardown transaction parameterized by its terminal policy and
 /// current stage. Dropping an incomplete transaction quarantines the runtime;
 /// successful transitions consume the old stage and return the next one.
-pub(crate) struct TeardownTxn<'runtime, A: Addin, K, S> {
+pub(crate) struct TeardownTxn<'runtime, A: Addin, K, S: ModuleAuthorityRecovery> {
     owner: TeardownOwner<'runtime, A>,
     stage: Option<S>,
-    recover: fn(S) -> crate::module_runtime::ModuleCleanupAuthority,
     _kind: PhantomData<K>,
 }
 
@@ -707,31 +700,23 @@ impl<A: Addin> Drop for TeardownOwner<'_, A> {
     }
 }
 
-impl<'runtime, A: Addin, K, S> TeardownTxn<'runtime, A, K, S> {
+impl<'runtime, A: Addin, K, S: ModuleAuthorityRecovery> TeardownTxn<'runtime, A, K, S> {
     pub(crate) fn new(
         deps: ShutdownDeps<'runtime, A>,
         owner: RemovalOwner<'runtime, A>,
         stage: S,
-    ) -> Self
-    where
-        S: ModuleAuthorityRecovery,
-    {
+    ) -> Self {
         Self {
             owner: TeardownOwner::new(deps, owner),
             stage: Some(stage),
-            recover: recover_stage::<S>,
             _kind: PhantomData,
         }
     }
 
-    fn from_parts(owner: TeardownOwner<'runtime, A>, stage: S) -> Self
-    where
-        S: ModuleAuthorityRecovery,
-    {
+    fn from_parts(owner: TeardownOwner<'runtime, A>, stage: S) -> Self {
         Self {
             owner,
             stage: Some(stage),
-            recover: recover_stage::<S>,
             _kind: PhantomData,
         }
     }
@@ -757,12 +742,12 @@ impl<'runtime, A: Addin, K, S> TeardownTxn<'runtime, A, K, S> {
     }
 }
 
-impl<A: Addin, K, S> Drop for TeardownTxn<'_, A, K, S> {
+impl<A: Addin, K, S: ModuleAuthorityRecovery> Drop for TeardownTxn<'_, A, K, S> {
     fn drop(&mut self) {
         let Some(stage) = self.stage.take() else {
             return;
         };
-        let authority = (self.recover)(stage);
+        let authority = stage.recover_module_authority();
         self.owner.return_module_authority(authority);
     }
 }

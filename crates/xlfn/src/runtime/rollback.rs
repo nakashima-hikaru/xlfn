@@ -36,7 +36,7 @@ pub(crate) struct OpenRollbackOutcome {
 }
 
 pub(crate) fn active_runtime_generation<A: Addin>(
-    runtime: &Runtime<A>,
+    runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
 ) -> Option<RuntimeGeneration> {
     runtime.protocol_generation()
 }
@@ -59,7 +59,7 @@ impl OpenRollbackOutcome {
 }
 
 fn incomplete<A: Addin>(
-    runtime: &Runtime<A>,
+    runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     hazard: crate::shutdown::UnloadHazard,
 ) -> OpenRollbackOutcome {
     // The transaction's affine cleanup authority is still held by stack
@@ -72,7 +72,7 @@ fn incomplete<A: Addin>(
 }
 
 pub(crate) fn rollback_open<A>(
-    runtime: &Runtime<A>,
+    runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     lifecycle: &AddinLifecycleAccess<'_, A>,
     callbacks: &mut HostCallbackSession,
     generation: Option<RuntimeGeneration>,
@@ -315,14 +315,22 @@ where
         }
     };
 
-    let rtd_quiescent = match crate::excel_rtd_protocol::wait_for_module_quiescence() {
+    let rtd_quiescent = match crate::excel_rtd_protocol::wait_for_module_quiescence(
+        runtime.module_residency_held(),
+    ) {
         Ok(certificate) => certificate,
         Err(failure) => {
             let error = XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_GIT_QUIESCENCE,
+                diagnostic_id: if failure.missing_module_residency {
+                    crate::diagnostics::id::DiagnosticId::MODULE_RESIDENCY
+                } else {
+                    crate::diagnostics::id::DiagnosticId::RTD_GIT_QUIESCENCE
+                },
             };
             report_boundary_error("xlAutoOpen RTD quiescence rollback", &error);
-            let hazard = if failure.revocation_debt != 0 {
+            let hazard = if failure.missing_module_residency {
+                crate::shutdown::UnloadHazard::RtdComObjectsWithoutResidency
+            } else if failure.revocation_debt != 0 {
                 crate::shutdown::UnloadHazard::RtdGitRevocationDebt
             } else {
                 crate::shutdown::UnloadHazard::RtdGitCallbackStillRegistered

@@ -384,11 +384,13 @@ impl TopicTable {
         if state.closed {
             return Err(XllError::Closing);
         }
-        if let Some(initialization) = state.initializing.get(&key).cloned() {
+        if let Some(initialization) = state.initializing.get(&key) {
             if initialization.owner == owner {
                 return Err(XllError::ReentrantCall);
             }
-            return Ok(PrepareDecision::Wait { initialization });
+            return Ok(PrepareDecision::Wait {
+                initialization: initialization.clone(),
+            });
         }
         if let Some(topic) = state.by_key.get(&key) {
             return Ok(PrepareDecision::Existing {
@@ -403,11 +405,13 @@ impl TopicTable {
         if state.closed {
             return Err(XllError::Closing);
         }
-        if let Some(initialization) = state.initializing.get(&key).cloned() {
+        if let Some(initialization) = state.initializing.get(&key) {
             if initialization.owner == owner {
                 return Err(XllError::ReentrantCall);
             }
-            return Ok(PrepareDecision::Wait { initialization });
+            return Ok(PrepareDecision::Wait {
+                initialization: initialization.clone(),
+            });
         }
         if let Some(topic) = state.by_key.get(&key) {
             return Ok(PrepareDecision::Existing {
@@ -591,7 +595,7 @@ impl TopicTable {
         &self,
         key: HandleTopicKey,
         generation: TopicGeneration,
-        initialization: InitializationPtr,
+        initialization: &InitializationPtr,
         publication: PublishedTopicPtr,
         on_linearized: impl FnOnce(),
     ) -> XllResult<()> {
@@ -599,7 +603,7 @@ impl TopicTable {
         if state.closed || state.generation != generation {
             return Err(XllError::Closing);
         }
-        if state.initializing.get(&key) != Some(&initialization) {
+        if state.initializing.get(&key) != Some(initialization) {
             return Err(XllError::StaleHandle);
         }
         let Some(topic) = state.by_key.get_mut(&key) else {
@@ -621,10 +625,10 @@ impl TopicTable {
     pub(crate) fn finish_initialization(
         &self,
         key: HandleTopicKey,
-        initialization: InitializationPtr,
+        initialization: &InitializationPtr,
     ) -> bool {
         let mut state = self.state.write();
-        if state.initializing.get(&key) == Some(&initialization) {
+        if state.initializing.get(&key) == Some(initialization) {
             state.initializing.remove(&key);
             true
         } else {

@@ -372,7 +372,10 @@ impl AsyncReturnValue {
 #[cfg(test)]
 #[doc(hidden)]
 #[must_use]
-pub(crate) fn ffi_boundary<A, F, T>(runtime: &'static Runtime<A>, operation: F) -> *mut XLOPER12
+pub(crate) fn ffi_boundary<A, F, T>(
+    runtime: &'static Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+    operation: F,
+) -> *mut XLOPER12
 where
     A: crate::Addin,
     F: FnOnce() -> XllResult<T>,
@@ -415,7 +418,10 @@ where
 /// wrappers, async calculation lifecycle exports, and similar void-returning
 /// Excel callbacks.
 #[doc(hidden)]
-pub(crate) fn ffi_boundary_void<A: crate::Addin>(runtime: &Runtime<A>, operation: impl FnOnce()) {
+pub(crate) fn ffi_boundary_void<A: crate::Addin>(
+    runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+    operation: impl FnOnce(),
+) {
     let ingress = match crate::module_runtime::ingress()
         .enter_with(|| {})
         .into_admitted()
@@ -507,7 +513,7 @@ impl SyncReturnAbi for NumericReturnAbi {
 /// Runs a generated Q UDF with common execution and shutdown protection.
 #[must_use]
 pub(crate) fn udf_boundary_named<A, F>(
-    runtime: &'static Runtime<A>,
+    runtime: &'static Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     udf_id: &'static str,
     excel_name: &'static str,
     operation: F,
@@ -525,7 +531,7 @@ where
 /// Runs a generated K% UDF; null is Excel's #NUM! pointer result.
 #[must_use]
 pub(crate) fn udf_boundary_numeric_named<A, F>(
-    runtime: &'static Runtime<A>,
+    runtime: &'static Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     udf_id: &'static str,
     excel_name: &'static str,
     operation: F,
@@ -541,7 +547,7 @@ where
 }
 
 fn report_sync_panic<A: crate::Addin>(
-    runtime: &Runtime<A>,
+    runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     udf_id: &'static str,
     call_id: CallId,
     calculation_id: crate::execution::CalculationId,
@@ -557,7 +563,7 @@ fn report_sync_panic<A: crate::Addin>(
 }
 
 fn report_sync_failure<A: crate::Addin, B: SyncReturnAbi>(
-    runtime: &Runtime<A>,
+    runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     udf_id: &'static str,
     call_id: Option<CallId>,
     calculation_id: crate::execution::CalculationId,
@@ -574,7 +580,7 @@ fn report_sync_failure<A: crate::Addin, B: SyncReturnAbi>(
 }
 
 fn sync_boundary<A, B, F>(
-    runtime: &'static Runtime<A>,
+    runtime: &'static Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     udf_id: &'static str,
     excel_name: &'static str,
     operation: F,
@@ -650,7 +656,7 @@ where
     reason = "Shared UDF boundary carries ABI and invocation authority"
 )]
 fn sync_boundary_inner<A, B, F>(
-    runtime: &Runtime<A>,
+    runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     guard: &crate::runtime::CallGuard<'_, A>,
     producer: &mut ReturnProducerGuard<'static>,
     numeric: &numeric::Fp12CallGuard,
@@ -1298,12 +1304,12 @@ mod tests {
         unsafe impl crate::PhysicallyUnloadableAddin for EmptyPhysicalAddin {}
 
         let _test = test_lock();
-        static RUNTIME: Runtime<EmptyPhysicalAddin> = Runtime::new_with_physical_unload();
+        static RUNTIME: Runtime<EmptyPhysicalAddin, crate::runtime::PhysicalUnload> =
+            Runtime::new_with_physical_unload();
         let runtime = &RUNTIME;
+        fn residency_probe_anchor() {}
         runtime
-            .ensure_module_residency(
-                crate::boundary::host::host_auto_close::<EmptyPhysicalAddin> as *const (),
-            )
+            .ensure_module_residency(residency_probe_anchor as *const ())
             .unwrap();
         let opening = runtime.begin_open().unwrap();
         let mut opening = runtime.publish(opening, (), ());

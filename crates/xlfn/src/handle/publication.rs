@@ -50,7 +50,7 @@ impl Drop for TopicReservation<'_> {
         if self
             .runtime
             .topics
-            .finish_initialization(self.key, self.initialization.clone())
+            .finish_initialization(self.key, &self.initialization)
         {
             self.runtime
                 .refinement
@@ -178,7 +178,7 @@ impl<'runtime> PublicationReservation<'runtime> {
 
     pub(super) fn insert_object<T: ExcelHandleObject>(
         self,
-        prepared: PreparedHandleObject<'runtime>,
+        prepared: PreparedHandleObject<'runtime, T>,
     ) -> XllResult<InsertedPublication<'runtime>> {
         let (token, _binding_id, _object_id, reused) = match prepared {
             PreparedHandleObject::New(value) => self
@@ -275,7 +275,7 @@ impl ObservedPublicationTxn<'_> {
         runtime.commit_publication(
             key,
             generation,
-            reservation.initialization.clone(),
+            &reservation.initialization,
             publication,
             &provisional.token,
         )?;

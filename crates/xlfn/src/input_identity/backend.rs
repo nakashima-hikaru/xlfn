@@ -158,6 +158,7 @@ impl InputIdentityEncoder {
     /// Appends converted numeric cells with the same framing as repeated
     /// `f64` calls. Selects the hashed sink once for the remaining sequence;
     /// validation stays with the iterator and completes before lookup.
+    #[inline(always)]
     pub(crate) fn f64_sequence(
         &mut self,
         mut values: impl Iterator<Item = XllResult<f64>>,

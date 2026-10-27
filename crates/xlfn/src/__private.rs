@@ -53,8 +53,6 @@ pub mod v1 {
 
     #[cfg(feature = "async")]
     use std::future::Future;
-    #[cfg(all(feature = "async", feature = "handles"))]
-    use std::pin::Pin;
 
     use crate::addin::{Addin, PhysicallyUnloadableAddin};
     use crate::boundary::host::{host_auto_close, host_auto_open, host_auto_remove};
@@ -68,12 +66,15 @@ pub mod v1 {
     pub use crate::return_abi::metadata::AddinMetadata;
     use crate::return_abi::{free_return_boundary, udf_boundary_named};
     use crate::runtime::Runtime;
+    #[doc(hidden)]
+    pub use crate::runtime::{LogicalUnload, PhysicalUnload, UnloadPolicy};
     #[cfg(any(feature = "handles", test))]
     pub use crate::value::input::FormulaInputMode;
     pub use crate::value::input::{
-        ArgumentContext, ExcelInputIdentity, ExcelParameter, InputMode, PlainInputMode,
-        PreparedArgument, argument_from_raw, argument_from_raw_with_arguments,
-        cell_presence_from_raw,
+        ArgumentContext, ArgumentMaterializer, ExcelInputIdentity, ExcelParameter, InputMode,
+        PlainInputMode, PreparedArgument, PreparedElement, PreparedParameter,
+        PreparedParameterSequence, ReadyArgument, argument_from_raw,
+        argument_from_raw_with_arguments, cell_presence_from_raw,
     };
     #[doc(hidden)]
     pub use crate::value::output::ExcelCellSink;
@@ -122,7 +123,9 @@ pub mod v1 {
 
     #[cfg(any(feature = "rtd", feature = "handles"))]
     #[doc(hidden)]
-    pub fn dll_can_unload_now<A: Addin>(runtime: &'static MacroRuntime<A>) -> i32 {
+    pub fn dll_can_unload_now<A: Addin>(
+        runtime: &'static MacroRuntime<A, impl UnloadPolicy<A>>,
+    ) -> i32 {
         if runtime.runtime().module_residency_held() {
             1 // COM S_FALSE: the XLL still owns its physical residency lease.
         } else {
@@ -186,20 +189,6 @@ pub mod v1 {
     #[doc(hidden)]
     pub use crate::value::input::CellPresence;
     pub use xlfn_common::{ExecutionKind, FunctionVisibility};
-
-    /// Boxes a future at the narrow generated async-task boundary while
-    /// preserving its inferred scope lifetime.
-    #[cfg(all(feature = "async", feature = "handles"))]
-    #[doc(hidden)]
-    pub fn box_scoped_future<'scope, T, F>(
-        _: AsyncTaskScope<'scope>,
-        future: F,
-    ) -> Pin<Box<dyn Future<Output = T> + Send + 'scope>>
-    where
-        F: Future<Output = T> + Send + 'scope,
-    {
-        Box::pin(future)
-    }
 
     /// Asserts at compile-time that `T` implements `ExcelParameter`.
     #[doc(hidden)]
@@ -275,11 +264,11 @@ pub mod v1 {
 
     /// Opaque wrapper around the add-in [`Runtime`] for generated code.
     #[doc(hidden)]
-    pub struct MacroRuntime<A: Addin> {
-        runtime: Runtime<A>,
+    pub struct MacroRuntime<A: Addin, P: UnloadPolicy<A> = LogicalUnload> {
+        runtime: Runtime<A, P>,
     }
 
-    impl<A: Addin> MacroRuntime<A> {
+    impl<A: Addin> MacroRuntime<A, LogicalUnload> {
         #[doc(hidden)]
         pub const fn new() -> Self {
             Self {
@@ -288,24 +277,28 @@ pub mod v1 {
         }
 
         #[doc(hidden)]
-        pub const fn new_with_physical_unload() -> Self
+        pub const fn new_with_physical_unload() -> MacroRuntime<A, PhysicalUnload>
         where
             A: PhysicallyUnloadableAddin,
         {
-            Self {
+            MacroRuntime {
                 runtime: Runtime::new_with_physical_unload(),
             }
         }
+    }
 
+    impl<A: Addin, P: UnloadPolicy<A>> MacroRuntime<A, P> {
         #[doc(hidden)]
-        pub const fn runtime(&self) -> &Runtime<A> {
+        pub const fn runtime(&self) -> &Runtime<A, P> {
             &self.runtime
         }
     }
 
-    impl<A: Addin> Default for MacroRuntime<A> {
+    impl<A: Addin, P: UnloadPolicy<A>> Default for MacroRuntime<A, P> {
         fn default() -> Self {
-            Self::new()
+            Self {
+                runtime: Runtime::default(),
+            }
         }
     }
 
@@ -394,7 +387,7 @@ pub mod v1 {
     /// Retains the quarantine if a newly acquired self-reference cannot be
     /// released after an opening transaction fails.
     fn release_open_residency_after_failure<A: Addin>(
-        runtime: &MacroRuntime<A>,
+        runtime: &MacroRuntime<A, impl UnloadPolicy<A>>,
         newly_acquired: bool,
     ) {
         // Only a failure before application initialization or a completed
@@ -424,7 +417,7 @@ pub mod v1 {
         reason = "Excel lifecycle entrypoint grants callback authority"
     )]
     pub unsafe fn open_generated_addin<A: Addin>(
-        runtime: &'static MacroRuntime<A>,
+        runtime: &'static MacroRuntime<A, impl UnloadPolicy<A>>,
         addin_id: &'static str,
         _display_name: &'static str,
         default_category: &'static str,
@@ -481,7 +474,9 @@ pub mod v1 {
         unsafe_code,
         reason = "Excel lifecycle entrypoint grants callback authority"
     )]
-    pub unsafe fn auto_close_generated_addin<A: Addin>(runtime: &'static MacroRuntime<A>) -> i32 {
+    pub unsafe fn auto_close_generated_addin<A: Addin>(
+        runtime: &'static MacroRuntime<A, impl UnloadPolicy<A>>,
+    ) -> i32 {
         #[cfg(feature = "lifecycle-diagnostics")]
         let diagnostic =
             crate::lifecycle_diagnostics::Boundary::enter("xlAutoClose", runtime.runtime().phase());
@@ -502,7 +497,9 @@ pub mod v1 {
         unsafe_code,
         reason = "Excel lifecycle entrypoint grants callback authority"
     )]
-    pub unsafe fn auto_remove_generated_addin<A: Addin>(runtime: &'static MacroRuntime<A>) -> i32 {
+    pub unsafe fn auto_remove_generated_addin<A: Addin>(
+        runtime: &'static MacroRuntime<A, impl UnloadPolicy<A>>,
+    ) -> i32 {
         #[cfg(feature = "lifecycle-diagnostics")]
         let diagnostic = crate::lifecycle_diagnostics::Boundary::enter(
             "xlAutoRemove",
@@ -598,7 +595,7 @@ pub mod v1 {
             index: usize,
             name: &'static str,
             value: T,
-        ) -> XllResult<PreparedArgument<T, T::Prepared>> {
+        ) -> XllResult<PreparedParameter<'call, T, M>> {
             self.arguments.record_decoded(index, name, &value)?;
             Ok(PreparedArgument::Ready(value))
         }
@@ -609,7 +606,7 @@ pub mod v1 {
             index: usize,
             name: &'static str,
             raw: f64,
-        ) -> XllResult<PreparedArgument<f64, ()>> {
+        ) -> XllResult<ReadyArgument<f64>> {
             self.native_f64(index, name, raw)
                 .map(PreparedArgument::Ready)
         }
@@ -620,7 +617,7 @@ pub mod v1 {
             index: usize,
             name: &'static str,
             raw: i16,
-        ) -> XllResult<PreparedArgument<bool, ()>> {
+        ) -> XllResult<ReadyArgument<bool>> {
             self.native_bool(index, name, raw)
                 .map(PreparedArgument::Ready)
         }
@@ -631,7 +628,7 @@ pub mod v1 {
             index: usize,
             name: &'static str,
             raw: i32,
-        ) -> XllResult<PreparedArgument<i32, ()>> {
+        ) -> XllResult<ReadyArgument<i32>> {
             self.native_i32(index, name, raw)
                 .map(PreparedArgument::Ready)
         }
@@ -648,7 +645,13 @@ pub mod v1 {
             index: usize,
             name: &'static str,
             raw: *const u16,
-        ) -> XllResult<PreparedArgument<String, crate::value::PreparedString<'call>>> {
+        ) -> XllResult<
+            PreparedArgument<
+                String,
+                crate::value::PreparedString<'call>,
+                crate::value::input::OwnedStringMaterializer,
+            >,
+        > {
             // SAFETY: the generated wrapper forwards Excel's live string argument.
             unsafe { self.arguments.prepare_native_string(index, name, raw) }
         }
@@ -666,8 +669,13 @@ pub mod v1 {
             index: usize,
             name: &'static str,
             raw: *const u16,
-        ) -> XllResult<PreparedArgument<&'call str, crate::value::PreparedBorrowedString<'call>>>
-        {
+        ) -> XllResult<
+            PreparedArgument<
+                &'call str,
+                crate::value::PreparedBorrowedString<'call>,
+                crate::value::input::BorrowedStringMaterializer,
+            >,
+        > {
             // SAFETY: the generated wrapper forwards Excel's live string argument.
             unsafe { self.arguments.prepare_native_str(index, name, raw) }
         }
@@ -719,7 +727,7 @@ pub mod v1 {
             index: usize,
             name: &'static str,
             raw: *mut xlfn_sys::XLOPER12,
-        ) -> XllResult<PreparedArgument<T, T::Prepared>> {
+        ) -> XllResult<PreparedParameter<'call, T, M>> {
             // SAFETY: Excel owns raw for the duration of this synchronous call.
             let borrowed =
                 unsafe { crate::value::XlValueRef::from_raw(raw) }.map_err(
@@ -749,7 +757,7 @@ pub mod v1 {
             index: usize,
             name: &'static str,
             raw: *const xlfn_sys::FP12,
-        ) -> XllResult<PreparedArgument<crate::value::NumericMatrixRef<'call>, ()>> {
+        ) -> XllResult<ReadyArgument<crate::value::NumericMatrixRef<'call>>> {
             // SAFETY: the generated wrapper forwards Excel's live FP12 argument.
             let value = unsafe { crate::value::NumericMatrixRef::from_raw(raw, name) }?;
             self.arguments.record_numeric_matrix(index, name, value)?;
@@ -913,7 +921,7 @@ pub mod v1 {
     #[doc(hidden)]
     #[allow(unsafe_code, reason = "Generated Excel entrypoint authority boundary")]
     pub unsafe fn sync_udf<A: Addin, R: ExcelReturn, F>(
-        runtime: &'static MacroRuntime<A>,
+        runtime: &'static MacroRuntime<A, impl UnloadPolicy<A>>,
         udf_id: &'static str,
         excel_name: &'static str,
         argument_count: usize,
@@ -946,7 +954,7 @@ pub mod v1 {
     #[doc(hidden)]
     #[allow(unsafe_code, reason = "Generated Excel entrypoint authority boundary")]
     pub unsafe fn sync_udf_fp12<A: Addin, R: NumericReturn, F>(
-        runtime: &'static MacroRuntime<A>,
+        runtime: &'static MacroRuntime<A, impl UnloadPolicy<A>>,
         udf_id: &'static str,
         excel_name: &'static str,
         argument_count: usize,
@@ -988,7 +996,7 @@ pub mod v1 {
     #[doc(hidden)]
     #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
     pub unsafe fn async_udf<A, R, F, Fut>(
-        runtime: &'static MacroRuntime<A>,
+        runtime: &'static MacroRuntime<A, impl UnloadPolicy<A>>,
         udf_id: &'static str,
         excel_name: &'static str,
         argument_count: usize,
@@ -1046,7 +1054,7 @@ pub mod v1 {
     #[doc(hidden)]
     #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
     pub unsafe fn async_udf_handle<A, R, F, Build>(
-        runtime: &'static MacroRuntime<A>,
+        runtime: &'static MacroRuntime<A, impl UnloadPolicy<A>>,
         udf_id: &'static str,
         excel_name: &'static str,
         argument_count: usize,
@@ -1095,7 +1103,9 @@ pub mod v1 {
     /// Cancels calculation in the async runtime.
     #[cfg(feature = "async")]
     #[doc(hidden)]
-    pub fn cancel_async_calculation<A: Addin>(runtime: &'static MacroRuntime<A>) {
+    pub fn cancel_async_calculation<A: Addin>(
+        runtime: &'static MacroRuntime<A, impl UnloadPolicy<A>>,
+    ) {
         // Excel can retain this export for the DLL lifetime. The common
         // boundary admits it only while a generation is published and keeps
         // that generation alive until cancellation returns.
@@ -1106,7 +1116,7 @@ pub mod v1 {
 
     /// Advances diagnostic calculation identity and async completion state.
     #[doc(hidden)]
-    pub fn end_calculation<A: Addin>(runtime: &'static MacroRuntime<A>) {
+    pub fn end_calculation<A: Addin>(runtime: &'static MacroRuntime<A, impl UnloadPolicy<A>>) {
         // Inactive generations must not advance calculation identity merely
         // because Excel still holds the module's event registration.
         ffi_boundary_void(runtime.runtime(), || {

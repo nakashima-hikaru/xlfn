@@ -125,9 +125,6 @@ theorem reachable_closed_has_no_executable_work
     current.resources.subscriptions = 0 ∧
     current.resources.callbacks = 0 ∧
     current.resources.rtdOperations = 0 ∧
-    current.resources.rtdClassFactories = 0 ∧
-    current.resources.rtdServers = 0 ∧
-    current.resources.rtdServerLocks = 0 ∧
     current.resources.handles = 0 ∧
     current.resources.handlePins = 0 ∧
     current.resources.handleObjects = 0 := by
@@ -143,9 +140,9 @@ theorem reachable_closed_has_no_executable_work
   rcases hReturns with ⟨hBlocks, hBlocksInFree, hFree⟩
   rcases hAsync with ⟨hTasks, hExecutor⟩
   rcases hSubscriptions with ⟨hSubscriptions, hCallbacks⟩
-  rcases hRtd with ⟨hOperations, hFactories, hServers, hLocks⟩
+  have hOperations := hRtd.1
   exact ⟨hExternal, hCalls, hBlocks, hBlocksInFree, hFree, hTasks, hExecutor,
-    hSubscriptions, hCallbacks, hOperations, hFactories, hServers, hLocks,
+    hSubscriptions, hCallbacks, hOperations,
     hHandles.1, hHandles.2.1, hHandles.2.2⟩
 
 theorem reachable_closed_has_isolated_host_and_no_dispatcher

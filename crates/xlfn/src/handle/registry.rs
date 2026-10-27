@@ -16,7 +16,6 @@ use crate::panic_boundary::catch_no_unwind;
 #[cfg(any(test, feature = "refinement"))]
 use crate::sync::Mutex;
 use crate::{XllError, XllResult};
-use std::any::{TypeId, type_name};
 use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
@@ -195,21 +194,12 @@ impl HandleRegistry {
             })
     }
 
-    #[allow(
-        unsafe_code,
-        reason = "Registry exclusively owns and drains the published arena"
-    )]
     pub(crate) fn new_object<'registry, T: Send + Sync + 'static>(
         &'registry self,
         value: T,
-    ) -> XllResult<PendingObjectBinding<'registry>> {
+    ) -> XllResult<PendingObjectBinding<'registry, T>> {
         let object_id = self.allocate_object_id()?;
-        // SAFETY: the registry retains this fixed allocation, pending bindings
-        // borrow it, published bindings belong to its table, and generated
-        // async pins drain before service retirement. Registry Drop validates
-        // all counts and final releases before recovering the allocation.
-        let binding = unsafe { ObjectArena::insert(&self.objects, object_id, value) }?;
-        PendingObjectBinding::new(self, binding)
+        PendingObjectBinding::new(self, object_id, value)
     }
 
     #[inline]
@@ -232,34 +222,32 @@ impl HandleRegistry {
     {
         let object = self.new_object(value.take().expect("pending handle value is armed"))?;
         object
-            .publish::<T>(self)
+            .publish(self)
             .map(|(token, _binding_id, _object_id, _reused)| token)
     }
 
     #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn publish_pending<'registry, T>(
         &'registry self,
-        pending: PendingObjectBinding<'registry>,
+        pending: PendingObjectBinding<'registry, T>,
     ) -> XllResult<(String, HandleId, ObjectId, bool)>
     where
         T: Send + Sync + 'static,
     {
-        pending.publish::<T>(self)
+        pending.publish(self)
     }
 
-    pub(crate) fn insert_pending_object_with_kind<T>(
+    // Only the typed PendingObjectBinding publication path calls this final
+    // erased storage boundary; the table owns heterogeneous object payloads.
+    pub(super) fn insert_pending_object(
         &self,
         value: &mut Option<ObjectBinding>,
-    ) -> XllResult<(String, HandleId, ObjectId, bool)>
-    where
-        T: Send + Sync + 'static,
-    {
+    ) -> XllResult<(String, HandleId, ObjectId, bool)> {
         if !self.is_open() {
             return Err(XllError::Closing);
         }
         let object = value.as_ref().expect("pending handle object is armed");
         self.check_object_arena(object)?;
-        self.validate_type::<T>(object)?;
         #[cfg(test)]
         self.pause_insert(InsertBoundary::BeforeReserve);
         let reservation = self.bindings.reserve()?;
@@ -297,21 +285,6 @@ impl HandleRegistry {
                 .recv_timeout(std::time::Duration::from_secs(10))
                 .unwrap();
         }
-    }
-
-    fn validate_type<T: Send + Sync + 'static>(&self, object: &ObjectBinding) -> XllResult<()> {
-        if object.object().type_id() == TypeId::of::<T>() {
-            return Ok(());
-        }
-        let actual_type = object.object().type_name();
-        let _ = catch_no_unwind(AssertUnwindSafe(|| {
-            tracing::warn!(
-                expected_type = type_name::<T>(),
-                actual_type,
-                "Excel handle object type mismatch"
-            );
-        }));
-        Err(XllError::InvalidHandle)
     }
 
     #[cfg(test)]
@@ -373,19 +346,7 @@ impl HandleRegistry {
         }
         // read_scoped's Live observation is the lookup linearization point.
         // The call permit protects projection and the result across withdrawal.
-        let record = binding.record();
-        let Some(value) = record.object().typed_projection::<T>() else {
-            let actual_type = record.object().type_name();
-            let _ = catch_no_unwind(AssertUnwindSafe(|| {
-                tracing::warn!(
-                    expected_type = type_name::<T>(),
-                    actual_type,
-                    "Excel handle type mismatch"
-                );
-            }));
-            return Err(XllError::InvalidHandle);
-        };
-        Ok(Handle::new(binding, value))
+        Handle::new(binding)
     }
 
     #[cfg(test)]

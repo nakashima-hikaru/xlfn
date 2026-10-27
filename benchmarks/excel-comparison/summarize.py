@@ -96,7 +96,7 @@ def summarize(records: list[dict]) -> list[dict]:
                           "excel_version", "excel_build", "excel_bitness", "host", "os",
                           "artifact_source", "artifact_architecture", "ci_commit", "ci_run_id")
             conditions += ("runner_commit", "runner_sources", "calculation_mode",
-                           "dump_on_failure", "shutdown_diagnostics")
+                           "dump_on_failure", "shutdown_diagnostics", "full_memory_dumps")
             if all(xlfn.get(key) == dna.get(key) for key in conditions):
                 left = xlfn["metrics"].get(metric)
                 right = dna["metrics"].get(metric)

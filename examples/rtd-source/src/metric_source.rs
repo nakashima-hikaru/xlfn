@@ -3,14 +3,12 @@ use std::{num::NonZeroUsize, time::Duration};
 use xlfn::{
     error::InputError,
     prelude::*,
-    rtd::{RtdChannelSource, RtdProducerErrorPolicy, RtdSender, RtdValue},
+    rtd::{RtdChannelSource, RtdProducerErrorPolicy, RtdSender, RtdSource, RtdValue},
 };
 
 use super::Client;
 
-pub(crate) type MetricSource = RtdChannelSource<RtdValue>;
-
-pub(crate) fn metric_source() -> MetricSource {
+pub(crate) fn metric_source() -> impl RtdSource<Value = RtdValue> {
     RtdChannelSource::new(NonZeroUsize::new(64).unwrap(), |topic| {
         let mut parts = topic.parts();
         let (Some(kind), Some(symbol), None) = (parts.next(), parts.next(), parts.next()) else {

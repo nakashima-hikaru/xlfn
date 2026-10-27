@@ -128,7 +128,9 @@ mod tests {
         )
     }
 
-    fn lifecycle_access<A: Addin>(runtime: &Runtime<A>) -> AddinLifecycleAccess<'_, A> {
+    fn lifecycle_access<A: Addin>(
+        runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+    ) -> AddinLifecycleAccess<'_, A> {
         runtime
             .bind_addin_lifecycle()
             .expect("test runs on the lifecycle thread")
@@ -914,7 +916,7 @@ mod tests {
         unsafe impl crate::subscription::RtdSubscription for TraceSubscription {
             fn request_cancel(&self) {}
 
-            fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
+            fn disconnect_and_wait(self) -> XllResult<()> {
                 Ok(())
             }
         }
@@ -1831,7 +1833,7 @@ mod tests {
         unsafe impl crate::subscription::RtdSubscription for OrderedSubscription {
             fn request_cancel(&self) {}
 
-            fn disconnect_and_wait(self: Box<Self>) -> XllResult<()> {
+            fn disconnect_and_wait(self) -> XllResult<()> {
                 self.events.lock().unwrap().push("subscription");
                 Ok(())
             }

@@ -151,14 +151,19 @@ struct BatchReport {
     latencies_ns: Vec<u64>,
 }
 
-fn run_worker_batch<'cache, const ALLOCATIONS: bool, const LATENCY: bool>(
-    cache: &'cache CalculationCache<u64, Payload>,
+fn run_worker_batch<'cache, K, F, const ALLOCATIONS: bool, const LATENCY: bool>(
+    cache: &'cache CalculationCache<K, Payload>,
     held: &mut [Option<CacheLease<'cache, Payload>>],
     next_key: &mut u64,
     key_stride: u64,
     payload_bytes: usize,
     operations: usize,
-) -> BatchReport {
+    make_key: &F,
+) -> BatchReport
+where
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+    F: Fn(u64) -> K,
+{
     let mut report = BatchReport {
         latencies_ns: if LATENCY {
             Vec::with_capacity(operations)
@@ -170,25 +175,33 @@ fn run_worker_batch<'cache, const ALLOCATIONS: bool, const LATENCY: bool>(
     let probe = ALLOCATIONS.then(AllocationProbe::start);
     for _ in 0..operations {
         let started = LATENCY.then(Instant::now);
-        let key = *next_key;
+        let serial = *next_key;
         *next_key = next_key
             .checked_add(key_stride)
             .expect("benchmark key space exhausted");
         let lease = cache
             .get_or_try_insert_with(
-                key,
+                make_key(serial),
                 |value| value.0.len(),
-                || Ok(Payload(vec![key as u8; payload_bytes].into_boxed_slice())),
+                || {
+                    let mut bytes = vec![serial as u8; payload_bytes].into_boxed_slice();
+                    bytes[..size_of::<u64>()].copy_from_slice(&serial.to_le_bytes());
+                    Ok(Payload(bytes))
+                },
             )
             .expect("reclamation benchmark initialization succeeds");
-        black_box((lease.0[0], lease.0[lease.0.len() - 1]));
+        assert_eq!(lease.0.len(), payload_bytes);
+        let actual = u64::from_le_bytes(lease.0[..size_of::<u64>()].try_into().unwrap());
+        assert_eq!(actual, serial);
+        assert_eq!(lease.0[payload_bytes - 1], serial as u8);
+        black_box((actual, lease.0[payload_bytes - 1]));
         if held.is_empty() {
             drop(lease);
         } else {
             // Retain each lease across 32 subsequent insertions on this
             // worker. Releasing the displaced lease belongs to the timed
             // operation, so its grace-period/reclamation cost is not hidden.
-            let index = ((key / key_stride) % held.len() as u64) as usize;
+            let index = ((serial / key_stride) % held.len() as u64) as usize;
             drop(held[index].replace(lease));
         }
         if let Some(started) = started {
@@ -214,9 +227,12 @@ fn run_worker_batch<'cache, const ALLOCATIONS: bool, const LATENCY: bool>(
     report
 }
 
-struct WorkerPool {
+struct WorkerPool<K>
+where
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+{
     // Retains the driver owner through worker shutdown, even without metrics.
-    _cache: Arc<CalculationCache<u64, Payload>>,
+    _cache: Arc<CalculationCache<K, Payload>>,
     start: Vec<SyncSender<RunMode>>,
     done: Receiver<BatchReport>,
     barrier: Arc<Barrier>,
@@ -224,13 +240,20 @@ struct WorkerPool {
     operations: usize,
 }
 
-impl WorkerPool {
-    fn new(
+impl<K> WorkerPool<K>
+where
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+{
+    fn new<F>(
         workload: Workload,
         worker_count: usize,
         payload_bytes: usize,
         operations: usize,
-    ) -> Self {
+        make_key: F,
+    ) -> Self
+    where
+        F: Fn(u64) -> K + Copy + Send + 'static,
+    {
         let cache = Arc::new(CalculationCache::new(RESIDENT_ENTRIES * payload_bytes));
         let barrier = Arc::new(Barrier::new(worker_count + 1));
         let (done_tx, done) = std::sync::mpsc::sync_channel(worker_count);
@@ -253,29 +276,32 @@ impl WorkerPool {
                 while let Ok(mode) = receiver.recv() {
                     barrier.wait();
                     let report = match mode {
-                        RunMode::Timing => run_worker_batch::<false, false>(
+                        RunMode::Timing => run_worker_batch::<K, F, false, false>(
                             &cache,
                             &mut held,
                             &mut next_key,
                             worker_count as u64,
                             payload_bytes,
                             operations,
+                            &make_key,
                         ),
-                        RunMode::Allocations => run_worker_batch::<true, false>(
+                        RunMode::Allocations => run_worker_batch::<K, F, true, false>(
                             &cache,
                             &mut held,
                             &mut next_key,
                             worker_count as u64,
                             payload_bytes,
                             operations,
+                            &make_key,
                         ),
-                        RunMode::Latency => run_worker_batch::<false, true>(
+                        RunMode::Latency => run_worker_batch::<K, F, false, true>(
                             &cache,
                             &mut held,
                             &mut next_key,
                             worker_count as u64,
                             payload_bytes,
                             operations,
+                            &make_key,
                         ),
                     };
                     if done.send(report).is_err() {
@@ -332,7 +358,10 @@ impl WorkerPool {
     }
 }
 
-impl Drop for WorkerPool {
+impl<K> Drop for WorkerPool<K>
+where
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+{
     fn drop(&mut self) {
         // Closing every channel lets workers release their final retained
         // leases before the driver's cache owner is dropped. This final
@@ -349,7 +378,10 @@ fn percentile(sorted: &[u64], percent: usize) -> u64 {
     sorted[rank.saturating_sub(1)]
 }
 
-fn report_probes(pool: &WorkerPool, workload: Workload, workers: usize, payload_bytes: usize) {
+fn report_probes<K>(pool: &WorkerPool<K>, workload: Workload, workers: usize, payload_bytes: usize)
+where
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+{
     pool.run(RunMode::Timing);
     let allocation = pool.run(RunMode::Allocations);
     let mut latency = pool.run(RunMode::Latency);
@@ -378,6 +410,7 @@ fn report_probes(pool: &WorkerPool, workload: Workload, workers: usize, payload_
         "cache_reclamation_probe {}",
         serde_json::json!({
             "workload": workload.name(),
+            "key_type": std::any::type_name::<K>(),
             "workers": workers,
             "payload_bytes": payload_bytes,
             "operations_per_batch": pool.operations,
@@ -455,6 +488,31 @@ fn reclamation_benchmarks(c: &mut Criterion) {
     });
     nonresident.finish();
 
+    let operations = operations_per_worker();
+    let mut group = c.benchmark_group("cache_reclamation");
+    group.measurement_time(benchmark_measurement_time());
+    group.sample_size(20);
+    group.sampling_mode(SamplingMode::Flat);
+    for workload in [Workload::Churn, Workload::LiveLeases] {
+        for payload_bytes in PAYLOAD_SIZES {
+            for workers in THREAD_COUNTS {
+                let pool = WorkerPool::new(workload, workers, payload_bytes, operations, |key| key);
+                report_probes(&pool, workload, workers, payload_bytes);
+                group.throughput(Throughput::Elements(pool.operations as u64));
+                group.bench_function(
+                    BenchmarkId::new(
+                        format!("{}/payload_{payload_bytes}b", workload.name()),
+                        format!("threads_{workers}"),
+                    ),
+                    |b| b.iter(|| black_box(pool.run(RunMode::Timing))),
+                );
+            }
+        }
+    }
+    group.finish();
+}
+
+fn operations_per_worker() -> usize {
     let operations = std::env::var("XLFN_CACHE_RECLAIM_OPERATIONS")
         .ok()
         .map(|value| {
@@ -467,25 +525,52 @@ fn reclamation_benchmarks(c: &mut Criterion) {
         (64..=65_536).contains(&operations),
         "operations per worker must be 64..=65536"
     );
-    let mut group = c.benchmark_group("cache_reclamation");
+    operations
+}
+
+fn report_owner_allocation<K>(key_type: &'static str)
+where
+    K: Clone + Eq + Hash + Send + Sync + 'static,
+{
+    // Owner construction includes resident policy and the retirement queue for
+    // Drop-bearing keys. Final cache destruction stays outside the probe.
+    let probe = AllocationProbe::start();
+    let cache = CalculationCache::<K, Payload>::new(RESIDENT_ENTRIES * 64);
+    let counts = probe.finish();
+    println!(
+        "cache_owner_allocation_probe {}",
+        serde_json::json!({
+            "key_type": key_type,
+            "weight_budget": RESIDENT_ENTRIES * 64,
+            "calls": counts.calls,
+            "requested_bytes": counts.requested_bytes,
+            "instrumented": cfg!(feature = "bench-internals"),
+        })
+    );
+    drop(cache);
+}
+
+fn owned_key_reclamation_benchmarks(c: &mut Criterion) {
+    report_owner_allocation::<u64>("u64");
+    report_owner_allocation::<String>("String");
+    let operations = operations_per_worker();
+    let mut group = c.benchmark_group("cache_reclamation_owned_key");
     group.measurement_time(benchmark_measurement_time());
     group.sample_size(20);
     group.sampling_mode(SamplingMode::Flat);
-    for workload in [Workload::Churn, Workload::LiveLeases] {
-        for payload_bytes in PAYLOAD_SIZES {
-            for workers in THREAD_COUNTS {
-                let pool = WorkerPool::new(workload, workers, payload_bytes, operations);
-                report_probes(&pool, workload, workers, payload_bytes);
-                group.throughput(Throughput::Elements(pool.operations as u64));
-                group.bench_function(
-                    BenchmarkId::new(
-                        format!("{}/payload_{payload_bytes}b", workload.name()),
-                        format!("threads_{workers}"),
-                    ),
-                    |b| b.iter(|| black_box(pool.run(RunMode::Timing))),
-                );
-            }
-        }
+    for workers in [1, 4, 16, 32] {
+        // Fixed-width owned strings keep allocation size independent of how
+        // many batches a faster implementation completes. Construction, key
+        // cloning, and retirement/destruction are inside each timed operation.
+        let pool = WorkerPool::new(Workload::Churn, workers, 64, operations, |key| {
+            format!("{key:020}")
+        });
+        report_probes(&pool, Workload::Churn, workers, 64);
+        group.throughput(Throughput::Elements(pool.operations as u64));
+        group.bench_function(
+            BenchmarkId::new("churn/payload_64b", format!("threads_{workers}")),
+            |b| b.iter(|| black_box(pool.run(RunMode::Timing))),
+        );
     }
     group.finish();
 }
@@ -558,5 +643,10 @@ fn deferred_queue_benchmarks(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, reclamation_benchmarks, deferred_queue_benchmarks);
+criterion_group!(
+    benches,
+    reclamation_benchmarks,
+    owned_key_reclamation_benchmarks,
+    deferred_queue_benchmarks
+);
 criterion_main!(benches);

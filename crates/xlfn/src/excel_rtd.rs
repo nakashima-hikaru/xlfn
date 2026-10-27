@@ -120,8 +120,8 @@ impl Drop for RtdOperationGuard {
 
 #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
 #[cfg(feature = "handles")]
-pub(crate) fn begin_operation<H: FormulaLifetimeBackend + ?Sized>(
-    _handles: &H,
+pub(crate) fn begin_operation(
+    _handles: &FormulaLifetimeBackend,
     ingress: &'static ExportIngress,
 ) -> XllResult<RtdOperationGuard> {
     #[cfg(any(test, feature = "refinement"))]
@@ -146,13 +146,29 @@ pub(crate) fn begin_operation<H: FormulaLifetimeBackend + ?Sized>(
 }
 
 #[cfg(all(target_os = "windows", any(test, feature = "refinement")))]
-pub(crate) fn set_trace_sink(trace: crate::shutdown_trace::ShutdownTraceHandle) {
-    windows::set_trace_sink(trace);
+pub(crate) fn connect_trace<F>(
+    trace: crate::shutdown_trace::ShutdownTraceHandle,
+    initialize: F,
+) -> XllResult<()>
+where
+    F: FnOnce(crate::excel_rtd_protocol::RtdTraceSnapshot) -> XllResult<()>,
+{
+    windows::connect_trace(trace, initialize)
+}
+
+#[cfg(all(target_os = "windows", any(test, feature = "refinement")))]
+pub(crate) fn trace_snapshot() -> crate::excel_rtd_protocol::RtdTraceSnapshot {
+    windows::trace_snapshot()
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn physical_unload_ready() -> bool {
+    windows::physical_unload_ready()
 }
 
 #[cfg(feature = "handles")]
-pub(crate) fn observe_handle<H: FormulaLifetimeBackend + 'static>(
-    handles: &H,
+pub(crate) fn observe_handle(
+    handles: &FormulaLifetimeBackend,
     ingress: &'static ExportIngress,
     lifetime_key: &str,
     token: &str,
@@ -196,9 +212,7 @@ pub(crate) fn observe_subscription(
 }
 
 #[cfg(feature = "handles")]
-pub(crate) fn shutdown_handle_topics<H: FormulaLifetimeBackend + 'static>(
-    handles: &H,
-) -> XllResult<()> {
+pub(crate) fn shutdown_handle_topics(handles: &FormulaLifetimeBackend) -> XllResult<()> {
     #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
     {
         windows::shutdown(handles)
@@ -264,7 +278,8 @@ pub(crate) fn dll_can_unload_now() -> i32 {
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn wait_for_transport_quiescence()
--> Result<(), crate::excel_rtd_protocol::RtdQuiescenceError> {
-    windows::wait_for_module_quiescence()
+pub(crate) fn wait_for_transport_quiescence(
+    module_residency_held: bool,
+) -> Result<(), crate::excel_rtd_protocol::RtdQuiescenceError> {
+    windows::wait_for_module_quiescence(module_residency_held)
 }

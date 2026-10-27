@@ -104,10 +104,13 @@ impl ModuleResidency {
         Ok(true)
     }
 
-    /// Returns false when native callbacks still require module residency.
+    /// Returns false when native callbacks or COM references still require
+    /// module residency. A late COM Release must never unmap its own code;
+    /// only an explicit lifecycle release retries this self-reference.
     pub(crate) fn release(&self) -> XllResult<bool> {
         let mut state = self.state.lock();
-        if state.resident_event_count() != 0 {
+        if state.resident_event_count() != 0 || !crate::excel_rtd_protocol::physical_unload_ready()
+        {
             return Ok(false);
         }
         let Some(residency) = state.lease.as_mut() else {
@@ -194,13 +197,6 @@ impl ModuleResidency {
         state.resident_event_count() == 0 || state.lease.is_some()
     }
 
-    #[cfg(any(
-        test,
-        feature = "refinement",
-        feature = "rtd",
-        feature = "handles",
-        feature = "lifecycle-diagnostics"
-    ))]
     pub(crate) fn is_held(&self) -> bool {
         self.state.lock().lease.is_some()
     }

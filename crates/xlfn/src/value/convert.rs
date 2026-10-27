@@ -162,6 +162,7 @@ pub fn optional<'call, T>(
 }
 
 /// Preserves the distinction between omitted, blank, and present inputs.
+#[inline(always)]
 pub fn optional_value<'call, T>(
     value: XlValueRef<'call>,
     argument: &'static str,

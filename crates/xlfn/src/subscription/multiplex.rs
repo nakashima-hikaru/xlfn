@@ -95,9 +95,6 @@ impl<T> RtdSourceContext<T> {
     }
 }
 
-type Producer<T> = dyn FnOnce(RtdSourceContext<T>) -> XllResult<()> + Send;
-type TopicValidator = dyn Fn(&RtdTopic) -> XllResult<()> + Send + Sync;
-
 /// A safe source that multiplexes many topics on one framework-owned worker.
 ///
 /// The job starts lazily on the first admitted subscription and runs once for
@@ -115,25 +112,35 @@ type TopicValidator = dyn Fn(&RtdTopic) -> XllResult<()> + Send + Sync;
 /// producer, bounding the control backlog even under rapid reconnects. Data
 /// buffers are charged to both source and runtime budgets. Upstream buffers,
 /// connection resources and application-owned event copies are not included.
-pub struct RtdMultiplexedSource<T> {
+/// The producer and validator keep their concrete types until registration in
+/// the runtime's heterogeneous source arena.
+pub struct RtdMultiplexedSource<T, P, V = fn(&RtdTopic) -> XllResult<()>> {
+    // Join source work before releasing other source fields or user captures.
+    worker: WorkerOwner<T, P>,
     delivery: RtdDelivery,
     limits: RtdSourceLimits,
     budget: Arc<ChannelBudget>,
-    validator: Box<TopicValidator>,
-    shared: Arc<Shared<T>>,
-    worker: Mutex<Worker<T>>,
-    joined: Condvar,
+    validator: Option<V>,
     error_policy: RtdProducerErrorPolicy,
     #[cfg(test)]
     fail_spawn: AtomicBool,
 }
 
-struct Worker<T> {
-    producer: Option<Box<Producer<T>>>,
+struct Worker<P> {
+    producer: Option<P>,
     handle: Option<JoinHandle<()>>,
     permit: Option<WorkerPermit>,
     joining: bool,
     result: Option<XllResult<()>>,
+}
+
+// Owns the shutdown barrier independently of the validator's concrete type.
+// Rebuilding a source in with_topic_validator moves this guard without running
+// shutdown or requiring unsafe moves out of a type that implements Drop.
+struct WorkerOwner<T, P> {
+    shared: Arc<Shared<T>>,
+    state: Mutex<Worker<P>>,
+    joined: Condvar,
 }
 
 struct Active<T> {
@@ -291,34 +298,44 @@ impl<T> Shared<T> {
     }
 }
 
-impl<T: IntoRtdValue + Send + 'static> RtdMultiplexedSource<T> {
+impl<T: IntoRtdValue + Send + 'static, P> RtdMultiplexedSource<T, P>
+where
+    P: FnOnce(RtdSourceContext<T>) -> XllResult<()> + Send + 'static,
+{
     /// Creates a shared producer without starting it or allocating a thread.
     ///
     /// The job may own resources that are neither `Clone` nor `Sync`.
-    pub fn new(
-        delivery: RtdDelivery,
-        producer: impl FnOnce(RtdSourceContext<T>) -> XllResult<()> + Send + 'static,
-    ) -> Self {
+    pub fn new(delivery: RtdDelivery, producer: P) -> Self {
+        let shared = Arc::new(Shared::new());
         Self {
             delivery,
             limits: RtdSourceLimits::standard(),
             budget: Arc::new(ChannelBudget::source(RtdSourceLimits::standard())),
-            validator: Box::new(|_| Ok(())),
-            shared: Arc::new(Shared::new()),
-            worker: Mutex::new(Worker {
-                producer: Some(Box::new(producer)),
-                handle: None,
-                permit: None,
-                joining: false,
-                result: None,
-            }),
-            joined: Condvar::new(),
+            validator: None,
+            worker: WorkerOwner {
+                shared,
+                state: Mutex::new(Worker {
+                    producer: Some(producer),
+                    handle: None,
+                    permit: None,
+                    joining: false,
+                    result: None,
+                }),
+                joined: Condvar::new(),
+            },
             error_policy: RtdProducerErrorPolicy::default(),
             #[cfg(test)]
             fail_spawn: AtomicBool::new(false),
         }
     }
+}
 
+impl<T, P, V> RtdMultiplexedSource<T, P, V>
+where
+    T: IntoRtdValue + Send + 'static,
+    P: FnOnce(RtdSourceContext<T>) -> XllResult<()> + Send + 'static,
+    V: Fn(&RtdTopic) -> XllResult<()> + Send + Sync + 'static,
+{
     /// Sets aggregate source bounds, preserving existing reservations.
     ///
     /// Subscription slots include unconsumed removals. Lowering a bound below
@@ -333,14 +350,23 @@ impl<T: IntoRtdValue + Send + 'static> RtdMultiplexedSource<T> {
     /// Validates each topic synchronously before starting its registration.
     ///
     /// Perform only bounded validation here; initialize shared I/O in the job.
-    /// Failure rolls back the channel and all subscription reservations.
+    /// Failure rolls back the channel and all subscription reservations. This
+    /// builder changes the source's validator type without starting its job.
     #[must_use]
-    pub fn with_topic_validator(
-        mut self,
-        validator: impl Fn(&RtdTopic) -> XllResult<()> + Send + Sync + 'static,
-    ) -> Self {
-        self.validator = Box::new(validator);
-        self
+    pub fn with_topic_validator<W>(self, validator: W) -> RtdMultiplexedSource<T, P, W>
+    where
+        W: Fn(&RtdTopic) -> XllResult<()> + Send + Sync + 'static,
+    {
+        RtdMultiplexedSource {
+            delivery: self.delivery,
+            limits: self.limits,
+            budget: self.budget,
+            validator: Some(validator),
+            worker: self.worker,
+            error_policy: self.error_policy,
+            #[cfg(test)]
+            fail_spawn: self.fail_spawn,
+        }
     }
 
     /// Selects the final cell behavior when the shared producer fails.
@@ -374,8 +400,11 @@ impl<T: IntoRtdValue + Send + 'static> RtdMultiplexedSource<T> {
         mut channel: RtdChannelSubscription,
         budget: &Arc<ChannelBudget>,
     ) -> XllResult<RtdMultiplexedSubscription<T>> {
-        let mut worker = self.worker.lock();
-        if self.shared.closed.load(Ordering::Acquire) || worker.joining || worker.result.is_some() {
+        let mut worker = self.worker.state.lock();
+        if self.worker.shared.closed.load(Ordering::Acquire)
+            || worker.joining
+            || worker.result.is_some()
+        {
             return Err(XllError::Closing);
         }
         // Reserve before registering control events: a rejected first worker
@@ -385,11 +414,11 @@ impl<T: IntoRtdValue + Send + 'static> RtdMultiplexedSource<T> {
         } else {
             None
         };
-        let id = self.shared.register(topic, channel.sender())?;
+        let id = self.worker.shared.register(topic, channel.sender())?;
         let subscription_permit = channel.take_subscription_permit();
         let subscription = RtdMultiplexedSubscription {
             channel,
-            shared: Arc::clone(&self.shared),
+            shared: Arc::clone(&self.worker.shared),
             id,
             permit: Some(subscription_permit),
         };
@@ -402,7 +431,7 @@ impl<T: IntoRtdValue + Send + 'static> RtdMultiplexedSource<T> {
         // while this source's worker mutex is held.
         let pending = Arc::new(Mutex::new(Some(producer)));
         let thread_pending = Arc::clone(&pending);
-        let shared = Arc::clone(&self.shared);
+        let shared = Arc::clone(&self.worker.shared);
         let policy = self.error_policy;
         let run = move || {
             let producer = thread_pending
@@ -435,7 +464,7 @@ impl<T: IntoRtdValue + Send + 'static> RtdMultiplexedSource<T> {
             }
             Err(error) => {
                 worker.producer = pending.lock().take();
-                self.shared.stop();
+                self.worker.shared.stop();
                 Err(XllError::Native {
                     code: error.raw_os_error().unwrap_or(0),
                     message: format!("failed to start RTD source worker: {error}"),
@@ -445,11 +474,11 @@ impl<T: IntoRtdValue + Send + 'static> RtdMultiplexedSource<T> {
     }
 }
 
-impl<T> RtdMultiplexedSource<T> {
+impl<T, P> WorkerOwner<T, P> {
     fn finish(&self) -> XllResult<()> {
         self.shared.stop();
         let (handle, producer, permit) = {
-            let mut worker = self.worker.lock();
+            let mut worker = self.state.lock();
             while worker.joining {
                 self.joined.wait(&mut worker);
             }
@@ -472,7 +501,7 @@ impl<T> RtdMultiplexedSource<T> {
         });
         drop(permit);
         let result = dropped.and(joined);
-        let mut worker = self.worker.lock();
+        let mut worker = self.state.lock();
         worker.result = Some(result.clone());
         worker.joining = false;
         self.joined.notify_all();
@@ -480,7 +509,7 @@ impl<T> RtdMultiplexedSource<T> {
     }
 }
 
-impl<T> Drop for RtdMultiplexedSource<T> {
+impl<T, P> Drop for WorkerOwner<T, P> {
     fn drop(&mut self) {
         let _ = self.finish();
     }
@@ -521,7 +550,7 @@ unsafe impl<T: Send + 'static> RtdSubscription for RtdMultiplexedSubscription<T>
     fn request_cancel(&self) {
         self.channel.request_cancel();
     }
-    fn disconnect_and_wait(mut self: Box<Self>) -> XllResult<()> {
+    fn disconnect_and_wait(mut self) -> XllResult<()> {
         self.finish()
     }
 }
@@ -530,7 +559,12 @@ unsafe impl<T: Send + 'static> RtdSubscription for RtdMultiplexedSubscription<T>
 // rollback and unwinding revoke its sink through Drop. The shared producer
 // receives only safe senders. Every successful subscription owns its channel
 // revocation barrier; source shutdown additionally joins the shared job.
-unsafe impl<T: IntoRtdValue + Send + 'static> RtdSource for RtdMultiplexedSource<T> {
+unsafe impl<T, P, V> RtdSource for RtdMultiplexedSource<T, P, V>
+where
+    T: IntoRtdValue + Send + 'static,
+    P: FnOnce(RtdSourceContext<T>) -> XllResult<()> + Send + 'static,
+    V: Fn(&RtdTopic) -> XllResult<()> + Send + Sync + 'static,
+{
     type Value = T;
     type Subscription = RtdMultiplexedSubscription<T>;
 
@@ -542,15 +576,17 @@ unsafe impl<T: IntoRtdValue + Send + 'static> RtdSource for RtdMultiplexedSource
             Arc::clone(&runtime_budget),
             sink,
         )?;
-        (self.validator)(topic)?;
+        if let Some(validator) = &self.validator {
+            validator(topic)?;
+        }
         self.start(topic, channel, &runtime_budget)
     }
 
     fn request_stop(&self) {
-        self.shared.stop();
+        self.worker.shared.stop();
     }
     fn shutdown_and_wait(&self) -> XllResult<()> {
-        self.finish()
+        self.worker.finish()
     }
 }
 

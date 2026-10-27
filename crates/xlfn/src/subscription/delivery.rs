@@ -1,14 +1,14 @@
 #![allow(
     unsafe_code,
-    reason = "ErasedSink is an audited non-owning capability over a runtime-owned PublishCore"
+    reason = "PublishSink is an audited non-owning capability over a runtime-owned PublishCore"
 )]
 
 use super::data_plane::PublishCore;
-use super::host::SubscriptionHost;
 use super::topic::{SubscriptionId, TopicId};
 #[cfg(test)]
 use super::value::RtdValue;
 use super::value::StoredRtdValue;
+use crate::excel_rtd::RtdSubscriptionHost;
 use crate::generation::ConnectionGeneration;
 use crate::{XllError, XllResult};
 use rustc_hash::FxHashMap;
@@ -18,100 +18,51 @@ use xlfn_kernel::quota::QuotaPermit;
 #[cfg(feature = "rtd")]
 pub(crate) type PublishBatch = smallvec::SmallVec<[StoredRtdValue; 32]>;
 
-#[cfg(feature = "rtd")]
-type PublishBatchFn = unsafe fn(
-    NonNull<()>,
-    TopicId,
-    ConnectionGeneration,
-    PublishBatch,
-    &std::sync::atomic::AtomicBool,
-) -> XllResult<()>;
-
+/// Non-owning capability into the concrete production publication backend.
+/// Source values remain generic; the host type is retained through each call.
 #[derive(Clone, Copy)]
-pub(crate) struct ErasedSink {
-    publish_core: NonNull<()>,
-    #[cfg(feature = "rtd")]
-    services: NonNull<super::RuntimeServices>,
-    publish: unsafe fn(NonNull<()>, TopicId, ConnectionGeneration, StoredRtdValue) -> XllResult<()>,
-    #[cfg(feature = "rtd")]
-    publish_batch: PublishBatchFn,
+pub(crate) struct PublishSink {
+    publish_core: NonNull<PublishCore<RtdSubscriptionHost>>,
     pub(crate) topic_id: TopicId,
     pub(crate) connection_generation: ConnectionGeneration,
 }
 
-impl ErasedSink {
-    pub(crate) fn for_publish<H: SubscriptionHost>(
-        publish: &PublishCore<H>,
+impl PublishSink {
+    pub(crate) fn for_publish(
+        publish: &PublishCore<RtdSubscriptionHost>,
         topic_id: TopicId,
         connection_generation: ConnectionGeneration,
     ) -> Self {
-        unsafe fn publish_through<H: SubscriptionHost>(
-            core: NonNull<()>,
-            topic_id: TopicId,
-            connection_generation: ConnectionGeneration,
-            value: StoredRtdValue,
-        ) -> XllResult<()> {
-            // SAFETY: `for_publish` records a pointer to `PublishCore<H>`, and
-            // the RtdSubscription safety contract requires every sink clone
-            // to stop publishing before that server is reclaimed.
-            let core = unsafe { core.cast::<PublishCore<H>>().as_ref() };
-            core.publish(topic_id, connection_generation, value)
-        }
-
-        #[cfg(feature = "rtd")]
-        unsafe fn publish_batch_through<H: SubscriptionHost>(
-            core: NonNull<()>,
-            topic_id: TopicId,
-            generation: ConnectionGeneration,
-            values: PublishBatch,
-            stopping: &std::sync::atomic::AtomicBool,
-        ) -> XllResult<()> {
-            // SAFETY: same erased type and subscription lifetime as the
-            // scalar entry; the channel owns publication until batch exit.
-            let core = unsafe { core.cast::<PublishCore<H>>().as_ref() };
-            core.publish_batch(topic_id, generation, values, stopping)
-        }
-
         Self {
-            publish_core: NonNull::from(publish).cast(),
-            #[cfg(feature = "rtd")]
-            services: NonNull::from(publish.services()),
-            publish: publish_through::<H>,
-            #[cfg(feature = "rtd")]
-            publish_batch: publish_batch_through::<H>,
+            publish_core: NonNull::from(publish),
             topic_id,
             connection_generation,
         }
     }
 
+    #[inline]
+    fn core(&self) -> &PublishCore<RtdSubscriptionHost> {
+        // SAFETY: the subscription's sink-transfer contract retains this
+        // concrete core until all of its scalar and batch publishers stop.
+        unsafe { self.publish_core.as_ref() }
+    }
+
     #[cfg(feature = "rtd")]
     pub(super) fn channel_budget(&self) -> triomphe::Arc<super::budget::ChannelBudget> {
-        // SAFETY: the subscription's sink-transfer contract keeps services
-        // alive while attaching its channel. Only owned accounting escapes.
-        triomphe::Arc::clone(&unsafe { self.services.as_ref() }.channel_budget)
+        triomphe::Arc::clone(&self.core().services().channel_budget)
     }
 
     #[cfg(feature = "rtd")]
     pub(super) fn publisher_queue(
         &self,
     ) -> XllResult<triomphe::Arc<super::channel::PublisherQueue>> {
-        // SAFETY: services outlive the publish core; subscribe holds the sink
-        // capability while obtaining the generation-owned publisher queue.
-        unsafe { self.services.as_ref() }.publishers.queue()
+        self.core().services().publishers.queue()
     }
 
     #[inline]
     pub(crate) fn publish_stored(&self, value: StoredRtdValue) -> XllResult<()> {
-        // SAFETY: construction fixes the erased type and the subscription
-        // teardown contract keeps the pointed-to core alive for every call.
-        unsafe {
-            (self.publish)(
-                self.publish_core,
-                self.topic_id,
-                self.connection_generation,
-                value,
-            )
-        }
+        self.core()
+            .publish(self.topic_id, self.connection_generation, value)
     }
 
     #[cfg(feature = "rtd")]
@@ -120,25 +71,16 @@ impl ErasedSink {
         values: PublishBatch,
         stopping: &std::sync::atomic::AtomicBool,
     ) -> XllResult<()> {
-        // SAFETY: construction fixes the core type. Channel teardown joins
-        // in-flight publication before relinquishing the sink capability.
-        unsafe {
-            (self.publish_batch)(
-                self.publish_core,
-                self.topic_id,
-                self.connection_generation,
-                values,
-                stopping,
-            )
-        }
+        self.core()
+            .publish_batch(self.topic_id, self.connection_generation, values, stopping)
     }
 }
 
-// SAFETY: PublishCore is Sync and the capability is read-only. Temporal
-// validity is guaranteed by the unsafe RtdSubscription contract.
-unsafe impl Send for ErasedSink {}
-// SAFETY: ErasedSink accesses PublishCore via synchronized atomic/mutex methods.
-unsafe impl Sync for ErasedSink {}
+// SAFETY: the concrete PublishCore is Sync and all access is synchronized.
+// The unsafe RtdSubscription contract retains it across every sink user.
+unsafe impl Send for PublishSink {}
+// SAFETY: shared access only calls the synchronized production backend.
+unsafe impl Sync for PublishSink {}
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct VersionedRtdValue {
@@ -431,5 +373,93 @@ impl<N: Clone> RefreshState<N> {
         let ticket = self.next_notification_ticket;
         self.ensure_notification_ticket()?;
         Ok(Some(PreparedNotification { ticket, notifier }))
+    }
+}
+
+#[cfg(all(test, feature = "rtd"))]
+mod typed_sink_tests {
+    use super::*;
+    use crate::rtd::test_support::TestNotifierState;
+    use crate::subscription::host::SubscriptionHost;
+    use crate::subscription::runtime::SubscriptionRuntime;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn miri_typed_sink_uses_production_backend_for_scalar_and_batch() {
+        let runtime = SubscriptionRuntime::<RtdSubscriptionHost>::new();
+        let server = runtime.register_test_server(1);
+        let core = server.test_server().publish.as_ref();
+        let topic = TopicId(1);
+        let generation = ConnectionGeneration::new(1).unwrap();
+        core.reserve_connection(topic, SubscriptionId(1), generation)
+            .unwrap();
+        core.install_connection(topic, generation).unwrap();
+        assert!(
+            core.commit_connection(topic, generation, None)
+                .unwrap()
+                .is_none()
+        );
+        let notifier = Arc::new(TestNotifierState::new());
+        server
+            .attach_update_notifier(crate::excel_rtd::RtdNotifier::for_test(Arc::clone(
+                &notifier,
+            )))
+            .unwrap();
+
+        // This is the exact production adapter, with no cfg(test) fallback or
+        // untyped core pointer. Both publication methods target the same core.
+        let sink = RtdSubscriptionHost::publish_sink(core, topic, generation);
+        let expected: NonNull<PublishCore<RtdSubscriptionHost>> = NonNull::from(core);
+        assert_eq!(sink.publish_core, expected);
+        sink.publish_stored(StoredRtdValue::Integer(7)).unwrap();
+        let batch = server.begin_refresh().unwrap();
+        assert_eq!(batch.updates.len(), 1);
+        assert_eq!(batch.updates[0].value, StoredRtdValue::Integer(7));
+        batch.complete(RefreshOutcome::Delivered).unwrap();
+
+        let stopping = AtomicBool::new(false);
+        sink.publish_batch(
+            smallvec::smallvec![StoredRtdValue::Integer(8), StoredRtdValue::Integer(9)],
+            &stopping,
+        )
+        .unwrap();
+        let batch = server.begin_refresh().unwrap();
+        assert_eq!(batch.updates.len(), 1);
+        assert_eq!(batch.updates[0].value, StoredRtdValue::Integer(9));
+        batch.complete(RefreshOutcome::Delivered).unwrap();
+        assert!(notifier.calls.load(Ordering::Acquire) >= 2);
+
+        let stale =
+            RtdSubscriptionHost::publish_sink(core, topic, ConnectionGeneration::new(2).unwrap());
+        assert!(matches!(
+            stale.publish_stored(StoredRtdValue::Integer(10)),
+            Err(XllError::Closing)
+        ));
+        assert!(matches!(
+            stale.publish_batch(smallvec::smallvec![StoredRtdValue::Integer(10)], &stopping),
+            Err(XllError::Closing)
+        ));
+        assert_eq!(server.pending_update_count(), 0);
+
+        stopping.store(true, Ordering::Release);
+        sink.publish_batch(smallvec::smallvec![StoredRtdValue::Integer(11)], &stopping)
+            .unwrap();
+        assert_eq!(server.pending_update_count(), 0);
+        stopping.store(false, Ordering::Release);
+        server.terminate().unwrap();
+        // The runtime still owns this terminal core. Closed admission must
+        // reject both direct adapter paths before looking up a retired topic.
+        assert!(matches!(
+            sink.publish_stored(StoredRtdValue::Integer(12)),
+            Err(XllError::Closing)
+        ));
+        assert!(matches!(
+            sink.publish_batch(smallvec::smallvec![StoredRtdValue::Integer(12)], &stopping),
+            Err(XllError::Closing)
+        ));
+        assert_eq!(runtime.services.active_quota.used(), 0);
+        assert_eq!(runtime.services.queued_update_quota.used(), 0);
+        runtime.close().unwrap();
     }
 }

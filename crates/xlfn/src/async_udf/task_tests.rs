@@ -92,8 +92,7 @@ fn assert_released(registry: &TaskRegistry, observation: &Observation) {
     assert_eq!(observation.drops.load(Ordering::Relaxed), 1);
     assert!(!observation.invalid_drop.load(Ordering::Relaxed));
     assert_eq!(registry.active_tasks.load(Ordering::Acquire), 0);
-    cancel_tasks(registry.request_close());
-    registry.finish_close();
+    registry.request_close().unwrap().cancel().wait().finish();
 }
 
 #[test]
@@ -153,7 +152,40 @@ fn miri_inline_async_task_drops_unpolled_future_before_registry_release() {
 }
 
 #[test]
-fn abort_waker_destructor_panic_cannot_skip_task_accounting_release() {
+fn miri_task_cancel_during_user_poll_cannot_miss_registration() {
+    struct CancelDuringPoll(Arc<TaskRegistry>, Arc<AtomicUsize>);
+    impl Future for CancelDuringPoll {
+        type Output = ();
+        fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
+            self.1.fetch_add(1, Ordering::Relaxed);
+            cancel_tasks(self.0.cancel_calculation(CalculationEpoch::INITIAL));
+            Poll::Pending
+        }
+    }
+    let registry = registry();
+    let polls = Arc::new(AtomicUsize::new(0));
+    let task = registry.reserve(CalculationEpoch::INITIAL).unwrap().commit(
+        CancelDuringPoll(Arc::clone(&registry), Arc::clone(&polls)),
+        source(),
+    );
+    let mut task = Box::pin(task);
+    assert!(
+        task.as_mut()
+            .poll(&mut Context::from_waker(
+                futures_util::task::noop_waker_ref()
+            ))
+            .is_ready()
+    );
+    assert_eq!(polls.load(Ordering::Relaxed), 1);
+    // Completed task retention still retains the calculation/registry authority.
+    assert_eq!(registry.active_tasks.load(Ordering::Acquire), 1);
+    drop(task);
+    assert_eq!(registry.active_tasks.load(Ordering::Acquire), 0);
+    registry.request_close().unwrap().cancel().wait().finish();
+}
+
+#[test]
+fn task_waker_destructor_panic_cannot_skip_task_accounting_release() {
     struct PanicDrop(Arc<AtomicUsize>);
     impl std::task::Wake for PanicDrop {
         fn wake(self: Arc<Self>) {
@@ -165,7 +197,7 @@ fn abort_waker_destructor_panic_cannot_skip_task_accounting_release() {
     impl Drop for PanicDrop {
         fn drop(&mut self) {
             self.0.fetch_add(1, Ordering::Relaxed);
-            panic!("injected abort waker destructor panic");
+            panic!("injected task waker destructor panic");
         }
     }
     let registry = registry();
@@ -182,12 +214,130 @@ fn abort_waker_destructor_panic_cannot_skip_task_accounting_release() {
             .is_pending()
     );
     drop(waker);
-    // The task first releases its AbortRegistration, making TaskControl the
-    // final owner of the registered waker. Its Drop must remain contained.
+    // Task registration releases its waker before completion removes the
+    // source. Its arbitrary destructor panic must remain contained.
     drop(task);
     assert_eq!(drops.load(Ordering::Relaxed), 1);
     assert_eq!(registry.active_tasks.load(Ordering::Acquire), 0);
-    cancel_tasks(registry.request_close());
-    registry.wait_idle();
-    registry.finish_close();
+    registry.request_close().unwrap().cancel().wait().finish();
+}
+
+#[test]
+fn miri_registry_close_drop_cancels_and_allows_only_close_retry() {
+    let registry = registry();
+    let (source, token) = CancellationSource::new(CancellationGuarantee::CalculationScoped);
+    let task = registry
+        .reserve(CalculationEpoch::INITIAL)
+        .unwrap()
+        .commit(std::future::pending::<()>(), source);
+
+    let closing = registry.request_close().unwrap();
+    assert!(matches!(
+        registry.request_close(),
+        Err(crate::XllError::Closing)
+    ));
+    assert!(matches!(
+        registry.start(AsyncTaskLimit::DEFAULT),
+        Err(crate::XllError::Closing)
+    ));
+    assert!(!token.is_cancelled());
+    // Dropping the pending stage performs its cancellation obligation. It
+    // releases the close attempt but cannot grant permission to restart.
+    drop(closing);
+    assert!(token.is_cancelled());
+    assert_eq!(registry.active_tasks.load(Ordering::Acquire), 1);
+    assert!(matches!(
+        registry.start(AsyncTaskLimit::DEFAULT),
+        Err(crate::XllError::Closing)
+    ));
+    drop(task);
+
+    let drained = registry.request_close().unwrap().cancel().wait();
+    assert!(matches!(
+        registry.request_close(),
+        Err(crate::XllError::Closing)
+    ));
+    // Even a completed wait requires the final, consuming state transition.
+    drop(drained);
+    assert!(matches!(
+        registry.start(AsyncTaskLimit::DEFAULT),
+        Err(crate::XllError::Closing)
+    ));
+    registry.request_close().unwrap().cancel().wait().finish();
+    registry.start(AsyncTaskLimit::DEFAULT).unwrap();
+    registry.request_close().unwrap().cancel().wait().finish();
+}
+
+#[test]
+fn miri_registry_close_wait_retains_task_and_release_tail_authority() {
+    let registry = registry();
+    let task = registry
+        .reserve(CalculationEpoch::INITIAL)
+        .unwrap()
+        .commit(std::future::pending::<()>(), source());
+    let closing = registry.request_close().unwrap().cancel();
+    let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let waiter = scope.spawn(move || {
+            waiting_tx.send(()).unwrap();
+            closing.wait().finish();
+            finished_tx.send(()).unwrap();
+        });
+        waiting_rx.recv().unwrap();
+        assert!(matches!(
+            finished_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            registry.start(AsyncTaskLimit::DEFAULT),
+            Err(crate::XllError::Closing)
+        ));
+        drop(task);
+        finished_rx.recv().unwrap();
+        waiter.join().unwrap();
+    });
+    registry.start(AsyncTaskLimit::DEFAULT).unwrap();
+    registry.request_close().unwrap().cancel().wait().finish();
+}
+
+#[test]
+fn registry_close_cancellation_callbacks_run_outside_control_lock() {
+    struct ReentrantWake(Arc<TaskRegistry>, Arc<AtomicUsize>);
+    impl std::task::Wake for ReentrantWake {
+        fn wake(self: Arc<Self>) {
+            assert!(self.0.control.try_lock().is_some());
+            assert!(matches!(
+                self.0.request_close(),
+                Err(crate::XllError::Closing)
+            ));
+            assert!(matches!(
+                self.0.start(AsyncTaskLimit::DEFAULT),
+                Err(crate::XllError::Closing)
+            ));
+            assert!(!self.0.advance());
+            self.1.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let registry = registry();
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let mut task = Box::pin(
+        registry
+            .reserve(CalculationEpoch::INITIAL)
+            .unwrap()
+            .commit(std::future::pending::<()>(), source()),
+    );
+    let waker = std::task::Waker::from(Arc::new(ReentrantWake(
+        Arc::clone(&registry),
+        Arc::clone(&wakes),
+    )));
+    assert!(
+        task.as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
+    let closing = registry.request_close().unwrap().cancel();
+    assert_eq!(wakes.load(Ordering::Relaxed), 1);
+    drop(task);
+    closing.wait().finish();
 }

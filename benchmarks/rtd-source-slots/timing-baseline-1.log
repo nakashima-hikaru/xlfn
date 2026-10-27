@@ -1,0 +1,59 @@
+Benchmarking rtd_connection/adapter/1
+Benchmarking rtd_connection/adapter/1: Warming up for 1.0000 s
+Benchmarking rtd_connection/adapter/1: Collecting 50 samples in estimated 2.0000 s (64M iterations)
+Benchmarking rtd_connection/adapter/1: Analyzing
+rtd_connection/adapter/1
+                        time:   [30.836 ns 30.867 ns 30.904 ns]
+                        thrpt:  [32.358 Melem/s 32.397 Melem/s 32.430 Melem/s]
+Found 7 outliers among 50 measurements (14.00%)
+  2 (4.00%) high mild
+  5 (10.00%) high severe
+Benchmarking rtd_connection/runtime/1
+Benchmarking rtd_connection/runtime/1: Warming up for 1.0000 s
+Benchmarking rtd_connection/runtime/1: Collecting 50 samples in estimated 2.0001 s (8.0M iterations)
+Benchmarking rtd_connection/runtime/1: Analyzing
+rtd_connection/runtime/1
+                        time:   [248.25 ns 248.52 ns 248.90 ns]
+                        thrpt:  [4.0177 Melem/s 4.0238 Melem/s 4.0282 Melem/s]
+Benchmarking rtd_connection/adapter/32
+Benchmarking rtd_connection/adapter/32: Warming up for 1.0000 s
+Benchmarking rtd_connection/adapter/32: Collecting 50 samples in estimated 2.0003 s (3.0M iterations)
+Benchmarking rtd_connection/adapter/32: Analyzing
+rtd_connection/adapter/32
+                        time:   [670.71 ns 671.25 ns 671.88 ns]
+                        thrpt:  [47.627 Melem/s 47.672 Melem/s 47.710 Melem/s]
+Found 6 outliers among 50 measurements (12.00%)
+  2 (4.00%) high mild
+  4 (8.00%) high severe
+Benchmarking rtd_connection/runtime/32
+Benchmarking rtd_connection/runtime/32: Warming up for 1.0000 s
+Benchmarking rtd_connection/runtime/32: Collecting 50 samples in estimated 2.0084 s (258k iterations)
+Benchmarking rtd_connection/runtime/32: Analyzing
+rtd_connection/runtime/32
+                        time:   [7.7587 µs 7.7682 µs 7.7804 µs]
+                        thrpt:  [4.1129 Melem/s 4.1193 Melem/s 4.1244 Melem/s]
+Found 7 outliers among 50 measurements (14.00%)
+  2 (4.00%) low mild
+  4 (8.00%) high mild
+  1 (2.00%) high severe
+Benchmarking rtd_connection/adapter/256
+Benchmarking rtd_connection/adapter/256: Warming up for 1.0000 s
+Benchmarking rtd_connection/adapter/256: Collecting 50 samples in estimated 2.0037 s (380k iterations)
+Benchmarking rtd_connection/adapter/256: Analyzing
+rtd_connection/adapter/256
+                        time:   [5.2559 µs 5.2666 µs 5.2847 µs]
+                        thrpt:  [48.441 Melem/s 48.608 Melem/s 48.707 Melem/s]
+Found 8 outliers among 50 measurements (16.00%)
+  2 (4.00%) high mild
+  6 (12.00%) high severe
+Benchmarking rtd_connection/runtime/256
+Benchmarking rtd_connection/runtime/256: Warming up for 1.0000 s
+Benchmarking rtd_connection/runtime/256: Collecting 50 samples in estimated 2.0585 s (33k iterations)
+Benchmarking rtd_connection/runtime/256: Analyzing
+rtd_connection/runtime/256
+                        time:   [61.837 µs 61.901 µs 61.975 µs]
+                        thrpt:  [4.1307 Melem/s 4.1356 Melem/s 4.1399 Melem/s]
+Found 4 outliers among 50 measurements (8.00%)
+  1 (2.00%) high mild
+  3 (6.00%) high severe
+

@@ -20,7 +20,7 @@ rtd = []
 # Formula handles use the private Excel RTD transport internally, but do not
 # expose the generic RTD subscription capability.
 handles = ["dep:blake3", "dep:constant_time_eq", "dep:getrandom", "dep:papaya"]
-cache = ["dep:quick_cache"]
+cache = ["dep:papaya", "dep:quick_cache"]
 refinement = ["serde/derive"]
 # Opt-in native lifecycle diagnostics; inactive without a process-bound control file.
 lifecycle-diagnostics = []
@@ -49,6 +49,11 @@ required-features = ["bench-internals", "async-builtin"]
 
 [[bench]]
 name = "async_handle_scoped_allocations"
+harness = false
+required-features = ["bench-internals", "async-builtin"]
+
+[[bench]]
+name = "async_pending_allocations"
 harness = false
 required-features = ["bench-internals", "async-builtin"]
 
@@ -98,6 +103,11 @@ harness = false
 required-features = ["bench-internals", "cache"]
 
 [[bench]]
+name = "cache_registry_allocations"
+harness = false
+required-features = ["cache"]
+
+[[bench]]
 name = "cache_workloads"
 harness = false
 required-features = ["bench-internals", "cache"]
@@ -136,6 +146,21 @@ required-features = ["bench-internals", "rtd"]
 name = "rtd_prepare_allocations"
 harness = false
 required-features = ["bench-internals", "rtd"]
+
+[[bench]]
+name = "rtd_connection"
+harness = false
+required-features = ["bench-internals", "rtd"]
+
+[[bench]]
+name = "rtd_connection_allocations"
+harness = false
+required-features = ["bench-internals", "rtd"]
+
+[[bench]]
+name = "rtd_channel_allocations"
+harness = false
+required-features = ["rtd"]
 
 [[bench]]
 name = "protocol_costs"

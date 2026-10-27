@@ -25,9 +25,36 @@ pub(crate) struct RtdAdmissionGuard {
     _ingress: Option<AdmittedExport<'static>>,
 }
 
+/// External transport ownership released before deferred runtime admission.
+pub(crate) enum RtdDisconnectCompletion {
+    #[cfg(target_os = "windows")]
+    Server {
+        _lease: super::windows::DeferredDisconnectLease,
+    },
+    #[cfg(test)]
+    Test { _completion: Box<dyn Send> },
+}
+
+#[cfg(target_os = "windows")]
+impl From<super::windows::DeferredDisconnectLease> for RtdDisconnectCompletion {
+    fn from(lease: super::windows::DeferredDisconnectLease) -> Self {
+        Self::Server { _lease: lease }
+    }
+}
+
+#[cfg(test)]
+impl<T: Send + 'static> From<Box<T>> for RtdDisconnectCompletion {
+    fn from(completion: Box<T>) -> Self {
+        Self::Test {
+            _completion: completion,
+        }
+    }
+}
+
 impl SubscriptionHost for RtdSubscriptionHost {
     type AdmissionGuard = RtdAdmissionGuard;
     type Notifier = RtdNotifier;
+    type DisconnectCompletion = RtdDisconnectCompletion;
 
     fn enter_with<F>(&self, operation: F) -> XllResult<Self::AdmissionGuard>
     where
@@ -60,5 +87,13 @@ impl SubscriptionHost for RtdSubscriptionHost {
 
     fn notify(&self, notifier: &Self::Notifier) -> XllResult<()> {
         notifier.notify()
+    }
+
+    fn publish_sink(
+        core: &crate::subscription::PublishCore<Self>,
+        topic_id: crate::subscription::SinkTopicId,
+        generation: crate::generation::ConnectionGeneration,
+    ) -> crate::subscription::PublishSink {
+        crate::subscription::PublishSink::for_publish(core, topic_id, generation)
     }
 }

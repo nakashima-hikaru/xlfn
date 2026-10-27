@@ -660,9 +660,11 @@ pub trait Addin: Send + Sync + 'static {
 /// is deliberately an `unsafe impl` rather than a safe configuration flag.
 ///
 /// This opt-in permits release only when all framework-owned native event
-/// registration slots are empty as well. Confirmed, in-flight, or indeterminate
-/// calculation-event registrations retain DLL residency even after successful
-/// logical close. The trait does not guarantee that Excel will unload the DLL.
+/// registration slots are empty and no COM references, server locks, calls, or
+/// GIT registrations remain. Confirmed, in-flight, or indeterminate calculation
+/// events and externally retained terminal RTD objects keep DLL residency even
+/// after successful logical close. The trait does not guarantee that Excel
+/// will unload the DLL.
 ///
 /// # Safety
 ///
@@ -673,15 +675,15 @@ pub trait Addin: Send + Sync + 'static {
 /// ensure that the hook itself synchronously establishes that condition before
 /// returning. The framework's own admission and executor accounting is not a
 /// substitute for this application-level guarantee. Conversely, satisfying
-/// this contract does not remove framework-owned native event roots or permit
-/// releasing their residency hold.
+/// this contract does not remove framework-owned native event or COM roots or
+/// permit releasing their residency hold.
 ///
 /// If `Addin::open` fails before returning its state, the framework retains
 /// DLL residency and quarantines the runtime rather than invoking this hook.
 pub unsafe trait PhysicallyUnloadableAddin: Addin {
     /// Performs the stronger quiescence required before releasing the DLL's
     /// physical residency lease. Successful quiescence does not override a
-    /// residency hold for native calculation-event registrations.
+    /// residency hold for native calculation-event registrations or COM roots.
     fn quiesce_for_physical_unload(
         shared: &mut Self::SharedState,
         lifecycle: &mut Self::LifecycleState,
@@ -1219,7 +1221,7 @@ mod tests {
         // SAFETY: test subscription does not access host or async runtimes.
         unsafe impl crate::subscription::RtdSubscription for TestSubscription {
             fn request_cancel(&self) {}
-            fn disconnect_and_wait(self: Box<Self>) -> crate::XllResult<()> {
+            fn disconnect_and_wait(self) -> crate::XllResult<()> {
                 self.disconnected.store(true, Ordering::Release);
                 Ok(())
             }

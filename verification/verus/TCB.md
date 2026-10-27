@@ -987,6 +987,32 @@ Quick Cache hashing, eviction policy, native Clone/Drop instrumentation or the
 mapping between library locks and this vstd lock. Those remain explicit library/
 representation obligations, as do metadata loads, weak memory and destruction.
 
+### Native resident keys borrow one fixed retirement queue owner
+
+`cache/resident_index.rs` owns its retirement queue with `PublishedOwner`, after
+the private Quick Cache backend in field-drop order. Each private `ResidentKey`
+holds a non-owning queue pointer. Moving the enclosing index cannot move or
+uniquely retag the published queue allocation; backend destruction finishes all
+key pointer uses before the unique queue owner is reclaimed. Key removal only
+transfers its owned `VersionedKey<K>` into that queue. Maintenance and final queue
+destruction detach owned batches and run user key destructors outside backend
+locks; TLS deferred destruction contains owned keys, never queue pointers.
+
+The wrapper intentionally implements neither `Clone` nor a public constructor.
+The adapter exposes value-only snapshots, synchronous insertion, removal with
+immediate local result destruction, retain/clear, and scalar observations. Its
+`DefaultLifecycle` request state is local to insertion; no iterator, drain,
+entry/placeholder guard, callback-owned key, or cache handle is returned. The
+backend has no background eviction worker. `ResidentKey`'s native Send/Sync
+implementations retain the key and queue's corresponding thread-safety bounds.
+Future adapter extensions must preserve this non-escape and destruction-order
+invariant; `PublishedOwner` alone does not prove pointer liveness.
+
+This is a native ownership invariant, supported by focused tests and Miri. The
+existing Verus resident-cell adapter does not model this queue pointer, Quick
+Cache's native request-state/unwind/drop behavior, or the enclosing field order.
+No additional formal-coverage claim follows from removing queue reference counts.
+
 ### Typed lease references borrow the exact pin until their last use
 
 The queued node exposes a typed read through its existing storage-backed pin guard.

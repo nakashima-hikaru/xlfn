@@ -350,7 +350,7 @@ impl Boundary {
     pub(crate) fn finish<A: crate::Addin>(
         mut self,
         status: i32,
-        runtime: &crate::runtime::Runtime<A>,
+        runtime: &crate::runtime::Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     ) {
         if self.finished {
             return;
