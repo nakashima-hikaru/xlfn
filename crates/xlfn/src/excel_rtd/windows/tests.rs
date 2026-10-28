@@ -4007,10 +4007,11 @@ fn typed_com_port_keeps_mixed_owners_and_rolls_back_failed_value_conversion() {
     // The same identity/topic can retry after only the failed connection was
     // rolled back. The first enum variant remains connected throughout.
     let mut initial = connect_subscription_backend(&ensured, 82, key);
-    // SAFETY: the retried concrete transaction committed this numeric VARIANT.
+    // SAFETY: CountedComSource publishes i32, so the retried concrete
+    // transaction committed an integer VARIANT with an initialized lVal.
     unsafe {
-        assert_eq!(initial.Anonymous.Anonymous.vt, VT_R8);
-        assert_eq!(initial.Anonymous.Anonymous.Anonymous.dblVal, 7.0);
+        assert_eq!(initial.Anonymous.Anonymous.vt, VT_I4);
+        assert_eq!(initial.Anonymous.Anonymous.Anonymous.lVal, 7);
         assert_eq!(VariantClear(&mut initial), S_OK);
     }
     prepared.commit();

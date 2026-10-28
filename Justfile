@@ -23,6 +23,7 @@ panic-boundaries:
 
 # Compile valid and invalid callers against private lifecycle typestates.
 typestate:
+    python3 -B -m unittest discover -s tools -p test_check_typestate.py
     python3 -B tools/check_typestate.py
 
 clippy:

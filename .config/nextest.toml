@@ -25,3 +25,12 @@ slow-timeout = { period = "60s", terminate-after = 3 }
 filter = 'test(/(trait_driven_function_signatures_compile|invalid_macro_options_fail_to_compile)/)'
 test-group = 'compile-ui'
 slow-timeout = { period = "60s", terminate-after = 4 }
+
+# This one test compiles the full public API fixture suite. A cold Windows
+# runner was still compiling fixtures when the four-minute budget expired.
+# Keep runtime-test limits and the overall CI deadline unchanged.
+[[profile.ci.overrides]]
+filter = 'package(xlfn) and test(=trait_driven_function_signatures_compile)'
+platform = 'cfg(windows)'
+test-group = 'compile-ui'
+slow-timeout = { period = "60s", terminate-after = 8 }

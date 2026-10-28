@@ -53,7 +53,7 @@ class Fixture:
 def fixtures(root: Path) -> list[Fixture]:
     result = []
     for path in sorted((root / "tools/typestate").glob("*/*.rs")):
-        lines = path.read_text().splitlines()
+        lines = path.read_text(encoding="utf-8").splitlines()
         if not lines or not lines[0].startswith("// module: "):
             raise ValueError(f"{path}: missing module header")
         module = lines[0].removeprefix("// module: ")
@@ -77,14 +77,14 @@ def copy_sources(root: Path, destination: Path) -> str:
     paths = subprocess.check_output(
         ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
         cwd=root,
-    ).decode().split("\0")
+    ).decode("utf-8").split("\0")
     digest = hashlib.sha256()
     for name in sorted(set(paths) - {""}):
         source = root / name
         if not source.is_file():
             continue
         data = source.read_bytes()
-        digest.update(name.encode() + b"\0" + data + b"\0")
+        digest.update(name.encode("utf-8") + b"\0" + data + b"\0")
         target = destination / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
@@ -100,10 +100,12 @@ def check_fixture(
     compile_target: str | None = None, extra_features: tuple[str, ...] = (),
 ) -> dict:
     for relative, source in originals.items():
-        (overlay / relative).write_text(source)
+        (overlay / relative).write_text(source, encoding="utf-8")
     injected = overlay / MODULES[fixture.module]
-    path_literal = json.dumps(str(overlay / fixture.path))
-    with injected.open("a") as source:
+    # Rust accepts literal Unicode; JSON's ASCII-only \uXXXX escapes are not
+    # Rust string escapes and would reject non-ASCII checkout/fixture paths.
+    path_literal = json.dumps(str(overlay / fixture.path), ensure_ascii=False)
+    with injected.open("a", encoding="utf-8") as source:
         source.write(
             f"\n#[allow(dead_code)]\n#[path = {path_literal}]\n"
             "mod typestate_compile_fixture;\n"
@@ -116,7 +118,7 @@ def check_fixture(
     if compile_target:
         command.extend(["--target", compile_target])
     completed = subprocess.run(
-        command, cwd=overlay, text=True, capture_output=True,
+        command, cwd=overlay, text=True, encoding="utf-8", capture_output=True,
         env={**os.environ, "CARGO_TERM_COLOR": "never"},
     )
     errors = []
@@ -160,6 +162,11 @@ def check_fixture(
 
 
 def main() -> int:
+    # Windows CI may inherit a legacy console code page even though repository
+    # files and Cargo's JSON diagnostics are UTF-8. Preserve their text in logs.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target-dir", type=Path, default=ROOT / "target/typestate-check")
     parser.add_argument("--report", type=Path)
@@ -168,7 +175,7 @@ def main() -> int:
     args = parser.parse_args()
     cases = fixtures(ROOT)
     target = args.target_dir.resolve()
-    rustc = subprocess.check_output(["rustc", "-Vv"], text=True).strip()
+    rustc = subprocess.check_output(["rustc", "-Vv"], text=True, encoding="utf-8").strip()
     host = next(line.removeprefix("host: ") for line in rustc.splitlines() if line.startswith("host: "))
     compile_target = args.target or host
     skipped = [
@@ -183,7 +190,9 @@ def main() -> int:
     )
     report = {
         "rustc": rustc, "target": compile_target,
-        "git_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+        "git_head": subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, encoding="utf-8",
+        ).strip(),
         "features": [*FEATURES, *extra_features], "fixtures": [],
         "build_environment": {key: os.environ[key] for key in environment_keys if key in os.environ},
         "skipped_fixtures": [
@@ -197,7 +206,7 @@ def main() -> int:
         overlay = Path(directory)
         report["source_sha256"] = copy_sources(ROOT, overlay)
         originals = {
-            path: (overlay / path).read_text() for path in MODULES.values()
+            path: (overlay / path).read_text(encoding="utf-8") for path in MODULES.values()
         }
         for fixture in cases:
             result = check_fixture(fixture, overlay, originals, target, args.target, extra_features)
@@ -214,7 +223,7 @@ def main() -> int:
     )
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(json.dumps(report, indent=2) + "\n")
+        args.report.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return 0 if report["passed"] else 1
 
 
