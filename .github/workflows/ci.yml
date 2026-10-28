@@ -102,6 +102,8 @@ jobs:
                       command: just test-ci
                     - name: production feature tests
                       command: just test-features
+                    - name: lifecycle typestate contracts
+                      command: just typestate
                     - name: handle publication interleavings
                       command: >-
                           cargo test

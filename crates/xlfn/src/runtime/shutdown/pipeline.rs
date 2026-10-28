@@ -7,7 +7,7 @@
 //! before waiting for RTD module quiescence.
 
 use super::certificate::TerminalCertificateKind;
-use super::owner::RemovalOwner;
+use super::owner::{RemovalClaimGuard, RemovalOwner};
 use crate::addin::Addin;
 use crate::panic_boundary::catch_no_unwind;
 use crate::runtime::capabilities::ShutdownDeps;
@@ -68,7 +68,7 @@ impl CleanedAddin {
 }
 
 impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
-    pub(crate) fn empty(
+    fn empty(
         deps: ShutdownDeps<'runtime, A>,
         generation: Option<crate::generation::RuntimeGeneration>,
     ) -> Self {
@@ -79,7 +79,7 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
         }
     }
 
-    pub(crate) fn shared(
+    fn shared(
         deps: ShutdownDeps<'runtime, A>,
         generation: Option<crate::generation::RuntimeGeneration>,
         shared_state: A::SharedState,
@@ -88,6 +88,88 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
             deps,
             generation,
             shared_state: Some(shared_state),
+        }
+    }
+
+    fn quiesce(
+        deps: ShutdownDeps<'runtime, A>,
+        runtime: &crate::runtime::Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+        lifecycle: &crate::runtime::AddinLifecycleAccess<'_, A>,
+        generation_id: Option<crate::generation::RuntimeGeneration>,
+        take_generation: impl FnOnce() -> Option<crate::generation::ShutdownGeneration<A>>,
+    ) -> Result<Self, AddinQuiesceFailure> {
+        // Validate the supplied policy/runtime and thread-affine access before
+        // extracting any state that would otherwise be dropped on an error.
+        if !std::ptr::eq(&runtime.lifecycle, deps.lifecycle()) {
+            return Err(AddinQuiesceFailure::Lifecycle(crate::XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_RUNTIME,
+            }));
+        }
+        let lifecycle_present = deps.has_addin_lifecycle(lifecycle).map_err(|error| {
+            AddinQuiesceFailure::Lifecycle(crate::lifecycle::lifecycle_access_error(error))
+        })?;
+        let Some(generation) = take_generation() else {
+            if lifecycle_present {
+                return Err(AddinQuiesceFailure::Lifecycle(crate::XllError::Internal {
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::LIFECYCLE_SLOT,
+                }));
+            }
+            return Ok(Self::empty(deps, generation_id));
+        };
+        match generation {
+            crate::generation::ShutdownGeneration::Open(generation) => {
+                let mut generation = *generation;
+                let quiesce = catch_no_unwind(AssertUnwindSafe(|| {
+                    runtime
+                        .with_addin_lifecycle(lifecycle, |lifecycle_state| {
+                            runtime.quiesce_addin(&mut generation.shared_state, lifecycle_state)
+                        })
+                        .map_err(crate::lifecycle::lifecycle_access_error)
+                }))
+                .map_err(|_| crate::XllError::Panic)
+                .and_then(|result| result)
+                .and_then(|result| result);
+                if let Err(error) = quiesce {
+                    runtime.lifecycle_orchestrator().quarantine_generation(
+                        generation_id,
+                        generation,
+                        crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
+                    );
+                    return Err(AddinQuiesceFailure::Quiesce(error));
+                }
+                let addin = Self::shared(deps, generation_id, generation.shared_state);
+                drop(generation.layers);
+                Ok(addin)
+            }
+            crate::generation::ShutdownGeneration::Opening(opening) => {
+                let (mut shared_state, layers, _config) = opening.into_parts();
+                let quiesce = catch_no_unwind(AssertUnwindSafe(|| {
+                    runtime
+                        .with_addin_lifecycle(lifecycle, |lifecycle_state| {
+                            runtime.quiesce_addin(&mut shared_state, lifecycle_state)
+                        })
+                        .map_err(crate::lifecycle::lifecycle_access_error)
+                }))
+                .map_err(|_| crate::XllError::Panic)
+                .and_then(|result| result)
+                .and_then(|result| result);
+                if let Err(error) = quiesce {
+                    runtime.lifecycle_orchestrator().quarantine_layers(
+                        generation_id,
+                        layers,
+                        crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
+                    );
+                    runtime.lifecycle_orchestrator().quarantine_shared_state(
+                        generation_id,
+                        shared_state,
+                        crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
+                    );
+                    return Err(AddinQuiesceFailure::Quiesce(error));
+                }
+                let addin = Self::shared(deps, generation_id, shared_state);
+                drop(layers);
+                Ok(addin)
+            }
         }
     }
 
@@ -247,6 +329,63 @@ pub(crate) struct ProducersStopped {
     subscriptions_stopped: crate::shutdown::SubscriptionsStopped,
 }
 
+/// Callback admission is closed; host detachment has not yet been checked.
+pub(crate) struct CallbacksClosed {
+    producers: ProducersStopped,
+}
+
+/// Every direct host callback is finished and generation registrations detached.
+pub(crate) struct HostDetached {
+    producers: ProducersStopped,
+    host_callbacks: crate::shutdown::GenerationCallbacksDetached,
+}
+
+/// Quiescence is produced only by invoking the selected add-in contract.
+pub(crate) struct AddinQuiesced<'runtime, A: Addin> {
+    host: HostDetached,
+    addin: QuiescedAddin<'runtime, A>,
+}
+
+pub(crate) enum HostDetachFailure {
+    RegistrationUnknown,
+    CallbacksRegistered,
+}
+
+impl HostDetachFailure {
+    pub(crate) fn hazard(&self) -> crate::shutdown::UnloadHazard {
+        match self {
+            Self::RegistrationUnknown => crate::shutdown::UnloadHazard::RegistrationStateUnknown,
+            Self::CallbacksRegistered => crate::shutdown::UnloadHazard::HostCallbackStillRegistered,
+        }
+    }
+
+    pub(crate) fn into_error(self) -> crate::XllError {
+        crate::XllError::Internal {
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRATION_UNKNOWN,
+        }
+    }
+}
+
+pub(crate) enum AddinQuiesceFailure {
+    Lifecycle(crate::XllError),
+    Quiesce(crate::XllError),
+}
+
+impl AddinQuiesceFailure {
+    pub(crate) fn hazard(&self) -> crate::shutdown::UnloadHazard {
+        match self {
+            Self::Lifecycle(_) => crate::shutdown::UnloadHazard::CloseInvariantViolation,
+            Self::Quiesce(_) => crate::shutdown::UnloadHazard::AddinQuiesceFailed,
+        }
+    }
+
+    pub(crate) fn into_error(self) -> crate::XllError {
+        match self {
+            Self::Lifecycle(error) | Self::Quiesce(error) => error,
+        }
+    }
+}
+
 /// Owns the generation service seal while the remaining shutdown stages run.
 ///
 /// The subscription certificate is consumed by `Runtime::seal_generation_services`
@@ -257,6 +396,7 @@ pub(crate) struct ServicesSealed<'runtime, A: Addin> {
     async_stopped: crate::shutdown::AsyncStopped,
     sealed: crate::runtime_components::SealedGenerationServices,
     addin: QuiescedAddin<'runtime, A>,
+    host_callbacks: crate::shutdown::GenerationCallbacksDetached,
 }
 
 pub(crate) struct ServicesCleaned {
@@ -264,6 +404,7 @@ pub(crate) struct ServicesCleaned {
     async_stopped: crate::shutdown::AsyncStopped,
     sealed: crate::runtime_components::SealedGenerationServices,
     addin: CleanedAddin,
+    host_callbacks: crate::shutdown::GenerationCallbacksDetached,
 }
 
 /// The generation services have both been sealed and fully finished.
@@ -279,6 +420,7 @@ pub(crate) struct ServicesQuiescent {
     handles: crate::shutdown::HandlesQuiescent,
     addin: crate::shutdown::AddinQuiesced,
     generation: crate::shutdown::GenerationReclaimed,
+    host_callbacks: crate::shutdown::GenerationCallbacksDetached,
 }
 
 /// Owns every resource certificate after producers have stopped. The only
@@ -287,48 +429,7 @@ pub(crate) struct ServicesQuiescent {
 pub(crate) struct ResourcesReclaimed {
     services: ServicesQuiescent,
     rtd: crate::excel_rtd_protocol::RtdQuiescent,
-    host_callbacks: crate::shutdown::GenerationCallbacksDetached,
     diagnostics: crate::diagnostics::DiagnosticsStopped,
-}
-
-pub(crate) trait ModuleCloseStage {
-    fn close_module_callbacks(&self);
-}
-
-impl ModuleCloseStage for ExecutionDrained {
-    fn close_module_callbacks(&self) {
-        self.module.close_callbacks();
-    }
-}
-
-impl ModuleCloseStage for ProducersStopped {
-    fn close_module_callbacks(&self) {
-        self.execution.close_module_callbacks();
-    }
-}
-
-impl<A: Addin> ModuleCloseStage for ServicesSealed<'_, A> {
-    fn close_module_callbacks(&self) {
-        self.execution.close_module_callbacks();
-    }
-}
-
-impl ModuleCloseStage for ServicesCleaned {
-    fn close_module_callbacks(&self) {
-        self.execution.close_module_callbacks();
-    }
-}
-
-impl ModuleCloseStage for ServicesQuiescent {
-    fn close_module_callbacks(&self) {
-        self.module.close_callbacks();
-    }
-}
-
-impl ModuleCloseStage for ResourcesReclaimed {
-    fn close_module_callbacks(&self) {
-        self.services.close_module_callbacks();
-    }
 }
 
 impl ExecutionDrained {
@@ -369,7 +470,7 @@ impl ExecutionDrained {
         Ok(Self { module, returns })
     }
 
-    pub(crate) fn close_module_callbacks(&self) {
+    fn close_module_callbacks(&self) {
         self.module.close_callbacks();
     }
 
@@ -442,26 +543,31 @@ impl ExecutionDrained {
     }
 }
 
-impl ProducersStopped {
-    pub(crate) fn seal_services<'runtime, A: Addin>(
+impl<'runtime, A: Addin> AddinQuiesced<'runtime, A> {
+    fn seal_services(
         self,
         deps: ShutdownDeps<'runtime, A>,
-        addin: QuiescedAddin<'runtime, A>,
     ) -> Result<
         ServicesSealed<'runtime, A>,
         (crate::XllError, crate::module_runtime::ModuleExportsDrained),
     > {
-        let Self {
+        let Self { host, addin } = self;
+        let HostDetached {
+            producers,
+            host_callbacks,
+        } = host;
+        let ProducersStopped {
             execution,
             async_stopped,
             subscriptions_stopped,
-        } = self;
+        } = producers;
         match deps.seal_generation_services(subscriptions_stopped) {
             Ok(sealed) => Ok(ServicesSealed {
                 execution,
                 async_stopped,
                 sealed,
                 addin,
+                host_callbacks,
             }),
             Err(error) => Err((error, execution.module)),
         }
@@ -480,6 +586,7 @@ impl<'runtime, A: Addin> ServicesSealed<'runtime, A> {
             async_stopped,
             sealed,
             addin,
+            host_callbacks,
         } = self;
         match addin.cleanup(lifecycle, report) {
             Ok(addin) => Ok(ServicesCleaned {
@@ -487,6 +594,7 @@ impl<'runtime, A: Addin> ServicesSealed<'runtime, A> {
                 async_stopped,
                 sealed,
                 addin,
+                host_callbacks,
             }),
             Err(error) => Err((error, execution.module)),
         }
@@ -503,6 +611,7 @@ impl ServicesCleaned {
             async_stopped,
             sealed,
             addin,
+            host_callbacks,
         } = self;
         match sealed.finish() {
             Ok((handles, subscriptions_stopped)) => Ok(ServicesQuiescent {
@@ -513,6 +622,7 @@ impl ServicesCleaned {
                 handles,
                 addin: addin.addin_quiesced,
                 generation: addin.generation_reclaimed,
+                host_callbacks,
             }),
             Err(error) => Err((error, execution.module)),
         }
@@ -530,6 +640,7 @@ impl ServicesQuiescent {
         crate::shutdown::HandlesQuiescent,
         crate::shutdown::AddinQuiesced,
         crate::shutdown::GenerationReclaimed,
+        crate::shutdown::GenerationCallbacksDetached,
     ) {
         (
             self.module,
@@ -539,6 +650,7 @@ impl ServicesQuiescent {
             self.handles,
             self.addin,
             self.generation,
+            self.host_callbacks,
         )
     }
 }
@@ -547,13 +659,11 @@ impl ResourcesReclaimed {
     pub(crate) fn new(
         services: ServicesQuiescent,
         rtd: crate::excel_rtd_protocol::RtdQuiescent,
-        host_callbacks: crate::shutdown::GenerationCallbacksDetached,
         diagnostics: crate::diagnostics::DiagnosticsStopped,
     ) -> Self {
         Self {
             services,
             rtd,
-            host_callbacks,
             diagnostics,
         }
     }
@@ -562,11 +672,18 @@ impl ResourcesReclaimed {
         let Self {
             services,
             rtd,
-            host_callbacks,
             diagnostics,
         } = self;
-        let (module, returns, async_stopped, subscriptions_stopped, handles, addin, generation) =
-            services.into_parts();
+        let (
+            module,
+            returns,
+            async_stopped,
+            subscriptions_stopped,
+            handles,
+            addin,
+            generation,
+            host_callbacks,
+        ) = services.into_parts();
         let services_generation = match (subscriptions_stopped.generation(), handles.generation()) {
             (subscriptions_generation, handles_generation)
                 if subscriptions_generation == handles_generation =>
@@ -621,6 +738,24 @@ impl ModuleAuthorityRecovery for ProducersStopped {
     }
 }
 
+impl ModuleAuthorityRecovery for CallbacksClosed {
+    fn recover_module_authority(self) -> crate::module_runtime::ModuleCleanupAuthority {
+        self.producers.recover_module_authority()
+    }
+}
+
+impl ModuleAuthorityRecovery for HostDetached {
+    fn recover_module_authority(self) -> crate::module_runtime::ModuleCleanupAuthority {
+        self.producers.recover_module_authority()
+    }
+}
+
+impl<A: Addin> ModuleAuthorityRecovery for AddinQuiesced<'_, A> {
+    fn recover_module_authority(self) -> crate::module_runtime::ModuleCleanupAuthority {
+        self.host.recover_module_authority()
+    }
+}
+
 impl<A: Addin> ModuleAuthorityRecovery for ServicesSealed<'_, A> {
     fn recover_module_authority(self) -> crate::module_runtime::ModuleCleanupAuthority {
         self.execution.recover_module_authority()
@@ -655,19 +790,19 @@ pub(crate) struct TeardownTxn<'runtime, A: Addin, K, S: ModuleAuthorityRecovery>
 }
 
 struct TeardownOwner<'runtime, A: Addin> {
-    owner: Option<RemovalOwner<'runtime, A>>,
+    owner: Option<RemovalClaimGuard<'runtime, A>>,
     deps: ShutdownDeps<'runtime, A>,
 }
 
 impl<'runtime, A: Addin> TeardownOwner<'runtime, A> {
-    fn new(deps: ShutdownDeps<'runtime, A>, owner: RemovalOwner<'runtime, A>) -> Self {
+    fn new(deps: ShutdownDeps<'runtime, A>, owner: RemovalClaimGuard<'runtime, A>) -> Self {
         Self {
             owner: Some(owner),
             deps,
         }
     }
 
-    fn take(&mut self) -> RemovalOwner<'runtime, A> {
+    fn take(&mut self) -> RemovalClaimGuard<'runtime, A> {
         self.owner
             .take()
             .expect("teardown transaction owns one removal owner")
@@ -701,18 +836,6 @@ impl<A: Addin> Drop for TeardownOwner<'_, A> {
 }
 
 impl<'runtime, A: Addin, K, S: ModuleAuthorityRecovery> TeardownTxn<'runtime, A, K, S> {
-    pub(crate) fn new(
-        deps: ShutdownDeps<'runtime, A>,
-        owner: RemovalOwner<'runtime, A>,
-        stage: S,
-    ) -> Self {
-        Self {
-            owner: TeardownOwner::new(deps, owner),
-            stage: Some(stage),
-            _kind: PhantomData,
-        }
-    }
-
     fn from_parts(owner: TeardownOwner<'runtime, A>, stage: S) -> Self {
         Self {
             owner,
@@ -729,16 +852,6 @@ impl<'runtime, A: Addin, K, S: ModuleAuthorityRecovery> TeardownTxn<'runtime, A,
             .take()
             .expect("teardown transaction owns one current stage");
         (owner, stage)
-    }
-
-    pub(crate) fn close_module_callbacks(&self)
-    where
-        S: ModuleCloseStage,
-    {
-        self.stage
-            .as_ref()
-            .expect("teardown transaction owns one current stage")
-            .close_module_callbacks();
     }
 }
 
@@ -773,13 +886,100 @@ impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ExecutionDrained> {
 }
 
 impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ProducersStopped> {
+    pub(crate) fn close_module_callbacks(self) -> TeardownTxn<'runtime, A, K, CallbacksClosed> {
+        let (owner, producers) = self.split();
+        producers.execution.close_module_callbacks();
+        TeardownTxn::from_parts(owner, CallbacksClosed { producers })
+    }
+}
+
+impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, CallbacksClosed> {
+    pub(crate) fn detach_host(
+        self,
+    ) -> Result<TeardownTxn<'runtime, A, K, HostDetached>, HostDetachFailure> {
+        let deps = self.owner.deps();
+        if deps.host().registration_state_unknown() {
+            return Err(HostDetachFailure::RegistrationUnknown);
+        }
+        if !deps.host().generation_callbacks_detached() {
+            return Err(HostDetachFailure::CallbacksRegistered);
+        }
+        let (owner, closed) = self.split();
+        Ok(TeardownTxn::from_parts(
+            owner,
+            HostDetached {
+                producers: closed.producers,
+                host_callbacks: crate::shutdown::GenerationCallbacksDetached::issue(),
+            },
+        ))
+    }
+}
+
+impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, HostDetached> {
+    fn quiesce_generation(
+        self,
+        runtime: &crate::runtime::Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+        lifecycle: &crate::runtime::AddinLifecycleAccess<'_, A>,
+        generation_id: Option<crate::generation::RuntimeGeneration>,
+        take_generation: impl FnOnce() -> Option<crate::generation::ShutdownGeneration<A>>,
+    ) -> Result<TeardownTxn<'runtime, A, K, AddinQuiesced<'runtime, A>>, AddinQuiesceFailure> {
+        let addin = QuiescedAddin::quiesce(
+            self.owner.deps(),
+            runtime,
+            lifecycle,
+            generation_id,
+            take_generation,
+        )?;
+        let (owner, host) = self.split();
+        Ok(TeardownTxn::from_parts(
+            owner,
+            AddinQuiesced { host, addin },
+        ))
+    }
+}
+
+impl<'runtime, A: Addin> TeardownTxn<'runtime, A, super::certificate::FinalRemoval, HostDetached> {
+    pub(crate) fn quiesce_addin(
+        self,
+        runtime: &crate::runtime::Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+        lifecycle: &crate::runtime::AddinLifecycleAccess<'_, A>,
+    ) -> Result<
+        TeardownTxn<'runtime, A, super::certificate::FinalRemoval, AddinQuiesced<'runtime, A>>,
+        AddinQuiesceFailure,
+    > {
+        let deps = self.owner.deps();
+        self.quiesce_generation(runtime, lifecycle, deps.protocol_generation(), || {
+            deps.take_generation_for_shutdown()
+        })
+    }
+}
+
+impl<'runtime, A: Addin> TeardownTxn<'runtime, A, super::certificate::OpenRollback, HostDetached> {
+    pub(crate) fn quiesce_addin(
+        self,
+        runtime: &crate::runtime::Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+        lifecycle: &crate::runtime::AddinLifecycleAccess<'_, A>,
+        generation_id: Option<crate::generation::RuntimeGeneration>,
+    ) -> Result<
+        TeardownTxn<'runtime, A, super::certificate::OpenRollback, AddinQuiesced<'runtime, A>>,
+        AddinQuiesceFailure,
+    > {
+        self.quiesce_generation(runtime, lifecycle, generation_id, || {
+            runtime
+                .lifecycle_orchestrator()
+                .take_opening_for_rollback()
+                .map(crate::generation::ShutdownGeneration::Opening)
+        })
+    }
+}
+
+impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, AddinQuiesced<'runtime, A>> {
     pub(crate) fn seal_services(
         self,
-        addin: QuiescedAddin<'runtime, A>,
     ) -> crate::XllResult<TeardownTxn<'runtime, A, K, ServicesSealed<'runtime, A>>> {
         let (mut owner, stage) = self.split();
         let deps = owner.deps();
-        match stage.seal_services(deps, addin) {
+        match stage.seal_services(deps) {
             Ok(stage) => Ok(TeardownTxn::from_parts(owner, stage)),
             Err((error, module)) => {
                 owner.return_module_authority(
@@ -834,11 +1034,10 @@ impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ServicesQuiescent> {
     pub(crate) fn reclaim(
         self,
         rtd: crate::excel_rtd_protocol::RtdQuiescent,
-        host_callbacks: crate::shutdown::GenerationCallbacksDetached,
         diagnostics: crate::diagnostics::DiagnosticsStopped,
     ) -> TeardownTxn<'runtime, A, K, ResourcesReclaimed> {
         let (owner, services) = self.split();
-        let stage = ResourcesReclaimed::new(services, rtd, host_callbacks, diagnostics);
+        let stage = ResourcesReclaimed::new(services, rtd, diagnostics);
         TeardownTxn::from_parts(owner, stage)
     }
 }
@@ -867,22 +1066,180 @@ impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ResourcesReclaimed> {
     }
 }
 
-pub(crate) fn drain_execution<A: Addin>(
-    deps: ShutdownDeps<'_, A>,
-    owner: &mut RemovalOwner<'_, A>,
-) -> Result<ExecutionDrained, ExecutionDrainError> {
-    let module = owner.take_module_closing();
-    match ExecutionDrained::begin(deps, module) {
-        Ok(stage) => Ok(stage),
-        Err((error, module)) => {
-            if matches!(error, ExecutionDrainError::Preparation(_)) {
-                // Terminal retention must precede the owner's release and
-                // notification. A waiting remover must never reclaim this
-                // undrained capability as an ordinary Closing authority.
+/// Keeps the returned authority and claim alive while the caller inspects a
+/// failed drain. Quarantine is published before this guard can notify waiters.
+pub(crate) struct ExecutionDrainFailure<'runtime, A: Addin> {
+    error: ExecutionDrainError,
+    _owner: Box<TeardownOwner<'runtime, A>>,
+}
+
+impl<A: Addin> ExecutionDrainFailure<'_, A> {
+    pub(crate) fn hazard(&self) -> crate::shutdown::UnloadHazard {
+        self.error.hazard()
+    }
+
+    pub(crate) fn into_error(self) -> crate::XllError {
+        self.error.into_error()
+    }
+}
+
+impl<'runtime, A: Addin> RemovalOwner<'runtime, A> {
+    pub(crate) fn drain<K>(
+        self,
+    ) -> Result<TeardownTxn<'runtime, A, K, ExecutionDrained>, ExecutionDrainFailure<'runtime, A>>
+    {
+        let (deps, claim, module) = self.into_parts();
+        let mut owner = TeardownOwner::new(deps, claim);
+        match ExecutionDrained::begin(deps, module) {
+            Ok(stage) => Ok(TeardownTxn::from_parts(owner, stage)),
+            Err((error, module)) => {
+                // Quarantine precedes returning an undrained authority and
+                // releasing the claim, so a waiter cannot retry that drain.
                 deps.quarantine_state();
+                owner.return_module_authority(module);
+                Err(ExecutionDrainFailure {
+                    error,
+                    _owner: Box::new(owner),
+                })
             }
-            owner.return_module_authority(module);
-            Err(error)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::addin::{Addin, OpenContext, OpenResult};
+    use crate::runtime::{Runtime, transactions::RemovalSuccess};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    enum Failure {
+        None,
+        Quiesce,
+        Cleanup,
+    }
+
+    struct ObservedState(Arc<AtomicUsize>);
+
+    impl Drop for ObservedState {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct RollbackProbe;
+
+    impl Addin for RollbackProbe {
+        #[cfg(feature = "rtd")]
+        type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
+        type SharedState = ObservedState;
+        type LifecycleState = Failure;
+        type Layers = ();
+        type Error = crate::XllError;
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
+
+        fn open(_: &OpenContext<Self>) -> OpenResult<Self> {
+            unreachable!("test stages state directly")
+        }
+
+        fn quiesce(_: &mut ObservedState, failure: &mut Failure) -> Result<(), Self::Error> {
+            if *failure == Failure::Quiesce {
+                Err(crate::XllError::Closing)
+            } else {
+                Ok(())
+            }
+        }
+
+        fn cleanup(failure: &mut Failure, _: &mut crate::shutdown::CleanupReporter<'_>) {
+            assert!(*failure != Failure::Cleanup, "injected cleanup panic");
+        }
+    }
+
+    #[test]
+    fn rollback_quarantine_keeps_failed_attempt_generation() {
+        for previously_committed in [false, true] {
+            for failure in [Failure::Quiesce, Failure::Cleanup] {
+                let runtime = Runtime::<RollbackProbe>::new();
+                if previously_committed {
+                    let opening = runtime.begin_open().unwrap();
+                    let mut opening = runtime.publish_with_lifecycle(
+                        opening,
+                        ObservedState(Arc::new(AtomicUsize::new(0))),
+                        Failure::None,
+                        (),
+                    );
+                    runtime.finish_open(&mut opening, Vec::new()).unwrap();
+                    let lifecycle = runtime.bind_addin_lifecycle().unwrap();
+                    let closed = crate::runtime::transactions::remove_addin_inner(
+                        &runtime,
+                        &lifecycle,
+                        &mut crate::host_callback::HostCallbackSession::new(),
+                    );
+                    assert!(matches!(closed, RemovalSuccess::Closed { .. }));
+                    drop(closed);
+                }
+
+                let drops = Arc::new(AtomicUsize::new(0));
+                let opening = runtime.begin_open().unwrap();
+                let failed_generation = opening.attempt_id().into_runtime_generation();
+                let opening = runtime.publish_with_lifecycle(
+                    opening,
+                    ObservedState(Arc::clone(&drops)),
+                    failure,
+                    (),
+                );
+                assert!(opening.fail_for_test().requires_rollback());
+                assert_ne!(runtime.protocol_generation(), Some(failed_generation));
+                let lifecycle = runtime.bind_addin_lifecycle().unwrap();
+                let outcome = crate::runtime::rollback::rollback_open(
+                    &runtime,
+                    &lifecycle,
+                    &mut crate::host_callback::HostCallbackSession::new(),
+                    Some(failed_generation),
+                );
+                assert!(!outcome.is_finalized());
+                let expected_reason = if failure == Failure::Quiesce {
+                    crate::runtime_components::QuarantineReason::AddinQuiesceFailed
+                } else {
+                    crate::runtime_components::QuarantineReason::AddinCleanupPanicked
+                };
+                let retained = runtime.quarantine_snapshot();
+                assert!(retained.contains(&(Some(failed_generation), expected_reason)));
+                assert!(
+                    retained
+                        .iter()
+                        .all(|(generation, _)| *generation == Some(failed_generation))
+                );
+                assert_eq!(drops.load(Ordering::SeqCst), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn quiesce_validates_runtime_and_lifecycle_before_extracting_generation() {
+        let runtime = Runtime::<RollbackProbe>::new();
+        let other = Runtime::<RollbackProbe>::new();
+        let lifecycle = runtime.bind_addin_lifecycle().unwrap();
+        let other_lifecycle = other.bind_addin_lifecycle().unwrap();
+        for (policy_runtime, access) in [(&other, &lifecycle), (&runtime, &other_lifecycle)] {
+            let mut extracted = false;
+            let result = QuiescedAddin::quiesce(
+                runtime.shutdown_deps(),
+                policy_runtime,
+                access,
+                None,
+                || {
+                    extracted = true;
+                    None
+                },
+            );
+            assert!(matches!(result, Err(AddinQuiesceFailure::Lifecycle(_))));
+            assert!(!extracted);
         }
     }
 }

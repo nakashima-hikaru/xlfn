@@ -307,7 +307,7 @@ unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
         token,
     );
     // SAFETY: forwarded from this function's raw-handle contract.
-    let mut responder = match unsafe { ExcelAsyncResponder::from_raw(udf_id, raw_handle) } {
+    let responder = match unsafe { ExcelAsyncResponder::from_raw(udf_id, raw_handle) } {
         Ok(responder) => responder,
         Err(error) => {
             let delivery = OwnedDeliveryOutcome::Unobserved;
@@ -383,7 +383,7 @@ unsafe fn async_udf_boundary_uninstrumented<A, Start, Fut, T>(
     let calculation = runtime.async_runtime().snapshot_calculation();
     let (cancellation, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
     // SAFETY: forwarded from this function's raw-handle contract.
-    let mut responder = match unsafe { ExcelAsyncResponder::from_raw(udf_id, raw_handle) } {
+    let responder = match unsafe { ExcelAsyncResponder::from_raw(udf_id, raw_handle) } {
         Ok(responder) => responder,
         Err(error) => {
             let delivery = OwnedDeliveryOutcome::Unobserved;
@@ -591,7 +591,7 @@ unsafe fn async_udf_boundary_instrumented_handle<A, Start, Build, T>(
         token,
     );
     // SAFETY: forwarded from this function's raw-handle contract.
-    let mut responder = match unsafe { ExcelAsyncResponder::from_raw(udf_id, raw_handle) } {
+    let responder = match unsafe { ExcelAsyncResponder::from_raw(udf_id, raw_handle) } {
         Ok(responder) => responder,
         Err(error) => {
             let delivery = OwnedDeliveryOutcome::Unobserved;
@@ -680,7 +680,7 @@ unsafe fn async_udf_boundary_uninstrumented_handle<A, Start, Build, T>(
     let calculation = runtime.async_runtime().snapshot_calculation();
     let (cancellation, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
     // SAFETY: forwarded from this function's raw-handle contract.
-    let mut responder = match unsafe { ExcelAsyncResponder::from_raw(udf_id, raw_handle) } {
+    let responder = match unsafe { ExcelAsyncResponder::from_raw(udf_id, raw_handle) } {
         Ok(responder) => responder,
         Err(error) => {
             let delivery = OwnedDeliveryOutcome::Unobserved;

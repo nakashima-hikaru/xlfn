@@ -1011,9 +1011,9 @@ fn async_handle_preserves_opaque_token_with_nonzero_size() {
     // SAFETY: raw is a live, well-formed test async handle.
     let _callback_guard = reset_test_callback();
     // SAFETY: raw is a live, well-formed test async handle.
-    let mut owned = unsafe { ExcelAsyncResponder::from_raw("test_payload", &mut raw) }.unwrap();
+    let owned = unsafe { ExcelAsyncResponder::from_raw("test_payload", &mut raw) }.unwrap();
     // SAFETY: the owned value remains XLTYPE_BIG_DATA with a positive size.
-    let big_data = unsafe { owned.raw.value.big_data };
+    let big_data = unsafe { owned.pending_handle().value.big_data };
     // SAFETY: the big_data union contains the raw byte pointer in `handle.data`.
     let copied = unsafe { big_data.handle.data };
     assert_eq!(copied, original);
@@ -1022,14 +1022,6 @@ fn async_handle_preserves_opaque_token_with_nonzero_size() {
     // SAFETY: the test callback owns the async-return boundary and both
     // pointers remain live for the duration of the call.
     unsafe { owned.deliver(result) }.unwrap();
-    assert_eq!(crate::test_callback::async_return_calls(), 1);
-
-    let second = AsyncReturnValue::error(&XllError::Closing);
-    let second_result = {
-        // SAFETY: the responder rejects a second delivery before touching Excel.
-        unsafe { owned.deliver(second) }
-    };
-    assert!(matches!(second_result, Err(XllError::Internal { .. })));
     assert_eq!(crate::test_callback::async_return_calls(), 1);
 }
 

@@ -1,4 +1,4 @@
-use super::owner::RemovalOwner;
+use super::owner::RemovalClaimGuard;
 use super::pipeline::QuiescenceProof;
 use crate::XllError;
 use crate::generation::RuntimeGeneration;
@@ -20,10 +20,10 @@ pub(crate) trait TerminalCertificateKind {
         A: 'runtime;
 
     fn certify<'runtime, A>(
-        owner: RemovalOwner<'runtime, A>,
+        owner: RemovalClaimGuard<'runtime, A>,
         proof: QuiescenceProof,
         deps: ShutdownDeps<'runtime, A>,
-    ) -> Result<Self::Certificate<'runtime, A>, (XllError, RemovalOwner<'runtime, A>)>
+    ) -> Result<Self::Certificate<'runtime, A>, (XllError, RemovalClaimGuard<'runtime, A>)>
     where
         A: crate::Addin + 'runtime;
 }
@@ -35,10 +35,10 @@ impl TerminalCertificateKind for FinalRemoval {
         A: 'runtime;
 
     fn certify<'runtime, A>(
-        owner: RemovalOwner<'runtime, A>,
+        owner: RemovalClaimGuard<'runtime, A>,
         proof: QuiescenceProof,
         deps: ShutdownDeps<'runtime, A>,
-    ) -> Result<Self::Certificate<'runtime, A>, (XllError, RemovalOwner<'runtime, A>)>
+    ) -> Result<Self::Certificate<'runtime, A>, (XllError, RemovalClaimGuard<'runtime, A>)>
     where
         A: crate::Addin + 'runtime,
     {
@@ -53,10 +53,10 @@ impl TerminalCertificateKind for OpenRollback {
         A: 'runtime;
 
     fn certify<'runtime, A>(
-        owner: RemovalOwner<'runtime, A>,
+        owner: RemovalClaimGuard<'runtime, A>,
         proof: QuiescenceProof,
         deps: ShutdownDeps<'runtime, A>,
-    ) -> Result<Self::Certificate<'runtime, A>, (XllError, RemovalOwner<'runtime, A>)>
+    ) -> Result<Self::Certificate<'runtime, A>, (XllError, RemovalClaimGuard<'runtime, A>)>
     where
         A: crate::Addin + 'runtime,
     {
@@ -75,13 +75,13 @@ pub(crate) enum FinalRemovalCertificate<'runtime, A: crate::Addin> {
     Committed {
         proof: QuiescenceProof,
         deps: ShutdownDeps<'runtime, A>,
-        owner: RemovalOwner<'runtime, A>,
+        owner: RemovalClaimGuard<'runtime, A>,
         generation: RuntimeGeneration,
     },
     Uncommitted {
         proof: QuiescenceProof,
         deps: ShutdownDeps<'runtime, A>,
-        owner: RemovalOwner<'runtime, A>,
+        owner: RemovalClaimGuard<'runtime, A>,
     },
 }
 
@@ -90,7 +90,7 @@ pub(crate) enum FinalRemovalCertificate<'runtime, A: crate::Addin> {
 pub(crate) struct OpenRollbackCertificate<'runtime, A: crate::Addin> {
     proof: QuiescenceProof,
     deps: ShutdownDeps<'runtime, A>,
-    owner: RemovalOwner<'runtime, A>,
+    owner: RemovalClaimGuard<'runtime, A>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -122,7 +122,7 @@ impl ClosedWitness {
     }
 }
 
-impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
+impl<'runtime, A: crate::Addin> RemovalClaimGuard<'runtime, A> {
     fn certify_final_removal(
         self,
         proof: QuiescenceProof,
@@ -147,9 +147,6 @@ impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
                 {
                     return Err((close_certificate_error(), self));
                 }
-                if self.has_module_closing() {
-                    return Err((close_certificate_error(), self));
-                }
                 let mut control = lifecycle.access();
                 if !lifecycle.clear_certified_retirement(&mut control) {
                     return Err((close_certificate_error(), self));
@@ -163,9 +160,6 @@ impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
             }
             FinalRemovalReady::Uncommitted => {
                 if !deps.host().is_quiescent() || !deps.residency().callbacks_retained_safely() {
-                    return Err((close_certificate_error(), self));
-                }
-                if self.has_module_closing() {
                     return Err((close_certificate_error(), self));
                 }
                 Ok(FinalRemovalCertificate::Uncommitted {
@@ -197,9 +191,6 @@ impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
                 self,
             ));
         }
-        if self.has_module_closing() {
-            return Err((close_certificate_error(), self));
-        }
 
         Ok(OpenRollbackCertificate {
             proof,
@@ -221,7 +212,7 @@ impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
 }
 
 impl<'runtime, A: crate::Addin> OpenRollbackCertificate<'runtime, A> {
-    pub(crate) fn finish(self) -> Result<RemovalOwner<'runtime, A>, (XllError, Box<Self>)> {
+    pub(crate) fn finish(self) -> Result<RemovalClaimGuard<'runtime, A>, (XllError, Box<Self>)> {
         let lifecycle = self.deps.lifecycle_control();
         let attempt = self.owner.attempt();
         let result = {
@@ -254,7 +245,7 @@ impl<'runtime, A: crate::Addin> OpenRollbackCertificate<'runtime, A> {
 impl<'runtime, A: crate::Addin> FinalRemovalCertificate<'runtime, A> {
     pub(crate) fn finish(
         self,
-    ) -> Result<(ClosedWitness, RemovalOwner<'runtime, A>), (XllError, Box<Self>)> {
+    ) -> Result<(ClosedWitness, RemovalClaimGuard<'runtime, A>), (XllError, Box<Self>)> {
         let deps = match &self {
             Self::Committed { deps, .. } | Self::Uncommitted { deps, .. } => *deps,
         };

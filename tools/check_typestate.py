@@ -31,8 +31,12 @@ MODULES = {
     "value": Path("crates/xlfn/src/value.rs"),
     "cache": Path("crates/xlfn/src/cache.rs"),
     "runtime": Path("crates/xlfn/src/runtime.rs"),
+    "runtime/open_txn": Path("crates/xlfn/src/runtime/open_txn.rs"),
     "runtime/shutdown/pipeline": Path("crates/xlfn/src/runtime/shutdown/pipeline.rs"),
+    "excel_rtd/windows": Path("crates/xlfn/src/excel_rtd/windows.rs"),
 }
+WINDOWS_MODULES = {"excel_rtd/windows"}
+FEATURES = ("async", "rtd", "handles", "cache")
 EXPECTED = re.compile(r"// error: (E\d{4})\s*$")
 
 
@@ -89,7 +93,8 @@ def error_spans(message: dict) -> list[dict]:
 
 
 def check_fixture(
-    fixture: Fixture, overlay: Path, originals: dict[Path, str], target: Path
+    fixture: Fixture, overlay: Path, originals: dict[Path, str], target: Path,
+    compile_target: str | None = None, extra_features: tuple[str, ...] = (),
 ) -> dict:
     for relative, source in originals.items():
         (overlay / relative).write_text(source)
@@ -102,9 +107,11 @@ def check_fixture(
         )
     command = [
         "cargo", "check", "-p", "xlfn", "--lib", "--locked", "--offline",
-        "--no-default-features", "--features", "async,rtd,handles,cache",
+        "--no-default-features", "--features", ",".join((*FEATURES, *extra_features)),
         "--target-dir", str(target), "--message-format=json",
     ]
+    if compile_target:
+        command.extend(["--target", compile_target])
     completed = subprocess.run(
         command, cwd=overlay, text=True, capture_output=True,
         env={**os.environ, "CARGO_TERM_COLOR": "never"},
@@ -139,7 +146,8 @@ def check_fixture(
         else completed.returncode != 0 and observed == expected and not unexpected
     )
     return {
-        "fixture": str(fixture.path), "passed": passed,
+        "fixture": str(fixture.path), "target": compile_target or "host", "passed": passed,
+        "command": command,
         "exit_code": completed.returncode,
         "expected": sorted(expected), "observed": sorted(observed),
         "unexpected_errors": unexpected,
@@ -152,14 +160,36 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target-dir", type=Path, default=ROOT / "target/typestate-check")
     parser.add_argument("--report", type=Path)
+    parser.add_argument("--target", help="Cargo compile target; defaults to the rustc host")
+    parser.add_argument("--extra-features", default="", help="Additional comma-separated Cargo features")
     args = parser.parse_args()
     cases = fixtures(ROOT)
     target = args.target_dir.resolve()
+    rustc = subprocess.check_output(["rustc", "-Vv"], text=True).strip()
+    host = next(line.removeprefix("host: ") for line in rustc.splitlines() if line.startswith("host: "))
+    compile_target = args.target or host
+    skipped = [
+        fixture for fixture in cases
+        if fixture.module in WINDOWS_MODULES and "-windows-" not in compile_target
+    ]
+    cases = [fixture for fixture in cases if fixture not in skipped]
+    extra_features = tuple(filter(None, args.extra_features.split(",")))
+    environment_keys = (
+        "SDKROOT", "CC", "CFLAGS", "AR",
+        *(f"{prefix}_{compile_target.replace('-', '_')}" for prefix in ("CC", "CFLAGS", "AR")),
+    )
     report = {
-        "rustc": subprocess.check_output(["rustc", "-Vv"], text=True).strip(),
+        "rustc": rustc, "target": compile_target,
         "git_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
-        "features": ["async", "rtd", "handles", "cache"], "fixtures": [],
+        "features": [*FEATURES, *extra_features], "fixtures": [],
+        "build_environment": {key: os.environ[key] for key in environment_keys if key in os.environ},
+        "skipped_fixtures": [
+            {"fixture": str(fixture.path), "reason": "requires a Windows target"}
+            for fixture in skipped
+        ],
     }
+    if skipped:
+        print(f"SKIP {len(skipped)} Windows fixtures on {compile_target}; run on Windows or use --target", flush=True)
     with tempfile.TemporaryDirectory(prefix="xlfn-typestate-") as directory:
         overlay = Path(directory)
         report["source_sha256"] = copy_sources(ROOT, overlay)
@@ -167,7 +197,7 @@ def main() -> int:
             path: (overlay / path).read_text() for path in MODULES.values()
         }
         for fixture in cases:
-            result = check_fixture(fixture, overlay, originals, target)
+            result = check_fixture(fixture, overlay, originals, target, args.target, extra_features)
             report["fixtures"].append(result)
             print(f"{'PASS' if result['passed'] else 'FAIL'} {fixture.path}", flush=True)
             if not result["passed"]:

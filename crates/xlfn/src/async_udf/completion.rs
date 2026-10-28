@@ -36,10 +36,11 @@ pub(crate) enum OwnedDeliveryOutcome {
 /// Owns delivery and observation together so forced destruction reports the
 /// result of the fallback callback rather than guessing that it was unobserved.
 pub(crate) struct AsyncDelivery<O: CompletionObserver = NoObservation> {
-    responder: ExcelAsyncResponder,
+    // Future::poll and Drop keep a fixed outer type. Taking this capability
+    // consumes the one pending delivery before any callback can reenter.
+    responder: Option<ExcelAsyncResponder>,
     token: CancellationToken,
     observation: O,
-    completed: bool,
 }
 
 impl<O: CompletionObserver> AsyncDelivery<O> {
@@ -49,10 +50,9 @@ impl<O: CompletionObserver> AsyncDelivery<O> {
         observation: O,
     ) -> Self {
         Self {
-            responder,
+            responder: Some(responder),
             token,
             observation,
-            completed: false,
         }
     }
 
@@ -62,24 +62,27 @@ impl<O: CompletionObserver> AsyncDelivery<O> {
         T: ExcelReturn + Send + 'static,
     {
         AsyncUdfTask {
-            future: super::future::NoUnwindFuture::new(self.responder.udf_id, future),
+            future: super::future::NoUnwindFuture::new(
+                self.responder.as_ref().expect("delivery is pending").udf_id,
+                future,
+            ),
             delivery: self,
         }
     }
 
-    fn finish(&mut self, completion: AsyncCompletion) {
-        self.completed = true;
-        super::boundary::report_completion(self.responder.udf_id, &completion);
+    fn finish(&mut self, udf_id: &'static str, completion: AsyncCompletion) {
+        super::boundary::report_completion(udf_id, &completion);
         self.observation.finish(&completion);
     }
 
     pub(crate) fn fallback(&mut self, panicked: bool) {
-        if self.completed {
+        let Some(responder) = self.responder.take() else {
             return;
-        }
+        };
+        let udf_id = responder.udf_id;
         let cancelled = self.token.is_cancelled();
         if cancelled && panicked {
-            crate::diagnostics::report_no_unwind(self.responder.udf_id, &XllError::Panic);
+            crate::diagnostics::report_no_unwind(udf_id, &XllError::Panic);
         }
         let completion = if cancelled {
             OwnedCompletionOutcome::Cancelled
@@ -96,14 +99,17 @@ impl<O: CompletionObserver> AsyncDelivery<O> {
             XllError::ExcelValue(crate::ExcelError::NotAvailable)
         };
         // SAFETY: the responder owns its validated, copied Excel handle.
-        let delivery = match unsafe { self.responder.deliver_error(&error) } {
+        let delivery = match unsafe { responder.deliver_error(&error) } {
             Ok(()) => OwnedDeliveryOutcome::Delivered,
             Err(error) => OwnedDeliveryOutcome::Failed(error),
         };
-        self.finish(AsyncCompletion {
-            completion,
-            delivery,
-        });
+        self.finish(
+            udf_id,
+            AsyncCompletion {
+                completion,
+                delivery,
+            },
+        );
     }
 }
 
@@ -161,15 +167,16 @@ where
         if let Some(hook) = *super::boundary::AFTER_ASYNC_EVALUATION_HOOK.lock() {
             hook();
         }
-        let completion =
-            complete_evaluation(&mut this.delivery.responder, this.delivery.token, evaluated);
-        this.delivery.finish(completion);
+        let responder = this.delivery.responder.take().expect("delivery is pending");
+        let udf_id = responder.udf_id;
+        let completion = complete_evaluation(responder, this.delivery.token, evaluated);
+        this.delivery.finish(udf_id, completion);
         std::task::Poll::Ready(())
     }
 }
 
 fn complete_evaluation<T: ExcelReturn + Send + 'static>(
-    responder: &mut ExcelAsyncResponder,
+    responder: ExcelAsyncResponder,
     token: CancellationToken,
     evaluated: Result<XllResult<T>, crate::panic_boundary::CaughtPanic>,
 ) -> AsyncCompletion {

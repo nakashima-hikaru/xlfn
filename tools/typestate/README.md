@@ -3,18 +3,42 @@
 Run `python3 tools/check_typestate.py` from any directory. The checker copies the
 current tracked and nonignored working files into a temporary workspace, injects
 each fixture as an internal module, and runs an offline, locked `cargo check`
-with `async,rtd,handles,cache`. The original source tree is never edited. An optional
-`--report PATH` retains toolchain, input hash, and diagnostics.
+with `async,rtd,handles,cache`. The default target is the rustc host. Windows COM
+fixtures run on Windows and are explicitly reported as skipped on other hosts.
+`--target x86_64-pc-windows-msvc` includes them in a cross-target check when the
+Windows native dependency toolchain is configured; `--extra-features` can enable
+additional dependency features such as `blake3/pure` for compile-only checks.
+CI runs the suite on both Linux and Windows. These are compile checks, not live
+Excel execution tests. The original source tree is never edited. An optional
+`--report PATH` retains toolchain, input hash, targets, commands, build settings,
+skipped fixtures, and diagnostics.
 
 Positive callers run first. Negative callers must produce the exact error code
 at each line marked `// error: E....`; unrelated errors fail the check. Internal
 injection verifies the actual method and field restrictions without publishing
 test APIs or accepting an ancestor-module privacy error as typestate evidence.
 
+Open transactions carry mandatory service inputs after initialization. Fixtures
+reject missing or repeated initialization inputs, commit before initialization
+or lifecycle installation, and committing twice. Async response delivery consumes
+the pending handle authority; its fixtures reject a second delivery attempt.
+
+Removal starts by consuming its owner into the teardown transaction. The
+transaction must close module callbacks, prove host detachment, and quiesce the
+add-in before sealing generation services. Fixtures reject skipping these stages,
+reusing the initial owner, and reassembling an unrelated owner and drained stage.
+Interrupted teardown still returns its module authority before releasing the
+cleanup claim.
+
 Server termination fixtures also require cancellation before finish, reject
 reusing cancellation or completion authority, and prevent passing a cancellation
 result from another termination. Coordinator fixtures check that only its affine
 owner can publish one terminal result and that shared state remains private.
+Publish termination carries its exact core through a consumed wait and finish;
+fixtures reject early finish, a substituted core, repeated wait/finish, and access
+to the raw finish method. COM ServerStart commits only after the consuming
+callback-publication operation; failures before and after publication retain
+their distinct retry policies.
 
 Typed handle fixtures also reject payload retagging and subtype conversions
 that would change the exact `TypeId`. Input fixtures check static materializer

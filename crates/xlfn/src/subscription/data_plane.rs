@@ -238,18 +238,44 @@ pub(crate) struct OwnedPublishOperation<H: SubscriptionHost> {
     _runtime_drop_trace: DropTrace,
 }
 
+#[must_use = "wait for admitted publication before finishing termination"]
 pub(crate) struct PublishTerminationStart<'a, H: SubscriptionHost> {
+    publish: &'a PublishCore<H>,
     wait: TerminationWaitGuard<'a>,
     notifier: Option<H::Notifier>,
 }
 
-impl<H: SubscriptionHost> PublishTerminationStart<'_, H> {
+#[cfg(test)]
+thread_local! {
+    static PANIC_BEFORE_TERMINATION_WAIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+impl<'a, H: SubscriptionHost> PublishTerminationStart<'a, H> {
     pub(crate) fn take_notifier(&mut self) -> Option<H::Notifier> {
         self.notifier.take()
     }
 
-    pub(crate) fn wait(self) {
+    pub(crate) fn wait(self) -> DrainedPublish<'a, H> {
+        #[cfg(test)]
+        if PANIC_BEFORE_TERMINATION_WAIT.replace(false) {
+            panic!("injected publish termination wait panic");
+        }
         self.wait.wait();
+        DrainedPublish {
+            publish: self.publish,
+        }
+    }
+}
+
+/// Completion authority for the exact publish core whose admission drained.
+#[must_use = "finish termination after its publication admission has drained"]
+pub(crate) struct DrainedPublish<'a, H: SubscriptionHost> {
+    publish: &'a PublishCore<H>,
+}
+
+impl<H: SubscriptionHost> DrainedPublish<'_, H> {
+    pub(crate) fn finish(self) -> PublishTerminationResult<H::Notifier> {
+        self.publish.finish_termination()
     }
 }
 
@@ -354,10 +380,14 @@ impl<H: SubscriptionHost> PublishCore<H> {
             .store(super::delivery::SERVER_LIFECYCLE_CLOSING, Ordering::Release);
         let notifier = self.refresh.lock().detach_notifier();
         self.clear_pending();
-        PublishTerminationStart { wait, notifier }
+        PublishTerminationStart {
+            publish: self,
+            wait,
+            notifier,
+        }
     }
 
-    pub(crate) fn finish_termination(&self) -> PublishTerminationResult<H::Notifier> {
+    fn finish_termination(&self) -> PublishTerminationResult<H::Notifier> {
         let (notifier, recycled_updates) = {
             let mut refresh = self.refresh.lock();
             (
@@ -1544,6 +1574,82 @@ mod tests {
     use super::{OperationDropTrace, with_operation_drop_trace};
     use crate::subscription::runtime::SubscriptionRuntime;
     use triomphe::Arc;
+
+    #[test]
+    fn interrupted_termination_wait_preserves_undrained_publish_storage() {
+        use crate::XllError;
+        use crate::excel_rtd::RtdSubscriptionHost;
+        use crate::subscription::delivery::SERVER_LIFECYCLE_CLOSING;
+        use crate::subscription::server::TerminationAdmission;
+        use crate::subscription::termination::TerminationPhase;
+        use crate::subscription::tests::publishing_source;
+        use crate::subscription::{RtdTopic, TopicId};
+        use std::sync::atomic::Ordering;
+
+        let (arena, source, sink_slot, disconnected) = publishing_source::<i32>(None);
+        let runtime =
+            SubscriptionRuntime::<RtdSubscriptionHost, _>::with_sources_for_internal(arena);
+        let server = runtime.register_test_server(1);
+        let prepared = runtime
+            .prepare(
+                &source,
+                RtdTopic::single("interrupted-wait").unwrap().borrowed(),
+            )
+            .unwrap();
+        server
+            .connect_transaction(TopicId(1), prepared.id())
+            .unwrap()
+            .commit()
+            .unwrap();
+        prepared.commit();
+        let publish = &server.test_server().publish;
+        let connections = || {
+            publish
+                .shards
+                .iter()
+                .map(|shard| shard.lock().active_by_topic.len())
+                .sum::<usize>()
+        };
+        let before = connections();
+        assert!(before > 0);
+        let admitted = publish.enter_operation().unwrap();
+        let TerminationAdmission::Owner(owner) = server.test_server().begin_termination(&runtime)
+        else {
+            panic!("first caller must own termination");
+        };
+        let TerminationAdmission::Waiter(waiter) = server.test_server().begin_termination(&runtime)
+        else {
+            panic!("second caller must wait for termination");
+        };
+        assert!(!disconnected.load(Ordering::Acquire));
+        std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| {
+                let result = waiter.wait();
+                assert!(disconnected.load(Ordering::Acquire));
+                assert!(sink_slot.lock().is_none());
+                result
+            });
+            super::PANIC_BEFORE_TERMINATION_WAIT.set(true);
+            assert!(matches!(
+                owner.request_cancel().finish(),
+                Err(XllError::Panic)
+            ));
+            assert!(matches!(waiter.join().unwrap(), Err(XllError::Panic)));
+        });
+
+        assert_eq!(
+            publish.lifecycle.load(Ordering::Acquire),
+            SERVER_LIFECYCLE_CLOSING
+        );
+        assert_eq!(connections(), before);
+        assert_eq!(
+            server.test_server().termination_coordinator.phase(),
+            TerminationPhase::Failed
+        );
+        assert!(matches!(server.terminate(), Err(XllError::Panic)));
+        drop(admitted);
+        assert!(matches!(runtime.close(), Err(XllError::Panic)));
+    }
 
     #[test]
     fn refresh_rearm_preserves_nonblocking_publish_and_next_notification() {

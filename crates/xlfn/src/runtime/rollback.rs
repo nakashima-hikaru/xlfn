@@ -10,11 +10,9 @@ use crate::boundary::{report_boundary_error, report_cleanup_issue};
 use crate::error::IntoXllError;
 use crate::generation::RuntimeGeneration;
 use crate::host_callback::HostCallbackSession;
-use crate::panic_boundary::catch_no_unwind;
 use crate::registration::{HostRegistrar, RegistrationHost};
-use crate::runtime::shutdown::{self as teardown, OpenRollback, drain_execution};
+use crate::runtime::shutdown::OpenRollback;
 use crate::runtime::{AddinLifecycleAccess, Runtime};
-use std::panic::AssertUnwindSafe;
 
 use crate::lifecycle::lifecycle_access_error;
 
@@ -108,7 +106,7 @@ where
     runtime.observer().begin_close();
     let shutdown_deps = runtime.shutdown_deps();
 
-    let lifecycle_present = match shutdown_deps.has_addin_lifecycle(lifecycle) {
+    let _lifecycle_present = match shutdown_deps.has_addin_lifecycle(lifecycle) {
         Ok(present) => present,
         Err(error) => {
             report_boundary_error("xlAutoOpen lifecycle slot", &lifecycle_access_error(error));
@@ -121,23 +119,14 @@ where
     // An opening transaction normally owns the lifecycle payload. It is only
     // safe to release the thread binding after that payload has been
     // explicitly taken and dropped below.
-    let mut rollback_attempt = rollback_attempt;
-    let execution_drained = match drain_execution(shutdown_deps, &mut rollback_attempt) {
+    let teardown = match rollback_attempt.drain::<OpenRollback>() {
         Ok(stage) => stage,
         Err(failure) => {
             let hazard = failure.hazard();
             report_boundary_error("xlAutoOpen execution drain", &failure.into_error());
-            if hazard == crate::shutdown::UnloadHazard::ExportDrainPreparationFailed {
-                // drain_execution established terminal quarantine before the
-                // owner is released. Return its retained capability before
-                // recovery inspects canonical cleanup ownership.
-                drop(rollback_attempt);
-            }
             return incomplete(runtime, hazard);
         }
     };
-    let teardown: teardown::TeardownTxn<'_, A, OpenRollback, teardown::ExecutionDrained> =
-        teardown::TeardownTxn::new(shutdown_deps, rollback_attempt, execution_drained);
     let teardown = match teardown.stop_producers(|issue| {
         report_cleanup_issue(issue);
     }) {
@@ -179,75 +168,25 @@ where
     // Native calculation exports survive a failed open, including a partial
     // event-registration sequence. Their module slots prevent duplicate retry
     // and retain residency independently of this generation's rollback.
-    teardown.close_module_callbacks();
+    let teardown = teardown.close_module_callbacks();
 
-    if runtime.host.registration_state_unknown() {
-        let error = XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRATION_UNKNOWN,
-        };
-        report_boundary_error("xlAutoOpen registration state unknown", &error);
-        return incomplete(
-            runtime,
-            crate::shutdown::UnloadHazard::RegistrationStateUnknown,
-        );
-    }
-    if !runtime.host.generation_callbacks_detached() {
-        let error = XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::REGISTRATION_UNKNOWN,
-        };
-        report_boundary_error("xlAutoOpen callbacks remain registered", &error);
-        return incomplete(
-            runtime,
-            crate::shutdown::UnloadHazard::HostCallbackStillRegistered,
-        );
-    }
-    let host_callbacks = crate::shutdown::GenerationCallbacksDetached::issue();
+    let teardown = match teardown.detach_host() {
+        Ok(teardown) => teardown,
+        Err(failure) => {
+            let hazard = failure.hazard();
+            report_boundary_error("xlAutoOpen host detachment rollback", &failure.into_error());
+            return incomplete(runtime, hazard);
+        }
+    };
 
-    // Remove and quiesce Add-in state before the registry drops its published
-    // object roots, matching the terminal removal ordering. Public Handle values
-    // are call-scoped borrows and cannot be stored in state.
-    let addin = if let Some(opening) = runtime.lifecycle_orchestrator().take_opening_for_rollback()
-    {
-        let (mut shared_state, layers, _config) = opening.into_parts();
-        let quiesce = catch_no_unwind(AssertUnwindSafe(|| {
-            runtime
-                .with_addin_lifecycle(lifecycle, |lifecycle_state| {
-                    runtime.quiesce_addin(&mut shared_state, lifecycle_state)
-                })
-                .map_err(lifecycle_access_error)?
-        }))
-        .map_err(|_| XllError::Panic)
-        .and_then(|result| result);
-        if let Err(error) = quiesce {
-            report_boundary_error("xlAutoOpen rollback quiesce", &error);
-            // A failed quiesce cannot prove that shared-state-owned execution
-            // resources have stopped. Preserve both parts until quarantine.
-            runtime.lifecycle_orchestrator().quarantine_layers(
-                generation,
-                layers,
-                crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
-            );
-            runtime.lifecycle_orchestrator().quarantine_shared_state(
-                generation,
-                shared_state,
-                crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
-            );
-            return incomplete(runtime, crate::shutdown::UnloadHazard::AddinQuiesceFailed);
+    // Quiescence consumes the owned generation only after host detachment.
+    let teardown = match teardown.quiesce_addin(runtime, lifecycle, generation) {
+        Ok(teardown) => teardown,
+        Err(failure) => {
+            let hazard = failure.hazard();
+            report_boundary_error("xlAutoOpen rollback quiesce", &failure.into_error());
+            return incomplete(runtime, hazard);
         }
-        drop(layers);
-        teardown::QuiescedAddin::shared(shutdown_deps, generation, shared_state)
-    } else {
-        if lifecycle_present {
-            let error = XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::LIFECYCLE_SLOT,
-            };
-            report_boundary_error("xlAutoOpen lifecycle rollback state", &error);
-            return incomplete(
-                runtime,
-                crate::shutdown::UnloadHazard::CloseInvariantViolation,
-            );
-        }
-        teardown::QuiescedAddin::empty(shutdown_deps, generation)
     };
 
     // The topic transport must release its backend while the handle slot is
@@ -261,7 +200,7 @@ where
         );
     }
 
-    let teardown = match teardown.seal_services(addin) {
+    let teardown = match teardown.seal_services() {
         Ok(stage) => stage,
         Err(error) => {
             report_boundary_error("xlAutoOpen handle rollback", &error);
@@ -339,7 +278,7 @@ where
         }
     };
 
-    let teardown = teardown.reclaim(rtd_quiescent, host_callbacks, diagnostics_stopped);
+    let teardown = teardown.reclaim(rtd_quiescent, diagnostics_stopped);
     let certificate = match teardown.certify() {
         Ok(certificate) => certificate,
         Err(error) => {

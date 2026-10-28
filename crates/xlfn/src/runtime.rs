@@ -949,7 +949,9 @@ impl<A: crate::Addin> CallGuard<'_, A> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::runtime::shutdown::{FinalRemoval, OpenRollback, QuiescenceProof, RemovalOwner};
+    use crate::runtime::shutdown::{
+        FinalRemoval, OpenRollback, QuiescenceProof, RemovalClaimGuard, RemovalOwner,
+    };
     use std::sync::atomic::Ordering;
     use std::sync::mpsc;
     use std::thread;
@@ -989,9 +991,9 @@ pub(crate) mod tests {
 
     fn finish_test_close<A: crate::Addin>(
         runtime: &Runtime<A, impl UnloadPolicy<A>>,
-        mut removal_attempt: RemovalOwner<'_, A>,
+        removal_attempt: RemovalOwner<'_, A>,
     ) {
-        let module_closing = removal_attempt.take_module_closing();
+        let (removal_attempt, module_closing) = removal_attempt.into_test_parts();
         let drained = module_closing.seal_and_drain().unwrap();
         let (module_quiescent, _exports) = drained.certify();
         let module_epoch = module_quiescent.id();
@@ -1026,9 +1028,9 @@ pub(crate) mod tests {
 
     fn finish_test_open_rollback<'a, A: crate::Addin>(
         runtime: &'a Runtime<A, impl UnloadPolicy<A>>,
-        mut rollback_attempt: RemovalOwner<'a, A>,
-    ) -> RemovalOwner<'a, A> {
-        let module_closing = rollback_attempt.take_module_closing();
+        rollback_attempt: RemovalOwner<'a, A>,
+    ) -> RemovalClaimGuard<'a, A> {
+        let (rollback_attempt, module_closing) = rollback_attempt.into_test_parts();
         let drained = module_closing.seal_and_drain().unwrap();
         let (module_quiescent, _exports) = drained.certify();
         let module_epoch = module_quiescent.id();
@@ -1199,10 +1201,10 @@ pub(crate) mod tests {
             .ensure_module_residency(drain_preparation_residency_anchor as *const ())
             .unwrap();
         let epoch = runtime.lifecycle.access().module_epoch_id().unwrap();
-        let mut owner = runtime.begin_final_removal().unwrap();
+        let owner = runtime.begin_final_removal().unwrap();
         runtime.observer().begin_close();
         let fault = crate::ingress::DrainPreparationFault::at(1);
-        let Err(failure) = shutdown::drain_execution(runtime.shutdown_deps(), &mut owner) else {
+        let Err(failure) = owner.drain::<FinalRemoval>() else {
             panic!("injected drain preparation succeeded");
         };
         assert_eq!(
@@ -1215,8 +1217,9 @@ pub(crate) mod tests {
         assert!(runtime.lifecycle.access().removal_attempt().is_some());
         let waiter = thread::spawn(move || assert!(runtime.begin_final_removal().is_none()));
         waiter.join().unwrap();
-        drop(owner);
-        recovery::quarantine_for_hazard(runtime, failure.hazard());
+        let hazard = failure.hazard();
+        drop(failure);
+        recovery::quarantine_for_hazard(runtime, hazard);
         assert_retained_drain(runtime, epoch);
         assert!(runtime.begin_final_removal().is_none());
         assert_eq!(fault.attempts(), 1);
@@ -1498,7 +1501,7 @@ pub(crate) mod tests {
         let mut opening = runtime.publish(opening, (), ());
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
-        let mut removal_attempt = runtime.begin_final_removal().unwrap();
+        let removal_attempt = runtime.begin_final_removal().unwrap();
         runtime.wait_for_returns();
         let subscriptions_stopped = runtime.close_subscriptions().unwrap();
         runtime.shutdown_handle_topics().unwrap();
@@ -1508,7 +1511,7 @@ pub(crate) mod tests {
         runtime.finish_generation_services(sealed).unwrap();
         assert!(runtime.take_current_generation().is_some());
 
-        let module_closing = removal_attempt.take_module_closing();
+        let (removal_attempt, module_closing) = removal_attempt.into_test_parts();
         let drained = module_closing.seal_and_drain().unwrap();
         let (module_quiescent, _exports) = drained.certify();
         let module_epoch = module_quiescent.id();
@@ -1631,11 +1634,10 @@ pub(crate) mod tests {
             .seal_generation_services(subscriptions_stopped)
             .unwrap();
         runtime.finish_generation_services(sealed).unwrap();
-        let module_epoch = runtime
-            .lifecycle
-            .access()
-            .module_epoch_id()
-            .expect("open module epoch");
+        let (removal_attempt, module_closing) = removal_attempt.into_test_parts();
+        let drained = module_closing.seal_and_drain().unwrap();
+        let (module_quiescent, _exports) = drained.certify();
+        let module_epoch = module_quiescent.id();
         let _rtd =
             crate::excel_rtd_protocol::wait_for_module_quiescence(runtime.module_residency_held())
                 .expect("RTD module quiescence");
@@ -1652,7 +1654,20 @@ pub(crate) mod tests {
         assert_eq!(runtime.phase(), LifecyclePhase::Closing);
 
         assert!(runtime.take_current_generation().is_some());
-        finish_test_close(&runtime, removal_attempt);
+        runtime.disable_trace_for_test();
+        let certificate = removal_attempt
+            .certify::<FinalRemoval>(
+                QuiescenceProof::for_test(
+                    Some(crate::generation::RuntimeGeneration::new(1).unwrap()),
+                    module_epoch,
+                ),
+                runtime.shutdown_deps(),
+            )
+            .map_err(|(error, _)| error)
+            .unwrap();
+        let (_witness, _claim) = certificate
+            .finish()
+            .unwrap_or_else(|(error, _)| panic!("{error}"));
         assert_eq!(runtime.phase(), LifecyclePhase::Closed);
     }
 

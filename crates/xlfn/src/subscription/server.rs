@@ -503,21 +503,27 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
             first_error = Some(error);
         }
 
-        if catch_no_unwind(AssertUnwindSafe(|| {
+        let drained = match catch_no_unwind(AssertUnwindSafe(|| {
             resources
                 .wait
                 .take()
                 .expect("termination owns its admission wait")
                 .wait()
-        }))
-        .is_err()
-            && first_error.is_none()
-        {
-            first_error = Some(XllError::Panic);
-        }
+        })) {
+            Ok(drained) => drained,
+            Err(_) => {
+                // An interrupted wait cannot certify quiescence. Keep the
+                // publish tables and late source owners intact for quarantine;
+                // release captured subscriptions before waking failed waiters.
+                let error = first_error.unwrap_or(XllError::Panic);
+                resources.runtime.record_cleanup_result(Err(error.clone()));
+                let owner = resources.owner.take().expect("live termination owner");
+                drop(resources);
+                return owner.fail(error);
+            }
+        };
 
-        let (late_notifier, active_entries) =
-            resources.server.publish.finish_termination().into_parts();
+        let (late_notifier, active_entries) = drained.finish().into_parts();
         if let Err(error) = drop_notifier_no_unwind(late_notifier)
             && first_error.is_none()
         {

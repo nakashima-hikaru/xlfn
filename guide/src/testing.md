@@ -95,13 +95,21 @@ abandonment publishes failure to its waiters. Consumed capabilities cannot be
 reused, and sibling modules cannot directly mutate lifecycle state. Typed pending
 handles retain their exact payload type through publication, including function
 type subtyping; ready input arguments cannot forge a deferred value. Teardown
-stages must carry their recovery authority. Cache endpoint memoization requires
+stages must carry their recovery authority and require callback close, host
+detachment, and add-in quiescence before sealing services. Removal consumes its
+initial owner into that transaction. Cache endpoint memoization requires
 matching endpoint and pointer types. Unload policy is fixed in the runtime type;
 the physical policy requires the add-in's physical-unload contract and cannot
 be substituted for the logical policy. Each invalid fixture must produce its
 specified diagnostic at the marked source line. The checks keep these APIs
 private and cover async, RTD, handles, and cache features. Fetch the workspace
-dependencies before running this offline check on a fresh checkout.
+dependencies before running this offline check on a fresh checkout. Open commit
+requires initialized service inputs and installed lifecycle state. Async delivery
+consumes its pending response, and RTD publish termination requires a drained
+capability tied to the same publish core. Windows COM start fixtures require
+callback publication before commit. They run on Windows CI and are explicitly
+skipped on other hosts unless a Windows `--target` is selected. These checks
+compile code without executing Excel.
 
 ## Test in Excel
 

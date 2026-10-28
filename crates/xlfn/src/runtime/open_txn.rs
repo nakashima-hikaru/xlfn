@@ -16,27 +16,20 @@ pub(crate) trait OpeningState<A: crate::Addin>: Sized {
     fn abandon(self, deps: &OpenDeps<'_, A>);
 }
 
-type OpenCoreParts<A> = (
-    OpenAttemptId,
-    crate::module_runtime::ModuleOpening,
-    Option<
-        crate::runtime_components::GenerationServiceInputs<
-            crate::addin::AddinSubscription<A>,
-            crate::addin::AddinSources<A>,
-        >,
-    >,
-);
+type ServiceInputs<A> = crate::runtime_components::GenerationServiceInputs<
+    crate::addin::AddinSubscription<A>,
+    crate::addin::AddinSources<A>,
+>;
+type InitializedOpenCore<A> = OpenCore<A, ServiceInputs<A>>;
+type RollbackOpenCore<A> = OpenCore<A, Option<ServiceInputs<A>>>;
 
-/// The only common payload shared by every open transaction state.
-pub(crate) struct OpenCore<A: crate::Addin> {
+/// Service inputs are absent before initialization and mandatory afterwards.
+/// Only the rollback projection erases that distinction into an `Option`.
+pub(crate) struct OpenCore<A: crate::Addin, I = ()> {
     attempt_id: OpenAttemptId,
     module_opening: crate::module_runtime::ModuleOpening,
-    service_inputs: Option<
-        crate::runtime_components::GenerationServiceInputs<
-            crate::addin::AddinSubscription<A>,
-            crate::addin::AddinSources<A>,
-        >,
-    >,
+    service_inputs: I,
+    _addin: std::marker::PhantomData<fn() -> A>,
 }
 
 impl<A: crate::Addin> OpenCore<A> {
@@ -47,32 +40,41 @@ impl<A: crate::Addin> OpenCore<A> {
         Self {
             attempt_id,
             module_opening,
-            service_inputs: None,
+            service_inputs: (),
+            _addin: std::marker::PhantomData,
         }
     }
 
+    fn initialized(self, inputs: ServiceInputs<A>) -> InitializedOpenCore<A> {
+        self.map_inputs(|()| inputs)
+    }
+
+    fn into_rollback(self) -> RollbackOpenCore<A> {
+        self.map_inputs(|()| None)
+    }
+}
+
+impl<A: crate::Addin> InitializedOpenCore<A> {
+    fn into_rollback(self) -> RollbackOpenCore<A> {
+        self.map_inputs(Some)
+    }
+}
+
+impl<A: crate::Addin, I> OpenCore<A, I> {
     fn attempt_id(&self) -> OpenAttemptId {
         self.attempt_id
     }
 
-    fn install_service_inputs(
-        &mut self,
-        inputs: crate::runtime_components::GenerationServiceInputs<
-            crate::addin::AddinSubscription<A>,
-            crate::addin::AddinSources<A>,
-        >,
-    ) {
-        if self.service_inputs.replace(inputs).is_some() {
-            crate::boundary::fail_stop_invariant(
-                "open transaction service inputs installed twice",
-                &crate::XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
-                },
-            );
+    fn map_inputs<J>(self, map: impl FnOnce(I) -> J) -> OpenCore<A, J> {
+        OpenCore {
+            attempt_id: self.attempt_id,
+            module_opening: self.module_opening,
+            service_inputs: map(self.service_inputs),
+            _addin: std::marker::PhantomData,
         }
     }
 
-    pub(crate) fn into_parts(self) -> OpenCoreParts<A> {
+    pub(crate) fn into_parts(self) -> (OpenAttemptId, crate::module_runtime::ModuleOpening, I) {
         (self.attempt_id, self.module_opening, self.service_inputs)
     }
 }
@@ -99,7 +101,7 @@ pub(crate) struct Initializing<A: crate::Addin> {
 /// `Addin::open` succeeded and its thread-affine lifecycle state is owned by
 /// the transaction.
 pub(crate) struct Initialized<A: crate::Addin> {
-    core: OpenCore<A>,
+    core: InitializedOpenCore<A>,
     host: HostOpeningState,
     lifecycle: A::LifecycleState,
 }
@@ -107,7 +109,7 @@ pub(crate) struct Initialized<A: crate::Addin> {
 /// The generation is staged in canonical lifecycle state, while the
 /// thread-affine lifecycle payload remains owned by the transaction.
 pub(crate) struct GenerationStaged<A: crate::Addin> {
-    core: OpenCore<A>,
+    core: InitializedOpenCore<A>,
     host: HostOpeningState,
     lifecycle: A::LifecycleState,
 }
@@ -115,13 +117,13 @@ pub(crate) struct GenerationStaged<A: crate::Addin> {
 /// The lifecycle payload has been transferred to the runtime's thread-affine
 /// slot. The transaction still owns the module and host capabilities.
 pub(crate) struct LifecycleInstalled<A: crate::Addin> {
-    core: OpenCore<A>,
+    core: InitializedOpenCore<A>,
     host: HostOpeningState,
 }
 
 /// All mandatory open steps are complete and the transaction may commit.
 pub(crate) struct HostMutated<A: crate::Addin> {
-    core: OpenCore<A>,
+    core: InitializedOpenCore<A>,
     host: HostOpeningState,
 }
 
@@ -159,13 +161,15 @@ pub(crate) enum LifecycleOwnership<A: crate::Addin> {
 }
 
 pub(crate) struct RollbackParts<A: crate::Addin> {
-    core: OpenCore<A>,
+    core: RollbackOpenCore<A>,
     host: HostOpeningState,
     lifecycle: LifecycleOwnership<A>,
 }
 
 impl<A: crate::Addin> RollbackParts<A> {
-    pub(crate) fn into_parts(self) -> (OpenCore<A>, HostOpeningState, LifecycleOwnership<A>) {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (RollbackOpenCore<A>, HostOpeningState, LifecycleOwnership<A>) {
         (self.core, self.host, self.lifecycle)
     }
 }
@@ -183,9 +187,9 @@ fn forget_untrusted_lifecycle_state<A: crate::Addin>(state: A::LifecycleState) {
     std::mem::forget(state);
 }
 
-fn abandon_open<A: crate::Addin>(
+fn abandon_open<A: crate::Addin, I>(
     deps: &OpenDeps<'_, A>,
-    core: OpenCore<A>,
+    core: OpenCore<A, I>,
     lifecycle: LifecycleOwnership<A>,
 ) {
     let (_, module_opening, _service_inputs) = core.into_parts();
@@ -297,7 +301,7 @@ impl<A: crate::Addin> RollbackState<A> for HostAttached<A> {
     fn into_rollback_parts(self) -> RollbackParts<A> {
         let Self { core, host } = self;
         RollbackParts {
-            core,
+            core: core.into_rollback(),
             host,
             lifecycle: LifecycleOwnership::Installed,
         }
@@ -312,7 +316,7 @@ impl<A: crate::Addin> RollbackState<A> for Initialized<A> {
             lifecycle,
         } = self;
         RollbackParts {
-            core,
+            core: core.into_rollback(),
             host,
             lifecycle: LifecycleOwnership::Owned(lifecycle),
         }
@@ -327,7 +331,7 @@ impl<A: crate::Addin> RollbackState<A> for GenerationStaged<A> {
             lifecycle,
         } = self;
         RollbackParts {
-            core,
+            core: core.into_rollback(),
             host,
             lifecycle: LifecycleOwnership::Owned(lifecycle),
         }
@@ -338,7 +342,7 @@ impl<A: crate::Addin> RollbackState<A> for LifecycleInstalled<A> {
     fn into_rollback_parts(self) -> RollbackParts<A> {
         let Self { core, host } = self;
         RollbackParts {
-            core,
+            core: core.into_rollback(),
             host,
             lifecycle: LifecycleOwnership::Installed,
         }
@@ -349,7 +353,7 @@ impl<A: crate::Addin> RollbackState<A> for HostMutated<A> {
     fn into_rollback_parts(self) -> RollbackParts<A> {
         let Self { core, host } = self;
         RollbackParts {
-            core,
+            core: core.into_rollback(),
             host,
             lifecycle: LifecycleOwnership::Installed,
         }
@@ -505,8 +509,8 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Initializing<A>> {
         >,
     ) -> OpeningTxn<'runtime, A, Initialized<A>> {
         let mut transaction = self;
-        let Initializing { mut core, host } = transaction.take_state();
-        core.install_service_inputs(service_inputs);
+        let Initializing { core, host } = transaction.take_state();
+        let core = core.initialized(service_inputs);
         OpeningTxn::new_state(
             transaction.deps,
             Initialized {
@@ -660,18 +664,10 @@ fn validate_commit_preconditions<A: crate::Addin, S: OpeningState<A>>(
 
 fn commit_inner<A: crate::Addin>(
     deps: OpenDeps<'_, A>,
-    core: OpenCore<A>,
+    core: InitializedOpenCore<A>,
     journal: &mut HostMutationJournal,
 ) -> XllResult<()> {
     let (attempt_id, module_opening, service_inputs) = core.into_parts();
-    let service_inputs = service_inputs.unwrap_or_else(|| {
-        crate::boundary::fail_stop_invariant(
-            "open transaction missing generation service inputs",
-            &crate::XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
-            },
-        )
-    });
     let mut control = deps.lifecycle_access();
     let registration_ids = journal
         .pending_registrations

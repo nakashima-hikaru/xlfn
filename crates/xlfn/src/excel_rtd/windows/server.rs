@@ -244,10 +244,14 @@ pub(super) struct RtdServer<
     pub(super) _module_lease: ComObjectLease,
 }
 
+/// Exclusive ServerStart reservation before a callback has been published.
 pub(super) struct ServerStartReservation<'a> {
-    pub(super) state: &'a AtomicU8,
-    pub(super) committed: bool,
-    pub(super) rollback_state: u8,
+    state: Option<&'a AtomicU8>,
+}
+
+/// A server-owned callback has been installed; failure is now terminal.
+pub(super) struct PublishedServerStart<'a> {
+    state: Option<&'a AtomicU8>,
 }
 
 impl<'a> ServerStartReservation<'a> {
@@ -260,30 +264,44 @@ impl<'a> ServerStartReservation<'a> {
                 Ordering::Acquire,
             )
             .ok()
-            .map(|_| ServerStartReservation {
-                state,
-                committed: false,
-                rollback_state: SERVER_NOT_STARTED,
-            })
+            .map(|_| ServerStartReservation { state: Some(state) })
     }
 
-    pub(super) fn callback_published(&mut self) {
+    pub(super) fn publish_callback(
+        mut self,
+        callbacks: &Mutex<ServerCallbacks>,
+        callback: Box<RetainedUpdateCallback>,
+    ) -> (PublishedServerStart<'a>, CallbackPtr) {
+        let callback = install_callback(callbacks, callback);
         // Once a GIT cookie is server-owned, a later failure must be terminal
         // for this server instance. Allowing another ServerStart would retain
         // one more external COM reference on every failed retry.
-        self.rollback_state = SERVER_START_FAILED;
+        let state = self.state.take();
+        (PublishedServerStart { state }, callback)
     }
+}
 
+impl PublishedServerStart<'_> {
     pub(super) fn commit(mut self) {
-        self.state.store(SERVER_STARTED, Ordering::Release);
-        self.committed = true;
+        self.state
+            .take()
+            .expect("published ServerStart owns its reservation")
+            .store(SERVER_STARTED, Ordering::Release);
     }
 }
 
 impl Drop for ServerStartReservation<'_> {
     fn drop(&mut self) {
-        if !self.committed {
-            self.state.store(self.rollback_state, Ordering::Release);
+        if let Some(state) = self.state.take() {
+            state.store(SERVER_NOT_STARTED, Ordering::Release);
+        }
+    }
+}
+
+impl Drop for PublishedServerStart<'_> {
+    fn drop(&mut self) {
+        if let Some(state) = self.state.take() {
+            state.store(SERVER_START_FAILED, Ordering::Release);
         }
     }
 }
@@ -1155,7 +1173,7 @@ unsafe fn server_start_inner<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
     // unbounded set of retained GIT cookies through repeated ServerStart calls.
     // SAFETY: `this` remains live for the complete COM method.
     let start_state = unsafe { &(*this).start_state };
-    let Some(mut start_reservation) = ServerStartReservation::acquire(start_state) else {
+    let Some(start_reservation) = ServerStartReservation::acquire(start_state) else {
         return E_FAIL;
     };
 
@@ -1211,8 +1229,8 @@ unsafe fn server_start_inner<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
 
     // SAFETY: `this` was validated as non-null and COM keeps the server alive
     // for the duration of ServerStart.
-    let callback_ptr = unsafe { install_callback(&(*this).callbacks, callback) };
-    start_reservation.callback_published();
+    let (start_reservation, callback_ptr) =
+        start_reservation.publish_callback(unsafe { &(*this).callbacks }, callback);
 
     // SAFETY: `this` remains live through the COM call. Re-reading backends
     // after installing the callback closes the race with a concurrently

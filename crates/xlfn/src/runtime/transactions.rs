@@ -10,7 +10,7 @@ use crate::runtime::capabilities::ShutdownDeps;
 use crate::runtime::open_txn::{
     GenerationStaged, HostAttached, OpeningState, OpeningTxn, RollbackState,
 };
-use crate::runtime::shutdown::{ClosedWitness, FinalRemoval, RemovalOwner};
+use crate::runtime::shutdown::{ClosedWitness, FinalRemoval, RemovalClaimGuard, RemovalOwner};
 use crate::runtime::{AddinLifecycleAccess, Runtime};
 use std::panic::AssertUnwindSafe;
 
@@ -18,8 +18,7 @@ use crate::boundary::{report_boundary_error, report_cleanup_issue};
 use crate::lifecycle::lifecycle_access_error;
 use crate::runtime::open;
 use crate::runtime::recovery::{commit_removal_control, handle_unload_hazard, quarantine_runtime};
-use crate::runtime::rollback::{active_runtime_generation, rollback_open};
-use crate::runtime::shutdown::{self, drain_execution};
+use crate::runtime::rollback::rollback_open;
 
 type StagedOpenResult<'runtime, A> = Result<
     (
@@ -311,7 +310,7 @@ pub(crate) enum RemovalSuccess<'runtime, A: Addin> {
     Quarantined,
     Closed {
         witness: ClosedWitness,
-        removal_attempt: RemovalOwner<'runtime, A>,
+        removal_attempt: RemovalClaimGuard<'runtime, A>,
     },
 }
 
@@ -407,7 +406,7 @@ where
 
     let mut report = crate::shutdown::CloseReport::default();
     let mut unload_failure: Option<(crate::shutdown::UnloadHazard, &'static str, XllError)> = None;
-    let lifecycle_present = match shutdown_deps.has_addin_lifecycle(lifecycle) {
+    let _lifecycle_present = match shutdown_deps.has_addin_lifecycle(lifecycle) {
         Ok(present) => present,
         Err(error) => {
             let error = lifecycle_access_error(error);
@@ -420,8 +419,7 @@ where
         }
     };
 
-    let mut owner = transaction.take_attempt();
-    let execution_drained = match drain_execution(shutdown_deps, &mut owner) {
+    let teardown = match transaction.take_attempt().drain::<FinalRemoval>() {
         Ok(stage) => stage,
         Err(failure) => {
             let hazard = failure.hazard();
@@ -434,8 +432,6 @@ where
             ));
         }
     };
-    let teardown: shutdown::TeardownTxn<'runtime, A, FinalRemoval, shutdown::ExecutionDrained> =
-        shutdown::TeardownTxn::new(shutdown_deps, owner, execution_drained);
     let teardown = match teardown.stop_producers(|issue| {
         report.push(issue.component, issue.kind, issue.error.clone());
     }) {
@@ -533,7 +529,7 @@ where
     // lifecycle. A terminal result transitions the module gate immediately;
     // once unregistering is complete, close it unconditionally so all later
     // cleanup is provably callback-free.
-    teardown.close_module_callbacks();
+    let teardown = teardown.close_module_callbacks();
 
     runtime.observer().callback_admission_closed();
 
@@ -541,97 +537,29 @@ where
         return Err(handle_unload_hazard(runtime, hazard, boundary, &error));
     }
 
-    let host_callbacks = crate::shutdown::GenerationCallbacksDetached::issue();
-    runtime.observer().host_detached();
-
-    let addin = if let Some(generation) = shutdown_deps.take_generation_for_shutdown() {
-        match generation {
-            crate::generation::ShutdownGeneration::Open(generation) => {
-                let mut generation = *generation;
-                let quiesce = catch_no_unwind(AssertUnwindSafe(|| {
-                    runtime
-                        .with_addin_lifecycle(lifecycle, |lifecycle_state| {
-                            runtime.quiesce_addin(&mut generation.shared_state, lifecycle_state)
-                        })
-                        .map_err(lifecycle_access_error)
-                }))
-                .map_err(|_| XllError::Panic)
-                .and_then(|result| result)
-                .and_then(|result| result);
-                if let Err(error) = quiesce {
-                    report_boundary_error("xlAutoRemove quiesce", &error);
-                    runtime.lifecycle_orchestrator().quarantine_generation(
-                        active_runtime_generation(runtime),
-                        generation,
-                        crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
-                    );
-                    return Err(handle_unload_hazard(
-                        runtime,
-                        crate::shutdown::UnloadHazard::AddinQuiesceFailed,
-                        "xlAutoRemove quiesce",
-                        &error,
-                    ));
-                }
-                drop(generation.layers);
-                shutdown::QuiescedAddin::shared(
-                    runtime.shutdown_deps(),
-                    active_runtime_generation(runtime),
-                    generation.shared_state,
-                )
-            }
-            crate::generation::ShutdownGeneration::Opening(opening) => {
-                let (mut shared_state, layers, _config) = opening.into_parts();
-                let quiesce = catch_no_unwind(AssertUnwindSafe(|| {
-                    runtime
-                        .with_addin_lifecycle(lifecycle, |lifecycle_state| {
-                            runtime.quiesce_addin(&mut shared_state, lifecycle_state)
-                        })
-                        .map_err(lifecycle_access_error)
-                }))
-                .map_err(|_| XllError::Panic)
-                .and_then(|result| result)
-                .and_then(|result| result);
-                if let Err(error) = quiesce {
-                    report_boundary_error("xlAutoRemove quiesce", &error);
-                    let generation_id = active_runtime_generation(runtime);
-                    runtime.lifecycle_orchestrator().quarantine_layers(
-                        generation_id,
-                        layers,
-                        crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
-                    );
-                    runtime.lifecycle_orchestrator().quarantine_shared_state(
-                        generation_id,
-                        shared_state,
-                        crate::runtime_components::QuarantineReason::AddinQuiesceFailed,
-                    );
-                    return Err(handle_unload_hazard(
-                        runtime,
-                        crate::shutdown::UnloadHazard::AddinQuiesceFailed,
-                        "xlAutoRemove quiesce",
-                        &error,
-                    ));
-                }
-                drop(layers);
-                shutdown::QuiescedAddin::shared(
-                    runtime.shutdown_deps(),
-                    active_runtime_generation(runtime),
-                    shared_state,
-                )
-            }
-        }
-    } else {
-        if lifecycle_present {
-            let error = XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::LIFECYCLE_SLOT,
-            };
+    let teardown = match teardown.detach_host() {
+        Ok(teardown) => teardown,
+        Err(failure) => {
             return Err(handle_unload_hazard(
                 runtime,
-                crate::shutdown::UnloadHazard::CloseInvariantViolation,
-                "xlAutoRemove lifecycle state",
-                &error,
+                failure.hazard(),
+                "xlAutoRemove host detachment",
+                &failure.into_error(),
             ));
         }
-        shutdown::QuiescedAddin::empty(runtime.shutdown_deps(), active_runtime_generation(runtime))
+    };
+    runtime.observer().host_detached();
+
+    let teardown = match teardown.quiesce_addin(runtime, lifecycle) {
+        Ok(teardown) => teardown,
+        Err(failure) => {
+            return Err(handle_unload_hazard(
+                runtime,
+                failure.hazard(),
+                "xlAutoRemove quiesce",
+                &failure.into_error(),
+            ));
+        }
     };
 
     runtime.observer().generation_unique();
@@ -646,7 +574,7 @@ where
         ));
     }
 
-    let teardown = match teardown.seal_services(addin) {
+    let teardown = match teardown.seal_services() {
         Ok(stage) => stage,
         Err(error) => {
             return Err(handle_unload_hazard(
@@ -750,7 +678,7 @@ where
 
     runtime.observer().rtd_drained();
 
-    let teardown = teardown.reclaim(rtd_quiescent, host_callbacks, diagnostics_stopped);
+    let teardown = teardown.reclaim(rtd_quiescent, diagnostics_stopped);
     let certificate = match teardown.certify() {
         Ok(certificate) => certificate,
         Err(error) => {
