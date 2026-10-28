@@ -11,7 +11,6 @@ use super::{ExcelHandleObject, Handle, HandleId, ObjectId};
 #[cfg(any(test, feature = "refinement"))]
 use super::{HandleToken, TokenWire};
 use crate::XllResult;
-use crate::generation::RuntimeGeneration;
 
 /// Owns the binding registry and its `ObjectCell` lifetime state.
 ///
@@ -102,21 +101,8 @@ impl HandleStore {
         self.registry.begin_close();
     }
 
-    pub(crate) fn seal(&self) -> XllResult<HandleRegistrySealed> {
+    pub(crate) fn seal(&self) -> XllResult<HandleRegistrySealed<'_>> {
         self.registry.seal()
-    }
-
-    pub(crate) fn finish_quiescence(&self, sealed: &HandleRegistrySealed) -> XllResult<()> {
-        self.registry.finish_quiescence(sealed)
-    }
-
-    pub(crate) fn quiescent(
-        &self,
-        sealed: &HandleRegistrySealed,
-        generation: Option<RuntimeGeneration>,
-    ) -> XllResult<crate::shutdown::HandlesQuiescent> {
-        self.finish_quiescence(sealed)?;
-        Ok(crate::shutdown::HandlesQuiescent::new(generation))
     }
 
     #[cfg(test)]

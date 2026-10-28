@@ -61,7 +61,7 @@ pub fn handle_removal_probe(samples: usize, reader_hold: Duration) -> serde_json
         retained_after_remove += usize::from(drops.load(Ordering::Relaxed) == index);
         let started = Instant::now();
         let sealed = registry.seal().unwrap();
-        registry.finish_quiescence(&sealed).unwrap();
+        sealed.finish_quiescence().unwrap();
         drain.push(started.elapsed().as_nanos() as u64);
         if let Some(reader) = reader {
             reader.join().unwrap();
@@ -117,7 +117,7 @@ pub fn handle_retirement_debt_probe() -> serde_json::Value {
     assert_eq!(debt, super::domain::HARD_DEBT_LIMIT + 7);
     let started = Instant::now();
     let sealed = registry.seal().unwrap();
-    registry.finish_quiescence(&sealed).unwrap();
+    sealed.finish_quiescence().unwrap();
     let drain_ns = started.elapsed().as_nanos();
     assert_eq!(registry.bindings.read_domain().debt(), 0);
     assert_eq!(drops.load(Ordering::Relaxed), debt + 1);

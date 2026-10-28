@@ -159,12 +159,54 @@ pub struct RtdMultiplexedSource<T, P, V = NoTopicValidator, D: RtdDeliveryPolicy
     fail_spawn: AtomicBool,
 }
 
-struct Worker<P> {
-    producer: Option<P>,
-    handle: Option<JoinHandle<()>>,
-    permit: Option<WorkerPermit>,
-    joining: bool,
-    result: Option<XllResult<()>>,
+enum Worker<P> {
+    Unstarted(P),
+    // Visible only while the start guard retains the worker mutex. Its Drop
+    // restores the producer if thread creation fails or setup unwinds.
+    Starting,
+    Running {
+        handle: JoinHandle<()>,
+        permit: WorkerPermit,
+    },
+    Joining,
+    Joined(XllResult<()>),
+}
+
+struct WorkerStart<'a, P> {
+    worker: Option<&'a mut Worker<P>>,
+    producer: Arc<Mutex<Option<P>>>,
+}
+
+impl<'a, P> WorkerStart<'a, P> {
+    fn reserve(worker: &'a mut Worker<P>) -> Self {
+        let Worker::Unstarted(producer) = std::mem::replace(worker, Worker::Starting) else {
+            xlfn_kernel::invariant::fail_stop();
+        };
+        Self {
+            worker: Some(worker),
+            producer: Arc::new(Mutex::new(Some(producer))),
+        }
+    }
+
+    fn commit(mut self, handle: JoinHandle<()>, permit: WorkerPermit) {
+        *self.worker.take().expect("start guard owns worker state") =
+            Worker::Running { handle, permit };
+    }
+}
+
+impl<P> Drop for WorkerStart<'_, P> {
+    fn drop(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            // OS spawn failure drops only the closure's Arc. The producer is
+            // restored without running user destructors under the worker lock.
+            let Some(producer) = self.producer.lock().take() else {
+                // A started thread must transfer its join handle immediately;
+                // otherwise there is no owner that could establish its barrier.
+                xlfn_kernel::invariant::fail_stop();
+            };
+            *worker = Worker::Unstarted(producer);
+        }
+    }
 }
 
 // Owns the shutdown barrier independently of the validator's concrete type.
@@ -349,13 +391,7 @@ where
             validator: NoTopicValidator,
             worker: WorkerOwner {
                 shared,
-                state: Mutex::new(Worker {
-                    producer: Some(producer),
-                    handle: None,
-                    permit: None,
-                    joining: false,
-                    result: None,
-                }),
+                state: Mutex::new(Worker::Unstarted(producer)),
                 started: AtomicBool::new(false),
                 joined: Condvar::new(),
             },
@@ -447,13 +483,13 @@ where
     fn register_channel(
         &self,
         topic: &RtdTopic,
-        mut channel: RtdChannelSubscription,
+        channel: super::channel::AttachedChannel,
     ) -> XllResult<RtdMultiplexedSubscription<T, D>> {
         let id = self
             .worker
             .shared
             .register(topic, channel.sender(self.delivery))?;
-        let subscription_permit = channel.take_subscription_permit();
+        let (channel, subscription_permit) = channel.into_multiplexed_parts();
         Ok(RtdMultiplexedSubscription {
             channel,
             shared: Arc::clone(&self.worker.shared),
@@ -465,7 +501,7 @@ where
     fn start(
         &self,
         topic: &RtdTopic,
-        channel: RtdChannelSubscription,
+        channel: super::channel::AttachedChannel,
         budget: &Arc<ChannelBudget>,
     ) -> XllResult<RtdMultiplexedSubscription<T, D>> {
         if self.worker.started.load(Ordering::Acquire) {
@@ -474,29 +510,24 @@ where
             return self.register_channel(topic, channel);
         }
         let mut worker = self.worker.state.lock();
-        if self.worker.shared.closed.load(Ordering::Acquire)
-            || worker.joining
-            || worker.result.is_some()
-        {
+        if self.worker.shared.closed.load(Ordering::Acquire) {
             return Err(XllError::Closing);
+        }
+        match &*worker {
+            Worker::Running { .. } => return self.register_channel(topic, channel),
+            Worker::Unstarted(_) => {}
+            Worker::Joining | Worker::Joined(_) => return Err(XllError::Closing),
+            Worker::Starting => xlfn_kernel::invariant::fail_stop(),
         }
         // Reserve before registering control events: a rejected first worker
         // must return the source slot even when no consumer exists yet.
-        let permit = if worker.handle.is_none() {
-            Some(ChannelBudget::try_worker(budget)?)
-        } else {
-            None
-        };
+        let permit = ChannelBudget::try_worker(budget)?;
         let subscription = self.register_channel(topic, channel)?;
-        if worker.handle.is_some() {
-            return Ok(subscription);
-        }
-        let producer = worker.producer.take().ok_or(XllError::Closing)?;
         // Retain ownership outside the spawn closure. Failed OS thread creation
         // drops that closure synchronously; it must not destroy user captures
         // while this source's worker mutex is held.
-        let pending = Arc::new(Mutex::new(Some(producer)));
-        let thread_pending = Arc::clone(&pending);
+        let starting = WorkerStart::reserve(&mut worker);
+        let thread_pending = Arc::clone(&starting.producer);
         let shared = Arc::clone(&self.worker.shared);
         let policy = self.error_policy;
         let run = move || {
@@ -524,13 +555,12 @@ where
         };
         match handle {
             Ok(handle) => {
-                worker.handle = Some(handle);
-                worker.permit = permit;
+                starting.commit(handle, permit);
                 self.worker.started.store(true, Ordering::Release);
                 Ok(subscription)
             }
             Err(error) => {
-                worker.producer = pending.lock().take();
+                drop(starting);
                 self.worker.shared.stop();
                 Err(XllError::Native {
                     code: error.raw_os_error().unwrap_or(0),
@@ -544,33 +574,37 @@ where
 impl<T, P, D: RtdDeliveryPolicy> WorkerOwner<T, P, D> {
     fn finish(&self) -> XllResult<()> {
         self.shared.stop();
-        let (handle, producer, permit) = {
+        let retiring = {
             let mut worker = self.state.lock();
-            while worker.joining {
-                self.joined.wait(&mut worker);
+            loop {
+                match &*worker {
+                    Worker::Joining => self.joined.wait(&mut worker),
+                    Worker::Joined(result) => return result.clone(),
+                    Worker::Unstarted(_) | Worker::Running { .. } => break,
+                    Worker::Starting => xlfn_kernel::invariant::fail_stop(),
+                }
             }
-            if let Some(result) = &worker.result {
-                return result.clone();
-            }
-            worker.joining = true;
-            (
-                worker.handle.take(),
-                worker.producer.take(),
-                worker.permit.take(),
-            )
+            std::mem::replace(&mut *worker, Worker::Joining)
         };
         // No registry or worker lock is held while user captures are destroyed
         // or the shared job is joined. Keep the worker reservation through both.
-        let dropped = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| drop(producer)))
-            .map_err(|_| XllError::Panic);
-        let joined = handle.map_or(Ok(()), |handle| {
-            crate::panic_boundary::contain_panic(handle.join()).map_err(|_| XllError::Panic)
-        });
-        drop(permit);
-        let result = dropped.and(joined);
+        let result = match retiring {
+            Worker::Unstarted(producer) => {
+                crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| drop(producer)))
+                    .map_err(|_| XllError::Panic)
+            }
+            Worker::Running { handle, permit } => {
+                let result = crate::panic_boundary::contain_panic(handle.join())
+                    .map_err(|_| XllError::Panic);
+                drop(permit);
+                result
+            }
+            Worker::Starting | Worker::Joining | Worker::Joined(_) => {
+                xlfn_kernel::invariant::fail_stop()
+            }
+        };
         let mut worker = self.state.lock();
-        worker.result = Some(result.clone());
-        worker.joining = false;
+        *worker = Worker::Joined(result.clone());
         self.joined.notify_all();
         result
     }
@@ -640,7 +674,7 @@ where
 
     fn subscribe(&self, topic: &RtdTopic, sink: RtdSink<T>) -> XllResult<Self::Subscription> {
         let runtime_budget = sink.channel_budget();
-        let channel = RtdChannelSubscription::attach(
+        let channel = super::channel::AttachedChannel::attach(
             self.delivery,
             Arc::clone(&self.budget),
             Arc::clone(&runtime_budget),

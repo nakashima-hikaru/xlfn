@@ -153,6 +153,89 @@ fn construction_is_lazy_and_unstarted_shutdown_is_idempotent() {
 }
 
 #[test]
+fn concurrent_shutdown_retains_worker_capacity_until_join_finishes() {
+    let (_runtime, _server, sink) =
+        crate::subscription::tests::connected_sink::<i32>(None, "join-capacity");
+    let budget = sink.channel_budget();
+    budget.configure_worker_limit(std::num::NonZeroUsize::new(1).unwrap());
+    let (stopping_tx, stopping_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let source = RtdMultiplexedSource::<i32, _, _, RtdLatest>::new(RtdLatest, move |context| {
+        while !context.is_closed() {
+            match context.recv_timeout(DEADLINE) {
+                Ok(_) => {}
+                Err(XllError::Closing) => break,
+                Err(error) => return Err(error),
+            }
+        }
+        stopping_tx.send(()).unwrap();
+        release_rx.recv_timeout(DEADLINE).unwrap();
+        Ok(())
+    });
+    let subscription = source
+        .subscribe(&RtdTopic::single("join-capacity").unwrap(), sink)
+        .unwrap();
+    std::thread::scope(|scope| {
+        let first = scope.spawn(|| source.shutdown_and_wait());
+        stopping_rx.recv_timeout(DEADLINE).unwrap();
+        let deadline = Instant::now() + DEADLINE;
+        while !matches!(*source.worker.state.lock(), Worker::Joining) {
+            assert!(
+                Instant::now() < deadline,
+                "shutdown did not claim the worker"
+            );
+            std::thread::yield_now();
+        }
+        let (finished_tx, finished_rx) = mpsc::sync_channel(1);
+        let shared_source = &source;
+        let second = scope.spawn(move || {
+            let result = shared_source.shutdown_and_wait();
+            finished_tx.send(()).unwrap();
+            result
+        });
+        assert!(matches!(
+            ChannelBudget::try_worker(&budget),
+            Err(XllError::Overloaded)
+        ));
+        assert!(matches!(
+            finished_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        release_tx.send(()).unwrap();
+        first.join().unwrap().unwrap();
+        second.join().unwrap().unwrap();
+    });
+    assert!(matches!(
+        *source.worker.state.lock(),
+        Worker::Joined(Ok(()))
+    ));
+    drop(ChannelBudget::try_worker(&budget).unwrap());
+    subscription.disconnect_and_wait().unwrap();
+}
+
+#[test]
+fn unstarted_capture_panic_is_cached_after_single_disposal() {
+    struct PanickingCapture(StdArc<AtomicUsize>);
+    impl Drop for PanickingCapture {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            panic!("injected unstarted producer capture drop panic");
+        }
+    }
+
+    let drops = StdArc::new(AtomicUsize::new(0));
+    let capture = PanickingCapture(StdArc::clone(&drops));
+    let source = RtdMultiplexedSource::<i32, _, _, RtdLatest>::new(RtdLatest, move |_| {
+        drop(capture);
+        Ok(())
+    });
+    assert!(matches!(source.shutdown_and_wait(), Err(XllError::Panic)));
+    assert!(matches!(source.shutdown_and_wait(), Err(XllError::Panic)));
+    drop(source);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn replacing_validator_preserves_unstarted_job_and_its_shutdown_barrier() {
     struct Capture(StdArc<AtomicUsize>);
     impl Drop for Capture {
@@ -764,7 +847,7 @@ fn spawn_failure_preserves_capture_until_disposal_outside_source_mutexes() {
     let result = source.subscribe(&RtdTopic::single("spawn-failure").unwrap(), sink);
     assert!(matches!(result, Err(XllError::Native { .. })));
     assert_eq!(drops.load(Ordering::SeqCst), 0);
-    assert!(source.worker.state.lock().producer.is_some());
+    assert!(matches!(*source.worker.state.lock(), Worker::Unstarted(_)));
     assert!(source.worker.shared.state.lock().active.is_empty());
     assert!(source.worker.shared.state.lock().events.is_empty());
     source.shutdown_and_wait().unwrap();

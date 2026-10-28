@@ -48,6 +48,117 @@ pub(super) enum ExecutorSlot<E> {
     Closing(Option<PublishedOwner<E>>),
 }
 
+struct PublicationsSealed;
+
+struct AwaitingTasks<'a> {
+    registry: RegistryClose<'a, TasksCancelled>,
+}
+
+struct ExecutorTasksDrained<'a> {
+    registry: RegistryClose<'a, TasksDrained>,
+}
+
+/// The state drops before the executor owner: a registry close claim must be
+/// released before another closer can acquire the restored executor.
+#[must_use = "finish executor shutdown or retain it for a later close attempt"]
+struct ExecutorClose<'a, E: AsyncExecutor, S> {
+    state: S,
+    owner: ExecutorCloseOwner<'a, E>,
+}
+
+/// Abandonment restores ownership without running executor code or reopening
+/// admission. The runtime borrow keeps the retained allocation's slot alive.
+struct ExecutorCloseOwner<'a, E: AsyncExecutor> {
+    runtime: &'a AsyncRuntime<E>,
+    executor: Option<PublishedOwner<E>>,
+}
+
+impl<E: AsyncExecutor> Drop for ExecutorCloseOwner<'_, E> {
+    fn drop(&mut self) {
+        if let Some(executor) = self.executor.take() {
+            let mut state = self.runtime.state.lock();
+            if !matches!(*state, ExecutorSlot::Closing(None)) {
+                xlfn_kernel::invariant::fail_stop();
+            }
+            *state = ExecutorSlot::Closing(Some(executor));
+            self.runtime.state_changed.notify_all();
+        }
+    }
+}
+
+impl<'a, E: AsyncExecutor> ExecutorClose<'a, E, PublicationsSealed> {
+    fn drain_readers(self) -> XllResult<ExecutorClose<'a, E, AwaitingTasks<'a>>> {
+        let owner = self.owner;
+        let runtime = owner.runtime;
+        // Readers include reserve/submit calls. Keep the executor available
+        // to cancellation wakes until every admitted task has been destroyed.
+        runtime.spawn_admission.wait_until_idle();
+        let registry = runtime.registry().request_close()?.cancel();
+        Ok(ExecutorClose {
+            state: AwaitingTasks { registry },
+            owner,
+        })
+    }
+}
+
+impl<'a, E: AsyncExecutor> ExecutorClose<'a, E, AwaitingTasks<'a>> {
+    fn wait(self) -> ExecutorClose<'a, E, ExecutorTasksDrained<'a>> {
+        let Self { state, owner } = self;
+        let registry = state.registry.wait();
+        ExecutorClose {
+            state: ExecutorTasksDrained { registry },
+            owner,
+        }
+    }
+
+    #[cfg(all(test, feature = "async-builtin"))]
+    fn wait_timeout(
+        self,
+        timeout: std::time::Duration,
+    ) -> XllResult<ExecutorClose<'a, E, ExecutorTasksDrained<'a>>> {
+        let Self { state, owner } = self;
+        let registry = state.registry.wait_timeout(timeout)?;
+        Ok(ExecutorClose {
+            state: ExecutorTasksDrained { registry },
+            owner,
+        })
+    }
+}
+
+impl<E: AsyncExecutor> ExecutorClose<'_, E, ExecutorTasksDrained<'_>> {
+    fn shutdown(self) -> XllResult<crate::shutdown::StopOutcome<AsyncStopped>> {
+        crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+            self.owner
+                .executor
+                .as_ref()
+                .expect("close owns executor")
+                .shutdown()
+        }))
+        .unwrap_or(Err(XllError::Panic))?;
+
+        let Self { state, mut owner } = self;
+        state.registry.finish();
+        let executor = owner.executor.take().expect("close owns executor");
+        let disposal =
+            crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| drop(executor)));
+        *owner.runtime.state.lock() = ExecutorSlot::Stopped;
+        owner.runtime.state_changed.notify_all();
+        let issues = if disposal.is_err() {
+            vec![crate::shutdown::CleanupIssue {
+                component: "async executor",
+                kind: crate::shutdown::CleanupIssueKind::DisposalPanicked,
+                error: XllError::Panic,
+            }]
+        } else {
+            Vec::new()
+        };
+        Ok(crate::shutdown::StopOutcome {
+            certificate: AsyncStopped::new(),
+            issues,
+        })
+    }
+}
+
 pub(crate) struct ExecutorRead<'a, E> {
     pointer: NonNull<E>,
     _permit: DrainPermit<'a>,
@@ -315,83 +426,32 @@ impl<E: AsyncExecutor> AsyncRuntime<E> {
     }
 
     pub(crate) fn close(&self) -> XllResult<crate::shutdown::StopOutcome<AsyncStopped>> {
-        self.close_with_task_drain(|closing| Ok(closing.wait()))
-    }
-
-    fn close_with_task_drain(
-        &self,
-        wait_for_tasks: impl for<'a> FnOnce(
-            RegistryClose<'a, TasksCancelled>,
-        ) -> XllResult<RegistryClose<'a, TasksDrained>>,
-    ) -> XllResult<crate::shutdown::StopOutcome<AsyncStopped>> {
-        self.registry().close_admission();
-        let Some(executor) = self.take_for_close() else {
+        let Some(closing) = self.take_for_close() else {
             return Ok(crate::shutdown::StopOutcome {
                 certificate: AsyncStopped::new(),
                 issues: Vec::new(),
             });
         };
-        // No publication reader can enter executor reserve/submit after this
-        // drain. Cancellation keeps executor alive to drive task wakes.
-        self.registry().close_admission();
-        self.spawn_admission.wait_until_idle();
-        let closing = match self.registry().request_close() {
-            Ok(closing) => closing.cancel(),
-            Err(error) => {
-                *self.state.lock() = ExecutorSlot::Closing(Some(executor));
-                self.state_changed.notify_all();
-                return Err(error);
-            }
-        };
-        let drained = match wait_for_tasks(closing) {
-            Ok(drained) => drained,
-            Err(error) => {
-                *self.state.lock() = ExecutorSlot::Closing(Some(executor));
-                self.state_changed.notify_all();
-                return Err(error);
-            }
-        };
-        let stopped = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
-            executor.shutdown()
-        }))
-        .unwrap_or(Err(XllError::Panic));
-        if let Err(error) = stopped {
-            // Release this attempt before publishing the executor for a retry.
-            drop(drained);
-            *self.state.lock() = ExecutorSlot::Closing(Some(executor));
-            self.state_changed.notify_all();
-            return Err(error);
-        }
-        drained.finish();
-        let disposal =
-            crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| drop(executor)));
-        *self.state.lock() = ExecutorSlot::Stopped;
-        self.state_changed.notify_all();
-        let issues = if disposal.is_err() {
-            vec![crate::shutdown::CleanupIssue {
-                component: "async executor",
-                kind: crate::shutdown::CleanupIssueKind::DisposalPanicked,
-                error: XllError::Panic,
-            }]
-        } else {
-            Vec::new()
-        };
-        Ok(crate::shutdown::StopOutcome {
-            certificate: AsyncStopped::new(),
-            issues,
-        })
+        closing.drain_readers()?.wait().shutdown()
     }
 
     #[cfg(all(test, feature = "async-builtin"))]
     pub(crate) fn close_with_timeout(&self, timeout: std::time::Duration) -> XllResult<()> {
-        self.close_with_task_drain(|closing| closing.wait_timeout(timeout))?
+        let Some(closing) = self.take_for_close() else {
+            return Ok(());
+        };
+        closing
+            .drain_readers()?
+            .wait_timeout(timeout)?
+            .shutdown()?
             .issues
             .into_iter()
             .next()
             .map_or(Ok(()), |issue| Err(issue.error))
     }
 
-    fn take_for_close(&self) -> Option<PublishedOwner<E>> {
+    fn take_for_close(&self) -> Option<ExecutorClose<'_, E, PublicationsSealed>> {
+        self.registry().close_admission();
         let mut state = self.state.lock();
         loop {
             match &*state {
@@ -404,7 +464,13 @@ impl<E: AsyncExecutor> AsyncRuntime<E> {
                     self.state_changed.notify_all();
                     return match old {
                         ExecutorSlot::Running(executor) | ExecutorSlot::Closing(Some(executor)) => {
-                            Some(executor)
+                            Some(ExecutorClose {
+                                state: PublicationsSealed,
+                                owner: ExecutorCloseOwner {
+                                    runtime: self,
+                                    executor: Some(executor),
+                                },
+                            })
                         }
                         _ => unreachable!(),
                     };
@@ -520,5 +586,162 @@ impl<E: AsyncExecutor> Drop for AsyncRuntime<E> {
                 let _retained = std::mem::ManuallyDrop::new(registry);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod close_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+    #[derive(Default)]
+    struct Counters {
+        stops: AtomicUsize,
+        drops: AtomicUsize,
+        panic_on_shutdown: AtomicBool,
+    }
+
+    struct Executor(Arc<Counters>);
+
+    impl Drop for Executor {
+        fn drop(&mut self) {
+            self.0.drops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    impl AsyncExecutor for Executor {
+        type Reservation = ();
+        fn start(&self) -> XllResult<()> {
+            Ok(())
+        }
+        fn reserve(&self) -> XllResult<()> {
+            Ok(())
+        }
+        fn submit<F>(&self, (): (), task: super::super::AsyncTask<F>)
+        where
+            F: Future<Output = ()> + Send + 'static,
+        {
+            drop(task);
+        }
+        fn shutdown(&self) -> XllResult<()> {
+            self.0.stops.fetch_add(1, Ordering::Relaxed);
+            assert!(
+                !self.0.panic_on_shutdown.load(Ordering::Relaxed),
+                "injected shutdown panic"
+            );
+            Ok(())
+        }
+    }
+
+    fn start() -> (AsyncRuntime<Executor>, Arc<Counters>) {
+        let counters = Arc::new(Counters::default());
+        let runtime = AsyncRuntime::new();
+        runtime
+            .start(
+                Executor(Arc::clone(&counters)),
+                crate::AsyncTaskLimit::DEFAULT,
+            )
+            .unwrap();
+        (runtime, counters)
+    }
+
+    fn abandon<S>(closing: ExecutorClose<'_, Executor, S>, unwind: bool) {
+        assert!(!unwind, "injected close abandonment");
+        drop(closing);
+    }
+
+    fn assert_retained(runtime: &AsyncRuntime<Executor>, counters: &Counters) {
+        assert!(matches!(
+            *runtime.state.lock(),
+            ExecutorSlot::Closing(Some(_))
+        ));
+        assert!(runtime.executor().is_none());
+        assert!(!runtime.is_stopped());
+        assert_eq!(counters.drops.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn abandoned_executor_close_stages_restore_owner_and_release_registry_claim() {
+        for stage in 0..3 {
+            for unwind in [false, true] {
+                let (runtime, counters) = start();
+                let result =
+                    crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+                        let closing = runtime.take_for_close().unwrap();
+                        match stage {
+                            0 => abandon(closing, unwind),
+                            1 => abandon(closing.drain_readers().unwrap(), unwind),
+                            _ => abandon(closing.drain_readers().unwrap().wait(), unwind),
+                        }
+                    }));
+                assert_eq!(result.is_err(), unwind);
+                assert_retained(&runtime, &counters);
+                assert_eq!(counters.stops.load(Ordering::Relaxed), 0);
+                assert!(runtime.close().unwrap().issues.is_empty());
+                assert_eq!(counters.stops.load(Ordering::Relaxed), 1);
+                assert_eq!(counters.drops.load(Ordering::Relaxed), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn registry_close_rejection_restores_executor_for_retry() {
+        let (runtime, counters) = start();
+        let competing = runtime.registry().request_close().unwrap();
+        assert!(matches!(runtime.close(), Err(XllError::Closing)));
+        assert_retained(&runtime, &counters);
+        assert_eq!(counters.stops.load(Ordering::Relaxed), 0);
+        drop(competing);
+        assert!(runtime.close().is_ok());
+        assert_eq!(counters.drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn panicking_executor_shutdown_retains_owner_without_stopped_certificate() {
+        let (runtime, counters) = start();
+        counters.panic_on_shutdown.store(true, Ordering::Relaxed);
+        assert!(matches!(runtime.close(), Err(XllError::Panic)));
+        assert_retained(&runtime, &counters);
+        counters.panic_on_shutdown.store(false, Ordering::Relaxed);
+        assert!(runtime.close().unwrap().issues.is_empty());
+        assert!(runtime.is_stopped());
+        assert_eq!(counters.stops.load(Ordering::Relaxed), 2);
+        assert_eq!(counters.drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn abandoned_executor_close_wakes_a_waiting_closer() {
+        let (runtime, counters) = start();
+        let closing = runtime
+            .take_for_close()
+            .unwrap()
+            .drain_readers()
+            .unwrap()
+            .wait();
+        std::thread::scope(|scope| {
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let runtime = &runtime;
+            let waiting = scope.spawn(move || {
+                started_tx.send(()).unwrap();
+                done_tx.send(runtime.close().is_ok()).unwrap();
+            });
+            started_rx.recv().unwrap();
+            assert!(
+                done_rx
+                    .recv_timeout(std::time::Duration::from_millis(10))
+                    .is_err()
+            );
+            drop(closing);
+            assert!(
+                done_rx
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .unwrap()
+            );
+            waiting.join().unwrap();
+        });
+        assert_eq!(counters.stops.load(Ordering::Relaxed), 1);
+        assert_eq!(counters.drops.load(Ordering::Relaxed), 1);
     }
 }

@@ -1444,7 +1444,7 @@ fn deferred_termination_spawn_failure_rolls_back_atomically() {
     assert_eq!(unsafe { server_terminate(server) }, E_FAIL);
     assert_eq!(server_ref.operations.state.lock().phase, ServerPhase::Open);
     assert_eq!(
-        server_ref.termination_worker.state.lock().status,
+        server_ref.termination_worker.phase(),
         TerminationWorkerStatus::Idle
     );
     // The failed reservation did not leave the operation gate closed.
@@ -1480,7 +1480,42 @@ fn termination_worker_can_finish_before_handle_registration() {
     start.commit(handle);
     joined_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     joining.join().unwrap();
-    assert_eq!(worker.state.lock().status, TerminationWorkerStatus::Joined);
+    assert_eq!(worker.phase(), TerminationWorkerStatus::Joined);
+}
+
+#[test]
+fn termination_worker_rejects_self_join_while_another_caller_owns_handle() {
+    let worker = Arc::new(TerminationWorker::default());
+    let start = worker.reserve_start().unwrap();
+    let (attempt_tx, attempt_rx) = mpsc::sync_channel(1);
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
+    let worker_thread = Arc::clone(&worker);
+    start.commit(std::thread::spawn(move || {
+        attempt_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        result_tx
+            .send(matches!(
+                worker_thread.join(),
+                Err(ServerCloseError::Reentrant)
+            ))
+            .unwrap();
+    }));
+
+    std::thread::scope(|scope| {
+        let joining = scope.spawn(|| worker.join());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while worker.phase() != TerminationWorkerStatus::Joining {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "joiner did not claim handle"
+            );
+            std::thread::yield_now();
+        }
+        attempt_tx.send(()).unwrap();
+        assert!(result_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+        joining.join().unwrap().unwrap();
+    });
+    assert_eq!(worker.phase(), TerminationWorkerStatus::Joined);
+    worker.join().unwrap();
 }
 
 #[cfg(feature = "handles")]
@@ -1937,7 +1972,7 @@ fn termination_worker_join_retains_panicking_payload_and_completes() {
         worker.join(),
         Err(ServerCloseError::WorkerPanicked)
     ));
-    assert_eq!(worker.state.lock().status, TerminationWorkerStatus::Joined);
+    assert_eq!(worker.phase(), TerminationWorkerStatus::Joined);
     assert_eq!(dropped.load(Ordering::Acquire), 0);
     assert!(worker.join().is_ok());
 }

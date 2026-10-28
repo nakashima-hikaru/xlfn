@@ -25,6 +25,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 MODULES = {
     "async_udf": Path("crates/xlfn/src/async_udf.rs"),
+    "async_udf/runtime": Path("crates/xlfn/src/async_udf/runtime.rs"),
     "subscription": Path("crates/xlfn/src/subscription.rs"),
     "subscription/runtime": Path("crates/xlfn/src/subscription/runtime.rs"),
     "handle": Path("crates/xlfn/src/handle.rs"),

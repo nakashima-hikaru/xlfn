@@ -22,6 +22,9 @@ Open transactions carry mandatory service inputs after initialization. Fixtures
 reject missing or repeated initialization inputs, commit before initialization
 or lifecycle installation, and committing twice. Async response delivery consumes
 the pending handle authority; its fixtures reject a second delivery attempt.
+Executor close retains the runtime and executor through publication-reader and
+task drain. Only the drained stage exposes executor shutdown; abandoning any
+stage restores the sealed executor after releasing the registry close claim.
 
 Removal starts by consuming its owner into the teardown transaction. The
 transaction must close module callbacks, prove host detachment, and quiesce the
@@ -29,6 +32,9 @@ add-in before sealing generation services. Fixtures reject skipping these stages
 reusing the initial owner, and reassembling an unrelated owner and drained stage.
 Interrupted teardown still returns its module authority before releasing the
 cleanup claim.
+An undrained module becomes a terminal retained owner without a drain or retry
+operation. A handle-registry seal carries its own registry reference, so callers
+cannot apply it to another store or pair a service with an unrelated seal.
 
 Server termination fixtures also require cancellation before finish, reject
 reusing cancellation or completion authority, and prevent passing a cancellation
@@ -45,6 +51,9 @@ that would change the exact `TypeId`. Input fixtures check static materializer
 selection and consuming prepared values once. Teardown fixtures require recovery
 authority while permitting borrowed stages, and cache fixtures enforce its
 thread-safety bounds.
+Single-flight cache completion consumes its leader guard and publishes before
+unregistering. The guard has no separate unregister operation; abandonment still
+detaches before waking followers to retry.
 
 Endpoint memoization fixtures require the endpoint and retained cache pointer
 to have the same key, value, and marker types, including function subtyping.
@@ -63,3 +72,7 @@ incremental source registration or changing a handle's concrete source type.
 RTD senders retain their FIFO or Latest policy in their type and cannot be
 retagged. Validated pending values and batches may still be retried on a sender
 with another policy, without converting again or changing their input type.
+Worker payload variants own the producer, running thread, or completed result
+required by each state. Channel attachment owns its subscription permit until
+a consuming transfer moves it to the multiplexed subscription. Windows worker
+joining retains its thread identity so a concurrent self-join remains rejected.

@@ -1021,13 +1021,14 @@ pub struct RtdChannelSubscription {
     subscription_permit: Option<SubscriptionPermit>,
 }
 
-impl RtdChannelSubscription {
-    pub(super) fn take_subscription_permit(&mut self) -> SubscriptionPermit {
-        self.subscription_permit
-            .take()
-            .expect("attached channel owns its subscription reservation")
-    }
+/// A newly attached publication barrier with its mandatory source reservation.
+/// Drop the barrier before returning capacity if setup is abandoned.
+pub(super) struct AttachedChannel {
+    subscription: RtdChannelSubscription,
+    permit: SubscriptionPermit,
+}
 
+impl AttachedChannel {
     pub(super) fn attach<T: IntoRtdValue + Send + 'static, D: RtdDeliveryPolicy>(
         delivery: D,
         source_budget: Arc<ChannelBudget>,
@@ -1039,11 +1040,31 @@ impl RtdChannelSubscription {
             delivery,
             BudgetPair::new(source_budget, runtime_budget),
         ));
-        let mut subscription = Self::start_publisher(channel, sink)?;
-        subscription.subscription_permit = Some(permit);
-        Ok(subscription)
+        let subscription = RtdChannelSubscription::start_publisher(channel, sink)?;
+        Ok(Self {
+            subscription,
+            permit,
+        })
     }
 
+    pub(super) fn sender<T, D: RtdDeliveryPolicy>(&self, delivery: D) -> RtdSender<T, D> {
+        self.subscription.sender(delivery)
+    }
+
+    /// Multiplexed removal keeps the reservation after this channel closes,
+    /// until the producer consumes its queued unsubscribe event.
+    pub(super) fn into_multiplexed_parts(self) -> (RtdChannelSubscription, SubscriptionPermit) {
+        (self.subscription, self.permit)
+    }
+
+    fn into_subscription(self) -> RtdChannelSubscription {
+        let mut subscription = self.subscription;
+        subscription.subscription_permit = Some(self.permit);
+        subscription
+    }
+}
+
+impl RtdChannelSubscription {
     pub(super) fn sender<T, D: RtdDeliveryPolicy>(&self, delivery: D) -> RtdSender<T, D> {
         Channel::sender_with_policy(&self.channel, delivery)
     }
@@ -1134,12 +1155,13 @@ where
         let permit = ChannelBudget::try_worker(&self.budget)?;
         let runtime_budget = sink.channel_budget();
         let worker_permit = ChannelBudget::try_worker(&runtime_budget)?;
-        let mut subscription = RtdChannelSubscription::attach(
+        let attached = AttachedChannel::attach(
             self.delivery,
             Arc::clone(&self.budget),
             runtime_budget,
             sink,
         )?;
+        let mut subscription = attached.into_subscription();
         subscription.producer_permit = Some(permit);
         subscription.worker_permit = Some(worker_permit);
         let producer = (self.factory)(topic.clone())?;

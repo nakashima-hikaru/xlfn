@@ -111,6 +111,14 @@ callback publication before commit. They run on Windows CI and are explicitly
 skipped on other hosts unless a Windows `--target` is selected. These checks
 compile code without executing Excel.
 
+Additional fixtures require executor publication readers and tasks to drain
+before shutdown, bind handle seals to their originating registry, and make
+undrained module retention terminal. Cache leader completion and channel permit
+transfer each consume their owner. RTD worker variants retain the payload for
+their state, including the thread identity needed to reject self-join while
+another caller is already joining. Runtime regressions also check abandonment,
+retry ownership, producer destruction, and permit lifetime.
+
 ## Test in Excel
 
 Artifact checks verify binary structure, but end-to-end worksheet behavior

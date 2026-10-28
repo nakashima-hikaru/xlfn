@@ -854,15 +854,23 @@ where
     K: Clone + Eq + Hash + Send + Sync + 'static,
     V: Send + Sync + 'static,
 {
-    fn unregister(&mut self) {
+    /// Publish before detaching the flight, consuming the only completion
+    /// authority. Abandonment instead detaches before inviting a retry.
+    fn complete(mut self, result: Result<(NodePtr<V>, u64), Box<XllError>>) {
+        {
+            let mut state = self.flight.state.lock();
+            *state = FlightState::Finished(result);
+        }
+        self.flight.changed.notify_all();
+
         let removed = self
             .cache
             .flights
             .shard(self.flight.hash)
             .lock()
             .remove(self.flight);
-        debug_assert!(removed.is_some(), "the leader owns one registered flight");
         self.registered = false;
+        debug_assert!(removed.is_some(), "the leader owns one registered flight");
         // The leader retains its own Arc. Even the table's reference is
         // released after unlocking, independently of key/value destruction.
         drop(removed);
@@ -876,7 +884,15 @@ where
 {
     fn drop(&mut self) {
         if self.registered {
-            self.unregister();
+            let removed = self
+                .cache
+                .flights
+                .shard(self.flight.hash)
+                .lock()
+                .remove(self.flight);
+            // A retry may immediately register a new flight for this key.
+            // Remove the abandoned identity before waking its followers.
+            drop(removed);
             {
                 let mut state = self.flight.state.lock();
                 if matches!(*state, FlightState::Pending) {
@@ -1756,7 +1772,7 @@ where
 
             // Leader path
             let _active = ActiveCacheGuard::enter()?;
-            let mut guard = LeaderGuard {
+            let guard = LeaderGuard {
                 cache: self,
                 flight: &flight,
                 registered: true,
@@ -1812,14 +1828,8 @@ where
                     // 3. Publish result to followers.
                     // Increment pins for Flight, transferring 1 pin to FlightState::Finished.
                     node_ref.acquire_anchor_pin();
-                    {
-                        let mut state = flight.state.lock();
-                        *state = FlightState::Finished(Ok((node_ptr, w)));
-                    }
-                    flight.changed.notify_all();
-
-                    // 4. Only then remove single-flight registration.
-                    guard.unregister();
+                    // 4. Completion publishes before removing registration.
+                    guard.complete(Ok((node_ptr, w)));
 
                     drop(_active);
                     self.maintain(true);
@@ -1829,13 +1839,7 @@ where
                 }
                 Err(err) => {
                     let error = Box::new(err.clone());
-                    {
-                        let mut state = flight.state.lock();
-                        *state = FlightState::Finished(Err(error));
-                    }
-                    flight.changed.notify_all();
-
-                    guard.unregister();
+                    guard.complete(Err(error));
 
                     drop(_active);
                     self.maintain(true);

@@ -1865,7 +1865,7 @@ fn scoped_handle_task_drain_releases_pin_before_handle_quiescence() {
     assert_eq!(drops.load(Ordering::Acquire), 1);
 
     let sealed = handles.seal().unwrap();
-    handles.store.registry.finish_quiescence(&sealed).unwrap();
+    sealed.finish_quiescence().unwrap();
 }
 
 #[test]
@@ -1896,13 +1896,13 @@ fn handle_lease_survives_terminal_runtime_close() {
         0
     );
     assert!(matches!(
-        runtime.store.registry.finish_quiescence(&sealed),
+        sealed.finish_quiescence(),
         Err(XllError::Internal { diagnostic_id })
             if diagnostic_id == crate::diagnostics::id::DiagnosticId::HANDLE_PINS
     ));
     drop(pinned);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
-    runtime.store.registry.finish_quiescence(&sealed).unwrap();
+    sealed.finish_quiescence().unwrap();
 }
 
 #[test]
@@ -1927,7 +1927,7 @@ fn binding_snapshot_blocks_object_quiescence_until_call_ends() {
             let (finished_tx, finished_rx) = mpsc::channel();
             let seal_handle = std::thread::spawn(move || {
                 started_tx.send(()).unwrap();
-                let sealed = rt_clone.seal();
+                let sealed = rt_clone.seal().map(|sealed| sealed.finish_quiescence());
                 finished_tx.send(sealed).unwrap();
             });
             started_rx.recv().unwrap();
@@ -1937,12 +1937,12 @@ fn binding_snapshot_blocks_object_quiescence_until_call_ends() {
             (seal_handle, finished_rx)
         });
 
-    let sealed = finished_rx
+    finished_rx
         .recv_timeout(Duration::from_secs(1))
+        .unwrap()
         .unwrap()
         .unwrap();
     seal_handle.join().unwrap();
-    runtime.store.registry.finish_quiescence(&sealed).unwrap();
 }
 
 #[test]
@@ -3721,7 +3721,7 @@ fn miri_deferred_seal_waits_for_in_flight_destructor() {
     let (finished_tx, finished_rx) = mpsc::channel();
     let closer = std::thread::spawn(move || {
         let sealed = closing.seal().unwrap();
-        closing.finish_quiescence(&sealed).unwrap();
+        sealed.finish_quiescence().unwrap();
         finished_tx.send(()).unwrap();
     });
     assert!(finished_rx.recv_timeout(Duration::from_millis(20)).is_err());
@@ -3820,7 +3820,7 @@ fn miri_deferred_removal_keeps_borrows_across_slot_reuse_and_batches() {
     registry.bindings.read_domain().flush_for_test();
     assert_eq!(drops.load(Ordering::Relaxed), 65);
     let sealed = registry.seal().unwrap();
-    registry.finish_quiescence(&sealed).unwrap();
+    sealed.finish_quiescence().unwrap();
 }
 
 #[test]
@@ -3847,7 +3847,7 @@ fn miri_deferred_seal_racing_removal_cannot_miss_queued_records() {
         // Seal includes destruction handed to concurrent maintenance,
         // even before the remover has joined.
         assert_eq!(drops.load(Ordering::Relaxed), 1);
-        registry.finish_quiescence(&sealed).unwrap();
+        sealed.finish_quiescence().unwrap();
         worker.join().unwrap();
     }
 }
@@ -3868,6 +3868,22 @@ fn miri_deferred_seal_drains_debt_below_batch_threshold() {
             .is_some()
     );
     let sealed = registry.seal().unwrap();
-    registry.finish_quiescence(&sealed).unwrap();
+    sealed.finish_quiescence().unwrap();
     assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn sealed_registry_finishes_its_owner_while_another_store_stays_open() {
+    let first = super::store::HandleStore::try_new(8).unwrap();
+    let second = super::store::HandleStore::try_new(8).unwrap();
+    let generation = crate::generation::RuntimeGeneration::new(1).unwrap();
+    let proof = first.seal().unwrap().quiescent(Some(generation)).unwrap();
+    assert_eq!(proof.generation(), Some(generation));
+    assert_eq!(first.registry.phase(), HandleRegistryPhase::Closed);
+    assert!(matches!(first.erase(DataRecord(1)), Err(XllError::Closing)));
+    assert_eq!(second.registry.phase(), HandleRegistryPhase::Open);
+    let pending = second.erase(DataRecord(2)).unwrap();
+    second.insert_pending(pending).unwrap();
+    assert_eq!(second.len(), 1);
+    second.seal().unwrap().finish_quiescence().unwrap();
 }

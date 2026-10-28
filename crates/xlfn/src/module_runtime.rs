@@ -84,7 +84,7 @@ pub(crate) enum ModuleAuthority {
     Drained(ModuleExportsDrained),
     /// Drain preparation failed. Keep the epoch and its resources resident;
     /// quarantine must not retry cleanup or manufacture a drained witness.
-    RetainedUndrained(ModuleClosing),
+    RetainedUndrained(ModuleRetainedUndrained),
 }
 
 /// The cleanup authority retained after a close transition has begun.
@@ -95,7 +95,7 @@ pub(crate) enum ModuleAuthority {
 pub(crate) enum ModuleCleanupAuthority {
     Closing(ModuleClosing),
     Drained(ModuleExportsDrained),
-    RetainedUndrained(ModuleClosing),
+    RetainedUndrained(ModuleRetainedUndrained),
 }
 
 /// Claiming cleanup distinguishes a deliberately retained epoch from a lost
@@ -115,6 +115,19 @@ pub(crate) enum ModuleCleanupClaim {
 pub(crate) struct ModuleClosing {
     module: &'static ModuleRuntime,
     id: ModuleEpochId,
+}
+
+/// Terminal authority after drain preparation fails. Keeping the original
+/// close capability private retains the epoch without exposing a retry path.
+#[derive(Debug)]
+pub(crate) struct ModuleRetainedUndrained {
+    closing: ModuleClosing,
+}
+
+impl ModuleRetainedUndrained {
+    pub(crate) fn id(&self) -> ModuleEpochId {
+        self.closing.id()
+    }
 }
 
 /// Affine module capability after all exports have drained.
@@ -259,10 +272,12 @@ impl ModuleClosing {
         self.id
     }
 
-    pub(crate) fn seal_and_drain(self) -> Result<ModuleExportsDrained, (crate::XllError, Self)> {
+    pub(crate) fn seal_and_drain(
+        self,
+    ) -> Result<ModuleExportsDrained, (crate::XllError, ModuleRetainedUndrained)> {
         let exports = match self.module.seal_and_drain_internal() {
             Ok(exports) => exports,
-            Err(error) => return Err((error, self)),
+            Err(error) => return Err((error, ModuleRetainedUndrained { closing: self })),
         };
         Ok(ModuleExportsDrained {
             module: self.module,
@@ -417,4 +432,35 @@ pub(crate) fn certify_quiescence_for_test() {
 /// module runtime.
 pub(crate) fn ingress() -> &'static ExportIngress {
     global().ingress()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ModuleAuthority, ModuleCleanupAuthority, ModuleRuntime};
+
+    #[test]
+    fn failed_drain_retains_identity_through_cleanup_handoff_without_retry() {
+        for wait in [1, 2] {
+            let module = Box::leak(Box::new(ModuleRuntime::new()));
+            let closing = module.begin_open_internal().rollback(|| {});
+            let epoch = closing.id();
+            let fault = crate::ingress::DrainPreparationFault::at(wait);
+            let Err((_, retained)) = closing.seal_and_drain() else {
+                panic!("injected drain preparation succeeded");
+            };
+            assert_eq!(retained.id(), epoch);
+            assert_eq!(module.ingress().phase(), crate::ingress::PHASE_CLOSING);
+            let authority = ModuleCleanupAuthority::RetainedUndrained(retained).into_authority();
+            assert!(authority.is_retained_undrained());
+            assert_eq!(authority.id(), epoch);
+            let ModuleCleanupAuthority::RetainedUndrained(retained) = authority.into_cleanup()
+            else {
+                panic!("retained authority became cleanup-ready");
+            };
+            assert_eq!(retained.id(), epoch);
+            let authority = ModuleAuthority::RetainedUndrained(retained);
+            assert_eq!(authority.id(), epoch);
+            assert_eq!(fault.attempts(), wait);
+        }
+    }
 }

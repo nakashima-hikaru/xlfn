@@ -41,14 +41,31 @@ impl HandleRegistryPhase {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct HandleRegistrySealed {
-    _private: (),
+/// A sealed view of one registry. The borrowed owner is the only registry
+/// whose object arena this capability can finish draining.
+pub(crate) struct HandleRegistrySealed<'registry> {
+    registry: &'registry HandleRegistry,
 }
 
-impl HandleRegistrySealed {
-    fn new() -> Self {
-        Self { _private: () }
+impl std::fmt::Debug for HandleRegistrySealed<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HandleRegistrySealed")
+            .finish_non_exhaustive()
+    }
+}
+
+impl HandleRegistrySealed<'_> {
+    pub(super) fn finish_quiescence(&self) -> XllResult<()> {
+        self.registry.objects.finish_quiescence()
+    }
+
+    pub(super) fn quiescent(
+        self,
+        generation: Option<crate::generation::RuntimeGeneration>,
+    ) -> XllResult<crate::shutdown::HandlesQuiescent> {
+        self.finish_quiescence()?;
+        Ok(crate::shutdown::HandlesQuiescent::new(generation))
     }
 }
 
@@ -425,7 +442,7 @@ impl HandleRegistry {
         );
     }
 
-    pub(super) fn seal(&self) -> XllResult<HandleRegistrySealed> {
+    pub(super) fn seal(&self) -> XllResult<HandleRegistrySealed<'_>> {
         if self.bindings.read_domain().is_reclaiming_here() {
             return Err(XllError::Closing);
         }
@@ -434,7 +451,7 @@ impl HandleRegistry {
             match phase {
                 HandleRegistryPhase::Closed => {
                     self.cleanup_result()?;
-                    return Ok(HandleRegistrySealed::new());
+                    return Ok(HandleRegistrySealed { registry: self });
                 }
                 HandleRegistryPhase::Sealing => return Err(XllError::Closing),
                 HandleRegistryPhase::Open | HandleRegistryPhase::Closing => {
@@ -459,11 +476,7 @@ impl HandleRegistry {
         self.phase
             .store(HandleRegistryPhase::Closed as u8, Ordering::Release);
         self.cleanup_result()?;
-        Ok(HandleRegistrySealed::new())
-    }
-
-    pub(super) fn finish_quiescence(&self, _sealed: &HandleRegistrySealed) -> XllResult<()> {
-        self.objects.finish_quiescence()
+        Ok(HandleRegistrySealed { registry: self })
     }
 }
 

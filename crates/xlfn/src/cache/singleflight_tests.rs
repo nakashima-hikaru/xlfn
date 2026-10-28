@@ -39,6 +39,56 @@ impl Drop for DropProbe {
 }
 
 #[test]
+#[cfg(not(miri))]
+fn abandoned_leader_detaches_before_follower_retries() {
+    let cache = CalculationCache::<u64, u64>::new(0);
+    let key = VersionedKey {
+        epoch: cache.generation.snapshot(),
+        key: 7,
+    };
+    let hash = flight_hash(&key);
+    let flight = Arc::new(Flight::new(key, hash));
+    cache
+        .flights
+        .shard(hash)
+        .lock()
+        .insert_unique(Arc::clone(&flight));
+    let leader = LeaderGuard {
+        cache: &cache,
+        flight: &flight,
+        registered: true,
+    };
+    std::thread::scope(|scope| {
+        let (finished_tx, finished_rx) = mpsc::sync_channel(1);
+        let cache_ref = &cache;
+        let follower = scope.spawn(move || {
+            let result = cache_ref.get_or_try_insert_with(7, |_| 1, || Ok(19));
+            finished_tx.send(result.map(|value| *value)).unwrap();
+        });
+        // This observer and the table hold two Arcs. A third proves that
+        // the follower is waiting on the identity the leader will abandon.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Arc::strong_count(&flight) < 3 && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        let enrolled = Arc::strong_count(&flight) >= 3;
+        drop(leader);
+        let result = finished_rx.recv_timeout(Duration::from_secs(5));
+        if result.is_err() {
+            // Release a stranded waiter before failing, including a mutant
+            // that wakes before detaching and loops on the abandoned flight.
+            drop(cache.flights.shard(hash).lock().remove(&flight));
+            *flight.state.lock() = FlightState::Retry;
+            flight.changed.notify_all();
+        }
+        follower.join().unwrap();
+        assert!(enrolled, "follower must observe the pending leader");
+        assert!(matches!(result, Ok(Ok(19))));
+    });
+    assert!(cache.flights.is_empty());
+}
+
+#[test]
 fn success_and_error_completion_do_not_reenter_key_callbacks() {
     for fault_mode in [1, 2] {
         for succeeds in [false, true] {
