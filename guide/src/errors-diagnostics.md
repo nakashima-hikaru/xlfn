@@ -151,6 +151,8 @@ A basic production setup installs the built-in bounded file sink during `Addin::
 ```rust
 {{#include ../fixtures/diagnostics.md}}
 impl Addin for AppTools {
+    type RtdSubscription = ();
+    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;
@@ -158,7 +160,7 @@ impl Addin for AppTools {
     #[cfg(feature = "async")]
     type AsyncExecutor = xlfn::NoAsyncExecutor;
 
-    fn open(context: &OpenContext) -> XllResult<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>> {
+    fn open(context: &OpenContext<Self>) -> XllResult<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>> {
         let path = context.diagnostics().install_file_sink()?;
         tracing::info!(path = %path.display(), "diagnostic log installed");
         Ok(Opened::new(State::new()))
@@ -211,6 +213,8 @@ Install the custom sink during `Addin::open`:
 # struct Telemetry;
 # impl DiagnosticSink for Telemetry { fn report(&self, _: &DiagnosticEvent<'_>) {} }
 impl Addin for AppTools {
+    type RtdSubscription = ();
+    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;
@@ -218,7 +222,7 @@ impl Addin for AppTools {
     #[cfg(feature = "async")]
     type AsyncExecutor = xlfn::NoAsyncExecutor;
 
-    fn open(context: &OpenContext) -> XllResult<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>> {
+    fn open(context: &OpenContext<Self>) -> XllResult<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>> {
         context.diagnostics().set_sink(Telemetry)?;
         Ok(Opened::new(State::new()))
     }

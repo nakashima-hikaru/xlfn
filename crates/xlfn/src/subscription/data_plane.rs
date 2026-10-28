@@ -1669,7 +1669,7 @@ mod tests {
             .map(|_| fixture.add::<i32>(None))
             .collect::<Vec<_>>();
         let runtime =
-            SubscriptionRuntime::<crate::excel_rtd::RtdSubscriptionHost>::with_sources_for_internal(
+            SubscriptionRuntime::<crate::excel_rtd::RtdSubscriptionHost, _>::with_sources_for_internal(
                 fixture.finish(),
             );
         for generation in [1, 2] {
@@ -1716,7 +1716,7 @@ mod tests {
         let fixture = SourceFixture::new();
         let sources = [fixture.add::<i32>(None), fixture.add::<i32>(None)];
         let runtime =
-            SubscriptionRuntime::<crate::excel_rtd::RtdSubscriptionHost>::with_sources_for_internal(
+            SubscriptionRuntime::<crate::excel_rtd::RtdSubscriptionHost, _>::with_sources_for_internal(
                 fixture.finish(),
             );
         let server = runtime.register_test_server(1);

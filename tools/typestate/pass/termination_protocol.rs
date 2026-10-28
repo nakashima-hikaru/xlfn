@@ -4,7 +4,7 @@ use super::server::{CancelPending, ServerTermination};
 use super::termination::{TerminationClaim, TerminationCoordinator};
 
 fn terminate<H: SubscriptionHost>(
-    pending: ServerTermination<'_, H, CancelPending>,
+    pending: ServerTermination<'_, H, (), crate::DynamicRtdSources<()>, CancelPending>,
 ) -> crate::XllResult<()> {
     pending.request_cancel().finish()
 }

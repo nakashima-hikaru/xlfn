@@ -26,7 +26,7 @@ mod multiplex;
 mod runtime;
 mod runtime_services;
 mod server;
-mod source;
+pub(crate) mod source;
 mod termination;
 mod topic;
 mod value;
@@ -34,29 +34,32 @@ mod value;
 pub(crate) type PublishSink = delivery::PublishSink;
 pub(crate) use data_plane::PublishCore;
 pub(crate) use topic::TopicId as SinkTopicId;
-pub(crate) type SubscriptionRuntime =
-    runtime::SubscriptionRuntime<crate::excel_rtd::RtdSubscriptionHost>;
-pub(crate) type SubscriptionConnection =
-    runtime::SubscriptionConnection<crate::excel_rtd::RtdSubscriptionHost>;
-pub(crate) type SubscriptionServerHandle =
-    server::SubscriptionServerHandle<crate::excel_rtd::RtdSubscriptionHost>;
+#[cfg(all(windows, any(feature = "rtd", feature = "handles")))]
+pub(crate) type RtdRefreshBatch<'a> =
+    data_plane::RtdRefreshBatch<'a, crate::excel_rtd::RtdSubscriptionHost>;
+pub(crate) type SubscriptionRuntime<E = (), C = crate::DynamicRtdSources<E>> =
+    runtime::SubscriptionRuntime<crate::excel_rtd::RtdSubscriptionHost, E, C>;
+pub(crate) type SubscriptionServerHandle<E = (), C = crate::DynamicRtdSources<E>> =
+    server::SubscriptionServerHandle<crate::excel_rtd::RtdSubscriptionHost, E, C>;
 
 #[cfg(feature = "rtd")]
-pub use budget::{RtdDelivery, RtdSourceLimits};
-#[cfg(all(feature = "rtd", feature = "bench-internals"))]
-pub use channel::channel_protocol_probe;
+pub use budget::{RtdDelivery, RtdDeliveryPolicy, RtdFifo, RtdLatest, RtdSourceLimits};
 #[cfg(feature = "rtd")]
 pub use channel::{
-    RtdChannelSource, RtdChannelSubscription, RtdPendingValue, RtdProducerErrorPolicy,
-    RtdSendError, RtdSender,
+    RtdBatchSendError, RtdChannelSource, RtdChannelSubscription, RtdPendingBatch, RtdPendingValue,
+    RtdProducerErrorPolicy, RtdSendError, RtdSender,
 };
+#[cfg(all(feature = "rtd", feature = "bench-internals"))]
+pub use channel::{RtdChannelEnqueueBenchmark, channel_protocol_probe};
 #[cfg(feature = "rtd")]
 pub use multiplex::{
-    RtdMultiplexedSource, RtdMultiplexedSubscription, RtdSourceContext, RtdSourceEvent,
-    RtdSubscriptionId,
+    NoTopicValidator, RtdMultiplexedSource, RtdMultiplexedSubscription, RtdSourceContext,
+    RtdSourceEvent, RtdSubscriptionId, RtdTopicValidator,
 };
 #[cfg(feature = "rtd")]
-pub use source::{RtdSink, RtdSource, RtdSourceHandle, RtdSubscription};
+pub use source::{IntoRtdSubscription, RtdSink, RtdSource, RtdSourceHandle, RtdSubscription};
+#[cfg(not(feature = "rtd"))]
+pub(crate) use topic::RtdTopic;
 #[cfg(feature = "rtd")]
 pub use topic::{RtdCapacity, RtdLimits};
 #[cfg(feature = "rtd")]

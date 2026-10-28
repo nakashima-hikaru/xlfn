@@ -34,8 +34,11 @@ pub(super) const DISPID_DISCONNECT_DATA: i32 = 13;
 pub(super) const DISPID_HEARTBEAT: i32 = 14;
 pub(super) const DISPID_SERVER_TERMINATE: i32 = 15;
 
-pub(super) unsafe extern "system" fn server_get_ids_of_names(
-    this: *mut RtdServer,
+pub(super) unsafe extern "system" fn server_get_ids_of_names<
+    E: crate::RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+>(
+    this: *mut RtdServer<E, C>,
     riid: *const GUID,
     names: *const *const u16,
     count: u32,
@@ -49,8 +52,11 @@ pub(super) unsafe extern "system" fn server_get_ids_of_names(
     })
 }
 
-unsafe fn server_get_ids_of_names_inner(
-    this: *mut RtdServer,
+unsafe fn server_get_ids_of_names_inner<
+    E: crate::RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+>(
+    this: *mut RtdServer<E, C>,
     riid: *const GUID,
     names: *const *const u16,
     count: u32,
@@ -97,8 +103,11 @@ unsafe fn server_get_ids_of_names_inner(
     if all_known { S_OK } else { DISP_E_UNKNOWNNAME }
 }
 
-pub(super) unsafe extern "system" fn server_invoke(
-    this: *mut RtdServer,
+pub(super) unsafe extern "system" fn server_invoke<
+    E: crate::RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+>(
+    this: *mut RtdServer<E, C>,
     id: i32,
     riid: *const GUID,
     _locale: u32,
@@ -130,8 +139,8 @@ pub(super) unsafe extern "system" fn server_invoke(
     clippy::too_many_arguments,
     reason = "COM IDispatch::Invoke ABI signature"
 )]
-unsafe fn server_invoke_inner(
-    this: *mut RtdServer,
+unsafe fn server_invoke_inner<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+    this: *mut RtdServer<E, C>,
     id: i32,
     riid: *const GUID,
     flags: u16,

@@ -64,6 +64,8 @@ mod tests {
     struct DistinctQuiesceAddin;
 
     impl Addin for DistinctQuiesceAddin {
+        type RtdSubscription = ();
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = usize;
         type LifecycleState = usize;
         type Error = crate::XllError;
@@ -71,7 +73,7 @@ mod tests {
         #[cfg(feature = "async")]
         type AsyncExecutor = crate::NoAsyncExecutor;
 
-        fn open(_: &OpenContext) -> OpenResult<Self> {
+        fn open(_: &OpenContext<Self>) -> OpenResult<Self> {
             Ok(Opened::new(0).with_lifecycle(0))
         }
 

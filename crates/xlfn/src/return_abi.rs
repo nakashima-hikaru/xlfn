@@ -1112,6 +1112,8 @@ mod tests {
             }
         }
         impl Addin for ReentrantAddin {
+            type RtdSubscription = ();
+            type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
             type SharedState = ();
             type LifecycleState = ();
             type Error = XllError;
@@ -1119,7 +1121,9 @@ mod tests {
             #[cfg(feature = "async")]
             type AsyncExecutor = crate::NoAsyncExecutor;
 
-            fn open(_: &OpenContext) -> XllResult<crate::addin::Opened<(), (), Self::Layers>> {
+            fn open(
+                _: &OpenContext<Self>,
+            ) -> XllResult<crate::addin::Opened<(), (), Self::Layers>> {
                 unreachable!()
             }
         }
@@ -1289,6 +1293,8 @@ mod tests {
     fn miri_primitive_root_survives_the_physical_unload_release_path() {
         struct EmptyPhysicalAddin;
         impl Addin for EmptyPhysicalAddin {
+            type RtdSubscription = ();
+            type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
             type SharedState = ();
             type LifecycleState = ();
             type Error = XllError;
@@ -1296,7 +1302,7 @@ mod tests {
             #[cfg(feature = "async")]
             type AsyncExecutor = crate::NoAsyncExecutor;
 
-            fn open(_: &OpenContext) -> crate::OpenResult<Self> {
+            fn open(_: &OpenContext<Self>) -> crate::OpenResult<Self> {
                 Ok(crate::Opened::new(()))
             }
         }
@@ -1983,6 +1989,8 @@ mod tests {
 
         struct LayerTestAddin;
         impl Addin for LayerTestAddin {
+            type RtdSubscription = ();
+            type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
             type SharedState = ();
             type LifecycleState = ();
             type Error = XllError;
@@ -1991,7 +1999,7 @@ mod tests {
             type AsyncExecutor = crate::NoAsyncExecutor;
 
             fn open(
-                _: &OpenContext,
+                _: &OpenContext<Self>,
             ) -> Result<
                 crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
                 Self::Error,

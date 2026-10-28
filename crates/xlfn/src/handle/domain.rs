@@ -47,7 +47,7 @@ fn update_count(
     counter: &AtomicUsize,
     amount: usize,
     ordering: Ordering,
-    step: fn(usize, usize) -> counters::CountStep<usize>,
+    step: impl Fn(usize, usize) -> counters::CountStep<usize>,
 ) -> usize {
     let previous = counter
         .try_update(ordering, Ordering::Relaxed, |state| {

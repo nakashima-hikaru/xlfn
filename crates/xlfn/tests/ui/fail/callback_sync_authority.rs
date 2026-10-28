@@ -8,7 +8,7 @@ fn main() {
         "MINT",
         0,
         |state, frame| {
-            let _context = xlfn::__private::v1::macro_sheet_context::<(), _>(frame, state);
+            let _context = xlfn::__private::v1::macro_sheet_context::<(), _, _, _>(frame, state);
             unreachable!()
         },
     );

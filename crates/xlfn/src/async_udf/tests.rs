@@ -68,6 +68,8 @@ fn test_lock_for_runtime<A: Addin>(runtime: &'static Runtime<A>) -> AsyncTestGua
 struct TestU32Addin;
 
 impl Addin for TestU32Addin {
+    type RtdSubscription = ();
+    type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = u32;
     type LifecycleState = ();
     type Error = XllError;
@@ -75,7 +77,7 @@ impl Addin for TestU32Addin {
     type AsyncExecutor = BuiltinAsyncExecutor;
 
     fn open(
-        _: &OpenContext,
+        _: &OpenContext<Self>,
     ) -> Result<
         crate::addin::Opened<
             Self::SharedState,
@@ -555,13 +557,15 @@ fn close_allows_aborted_future_drop_to_reenter_runtime() {
 fn close_allows_aborted_layer_cleanup_to_reenter_runtime() {
     struct ReentrantTestAddin;
     impl Addin for ReentrantTestAddin {
+        type RtdSubscription = ();
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = u32;
         type LifecycleState = ();
         type Error = XllError;
         type Layers = (ReentrantLayer,);
         type AsyncExecutor = BuiltinAsyncExecutor;
         fn open(
-            _: &OpenContext,
+            _: &OpenContext<Self>,
         ) -> Result<
             crate::addin::Opened<
                 Self::SharedState,
@@ -1356,13 +1360,15 @@ fn async_boundary_reports_handler_failures_to_layers() {
 
     struct HandlerFailAddin;
     impl Addin for HandlerFailAddin {
+        type RtdSubscription = ();
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = u32;
         type LifecycleState = ();
         type Error = XllError;
         type Layers = (Recorder,);
         type AsyncExecutor = BuiltinAsyncExecutor;
         fn open(
-            _: &OpenContext,
+            _: &OpenContext<Self>,
         ) -> Result<
             crate::addin::Opened<
                 Self::SharedState,
@@ -1464,13 +1470,15 @@ fn async_boundary_records_delivery_rejection_as_failure() {
 
     struct DeliveryRejectionAddin;
     impl Addin for DeliveryRejectionAddin {
+        type RtdSubscription = ();
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = u32;
         type LifecycleState = ();
         type Error = XllError;
         type Layers = (Recorder,);
         type AsyncExecutor = BuiltinAsyncExecutor;
         fn open(
-            _: &OpenContext,
+            _: &OpenContext<Self>,
         ) -> Result<
             crate::addin::Opened<
                 Self::SharedState,
@@ -2607,13 +2615,15 @@ fn async_udf_boundary_catches_unhandled_panics_at_ffi_boundary() {
 
     struct PanickingAddin;
     impl Addin for PanickingAddin {
+        type RtdSubscription = ();
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = u32;
         type LifecycleState = ();
         type Error = XllError;
         type Layers = (PanickingLayer,);
         type AsyncExecutor = BuiltinAsyncExecutor;
         fn open(
-            _: &OpenContext,
+            _: &OpenContext<Self>,
         ) -> Result<
             crate::addin::Opened<
                 Self::SharedState,

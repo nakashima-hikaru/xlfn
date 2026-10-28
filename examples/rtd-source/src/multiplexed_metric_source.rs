@@ -4,29 +4,29 @@ use xlfn::{
     error::InputError,
     prelude::*,
     rtd::{
-        RtdDelivery, RtdMultiplexedSource, RtdProducerErrorPolicy, RtdSendError, RtdSender,
+        RtdLatest, RtdMultiplexedSource, RtdProducerErrorPolicy, RtdSendError, RtdSender,
         RtdSourceContext, RtdSourceEvent, RtdSubscriptionId, RtdTopic, RtdValue,
     },
 };
 
 use super::Client;
 
-type MetricProducer = fn(RtdSourceContext<RtdValue>) -> XllResult<()>;
+type MetricProducer = fn(RtdSourceContext<RtdValue, RtdLatest>) -> XllResult<()>;
 type MetricValidator = fn(&RtdTopic) -> XllResult<()>;
-pub(crate) type MetricSource = RtdMultiplexedSource<RtdValue, MetricProducer, MetricValidator>;
+pub(crate) type MetricSource = RtdMultiplexedSource<RtdValue, MetricProducer, MetricValidator, RtdLatest>;
 
 pub(crate) fn metric_source() -> MetricSource {
-    RtdMultiplexedSource::new(RtdDelivery::Latest, produce_metrics as MetricProducer)
+    RtdMultiplexedSource::new(RtdLatest, produce_metrics as MetricProducer)
         .with_topic_validator(validate_topic as MetricValidator)
         .with_error_policy(RtdProducerErrorPolicy::PublishError(
             ExcelError::NotAvailable,
         ))
 }
 
-fn produce_metrics(context: RtdSourceContext<RtdValue>) -> XllResult<()> {
+fn produce_metrics(context: RtdSourceContext<RtdValue, RtdLatest>) -> XllResult<()> {
     // One job owns the shared connection and all of its topic routing.
     let mut client = Client;
-    let mut topics: HashMap<String, HashMap<RtdSubscriptionId, RtdSender<RtdValue>>> =
+    let mut topics: HashMap<String, HashMap<RtdSubscriptionId, RtdSender<RtdValue, RtdLatest>>> =
         HashMap::new();
     let mut symbols = HashMap::new();
 

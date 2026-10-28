@@ -192,8 +192,15 @@ pub mod v1 {
 
     /// Asserts at compile-time that `T` implements `ExcelParameter`.
     #[doc(hidden)]
-    pub fn assert_excel_parameter<'call, R, T>(_: &CallFrame<'call, R::InputMode>)
-    where
+    pub fn assert_excel_parameter<
+        'call,
+        R,
+        T,
+        E: crate::RtdSubscription,
+        C: crate::RtdSourceCatalog<E>,
+    >(
+        _: &CallFrame<'call, R::InputMode, E, C>,
+    ) where
         R: ExcelReturn,
         T: ExcelParameter<'call, R::InputMode>,
     {
@@ -201,8 +208,14 @@ pub mod v1 {
 
     /// Instantiates a [`ThreadSafeContext`](crate::addin::ThreadSafeContext) for generated UDFs.
     #[doc(hidden)]
-    pub fn thread_safe_context<'call, A: Addin, M: InputMode>(
-        frame: &CallFrame<'call, M>,
+    pub fn thread_safe_context<
+        'call,
+        A: Addin,
+        M: InputMode,
+        E: crate::RtdSubscription,
+        C: crate::RtdSourceCatalog<E>,
+    >(
+        frame: &CallFrame<'call, M, E, C>,
         state: &'call A::SharedState,
     ) -> crate::addin::ThreadSafeContext<'call, A> {
         crate::addin::ThreadSafeContext::new(state, frame.diagnostics)
@@ -211,7 +224,7 @@ pub mod v1 {
     /// Instantiates a [`MainThreadContext`](crate::addin::MainThreadContext) for generated UDFs.
     #[doc(hidden)]
     pub fn main_thread_context<'call, A: Addin, M: InputMode>(
-        _frame: &CallFrame<'call, M>,
+        _frame: &CallFrame<'call, M, A::RtdSubscription, A::RtdSources>,
         state: &'call A::SharedState,
     ) -> crate::addin::MainThreadContext<'call, A> {
         #[cfg(feature = "rtd")]
@@ -231,8 +244,14 @@ pub mod v1 {
 
     /// Instantiates a [`MacroSheetContext`](crate::addin::MacroSheetContext) for generated UDFs.
     #[doc(hidden)]
-    pub fn macro_sheet_context<'call, A: Addin, M: InputMode>(
-        frame: &CallFrame<'call, M>,
+    pub fn macro_sheet_context<
+        'call,
+        A: Addin,
+        M: InputMode,
+        E: crate::RtdSubscription,
+        C: crate::RtdSourceCatalog<E>,
+    >(
+        frame: &CallFrame<'call, M, E, C>,
         state: &'call A::SharedState,
     ) -> crate::addin::MacroSheetContext<'call, A> {
         crate::addin::MacroSheetContext::new(
@@ -540,21 +559,34 @@ pub mod v1 {
 
     /// Calculation call frame for converted arguments and identity recording.
     #[doc(hidden)]
-    pub struct CallFrame<'call, M: InputMode> {
+    pub struct CallFrame<
+        'call,
+        M: InputMode,
+        E: crate::RtdSubscription = (),
+        C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+    > {
+        marker: std::marker::PhantomData<fn() -> (E, C)>,
+        #[cfg(feature = "rtd")]
+        rtd: Option<crate::rtd::RtdGenerationAccess<'call, E, C>>,
         arguments: ArgumentContext<'call, M>,
         callbacks: &'call crate::host_callback::HostCallbackSession,
         diagnostics: &'call crate::diagnostics::DiagnosticHistory,
     }
 
-    impl<'call, M: InputMode> CallFrame<'call, M> {
+    impl<'call, M: InputMode, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>
+        CallFrame<'call, M, E, C>
+    {
         #[doc(hidden)]
-        pub(crate) fn new<A: Addin>(
+        pub(crate) fn new<A: Addin<RtdSubscription = E, RtdSources = C>>(
             call: &'call crate::runtime::CallGuard<'_, A>,
             scope: &'call CallScope<'call>,
             callbacks: &'call crate::host_callback::HostCallbackSession,
             argument_count: usize,
         ) -> Self {
             Self {
+                marker: std::marker::PhantomData,
+                #[cfg(feature = "rtd")]
+                rtd: Some(call.rtd_call_access()),
                 arguments: ArgumentContext::new(call, scope, argument_count),
                 callbacks,
                 diagnostics: call.diagnostics(),
@@ -562,8 +594,9 @@ pub mod v1 {
         }
 
         #[cfg(feature = "rtd")]
-        pub(crate) fn rtd_access(&self) -> crate::rtd::RtdGenerationAccess<'call> {
-            self.arguments.rtd_access()
+        pub(crate) fn rtd_access(&self) -> crate::rtd::RtdGenerationAccess<'call, E, C> {
+            self.rtd
+                .expect("an admitted call has RTD generation access")
         }
 
         #[doc(hidden)]
@@ -856,8 +889,14 @@ pub mod v1 {
     /// Helper free function to convert a typed argument from a raw pointer using the active call frame.
     #[doc(hidden)]
     #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
-    pub unsafe fn convert_argument<'call, R, T>(
-        frame: &mut CallFrame<'call, R::InputMode>,
+    pub unsafe fn convert_argument<
+        'call,
+        R,
+        T,
+        E: crate::RtdSubscription,
+        C: crate::RtdSourceCatalog<E>,
+    >(
+        frame: &mut CallFrame<'call, R::InputMode, E, C>,
         index: usize,
         name: &'static str,
         raw: *mut xlfn_sys::XLOPER12,
@@ -887,8 +926,14 @@ pub mod v1 {
     /// Helper free function to convert a reference argument from a raw pointer using the active call frame.
     #[doc(hidden)]
     #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
-    pub unsafe fn convert_reference<'call, M: InputMode, T>(
-        frame: &mut CallFrame<'call, M>,
+    pub unsafe fn convert_reference<
+        'call,
+        M: InputMode,
+        T,
+        E: crate::RtdSubscription,
+        C: crate::RtdSourceCatalog<E>,
+    >(
+        frame: &mut CallFrame<'call, M, E, C>,
         name: &'static str,
         raw: *mut xlfn_sys::XLOPER12,
     ) -> XllResult<T>
@@ -902,8 +947,12 @@ pub mod v1 {
     /// Helper free function to query cell presence for default/missing policies.
     #[doc(hidden)]
     #[allow(unsafe_code, reason = "Internal C-ABI raw memory access")]
-    pub unsafe fn argument_presence<M: InputMode>(
-        frame: &CallFrame<'_, M>,
+    pub unsafe fn argument_presence<
+        E: crate::RtdSubscription,
+        C: crate::RtdSourceCatalog<E>,
+        M: InputMode,
+    >(
+        frame: &CallFrame<'_, M, E, C>,
         name: &'static str,
         raw: *mut xlfn_sys::XLOPER12,
     ) -> XllResult<CellPresence> {
@@ -930,7 +979,7 @@ pub mod v1 {
     where
         F: for<'call> FnOnce(
             &'call A::SharedState,
-            &mut CallFrame<'call, R::InputMode>,
+            &mut CallFrame<'call, R::InputMode, A::RtdSubscription, A::RtdSources>,
         ) -> XllResult<ExcelOutput>,
     {
         udf_boundary_named(runtime.runtime(), udf_id, excel_name, |_, call| {
@@ -940,7 +989,12 @@ pub mod v1 {
                 &callbacks,
                 |call, scope, callbacks| {
                     let mut frame =
-                        CallFrame::<R::InputMode>::new(call, scope, callbacks, argument_count);
+                        CallFrame::<R::InputMode, A::RtdSubscription, A::RtdSources>::new(
+                            call,
+                            scope,
+                            callbacks,
+                            argument_count,
+                        );
                     execute(call.state(), &mut frame)
                 },
             )
@@ -963,7 +1017,7 @@ pub mod v1 {
     where
         F: for<'call> FnOnce(
             &'call A::SharedState,
-            &mut CallFrame<'call, R::InputMode>,
+            &mut CallFrame<'call, R::InputMode, A::RtdSubscription, A::RtdSources>,
         ) -> XllResult<crate::output::NumericArrayOutput>,
     {
         crate::return_abi::udf_boundary_numeric_named(
@@ -977,7 +1031,12 @@ pub mod v1 {
                     &callbacks,
                     |call, scope, callbacks| {
                         let mut frame =
-                            CallFrame::<R::InputMode>::new(call, scope, callbacks, argument_count);
+                            CallFrame::<R::InputMode, A::RtdSubscription, A::RtdSources>::new(
+                                call,
+                                scope,
+                                callbacks,
+                                argument_count,
+                            );
                         execute(call.state(), &mut frame)
                     },
                 )
@@ -1009,7 +1068,7 @@ pub mod v1 {
             &'call crate::runtime::CallGuard<'call, A>,
             crate::generation::ExecutionLease<A>,
             CancellationToken,
-            &mut CallFrame<'call, R::InputMode>,
+            &mut CallFrame<'call, R::InputMode, A::RtdSubscription, A::RtdSources>,
         ) -> XllResult<Fut>,
         Fut: Future<Output = XllResult<R>> + Send + 'static,
     {
@@ -1026,11 +1085,12 @@ pub mod v1 {
                         call,
                         &callbacks,
                         |call, scope, callbacks| {
-                            let mut frame = CallFrame::<R::InputMode>::new(
-                                call,
-                                scope,
-                                callbacks,
-                                argument_count,
+                            let mut frame = CallFrame::<
+                                R::InputMode,
+                                A::RtdSubscription,
+                                A::RtdSources,
+                            >::new(
+                                call, scope, callbacks, argument_count
                             );
                             let future = execute(call, lease, cancellation, &mut frame)?;
                             frame.arguments.finish()?;
@@ -1067,7 +1127,7 @@ pub mod v1 {
             &'call crate::runtime::CallGuard<'call, A>,
             crate::generation::ExecutionLease<A>,
             CancellationToken,
-            &mut CallFrame<'call, R::InputMode>,
+            &mut CallFrame<'call, R::InputMode, A::RtdSubscription, A::RtdSources>,
         ) -> XllResult<Build>,
         Build: HandleScopedBuilder<R> + Send + 'static,
     {
@@ -1084,11 +1144,12 @@ pub mod v1 {
                         call,
                         &callbacks,
                         |call, scope, callbacks| {
-                            let mut frame = CallFrame::<R::InputMode>::new(
-                                call,
-                                scope,
-                                callbacks,
-                                argument_count,
+                            let mut frame = CallFrame::<
+                                R::InputMode,
+                                A::RtdSubscription,
+                                A::RtdSources,
+                            >::new(
+                                call, scope, callbacks, argument_count
                             );
                             let build = execute(call, lease, cancellation, &mut frame)?;
                             frame.arguments.finish()?;
@@ -1194,6 +1255,9 @@ pub mod v1 {
                 );
                 with_excel_call_scope_and_state(&state, |state, scope| {
                     let mut frame = CallFrame::<M> {
+                        marker: std::marker::PhantomData,
+                        #[cfg(feature = "rtd")]
+                        rtd: None,
                         arguments: ArgumentContext::from_scope(scope, 1),
                         callbacks: &state.1,
                         diagnostics: &state.2,
@@ -1223,6 +1287,8 @@ pub mod v1 {
         struct CallbackAddin;
 
         impl crate::Addin for CallbackAddin {
+            type RtdSubscription = ();
+            type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
             type SharedState = &'static MacroRuntime<Self>;
             type LifecycleState = ();
             type Error = crate::XllError;
@@ -1232,7 +1298,7 @@ pub mod v1 {
             #[cfg(feature = "async-builtin")]
             type AsyncExecutor = crate::BuiltinAsyncExecutor;
 
-            fn open(_: &crate::OpenContext) -> crate::OpenResult<Self> {
+            fn open(_: &crate::OpenContext<Self>) -> crate::OpenResult<Self> {
                 unreachable!("the test publishes its runtime reference directly")
             }
 
@@ -1348,6 +1414,8 @@ pub mod v1 {
         static QUIESCE_CALLS: AtomicUsize = AtomicUsize::new(0);
 
         impl Addin for ErrorBeforeState {
+            type RtdSubscription = ();
+            type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
             type SharedState = ();
             type LifecycleState = ();
             type Layers = ();
@@ -1355,7 +1423,7 @@ pub mod v1 {
             type AsyncExecutor = crate::NoAsyncExecutor;
             type Error = XllError;
 
-            fn open(_: &OpenContext) -> Result<Opened<()>, XllError> {
+            fn open(_: &OpenContext<Self>) -> Result<Opened<()>, XllError> {
                 OPEN_CALLS.fetch_add(1, Ordering::Relaxed);
                 Err(XllError::Overloaded)
             }
@@ -1375,6 +1443,8 @@ pub mod v1 {
 
         #[cfg(any(not(target_os = "windows"), feature = "async", feature = "handles"))]
         impl Addin for ErrorAfterEventRegistration {
+            type RtdSubscription = ();
+            type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
             type SharedState = ();
             type LifecycleState = ();
             type Layers = ();
@@ -1382,7 +1452,7 @@ pub mod v1 {
             type AsyncExecutor = crate::NoAsyncExecutor;
             type Error = XllError;
 
-            fn open(_: &OpenContext) -> Result<Opened<()>, XllError> {
+            fn open(_: &OpenContext<Self>) -> Result<Opened<()>, XllError> {
                 Ok(Opened::new(()))
             }
         }

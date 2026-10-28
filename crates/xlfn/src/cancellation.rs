@@ -305,23 +305,23 @@ unsafe impl Send for TaskCancellationRegistration {}
 /// The identity of the source-owned waker, without owning another reference.
 /// A cloned RawWaker may have a different identity from its input waker, so
 /// this value is always captured from the clone actually stored in the slot.
-#[cfg(feature = "async")]
 struct WakerIdentity {
-    data: *const (),
+    // An address is sufficient for comparison and owns no pointee. Keeping a
+    // raw pointer here would make the public Cancelled future lose Send/Sync.
+    data: usize,
     vtable: &'static std::task::RawWakerVTable,
 }
 
-#[cfg(feature = "async")]
 impl WakerIdentity {
     fn of(waker: &std::task::Waker) -> Self {
         Self {
-            data: waker.data(),
+            data: waker.data().addr(),
             vtable: waker.vtable(),
         }
     }
 
     fn matches(&self, waker: &std::task::Waker) -> bool {
-        self.data == waker.data() && std::ptr::eq(self.vtable, waker.vtable())
+        self.data == waker.data().addr() && std::ptr::eq(self.vtable, waker.vtable())
     }
 }
 
@@ -498,6 +498,7 @@ impl CancellationToken {
         Cancelled {
             token: *self,
             waiter_id: None,
+            registered_waker: None,
             _marker: PhantomData,
         }
     }
@@ -510,6 +511,7 @@ impl CancellationToken {
 pub struct Cancelled<'token> {
     token: CancellationToken,
     waiter_id: Option<u64>,
+    registered_waker: Option<WakerIdentity>,
     _marker: PhantomData<&'token ()>,
 }
 
@@ -535,6 +537,17 @@ impl Cancelled<'_> {
             self.unregister();
             return Poll::Ready(());
         }
+        if self
+            .registered_waker
+            .as_ref()
+            .is_some_and(|identity| identity.matches(context.waker()))
+        {
+            // Only this future removes its entry. Cancellation/source release
+            // publishes the terminal state before detaching and waking it;
+            // reuse changes the generation checked above. An unchanged entry
+            // can therefore remain pending without locking or cloning a waker.
+            return Poll::Pending;
+        }
 
         // RawWaker clone/drop callbacks may reenter this slot. Keep the new
         // waker outside the guard's lifetime, including early returns/unwind.
@@ -543,11 +556,13 @@ impl Cancelled<'_> {
         let mut waiters = slot.waiters.lock();
         if waiters.generation != self.token.generation {
             self.waiter_id = None;
+            self.registered_waker = None;
             return Poll::Ready(());
         }
         let detached;
         let result;
         if self.token.is_cancelled() {
+            self.registered_waker = None;
             detached = self
                 .waiter_id
                 .take()
@@ -564,11 +579,13 @@ impl Cancelled<'_> {
                 .get(&waiter_id)
                 .is_some_and(|waker| waker.will_wake(context.waker()))
             {
+                self.registered_waker = waiters.entries.get(&waiter_id).map(WakerIdentity::of);
                 detached = None;
             } else {
-                detached = waiters
-                    .entries
-                    .insert(waiter_id, replacement.take().expect("new waker"));
+                let next = replacement.take().expect("new waker");
+                let identity = WakerIdentity::of(&next);
+                detached = waiters.entries.insert(waiter_id, next);
+                self.registered_waker = Some(identity);
             }
             result = Poll::Pending;
         }
@@ -578,6 +595,7 @@ impl Cancelled<'_> {
     }
 
     fn unregister(&mut self) {
+        self.registered_waker = None;
         if let Some(waiter_id) = self.waiter_id.take() {
             // SAFETY: slot memory is stable for the lifetime of the process.
             let slot = unsafe { self.token.slot.as_ref() };
@@ -652,6 +670,7 @@ mod tests {
         Cancelled {
             token,
             waiter_id: None,
+            registered_waker: None,
             _marker: PhantomData,
         }
     }
@@ -715,6 +734,84 @@ mod tests {
         fn wake_by_ref(arc_self: &StdArc<Self>) {
             arc_self.0.fetch_add(1, Ordering::AcqRel);
         }
+    }
+
+    #[test]
+    fn miri_public_waker_warm_poll_avoids_slot_lock_and_clone() {
+        fn assert_send_sync_unpin<T: Send + Sync + Unpin>() {}
+        assert_send_sync_unpin::<Cancelled<'static>>();
+
+        let registry = CancellationRegistry::new();
+        let (source, token) = local_source(&registry);
+        let count = StdArc::new(WakeCount(AtomicUsize::new(0)));
+        let waker = waker(StdArc::clone(&count));
+        let mut future = token.cancelled();
+        assert!(
+            Pin::new(&mut future)
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        let references = StdArc::strong_count(&count);
+        // SAFETY: the local source and registry outlive this future and guard.
+        let slot = unsafe { token.slot.as_ref() };
+        {
+            let waiters = slot.waiters.lock();
+            assert_eq!(waiters.entries.len(), 1);
+            assert!(
+                future
+                    .poll_before_lock(&mut Context::from_waker(&waker), || {
+                        panic!("unchanged waker must bypass registration")
+                    })
+                    .is_pending()
+            );
+            assert_eq!(StdArc::strong_count(&count), references);
+        }
+        source.cancel();
+        assert_eq!(count.0.load(Ordering::Acquire), 1);
+        assert!(
+            Pin::new(&mut future)
+                .poll(&mut Context::from_waker(&waker))
+                .is_ready()
+        );
+    }
+
+    #[test]
+    fn miri_cached_public_waker_cannot_hide_slot_reuse() {
+        let registry = CancellationRegistry::new();
+        let (source, old_token) = local_source(&registry);
+        let count = StdArc::new(WakeCount(AtomicUsize::new(0)));
+        let waker = waker(StdArc::clone(&count));
+        let mut old = old_token.cancelled();
+        assert!(
+            Pin::new(&mut old)
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        drop(source);
+        let (source, token) = local_source(&registry);
+        assert_eq!(token.slot, old_token.slot);
+        let mut next = token.cancelled();
+        assert!(
+            Pin::new(&mut next)
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        assert!(
+            Pin::new(&mut old)
+                .poll(&mut Context::from_waker(&waker))
+                .is_ready()
+        );
+        drop(old);
+        // SAFETY: this local source retains the fixture slot through this check.
+        let waiters = unsafe { token.slot.as_ref() }.waiters.lock().entries.len();
+        assert_eq!(waiters, 1);
+        source.cancel();
+        assert_eq!(count.0.load(Ordering::Acquire), 2);
+        assert!(
+            Pin::new(&mut next)
+                .poll(&mut Context::from_waker(&waker))
+                .is_ready()
+        );
     }
 
     struct PanicFirstWake(AtomicUsize);
@@ -783,9 +880,10 @@ mod tests {
         assert!(next.poll_cancelled(&context).is_ready());
     }
 
-    #[cfg(feature = "async")]
-    #[test]
-    fn miri_task_waker_cache_tracks_the_registered_clone_identity() {
+    fn check_cache_tracks_the_registered_clone_identity(
+        mut poll: impl FnMut(&std::task::Waker) -> Poll<()>,
+        cancel: impl FnOnce(),
+    ) {
         use std::task::{RawWaker, RawWakerVTable, Waker};
         struct State {
             clones: StdArc<AtomicUsize>,
@@ -820,8 +918,6 @@ mod tests {
             unsafe { release(data) };
         }
         static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake_by_ref, release);
-        let (source, _) = CancellationSource::new(CancellationGuarantee::BestEffort);
-        let mut task = source.task_registration();
         let clones = StdArc::new(AtomicUsize::new(0));
         let wakes = StdArc::new(AtomicUsize::new(0));
         let state = StdArc::new(State {
@@ -832,17 +928,37 @@ mod tests {
         // SAFETY: every clone owns a separate State, balanced by the vtable.
         let waker = unsafe { Waker::from_raw(raw) };
         for _ in 0..2 {
-            assert!(
-                task.poll_cancelled(&Context::from_waker(&waker))
-                    .is_pending()
-            );
+            assert!(poll(&waker).is_pending());
         }
         // Caching the input identity would incorrectly suppress the second
         // registration, although that input allocation is not source-owned.
         assert_eq!(clones.load(Ordering::Relaxed), 2);
-        source.cancel();
+        cancel();
         assert_eq!(wakes.load(Ordering::Relaxed), 1);
-        assert!(task.poll_cancelled(&Context::from_waker(&waker)).is_ready());
+        assert!(poll(&waker).is_ready());
+    }
+
+    #[test]
+    fn miri_public_waker_cache_tracks_the_registered_clone_identity() {
+        let registry = CancellationRegistry::new();
+        let (source, token) = local_source(&registry);
+        let mut future = token.cancelled();
+        check_cache_tracks_the_registered_clone_identity(
+            |waker| Pin::new(&mut future).poll(&mut Context::from_waker(waker)),
+            || source.cancel(),
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[test]
+    fn miri_task_waker_cache_tracks_the_registered_clone_identity() {
+        let registry = CancellationRegistry::new();
+        let (source, _) = local_source(&registry);
+        let mut task = source.task_registration();
+        check_cache_tracks_the_registered_clone_identity(
+            |waker| task.poll_cancelled(&Context::from_waker(waker)),
+            || source.cancel(),
+        );
     }
 
     #[cfg(feature = "async")]
@@ -1244,9 +1360,12 @@ mod tests {
             }
             let paused = std::sync::Barrier::new(2);
             let resume = std::sync::Barrier::new(2);
+            // A different waker forces the registration path even when the
+            // first poll populated the unchanged-waker cache.
+            let replacement = waker(StdArc::new(WakeCount(AtomicUsize::new(0))));
             std::thread::scope(|scope| {
                 let old_poll = scope.spawn(|| {
-                    old_waiter.poll_before_lock(&mut Context::from_waker(&noop), || {
+                    old_waiter.poll_before_lock(&mut Context::from_waker(&replacement), || {
                         paused.wait();
                         resume.wait();
                     })
@@ -1404,6 +1523,8 @@ mod tests {
         unsafe fn wake_by_ref(_: *const ()) {}
 
         static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, release, wake_by_ref, release);
+        static OTHER_VTABLE: RawWakerVTable =
+            RawWakerVTable::new(clone, release, wake_by_ref, release);
 
         let registry = CancellationRegistry::new();
         let (source, token) = local_source(&registry);
@@ -1431,21 +1552,27 @@ mod tests {
                     .is_pending()
             );
         }
-        assert_eq!(state.clones.load(Ordering::Acquire), 2);
-        assert_eq!(state.drops.load(Ordering::Acquire), 1);
+        assert_eq!(state.clones.load(Ordering::Acquire), 1);
+        assert_eq!(state.drops.load(Ordering::Acquire), 0);
         assert!(state.nested.lock().is_none());
 
+        let raw = RawWaker::new(
+            StdArc::into_raw(StdArc::clone(&state)).cast(),
+            &OTHER_VTABLE,
+        );
+        // SAFETY: the alternate vtable balances this new raw Arc reference.
+        let changed_waker = unsafe { Waker::from_raw(raw) };
         let mut next_source = None;
         assert!(
             future
-                .poll_before_lock(&mut Context::from_waker(&waker), || {
+                .poll_before_lock(&mut Context::from_waker(&changed_waker), || {
                     drop(source);
                     next_source = Some(local_source(&registry).0);
                 })
                 .is_ready()
         );
-        assert_eq!(state.clones.load(Ordering::Acquire), 3);
-        assert_eq!(state.drops.load(Ordering::Acquire), 3);
+        assert_eq!(state.clones.load(Ordering::Acquire), 2);
+        assert_eq!(state.drops.load(Ordering::Acquire), 2);
         drop(next_source);
 
         #[cfg(feature = "async")]

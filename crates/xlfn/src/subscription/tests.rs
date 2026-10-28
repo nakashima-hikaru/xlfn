@@ -78,7 +78,7 @@ where
 }
 
 pub(crate) struct SourceFixture {
-    registration: SourceRegistration,
+    registration: SourceRegistration<TestSubscription>,
 }
 
 impl SourceFixture {
@@ -117,13 +117,13 @@ impl SourceFixture {
         (source, slot, disconnected)
     }
 
-    pub(crate) fn finish(self) -> SourceArena {
+    pub(crate) fn finish(self) -> SourceArena<TestSubscription> {
         self.registration.finish()
     }
 }
 
 pub(crate) type PublishingSourceResult<T> = (
-    SourceArena,
+    SourceArena<TestSubscription>,
     RtdSourceHandle<PublishingSource<T, fn() -> XllResult<()>>>,
     Arc<Mutex<Option<RtdSink<T>>>>,
     Arc<AtomicBool>,
@@ -141,8 +141,8 @@ pub(crate) fn connected_sink<T: IntoRtdValue + Clone + Send + Sync + 'static>(
     initial: Option<T>,
     topic: &str,
 ) -> (
-    Arc<SubscriptionRuntime>,
-    SubscriptionServerHandle,
+    Arc<SubscriptionRuntime<TestSubscription>>,
+    SubscriptionServerHandle<TestSubscription>,
     RtdSink<T>,
 ) {
     let (arena, source, sink_slot, _) = publishing_source(initial);
@@ -435,7 +435,7 @@ fn server_locality_refresh_lock_independence() {
 
 #[test]
 fn refresh_batch_borrows_server_lifetime() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let runtime = Arc::new(SubscriptionRuntime::<()>::new());
     let server = runtime.register_test_server(1);
 
     let batch = server.begin_refresh().unwrap();
@@ -1417,7 +1417,7 @@ fn runtime_close_waits_for_inflight() {
 
 #[test]
 fn inflight_register_waits_for_close() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let runtime = Arc::new(SubscriptionRuntime::<()>::new());
     let (enter_tx, enter_rx) = std::sync::mpsc::channel();
     let (unblock_tx, unblock_rx) = std::sync::mpsc::channel();
     let unblock_rx = Arc::new(Mutex::new(unblock_rx));
@@ -1547,7 +1547,7 @@ fn inflight_prepare_waits_for_close() {
 #[test]
 fn reentrant_drop_safety() {
     struct ReentrantSource {
-        runtime: Arc<SubscriptionRuntime>,
+        runtime: Arc<SubscriptionRuntime<()>>,
     }
 
     impl Drop for ReentrantSource {
@@ -1574,7 +1574,7 @@ fn reentrant_drop_safety() {
     }
 
     let fixture = SourceFixture::new();
-    let runtime_for_source = Arc::new(SubscriptionRuntime::new());
+    let runtime_for_source = Arc::new(SubscriptionRuntime::<()>::new());
     let source = fixture
         .registration
         .register(ReentrantSource {
@@ -1697,7 +1697,7 @@ fn server_terminate_returns_cleanup_error_to_caller_and_waiter() {
 
 #[test]
 fn server_terminate_callback_drop_failure_reaches_waiter() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let runtime = Arc::new(SubscriptionRuntime::<()>::new());
     let server = runtime.register_test_server(1);
 
     let mut state = TestNotifierState::new();
@@ -1723,7 +1723,7 @@ fn server_terminate_callback_drop_failure_reaches_waiter() {
 
 #[test]
 fn server_terminate_owner_unwind_notifies_waiter() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let runtime = Arc::new(SubscriptionRuntime::<()>::new());
     let server = runtime.register_test_server(1);
 
     let admission = server.test_server().begin_termination(&runtime);
@@ -2630,7 +2630,7 @@ fn borrowed_admission_rejection_preserves_counts_and_runtime_checks() {
         RuntimeGeneration::new(2).unwrap(),
         RtdLimits::standard(),
         Default::default(),
-        SourceArena::empty(RuntimeGeneration::new(2).unwrap()),
+        SourceArena::<()>::empty(RuntimeGeneration::new(2).unwrap()),
     );
     assert!(matches!(
         stale_runtime.prepare(&source, BorrowedTopicParts::new(&["a"]).unwrap()),
@@ -3092,7 +3092,7 @@ fn server_notification_panic_records_cleanup_failure() {
 
 #[test]
 fn runtime_close_causes_fail_closed_on_server() {
-    let runtime = Arc::new(SubscriptionRuntime::new());
+    let runtime = Arc::new(SubscriptionRuntime::<()>::new());
     let server = runtime.register_test_server(1);
 
     runtime.close().unwrap();
@@ -3334,7 +3334,7 @@ fn existing_active_does_not_downgrade_runtime_or_mutate_catalog() {
 fn resolve_transport_key_validates_runtime_identity() {
     let (arena, source, _, _) = publishing_source::<f64>(None);
     let runtime_a = Arc::new(SubscriptionRuntime::with_sources_for_internal(arena));
-    let runtime_b = Arc::new(SubscriptionRuntime::new());
+    let runtime_b = Arc::new(SubscriptionRuntime::<()>::new());
 
     let prep = runtime_a
         .prepare(
@@ -3363,8 +3363,8 @@ fn resolve_transport_key_validates_runtime_identity() {
 
 #[test]
 fn server_handle_cannot_cross_subscription_runtime_boundary() {
-    let runtime_a = Arc::new(SubscriptionRuntime::new());
-    let runtime_b = Arc::new(SubscriptionRuntime::new());
+    let runtime_a = Arc::new(SubscriptionRuntime::<()>::new());
+    let runtime_b = Arc::new(SubscriptionRuntime::<()>::new());
     let server_a = runtime_a.register_test_server(1);
 
     assert!(matches!(
@@ -4393,4 +4393,21 @@ fn refresh_batch_drop_on_unwind_does_not_deadlock() {
         StoredRtdValue::String("unwind-val".into())
     );
     retry.complete(RefreshOutcome::Delivered).unwrap();
+}
+
+#[test]
+fn server_handle_access_does_not_reenter_the_server_registry() {
+    let runtime = SubscriptionRuntime::<()>::new();
+    let server = runtime.register_test_server(1);
+    std::thread::scope(|scope| {
+        let registry = runtime.servers.lock();
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = scope.spawn(move || {
+            sent.send(server.generation()).unwrap();
+        });
+        let result = received.recv_timeout(std::time::Duration::from_secs(5));
+        drop(registry);
+        worker.join().unwrap();
+        assert_eq!(result.unwrap(), ServerGeneration::new(1).unwrap());
+    });
 }

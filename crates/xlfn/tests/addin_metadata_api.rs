@@ -10,6 +10,8 @@ struct MetadataAddin;
 static OPEN_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 impl Addin for MetadataAddin {
+    type RtdSubscription = ();
+    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();
     type Layers = ();
@@ -17,7 +19,7 @@ impl Addin for MetadataAddin {
     type AsyncExecutor = xlfn::NoAsyncExecutor;
     type Error = XllError;
 
-    fn open(_: &OpenContext) -> Result<Opened<()>, XllError> {
+    fn open(_: &OpenContext<Self>) -> Result<Opened<()>, XllError> {
         OPEN_CALLS.fetch_add(1, Ordering::Relaxed);
         panic!("a metadata query must not initialize the add-in")
     }

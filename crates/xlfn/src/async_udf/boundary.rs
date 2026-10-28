@@ -1,7 +1,7 @@
 use super::completion::{
     AsyncCompletion, AsyncDelivery, OwnedCompletionOutcome, OwnedDeliveryOutcome, return_error,
 };
-use super::instrumentation::AsyncObservation;
+use super::instrumentation::{AsyncObservation, CompletionObserver, NoObservation};
 #[cfg(feature = "handles")]
 use super::task_scope::{HandleScopedBuilder, HandleScopedTaskBuilder};
 use super::transport::ExcelAsyncResponder;
@@ -85,7 +85,7 @@ where
         future: impl Future<Output = Self::Output> + Send + 'generation,
     ) -> impl Future<Output = ()> + Send + 'generation {
         let (responder, token, observation, _) = delivery;
-        AsyncDelivery::new(responder, token, Some(observation)).task(future)
+        AsyncDelivery::new(responder, token, observation).task(future)
     }
 }
 
@@ -130,7 +130,7 @@ where
         future: impl Future<Output = Self::Output> + Send + 'generation,
     ) -> impl Future<Output = ()> + Send + 'generation {
         let (responder, token, _) = delivery;
-        AsyncDelivery::<()>::new(responder, token, None).task(future)
+        AsyncDelivery::new(responder, token, NoObservation).task(future)
     }
 }
 
@@ -149,7 +149,7 @@ impl<Build, T> Drop for UninstrumentedHandleTask<Build, T> {
     fn drop(&mut self) {
         let panicked = catch_no_unwind(AssertUnwindSafe(|| drop(self.build.take()))).is_err();
         if let Some(responder) = self.responder.take() {
-            AsyncDelivery::<()>::new(responder, self.token, None).fallback(panicked);
+            AsyncDelivery::new(responder, self.token, NoObservation).fallback(panicked);
         }
     }
 }
@@ -299,7 +299,7 @@ unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
     // programmatic recalculation, so the public token cannot promise complete
     // calculation scoping even though event-driven generations are linearized.
     let (cancellation, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
-    let observation = AsyncObservation::new(
+    let mut observation = AsyncObservation::new(
         &metadata,
         timer,
         layers,
@@ -345,7 +345,7 @@ unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
                     return;
                 }
             };
-            let task = AsyncDelivery::new(responder, token, Some(observation)).task(future);
+            let task = AsyncDelivery::new(responder, token, observation).task(future);
             reservation.commit(task, cancellation);
         }
         Err(error) => {
@@ -419,7 +419,7 @@ unsafe fn async_udf_boundary_uninstrumented<A, Start, Fut, T>(
                     return;
                 }
             };
-            let task = AsyncDelivery::<()>::new(responder, token, None).task(future);
+            let task = AsyncDelivery::new(responder, token, NoObservation).task(future);
             reservation.commit(task, cancellation);
         }
         Err(error) => {
@@ -583,7 +583,7 @@ unsafe fn async_udf_boundary_instrumented_handle<A, Start, Build, T>(
     // The public cancellation token remains best effort; the task drain is
     // the stronger lifetime guarantee for raw object pins.
     let (cancellation, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
-    let observation = AsyncObservation::new(
+    let mut observation = AsyncObservation::new(
         &metadata,
         timer,
         layers,
@@ -772,13 +772,15 @@ mod numeric_launch_tests {
     struct LaunchTestAddin;
 
     impl crate::Addin for LaunchTestAddin {
+        type RtdSubscription = ();
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = ();
         type Error = XllError;
         type Layers = ();
         type AsyncExecutor = crate::NoAsyncExecutor;
 
-        fn open(_: &crate::OpenContext) -> crate::OpenResult<Self> {
+        fn open(_: &crate::OpenContext<Self>) -> crate::OpenResult<Self> {
             unreachable!()
         }
     }

@@ -1,5 +1,5 @@
 use super::calculation::CalculationPin;
-use super::future::NoUnwindFuture;
+use super::future::{NoUnwindFuture, TaskDestruction};
 use super::registry::{RegistryPtr, TaskRegistry};
 
 use crate::cancellation::{CancellationSource, TaskCancellationRegistration};
@@ -39,7 +39,7 @@ impl<F: Future<Output = ()>> Future for AsyncTask<F> {
 /// captures. Even before the first poll, user cleanup precedes the release
 /// that permits generation and executor reclamation.
 pub(crate) struct TrackedFuture<F> {
-    future: NoUnwindFuture<CancellableTaskFuture<F>>,
+    future: NoUnwindFuture<CancellableTaskFuture<F>, TaskDestruction>,
     completion: CompletionGuard,
 }
 
@@ -51,7 +51,7 @@ impl<F> TrackedFuture<F> {
     ) -> Self {
         Self {
             future: NoUnwindFuture::new(
-                "async task destruction",
+                TaskDestruction,
                 CancellableTaskFuture {
                     future,
                     registration,

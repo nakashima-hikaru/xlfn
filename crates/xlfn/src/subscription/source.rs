@@ -11,184 +11,205 @@ use crate::panic_boundary::catch_no_unwind;
 use crate::sync::Mutex;
 use crate::{XllError, XllResult};
 use std::marker::PhantomData;
-use std::ptr::NonNull;
-
-mod storage;
 use std::panic::AssertUnwindSafe;
-use storage::{SlotKey, SubscriptionStorage};
+
+pub use crate::subscription_owner::{IntoRtdSubscription, RtdSubscription};
 
 #[cfg(all(test, feature = "rtd"))]
 mod lifecycle_tests;
 #[cfg(all(test, feature = "rtd"))]
 mod ticket_tests;
 
-/// A subscription whose cancellation and disconnection protocol is explicit.
-///
-/// The subscription value lives in its source's typed storage. One affine
-/// ticket belongs to its server, or the generation's bounded cleanup queue
-/// after COM disconnection revokes the connection.
-/// Deferred COM cleanup and shutdown invoke `request_cancel`, then consume
-/// the object through `disconnect_and_wait`. Shutdown drains this work before
-/// reclaiming its server or source. No detached shared cancellation object
-/// participates in the ownership graph.
-/// The framework may move the value between storage and callback invocation;
-/// it provides no pinning guarantee for the subscription itself.
-/// # Safety
-///
-/// `disconnect_and_wait` must stop every callback and worker that can use any
-/// [`RtdSink`] clone issued to this subscription before control leaves the
-/// method, whether it returns `Ok`, returns `Err`, or unwinds. No sink clone
-/// may be used after any of those exits. Preserve this guarantee during
-/// unwinding, for example with a cleanup guard that joins every sink user.
-/// This barrier also applies when no prior `request_cancel` call was made.
-/// Cancellation and disconnection must not synchronously initiate this
-/// add-in's own removal: removal waits for this subscription's cleanup.
-/// These methods may run on different framework-owned threads, including a
-/// Windows MTA cleanup worker. They must not rely on the subscribing thread's
-/// affinity or pass an apartment-bound COM interface without marshaling.
-///
-/// The framework contains cleanup panics and may reclaim the publish core
-/// afterward. Neither an error nor a panic extends the lifetime of a sink.
-pub unsafe trait RtdSubscription: Sized + Send + 'static {
-    /// Requests that subscription work stop without transferring ownership.
-    fn request_cancel(&self);
-    /// Consumes the subscription and stops all sink users before returning.
-    fn disconnect_and_wait(self) -> XllResult<()>;
-}
-
 /// Mutable source-registration authority available only during add-in open.
 ///
 /// Registered sources are transferred as one arena into the generation's RTD
 /// runtime. Handles carry identity only and never own their source.
-pub(crate) struct SourceRegistration {
+pub(crate) struct SourceRegistration<
+    E: RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+> {
     generation: RuntimeGeneration,
-    sources: Mutex<Vec<Box<dyn ErasedRtdSource>>>,
+    sources: Mutex<Option<C>>,
+    marker: PhantomData<fn() -> E>,
 }
-
-impl std::fmt::Debug for SourceRegistration {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("SourceRegistration")
+impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> std::fmt::Debug
+    for SourceRegistration<E, C>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SourceRegistration")
             .field("generation", &self.generation)
-            .field("source_count", &self.sources.lock().len())
+            .field(
+                "source_count",
+                &self.sources.lock().as_ref().map_or(0, C::len),
+            )
             .finish()
     }
 }
-
-impl SourceRegistration {
+impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> SourceRegistration<E, C> {
     pub(crate) const fn new(generation: RuntimeGeneration) -> Self {
         Self {
             generation,
-            sources: Mutex::new(Vec::new()),
+            sources: Mutex::new(None),
+            marker: PhantomData,
         }
     }
-
-    pub(crate) fn register<S: RtdSource>(&self, source: S) -> XllResult<RtdSourceHandle<S>> {
+    pub(crate) fn register_sources(&self, catalog: C) -> XllResult<C::Handles> {
         let mut sources = self.sources.lock();
+        if sources.is_some() {
+            return Err(XllError::custom(
+                crate::ExcelError::Value,
+                "RTD source catalog is already registered",
+            ));
+        }
+        let handles = catalog.handles(self.generation);
+        *sources = Some(catalog);
+        Ok(handles)
+    }
+    pub(crate) fn finish(self) -> SourceArena<E, C> {
+        SourceArena {
+            generation: self.generation,
+            sources: self.sources.into_inner().map(C::store),
+            marker: PhantomData,
+        }
+    }
+}
+impl<E: RtdSubscription> SourceRegistration<E> {
+    pub(crate) fn register<S>(&self, source: S) -> XllResult<RtdSourceHandle<S>>
+    where
+        S: RtdSource,
+        S::Subscription: IntoRtdSubscription<E>,
+    {
+        let mut registration = self.sources.lock();
+        let sources = &mut registration
+            .get_or_insert_with(crate::DynamicRtdSources::default)
+            .sources;
         let sequence = u64::try_from(sources.len())
             .ok()
-            .and_then(|current| current.checked_add(1))
+            .and_then(|n| n.checked_add(1))
             .ok_or(XllError::Internal {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_SUBSCRIPTION_ID_OVERFLOW,
             })?;
         sources.push(Box::new(SourceAdapter {
-            subscriptions: SubscriptionStorage::new(),
             source,
+            _subscription: PhantomData,
         }));
         Ok(RtdSourceHandle::from_id(SourceHandleId {
             generation: self.generation,
             sequence,
         }))
     }
-
-    pub(crate) fn finish(self) -> SourceArena {
-        SourceArena {
-            generation: self.generation,
-            sources: self.sources.into_inner().into_boxed_slice(),
-        }
-    }
 }
 
-/// Unique owner of every RTD source registered for one runtime generation.
-///
-/// Entries are never individually reclaimed. Subscription state refers to
-/// them by [`SourceHandleId`], and the complete arena is reclaimed only after
-/// subscription shutdown has drained callbacks and disconnected every
-/// subscription.
-pub(crate) struct SourceArena {
+/// Fixed-address owner of the source catalog for one runtime generation.
+/// The allocation is retained until all subscription barriers have completed.
+pub(crate) struct SourceArena<
+    E: RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+> {
     generation: RuntimeGeneration,
-    sources: Box<[Box<dyn ErasedRtdSource>]>,
+    sources: Option<C::Stored>,
+    marker: PhantomData<fn() -> E>,
 }
-
-impl SourceArena {
+impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> SourceArena<E, C> {
     pub(crate) fn is_empty(&self) -> bool {
-        self.sources.is_empty()
+        self.sources
+            .as_ref()
+            .is_none_or(|sources| sources.as_ref().len() == 0)
     }
-
     #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn empty(generation: RuntimeGeneration) -> Self {
         Self {
             generation,
-            sources: Box::new([]),
+            sources: None,
+            marker: PhantomData,
         }
     }
-
-    pub(crate) fn resolve(&self, id: SourceHandleId) -> Option<&dyn ErasedRtdSource> {
+    pub(crate) fn resolve(&self, id: SourceHandleId) -> Option<ResolvedSource<'_, E, C>> {
         if id.generation != self.generation || id.sequence == 0 {
             return None;
         }
         let index = usize::try_from(id.sequence - 1).ok()?;
-        self.sources.get(index).map(Box::as_ref)
+        let catalog = self.sources.as_ref()?.as_ref();
+        (index < catalog.len()).then_some(ResolvedSource {
+            catalog,
+            index,
+            marker: PhantomData,
+        })
     }
-
-    /// Request every source to stop before waiting for any source worker.
-    /// A failing source must not prevent cancellation of unrelated sources.
+    /// Catch each source independently so a panic cannot skip later stop hooks.
     pub(crate) fn request_stop(&self) -> XllResult<()> {
         let mut first_error = None;
-        for source in &self.sources {
-            if catch_no_unwind(AssertUnwindSafe(|| source.request_stop())).is_err()
-                && first_error.is_none()
-            {
-                first_error = Some(XllError::Panic);
+        if let Some(storage) = &self.sources {
+            let catalog = storage.as_ref();
+            for index in 0..catalog.len() {
+                if catch_no_unwind(AssertUnwindSafe(|| catalog.request_stop(index))).is_err()
+                    && first_error.is_none()
+                {
+                    first_error = Some(XllError::Panic);
+                }
             }
         }
         first_error.map_or(Ok(()), Err)
     }
-
-    /// Join every source after its subscriptions have relinquished their sinks.
-    /// Hooks uphold their barrier on errors and unwinding as well as success.
     pub(crate) fn shutdown_and_wait(&self) -> XllResult<()> {
         let mut first_error = None;
-        for source in &self.sources {
-            let result = catch_no_unwind(AssertUnwindSafe(|| source.shutdown_and_wait()))
-                .unwrap_or(Err(XllError::Panic));
-            if let Err(error) = result
-                && first_error.is_none()
-            {
-                first_error = Some(error);
+        if let Some(storage) = &self.sources {
+            let catalog = storage.as_ref();
+            for index in 0..catalog.len() {
+                let result = catch_no_unwind(AssertUnwindSafe(|| catalog.shutdown_and_wait(index)))
+                    .unwrap_or(Err(XllError::Panic));
+                if let Err(error) = result
+                    && first_error.is_none()
+                {
+                    first_error = Some(error);
+                }
             }
         }
         first_error.map_or(Ok(()), Err)
     }
-
+}
+impl<E: RtdSubscription> SourceArena<E> {
     #[cfg(test)]
-    pub(crate) fn with_source<S: RtdSource>(
+    pub(crate) fn with_source<S>(
         generation: RuntimeGeneration,
         source: S,
-    ) -> XllResult<(Self, RtdSourceHandle<S>)> {
+    ) -> XllResult<(Self, RtdSourceHandle<S>)>
+    where
+        S: RtdSource,
+        S::Subscription: IntoRtdSubscription<E>,
+    {
         let registration = SourceRegistration::new(generation);
         let handle = registration.register(source)?;
         Ok((registration.finish(), handle))
     }
 }
-
-impl std::fmt::Debug for SourceArena {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("SourceArena")
+impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> std::fmt::Debug for SourceArena<E, C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SourceArena")
             .field("generation", &self.generation)
-            .field("source_count", &self.sources.len())
+            .field(
+                "source_count",
+                &self.sources.as_ref().map_or(0, |c| c.as_ref().len()),
+            )
             .finish()
+    }
+}
+pub(crate) struct ResolvedSource<'a, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> {
+    catalog: &'a C,
+    index: usize,
+    marker: PhantomData<fn() -> E>,
+}
+impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> ErasedRtdSource<E>
+    for ResolvedSource<'_, E, C>
+{
+    fn subscribe(&self, topic: &RtdTopic, sink: PublishSink) -> XllResult<E> {
+        self.catalog.subscribe(self.index, topic, sink)
+    }
+    fn request_stop(&self) {
+        self.catalog.request_stop(self.index);
+    }
+    fn shutdown_and_wait(&self) -> XllResult<()> {
+        self.catalog.shutdown_and_wait(self.index)
     }
 }
 
@@ -297,7 +318,7 @@ impl<S: RtdSource> std::fmt::Debug for RtdSourceHandle<S> {
 }
 
 impl<S: RtdSource> RtdSourceHandle<S> {
-    const fn from_id(id: SourceHandleId) -> Self {
+    pub(crate) const fn from_id(id: SourceHandleId) -> Self {
         Self {
             id,
             _source: PhantomData,
@@ -355,54 +376,27 @@ where
     }
 }
 
-/// One erased adapter per registered source; connections remain typed inside it.
-pub(crate) trait ErasedRtdSource: Send + Sync + 'static {
-    fn subscribe(&self, topic: &RtdTopic, sink: PublishSink) -> XllResult<SlotKey>;
-    fn request_cancel(&self, key: SlotKey);
-    fn disconnect_and_wait(&self, key: SlotKey) -> XllResult<()>;
+/// One erased adapter per registered source; subscriptions move out by value.
+pub(crate) trait ErasedRtdSource<E: RtdSubscription = ()>: Send + Sync {
+    fn subscribe(&self, topic: &RtdTopic, sink: PublishSink) -> XllResult<E>;
     fn request_stop(&self);
     fn shutdown_and_wait(&self) -> XllResult<()>;
 }
 
-struct SourceAdapter<S: RtdSource> {
-    // Connection owners must drain before source reclamation. Storage is
-    // declared first as an additional drop-order safeguard.
-    subscriptions: SubscriptionStorage<S::Subscription>,
+struct SourceAdapter<S: RtdSource, E: RtdSubscription> {
     source: S,
+    // No E is retained in the shared source. E need only be Send, never Sync.
+    _subscription: PhantomData<fn() -> E>,
 }
 
-impl<S: RtdSource> ErasedRtdSource for SourceAdapter<S> {
-    fn subscribe(&self, topic: &RtdTopic, sink: PublishSink) -> XllResult<SlotKey> {
-        let reservation = self.subscriptions.reserve()?;
-        let subscription = self.source.subscribe(
-            topic,
-            RtdSink {
-                sink,
-                _value: PhantomData,
-            },
-        )?;
-        // No fallible operation, allocation or application callback remains
-        // between successful sink transfer and publication of its owner.
-        Ok(reservation.publish(subscription))
-    }
-
-    fn request_cancel(&self, key: SlotKey) {
-        let subscription = self
-            .subscriptions
-            .checkout(key)
-            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
-        subscription.value().request_cancel();
-        // Checkout restores the value even if cancellation unwinds.
-    }
-
-    fn disconnect_and_wait(&self, key: SlotKey) -> XllResult<()> {
-        let mut subscription = self
-            .subscriptions
-            .checkout(key)
-            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
-        subscription.take().disconnect_and_wait()
-        // Checkout releases the slot after the callback's barrier, including
-        // errors and unwinding. Neither the callback nor T::drop holds a lock.
+impl<S, E> ErasedRtdSource<E> for SourceAdapter<S, E>
+where
+    S: RtdSource,
+    E: RtdSubscription,
+    S::Subscription: IntoRtdSubscription<E>,
+{
+    fn subscribe(&self, topic: &RtdTopic, sink: PublishSink) -> XllResult<E> {
+        subscribe_typed(&self.source, topic, sink)
     }
 
     fn request_stop(&self) {
@@ -414,71 +408,69 @@ impl<S: RtdSource> ErasedRtdSource for SourceAdapter<S> {
     }
 }
 
-impl<S: RtdSource> Drop for SourceAdapter<S> {
-    fn drop(&mut self) {
-        if !self.subscriptions.is_empty() {
-            // A lost ticket would strand sink users. Dropping their values is
-            // insufficient: only disconnect_and_wait establishes the barrier.
-            xlfn_kernel::invariant::fail_stop();
-        }
-    }
+pub(crate) fn subscribe_typed<S, E>(source: &S, topic: &RtdTopic, sink: PublishSink) -> XllResult<E>
+where
+    S: RtdSource,
+    E: RtdSubscription,
+    S::Subscription: IntoRtdSubscription<E>,
+{
+    let subscription = source.subscribe(
+        topic,
+        RtdSink {
+            sink,
+            _value: PhantomData,
+        },
+    )?;
+    // The unsafe conversion contract preserves every sink obligation, including
+    // completing the cancellation barrier if conversion unwinds.
+    Ok(subscription.into_rtd_subscription())
 }
 
-/// Affine connection owner in a runtime-owned source adapter. The source's
-/// allocation is stable, while its typed values can move as the slot Vec grows.
-/// No pointer into that Vec escapes a storage lock.
-pub(crate) struct SourceSubscription {
-    source: NonNull<dyn ErasedRtdSource>,
-    key: Option<SlotKey>,
+/// Affine by-value connection owner, transferred between server and cleanup.
+pub(crate) struct SourceSubscription<E: RtdSubscription = ()> {
+    subscription: Option<E>,
     // The underlying subscription is Send but need not be Sync. Cancellation
     // requires mutable access to this unique ticket, not shared access to T.
     _not_sync: PhantomData<std::cell::Cell<()>>,
 }
 
-// SAFETY: every erased adapter is Sync and its typed subscriptions are Send.
-// Moving the affine ticket transfers the sole checkout authority; construction
-// requires the source arena and its sink roots to outlive the entire ticket.
-unsafe impl Send for SourceSubscription {}
-
-impl SourceSubscription {
+impl<E: RtdSubscription> SourceSubscription<E> {
     /// # Safety
     /// The source allocation and all sink roots must remain valid until this
     /// owner is consumed or dropped. Runtime/server admissions and declaration
     /// order provide that lifetime across rollback, deferred jobs and shutdown.
     pub(crate) unsafe fn subscribe(
-        source: &dyn ErasedRtdSource,
+        source: &(impl ErasedRtdSource<E> + ?Sized),
         topic: &RtdTopic,
         sink: PublishSink,
     ) -> XllResult<Self> {
-        let key = source.subscribe(topic, sink)?;
+        let subscription = source.subscribe(topic, sink)?;
         Ok(Self {
-            source: NonNull::from(source),
-            key: Some(key),
+            subscription: Some(subscription),
             _not_sync: PhantomData,
         })
     }
 
     pub(crate) fn request_cancel(&mut self) {
-        let key = self.key.expect("live source subscription");
-        // SAFETY: the constructor's caller keeps the arena alive through this owner.
-        unsafe { self.source.as_ref() }.request_cancel(key);
+        self.subscription
+            .as_ref()
+            .expect("live source subscription")
+            .request_cancel();
     }
 
     pub(crate) fn disconnect_and_wait(mut self) -> XllResult<()> {
-        let key = self.key.take().expect("live source subscription");
-        // SAFETY: the source outlives this owner and its consuming barrier.
-        unsafe { self.source.as_ref() }.disconnect_and_wait(key)
+        self.subscription
+            .take()
+            .expect("live source subscription")
+            .disconnect_and_wait()
     }
 }
 
-impl Drop for SourceSubscription {
+impl<E: RtdSubscription> Drop for SourceSubscription<E> {
     fn drop(&mut self) {
-        if let Some(key) = self.key.take() {
-            let result = catch_no_unwind(AssertUnwindSafe(|| {
-                // SAFETY: the arena lifetime includes this fallback barrier.
-                unsafe { self.source.as_ref() }.disconnect_and_wait(key)
-            }))
-            .unwrap_or(Err(XllError::Panic));
+        if let Some(subscription) = self.subscription.take() {
+            let result = catch_no_unwind(AssertUnwindSafe(|| subscription.disconnect_and_wait()))
+                .unwrap_or(Err(XllError::Panic));
             if let Err(error) = result {
                 crate::diagnostics::report_no_unwind("RTD source ticket drop", &error);
             }

@@ -89,7 +89,7 @@ type ObjectPinCount = u32;
 const OBJECT_SHARD_COUNT: usize = 32;
 
 struct ObjectEntry {
-    cell: PublishedOwner<ObjectCell>,
+    cell: ObjectAllocationOwner,
     bindings: ObjectBindingCount,
     pins: ObjectPinCount,
 }
@@ -161,14 +161,7 @@ impl ObjectArena {
         id: ObjectId,
         value: T,
     ) -> XllResult<ObjectBinding> {
-        let owner: Box<dyn ErasedObject> = Box::new(value);
-        let cell = Box::new(ObjectCell {
-            arena: NonNull::from(arena.as_ref()),
-            id,
-            owner: Some(owner),
-            type_id: TypeId::of::<T>(),
-        });
-        let cell = PublishedOwner::from_box(cell);
+        let cell = ObjectAllocationOwner::new(NonNull::from(arena.as_ref()), id, value);
 
         let mut state = arena.state(id).lock();
         if state.sealed {
@@ -308,19 +301,15 @@ impl ObjectArena {
         }
     }
 
-    fn destroy(&self, cell: PublishedOwner<ObjectCell>) {
+    fn destroy(&self, cell: ObjectAllocationOwner) {
         // Binding grace periods and the arena's pin count have both drained.
-        let mut cell = cell.into_box();
-        let owner = cell
-            .owner
-            .take()
-            .expect("object cell owner is consumed exactly once");
-        if catch_no_unwind(AssertUnwindSafe(|| drop(owner))).is_err() {
+        // The specialized owner recovers the exact allocation layout, whose
+        // Box cleanup frees storage even when user destruction unwinds.
+        if catch_no_unwind(AssertUnwindSafe(|| drop(cell))).is_err() {
             let error = XllError::Panic;
             crate::diagnostics::report_no_unwind("handle object final drop", &error);
             self.cleanup.record(error);
         }
-        drop(cell);
         self.record(crate::shutdown_trace::ShutdownEvent::RemoveHandleObject);
     }
 
@@ -429,20 +418,149 @@ impl Drop for ObjectArena {
 /// without storing a name alongside every object. Lookup uses the cached TypeId.
 trait ErasedObject: Any + Send + Sync {
     fn concrete_type_name(&self) -> &'static str;
+    fn allocation_destructor(&self) -> unsafe fn(NonNull<ObjectCell>);
 }
 
 impl<T: Any + Send + Sync> ErasedObject for T {
     fn concrete_type_name(&self) -> &'static str {
         type_name::<T>()
     }
+
+    fn allocation_destructor(&self) -> unsafe fn(NonNull<ObjectCell>) {
+        if combine_object_allocation::<T>() {
+            destroy_combined::<T>
+        } else {
+            destroy_separate::<T>
+        }
+    }
 }
 
 pub(crate) struct ObjectCell {
     arena: NonNull<ObjectArena>,
     id: ObjectId,
-    owner: Option<Box<dyn ErasedObject>>,
+    payload: NonNull<dyn ErasedObject>,
     type_id: TypeId,
 }
+
+/// The fixed header stays at offset zero; bindings never carry tail metadata.
+#[repr(C)]
+struct ObjectAllocation<T> {
+    cell: ObjectCell,
+    payload: T,
+}
+
+const fn combine_object_allocation<T>() -> bool {
+    // Coallocate only when it removes an allocation without introducing any
+    // header/tail alignment padding. Zero-sized Box payloads allocate nothing.
+    size_of::<T>() != 0
+        && match size_of::<ObjectCell>().checked_add(size_of::<T>()) {
+            Some(size) => size == size_of::<ObjectAllocation<T>>(),
+            None => false,
+        }
+}
+
+/// Unique erased allocation owner. Unlike a Box, moving this owner cannot
+/// retag the published header or payload. Destruction dispatch is shared in the
+/// existing payload vtable rather than retained per object or per binding.
+struct ObjectAllocationOwner {
+    cell: NonNull<ObjectCell>,
+}
+
+impl ObjectAllocationOwner {
+    fn new<T: Send + Sync + 'static>(arena: NonNull<ObjectArena>, id: ObjectId, value: T) -> Self {
+        if !combine_object_allocation::<T>() {
+            return Self::separate(arena, id, value);
+        }
+        let allocation = PublishedOwner::new(ObjectAllocation {
+            cell: ObjectCell {
+                arena,
+                id,
+                payload: NonNull::<T>::dangling(),
+                type_id: TypeId::of::<T>(),
+            },
+            payload: value,
+        });
+        let pointer = allocation.as_ptr();
+        // SAFETY: PublishedOwner has consumed the Box before either pointer
+        // is published. Raw field projections retain its original provenance;
+        // initialization touches only the header, not the payload projection.
+        let payload_pointer = unsafe { &raw mut (*pointer).payload };
+        let payload: NonNull<dyn ErasedObject> =
+            NonNull::new(payload_pointer).expect("allocated payload pointer is nonnull");
+        // SAFETY: this unpublished header is uniquely owned by allocation.
+        let payload_slot = unsafe { &raw mut (*pointer).cell.payload };
+        // SAFETY: the raw slot points to the live, initialized header field;
+        // replacing the initial non-owning pointer cannot drop any payload.
+        unsafe { payload_slot.write(payload) };
+        // repr(C) places cell at offset zero, preserving allocation provenance.
+        let cell = NonNull::new(pointer.cast::<ObjectCell>()).expect("allocated header is nonnull");
+        // Transfer the unique allocation obligation to the matching concrete
+        // destructor without ever recovering or moving a published Box.
+        let _allocation = std::mem::ManuallyDrop::new(allocation);
+        Self { cell }
+    }
+
+    fn separate<T: Send + Sync + 'static>(
+        arena: NonNull<ObjectArena>,
+        id: ObjectId,
+        value: T,
+    ) -> Self {
+        let payload = PublishedOwner::new(value);
+        let pointer = NonNull::new(payload.as_ptr()).expect("published owner is nonnull");
+        let cell = PublishedOwner::new(ObjectCell {
+            arena,
+            id,
+            payload: pointer,
+            type_id: TypeId::of::<T>(),
+        });
+        let pointer = NonNull::new(cell.as_ptr()).expect("published owner is nonnull");
+        let _payload = std::mem::ManuallyDrop::new(payload);
+        let _cell = std::mem::ManuallyDrop::new(cell);
+        Self { cell: pointer }
+    }
+
+    fn as_ref(&self) -> &ObjectCell {
+        // SAFETY: the unique owner keeps this header and its payload alive.
+        unsafe { self.cell.as_ref() }
+    }
+}
+
+unsafe fn destroy_combined<T>(cell: NonNull<ObjectCell>) {
+    // SAFETY: ObjectAllocation<T> is repr(C) with cell at offset zero. The
+    // owner was constructed for this exact T, and all readers have drained.
+    unsafe { drop(Box::from_non_null(cell.cast::<ObjectAllocation<T>>())) };
+}
+
+unsafe fn destroy_separate<T>(cell: NonNull<ObjectCell>) {
+    // SAFETY: the separate constructor transferred these exact Box allocations
+    // and their unique ownership. All header/payload readers have drained.
+    let cell = unsafe { Box::from_non_null(cell) };
+    // SAFETY: the constructor paired this concrete payload pointer with T.
+    let payload = unsafe { Box::from_non_null(cell.payload.cast::<T>()) };
+    // cell remains the allocation guard if payload destruction panics.
+    drop(payload);
+    drop(cell);
+}
+
+impl Drop for ObjectAllocationOwner {
+    fn drop(&mut self) {
+        // Resolve the concrete destructor while the payload is still live.
+        // Copy only pointer/function values out of these borrows: recovering
+        // the allocation must never free the receiver of a live vtable call.
+        let payload = self.as_ref().payload;
+        // SAFETY: this unique owner retains the payload throughout this call.
+        let destroy = unsafe { payload.as_ref() }.allocation_destructor();
+        // SAFETY: the private blanket implementation selects the same layout
+        // as construction. All source borrows above ended before consumption,
+        // and the arena has drained every published binding and pin.
+        unsafe { destroy(self.cell) };
+    }
+}
+
+// SAFETY: construction requires Send + Sync payloads and the header is immutable.
+unsafe impl Send for ObjectAllocationOwner {}
+// SAFETY: shared owner access exposes only the immutable header and payload.
+unsafe impl Sync for ObjectAllocationOwner {}
 
 impl ObjectCell {
     pub(crate) fn id(&self) -> ObjectId {
@@ -455,10 +573,8 @@ impl ObjectCell {
     }
 
     pub(crate) fn type_name(&self) -> &'static str {
-        self.owner
-            .as_deref()
-            .expect("published object cell retains its owner")
-            .concrete_type_name()
+        // SAFETY: this header's allocation owner retains the payload.
+        unsafe { self.payload.as_ref() }.concrete_type_name()
     }
 
     pub(crate) fn typed_projection<T: 'static>(&self) -> Option<TypedObjectProjection<T>> {
@@ -466,12 +582,7 @@ impl ObjectCell {
             // Recover the data pointer from the retained owner after checking
             // the cached concrete type. The owner stays present until every
             // binding/read capability and pin has drained.
-            pointer: NonNull::from_ref(
-                self.owner
-                    .as_deref()
-                    .expect("published object cell retains its owner"),
-            )
-            .cast(),
+            pointer: self.payload.cast(),
             _type: PhantomData,
         })
     }
@@ -649,6 +760,133 @@ unsafe impl Sync for RawObjectLeaseGuard {}
 
 #[cfg(all(feature = "bench-internals", feature = "async"))]
 pub use benchmark::{ObjectFinalPinRelease, ObjectLeaseBenchCase, ObjectLeaseBenchmark};
+
+#[cfg(feature = "bench-internals")]
+pub use storage_benchmark::{ObjectPayloadKind, ObjectStorageBenchmark, object_storage_layout};
+
+#[cfg(feature = "bench-internals")]
+mod storage_benchmark {
+    use super::super::binding::{BindingRecord, BindingTable};
+    use super::*;
+
+    /// Nonallocating payload shapes for object storage comparisons.
+    #[derive(Clone, Copy, Debug)]
+    pub enum ObjectPayloadKind {
+        /// A zero-sized payload.
+        Zst,
+        /// One machine-independent 64-bit scalar.
+        U64,
+        /// A four-kibibyte inline payload.
+        Bytes4096,
+        /// A 256-byte-aligned payload with two initialized scalar fields.
+        Aligned256,
+    }
+
+    impl ObjectPayloadKind {
+        /// Every payload shape covered by the fixture.
+        pub const ALL: [Self; 4] = [Self::Zst, Self::U64, Self::Bytes4096, Self::Aligned256];
+
+        /// Stable name for benchmark IDs and allocation records.
+        pub const fn name(self) -> &'static str {
+            match self {
+                Self::Zst => "zst",
+                Self::U64 => "u64",
+                Self::Bytes4096 => "bytes4096",
+                Self::Aligned256 => "aligned256",
+            }
+        }
+    }
+
+    #[repr(align(256))]
+    struct AlignedPayload([u64; 2]);
+
+    /// Actual arena and binding-table storage, without formula keys, tokens,
+    /// producer callbacks or worker startup. Every alias owns a BindingRecord.
+    pub struct ObjectStorageBenchmark {
+        table: BindingTable,
+        arena: PublishedOwner<ObjectArena>,
+        objects: usize,
+        aliases: usize,
+    }
+
+    impl ObjectStorageBenchmark {
+        /// Creates empty storage for a nonzero number of objects and aliases.
+        pub fn new(objects: usize, aliases: usize) -> Self {
+            assert!(objects > 0 && aliases > 0);
+            let maximum = objects.checked_mul(aliases).expect("bounded fixture count");
+            Self {
+                table: BindingTable::new(u32::try_from(maximum).expect("fixture fits u32")),
+                arena: PublishedOwner::new(ObjectArena::new()),
+                objects,
+                aliases,
+            }
+        }
+
+        /// Populates an empty fixture; aliases include the original binding.
+        pub fn populate(&self, kind: ObjectPayloadKind) {
+            for index in 0..self.objects {
+                let id = ObjectId::new(1, index as u64 + 1);
+                let binding = match kind {
+                    ObjectPayloadKind::Zst => self.insert_payload(id, ()),
+                    ObjectPayloadKind::U64 => self.insert_payload(id, index as u64),
+                    ObjectPayloadKind::Bytes4096 => self.insert_payload(id, [index as u8; 4096]),
+                    ObjectPayloadKind::Aligned256 => {
+                        let value = AlignedPayload([index as u64; 2]);
+                        std::hint::black_box(value.0);
+                        self.insert_payload(id, value)
+                    }
+                };
+                for _ in 1..self.aliases {
+                    let duplicate = binding.duplicate().unwrap();
+                    self.table.reserve().unwrap().publish(duplicate);
+                }
+                self.table.reserve().unwrap().publish(binding);
+            }
+        }
+
+        fn insert_payload<T: Send + Sync + 'static>(
+            &self,
+            id: ObjectId,
+            value: T,
+        ) -> ObjectBinding {
+            // SAFETY: the fixture retains its published arena through table
+            // retirement and final payload destruction in clear.
+            unsafe { ObjectArena::insert(&self.arena, id, value) }.unwrap()
+        }
+
+        /// Withdraws every binding and waits for final payload destruction.
+        pub fn clear(&self) {
+            let (_, retired) = self.table.retire_all();
+            drop(retired);
+            self.arena.finish_quiescence().unwrap();
+        }
+
+        /// Populates and clears the fixture while retaining reusable storage.
+        pub fn run_cycle(&self, kind: ObjectPayloadKind) {
+            self.populate(kind);
+            self.clear();
+        }
+    }
+
+    impl Drop for ObjectStorageBenchmark {
+        fn drop(&mut self) {
+            self.clear();
+            self.arena.assert_reclaimable();
+        }
+    }
+
+    /// Reports retained metadata layouts without claiming allocator usable size.
+    pub fn object_storage_layout() -> serde_json::Value {
+        serde_json::json!({
+            "object_binding": size_of::<ObjectBinding>(),
+            "binding_record": size_of::<BindingRecord>(),
+            "object_entry": size_of::<ObjectEntry>(),
+            "object_arena": size_of::<ObjectArena>(),
+            "payload_u64": size_of::<u64>(),
+            "payload_aligned256": size_of::<AlignedPayload>(),
+        })
+    }
+}
 
 #[cfg(all(feature = "bench-internals", feature = "async"))]
 mod benchmark {
@@ -1109,7 +1347,7 @@ mod tests {
         );
         assert_eq!(
             size_of::<ObjectEntry>(),
-            size_of::<(NonNull<ObjectCell>, u32, u32)>()
+            size_of::<(ObjectAllocationOwner, u32, u32)>()
         );
         #[cfg(target_pointer_width = "64")]
         assert_eq!(size_of::<super::super::binding::BindingRecord>(), 32);
@@ -1195,6 +1433,133 @@ mod tests {
         drop(binding);
         arena.finish_quiescence().unwrap();
         arena.assert_reclaimable();
+    }
+
+    #[test]
+    fn miri_overaligned_tail_survives_moves_aliases_and_panicking_final_drop() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct FieldDrop(Arc<AtomicUsize>);
+        impl Drop for FieldDrop {
+            fn drop(&mut self) {
+                assert_eq!(self.0.fetch_add(1, Ordering::Relaxed), 0);
+            }
+        }
+        #[repr(align(256))]
+        struct Payload {
+            values: [u64; 4],
+            drops: Arc<AtomicUsize>,
+            _field: FieldDrop,
+            panic: bool,
+        }
+        impl Drop for Payload {
+            fn drop(&mut self) {
+                assert_eq!(self.drops.fetch_add(1, Ordering::Relaxed), 0);
+                assert!(!self.panic, "aligned payload destructor panic");
+            }
+        }
+
+        for panic in [false, true] {
+            let arena = PublishedOwner::new(ObjectArena::new());
+            let drops = Arc::new(AtomicUsize::new(0));
+            let field_drops = Arc::new(AtomicUsize::new(0));
+            // SAFETY: the published arena owner survives every alias and pin.
+            let binding = unsafe {
+                ObjectArena::insert(
+                    &arena,
+                    ObjectId::new(1, 1),
+                    Payload {
+                        values: [11, 22, 33, 44],
+                        drops: Arc::clone(&drops),
+                        _field: FieldDrop(Arc::clone(&field_drops)),
+                        panic,
+                    },
+                )
+            }
+            .unwrap();
+            let projection = binding.object().typed_projection::<Payload>().unwrap();
+            assert_eq!(projection.addr() % align_of::<Payload>(), 0);
+            assert!(binding.object().typed_projection::<[u64; 4]>().is_none());
+            let pin = binding.acquire_lease().unwrap();
+            let aliases: Vec<_> = (0..8).map(|_| binding.duplicate().unwrap()).collect();
+            // Move the stable arena owner after publishing capabilities, and
+            // force its object shard to move existing map entries on growth.
+            let mut owners = vec![arena];
+            for _ in 0..8 {
+                owners.push(PublishedOwner::new(ObjectArena::new()));
+            }
+            let arena = &owners[0];
+            let neighbors: Vec<_> = (1..9)
+                .map(|index| {
+                    // SAFETY: all neighbors drain before the same arena owner.
+                    unsafe {
+                        ObjectArena::insert(
+                            arena,
+                            ObjectId::new(1, 1 + index * OBJECT_SHARD_COUNT as u64),
+                            index,
+                        )
+                    }
+                    .unwrap()
+                })
+                .collect();
+            drop(binding);
+            drop(aliases);
+            drop(neighbors);
+            assert_eq!(drops.load(Ordering::Relaxed), 0);
+            // SAFETY: the remaining pin retains this aligned tail after every
+            // map, owner and alias movement and after all bindings retired.
+            let value = unsafe { projection.as_ref_unchecked() };
+            assert_eq!(value.values, [11, 22, 33, 44]);
+            drop(pin);
+            assert_eq!(drops.load(Ordering::Relaxed), 1);
+            assert_eq!(field_drops.load(Ordering::Relaxed), 1);
+            if panic {
+                assert!(matches!(arena.finish_quiescence(), Err(XllError::Panic)));
+            } else {
+                arena.finish_quiescence().unwrap();
+            }
+            arena.assert_reclaimable();
+        }
+    }
+
+    #[test]
+    fn miri_rejected_object_insert_destroys_unpublished_payload() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct DropProbe(Arc<AtomicUsize>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                assert_eq!(self.0.fetch_add(1, Ordering::Relaxed), 0);
+            }
+        }
+        let arena = PublishedOwner::new(ObjectArena::new());
+        arena.seal();
+        let drops = Arc::new(AtomicUsize::new(0));
+        // SAFETY: the owner remains published through this rejected insertion.
+        let result = unsafe {
+            ObjectArena::insert(&arena, ObjectId::new(1, 1), DropProbe(Arc::clone(&drops)))
+        };
+        assert!(matches!(result, Err(XllError::Closing)));
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        arena.finish_quiescence().unwrap();
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn miri_object_storage_fixture_keeps_all_aliases_until_clear() {
+        for kind in ObjectPayloadKind::ALL {
+            let mut fixtures = Vec::new();
+            let fixture = ObjectStorageBenchmark::new(2, 4);
+            fixture.populate(kind);
+            fixtures.push(fixture);
+            for _ in 0..8 {
+                fixtures.push(ObjectStorageBenchmark::new(1, 1));
+            }
+            fixtures[0].clear();
+            fixtures[0].run_cycle(kind);
+        }
     }
 
     #[test]

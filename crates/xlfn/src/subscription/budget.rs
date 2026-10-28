@@ -19,6 +19,70 @@ pub enum RtdDelivery {
     Latest,
 }
 
+mod delivery_policy {
+    pub trait Sealed {}
+}
+
+/// A buffering policy selected when a source is constructed.
+///
+/// The concrete policy is retained by senders, so publication does not need
+/// to inspect a FIFO/latest tag on each admission. The shared publisher and
+/// cancellation core remain independent of the policy.
+pub trait RtdDeliveryPolicy: delivery_policy::Sealed + Copy + Send + Sync + 'static {
+    #[doc(hidden)]
+    const LATEST: bool;
+
+    /// The buffering policy exposed for inspection.
+    fn delivery(self) -> RtdDelivery;
+
+    #[doc(hidden)]
+    fn capacity(self) -> NonZeroUsize;
+}
+
+/// Retains accepted values in FIFO order up to the supplied queue capacity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RtdFifo(NonZeroUsize);
+
+impl RtdFifo {
+    /// Creates a FIFO policy with a nonzero per-subscription queue capacity.
+    #[must_use]
+    pub const fn new(capacity: NonZeroUsize) -> Self {
+        Self(capacity)
+    }
+}
+
+impl delivery_policy::Sealed for RtdFifo {}
+
+impl RtdDeliveryPolicy for RtdFifo {
+    const LATEST: bool = false;
+
+    fn delivery(self) -> RtdDelivery {
+        RtdDelivery::Fifo(self.0)
+    }
+
+    fn capacity(self) -> NonZeroUsize {
+        self.0
+    }
+}
+
+/// Coalesces unconsumed values to the most recently accepted value.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RtdLatest;
+
+impl delivery_policy::Sealed for RtdLatest {}
+
+impl RtdDeliveryPolicy for RtdLatest {
+    const LATEST: bool = true;
+
+    fn delivery(self) -> RtdDelivery {
+        RtdDelivery::Latest
+    }
+
+    fn capacity(self) -> NonZeroUsize {
+        NonZeroUsize::MIN
+    }
+}
+
 /// Aggregate admission limits shared by all subscriptions of one source.
 ///
 /// Buffered limits include values being published. The byte charge is the
@@ -311,11 +375,32 @@ impl BufferLedger {
 
     #[inline]
     pub(super) fn try_push(&mut self, budgets: &BudgetPair, bytes: usize) -> bool {
-        if !budgets.acquire(1, bytes) {
+        self.try_push_batch(budgets, 1, bytes)
+    }
+
+    /// Reserve the whole FIFO batch against both budgets before any value is
+    /// installed. The source reservation rolls back if the runtime rejects it.
+    pub(super) fn try_push_batch(
+        &mut self,
+        budgets: &BudgetPair,
+        values: usize,
+        bytes: usize,
+    ) -> bool {
+        if values == 0 {
+            debug_assert_eq!(bytes, 0);
+            return true;
+        }
+        let Some(next_values) = self.values.checked_add(values) else {
+            return false;
+        };
+        let Some(next_bytes) = self.bytes.checked_add(bytes) else {
+            return false;
+        };
+        if !budgets.acquire(values, bytes) {
             return false;
         }
-        self.values += 1;
-        self.bytes += bytes;
+        self.values = next_values;
+        self.bytes = next_bytes;
         true
     }
 

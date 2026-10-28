@@ -3,30 +3,38 @@
 
 use super::host::SubscriptionHost;
 use super::server::{OwnedServerOperation, disconnect_one_no_unwind};
-use super::source::SourceSubscription;
+use super::source::{RtdSubscription, SourceSubscription};
 use crate::panic_boundary::catch_no_unwind;
 use crate::sync::{Condvar, Mutex};
 use crate::{XllError, XllResult};
 use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{Builder, JoinHandle};
 use triomphe::Arc;
 
-pub(super) struct DeferredDisconnect<H: SubscriptionHost> {
-    subscription: Option<SourceSubscription>,
+pub(super) struct DeferredDisconnect<
+    H: SubscriptionHost,
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+> {
+    subscription: Option<SourceSubscription<E>>,
     // The connection reserved this capacity before any source sink escaped.
-    _reservation: DisconnectReservation<H>,
+    _reservation: DisconnectReservation<H, E, C>,
     // Drop the external server/module lease before releasing runtime admission.
     _completion: H::DisconnectCompletion,
-    operation: OwnedServerOperation<H>,
+    operation: OwnedServerOperation<H, E, C>,
 }
 
-impl<H: SubscriptionHost> DeferredDisconnect<H> {
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    DeferredDisconnect<H, E, C>
+{
     pub(super) fn new(
-        subscription: SourceSubscription,
+        subscription: SourceSubscription<E>,
         completion: H::DisconnectCompletion,
-        reservation: DisconnectReservation<H>,
-        operation: OwnedServerOperation<H>,
+        reservation: DisconnectReservation<H, E, C>,
+        operation: OwnedServerOperation<H, E, C>,
     ) -> Self {
         Self {
             subscription: Some(subscription),
@@ -57,18 +65,22 @@ impl<H: SubscriptionHost> DeferredDisconnect<H> {
     }
 }
 
-struct Ready<H: SubscriptionHost> {
-    jobs: VecDeque<DeferredDisconnect<H>>,
-    outstanding: usize,
+struct Ready<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> {
+    jobs: VecDeque<DeferredDisconnect<H, E, C>>,
     stopping: bool,
 }
 
-struct DisconnectQueue<H: SubscriptionHost> {
-    ready: Mutex<Ready<H>>,
+struct DisconnectQueue<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> {
+    ready: Mutex<Ready<H, E, C>>,
     changed: Condvar,
+    outstanding: AtomicUsize,
+    storage_capacity: AtomicUsize,
+    closed: AtomicBool,
 }
 
-impl<H: SubscriptionHost> DisconnectQueue<H> {
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    DisconnectQueue<H, E, C>
+{
     fn run(&self) {
         loop {
             let job = {
@@ -86,9 +98,9 @@ impl<H: SubscriptionHost> DisconnectQueue<H> {
     }
 }
 
-enum DisconnectWorker<H: SubscriptionHost> {
+enum DisconnectWorker<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> {
     Dormant,
-    Running(Arc<DisconnectQueue<H>>, JoinHandle<()>),
+    Running(Arc<DisconnectQueue<H, E, C>>, JoinHandle<()>),
     Stopped,
 }
 
@@ -96,8 +108,13 @@ enum DisconnectWorker<H: SubscriptionHost> {
 /// capacity before subscription starts, so terminal disconnect never competes
 /// with new connections for cleanup capacity or worker startup. Runtime
 /// admission keeps every queued job alive until its sink-user barrier finishes.
-pub(super) struct DisconnectPool<H: SubscriptionHost> {
-    worker: Mutex<DisconnectWorker<H>>,
+pub(super) struct DisconnectPool<
+    H: SubscriptionHost,
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+> {
+    worker: Mutex<DisconnectWorker<H, E, C>>,
+    published: OnceLock<Arc<DisconnectQueue<H, E, C>>>,
     capacity: usize,
     #[cfg(test)]
     fail_spawn: std::sync::atomic::AtomicBool,
@@ -109,10 +126,13 @@ pub(super) struct DisconnectPool<H: SubscriptionHost> {
     stop_attempts: std::sync::atomic::AtomicUsize,
 }
 
-impl<H: SubscriptionHost> DisconnectPool<H> {
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    DisconnectPool<H, E, C>
+{
     pub(super) const fn new(capacity: usize) -> Self {
         Self {
             worker: Mutex::new(DisconnectWorker::Dormant),
+            published: OnceLock::new(),
             capacity,
             #[cfg(test)]
             fail_spawn: std::sync::atomic::AtomicBool::new(false),
@@ -125,19 +145,62 @@ impl<H: SubscriptionHost> DisconnectPool<H> {
         }
     }
 
-    pub(super) fn reserve(&self) -> XllResult<DisconnectReservation<H>> {
+    pub(super) fn reserve(&self) -> XllResult<DisconnectReservation<H, E, C>> {
         if self.capacity == 0 {
             return Err(XllError::Overloaded);
         }
+        let queue = match self.published.get() {
+            Some(queue) => queue,
+            None => self.initialize()?,
+        };
+        if queue.closed.load(Ordering::Acquire) {
+            return Err(XllError::Closing);
+        }
+        let required = queue
+            .outstanding
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < self.capacity).then(|| count + 1)
+            })
+            .map_err(|_| XllError::Overloaded)?
+            + 1;
+        // This affine reservation also rolls quota back on allocation failure.
+        let reservation = DisconnectReservation {
+            queue: Arc::clone(queue),
+        };
+        if queue.closed.load(Ordering::Acquire) {
+            return Err(XllError::Closing);
+        }
+        if required > queue.storage_capacity.load(Ordering::Acquire) {
+            let mut ready = queue.ready.lock();
+            if ready.jobs.capacity() < required {
+                // Every live or retiring owner already has space for its eventual
+                // job. Only a new high-water mark grows storage; enqueue cannot
+                // allocate and warm reservation/release never locks this queue.
+                let additional = required - ready.jobs.len();
+                ready
+                    .jobs
+                    .try_reserve(additional)
+                    .map_err(|_| XllError::Overloaded)?;
+                queue
+                    .storage_capacity
+                    .store(ready.jobs.capacity(), Ordering::Release);
+            }
+        }
+        Ok(reservation)
+    }
+
+    fn initialize(&self) -> XllResult<&Arc<DisconnectQueue<H, E, C>>> {
         let mut worker = self.worker.lock();
         if matches!(*worker, DisconnectWorker::Dormant) {
             let queue = Arc::new(DisconnectQueue {
                 ready: Mutex::new(Ready {
                     jobs: VecDeque::new(),
-                    outstanding: 0,
                     stopping: false,
                 }),
                 changed: Condvar::new(),
+                outstanding: AtomicUsize::new(0),
+                storage_capacity: AtomicUsize::new(0),
+                closed: AtomicBool::new(false),
             });
             #[cfg(test)]
             if self
@@ -187,26 +250,16 @@ impl<H: SubscriptionHost> DisconnectPool<H> {
                 let _ = crate::panic_boundary::contain_panic(handle.join());
                 return Err(error);
             }
+            let _ = self.published.set(Arc::clone(&queue));
             *worker = DisconnectWorker::Running(queue, handle);
         }
-        let DisconnectWorker::Running(queue, _) = &*worker else {
+        if !matches!(*worker, DisconnectWorker::Running(..)) {
             return Err(XllError::Closing);
-        };
-        let mut ready = queue.ready.lock();
-        if ready.outstanding >= self.capacity {
-            return Err(XllError::Overloaded);
         }
-        // Reserve the eventual queue slot now, including slots for all live
-        // owners. Enqueue after terminal revocation requires no allocation.
-        let additional = ready.outstanding + 1 - ready.jobs.len();
-        ready
-            .jobs
-            .try_reserve(additional)
-            .map_err(|_| XllError::Overloaded)?;
-        ready.outstanding += 1;
-        Ok(DisconnectReservation {
-            queue: Arc::clone(queue),
-        })
+        Ok(self
+            .published
+            .get()
+            .expect("successful startup publishes its queue"))
     }
 
     #[allow(
@@ -229,6 +282,7 @@ impl<H: SubscriptionHost> DisconnectPool<H> {
                 // Only start retirement after the dispatch helper is ready.
                 // Its preflight failure returns this unexecuted closure, so
                 // the still-running worker and its handle can be restored.
+                queue.closed.store(true, Ordering::Release);
                 queue.ready.lock().stopping = true;
                 queue.changed.notify_all();
                 if crate::panic_boundary::contain_panic(owned_handle.take().unwrap().join())
@@ -265,7 +319,7 @@ impl<H: SubscriptionHost> DisconnectPool<H> {
                 let mut join = join;
                 join();
             }
-            debug_assert_eq!(queue.ready.lock().outstanding, 0);
+            debug_assert_eq!(queue.outstanding.load(Ordering::Acquire), 0);
         }
         Ok(())
     }
@@ -273,7 +327,7 @@ impl<H: SubscriptionHost> DisconnectPool<H> {
     #[cfg(any(test, all(windows, any(feature = "rtd", feature = "handles"))))]
     fn retain_worker(
         &self,
-        queue: Arc<DisconnectQueue<H>>,
+        queue: Arc<DisconnectQueue<H, E, C>>,
         handle: JoinHandle<()>,
         error: XllError,
     ) -> XllResult<()> {
@@ -296,13 +350,15 @@ impl<H: SubscriptionHost> DisconnectPool<H> {
     #[cfg(test)]
     pub(super) fn retained_source_count(&self) -> usize {
         match &*self.worker.lock() {
-            DisconnectWorker::Running(queue, _) => queue.ready.lock().outstanding,
+            DisconnectWorker::Running(queue, _) => queue.outstanding.load(Ordering::Acquire),
             _ => 0,
         }
     }
 }
 
-impl<H: SubscriptionHost> Drop for DisconnectPool<H> {
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Drop
+    for DisconnectPool<H, E, C>
+{
     fn drop(&mut self) {
         if self.stop().is_err() {
             // A normal teardown retains the runtime on preflight failure.
@@ -312,16 +368,22 @@ impl<H: SubscriptionHost> Drop for DisconnectPool<H> {
     }
 }
 
-pub(super) struct DisconnectReservation<H: SubscriptionHost> {
-    queue: Arc<DisconnectQueue<H>>,
+pub(super) struct DisconnectReservation<
+    H: SubscriptionHost,
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+> {
+    queue: Arc<DisconnectQueue<H, E, C>>,
 }
 
-impl<H: SubscriptionHost> DisconnectReservation<H> {
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    DisconnectReservation<H, E, C>
+{
     fn commit(
         self,
-        subscription: SourceSubscription,
+        subscription: SourceSubscription<E>,
         completion: H::DisconnectCompletion,
-        operation: OwnedServerOperation<H>,
+        operation: OwnedServerOperation<H, E, C>,
     ) {
         let queue = Arc::clone(&self.queue);
         queue.ready.lock().jobs.push_back(DeferredDisconnect::new(
@@ -334,28 +396,34 @@ impl<H: SubscriptionHost> DisconnectReservation<H> {
     }
 }
 
-impl<H: SubscriptionHost> Drop for DisconnectReservation<H> {
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Drop
+    for DisconnectReservation<H, E, C>
+{
     fn drop(&mut self) {
-        let mut ready = self.queue.ready.lock();
-        ready.outstanding = ready
-            .outstanding
-            .checked_sub(1)
-            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+        if self.queue.outstanding.fetch_sub(1, Ordering::AcqRel) == 0 {
+            xlfn_kernel::invariant::fail_stop();
+        }
     }
 }
 
 /// Unique source owner and its already prepared terminal cleanup capacity.
 /// Keep the reservation through every synchronous and asynchronous barrier,
 /// including rollback, cleanup errors, and unwinding of a termination owner.
-pub(super) struct OwnedSubscription<H: SubscriptionHost> {
-    subscription: Option<SourceSubscription>,
-    reservation: Option<DisconnectReservation<H>>,
+pub(super) struct OwnedSubscription<
+    H: SubscriptionHost,
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+> {
+    subscription: Option<SourceSubscription<E>>,
+    reservation: Option<DisconnectReservation<H, E, C>>,
 }
 
-impl<H: SubscriptionHost> OwnedSubscription<H> {
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    OwnedSubscription<H, E, C>
+{
     pub(super) fn new(
-        subscription: SourceSubscription,
-        reservation: DisconnectReservation<H>,
+        subscription: SourceSubscription<E>,
+        reservation: DisconnectReservation<H, E, C>,
     ) -> Self {
         Self {
             subscription: Some(subscription),
@@ -381,7 +449,7 @@ impl<H: SubscriptionHost> OwnedSubscription<H> {
     pub(super) fn defer(
         mut self,
         completion: H::DisconnectCompletion,
-        operation: OwnedServerOperation<H>,
+        operation: OwnedServerOperation<H, E, C>,
     ) {
         self.reservation
             .take()
@@ -396,7 +464,9 @@ impl<H: SubscriptionHost> OwnedSubscription<H> {
     }
 }
 
-impl<H: SubscriptionHost> Drop for OwnedSubscription<H> {
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Drop
+    for OwnedSubscription<H, E, C>
+{
     fn drop(&mut self) {
         if let Some(subscription) = self.subscription.take()
             && let Err(error) = disconnect_one_no_unwind(subscription)
@@ -439,14 +509,23 @@ mod tests {
         }
     }
 
+    #[allow(
+        clippy::type_complexity,
+        reason = "test helper returns its concrete runtime, server and producer sender"
+    )]
     fn channel_runtime(
         host: RtdSubscriptionHost,
     ) -> (
-        StdArc<SubscriptionRuntime<RtdSubscriptionHost>>,
-        crate::subscription::server::SubscriptionServerHandle<RtdSubscriptionHost>,
+        StdArc<SubscriptionRuntime<RtdSubscriptionHost, crate::rtd::RtdChannelSubscription>>,
+        crate::subscription::server::SubscriptionServerHandle<
+            RtdSubscriptionHost,
+            crate::rtd::RtdChannelSubscription,
+        >,
         RtdSender<i32>,
     ) {
-        let registration = SourceRegistration::new(RuntimeGeneration::new(1).unwrap());
+        let registration = SourceRegistration::<crate::rtd::RtdChannelSubscription>::new(
+            RuntimeGeneration::new(1).unwrap(),
+        );
         let (sender_tx, sender_rx) = mpsc::sync_channel(1);
         let source = registration
             .register(RtdChannelSource::new(
@@ -479,6 +558,38 @@ mod tests {
         prepared.commit();
         let sender = sender_rx.recv_timeout(DEADLINE).unwrap();
         (runtime, server, sender)
+    }
+
+    #[test]
+    fn warm_cleanup_reservations_do_not_lock_worker_or_queue() {
+        let pool = StdArc::new(DisconnectPool::<
+            RtdSubscriptionHost,
+            (),
+            crate::DynamicRtdSources<()>,
+        >::new(2));
+        drop((pool.reserve().unwrap(), pool.reserve().unwrap()));
+        let queue = pool.published.get().unwrap();
+        let queue_capacity = queue.ready.lock().jobs.capacity();
+        let worker_guard = pool.worker.lock();
+        let ready_guard = queue.ready.lock();
+        let (sent, received) = mpsc::channel();
+        let shared = StdArc::clone(&pool);
+        let worker = std::thread::spawn(move || {
+            let first = shared.reserve().unwrap();
+            let second = shared.reserve().unwrap();
+            assert!(matches!(shared.reserve(), Err(XllError::Overloaded)));
+            drop((first, second));
+            sent.send(()).unwrap();
+        });
+        let result = received.recv_timeout(DEADLINE);
+        drop(ready_guard);
+        drop(worker_guard);
+        worker.join().unwrap();
+        result.expect("warm reserve and release must complete while both mutexes are held");
+        assert_eq!(queue.ready.lock().jobs.capacity(), queue_capacity);
+        assert_eq!(queue.outstanding.load(Ordering::Acquire), 0);
+        pool.stop().unwrap();
+        assert!(matches!(pool.reserve(), Err(XllError::Closing)));
     }
 
     #[test]
@@ -673,7 +784,9 @@ mod tests {
         let (joining_tx, joining_rx) = mpsc::sync_channel(1);
         let (release_tx, release_rx) = mpsc::sync_channel(1);
         let release = StdArc::new(Mutex::new(Some(release_rx)));
-        let registration = SourceRegistration::new(RuntimeGeneration::new(1).unwrap());
+        let registration = SourceRegistration::<crate::rtd::RtdChannelSubscription>::new(
+            RuntimeGeneration::new(1).unwrap(),
+        );
         let source = registration
             .register(
                 RtdChannelSource::new(NonZeroUsize::new(8).unwrap(), move |_| {
@@ -773,7 +886,9 @@ mod tests {
             let (joining_tx, joining_rx) = mpsc::sync_channel(1);
             let (release_tx, release_rx) = mpsc::sync_channel(1);
             let release = StdArc::new(Mutex::new(Some(release_rx)));
-            let registration = SourceRegistration::new(RuntimeGeneration::new(1).unwrap());
+            let registration = SourceRegistration::<crate::rtd::RtdChannelSubscription>::new(
+                RuntimeGeneration::new(1).unwrap(),
+            );
             let source = registration
                 .register(RtdChannelSource::new(
                     NonZeroUsize::new(8).unwrap(),
@@ -861,7 +976,9 @@ mod tests {
         for panic in [false, true] {
             let calls = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
             let called = StdArc::clone(&calls);
-            let registration = SourceRegistration::new(RuntimeGeneration::new(1).unwrap());
+            let registration = SourceRegistration::<crate::rtd::RtdChannelSubscription>::new(
+                RuntimeGeneration::new(1).unwrap(),
+            );
             let source = registration
                 .register(
                     RtdChannelSource::new(NonZeroUsize::new(8).unwrap(), move |_| {
@@ -977,7 +1094,7 @@ mod tests {
                     fail_disconnect,
                 })
                 .unwrap();
-            let runtime = SubscriptionRuntime::<RtdSubscriptionHost>::with_sources_for_internal(
+            let runtime = SubscriptionRuntime::<RtdSubscriptionHost, _>::with_sources_for_internal(
                 registration.finish(),
             );
             let server = runtime.register_test_server(1);

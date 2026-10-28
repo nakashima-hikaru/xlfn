@@ -824,8 +824,6 @@ struct RuntimeCallAccess<'call> {
     scope: &'call CallScope<'call>,
     #[cfg(feature = "handles")]
     handles: crate::handle::FormulaHandleServiceResolver<'call>,
-    #[cfg(feature = "rtd")]
-    rtd: crate::rtd::RtdGenerationAccess<'call>,
 }
 
 /// Runtime services available while converting one Excel-visible argument.
@@ -857,15 +855,13 @@ impl<'call> CallContext<'call> {
         call: &'call crate::runtime::CallGuard<'_, A>,
         scope: &'call CallScope<'call>,
     ) -> Self {
-        #[cfg(all(not(feature = "handles"), not(feature = "rtd")))]
+        #[cfg(not(feature = "handles"))]
         let _ = call;
         Self {
             access: CallAccess::Runtime(RuntimeCallAccess {
                 scope,
                 #[cfg(feature = "handles")]
                 handles: call.handle_call_access(),
-                #[cfg(feature = "rtd")]
-                rtd: call.rtd_call_access(),
             }),
         }
     }
@@ -884,20 +880,6 @@ impl<'call> CallContext<'call> {
     pub(crate) fn from_scope(scope: &'call CallScope<'call>) -> Self {
         Self {
             access: CallAccess::Plain(scope),
-        }
-    }
-
-    #[cfg(feature = "rtd")]
-    pub(crate) fn rtd_access(&self) -> crate::rtd::RtdGenerationAccess<'call> {
-        match &self.access {
-            CallAccess::Runtime(access) => access.rtd,
-            CallAccess::Plain(_) => {
-                panic!("plain conversion context has no RTD access")
-            }
-            #[cfg(all(test, feature = "handles"))]
-            CallAccess::HandleOnly { .. } => {
-                panic!("handle-only conversion context has no RTD access")
-            }
         }
     }
 
@@ -1001,11 +983,6 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
             call: CallContext::from_handle_access(scope, handles),
             inputs: Some(M::new_fingerprint(argument_count)),
         }
-    }
-
-    #[cfg(feature = "rtd")]
-    pub(crate) fn rtd_access(&self) -> crate::rtd::RtdGenerationAccess<'call> {
-        self.call.rtd_access()
     }
 
     #[cfg(feature = "handles")]

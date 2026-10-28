@@ -211,7 +211,7 @@ fn run_worker<S: Publisher>(shared: Arc<RtdShared<S>>) {
     }
 }
 
-pub(super) struct BenchRtdSource {
+pub struct BenchRtdSource {
     shared: Arc<RtdShared>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
 }
@@ -259,7 +259,7 @@ impl Drop for BenchRtdSource {
     }
 }
 
-pub(super) struct BenchSubscription {
+pub struct BenchSubscription {
     shared: Arc<RtdShared>,
     id: u64,
     entry: Arc<RtdEntry<RtdSink<RtdValue>>>,

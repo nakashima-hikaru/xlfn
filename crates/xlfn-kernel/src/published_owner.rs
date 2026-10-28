@@ -125,6 +125,75 @@ mod tests {
     }
 
     #[test]
+    fn miri_unsized_trait_pointer_survives_owner_and_parent_box_moves() {
+        trait Counter: Send + Sync {
+            fn increment(&self);
+            fn value(&self) -> usize;
+        }
+        struct Probe {
+            value: AtomicUsize,
+            drops: std::sync::Arc<AtomicUsize>,
+        }
+        impl Counter for Probe {
+            fn increment(&self) {
+                self.value.fetch_add(1, Ordering::Relaxed);
+            }
+            fn value(&self) -> usize {
+                self.value.load(Ordering::Relaxed)
+            }
+        }
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        struct Container {
+            owner: Option<PublishedOwner<dyn Counter>>,
+        }
+
+        let drops = std::sync::Arc::new(AtomicUsize::new(0));
+        let boxed: Box<dyn Counter> = Box::new(Probe {
+            value: AtomicUsize::new(0),
+            drops: std::sync::Arc::clone(&drops),
+        });
+        let owner = PublishedOwner::from_box(boxed);
+        let port = NonNull::from(owner.as_ref());
+        // Publish the immutable fat-pointer slot through an atomic thin pointer
+        // so the reader retains its vtable metadata without unsafe Send wrappers.
+        let published = AtomicPtr::new((&raw const port).cast_mut());
+        let mut owners = vec![Container { owner: Some(owner) }];
+        let original = std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                // SAFETY: port is immutable and remains live until this scoped
+                // thread joins. Its allocation is retained by the moving owner.
+                let port = unsafe { *published.load(Ordering::Acquire) };
+                // SAFETY: every container/owner move preserves this allocation;
+                // recovery and destruction happen only after the reader joins.
+                let counter = unsafe { port.as_ref() };
+                for _ in 0..64 {
+                    counter.increment();
+                }
+            });
+            for _ in 0..64 {
+                owners.push(Container { owner: None });
+            }
+            let moved = owners.remove(0);
+            let mut parent = Box::new(moved);
+            // Moving the parent Box must not invalidate pointers to its raw-
+            // owned child, unlike retaining a nested ordinary child Box.
+            let mut moved_parent = Some(parent);
+            parent = moved_parent.take().unwrap();
+            reader.join().unwrap();
+            parent.owner.take().unwrap()
+        });
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        let recovered = original.into_box();
+        assert_eq!(recovered.value(), 64);
+        drop(recovered);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
     fn miri_owner_drops_payload_once_with_or_without_box_recovery() {
         struct CountDrop<'a>(&'a AtomicUsize);
         impl Drop for CountDrop<'_> {

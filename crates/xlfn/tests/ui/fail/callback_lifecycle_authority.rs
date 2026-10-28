@@ -4,6 +4,8 @@ use xlfn::prelude::*;
 struct CallbackAddin;
 
 impl Addin for CallbackAddin {
+    type RtdSubscription = ();
+    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();
     type Layers = ();
@@ -11,7 +13,7 @@ impl Addin for CallbackAddin {
     type AsyncExecutor = xlfn::NoAsyncExecutor;
     type Error = XllError;
 
-    fn open(_: &OpenContext) -> Result<Opened<()>, XllError> {
+    fn open(_: &OpenContext<Self>) -> Result<Opened<()>, XllError> {
         Ok(Opened::new(()))
     }
 }

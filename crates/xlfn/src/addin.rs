@@ -67,16 +67,25 @@ impl BuildInfo {
 ///
 /// Initialization runs on Excel's lifecycle thread. Read installed sidecars
 /// relative to [`Self::module_directory`] rather than Excel's working directory.
-#[derive(Debug)]
-pub struct OpenContext {
+pub struct OpenContext<A: Addin = ()> {
+    marker: PhantomData<fn() -> A>,
     module_path: PathBuf,
     module_directory: PathBuf,
     build_info: BuildInfo,
     #[cfg(feature = "rtd")]
-    source_registration: crate::subscription::SourceRegistration,
+    source_registration: crate::subscription::SourceRegistration<A::RtdSubscription, A::RtdSources>,
 }
 
-impl OpenContext {
+impl<A: Addin> std::fmt::Debug for OpenContext<A> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenContext")
+            .field("module_path", &self.module_path)
+            .field("build_info", &self.build_info)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<A: Addin> OpenContext<A> {
     pub(crate) fn new(
         module_path: PathBuf,
         build_info: BuildInfo,
@@ -89,6 +98,7 @@ impl OpenContext {
         #[cfg(not(feature = "rtd"))]
         let _ = generation;
         Self {
+            marker: PhantomData,
             module_path,
             module_directory,
             build_info,
@@ -117,20 +127,22 @@ impl OpenContext {
 
     #[must_use]
     /// Provides diagnostic sink installation during initialization.
-    pub fn diagnostics(&self) -> DiagnosticsSetup<'_> {
+    pub fn diagnostics(&self) -> DiagnosticsSetup<'_, A> {
         DiagnosticsSetup { context: self }
     }
 
     /// Provides the RTD source-registration capability for this open.
     #[cfg(feature = "rtd")]
     #[must_use]
-    pub fn rtd(&self) -> RtdOpenContext<'_> {
+    pub fn rtd(&self) -> RtdOpenContext<'_, A::RtdSubscription, A::RtdSources> {
         RtdOpenContext {
             registration: &self.source_registration,
         }
     }
 
-    pub(crate) fn into_service_inputs(self) -> crate::runtime_components::GenerationServiceInputs {
+    pub(crate) fn into_service_inputs(
+        self,
+    ) -> crate::runtime_components::GenerationServiceInputs<A::RtdSubscription, A::RtdSources> {
         #[cfg(feature = "rtd")]
         {
             crate::runtime_components::GenerationServiceInputs::with_rtd_sources(
@@ -146,29 +158,40 @@ impl OpenContext {
 
 /// Capability for registering opaque RTD source identities during open.
 #[cfg(feature = "rtd")]
-#[derive(Clone, Copy, Debug)]
-pub struct RtdOpenContext<'a> {
-    registration: &'a crate::subscription::SourceRegistration,
+pub struct RtdOpenContext<
+    'a,
+    E: crate::RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+> {
+    registration: &'a crate::subscription::SourceRegistration<E, C>,
 }
 
 #[cfg(feature = "rtd")]
-impl RtdOpenContext<'_> {
+impl<E: crate::RtdSubscription> RtdOpenContext<'_, E> {
     /// Registers one source and returns the handle used by subscriptions.
     pub fn register_source<S>(&self, source: S) -> XllResult<RtdSourceHandle<S>>
     where
         S: RtdSource,
+        S::Subscription: crate::IntoRtdSubscription<E>,
     {
         self.registration.register(source)
     }
 }
 
-/// Diagnostic sink configuration capability available during add-in open.
-#[derive(Clone, Copy, Debug)]
-pub struct DiagnosticsSetup<'a> {
-    context: &'a OpenContext,
+#[cfg(feature = "rtd")]
+impl<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> RtdOpenContext<'_, E, C> {
+    /// Registers the complete typed catalog once and returns its typed handles.
+    pub fn register_sources(&self, sources: C) -> XllResult<C::Handles> {
+        self.registration.register_sources(sources)
+    }
 }
 
-impl DiagnosticsSetup<'_> {
+/// Diagnostic sink configuration capability available during add-in open.
+pub struct DiagnosticsSetup<'a, A: Addin = ()> {
+    context: &'a OpenContext<A>,
+}
+
+impl<A: Addin> DiagnosticsSetup<'_, A> {
     /// Installs a basic failure log at `%LOCALAPPDATA%/<addin-id>/logs/diagnostics.log`.
     pub fn install_file_sink(&self) -> Result<PathBuf, DiagnosticInitError> {
         crate::diagnostics::install_file_diagnostic_sink(&self.context.build_info.addin_id)
@@ -588,7 +611,12 @@ impl<S, L, U, E> Opened<S, L, U, E> {
 /// [`Self::quiesce`] must synchronously stop every execution source before
 /// best-effort lifecycle cleanup begins. The shared state is dropped only
 /// after quiescence; lifecycle cleanup receives the dedicated lifecycle state.
-pub trait Addin: Send + Sync + 'static {
+pub trait Addin: Sized + Send + Sync + 'static {
+    /// Concrete subscription owner, or `()` when this add-in has no RTD sources.
+    /// Use [`crate::rtd_subscriptions!`] to combine multiple source subscription types.
+    type RtdSubscription: crate::RtdSubscription;
+    /// Concrete source catalog, or DynamicRtdSources for incremental registration.
+    type RtdSources: crate::RtdSourceCatalog<Self::RtdSubscription>;
     /// State shared by worksheet calls in this open generation.
     type SharedState: Send + Sync + 'static;
     /// State accessed and disposed only on Excel's lifecycle thread.
@@ -613,7 +641,7 @@ pub trait Addin: Send + Sync + 'static {
     /// enabled. No state is available to call `quiesce`, so the framework
     /// cannot prove that application-created execution sources have stopped.
     /// That runtime cannot be opened again.
-    fn open(context: &OpenContext) -> OpenResult<Self>;
+    fn open(context: &OpenContext<Self>) -> OpenResult<Self>;
 
     /// Stops every framework-visible Add-in callback, worker, and other
     /// execution source before lifecycle cleanup.
@@ -693,6 +721,8 @@ pub unsafe trait PhysicallyUnloadableAddin: Addin {
 }
 
 impl Addin for () {
+    type RtdSubscription = ();
+    type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();
     type Error = XllError;
@@ -700,7 +730,7 @@ impl Addin for () {
     #[cfg(feature = "async")]
     type AsyncExecutor = NoAsyncExecutor;
 
-    fn open(_context: &OpenContext) -> OpenResult<Self> {
+    fn open(_context: &OpenContext<Self>) -> OpenResult<Self> {
         Ok(Opened::new(()))
     }
 }
@@ -833,7 +863,7 @@ pub struct MainThreadContext<'call, A: Addin> {
     state: &'call A::SharedState,
     diagnostics: &'call crate::diagnostics::DiagnosticHistory,
     #[cfg(feature = "rtd")]
-    rtd: RtdCallContext<'call>,
+    rtd: RtdCallContext<'call, A::RtdSubscription, A::RtdSources>,
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
@@ -940,7 +970,7 @@ impl<A: Addin> MainThreadContext<'_, A> {
     pub(crate) fn new<'ctx>(
         state: &'ctx A::SharedState,
         diagnostics: &'ctx crate::diagnostics::DiagnosticHistory,
-        rtd: RtdCallContext<'ctx>,
+        rtd: RtdCallContext<'ctx, A::RtdSubscription, A::RtdSources>,
     ) -> MainThreadContext<'ctx, A> {
         MainThreadContext {
             state,
@@ -982,8 +1012,41 @@ impl<'call, A: Addin> MainThreadContext<'call, A> {
     #[cfg(feature = "rtd")]
     #[must_use]
     /// Returns the RTD subscription capability for this invocation.
-    pub fn rtd(&self) -> RtdCallContext<'call> {
+    pub fn rtd(&self) -> RtdCallContext<'call, A::RtdSubscription, A::RtdSources> {
         self.rtd
+    }
+}
+
+#[cfg(feature = "rtd")]
+impl<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> Copy for RtdOpenContext<'_, E, C> {}
+#[cfg(feature = "rtd")]
+impl<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> Clone for RtdOpenContext<'_, E, C> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+#[cfg(feature = "rtd")]
+impl<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> std::fmt::Debug
+    for RtdOpenContext<'_, E, C>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RtdOpenContext")
+            .field("registration", &self.registration)
+            .finish()
+    }
+}
+
+impl<A: Addin> Copy for DiagnosticsSetup<'_, A> {}
+impl<A: Addin> Clone for DiagnosticsSetup<'_, A> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<A: Addin> std::fmt::Debug for DiagnosticsSetup<'_, A> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DiagnosticsSetup")
+            .field("context", &self.context)
+            .finish()
     }
 }
 
@@ -1030,6 +1093,8 @@ mod tests {
     struct NonSendLifecycleAddin;
 
     impl crate::Addin for NonSendLifecycleAddin {
+        type RtdSubscription = ();
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = Rc<()>;
         type Error = crate::XllError;
@@ -1038,7 +1103,7 @@ mod tests {
         type AsyncExecutor = NoAsyncExecutor;
 
         fn open(
-            _: &crate::OpenContext,
+            _: &crate::OpenContext<Self>,
         ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error>
         {
             Ok(Opened::new(()).with_lifecycle(Rc::new(())))
@@ -1050,6 +1115,8 @@ mod tests {
     struct TestU32Addin;
 
     impl crate::Addin for TestU32Addin {
+        type RtdSubscription = ();
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = u32;
         type LifecycleState = ();
         type Error = crate::XllError;
@@ -1058,7 +1125,7 @@ mod tests {
         type AsyncExecutor = NoAsyncExecutor;
 
         fn open(
-            _: &crate::OpenContext,
+            _: &crate::OpenContext<Self>,
         ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error>
         {
             unreachable!()
@@ -1259,7 +1326,9 @@ mod tests {
         )
         .unwrap();
 
-        let runtime = crate::runtime::Runtime::<()>::new();
+        let runtime = crate::runtime::Runtime::<
+            crate::rtd::test_support::TestRtdAddin<TestSubscription>,
+        >::new();
         let opening = runtime.begin_open().unwrap();
         let mut opening = runtime.publish_with_sources(opening, (), (), arena);
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
@@ -1302,7 +1371,9 @@ mod tests {
         crate::call::with_excel_call_scope(|_scope| {
             runtime
                 .with_generation_services(|services| {
-                    let context = MainThreadContext::<()>::new(
+                    let context = MainThreadContext::<
+                        crate::rtd::test_support::TestRtdAddin<TestSubscription>,
+                    >::new(
                         &_state,
                         runtime.diagnostics(),
                         crate::rtd::RtdCallContext::new(
@@ -1340,6 +1411,8 @@ mod tests {
 
     #[cfg(feature = "async")]
     impl crate::Addin for AsyncTestAddin {
+        type RtdSubscription = ();
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = u32;
         type LifecycleState = ();
         type Error = crate::XllError;
@@ -1347,7 +1420,7 @@ mod tests {
         type AsyncExecutor = NoAsyncExecutor;
 
         fn open(
-            _context: &crate::OpenContext,
+            _context: &crate::OpenContext<Self>,
         ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error>
         {
             Ok(Opened::new(23))
@@ -1387,7 +1460,7 @@ mod tests {
             "0.1.0",
             "x86_64-pc-windows-msvc",
         );
-        let context = crate::OpenContext::new(
+        let context = crate::OpenContext::<()>::new(
             std::path::PathBuf::from("/test/module.xll"),
             build_info,
             super::RuntimeGeneration::new(1).expect("test generation is non-zero"),

@@ -9,6 +9,8 @@ pub struct ExampleState;
 pub struct ExampleAddin;
 
 impl Addin for ExampleAddin {
+    type RtdSubscription = ();
+    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ExampleState;
     type LifecycleState = ();
     type Error = XllError;
@@ -16,7 +18,7 @@ impl Addin for ExampleAddin {
     #[cfg(feature = "async")]
     type AsyncExecutor = xlfn::NoAsyncExecutor;
 
-    fn open(_context: &OpenContext) -> OpenResult<Self> {
+    fn open(_context: &OpenContext<Self>) -> OpenResult<Self> {
         Ok(Opened::new(ExampleState))
     }
 }

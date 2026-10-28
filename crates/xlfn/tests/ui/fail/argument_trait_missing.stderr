@@ -23,7 +23,7 @@ help: the trait `FromExcel<'_>` is not implemented for `NotAnArgument`
 note: required by a bound in `xlfn::__private::v1::assert_excel_parameter`
  --> src/__private.rs
   |
-  |     pub fn assert_excel_parameter<'call, R, T>(_: &CallFrame<'call, R::InputMode>)
+  |     pub fn assert_excel_parameter<
   |            ---------------------- required by a bound in this function
 ...
   |         T: ExcelParameter<'call, R::InputMode>,

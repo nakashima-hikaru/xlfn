@@ -11,11 +11,12 @@ use crate::XllResult;
 use crate::host_api::ExcelHost;
 #[cfg(feature = "rtd")]
 pub use crate::subscription::{
-    IntoRtdValue, RtdCapacity, RtdChannelSource, RtdChannelSubscription, RtdDelivery, RtdLimits,
-    RtdMultiplexedSource, RtdMultiplexedSubscription, RtdPendingValue, RtdProducerErrorPolicy,
-    RtdSendError, RtdSender, RtdSink, RtdSource, RtdSourceContext, RtdSourceEvent, RtdSourceHandle,
-    RtdSourceLimits, RtdSubscription, RtdSubscriptionId, RtdTopic, RtdTopicInput, RtdTopicParts,
-    RtdValue,
+    IntoRtdSubscription, IntoRtdValue, NoTopicValidator, RtdBatchSendError, RtdCapacity,
+    RtdChannelSource, RtdChannelSubscription, RtdDelivery, RtdDeliveryPolicy, RtdFifo, RtdLatest,
+    RtdLimits, RtdMultiplexedSource, RtdMultiplexedSubscription, RtdPendingBatch, RtdPendingValue,
+    RtdProducerErrorPolicy, RtdSendError, RtdSender, RtdSink, RtdSource, RtdSourceContext,
+    RtdSourceEvent, RtdSourceHandle, RtdSourceLimits, RtdSubscription, RtdSubscriptionId, RtdTopic,
+    RtdTopicInput, RtdTopicParts, RtdTopicValidator, RtdValue,
 };
 
 #[cfg(test)]
@@ -28,23 +29,31 @@ pub(crate) mod test_support;
 /// [`crate::addin::MainThreadContext`] only exposes this narrow entry point and
 /// does not know how generation services are composed.
 #[cfg(feature = "rtd")]
-#[derive(Clone, Copy)]
-pub struct RtdCallContext<'call> {
-    generation: RtdGenerationAccess<'call>,
+pub struct RtdCallContext<
+    'call,
+    E: crate::RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+> {
+    generation: RtdGenerationAccess<'call, E, C>,
     host: ExcelHost<'call>,
 }
 
 #[cfg(feature = "rtd")]
-#[derive(Clone, Copy)]
-pub(crate) struct RtdGenerationAccess<'call> {
-    subscriptions: &'call crate::excel_rtd::SubscriptionServiceSlot,
+pub(crate) struct RtdGenerationAccess<
+    'call,
+    E: crate::RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+> {
+    subscriptions: &'call crate::excel_rtd::SubscriptionServiceSlot<E, C>,
     subscription_host: crate::excel_rtd::RtdSubscriptionHost,
 }
 
 #[cfg(feature = "rtd")]
-impl<'call> RtdGenerationAccess<'call> {
+impl<'call, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    RtdGenerationAccess<'call, E, C>
+{
     pub(crate) const fn new(
-        subscriptions: &'call crate::excel_rtd::SubscriptionServiceSlot,
+        subscriptions: &'call crate::excel_rtd::SubscriptionServiceSlot<E, C>,
         subscription_host: crate::excel_rtd::RtdSubscriptionHost,
     ) -> Self {
         Self {
@@ -55,9 +64,9 @@ impl<'call> RtdGenerationAccess<'call> {
 }
 
 #[cfg(feature = "rtd")]
-impl<'call> RtdCallContext<'call> {
+impl<'call, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> RtdCallContext<'call, E, C> {
     pub(crate) const fn new(
-        generation: RtdGenerationAccess<'call>,
+        generation: RtdGenerationAccess<'call, E, C>,
         host: ExcelHost<'call>,
     ) -> Self {
         Self { generation, host }
@@ -96,16 +105,41 @@ impl<'call> RtdCallContext<'call> {
 }
 
 #[cfg(feature = "rtd")]
-impl<'call> RtdGenerationAccess<'call> {
-    pub(crate) fn read(self) -> XllResult<crate::excel_rtd::SubscriptionRuntimeRead<'call>> {
+impl<'call, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    RtdGenerationAccess<'call, E, C>
+{
+    pub(crate) fn read(self) -> XllResult<crate::excel_rtd::SubscriptionRuntimeRead<'call, E, C>> {
         self.subscriptions.read(self.subscription_host)
     }
 }
 
-pub(crate) fn observe_subscription(
-    subscriptions: &crate::subscription::SubscriptionRuntime,
+pub(crate) fn observe_subscription<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+    subscriptions: &crate::subscription::SubscriptionRuntime<E, C>,
     key: &crate::subscription::SubscriptionKey,
     host: ExcelHost<'_>,
 ) -> XllResult<crate::subscription::RtdValue> {
     crate::excel_rtd::observe_subscription(subscriptions, key, host)
+}
+
+#[cfg(feature = "rtd")]
+impl<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> Copy for RtdCallContext<'_, E, C> {}
+#[cfg(feature = "rtd")]
+impl<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> Clone for RtdCallContext<'_, E, C> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+#[cfg(feature = "rtd")]
+impl<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> Copy
+    for RtdGenerationAccess<'_, E, C>
+{
+}
+#[cfg(feature = "rtd")]
+impl<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> Clone
+    for RtdGenerationAccess<'_, E, C>
+{
+    fn clone(&self) -> Self {
+        *self
+    }
 }

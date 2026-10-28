@@ -4,6 +4,8 @@ use xlfn::prelude::*;
 struct TestAddin;
 
 impl Addin for TestAddin {
+    type RtdSubscription = ();
+    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();
     type Error = XllError;
@@ -11,7 +13,7 @@ impl Addin for TestAddin {
     #[cfg(feature = "async")]
     type AsyncExecutor = xlfn::NoAsyncExecutor;
 
-    fn open(_: &OpenContext) -> OpenResult<Self> {
+    fn open(_: &OpenContext<Self>) -> OpenResult<Self> {
         Ok(Opened::new(()))
     }
 }

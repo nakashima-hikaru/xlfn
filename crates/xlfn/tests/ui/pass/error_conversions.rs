@@ -8,6 +8,8 @@ use xlfn::prelude::*;
 struct ErrorConversions;
 
 impl Addin for ErrorConversions {
+    type RtdSubscription = ();
+    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();
     type Error = XllError;
@@ -15,7 +17,7 @@ impl Addin for ErrorConversions {
     #[cfg(feature = "async")]
     type AsyncExecutor = xlfn::NoAsyncExecutor;
 
-    fn open(context: &OpenContext) -> xlfn::OpenResult<Self> {
+    fn open(context: &OpenContext<Self>) -> xlfn::OpenResult<Self> {
         context.diagnostics().set_sink(Discard)?;
         Ok(Opened::new(()))
     }

@@ -39,6 +39,8 @@ mod module_state;
 mod registration;
 mod server;
 mod server_gate;
+mod server_type;
+mod subscription_backend;
 mod update_event;
 #[cfg(test)]
 use crate::win32::{
@@ -59,7 +61,6 @@ use automation::{
     checked_topic_part_count, checked_topic_part_length, topic_key_from_safearray,
     unwrap_dispatch_variant, write_bstr_variant, write_refresh_data,
 };
-pub(super) use class_factory::dll_get_class_object;
 #[cfg(test)]
 use class_factory::{
     CLASS_FACTORY_VTABLE, ClassFactory, ClassFactoryVtable, IID_ICLASS_FACTORY, factory_lock_server,
@@ -68,8 +69,6 @@ use class_factory::{
 use com_abi::IUnknown_Vtbl;
 use com_abi::{IID_IUNKNOWN, com_boundary, guid_eq};
 pub(crate) use event::drain_with_com_dispatch;
-#[cfg(feature = "handles")]
-pub(super) use excel_rtd::observe;
 #[cfg(feature = "rtd")]
 pub(super) use excel_rtd::observe_subscription;
 pub(crate) use module_state::ComModuleLifetime;
@@ -84,8 +83,6 @@ use registration::{
 pub(crate) use server::DeferredDisconnectLease;
 #[cfg(all(test, feature = "handles"))]
 use server::ensure_server;
-#[cfg(feature = "handles")]
-pub(super) use server::shutdown;
 #[cfg(feature = "rtd")]
 pub(super) use server::shutdown_subscriptions;
 use server::{
@@ -101,8 +98,7 @@ use server::{
 #[cfg(test)]
 use server::{
     IID_IDISPATCH, IID_IRTD_SERVER, PANIC_IN_REFRESH_DATA, SERVER_NOT_STARTED, SERVER_START_FAILED,
-    SERVER_STARTED, SERVER_STARTING, ServerStartReservation, discard_unpublished_server,
-    ensure_server_without_handles,
+    SERVER_STARTED, SERVER_STARTING, ServerStartReservation, ensure_server_without_handles,
 };
 #[cfg(test)]
 use server_gate::{
@@ -110,6 +106,11 @@ use server_gate::{
     ServerPhase, ServerTermination, ServerTerminationRequest, TerminationWorker,
     TerminationWorkerStatus,
 };
+#[cfg(feature = "handles")]
+pub(super) use server_type::observe;
+#[cfg(feature = "handles")]
+pub(super) use server_type::shutdown;
+pub(super) use server_type::{dll_get_class_object, register_server_type};
 pub(crate) use update_event::ComApartmentGuard;
 pub(crate) use update_event::RtdNotifier;
 use update_event::retry_git_revocation_debt;
@@ -167,3 +168,5 @@ pub(super) fn wait_for_module_quiescence(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+use server_type::discard_unpublished_server;

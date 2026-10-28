@@ -23,7 +23,12 @@ pub(crate) struct LifecycleControl<'coordinator, A: Addin> {
 pub(crate) type PublishGenerationFailure<A> = Box<(
     XllError,
     Option<OpeningGeneration<A>>,
-    Box<crate::runtime_components::GenerationServices>,
+    Box<
+        crate::runtime_components::GenerationServices<
+            <A as Addin>::RtdSubscription,
+            <A as Addin>::RtdSources,
+        >,
+    >,
     crate::module_runtime::ModuleEpochLease,
 )>;
 
@@ -171,7 +176,9 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
         &self,
         control: &mut LifecycleAccess<'_, A>,
         generation: crate::generation::RuntimeGeneration,
-        services: Box<crate::runtime_components::GenerationServices>,
+        services: Box<
+            crate::runtime_components::GenerationServices<A::RtdSubscription, A::RtdSources>,
+        >,
         module_epoch: crate::module_runtime::ModuleEpochLease,
     ) -> Result<(), PublishGenerationFailure<A>> {
         self.coordinator

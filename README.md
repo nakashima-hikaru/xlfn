@@ -64,12 +64,13 @@ use xlfn::prelude::*;
 pub struct ExampleAddin;
 
 impl Addin for ExampleAddin {
+    type RtdSubscription = ();
     type SharedState = ();
     type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
 
-    fn open(_: &OpenContext) -> OpenResult<Self> {
+    fn open(_: &OpenContext<Self>) -> OpenResult<Self> {
         Ok(Opened::new(()))
     }
 }

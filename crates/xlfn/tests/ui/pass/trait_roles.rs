@@ -6,6 +6,8 @@ pub struct State;
 pub struct TestAddin;
 
 impl Addin for TestAddin {
+    type RtdSubscription = ();
+    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;
@@ -14,7 +16,7 @@ impl Addin for TestAddin {
     type AsyncExecutor = xlfn::NoAsyncExecutor;
 
     fn open(
-        _: &OpenContext,
+        _: &OpenContext<Self>,
     ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
         Ok(Opened::new(State))
     }

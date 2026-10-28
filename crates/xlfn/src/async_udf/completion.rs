@@ -1,3 +1,4 @@
+use super::instrumentation::{CompletionObserver, NoObservation};
 use super::transport::ExcelAsyncResponder;
 use crate::call_return::{ExcelReturn, ReturnContext};
 use crate::cancellation::CancellationToken;
@@ -34,18 +35,18 @@ pub(crate) enum OwnedDeliveryOutcome {
 
 /// Owns delivery and observation together so forced destruction reports the
 /// result of the fallback callback rather than guessing that it was unobserved.
-pub(crate) struct AsyncDelivery<G: crate::execution::UdfLayerGuard = ()> {
+pub(crate) struct AsyncDelivery<O: CompletionObserver = NoObservation> {
     responder: ExcelAsyncResponder,
     token: CancellationToken,
-    observation: Option<super::instrumentation::AsyncObservation<G>>,
+    observation: O,
     completed: bool,
 }
 
-impl<G: crate::execution::UdfLayerGuard> AsyncDelivery<G> {
+impl<O: CompletionObserver> AsyncDelivery<O> {
     pub(crate) fn new(
         responder: ExcelAsyncResponder,
         token: CancellationToken,
-        observation: Option<super::instrumentation::AsyncObservation<G>>,
+        observation: O,
     ) -> Self {
         Self {
             responder,
@@ -55,7 +56,7 @@ impl<G: crate::execution::UdfLayerGuard> AsyncDelivery<G> {
         }
     }
 
-    pub(crate) fn task<Fut, T>(self, future: Fut) -> AsyncUdfTask<Fut, G>
+    pub(crate) fn task<Fut, T>(self, future: Fut) -> AsyncUdfTask<Fut, O>
     where
         Fut: Future<Output = XllResult<T>> + Send,
         T: ExcelReturn + Send + 'static,
@@ -69,9 +70,7 @@ impl<G: crate::execution::UdfLayerGuard> AsyncDelivery<G> {
     fn finish(&mut self, completion: AsyncCompletion) {
         self.completed = true;
         super::boundary::report_completion(self.responder.udf_id, &completion);
-        if let Some(observation) = self.observation.take() {
-            observation.finish(&completion);
-        }
+        self.observation.finish(&completion);
     }
 
     pub(crate) fn fallback(&mut self, panicked: bool) {
@@ -108,7 +107,7 @@ impl<G: crate::execution::UdfLayerGuard> AsyncDelivery<G> {
     }
 }
 
-impl<G: crate::execution::UdfLayerGuard> Drop for AsyncDelivery<G> {
+impl<O: CompletionObserver> Drop for AsyncDelivery<O> {
     fn drop(&mut self) {
         self.fallback(false);
     }
@@ -116,12 +115,12 @@ impl<G: crate::execution::UdfLayerGuard> Drop for AsyncDelivery<G> {
 
 /// Explicit fields enforce cleanup order even when the task is never polled.
 /// User destruction is contained, and precedes Excel delivery and layer exit.
-pub(crate) struct AsyncUdfTask<Fut, G: crate::execution::UdfLayerGuard> {
+pub(crate) struct AsyncUdfTask<Fut, O: CompletionObserver> {
     future: super::future::NoUnwindFuture<Fut>,
-    delivery: AsyncDelivery<G>,
+    delivery: AsyncDelivery<O>,
 }
 
-impl<Fut, G: crate::execution::UdfLayerGuard> Drop for AsyncUdfTask<Fut, G> {
+impl<Fut, O: CompletionObserver> Drop for AsyncUdfTask<Fut, O> {
     fn drop(&mut self) {
         // SAFETY: the field is destroyed in place and never moved after polling.
         let panicked = unsafe { std::pin::Pin::new_unchecked(&mut self.future) }
@@ -131,11 +130,11 @@ impl<Fut, G: crate::execution::UdfLayerGuard> Drop for AsyncUdfTask<Fut, G> {
     }
 }
 
-impl<Fut, T, G> Future for AsyncUdfTask<Fut, G>
+impl<Fut, T, O> Future for AsyncUdfTask<Fut, O>
 where
     Fut: Future<Output = XllResult<T>> + Send,
     T: ExcelReturn + Send + 'static,
-    G: crate::execution::UdfLayerGuard,
+    O: CompletionObserver,
 {
     type Output = ();
 
@@ -286,6 +285,30 @@ pub(crate) unsafe fn async_return(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unobserved_task_layout_omits_instrumentation_storage() {
+        type Pending = std::future::Pending<crate::XllResult<()>>;
+        type Unobserved = super::AsyncUdfTask<Pending, super::NoObservation>;
+        type Observed =
+            super::AsyncUdfTask<Pending, crate::async_udf::instrumentation::AsyncObservation<()>>;
+        assert_eq!(std::mem::size_of::<super::NoObservation>(), 0);
+        assert!(std::mem::size_of::<Unobserved>() < std::mem::size_of::<Observed>());
+        eprintln!(
+            "GENERIC_LAYOUT delivery_unobserved={} task_unobserved={} tracked_task={} panic_wrapper_dynamic={} panic_wrapper_static={}",
+            std::mem::size_of::<super::AsyncDelivery<super::NoObservation>>(),
+            std::mem::size_of::<Unobserved>(),
+            std::mem::size_of::<crate::async_udf::task::TrackedFuture<Unobserved>>(),
+            std::mem::size_of::<crate::async_udf::future::NoUnwindFuture<std::future::Pending<()>>>(
+            ),
+            std::mem::size_of::<
+                crate::async_udf::future::NoUnwindFuture<
+                    std::future::Pending<()>,
+                    crate::async_udf::future::TaskDestruction,
+                >,
+            >(),
+        );
+    }
+
     use super::*;
     use crate::cancellation::{CancellationGuarantee, CancellationSource};
     use crate::execution::{
@@ -346,6 +369,61 @@ mod tests {
     }
 
     #[test]
+    fn miri_unobserved_task_drop_preserves_cleanup_before_one_fallback() {
+        let _runtime = crate::runtime::tests::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _callbacks = crate::test_callback::lock();
+        crate::test_callback::install();
+        for polled in [false, true] {
+            for cancelled in [false, true] {
+                for panic_on_drop in [false, true] {
+                    crate::test_callback::reset();
+                    let (source, token) =
+                        CancellationSource::new(CancellationGuarantee::BestEffort);
+                    let callbacks_at_drop = Arc::new(AtomicUsize::new(usize::MAX));
+                    let mut raw = XLOPER12 {
+                        value: XLOPER12Value {
+                            big_data: XLOPER12BigData {
+                                handle: XLOPER12BigDataHandle {
+                                    data: std::ptr::null_mut(),
+                                },
+                                byte_count: 0,
+                            },
+                        },
+                        xltype: XLTYPE_BIG_DATA,
+                    };
+                    // SAFETY: the live, initialized handle is copied by the responder.
+                    let responder = unsafe {
+                        ExcelAsyncResponder::from_raw("DROP.UNOBSERVED", &mut raw).unwrap()
+                    };
+                    let mut task = Box::pin(
+                        AsyncDelivery::new(responder, token, NoObservation).task(Pending {
+                            callbacks_at_drop: Arc::clone(&callbacks_at_drop),
+                            panic_on_drop,
+                        }),
+                    );
+                    if polled {
+                        assert!(
+                            task.as_mut()
+                                .poll(&mut Context::from_waker(
+                                    futures_util::task::noop_waker_ref(),
+                                ))
+                                .is_pending()
+                        );
+                    }
+                    if cancelled {
+                        source.cancel();
+                    }
+                    drop(task);
+                    assert_eq!(callbacks_at_drop.load(Ordering::Relaxed), 0);
+                    assert_eq!(crate::test_callback::async_return_calls(), 1);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn forced_task_drop_disposes_user_future_before_delivery_and_reports_callback_outcome() {
         let _runtime = crate::runtime::tests::TEST_LOCK
             .lock()
@@ -399,12 +477,12 @@ mod tests {
                 // SAFETY: the live, initialized handle is copied by the responder.
                 let responder =
                     unsafe { ExcelAsyncResponder::from_raw("DROP.ORDER", &mut raw).unwrap() };
-                let mut task = Box::pin(
-                    AsyncDelivery::new(responder, token, Some(observation)).task(Pending {
+                let mut task = Box::pin(AsyncDelivery::new(responder, token, observation).task(
+                    Pending {
                         callbacks_at_drop: Arc::clone(&callbacks_at_drop),
                         panic_on_drop,
-                    }),
-                );
+                    },
+                ));
                 if polled {
                     assert!(
                         task.as_mut()

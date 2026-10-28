@@ -4,6 +4,7 @@
 )]
 
 use super::server::shutdown_subscriptions;
+use super::subscription_backend::BackendSubscriptions;
 use super::*;
 
 #[cfg(feature = "rtd")]
@@ -36,6 +37,36 @@ use crate::win32::{
     SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayPutElement, SysAllocStringLen, SysStringLen,
 };
 use static_assertions::assert_not_impl_any;
+
+#[cfg(feature = "rtd")]
+fn connect_subscription_backend<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+    ensured: &super::server::EnsuredServer<E, C>,
+    topic_id: i32,
+    key: crate::subscription::SubscriptionKey,
+) -> VARIANT {
+    let server = ensured.pointer();
+    // SAFETY: ensured retains the COM allocation through this operation.
+    let _operation = unsafe { (*server).operations.enter() }.unwrap();
+    let mut initial = VARIANT::default();
+    // SAFETY: initial is writable VARIANT storage, and the retained COM
+    // reference/admission keeps the production typed adapter and runtime live.
+    assert_eq!(
+        // SAFETY: the writable output and retained COM admission are described above.
+        unsafe {
+            ensured.subscription_server.unwrap().connect_data(
+                crate::subscription::TopicId(topic_id),
+                key,
+                &mut initial,
+            )
+        },
+        S_OK
+    );
+    initial
+}
+
+#[cfg(all(feature = "rtd", feature = "handles"))]
+type ChannelOwnerAddin =
+    crate::rtd::test_support::TestRtdAddin<crate::subscription::RtdChannelSubscription>;
 
 assert_not_impl_any!(ServerOperation<'static>: Send, Sync);
 assert_not_impl_any!(ServerNotificationOperation<'static>: Send, Sync);
@@ -413,22 +444,25 @@ impl Drop for TestServerLock {
     }
 }
 
-struct TestClassFactory(NonNull<ClassFactory>);
+struct TestClassFactory<
+    E: crate::RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+>(NonNull<ClassFactory<E, C>>);
 
-impl TestClassFactory {
-    fn as_ptr(&self) -> *mut ClassFactory {
+impl<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> TestClassFactory<E, C> {
+    fn as_ptr(&self) -> *mut ClassFactory<E, C> {
         self.0.as_ptr()
     }
 
-    fn vtable(&self) -> &ClassFactoryVtable {
+    fn vtable(&self) -> &ClassFactoryVtable<E, C> {
         // SAFETY: `get_test_class_factory` constructs this wrapper only
         // from a successful COM class-factory result with the static
         // implementation vtable.
-        unsafe { &**self.as_ptr().cast::<*const ClassFactoryVtable>() }
+        unsafe { &**self.as_ptr().cast::<*const ClassFactoryVtable<E, C>>() }
     }
 }
 
-impl Drop for TestClassFactory {
+impl<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> Drop for TestClassFactory<E, C> {
     fn drop(&mut self) {
         // SAFETY: the wrapper owns exactly the factory reference returned
         // by DllGetClassObject.
@@ -448,7 +482,11 @@ impl TestUnknownReference {
         self.0.as_ptr()
     }
 
-    fn cast<T>(&self) -> NonNull<T> {
+    fn server<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+        &self,
+        ensured: &super::server::EnsuredServer<E, C>,
+    ) -> NonNull<RtdServer<E, C>> {
+        assert_eq!(self.0.as_ptr(), ensured.pointer().cast());
         self.0.cast()
     }
 
@@ -682,10 +720,12 @@ fn final_remove_retains_com_shells_without_blocking_close_or_reviving_on_reopen(
     };
     open();
     let ensured = runtime
-        .with_subscriptions(|subscriptions| ensure_server_without_handles(Some(subscriptions)))
+        .with_subscriptions(|subscriptions| {
+            ensure_server_without_handles(Some(BackendSubscriptions::new(subscriptions)))
+        })
         .unwrap()
         .unwrap();
-    let server = ensured.active.pointer as *mut RtdServer;
+    let server = ensured.pointer();
     let mut factory_pointer = ptr::null_mut();
     assert_eq!(
         // SAFETY: the active server owns the class identity; output is writable.
@@ -751,18 +791,15 @@ fn final_remove_retains_com_shells_without_blocking_close_or_reviving_on_reopen(
     assert!(instance.is_null());
 
     let current = runtime
-        .with_subscriptions(|subscriptions| ensure_server_without_handles(Some(subscriptions)))
+        .with_subscriptions(|subscriptions| {
+            ensure_server_without_handles(Some(BackendSubscriptions::new(subscriptions)))
+        })
         .unwrap()
         .unwrap();
     assert_ne!(current.active.generation, ensured.active.generation);
     assert_eq!(
         // SAFETY: the current reference retains its newly opened server.
-        unsafe {
-            heartbeat(
-                current.active.pointer as *mut RtdServer,
-                &mut heartbeat_result,
-            )
-        },
+        unsafe { heartbeat(current.pointer(), &mut heartbeat_result,) },
         S_OK
     );
     drop(server_lock);
@@ -977,9 +1014,10 @@ fn server_start_reservation_is_single_use_and_rolls_back_failure() {
 #[test]
 fn failed_server_start_is_retired_without_server_terminate_before_retry() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let subscriptions = SubscriptionRuntime::new();
-    let failed = ensure_server_without_handles(Some(&subscriptions)).unwrap();
-    let server = failed.active.pointer as *mut RtdServer;
+    let subscriptions = SubscriptionRuntime::<()>::new();
+    let failed =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
+    let server = failed.pointer();
     // SAFETY: ACTIVE_SERVER and `failed` retain this allocation throughout the test.
     let server_ref = unsafe { &*server };
     let callback_drops = Arc::new(AtomicUsize::new(0));
@@ -1009,7 +1047,7 @@ fn failed_server_start_is_retired_without_server_terminate_before_retry() {
     // Reentrant recovery must leave the retained callback/backend intact
     // until the failed COM method has left its server admission.
     assert!(matches!(
-        ensure_server_without_handles(Some(&subscriptions)),
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))),
         Err(XllError::Closing)
     ));
     assert_eq!(callback_drops.load(Ordering::Acquire), 0);
@@ -1017,7 +1055,8 @@ fn failed_server_start_is_retired_without_server_terminate_before_retry() {
 
     // Excel may release a failed activation without ever issuing
     // ServerTerminate. A new observation must retire it and create a server.
-    let replacement = ensure_server_without_handles(Some(&subscriptions)).unwrap();
+    let replacement =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
     assert!(replacement.newly_created);
     assert_ne!(replacement.active.pointer, failed.active.pointer);
     assert_ne!(replacement.active.generation, failed.active.generation);
@@ -1033,7 +1072,7 @@ fn failed_server_start_is_retired_without_server_terminate_before_retry() {
     drop(backends);
 
     // SAFETY: the replacement guard retains its independently allocated server.
-    let replacement_ref = unsafe { &*(replacement.active.pointer as *mut RtdServer) };
+    let replacement_ref = unsafe { &*(replacement.pointer()) };
     let start = ServerStartReservation::acquire(&replacement_ref.start_state)
         .expect("replacement must accept a fresh ServerStart");
     start.commit();
@@ -1047,9 +1086,10 @@ fn failed_server_start_is_retired_without_server_terminate_before_retry() {
 #[test]
 fn ensure_server_waits_for_terminating_server_and_concurrent_reapers_share_replacement() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let subscriptions = SubscriptionRuntime::new();
-    let ensured = ensure_server_without_handles(Some(&subscriptions)).unwrap();
-    let server = ensured.active.pointer as *mut RtdServer;
+    let subscriptions = SubscriptionRuntime::<()>::new();
+    let ensured =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
+    let server = ensured.pointer();
     // SAFETY: `ensured` retains this allocation throughout the race.
     let server_ref = unsafe { &*server };
     let operation = server_ref.operations.enter().unwrap();
@@ -1071,8 +1111,11 @@ fn ensure_server_waits_for_terminating_server_and_concurrent_reapers_share_repla
             scope.spawn(move || {
                 let _apartment = TestComApartment::enter();
                 rendezvous.wait();
-                let result = ensure_server_without_handles(Some(subscriptions))
-                    .map(|replacement| (replacement.active.pointer, replacement.active.generation));
+                let result =
+                    ensure_server_without_handles(Some(BackendSubscriptions::new(subscriptions)))
+                        .map(|replacement| {
+                            (replacement.active.pointer, replacement.active.generation)
+                        });
                 result_tx.send(result).unwrap();
             });
         }
@@ -1107,9 +1150,13 @@ fn shared_server_subscription_shutdown_preserves_handle_roots_until_handle_shutd
     let _guard = TEST_LOCK.lock().unwrap();
     for subscriptions_first in [false, true] {
         let handles = FormulaHandleService::new(4);
-        let subscriptions = SubscriptionRuntime::new();
-        let ensured = ensure_server(Some(&handles), Some(&subscriptions)).unwrap();
-        let server = ensured.active.pointer as *mut RtdServer;
+        let subscriptions = SubscriptionRuntime::<()>::new();
+        let ensured = ensure_server(
+            Some(&handles),
+            Some(BackendSubscriptions::new(&subscriptions)),
+        )
+        .unwrap();
+        let server = ensured.pointer();
         // SAFETY: ACTIVE_SERVER and `ensured` retain the server until cleanup.
         let server_ref = unsafe { &*server };
         let key = crate::handle::test_topic_key("shared-server-shutdown");
@@ -1202,11 +1249,15 @@ fn handle_shutdown_retires_unobserved_and_other_generation_topics() {
     let _guard = TEST_LOCK.lock().unwrap();
     for detached_server in [false, true] {
         let handles = FormulaHandleService::new(4);
-        let subscriptions = SubscriptionRuntime::new();
+        let subscriptions = SubscriptionRuntime::<()>::new();
         let ensured = if detached_server {
-            ensure_server_without_handles(Some(&subscriptions)).unwrap()
+            ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap()
         } else {
-            ensure_server(Some(&handles), Some(&subscriptions)).unwrap()
+            ensure_server(
+                Some(&handles),
+                Some(BackendSubscriptions::new(&subscriptions)),
+            )
+            .unwrap()
         };
         let unobserved = crate::handle::test_topic_key("shutdown-unobserved");
         handles.prepare(unobserved, || Ok(Payload)).unwrap();
@@ -1224,7 +1275,7 @@ fn handle_shutdown_retires_unobserved_and_other_generation_topics() {
             .unwrap();
 
         if detached_server {
-            let server = ensured.active.pointer as *mut RtdServer;
+            let server = ensured.pointer();
             // SAFETY: `ensured` retains the server through worker completion.
             let server_ref = unsafe { &*server };
             let operation = server_ref.operations.enter().unwrap();
@@ -1254,8 +1305,8 @@ fn handle_shutdown_retires_unobserved_and_other_generation_topics() {
 fn server_terminate_reentry_is_deferred_and_idempotent() {
     let _guard = TEST_LOCK.lock().unwrap();
     let handles = FormulaHandleService::new(4);
-    let ensured = ensure_server(Some(&handles), None).unwrap();
-    let server = ensured.active.pointer as *mut RtdServer;
+    let ensured = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
+    let server = ensured.pointer();
     // SAFETY: ACTIVE_SERVER and `ensured` retain the allocation throughout
     // this test, including after deferred ACTIVE cleanup is postponed.
     let server_ref = unsafe { &*server };
@@ -1301,8 +1352,8 @@ fn server_terminate_reentry_is_deferred_and_idempotent() {
 fn deferred_termination_drains_callbacks_and_rejects_worker_self_close() {
     let _guard = TEST_LOCK.lock().unwrap();
     let handles = FormulaHandleService::new(4);
-    let ensured = ensure_server(Some(&handles), None).unwrap();
-    let server = ensured.active.pointer as *mut RtdServer;
+    let ensured = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
+    let server = ensured.pointer();
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server for this test.
     let server_ref = unsafe { &*server };
     let server_address = server as usize;
@@ -1365,8 +1416,8 @@ fn deferred_termination_drains_callbacks_and_rejects_worker_self_close() {
 fn deferred_termination_spawn_failure_rolls_back_atomically() {
     let _guard = TEST_LOCK.lock().unwrap();
     let handles = FormulaHandleService::new(4);
-    let ensured = ensure_server(Some(&handles), None).unwrap();
-    let server = ensured.active.pointer as *mut RtdServer;
+    let ensured = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
+    let server = ensured.pointer();
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server for this test.
     let server_ref = unsafe { &*server };
     let operation = server_ref.operations.enter().unwrap();
@@ -1420,8 +1471,8 @@ fn termination_worker_can_finish_before_handle_registration() {
 fn deferred_cleanup_panic_signals_phase_and_is_detected_by_join() {
     let _guard = TEST_LOCK.lock().unwrap();
     let handles = FormulaHandleService::new(4);
-    let ensured = ensure_server(Some(&handles), None).unwrap();
-    let server = ensured.active.pointer as *mut RtdServer;
+    let ensured = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
+    let server = ensured.pointer();
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server for this test.
     let server_ref = unsafe { &*server };
     let operation = server_ref.operations.enter().unwrap();
@@ -1494,8 +1545,8 @@ fn retired_callback_drop_can_reenter_terminate_after_quiescence() {
 
     let _guard = TEST_LOCK.lock().unwrap();
     let handles = FormulaHandleService::new(4);
-    let ensured = ensure_server(Some(&handles), None).unwrap();
-    let server = ensured.active.pointer as *mut RtdServer;
+    let ensured = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
+    let server = ensured.pointer();
     let server_address = server as usize;
 
     let dropped_while_active = Arc::new(AtomicBool::new(false));
@@ -1571,8 +1622,8 @@ fn retired_callback_drop_can_reenter_terminate_after_quiescence() {
 fn callback_subscription_attach_handshake_covers_early_empty_snapshot() {
     let _guard = TEST_LOCK.lock().unwrap();
     let handles = FormulaHandleService::new(4);
-    let ensured = ensure_server(Some(&handles), None).unwrap();
-    let server = ensured.active.pointer as *mut RtdServer;
+    let ensured = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
+    let server = ensured.pointer();
     let _generation = ensured.active.generation;
 
     // Model ServerStart's early backend snapshot before another thread
@@ -1582,14 +1633,15 @@ fn callback_subscription_attach_handshake_covers_early_empty_snapshot() {
     // SAFETY: the retained server remains live for the scoped race.
     let operation = unsafe { (*server).operations.enter() }.unwrap();
 
-    let subscriptions = SubscriptionRuntime::new();
+    let subscriptions = SubscriptionRuntime::<()>::new();
     let (attached_tx, attached_rx) = mpsc::sync_channel(1);
     let (release_tx, release_rx) = mpsc::sync_channel(1);
     let notifier_attached = std::thread::scope(|scope| {
         let subscriptions = &subscriptions;
         scope.spawn(move || {
             let attached =
-                ensure_server_without_handles(Some(subscriptions)).expect("attach subscriptions");
+                ensure_server_without_handles(Some(BackendSubscriptions::new(subscriptions)))
+                    .expect("attach subscriptions");
             attached_tx.send(()).unwrap();
             // An assertion on the installing side must not strand this thread.
             let _ = release_rx.recv_timeout(Duration::from_secs(2));
@@ -1691,7 +1743,10 @@ unsafe fn release_unknown(interface: NonNull<c_void>) -> u32 {
     unsafe { ((*vtable).Release)(interface.as_ptr()) }
 }
 
-fn get_test_class_factory(active: &ActiveServer) -> TestClassFactory {
+fn get_test_class_factory<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+    ensured: &super::server::EnsuredServer<E, C>,
+) -> TestClassFactory<E, C> {
+    let active = &ensured.active;
     let iid = iid_iclass_factory_from_fields();
     let mut output = ptr::null_mut();
 
@@ -1724,6 +1779,51 @@ unsafe impl RtdSubscription for DispatchTestSubscription {
         self.sink.lock().take();
         self.disconnected.store(true, Ordering::Release);
         Ok(())
+    }
+}
+
+#[cfg(feature = "rtd")]
+struct CountedComSubscription {
+    _sink: RtdSink<i32>,
+    disconnected: Arc<AtomicUsize>,
+}
+
+// SAFETY: this subscription retains only an idle sink, with no worker or
+// callback; the sink is never used again after subscribe returns.
+#[cfg(feature = "rtd")]
+unsafe impl RtdSubscription for CountedComSubscription {
+    fn request_cancel(&self) {}
+
+    fn disconnect_and_wait(self) -> XllResult<()> {
+        self.disconnected.fetch_add(1, Ordering::AcqRel);
+        Ok(())
+    }
+}
+
+#[cfg(feature = "rtd")]
+struct CountedComSource(Arc<AtomicUsize>);
+
+// SAFETY: successful subscribe transfers its sole sink into the returned
+// owner, and publication errors retain no sink or background activity.
+#[cfg(feature = "rtd")]
+unsafe impl RtdSource for CountedComSource {
+    type Value = i32;
+    type Subscription = CountedComSubscription;
+
+    fn subscribe(&self, _: &RtdTopic, sink: RtdSink<i32>) -> XllResult<Self::Subscription> {
+        sink.publish(7)?;
+        Ok(CountedComSubscription {
+            _sink: sink,
+            disconnected: Arc::clone(&self.0),
+        })
+    }
+}
+
+#[cfg(feature = "rtd")]
+crate::rtd_subscriptions! {
+    enum MixedComSubscriptions {
+        Dispatch(DispatchTestSubscription),
+        Counted(CountedComSubscription),
     }
 }
 
@@ -1832,8 +1932,8 @@ fn notification_worker_is_drained_before_callback_retirement() {
 
     let _guard = TEST_LOCK.lock().unwrap();
     let handles = FormulaHandleService::new(4);
-    let ensured = ensure_server(Some(&handles), None).unwrap();
-    let server = ensured.active.pointer as *mut RtdServer;
+    let ensured = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
+    let server = ensured.pointer();
     // SAFETY: ACTIVE_SERVER and ensured retain the allocation through cleanup.
     let server_ref = unsafe { &*server };
     let operations = triomphe::Arc::clone(&server_ref.operations);
@@ -1882,8 +1982,8 @@ fn successful_refresh_acknowledges_the_notification_worker() {
     let _guard = TEST_LOCK.lock().unwrap();
     let _apartment = TestComApartment::enter();
     let handles = FormulaHandleService::new(4);
-    let ensured = ensure_server(Some(&handles), None).unwrap();
-    let server = ensured.active.pointer as *mut RtdServer;
+    let ensured = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
+    let server = ensured.pointer();
     // SAFETY: ACTIVE_SERVER and ensured retain the allocation through cleanup.
     let server_ref = unsafe { &*server };
     let pump = NotificationPump::start(|| Ok(())).unwrap();
@@ -1932,7 +2032,13 @@ fn refresh_data_converts_panics_to_e_unexpected() {
     assert_eq!(
         // SAFETY: the injected panic occurs before RefreshData reads any of the
         // supplied COM pointers.
-        unsafe { refresh_data(ptr::null_mut(), &mut topic_count, &mut result) },
+        unsafe {
+            refresh_data::<(), crate::DynamicRtdSources<()>>(
+                ptr::null_mut(),
+                &mut topic_count,
+                &mut result,
+            )
+        },
         E_UNEXPECTED
     );
 }
@@ -2408,12 +2514,12 @@ fn topic_key_from_safearray_handles_single_and_rejects_multi_or_invalid_dimensio
 fn standard_com_activation_exposes_unknown_dispatch_and_rtd_server() {
     let _guard = TEST_LOCK.lock().unwrap();
     let handles = FormulaHandleService::new(4);
-    let ensured = ensure_server(Some(&handles), None).unwrap();
+    let ensured = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
     assert!(ensured.newly_created);
 
     // SAFETY: ACTIVE_SERVER and `ensured` retain the RTD server while the
     // factory and queried interfaces are exercised and released.
-    let factory = get_test_class_factory(&ensured.active);
+    let factory = get_test_class_factory(&ensured);
     // Read the first pointer-sized slot, not a Rust field projection, for
     // every factory dispatch. The Windows CI matrix runs this on x86 and x64.
     for iid in [iid_iunknown_from_fields(), iid_iclass_factory_from_fields()] {
@@ -2478,10 +2584,10 @@ fn standard_com_activation_exposes_unknown_dispatch_and_rtd_server() {
 fn create_instance_nulls_output_on_every_rejected_request() {
     let _guard = TEST_LOCK.lock().unwrap();
     let handles = FormulaHandleService::new(4);
-    let ensured = ensure_server(Some(&handles), None).unwrap();
+    let ensured = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
 
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server for the test.
-    let factory = get_test_class_factory(&ensured.active);
+    let factory = get_test_class_factory(&ensured);
     // SAFETY: `factory` is a live IClassFactory pointer.
     let create_instance = factory.vtable().create_instance;
     let unknown_iid = iid_iunknown_from_fields();
@@ -2560,7 +2666,7 @@ fn create_instance_nulls_output_on_every_rejected_request() {
 fn com_query_failures_clear_stale_output_pointers() {
     let _guard = TEST_LOCK.lock().unwrap();
     let handles = FormulaHandleService::new(4);
-    let ensured = ensure_server(Some(&handles), None).unwrap();
+    let ensured = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
     let class_factory_iid = iid_iclass_factory_from_fields();
     let unknown_iid = iid_iunknown_from_fields();
     let unsupported_iid = GUID {
@@ -2617,7 +2723,7 @@ fn com_query_failures_clear_stale_output_pointers() {
     assert!(output.is_null());
 
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server for the test.
-    let factory = get_test_class_factory(&ensured.active);
+    let factory = get_test_class_factory(&ensured);
     // SAFETY: `factory` is a live IClassFactory pointer.
     let factory_query = factory.vtable().query_interface;
 
@@ -2662,7 +2768,7 @@ fn com_query_failures_clear_stale_output_pointers() {
         S_OK
     );
     let server_unknown = TestUnknownReference::new(server_unknown);
-    let server = server_unknown.cast::<RtdServer>();
+    let server = server_unknown.server(&ensured);
     // SAFETY: CreateInstance returned the RtdServer identity pointer.
     let server_query = unsafe { (*server.as_ref().vtable).query_interface };
 
@@ -2703,11 +2809,11 @@ fn com_query_failures_clear_stale_output_pointers() {
 fn idispatch_resolves_names_and_invokes_heartbeat() {
     let _guard = TEST_LOCK.lock().unwrap();
     let handles = FormulaHandleService::new(4);
-    let ensured = ensure_server(Some(&handles), None).unwrap();
+    let ensured = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
 
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server while its COM
     // interfaces are used below.
-    let factory = get_test_class_factory(&ensured.active);
+    let factory = get_test_class_factory(&ensured);
     let dispatch_iid = iid_idispatch_from_fields();
     let mut dispatch = ptr::null_mut();
     assert_eq!(
@@ -2723,7 +2829,7 @@ fn idispatch_resolves_names_and_invokes_heartbeat() {
         S_OK
     );
     let dispatch = TestUnknownReference::new(dispatch);
-    let server = dispatch.cast::<RtdServer>();
+    let server = dispatch.server(&ensured);
     // SAFETY: the IDispatch pointer is the RtdServer's identity pointer.
     let vtable = unsafe { server.as_ref().vtable };
 
@@ -2878,10 +2984,10 @@ fn idispatch_resolves_names_and_invokes_heartbeat() {
 fn idispatch_validates_flags_counts_types_and_reversed_arguments() {
     let _guard = TEST_LOCK.lock().unwrap();
     let handles = FormulaHandleService::new(4);
-    let ensured = ensure_server(Some(&handles), None).unwrap();
+    let ensured = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
 
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server for the test.
-    let factory = get_test_class_factory(&ensured.active);
+    let factory = get_test_class_factory(&ensured);
     let dispatch_iid = iid_idispatch_from_fields();
     let mut dispatch = ptr::null_mut();
     assert_eq!(
@@ -2897,7 +3003,7 @@ fn idispatch_validates_flags_counts_types_and_reversed_arguments() {
         S_OK
     );
     let dispatch = TestUnknownReference::new(dispatch);
-    let server = dispatch.cast::<RtdServer>();
+    let server = dispatch.server(&ensured);
     // SAFETY: the IDispatch pointer is the RtdServer's identity pointer.
     let vtable = unsafe { server.as_ref().vtable };
     let null_iid = iid_null_from_fields();
@@ -3117,13 +3223,15 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
     let _guard = TEST_LOCK.lock().unwrap();
     let disconnected = Arc::new(AtomicBool::new(false));
     let source = DispatchTestSource::new(Arc::clone(&disconnected));
-    let (arena, source_handle) = crate::subscription::SourceArena::with_source(
-        crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
-        source.clone(),
-    )
-    .unwrap();
+    let (arena, source_handle) =
+        crate::subscription::SourceArena::<DispatchTestSubscription>::with_source(
+            crate::generation::RuntimeGeneration::new(1).expect("test generation is non-zero"),
+            source.clone(),
+        )
+        .unwrap();
     let subscriptions = SubscriptionRuntime::with_sources_for_internal(arena);
-    let ensured = ensure_server_without_handles(Some(&subscriptions)).unwrap();
+    let ensured =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
     let _generation = ensured.active.generation;
     let handle = ensured.subscription_server.unwrap();
 
@@ -3133,17 +3241,19 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
             RtdTopic::single("dispatch-refresh").unwrap().borrowed(),
         )
         .unwrap();
-    let conn = subscriptions
-        .connect_transaction(&handle, crate::subscription::TopicId(77), prepared.id())
-        .unwrap();
-    assert_eq!(conn.value(), &StoredRtdValue::Number(12.5));
-    conn.commit().unwrap();
+    let mut initial = connect_subscription_backend(&ensured, 77, *prepared.key());
+    // SAFETY: the production adapter wrote and committed a valid VARIANT.
+    unsafe {
+        assert_eq!(initial.Anonymous.Anonymous.vt, VT_R8);
+        assert_eq!(initial.Anonymous.Anonymous.Anonymous.dblVal, 12.5);
+        assert_eq!(VariantClear(&mut initial), S_OK);
+    }
     drop(prepared);
     assert_eq!(handle.pending_update_count(), 0);
 
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server while the
     // factory and dispatch interface are used.
-    let factory = get_test_class_factory(&ensured.active);
+    let factory = get_test_class_factory(&ensured);
     let dispatch_iid = iid_idispatch_from_fields();
     let mut dispatch = ptr::null_mut();
     assert_eq!(
@@ -3159,7 +3269,7 @@ fn idispatch_refresh_transfers_safearray_and_terminate_quiesces_subscription() {
         S_OK
     );
     let dispatch = TestUnknownReference::new(dispatch);
-    let server = dispatch.cast::<RtdServer>();
+    let server = dispatch.server(&ensured);
     // SAFETY: CreateInstance returned the RtdServer identity pointer.
     let vtable = unsafe { server.as_ref().vtable };
     let null_iid = iid_null_from_fields();
@@ -3312,9 +3422,9 @@ fn sta_disconnect_returns_before_notification_dispatch_and_termination_drains_cl
             should_uninitialize: true,
             _not_send_or_sync: PhantomData,
         };
-        let registration = crate::subscription::SourceRegistration::new(
-            crate::generation::RuntimeGeneration::new(1).unwrap(),
-        );
+        let registration = crate::subscription::SourceRegistration::<
+            crate::subscription::RtdChannelSubscription,
+        >::new(crate::generation::RuntimeGeneration::new(1).unwrap());
         let (sender_tx, sender_rx) = mpsc::sync_channel(1);
         let source = registration
             .register(crate::subscription::RtdChannelSource::new(
@@ -3330,7 +3440,8 @@ fn sta_disconnect_returns_before_notification_dispatch_and_termination_drains_cl
             ))
             .unwrap();
         let subscriptions = SubscriptionRuntime::with_sources_for_internal(registration.finish());
-        let ensured = ensure_server_without_handles(Some(&subscriptions)).unwrap();
+        let ensured =
+            ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
         let handle = ensured.subscription_server.unwrap();
         let prepared = subscriptions
             .prepare(
@@ -3338,11 +3449,9 @@ fn sta_disconnect_returns_before_notification_dispatch_and_termination_drains_cl
                 RtdTopic::single("sta-disconnect").unwrap().borrowed(),
             )
             .unwrap();
-        handle
-            .connect_transaction(crate::subscription::TopicId(1), prepared.id())
-            .unwrap()
-            .commit()
-            .unwrap();
+        let mut initial = connect_subscription_backend(&ensured, 1, *prepared.key());
+        // SAFETY: the adapter returned a committed, initialized VARIANT.
+        assert_eq!(unsafe { VariantClear(&mut initial) }, S_OK);
         prepared.commit();
         let sender = sender_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         let (entered_tx, entered_rx) = mpsc::channel();
@@ -3357,7 +3466,7 @@ fn sta_disconnect_returns_before_notification_dispatch_and_termination_drains_cl
             .unwrap();
         sender.try_send(1).unwrap();
         entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        let server = ensured.active.pointer as *mut RtdServer;
+        let server = ensured.pointer();
         // SAFETY: `ensured` and ACTIVE_SERVER retain this live COM server.
         assert_eq!(unsafe { disconnect_data(server, 1) }, S_OK);
         assert_eq!(handle.pending_update_count(), 0);
@@ -3479,17 +3588,18 @@ fn sta_final_remove_dispatches_com_before_ingress_drain_and_coalesces_reentry() 
         };
         let _guard = TEST_LOCK.lock().unwrap();
         close_test_ingress();
-        let fixture = crate::runtime::StaticTestRuntime::<()>::new();
+        let fixture = crate::runtime::StaticTestRuntime::<ChannelOwnerAddin>::new();
         let runtime = fixture.runtime();
         runtime
             .ensure_module_residency(
-                crate::boundary::host::host_auto_remove::<()>
-                    as fn(&crate::runtime::Runtime<()>) -> i32 as *const (),
+                crate::boundary::host::host_auto_remove::<ChannelOwnerAddin>
+                    as fn(&crate::runtime::Runtime<ChannelOwnerAddin>) -> i32
+                    as *const (),
             )
             .unwrap();
-        let registration = crate::subscription::SourceRegistration::new(
-            crate::generation::RuntimeGeneration::new(1).unwrap(),
-        );
+        let registration = crate::subscription::SourceRegistration::<
+            crate::subscription::RtdChannelSubscription,
+        >::new(crate::generation::RuntimeGeneration::new(1).unwrap());
         let (sender_tx, sender_rx) = mpsc::sync_channel(1);
         let source = registration
             .register(crate::subscription::RtdChannelSource::new(
@@ -3509,19 +3619,18 @@ fn sta_final_remove_dispatches_com_before_ingress_drain_and_coalesces_reentry() 
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
         let ensured = runtime
             .with_subscriptions(|subscriptions| {
-                let ensured = ensure_server_without_handles(Some(subscriptions)).unwrap();
-                let handle = ensured.subscription_server.unwrap();
+                let ensured =
+                    ensure_server_without_handles(Some(BackendSubscriptions::new(subscriptions)))
+                        .unwrap();
                 let prepared = subscriptions
                     .prepare(
                         &source,
                         RtdTopic::single("final-remove").unwrap().borrowed(),
                     )
                     .unwrap();
-                handle
-                    .connect_transaction(crate::subscription::TopicId(1), prepared.id())
-                    .unwrap()
-                    .commit()
-                    .unwrap();
+                let mut initial = connect_subscription_backend(&ensured, 1, *prepared.key());
+                // SAFETY: the adapter returned a committed, initialized VARIANT.
+                assert_eq!(unsafe { VariantClear(&mut initial) }, S_OK);
                 prepared.commit();
                 ensured
             })
@@ -3539,7 +3648,7 @@ fn sta_final_remove_dispatches_com_before_ingress_drain_and_coalesces_reentry() 
         sender.try_send(1).unwrap();
         entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         // SAFETY: ACTIVE_SERVER and this reference retain the live server.
-        let status = unsafe { disconnect_data(ensured.active.pointer as *mut RtdServer, 1) };
+        let status = unsafe { disconnect_data(ensured.pointer(), 1) };
         assert_eq!(status, S_OK);
         // Final removal must be allowed to reclaim its COM object count.
         drop(ensured);
@@ -3623,7 +3732,7 @@ fn sta_final_remove_dispatches_com_before_ingress_drain_and_coalesces_reentry() 
 fn wrong_clsid_is_not_served() {
     let _guard = TEST_LOCK.lock().unwrap();
     let handles = FormulaHandleService::new(4);
-    let _active = ensure_server(Some(&handles), None).unwrap();
+    let _active = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
     let wrong = GUID {
         data1: 1,
         ..GUID::default()
@@ -3652,16 +3761,17 @@ fn wrong_clsid_is_not_served() {
 fn existing_server_attaches_each_backend_without_replacement() {
     let _guard = TEST_LOCK.lock().unwrap();
     let handles = FormulaHandleService::new(4);
-    let subscriptions = SubscriptionRuntime::new();
+    let subscriptions = SubscriptionRuntime::<()>::new();
 
-    let first = ensure_server(Some(&handles), None).unwrap();
+    let first = ensure_server::<(), crate::DynamicRtdSources<()>>(Some(&handles), None).unwrap();
     assert!(first.newly_created);
 
-    let second = ensure_server_without_handles(Some(&subscriptions)).unwrap();
+    let second =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
     assert!(!second.newly_created);
     assert_eq!(first.active.pointer, second.active.pointer);
 
-    let server = second.active.pointer as *mut RtdServer;
+    let server = second.pointer();
 
     // SAFETY: ACTIVE_SERVER owns a live reference and both EnsuredServer
     // guards retain additional temporary references for this test.
@@ -3678,7 +3788,7 @@ fn existing_server_attaches_each_backend_without_replacement() {
         backends
             .subscriptions
             .as_ref()
-            .is_some_and(|active| std::ptr::eq(active.0.as_ptr(), &subscriptions))
+            .is_some_and(|active| active.is_runtime(&subscriptions))
     );
     drop(backends);
     drop(second);
@@ -3693,8 +3803,9 @@ fn repeated_ensure_server_calls_do_not_rearm_subscription_notifications() {
     let (arena, source, sink, _) = crate::subscription::tests::publishing_source::<f64>(None);
     let subscriptions = SubscriptionRuntime::with_sources_for_internal(arena);
 
-    let ensured = ensure_server_without_handles(Some(&subscriptions)).unwrap();
-    let server = ensured.active.pointer as *mut RtdServer;
+    let ensured =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
+    let server = ensured.pointer();
 
     let callback = Box::new(RetainedUpdateCallback {
         cookie: None,
@@ -3717,12 +3828,11 @@ fn repeated_ensure_server_calls_do_not_rearm_subscription_notifications() {
     let prepared = subscriptions
         .prepare(&source, RtdTopic::single("ensure-test").unwrap().borrowed())
         .unwrap();
-    let id = prepared.id();
+    let key = *prepared.key();
     prepared.commit();
-    let conn = subscriptions
-        .connect_transaction(handle, crate::subscription::TopicId(1), id)
-        .unwrap();
-    conn.commit().unwrap();
+    let mut initial = connect_subscription_backend(&ensured, 1, key);
+    // SAFETY: the adapter returned a committed, initialized VARIANT.
+    assert_eq!(unsafe { VariantClear(&mut initial) }, S_OK);
 
     let sink = sink.lock().clone().unwrap();
     sink.publish(1.0).unwrap();
@@ -3730,12 +3840,160 @@ fn repeated_ensure_server_calls_do_not_rearm_subscription_notifications() {
     assert_eq!(notifier_state.calls.load(Ordering::SeqCst), 1);
 
     for _ in 0..100 {
-        let _res = ensure_server_without_handles(Some(&subscriptions)).unwrap();
+        let _res =
+            ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
     }
 
     assert_eq!(notifier_state.calls.load(Ordering::SeqCst), 1);
     drop(ensured);
     shutdown_subscriptions(&subscriptions).unwrap();
+}
+
+#[cfg(feature = "rtd")]
+type MixedComSources = (DispatchTestSource, CountedComSource);
+
+#[test]
+#[cfg(feature = "rtd")]
+fn typed_com_port_keeps_mixed_owners_and_rolls_back_failed_value_conversion() {
+    use super::subscription_backend::FAIL_NEXT_SUBSCRIPTION_WRITE;
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    let _apartment = TestComApartment::enter();
+    let _reset_failure = scopeguard::guard((), |()| {
+        FAIL_NEXT_SUBSCRIPTION_WRITE.store(false, Ordering::Release);
+    });
+    let first_disconnected = Arc::new(AtomicBool::new(false));
+    let second_disconnected = Arc::new(AtomicUsize::new(0));
+    let registration = crate::subscription::SourceRegistration::<
+        MixedComSubscriptions,
+        MixedComSources,
+    >::new(crate::generation::RuntimeGeneration::new(1).unwrap());
+    let (first, second) = registration
+        .register_sources((
+            DispatchTestSource::new(Arc::clone(&first_disconnected)),
+            CountedComSource(Arc::clone(&second_disconnected)),
+        ))
+        .unwrap();
+    let subscriptions =
+        SubscriptionRuntime::<MixedComSubscriptions, MixedComSources>::with_sources_for_internal(
+            registration.finish(),
+        );
+    super::server_type::register_server_type::<MixedComSubscriptions, MixedComSources>().unwrap();
+    #[cfg(feature = "handles")]
+    let handles = FormulaHandleService::new(4);
+    #[cfg(feature = "handles")]
+    let handle_first =
+        ensure_server::<MixedComSubscriptions, MixedComSources>(Some(&handles), None).unwrap();
+    #[cfg(feature = "handles")]
+    assert!(handle_first.subscription_server.is_none());
+    let backend = BackendSubscriptions::new(&subscriptions);
+    assert!(backend.is_runtime(&subscriptions));
+    let ensured = ensure_server_without_handles(Some(backend)).unwrap();
+    #[cfg(feature = "handles")]
+    assert_eq!(handle_first.active.pointer, ensured.active.pointer);
+    let retained_factory = get_test_class_factory(&ensured);
+    // A different add-in type cannot reinterpret this allocation or replace
+    // its installed constructor while it is the active generation.
+    assert!(
+        super::server_type::register_server_type::<(), crate::DynamicRtdSources<()>>().is_err()
+    );
+    assert!(ensure_server_without_handles::<(), crate::DynamicRtdSources<()>>(None).is_err());
+    // Equal owner enums cannot reinterpret a server with a different catalog.
+    assert!(
+        ensure_server_without_handles::<
+            MixedComSubscriptions,
+            crate::DynamicRtdSources<MixedComSubscriptions>,
+        >(None)
+        .is_err()
+    );
+
+    let repeated =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
+    assert_eq!(ensured.active.pointer, repeated.active.pointer);
+
+    let prepared = subscriptions
+        .prepare(&first, RtdTopic::single("mixed-first").unwrap().borrowed())
+        .unwrap();
+    let mut initial = connect_subscription_backend(&ensured, 81, *prepared.key());
+    // SAFETY: the concrete port wrote this initialized numeric VARIANT.
+    unsafe {
+        assert_eq!(initial.Anonymous.Anonymous.vt, VT_R8);
+        assert_eq!(initial.Anonymous.Anonymous.Anonymous.dblVal, 12.5);
+        assert_eq!(VariantClear(&mut initial), S_OK);
+    }
+    prepared.commit();
+
+    let prepared = subscriptions
+        .prepare(
+            &second,
+            RtdTopic::single("mixed-second").unwrap().borrowed(),
+        )
+        .unwrap();
+    let key = *prepared.key();
+    let server = ensured.pointer();
+    // SAFETY: ensured retains this COM allocation through the admitted call.
+    let operation = unsafe { (*server).operations.enter() }.unwrap();
+    FAIL_NEXT_SUBSCRIPTION_WRITE.store(true, Ordering::Release);
+    let mut initial = VARIANT::default();
+    // SAFETY: initialized output storage and the admitted COM reference retain
+    // the real erased port while its typed transaction rolls back.
+    let status = unsafe {
+        ensured.subscription_server.unwrap().connect_data(
+            crate::subscription::TopicId(82),
+            key,
+            &mut initial,
+        )
+    };
+    drop(operation);
+    assert_eq!(status, E_FAIL);
+    assert!(!FAIL_NEXT_SUBSCRIPTION_WRITE.load(Ordering::Acquire));
+    // SAFETY: failure occurred before VARIANT publication.
+    unsafe { assert_eq!(initial.Anonymous.Anonymous.vt, VT_EMPTY) };
+    assert_eq!(second_disconnected.load(Ordering::Acquire), 1);
+    assert!(!first_disconnected.load(Ordering::Acquire));
+
+    // The same identity/topic can retry after only the failed connection was
+    // rolled back. The first enum variant remains connected throughout.
+    let mut initial = connect_subscription_backend(&ensured, 82, key);
+    // SAFETY: the retried concrete transaction committed this numeric VARIANT.
+    unsafe {
+        assert_eq!(initial.Anonymous.Anonymous.vt, VT_R8);
+        assert_eq!(initial.Anonymous.Anonymous.Anonymous.dblVal, 7.0);
+        assert_eq!(VariantClear(&mut initial), S_OK);
+    }
+    prepared.commit();
+    shutdown_subscriptions(&subscriptions).unwrap();
+    #[cfg(feature = "handles")]
+    shutdown(&handles).unwrap();
+    assert!(first_disconnected.load(Ordering::Acquire));
+    assert_eq!(second_disconnected.load(Ordering::Acquire), 2);
+    // The detached COM allocation outlives its typed runtime; the inline
+    // copied handle is cleared and final Release must not touch that runtime.
+    drop(subscriptions);
+    super::server_type::register_server_type::<(), crate::DynamicRtdSources<()>>().unwrap();
+    let replacement =
+        ensure_server_without_handles::<(), crate::DynamicRtdSources<()>>(None).unwrap();
+    assert_ne!(replacement.active.generation, ensured.active.generation);
+    let mut instance = ptr::null_mut();
+    // SAFETY: the old factory retains its original concrete allocation even
+    // after a new generation has selected a different subscription owner type.
+    let status = unsafe {
+        (retained_factory.vtable().create_instance)(
+            retained_factory.as_ptr(),
+            ptr::null_mut(),
+            &IID_IRTD_SERVER,
+            &mut instance,
+        )
+    };
+    assert_eq!(status, E_FAIL);
+    assert!(instance.is_null());
+    drop(retained_factory);
+    #[cfg(feature = "handles")]
+    drop(handle_first);
+    drop(repeated);
+    drop(ensured);
+    discard_unpublished_server(replacement.active.pointer, true);
+    drop(replacement);
 }
 
 #[test]
@@ -4009,23 +4267,25 @@ fn scavenger_preserves_registrations_with_inconsistent_ownership_links() {
 #[test]
 fn failed_observation_before_server_start_releases_global_owner_and_backends() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let subscriptions = SubscriptionRuntime::new();
-    let retained = ensure_server_without_handles(Some(&subscriptions)).unwrap();
+    let subscriptions = SubscriptionRuntime::<()>::new();
+    let retained =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
     let observation = super::server::ServerObservation::begin(
-        ensure_server_without_handles(Some(&subscriptions)).unwrap(),
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap(),
     )
     .unwrap();
     drop(observation); // models any preparation/host.invoke/decoder error
     assert!(ACTIVE_SERVER.lock().is_none());
     // SAFETY: retained owns the last COM reference after rollback.
-    let server = unsafe { &*(retained.active.pointer as *mut RtdServer) };
+    let server = unsafe { &*(retained.pointer()) };
     assert_eq!(server.references.load(Ordering::Acquire), 1);
     assert_eq!(
         server.operations.state.lock().phase,
         ServerPhase::Terminated
     );
     assert!(server.backends.lock().subscriptions.is_none());
-    let replacement = ensure_server_without_handles(Some(&subscriptions)).unwrap();
+    let replacement =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
     assert_ne!(replacement.active.generation, retained.active.generation);
     shutdown_subscriptions(&subscriptions).unwrap();
 }
@@ -4033,14 +4293,15 @@ fn failed_observation_before_server_start_releases_global_owner_and_backends() {
 #[test]
 fn failed_observation_after_failed_start_disposes_callback_exactly_once() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let subscriptions = SubscriptionRuntime::new();
-    let retained = ensure_server_without_handles(Some(&subscriptions)).unwrap();
+    let subscriptions = SubscriptionRuntime::<()>::new();
+    let retained =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
     let observation = super::server::ServerObservation::begin(
-        ensure_server_without_handles(Some(&subscriptions)).unwrap(),
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap(),
     )
     .unwrap();
     // SAFETY: retained keeps the server live through the final assertions.
-    let server = unsafe { &*(retained.active.pointer as *mut RtdServer) };
+    let server = unsafe { &*(retained.pointer()) };
     let drops = Arc::new(AtomicUsize::new(0));
     let tracked = Arc::clone(&drops);
     install_callback(
@@ -4067,14 +4328,15 @@ fn failed_observation_after_failed_start_disposes_callback_exactly_once() {
 #[test]
 fn failed_observation_during_server_start_defers_teardown_until_com_call_exits() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let subscriptions = SubscriptionRuntime::new();
-    let retained = ensure_server_without_handles(Some(&subscriptions)).unwrap();
+    let subscriptions = SubscriptionRuntime::<()>::new();
+    let retained =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
     let observation = super::server::ServerObservation::begin(
-        ensure_server_without_handles(Some(&subscriptions)).unwrap(),
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap(),
     )
     .unwrap();
     // SAFETY: retained keeps the server live while its admitted COM method runs.
-    let server = unsafe { &*(retained.active.pointer as *mut RtdServer) };
+    let server = unsafe { &*(retained.pointer()) };
     let operation = server.operations.enter().unwrap();
     let start = ServerStartReservation::acquire(&server.start_state).unwrap();
     drop(observation);
@@ -4086,7 +4348,8 @@ fn failed_observation_during_server_start_defers_teardown_until_com_call_exits()
     assert!(server.backends.lock().subscriptions.is_some());
     drop(start);
     drop(operation);
-    let replacement = ensure_server_without_handles(Some(&subscriptions)).unwrap();
+    let replacement =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
     assert_ne!(replacement.active.generation, retained.active.generation);
     assert_eq!(server.references.load(Ordering::Acquire), 1);
     assert!(server.backends.lock().subscriptions.is_none());
@@ -4096,14 +4359,15 @@ fn failed_observation_during_server_start_defers_teardown_until_com_call_exits()
 #[test]
 fn failed_observation_after_successful_start_preserves_com_publication_until_shutdown() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let subscriptions = SubscriptionRuntime::new();
-    let retained = ensure_server_without_handles(Some(&subscriptions)).unwrap();
+    let subscriptions = SubscriptionRuntime::<()>::new();
+    let retained =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
     let observation = super::server::ServerObservation::begin(
-        ensure_server_without_handles(Some(&subscriptions)).unwrap(),
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap(),
     )
     .unwrap();
     // SAFETY: retained keeps the server live through observation and shutdown.
-    let server = unsafe { &*(retained.active.pointer as *mut RtdServer) };
+    let server = unsafe { &*(retained.pointer()) };
     ServerStartReservation::acquire(&server.start_state)
         .unwrap()
         .commit();
@@ -4113,7 +4377,8 @@ fn failed_observation_after_successful_start_preserves_com_publication_until_shu
         retained.active.pointer
     );
     assert_eq!(server.references.load(Ordering::Acquire), 2);
-    let retry = ensure_server_without_handles(Some(&subscriptions)).unwrap();
+    let retry =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
     assert!(!retry.newly_created);
     drop(retry);
     shutdown_subscriptions(&subscriptions).unwrap();
@@ -4125,14 +4390,14 @@ fn failed_observation_after_successful_start_preserves_com_publication_until_shu
 #[test]
 fn concurrent_observations_keep_server_until_last_failure_and_preserve_success() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let subscriptions = SubscriptionRuntime::new();
+    let subscriptions = SubscriptionRuntime::<()>::new();
     for commit_second in [false, true] {
         let first = super::server::ServerObservation::begin(
-            ensure_server_without_handles(Some(&subscriptions)).unwrap(),
+            ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap(),
         )
         .unwrap();
         let mut second = super::server::ServerObservation::begin(
-            ensure_server_without_handles(Some(&subscriptions)).unwrap(),
+            ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap(),
         )
         .unwrap();
         drop(first);
@@ -4150,14 +4415,15 @@ fn concurrent_observations_keep_server_until_last_failure_and_preserve_success()
 #[test]
 fn observation_rollback_racing_shutdown_releases_server_reference_once() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let subscriptions = SubscriptionRuntime::new();
-    let retained = ensure_server_without_handles(Some(&subscriptions)).unwrap();
+    let subscriptions = SubscriptionRuntime::<()>::new();
+    let retained =
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
     let observation = super::server::ServerObservation::begin(
-        ensure_server_without_handles(Some(&subscriptions)).unwrap(),
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap(),
     )
     .unwrap();
     // SAFETY: retained outlives the scoped shutdown and rollback.
-    let server = unsafe { &*(retained.active.pointer as *mut RtdServer) };
+    let server = unsafe { &*(retained.pointer()) };
     thread::scope(|scope| {
         let worker = scope.spawn(|| shutdown_subscriptions(&subscriptions));
         while server.operations.state.lock().phase == ServerPhase::Open {
@@ -4174,7 +4440,7 @@ fn observation_rollback_racing_shutdown_releases_server_reference_once() {
 #[test]
 fn foreign_subscription_key_is_rejected_before_server_allocation() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let subscriptions = SubscriptionRuntime::new();
+    let subscriptions = SubscriptionRuntime::<()>::new();
     let foreign_key = crate::subscription::SubscriptionKey::from_allocated_id(0, 1);
     let callbacks = crate::host_callback::HostCallbackSession::new();
     let host = crate::host_api::ExcelHost::new(&callbacks);
@@ -4189,19 +4455,19 @@ fn foreign_subscription_key_is_rejected_before_server_allocation() {
 #[test]
 fn observation_admission_detects_reentrant_failed_start_recovery() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let subscriptions = SubscriptionRuntime::new();
+    let subscriptions = SubscriptionRuntime::<()>::new();
     let observation = super::server::ServerObservation::begin(
-        ensure_server_without_handles(Some(&subscriptions)).unwrap(),
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap(),
     )
     .unwrap();
-    let pointer = observation.server().active.pointer as *mut RtdServer;
+    let pointer = observation.server().pointer();
     // SAFETY: observation owns a live reference and operation admission.
     let server = unsafe { &*pointer };
     let mut start = ServerStartReservation::acquire(&server.start_state).unwrap();
     start.callback_published();
     drop(start);
     assert!(matches!(
-        ensure_server_without_handles(Some(&subscriptions)),
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))),
         Err(XllError::Closing)
     ));
     // Recovery must return rather than wait for this same thread's observation.
@@ -4213,9 +4479,9 @@ fn observation_admission_detects_reentrant_failed_start_recovery() {
 #[test]
 fn observations_on_different_threads_retire_only_after_last_failure() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let subscriptions = SubscriptionRuntime::new();
+    let subscriptions = SubscriptionRuntime::<()>::new();
     let first = super::server::ServerObservation::begin(
-        ensure_server_without_handles(Some(&subscriptions)).unwrap(),
+        ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap(),
     )
     .unwrap();
     thread::scope(|scope| {
@@ -4224,7 +4490,8 @@ fn observations_on_different_threads_retire_only_after_last_failure() {
         let subscriptions = &subscriptions;
         let worker = scope.spawn(move || {
             let second = super::server::ServerObservation::begin(
-                ensure_server_without_handles(Some(subscriptions)).unwrap(),
+                ensure_server_without_handles(Some(BackendSubscriptions::new(subscriptions)))
+                    .unwrap(),
             )
             .unwrap();
             admitted_tx.send(()).unwrap();
@@ -4249,11 +4516,12 @@ fn failed_excel_rtd_invocation_rolls_back_subscription_observation() {
 
     let _guard = TEST_LOCK.lock().unwrap();
     let source = DispatchTestSource::new(Arc::new(AtomicBool::new(false)));
-    let (arena, source_handle) = crate::subscription::SourceArena::with_source(
-        crate::generation::RuntimeGeneration::new(1).unwrap(),
-        source,
-    )
-    .unwrap();
+    let (arena, source_handle) =
+        crate::subscription::SourceArena::<DispatchTestSubscription>::with_source(
+            crate::generation::RuntimeGeneration::new(1).unwrap(),
+            source,
+        )
+        .unwrap();
     let subscriptions = SubscriptionRuntime::with_sources_for_internal(arena);
     let prepared = subscriptions
         .prepare(
@@ -4281,4 +4549,47 @@ fn failed_excel_rtd_invocation_rolls_back_subscription_observation() {
     script.assert_calls(&[XL_GET_NAME, XLF_RTD]);
     drop(prepared);
     shutdown_subscriptions(&subscriptions).unwrap();
+}
+
+#[cfg(all(feature = "rtd", feature = "handles"))]
+#[test]
+fn installed_nonunit_constructor_handles_first_observation_and_rolls_back() {
+    use crate::registration::host::test_support::{CallbackScript, Reply};
+    use xlfn_sys::{XL_GET_NAME, XLOPER12, XLRET_FAILED};
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    let handles = FormulaHandleService::new(4);
+    super::server_type::register_server_type::<MixedComSubscriptions, MixedComSources>().unwrap();
+    let script =
+        CallbackScript::install(
+            [Reply::success(XL_GET_NAME, XLOPER12::nil()).status(XLRET_FAILED)],
+        );
+    script.on_call(XL_GET_NAME, || {
+        let active = ACTIVE_SERVER.lock();
+        let active = active
+            .as_ref()
+            .expect("handle observation created the server");
+        assert_eq!(
+            active.subscription_type,
+            std::any::TypeId::of::<(MixedComSubscriptions, MixedComSources)>()
+        );
+    });
+    let callbacks = crate::host_callback::HostCallbackSession::new();
+    let host = crate::host_api::ExcelHost::new(&callbacks);
+    assert!(
+        super::server_type::observe(
+            &handles,
+            crate::module_runtime::ingress(),
+            "unused-key",
+            "unused-token",
+            host,
+        )
+        .is_err()
+    );
+    // Failure precedes claim_lifetime, yet the typed COM shell must still
+    // complete the observation retirement protocol and release ACTIVE_SERVER.
+    assert!(ACTIVE_SERVER.lock().is_none());
+    script.assert_calls(&[XL_GET_NAME]);
+    shutdown(&handles).unwrap();
+    super::server_type::register_server_type::<(), crate::DynamicRtdSources<()>>().unwrap();
 }

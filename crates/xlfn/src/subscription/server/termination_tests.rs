@@ -119,7 +119,7 @@ unsafe impl RtdSource for ObservedSource {
 fn observed_runtime(
     observation: &Arc<Observation>,
 ) -> (
-    SubscriptionRuntime<RtdSubscriptionHost>,
+    SubscriptionRuntime<RtdSubscriptionHost, ObservedSubscription>,
     RtdSourceHandle<ObservedSource>,
 ) {
     let (arena, source) = SourceArena::with_source(
@@ -136,8 +136,8 @@ fn observed_runtime(
 }
 
 fn seed(
-    runtime: &SubscriptionRuntime<RtdSubscriptionHost>,
-    server: &SubscriptionServerHandle<RtdSubscriptionHost>,
+    runtime: &SubscriptionRuntime<RtdSubscriptionHost, ObservedSubscription>,
+    server: &SubscriptionServerHandle<RtdSubscriptionHost, ObservedSubscription>,
     id: usize,
     source: &RtdSourceHandle<ObservedSource>,
     panic_on_cancel: bool,

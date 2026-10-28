@@ -38,7 +38,7 @@ pub(crate) fn open_addin_inner<'runtime, A>(
     runtime: &'runtime Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     build_info: BuildInfo,
     descriptors: &[RegistrationDescriptor],
-    mut transaction: OpeningTxn<'runtime, A, HostAttached>,
+    mut transaction: OpeningTxn<'runtime, A, HostAttached<A>>,
 ) -> StagedOpenResult<'runtime, A>
 where
     A: Addin,
@@ -46,6 +46,12 @@ where
     #[cfg(test)]
     let _diagnostic_test_guard = crate::diagnostics::DIAGNOSTIC_TEST_MUTEX.lock();
     if let Err(error) = crate::diagnostics::reset_diagnostic_router() {
+        return Err(transaction.failure(error));
+    }
+    #[cfg(all(windows, any(feature = "rtd", feature = "handles")))]
+    if let Err(error) =
+        crate::excel_rtd::register_server_type::<A::RtdSubscription, A::RtdSources>()
+    {
         return Err(transaction.failure(error));
     }
     let prepare = || crate::registration::preflight_registration(descriptors);
@@ -190,8 +196,8 @@ pub(crate) fn rollback_active_open<'runtime, A, S>(
 }
 
 pub(crate) fn initialize_addin<'runtime, A>(
-    context: OpenContext,
-    transaction: OpeningTxn<'runtime, A, HostAttached>,
+    context: OpenContext<A>,
+    transaction: OpeningTxn<'runtime, A, HostAttached<A>>,
 ) -> InitializedOpenResult<'runtime, A>
 where
     A: Addin,

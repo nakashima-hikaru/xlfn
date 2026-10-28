@@ -242,12 +242,14 @@ fn external_executor_polls_native_async_task_and_delivers_exactly_once() {
     }
     struct NativeAddin;
     impl crate::Addin for NativeAddin {
+        type RtdSubscription = ();
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = ();
         type Error = XllError;
         type Layers = ();
         type AsyncExecutor = ImmediateExecutor;
-        fn open(_: &crate::OpenContext) -> crate::OpenResult<Self> {
+        fn open(_: &crate::OpenContext<Self>) -> crate::OpenResult<Self> {
             unreachable!()
         }
     }

@@ -11,7 +11,7 @@ use super::data_plane::{
 use super::disconnect::OwnedSubscription;
 use super::host::SubscriptionHost;
 use super::runtime::{SubscriptionConnection, SubscriptionRuntime};
-use super::source::SourceSubscription;
+use super::source::{RtdSubscription, SourceSubscription};
 use super::termination::{
     TerminationClaim, TerminationCompleted, TerminationCoordinator, TerminationOwner,
     TerminationWaiter,
@@ -27,59 +27,72 @@ use std::ptr::NonNull;
 
 /// Generational, non-owning access to one server retained by a subscription
 /// runtime arena.
-pub(crate) struct SubscriptionServerHandle<H: SubscriptionHost> {
-    runtime: NonNull<SubscriptionRuntime<H>>,
-    generation: ServerGeneration,
+pub(crate) struct SubscriptionServerHandle<
+    H: SubscriptionHost,
+    E: RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+> {
+    runtime: NonNull<SubscriptionRuntime<H, E, C>>,
+    server: NonNull<SubscriptionServer<H, E, C>>,
 }
 
-impl<H: SubscriptionHost> Copy for SubscriptionServerHandle<H> {}
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Copy
+    for SubscriptionServerHandle<H, E, C>
+{
+}
 
-impl<H: SubscriptionHost> Clone for SubscriptionServerHandle<H> {
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Clone
+    for SubscriptionServerHandle<H, E, C>
+{
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<H: SubscriptionHost> SubscriptionServerHandle<H> {
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    SubscriptionServerHandle<H, E, C>
+{
     /// Constructs a generational handle to a registered subscription server.
     ///
     /// # Safety
     ///
-    /// The caller must ensure that `runtime` outlives all copies of the returned
-    /// `SubscriptionServerHandle`.
+    /// `server` must point to a registered allocation owned by `runtime` and
+    /// retained without replacement. Keep both allocations stable through every
+    /// method call and returned guard/batch. Inert copies may outlive reclamation
+    /// only when they are never used again; their Drop does not dereference them.
     pub(super) unsafe fn new(
-        runtime: &SubscriptionRuntime<H>,
-        generation: ServerGeneration,
+        runtime: &SubscriptionRuntime<H, E, C>,
+        server: NonNull<SubscriptionServer<H, E, C>>,
     ) -> Self {
         Self {
             runtime: NonNull::from(runtime),
-            generation,
+            server,
         }
     }
 
     #[inline]
-    pub(super) fn belongs_to(&self, runtime: &SubscriptionRuntime<H>) -> bool {
+    pub(super) fn belongs_to(&self, runtime: &SubscriptionRuntime<H, E, C>) -> bool {
         self.runtime == NonNull::from(runtime)
     }
 
     #[cfg(test)]
     #[inline]
-    pub(crate) const fn generation(&self) -> ServerGeneration {
-        self.generation
+    pub(crate) fn generation(&self) -> ServerGeneration {
+        self.server().expect("registered server").generation
     }
 
     #[inline]
-    fn runtime(&self) -> &SubscriptionRuntime<H> {
+    fn runtime(&self) -> &SubscriptionRuntime<H, E, C> {
         // SAFETY: the COM/server lifecycle contract drains every handle use
         // before the runtime service is sealed and reclaimed.
         unsafe { self.runtime.as_ref() }
     }
 
     #[inline]
-    pub(crate) fn server(&self) -> XllResult<&SubscriptionServer<H>> {
-        self.runtime()
-            .resolve_server(self.generation)
-            .ok_or(XllError::Closing)
+    pub(crate) fn server(&self) -> XllResult<&SubscriptionServer<H, E, C>> {
+        // SAFETY: registration retains this stable allocation until the runtime
+        // and every handle use have been drained. No entry is removed or replaced.
+        Ok(unsafe { self.server.as_ref() })
     }
 
     pub(crate) fn attach_update_notifier(
@@ -112,7 +125,7 @@ impl<H: SubscriptionHost> SubscriptionServerHandle<H> {
     }
 
     #[cfg(test)]
-    pub(crate) fn test_server(&self) -> &SubscriptionServer<H> {
+    pub(crate) fn test_server(&self) -> &SubscriptionServer<H, E, C> {
         self.server().expect("test server remains registered")
     }
 
@@ -122,14 +135,22 @@ impl<H: SubscriptionHost> SubscriptionServerHandle<H> {
         let server = self.server()?;
         let _server_operation = server.enter_operation()?;
         server.ensure_open()?;
-        runtime.claim_server(self.generation, id)
+        runtime.claim_server(server.generation, id)
+    }
+
+    #[cfg(all(windows, any(feature = "rtd", feature = "handles")))]
+    pub(crate) fn resolve_transport_key(
+        &self,
+        key: super::topic::SubscriptionKey,
+    ) -> XllResult<SubscriptionId> {
+        self.runtime().resolve_transport_key(key)
     }
 
     pub(crate) fn connect_transaction(
         &self,
         topic_id: TopicId,
         id: SubscriptionId,
-    ) -> XllResult<SubscriptionConnection<H>> {
+    ) -> XllResult<SubscriptionConnection<H, E, C>> {
         self.runtime().connect_transaction(self, topic_id, id)
     }
 
@@ -154,24 +175,36 @@ impl<H: SubscriptionHost> SubscriptionServerHandle<H> {
     }
 
     pub(crate) fn terminate(&self) -> XllResult<()> {
-        self.runtime().terminate_server(self.generation)
+        self.runtime().terminate_server(self.server()?.generation)
     }
 }
 
 // SAFETY: the runtime and server are thread-safe; the temporal validity proof
 // is the same server/module quiescence contract used by every handle method.
-unsafe impl<H: SubscriptionHost> Send for SubscriptionServerHandle<H> {}
+unsafe impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Send
+    for SubscriptionServerHandle<H, E, C>
+{
+}
 // SAFETY: SubscriptionServerHandle is a Copy non-owning handle with no interior mutability.
-unsafe impl<H: SubscriptionHost> Sync for SubscriptionServerHandle<H> {}
+unsafe impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Sync
+    for SubscriptionServerHandle<H, E, C>
+{
+}
 
-pub(crate) struct SubscriptionServer<H: SubscriptionHost> {
+pub(crate) struct SubscriptionServer<
+    H: SubscriptionHost,
+    E: RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+> {
     pub(crate) generation: ServerGeneration,
     pub(crate) publish: xlfn_kernel::published_owner::PublishedOwner<PublishCore<H>>,
-    pub(super) subscriptions: Mutex<FxHashMap<TopicId, OwnedSubscription<H>>>,
+    pub(super) subscriptions: Mutex<FxHashMap<TopicId, OwnedSubscription<H, E, C>>>,
     pub(super) termination_coordinator: TerminationCoordinator,
 }
 
-impl<H: SubscriptionHost> std::fmt::Debug for SubscriptionServer<H> {
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> std::fmt::Debug
+    for SubscriptionServer<H, E, C>
+{
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("SubscriptionServer")
@@ -181,25 +214,36 @@ impl<H: SubscriptionHost> std::fmt::Debug for SubscriptionServer<H> {
     }
 }
 
-pub(crate) struct OwnedServerOperation<H: SubscriptionHost> {
-    server: NonNull<SubscriptionServer<H>>,
+pub(crate) struct OwnedServerOperation<
+    H: SubscriptionHost,
+    E: RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+> {
+    server: NonNull<SubscriptionServer<H, E, C>>,
     pub(crate) _publish_operation: OwnedPublishOperation<H>,
 }
 
 // SAFETY: the nested publish operation guards ensure liveness of the server
 // across thread boundaries for the duration of the owned operation.
-unsafe impl<H: SubscriptionHost> Send for OwnedServerOperation<H> {}
+unsafe impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Send
+    for OwnedServerOperation<H, E, C>
+{
+}
 
-impl<H: SubscriptionHost> OwnedServerOperation<H> {
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    OwnedServerOperation<H, E, C>
+{
     #[inline]
-    pub(crate) fn server(&self) -> &SubscriptionServer<H> {
+    pub(crate) fn server(&self) -> &SubscriptionServer<H, E, C> {
         // SAFETY: the nested runtime/server operation guards prevent teardown
         // while this non-owning pointer is used.
         unsafe { self.server.as_ref() }
     }
 }
 
-impl<H: SubscriptionHost> SubscriptionServer<H> {
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    SubscriptionServer<H, E, C>
+{
     #[inline]
     pub(crate) fn ensure_open(&self) -> XllResult<()> {
         self.publish.ensure_open()
@@ -219,7 +263,7 @@ impl<H: SubscriptionHost> SubscriptionServer<H> {
     /// allocated until the returned operation is dropped. In particular, the
     /// runtime and server must seal and drain their operation gates before
     /// reclaiming either object.
-    pub(crate) unsafe fn enter_owned_operation(&self) -> XllResult<OwnedServerOperation<H>> {
+    pub(crate) unsafe fn enter_owned_operation(&self) -> XllResult<OwnedServerOperation<H, E, C>> {
         // SAFETY: upheld by this function's caller; the publish core is
         // runtime-owned and its operation guard keeps both gates admitted.
         let publish_operation = unsafe { self.publish.enter_owned_operation()? };
@@ -231,8 +275,8 @@ impl<H: SubscriptionHost> SubscriptionServer<H> {
 
     pub(super) fn begin_termination<'a>(
         &'a self,
-        runtime: &'a SubscriptionRuntime<H>,
-    ) -> TerminationAdmission<'a, H> {
+        runtime: &'a SubscriptionRuntime<H, E, C>,
+    ) -> TerminationAdmission<'a, H, E, C> {
         match self.termination_coordinator.begin() {
             TerminationClaim::Owner(owner) => {
                 // Install the unique failure guard before touching publish state.
@@ -260,21 +304,30 @@ impl<H: SubscriptionHost> SubscriptionServer<H> {
     }
 }
 
-impl<H: SubscriptionHost> Drop for SubscriptionServer<H> {
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Drop
+    for SubscriptionServer<H, E, C>
+{
     fn drop(&mut self) {
         self.publish.close_on_server_drop();
     }
 }
 
-pub(super) enum TerminationAdmission<'a, H: SubscriptionHost> {
-    Owner(ServerTermination<'a, H, CancelPending>),
+pub(super) enum TerminationAdmission<
+    'a,
+    H: SubscriptionHost,
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+> {
+    Owner(ServerTermination<'a, H, E, C, CancelPending>),
     Waiter(TerminationWaiter<'a>),
     Complete(TerminationCompleted),
 }
 
-impl<'a, H: SubscriptionHost> TerminationAdmission<'a, H> {
+impl<'a, H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    TerminationAdmission<'a, H, E, C>
+{
     /// Notify every owner before the caller waits for any one server.
-    pub(super) fn request_cancel(self) -> CancelRequestedAdmission<'a, H> {
+    pub(super) fn request_cancel(self) -> CancelRequestedAdmission<'a, H, E, C> {
         match self {
             Self::Owner(owner) => CancelRequestedAdmission::Owner(owner.request_cancel()),
             Self::Waiter(waiter) => CancelRequestedAdmission::Waiter(waiter),
@@ -283,13 +336,20 @@ impl<'a, H: SubscriptionHost> TerminationAdmission<'a, H> {
     }
 }
 
-pub(super) enum CancelRequestedAdmission<'a, H: SubscriptionHost> {
-    Owner(ServerTermination<'a, H, CancelRequested>),
+pub(super) enum CancelRequestedAdmission<
+    'a,
+    H: SubscriptionHost,
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+> {
+    Owner(ServerTermination<'a, H, E, C, CancelRequested>),
     Waiter(TerminationWaiter<'a>),
     Complete(TerminationCompleted),
 }
 
-impl<H: SubscriptionHost> CancelRequestedAdmission<'_, H> {
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    CancelRequestedAdmission<'_, H, E, C>
+{
     pub(super) fn finish(self) -> XllResult<()> {
         match self {
             Self::Owner(owner) => owner.finish(),
@@ -330,16 +390,23 @@ impl TerminationStage for CancelRequested {
 
 /// Resources precede the coordinator owner so abandonment cannot publish a
 /// completed attempt before its captured source obligations have been released.
-struct ServerTerminationResources<'a, H: SubscriptionHost> {
-    runtime: &'a SubscriptionRuntime<H>,
-    server: &'a SubscriptionServer<H>,
+struct ServerTerminationResources<
+    'a,
+    H: SubscriptionHost,
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+> {
+    runtime: &'a SubscriptionRuntime<H, E, C>,
+    server: &'a SubscriptionServer<H, E, C>,
     wait: Option<PublishTerminationStart<'a, H>>,
     notifier: Option<H::Notifier>,
-    initial_subscriptions: FxHashMap<TopicId, OwnedSubscription<H>>,
+    initial_subscriptions: FxHashMap<TopicId, OwnedSubscription<H, E, C>>,
     owner: Option<TerminationOwner<'a>>,
 }
 
-impl<H: SubscriptionHost> ServerTerminationResources<'_, H> {
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    ServerTerminationResources<'_, H, E, C>
+{
     fn request_cancel(&mut self) -> XllResult<()> {
         let mut first_error = None;
         for subscription in self.initial_subscriptions.values_mut() {
@@ -353,7 +420,9 @@ impl<H: SubscriptionHost> ServerTerminationResources<'_, H> {
     }
 }
 
-impl<H: SubscriptionHost> Drop for ServerTerminationResources<'_, H> {
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Drop
+    for ServerTerminationResources<'_, H, E, C>
+{
     fn drop(&mut self) {
         // Even an unexpected unwind must contain notifier/source destructors.
         // The affine owner is dropped last and publishes Failed, never drained.
@@ -373,13 +442,21 @@ impl<H: SubscriptionHost> Drop for ServerTerminationResources<'_, H> {
 }
 
 #[must_use = "request cancellation and finish termination; abandonment publishes failure"]
-pub(super) struct ServerTermination<'a, H: SubscriptionHost, S: TerminationStage> {
-    resources: Option<ServerTerminationResources<'a, H>>,
+pub(super) struct ServerTermination<
+    'a,
+    H: SubscriptionHost,
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+    S: TerminationStage,
+> {
+    resources: Option<ServerTerminationResources<'a, H, E, C>>,
     state: S,
 }
 
-impl<'a, H: SubscriptionHost> ServerTermination<'a, H, CancelPending> {
-    pub(super) fn request_cancel(mut self) -> ServerTermination<'a, H, CancelRequested> {
+impl<'a, H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    ServerTermination<'a, H, E, C, CancelPending>
+{
+    pub(super) fn request_cancel(mut self) -> ServerTermination<'a, H, E, C, CancelRequested> {
         let result = self
             .resources
             .as_mut()
@@ -394,7 +471,9 @@ impl<'a, H: SubscriptionHost> ServerTermination<'a, H, CancelPending> {
     }
 }
 
-impl<H: SubscriptionHost, S: TerminationStage> Drop for ServerTermination<'_, H, S> {
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>, S: TerminationStage>
+    Drop for ServerTermination<'_, H, E, C, S>
+{
     fn drop(&mut self) {
         if let Some(mut resources) = self.resources.take() {
             if S::CANCEL_PENDING {
@@ -407,7 +486,9 @@ impl<H: SubscriptionHost, S: TerminationStage> Drop for ServerTermination<'_, H,
     }
 }
 
-impl<H: SubscriptionHost> ServerTermination<'_, H, CancelRequested> {
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    ServerTermination<'_, H, E, C, CancelRequested>
+{
     pub(super) fn finish(mut self) -> XllResult<()> {
         let mut resources = self.resources.take().expect("live termination");
         #[cfg(test)]
@@ -500,7 +581,9 @@ impl<H: SubscriptionHost> ServerTermination<'_, H, CancelRequested> {
     }
 }
 
-pub(crate) fn disconnect_one_no_unwind(subscription: SourceSubscription) -> XllResult<()> {
+pub(crate) fn disconnect_one_no_unwind<E: RtdSubscription>(
+    subscription: SourceSubscription<E>,
+) -> XllResult<()> {
     match catch_no_unwind(AssertUnwindSafe(|| subscription.disconnect_and_wait())) {
         Ok(result) => result,
         Err(_) => Err(XllError::Internal {
@@ -509,8 +592,12 @@ pub(crate) fn disconnect_one_no_unwind(subscription: SourceSubscription) -> XllR
     }
 }
 
-fn disconnect_all_no_unwind<H: SubscriptionHost>(
-    subscriptions: impl IntoIterator<Item = OwnedSubscription<H>>,
+fn disconnect_all_no_unwind<
+    H: SubscriptionHost,
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+>(
+    subscriptions: impl IntoIterator<Item = OwnedSubscription<H, E, C>>,
 ) -> XllResult<()> {
     let mut first_error = None;
     for subscription in subscriptions {

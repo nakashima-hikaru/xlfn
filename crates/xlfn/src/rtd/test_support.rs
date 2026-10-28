@@ -74,3 +74,19 @@ impl TestNotifierState {
         }
     }
 }
+
+/// Typed add-in fixture for tests that install concrete subscription owners.
+pub(crate) struct TestRtdAddin<E>(std::marker::PhantomData<fn() -> E>);
+impl<E: crate::RtdSubscription> crate::Addin for TestRtdAddin<E> {
+    type RtdSubscription = E;
+    type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
+    type SharedState = ();
+    type LifecycleState = ();
+    type Error = XllError;
+    type Layers = ();
+    #[cfg(feature = "async")]
+    type AsyncExecutor = crate::NoAsyncExecutor;
+    fn open(_: &crate::OpenContext<Self>) -> crate::OpenResult<Self> {
+        Ok(crate::Opened::new(()))
+    }
+}

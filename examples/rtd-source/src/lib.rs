@@ -43,6 +43,8 @@ pub struct State {
 pub struct RtdSourceExample;
 
 impl Addin for RtdSourceExample {
+    type RtdSubscription = <MetricSource as xlfn::rtd::RtdSource>::Subscription;
+    type RtdSources = (MetricSource,);
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;
@@ -51,11 +53,10 @@ impl Addin for RtdSourceExample {
     type AsyncExecutor = xlfn::NoAsyncExecutor;
 
     fn open(
-        context: &OpenContext,
+        context: &OpenContext<Self>,
     ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
-        Ok(Opened::new(State {
-            metrics: context.rtd().register_source(metric_source())?,
-        }))
+        let (metrics,) = context.rtd().register_sources((metric_source(),))?;
+        Ok(Opened::new(State { metrics }))
     }
 }
 

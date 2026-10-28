@@ -22,6 +22,8 @@ pub struct State {
 }
 
 impl Addin for ServiceAddin {
+    type RtdSubscription = ();
+    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;
@@ -29,7 +31,7 @@ impl Addin for ServiceAddin {
     #[cfg(feature = "async")]
     type AsyncExecutor = xlfn::NoAsyncExecutor;
 
-    fn open(_: &OpenContext) -> OpenResult<Self> {
+    fn open(_: &OpenContext<Self>) -> OpenResult<Self> {
         Ok(Opened::new(State { scale: 2.0 }))
     }
 }

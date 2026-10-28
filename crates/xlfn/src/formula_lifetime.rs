@@ -38,8 +38,6 @@ impl FormulaLifetimeGeneration {
 // placeholders and do not compile any formula-handle state.
 #[cfg(feature = "handles")]
 pub(crate) use crate::handle::FormulaHandleService as FormulaLifetimeBackend;
-#[cfg(all(target_os = "windows", feature = "handles"))]
-pub(crate) use crate::handle::HandleConnection as FormulaLifetimeConnection;
 
 #[cfg(all(target_os = "windows", not(feature = "handles")))]
 pub(crate) enum FormulaLifetimeBackend {}

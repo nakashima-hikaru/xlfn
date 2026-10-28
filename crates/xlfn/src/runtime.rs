@@ -154,7 +154,7 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
     pub(crate) fn begin_open_if_epoch(
         &self,
         expected_removal_epoch: RemovalEpoch,
-    ) -> XllResult<OpeningTxn<'_, A, Begun>> {
+    ) -> XllResult<OpeningTxn<'_, A, Begun<A>>> {
         let start = self
             .lifecycle_orchestrator()
             .begin_open_if_epoch(expected_removal_epoch)?;
@@ -166,7 +166,7 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
     }
 
     #[cfg(test)]
-    pub(crate) fn begin_open(&self) -> XllResult<OpeningTxn<'_, A, Begun>> {
+    pub(crate) fn begin_open(&self) -> XllResult<OpeningTxn<'_, A, Begun<A>>> {
         self.begin_open_if_epoch(self.removal_epoch())
     }
 
@@ -318,10 +318,10 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
     #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn publish<'runtime>(
         &self,
-        opening: OpeningTxn<'runtime, A, Begun>,
+        opening: OpeningTxn<'runtime, A, Begun<A>>,
         state: A::SharedState,
         layers: A::Layers,
-    ) -> OpeningTxn<'runtime, A, LifecycleInstalled>
+    ) -> OpeningTxn<'runtime, A, LifecycleInstalled<A>>
     where
         A::LifecycleState: Default,
     {
@@ -331,11 +331,11 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
     #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn publish_with_lifecycle<'runtime>(
         &self,
-        opening: OpeningTxn<'runtime, A, Begun>,
+        opening: OpeningTxn<'runtime, A, Begun<A>>,
         state: A::SharedState,
         lifecycle_state: A::LifecycleState,
         layers: A::Layers,
-    ) -> OpeningTxn<'runtime, A, LifecycleInstalled> {
+    ) -> OpeningTxn<'runtime, A, LifecycleInstalled<A>> {
         let access = self
             .bind_addin_lifecycle()
             .expect("test runtime binds its lifecycle thread");
@@ -376,11 +376,11 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
     ))]
     pub(crate) fn publish_with_sources<'runtime>(
         &self,
-        opening: OpeningTxn<'runtime, A, Begun>,
+        opening: OpeningTxn<'runtime, A, Begun<A>>,
         state: A::SharedState,
         layers: A::Layers,
-        sources: crate::subscription::SourceArena,
-    ) -> OpeningTxn<'runtime, A, LifecycleInstalled>
+        sources: crate::subscription::SourceArena<A::RtdSubscription, A::RtdSources>,
+    ) -> OpeningTxn<'runtime, A, LifecycleInstalled<A>>
     where
         A::LifecycleState: Default,
     {
@@ -417,12 +417,12 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
     #[cfg(all(test, feature = "rtd", feature = "handles"))]
     pub(crate) fn publish_with_lifecycle_and_sources<'runtime>(
         &self,
-        opening: OpeningTxn<'runtime, A, Begun>,
+        opening: OpeningTxn<'runtime, A, Begun<A>>,
         state: A::SharedState,
         lifecycle_state: A::LifecycleState,
         layers: A::Layers,
-        sources: crate::subscription::SourceArena,
-    ) -> OpeningTxn<'runtime, A, LifecycleInstalled> {
+        sources: crate::subscription::SourceArena<A::RtdSubscription, A::RtdSources>,
+    ) -> OpeningTxn<'runtime, A, LifecycleInstalled<A>> {
         let access = self
             .bind_addin_lifecycle()
             .expect("test runtime binds its lifecycle thread");
@@ -524,7 +524,7 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
     #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn finish_open(
         &self,
-        attempt: &mut OpeningTxn<'_, A, LifecycleInstalled>,
+        attempt: &mut OpeningTxn<'_, A, LifecycleInstalled<A>>,
         registrations: Vec<RegistrationId>,
     ) -> XllResult<()> {
         attempt.finish_in_place(registrations)
@@ -681,7 +681,7 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
     #[cfg(any(feature = "bench-internals", all(test, feature = "rtd")))]
     pub(crate) fn with_generation_services<R>(
         &self,
-        operation: impl FnOnce(&GenerationServices) -> R,
+        operation: impl FnOnce(&GenerationServices<A::RtdSubscription, A::RtdSources>) -> R,
     ) -> XllResult<R> {
         self.lifecycle
             .with_generation_services(operation)
@@ -740,7 +740,9 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
     ))]
     pub(crate) fn with_subscriptions<R>(
         &self,
-        operation: impl FnOnce(&crate::subscription::SubscriptionRuntime) -> R,
+        operation: impl FnOnce(
+            &crate::subscription::SubscriptionRuntime<A::RtdSubscription, A::RtdSources>,
+        ) -> R,
     ) -> XllResult<R> {
         self.with_generation_services(|services| {
             services
@@ -916,7 +918,9 @@ impl<A: crate::Addin> CallGuard<'_, A> {
 
     #[cfg(feature = "rtd")]
     #[must_use]
-    pub(crate) fn rtd_call_access(&self) -> crate::rtd::RtdGenerationAccess<'_> {
+    pub(crate) fn rtd_call_access(
+        &self,
+    ) -> crate::rtd::RtdGenerationAccess<'_, A::RtdSubscription, A::RtdSources> {
         self.admission.services().rtd_call_access()
     }
 
@@ -940,6 +944,8 @@ pub(crate) mod tests {
     struct TestU32Addin;
 
     impl crate::Addin for TestU32Addin {
+        type RtdSubscription = ();
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = u32;
         type LifecycleState = ();
         type Error = XllError;
@@ -948,7 +954,7 @@ pub(crate) mod tests {
         type AsyncExecutor = crate::NoAsyncExecutor;
 
         fn open(
-            _context: &crate::addin::OpenContext,
+            _context: &crate::addin::OpenContext<Self>,
         ) -> Result<
             crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
             Self::Error,
@@ -1045,6 +1051,8 @@ pub(crate) mod tests {
     }
 
     impl crate::Addin for DrainPreparationAddin {
+        type RtdSubscription = ();
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = RetainedState;
         type LifecycleState = RetainedState;
         type Error = XllError;
@@ -1053,7 +1061,7 @@ pub(crate) mod tests {
         type AsyncExecutor = crate::NoAsyncExecutor;
 
         fn open(
-            _: &crate::addin::OpenContext,
+            _: &crate::addin::OpenContext<Self>,
         ) -> Result<
             crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
             Self::Error,
@@ -1873,12 +1881,14 @@ pub(crate) mod tests {
         }
         struct ProbeAddin;
         impl crate::Addin for ProbeAddin {
+            type RtdSubscription = ();
+            type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
             type SharedState = ProbeState;
             type LifecycleState = ProbeState;
             type Error = XllError;
             type Layers = ();
             type AsyncExecutor = ProbeExecutor;
-            fn open(_: &crate::OpenContext) -> crate::OpenResult<Self> {
+            fn open(_: &crate::OpenContext<Self>) -> crate::OpenResult<Self> {
                 Ok(crate::Opened::new(ProbeState)
                     .with_lifecycle(ProbeState)
                     .with_async_executor(ProbeExecutor))
@@ -1977,13 +1987,15 @@ pub(crate) mod tests {
 
     #[cfg(feature = "async")]
     impl crate::Addin for AsyncStopFailureAddin {
+        type RtdSubscription = ();
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = RetainedState;
         type LifecycleState = RetainedState;
         type Error = XllError;
         type Layers = ();
         type AsyncExecutor = AsyncStopProbe;
 
-        fn open(_: &crate::OpenContext) -> crate::OpenResult<Self> {
+        fn open(_: &crate::OpenContext<Self>) -> crate::OpenResult<Self> {
             unreachable!("stop failure tests stage observed resources directly")
         }
 
@@ -2043,13 +2055,15 @@ pub(crate) mod tests {
 
     #[cfg(feature = "async-builtin")]
     impl crate::Addin for AsyncCalculationAddin {
+        type RtdSubscription = ();
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = ();
         type Error = XllError;
         type Layers = ();
         type AsyncExecutor = crate::BuiltinAsyncExecutor;
 
-        fn open(_: &crate::OpenContext) -> crate::OpenResult<Self> {
+        fn open(_: &crate::OpenContext<Self>) -> crate::OpenResult<Self> {
             Ok(crate::Opened::new(()).with_async_executor(one_poller()))
         }
     }

@@ -1,7 +1,8 @@
 use super::registration::TemporaryRegistration;
 #[cfg(feature = "handles")]
 use super::server::ensure_server;
-use super::server::{RtdServer, SERVER_STARTED, ServerObservation, ensure_server_without_handles};
+use super::server::{SERVER_STARTED, ServerObservation, ensure_server_without_handles};
+use super::subscription_backend::BackendSubscriptions;
 #[cfg(feature = "handles")]
 use crate::XllError;
 use crate::XllResult;
@@ -18,7 +19,7 @@ use std::sync::atomic::Ordering;
 use xlfn_sys::{XLF_RTD, XLOPER12};
 
 #[cfg(feature = "handles")]
-pub(crate) fn observe(
+pub(crate) fn observe<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
     handles: &FormulaLifetimeBackend,
     ingress: &'static ExportIngress,
     rtd_key: &str,
@@ -26,10 +27,10 @@ pub(crate) fn observe(
     host: ExcelHost<'_>,
 ) -> XllResult<()> {
     let _rtd_operation = crate::excel_rtd::begin_operation(handles, ingress)?;
-    let mut observation = ServerObservation::begin(ensure_server(Some(handles), None)?)?;
+    let mut observation = ServerObservation::begin(ensure_server::<E, C>(Some(handles), None)?)?;
     let ensured = observation.server();
     let active = &ensured.active;
-    let server = active.pointer as *mut RtdServer;
+    let server = ensured.pointer();
 
     // SAFETY: ACTIVE_SERVER owns a live server reference and `ensured` holds a
     // separate temporary reference throughout `observe`.
@@ -74,19 +75,20 @@ pub(crate) fn observe(
     Ok(())
 }
 
-pub(crate) fn observe_subscription(
-    subscriptions: &SubscriptionRuntime,
+pub(crate) fn observe_subscription<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+    subscriptions: &SubscriptionRuntime<E, C>,
     key: &crate::subscription::SubscriptionKey,
     host: ExcelHost<'_>,
 ) -> XllResult<RtdValue> {
     let _rtd_operation = subscriptions.enter_external_operation()?;
     // Reject a key from another runtime before allocating or attaching a server.
-    let id = subscriptions.resolve_transport_key(*key)?;
-    let mut observation =
-        ServerObservation::begin(ensure_server_without_handles(Some(subscriptions))?)?;
+    let _ = subscriptions.resolve_transport_key(*key)?;
+    let mut observation = ServerObservation::begin(ensure_server_without_handles(Some(
+        BackendSubscriptions::new(subscriptions),
+    ))?)?;
     let ensured = observation.server();
     let active = &ensured.active;
-    let server = active.pointer as *mut RtdServer;
+    let server = ensured.pointer();
 
     // SAFETY: ACTIVE_SERVER owns a live server reference and `ensured` holds a
     // separate temporary reference throughout this function.
@@ -102,7 +104,7 @@ pub(crate) fn observe_subscription(
     let key_transport = key.to_transport();
     let mut topic = CountedString::new(key_transport.as_str())?;
     if let Some(subscription_server) = &ensured.subscription_server {
-        subscription_server.claim(id)?;
+        subscription_server.claim(*key)?;
     }
 
     let mut server_name = XLOPER12::missing();

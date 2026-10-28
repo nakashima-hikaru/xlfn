@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use xlfn::rtd::{
-    RtdCapacity, RtdDelivery, RtdLimits, RtdMultiplexedSource, RtdProducerErrorPolicy, RtdSource,
+    RtdCapacity, RtdLatest, RtdLimits, RtdMultiplexedSource, RtdProducerErrorPolicy, RtdSource,
     RtdSourceContext, RtdSourceEvent, RtdSourceLimits,
 };
 use xlfn::{ExcelError, XllError, XllResult};
@@ -19,7 +19,7 @@ fn multiplexed_source_accepts_an_owned_non_sync_job_without_starting_it() {
     let observed = Arc::clone(&started);
     // Cell makes the captured job non-Sync; each source runs its job once.
     let state = Cell::new(0);
-    let source = RtdMultiplexedSource::new(RtdDelivery::Latest, move |context| {
+    let source = RtdMultiplexedSource::new(RtdLatest, move |context| {
         observed.store(true, Ordering::Release);
         state.set(state.get() + 1);
         serve(context, state.get())
@@ -47,7 +47,7 @@ fn multiplexed_source_accepts_an_owned_non_sync_job_without_starting_it() {
 
 // Compiles the consumer side of the public control protocol without exposing
 // test-only constructors or a raw publication capability.
-fn serve(context: RtdSourceContext<i32>, initial: i32) -> XllResult<()> {
+fn serve(context: RtdSourceContext<i32, RtdLatest>, initial: i32) -> XllResult<()> {
     while !context.is_closed() {
         match context.recv_timeout(Duration::from_millis(1)) {
             Ok(Some(RtdSourceEvent::Subscribe { id, topic, sender })) => {

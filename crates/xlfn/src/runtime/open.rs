@@ -16,11 +16,11 @@ use crate::runtime::{AddinLifecycleAccess, Runtime};
 
 pub(crate) enum OpenFailure<'runtime, A: Addin> {
     HostAttached {
-        transaction: Box<OpeningTxn<'runtime, A, HostAttached>>,
+        transaction: Box<OpeningTxn<'runtime, A, HostAttached<A>>>,
         error: XllError,
     },
     Initializing {
-        transaction: Box<OpeningTxn<'runtime, A, Initializing>>,
+        transaction: Box<OpeningTxn<'runtime, A, Initializing<A>>>,
         error: XllError,
     },
     Initialized {
@@ -67,7 +67,7 @@ impl<'runtime, A: Addin> OpenFailure<'runtime, A> {
     }
 }
 
-impl<'runtime, A: Addin> OpeningTxn<'runtime, A, HostAttached> {
+impl<'runtime, A: Addin> OpeningTxn<'runtime, A, HostAttached<A>> {
     pub(crate) fn failure(self, error: XllError) -> OpenFailure<'runtime, A> {
         OpenFailure::HostAttached {
             transaction: Box::new(self),
@@ -76,7 +76,7 @@ impl<'runtime, A: Addin> OpeningTxn<'runtime, A, HostAttached> {
     }
 }
 
-impl<'runtime, A: Addin> OpeningTxn<'runtime, A, Initializing> {
+impl<'runtime, A: Addin> OpeningTxn<'runtime, A, Initializing<A>> {
     pub(crate) fn failure(self, error: XllError) -> OpenFailure<'runtime, A> {
         OpenFailure::Initializing {
             transaction: Box::new(self),

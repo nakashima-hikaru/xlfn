@@ -3,6 +3,8 @@
 # pub struct AppTools;
 # pub struct State { environment: String, version: String }
 # impl Addin for AppTools {
+#     type RtdSubscription = ();
+#     type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
 #     type SharedState = State;
 #     type LifecycleState = ();
 #     type Error = XllError;
@@ -11,7 +13,7 @@
 #     type AsyncExecutor = xlfn::BuiltinAsyncExecutor;
 #     #[cfg(all(feature = "async", not(feature = "async-builtin")))]
 #     type AsyncExecutor = xlfn::NoAsyncExecutor;
-#     fn open(_: &OpenContext) -> xlfn::OpenResult<Self> {
+#     fn open(_: &OpenContext<Self>) -> xlfn::OpenResult<Self> {
 #         let opened = Opened::new(State { environment: "test".into(), version: "test".into() });
 #         #[cfg(feature = "async-builtin")]
 #         let opened = opened.with_async_executor(xlfn::BuiltinAsyncExecutor::new(

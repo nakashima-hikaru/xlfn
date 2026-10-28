@@ -39,6 +39,7 @@ fn record_callback_value_debt(debt: CallbackCleanupDebt) {
     audit.debts.push_back(debt);
 }
 
+#[cfg(test)]
 type ReleaseCallback = unsafe fn(&mut XLOPER12) -> i32;
 
 fn state_after_call(
@@ -63,7 +64,9 @@ fn state_after_call(
 pub(crate) struct ExcelCallbackValue<'session> {
     raw: XLOPER12,
     release_required: bool,
+    #[cfg(test)]
     audit_failures: bool,
+    #[cfg(test)]
     release_callback: ReleaseCallback,
     state: CallbackValueReleaseState,
     session: Option<&'session HostCallbackSession>,
@@ -167,7 +170,9 @@ impl<'session> ExcelCallbackValue<'session> {
             Self {
                 raw,
                 release_required: callback_invoked,
+                #[cfg(test)]
                 audit_failures: true,
+                #[cfg(test)]
                 release_callback: excel_free,
                 state,
                 session: Some(session),
@@ -253,9 +258,13 @@ impl<'session> ExcelCallbackValue<'session> {
         };
 
         let permit = self.module_permit.take();
+        #[cfg(test)]
+        let release = self.release_callback;
+        #[cfg(not(test))]
+        let release = excel_free;
         // SAFETY: `Live` / `TerminalSuppressed` plus `release_required` means this exact XLOPER12
         // was supplied as result storage to one completed callback.
-        let raw_status = unsafe { (self.release_callback)(&mut self.raw) };
+        let raw_status = unsafe { release(&mut self.raw) };
         drop(permit);
 
         let status = ExcelCallbackStatus::from_raw(raw_status);
@@ -268,7 +277,11 @@ impl<'session> ExcelCallbackValue<'session> {
             Ok(())
         } else {
             self.state = CallbackValueReleaseState::Indeterminate { status };
-            if self.audit_failures {
+            #[cfg(test)]
+            let audit_failures = self.audit_failures;
+            #[cfg(not(test))]
+            let audit_failures = true;
+            if audit_failures {
                 record_callback_value_debt(CallbackCleanupDebt { status });
             }
             Err(XllError::ExcelApi {

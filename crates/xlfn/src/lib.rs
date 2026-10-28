@@ -125,8 +125,11 @@ mod runtime;
 mod runtime_components;
 mod shutdown;
 mod shutdown_trace;
+mod source_catalog;
 #[cfg(any(feature = "rtd", feature = "handles"))]
 mod subscription;
+mod subscription_owner;
+pub use source_catalog::{DynamicRtdSources, RtdSourceCatalog};
 mod utf16;
 /// Safe worksheet input views, owned values, and explicit output shapes.
 pub mod value;
@@ -155,6 +158,7 @@ pub use error::{
 #[cfg(feature = "rtd")]
 pub use rtd::RtdCallContext;
 pub use shutdown::{CleanupIssueKind, CleanupReporter};
+pub use subscription_owner::{IntoRtdSubscription, RtdSubscription};
 
 mod ingress;
 

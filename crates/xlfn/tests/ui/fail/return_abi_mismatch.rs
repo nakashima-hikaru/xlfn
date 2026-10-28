@@ -6,6 +6,8 @@ struct State;
 struct ReturnMismatchAddin;
 
 impl Addin for ReturnMismatchAddin {
+    type RtdSubscription = ();
+    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;
@@ -13,7 +15,7 @@ impl Addin for ReturnMismatchAddin {
     #[cfg(feature = "async")]
     type AsyncExecutor = xlfn::NoAsyncExecutor;
 
-    fn open(_: &OpenContext) -> Result<Opened<State, (), ()>, XllError> {
+    fn open(_: &OpenContext<Self>) -> Result<Opened<State, (), ()>, XllError> {
         Ok(Opened::new(State))
     }
 }

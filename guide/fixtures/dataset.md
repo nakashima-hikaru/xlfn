@@ -8,6 +8,8 @@
 # #[excel_addin(name = "Guide dataset", id = "guide-dataset", category = "Guide")]
 # pub struct DatasetAddin;
 # impl Addin for DatasetAddin {
+#     type RtdSubscription = ();
+#     type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
 #     type SharedState = ();
 #     type LifecycleState = ();
 #     type Error = XllError;
@@ -16,7 +18,7 @@
 #     type AsyncExecutor = xlfn::BuiltinAsyncExecutor;
 #     #[cfg(all(feature = "async", not(feature = "async-builtin")))]
 #     type AsyncExecutor = xlfn::NoAsyncExecutor;
-#     fn open(_: &OpenContext) -> xlfn::OpenResult<Self> {
+#     fn open(_: &OpenContext<Self>) -> xlfn::OpenResult<Self> {
 #         let opened = Opened::new(());
 #         #[cfg(feature = "async-builtin")]
 #         let opened = opened.with_async_executor(xlfn::BuiltinAsyncExecutor::new(

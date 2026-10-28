@@ -23,6 +23,10 @@ pub(crate) struct TaskRegistry {
     limit: AtomicUsize,
     closing: AtomicBool,
     current: AtomicPtr<CalculationState>,
+    // Scalar observation never dereferences a reclaimable calculation. Writers
+    // publish it with current under publication; snapshots still pin under that
+    // mutex and cannot observe the intermediate pointer/epoch update.
+    published_epoch: AtomicU64,
     publication: Mutex<()>,
     transition: Mutex<()>,
     pub(super) control: Mutex<RegistryControl>,
@@ -213,6 +217,7 @@ impl TaskRegistry {
             limit: AtomicUsize::new(0),
             closing: AtomicBool::new(true),
             current: AtomicPtr::new(current.as_ptr()),
+            published_epoch: AtomicU64::new(CalculationEpoch::INITIAL.get()),
             publication: Mutex::new(()),
             transition: Mutex::new(()),
             control: Mutex::new(RegistryControl::new(initial)),
@@ -232,10 +237,16 @@ impl TaskRegistry {
     }
 
     pub(crate) fn current_epoch(&self) -> CalculationEpoch {
-        let _publication = self.publication.lock();
-        // SAFETY: publication excludes state reclamation, and the registry
-        // always owns the state referenced by its authoritative current pointer.
-        unsafe { &*self.current.load(Ordering::Acquire) }.epoch
+        CalculationEpoch::new(self.published_epoch.load(Ordering::Acquire))
+            .expect("published calculation epochs are non-zero")
+    }
+
+    // The caller holds publication and has installed this state's owner in
+    // control. The scalar store is the epoch observation's linearization point;
+    // it grants no calculation admission or allocation lifetime authority.
+    fn publish_current(&self, pointer: NonNull<CalculationState>, epoch: CalculationEpoch) {
+        self.current.store(pointer.as_ptr(), Ordering::Release);
+        self.published_epoch.store(epoch.get(), Ordering::Release);
     }
 
     pub(crate) fn snapshot(&self) -> CalculationSnapshot<'_> {
@@ -282,7 +293,7 @@ impl TaskRegistry {
         control
             .calculations
             .retain(|id, state| *id == epoch || state.pin_count() != 0);
-        self.current.store(pointer.as_ptr(), Ordering::Release);
+        self.publish_current(pointer, epoch);
         self.limit.store(limit.get(), Ordering::Relaxed);
         self.closing.store(false, Ordering::Release);
         self.activity
@@ -432,7 +443,7 @@ impl TaskRegistry {
                 state.seal_admission();
                 let pointer = NonNull::from(state.as_ref());
                 control.calculations.insert(next, state);
-                self.current.store(pointer.as_ptr(), Ordering::Release);
+                self.publish_current(pointer, next);
                 control
                     .calculations
                     .retain(|id, state| *id == next || state.pin_count() != 0);
@@ -462,7 +473,7 @@ impl TaskRegistry {
         let state = PublishedOwner::new(CalculationState::new(to));
         let pointer = NonNull::from(state.as_ref());
         control.calculations.insert(to, state);
-        self.current.store(pointer.as_ptr(), Ordering::Release);
+        self.publish_current(pointer, to);
         drop(old);
         control
             .calculations
@@ -555,7 +566,7 @@ impl TaskRegistry {
         let pointer = NonNull::from(state.as_ref());
         control.calculations.clear();
         control.calculations.insert(epoch, state);
-        self.current.store(pointer.as_ptr(), Ordering::Release);
+        self.publish_current(pointer, epoch);
     }
 
     pub(crate) fn capacity(&self) -> usize {
@@ -579,4 +590,74 @@ pub(crate) fn cancel_tasks(tasks: TaskControlBatch) {
 pub(crate) fn cancel_source_no_unwind(source: &CancellationSource) {
     let _ =
         crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| source.cancel()));
+}
+
+#[cfg(test)]
+mod epoch_projection_tests {
+    use super::*;
+
+    fn assert_epoch(registry: &TaskRegistry, expected: CalculationEpoch) {
+        assert_eq!(registry.current_epoch(), expected);
+        assert_eq!(registry.snapshot().epoch(), expected);
+    }
+
+    #[cfg(not(miri))]
+    #[test]
+    fn epoch_observation_does_not_wait_for_publication_mutex() {
+        let registry = TaskRegistry::new();
+        let result = std::thread::scope(|scope| {
+            let publication = registry.publication.lock();
+            let (send, receive) = std::sync::mpsc::sync_channel(1);
+            let observed = &registry;
+            scope.spawn(move || send.send(observed.current_epoch()).unwrap());
+            let result = receive.recv_timeout(std::time::Duration::from_secs(5));
+            // Release before scoped joining, including the regression case.
+            drop(publication);
+            result
+        });
+        assert_eq!(result.unwrap(), CalculationEpoch::INITIAL);
+    }
+
+    #[test]
+    fn miri_epoch_projection_follows_stopped_running_and_restart_publications() {
+        let registry = TaskRegistry::new();
+        let initial = CalculationEpoch::INITIAL;
+        assert_epoch(&registry, initial);
+        assert!(registry.advance());
+        let stopped = initial.checked_next().unwrap();
+        assert_epoch(&registry, stopped);
+        registry.start(crate::AsyncTaskLimit::DEFAULT).unwrap();
+        assert_epoch(&registry, stopped);
+
+        let old_snapshot = registry.snapshot();
+        assert!(registry.advance());
+        let running = stopped.checked_next().unwrap();
+        assert_epoch(&registry, running);
+        assert_eq!(old_snapshot.epoch(), stopped);
+        drop(old_snapshot);
+
+        let retained = registry.snapshot();
+        registry.request_close().unwrap().cancel().wait().finish();
+        assert!(registry.start(crate::AsyncTaskLimit::DEFAULT).is_err());
+        assert_epoch(&registry, running);
+        drop(retained);
+        registry.start(crate::AsyncTaskLimit::DEFAULT).unwrap();
+        assert_epoch(&registry, running);
+        registry.request_close().unwrap().cancel().wait().finish();
+    }
+
+    #[cfg(feature = "async-builtin")]
+    #[test]
+    fn miri_epoch_projection_preserves_the_terminal_epoch_on_overflow() {
+        let registry = TaskRegistry::new();
+        let terminal = CalculationEpoch::new(u64::MAX).unwrap();
+        registry.set_stopped_epoch(terminal);
+        assert_epoch(&registry, terminal);
+        assert!(!registry.advance());
+        assert_epoch(&registry, terminal);
+        registry.start(crate::AsyncTaskLimit::DEFAULT).unwrap();
+        assert!(!registry.advance());
+        assert_epoch(&registry, terminal);
+        registry.request_close().unwrap().cancel().wait().finish();
+    }
 }

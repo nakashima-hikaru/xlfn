@@ -18,6 +18,8 @@ pub struct CustomHandle {
 pub struct RenamedAddin;
 
 impl Addin for RenamedAddin {
+    type RtdSubscription = ();
+    type RtdSources = my_xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();
     type Error = XllError;
@@ -25,7 +27,7 @@ impl Addin for RenamedAddin {
     #[cfg(feature = "async")]
     type AsyncExecutor = xlfn::NoAsyncExecutor;
 
-    fn open(_context: &OpenContext) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
+    fn open(_context: &OpenContext<Self>) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
         Ok(Opened::new(()))
     }
 }

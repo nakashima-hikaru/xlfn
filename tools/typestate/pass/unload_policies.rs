@@ -3,13 +3,15 @@ use super::{LogicalUnload, PhysicalUnload, Runtime, UnloadPolicy};
 
 struct PhysicalAddin;
 impl crate::Addin for PhysicalAddin {
+    type RtdSubscription = ();
+    type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();
     type Error = crate::XllError;
     type Layers = ();
     type AsyncExecutor = crate::NoAsyncExecutor;
 
-    fn open(_: &crate::OpenContext) -> crate::OpenResult<Self> {
+    fn open(_: &crate::OpenContext<Self>) -> crate::OpenResult<Self> {
         Ok(crate::Opened::new(()))
     }
 }

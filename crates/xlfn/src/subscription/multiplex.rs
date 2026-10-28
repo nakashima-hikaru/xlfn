@@ -4,7 +4,8 @@
 )]
 
 use super::budget::{
-    ChannelBudget, RtdDelivery, RtdSourceLimits, SubscriptionPermit, WorkerPermit,
+    ChannelBudget, RtdDelivery, RtdDeliveryPolicy, RtdFifo, RtdSourceLimits, SubscriptionPermit,
+    WorkerPermit,
 };
 use super::channel::{RtdChannelSubscription, RtdProducerErrorPolicy, RtdSender};
 use super::source::{RtdSink, RtdSource, RtdSubscription};
@@ -33,7 +34,7 @@ pub struct RtdSubscriptionId(u64);
 /// disconnects before the producer reads its `Subscribe` event. In that case
 /// the event's sender is already closed. Always key removals by ID.
 #[non_exhaustive]
-pub enum RtdSourceEvent<T> {
+pub enum RtdSourceEvent<T, D: RtdDeliveryPolicy = RtdFifo> {
     /// Register a topic on the shared upstream connection.
     Subscribe {
         /// Source-local identity of this connection.
@@ -41,7 +42,7 @@ pub enum RtdSourceEvent<T> {
         /// Canonical topic parts.
         topic: RtdTopic,
         /// Revocable, bounded value sender for this connection.
-        sender: RtdSender<T>,
+        sender: RtdSender<T, D>,
     },
     /// Remove this connection from the upstream subscription set.
     Unsubscribe {
@@ -56,11 +57,11 @@ pub enum RtdSourceEvent<T> {
 /// turns. The producer must return when the context closes and must join any
 /// additional threads/callbacks before returning. Neither a context nor a
 /// sender can extend the lifetime of the RTD runtime.
-pub struct RtdSourceContext<T> {
-    shared: Arc<Shared<T>>,
+pub struct RtdSourceContext<T, D: RtdDeliveryPolicy = RtdFifo> {
+    shared: Arc<Shared<T, D>>,
 }
 
-impl<T> RtdSourceContext<T> {
+impl<T, D: RtdDeliveryPolicy> RtdSourceContext<T, D> {
     /// Returns whether source shutdown or producer completion has closed it.
     #[must_use]
     pub fn is_closed(&self) -> bool {
@@ -72,7 +73,7 @@ impl<T> RtdSourceContext<T> {
     /// A zero timeout polls without waiting. Source cancellation wakes the
     /// waiter and returns [`XllError::Closing`]. Reading an unsubscribe returns
     /// its reserved control capacity before handing the event to the caller.
-    pub fn recv_timeout(&self, timeout: Duration) -> XllResult<Option<RtdSourceEvent<T>>> {
+    pub fn recv_timeout(&self, timeout: Duration) -> XllResult<Option<RtdSourceEvent<T, D>>> {
         let mut state = self.shared.state.lock();
         self.shared.changed.wait_while_for(
             &mut state,
@@ -82,16 +83,48 @@ impl<T> RtdSourceContext<T> {
         if state.closed {
             return Err(XllError::Closing);
         }
-        Ok(state.events.pop_front().map(|event| match event {
+        let event = state.events.pop_front();
+        if matches!(event, Some(ControlEvent::Unsubscribe { .. })) {
+            state.removals -= 1;
+        }
+        drop(state);
+        Ok(event.map(|event| match event {
             ControlEvent::Subscribe { id, topic, sender } => {
                 RtdSourceEvent::Subscribe { id, topic, sender }
             }
             ControlEvent::Unsubscribe { id, permit } => {
-                state.removals -= 1;
                 drop(permit);
                 RtdSourceEvent::Unsubscribe { id }
             }
         }))
+    }
+}
+
+/// Validates a topic before registration in a multiplexed source.
+///
+/// Closures implement this trait directly. Sources without a validator retain
+/// a zero-sized [`NoTopicValidator`] instead of an optional function pointer.
+pub trait RtdTopicValidator: Send + Sync + 'static {
+    /// Rejects an invalid topic before its registration starts.
+    fn validate(&self, topic: &RtdTopic) -> XllResult<()>;
+}
+
+/// A zero-sized policy that accepts every already-parsed topic.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoTopicValidator;
+
+impl RtdTopicValidator for NoTopicValidator {
+    fn validate(&self, _topic: &RtdTopic) -> XllResult<()> {
+        Ok(())
+    }
+}
+
+impl<F> RtdTopicValidator for F
+where
+    F: Fn(&RtdTopic) -> XllResult<()> + Send + Sync + 'static,
+{
+    fn validate(&self, topic: &RtdTopic) -> XllResult<()> {
+        self(topic)
     }
 }
 
@@ -114,13 +147,13 @@ impl<T> RtdSourceContext<T> {
 /// connection resources and application-owned event copies are not included.
 /// The producer and validator keep their concrete types until registration in
 /// the runtime's heterogeneous source arena.
-pub struct RtdMultiplexedSource<T, P, V = fn(&RtdTopic) -> XllResult<()>> {
+pub struct RtdMultiplexedSource<T, P, V = NoTopicValidator, D: RtdDeliveryPolicy = RtdFifo> {
     // Join source work before releasing other source fields or user captures.
-    worker: WorkerOwner<T, P>,
-    delivery: RtdDelivery,
+    worker: WorkerOwner<T, P, D>,
+    delivery: D,
     limits: RtdSourceLimits,
     budget: Arc<ChannelBudget>,
-    validator: Option<V>,
+    validator: V,
     error_policy: RtdProducerErrorPolicy,
     #[cfg(test)]
     fail_spawn: AtomicBool,
@@ -137,22 +170,23 @@ struct Worker<P> {
 // Owns the shutdown barrier independently of the validator's concrete type.
 // Rebuilding a source in with_topic_validator moves this guard without running
 // shutdown or requiring unsafe moves out of a type that implements Drop.
-struct WorkerOwner<T, P> {
-    shared: Arc<Shared<T>>,
+struct WorkerOwner<T, P, D: RtdDeliveryPolicy> {
+    shared: Arc<Shared<T, D>>,
     state: Mutex<Worker<P>>,
+    started: AtomicBool,
     joined: Condvar,
 }
 
-struct Active<T> {
+struct Active<T, D: RtdDeliveryPolicy> {
     topic: RtdTopic,
-    sender: RtdSender<T>,
+    sender: RtdSender<T, D>,
 }
 
-enum ControlEvent<T> {
+enum ControlEvent<T, D: RtdDeliveryPolicy> {
     Subscribe {
         id: RtdSubscriptionId,
         topic: RtdTopic,
-        sender: RtdSender<T>,
+        sender: RtdSender<T, D>,
     },
     Unsubscribe {
         id: RtdSubscriptionId,
@@ -160,22 +194,22 @@ enum ControlEvent<T> {
     },
 }
 
-struct State<T> {
-    events: VecDeque<ControlEvent<T>>,
-    active: FxHashMap<RtdSubscriptionId, Active<T>>,
+struct State<T, D: RtdDeliveryPolicy> {
+    events: VecDeque<ControlEvent<T, D>>,
+    active: FxHashMap<RtdSubscriptionId, Active<T, D>>,
     removals: usize,
     next_id: u64,
     closed: bool,
     stopping: bool,
 }
 
-struct Shared<T> {
-    state: Mutex<State<T>>,
+struct Shared<T, D: RtdDeliveryPolicy> {
+    state: Mutex<State<T, D>>,
     closed: AtomicBool,
     changed: Condvar,
 }
 
-impl<T> Shared<T> {
+impl<T, D: RtdDeliveryPolicy> Shared<T, D> {
     fn new() -> Self {
         Self {
             state: Mutex::new(State {
@@ -191,7 +225,7 @@ impl<T> Shared<T> {
         }
     }
 
-    fn register(&self, topic: &RtdTopic, sender: RtdSender<T>) -> XllResult<RtdSubscriptionId> {
+    fn register(&self, topic: &RtdTopic, sender: RtdSender<T, D>) -> XllResult<RtdSubscriptionId> {
         let mut state = self.state.lock();
         if state.closed {
             return Err(XllError::Closing);
@@ -298,20 +332,21 @@ impl<T> Shared<T> {
     }
 }
 
-impl<T: IntoRtdValue + Send + 'static, P> RtdMultiplexedSource<T, P>
+impl<T: IntoRtdValue + Send + 'static, P, D: RtdDeliveryPolicy>
+    RtdMultiplexedSource<T, P, NoTopicValidator, D>
 where
-    P: FnOnce(RtdSourceContext<T>) -> XllResult<()> + Send + 'static,
+    P: FnOnce(RtdSourceContext<T, D>) -> XllResult<()> + Send + 'static,
 {
     /// Creates a shared producer without starting it or allocating a thread.
     ///
     /// The job may own resources that are neither `Clone` nor `Sync`.
-    pub fn new(delivery: RtdDelivery, producer: P) -> Self {
+    pub fn new(delivery: D, producer: P) -> Self {
         let shared = Arc::new(Shared::new());
         Self {
             delivery,
             limits: RtdSourceLimits::standard(),
             budget: Arc::new(ChannelBudget::source(RtdSourceLimits::standard())),
-            validator: None,
+            validator: NoTopicValidator,
             worker: WorkerOwner {
                 shared,
                 state: Mutex::new(Worker {
@@ -321,6 +356,7 @@ where
                     joining: false,
                     result: None,
                 }),
+                started: AtomicBool::new(false),
                 joined: Condvar::new(),
             },
             error_policy: RtdProducerErrorPolicy::default(),
@@ -330,11 +366,12 @@ where
     }
 }
 
-impl<T, P, V> RtdMultiplexedSource<T, P, V>
+impl<T, P, V, D> RtdMultiplexedSource<T, P, V, D>
 where
     T: IntoRtdValue + Send + 'static,
-    P: FnOnce(RtdSourceContext<T>) -> XllResult<()> + Send + 'static,
-    V: Fn(&RtdTopic) -> XllResult<()> + Send + Sync + 'static,
+    P: FnOnce(RtdSourceContext<T, D>) -> XllResult<()> + Send + 'static,
+    V: RtdTopicValidator,
+    D: RtdDeliveryPolicy,
 {
     /// Sets aggregate source bounds, preserving existing reservations.
     ///
@@ -353,15 +390,28 @@ where
     /// Failure rolls back the channel and all subscription reservations. This
     /// builder changes the source's validator type without starting its job.
     #[must_use]
-    pub fn with_topic_validator<W>(self, validator: W) -> RtdMultiplexedSource<T, P, W>
+    pub fn with_topic_validator<W>(self, validator: W) -> RtdMultiplexedSource<T, P, W, D>
     where
         W: Fn(&RtdTopic) -> XllResult<()> + Send + Sync + 'static,
     {
+        self.with_validator_policy(validator)
+    }
+
+    /// Removes validation while preserving the owned job and shutdown barrier.
+    #[must_use]
+    pub fn without_topic_validator(self) -> RtdMultiplexedSource<T, P, NoTopicValidator, D> {
+        self.with_validator_policy(NoTopicValidator)
+    }
+
+    fn with_validator_policy<W: RtdTopicValidator>(
+        self,
+        validator: W,
+    ) -> RtdMultiplexedSource<T, P, W, D> {
         RtdMultiplexedSource {
             delivery: self.delivery,
             limits: self.limits,
             budget: self.budget,
-            validator: Some(validator),
+            validator,
             worker: self.worker,
             error_policy: self.error_policy,
             #[cfg(test)]
@@ -378,8 +428,8 @@ where
 
     /// Returns the data buffering policy.
     #[must_use]
-    pub const fn delivery(&self) -> RtdDelivery {
-        self.delivery
+    pub fn delivery(&self) -> RtdDelivery {
+        self.delivery.delivery()
     }
 
     /// Returns the aggregate source limits.
@@ -394,12 +444,35 @@ where
         self.error_policy
     }
 
-    fn start(
+    fn register_channel(
         &self,
         topic: &RtdTopic,
         mut channel: RtdChannelSubscription,
+    ) -> XllResult<RtdMultiplexedSubscription<T, D>> {
+        let id = self
+            .worker
+            .shared
+            .register(topic, channel.sender(self.delivery))?;
+        let subscription_permit = channel.take_subscription_permit();
+        Ok(RtdMultiplexedSubscription {
+            channel,
+            shared: Arc::clone(&self.worker.shared),
+            id,
+            permit: Some(subscription_permit),
+        })
+    }
+
+    fn start(
+        &self,
+        topic: &RtdTopic,
+        channel: RtdChannelSubscription,
         budget: &Arc<ChannelBudget>,
-    ) -> XllResult<RtdMultiplexedSubscription<T>> {
+    ) -> XllResult<RtdMultiplexedSubscription<T, D>> {
+        if self.worker.started.load(Ordering::Acquire) {
+            // stop/complete close shared registration before joining. Its
+            // mutex remains the admission authority for every warm subscriber.
+            return self.register_channel(topic, channel);
+        }
         let mut worker = self.worker.state.lock();
         if self.worker.shared.closed.load(Ordering::Acquire)
             || worker.joining
@@ -414,14 +487,7 @@ where
         } else {
             None
         };
-        let id = self.worker.shared.register(topic, channel.sender())?;
-        let subscription_permit = channel.take_subscription_permit();
-        let subscription = RtdMultiplexedSubscription {
-            channel,
-            shared: Arc::clone(&self.worker.shared),
-            id,
-            permit: Some(subscription_permit),
-        };
+        let subscription = self.register_channel(topic, channel)?;
         if worker.handle.is_some() {
             return Ok(subscription);
         }
@@ -460,6 +526,7 @@ where
             Ok(handle) => {
                 worker.handle = Some(handle);
                 worker.permit = permit;
+                self.worker.started.store(true, Ordering::Release);
                 Ok(subscription)
             }
             Err(error) => {
@@ -474,7 +541,7 @@ where
     }
 }
 
-impl<T, P> WorkerOwner<T, P> {
+impl<T, P, D: RtdDeliveryPolicy> WorkerOwner<T, P, D> {
     fn finish(&self) -> XllResult<()> {
         self.shared.stop();
         let (handle, producer, permit) = {
@@ -509,7 +576,7 @@ impl<T, P> WorkerOwner<T, P> {
     }
 }
 
-impl<T, P> Drop for WorkerOwner<T, P> {
+impl<T, P, D: RtdDeliveryPolicy> Drop for WorkerOwner<T, P, D> {
     fn drop(&mut self) {
         let _ = self.finish();
     }
@@ -520,14 +587,14 @@ impl<T, P> Drop for WorkerOwner<T, P> {
 /// Disconnect never waits for upstream I/O or joins the source worker. It
 /// closes the data queue, waits for in-flight publication, revokes the sink,
 /// and transfers a pre-reserved removal event to the shared producer.
-pub struct RtdMultiplexedSubscription<T> {
+pub struct RtdMultiplexedSubscription<T, D: RtdDeliveryPolicy = RtdFifo> {
     channel: RtdChannelSubscription,
-    shared: Arc<Shared<T>>,
+    shared: Arc<Shared<T, D>>,
     id: RtdSubscriptionId,
     permit: Option<SubscriptionPermit>,
 }
 
-impl<T> RtdMultiplexedSubscription<T> {
+impl<T, D: RtdDeliveryPolicy> RtdMultiplexedSubscription<T, D> {
     fn finish(&mut self) -> XllResult<()> {
         let result = self.channel.finish();
         if let Some(permit) = self.permit.take() {
@@ -537,7 +604,7 @@ impl<T> RtdMultiplexedSubscription<T> {
     }
 }
 
-impl<T> Drop for RtdMultiplexedSubscription<T> {
+impl<T, D: RtdDeliveryPolicy> Drop for RtdMultiplexedSubscription<T, D> {
     fn drop(&mut self) {
         let _ = self.finish();
     }
@@ -546,7 +613,9 @@ impl<T> Drop for RtdMultiplexedSubscription<T> {
 // SAFETY: only the channel's shared publisher can access a sink. finish and
 // Drop revoke that channel and wait for publication before any exit. The
 // producer and any escaped sender clones retain no usable runtime capability.
-unsafe impl<T: Send + 'static> RtdSubscription for RtdMultiplexedSubscription<T> {
+unsafe impl<T: Send + 'static, D: RtdDeliveryPolicy> RtdSubscription
+    for RtdMultiplexedSubscription<T, D>
+{
     fn request_cancel(&self) {
         self.channel.request_cancel();
     }
@@ -559,14 +628,15 @@ unsafe impl<T: Send + 'static> RtdSubscription for RtdMultiplexedSubscription<T>
 // rollback and unwinding revoke its sink through Drop. The shared producer
 // receives only safe senders. Every successful subscription owns its channel
 // revocation barrier; source shutdown additionally joins the shared job.
-unsafe impl<T, P, V> RtdSource for RtdMultiplexedSource<T, P, V>
+unsafe impl<T, P, V, D> RtdSource for RtdMultiplexedSource<T, P, V, D>
 where
     T: IntoRtdValue + Send + 'static,
-    P: FnOnce(RtdSourceContext<T>) -> XllResult<()> + Send + 'static,
-    V: Fn(&RtdTopic) -> XllResult<()> + Send + Sync + 'static,
+    P: FnOnce(RtdSourceContext<T, D>) -> XllResult<()> + Send + 'static,
+    V: RtdTopicValidator,
+    D: RtdDeliveryPolicy,
 {
     type Value = T;
-    type Subscription = RtdMultiplexedSubscription<T>;
+    type Subscription = RtdMultiplexedSubscription<T, D>;
 
     fn subscribe(&self, topic: &RtdTopic, sink: RtdSink<T>) -> XllResult<Self::Subscription> {
         let runtime_budget = sink.channel_budget();
@@ -576,9 +646,7 @@ where
             Arc::clone(&runtime_budget),
             sink,
         )?;
-        if let Some(validator) = &self.validator {
-            validator(topic)?;
-        }
+        self.validator.validate(topic)?;
         self.start(topic, channel, &runtime_budget)
     }
 

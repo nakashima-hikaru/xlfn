@@ -80,6 +80,21 @@ The source handle is the opaque RTD identity. Clone a handle when multiple
 functions should refer to the same source; registering a new source creates a
 distinct identity even when its value is equivalent. The runtime owns the
 source and subscription identity; handles do not extend its lifetime.
+
+Declare one to sixteen known source types with
+`Addin::RtdSources = (SourceA, SourceB)` and
+register the complete tuple once with
+`context.rtd().register_sources((source_a, source_b))?`. The returned handles
+have the same tuple order. The runtime stores the concrete sources together
+and dispatches through their types, without a separate boxed adapter for each
+source. A one-source catalog uses `(Source,)`, including the trailing comma.
+
+For a source set assembled incrementally, or source types containing captured
+closures that cannot be named in an associated type, select
+`type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;`.
+This mode retains `register_source(source)` and owns a boxed adapter per source.
+Both modes use the same typed subscription owners and shutdown barriers.
+
 `context.rtd().subscribe(&source, &topic)` accepts an existing `RtdTopic`
 directly. Arrays, slices, and vectors of `String` or string references are
 also accepted, so `Vec<String>` does not need a temporary `Vec<&str>`. These
@@ -194,24 +209,32 @@ The active-stream limit includes disconnected subscriptions until their source
 cleanup finishes. Each connection reserves its terminal cleanup capacity and
 prepares the worker before starting its source. While cleanup holds the final
 slot, a new connection returns `Overloaded`; an admitted subscription's
-`DisconnectData` can always revoke its topic and transfer its cleanup.
+`DisconnectData` can always revoke its topic and transfer its cleanup. Queue
+storage grows only when the actual number of live or retiring owners reaches
+a new high-water mark; its configured maximum is not eagerly allocated.
+Warm cleanup reservations and releases use an atomic quota, while enqueue
+and dequeue retain the worker queue mutex.
 
 ## Backpressure and errors
 
-`RtdDelivery::Fifo(capacity)` queues accepted data in order up to the
-per-subscription capacity. `RtdDelivery::Latest` keeps at most one pending
+`RtdFifo::new(capacity)` queues accepted data in order up to the
+per-subscription capacity. `RtdLatest` keeps at most one pending
 data value, replacing it with newer accepted data. It does not retract a
 publication already in flight. Both modes also enforce source and runtime
 buffer budgets. A rejected replacement preserves the old pending value and
 returns the new value in `RtdSendError::Full`. Terminal errors remain separate
-from data and cannot be replaced by later samples. Set the blocking adapter's
-mode with `.with_delivery(...)`; its constructor otherwise retains FIFO
-behavior.
+from data and cannot be replaced by later samples. Select the blocking adapter's policy with
+`RtdChannelSource::with_policy(RtdLatest, factory)` or keep the FIFO
+`RtdChannelSource::new(capacity, factory)` constructor. Multiplexed sources take
+the policy as their first constructor argument. Senders and multiplex contexts
+carry the policy type (`RtdSender<T, RtdLatest>` and
+`RtdSourceContext<T, RtdLatest>`); default type parameters select FIFO.
+`delivery()` returns the `RtdDelivery` description for inspection.
 
 `RtdSender::try_send` validates values before enqueueing and never waits for
 queue capacity. `RtdSendError::Full` and `RtdSendError::Closed` retain the
 validated update as `RtdPendingValue<T>`. Recover it with `into_pending()` and retry
-on any `RtdSender<T>` of the same input type with `try_send_pending()`, without
+on any `RtdSender<T, D>` of the same input type, including a different policy, with `try_send_pending()`, without
 cloning the original input or re-running its
 converter. Use a bounded retry policy and stop when the channel closes.
 `RtdSendError::Invalid` contains a conversion/validation error and no payload.
@@ -224,6 +247,23 @@ publisher encounters a runtime error, it closes admission, wakes the producer,
 and reports that error during disconnect. `Closing` is treated as normal
 shutdown when it follows cancellation. Returning `Closing` from a producer
 before cancellation is diagnosed as a producer failure.
+
+`RtdSender::try_send_batch` converts and validates at most 32 inputs before
+queue admission. FIFO accepts the whole batch in order or accepts none, with
+one aggregate count/byte reservation against each shared budget. Latest validates
+every input but atomically coalesces a successful batch to its final value;
+it never publishes a prefix. A rejected batch leaves the previous latest value
+intact.
+
+`RtdBatchSendError::Full` and `Closed` retain all validated values as
+`RtdPendingBatch<T>`. Use `into_pending()` and `try_send_pending_batch()` to retry
+on any sender of the same input type, without converting again. This includes
+retrying a rejected latest batch on a FIFO sender. `Invalid` discards the
+converted prefix and remaining inputs without changing the queue. More than
+32 inputs is invalid. Conversion occurs even when closed; an empty batch is a
+successful no-op, including on a closed sender. The publisher still handles at
+most 32 values per turn, so batch admission does not change inter-topic fairness
+or promise that Excel displays every intermediate sample.
 
 Producer errors and panics are diagnosed at completion. Publication or
 worker-join failures can also be returned by shutdown. The framework revokes
@@ -283,14 +323,39 @@ panic paths. Source-wide `request_stop` and `shutdown_and_wait` hooks are
 separate from per-topic cancellation and disconnection.
 
 `RtdSubscription::disconnect_and_wait(self)` consumes the concrete subscription
-by value. The framework stores these values in reusable slots belonging to each
-registered source; it does not allocate a `Box` for each connection. A unique
-ticket carries the source, slot and generation through connection rollback,
-deferred cleanup and shutdown. Cancellation temporarily takes the value out of
-storage, and disconnection releases its slot only after the sink-user barrier
-finishes, including errors and panics. User callbacks run outside the storage
-lock. Slot capacity is retained until the source is reclaimed, so this removes
-repeated allocation at the cost of retaining each source's high-water capacity.
+by value. The add-in selects its owner type with `Addin::RtdSubscription`.
+Each connection moves this value through rollback, the server, and deferred
+cleanup without a per-connection box or source-storage mutex. Cancellation
+borrows the owner; the consuming disconnect completes the sink-user barrier
+before releasing cleanup capacity, including errors and panics. The runtime
+keeps the source and publish core alive throughout that barrier.
+
+Use the source's concrete subscription type for an add-in with one kind of
+source. For several kinds, declare their closed set and use it as the associated
+type:
+
+```rust
+xlfn::rtd_subscriptions! {
+    /// Concrete owners accepted by this add-in.
+    pub enum Subscriptions {
+        Blocking(xlfn::rtd::RtdChannelSubscription),
+        Shared(xlfn::rtd::RtdMultiplexedSubscription<f64>),
+    }
+}
+// In `impl Addin`: type RtdSubscription = Subscriptions;
+// Also select RtdSources: a tuple of named source types, or
+// xlfn::DynamicRtdSources<Self::RtdSubscription> for incremental registration.
+```
+
+The macro generates direct enum construction and delegates each barrier to
+its concrete variant. A custom conversion must implement the unsafe
+`IntoRtdSubscription<E>` contract; an ordinary `From` implementation is not
+sufficient because it could lose or retain a separate sink owner, or panic
+before the barrier. `()` selects an add-in with no registered RTD sources.
+
+An enum occupies enough space for its largest variant. This affects server
+entries and the cleanup queue, so keep unusually large producer data in the
+source or a producer-owned allocation and measure bytes as well as allocations.
 
 ## Temporary COM registration
 

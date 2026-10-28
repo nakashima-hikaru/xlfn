@@ -1,7 +1,10 @@
 //! Allocation gate for the production source adapter and full connection path.
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use xlfn::benchmark_support::with_rtd_connection_benchmark;
+use xlfn::benchmark_support::{
+    rtd_source_catalog_allocation_probe, with_rtd_connection_benchmark,
+    with_rtd_connection_memory_benchmark,
+};
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
@@ -57,6 +60,34 @@ fn retained_bytes_delta() -> i128 {
 
 fn main() {
     let report_only = std::env::var_os("XLFN_BENCH_REPORT_ONLY").is_some();
+    for source_count in [1, 4, 16] {
+        for static_catalog in [false, true] {
+            rtd_source_catalog_allocation_probe(static_catalog, source_count);
+            begin_counting();
+            rtd_source_catalog_allocation_probe(static_catalog, source_count);
+            ENABLED.store(false, Ordering::Relaxed);
+            println!(
+                "{}",
+                serde_json::json!({
+                    "case":"source_catalog_lifecycle",
+                    "static_catalog":static_catalog,
+                    "sources":source_count,
+                    "process_allocations":ALLOCS.load(Ordering::Relaxed),
+                    "process_reallocations":REALLOCS.load(Ordering::Relaxed),
+                    "process_requested_bytes":BYTES.load(Ordering::Relaxed),
+                    "process_retained_bytes_delta":retained_bytes_delta(),
+                })
+            );
+            if !report_only {
+                assert_eq!(
+                    ALLOCS.load(Ordering::Relaxed),
+                    if static_catalog { 1 } else { source_count + 1 }
+                );
+                assert_eq!(retained_bytes_delta(), 0);
+            }
+        }
+    }
+
     for count in [1, 32, 256] {
         // Warm process/TLS infrastructure before measuring complete ownership.
         with_rtd_connection_benchmark(count, true, false, |operation| operation());
@@ -79,7 +110,7 @@ fn main() {
             assert_eq!(
                 retained_bytes_delta(),
                 0,
-                "source teardown must reclaim every slot"
+                "source teardown must reclaim every connection owner"
             );
         }
         for adapter_only in [true, false] {
@@ -103,13 +134,91 @@ fn main() {
                             "report_only": report_only,
                         })
                     );
-                    if warm && !report_only {
+                    if (warm || adapter_only) && !report_only {
                         // Runtime connection takes one owned canonical-topic
                         // snapshot per connection; source storage adds none.
                         assert_eq!(allocations, if adapter_only { 0 } else { count });
                         assert_eq!(reallocations, 0);
+                        if adapter_only {
+                            assert_eq!(BYTES.load(Ordering::Relaxed), 0);
+                            assert_eq!(retained_bytes_delta(), 0);
+                        }
                     }
                 });
+            }
+        }
+    }
+
+    for owner_payload_target in [8, 256, 4096] {
+        for cleanup_capacity in [1, 32, 256, 4096] {
+            // The active variant always owns the same eight-byte value. Only
+            // the add-in's closed owner set and terminal queue limit change.
+            with_rtd_connection_memory_benchmark(
+                1,
+                cleanup_capacity,
+                owner_payload_target,
+                |operation, _, _| operation(),
+            );
+            with_rtd_connection_memory_benchmark(
+                1,
+                cleanup_capacity,
+                owner_payload_target,
+                |operation, common_owner_bytes, connection_owner_bytes| {
+                    begin_counting();
+                    operation();
+                    ENABLED.store(false, Ordering::Relaxed);
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "case": "cleanup_capacity_cold_cycle",
+                            "subscriptions": 1,
+                            "cleanup_capacity": cleanup_capacity,
+                            "owner_payload_target": owner_payload_target,
+                            "common_owner_bytes": common_owner_bytes,
+                            "connection_owner_bytes": connection_owner_bytes,
+                            "process_allocations": ALLOCS.load(Ordering::Relaxed),
+                            "process_reallocations": REALLOCS.load(Ordering::Relaxed),
+                            "process_requested_bytes": BYTES.load(Ordering::Relaxed),
+                            "process_retained_bytes_delta": retained_bytes_delta(),
+                            "report_only": report_only,
+                        })
+                    );
+                },
+            );
+
+            begin_counting();
+            let (common_owner_bytes, connection_owner_bytes) = with_rtd_connection_memory_benchmark(
+                1,
+                cleanup_capacity,
+                owner_payload_target,
+                |operation, common_owner_bytes, connection_owner_bytes| {
+                    operation();
+                    (common_owner_bytes, connection_owner_bytes)
+                },
+            );
+            ENABLED.store(false, Ordering::Relaxed);
+            println!(
+                "{}",
+                serde_json::json!({
+                    "case": "cleanup_capacity_owner_lifecycle",
+                    "subscriptions": 1,
+                    "cleanup_capacity": cleanup_capacity,
+                    "owner_payload_target": owner_payload_target,
+                    "common_owner_bytes": common_owner_bytes,
+                    "connection_owner_bytes": connection_owner_bytes,
+                    "process_allocations": ALLOCS.load(Ordering::Relaxed),
+                    "process_reallocations": REALLOCS.load(Ordering::Relaxed),
+                    "process_requested_bytes": BYTES.load(Ordering::Relaxed),
+                    "process_retained_bytes_delta": retained_bytes_delta(),
+                    "report_only": report_only,
+                })
+            );
+            if !report_only {
+                assert_eq!(
+                    retained_bytes_delta(),
+                    0,
+                    "runtime teardown must reclaim its complete terminal queue"
+                );
             }
         }
     }

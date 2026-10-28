@@ -9,13 +9,15 @@
 # fn main() {}
 # pub struct State { client: Client, adapter: Client }
 # impl Addin for ServiceAddin {
+#     type RtdSubscription = ();
+#     type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
 #     type SharedState = State;
 #     type LifecycleState = ();
 #     type Error = XllError;
 #     type Layers = ();
 #     #[cfg(feature = "async")]
 #     type AsyncExecutor = xlfn::BuiltinAsyncExecutor;
-#     fn open(_: &OpenContext) -> xlfn::OpenResult<Self> {
+#     fn open(_: &OpenContext<Self>) -> xlfn::OpenResult<Self> {
 #         Ok(Opened::new(State { client: Client, adapter: Client })
 #             .with_async_executor(xlfn::BuiltinAsyncExecutor::new(xlfn::BuiltinExecutorConfig::new())))
 #     }

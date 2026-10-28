@@ -16,14 +16,27 @@ pub(crate) trait OpeningState<A: crate::Addin>: Sized {
     fn abandon(self, deps: &OpenDeps<'_, A>);
 }
 
+type OpenCoreParts<A> = (
+    OpenAttemptId,
+    crate::module_runtime::ModuleOpening,
+    Option<
+        crate::runtime_components::GenerationServiceInputs<
+            <A as crate::Addin>::RtdSubscription,
+            <A as crate::Addin>::RtdSources,
+        >,
+    >,
+);
+
 /// The only common payload shared by every open transaction state.
-pub(crate) struct OpenCore {
+pub(crate) struct OpenCore<A: crate::Addin> {
     attempt_id: OpenAttemptId,
     module_opening: crate::module_runtime::ModuleOpening,
-    service_inputs: Option<crate::runtime_components::GenerationServiceInputs>,
+    service_inputs: Option<
+        crate::runtime_components::GenerationServiceInputs<A::RtdSubscription, A::RtdSources>,
+    >,
 }
 
-impl OpenCore {
+impl<A: crate::Addin> OpenCore<A> {
     fn new(
         attempt_id: OpenAttemptId,
         module_opening: crate::module_runtime::ModuleOpening,
@@ -41,7 +54,10 @@ impl OpenCore {
 
     fn install_service_inputs(
         &mut self,
-        inputs: crate::runtime_components::GenerationServiceInputs,
+        inputs: crate::runtime_components::GenerationServiceInputs<
+            A::RtdSubscription,
+            A::RtdSources,
+        >,
     ) {
         if self.service_inputs.replace(inputs).is_some() {
             crate::boundary::fail_stop_invariant(
@@ -53,40 +69,34 @@ impl OpenCore {
         }
     }
 
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        OpenAttemptId,
-        crate::module_runtime::ModuleOpening,
-        Option<crate::runtime_components::GenerationServiceInputs>,
-    ) {
+    pub(crate) fn into_parts(self) -> OpenCoreParts<A> {
         (self.attempt_id, self.module_opening, self.service_inputs)
     }
 }
 
 /// The open protocol has begun, but no host callback session is attached yet.
-pub(crate) struct Begun {
-    core: OpenCore,
+pub(crate) struct Begun<A: crate::Addin> {
+    core: OpenCore<A>,
 }
 
 /// Host callback and registration journal ownership is now attached.
-pub(crate) struct HostAttached {
-    core: OpenCore,
+pub(crate) struct HostAttached<A: crate::Addin> {
+    core: OpenCore<A>,
     host: HostOpeningState,
 }
 
 /// Application initialization has begun, but no state is available to quiesce.
 /// This state deliberately cannot implement `RollbackState`: an unsuccessful
 /// `Addin::open` may leave execution sources that only the application knows.
-pub(crate) struct Initializing {
-    core: OpenCore,
+pub(crate) struct Initializing<A: crate::Addin> {
+    core: OpenCore<A>,
     host: HostOpeningState,
 }
 
 /// `Addin::open` succeeded and its thread-affine lifecycle state is owned by
 /// the transaction.
 pub(crate) struct Initialized<A: crate::Addin> {
-    core: OpenCore,
+    core: OpenCore<A>,
     host: HostOpeningState,
     lifecycle: A::LifecycleState,
 }
@@ -94,21 +104,21 @@ pub(crate) struct Initialized<A: crate::Addin> {
 /// The generation is staged in canonical lifecycle state, while the
 /// thread-affine lifecycle payload remains owned by the transaction.
 pub(crate) struct GenerationStaged<A: crate::Addin> {
-    core: OpenCore,
+    core: OpenCore<A>,
     host: HostOpeningState,
     lifecycle: A::LifecycleState,
 }
 
 /// The lifecycle payload has been transferred to the runtime's thread-affine
 /// slot. The transaction still owns the module and host capabilities.
-pub(crate) struct LifecycleInstalled {
-    core: OpenCore,
+pub(crate) struct LifecycleInstalled<A: crate::Addin> {
+    core: OpenCore<A>,
     host: HostOpeningState,
 }
 
 /// All mandatory open steps are complete and the transaction may commit.
-pub(crate) struct HostMutated {
-    core: OpenCore,
+pub(crate) struct HostMutated<A: crate::Addin> {
+    core: OpenCore<A>,
     host: HostOpeningState,
 }
 
@@ -146,13 +156,13 @@ pub(crate) enum LifecycleOwnership<A: crate::Addin> {
 }
 
 pub(crate) struct RollbackParts<A: crate::Addin> {
-    core: OpenCore,
+    core: OpenCore<A>,
     host: HostOpeningState,
     lifecycle: LifecycleOwnership<A>,
 }
 
 impl<A: crate::Addin> RollbackParts<A> {
-    pub(crate) fn into_parts(self) -> (OpenCore, HostOpeningState, LifecycleOwnership<A>) {
+    pub(crate) fn into_parts(self) -> (OpenCore<A>, HostOpeningState, LifecycleOwnership<A>) {
         (self.core, self.host, self.lifecycle)
     }
 }
@@ -172,7 +182,7 @@ fn forget_untrusted_lifecycle_state<A: crate::Addin>(state: A::LifecycleState) {
 
 fn abandon_open<A: crate::Addin>(
     deps: &OpenDeps<'_, A>,
-    core: OpenCore,
+    core: OpenCore<A>,
     lifecycle: LifecycleOwnership<A>,
 ) {
     let (_, module_opening, _service_inputs) = core.into_parts();
@@ -188,7 +198,7 @@ fn abandon_open<A: crate::Addin>(
     }
 }
 
-impl<A: crate::Addin> OpeningState<A> for Begun {
+impl<A: crate::Addin> OpeningState<A> for Begun<A> {
     fn attempt_id(&self) -> OpenAttemptId {
         self.core.attempt_id()
     }
@@ -199,7 +209,7 @@ impl<A: crate::Addin> OpeningState<A> for Begun {
     }
 }
 
-impl<A: crate::Addin> OpeningState<A> for HostAttached {
+impl<A: crate::Addin> OpeningState<A> for HostAttached<A> {
     fn attempt_id(&self) -> OpenAttemptId {
         self.core.attempt_id()
     }
@@ -210,7 +220,7 @@ impl<A: crate::Addin> OpeningState<A> for HostAttached {
     }
 }
 
-impl<A: crate::Addin> OpeningState<A> for Initializing {
+impl<A: crate::Addin> OpeningState<A> for Initializing<A> {
     fn attempt_id(&self) -> OpenAttemptId {
         self.core.attempt_id()
     }
@@ -258,7 +268,7 @@ impl<A: crate::Addin> OpeningState<A> for GenerationStaged<A> {
     }
 }
 
-impl<A: crate::Addin> OpeningState<A> for LifecycleInstalled {
+impl<A: crate::Addin> OpeningState<A> for LifecycleInstalled<A> {
     fn attempt_id(&self) -> OpenAttemptId {
         self.core.attempt_id()
     }
@@ -269,7 +279,7 @@ impl<A: crate::Addin> OpeningState<A> for LifecycleInstalled {
     }
 }
 
-impl<A: crate::Addin> OpeningState<A> for HostMutated {
+impl<A: crate::Addin> OpeningState<A> for HostMutated<A> {
     fn attempt_id(&self) -> OpenAttemptId {
         self.core.attempt_id()
     }
@@ -280,7 +290,7 @@ impl<A: crate::Addin> OpeningState<A> for HostMutated {
     }
 }
 
-impl<A: crate::Addin> RollbackState<A> for HostAttached {
+impl<A: crate::Addin> RollbackState<A> for HostAttached<A> {
     fn into_rollback_parts(self) -> RollbackParts<A> {
         let Self { core, host } = self;
         RollbackParts {
@@ -321,7 +331,7 @@ impl<A: crate::Addin> RollbackState<A> for GenerationStaged<A> {
     }
 }
 
-impl<A: crate::Addin> RollbackState<A> for LifecycleInstalled {
+impl<A: crate::Addin> RollbackState<A> for LifecycleInstalled<A> {
     fn into_rollback_parts(self) -> RollbackParts<A> {
         let Self { core, host } = self;
         RollbackParts {
@@ -332,7 +342,7 @@ impl<A: crate::Addin> RollbackState<A> for LifecycleInstalled {
     }
 }
 
-impl<A: crate::Addin> RollbackState<A> for HostMutated {
+impl<A: crate::Addin> RollbackState<A> for HostMutated<A> {
     fn into_rollback_parts(self) -> RollbackParts<A> {
         let Self { core, host } = self;
         RollbackParts {
@@ -347,7 +357,7 @@ pub(crate) trait HasHost {
     fn host_mut(&mut self) -> &mut HostOpeningState;
 }
 
-impl HasHost for HostAttached {
+impl<A: crate::Addin> HasHost for HostAttached<A> {
     fn host_mut(&mut self) -> &mut HostOpeningState {
         &mut self.host
     }
@@ -365,13 +375,13 @@ impl<A: crate::Addin> HasHost for GenerationStaged<A> {
     }
 }
 
-impl HasHost for LifecycleInstalled {
+impl<A: crate::Addin> HasHost for LifecycleInstalled<A> {
     fn host_mut(&mut self) -> &mut HostOpeningState {
         &mut self.host
     }
 }
 
-impl HasHost for HostMutated {
+impl<A: crate::Addin> HasHost for HostMutated<A> {
     fn host_mut(&mut self) -> &mut HostOpeningState {
         &mut self.host
     }
@@ -428,7 +438,7 @@ impl<'runtime, A: crate::Addin, S: OpeningState<A>> OpeningTxn<'runtime, A, S> {
     }
 }
 
-impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Begun> {
+impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Begun<A>> {
     pub(crate) fn new_begun(
         deps: OpenDeps<'runtime, A>,
         attempt_id: OpenAttemptId,
@@ -445,7 +455,7 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Begun> {
     pub(crate) fn attach_host(
         self,
         callbacks: HostCallbackSession,
-    ) -> OpeningTxn<'runtime, A, HostAttached> {
+    ) -> OpeningTxn<'runtime, A, HostAttached<A>> {
         let mut transaction = self;
         let Begun { core } = transaction.take_state();
         OpeningTxn::new_state(
@@ -474,19 +484,22 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Begun> {
     }
 }
 
-impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, HostAttached> {
-    pub(crate) fn begin_initialization(self) -> OpeningTxn<'runtime, A, Initializing> {
+impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, HostAttached<A>> {
+    pub(crate) fn begin_initialization(self) -> OpeningTxn<'runtime, A, Initializing<A>> {
         let mut transaction = self;
         let HostAttached { core, host } = transaction.take_state();
         OpeningTxn::new_state(transaction.deps, Initializing { core, host })
     }
 }
 
-impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Initializing> {
+impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Initializing<A>> {
     pub(crate) fn initialized(
         self,
         lifecycle: A::LifecycleState,
-        service_inputs: crate::runtime_components::GenerationServiceInputs,
+        service_inputs: crate::runtime_components::GenerationServiceInputs<
+            A::RtdSubscription,
+            A::RtdSources,
+        >,
     ) -> OpeningTxn<'runtime, A, Initialized<A>> {
         let mut transaction = self;
         let Initializing { mut core, host } = transaction.take_state();
@@ -538,7 +551,7 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, GenerationStaged<A>> {
     pub(crate) fn install_lifecycle(
         self,
         access: &AddinLifecycleAccess<'_, A>,
-    ) -> Result<OpeningTxn<'runtime, A, LifecycleInstalled>, LifecycleInstallFailure<'runtime, A>>
+    ) -> Result<OpeningTxn<'runtime, A, LifecycleInstalled<A>>, LifecycleInstallFailure<'runtime, A>>
     {
         let mut transaction = self;
         let GenerationStaged {
@@ -563,11 +576,11 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, GenerationStaged<A>> {
     }
 }
 
-impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, LifecycleInstalled> {
+impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, LifecycleInstalled<A>> {
     pub(crate) fn stage_host_mutations(
         self,
         registrations: Vec<RegistrationId>,
-    ) -> OpeningTxn<'runtime, A, HostMutated> {
+    ) -> OpeningTxn<'runtime, A, HostMutated<A>> {
         let mut transaction = self;
         let LifecycleInstalled { core, mut host } = transaction.take_state();
         host.stage_registrations(registrations);
@@ -599,7 +612,7 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, LifecycleInstalled> {
     }
 }
 
-impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, HostMutated> {
+impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, HostMutated<A>> {
     pub(crate) fn commit(self) -> XllResult<()> {
         let mut transaction = self;
         validate_commit_preconditions(&transaction)?;
@@ -644,7 +657,7 @@ fn validate_commit_preconditions<A: crate::Addin, S: OpeningState<A>>(
 
 fn commit_inner<A: crate::Addin>(
     deps: OpenDeps<'_, A>,
-    core: OpenCore,
+    core: OpenCore<A>,
     journal: &mut HostMutationJournal,
 ) -> XllResult<()> {
     let (attempt_id, module_opening, service_inputs) = core.into_parts();
@@ -731,7 +744,10 @@ fn publish_generation<A: crate::Addin>(
     attempt_id: OpenAttemptId,
     control: &mut LifecycleAccess<'_, A>,
     module_opening: &mut Option<crate::module_runtime::ModuleOpening>,
-    service_inputs: crate::runtime_components::GenerationServiceInputs,
+    service_inputs: crate::runtime_components::GenerationServiceInputs<
+        A::RtdSubscription,
+        A::RtdSources,
+    >,
 ) -> XllResult<()> {
     let generation = attempt_id.into_runtime_generation();
     let config = control.opening_config().ok_or(XllError::Internal {

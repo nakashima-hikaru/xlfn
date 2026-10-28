@@ -5,10 +5,12 @@ use super::{
     ACTIVE_SERVER, IID_IUNKNOWN, RtdServer, com_boundary, guid_eq, server_add_ref,
     server_query_interface, server_release,
 };
+use crate::RtdSubscription;
 use crate::win32::{
     CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_FAIL, E_NOINTERFACE, E_POINTER,
     E_UNEXPECTED, GUID, S_OK,
 };
+use std::any::TypeId;
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -20,21 +22,28 @@ pub(crate) const IID_ICLASS_FACTORY: GUID = GUID {
     data4: [0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
 };
 
-pub(super) static CLASS_FACTORY_VTABLE: ClassFactoryVtable = ClassFactoryVtable {
-    query_interface: factory_query_interface,
-    add_ref: factory_add_ref,
-    release: factory_release,
-    create_instance: factory_create_instance,
-    lock_server: factory_lock_server,
-};
+impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> ClassFactory<E, C> {
+    pub(super) const VTABLE: ClassFactoryVtable<E, C> = ClassFactoryVtable::<E, C> {
+        query_interface: factory_query_interface,
+        add_ref: factory_add_ref,
+        release: factory_release,
+        create_instance: factory_create_instance,
+        lock_server: factory_lock_server,
+    };
+}
+#[cfg(test)]
+pub(super) static CLASS_FACTORY_VTABLE: ClassFactoryVtable = ClassFactory::<()>::VTABLE;
 
 #[repr(C)]
-pub(super) struct ClassFactory {
+pub(super) struct ClassFactory<
+    E: RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+> {
     // The COM caller reads this first slot through the published object ABI.
     #[allow(dead_code, reason = "read by the external COM vtable ABI")]
-    pub(super) vtable: *const ClassFactoryVtable,
+    pub(super) vtable: *const ClassFactoryVtable<E, C>,
     pub(super) references: AtomicU32,
-    pub(super) server: *mut RtdServer,
+    pub(super) server: *mut RtdServer<E, C>,
     // Keep the module hold until every other field has been destroyed.
     pub(super) _module_lease: ComObjectLease,
 }
@@ -42,21 +51,24 @@ pub(super) struct ClassFactory {
 const _: () = assert!(std::mem::offset_of!(ClassFactory, vtable) == 0);
 
 #[repr(C)]
-pub(super) struct ClassFactoryVtable {
+pub(super) struct ClassFactoryVtable<
+    E: RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+> {
     pub(super) query_interface:
-        unsafe extern "system" fn(*mut ClassFactory, *const GUID, *mut *mut c_void) -> i32,
-    pub(super) add_ref: unsafe extern "system" fn(*mut ClassFactory) -> u32,
-    pub(super) release: unsafe extern "system" fn(*mut ClassFactory) -> u32,
+        unsafe extern "system" fn(*mut ClassFactory<E, C>, *const GUID, *mut *mut c_void) -> i32,
+    pub(super) add_ref: unsafe extern "system" fn(*mut ClassFactory<E, C>) -> u32,
+    pub(super) release: unsafe extern "system" fn(*mut ClassFactory<E, C>) -> u32,
     pub(super) create_instance: unsafe extern "system" fn(
-        *mut ClassFactory,
+        *mut ClassFactory<E, C>,
         *mut c_void,
         *const GUID,
         *mut *mut c_void,
     ) -> i32,
-    pub(super) lock_server: unsafe extern "system" fn(*mut ClassFactory, i32) -> i32,
+    pub(super) lock_server: unsafe extern "system" fn(*mut ClassFactory<E, C>, i32) -> i32,
 }
 
-pub(crate) unsafe fn dll_get_class_object(
+pub(crate) unsafe fn dll_get_class_object<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
     class_id: *const c_void,
     interface_id: *const c_void,
     output: *mut *mut c_void,
@@ -64,11 +76,11 @@ pub(crate) unsafe fn dll_get_class_object(
     com_boundary("DllGetClassObject", || {
         // SAFETY: the raw pointers are forwarded unchanged from the COM export.
         // The inner function validates them before dereferencing.
-        unsafe { dll_get_class_object_inner(class_id, interface_id, output) }
+        unsafe { dll_get_class_object_inner::<E, C>(class_id, interface_id, output) }
     })
 }
 
-unsafe fn dll_get_class_object_inner(
+unsafe fn dll_get_class_object_inner<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
     class_id: *const c_void,
     interface_id: *const c_void,
     output: *mut *mut c_void,
@@ -90,14 +102,14 @@ unsafe fn dll_get_class_object_inner(
     let requested_class = unsafe { *(class_id.cast::<GUID>()) };
 
     let active = ACTIVE_SERVER.lock();
-    let Some(entry) = active
-        .as_ref()
-        .filter(|entry| guid_eq(entry.class_id, requested_class))
-    else {
+    let Some(entry) = active.as_ref().filter(|entry| {
+        guid_eq(entry.class_id, requested_class)
+            && entry.subscription_type == TypeId::of::<(E, C)>()
+    }) else {
         return CLASS_E_CLASSNOTAVAILABLE;
     };
 
-    let server = entry.pointer as *mut RtdServer;
+    let server = entry.pointer as *mut RtdServer<E, C>;
 
     // Do not publish a new class factory once add-in shutdown has closed this
     // server. Holding the guard also makes a concurrent shutdown wait until the
@@ -112,8 +124,8 @@ unsafe fn dll_get_class_object_inner(
     // an additional reference that it releases when the factory is destroyed.
     unsafe { server_add_ref(server) };
 
-    let factory = Box::into_non_null(Box::new(ClassFactory {
-        vtable: &CLASS_FACTORY_VTABLE,
+    let factory = Box::into_non_null(Box::new(ClassFactory::<E, C> {
+        vtable: &ClassFactory::<E, C>::VTABLE,
         references: AtomicU32::new(1),
         server,
         _module_lease: ComObjectLease::new(ComObjectKind::Factory),
@@ -131,8 +143,11 @@ unsafe fn dll_get_class_object_inner(
     status
 }
 
-unsafe extern "system" fn factory_query_interface(
-    this: *mut ClassFactory,
+unsafe extern "system" fn factory_query_interface<
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+>(
+    this: *mut ClassFactory<E, C>,
     interface_id: *const GUID,
     output: *mut *mut c_void,
 ) -> i32 {
@@ -167,7 +182,9 @@ unsafe extern "system" fn factory_query_interface(
     })
 }
 
-unsafe extern "system" fn factory_add_ref(this: *mut ClassFactory) -> u32 {
+unsafe extern "system" fn factory_add_ref<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+    this: *mut ClassFactory<E, C>,
+) -> u32 {
     com_lifetime_boundary("IClassFactory::AddRef", 0, || {
         // SAFETY: COM calls AddRef only on a live object pointer. The atomic update
         // preserves the shared COM reference count.
@@ -181,7 +198,12 @@ unsafe extern "system" fn factory_add_ref(this: *mut ClassFactory) -> u32 {
     })
 }
 
-pub(super) unsafe extern "system" fn factory_release(this: *mut ClassFactory) -> u32 {
+pub(super) unsafe extern "system" fn factory_release<
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+>(
+    this: *mut ClassFactory<E, C>,
+) -> u32 {
     com_lifetime_boundary("IClassFactory::Release", 0, || {
         let Some(this) = NonNull::new(this) else {
             return 0;
@@ -209,8 +231,11 @@ pub(super) unsafe extern "system" fn factory_release(this: *mut ClassFactory) ->
     })
 }
 
-unsafe extern "system" fn factory_create_instance(
-    this: *mut ClassFactory,
+unsafe extern "system" fn factory_create_instance<
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+>(
+    this: *mut ClassFactory<E, C>,
     outer: *mut c_void,
     interface_id: *const GUID,
     output: *mut *mut c_void,
@@ -230,8 +255,8 @@ unsafe extern "system" fn factory_create_instance(
     })
 }
 
-unsafe fn factory_create_instance_inner(
-    this: *mut ClassFactory,
+unsafe fn factory_create_instance_inner<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+    this: *mut ClassFactory<E, C>,
     outer: *mut c_void,
     interface_id: *const GUID,
     output: *mut *mut c_void,
@@ -268,8 +293,11 @@ unsafe fn factory_create_instance_inner(
     unsafe { server_query_interface(server, interface_id, output) }
 }
 
-pub(super) unsafe extern "system" fn factory_lock_server(
-    this: *mut ClassFactory,
+pub(super) unsafe extern "system" fn factory_lock_server<
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+>(
+    this: *mut ClassFactory<E, C>,
     lock: i32,
 ) -> i32 {
     let operation = || {

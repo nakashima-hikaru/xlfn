@@ -212,14 +212,14 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                     quote! {
                         {
                             #async_assertion
-                            #krate::__private::v1::assert_excel_parameter::<#return_type, #ty>(__frame);
+                            #krate::__private::v1::assert_excel_parameter::<#return_type, #ty, _, _>(__frame);
                             #convert
                         }
                     }
                 }
                 model::ArgumentConversion::Value(_) => {
                     let convert = if is_async {
-                        quote!(#krate::__private::v1::convert_argument::<#return_type, #ty>(__frame, #index, #argument_name, #raw))
+                        quote!(#krate::__private::v1::convert_argument::<#return_type, #ty, _, _>(__frame, #index, #argument_name, #raw))
                     } else {
                         quote!(__frame.prepare_argument::<#ty>(#index, #argument_name, #raw))
                     };
@@ -229,7 +229,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                     quote! {
                         {
                             #async_assertion
-                            #krate::__private::v1::assert_excel_parameter::<#return_type, #ty>(__frame);
+                            #krate::__private::v1::assert_excel_parameter::<#return_type, #ty, _, _>(__frame);
                             // SAFETY: Excel supplies the live XLOPER12 pointer for this ABI call.
                             unsafe {
                                 #convert

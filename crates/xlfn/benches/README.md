@@ -271,11 +271,12 @@ The callback dispatch in the benchmark driver occurs once per whole batch.
 These measurements do not call Excel or COM or start producer workers.
 
 `rtd_connection_allocations` counts process-wide allocator requests separately
-from timing. Warm adapter batches must allocate nothing; warm runtime batches
+from timing. Cold and warm adapter batches must allocate nothing; warm runtime batches
 may allocate only one canonical-topic snapshot per connection. Reallocations
-are forbidden in both warmed cases. Cold batches report source-storage growth,
-map growth, and (for runtime mode) cleanup-worker startup without an allocation
-gate. Requested bytes are cumulative allocation traffic. The retained-byte
+are forbidden in both warmed cases. Cold runtime batches report map growth,
+cleanup-worker startup, and demand-driven terminal queue growth without an allocation
+gate. Source adapters transfer their common subscription owner by value, so
+they retain no subscription slot capacity. Requested bytes are cumulative allocation traffic. The retained-byte
 delta subtracts deallocated layouts and replaced realloc layouts during the
 batch; it exposes reusable storage retained after a cold high-water mark.
 Neither measure is process RSS. Set `XLFN_BENCH_REPORT_ONLY=1` only to measure a
@@ -283,8 +284,22 @@ historical implementation without the warmed allocation assertions.
 
 The `adapter_owner_lifecycle` cases count complete runtime/source construction,
 one batch and final destruction after warming process/TLS infrastructure. They
-require a zero requested-live-byte delta, including reclamation of all source
-slot capacity at owner teardown.
+require a zero requested-live-byte delta at owner teardown.
+
+The cleanup-capacity cases keep only one eight-byte source subscription live
+while varying `max_active` across 1, 32, 256, and 4096. They also include common
+owner enums with an unused 256- or 4096-byte variant, exposing the memory cost
+of the largest variant in connection maps and terminal queue entries. Each row
+reports actual common-owner and affine-owner layout sizes. Queue storage grows
+with the observed simultaneous owner count, rather than the configured limit.
+Cold-cycle rows exclude fixture construction; owner-lifecycle rows include
+construction, one cycle, and complete destruction and require a zero live-byte
+delta. These requested-layout measurements do not describe allocator usable
+sizes or process RSS.
+
+The old boxed owner, source-slot owner, and common by-value owner comparison,
+including the rejected full-capacity queue experiment, is recorded under
+[`benchmarks/rtd-lock-reduction`](../../../benchmarks/rtd-lock-reduction/README.md).
 
 ```sh
 cargo bench -p xlfn --features bench-internals,rtd --bench rtd_connection --locked

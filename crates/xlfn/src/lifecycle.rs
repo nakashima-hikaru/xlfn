@@ -120,7 +120,7 @@ mod tests {
         attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
 
-    fn test_open_context() -> OpenContext {
+    fn test_open_context<A: Addin>() -> OpenContext<A> {
         OpenContext::new(
             std::path::PathBuf::from("test.xll"),
             BuildInfo::new(AddinId::parse("test").unwrap(), "0", "test"),
@@ -143,6 +143,8 @@ mod tests {
     struct LayersPanic;
 
     impl Addin for LayersPanic {
+        type RtdSubscription = ();
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = ();
         type Error = XllError;
@@ -151,7 +153,7 @@ mod tests {
         type AsyncExecutor = crate::NoAsyncExecutor;
 
         fn open(
-            _: &OpenContext,
+            _: &OpenContext<Self>,
         ) -> Result<
             crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
             Self::Error,
@@ -189,7 +191,7 @@ mod tests {
         let owner = runtime.begin_open().unwrap();
         let lifecycle = lifecycle_access(&runtime);
 
-        rollback_active_open::<LayersPanic, HostAttached>(&runtime, &lifecycle, None);
+        rollback_active_open::<LayersPanic, HostAttached<LayersPanic>>(&runtime, &lifecycle, None);
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Opening);
 
         let mut owner = runtime.publish(owner, (), ());
@@ -260,6 +262,8 @@ mod tests {
     struct ReloadFailure;
 
     impl Addin for ReloadFailure {
+        type RtdSubscription = ();
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = ();
         type Error = XllError;
@@ -268,7 +272,7 @@ mod tests {
         type AsyncExecutor = crate::NoAsyncExecutor;
 
         fn open(
-            _: &OpenContext,
+            _: &OpenContext<Self>,
         ) -> Result<
             crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
             Self::Error,
@@ -308,6 +312,8 @@ mod tests {
     }
 
     impl Addin for RetryClose {
+        type RtdSubscription = ();
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = RetryState;
         type Error = XllError;
@@ -316,7 +322,7 @@ mod tests {
         type AsyncExecutor = crate::NoAsyncExecutor;
 
         fn open(
-            _context: &OpenContext,
+            _context: &OpenContext<Self>,
         ) -> Result<
             crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
             Self::Error,
@@ -374,6 +380,8 @@ mod tests {
     }
 
     impl Addin for CleanupPanic {
+        type RtdSubscription = ();
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = DropObserved;
         type Error = XllError;
@@ -382,7 +390,7 @@ mod tests {
         type AsyncExecutor = crate::NoAsyncExecutor;
 
         fn open(
-            _: &OpenContext,
+            _: &OpenContext<Self>,
         ) -> Result<
             crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
             Self::Error,
@@ -437,6 +445,8 @@ mod tests {
     struct WrongThreadRemoval;
 
     impl Addin for WrongThreadRemoval {
+        type RtdSubscription = ();
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = DropObserved;
         type Error = XllError;
@@ -445,7 +455,7 @@ mod tests {
         type AsyncExecutor = crate::NoAsyncExecutor;
 
         fn open(
-            _: &OpenContext,
+            _: &OpenContext<Self>,
         ) -> Result<
             crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
             Self::Error,
@@ -510,6 +520,8 @@ mod tests {
     struct QuiesceFailure;
 
     impl Addin for QuiesceFailure {
+        type RtdSubscription = ();
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = DropObserved;
         type Error = XllError;
@@ -518,7 +530,7 @@ mod tests {
         type AsyncExecutor = crate::NoAsyncExecutor;
 
         fn open(
-            _: &OpenContext,
+            _: &OpenContext<Self>,
         ) -> Result<
             crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
             Self::Error,
@@ -643,6 +655,8 @@ mod tests {
     struct CleanClose;
 
     impl Addin for CleanClose {
+        type RtdSubscription = ();
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = ();
         type Error = XllError;
@@ -651,7 +665,7 @@ mod tests {
         type AsyncExecutor = crate::NoAsyncExecutor;
 
         fn open(
-            _context: &OpenContext,
+            _context: &OpenContext<Self>,
         ) -> Result<
             crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
             Self::Error,
@@ -666,6 +680,8 @@ mod tests {
     struct InitializationFailure<const PANIC: bool>;
 
     impl<const PANIC: bool> Addin for InitializationFailure<PANIC> {
+        type RtdSubscription = ();
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = ();
         type Error = XllError;
@@ -673,7 +689,7 @@ mod tests {
         #[cfg(feature = "async")]
         type AsyncExecutor = crate::NoAsyncExecutor;
 
-        fn open(_: &OpenContext) -> Result<crate::addin::Opened<(), ()>, XllError> {
+        fn open(_: &OpenContext<Self>) -> Result<crate::addin::Opened<(), ()>, XllError> {
             if PANIC {
                 panic!("injected application initialization panic");
             }
@@ -879,6 +895,8 @@ mod tests {
         struct TraceCleanup;
 
         impl Addin for TraceCleanup {
+            type RtdSubscription = TraceSubscription;
+            type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
             type SharedState = ();
             type LifecycleState = ();
             type Error = XllError;
@@ -888,7 +906,7 @@ mod tests {
             #[cfg(all(feature = "async", not(feature = "async-builtin")))]
             type AsyncExecutor = crate::NoAsyncExecutor;
 
-            fn open(_context: &OpenContext) -> crate::OpenResult<Self> {
+            fn open(_context: &OpenContext<Self>) -> crate::OpenResult<Self> {
                 unreachable!()
             }
 
@@ -1505,6 +1523,8 @@ mod tests {
     struct AlwaysFailClose;
 
     impl Addin for AlwaysFailClose {
+        type RtdSubscription = ();
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = ();
         type Error = XllError;
@@ -1513,7 +1533,7 @@ mod tests {
         type AsyncExecutor = crate::NoAsyncExecutor;
 
         fn open(
-            _context: &OpenContext,
+            _context: &OpenContext<Self>,
         ) -> Result<
             crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
             Self::Error,
@@ -1719,13 +1739,15 @@ mod tests {
         struct AsyncCloseAddin;
 
         impl Addin for AsyncCloseAddin {
+            type RtdSubscription = ();
+            type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
             type SharedState = ();
             type LifecycleState = ();
             type Error = XllError;
             type Layers = ();
             type AsyncExecutor = crate::BuiltinAsyncExecutor;
 
-            fn open(_: &OpenContext) -> crate::OpenResult<Self> {
+            fn open(_: &OpenContext<Self>) -> crate::OpenResult<Self> {
                 unreachable!("the test publishes its isolated runtime directly")
             }
         }
@@ -1868,6 +1890,8 @@ mod tests {
         impl crate::handle::ExcelHandleObject for OrderedHandle {}
 
         impl Addin for OrderedClose {
+            type RtdSubscription = OrderedSubscription;
+            type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
             type SharedState = ();
             type LifecycleState = OrderedState;
             type Error = XllError;
@@ -1876,7 +1900,7 @@ mod tests {
             type AsyncExecutor = crate::NoAsyncExecutor;
 
             fn open(
-                _context: &OpenContext,
+                _context: &OpenContext<Self>,
             ) -> Result<
                 crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
                 Self::Error,
@@ -1976,6 +2000,8 @@ mod tests {
     struct StagedRaceAddin;
 
     impl Addin for StagedRaceAddin {
+        type RtdSubscription = ();
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = StagedRaceState;
         type Error = XllError;
@@ -1984,7 +2010,7 @@ mod tests {
         type AsyncExecutor = crate::NoAsyncExecutor;
 
         fn open(
-            _context: &OpenContext,
+            _context: &OpenContext<Self>,
         ) -> Result<
             crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
             Self::Error,
@@ -2084,6 +2110,8 @@ mod tests {
     struct PanicLayersAddin;
 
     impl Addin for PanicLayersAddin {
+        type RtdSubscription = ();
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = PanicLayersState;
         type Error = XllError;
@@ -2092,7 +2120,7 @@ mod tests {
         type AsyncExecutor = crate::NoAsyncExecutor;
 
         fn open(
-            _context: &OpenContext,
+            _context: &OpenContext<Self>,
         ) -> Result<
             crate::addin::Opened<Self::SharedState, Self::LifecycleState, Self::Layers>,
             Self::Error,

@@ -254,6 +254,8 @@ mod tests {
     }
 
     impl Addin for ReentrantClose {
+        type RtdSubscription = ();
+        type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = CloseState;
         type Error = XllError;
@@ -261,7 +263,7 @@ mod tests {
         #[cfg(feature = "async")]
         type AsyncExecutor = crate::NoAsyncExecutor;
 
-        fn open(_: &OpenContext) -> Result<Opened<(), CloseState>, XllError> {
+        fn open(_: &OpenContext<Self>) -> Result<Opened<(), CloseState>, XllError> {
             unreachable!("test publishes lifecycle state directly")
         }
 
@@ -349,6 +351,8 @@ mod tests {
         struct ReloadAddin;
 
         impl Addin for ReloadAddin {
+            type RtdSubscription = ();
+            type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
             type SharedState = ();
             type LifecycleState = ();
             type Error = XllError;
@@ -358,7 +362,7 @@ mod tests {
             #[cfg(all(feature = "async", not(feature = "async-builtin")))]
             type AsyncExecutor = crate::NoAsyncExecutor;
 
-            fn open(_: &OpenContext) -> crate::addin::OpenResult<Self> {
+            fn open(_: &OpenContext<Self>) -> crate::addin::OpenResult<Self> {
                 SCRIPT.with_borrow_mut(|script| script.opens += 1);
                 let opened = Opened::new(());
                 #[cfg(feature = "async-builtin")]

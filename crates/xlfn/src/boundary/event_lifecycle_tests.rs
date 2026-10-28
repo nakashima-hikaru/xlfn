@@ -64,6 +64,8 @@ impl Drop for LifecycleState {
 struct ResidentEventAddin;
 
 impl Addin for ResidentEventAddin {
+    type RtdSubscription = ();
+    type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = SharedState;
     type LifecycleState = LifecycleState;
     type Error = XllError;
@@ -71,7 +73,7 @@ impl Addin for ResidentEventAddin {
     #[cfg(feature = "async")]
     type AsyncExecutor = crate::NoAsyncExecutor;
 
-    fn open(_: &OpenContext) -> Result<Opened<SharedState, LifecycleState>, XllError> {
+    fn open(_: &OpenContext<Self>) -> Result<Opened<SharedState, LifecycleState>, XllError> {
         update_counts(|counts| counts.opens += 1);
         Ok(Opened::new(SharedState).with_lifecycle(LifecycleState))
     }

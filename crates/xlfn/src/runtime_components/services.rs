@@ -1,24 +1,33 @@
 //! Runtime-owned generation service slots.
 
+use crate::RtdSubscription;
+
 use crate::generation::RuntimeGeneration;
 
 /// Resources registered during `Addin::open` and moved into generation
 /// services at commit. The value is affine: no subsystem can retain a second
 /// owner when the opening transaction rolls back or publishes the generation.
-pub(crate) struct GenerationServiceInputs {
+pub(crate) struct GenerationServiceInputs<
+    E: RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+> {
+    marker: std::marker::PhantomData<fn() -> (E, C)>,
     #[cfg(feature = "rtd")]
-    rtd_sources: crate::subscription::SourceArena,
+    rtd_sources: crate::subscription::SourceArena<E, C>,
 }
 
-impl GenerationServiceInputs {
+impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> GenerationServiceInputs<E, C> {
     #[cfg(not(feature = "rtd"))]
     pub(crate) const fn empty() -> Self {
-        Self {}
+        Self {
+            marker: std::marker::PhantomData,
+        }
     }
 
     #[cfg(feature = "rtd")]
-    pub(crate) const fn with_rtd_sources(sources: crate::subscription::SourceArena) -> Self {
+    pub(crate) const fn with_rtd_sources(sources: crate::subscription::SourceArena<E, C>) -> Self {
         Self {
+            marker: std::marker::PhantomData,
             rtd_sources: sources,
         }
     }
@@ -40,16 +49,23 @@ impl GenerationServiceInputs {
 /// Service slots whose liveness is coupled to one open generation.
 /// Generation-specific policy is consumed from [`crate::generation::OpeningGeneration`]
 /// while these slots carry the service state owned by the open bundle.
-pub(crate) struct GenerationServices {
+pub(crate) struct GenerationServices<
+    E: RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+> {
+    marker: std::marker::PhantomData<fn() -> (E, C)>,
     #[cfg(feature = "handles")]
     formula_handles: crate::handle::FormulaHandleServiceSlot,
     #[cfg(feature = "rtd")]
-    rtd: RtdGenerationServices,
+    rtd: RtdGenerationServices<E, C>,
 }
 
 #[cfg(feature = "rtd")]
-struct RtdGenerationServices {
-    subscriptions: crate::excel_rtd::SubscriptionServiceSlot,
+struct RtdGenerationServices<
+    E: RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+> {
+    subscriptions: crate::excel_rtd::SubscriptionServiceSlot<E, C>,
     subscription_host: crate::excel_rtd::RtdSubscriptionHost,
 }
 
@@ -70,12 +86,15 @@ pub(crate) struct SealedGenerationServices {
 /// violated its ownership invariant, so it is fail-stopped instead of being
 /// silently discarded at an open boundary.
 #[must_use = "an armed service reservation must be committed or rolled back"]
-pub(crate) struct ArmedServices {
-    services: Option<GenerationServices>,
+pub(crate) struct ArmedServices<
+    E: RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+> {
+    services: Option<GenerationServices<E, C>>,
 }
 
-impl ArmedServices {
-    pub(crate) fn commit(mut self) -> Box<GenerationServices> {
+impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> ArmedServices<E, C> {
+    pub(crate) fn commit(mut self) -> Box<GenerationServices<E, C>> {
         Box::new(
             self.services
                 .take()
@@ -84,7 +103,7 @@ impl ArmedServices {
     }
 }
 
-impl Drop for ArmedServices {
+impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Drop for ArmedServices<E, C> {
     fn drop(&mut self) {
         if let Some(services) = self.services.as_ref() {
             services.disarm_or_abort();
@@ -92,16 +111,17 @@ impl Drop for ArmedServices {
     }
 }
 
-impl GenerationServices {
+impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> GenerationServices<E, C> {
     pub(crate) fn arm_generation(
         generation: RuntimeGeneration,
         _config: crate::addin::RuntimeConfig,
         #[cfg(feature = "rtd")] subscription_host: crate::excel_rtd::RtdSubscriptionHost,
-        inputs: GenerationServiceInputs,
-    ) -> crate::XllResult<ArmedServices> {
+        inputs: GenerationServiceInputs<E, C>,
+    ) -> crate::XllResult<ArmedServices<E, C>> {
         #[cfg(not(feature = "rtd"))]
         let _ = (generation, inputs);
         let services = Self {
+            marker: std::marker::PhantomData,
             #[cfg(feature = "handles")]
             formula_handles: crate::handle::FormulaHandleServiceSlot::new(),
             #[cfg(feature = "rtd")]
@@ -138,7 +158,7 @@ impl GenerationServices {
     }
 
     #[cfg(feature = "rtd")]
-    pub(crate) const fn rtd_call_access(&self) -> crate::rtd::RtdGenerationAccess<'_> {
+    pub(crate) const fn rtd_call_access(&self) -> crate::rtd::RtdGenerationAccess<'_, E, C> {
         crate::rtd::RtdGenerationAccess::new(&self.rtd.subscriptions, self.rtd.subscription_host)
     }
 

@@ -18,6 +18,8 @@ use xlfn_sys::{
 struct EventAddin;
 
 impl crate::Addin for EventAddin {
+    type RtdSubscription = ();
+    type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();
     type Error = crate::XllError;
@@ -27,7 +29,7 @@ impl crate::Addin for EventAddin {
     #[cfg(all(feature = "async", not(feature = "async-builtin")))]
     type AsyncExecutor = crate::NoAsyncExecutor;
 
-    fn open(_: &crate::OpenContext) -> crate::OpenResult<Self> {
+    fn open(_: &crate::OpenContext<Self>) -> crate::OpenResult<Self> {
         let opened = crate::Opened::new(());
         #[cfg(feature = "async-builtin")]
         let opened = opened.with_async_executor(crate::BuiltinAsyncExecutor::new(

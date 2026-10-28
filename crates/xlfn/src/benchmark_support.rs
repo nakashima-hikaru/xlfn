@@ -70,10 +70,11 @@ pub use crate::handle::{
     handle_removal_probe, handle_retirement_debt_probe, token_cache_associativity_probe,
 };
 #[cfg(feature = "rtd")]
-pub use crate::subscription::channel_protocol_probe;
+pub use crate::subscription::{RtdChannelEnqueueBenchmark, channel_protocol_probe};
 
 #[cfg(feature = "async")]
 pub use crate::handle::{ObjectFinalPinRelease, ObjectLeaseBenchCase, ObjectLeaseBenchmark};
+pub use crate::handle::{ObjectPayloadKind, ObjectStorageBenchmark, object_storage_layout};
 
 #[cfg(feature = "async-builtin")]
 pub use crate::async_udf::AsyncPendingTaskBenchmark;
@@ -117,14 +118,17 @@ pub use registration::RegistrationBenchmark;
 pub use rtd::{
     RTD_REFRESH_SCALING_CASES, RtdChannelPipelineBenchmark, RtdPrepareBenchmark,
     RtdPublishNumberBenchmark, RtdPublishStringBenchmark, RtdRefreshScalingBenchmark,
-    RtdRefreshScalingCase, RtdRefreshValueKind, rtd_pipeline_probe, rtd_topology_probe,
-    with_rtd_connection_benchmark,
+    RtdRefreshScalingCase, RtdRefreshValueKind, rtd_pipeline_probe,
+    rtd_source_catalog_allocation_probe, rtd_topology_probe, with_rtd_connection_benchmark,
+    with_rtd_connection_memory_benchmark,
 };
 pub use sync_boundary::{SyncBenchKind, SyncBoundaryWorkerPool};
 
 pub(super) struct BenchmarkAddin;
 
 impl crate::Addin for BenchmarkAddin {
+    type RtdSubscription = ();
+    type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();
     type Error = crate::XllError;
@@ -134,7 +138,7 @@ impl crate::Addin for BenchmarkAddin {
     #[cfg(all(feature = "async", not(feature = "async-builtin")))]
     type AsyncExecutor = crate::NoAsyncExecutor;
 
-    fn open(_: &crate::OpenContext) -> crate::OpenResult<Self> {
+    fn open(_: &crate::OpenContext<Self>) -> crate::OpenResult<Self> {
         unreachable!("benchmark fixtures publish their isolated runtime directly")
     }
 }

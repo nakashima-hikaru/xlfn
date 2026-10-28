@@ -39,11 +39,14 @@ use crate::runtime_components::GenerationServices;
 /// services from another attempt.
 struct PublishedGeneration<A: crate::Addin> {
     root: NonNull<ExecutionGeneration<A>>,
-    services: NonNull<GenerationServices>,
+    services: NonNull<GenerationServices<A::RtdSubscription, A::RtdSources>>,
 }
 
 impl<A: crate::Addin> PublishedGeneration<A> {
-    fn new(root: &ExecutionGeneration<A>, services: &GenerationServices) -> Self {
+    fn new(
+        root: &ExecutionGeneration<A>,
+        services: &GenerationServices<A::RtdSubscription, A::RtdSources>,
+    ) -> Self {
         Self {
             root: NonNull::from(root),
             services: NonNull::from(services),
@@ -56,7 +59,7 @@ impl<A: crate::Addin> PublishedGeneration<A> {
         unsafe { self.root.as_ref() }
     }
 
-    fn services(&self) -> &GenerationServices {
+    fn services(&self) -> &GenerationServices<A::RtdSubscription, A::RtdSources> {
         // SAFETY: publication implies generation services are valid for the
         // duration of the read-side lease.
         unsafe { self.services.as_ref() }
@@ -108,7 +111,7 @@ impl<'lifecycle, A: crate::Addin> GenerationAdmission<'lifecycle, A> {
         self.publication().root
     }
 
-    pub(crate) fn services(&self) -> &GenerationServices {
+    pub(crate) fn services(&self) -> &GenerationServices<A::RtdSubscription, A::RtdSources> {
         self.publication().services()
     }
 }
@@ -116,7 +119,7 @@ impl<'lifecycle, A: crate::Addin> GenerationAdmission<'lifecycle, A> {
 /// The complete ownership bundle for a published generation.
 pub(crate) struct OpenGeneration<A: crate::Addin> {
     generation: PublishedOwner<ExecutionGeneration<A>>,
-    services: PublishedOwner<GenerationServices>,
+    services: PublishedOwner<GenerationServices<A::RtdSubscription, A::RtdSources>>,
     publication: PublishedOwner<PublishedGeneration<A>>,
     module_epoch: ModuleEpochLease,
 }
@@ -125,7 +128,7 @@ pub(crate) struct OpenGeneration<A: crate::Addin> {
 /// closing ownership slot.
 pub(crate) struct ClosingGeneration<A: crate::Addin> {
     generation: PublishedOwner<ExecutionGeneration<A>>,
-    services: PublishedOwner<GenerationServices>,
+    services: PublishedOwner<GenerationServices<A::RtdSubscription, A::RtdSources>>,
     publication: PublishedOwner<PublishedGeneration<A>>,
 }
 
@@ -134,7 +137,7 @@ pub(crate) struct ClosingGeneration<A: crate::Addin> {
 /// payload while the module authority remains in the lifecycle state.
 pub(crate) struct OpenRetirement<A: crate::Addin> {
     generation: RuntimeGeneration,
-    services: PublishedOwner<GenerationServices>,
+    services: PublishedOwner<GenerationServices<A::RtdSubscription, A::RtdSources>>,
     _publication: PublishedOwner<PublishedGeneration<A>>,
 }
 
@@ -283,7 +286,7 @@ impl<A: crate::Addin> ClosePayload<A> {
         }
     }
 
-    fn retiring_services(&self) -> Option<&GenerationServices> {
+    fn retiring_services(&self) -> Option<&GenerationServices<A::RtdSubscription, A::RtdSources>> {
         match self {
             Self::Retiring(retirement) => Some(retirement.services.as_ref()),
             Self::Published(bundle) => Some(bundle.services.as_ref()),
@@ -379,7 +382,7 @@ impl<A: crate::Addin> PublishedClosePayload<A> {
         }
     }
 
-    fn retiring_services(&self) -> &GenerationServices {
+    fn retiring_services(&self) -> &GenerationServices<A::RtdSubscription, A::RtdSources> {
         match self {
             Self::Published(closing) => closing.services.as_ref(),
             Self::Retiring(retirement) => retirement.services.as_ref(),
@@ -446,7 +449,7 @@ impl<A: crate::Addin> CloseResources<A> {
         }
     }
 
-    fn retiring_services(&self) -> Option<&GenerationServices> {
+    fn retiring_services(&self) -> Option<&GenerationServices<A::RtdSubscription, A::RtdSources>> {
         match self {
             Self::AwaitingOpenAbort { .. } => None,
             Self::Unowned { payload }
@@ -888,7 +891,7 @@ impl<A: crate::Addin> ClosingState<A> {
         }
     }
 
-    fn retiring_services(&self) -> Option<&GenerationServices> {
+    fn retiring_services(&self) -> Option<&GenerationServices<A::RtdSubscription, A::RtdSources>> {
         match self {
             Self::OpeningActive {
                 resources: ActiveOpeningClose::Published { payload, .. },
@@ -1150,7 +1153,9 @@ impl<A: crate::Addin> LifecycleState<A> {
         }
     }
 
-    fn generation_services(&self) -> Option<&GenerationServices> {
+    fn generation_services(
+        &self,
+    ) -> Option<&GenerationServices<A::RtdSubscription, A::RtdSources>> {
         match self {
             Self::Opening {
                 payload: OpeningPayload::Published(bundle),
@@ -1386,7 +1391,9 @@ impl<A: crate::Addin> LifecycleCore<A> {
         self.state.has_current_generation()
     }
 
-    fn generation_services(&self) -> Option<&GenerationServices> {
+    fn generation_services(
+        &self,
+    ) -> Option<&GenerationServices<A::RtdSubscription, A::RtdSources>> {
         self.state.generation_services()
     }
 }
@@ -1480,7 +1487,9 @@ impl<A: crate::Addin> LifecycleAccess<'_, A> {
         self.core.state.has_opening_generation()
     }
 
-    pub(crate) fn generation_services(&self) -> Option<&GenerationServices> {
+    pub(crate) fn generation_services(
+        &self,
+    ) -> Option<&GenerationServices<A::RtdSubscription, A::RtdSources>> {
         self.core.generation_services()
     }
 
@@ -1508,7 +1517,7 @@ pub(crate) struct LifecycleCoordinator<A: crate::Addin> {
 pub(crate) struct PublishOpeningError<A: crate::Addin> {
     pub(crate) error: crate::XllError,
     pub(crate) opening: Option<OpeningGeneration<A>>,
-    pub(crate) services: Box<GenerationServices>,
+    pub(crate) services: Box<GenerationServices<A::RtdSubscription, A::RtdSources>>,
     pub(crate) module_epoch: ModuleEpochLease,
 }
 
@@ -2142,7 +2151,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         &self,
         core: &mut LifecycleAccess<'_, A>,
         generation: RuntimeGeneration,
-        services: Box<GenerationServices>,
+        services: Box<GenerationServices<A::RtdSubscription, A::RtdSources>>,
         module_epoch: ModuleEpochLease,
     ) -> Result<(), Box<PublishOpeningError<A>>> {
         core.transition(|core| {
@@ -2228,7 +2237,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     /// canonical lifecycle lock proves the unique owner cannot move.
     pub(crate) fn with_generation_services<R>(
         &self,
-        operation: impl FnOnce(&GenerationServices) -> R,
+        operation: impl FnOnce(&GenerationServices<A::RtdSubscription, A::RtdSources>) -> R,
     ) -> Option<R> {
         if let Ok(admission) = self.try_admit() {
             return Some(operation(admission.services()));

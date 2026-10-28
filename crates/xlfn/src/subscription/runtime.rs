@@ -13,7 +13,7 @@ use super::server::{
     OwnedServerOperation, SubscriptionServer, SubscriptionServerHandle, TerminationAdmission,
     cleanup_catalog_binding_and_pending,
 };
-use super::source::{RtdSource, RtdSourceHandle, SourceArena, SourceSubscription};
+use super::source::{RtdSource, RtdSourceHandle, RtdSubscription, SourceArena, SourceSubscription};
 use super::termination::{TerminationClaim, TerminationCoordinator};
 use super::topic::{
     BorrowedTopicParts, RtdLimits, SourceId, SubscriptionId, SubscriptionKey, TopicId,
@@ -34,25 +34,26 @@ use xlfn_kernel::published_owner::PublishedOwner;
 #[cfg(test)]
 pub(crate) type OperationEnterHook = Arc<dyn Fn() + Send + Sync + 'static>;
 
-pub(crate) struct SubscriptionRuntime<H: SubscriptionHost> {
+type ServerMap<H, E, C> = FxHashMap<ServerGeneration, PublishedOwner<SubscriptionServer<H, E, C>>>;
+
+pub(crate) struct SubscriptionRuntime<
+    H: SubscriptionHost,
+    E: RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+> {
     pub(crate) generation: RuntimeGeneration,
     pub(crate) runtime_id: u64,
     pub(crate) limits: RtdLimits,
     // Deferred jobs carry non-owning admissions into the following server and
     // service allocations. Reclaim their worker before those allocations even
     // if unwinding interrupts the explicit close sequence.
-    pub(super) disconnects: super::disconnect::DisconnectPool<H>,
+    pub(super) disconnects: super::disconnect::DisconnectPool<H, E, C>,
     pub(crate) host: H,
     // Pointer-bearing server roots are declared before every field they
     // reference so Rust's declaration-order drop reclaims servers first.
-    pub(crate) servers: Mutex<
-        FxHashMap<
-            ServerGeneration,
-            xlfn_kernel::published_owner::PublishedOwner<SubscriptionServer<H>>,
-        >,
-    >,
+    pub(crate) servers: Mutex<ServerMap<H, E, C>>,
     pub(crate) catalog: Mutex<SubscriptionCatalog>,
-    pub(crate) sources: SourceArena,
+    pub(crate) sources: SourceArena<E, C>,
     pub(crate) next_connection_generation: AtomicU64,
     pub(super) termination_coordinator: TerminationCoordinator,
     // Every raw publish capability targets this independent allocation, so
@@ -64,7 +65,9 @@ pub(crate) struct SubscriptionRuntime<H: SubscriptionHost> {
     pub(crate) fail_source_shutdown_preflight: std::sync::atomic::AtomicBool,
 }
 
-impl<H: SubscriptionHost> SubscriptionRuntime<H> {
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    SubscriptionRuntime<H, E, C>
+{
     #[cfg(test)]
     pub(crate) fn new() -> Self
     where
@@ -79,7 +82,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
     }
 
     #[cfg(any(test, feature = "bench-internals"))]
-    pub(crate) fn with_sources_for_internal(sources: SourceArena) -> Self
+    pub(crate) fn with_sources_for_internal(sources: SourceArena<E, C>) -> Self
     where
         H: Default,
     {
@@ -91,7 +94,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         generation: RuntimeGeneration,
         limits: RtdLimits,
         host: H,
-        sources: SourceArena,
+        sources: SourceArena<E, C>,
     ) -> Self {
         let runtime_id = allocate_runtime_id().expect("runtime ID allocation overflow");
         Self {
@@ -151,13 +154,15 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
     ///
     /// # Safety
     ///
-    /// The caller must ensure that `self` (the subscription runtime) outlives
-    /// all copies of the returned [`SubscriptionServerHandle`]. All operations
-    /// and handles must be drained or dropped before reclaiming the runtime.
+    /// Keep `self` at a stable address through every method call on the returned
+    /// handle and its copies, including every guard or batch they return. Drain
+    /// those operations before reclaiming the runtime. Inert copies may remain
+    /// afterward, but must never be used again; dropping a handle dereferences
+    /// neither the runtime nor the server.
     pub(crate) unsafe fn register_server(
         &self,
         generation: ServerGeneration,
-    ) -> XllResult<SubscriptionServerHandle<H>> {
+    ) -> XllResult<SubscriptionServerHandle<H, E, C>> {
         let _operation = self
             .services
             .runtime_gate
@@ -187,14 +192,18 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_SERVER_DUE,
             });
         }
+        let pointer = NonNull::from(server.as_ref());
         servers.insert(generation, server);
-        // SAFETY: `self` is guaranteed to outlive the server handle by the caller's safety contract;
-        // shutdown drains all operations and handles before runtime reclamation.
-        Ok(unsafe { SubscriptionServerHandle::new(self, generation) })
+        // SAFETY: the caller retains the stable runtime through every handle use;
+        // shutdown drains all operations before runtime reclamation.
+        Ok(unsafe { SubscriptionServerHandle::new(self, pointer) })
     }
 
     #[cfg(all(test, feature = "rtd"))]
-    pub(crate) fn register_test_server(&self, generation: u64) -> SubscriptionServerHandle<H> {
+    pub(crate) fn register_test_server(
+        &self,
+        generation: u64,
+    ) -> SubscriptionServerHandle<H, E, C> {
         // SAFETY: test helper guarantees runtime outlives the server handle in the test.
         unsafe {
             self.register_server(
@@ -207,7 +216,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
     pub(crate) fn resolve_server(
         &self,
         generation: ServerGeneration,
-    ) -> Option<&SubscriptionServer<H>> {
+    ) -> Option<&SubscriptionServer<H, E, C>> {
         let pointer = {
             let servers = self.servers.lock();
             NonNull::from(servers.get(&generation)?.as_ref())
@@ -221,7 +230,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
         &self,
         source: &RtdSourceHandle<S>,
         topic: BorrowedTopicParts<'_, Part>,
-    ) -> XllResult<PreparedSubscription<'_, H>>
+    ) -> XllResult<PreparedSubscription<'_, H, E, C>>
     where
         S: RtdSource,
     {
@@ -326,10 +335,10 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
 
     pub(crate) fn connect_transaction(
         &self,
-        server_handle: &SubscriptionServerHandle<H>,
+        server_handle: &SubscriptionServerHandle<H, E, C>,
         topic_id: TopicId,
         id: SubscriptionId,
-    ) -> XllResult<SubscriptionConnection<H>> {
+    ) -> XllResult<SubscriptionConnection<H, E, C>> {
         if !server_handle.belongs_to(self) {
             return Err(XllError::StaleHandle);
         }
@@ -393,7 +402,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
             // the owner is installed or synchronously disconnected before it
             // releases admission. Deferred cleanup retains its own admission;
             // runtime drop drains servers before reclaiming the source arena.
-            unsafe { SourceSubscription::subscribe(source, &topic, publish_sink) }
+            unsafe { SourceSubscription::subscribe(&source, &topic, publish_sink) }
         }));
 
         let subscription = match sub_res {
@@ -413,7 +422,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
 
     fn commit_connection(
         &self,
-        server: &SubscriptionServer<H>,
+        server: &SubscriptionServer<H, E, C>,
         topic_id: TopicId,
         ticket: &ConnectionTicket,
         id: SubscriptionId,
@@ -443,7 +452,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
 
     fn rollback_connection(
         &self,
-        server: &SubscriptionServer<H>,
+        server: &SubscriptionServer<H, E, C>,
         topic_id: TopicId,
         ticket: &ConnectionTicket,
         id: SubscriptionId,
@@ -502,7 +511,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
     )]
     pub(crate) fn disconnect(
         &self,
-        server_handle: &SubscriptionServerHandle<H>,
+        server_handle: &SubscriptionServerHandle<H, E, C>,
         topic_id: TopicId,
     ) -> XllResult<()> {
         if !server_handle.belongs_to(self) {
@@ -559,7 +568,7 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
     /// backend disconnection keeps its existing barrier contract.
     pub(crate) fn disconnect_deferred(
         &self,
-        server_handle: &SubscriptionServerHandle<H>,
+        server_handle: &SubscriptionServerHandle<H, E, C>,
         topic_id: TopicId,
         completion: H::DisconnectCompletion,
     ) -> XllResult<()> {
@@ -723,17 +732,29 @@ impl<H: SubscriptionHost> SubscriptionRuntime<H> {
     }
 }
 
-struct PreparationReservation<'runtime, H: SubscriptionHost> {
-    runtime: &'runtime SubscriptionRuntime<H>,
+struct PreparationReservation<
+    'runtime,
+    H: SubscriptionHost,
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+> {
+    runtime: &'runtime SubscriptionRuntime<H, E, C>,
 }
 
-pub(crate) struct PreparedSubscription<'runtime, H: SubscriptionHost> {
+pub(crate) struct PreparedSubscription<
+    'runtime,
+    H: SubscriptionHost,
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+> {
     id: SubscriptionId,
     key: SubscriptionKey,
-    reservation: Option<PreparationReservation<'runtime, H>>,
+    reservation: Option<PreparationReservation<'runtime, H, E, C>>,
 }
 
-impl<H: SubscriptionHost> PreparedSubscription<'_, H> {
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    PreparedSubscription<'_, H, E, C>
+{
     #[cfg(any(test, all(feature = "bench-internals", feature = "rtd")))]
     #[inline]
     pub(crate) fn id(&self) -> SubscriptionId {
@@ -766,7 +787,9 @@ impl<H: SubscriptionHost> PreparedSubscription<'_, H> {
     }
 }
 
-impl<H: SubscriptionHost> Drop for PreparedSubscription<'_, H> {
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Drop
+    for PreparedSubscription<'_, H, E, C>
+{
     fn drop(&mut self) {
         self.finish(false);
     }
@@ -775,7 +798,8 @@ impl<H: SubscriptionHost> Drop for PreparedSubscription<'_, H> {
 /// A connection can reach commit only after catalog admission, publication
 /// reservation, source subscription, and installation have all succeeded.
 /// Each transition consumes its predecessor; every incomplete stage rolls back.
-pub(crate) type SubscriptionConnection<H> = ConnectionTransaction<H, InstalledConnection>;
+pub(crate) type SubscriptionConnection<H, E = (), C = crate::DynamicRtdSources<E>> =
+    ConnectionTransaction<H, E, C, InstalledConnection>;
 
 pub(crate) trait ConnectionStage {
     const HAS_PUBLICATION: bool;
@@ -798,16 +822,22 @@ impl ConnectionStage for InstalledConnection {
     const HAS_PUBLICATION: bool = true;
 }
 
-struct ConnectionReservation<H: SubscriptionHost> {
-    runtime: NonNull<SubscriptionRuntime<H>>,
-    operation: OwnedServerOperation<H>,
+struct ConnectionReservation<
+    H: SubscriptionHost,
+    E: RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+> {
+    runtime: NonNull<SubscriptionRuntime<H, E, C>>,
+    operation: OwnedServerOperation<H, E, C>,
     topic_id: TopicId,
     id: SubscriptionId,
     ticket: ConnectionTicket,
 }
 
-impl<H: SubscriptionHost> ConnectionReservation<H> {
-    fn runtime(&self) -> &SubscriptionRuntime<H> {
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    ConnectionReservation<H, E, C>
+{
+    fn runtime(&self) -> &SubscriptionRuntime<H, E, C> {
         // SAFETY: the owned operation retains the runtime and server until
         // the transaction finishes, including all rollback callbacks.
         unsafe { self.runtime.as_ref() }
@@ -830,26 +860,40 @@ impl<H: SubscriptionHost> ConnectionReservation<H> {
 }
 
 #[must_use = "dropping a connection transaction rolls it back"]
-pub(crate) struct ConnectionTransaction<H: SubscriptionHost, S: ConnectionStage> {
+pub(crate) struct ConnectionTransaction<
+    H: SubscriptionHost,
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+    S: ConnectionStage,
+> {
     // None exists only while a consuming transition or completion transfers
     // the sole obligation; callers cannot construct a disarmed transaction.
-    reservation: Option<ConnectionReservation<H>>,
+    reservation: Option<ConnectionReservation<H, E, C>>,
     state: S,
 }
 
 // SAFETY: the owned operation retains runtime/server allocations across threads;
 // stage data must itself be transferable.
-unsafe impl<H: SubscriptionHost, S: ConnectionStage + Send> Send for ConnectionTransaction<H, S> {}
+unsafe impl<
+    H: SubscriptionHost,
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+    S: ConnectionStage + Send,
+> Send for ConnectionTransaction<H, E, C, S>
+{
+}
 
-impl<H: SubscriptionHost, S: ConnectionStage> ConnectionTransaction<H, S> {
-    fn transition<N: ConnectionStage>(mut self, state: N) -> ConnectionTransaction<H, N> {
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>, S: ConnectionStage>
+    ConnectionTransaction<H, E, C, S>
+{
+    fn transition<N: ConnectionStage>(mut self, state: N) -> ConnectionTransaction<H, E, C, N> {
         ConnectionTransaction {
             reservation: self.reservation.take(),
             state,
         }
     }
 
-    fn reservation(&self) -> &ConnectionReservation<H> {
+    fn reservation(&self) -> &ConnectionReservation<H, E, C> {
         self.reservation
             .as_ref()
             .expect("live connection transaction")
@@ -863,8 +907,10 @@ impl<H: SubscriptionHost, S: ConnectionStage> ConnectionTransaction<H, S> {
     }
 }
 
-impl<H: SubscriptionHost> ConnectionTransaction<H, CatalogReserved> {
-    fn reserve_publication(self) -> XllResult<ConnectionTransaction<H, PublishReserved>> {
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    ConnectionTransaction<H, E, C, CatalogReserved>
+{
+    fn reserve_publication(self) -> XllResult<ConnectionTransaction<H, E, C, PublishReserved>> {
         let reservation = self.reservation();
         reservation.operation.server().publish.reserve_connection(
             reservation.topic_id,
@@ -875,8 +921,13 @@ impl<H: SubscriptionHost> ConnectionTransaction<H, CatalogReserved> {
     }
 }
 
-impl<H: SubscriptionHost> ConnectionTransaction<H, PublishReserved> {
-    fn install(self, subscription: OwnedSubscription<H>) -> XllResult<SubscriptionConnection<H>> {
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    ConnectionTransaction<H, E, C, PublishReserved>
+{
+    fn install(
+        self,
+        subscription: OwnedSubscription<H, E, C>,
+    ) -> XllResult<SubscriptionConnection<H, E, C>> {
         let reservation = self.reservation();
         let server = reservation.operation.server();
         let install_result = {
@@ -920,7 +971,9 @@ impl<H: SubscriptionHost> ConnectionTransaction<H, PublishReserved> {
     }
 }
 
-impl<H: SubscriptionHost> ConnectionTransaction<H, InstalledConnection> {
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    ConnectionTransaction<H, E, C, InstalledConnection>
+{
     pub(crate) fn value(&self) -> &StoredRtdValue {
         &self.state.value
     }
@@ -946,7 +999,9 @@ impl<H: SubscriptionHost> ConnectionTransaction<H, InstalledConnection> {
     }
 }
 
-impl<H: SubscriptionHost, S: ConnectionStage> Drop for ConnectionTransaction<H, S> {
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>, S: ConnectionStage>
+    Drop for ConnectionTransaction<H, E, C, S>
+{
     fn drop(&mut self) {
         if let Some(reservation) = self.reservation.take() {
             let _ = reservation.rollback(S::HAS_PUBLICATION);
@@ -954,7 +1009,9 @@ impl<H: SubscriptionHost, S: ConnectionStage> Drop for ConnectionTransaction<H, 
     }
 }
 
-impl<H: SubscriptionHost> Drop for SubscriptionRuntime<H> {
+impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Drop
+    for SubscriptionRuntime<H, E, C>
+{
     fn drop(&mut self) {
         // Ownership includes joining every producer that can retain a raw sink.
         // Dropping only the operation gates would leave idle producers able to
@@ -975,7 +1032,7 @@ mod typestate_tests {
         for reserve_publication in [false, true] {
             let fixture = SourceFixture::new();
             let (source, _, _) = fixture.add::<i32>(None);
-            let runtime = SubscriptionRuntime::<RtdSubscriptionHost>::with_sources_for_internal(
+            let runtime = SubscriptionRuntime::<RtdSubscriptionHost, _>::with_sources_for_internal(
                 fixture.finish(),
             );
             let server = runtime.register_test_server(1);

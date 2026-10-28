@@ -1,9 +1,12 @@
+use super::super::budget::RtdLatest;
 use super::*;
 use crate::excel_rtd::RtdSubscriptionHost;
 use crate::generation::RuntimeGeneration;
+use crate::subscription::source::ErasedRtdSource;
 use crate::subscription::{
-    RefreshOutcome, RtdCapacity, RtdLimits, RtdSendError, RtdSourceHandle, SourceRegistration,
-    StoredRtdValue, SubscriptionRuntime, SubscriptionServerHandle, TopicId,
+    IntoRtdSubscription, RefreshOutcome, RtdCapacity, RtdLimits, RtdSendError, RtdSourceHandle,
+    RtdSubscription, SourceRegistration, StoredRtdValue, SubscriptionRuntime,
+    SubscriptionServerHandle, TopicId,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc as StdArc;
@@ -13,12 +16,53 @@ use std::time::Instant;
 
 const DEADLINE: Duration = Duration::from_secs(10);
 
+crate::rtd_subscriptions! {
+    enum MixedAdapterSubscriptions {
+        Blocking(super::super::channel::RtdChannelSubscription),
+        Multiplexed(RtdMultiplexedSubscription<i32, RtdLatest>),
+    }
+}
+
+#[test]
+fn miri_running_multiplex_worker_registers_without_relocking_worker_state() {
+    let (_runtime, _server, sink) =
+        crate::subscription::tests::connected_sink::<i32>(None, "multiplex-warm");
+    let source = RtdMultiplexedSource::<i32, _, _, RtdLatest>::new(RtdLatest, |context| {
+        loop {
+            match context.recv_timeout(DEADLINE) {
+                Ok(_) => {}
+                Err(XllError::Closing) => return Ok(()),
+                Err(error) => return Err(error),
+            }
+        }
+    });
+    let first = source
+        .subscribe(&RtdTopic::single("first").unwrap(), sink.clone())
+        .unwrap();
+    let second = std::thread::scope(|scope| {
+        let guard = source.worker.state.lock();
+        let (sent, received) = mpsc::sync_channel(1);
+        let shared = &source;
+        let worker = scope.spawn(move || {
+            sent.send(shared.subscribe(&RtdTopic::single("second").unwrap(), sink))
+                .unwrap();
+        });
+        let result = received.recv_timeout(DEADLINE);
+        drop(guard);
+        worker.join().unwrap();
+        result.unwrap().unwrap()
+    });
+    second.disconnect_and_wait().unwrap();
+    first.disconnect_and_wait().unwrap();
+    source.shutdown_and_wait().unwrap();
+}
+
 fn runtime_with_source<S: RtdSource>(
     source: S,
     limits: RtdLimits,
-) -> (SubscriptionRuntime, RtdSourceHandle<S>) {
+) -> (SubscriptionRuntime<S::Subscription>, RtdSourceHandle<S>) {
     let generation = RuntimeGeneration::new(1).unwrap();
-    let registration = SourceRegistration::new(generation);
+    let registration = SourceRegistration::<S::Subscription>::new(generation);
     let handle = registration.register(source).unwrap();
     (
         SubscriptionRuntime::with_host(
@@ -31,13 +75,16 @@ fn runtime_with_source<S: RtdSource>(
     )
 }
 
-fn connect<S: RtdSource>(
-    runtime: &SubscriptionRuntime,
-    server: &SubscriptionServerHandle,
+fn connect<S: RtdSource, E: RtdSubscription>(
+    runtime: &SubscriptionRuntime<E>,
+    server: &SubscriptionServerHandle<E>,
     source: &RtdSourceHandle<S>,
     topic_id: i32,
     topic: &str,
-) -> XllResult<StoredRtdValue> {
+) -> XllResult<StoredRtdValue>
+where
+    S::Subscription: IntoRtdSubscription<E>,
+{
     let prepared = runtime.prepare(source, RtdTopic::single(topic)?.borrowed())?;
     let id = prepared.id();
     prepared.commit();
@@ -47,15 +94,15 @@ fn connect<S: RtdSource>(
     Ok(value)
 }
 
-fn refresh_until(
-    server: &SubscriptionServerHandle,
+fn refresh_until<E: RtdSubscription>(
+    server: &SubscriptionServerHandle<E>,
     done: impl Fn(&BTreeMap<i32, StoredRtdValue>) -> bool,
 ) -> BTreeMap<i32, StoredRtdValue> {
     refresh_from(server, BTreeMap::new(), done)
 }
 
-fn refresh_from(
-    server: &SubscriptionServerHandle,
+fn refresh_from<E: RtdSubscription>(
+    server: &SubscriptionServerHandle<E>,
     mut observed: BTreeMap<i32, StoredRtdValue>,
     done: impl Fn(&BTreeMap<i32, StoredRtdValue>) -> bool,
 ) -> BTreeMap<i32, StoredRtdValue> {
@@ -78,8 +125,8 @@ fn refresh_from(
 }
 
 fn run_forwarder(
-    context: RtdSourceContext<i32>,
-    events: mpsc::Sender<RtdSourceEvent<i32>>,
+    context: RtdSourceContext<i32, RtdLatest>,
+    events: mpsc::Sender<RtdSourceEvent<i32, RtdLatest>>,
 ) -> XllResult<()> {
     loop {
         match context.recv_timeout(DEADLINE) {
@@ -95,7 +142,7 @@ fn run_forwarder(
 fn construction_is_lazy_and_unstarted_shutdown_is_idempotent() {
     let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let worker_started = std::sync::Arc::clone(&started);
-    let source = RtdMultiplexedSource::<i32, _>::new(RtdDelivery::Latest, move |_| {
+    let source = RtdMultiplexedSource::<i32, _, _, RtdLatest>::new(RtdLatest, move |_| {
         worker_started.fetch_add(1, Ordering::SeqCst);
         Ok(())
     });
@@ -118,7 +165,7 @@ fn replacing_validator_preserves_unstarted_job_and_its_shutdown_barrier() {
     let validator_drops = StdArc::new(AtomicUsize::new(0));
     let job = Capture(StdArc::clone(&job_drops));
     let first_validator = Capture(StdArc::clone(&validator_drops));
-    let source = RtdMultiplexedSource::<i32, _>::new(RtdDelivery::Latest, move |_| {
+    let source = RtdMultiplexedSource::<i32, _, _, RtdLatest>::new(RtdLatest, move |_| {
         drop(job);
         Ok(())
     })
@@ -126,7 +173,7 @@ fn replacing_validator_preserves_unstarted_job_and_its_shutdown_barrier() {
         let _capture = &first_validator;
         Ok(())
     });
-    let source = source.with_topic_validator(|_| Ok(()));
+    let source = source.without_topic_validator();
     assert_eq!(validator_drops.load(Ordering::SeqCst), 1);
     assert_eq!(job_drops.load(Ordering::SeqCst), 0);
     source.shutdown_and_wait().unwrap();
@@ -163,7 +210,7 @@ fn one_source_worker_delivers_updates_to_2048_subscriptions() {
     const TOPICS: i32 = 2048;
     let starts = StdArc::new(AtomicUsize::new(0));
     let worker_starts = StdArc::clone(&starts);
-    let source = RtdMultiplexedSource::<i32, _>::new(RtdDelivery::Latest, move |context| {
+    let source = RtdMultiplexedSource::<i32, _, _, RtdLatest>::new(RtdLatest, move |context| {
         worker_starts.fetch_add(1, Ordering::SeqCst);
         loop {
             match context.recv_timeout(DEADLINE) {
@@ -208,7 +255,7 @@ fn stalled_source_does_not_block_disconnect_and_retains_control_capacity_until_c
     let read_events = StdArc::new(AtomicBool::new(false));
     let worker_read_events = StdArc::clone(&read_events);
     let (event_tx, event_rx) = mpsc::channel();
-    let source = RtdMultiplexedSource::<i32, _>::new(RtdDelivery::Latest, move |context| {
+    let source = RtdMultiplexedSource::<i32, _, _, RtdLatest>::new(RtdLatest, move |context| {
         while !worker_read_events.load(Ordering::Acquire) {
             if context.is_closed() {
                 return Ok(());
@@ -289,7 +336,7 @@ fn completion_and_failures_close_all_topics_and_apply_terminal_policy() {
         let finish = StdArc::new(AtomicBool::new(false));
         let worker_finish = StdArc::clone(&finish);
         let (senders_tx, senders_rx) = mpsc::channel();
-        let source = RtdMultiplexedSource::<i32, _>::new(RtdDelivery::Latest, move |context| {
+        let source = RtdMultiplexedSource::<i32, _, _, RtdLatest>::new(RtdLatest, move |context| {
             let mut senders = Vec::new();
             while senders.len() != 2 {
                 if let Some(RtdSourceEvent::Subscribe { sender, .. }) =
@@ -350,7 +397,7 @@ fn rejected_topic_validation_does_not_start_worker_or_consume_source_slot() {
     let starts = StdArc::new(AtomicUsize::new(0));
     let worker_starts = StdArc::clone(&starts);
     let (events_tx, events_rx) = mpsc::channel();
-    let source = RtdMultiplexedSource::<i32, _>::new(RtdDelivery::Latest, move |context| {
+    let source = RtdMultiplexedSource::<i32, _, _, RtdLatest>::new(RtdLatest, move |context| {
         worker_starts.fetch_add(1, Ordering::SeqCst);
         run_forwarder(context, events_tx)
     })
@@ -386,7 +433,7 @@ fn rejected_topic_validation_does_not_start_worker_or_consume_source_slot() {
 #[test]
 fn miri_sender_survives_runtime_drop_without_live_publication_capability() {
     let (events_tx, events_rx) = mpsc::channel();
-    let source = RtdMultiplexedSource::<i32, _>::new(RtdDelivery::Latest, move |context| {
+    let source = RtdMultiplexedSource::<i32, _, _, RtdLatest>::new(RtdLatest, move |context| {
         run_forwarder(context, events_tx)
     });
     let (runtime, source) = runtime_with_source(source, RtdLimits::standard());
@@ -404,11 +451,12 @@ fn miri_sender_survives_runtime_drop_without_live_publication_capability() {
 #[test]
 fn runtime_worker_limit_is_shared_by_sources_and_released_only_after_join() {
     let generation = RuntimeGeneration::new(1).unwrap();
-    let registration = SourceRegistration::new(generation);
+    let registration =
+        SourceRegistration::<RtdMultiplexedSubscription<i32, RtdLatest>>::new(generation);
     let (first_events_tx, first_events_rx) = mpsc::channel();
     let first = registration
-        .register(RtdMultiplexedSource::<i32, _>::new(
-            RtdDelivery::Latest,
+        .register(RtdMultiplexedSource::<i32, _, _, RtdLatest>::new(
+            RtdLatest,
             move |context| run_forwarder(context, first_events_tx),
         ))
         .unwrap();
@@ -416,8 +464,8 @@ fn runtime_worker_limit_is_shared_by_sources_and_released_only_after_join() {
     let worker_starts = StdArc::clone(&starts);
     let (second_events_tx, second_events_rx) = mpsc::channel();
     let second = registration
-        .register(RtdMultiplexedSource::<i32, _>::new(
-            RtdDelivery::Latest,
+        .register(RtdMultiplexedSource::<i32, _, _, RtdLatest>::new(
+            RtdLatest,
             move |context| {
                 worker_starts.fetch_add(1, Ordering::SeqCst);
                 run_forwarder(context, second_events_tx)
@@ -462,7 +510,7 @@ fn runtime_worker_limit_is_shared_by_sources_and_released_only_after_join() {
 #[test]
 fn source_join_preflight_failure_retains_worker_owner_and_is_terminal_for_close() {
     let (events_tx, events_rx) = mpsc::channel();
-    let source = RtdMultiplexedSource::<i32, _>::new(RtdDelivery::Latest, move |context| {
+    let source = RtdMultiplexedSource::<i32, _, _, RtdLatest>::new(RtdLatest, move |context| {
         run_forwarder(context, events_tx)
     });
     let (runtime, source) = runtime_with_source(
@@ -497,7 +545,7 @@ fn source_join_preflight_failure_retains_worker_owner_and_is_terminal_for_close(
 fn close_racing_admitted_setup_prevents_late_worker_start_and_revokes_partial_channel() {
     let starts = StdArc::new(AtomicUsize::new(0));
     let worker_starts = StdArc::clone(&starts);
-    let source = RtdMultiplexedSource::<i32, _>::new(RtdDelivery::Latest, move |_| {
+    let source = RtdMultiplexedSource::<i32, _, _, RtdLatest>::new(RtdLatest, move |_| {
         worker_starts.fetch_add(1, Ordering::SeqCst);
         Ok(())
     });
@@ -533,7 +581,7 @@ fn close_racing_admitted_setup_prevents_late_worker_start_and_revokes_partial_ch
 #[test]
 fn blocking_and_multiplexed_adapters_share_the_runtime_worker_budget() {
     let generation = RuntimeGeneration::new(1).unwrap();
-    let registration = SourceRegistration::new(generation);
+    let registration = SourceRegistration::<MixedAdapterSubscriptions>::new(generation);
     let (blocking_tx, blocking_rx) = mpsc::channel();
     let blocking = registration
         .register(super::super::channel::RtdChannelSource::new(
@@ -552,8 +600,8 @@ fn blocking_and_multiplexed_adapters_share_the_runtime_worker_budget() {
         .unwrap();
     let (events_tx, events_rx) = mpsc::channel();
     let multiplexed = registration
-        .register(RtdMultiplexedSource::<i32, _>::new(
-            RtdDelivery::Latest,
+        .register(RtdMultiplexedSource::<i32, _, _, RtdLatest>::new(
+            RtdLatest,
             move |context| run_forwarder(context, events_tx),
         ))
         .unwrap();
@@ -587,7 +635,7 @@ fn first_registration_exists_before_an_immediately_completing_producer_runs() {
         let (_runtime, server, sink) =
             crate::subscription::tests::connected_sink::<i32>(None, "immediate");
         let (observed_tx, observed_rx) = mpsc::channel();
-        let source = RtdMultiplexedSource::<i32, _>::new(RtdDelivery::Latest, move |context| {
+        let source = RtdMultiplexedSource::<i32, _, _, RtdLatest>::new(RtdLatest, move |context| {
             let state = context.shared.state.lock();
             let registered = state.active.len() == 1
                 && matches!(state.events.front(), Some(ControlEvent::Subscribe { .. }));
@@ -605,7 +653,7 @@ fn first_registration_exists_before_an_immediately_completing_producer_runs() {
         let subscription = source
             .subscribe(&RtdTopic::single("immediate").unwrap(), sink)
             .expect("a completed first producer must not race away its registration");
-        let sender = subscription.channel.sender::<i32>();
+        let sender = subscription.channel.sender::<i32, _>(RtdLatest);
         assert!(observed_rx.recv_timeout(DEADLINE).unwrap());
         assert!(sender.wait_closed(DEADLINE));
         assert!(matches!(sender.try_send(3), Err(RtdSendError::Closed(_))));
@@ -624,21 +672,23 @@ fn first_registration_exists_before_an_immediately_completing_producer_runs() {
 #[test]
 fn initial_worker_budget_rejection_returns_the_only_source_slot_for_retry() {
     let generation = RuntimeGeneration::new(1).unwrap();
-    let registration = SourceRegistration::new(generation);
+    let registration =
+        SourceRegistration::<RtdMultiplexedSubscription<i32, RtdLatest>>::new(generation);
     let (first_events_tx, first_events_rx) = mpsc::channel();
     let first = registration
-        .register(RtdMultiplexedSource::<i32, _>::new(
-            RtdDelivery::Latest,
+        .register(RtdMultiplexedSource::<i32, _, _, RtdLatest>::new(
+            RtdLatest,
             move |context| run_forwarder(context, first_events_tx),
         ))
         .unwrap();
     let (second_events_tx, second_events_rx) = mpsc::channel();
-    let second_source = RtdMultiplexedSource::<i32, _>::new(RtdDelivery::Latest, move |context| {
-        run_forwarder(context, second_events_tx)
-    })
-    .with_limits(
-        RtdSourceLimits::standard().with_max_subscriptions(RtdCapacity::disabled_if_zero(1)),
-    );
+    let second_source =
+        RtdMultiplexedSource::<i32, _, _, RtdLatest>::new(RtdLatest, move |context| {
+            run_forwarder(context, second_events_tx)
+        })
+        .with_limits(
+            RtdSourceLimits::standard().with_max_subscriptions(RtdCapacity::disabled_if_zero(1)),
+        );
     let second_shared = Arc::clone(&second_source.worker.shared);
     let second = registration.register(second_source).unwrap();
     let runtime = SubscriptionRuntime::with_host(
@@ -696,8 +746,8 @@ fn spawn_failure_preserves_capture_until_disposal_outside_source_mutexes() {
         drops: StdArc::clone(&drops),
         locks_available: StdArc::clone(&locks_available),
     };
-    let source = StdArc::new(RtdMultiplexedSource::<i32, _>::new(
-        RtdDelivery::Latest,
+    let source = StdArc::new(RtdMultiplexedSource::<i32, _, _, RtdLatest>::new(
+        RtdLatest,
         move |_| {
             drop(capture);
             Ok(())

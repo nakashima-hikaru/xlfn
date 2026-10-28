@@ -44,13 +44,15 @@ impl AsyncExecutor for ApplicationExecutor {
 struct ApplicationAddin;
 
 impl Addin for ApplicationAddin {
+    type RtdSubscription = ();
+    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = String;
     type Error = XllError;
     type Layers = ();
     type AsyncExecutor = ApplicationExecutor;
 
-    fn open(_: &OpenContext) -> OpenResult<Self> {
+    fn open(_: &OpenContext<Self>) -> OpenResult<Self> {
         Ok(Opened::new(())
             .with_async_executor(ApplicationExecutor {
                 drops: Arc::new(AtomicUsize::new(0)),

@@ -46,6 +46,8 @@ pub struct State {
 pub struct BenchAddin;
 
 impl Addin for BenchAddin {
+    type RtdSubscription = rtd_source::BenchSubscription;
+    type RtdSources = (BenchRtdSource,);
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;
@@ -55,9 +57,9 @@ impl Addin for BenchAddin {
     type Layers = (native_abi_semantics::SemanticLayer,);
     type AsyncExecutor = BuiltinAsyncExecutor;
 
-    fn open(context: &OpenContext) -> OpenResult<Self> {
+    fn open(context: &OpenContext<Self>) -> OpenResult<Self> {
         let (source, rtd_shared) = BenchRtdSource::new();
-        let rtd = context.rtd().register_source(source)?;
+        let (rtd,) = context.rtd().register_sources((source,))?;
         let limits = RtdLimits::standard()
             .with_max_pending(RtdCapacity::disabled_if_zero(120_000))
             .with_max_active(RtdCapacity::disabled_if_zero(120_000))

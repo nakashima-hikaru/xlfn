@@ -28,6 +28,8 @@ thread_local! {
 }
 
 impl Addin for ReloadAddin {
+    type RtdSubscription = ();
+    type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();
     type Error = XllError;
@@ -35,7 +37,7 @@ impl Addin for ReloadAddin {
     #[cfg(feature = "async")]
     type AsyncExecutor = crate::NoAsyncExecutor;
 
-    fn open(_: &OpenContext) -> Result<Opened<()>, XllError> {
+    fn open(_: &OpenContext<Self>) -> Result<Opened<()>, XllError> {
         OPENS.set(OPENS.get() + 1);
         Ok(Opened::new(()))
     }

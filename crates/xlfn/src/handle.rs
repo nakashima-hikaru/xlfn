@@ -6,6 +6,8 @@ mod formula;
 mod object;
 #[cfg(all(feature = "bench-internals", feature = "async"))]
 pub use object::{ObjectFinalPinRelease, ObjectLeaseBenchCase, ObjectLeaseBenchmark};
+#[cfg(feature = "bench-internals")]
+pub use object::{ObjectPayloadKind, ObjectStorageBenchmark, object_storage_layout};
 mod prepare;
 #[cfg(feature = "bench-internals")]
 mod protocol_bench;

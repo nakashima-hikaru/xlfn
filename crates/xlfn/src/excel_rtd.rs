@@ -190,8 +190,8 @@ pub(crate) fn observe_handle(
     }
 }
 
-pub(crate) fn observe_subscription(
-    subscriptions: &crate::subscription::SubscriptionRuntime,
+pub(crate) fn observe_subscription<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+    subscriptions: &crate::subscription::SubscriptionRuntime<E, C>,
     key: &crate::subscription::SubscriptionKey,
     host: ExcelHost<'_>,
 ) -> XllResult<crate::subscription::RtdValue> {
@@ -224,8 +224,8 @@ pub(crate) fn shutdown_handle_topics(handles: &FormulaLifetimeBackend) -> XllRes
     }
 }
 
-pub(crate) fn shutdown_subscriptions(
-    subscriptions: &crate::subscription::SubscriptionRuntime,
+pub(crate) fn shutdown_subscriptions<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+    subscriptions: &crate::subscription::SubscriptionRuntime<E, C>,
 ) -> XllResult<()> {
     #[cfg(all(target_os = "windows", feature = "rtd"))]
     {
@@ -282,4 +282,10 @@ pub(crate) fn wait_for_transport_quiescence(
     module_residency_held: bool,
 ) -> Result<(), crate::excel_rtd_protocol::RtdQuiescenceError> {
     windows::wait_for_module_quiescence(module_residency_held)
+}
+
+#[cfg(windows)]
+pub(crate) fn register_server_type<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>()
+-> crate::XllResult<()> {
+    windows::register_server_type::<E, C>()
 }

@@ -1,26 +1,33 @@
+use crate::RtdSubscription;
 use crate::generation::RuntimeGeneration;
 use crate::shutdown::SubscriptionsStopped;
 use crate::subscription::{RtdLimits, SubscriptionRuntime};
 
-pub(crate) struct SubscriptionServiceSlot {
+pub(crate) struct SubscriptionServiceSlot<
+    E: RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+> {
     service: xlfn_kernel::service_slot::GenerationServiceSlot<
-        SubscriptionRuntimeConfig,
-        SubscriptionRuntime,
+        SubscriptionRuntimeConfig<E, C>,
+        SubscriptionRuntime<E, C>,
         crate::XllError,
     >,
     observer: crate::shutdown_trace::ObservationSink,
 }
 
-pub(crate) type SubscriptionRuntimeRead<'a> =
-    xlfn_kernel::service_slot::GenerationServiceRead<'a, SubscriptionRuntime>;
+pub(crate) type SubscriptionRuntimeRead<'a, E = (), C = crate::DynamicRtdSources<E>> =
+    xlfn_kernel::service_slot::GenerationServiceRead<'a, SubscriptionRuntime<E, C>>;
 
-struct SubscriptionRuntimeConfig {
+struct SubscriptionRuntimeConfig<
+    E: RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+> {
     generation: RuntimeGeneration,
     limits: RtdLimits,
-    sources: crate::subscription::SourceArena,
+    sources: crate::subscription::SourceArena<E, C>,
 }
 
-impl SubscriptionServiceSlot {
+impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> SubscriptionServiceSlot<E, C> {
     pub(crate) const fn new() -> Self {
         Self {
             service: xlfn_kernel::service_slot::GenerationServiceSlot::new(),
@@ -32,7 +39,7 @@ impl SubscriptionServiceSlot {
         &self,
         generation: RuntimeGeneration,
         limits: RtdLimits,
-        sources: crate::subscription::SourceArena,
+        sources: crate::subscription::SourceArena<E, C>,
     ) -> crate::XllResult<()> {
         self.service
             .arm(SubscriptionRuntimeConfig {
@@ -53,7 +60,7 @@ impl SubscriptionServiceSlot {
     pub(crate) fn read(
         &self,
         host: crate::excel_rtd::RtdSubscriptionHost,
-    ) -> crate::XllResult<SubscriptionRuntimeRead<'_>> {
+    ) -> crate::XllResult<SubscriptionRuntimeRead<'_, E, C>> {
         self.service
             .read(
                 |config| {
@@ -130,7 +137,7 @@ mod tests {
 
     #[test]
     fn subscription_service_slot_reuses_published_runtime() {
-        let slot = SubscriptionServiceSlot::new();
+        let slot = SubscriptionServiceSlot::<()>::new();
         slot.arm(
             generation(),
             RtdLimits::standard(),
@@ -146,7 +153,7 @@ mod tests {
 
     #[test]
     fn subscription_service_slot_initializes_once_under_contention() {
-        let slot = Arc::new(SubscriptionServiceSlot::new());
+        let slot = Arc::new(SubscriptionServiceSlot::<()>::new());
         slot.arm(
             generation(),
             RtdLimits::standard(),
@@ -175,7 +182,7 @@ mod tests {
 
     #[test]
     fn subscription_service_slot_seal_unpublishes_runtime() {
-        let slot = SubscriptionServiceSlot::new();
+        let slot = SubscriptionServiceSlot::<()>::new();
         slot.arm(
             generation(),
             RtdLimits::standard(),
@@ -196,7 +203,7 @@ mod tests {
 
     #[test]
     fn subscription_service_slot_can_reopen_after_close() {
-        let slot = SubscriptionServiceSlot::new();
+        let slot = SubscriptionServiceSlot::<()>::new();
         slot.arm(
             generation(),
             RtdLimits::standard(),
@@ -223,7 +230,7 @@ mod tests {
 
     #[test]
     fn subscription_service_slot_seal_is_local_to_its_generation_bundle() {
-        let slot = SubscriptionServiceSlot::new();
+        let slot = SubscriptionServiceSlot::<()>::new();
         assert!(matches!(
             slot.read(RtdSubscriptionHost::detached()),
             Err(crate::XllError::Closing)

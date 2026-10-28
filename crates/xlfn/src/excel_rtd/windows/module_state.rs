@@ -273,7 +273,7 @@ impl ComModuleLifetime {
     /// external references require residency, not a blocking physical drain.
     pub(super) fn wait_for_logical_quiescence(
         &self,
-        retry_git_revocation_debt: fn(),
+        mut retry_git_revocation_debt: impl FnMut(),
         module_residency_held: bool,
     ) -> Result<(), ComModuleQuiescenceError> {
         #[cfg(test)]

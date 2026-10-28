@@ -6,6 +6,28 @@ use crate::execution::{
     UdfTraceMetadata, safe_exit, trace,
 };
 
+/// Completion observation is selected when an invocation chooses its path.
+/// Uninstrumented tasks carry a zero-sized policy instead of optional metadata.
+pub(crate) trait CompletionObserver {
+    fn finish(&mut self, completion: &AsyncCompletion);
+}
+
+pub(crate) struct NoObservation;
+
+impl CompletionObserver for NoObservation {
+    fn finish(&mut self, _: &AsyncCompletion) {}
+}
+
+// A scoped builder may still own its observation before transferring it into
+// the task. Its temporary Drop fallback consumes that optional ownership.
+impl<O: CompletionObserver> CompletionObserver for Option<O> {
+    fn finish(&mut self, completion: &AsyncCompletion) {
+        if let Some(mut observation) = self.take() {
+            observation.finish(completion);
+        }
+    }
+}
+
 /// Observation state for one async UDF invocation uniquely owned by the running task.
 ///
 /// The observation plane owns timing, layer guards, trace metadata, and the
@@ -49,8 +71,10 @@ impl<G: UdfLayerGuard> AsyncObservation<G> {
             }),
         }
     }
+}
 
-    pub(crate) fn finish(mut self, completion: &AsyncCompletion) {
+impl<G: UdfLayerGuard> CompletionObserver for AsyncObservation<G> {
+    fn finish(&mut self, completion: &AsyncCompletion) {
         if let Some(active) = self.active.take() {
             finish_active(active, completion);
         }
@@ -235,7 +259,7 @@ mod tests {
     fn completion_and_delivery_failures_remain_independent() {
         let (_source, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
         let (sender, receiver) = std::sync::mpsc::channel();
-        let observation = observation(sender, token);
+        let mut observation = observation(sender, token);
         let computation_error = XllError::Native {
             code: 73,
             message: "computation".to_owned(),
@@ -246,13 +270,19 @@ mod tests {
             delivery: OwnedDeliveryOutcome::Failed(delivery_error),
         };
         observation.finish(&completion);
+        observation.finish(&completion);
+        drop(observation);
 
         assert_eq!(
-            receive(receiver),
+            receiver.recv().unwrap(),
             (
                 CompletionSnapshot::Error(UdfErrorKind::Vendor, Some(73)),
                 DeliverySnapshot::Failed,
             )
         );
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        ));
     }
 }

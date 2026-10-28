@@ -163,6 +163,11 @@ harness = false
 required-features = ["rtd"]
 
 [[bench]]
+name = "rtd_channel_enqueue"
+harness = false
+required-features = ["bench-internals", "rtd"]
+
+[[bench]]
 name = "protocol_costs"
 harness = false
 required-features = ["bench-internals", "rtd"]
@@ -243,6 +248,16 @@ workspace = true
 
 [[bench]]
 name = "handle_memory"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "handle_object_allocations"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "handle_object_storage"
 harness = false
 required-features = ["bench-internals"]
 

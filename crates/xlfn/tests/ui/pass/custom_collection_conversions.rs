@@ -12,6 +12,8 @@ use xlfn::value::{
 struct CollectionConversionAddin;
 
 impl Addin for CollectionConversionAddin {
+    type RtdSubscription = ();
+    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();
     type Error = XllError;
@@ -19,7 +21,7 @@ impl Addin for CollectionConversionAddin {
     #[cfg(feature = "async")]
     type AsyncExecutor = xlfn::NoAsyncExecutor;
 
-    fn open(_: &OpenContext) -> XllResult<Opened<()>> {
+    fn open(_: &OpenContext<Self>) -> XllResult<Opened<()>> {
         Ok(Opened::new(()))
     }
 }

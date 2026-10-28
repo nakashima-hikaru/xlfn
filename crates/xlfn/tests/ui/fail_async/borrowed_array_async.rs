@@ -7,6 +7,8 @@ struct State;
 struct BorrowedAsyncAddin;
 
 impl Addin for BorrowedAsyncAddin {
+    type RtdSubscription = ();
+    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;
@@ -14,7 +16,7 @@ impl Addin for BorrowedAsyncAddin {
     #[cfg(feature = "async")]
     type AsyncExecutor = xlfn::NoAsyncExecutor;
 
-    fn open(_: &OpenContext) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
+    fn open(_: &OpenContext<Self>) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
         Ok(Opened::new(State))
     }
 }

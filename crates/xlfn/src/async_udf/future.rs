@@ -5,20 +5,40 @@ use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+/// Diagnostic identity retained only when the owning wrapper needs it.
+pub(super) trait PanicContext {
+    fn udf_id(&self) -> &'static str;
+}
+
+impl PanicContext for &'static str {
+    fn udf_id(&self) -> &'static str {
+        self
+    }
+}
+
+/// The outer task wrapper has one fixed context for every UDF.
+pub(super) struct TaskDestruction;
+
+impl PanicContext for TaskDestruction {
+    fn udf_id(&self) -> &'static str {
+        "async task destruction"
+    }
+}
+
 /// Keeps user destruction inside a panic boundary, including when a task is
 /// cancelled before its first poll or a runnable is reclaimed without polling.
 /// The future stays inline and is destroyed in place, preserving its pin.
-pub(super) struct NoUnwindFuture<F> {
+pub(super) struct NoUnwindFuture<F, C: PanicContext = &'static str> {
     future: ManuallyDrop<F>,
-    udf_id: &'static str,
+    context: C,
     destroyed: bool,
 }
 
-impl<F> NoUnwindFuture<F> {
-    pub(super) fn new(udf_id: &'static str, future: F) -> Self {
+impl<F, C: PanicContext> NoUnwindFuture<F, C> {
+    pub(super) fn new(context: C, future: F) -> Self {
         Self {
             future: ManuallyDrop::new(future),
-            udf_id,
+            context,
             destroyed: false,
         }
     }
@@ -42,7 +62,7 @@ impl<F> NoUnwindFuture<F> {
     }
 }
 
-impl<F: Future> Future for NoUnwindFuture<F> {
+impl<F: Future, C: PanicContext> Future for NoUnwindFuture<F, C> {
     type Output = F::Output;
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
@@ -60,10 +80,10 @@ impl<F: Future> Future for NoUnwindFuture<F> {
     }
 }
 
-impl<F> Drop for NoUnwindFuture<F> {
+impl<F, C: PanicContext> Drop for NoUnwindFuture<F, C> {
     fn drop(&mut self) {
         if self.destroy().is_err() {
-            crate::diagnostics::report_no_unwind(self.udf_id, &crate::XllError::Panic);
+            crate::diagnostics::report_no_unwind(self.context.udf_id(), &crate::XllError::Panic);
         }
     }
 }
@@ -103,33 +123,37 @@ mod tests {
             }
         }
 
-        for panic_on_drop in [false, true] {
-            let drops = Arc::new(AtomicUsize::new(0));
-            {
-                let future = PinnedFuture {
-                    address: AtomicUsize::new(0),
-                    drops: Arc::clone(&drops),
-                    panic_on_drop,
-                    _pin: std::marker::PhantomPinned,
-                };
-                let mut future = std::pin::pin!(NoUnwindFuture::new("pinned future drop", future));
-                let waker = futures_util::task::noop_waker();
-                assert!(
-                    future
-                        .as_mut()
-                        .poll(&mut Context::from_waker(&waker))
-                        .is_ready()
-                );
-                let expected = if panic_on_drop {
-                    Err(CaughtPanic)
-                } else {
-                    Ok(())
-                };
-                assert_eq!(future.as_mut().finish(), expected);
-                assert_eq!(future.as_mut().finish(), Ok(()));
+        fn exercise<C: PanicContext>(context: impl Fn() -> C) {
+            for panic_on_drop in [false, true] {
+                let drops = Arc::new(AtomicUsize::new(0));
+                {
+                    let future = PinnedFuture {
+                        address: AtomicUsize::new(0),
+                        drops: Arc::clone(&drops),
+                        panic_on_drop,
+                        _pin: std::marker::PhantomPinned,
+                    };
+                    let mut future = std::pin::pin!(NoUnwindFuture::new(context(), future));
+                    let waker = futures_util::task::noop_waker();
+                    assert!(
+                        future
+                            .as_mut()
+                            .poll(&mut Context::from_waker(&waker))
+                            .is_ready()
+                    );
+                    let expected = if panic_on_drop {
+                        Err(CaughtPanic)
+                    } else {
+                        Ok(())
+                    };
+                    assert_eq!(future.as_mut().finish(), expected);
+                    assert_eq!(future.as_mut().finish(), Ok(()));
+                }
+                assert_eq!(drops.load(Ordering::Relaxed), 1);
             }
-            assert_eq!(drops.load(Ordering::Relaxed), 1);
         }
+        exercise(|| "pinned future drop");
+        exercise(|| TaskDestruction);
     }
 
     #[test]

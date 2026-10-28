@@ -1,6 +1,6 @@
 use super::automation::{
     server_get_ids_of_names, server_invoke, topic_key_from_safearray, write_bstr_variant,
-    write_refresh_data, write_value_variant,
+    write_refresh_data,
 };
 use super::com_abi::IID_IUNKNOWN;
 use super::com_abi::com_lifetime_boundary;
@@ -11,15 +11,16 @@ use super::server_gate::{
     OwnedServerCall, OwnedServerObservationCall, ServerCloseError, ServerOperationBarrier,
     ServerPhase, ServerTerminationRequest, TerminationWorker,
 };
+use super::subscription_backend::{
+    BackendSubscriptionServer, BackendSubscriptions, finish_connect_data,
+};
 use super::update_event::{
     CallbackPtr, GitCookieLease, RetainedUpdateCallback, RtdNotifier, RtdUpdateEvent,
     ServerCallbacks, active_callback, drain_callbacks, install_callback, retry_git_revocation_debt,
 };
 use super::{com_boundary, guid_eq};
 use crate::error::InputError;
-use crate::formula_lifetime::{
-    FormulaLifetimeBackend, FormulaLifetimeConnection, FormulaLifetimeGeneration,
-};
+use crate::formula_lifetime::{FormulaLifetimeBackend, FormulaLifetimeGeneration};
 use crate::subscription::ServerGeneration;
 use crate::subscription::SubscriptionRuntime;
 use crate::sync::Mutex;
@@ -27,9 +28,10 @@ use crate::win32::E_UNEXPECTED;
 use crate::win32::{
     CoCreateGuid, DISP_E_BADINDEX, DISPPARAMS, E_FAIL, E_INVALIDARG, E_NOINTERFACE, E_NOTIMPL,
     E_POINTER, EXCEPINFO, GUID, S_OK, SAFEARRAY, VARIANT, VARIANT_BOOL, VARIANT_FALSE,
-    VARIANT_TRUE, VariantClear,
+    VARIANT_TRUE,
 };
-use crate::{XllError, XllResult};
+use crate::{RtdSubscription, XllError, XllResult};
+use std::any::TypeId;
 use std::ffi::c_void;
 use std::num::NonZeroU32;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -64,6 +66,7 @@ pub(super) struct ActiveServer {
     pub(super) prog_id: String,
     pub(super) pointer: usize,
     pub(super) generation: ServerGeneration,
+    pub(super) subscription_type: TypeId,
 }
 
 pub(super) static ACTIVE_SERVER: Mutex<Option<ActiveServer>> = Mutex::new(None);
@@ -93,18 +96,27 @@ pub(super) static FAIL_DEFERRED_TERMINATION_SPAWN: AtomicBool = AtomicBool::new(
 #[cfg(test)]
 pub(super) static PANIC_DEFERRED_TERMINATION_CLEANUP: AtomicBool = AtomicBool::new(false);
 
-pub(super) struct EnsuredServer {
+pub(super) struct EnsuredServer<
+    E: RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+> {
     pub(super) active: ActiveServer,
     #[cfg(test)]
     pub(super) newly_created: bool,
-    pub(super) subscription_server: Option<crate::subscription::SubscriptionServerHandle>,
+    pub(super) subscription_server: Option<BackendSubscriptionServer<E, C>>,
 }
 
-impl Drop for EnsuredServer {
+impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> EnsuredServer<E, C> {
+    pub(super) fn pointer(&self) -> *mut RtdServer<E, C> {
+        self.active.pointer as *mut RtdServer<E, C>
+    }
+}
+
+impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Drop for EnsuredServer<E, C> {
     fn drop(&mut self) {
         // SAFETY: `ensure_server` acquires one temporary reference specifically
         // for this guard, so dropping the guard must release exactly that reference.
-        unsafe { server_release(self.active.pointer as *mut RtdServer) };
+        unsafe { server_release(self.pointer()) };
     }
 }
 
@@ -113,8 +125,11 @@ impl Drop for EnsuredServer {
 /// A successful ServerStart is the COM publication boundary, independently of
 /// Excel's later return status. Otherwise the last failed observation retires
 /// the unused server through the normal terminal protocol.
-pub(super) struct ServerObservation {
-    ensured: EnsuredServer,
+pub(super) struct ServerObservation<
+    E: RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+> {
+    ensured: EnsuredServer<E, C>,
     operation: Option<OwnedServerObservationCall>,
     committed: bool,
 }
@@ -125,9 +140,9 @@ struct ObservationState {
     committed: bool,
 }
 
-impl ServerObservation {
-    pub(super) fn begin(ensured: EnsuredServer) -> XllResult<Self> {
-        let pointer = ensured.active.pointer as *mut RtdServer;
+impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> ServerObservation<E, C> {
+    pub(super) fn begin(ensured: EnsuredServer<E, C>) -> XllResult<Self> {
+        let pointer = ensured.active.pointer as *mut RtdServer<E, C>;
         let active = ACTIVE_SERVER.lock();
         if !active
             .as_ref()
@@ -156,7 +171,7 @@ impl ServerObservation {
         })
     }
 
-    pub(super) fn server(&self) -> &EnsuredServer {
+    pub(super) fn server(&self) -> &EnsuredServer<E, C> {
         &self.ensured
     }
 
@@ -165,12 +180,12 @@ impl ServerObservation {
     }
 }
 
-impl Drop for ServerObservation {
+impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Drop for ServerObservation<E, C> {
     fn drop(&mut self) {
         // Release observation admission before requesting termination. An
         // in-flight COM ServerStart still owns its separate admission.
         drop(self.operation.take());
-        let pointer = self.ensured.active.pointer as *mut RtdServer;
+        let pointer = self.ensured.active.pointer as *mut RtdServer<E, C>;
         let active = ACTIVE_SERVER.lock();
         // SAFETY: self.ensured retains the server throughout this destructor.
         let server = unsafe { &*pointer };
@@ -210,8 +225,11 @@ impl Drop for ServerObservation {
 }
 
 #[repr(C)]
-pub(super) struct RtdServer {
-    pub(super) vtable: *const RtdServerVtable,
+pub(super) struct RtdServer<
+    E: RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+> {
+    pub(super) vtable: *const RtdServerVtable<E, C>,
     pub(super) references: AtomicU32,
     pub(super) start_state: AtomicU8,
     observations: Mutex<ObservationState>,
@@ -220,7 +238,7 @@ pub(super) struct RtdServer {
     // allocated through their final rejected entry and thread exit.
     pub(super) operations: Arc<ServerOperationBarrier>,
     pub(super) termination_worker: TerminationWorker,
-    pub(super) backends: Mutex<ServerBackends>,
+    pub(super) backends: Mutex<ServerBackends<E, C>>,
     pub(super) callbacks: Mutex<ServerCallbacks>,
     // Keep the module hold until every other field has been destroyed.
     pub(super) _module_lease: ComObjectLease,
@@ -282,7 +300,9 @@ pub(crate) struct DeferredDisconnectLease {
 }
 
 impl OwnedServerReference {
-    unsafe fn acquire(pointer: *mut RtdServer) -> Self {
+    unsafe fn acquire<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+        pointer: *mut RtdServer<E, C>,
+    ) -> Self {
         // SAFETY: the caller guarantees `pointer` is a live server reference.
         unsafe { server_add_ref(pointer) };
         Self {
@@ -294,7 +314,11 @@ impl OwnedServerReference {
 impl Drop for OwnedServerReference {
     fn drop(&mut self) {
         // SAFETY: acquire created exactly one reference owned by this guard.
-        unsafe { server_release(self.pointer as *mut RtdServer) };
+        unsafe {
+            let pointer = self.pointer as *mut c_void;
+            let vtable = *pointer.cast::<*const super::com_abi::IUnknown_Vtbl>();
+            ((*vtable).Release)(pointer);
+        };
     }
 }
 
@@ -325,40 +349,16 @@ impl BackendHandles {
     }
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct BackendSubscriptions(pub(super) NonNull<SubscriptionRuntime>);
-
-// SAFETY: SubscriptionRuntime is Send + Sync and remains valid while attached to the server.
-unsafe impl Send for BackendSubscriptions {}
-// SAFETY: SubscriptionRuntime methods are thread-safe.
-unsafe impl Sync for BackendSubscriptions {}
-
-impl BackendSubscriptions {
-    pub(super) fn new(subscriptions: &SubscriptionRuntime) -> Self {
-        let raw = std::ptr::from_ref(subscriptions).cast_mut();
-        // SAFETY: `raw` originates from a valid reference and is non-null.
-        unsafe { Self(NonNull::new_unchecked(raw)) }
-    }
-
-    /// Accesses the underlying subscription runtime reference.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that the runtime remains alive (e.g., during
-    /// active server callback execution before shutdown completion).
-    pub(super) unsafe fn as_ref(&self) -> &SubscriptionRuntime {
-        // SAFETY: guaranteed by caller contract.
-        unsafe { self.0.as_ref() }
-    }
-}
-
-pub(super) struct ServerBackends {
+pub(super) struct ServerBackends<
+    E: RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+> {
     pub(super) handles: Option<BackendHandles>,
-    pub(super) subscriptions: Option<BackendSubscriptions>,
-    pub(super) subscription_server: Option<crate::subscription::SubscriptionServerHandle>,
+    pub(super) subscriptions: Option<BackendSubscriptions<E, C>>,
+    pub(super) subscription_server: Option<BackendSubscriptionServer<E, C>>,
 }
 
-impl ServerBackends {
+impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> ServerBackends<E, C> {
     fn is_detached(&self) -> bool {
         self.handles.is_none() && self.subscriptions.is_none() && self.subscription_server.is_none()
     }
@@ -370,8 +370,11 @@ impl ServerBackends {
 ///
 /// The caller must ensure that `server` (and its contained `operations` barrier
 /// and pinned `callback`) outlives the update notifier attached to `subscription_server`.
-pub(super) unsafe fn synchronize_callback_notification(
-    server: &RtdServer,
+pub(super) unsafe fn synchronize_callback_notification<
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+>(
+    server: &RtdServer<E, C>,
     callback: CallbackPtr,
 ) -> XllResult<()> {
     let subscription_server = server.backends.lock().subscription_server;
@@ -386,7 +389,7 @@ pub(super) unsafe fn synchronize_callback_notification(
     Ok(())
 }
 
-impl Drop for RtdServer {
+impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Drop for RtdServer<E, C> {
     fn drop(&mut self) {
         if !self.termination_worker.is_idle_or_joined() {
             // Dropping a JoinHandle would detach live code from the DLL that
@@ -404,16 +407,20 @@ impl Drop for RtdServer {
 }
 
 #[repr(C)]
-pub(super) struct RtdServerVtable {
+pub(super) struct RtdServerVtable<
+    E: RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+> {
     pub(super) query_interface:
-        unsafe extern "system" fn(*mut RtdServer, *const GUID, *mut *mut c_void) -> i32,
-    pub(super) add_ref: unsafe extern "system" fn(*mut RtdServer) -> u32,
-    pub(super) release: unsafe extern "system" fn(*mut RtdServer) -> u32,
-    pub(super) get_type_info_count: unsafe extern "system" fn(*mut RtdServer, *mut u32) -> i32,
+        unsafe extern "system" fn(*mut RtdServer<E, C>, *const GUID, *mut *mut c_void) -> i32,
+    pub(super) add_ref: unsafe extern "system" fn(*mut RtdServer<E, C>) -> u32,
+    pub(super) release: unsafe extern "system" fn(*mut RtdServer<E, C>) -> u32,
+    pub(super) get_type_info_count:
+        unsafe extern "system" fn(*mut RtdServer<E, C>, *mut u32) -> i32,
     pub(super) get_type_info:
-        unsafe extern "system" fn(*mut RtdServer, u32, u32, *mut *mut c_void) -> i32,
+        unsafe extern "system" fn(*mut RtdServer<E, C>, u32, u32, *mut *mut c_void) -> i32,
     pub(super) get_ids_of_names: unsafe extern "system" fn(
-        *mut RtdServer,
+        *mut RtdServer<E, C>,
         *const GUID,
         *const *const u16,
         u32,
@@ -421,7 +428,7 @@ pub(super) struct RtdServerVtable {
         *mut i32,
     ) -> i32,
     pub(super) invoke: unsafe extern "system" fn(
-        *mut RtdServer,
+        *mut RtdServer<E, C>,
         i32,
         *const GUID,
         u32,
@@ -432,38 +439,43 @@ pub(super) struct RtdServerVtable {
         *mut u32,
     ) -> i32,
     pub(super) server_start:
-        unsafe extern "system" fn(*mut RtdServer, *mut c_void, *mut i32) -> i32,
+        unsafe extern "system" fn(*mut RtdServer<E, C>, *mut c_void, *mut i32) -> i32,
     pub(super) connect_data: unsafe extern "system" fn(
-        *mut RtdServer,
+        *mut RtdServer<E, C>,
         i32,
         *mut *mut SAFEARRAY,
         *mut VARIANT_BOOL,
         *mut VARIANT,
     ) -> i32,
     pub(super) refresh_data:
-        unsafe extern "system" fn(*mut RtdServer, *mut i32, *mut *mut SAFEARRAY) -> i32,
-    pub(super) disconnect_data: unsafe extern "system" fn(*mut RtdServer, i32) -> i32,
-    pub(super) heartbeat: unsafe extern "system" fn(*mut RtdServer, *mut i32) -> i32,
-    pub(super) server_terminate: unsafe extern "system" fn(*mut RtdServer) -> i32,
+        unsafe extern "system" fn(*mut RtdServer<E, C>, *mut i32, *mut *mut SAFEARRAY) -> i32,
+    pub(super) disconnect_data: unsafe extern "system" fn(*mut RtdServer<E, C>, i32) -> i32,
+    pub(super) heartbeat: unsafe extern "system" fn(*mut RtdServer<E, C>, *mut i32) -> i32,
+    pub(super) server_terminate: unsafe extern "system" fn(*mut RtdServer<E, C>) -> i32,
 }
 
-pub(super) static RTD_SERVER_VTABLE: RtdServerVtable = RtdServerVtable {
-    query_interface: server_query_interface,
-    add_ref: server_add_ref,
-    release: server_release,
-    get_type_info_count: server_get_type_info_count,
-    get_type_info: server_get_type_info,
-    get_ids_of_names: server_get_ids_of_names,
-    invoke: server_invoke,
-    server_start,
-    connect_data,
-    refresh_data,
-    disconnect_data,
-    heartbeat,
-    server_terminate,
-};
+impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> RtdServer<E, C> {
+    pub(super) const VTABLE: RtdServerVtable<E, C> = RtdServerVtable::<E, C> {
+        query_interface: server_query_interface,
+        add_ref: server_add_ref,
+        release: server_release,
+        get_type_info_count: server_get_type_info_count,
+        get_type_info: server_get_type_info,
+        get_ids_of_names: server_get_ids_of_names,
+        invoke: server_invoke,
+        server_start,
+        connect_data,
+        refresh_data,
+        disconnect_data,
+        heartbeat,
+        server_terminate,
+    };
+}
 #[cfg(test)]
-pub(super) fn discard_unpublished_server(pointer: usize, newly_created: bool) {
+pub(super) fn discard_unpublished_server<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+    pointer: usize,
+    newly_created: bool,
+) {
     if !newly_created {
         return;
     }
@@ -472,9 +484,11 @@ pub(super) fn discard_unpublished_server(pointer: usize, newly_created: bool) {
         let active = ACTIVE_SERVER.lock();
         active
             .as_ref()
-            .filter(|entry| entry.pointer == pointer)
+            .filter(|entry| {
+                entry.pointer == pointer && entry.subscription_type == TypeId::of::<(E, C)>()
+            })
             .map(|_| {
-                let server = pointer as *mut RtdServer;
+                let server = pointer as *mut RtdServer<E, C>;
                 // SAFETY: ACTIVE_SERVER owns a live reference while locked.
                 unsafe { server_add_ref(server) };
                 server
@@ -524,16 +538,19 @@ pub(super) fn discard_unpublished_server(pointer: usize, newly_created: bool) {
 }
 
 #[cfg(feature = "handles")]
-pub(crate) fn shutdown(handles: &FormulaLifetimeBackend) -> XllResult<()> {
+pub(crate) fn shutdown<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+    handles: &FormulaLifetimeBackend,
+) -> XllResult<()> {
     let mut shutdown_error = None;
     let retained = {
         let active = ACTIVE_SERVER.lock();
         active
             .as_ref()
+            .filter(|entry| entry.subscription_type == TypeId::of::<(E, C)>())
             .filter(|entry| {
-                let server = entry.pointer as *mut RtdServer;
+                let server = entry.pointer as *mut RtdServer<E, C>;
 
-                // SAFETY: ACTIVE_SERVER owns a live reference to this RtdServer
+                // SAFETY: ACTIVE_SERVER owns a live reference to this RtdServer<E, C>
                 // while its mutex remains held, and handles backend is alive while attached.
                 unsafe {
                     let backends = (*server).backends.lock();
@@ -552,12 +569,12 @@ pub(crate) fn shutdown(handles: &FormulaLifetimeBackend) -> XllResult<()> {
                 // SAFETY: ACTIVE_SERVER owns a live reference while its mutex
                 // remains held. This temporary reference keeps the raw pointer
                 // alive while shutdown waits outside the global mutex.
-                unsafe { server_add_ref(entry.pointer as *mut RtdServer) };
+                unsafe { server_add_ref(entry.pointer as *mut RtdServer<E, C>) };
             })
     };
 
     if let Some(retained) = retained {
-        let server = retained.pointer as *mut RtdServer;
+        let server = retained.pointer as *mut RtdServer<E, C>;
 
         // SAFETY: the temporary reference acquired above keeps `server` alive.
         let _server_termination = match unsafe { (*server).operations.close_and_wait() } {
@@ -618,24 +635,26 @@ pub(crate) fn shutdown(handles: &FormulaLifetimeBackend) -> XllResult<()> {
     }
 }
 
-pub(crate) fn shutdown_subscriptions(subscriptions: &SubscriptionRuntime) -> XllResult<()> {
+pub(crate) fn shutdown_subscriptions<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+    subscriptions: &SubscriptionRuntime<E, C>,
+) -> XllResult<()> {
     let mut shutdown_error = None;
     let retained = {
         let active = ACTIVE_SERVER.lock();
         active
             .as_ref()
+            .filter(|entry| entry.subscription_type == TypeId::of::<(E, C)>())
             .filter(|entry| {
-                let server = entry.pointer as *mut RtdServer;
+                let server = entry.pointer as *mut RtdServer<E, C>;
 
-                // SAFETY: ACTIVE_SERVER owns a live reference to this RtdServer
+                // SAFETY: ACTIVE_SERVER owns a live reference to this RtdServer<E, C>
                 // while its mutex remains held.
                 unsafe {
                     let backends = (*server).backends.lock();
                     backends.is_detached()
-                        || backends
-                            .subscriptions
-                            .as_ref()
-                            .is_some_and(|active| std::ptr::eq(active.0.as_ptr(), subscriptions))
+                        || backends.subscriptions.as_ref().is_some_and(|active| {
+                            active.same_runtime(BackendSubscriptions::new(subscriptions))
+                        })
                 }
             })
             .cloned()
@@ -643,12 +662,12 @@ pub(crate) fn shutdown_subscriptions(subscriptions: &SubscriptionRuntime) -> Xll
                 // SAFETY: ACTIVE_SERVER owns a live reference while its mutex
                 // remains held. This temporary reference keeps the raw pointer
                 // alive while shutdown waits outside the global mutex.
-                unsafe { server_add_ref(entry.pointer as *mut RtdServer) };
+                unsafe { server_add_ref(entry.pointer as *mut RtdServer<E, C>) };
             })
     };
 
     if let Some(retained) = retained {
-        let server = retained.pointer as *mut RtdServer;
+        let server = retained.pointer as *mut RtdServer<E, C>;
 
         // Stop all COM methods first. SubscriptionRuntime::close then closes
         // background publish/notification work that does not enter through COM.
@@ -709,28 +728,38 @@ pub(crate) fn shutdown_subscriptions(subscriptions: &SubscriptionRuntime) -> Xll
 }
 
 #[cfg(feature = "handles")]
-pub(super) fn ensure_server(
+pub(super) fn ensure_server<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
     handles: Option<&FormulaLifetimeBackend>,
-    subscriptions: Option<&SubscriptionRuntime>,
-) -> XllResult<EnsuredServer> {
+    subscriptions: Option<BackendSubscriptions<E, C>>,
+) -> XllResult<EnsuredServer<E, C>> {
     ensure_server_impl(handles, subscriptions)
 }
 
-pub(super) fn ensure_server_without_handles(
-    subscriptions: Option<&SubscriptionRuntime>,
-) -> XllResult<EnsuredServer> {
+pub(super) fn ensure_server_without_handles<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+    subscriptions: Option<BackendSubscriptions<E, C>>,
+) -> XllResult<EnsuredServer<E, C>> {
     ensure_server_impl(None, subscriptions)
 }
 
-fn ensure_server_impl(
+fn ensure_server_impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
     handles: Option<&FormulaLifetimeBackend>,
-    subscriptions: Option<&SubscriptionRuntime>,
-) -> XllResult<EnsuredServer> {
+    subscriptions: Option<BackendSubscriptions<E, C>>,
+) -> XllResult<EnsuredServer<E, C>> {
+    #[cfg(test)]
+    super::server_type::register_server_type::<E, C>()?;
     loop {
         let mut active = ACTIVE_SERVER.lock();
+        if !super::server_type::is_registered::<E, C>() {
+            return Err(XllError::Closing);
+        }
 
         if let Some(existing) = active.as_ref() {
-            let server = existing.pointer as *mut RtdServer;
+            if existing.subscription_type != TypeId::of::<(E, C)>() {
+                return Err(XllError::Internal {
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_MULTI,
+                });
+            }
+            let server = existing.pointer as *mut RtdServer<E, C>;
             // Deferred ServerTerminate intentionally leaves ACTIVE_SERVER in place
             // until a host lifecycle path can join its coordinator. A ServerStart
             // failure after callback publication is also terminal for that
@@ -807,7 +836,7 @@ fn ensure_server_impl(
             };
 
             // SAFETY: ACTIVE_SERVER owns a live server reference while its mutex is
-            // held, so the RtdServer and its `backends` mutex are valid.
+            // held, so the RtdServer<E, C> and its `backends` mutex are valid.
             let mut backends = unsafe { (*server).backends.lock() };
 
             if let Some(handles) = handles {
@@ -831,7 +860,7 @@ fn ensure_server_impl(
                 subscriptions
             {
                 match backends.subscriptions.as_ref() {
-                    Some(active) if std::ptr::eq(active.0.as_ptr(), subscriptions) => {
+                    Some(active) if active.same_runtime(subscriptions) => {
                         (None, backends.subscription_server)
                     }
                     Some(_) => {
@@ -840,10 +869,9 @@ fn ensure_server_impl(
                         });
                     }
                     None => {
-                        // SAFETY: `subscriptions` is the active generation's subscription runtime which
-                        // outlives the RTD server lifecycle (protected by COM refcounting and shutdown barriers).
+                        // SAFETY: admission/shutdown retain the runtime through every typed handle call.
                         let handle = unsafe { subscriptions.register_server(existing.generation)? };
-                        backends.subscriptions = Some(BackendSubscriptions::new(subscriptions));
+                        backends.subscriptions = Some(subscriptions);
                         backends.subscription_server = Some(handle);
                         (Some(handle), Some(handle))
                     }
@@ -869,7 +897,7 @@ fn ensure_server_impl(
             // the count to create the separate temporary reference held by the guard.
             unsafe { server_add_ref(server) };
 
-            return Ok(EnsuredServer {
+            return Ok(EnsuredServer::<E, C> {
                 active: existing.clone(),
                 #[cfg(test)]
                 newly_created: false,
@@ -907,17 +935,17 @@ fn ensure_server_impl(
             None
         };
 
-        let server = Box::new(RtdServer {
-            vtable: &RTD_SERVER_VTABLE,
+        let server = Box::new(RtdServer::<E, C> {
+            vtable: &RtdServer::<E, C>::VTABLE,
             references: AtomicU32::new(1),
             start_state: AtomicU8::new(SERVER_NOT_STARTED),
             observations: Mutex::new(ObservationState::default()),
             generation,
             operations: Arc::new(operations),
             termination_worker: TerminationWorker::default(),
-            backends: Mutex::new(ServerBackends {
+            backends: Mutex::new(ServerBackends::<E, C> {
                 handles: handles.map(BackendHandles::new),
-                subscriptions: subscriptions.map(BackendSubscriptions::new),
+                subscriptions,
                 subscription_server: subscription_handle,
             }),
             callbacks: Mutex::new(ServerCallbacks::default()),
@@ -930,15 +958,16 @@ fn ensure_server_impl(
             prog_id: format!("XlFnRtd_{}", guid_compact(class_id)),
             pointer,
             generation,
+            subscription_type: TypeId::of::<(E, C)>(),
         };
 
         *active = Some(entry.clone());
 
         // SAFETY: the construction reference is now owned by ACTIVE_SERVER.
-        // Incrementing here creates a separate temporary reference for EnsuredServer.
-        unsafe { server_add_ref(pointer as *mut RtdServer) };
+        // Incrementing here creates a separate temporary reference for EnsuredServer<E, C>.
+        unsafe { server_add_ref(pointer as *mut RtdServer<E, C>) };
 
-        return Ok(EnsuredServer {
+        return Ok(EnsuredServer::<E, C> {
             active: entry,
             #[cfg(test)]
             newly_created: true,
@@ -946,8 +975,11 @@ fn ensure_server_impl(
         });
     }
 }
-pub(super) unsafe extern "system" fn server_query_interface(
-    this: *mut RtdServer,
+pub(super) unsafe extern "system" fn server_query_interface<
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+>(
+    this: *mut RtdServer<E, C>,
     interface_id: *const GUID,
     output: *mut *mut c_void,
 ) -> i32 {
@@ -985,9 +1017,14 @@ pub(super) unsafe extern "system" fn server_query_interface(
     })
 }
 
-pub(super) unsafe extern "system" fn server_add_ref(this: *mut RtdServer) -> u32 {
+pub(super) unsafe extern "system" fn server_add_ref<
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+>(
+    this: *mut RtdServer<E, C>,
+) -> u32 {
     com_lifetime_boundary("IRtdServer::AddRef", 0, || {
-        // SAFETY: COM and internal callers invoke AddRef only on a live RtdServer.
+        // SAFETY: COM and internal callers invoke AddRef only on a live RtdServer<E, C>.
         let references = unsafe { &(*this).references };
         references
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
@@ -998,7 +1035,12 @@ pub(super) unsafe extern "system" fn server_add_ref(this: *mut RtdServer) -> u32
     })
 }
 
-pub(super) unsafe extern "system" fn server_release(this: *mut RtdServer) -> u32 {
+pub(super) unsafe extern "system" fn server_release<
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+>(
+    this: *mut RtdServer<E, C>,
+) -> u32 {
     com_lifetime_boundary("IRtdServer::Release", 0, || {
         let Some(this) = NonNull::new(this) else {
             return 0;
@@ -1023,7 +1065,13 @@ pub(super) unsafe extern "system" fn server_release(this: *mut RtdServer) -> u32
     })
 }
 
-unsafe extern "system" fn server_get_type_info_count(this: *mut RtdServer, count: *mut u32) -> i32 {
+unsafe extern "system" fn server_get_type_info_count<
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+>(
+    this: *mut RtdServer<E, C>,
+    count: *mut u32,
+) -> i32 {
     com_lifetime_boundary("IDispatch::GetTypeInfoCount", E_UNEXPECTED, || {
         if this.is_null() || count.is_null() {
             return E_POINTER;
@@ -1036,8 +1084,11 @@ unsafe extern "system" fn server_get_type_info_count(this: *mut RtdServer, count
     })
 }
 
-unsafe extern "system" fn server_get_type_info(
-    this: *mut RtdServer,
+unsafe extern "system" fn server_get_type_info<
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+>(
+    this: *mut RtdServer<E, C>,
     index: u32,
     _locale: u32,
     output: *mut *mut c_void,
@@ -1064,8 +1115,11 @@ unsafe extern "system" fn server_get_type_info(
     })
 }
 
-pub(super) unsafe extern "system" fn server_start(
-    this: *mut RtdServer,
+pub(super) unsafe extern "system" fn server_start<
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+>(
+    this: *mut RtdServer<E, C>,
     callback: *mut c_void,
     result: *mut i32,
 ) -> i32 {
@@ -1076,7 +1130,11 @@ pub(super) unsafe extern "system" fn server_start(
     })
 }
 
-unsafe fn server_start_inner(this: *mut RtdServer, callback: *mut c_void, result: *mut i32) -> i32 {
+unsafe fn server_start_inner<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+    this: *mut RtdServer<E, C>,
+    callback: *mut c_void,
+    result: *mut i32,
+) -> i32 {
     if this.is_null() || callback.is_null() || result.is_null() {
         return E_POINTER;
     }
@@ -1172,8 +1230,11 @@ unsafe fn server_start_inner(this: *mut RtdServer, callback: *mut c_void, result
     S_OK
 }
 
-pub(super) unsafe extern "system" fn connect_data(
-    this: *mut RtdServer,
+pub(super) unsafe extern "system" fn connect_data<
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+>(
+    this: *mut RtdServer<E, C>,
     topic_id: i32,
     strings: *mut *mut SAFEARRAY,
     new_values: *mut VARIANT_BOOL,
@@ -1186,40 +1247,8 @@ pub(super) unsafe extern "system" fn connect_data(
     })
 }
 
-#[cfg_attr(
-    test,
-    allow(
-        clippy::large_enum_variant,
-        reason = "test-only operation drop traces enlarge the subscription variant; production needs no extra allocation"
-    )
-)]
-enum ConnectDataTransaction<'runtime> {
-    Handle(FormulaLifetimeConnection<'runtime>),
-    Subscription(crate::subscription::SubscriptionConnection),
-}
-
-impl ConnectDataTransaction<'_> {
-    unsafe fn write_value(&self, result: *mut VARIANT) -> i32 {
-        match self {
-            // SAFETY: caller validated result as non-null and writable; token remains readable.
-            Self::Handle(connection) => unsafe { write_bstr_variant(result, connection.token()) },
-            // SAFETY: caller validated result as non-null and writable; value remains readable.
-            Self::Subscription(connection) => unsafe {
-                write_value_variant(result, connection.value())
-            },
-        }
-    }
-
-    fn commit(self) -> XllResult<()> {
-        match self {
-            Self::Handle(connection) => connection.commit(),
-            Self::Subscription(connection) => connection.commit(),
-        }
-    }
-}
-
-unsafe fn connect_data_inner(
-    this: *mut RtdServer,
+unsafe fn connect_data_inner<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+    this: *mut RtdServer<E, C>,
     topic_id: i32,
     strings: *mut *mut SAFEARRAY,
     new_values: *mut VARIANT_BOOL,
@@ -1269,7 +1298,7 @@ unsafe fn connect_data_inner(
     // SAFETY: `this` remains valid for the duration of ConnectData.
     let generation = unsafe { (*this).generation };
 
-    let connection = if let Some(rtd_key) = key.strip_prefix("handle:") {
+    let status = if let Some(rtd_key) = key.strip_prefix("handle:") {
         let Some(handles) = handles.as_ref() else {
             return E_FAIL;
         };
@@ -1278,7 +1307,16 @@ unsafe fn connect_data_inner(
         // which withdraws/shuts down the server before dropping the backend.
         let handles_ref = unsafe { handles.as_ref() };
         match handles_ref.connect_transaction(lifetime_generation(generation), topic_id, rtd_key) {
-            Ok(connection) => ConnectDataTransaction::Handle(connection),
+            // SAFETY: result is writable COM storage. The concrete handle
+            // transaction stays owned through BSTR conversion and commit.
+            Ok(connection) => unsafe {
+                finish_connect_data(
+                    connection,
+                    result,
+                    |connection, result| write_bstr_variant(result, connection.token()),
+                    |connection| connection.commit(),
+                )
+            },
             Err(error) => {
                 crate::diagnostics::report_no_unwind("IRtdServer::ConnectData", &error);
                 return E_FAIL;
@@ -1288,52 +1326,24 @@ unsafe fn connect_data_inner(
         let Some(subscription_server) = subscription_server.as_ref() else {
             return E_FAIL;
         };
-        let Some(subscriptions) = subscriptions.as_ref() else {
+        if subscriptions.is_none() {
             return E_FAIL;
-        };
-
-        // SAFETY: Excel RTD server outlives or is bounded by the lifecycle coordinator
-        // which withdraws/shuts down the server before dropping the runtime.
-        let subscriptions_ref = unsafe { subscriptions.as_ref() };
-        let sub_id = match subscriptions_ref.resolve_transport_key(sub_key) {
-            Ok(id) => id,
-            Err(error) => {
-                crate::diagnostics::report_no_unwind("IRtdServer::ConnectData", &error);
-                return E_FAIL;
-            }
-        };
-
-        match subscription_server
-            .connect_transaction(crate::subscription::TopicId(topic_id), sub_id)
-        {
-            Ok(connection) => ConnectDataTransaction::Subscription(connection),
-            Err(error) => {
-                crate::diagnostics::report_no_unwind("IRtdServer::ConnectData", &error);
-                return E_FAIL;
-            }
+        }
+        // SAFETY: COM admission retains this adapter and runtime. It resolves
+        // the key and completes its typed connection before returning.
+        unsafe {
+            subscription_server.connect_data(
+                crate::subscription::TopicId(topic_id),
+                sub_key,
+                result,
+            )
         }
     } else {
         return E_INVALIDARG;
     };
 
-    // SAFETY: `result` was validated as non-null and points to writable VARIANT
-    // storage supplied by COM.
-    let status = unsafe { connection.write_value(result) };
-
     if status != S_OK {
-        // Dropping the uncommitted transaction rolls back only the connection
-        // created by this call. Existing shared connections remain untouched.
-        drop(connection);
         return status;
-    }
-
-    if let Err(error) = connection.commit() {
-        crate::diagnostics::report_no_unwind("IRtdServer::ConnectData commit", &error);
-        // SAFETY: write_value_variant succeeded, so result contains a valid
-        // initialized VARIANT whose owned resources must be released before
-        // returning failure to COM.
-        let _ = unsafe { VariantClear(result) };
-        return E_FAIL;
     }
 
     // SAFETY: `new_values` was validated as non-null and remains writable for
@@ -1342,8 +1352,11 @@ unsafe fn connect_data_inner(
     S_OK
 }
 
-pub(super) unsafe extern "system" fn refresh_data(
-    this: *mut RtdServer,
+pub(super) unsafe extern "system" fn refresh_data<
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+>(
+    this: *mut RtdServer<E, C>,
     topic_count: *mut i32,
     result: *mut *mut SAFEARRAY,
 ) -> i32 {
@@ -1354,8 +1367,8 @@ pub(super) unsafe extern "system" fn refresh_data(
     })
 }
 
-unsafe fn refresh_data_inner(
-    this: *mut RtdServer,
+unsafe fn refresh_data_inner<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+    this: *mut RtdServer<E, C>,
     topic_count: *mut i32,
     result: *mut *mut SAFEARRAY,
 ) -> i32 {
@@ -1433,7 +1446,13 @@ unsafe fn refresh_data_inner(
     status
 }
 
-pub(super) unsafe extern "system" fn disconnect_data(this: *mut RtdServer, topic_id: i32) -> i32 {
+pub(super) unsafe extern "system" fn disconnect_data<
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+>(
+    this: *mut RtdServer<E, C>,
+    topic_id: i32,
+) -> i32 {
     com_boundary("IRtdServer::DisconnectData", || {
         // SAFETY: arguments are forwarded from the COM vtable invocation. The
         // inner function validates `this` before dereferencing it.
@@ -1441,7 +1460,10 @@ pub(super) unsafe extern "system" fn disconnect_data(this: *mut RtdServer, topic
     })
 }
 
-unsafe fn disconnect_data_inner(this: *mut RtdServer, topic_id: i32) -> i32 {
+unsafe fn disconnect_data_inner<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+    this: *mut RtdServer<E, C>,
+    topic_id: i32,
+) -> i32 {
     if this.is_null() {
         return E_POINTER;
     }
@@ -1497,7 +1519,13 @@ unsafe fn disconnect_data_inner(this: *mut RtdServer, topic_id: i32) -> i32 {
     S_OK
 }
 
-pub(super) unsafe extern "system" fn heartbeat(this: *mut RtdServer, result: *mut i32) -> i32 {
+pub(super) unsafe extern "system" fn heartbeat<
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+>(
+    this: *mut RtdServer<E, C>,
+    result: *mut i32,
+) -> i32 {
     com_boundary("IRtdServer::Heartbeat", || {
         if result.is_null() {
             return E_POINTER;
@@ -1529,7 +1557,12 @@ pub(super) unsafe extern "system" fn heartbeat(this: *mut RtdServer, result: *mu
     })
 }
 
-pub(super) unsafe extern "system" fn server_terminate(this: *mut RtdServer) -> i32 {
+pub(super) unsafe extern "system" fn server_terminate<
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+>(
+    this: *mut RtdServer<E, C>,
+) -> i32 {
     com_boundary("IRtdServer::ServerTerminate", || {
         // SAFETY: `this` is forwarded from the COM vtable invocation. The inner
         // function validates it before dereferencing.
@@ -1537,7 +1570,9 @@ pub(super) unsafe extern "system" fn server_terminate(this: *mut RtdServer) -> i
     })
 }
 
-unsafe fn server_terminate_inner(this: *mut RtdServer) -> i32 {
+unsafe fn server_terminate_inner<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+    this: *mut RtdServer<E, C>,
+) -> i32 {
     if this.is_null() {
         return E_POINTER;
     }
@@ -1556,8 +1591,8 @@ unsafe fn server_terminate_inner(this: *mut RtdServer) -> i32 {
     unsafe { finish_termination_request(this, request) }
 }
 
-unsafe fn finish_termination_request(
-    this: *mut RtdServer,
+unsafe fn finish_termination_request<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+    this: *mut RtdServer<E, C>,
     request: ServerTerminationRequest<'_>,
 ) -> i32 {
     match request {
@@ -1582,7 +1617,7 @@ unsafe fn finish_termination_request(
             // transferred into the coordinator closure (or dropped on failure).
             let reference = unsafe { OwnedServerReference::acquire(this) };
             let owner = reservation.owner;
-            match spawn_deferred_termination(reference, owner) {
+            match spawn_deferred_termination::<E, C>(reference, owner) {
                 Ok(handle) => {
                     worker_start.commit(handle);
                     reservation.commit();
@@ -1594,7 +1629,7 @@ unsafe fn finish_termination_request(
     }
 }
 
-fn spawn_deferred_termination(
+fn spawn_deferred_termination<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
     reference: OwnedServerReference,
     owner: ThreadId,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
@@ -1607,11 +1642,14 @@ fn spawn_deferred_termination(
 
     std::thread::Builder::new()
         .name("xlfn-rtd-termination".to_owned())
-        .spawn(move || deferred_termination_worker(reference, owner))
+        .spawn(move || deferred_termination_worker::<E, C>(reference, owner))
 }
 
-fn deferred_termination_worker(reference: OwnedServerReference, owner: ThreadId) {
-    let this = reference.pointer as *mut RtdServer;
+fn deferred_termination_worker<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+    reference: OwnedServerReference,
+    owner: ThreadId,
+) {
+    let this = reference.pointer as *mut RtdServer<E, C>;
     // Keep the internal reference outside the unwind boundary. It remains live
     // until all cleanup and phase signaling have completed.
     let outcome = catch_unwind(AssertUnwindSafe(|| {
@@ -1668,13 +1706,19 @@ fn deferred_termination_worker(reference: OwnedServerReference, owner: ThreadId)
     drop(reference);
 }
 
-pub(super) unsafe fn teardown_server_resources(this: *mut RtdServer, remove_active: bool) -> i32 {
+pub(super) unsafe fn teardown_server_resources<
+    E: RtdSubscription,
+    C: crate::RtdSourceCatalog<E>,
+>(
+    this: *mut RtdServer<E, C>,
+    remove_active: bool,
+) -> i32 {
     // SAFETY: forwarded from the caller's live, terminal server reference.
     unsafe { teardown_server_resources_inner(this, remove_active, false) }
 }
 
-unsafe fn teardown_server_resources_inner(
-    this: *mut RtdServer,
+unsafe fn teardown_server_resources_inner<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+    this: *mut RtdServer<E, C>,
     remove_active: bool,
     retain_handle_topics: bool,
 ) -> i32 {

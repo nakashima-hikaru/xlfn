@@ -1,6 +1,6 @@
 use super::{RtdSink, RtdSource, RtdSubscription, SourceRegistration};
 use crate::generation::RuntimeGeneration;
-use crate::subscription::{RtdTopic, SubscriptionRuntime, TopicId};
+use crate::subscription::{RtdTopic, TopicId};
 use crate::sync::{Condvar, Mutex};
 use crate::{XllError, XllResult};
 use std::sync::Arc;
@@ -96,7 +96,8 @@ fn runtime_cancels_all_sources_and_disconnects_before_joining_shared_workers() {
                 .unwrap(),
         );
     }
-    let runtime = SubscriptionRuntime::with_sources_for_internal(registration.finish());
+    let runtime =
+        crate::subscription::SubscriptionRuntime::with_sources_for_internal(registration.finish());
     let server = runtime.register_test_server(1);
     for (index, source) in handles.iter().enumerate() {
         let prepared = runtime
@@ -146,7 +147,9 @@ fn source_lifecycle_failures_do_not_skip_later_cancellation_or_join_hooks() {
                 })
                 .unwrap();
         }
-        let runtime = SubscriptionRuntime::with_sources_for_internal(registration.finish());
+        let runtime = crate::subscription::SubscriptionRuntime::with_sources_for_internal(
+            registration.finish(),
+        );
 
         let result = runtime.close();
         match failure {
@@ -239,7 +242,8 @@ fn source_cancellation_precedes_waiting_for_deferred_disconnect_admission() {
             entered: entered_tx,
         })
         .unwrap();
-    let runtime = SubscriptionRuntime::with_sources_for_internal(registration.finish());
+    let runtime =
+        crate::subscription::SubscriptionRuntime::with_sources_for_internal(registration.finish());
     let server = runtime.register_test_server(1);
     let prepared = runtime
         .prepare(&source, RtdTopic::single("shared").unwrap().borrowed())
@@ -261,7 +265,7 @@ fn source_cancellation_precedes_waiting_for_deferred_disconnect_admission() {
 
 #[test]
 fn empty_source_arena_does_not_prepare_a_source_join_worker() {
-    let runtime = SubscriptionRuntime::new();
+    let runtime = crate::subscription::SubscriptionRuntime::<()>::new();
     runtime
         .fail_source_shutdown_preflight
         .store(true, std::sync::atomic::Ordering::Release);
@@ -271,4 +275,110 @@ fn empty_source_arena_does_not_prepare_a_source_join_worker() {
             .fail_source_shutdown_preflight
             .load(std::sync::atomic::Ordering::Acquire)
     );
+}
+
+#[test]
+fn miri_static_catalog_stops_every_source_before_join_despite_each_failure() {
+    for failure in [
+        Failure::None,
+        Failure::StopPanic,
+        Failure::JoinError,
+        Failure::JoinPanic,
+    ] {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let source = |id| LifecycleSource {
+            id,
+            events: Arc::clone(&events),
+            failure: if id == 0 { failure } else { Failure::None },
+        };
+        let registration = SourceRegistration::<
+            LifecycleSubscription,
+            (LifecycleSource, LifecycleSource, LifecycleSource),
+        >::new(RuntimeGeneration::new(1).unwrap());
+        let (a, b, c) = registration
+            .register_sources((source(0), source(1), source(2)))
+            .unwrap();
+        let runtime = crate::subscription::SubscriptionRuntime::with_sources_for_internal(
+            registration.finish(),
+        );
+        let server = runtime.register_test_server(1);
+        for (index, source) in [a, b, c].iter().enumerate() {
+            let prepared = runtime
+                .prepare(
+                    source,
+                    RtdTopic::single("static lifecycle").unwrap().borrowed(),
+                )
+                .unwrap();
+            let id = prepared.id();
+            prepared.commit();
+            runtime
+                .connect_transaction(&server, TopicId(index as i32 + 1), id)
+                .unwrap()
+                .commit()
+                .unwrap();
+        }
+        let result = runtime.close();
+        match failure {
+            Failure::None => result.unwrap(),
+            Failure::JoinError => assert!(matches!(result, Err(XllError::Overloaded))),
+            Failure::StopPanic | Failure::JoinPanic => {
+                assert!(matches!(result, Err(XllError::Panic)))
+            }
+        }
+        let observed = events.lock().clone();
+        assert_eq!(
+            &observed[..3],
+            &[Event::Stop(0), Event::Stop(1), Event::Stop(2)]
+        );
+        let first_join = observed
+            .iter()
+            .position(|event| matches!(event, Event::Join(_)))
+            .unwrap();
+        for id in 0..3 {
+            assert!(observed[..first_join].contains(&Event::Cancel(id)));
+            assert!(observed[..first_join].contains(&Event::Disconnect(id)));
+        }
+        assert_eq!(
+            &observed[first_join..],
+            &[Event::Join(0), Event::Join(1), Event::Join(2)]
+        );
+        let _ = runtime.close();
+        assert_eq!(*events.lock(), observed);
+    }
+}
+
+#[test]
+fn static_catalog_rejects_repeated_registration_and_foreign_source_ids() {
+    let generation = RuntimeGeneration::new(1).unwrap();
+    let registration =
+        SourceRegistration::<LifecycleSubscription, (LifecycleSource,)>::new(generation);
+    let source = || LifecycleSource {
+        id: 0,
+        events: Arc::new(Mutex::new(Vec::new())),
+        failure: Failure::None,
+    };
+    let (handle,) = registration.register_sources((source(),)).unwrap();
+    assert!(registration.register_sources((source(),)).is_err());
+    let arena = registration.finish();
+    assert!(arena.resolve(handle.id).is_some());
+    for (generation, sequence) in [
+        (RuntimeGeneration::new(2).unwrap(), 1),
+        (generation, 0),
+        (generation, 2),
+        (generation, u64::MAX),
+    ] {
+        assert!(
+            arena
+                .resolve(super::SourceHandleId {
+                    generation,
+                    sequence
+                })
+                .is_none()
+        );
+    }
+    let unregistered =
+        SourceRegistration::<LifecycleSubscription, (LifecycleSource,)>::new(generation).finish();
+    assert!(unregistered.is_empty());
+    unregistered.request_stop().unwrap();
+    unregistered.shutdown_and_wait().unwrap();
 }

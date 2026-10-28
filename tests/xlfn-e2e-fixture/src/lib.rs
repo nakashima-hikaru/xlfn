@@ -20,21 +20,23 @@ pub struct State {
 pub struct FixtureAddin;
 
 impl Addin for FixtureAddin {
+    type RtdSubscription = RtdFixtureSubscription;
+    type RtdSources = (RtdFixtureSource,);
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
     type AsyncExecutor = xlfn::BuiltinAsyncExecutor;
 
-    fn open(context: &OpenContext) -> OpenResult<Self> {
+    fn open(context: &OpenContext<Self>) -> OpenResult<Self> {
         let core = Box::new(FixtureCore {
             sinks: Mutex::new(HashMap::new()),
             sequence: AtomicI32::new(0),
         });
         let core_ptr = NonNull::from(&*core);
-        let rtd = context
+        let (rtd,) = context
             .rtd()
-            .register_source(RtdFixtureSource { core: core_ptr })?;
+            .register_sources((RtdFixtureSource { core: core_ptr },))?;
         Ok(Opened::new(State { rtd, core }).with_async_executor(xlfn::BuiltinAsyncExecutor::new(
             xlfn::BuiltinExecutorConfig::new(),
         )))
@@ -104,7 +106,8 @@ impl FixtureCore {
 }
 
 #[derive(Clone, Copy)]
-struct RtdFixtureSource {
+#[doc(hidden)]
+pub struct RtdFixtureSource {
     core: NonNull<FixtureCore>,
 }
 
@@ -151,7 +154,8 @@ unsafe impl RtdSource for RtdFixtureSource {
     }
 }
 
-struct RtdFixtureSubscription {
+#[doc(hidden)]
+pub struct RtdFixtureSubscription {
     core: NonNull<FixtureCore>,
     key: String,
 }

@@ -2,6 +2,7 @@ use super::*;
 use std::{cell::Cell, time::Instant};
 
 use crate::subscription::TOPIC_SHARDS;
+use xlfn_kernel::published_owner::PublishedOwner;
 
 struct InlineBenchmarkSubscription(u64);
 
@@ -48,17 +49,118 @@ pub fn with_rtd_connection_benchmark<R>(
     warm: bool,
     measure: impl FnOnce(&mut dyn FnMut()) -> R,
 ) -> R {
+    with_rtd_connection_source::<_, InlineBenchmarkSubscription, _>(
+        InlineBenchmarkSource,
+        count,
+        adapter_only,
+        warm,
+        4096,
+        measure,
+    )
+}
+
+struct PaddedBenchmarkSubscription<const N: usize>([u8; N]);
+
+// SAFETY: this size probe owns no sink and starts no work.
+unsafe impl<const N: usize> crate::RtdSubscription for PaddedBenchmarkSubscription<N> {
+    fn request_cancel(&self) {
+        std::hint::black_box(&self.0);
+    }
+
+    fn disconnect_and_wait(self) -> crate::XllResult<()> {
+        std::hint::black_box(self.0);
+        Ok(())
+    }
+}
+
+crate::rtd_subscriptions! {
+    #[allow(dead_code, clippy::large_enum_variant, reason = "the unused large variant measures closed-enum storage padding")]
+    enum BenchmarkOwners256 {
+        Small(InlineBenchmarkSubscription),
+        Large(PaddedBenchmarkSubscription<256>),
+    }
+}
+
+crate::rtd_subscriptions! {
+    #[allow(dead_code, clippy::large_enum_variant, reason = "the unused large variant measures closed-enum storage padding")]
+    enum BenchmarkOwners4096 {
+        Small(InlineBenchmarkSubscription),
+        Large(PaddedBenchmarkSubscription<4096>),
+    }
+}
+
+/// Measures an eight-byte live subscription with configurable cleanup capacity
+/// and optional rare large variants in the common subscription enum. Layout
+/// arguments report the common enum and its affine by-value owner's sizes.
+pub fn with_rtd_connection_memory_benchmark<R>(
+    count: usize,
+    max_active: usize,
+    owner_payload_target: usize,
+    measure: impl FnOnce(&mut dyn FnMut(), usize, usize) -> R,
+) -> R {
+    fn run<E, R>(
+        count: usize,
+        max_active: usize,
+        measure: impl FnOnce(&mut dyn FnMut(), usize, usize) -> R,
+    ) -> R
+    where
+        E: crate::RtdSubscription,
+        InlineBenchmarkSubscription: crate::IntoRtdSubscription<E>,
+    {
+        with_rtd_connection_source::<_, E, _>(
+            InlineBenchmarkSource,
+            count,
+            false,
+            false,
+            max_active,
+            |operation| {
+                measure(
+                    operation,
+                    std::mem::size_of::<E>(),
+                    std::mem::size_of::<crate::subscription::SourceSubscription<E>>(),
+                )
+            },
+        )
+    }
+    match owner_payload_target {
+        8 => run::<InlineBenchmarkSubscription, _>(count, max_active, measure),
+        256 => run::<BenchmarkOwners256, _>(count, max_active, measure),
+        4096 => run::<BenchmarkOwners4096, _>(count, max_active, measure),
+        _ => panic!("unsupported common subscription payload size"),
+    }
+}
+
+fn with_rtd_connection_source<S, E, R>(
+    source: S,
+    count: usize,
+    adapter_only: bool,
+    warm: bool,
+    max_active: usize,
+    measure: impl FnOnce(&mut dyn FnMut()) -> R,
+) -> R
+where
+    S: crate::subscription::RtdSource,
+    E: crate::RtdSubscription,
+    S::Subscription: crate::IntoRtdSubscription<E>,
+{
     use crate::subscription::SubscriptionHost;
 
     assert!((1..=4096).contains(&count));
+    assert!(count <= max_active);
     assert_ne!(std::mem::size_of::<InlineBenchmarkSubscription>(), 0);
     let generation = crate::generation::RuntimeGeneration::new(1).unwrap();
-    let registration = crate::subscription::SourceRegistration::new(generation);
-    let source_handle = registration.register(InlineBenchmarkSource).unwrap();
-    let runtime = Box::new(
-        crate::subscription::SubscriptionRuntime::with_sources_for_internal(registration.finish()),
+    let registration = crate::subscription::SourceRegistration::<E>::new(generation);
+    let source_handle = registration.register(source).unwrap();
+    let limits = crate::subscription::RtdLimits::standard().with_max_active(
+        crate::subscription::RtdCapacity::disabled_if_zero(max_active),
     );
-    // SAFETY: the boxed runtime stays at a stable address and is reclaimed only
+    let runtime = PublishedOwner::new(crate::subscription::SubscriptionRuntime::<E>::with_host(
+        generation,
+        limits,
+        crate::excel_rtd::RtdSubscriptionHost::default(),
+        registration.finish(),
+    ));
+    // SAFETY: PublishedOwner retains this allocation across owner moves and reclaims it only
     // after the callback, all subscriptions and the server handle are dropped.
     let server_handle = unsafe {
         runtime
@@ -85,7 +187,8 @@ pub fn with_rtd_connection_benchmark<R>(
                 // SAFETY: this scope owns the stable runtime/source arena and
                 // publish core until every ticket has finished or been dropped.
                 subscriptions.push(unsafe {
-                    crate::subscription::SourceSubscription::subscribe(source, topic, sink).unwrap()
+                    crate::subscription::SourceSubscription::subscribe(&source, topic, sink)
+                        .unwrap()
                 });
             }
             for mut subscription in subscriptions.drain(..) {
@@ -163,7 +266,7 @@ unsafe impl<T: crate::subscription::IntoRtdValue + Clone + Send + Sync + 'static
 
 /// A batch of prebuilt topics; construction and runtime teardown stay outside timing.
 pub struct RtdPrepareBenchmark {
-    runtime: crate::subscription::SubscriptionRuntime,
+    runtime: crate::subscription::SubscriptionRuntime<BenchmarkSubscription>,
     source: crate::subscription::RtdSourceHandle<BenchmarkRtdSource<f64>>,
     topics: Vec<crate::subscription::RtdTopic>,
 }
@@ -325,8 +428,8 @@ impl RtdPrepareBenchmark {
 }
 
 pub struct RtdPublishNumberBenchmark {
-    _runtime: Box<crate::subscription::SubscriptionRuntime>,
-    _server: crate::subscription::SubscriptionServerHandle,
+    _runtime: PublishedOwner<crate::subscription::SubscriptionRuntime<BenchmarkSubscription>>,
+    _server: crate::subscription::SubscriptionServerHandle<BenchmarkSubscription>,
     sink: crate::subscription::RtdSink<f64>,
 }
 
@@ -347,12 +450,13 @@ impl RtdPublishNumberBenchmark {
                 sink: Arc::clone(&sink_slot),
             })
             .expect("benchmark source handle allocation must succeed");
-        let runtime = Box::new(
+        let runtime = PublishedOwner::new(
             crate::subscription::SubscriptionRuntime::with_sources_for_internal(
                 registration.finish(),
             ),
         );
-        // SAFETY: `runtime` outlives `server` for the benchmark setup duration.
+        // SAFETY: PublishedOwner retains the runtime across fixture moves; all handle
+        // uses end before runtime teardown.
         let server = unsafe {
             runtime
                 .register_server(
@@ -398,8 +502,8 @@ impl RtdPublishNumberBenchmark {
 }
 
 pub struct RtdPublishStringBenchmark {
-    _runtime: Box<crate::subscription::SubscriptionRuntime>,
-    _server: crate::subscription::SubscriptionServerHandle,
+    _runtime: PublishedOwner<crate::subscription::SubscriptionRuntime<BenchmarkSubscription>>,
+    _server: crate::subscription::SubscriptionServerHandle<BenchmarkSubscription>,
     sink: crate::subscription::RtdSink<String>,
     first_value: String,
     second_value: String,
@@ -437,12 +541,13 @@ impl RtdPublishStringBenchmark {
                 sink: Arc::clone(&sink_slot),
             })
             .expect("benchmark source handle allocation must succeed");
-        let runtime = Box::new(
+        let runtime = PublishedOwner::new(
             crate::subscription::SubscriptionRuntime::with_sources_for_internal(
                 registration.finish(),
             ),
         );
-        // SAFETY: `runtime` outlives `server` for the benchmark setup duration.
+        // SAFETY: PublishedOwner retains the runtime across fixture moves; all handle
+        // uses end before runtime teardown.
         let server = unsafe {
             runtime
                 .register_server(
@@ -549,8 +654,8 @@ fn string_refresh_sinks(
     first_value: String,
     second_value: String,
 ) -> (
-    Box<crate::subscription::SubscriptionRuntime>,
-    crate::subscription::SubscriptionServerHandle,
+    PublishedOwner<crate::subscription::SubscriptionRuntime<BenchmarkSubscription>>,
+    crate::subscription::SubscriptionServerHandle<BenchmarkSubscription>,
     RtdRefreshSinks,
 ) {
     let (runtime, server, sinks) = build_refresh_topics::<String>(topic_ids);
@@ -566,8 +671,8 @@ fn string_refresh_sinks(
 }
 
 pub struct RtdRefreshScalingBenchmark {
-    _runtime: Box<crate::subscription::SubscriptionRuntime>,
-    server: crate::subscription::SubscriptionServerHandle,
+    _runtime: PublishedOwner<crate::subscription::SubscriptionRuntime<BenchmarkSubscription>>,
+    server: crate::subscription::SubscriptionServerHandle<BenchmarkSubscription>,
     sinks: RtdRefreshSinks,
     updated_indices: Vec<usize>,
     publish_revision: Cell<u64>,
@@ -739,8 +844,8 @@ fn benchmark_string_payload(payload_len: usize, suffix: u8) -> String {
 fn build_refresh_topics<T>(
     topic_ids: &[crate::subscription::TopicId],
 ) -> (
-    Box<crate::subscription::SubscriptionRuntime>,
-    crate::subscription::SubscriptionServerHandle,
+    PublishedOwner<crate::subscription::SubscriptionRuntime<BenchmarkSubscription>>,
+    crate::subscription::SubscriptionServerHandle<BenchmarkSubscription>,
     Vec<crate::subscription::RtdSink<T>>,
 )
 where
@@ -761,10 +866,11 @@ where
             (source, sink_slot)
         })
         .collect::<Vec<_>>();
-    let runtime = Box::new(
+    let runtime = PublishedOwner::new(
         crate::subscription::SubscriptionRuntime::with_sources_for_internal(registration.finish()),
     );
-    // SAFETY: `runtime` outlives `server` for the benchmark setup duration.
+    // SAFETY: PublishedOwner retains the runtime across fixture moves; all handle
+    // uses end before runtime teardown.
     let server = unsafe {
         runtime
             .register_server(
@@ -819,8 +925,11 @@ fn topic_ids_for_case(case: RtdRefreshScalingCase) -> Vec<crate::subscription::T
 /// Persistent real channel adapter, sender workers, PublishCore, and refresh consumer.
 /// All worker creation and subscription setup are outside measured cycles.
 pub struct RtdChannelPipelineBenchmark {
-    _runtime: Box<crate::subscription::SubscriptionRuntime>,
-    server: crate::subscription::SubscriptionServerHandle,
+    _runtime: PublishedOwner<
+        crate::subscription::SubscriptionRuntime<crate::subscription::RtdChannelSubscription>,
+    >,
+    server:
+        crate::subscription::SubscriptionServerHandle<crate::subscription::RtdChannelSubscription>,
     sender: crate::subscription::RtdSender<f64>,
     jobs: Vec<std::sync::mpsc::SyncSender<(u64, usize)>>,
     done: std::sync::mpsc::Receiver<usize>,
@@ -849,12 +958,12 @@ impl RtdChannelPipelineBenchmark {
                 },
             ))
             .unwrap();
-        let runtime = Box::new(
+        let runtime = PublishedOwner::new(
             crate::subscription::SubscriptionRuntime::with_sources_for_internal(
                 registration.finish(),
             ),
         );
-        // SAFETY: the boxed runtime stays at a stable address for this fixture.
+        // SAFETY: PublishedOwner keeps raw handles valid across fixture owner moves.
         let server = unsafe {
             runtime
                 .register_server(crate::subscription::ServerGeneration::new(1).unwrap())
@@ -994,6 +1103,52 @@ pub fn rtd_pipeline_probe(
         "median_ns": elapsed[elapsed.len()/2], "overloaded_retries": retries })
 }
 
+#[cfg(test)]
+mod published_runtime_tests {
+    use super::*;
+
+    fn move_fixture<T>(fixture: T) -> T {
+        let mut owners = vec![fixture];
+        owners.reserve(4);
+        owners.remove(0)
+    }
+
+    #[test]
+    fn miri_benchmark_published_runtime_owners_survive_moves_and_shutdown() {
+        with_rtd_connection_benchmark(2, true, false, |operation| operation());
+        with_rtd_connection_benchmark(2, false, false, |operation| operation());
+
+        let number = move_fixture(RtdPublishNumberBenchmark::new());
+        number.run_changing(2);
+        drop(number);
+
+        let string = move_fixture(RtdPublishStringBenchmark::new());
+        string.run_changing(2);
+        drop(string);
+
+        for kind in [
+            RtdRefreshValueKind::Number,
+            RtdRefreshValueKind::ShortString,
+        ] {
+            let refresh = move_fixture(RtdRefreshScalingBenchmark::new(
+                RtdRefreshScalingCase {
+                    name: "published-owner-smoke",
+                    active_topics: 2,
+                    updated_topics: 1,
+                    ready_shards: 1,
+                },
+                kind,
+            ));
+            refresh.run_end_to_end_cycle();
+            drop(refresh);
+        }
+
+        let mut pipeline = move_fixture(RtdChannelPipelineBenchmark::new(4, 2));
+        pipeline.run_cycle(2);
+        drop(pipeline);
+    }
+}
+
 #[derive(Default)]
 struct TopologyCounters {
     started: AtomicUsize,
@@ -1030,7 +1185,7 @@ impl Drop for TopologyWorkerExit {
 /// separate readiness/removal waits expose asynchronous completion time.
 pub fn rtd_topology_probe(multiplexed: bool, subscriptions: usize) -> serde_json::Value {
     use crate::rtd::{
-        RtdCapacity, RtdChannelSource, RtdDelivery, RtdMultiplexedSource, RtdSourceEvent,
+        RtdCapacity, RtdChannelSource, RtdLatest, RtdMultiplexedSource, RtdSourceEvent,
         RtdSourceLimits,
     };
     use std::num::NonZeroUsize;
@@ -1042,7 +1197,7 @@ pub fn rtd_topology_probe(multiplexed: bool, subscriptions: usize) -> serde_json
     let limits = RtdSourceLimits::standard()
         .with_max_subscriptions(RtdCapacity::disabled_if_zero(subscriptions));
     if multiplexed {
-        let source = RtdMultiplexedSource::<i32, _>::new(RtdDelivery::Latest, move |context| {
+        let source = RtdMultiplexedSource::<i32, _, _, _>::new(RtdLatest, move |context| {
             let _exit = TopologyWorkerExit::start(worker_counters);
             loop {
                 match context.recv_timeout(Duration::from_secs(1)) {
@@ -1101,7 +1256,7 @@ fn run_rtd_topology<S: crate::rtd::RtdSource<Value = i32>>(
     let source = registration.register(source).unwrap();
     let limits =
         RtdLimits::standard().with_max_active(RtdCapacity::disabled_if_zero(subscriptions));
-    let runtime = Box::new(crate::subscription::SubscriptionRuntime::with_host(
+    let runtime = PublishedOwner::new(crate::subscription::SubscriptionRuntime::with_host(
         generation,
         limits,
         crate::excel_rtd::RtdSubscriptionHost::default(),
@@ -1186,4 +1341,53 @@ fn run_rtd_topology<S: crate::rtd::RtdSource<Value = i32>>(
         "unsubscribe_wait_ns": unsubscribe_wait_ns,
         "close_ns": close_ns,
     })
+}
+
+struct CatalogAllocationSource(u64);
+// SAFETY: this allocation probe never retains its sink or starts a worker.
+unsafe impl crate::subscription::RtdSource for CatalogAllocationSource {
+    type Value = i32;
+    type Subscription = ();
+    fn subscribe(
+        &self,
+        _: &crate::subscription::RtdTopic,
+        _: crate::subscription::RtdSink<i32>,
+    ) -> crate::XllResult<()> {
+        std::hint::black_box(self.0);
+        Ok(())
+    }
+}
+
+/// Constructs and releases a source catalog of nonzero-sized, nonallocating
+/// source values. Counts 1, 4 and 16 compare static tuple storage with dynamic
+/// per-source adapters; no runtime, connection or worker allocations enter.
+pub fn rtd_source_catalog_allocation_probe(static_catalog: bool, count: usize) {
+    use crate::generation::RuntimeGeneration;
+    use crate::subscription::SourceRegistration;
+    let generation = RuntimeGeneration::new(1).unwrap();
+    if !static_catalog {
+        let registration = SourceRegistration::<()>::new(generation);
+        for index in 0..count {
+            std::hint::black_box(
+                registration
+                    .register(CatalogAllocationSource(index as u64))
+                    .unwrap(),
+            );
+        }
+        std::hint::black_box(registration.finish());
+        return;
+    }
+    macro_rules! fixed_catalog {
+        ($($index:literal),+) => {{
+            let registration = SourceRegistration::<(),_>::new(generation);
+            std::hint::black_box(registration.register_sources(($(CatalogAllocationSource($index),)+)).unwrap());
+            std::hint::black_box(registration.finish());
+        }};
+    }
+    match count {
+        1 => fixed_catalog!(0),
+        4 => fixed_catalog!(0, 1, 2, 3),
+        16 => fixed_catalog!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15),
+        _ => panic!("catalog allocation probe accepts 1, 4 or 16 sources"),
+    }
 }
