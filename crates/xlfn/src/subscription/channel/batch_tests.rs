@@ -160,7 +160,7 @@ fn batch_latest_coalesces_atomically_and_returns_its_full_input_on_rejection() {
             Arc::new(ChannelBudget::runtime(RtdLimits::standard())),
         ),
     ));
-    let sender = Channel::sender_with_policy::<String, _>(&channel, RtdLatest);
+    let sender = Channel::sender_with_policy::<String>(&channel, RtdLatest);
     sender.try_send("old".into()).unwrap();
     sender
         .try_send_batch(["discarded-large-prefix".into(), "xy".into()])
@@ -199,7 +199,7 @@ fn miri_pending_fifo_batch_can_be_retried_on_typed_latest_sender() {
             Arc::new(ChannelBudget::runtime(RtdLimits::standard())),
         ),
     ));
-    let sender = Channel::sender_with_policy::<i32, _>(&latest, RtdLatest);
+    let sender = Channel::sender_with_policy::<i32>(&latest, RtdLatest);
     sender.try_send(0).unwrap();
     sender.try_send_pending_batch(pending).unwrap();
     assert_eq!(latest.state.lock().values.len(), 1);

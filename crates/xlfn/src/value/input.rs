@@ -12,7 +12,14 @@ use xlfn_sys::XLOPER12;
 use super::{XlValueRef, XlValueType};
 
 pub(crate) mod sealed {
-    pub trait InputModeSealed {}
+    pub trait InputModeSealed: Sized {
+        fn finish_return<'call, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+            arguments: &mut super::ArgumentContext<'call, Self>,
+            access: crate::call_return::ReturnFrameAccess<'call>,
+        ) -> crate::XllResult<crate::call_return::ReturnContext<'call, 'call, Self, E, C>>
+        where
+            Self: super::InputMode;
+    }
 
     pub trait ExcelParameterSealed<'call, M: super::InputMode> {}
 }
@@ -23,6 +30,10 @@ pub trait InputMode: sealed::InputModeSealed + Sized {
     const RECORDS_IDENTITY: bool;
     type Identity;
     type Fingerprint;
+    type FinishedFingerprint;
+    type ReturnState<'call, 'scope, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>;
+
+    fn finish_typed(fingerprint: Self::Fingerprint) -> XllResult<Self::FinishedFingerprint>;
 
     #[doc(hidden)]
     fn new_fingerprint(argument_count: usize) -> Self::Fingerprint;
@@ -88,14 +99,47 @@ pub struct PlainInputMode;
 #[cfg(any(feature = "handles", test))]
 pub struct FormulaInputMode;
 
-impl sealed::InputModeSealed for PlainInputMode {}
+impl sealed::InputModeSealed for PlainInputMode {
+    fn finish_return<'call, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+        arguments: &mut ArgumentContext<'call, Self>,
+        access: crate::call_return::ReturnFrameAccess<'call>,
+    ) -> XllResult<crate::call_return::ReturnContext<'call, 'call, Self, E, C>> {
+        let _ = (access.udf_id, access.callbacks);
+        arguments.finish_typed()?;
+        Ok(crate::call_return::ReturnContext::from_state(()))
+    }
+}
 #[cfg(any(feature = "handles", test))]
-impl sealed::InputModeSealed for FormulaInputMode {}
+impl sealed::InputModeSealed for FormulaInputMode {
+    fn finish_return<'call, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+        arguments: &mut ArgumentContext<'call, Self>,
+        access: crate::call_return::ReturnFrameAccess<'call>,
+    ) -> XllResult<crate::call_return::ReturnContext<'call, 'call, Self, E, C>> {
+        let inputs = arguments.finish_typed()?;
+        #[cfg(feature = "handles")]
+        let state = crate::call_return::FormulaPublisher::new(
+            arguments.take_handle_access(),
+            access.udf_id,
+            inputs,
+            access.callbacks,
+        );
+        #[cfg(not(feature = "handles"))]
+        let state = {
+            let _ = (inputs, access);
+        };
+        Ok(crate::call_return::ReturnContext::from_state(state))
+    }
+}
 
 impl InputMode for PlainInputMode {
     const RECORDS_IDENTITY: bool = false;
     type Identity = ();
     type Fingerprint = ();
+    type FinishedFingerprint = ();
+    type ReturnState<'call, 'scope, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> = ();
+    fn finish_typed(_: ()) -> XllResult<()> {
+        Ok(())
+    }
 
     fn new_fingerprint(_: usize) -> Self::Fingerprint {}
 
@@ -151,6 +195,15 @@ impl InputMode for FormulaInputMode {
     const RECORDS_IDENTITY: bool = true;
     type Identity = InputIdentityEncoder;
     type Fingerprint = InputFingerprintBuilder;
+    type FinishedFingerprint = [u8; 32];
+    #[cfg(feature = "handles")]
+    type ReturnState<'call, 'scope, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> =
+        crate::call_return::FormulaPublisher<'call, 'scope, E, C>;
+    #[cfg(not(feature = "handles"))]
+    type ReturnState<'call, 'scope, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> = ();
+    fn finish_typed(fingerprint: Self::Fingerprint) -> XllResult<[u8; 32]> {
+        fingerprint.finish().map(|value| *value.as_bytes())
+    }
 
     fn new_fingerprint(argument_count: usize) -> Self::Fingerprint {
         InputFingerprintBuilder::new(argument_count)
@@ -990,6 +1043,13 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
         self.call
             .take_handle_access()
             .expect("formula argument context must retain handle access")
+    }
+
+    fn finish_typed(&mut self) -> XllResult<M::FinishedFingerprint> {
+        let fingerprint = self.inputs.take().ok_or(XllError::Internal {
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::INPUT_FINGERPRINT,
+        })?;
+        M::finish_typed(fingerprint)
     }
 
     pub fn finish(&mut self) -> XllResult<Option<[u8; 32]>> {

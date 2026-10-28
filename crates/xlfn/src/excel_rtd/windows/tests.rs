@@ -4606,7 +4606,7 @@ fn failed_excel_rtd_invocation_rolls_back_subscription_observation() {
 
 #[cfg(all(feature = "rtd", feature = "handles"))]
 #[test]
-fn installed_nonunit_constructor_handles_first_observation_and_rolls_back() {
+fn typed_handle_observer_uses_registered_nonunit_server_and_rolls_back() {
     use crate::registration::host::test_support::{CallbackScript, Reply};
     use xlfn_sys::{XL_GET_NAME, XLOPER12, XLRET_FAILED};
 
@@ -4630,7 +4630,7 @@ fn installed_nonunit_constructor_handles_first_observation_and_rolls_back() {
     let callbacks = crate::host_callback::HostCallbackSession::new();
     let host = crate::host_api::ExcelHost::new(&callbacks);
     assert!(
-        super::server_type::observe(
+        super::excel_rtd::observe::<MixedComSubscriptions, MixedComSources>(
             &handles,
             crate::module_runtime::ingress(),
             "unused-key",

@@ -18,13 +18,26 @@ use std::panic::AssertUnwindSafe;
 use xlfn_sys::XLOPER12;
 
 #[cfg(feature = "handles")]
-struct InstrumentedHandleTask<Build, G: crate::execution::UdfLayerGuard, T> {
+struct HandleTask<Build, O: CompletionObserver, T> {
     build: Option<Build>,
-    responder: Option<ExcelAsyncResponder>,
-    token: CancellationToken,
-    observation: Option<AsyncObservation<G>>,
-    udf_id: &'static str,
+    delivery: Option<AsyncDelivery<O>>,
     _result: std::marker::PhantomData<fn() -> T>,
+}
+
+#[cfg(feature = "handles")]
+impl<Build, O: CompletionObserver, T> HandleTask<Build, O, T> {
+    fn new(
+        build: Build,
+        responder: ExcelAsyncResponder,
+        token: CancellationToken,
+        observation: O,
+    ) -> Self {
+        Self {
+            build: Some(build),
+            delivery: Some(AsyncDelivery::new(responder, token, observation)),
+            _result: std::marker::PhantomData,
+        }
+    }
 }
 
 #[cfg(all(
@@ -43,19 +56,14 @@ pub use scoped_bench::HandleScopedDeliveryBenchmark;
 mod scoped_tests;
 
 #[cfg(feature = "handles")]
-impl<Build, G, T> HandleScopedTaskBuilder for InstrumentedHandleTask<Build, G, T>
+impl<Build, O, T> HandleScopedTaskBuilder for HandleTask<Build, O, T>
 where
     Build: HandleScopedBuilder<T> + 'static,
-    G: crate::execution::UdfLayerGuard,
-    T: ExcelReturn + Send + 'static,
+    O: CompletionObserver + Send + 'static,
+    T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
 {
     type Output = XllResult<T>;
-    type Delivery = (
-        ExcelAsyncResponder,
-        CancellationToken,
-        AsyncObservation<G>,
-        &'static str,
-    );
+    type Delivery = AsyncDelivery<O>;
 
     fn build_task<'generation>(
         mut self,
@@ -69,87 +77,26 @@ where
             Ok(future) => futures_util::future::Either::Left(future),
             Err(_) => futures_util::future::Either::Right(std::future::ready(Err(XllError::Panic))),
         };
-        (
-            future,
-            (
-                self.responder.take().unwrap(),
-                self.token,
-                self.observation.take().unwrap(),
-                self.udf_id,
-            ),
-        )
+        (future, self.delivery.take().expect("task owns delivery"))
     }
 
     fn deliver<'generation>(
         delivery: Self::Delivery,
         future: impl Future<Output = Self::Output> + Send + 'generation,
     ) -> impl Future<Output = ()> + Send + 'generation {
-        let (responder, token, observation, _) = delivery;
-        AsyncDelivery::new(responder, token, observation).task(future)
+        delivery.task(future)
     }
 }
 
 #[cfg(feature = "handles")]
-struct UninstrumentedHandleTask<Build, T> {
-    build: Option<Build>,
-    responder: Option<ExcelAsyncResponder>,
-    token: CancellationToken,
-    udf_id: &'static str,
-    _result: std::marker::PhantomData<fn() -> T>,
-}
-
-#[cfg(feature = "handles")]
-impl<Build, T> HandleScopedTaskBuilder for UninstrumentedHandleTask<Build, T>
-where
-    Build: HandleScopedBuilder<T> + 'static,
-    T: ExcelReturn + Send + 'static,
-{
-    type Output = XllResult<T>;
-    type Delivery = (ExcelAsyncResponder, CancellationToken, &'static str);
-
-    fn build_task<'generation>(
-        mut self,
-        scope: super::task_scope::AsyncTaskScope<'generation>,
-    ) -> (
-        impl Future<Output = Self::Output> + Send + 'generation,
-        Self::Delivery,
-    ) {
-        let build = self.build.take().expect("task owns builder");
-        let future = match catch_no_unwind(AssertUnwindSafe(|| build.build(scope))) {
-            Ok(future) => futures_util::future::Either::Left(future),
-            Err(_) => futures_util::future::Either::Right(std::future::ready(Err(XllError::Panic))),
-        };
-        (
-            future,
-            (self.responder.take().unwrap(), self.token, self.udf_id),
-        )
-    }
-
-    fn deliver<'generation>(
-        delivery: Self::Delivery,
-        future: impl Future<Output = Self::Output> + Send + 'generation,
-    ) -> impl Future<Output = ()> + Send + 'generation {
-        let (responder, token, _) = delivery;
-        AsyncDelivery::new(responder, token, NoObservation).task(future)
-    }
-}
-
-#[cfg(feature = "handles")]
-impl<Build, G: crate::execution::UdfLayerGuard, T> Drop for InstrumentedHandleTask<Build, G, T> {
+impl<Build, O: CompletionObserver, T> Drop for HandleTask<Build, O, T> {
     fn drop(&mut self) {
+        // User captures release their raw pins before delivery/layer exit. A
+        // transferred delivery is absent; an abandoned one consumes its
+        // responder here, so AsyncDelivery's later Drop cannot deliver twice.
         let panicked = catch_no_unwind(AssertUnwindSafe(|| drop(self.build.take()))).is_err();
-        if let Some(responder) = self.responder.take() {
-            AsyncDelivery::new(responder, self.token, self.observation.take()).fallback(panicked);
-        }
-    }
-}
-
-#[cfg(feature = "handles")]
-impl<Build, T> Drop for UninstrumentedHandleTask<Build, T> {
-    fn drop(&mut self) {
-        let panicked = catch_no_unwind(AssertUnwindSafe(|| drop(self.build.take()))).is_err();
-        if let Some(responder) = self.responder.take() {
-            AsyncDelivery::new(responder, self.token, NoObservation).fallback(panicked);
+        if let Some(delivery) = &mut self.delivery {
+            delivery.fallback(panicked);
         }
     }
 }
@@ -175,7 +122,7 @@ pub(crate) unsafe fn async_udf_boundary_named<A, Start, Fut, T>(
         CancellationToken,
     ) -> XllResult<Fut>,
     Fut: Future<Output = XllResult<T>> + Send + 'static,
-    T: ExcelReturn + Send + 'static,
+    T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
 {
     // Only synchronous launch owns this epoch. Reentrant numeric siblings
     // remain live through admission, user preparation, and call teardown.
@@ -223,7 +170,7 @@ pub(crate) unsafe fn async_udf_boundary_named_inner<A, Start, Fut, T>(
         CancellationToken,
     ) -> XllResult<Fut>,
     Fut: Future<Output = XllResult<T>> + Send + 'static,
-    T: ExcelReturn + Send + 'static,
+    T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
 {
     let instrumentation = InstrumentationPlan::for_call(guard);
     if instrumentation.enabled() {
@@ -263,7 +210,7 @@ unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
         CancellationToken,
     ) -> XllResult<Fut>,
     Fut: Future<Output = XllResult<T>> + Send + 'static,
-    T: ExcelReturn + Send + 'static,
+    T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
 {
     let call_id = CallId::new(runtime.next_call_id());
     let timer = crate::execution::CallTimer::start();
@@ -378,7 +325,7 @@ unsafe fn async_udf_boundary_uninstrumented<A, Start, Fut, T>(
         CancellationToken,
     ) -> XllResult<Fut>,
     Fut: Future<Output = XllResult<T>> + Send + 'static,
-    T: ExcelReturn + Send + 'static,
+    T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
 {
     let calculation = runtime.async_runtime().snapshot_calculation();
     let (cancellation, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
@@ -456,7 +403,7 @@ pub(crate) unsafe fn async_udf_boundary_named_handle<A, Start, Build, T>(
         CancellationToken,
     ) -> XllResult<Build>,
     Build: HandleScopedBuilder<T> + Send + 'static,
-    T: ExcelReturn + Send + 'static,
+    T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
 {
     // The guard remains on the launch stack; no async task captures it.
     // Keep it through teardown, which can itself reenter a worksheet UDF.
@@ -507,7 +454,7 @@ unsafe fn async_udf_boundary_named_handle_inner<A, Start, Build, T>(
         CancellationToken,
     ) -> XllResult<Build>,
     Build: HandleScopedBuilder<T> + Send + 'static,
-    T: ExcelReturn + Send + 'static,
+    T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
 {
     let instrumentation = InstrumentationPlan::for_call(guard);
     if instrumentation.enabled() {
@@ -548,7 +495,7 @@ unsafe fn async_udf_boundary_instrumented_handle<A, Start, Build, T>(
         CancellationToken,
     ) -> XllResult<Build>,
     Build: HandleScopedBuilder<T> + Send + 'static,
-    T: ExcelReturn + Send + 'static,
+    T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
 {
     let call_id = CallId::new(runtime.next_call_id());
     let timer = crate::execution::CallTimer::start();
@@ -633,14 +580,7 @@ unsafe fn async_udf_boundary_instrumented_handle<A, Start, Build, T>(
             };
             reservation.commit_handle_scoped(
                 generation,
-                InstrumentedHandleTask {
-                    build: Some(build),
-                    responder: Some(responder),
-                    token,
-                    observation: Some(observation),
-                    udf_id,
-                    _result: std::marker::PhantomData,
-                },
+                HandleTask::new(build, responder, token, observation),
                 cancellation,
             );
         }
@@ -675,7 +615,7 @@ unsafe fn async_udf_boundary_uninstrumented_handle<A, Start, Build, T>(
         CancellationToken,
     ) -> XllResult<Build>,
     Build: HandleScopedBuilder<T> + Send + 'static,
-    T: ExcelReturn + Send + 'static,
+    T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
 {
     let calculation = runtime.async_runtime().snapshot_calculation();
     let (cancellation, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
@@ -720,13 +660,7 @@ unsafe fn async_udf_boundary_uninstrumented_handle<A, Start, Build, T>(
             };
             reservation.commit_handle_scoped(
                 generation,
-                UninstrumentedHandleTask {
-                    build: Some(build),
-                    responder: Some(responder),
-                    token,
-                    udf_id,
-                    _result: std::marker::PhantomData,
-                },
+                HandleTask::new(build, responder, token, NoObservation),
                 cancellation,
             );
         }

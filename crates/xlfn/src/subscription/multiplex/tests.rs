@@ -736,7 +736,7 @@ fn first_registration_exists_before_an_immediately_completing_producer_runs() {
         let subscription = source
             .subscribe(&RtdTopic::single("immediate").unwrap(), sink)
             .expect("a completed first producer must not race away its registration");
-        let sender = subscription.channel.sender::<i32, _>(RtdLatest);
+        let sender = subscription.channel.latest_sender::<i32>();
         assert!(observed_rx.recv_timeout(DEADLINE).unwrap());
         assert!(sender.wait_closed(DEADLINE));
         assert!(matches!(sender.try_send(3), Err(RtdSendError::Closed(_))));

@@ -19,15 +19,22 @@ pub enum RtdDelivery {
     Latest,
 }
 
-mod delivery_policy {
-    pub trait Sealed {}
+pub(super) mod delivery_policy {
+    use super::super::channel::{Channel, SharedChannel};
+    use triomphe::Arc;
+    pub trait Sealed {
+        type Buffer<T: Send>: super::super::channel::Buffer<T>;
+        fn erase_channel(channel: Arc<Channel<Self>>) -> SharedChannel
+        where
+            Self: super::RtdDeliveryPolicy;
+    }
 }
 
 /// A buffering policy selected when a source is constructed.
 ///
 /// The concrete policy is retained by senders, so publication does not need
-/// to inspect a FIFO/latest tag on each admission. The shared publisher and
-/// cancellation core remain independent of the policy.
+/// to inspect a FIFO/latest tag on each admission. Queue storage also follows the policy. The shared publisher and
+/// subscription barrier accept both policies through a closed internal boundary.
 pub trait RtdDeliveryPolicy: delivery_policy::Sealed + Copy + Send + Sync + 'static {
     #[doc(hidden)]
     const LATEST: bool;
@@ -51,7 +58,12 @@ impl RtdFifo {
     }
 }
 
-impl delivery_policy::Sealed for RtdFifo {}
+impl delivery_policy::Sealed for RtdFifo {
+    type Buffer<T: Send> = super::channel::FifoBuffer<T>;
+    fn erase_channel(channel: Arc<super::channel::Channel<Self>>) -> super::channel::SharedChannel {
+        super::channel::SharedChannel::Fifo(channel)
+    }
+}
 
 impl RtdDeliveryPolicy for RtdFifo {
     const LATEST: bool = false;
@@ -69,7 +81,12 @@ impl RtdDeliveryPolicy for RtdFifo {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RtdLatest;
 
-impl delivery_policy::Sealed for RtdLatest {}
+impl delivery_policy::Sealed for RtdLatest {
+    type Buffer<T: Send> = super::channel::LatestBuffer<T>;
+    fn erase_channel(channel: Arc<super::channel::Channel<Self>>) -> super::channel::SharedChannel {
+        super::channel::SharedChannel::Latest(channel)
+    }
+}
 
 impl RtdDeliveryPolicy for RtdLatest {
     const LATEST: bool = true;

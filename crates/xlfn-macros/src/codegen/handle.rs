@@ -46,19 +46,20 @@ pub(crate) fn expand_excel_handle_object(
             for #ident #type_generics #where_clause
         {
             type InputMode = #krate::__private::v1::FormulaInputMode;
+            type Payload = #krate::__private::v1::XlScalarOutput;
 
-            fn invoke(
-                __context: &mut #krate::__private::v1::ReturnContext<'_, '_>,
+            fn invoke<__E: #krate::RtdSubscription, __C: #krate::RtdSourceCatalog<__E>>(
+                __context: &mut #krate::__private::v1::ReturnContext<'_, '_, Self::InputMode, __E, __C>,
                 __operation: impl ::core::ops::FnOnce()
                     -> #krate::error::XllResult<Self>,
-            ) -> #krate::error::XllResult<#krate::__private::v1::ExcelOutput> {
+            ) -> #krate::error::XllResult<Self::Payload> {
                 #krate::__private::v1::publish_new_handle(__context, __operation)
             }
 
-            fn into_excel(
+            fn into_excel<__E: #krate::RtdSubscription, __C: #krate::RtdSourceCatalog<__E>>(
                 self,
-                __context: &mut #krate::__private::v1::ReturnContext<'_, '_>,
-            ) -> #krate::error::XllResult<#krate::__private::v1::ExcelOutput> {
+                __context: &mut #krate::__private::v1::ReturnContext<'_, '_, Self::InputMode, __E, __C>,
+            ) -> #krate::error::XllResult<Self::Payload> {
                 #krate::__private::v1::publish_new_handle(
                     __context,
                     || ::core::result::Result::Ok(self),

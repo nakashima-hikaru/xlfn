@@ -1,122 +1,122 @@
 //! Call-scoped capabilities used while producing a return payload.
 
+use crate::value::input::{InputMode, PlainInputMode};
 #[cfg(feature = "handles")]
-use crate::XllResult;
-#[cfg(feature = "handles")]
-use crate::host_api::ExcelHost;
-#[cfg(feature = "handles")]
-use crate::input_identity::InputFingerprint;
+use crate::{XllResult, host_api::ExcelHost, input_identity::InputFingerprint};
 use std::marker::PhantomData;
 use std::rc::Rc;
 
-/// Call-scoped services used by [`super::ExcelReturn`] implementations.
+type ServerIdentity<E, C> = fn(E, C) -> (E, C);
+type ReturnContextMarker<'call, 'scope, E, C> =
+    (Rc<()>, &'call (), &'scope (), ServerIdentity<E, C>);
+
+/// Callback authority supplied by the admitted call frame.
 #[doc(hidden)]
-pub struct ReturnContext<'call, 'scope> {
-    #[cfg(feature = "handles")]
-    publisher: Option<FormulaPublisher<'call, 'scope>>,
-    lifetime: PhantomData<(Rc<()>, &'call (), &'scope ())>,
-}
-
-/// Capability for publishing a handle result for one formula revision.
-#[cfg(feature = "handles")]
-pub(crate) struct FormulaPublisher<'call, 'scope> {
-    pub(crate) runtime: crate::handle::FormulaHandleServiceResolver<'call>,
+pub struct ReturnFrameAccess<'call> {
     pub(crate) udf_id: &'static str,
-    pub(crate) inputs: InputFingerprint,
-    pub(crate) host: ExcelHost<'scope>,
+    pub(crate) callbacks: &'call crate::host_callback::HostCallbackSession,
 }
 
-impl<'call, 'scope> ReturnContext<'call, 'scope> {
+/// Return capabilities selected by the UDF's input identity mode.
+#[doc(hidden)]
+pub struct ReturnContext<
+    'call,
+    'scope,
+    M: InputMode = PlainInputMode,
+    E: crate::RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+> {
+    #[cfg_attr(
+        not(feature = "handles"),
+        allow(dead_code, reason = "Plain contexts carry only unit state")
+    )]
+    state: M::ReturnState<'call, 'scope, E, C>,
+    lifetime: PhantomData<ReturnContextMarker<'call, 'scope, E, C>>,
+}
+
+impl<'call, 'scope, M: InputMode, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    ReturnContext<'call, 'scope, M, E, C>
+{
+    pub(crate) fn from_state(state: M::ReturnState<'call, 'scope, E, C>) -> Self {
+        Self {
+            state,
+            lifetime: PhantomData,
+        }
+    }
+}
+
+impl ReturnContext<'_, '_> {
     #[doc(hidden)]
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            #[cfg(feature = "handles")]
-            publisher: None,
+            state: (),
             lifetime: PhantomData,
         }
     }
-
-    #[cfg(test)]
-    /// Creates return services while borrowing existing callback authority.
-    pub(crate) fn for_call<A: crate::Addin>(
-        call: &'call crate::runtime::CallGuard<'_, A>,
-        udf_id: &'static str,
-        inputs: Option<[u8; 32]>,
-        callbacks: &'scope crate::host_callback::HostCallbackSession,
-    ) -> Self {
-        #[cfg(feature = "handles")]
-        let publisher = inputs.map(|inputs| FormulaPublisher {
-            runtime: call.handle_call_access(),
-            udf_id,
-            inputs: InputFingerprint::from_bytes(inputs),
-            host: ExcelHost::new(callbacks),
-        });
-        #[cfg(not(feature = "handles"))]
-        let _ = (call, udf_id, inputs, callbacks);
-        Self {
-            #[cfg(feature = "handles")]
-            publisher,
-            lifetime: PhantomData,
-        }
-    }
-
-    #[cfg(feature = "handles")]
-    fn publisher(&self) -> XllResult<&FormulaPublisher<'call, 'scope>> {
-        self.publisher.as_ref().ok_or(crate::XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::HANDLE_CONTEXT,
-        })
+}
+impl Default for ReturnContext<'_, '_> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
+/// Required publication capability, retained only by formula return contexts.
 #[cfg(feature = "handles")]
-impl<'call> ReturnContext<'call, 'call> {
-    pub(crate) fn for_frame(
+#[doc(hidden)]
+pub struct FormulaPublisher<'call, 'scope, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>
+{
+    runtime: crate::handle::FormulaHandleServiceResolver<'call>,
+    udf_id: &'static str,
+    inputs: InputFingerprint,
+    host: ExcelHost<'scope>,
+    server: PhantomData<ServerIdentity<E, C>>,
+}
+
+#[cfg(feature = "handles")]
+impl<'call, 'scope, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    FormulaPublisher<'call, 'scope, E, C>
+{
+    pub(crate) fn new(
         handles: crate::value::input::HandleCallAccess<'call>,
         udf_id: &'static str,
-        inputs: Option<[u8; 32]>,
-        callbacks: &'call crate::host_callback::HostCallbackSession,
+        inputs: [u8; 32],
+        callbacks: &'scope crate::host_callback::HostCallbackSession,
     ) -> Self {
-        let publisher = inputs.map(|inputs| FormulaPublisher {
+        Self {
             runtime: handles.runtime,
             udf_id,
             inputs: InputFingerprint::from_bytes(inputs),
             host: ExcelHost::new(callbacks),
-        });
-        Self {
-            publisher,
-            lifetime: PhantomData,
+            server: PhantomData,
         }
     }
 }
 
 #[cfg(feature = "handles")]
-impl<'call, 'scope> ReturnContext<'call, 'scope> {
+impl<'call, 'scope, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    ReturnContext<'call, 'scope, crate::value::FormulaInputMode, E, C>
+{
     #[doc(hidden)]
-    pub fn publish_existing_alias<'handle, T>(
+    pub fn publish_existing_alias<'handle, T: crate::handle::ExcelHandleObject>(
         &mut self,
         operation: impl FnOnce() -> XllResult<crate::handle::HandleAlias<'handle, T>>,
-    ) -> XllResult<String>
-    where
-        T: crate::handle::ExcelHandleObject,
-    {
-        self.publisher()?.publish_existing_alias(operation)
+    ) -> XllResult<String> {
+        self.state.publish_existing_alias(operation)
     }
-
     #[doc(hidden)]
-    pub fn publish_new_handle<T>(
+    pub fn publish_new_handle<T: crate::handle::ExcelHandleObject>(
         &mut self,
         operation: impl FnOnce() -> XllResult<T>,
-    ) -> XllResult<String>
-    where
-        T: crate::handle::ExcelHandleObject,
-    {
-        self.publisher()?.publish_new_handle(operation)
+    ) -> XllResult<String> {
+        self.state.publish_new_handle(operation)
     }
 }
 
 #[cfg(feature = "handles")]
-impl<'call, 'scope> FormulaPublisher<'call, 'scope> {
+impl<'call, 'scope, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    FormulaPublisher<'call, 'scope, E, C>
+{
     fn publish_existing_alias<'handle, T>(
         &self,
         operation: impl FnOnce() -> XllResult<crate::handle::HandleAlias<'handle, T>>,
@@ -129,7 +129,7 @@ impl<'call, 'scope> FormulaPublisher<'call, 'scope> {
         let key = crate::handle::formula_revision_key(access.host, access.udf_id, access.inputs)?;
         let preparation =
             handles.prepare_observed_alias::<T, _>(key, operation()?, |key, token| {
-                crate::excel_rtd::observe_handle(
+                crate::excel_rtd::observe_handle::<E, C>(
                     handles,
                     crate::module_runtime::ingress(),
                     key,
@@ -148,7 +148,7 @@ impl<'call, 'scope> FormulaPublisher<'call, 'scope> {
         let handles = access.runtime.get()?;
         let key = crate::handle::formula_revision_key(access.host, access.udf_id, access.inputs)?;
         let preparation = handles.prepare_observed(key, operation, |key, token| {
-            crate::excel_rtd::observe_handle(
+            crate::excel_rtd::observe_handle::<E, C>(
                 handles,
                 crate::module_runtime::ingress(),
                 key,
@@ -157,11 +157,5 @@ impl<'call, 'scope> FormulaPublisher<'call, 'scope> {
             )
         })?;
         Ok(preparation.into_token())
-    }
-}
-
-impl Default for ReturnContext<'_, '_> {
-    fn default() -> Self {
-        Self::new()
     }
 }

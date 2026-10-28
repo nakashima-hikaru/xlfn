@@ -286,32 +286,24 @@ fn run(mode: Mode, instrumented: bool, cancel_before_poll: bool, reenter: bool) 
         if instrumented {
             reservation.commit_handle_scoped(
                 RuntimeGeneration::new(1).unwrap(),
-                InstrumentedHandleTask {
-                    build: Some(build),
-                    responder: Some(responder()),
+                HandleTask::new(
+                    build,
+                    responder(),
                     token,
-                    observation: Some(observation(
+                    observation(
                         token,
                         Arc::clone(&events),
                         Arc::clone(&payload_drops),
                         true,
                         reenter.then(|| Arc::downgrade(&lifecycle)),
-                    )),
-                    udf_id: "SCOPED.TEST",
-                    _result: std::marker::PhantomData,
-                },
+                    ),
+                ),
                 cancellation,
             );
         } else {
             reservation.commit_handle_scoped(
                 RuntimeGeneration::new(1).unwrap(),
-                UninstrumentedHandleTask {
-                    build: Some(build),
-                    responder: Some(responder()),
-                    token,
-                    udf_id: "SCOPED.TEST",
-                    _result: std::marker::PhantomData,
-                },
+                HandleTask::new(build, responder(), token, NoObservation),
                 cancellation,
             );
         }
@@ -452,13 +444,7 @@ fn miri_external_executor_retains_scoped_handle_until_opaque_task_destruction() 
         .unwrap()
         .commit_handle_scoped(
             RuntimeGeneration::new(1).unwrap(),
-            UninstrumentedHandleTask {
-                build: Some(build),
-                responder: Some(responder()),
-                token,
-                udf_id: "EXTERNAL.SCOPED",
-                _result: std::marker::PhantomData,
-            },
+            HandleTask::new(build, responder(), token, NoObservation),
             cancellation,
         );
     assert_eq!(polls.load(Ordering::Relaxed), 0);

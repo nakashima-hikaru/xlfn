@@ -1,6 +1,6 @@
 //! Return dispatch contracts used by generated UDF boundaries.
 
-use super::{ReturnContext, ReturnPayload};
+use super::ReturnContext;
 use crate::error::IntoXllError;
 use crate::value::input::{ExcelParameter, InputMode, PlainInputMode};
 use crate::{XllResult, value::IntoExcel};
@@ -15,14 +15,18 @@ pub trait ExcelReturn: ExcelReturnSealed + Sized {
     /// Selects the input conversion contract for this return path.
     #[doc(hidden)]
     type InputMode: InputMode;
+    type Payload: super::EncodedReturn;
 
-    fn into_excel(self, context: &mut ReturnContext<'_, '_>) -> XllResult<ReturnPayload>;
+    fn into_excel<S: crate::RtdSubscription, C: crate::RtdSourceCatalog<S>>(
+        self,
+        context: &mut ReturnContext<'_, '_, Self::InputMode, S, C>,
+    ) -> XllResult<Self::Payload>;
 
     #[doc(hidden)]
-    fn invoke(
-        context: &mut ReturnContext<'_, '_>,
+    fn invoke<S: crate::RtdSubscription, C: crate::RtdSourceCatalog<S>>(
+        context: &mut ReturnContext<'_, '_, Self::InputMode, S, C>,
         operation: impl FnOnce() -> XllResult<Self>,
-    ) -> XllResult<ReturnPayload> {
+    ) -> XllResult<Self::Payload> {
         operation()?.into_excel(context)
     }
 }
@@ -61,7 +65,7 @@ pub trait MacroSheetReturn: ExcelReturn {}
     label = "`{Self}` is not a valid return type for an async UDF",
     note = "return a type that implements `IntoExcel`, or implement `IntoExcel` for `{Self}`"
 )]
-pub trait AsyncReturn: ExcelReturn {}
+pub trait AsyncReturn: ExcelReturn<InputMode = PlainInputMode> {}
 
 /// Return values supported by volatile functions.
 #[doc(hidden)]
@@ -74,9 +78,13 @@ pub trait VolatileReturn: ExcelReturn {}
 
 impl<T: IntoExcel> ExcelReturn for T {
     type InputMode = PlainInputMode;
+    type Payload = crate::return_abi::XlScalarOutput;
 
-    fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<ReturnPayload> {
-        ReturnPayload::scalar(self)
+    fn into_excel<S: crate::RtdSubscription, C: crate::RtdSourceCatalog<S>>(
+        self,
+        _: &mut ReturnContext<'_, '_, Self::InputMode, S, C>,
+    ) -> XllResult<Self::Payload> {
+        crate::return_abi::XlScalarOutput::encode(self)
     }
 }
 
@@ -93,16 +101,20 @@ where
     E: IntoXllError,
 {
     type InputMode = T::InputMode;
+    type Payload = T::Payload;
 
-    fn into_excel(self, context: &mut ReturnContext<'_, '_>) -> XllResult<ReturnPayload> {
+    fn into_excel<S: crate::RtdSubscription, C: crate::RtdSourceCatalog<S>>(
+        self,
+        context: &mut ReturnContext<'_, '_, Self::InputMode, S, C>,
+    ) -> XllResult<Self::Payload> {
         self.map_err(IntoXllError::into_xll_error)?
             .into_excel(context)
     }
 
-    fn invoke(
-        context: &mut ReturnContext<'_, '_>,
+    fn invoke<S: crate::RtdSubscription, C: crate::RtdSourceCatalog<S>>(
+        context: &mut ReturnContext<'_, '_, Self::InputMode, S, C>,
         operation: impl FnOnce() -> XllResult<Self>,
-    ) -> XllResult<ReturnPayload> {
+    ) -> XllResult<Self::Payload> {
         T::invoke(context, || {
             operation()?.map_err(IntoXllError::into_xll_error)
         })

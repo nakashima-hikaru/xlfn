@@ -76,3 +76,14 @@ Worker payload variants own the producer, running thread, or completed result
 required by each state. Channel attachment owns its subscription permit until
 a consuming transfer moves it to the multiplexed subscription. Windows worker
 joining retains its thread identity so a concurrent self-join remains rejected.
+
+Registration mutation evidence retains its concrete operation type. Its callback
+ID, decoder, output type and decode-failure policy come from that same operation;
+fixtures reject substituting another operation even when both return `()`, or
+applying mutation policy to untyped callback evidence.
+
+Return contexts retain their input mode and concrete RTD observer catalog.
+Plain contexts cannot publish handles, formula contexts require their publisher,
+and scalar/array payload types remain concrete through the value ABI boundary.
+Channel senders also retain the actual FIFO/latest storage policy, preventing a
+sender from being constructed with the other policy's channel allocation.

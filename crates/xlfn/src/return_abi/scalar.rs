@@ -150,7 +150,7 @@ impl ExcelCellSink for ScalarSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::call_return::{ExcelReturn, ReturnContext, ReturnPayload};
+    use crate::call_return::{ExcelReturn, ReturnContext};
     use crate::value::XlValueRef;
     use std::cell::Cell;
 
@@ -171,9 +171,6 @@ mod tests {
                 let borrowed = scope.scratch().decode_utf16(&units, "text").unwrap();
                 ExcelReturn::into_excel(borrowed, &mut ReturnContext::new()).unwrap()
             });
-            let ReturnPayload::Scalar(output) = output else {
-                panic!("text must encode as a scalar");
-            };
             let mut outputs = vec![output];
             let output = outputs.pop().unwrap();
             assert_eq!(text(&output), value);
@@ -193,11 +190,7 @@ mod tests {
             }
         }
         let source = "日本語💡".to_owned();
-        let ReturnPayload::Scalar(output) =
-            ExcelReturn::into_excel(Direct(&source), &mut ReturnContext::new()).unwrap()
-        else {
-            panic!("direct text must encode as a scalar");
-        };
+        let output = ExcelReturn::into_excel(Direct(&source), &mut ReturnContext::new()).unwrap();
         drop(source);
         assert_eq!(text(&output), "日本語💡");
 
@@ -206,11 +199,7 @@ mod tests {
             #[excel_enum(name = "価格💡")]
             Unicode,
         }
-        let ReturnPayload::Scalar(output) =
-            ExcelReturn::into_excel(Label::Unicode, &mut ReturnContext::new()).unwrap()
-        else {
-            panic!("enum label must encode as a scalar");
-        };
+        let output = ExcelReturn::into_excel(Label::Unicode, &mut ReturnContext::new()).unwrap();
         assert_eq!(text(&output), "価格💡");
     }
 

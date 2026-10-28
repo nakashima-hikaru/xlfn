@@ -483,7 +483,7 @@ where
     fn register_channel(
         &self,
         topic: &RtdTopic,
-        channel: super::channel::AttachedChannel,
+        channel: super::channel::AttachedChannel<D>,
     ) -> XllResult<RtdMultiplexedSubscription<T, D>> {
         let id = self
             .worker
@@ -501,7 +501,7 @@ where
     fn start(
         &self,
         topic: &RtdTopic,
-        channel: super::channel::AttachedChannel,
+        channel: super::channel::AttachedChannel<D>,
         budget: &Arc<ChannelBudget>,
     ) -> XllResult<RtdMultiplexedSubscription<T, D>> {
         if self.worker.started.load(Ordering::Acquire) {

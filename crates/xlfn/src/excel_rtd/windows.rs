@@ -69,6 +69,8 @@ use class_factory::{
 use com_abi::IUnknown_Vtbl;
 use com_abi::{IID_IUNKNOWN, com_boundary, guid_eq};
 pub(crate) use event::drain_with_com_dispatch;
+#[cfg(feature = "handles")]
+pub(super) use excel_rtd::observe;
 #[cfg(feature = "rtd")]
 pub(super) use excel_rtd::observe_subscription;
 pub(crate) use module_state::ComModuleLifetime;
@@ -106,8 +108,6 @@ use server_gate::{
     ServerPhase, ServerTermination, ServerTerminationRequest, TerminationWorker,
     TerminationWorkerStatus,
 };
-#[cfg(feature = "handles")]
-pub(super) use server_type::observe;
 #[cfg(feature = "handles")]
 pub(super) use server_type::shutdown;
 pub(super) use server_type::{dll_get_class_object, register_server_type};

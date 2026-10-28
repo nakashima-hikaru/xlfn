@@ -45,7 +45,11 @@ impl ScalarOutputBenchmark {
         self.run(std::hint::black_box(42.0), xlfn_sys::XLTYPE_NUM);
     }
 
-    fn run<T: crate::call_return::ExcelReturn>(&self, value: T, expected_type: u32) {
+    fn run<T: crate::call_return::ExcelReturn<InputMode = crate::value::PlainInputMode>>(
+        &self,
+        value: T,
+        expected_type: u32,
+    ) {
         let pointer = crate::return_abi::udf_boundary_named(
             self.runtime,
             "bench_scalar_output",
@@ -177,7 +181,7 @@ impl NumericArrayOutputBenchmark {
         std::hint::black_box(pointer);
     }
 
-    fn run<T: crate::call_return::ExcelReturn>(
+    fn run<T: crate::call_return::ExcelReturn<InputMode = crate::value::PlainInputMode>>(
         &self,
         operation: impl FnOnce() -> crate::XllResult<T>,
     ) {
@@ -203,15 +207,12 @@ impl NumericArrayOutputBenchmark {
     }
 
     fn validate_result_paths(&self) {
-        use crate::call_return::{ExcelReturn, ReturnContext, ReturnPayload};
+        use crate::call_return::{ExcelReturn, ReturnContext};
 
         let matrix = self
             .prepared_matrix()
             .into_excel(&mut ReturnContext::new())
             .expect("benchmark matrix must encode");
-        let ReturnPayload::Array(matrix) = matrix else {
-            panic!("benchmark matrix must produce an array");
-        };
         let direct = self
             .build_direct()
             .expect("benchmark direct array must encode");

@@ -123,7 +123,7 @@ impl SyncBoundaryWorkerPool {
                                                 code: crate::error::DomainErrorCode::InvalidInput,
                                             })
                                         }
-                                        _ => crate::call_return::ReturnPayload::scalar(42.0),
+                                        _ => crate::return_abi::XlScalarOutput::encode(42.0),
                                     },
                                 );
                                 #[allow(

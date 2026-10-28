@@ -1,6 +1,6 @@
 //! Generic RTD-value return dispatch.
 
-use super::{ReturnContext, ReturnPayload};
+use super::ReturnContext;
 use crate::XllResult;
 use crate::subscription::RtdValue;
 use crate::value::{ExcelCellOutput, PlainInputMode};
@@ -9,8 +9,12 @@ impl super::ExcelReturnSealed for RtdValue {}
 
 impl super::ExcelReturn for RtdValue {
     type InputMode = PlainInputMode;
+    type Payload = crate::return_abi::XlScalarOutput;
 
-    fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<ReturnPayload> {
+    fn into_excel<S: crate::RtdSubscription, C: crate::RtdSourceCatalog<S>>(
+        self,
+        _: &mut ReturnContext<'_, '_, Self::InputMode, S, C>,
+    ) -> XllResult<Self::Payload> {
         self.validate()?;
         let cell = match self {
             RtdValue::Number(value) => ExcelCellOutput::Number(value),
@@ -20,7 +24,7 @@ impl super::ExcelReturn for RtdValue {
             RtdValue::Error(value) => ExcelCellOutput::Error(value),
             RtdValue::Empty => ExcelCellOutput::Error(crate::ExcelError::NotAvailable),
         };
-        ReturnPayload::scalar(cell)
+        crate::return_abi::XlScalarOutput::encode(cell)
     }
 }
 

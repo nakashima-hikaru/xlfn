@@ -70,7 +70,9 @@ pub use crate::handle::{
     handle_removal_probe, handle_retirement_debt_probe, token_cache_associativity_probe,
 };
 #[cfg(feature = "rtd")]
-pub use crate::subscription::{RtdChannelEnqueueBenchmark, channel_protocol_probe};
+pub use crate::subscription::{
+    RtdChannelEnqueueBenchmark, RtdChannelStorageBenchmark, channel_protocol_probe,
+};
 
 #[cfg(feature = "async")]
 pub use crate::handle::{ObjectFinalPinRelease, ObjectLeaseBenchCase, ObjectLeaseBenchmark};

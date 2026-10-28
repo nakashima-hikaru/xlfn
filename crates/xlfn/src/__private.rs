@@ -141,6 +141,8 @@ pub mod v1 {
     pub use crate::__xlfn_private_calculation_exports as __xlfn_calculation_exports;
     #[doc(hidden)]
     pub use crate::__xlfn_private_excel_rtd_exports as __xlfn_excel_rtd_exports;
+    #[cfg(feature = "handles")]
+    pub use crate::call_return::FormulaPublisher;
     pub use crate::call_return::ReturnPayload as ExcelOutput;
     #[doc(hidden)]
     pub use crate::call_return::assert_async_parameter;
@@ -149,11 +151,13 @@ pub mod v1 {
         AsyncReturn, ExcelReturn, ExcelReturnSealed, MacroSheetReturn, MainThreadReturn,
         ThreadSafeReturn, VolatileReturn,
     };
+    pub use crate::call_return::{EncodedReturn, ReturnFrameAccess};
     #[doc(hidden)]
     pub use crate::call_return::{
         assert_async_return, assert_macro_sheet_return, assert_main_thread_return,
         assert_thread_safe_return, assert_volatile_return,
     };
+    pub use crate::return_abi::XlScalarOutput;
     #[doc(hidden)]
     pub use crate::utf16::utf16_eq_ignore_ascii_case;
     /// Builds an enum input error while bounding decoded diagnostic storage.
@@ -610,23 +614,14 @@ pub mod v1 {
         pub fn return_context(
             &mut self,
             udf_id: &'static str,
-        ) -> XllResult<ReturnContext<'call, 'call>> {
-            let inputs = self.arguments.finish()?;
-            #[cfg(feature = "handles")]
-            {
-                let handles = self.arguments.take_handle_access();
-                Ok(ReturnContext::for_frame(
-                    handles,
+        ) -> XllResult<ReturnContext<'call, 'call, M, E, C>> {
+            M::finish_return(
+                &mut self.arguments,
+                ReturnFrameAccess {
                     udf_id,
-                    inputs,
-                    self.callbacks,
-                ))
-            }
-            #[cfg(not(feature = "handles"))]
-            {
-                let _ = (udf_id, inputs);
-                Ok(ReturnContext::new())
-            }
+                    callbacks: self.callbacks,
+                },
+            )
         }
 
         #[doc(hidden)]
@@ -992,7 +987,7 @@ pub mod v1 {
                 crate::addin::AddinSubscription<A>,
                 crate::addin::AddinSources<A>,
             >,
-        ) -> XllResult<ExcelOutput>,
+        ) -> XllResult<R::Payload>,
     {
         udf_boundary_named(runtime.runtime(), udf_id, excel_name, |_, call| {
             let callbacks = crate::host_callback::HostCallbackSession::new();
@@ -1079,7 +1074,7 @@ pub mod v1 {
         execute: F,
     ) where
         A: Addin,
-        R: ExcelReturn + Send + 'static,
+        R: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
         F: for<'call> FnOnce(
             &'call crate::runtime::CallGuard<'call, A>,
             crate::generation::ExecutionLease<A>,
@@ -1143,7 +1138,7 @@ pub mod v1 {
         execute: F,
     ) where
         A: Addin,
-        R: ExcelReturn + Send + 'static,
+        R: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
         F: for<'call> FnOnce(
             &'call crate::runtime::CallGuard<'call, A>,
             crate::generation::ExecutionLease<A>,
@@ -1214,16 +1209,16 @@ pub mod v1 {
     /// Publishes a new handle instance inside a return context.
     #[cfg(feature = "handles")]
     #[doc(hidden)]
-    pub fn publish_new_handle<T>(
-        context: &mut ReturnContext<'_, '_>,
+    pub fn publish_new_handle<T, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+        context: &mut ReturnContext<'_, '_, crate::value::FormulaInputMode, E, C>,
         operation: impl FnOnce() -> XllResult<T>,
-    ) -> XllResult<ExcelOutput>
+    ) -> XllResult<XlScalarOutput>
     where
         T: crate::handle::ExcelHandleObject,
     {
         context
             .publish_new_handle(operation)
-            .and_then(ExcelOutput::scalar)
+            .and_then(XlScalarOutput::encode)
     }
 
     // External compile-fail fixtures build their dependency without cfg(test).

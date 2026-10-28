@@ -50,7 +50,7 @@ pub use channel::{
     RtdProducerErrorPolicy, RtdSendError, RtdSender,
 };
 #[cfg(all(feature = "rtd", feature = "bench-internals"))]
-pub use channel::{RtdChannelEnqueueBenchmark, channel_protocol_probe};
+pub use channel::{RtdChannelEnqueueBenchmark, RtdChannelStorageBenchmark, channel_protocol_probe};
 #[cfg(feature = "rtd")]
 pub use multiplex::{
     NoTopicValidator, RtdMultiplexedSource, RtdMultiplexedSubscription, RtdSourceContext,

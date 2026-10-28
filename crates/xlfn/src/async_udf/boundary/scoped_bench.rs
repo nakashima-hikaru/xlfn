@@ -1,7 +1,7 @@
 //! Production scoped-builder, delivery, and executor fixture.
 //! Worker startup and seed object publication are outside measured cycles.
 
-use super::{InstrumentedHandleTask, UninstrumentedHandleTask};
+use super::{HandleTask, NoObservation};
 use crate::XllResult;
 use crate::async_udf::instrumentation::AsyncObservation;
 use crate::async_udf::task_scope::{AsyncTaskScope, HandleScopedBuilder};
@@ -171,26 +171,13 @@ impl HandleScopedDeliveryBenchmark {
                     AsyncObservation::new(&metadata, CallTimer::start(), Some(()), false, token);
                 reservation.commit_handle_scoped(
                     self.generation,
-                    InstrumentedHandleTask {
-                        build: Some(build),
-                        responder: Some(responder),
-                        token,
-                        observation: Some(observation),
-                        udf_id: UDF_ID,
-                        _result: std::marker::PhantomData,
-                    },
+                    HandleTask::new(build, responder, token, observation),
                     cancellation,
                 );
             } else {
                 reservation.commit_handle_scoped(
                     self.generation,
-                    UninstrumentedHandleTask {
-                        build: Some(build),
-                        responder: Some(responder),
-                        token,
-                        udf_id: UDF_ID,
-                        _result: std::marker::PhantomData,
-                    },
+                    HandleTask::new(build, responder, token, NoObservation),
                     cancellation,
                 );
             }

@@ -1,3 +1,4 @@
+#[cfg(test)]
 use crate::call_return::ReturnPayload;
 #[cfg(test)]
 use crate::call_return::{ExcelReturn, ReturnContext};
@@ -40,7 +41,7 @@ pub use numeric::{
     MAX_THREAD_NUMERIC_RETURN_BYTES, NumericArrayBuilder, NumericArrayOutput,
     NumericReturnMemoryMetrics, numeric_return_memory_metrics,
 };
-pub(crate) use scalar::XlScalarOutput;
+pub use scalar::XlScalarOutput;
 pub(crate) use storage::ReturnStorage;
 
 const RETURN_MAGIC: u64 = 0x584c_4c52_4554_3132;
@@ -140,25 +141,27 @@ thread_local! {
 }
 
 #[derive(Debug)]
-struct PreparedReturn {
+#[doc(hidden)]
+pub struct PreparedReturn {
     oper: XLOPER12,
     storage: Option<ReturnStringStorage>,
     array: Option<PublishedOwner<[XLOPER12]>>,
 }
 
 impl PreparedReturn {
-    fn encode(value: ReturnPayload) -> XllResult<Self> {
-        match value {
-            ReturnPayload::Array(encoded) => Self::from_array_output(encoded),
-            ReturnPayload::Scalar(encoded) => Ok(Self {
-                oper: encoded.oper,
-                storage: encoded.storage.map(ReturnStringStorage::Scalar),
-                array: None,
-            }),
+    fn encode(value: impl crate::call_return::EncodedReturn) -> XllResult<Self> {
+        value.prepare()
+    }
+
+    pub(crate) fn from_scalar_output(encoded: XlScalarOutput) -> Self {
+        Self {
+            oper: encoded.oper,
+            storage: encoded.storage.map(ReturnStringStorage::Scalar),
+            array: None,
         }
     }
 
-    fn from_array_output(encoded: XlArrayOutput) -> XllResult<Self> {
+    pub(crate) fn from_array_output(encoded: XlArrayOutput) -> XllResult<Self> {
         let total_bytes = encoded
             .payload_bytes
             .checked_add(std::mem::size_of::<ReturnBlock>())
@@ -310,7 +313,7 @@ fn enforce_return_limit(bytes: usize) -> XllResult<()> {
 
 #[cfg(test)]
 fn allocate_excel_owned(
-    value: ReturnPayload,
+    value: impl crate::call_return::EncodedReturn,
     producer: &mut ReturnProducerGuard<'static>,
 ) -> XllResult<*mut XLOPER12> {
     let prepared = PreparedReturn::encode(value)?;
@@ -353,7 +356,7 @@ pub(crate) struct AsyncReturnValue {
 
 #[cfg(feature = "async")]
 impl AsyncReturnValue {
-    pub(crate) fn from_value(value: ReturnPayload) -> XllResult<Self> {
+    pub(crate) fn from_value(value: impl crate::call_return::EncodedReturn) -> XllResult<Self> {
         PreparedReturn::encode(value).map(|prepared| Self { prepared })
     }
 
@@ -379,7 +382,7 @@ pub(crate) fn ffi_boundary<A, F, T>(
 where
     A: crate::Addin,
     F: FnOnce() -> XllResult<T>,
-    T: ExcelReturn,
+    T: ExcelReturn<InputMode = crate::value::PlainInputMode>,
 {
     let ingress = match crate::module_runtime::ingress()
         .enter_with(|| {})
@@ -459,9 +462,9 @@ enum ValuePublication {
     Owned(*mut XLOPER12),
 }
 
-struct ValueReturnAbi;
-impl SyncReturnAbi for ValueReturnAbi {
-    type Payload = ReturnPayload;
+struct ValueReturnAbi<P>(std::marker::PhantomData<P>);
+impl<P: crate::call_return::EncodedReturn> SyncReturnAbi for ValueReturnAbi<P> {
+    type Payload = P;
     type Pointer = *mut XLOPER12;
     type Publication = ValuePublication;
     const INCLUDE_EXCEL_VALUE: bool = false;
@@ -469,7 +472,7 @@ impl SyncReturnAbi for ValueReturnAbi {
         closing_error_pointer()
     }
     fn publish(
-        payload: ReturnPayload,
+        payload: P,
         producer: &mut ReturnProducerGuard<'static>,
         _: &numeric::Fp12CallGuard,
     ) -> XllResult<Self::Publication> {
@@ -512,7 +515,7 @@ impl SyncReturnAbi for NumericReturnAbi {
 
 /// Runs a generated Q UDF with common execution and shutdown protection.
 #[must_use]
-pub(crate) fn udf_boundary_named<A, F>(
+pub(crate) fn udf_boundary_named<A, F, P: crate::call_return::EncodedReturn>(
     runtime: &'static Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     udf_id: &'static str,
     excel_name: &'static str,
@@ -523,9 +526,9 @@ where
     F: for<'call> FnOnce(
         &'call A::SharedState,
         &'call crate::runtime::CallGuard<'call, A>,
-    ) -> XllResult<ReturnPayload>,
+    ) -> XllResult<P>,
 {
-    sync_boundary::<A, ValueReturnAbi, F>(runtime, udf_id, excel_name, operation)
+    sync_boundary::<A, ValueReturnAbi<P>, F>(runtime, udf_id, excel_name, operation)
 }
 
 /// Runs a generated K% UDF; null is Excel's #NUM! pointer result.
@@ -923,7 +926,9 @@ mod tests {
             assert_eq!(error.excel_error(), ExcelError::Number);
         }
 
-        fn assert_rejected_output<T: ExcelReturn>(value: T) {
+        fn assert_rejected_output<T: ExcelReturn<InputMode = crate::value::PlainInputMode>>(
+            value: T,
+        ) {
             let result = ExcelReturn::into_excel(value, &mut ReturnContext::new())
                 .and_then(PreparedReturn::encode);
             match result {
@@ -1343,7 +1348,7 @@ mod tests {
 
     fn allocate_excel_for_test(
         runtime: &'static crate::runtime::Runtime<()>,
-        value: ReturnPayload,
+        value: impl crate::call_return::EncodedReturn,
     ) -> XllResult<*mut XLOPER12> {
         let ingress = crate::module_runtime::ingress()
             .enter_with(|| {})
@@ -1766,8 +1771,12 @@ mod tests {
 
         impl ExcelReturn for PanickingReturn {
             type InputMode = crate::value::PlainInputMode;
+            type Payload = ReturnPayload;
 
-            fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<ReturnPayload> {
+            fn into_excel<S: crate::RtdSubscription, C: crate::RtdSourceCatalog<S>>(
+                self,
+                _: &mut ReturnContext<'_, '_, Self::InputMode, S, C>,
+            ) -> XllResult<ReturnPayload> {
                 panic!("injected return conversion panic")
             }
         }
@@ -1791,7 +1800,11 @@ mod tests {
         impl crate::call_return::ExcelReturnSealed for PanickingReturn {}
         impl ExcelReturn for PanickingReturn {
             type InputMode = crate::value::PlainInputMode;
-            fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<ReturnPayload> {
+            type Payload = ReturnPayload;
+            fn into_excel<S: crate::RtdSubscription, C: crate::RtdSourceCatalog<S>>(
+                self,
+                _: &mut ReturnContext<'_, '_, Self::InputMode, S, C>,
+            ) -> XllResult<ReturnPayload> {
                 std::panic::panic_any(self.0)
             }
         }
@@ -1864,8 +1877,12 @@ mod tests {
 
         impl ExcelReturn for BlockingReturn {
             type InputMode = crate::value::PlainInputMode;
+            type Payload = ReturnPayload;
 
-            fn into_excel(self, _: &mut ReturnContext<'_, '_>) -> XllResult<ReturnPayload> {
+            fn into_excel<S: crate::RtdSubscription, C: crate::RtdSourceCatalog<S>>(
+                self,
+                _: &mut ReturnContext<'_, '_, Self::InputMode, S, C>,
+            ) -> XllResult<ReturnPayload> {
                 self.converting.send(()).unwrap();
                 self.release.recv().unwrap();
                 ReturnPayload::scalar(1.0)
@@ -2083,21 +2100,27 @@ mod tests {
             .expect("test call enters during OPEN");
         let call = runtime.enter(&ingress).unwrap();
         let callbacks = crate::host_callback::HostCallbackSession::new();
-        crate::call::with_excel_call_scope(|_scope| {
-            let mut context = ReturnContext::for_call(&call, "scalar", None, &callbacks);
-            let value =
-                <f64 as crate::call_return::ExcelReturn>::invoke(&mut context, || Ok(4.5)).unwrap();
-            let ReturnPayload::Scalar(value) = value else {
-                panic!("scalar return expected");
-            };
-            assert_eq!(
-                crate::value::XlValueRef::from_array_cell(value.as_raw())
-                    .unwrap()
-                    .as_f64()
-                    .unwrap(),
-                4.5
-            );
-        });
+        crate::call::with_excel_callback_scope_and_call(
+            &call,
+            &callbacks,
+            |call, scope, callbacks| {
+                let mut frame =
+                    crate::__private::v1::CallFrame::<crate::value::PlainInputMode>::new(
+                        call, scope, callbacks, 0,
+                    );
+                let mut context = frame.return_context("scalar").unwrap();
+                let value =
+                    <f64 as crate::call_return::ExcelReturn>::invoke(&mut context, || Ok(4.5))
+                        .unwrap();
+                assert_eq!(
+                    crate::value::XlValueRef::from_array_cell(value.as_raw())
+                        .unwrap()
+                        .as_f64()
+                        .unwrap(),
+                    4.5
+                );
+            },
+        );
     }
 
     #[cfg(feature = "async")]
@@ -2310,7 +2333,7 @@ mod tests {
         let matrix = Matrix::new(1, 2, vec!["hello".to_string(), "world".to_string()]).unwrap();
         let value =
             <Matrix<_> as ExcelReturn>::into_excel(matrix, &mut ReturnContext::new()).unwrap();
-        assert!(matches!(value, ReturnPayload::Array(_)));
+        let _: XlArrayOutput = value;
 
         let prepared = PreparedReturn::encode(value).unwrap();
         let cells = prepared.array.as_ref().unwrap();
@@ -2416,7 +2439,7 @@ mod tests {
         assert!(!success.is_null());
         assert_eq!(runtime.diagnostics().stats().retained_records, before);
         let q = udf_boundary_named(runtime, "q_error", "Q.ERROR", |_, _| {
-            Err(XllError::ExcelValue(ExcelError::NotAvailable))
+            Err::<ReturnPayload, _>(XllError::ExcelValue(ExcelError::NotAvailable))
         });
         // SAFETY: q is the live scalar returned above, tagged as an error.
         let q = unsafe { &*q };
@@ -2475,7 +2498,7 @@ mod tests {
         let entered = runtime.calculation_id();
         let pointer = udf_boundary_numeric_named(runtime, "epoch", "EPOCH", |_, _| {
             runtime.finish_calculation();
-            Err(XllError::ExcelValue(ExcelError::NotAvailable))
+            Err::<numeric::NumericArrayOutput, _>(XllError::ExcelValue(ExcelError::NotAvailable))
         });
         assert!(pointer.is_null());
         let page = runtime

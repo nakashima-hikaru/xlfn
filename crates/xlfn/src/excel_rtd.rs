@@ -167,7 +167,7 @@ pub(crate) fn physical_unload_ready() -> bool {
 }
 
 #[cfg(feature = "handles")]
-pub(crate) fn observe_handle(
+pub(crate) fn observe_handle<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
     handles: &FormulaLifetimeBackend,
     ingress: &'static ExportIngress,
     lifetime_key: &str,
@@ -176,11 +176,18 @@ pub(crate) fn observe_handle(
 ) -> XllResult<()> {
     #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
     {
-        windows::observe(handles, ingress, lifetime_key, token, host)
+        windows::observe::<E, C>(handles, ingress, lifetime_key, token, host)
     }
     #[cfg(not(all(target_os = "windows", any(feature = "rtd", feature = "handles"))))]
     {
-        let _ = (handles, ingress, lifetime_key, token, host);
+        let _ = (
+            handles,
+            ingress,
+            lifetime_key,
+            token,
+            host,
+            std::marker::PhantomData::<(E, C)>,
+        );
         Err(crate::XllError::ExcelApi {
             function: crate::error::ExcelApiFunction::Rtd,
             failure: crate::error::ExcelApiFailure::Status(

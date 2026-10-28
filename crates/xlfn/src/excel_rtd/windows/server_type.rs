@@ -13,14 +13,6 @@ struct ServerType {
     discard: fn(usize, bool),
     class_factory: unsafe fn(*const c_void, *const c_void, *mut *mut c_void) -> i32,
     #[cfg(feature = "handles")]
-    observe: for<'host> fn(
-        &crate::formula_lifetime::FormulaLifetimeBackend,
-        &'static crate::ingress::ExportIngress,
-        &str,
-        &str,
-        crate::host_api::ExcelHost<'host>,
-    ) -> XllResult<()>,
-    #[cfg(feature = "handles")]
     shutdown: fn(&crate::formula_lifetime::FormulaLifetimeBackend) -> XllResult<()>,
 }
 
@@ -31,8 +23,6 @@ impl ServerType {
             #[cfg(test)]
             discard: super::server::discard_unpublished_server::<E, C>,
             class_factory: super::class_factory::dll_get_class_object::<E, C>,
-            #[cfg(feature = "handles")]
-            observe: super::excel_rtd::observe::<E, C>,
             #[cfg(feature = "handles")]
             shutdown: super::server::shutdown::<E, C>,
         }
@@ -91,18 +81,6 @@ pub(crate) unsafe fn dll_get_class_object(
     // SAFETY: forward the validated COM ABI arguments unchanged; the typed
     // factory checks the active server's identity before casting its pointer.
     unsafe { (descriptor.class_factory)(class_id, interface_id, output) }
-}
-
-#[cfg(feature = "handles")]
-pub(crate) fn observe(
-    handles: &crate::formula_lifetime::FormulaLifetimeBackend,
-    ingress: &'static crate::ingress::ExportIngress,
-    key: &str,
-    token: &str,
-    host: crate::host_api::ExcelHost<'_>,
-) -> XllResult<()> {
-    let descriptor = selected().ok_or(XllError::Closing)?;
-    (descriptor.observe)(handles, ingress, key, token, host)
 }
 
 #[cfg(feature = "handles")]

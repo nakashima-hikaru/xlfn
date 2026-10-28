@@ -1,3 +1,24 @@
+error[E0271]: type mismatch resolving `<Dataset as ExcelReturn>::InputMode == PlainInputMode`
+  --> tests/ui/fail_async/handle_return_async.rs:10:19
+   |
+10 | async fn bad() -> Dataset {
+   |                   ^^^^^^^ type mismatch resolving `<Dataset as ExcelReturn>::InputMode == PlainInputMode`
+   |
+note: expected this to be `xlfn::__private::v1::PlainInputMode`
+  --> tests/ui/fail_async/handle_return_async.rs:3:10
+   |
+ 3 | #[derive(ExcelHandleObject)]
+   |          ^^^^^^^^^^^^^^^^^
+note: required by a bound in `xlfn::__private::v1::async_udf`
+  --> src/__private.rs
+   |
+   |     pub unsafe fn async_udf<A, R, F, Fut>(
+   |                   --------- required by a bound in this function
+...
+   |         R: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `async_udf`
+   = note: this error originates in the derive macro `ExcelHandleObject` (in Nightly builds, run with -Z macro-backtrace for more info)
+
 error[E0277]: `Dataset` cannot be returned from an asynchronous Excel function
   --> tests/ui/fail_async/handle_return_async.rs:10:19
    |

@@ -59,7 +59,7 @@ impl<O: CompletionObserver> AsyncDelivery<O> {
     pub(crate) fn task<Fut, T>(self, future: Fut) -> AsyncUdfTask<Fut, O>
     where
         Fut: Future<Output = XllResult<T>> + Send,
-        T: ExcelReturn + Send + 'static,
+        T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
     {
         AsyncUdfTask {
             future: super::future::NoUnwindFuture::new(
@@ -139,7 +139,7 @@ impl<Fut, O: CompletionObserver> Drop for AsyncUdfTask<Fut, O> {
 impl<Fut, T, O> Future for AsyncUdfTask<Fut, O>
 where
     Fut: Future<Output = XllResult<T>> + Send,
-    T: ExcelReturn + Send + 'static,
+    T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
     O: CompletionObserver,
 {
     type Output = ();
@@ -175,7 +175,9 @@ where
     }
 }
 
-fn complete_evaluation<T: ExcelReturn + Send + 'static>(
+fn complete_evaluation<
+    T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
+>(
     responder: ExcelAsyncResponder,
     token: CancellationToken,
     evaluated: Result<XllResult<T>, crate::panic_boundary::CaughtPanic>,

@@ -1082,7 +1082,7 @@ where
         if !M::RECORDS_IDENTITY {
             return Self::decode(value, argument, context, identity).map(PreparedArgument::Ready);
         }
-        let grid = convert::grid(value, argument, convert::GridShape::Matrix)?;
+        let grid = convert::grid::<convert::MatrixShape>(value, argument)?;
         let (rows, columns) = grid.shape();
         M::u64(identity, rows as u64);
         M::u64(identity, columns as u64);
@@ -1134,7 +1134,7 @@ where
         context: &CallContext<'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
-        let grid = convert::grid(value, argument, convert::GridShape::Matrix)?;
+        let grid = convert::grid::<convert::MatrixShape>(value, argument)?;
         let (rows, columns) = grid.shape();
         M::u64(identity, rows as u64);
         M::u64(identity, columns as u64);
@@ -1178,7 +1178,7 @@ where
         if !M::RECORDS_IDENTITY || !T::BORROWED_ELEMENTS {
             return Self::decode(value, argument, context, identity).map(PreparedArgument::Ready);
         }
-        let grid = convert::grid(value, argument, convert::GridShape::Matrix)?;
+        let grid = convert::grid::<convert::MatrixShape>(value, argument)?;
         let (rows, columns) = grid.shape();
         M::u64(identity, rows as u64);
         M::u64(identity, columns as u64);
@@ -1233,7 +1233,7 @@ where
         context: &CallContext<'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
-        let grid = convert::grid(value, argument, convert::GridShape::Matrix)?;
+        let grid = convert::grid::<convert::MatrixShape>(value, argument)?;
         let (rows, columns) = grid.shape();
         M::u64(identity, rows as u64);
         M::u64(identity, columns as u64);
@@ -1272,7 +1272,7 @@ where
         if !M::RECORDS_IDENTITY {
             return Self::decode(value, argument, context, identity).map(PreparedArgument::Ready);
         }
-        let grid = convert::grid(value, argument, convert::GridShape::Vector)?;
+        let grid = convert::grid::<convert::VectorShape>(value, argument)?;
         let (rows, columns) = grid.shape();
         M::u64(identity, grid.cells().len() as u64);
         let elements = T::prepare_elements(ExcelInputCells { grid, argument }, context, identity)?;
@@ -1323,7 +1323,7 @@ where
         context: &CallContext<'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
-        let grid = convert::grid(value, argument, convert::GridShape::Vector)?;
+        let grid = convert::grid::<convert::VectorShape>(value, argument)?;
         M::u64(identity, grid.cells().len() as u64);
         convert_grid_elements::<T, M>(&grid, argument, context, identity)
     }
@@ -1453,7 +1453,7 @@ where
         if !M::RECORDS_IDENTITY {
             return Self::decode(value, argument, context, identity).map(PreparedArgument::Ready);
         }
-        let grid = convert::grid(value, argument, convert::GridShape::Row)?;
+        let grid = convert::grid::<convert::RowShape>(value, argument)?;
         let (rows, columns) = grid.shape();
         M::u64(identity, grid.cells().len() as u64);
         let elements = T::prepare_elements(ExcelInputCells { grid, argument }, context, identity)?;
@@ -1504,7 +1504,7 @@ where
         context: &CallContext<'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
-        let grid = convert::grid(value, argument, convert::GridShape::Row)?;
+        let grid = convert::grid::<convert::RowShape>(value, argument)?;
         M::u64(identity, grid.cells().len() as u64);
         convert_grid_elements::<T, M>(&grid, argument, context, identity).and_then(Self::new)
     }
@@ -1539,7 +1539,7 @@ where
         if !M::RECORDS_IDENTITY {
             return Self::decode(value, argument, context, identity).map(PreparedArgument::Ready);
         }
-        let grid = convert::grid(value, argument, convert::GridShape::Column)?;
+        let grid = convert::grid::<convert::ColumnShape>(value, argument)?;
         let (rows, columns) = grid.shape();
         M::u64(identity, grid.cells().len() as u64);
         let elements = T::prepare_elements(ExcelInputCells { grid, argument }, context, identity)?;
@@ -1590,7 +1590,7 @@ where
         context: &CallContext<'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
-        let grid = convert::grid(value, argument, convert::GridShape::Column)?;
+        let grid = convert::grid::<convert::ColumnShape>(value, argument)?;
         M::u64(identity, grid.cells().len() as u64);
         convert_grid_elements::<T, M>(&grid, argument, context, identity).and_then(Self::new)
     }
@@ -1796,7 +1796,7 @@ impl<'call> FromExcel<'call> for ExcelValue {
             converted.encode_input_identity(identity);
             return Ok(converted);
         }
-        let grid = convert::grid(value, argument, convert::GridShape::Matrix)?;
+        let grid = convert::grid::<convert::MatrixShape>(value, argument)?;
         let (rows, columns) = grid.shape();
         identity.tag(3);
         identity.u64(rows as u64);
@@ -2081,7 +2081,7 @@ mod tests {
     use super::*;
     use crate::call::with_excel_call_scope;
     use crate::call_return::{
-        AsyncReturn, ExcelReturn, MacroSheetReturn, MainThreadReturn, ReturnContext, ReturnPayload,
+        AsyncReturn, ExcelReturn, MacroSheetReturn, MainThreadReturn, ReturnContext,
         ThreadSafeReturn, VolatileReturn,
     };
     use crate::return_abi::XlArrayBuilder;
@@ -2622,9 +2622,6 @@ mod tests {
         let value =
             <AliasedReturn as ExcelReturn>::into_excel(Ok::<_, XllError>(4.5), &mut context)
                 .unwrap();
-        let ReturnPayload::Scalar(value) = value else {
-            panic!("scalar return expected");
-        };
         assert_eq!(
             XlValueRef::from_array_cell(value.as_raw())
                 .unwrap()

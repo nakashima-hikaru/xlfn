@@ -12,24 +12,60 @@ use super::{
 use crate::error::{InputError, Shape};
 use crate::{XllError, XllResult};
 
-pub(super) enum GridShape {
-    Matrix,
-    Vector,
-    Row,
-    Column,
+pub(super) trait GridShapePolicy {
+    const MATRIX_LIMITS: bool;
+    fn expected(rows: usize, columns: usize) -> Option<Shape>;
 }
-
-pub(super) fn grid<'call>(
+pub(super) struct MatrixShape;
+impl GridShapePolicy for MatrixShape {
+    const MATRIX_LIMITS: bool = true;
+    fn expected(_: usize, _: usize) -> Option<Shape> {
+        None
+    }
+}
+pub(super) struct VectorShape;
+impl GridShapePolicy for VectorShape {
+    const MATRIX_LIMITS: bool = false;
+    fn expected(rows: usize, columns: usize) -> Option<Shape> {
+        if rows != 1 && columns != 1 {
+            Some(Shape {
+                rows: 1,
+                columns: rows * columns,
+            })
+        } else {
+            None
+        }
+    }
+}
+pub(super) struct RowShape;
+impl GridShapePolicy for RowShape {
+    const MATRIX_LIMITS: bool = true;
+    fn expected(rows: usize, columns: usize) -> Option<Shape> {
+        if rows != 1 {
+            Some(Shape { rows: 1, columns })
+        } else {
+            None
+        }
+    }
+}
+pub(super) struct ColumnShape;
+impl GridShapePolicy for ColumnShape {
+    const MATRIX_LIMITS: bool = true;
+    fn expected(rows: usize, columns: usize) -> Option<Shape> {
+        if columns != 1 {
+            Some(Shape { rows, columns: 1 })
+        } else {
+            None
+        }
+    }
+}
+pub(super) fn grid<'call, S: GridShapePolicy>(
     value: XlValueRef<'call>,
     argument: &'static str,
-    shape: GridShape,
 ) -> XllResult<GridView<'call>> {
     let grid = GridView::from_value(value, argument)?;
     let (rows, columns) = grid.shape();
-    if matches!(
-        shape,
-        GridShape::Matrix | GridShape::Row | GridShape::Column
-    ) {
+    if S::MATRIX_LIMITS {
         super::matrix::validate_matrix_dimensions_for_argument(
             rows,
             columns,
@@ -37,17 +73,7 @@ pub(super) fn grid<'call>(
             argument,
         )?;
     }
-    let expected = match shape {
-        GridShape::Matrix => None,
-        GridShape::Vector if rows != 1 && columns != 1 => Some(Shape {
-            rows: 1,
-            columns: rows * columns,
-        }),
-        GridShape::Row if rows != 1 => Some(Shape { rows: 1, columns }),
-        GridShape::Column if columns != 1 => Some(Shape { rows, columns: 1 }),
-        _ => None,
-    };
-    if let Some(expected) = expected {
+    if let Some(expected) = S::expected(rows, columns) {
         return Err(XllError::Shape {
             expected,
             actual: Shape { rows, columns },
@@ -75,7 +101,7 @@ pub fn matrix<'call, T>(
     argument: &'static str,
     mut convert: impl FnMut(XlValueRef<'call>, &'static str) -> XllResult<T>,
 ) -> XllResult<Matrix<T>> {
-    let grid = grid(value, argument, GridShape::Matrix)?;
+    let grid = grid::<MatrixShape>(value, argument)?;
     let (rows, columns) = grid.shape();
     let data = convert_owned_grid_elements(&grid, argument, |cell| convert(cell, argument))?;
     Matrix::new(rows, columns, data)
@@ -87,7 +113,7 @@ pub fn vector<'call, T>(
     argument: &'static str,
     mut convert: impl FnMut(XlValueRef<'call>, &'static str) -> XllResult<T>,
 ) -> XllResult<Vec<T>> {
-    let grid = grid(value, argument, GridShape::Vector)?;
+    let grid = grid::<VectorShape>(value, argument)?;
     convert_owned_grid_elements(&grid, argument, |cell| convert(cell, argument))
 }
 
@@ -97,7 +123,7 @@ pub fn row<'call, T>(
     argument: &'static str,
     mut convert: impl FnMut(XlValueRef<'call>, &'static str) -> XllResult<T>,
 ) -> XllResult<Row<T>> {
-    let grid = grid(value, argument, GridShape::Row)?;
+    let grid = grid::<RowShape>(value, argument)?;
     convert_owned_grid_elements(&grid, argument, |cell| convert(cell, argument)).and_then(Row::new)
 }
 
@@ -107,7 +133,7 @@ pub fn column<'call, T>(
     argument: &'static str,
     mut convert: impl FnMut(XlValueRef<'call>, &'static str) -> XllResult<T>,
 ) -> XllResult<Column<T>> {
-    let grid = grid(value, argument, GridShape::Column)?;
+    let grid = grid::<ColumnShape>(value, argument)?;
     convert_owned_grid_elements(&grid, argument, |cell| convert(cell, argument))
         .and_then(Column::new)
 }
@@ -135,7 +161,7 @@ pub(super) fn bounded_grid<'call, const MAX: usize>(
             InputError::Malformed("bounded varargs maximum must be non-zero"),
         ));
     }
-    let grid = grid(value, argument, GridShape::Vector)?;
+    let grid = grid::<VectorShape>(value, argument)?;
     let actual = grid.cells().len();
     if actual > MAX {
         return Err(XllError::input(

@@ -3275,11 +3275,13 @@ fn resolver_keeps_one_runtime_read_guard_across_arguments_and_return_context() {
         let res_ref = &moved_access.as_ref().unwrap().runtime;
         assert!(std::ptr::eq(res_ref.get().unwrap(), &*handle_rt));
 
-        let mut return_ctx = ReturnContext::for_frame(
-            moved_access.expect("test context has handle access"),
-            "test_udf",
-            Some([0; 32]),
-            callbacks,
+        let mut return_ctx = ReturnContext::<crate::value::FormulaInputMode>::from_state(
+            crate::call_return::FormulaPublisher::new(
+                moved_access.expect("test context has handle access"),
+                "test_udf",
+                [0; 32],
+                callbacks,
+            ),
         );
         let err = return_ctx
             .publish_new_handle(|| Ok(TestObj(456)))

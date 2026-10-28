@@ -140,16 +140,14 @@ impl<'call> RegistrationHost<'call> {
         ];
         pointers.extend(argument_help.iter_mut().map(TemporaryString::pointer));
 
-        let invocation = self
-            .excel
-            .invoke_protocol(XLF_REGISTER, &pointers, |result| {
-                decode_registration_id(result, descriptor.excel_name)
-            });
-        mutation_from_invocation(
-            invocation,
-            ExcelApiFunction::Register,
-            DecodeFailureDisposition::Indeterminate,
-        )
+        let invocation = invoke_operation(
+            self.excel,
+            Register {
+                excel_name: descriptor.excel_name,
+            },
+            &pointers,
+        );
+        mutation_from_invocation(invocation)
     }
 
     pub(crate) fn register_event(
@@ -166,16 +164,7 @@ impl<'call> RegistrationHost<'call> {
             procedure_value.pointer(),
             NonNull::from_mut(&mut event_value),
         ];
-        let invocation = self
-            .excel
-            .invoke_protocol(XL_EVENT_REGISTER, &arguments, |result| {
-                decode_event_registration_id(result)
-            });
-        mutation_from_invocation(
-            invocation,
-            ExcelApiFunction::EventRegister,
-            DecodeFailureDisposition::Indeterminate,
-        )
+        mutation_from_invocation(invoke_operation(self.excel, RegisterEvent, &arguments))
     }
 
     pub(crate) fn registration_id(
@@ -221,27 +210,20 @@ impl<'call> RegistrationHost<'call> {
         let arguments = [NonNull::from_mut(&mut id)];
         #[cfg(feature = "lifecycle-diagnostics")]
         let mut raw_result = None;
-        let invocation = self
-            .excel
-            .invoke_protocol(XLF_UNREGISTER, &arguments, |result| {
-                #[cfg(feature = "lifecycle-diagnostics")]
-                {
-                    raw_result = crate::lifecycle_diagnostics::registration_result(result);
-                }
-                read_applied_bool(result, ExcelApiFunction::Unregister)
-            });
+        let invocation = invoke_observed_operation(self.excel, Unregister, &arguments, |_result| {
+            #[cfg(feature = "lifecycle-diagnostics")]
+            {
+                raw_result = crate::lifecycle_diagnostics::registration_result(_result);
+            }
+        });
         #[cfg(feature = "lifecycle-diagnostics")]
         crate::lifecycle_diagnostics::registration_removal(
             "xlfUnregister",
             registration.id,
-            &invocation,
+            &invocation.evidence,
             raw_result,
         );
-        mutation_from_invocation(
-            invocation,
-            ExcelApiFunction::Unregister,
-            DecodeFailureDisposition::Rejected,
-        )
+        mutation_from_invocation(invocation)
     }
 
     /// Deletes registration metadata only while its current binding is still
@@ -276,16 +258,7 @@ impl<'call> RegistrationHost<'call> {
             Err(error) => return RegistrationMutation::Rejected { error },
         };
         let arguments = [name.pointer()];
-        let invocation = self
-            .excel
-            .invoke_protocol(XLF_SET_NAME, &arguments, |result| {
-                read_applied_bool(result, ExcelApiFunction::SetName)
-            });
-        mutation_from_invocation(
-            invocation,
-            ExcelApiFunction::SetName,
-            DecodeFailureDisposition::Rejected,
-        )
+        mutation_from_invocation(invoke_operation(self.excel, DeleteName, &arguments))
     }
 }
 
@@ -295,11 +268,97 @@ enum DecodeFailureDisposition {
     Indeterminate,
 }
 
-fn mutation_from_invocation<T>(
-    invocation: HostInvocation<T>,
-    function: ExcelApiFunction,
-    decode_failure: DecodeFailureDisposition,
-) -> RegistrationMutation<T> {
+/// One operation owns its callback ID, decoder, diagnostic identity and
+/// treatment of a successful callback whose result cannot be decoded.
+trait RegistrationOperation {
+    type Output;
+    const FUNCTION_ID: i32;
+    const FUNCTION: ExcelApiFunction;
+    const DECODE_FAILURE: DecodeFailureDisposition;
+    fn decode(self, result: &mut ExcelCallbackValue<'_>) -> XllResult<Self::Output>;
+}
+
+struct Register {
+    excel_name: &'static str,
+}
+struct RegisterEvent;
+struct Unregister;
+struct DeleteName;
+
+impl RegistrationOperation for Register {
+    type Output = RegistrationId;
+    const FUNCTION_ID: i32 = XLF_REGISTER;
+    const FUNCTION: ExcelApiFunction = ExcelApiFunction::Register;
+    const DECODE_FAILURE: DecodeFailureDisposition = DecodeFailureDisposition::Indeterminate;
+    fn decode(self, result: &mut ExcelCallbackValue<'_>) -> XllResult<Self::Output> {
+        decode_registration_id(result, self.excel_name)
+    }
+}
+
+impl RegistrationOperation for RegisterEvent {
+    type Output = i32;
+    const FUNCTION_ID: i32 = XL_EVENT_REGISTER;
+    const FUNCTION: ExcelApiFunction = ExcelApiFunction::EventRegister;
+    const DECODE_FAILURE: DecodeFailureDisposition = DecodeFailureDisposition::Indeterminate;
+    fn decode(self, result: &mut ExcelCallbackValue<'_>) -> XllResult<Self::Output> {
+        decode_event_registration_id(result)
+    }
+}
+
+impl RegistrationOperation for Unregister {
+    type Output = ();
+    const FUNCTION_ID: i32 = XLF_UNREGISTER;
+    const FUNCTION: ExcelApiFunction = ExcelApiFunction::Unregister;
+    const DECODE_FAILURE: DecodeFailureDisposition = DecodeFailureDisposition::Rejected;
+    fn decode(self, result: &mut ExcelCallbackValue<'_>) -> XllResult<()> {
+        read_applied_bool(result, Self::FUNCTION)
+    }
+}
+
+impl RegistrationOperation for DeleteName {
+    type Output = ();
+    const FUNCTION_ID: i32 = XLF_SET_NAME;
+    const FUNCTION: ExcelApiFunction = ExcelApiFunction::SetName;
+    const DECODE_FAILURE: DecodeFailureDisposition = DecodeFailureDisposition::Rejected;
+    fn decode(self, result: &mut ExcelCallbackValue<'_>) -> XllResult<()> {
+        read_applied_bool(result, Self::FUNCTION)
+    }
+}
+
+struct RegistrationInvocation<O: RegistrationOperation> {
+    evidence: HostInvocation<O::Output>,
+    operation: std::marker::PhantomData<fn(O) -> O>,
+}
+
+fn invoke_operation<O: RegistrationOperation>(
+    host: ExcelHost<'_>,
+    operation: O,
+    arguments: &[NonNull<XLOPER12>],
+) -> RegistrationInvocation<O> {
+    invoke_observed_operation(host, operation, arguments, |_| {})
+}
+
+fn invoke_observed_operation<O: RegistrationOperation>(
+    host: ExcelHost<'_>,
+    operation: O,
+    arguments: &[NonNull<XLOPER12>],
+    observe: impl FnOnce(&mut ExcelCallbackValue<'_>),
+) -> RegistrationInvocation<O> {
+    RegistrationInvocation {
+        evidence: host.invoke_protocol(O::FUNCTION_ID, arguments, |result| {
+            observe(result);
+            operation.decode(result)
+        }),
+        operation: std::marker::PhantomData,
+    }
+}
+
+fn mutation_from_invocation<O: RegistrationOperation>(
+    invocation: RegistrationInvocation<O>,
+) -> RegistrationMutation<O::Output> {
+    let function = O::FUNCTION;
+    let decode_failure = O::DECODE_FAILURE;
+    let invocation = invocation.evidence;
     match invocation {
         HostInvocation::Suppressed { status } => RegistrationMutation::Rejected {
             error: XllError::ExcelApi {
@@ -1101,17 +1160,16 @@ mod tests {
 
     #[test]
     fn successful_decode_failure_is_indeterminate_for_mutations() {
-        let invocation = HostInvocation::<()>::Completed {
+        let invocation = HostInvocation::<RegistrationId>::Completed {
             status: ExcelCallbackStatus::Success,
             decoded: Some(Err(XllError::Closing)),
             cleanup: Ok(()),
         };
         assert!(matches!(
-            mutation_from_invocation(
-                invocation,
-                ExcelApiFunction::Register,
-                DecodeFailureDisposition::Indeterminate,
-            ),
+            mutation_from_invocation(RegistrationInvocation::<Register> {
+                evidence: invocation,
+                operation: std::marker::PhantomData,
+            }),
             RegistrationMutation::Indeterminate {
                 status: ExcelCallbackStatus::Success,
                 ..
@@ -1127,11 +1185,10 @@ mod tests {
             cleanup: Ok(()),
         };
         assert!(matches!(
-            mutation_from_invocation(
-                invocation,
-                ExcelApiFunction::Unregister,
-                DecodeFailureDisposition::Rejected,
-            ),
+            mutation_from_invocation(RegistrationInvocation::<Unregister> {
+                evidence: invocation,
+                operation: std::marker::PhantomData,
+            }),
             RegistrationMutation::Indeterminate {
                 status: ExcelCallbackStatus::Abort,
                 ..

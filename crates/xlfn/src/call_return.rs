@@ -10,9 +10,11 @@ mod payload;
 mod rtd;
 mod traits;
 
-pub use context::ReturnContext;
+#[cfg(feature = "handles")]
+pub use context::FormulaPublisher;
+pub use context::{ReturnContext, ReturnFrameAccess};
 pub use numeric::NumericReturn;
-pub use payload::ReturnPayload;
+pub use payload::{EncodedReturn, ReturnPayload};
 pub use traits::{
     AsyncReturn, ExcelReturn, ExcelReturnSealed, MacroSheetReturn, MainThreadReturn,
     ThreadSafeReturn, VolatileReturn,
