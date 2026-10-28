@@ -121,6 +121,12 @@ jobs:
                   tool: just,cargo-nextest,cargo-hack
                   fallback: none
 
+            # The typestate runner deliberately checks temporary workspaces
+            # offline; a fresh Windows job must first populate Cargo's cache.
+            - name: Fetch dependencies for offline lifecycle checks
+              if: matrix.check.name == 'lifecycle typestate contracts'
+              run: cargo fetch --locked
+
             - name: Run ${{ matrix.check.name }}
               run: ${{ matrix.check.command }}
 
