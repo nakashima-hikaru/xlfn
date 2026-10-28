@@ -42,6 +42,9 @@ class Utf8TypestateTests(unittest.TestCase):
                 # Python versions. Both mean the simulated Windows default.
                 if "b" not in mode and encoding in (None, "locale"):
                     encoding = "cp1252"
+                # Exercise Windows text-write translation on every host, too.
+                if "b" not in mode and newline is None and any(flag in mode for flag in "wax"):
+                    newline = "\r\n"
                 return original_open(path, mode, buffering, encoding, errors, newline)
 
             def command_output(command, **kwargs):
@@ -67,7 +70,7 @@ class Utf8TypestateTests(unittest.TestCase):
                 injections = []
                 for relative in checker.MODULES.values():
                     text = (overlay / relative).read_bytes().decode("utf-8")
-                    self.assertTrue(text.startswith(source_text))
+                    self.assertEqual(text.splitlines()[:1], source_text.splitlines())
                     injections.extend(line for line in text.splitlines() if line.startswith("#[path = "))
                 # Restoring each original must leave exactly one current fixture.
                 self.assertEqual(len(injections), 1)
