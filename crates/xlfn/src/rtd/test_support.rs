@@ -76,7 +76,11 @@ impl TestNotifierState {
 }
 
 /// Typed add-in fixture for tests that install concrete subscription owners.
+// Windows uses it only for the mixed handle/RTD lifecycle tests; the portable
+// RTD observation test also needs it without handle support.
+#[cfg(all(feature = "rtd", any(not(target_os = "windows"), feature = "handles")))]
 pub(crate) struct TestRtdAddin<E>(std::marker::PhantomData<fn() -> E>);
+#[cfg(all(feature = "rtd", any(not(target_os = "windows"), feature = "handles")))]
 impl<E: crate::RtdSubscription> crate::Addin for TestRtdAddin<E> {
     #[cfg(feature = "rtd")]
     type RtdSubscription = E;

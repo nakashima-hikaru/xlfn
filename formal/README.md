@@ -175,6 +175,11 @@ which preserves the closed phase and DLL lease. A reopened generation starts
 with the remaining module COM counts; releases during that generation decrement
 that snapshot. `resident-com.json` and `reopen-resident-com.json` exercise retained
 COM roots and subsequent release without claiming physical DLL unload.
+The Shutdown activity checker credits those three initial COM counts before
+checking additions and releases; it still rejects releases beyond the initial
+count plus recorded additions. The shutdown `reopen-resident-com.json` fixture
+replays the retained-root Windows scenario, and Lean-checked regressions reject
+zero-credit and excess releases for each COM resource type.
 
 Handle shutdown has three distinct obligations. `handles = 0` means that no
 formula binding roots remain; `handlePins = 0` means that no pending or

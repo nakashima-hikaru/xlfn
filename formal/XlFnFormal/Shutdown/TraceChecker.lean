@@ -323,7 +323,8 @@ private def checkCountPair (label : String) (starts stops : Nat) : Except String
   if stops > starts then
     throw s!"{label} activity balance underflow"
 
-private def checkActivities (activities : Array Activity) : Except String Unit := do
+private def checkActivities (initial : Resources) (activities : Array Activity) :
+    Except String Unit := do
   let externalEnters := idsFor (fun activity =>
     match activity with
     | .enterExternal id => some id
@@ -385,22 +386,26 @@ private def checkActivities (activities : Array Activity) : Except String Unit :
     (countActivity (fun activity => match activity with
       | .endCallback => true
       | _ => false) observations)
+  -- A new generation can inherit terminal COM roots from the previous one.
+  -- Their creation precedes this trace, so releases spend the initial snapshot
+  -- as well as this generation's additions. Only these module-lived counts
+  -- carry over; generation-local activity pairs retain their original checks.
   checkCountPair "RTD class factory" 
-    (countActivity (fun activity => match activity with
+    (initial.rtdClassFactories + countActivity (fun activity => match activity with
       | .addRtdClassFactory => true
       | _ => false) observations)
     (countActivity (fun activity => match activity with
       | .removeRtdClassFactory => true
       | _ => false) observations)
   checkCountPair "RTD server" 
-    (countActivity (fun activity => match activity with
+    (initial.rtdServers + countActivity (fun activity => match activity with
       | .addRtdServer => true
       | _ => false) observations)
     (countActivity (fun activity => match activity with
       | .removeRtdServer => true
       | _ => false) observations)
   checkCountPair "RTD server lock" 
-    (countActivity (fun activity => match activity with
+    (initial.rtdServerLocks + countActivity (fun activity => match activity with
       | .lockRtdServer => true
       | _ => false) observations)
     (countActivity (fun activity => match activity with
@@ -427,6 +432,60 @@ private def checkActivities (activities : Array Activity) : Except String Unit :
     (countActivity (fun activity => match activity with
       | .removeHandlePin => true
       | _ => false) observations)
+
+private def retainedComInitial : Resources := {
+  rtdClassFactories := 1
+  rtdServers := 1
+  rtdServerLocks := 1
+}
+
+-- Checked regressions for the generation boundary: existing roots can be
+-- released, additions add credit, and neither zero nor exhausted credit can
+-- authorize another release. These are independent of certificate acceptance.
+example : checkActivities retainedComInitial
+    #[.removeRtdClassFactory, .removeRtdServer, .unlockRtdServer] = .ok () := by
+  rfl
+
+example : checkActivities retainedComInitial
+    #[.addRtdClassFactory, .removeRtdClassFactory, .removeRtdClassFactory,
+      .addRtdServer, .removeRtdServer, .removeRtdServer,
+      .lockRtdServer, .unlockRtdServer, .unlockRtdServer] = .ok () := by
+  rfl
+
+example : checkActivities {} #[.removeRtdClassFactory] =
+    .error "RTD class factory activity balance underflow" := by rfl
+
+example : checkActivities {} #[.removeRtdServer] =
+    .error "RTD server activity balance underflow" := by rfl
+
+example : checkActivities {} #[.unlockRtdServer] =
+    .error "RTD server lock activity balance underflow" := by rfl
+
+example : checkActivities retainedComInitial
+    #[.removeRtdClassFactory, .removeRtdClassFactory] =
+    .error "RTD class factory activity balance underflow" := by rfl
+
+example : checkActivities retainedComInitial #[.removeRtdServer, .removeRtdServer] =
+    .error "RTD server activity balance underflow" := by rfl
+
+example : checkActivities retainedComInitial #[.unlockRtdServer, .unlockRtdServer] =
+    .error "RTD server lock activity balance underflow" := by rfl
+
+example : checkActivities { rtdClassFactories := 2 }
+    #[.addRtdClassFactory, .removeRtdClassFactory, .removeRtdClassFactory,
+      .removeRtdClassFactory] = .ok () := by rfl
+
+example : checkActivities { rtdClassFactories := 2 }
+    #[.addRtdClassFactory, .removeRtdClassFactory, .removeRtdClassFactory,
+      .removeRtdClassFactory, .removeRtdClassFactory] =
+    .error "RTD class factory activity balance underflow" := by rfl
+
+-- Unordered ownership observations and generation-local rejection stay strict.
+example : checkActivities {} #[.removeRtdClassFactory, .addRtdClassFactory] =
+    .ok () := by rfl
+
+example : checkActivities retainedComInitial #[.removeHandle] =
+    .error "handle activity balance underflow" := by rfl
 
 private def checkEventWithProof (current : WireState) (event : Event) :
     Except String (Subtype fun next => wireRefinement.concreteStep current event next) := do
@@ -492,7 +551,7 @@ private def checkTrace (json : Json) : Except String Unit := do
   let trace ← parseTrace json
   if trace.generation == 0 then
     throw "shutdown trace generation must be non-zero"
-  checkActivities trace.activities
+  checkActivities trace.initial trace.activities
   let initial : WireState := {
     generation := trace.generation
     state := State.opened trace.initial
