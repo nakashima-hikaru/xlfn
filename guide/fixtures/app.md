@@ -1,10 +1,8 @@
 # use xlfn::prelude::*;
-# #[excel_addin(name = "Guide app", id = "guide-app", category = "Guide")]
 # pub struct AppTools;
 # pub struct State { environment: String, version: String }
+# #[excel_addin(name = "Guide app", id = "guide-app", category = "Guide")]
 # impl Addin for AppTools {
-#     type RtdSubscription = ();
-#     type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
 #     type SharedState = State;
 #     type LifecycleState = ();
 #     type Error = XllError;

@@ -7,12 +7,10 @@ macro_rules! env {
     };
 }
 
-#[excel_addin(name = "Macro Hygiene", id = "macro-hygiene")]
 struct HygieneAddin;
 
+#[excel_addin(name = "Macro Hygiene", id = "macro-hygiene")]
 impl Addin for HygieneAddin {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();
     type Error = XllError;

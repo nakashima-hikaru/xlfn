@@ -25,8 +25,8 @@ pub(crate) type PublishGenerationFailure<A> = Box<(
     Option<OpeningGeneration<A>>,
     Box<
         crate::runtime_components::GenerationServices<
-            <A as Addin>::RtdSubscription,
-            <A as Addin>::RtdSources,
+            crate::addin::AddinSubscription<A>,
+            crate::addin::AddinSources<A>,
         >,
     >,
     crate::module_runtime::ModuleEpochLease,
@@ -177,7 +177,10 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
         control: &mut LifecycleAccess<'_, A>,
         generation: crate::generation::RuntimeGeneration,
         services: Box<
-            crate::runtime_components::GenerationServices<A::RtdSubscription, A::RtdSources>,
+            crate::runtime_components::GenerationServices<
+                crate::addin::AddinSubscription<A>,
+                crate::addin::AddinSources<A>,
+            >,
         >,
         module_epoch: crate::module_runtime::ModuleEpochLease,
     ) -> Result<(), PublishGenerationFailure<A>> {

@@ -1,15 +1,15 @@
 error[E0308]: mismatched types
-  --> tests/ui/fail_async/handle_lease_return.rs:26:1
+  --> tests/ui/fail_async/handle_lease_return.rs:24:1
    |
-26 | #[excel_function(name = "TEST.RETURNED.HANDLE.LEASE")]
+24 | #[excel_function(name = "TEST.RETURNED.HANDLE.LEASE")]
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ lifetime mismatch
    |
    = note: expected enum `Result<HandleLease<'generation, Dataset>, XllError>`
               found enum `Result<HandleLease<'_, Dataset>, XllError>`
 note: the anonymous lifetime as defined here...
-  --> tests/ui/fail_async/handle_lease_return.rs:27:82
+  --> tests/ui/fail_async/handle_lease_return.rs:25:82
    |
-27 | async fn returned_handle_lease(dataset: HandleLease<'_, Dataset>) -> HandleLease<'_, Dataset> {
+25 | async fn returned_handle_lease(dataset: HandleLease<'_, Dataset>) -> HandleLease<'_, Dataset> {
    |                                                                                  ^^
 note: ...does not necessarily outlive the lifetime `'generation` as defined here
   --> src/async_udf/task_scope.rs
@@ -19,9 +19,9 @@ note: ...does not necessarily outlive the lifetime `'generation` as defined here
    = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0308]: mismatched types
-  --> tests/ui/fail_async/handle_lease_return.rs:26:1
+  --> tests/ui/fail_async/handle_lease_return.rs:24:1
    |
-26 | #[excel_function(name = "TEST.RETURNED.HANDLE.LEASE")]
+24 | #[excel_function(name = "TEST.RETURNED.HANDLE.LEASE")]
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ lifetime mismatch
    |
    = note: expected enum `Result<HandleLease<'generation, Dataset>, XllError>`
@@ -32,16 +32,16 @@ note: the lifetime `'generation` as defined here...
    |     fn build<'generation>(
    |              ^^^^^^^^^^^
 note: ...does not necessarily outlive the anonymous lifetime as defined here
-  --> tests/ui/fail_async/handle_lease_return.rs:27:82
+  --> tests/ui/fail_async/handle_lease_return.rs:25:82
    |
-27 | async fn returned_handle_lease(dataset: HandleLease<'_, Dataset>) -> HandleLease<'_, Dataset> {
+25 | async fn returned_handle_lease(dataset: HandleLease<'_, Dataset>) -> HandleLease<'_, Dataset> {
    |                                                                                  ^^
    = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: `xlfn::handle::HandleLease<'_, Dataset>` cannot be returned from an asynchronous Excel function
-  --> tests/ui/fail_async/handle_lease_return.rs:27:70
+  --> tests/ui/fail_async/handle_lease_return.rs:25:70
    |
-27 | async fn returned_handle_lease(dataset: HandleLease<'_, Dataset>) -> HandleLease<'_, Dataset> {
+25 | async fn returned_handle_lease(dataset: HandleLease<'_, Dataset>) -> HandleLease<'_, Dataset> {
    |                                                                      ^^^^^^^^^^^^^^^^^^^^^^^^ `xlfn::handle::HandleLease<'_, Dataset>` is not a valid return type for an async UDF
    |
    = help: the trait `IntoExcel` is not implemented for `xlfn::handle::HandleLease<'_, Dataset>`
@@ -64,9 +64,9 @@ note: required by a bound in `xlfn::__private::v1::assert_async_return`
    |                               ^^^^^^^^^^^ required by this bound in `assert_async_return`
 
 error[E0277]: `xlfn::handle::HandleLease<'_, Dataset>` cannot be converted into an Excel return value
-  --> tests/ui/fail_async/handle_lease_return.rs:26:1
+  --> tests/ui/fail_async/handle_lease_return.rs:24:1
    |
-26 | #[excel_function(name = "TEST.RETURNED.HANDLE.LEASE")]
+24 | #[excel_function(name = "TEST.RETURNED.HANDLE.LEASE")]
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `xlfn::handle::HandleLease<'_, Dataset>` does not implement `IntoExcel`
    |
    = help: the trait `IntoExcel` is not implemented for `xlfn::handle::HandleLease<'_, Dataset>`

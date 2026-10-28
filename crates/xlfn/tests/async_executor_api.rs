@@ -44,8 +44,7 @@ impl AsyncExecutor for ApplicationExecutor {
 struct ApplicationAddin;
 
 impl Addin for ApplicationAddin {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
+    xlfn::__private::v1::__xlfn_addin_rtd_types!(@default);
     type SharedState = ();
     type LifecycleState = String;
     type Error = XllError;

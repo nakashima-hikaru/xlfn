@@ -2,16 +2,14 @@ use xlfn::prelude::*;
 
 struct State;
 
+struct OwnedMatrixAsyncAddin;
+
 #[excel_addin(
     name = "Owned Matrix Async",
     id = "owned-matrix-async",
     category = "Test"
 )]
-struct OwnedMatrixAsyncAddin;
-
 impl Addin for OwnedMatrixAsyncAddin {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;

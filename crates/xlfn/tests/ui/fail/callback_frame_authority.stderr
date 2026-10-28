@@ -6,7 +6,7 @@ error[E0624]: associated function `new` is private
   |
  ::: src/__private.rs
   |
-  | /         pub(crate) fn new<A: Addin<RtdSubscription = E, RtdSources = C>>(
+  | /         pub(crate) fn new<A: Addin + crate::addin::AddinRtdTypes<Subscription = E, Sources = C>>(
   | |             call: &'call crate::runtime::CallGuard<'_, A>,
   | |             scope: &'call CallScope<'call>,
   | |             callbacks: &'call crate::host_callback::HostCallbackSession,

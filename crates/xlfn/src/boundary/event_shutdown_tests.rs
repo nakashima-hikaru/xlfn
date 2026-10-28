@@ -18,7 +18,9 @@ use xlfn_sys::{
 struct EventAddin;
 
 impl crate::Addin for EventAddin {
+    #[cfg(feature = "rtd")]
     type RtdSubscription = ();
+    #[cfg(feature = "rtd")]
     type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();

@@ -2,12 +2,10 @@ use xlfn::prelude::*;
 use xlfn::value::IntoExcel;
 
 #[allow(non_camel_case_types, reason = "exercise a reserved Rust keyword as an add-in name")]
-#[excel_addin]
 struct r#gen;
 
+#[excel_addin]
 impl Addin for r#gen {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();
     type Error = XllError;

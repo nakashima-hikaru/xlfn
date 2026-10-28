@@ -2,12 +2,10 @@ use xlfn::prelude::*;
 
 struct State;
 
-#[excel_addin(name = "Excel Enum Compile Test", id = "excel-enum-compile-test", category = "Test")]
 struct TestAddin;
 
+#[excel_addin(name = "Excel Enum Compile Test", id = "excel-enum-compile-test", category = "Test")]
 impl Addin for TestAddin {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;

@@ -1,11 +1,9 @@
 use xlfn::prelude::*;
 
-#[excel_addin(name = "Scoped Context", id = "scoped-context", category = "Test")]
 struct TestAddin;
 
+#[excel_addin(name = "Scoped Context", id = "scoped-context", category = "Test")]
 impl Addin for TestAddin {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();
     type Error = XllError;

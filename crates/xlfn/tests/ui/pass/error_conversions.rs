@@ -1,15 +1,13 @@
 use xlfn::prelude::*;
 
+struct ErrorConversions;
+
 #[excel_addin(
     name = "Error Conversions",
     id = "error-conversions",
     category = "Test"
 )]
-struct ErrorConversions;
-
 impl Addin for ErrorConversions {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();
     type Error = XllError;

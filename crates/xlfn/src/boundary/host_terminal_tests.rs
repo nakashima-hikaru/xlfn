@@ -28,7 +28,9 @@ thread_local! {
 }
 
 impl Addin for ReloadAddin {
+    #[cfg(feature = "rtd")]
     type RtdSubscription = ();
+    #[cfg(feature = "rtd")]
     type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();

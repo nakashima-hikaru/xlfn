@@ -1,0 +1,9 @@
+    Checking xlfn-rtd-api-fixture v0.1.0 (/var/folders/4r/_58mxm_d5zl1kvcz77gl1njr0000gn/T/xlfn-rtd-api-consumer-4woo55kb)
+error: could not compile `xlfn-rtd-api-fixture` (lib) due to 1 previous error
+
+error[E0599]: no method named `rtd` found for reference `&xlfn::OpenContext<BasicAddin>` in the current scope
+  --> src/lib.rs:13:25
+   |
+13 |         let _ = context.rtd();
+   |                         ^^^ method not found in `&xlfn::OpenContext<BasicAddin>`
+

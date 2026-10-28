@@ -1112,7 +1112,9 @@ mod tests {
             }
         }
         impl Addin for ReentrantAddin {
+            #[cfg(feature = "rtd")]
             type RtdSubscription = ();
+            #[cfg(feature = "rtd")]
             type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
             type SharedState = ();
             type LifecycleState = ();
@@ -1293,7 +1295,9 @@ mod tests {
     fn miri_primitive_root_survives_the_physical_unload_release_path() {
         struct EmptyPhysicalAddin;
         impl Addin for EmptyPhysicalAddin {
+            #[cfg(feature = "rtd")]
             type RtdSubscription = ();
+            #[cfg(feature = "rtd")]
             type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
             type SharedState = ();
             type LifecycleState = ();
@@ -1989,7 +1993,9 @@ mod tests {
 
         struct LayerTestAddin;
         impl Addin for LayerTestAddin {
+            #[cfg(feature = "rtd")]
             type RtdSubscription = ();
+            #[cfg(feature = "rtd")]
             type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
             type SharedState = ();
             type LifecycleState = ();

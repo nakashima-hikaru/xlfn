@@ -12,13 +12,13 @@ pub struct State {
     core: Box<FixtureCore>,
 }
 
+pub struct FixtureAddin;
+
 #[excel_addin(
     name = "Excel XLL Framework E2E Fixture",
     id = "xlfn-e2e-fixture",
     category = "Framework E2E"
 )]
-pub struct FixtureAddin;
-
 impl Addin for FixtureAddin {
     type RtdSubscription = RtdFixtureSubscription;
     type RtdSources = (RtdFixtureSource,);

@@ -38,13 +38,13 @@ pub struct State {
     rtd_shared: Arc<RtdShared>,
 }
 
+pub struct BenchAddin;
+
 #[excel_addin(
     name = "xlfn Excel Comparison",
     id = "xlfn-excel-comparison",
     category = "Bench"
 )]
-pub struct BenchAddin;
-
 impl Addin for BenchAddin {
     type RtdSubscription = rtd_source::BenchSubscription;
     type RtdSources = (BenchRtdSource,);

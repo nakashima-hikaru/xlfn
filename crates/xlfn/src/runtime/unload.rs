@@ -64,7 +64,9 @@ mod tests {
     struct DistinctQuiesceAddin;
 
     impl Addin for DistinctQuiesceAddin {
+        #[cfg(feature = "rtd")]
         type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
         type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = usize;
         type LifecycleState = usize;

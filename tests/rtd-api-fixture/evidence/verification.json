@@ -1,0 +1,493 @@
+{
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1",
+  "environment": {
+    "CARGO_INCREMENTAL": "0"
+  },
+  "source_sha256": {
+    "Cargo.toml": "ed444b49ef377d623e481acff6c955ccbabd5136f79e5f6c89588652f45d586e",
+    "Cargo.lock": "0923b5ac9cc1fa1d2803a9994c5b532fdf6706494f6a75c18b0abded5686ea1f",
+    "check.py": "c3a3460a16ee33a9828e504e3d51acb69ad6ea508ab16dc3105ae2cef97975a1",
+    "src/lib.rs": "2c99895de2aed3c2f1f3e2cdcd3a3b49d1dc562618a4cf988565f5c1e9523f1f",
+    "cases/configured.rs": "4ba6e69d402808022ce3d2599a95e79d870372caa4feb9f78a74c311e79f24db",
+    "cases/rtd_exports.rs": "a46854c5fac481ca452510d262c6db1821326c98d564eafac0d4b92253d7a2c6",
+    "cases/rtd_access.rs": "dcb07822f76373936bc942cc43db2dc0f457c99a8120afdc9fa87bfff16cb4ab"
+  },
+  "checks": [
+    {
+      "case": "basic",
+      "consumer_features": [],
+      "expected_success": true,
+      "exit_code": 0,
+      "passed": true,
+      "command": [
+        "cargo",
+        "check",
+        "--manifest-path",
+        "/var/folders/4r/_58mxm_d5zl1kvcz77gl1njr0000gn/T/xlfn-rtd-api-consumer-4woo55kb/Cargo.toml",
+        "--lib",
+        "--no-default-features",
+        "--locked",
+        "--offline",
+        "--target-dir",
+        "/private/tmp/xlfn-rtd-api-consumer-target",
+        "--message-format=json"
+      ],
+      "diagnostics": [],
+      "log": "basic-core.log",
+      "log_sha256": "b90db8a93d184cea74ce7d1cc7bf8a5901ad927d7408230faac5a1e1837f2c9f"
+    },
+    {
+      "case": "basic",
+      "consumer_features": [
+        "objects"
+      ],
+      "expected_success": true,
+      "exit_code": 0,
+      "passed": true,
+      "command": [
+        "cargo",
+        "check",
+        "--manifest-path",
+        "/var/folders/4r/_58mxm_d5zl1kvcz77gl1njr0000gn/T/xlfn-rtd-api-consumer-4woo55kb/Cargo.toml",
+        "--lib",
+        "--no-default-features",
+        "--locked",
+        "--offline",
+        "--target-dir",
+        "/private/tmp/xlfn-rtd-api-consumer-target",
+        "--message-format=json",
+        "--features",
+        "objects"
+      ],
+      "diagnostics": [],
+      "log": "basic-objects.log",
+      "log_sha256": "b10f58fe63bdea27aa3dd5cec8196344eebf3c5c73fbe85d7688be171db6bb81"
+    },
+    {
+      "case": "basic",
+      "consumer_features": [
+        "streaming"
+      ],
+      "expected_success": true,
+      "exit_code": 0,
+      "passed": true,
+      "command": [
+        "cargo",
+        "check",
+        "--manifest-path",
+        "/var/folders/4r/_58mxm_d5zl1kvcz77gl1njr0000gn/T/xlfn-rtd-api-consumer-4woo55kb/Cargo.toml",
+        "--lib",
+        "--no-default-features",
+        "--locked",
+        "--offline",
+        "--target-dir",
+        "/private/tmp/xlfn-rtd-api-consumer-target",
+        "--message-format=json",
+        "--features",
+        "streaming"
+      ],
+      "diagnostics": [],
+      "log": "basic-streaming.log",
+      "log_sha256": "5d14917b955baaf4691839c0997afdf29d566cc1e934ade0fcdce76b64ef2fb6"
+    },
+    {
+      "case": "basic",
+      "consumer_features": [
+        "objects",
+        "streaming"
+      ],
+      "expected_success": true,
+      "exit_code": 0,
+      "passed": true,
+      "command": [
+        "cargo",
+        "check",
+        "--manifest-path",
+        "/var/folders/4r/_58mxm_d5zl1kvcz77gl1njr0000gn/T/xlfn-rtd-api-consumer-4woo55kb/Cargo.toml",
+        "--lib",
+        "--no-default-features",
+        "--locked",
+        "--offline",
+        "--target-dir",
+        "/private/tmp/xlfn-rtd-api-consumer-target",
+        "--message-format=json",
+        "--features",
+        "objects,streaming"
+      ],
+      "diagnostics": [],
+      "log": "basic-objects-streaming.log",
+      "log_sha256": "7f78afbc66e269cda204a5e731c2f5015fa952e97f7942bdbe85d4487e7bf421"
+    },
+    {
+      "case": "configured",
+      "consumer_features": [],
+      "expected_success": false,
+      "exit_code": 101,
+      "passed": true,
+      "command": [
+        "cargo",
+        "check",
+        "--manifest-path",
+        "/var/folders/4r/_58mxm_d5zl1kvcz77gl1njr0000gn/T/xlfn-rtd-api-consumer-4woo55kb/Cargo.toml",
+        "--lib",
+        "--no-default-features",
+        "--locked",
+        "--offline",
+        "--target-dir",
+        "/private/tmp/xlfn-rtd-api-consumer-target",
+        "--message-format=json"
+      ],
+      "diagnostics": [
+        {
+          "message": "RTD configuration requires the xlfn `rtd` feature",
+          "code": null
+        }
+      ],
+      "log": "configured-core.log",
+      "log_sha256": "634df986ea40d9e41fcb2a02339e02d7feb4dc1afde4c40c0eaf7ee3c7473bef"
+    },
+    {
+      "case": "configured",
+      "consumer_features": [
+        "objects"
+      ],
+      "expected_success": false,
+      "exit_code": 101,
+      "passed": true,
+      "command": [
+        "cargo",
+        "check",
+        "--manifest-path",
+        "/var/folders/4r/_58mxm_d5zl1kvcz77gl1njr0000gn/T/xlfn-rtd-api-consumer-4woo55kb/Cargo.toml",
+        "--lib",
+        "--no-default-features",
+        "--locked",
+        "--offline",
+        "--target-dir",
+        "/private/tmp/xlfn-rtd-api-consumer-target",
+        "--message-format=json",
+        "--features",
+        "objects"
+      ],
+      "diagnostics": [
+        {
+          "message": "RTD configuration requires the xlfn `rtd` feature",
+          "code": null
+        }
+      ],
+      "log": "configured-objects.log",
+      "log_sha256": "634df986ea40d9e41fcb2a02339e02d7feb4dc1afde4c40c0eaf7ee3c7473bef"
+    },
+    {
+      "case": "configured",
+      "consumer_features": [
+        "streaming"
+      ],
+      "expected_success": true,
+      "exit_code": 0,
+      "passed": true,
+      "command": [
+        "cargo",
+        "check",
+        "--manifest-path",
+        "/var/folders/4r/_58mxm_d5zl1kvcz77gl1njr0000gn/T/xlfn-rtd-api-consumer-4woo55kb/Cargo.toml",
+        "--lib",
+        "--no-default-features",
+        "--locked",
+        "--offline",
+        "--target-dir",
+        "/private/tmp/xlfn-rtd-api-consumer-target",
+        "--message-format=json",
+        "--features",
+        "streaming"
+      ],
+      "diagnostics": [],
+      "log": "configured-streaming.log",
+      "log_sha256": "4549e368961cad6e762903dfd73bac1a7d71d8c2348c0f82ab16a9594ec25323"
+    },
+    {
+      "case": "configured",
+      "consumer_features": [
+        "objects",
+        "streaming"
+      ],
+      "expected_success": true,
+      "exit_code": 0,
+      "passed": true,
+      "command": [
+        "cargo",
+        "check",
+        "--manifest-path",
+        "/var/folders/4r/_58mxm_d5zl1kvcz77gl1njr0000gn/T/xlfn-rtd-api-consumer-4woo55kb/Cargo.toml",
+        "--lib",
+        "--no-default-features",
+        "--locked",
+        "--offline",
+        "--target-dir",
+        "/private/tmp/xlfn-rtd-api-consumer-target",
+        "--message-format=json",
+        "--features",
+        "objects,streaming"
+      ],
+      "diagnostics": [],
+      "log": "configured-objects-streaming.log",
+      "log_sha256": "cc1ff221269a2183aa9addbcfa7fa7d1c74eae87620929e3921cb4254244ee41"
+    },
+    {
+      "case": "rtd_exports",
+      "consumer_features": [],
+      "expected_success": false,
+      "exit_code": 101,
+      "passed": true,
+      "command": [
+        "cargo",
+        "check",
+        "--manifest-path",
+        "/var/folders/4r/_58mxm_d5zl1kvcz77gl1njr0000gn/T/xlfn-rtd-api-consumer-4woo55kb/Cargo.toml",
+        "--lib",
+        "--no-default-features",
+        "--locked",
+        "--offline",
+        "--target-dir",
+        "/private/tmp/xlfn-rtd-api-consumer-target",
+        "--message-format=json"
+      ],
+      "diagnostics": [
+        {
+          "message": "unresolved import `framework::IntoRtdSubscription`",
+          "code": "E0432"
+        },
+        {
+          "message": "struct `DynamicRtdSources` is private",
+          "code": "E0603"
+        },
+        {
+          "message": "trait `RtdSourceCatalog` is private",
+          "code": "E0603"
+        },
+        {
+          "message": "trait `RtdSubscription` is private",
+          "code": "E0603"
+        }
+      ],
+      "log": "rtd_exports-core.log",
+      "log_sha256": "420b7413450e886ed61d07e5ad939ca952389da3b475d49659518179b9a64a6a"
+    },
+    {
+      "case": "rtd_exports",
+      "consumer_features": [
+        "objects"
+      ],
+      "expected_success": false,
+      "exit_code": 101,
+      "passed": true,
+      "command": [
+        "cargo",
+        "check",
+        "--manifest-path",
+        "/var/folders/4r/_58mxm_d5zl1kvcz77gl1njr0000gn/T/xlfn-rtd-api-consumer-4woo55kb/Cargo.toml",
+        "--lib",
+        "--no-default-features",
+        "--locked",
+        "--offline",
+        "--target-dir",
+        "/private/tmp/xlfn-rtd-api-consumer-target",
+        "--message-format=json",
+        "--features",
+        "objects"
+      ],
+      "diagnostics": [
+        {
+          "message": "struct `DynamicRtdSources` is private",
+          "code": "E0603"
+        },
+        {
+          "message": "trait `IntoRtdSubscription` is private",
+          "code": "E0603"
+        },
+        {
+          "message": "trait `RtdSourceCatalog` is private",
+          "code": "E0603"
+        },
+        {
+          "message": "trait `RtdSubscription` is private",
+          "code": "E0603"
+        }
+      ],
+      "log": "rtd_exports-objects.log",
+      "log_sha256": "6486c971ffc8552206adb3950c10f6f667ff236a1a5074cd301183705db7469e"
+    },
+    {
+      "case": "rtd_exports",
+      "consumer_features": [
+        "streaming"
+      ],
+      "expected_success": true,
+      "exit_code": 0,
+      "passed": true,
+      "command": [
+        "cargo",
+        "check",
+        "--manifest-path",
+        "/var/folders/4r/_58mxm_d5zl1kvcz77gl1njr0000gn/T/xlfn-rtd-api-consumer-4woo55kb/Cargo.toml",
+        "--lib",
+        "--no-default-features",
+        "--locked",
+        "--offline",
+        "--target-dir",
+        "/private/tmp/xlfn-rtd-api-consumer-target",
+        "--message-format=json",
+        "--features",
+        "streaming"
+      ],
+      "diagnostics": [],
+      "log": "rtd_exports-streaming.log",
+      "log_sha256": "5d14917b955baaf4691839c0997afdf29d566cc1e934ade0fcdce76b64ef2fb6"
+    },
+    {
+      "case": "rtd_exports",
+      "consumer_features": [
+        "objects",
+        "streaming"
+      ],
+      "expected_success": true,
+      "exit_code": 0,
+      "passed": true,
+      "command": [
+        "cargo",
+        "check",
+        "--manifest-path",
+        "/var/folders/4r/_58mxm_d5zl1kvcz77gl1njr0000gn/T/xlfn-rtd-api-consumer-4woo55kb/Cargo.toml",
+        "--lib",
+        "--no-default-features",
+        "--locked",
+        "--offline",
+        "--target-dir",
+        "/private/tmp/xlfn-rtd-api-consumer-target",
+        "--message-format=json",
+        "--features",
+        "objects,streaming"
+      ],
+      "diagnostics": [],
+      "log": "rtd_exports-objects-streaming.log",
+      "log_sha256": "0ff558bcd42c96e39f0140446583dc062e5ef3e4694710efad016df9cf251305"
+    },
+    {
+      "case": "rtd_access",
+      "consumer_features": [],
+      "expected_success": false,
+      "exit_code": 101,
+      "passed": true,
+      "command": [
+        "cargo",
+        "check",
+        "--manifest-path",
+        "/var/folders/4r/_58mxm_d5zl1kvcz77gl1njr0000gn/T/xlfn-rtd-api-consumer-4woo55kb/Cargo.toml",
+        "--lib",
+        "--no-default-features",
+        "--locked",
+        "--offline",
+        "--target-dir",
+        "/private/tmp/xlfn-rtd-api-consumer-target",
+        "--message-format=json"
+      ],
+      "diagnostics": [
+        {
+          "message": "no method named `rtd` found for reference `&xlfn::OpenContext<BasicAddin>` in the current scope",
+          "code": "E0599"
+        }
+      ],
+      "log": "rtd_access-core.log",
+      "log_sha256": "8fb3b6288ef4d36405f622c2d37f2b3101c9bcebc903df84e0501b5abbac437f"
+    },
+    {
+      "case": "rtd_access",
+      "consumer_features": [
+        "objects"
+      ],
+      "expected_success": false,
+      "exit_code": 101,
+      "passed": true,
+      "command": [
+        "cargo",
+        "check",
+        "--manifest-path",
+        "/var/folders/4r/_58mxm_d5zl1kvcz77gl1njr0000gn/T/xlfn-rtd-api-consumer-4woo55kb/Cargo.toml",
+        "--lib",
+        "--no-default-features",
+        "--locked",
+        "--offline",
+        "--target-dir",
+        "/private/tmp/xlfn-rtd-api-consumer-target",
+        "--message-format=json",
+        "--features",
+        "objects"
+      ],
+      "diagnostics": [
+        {
+          "message": "no method named `rtd` found for reference `&xlfn::OpenContext<BasicAddin>` in the current scope",
+          "code": "E0599"
+        }
+      ],
+      "log": "rtd_access-objects.log",
+      "log_sha256": "8fb3b6288ef4d36405f622c2d37f2b3101c9bcebc903df84e0501b5abbac437f"
+    },
+    {
+      "case": "rtd_access",
+      "consumer_features": [
+        "streaming"
+      ],
+      "expected_success": true,
+      "exit_code": 0,
+      "passed": true,
+      "command": [
+        "cargo",
+        "check",
+        "--manifest-path",
+        "/var/folders/4r/_58mxm_d5zl1kvcz77gl1njr0000gn/T/xlfn-rtd-api-consumer-4woo55kb/Cargo.toml",
+        "--lib",
+        "--no-default-features",
+        "--locked",
+        "--offline",
+        "--target-dir",
+        "/private/tmp/xlfn-rtd-api-consumer-target",
+        "--message-format=json",
+        "--features",
+        "streaming"
+      ],
+      "diagnostics": [],
+      "log": "rtd_access-streaming.log",
+      "log_sha256": "58760880be6cd2b826fa49eb01bd465a2f224393fc6f6034c7b8dfe95c0fdef4"
+    },
+    {
+      "case": "rtd_access",
+      "consumer_features": [
+        "objects",
+        "streaming"
+      ],
+      "expected_success": true,
+      "exit_code": 0,
+      "passed": true,
+      "command": [
+        "cargo",
+        "check",
+        "--manifest-path",
+        "/var/folders/4r/_58mxm_d5zl1kvcz77gl1njr0000gn/T/xlfn-rtd-api-consumer-4woo55kb/Cargo.toml",
+        "--lib",
+        "--no-default-features",
+        "--locked",
+        "--offline",
+        "--target-dir",
+        "/private/tmp/xlfn-rtd-api-consumer-target",
+        "--message-format=json",
+        "--features",
+        "objects,streaming"
+      ],
+      "diagnostics": [],
+      "log": "rtd_access-objects-streaming.log",
+      "log_sha256": "7f78afbc66e269cda204a5e731c2f5015fa952e97f7942bdbe85d4487e7bf421"
+    }
+  ],
+  "passed": true,
+  "passed_checks": 16
+}

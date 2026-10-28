@@ -129,7 +129,10 @@ mod source_catalog;
 #[cfg(any(feature = "rtd", feature = "handles"))]
 mod subscription;
 mod subscription_owner;
+#[cfg(feature = "rtd")]
 pub use source_catalog::{DynamicRtdSources, RtdSourceCatalog};
+#[cfg(not(feature = "rtd"))]
+pub(crate) use source_catalog::{DynamicRtdSources, RtdSourceCatalog};
 mod utf16;
 /// Safe worksheet input views, owned values, and explicit output shapes.
 pub mod value;
@@ -158,6 +161,11 @@ pub use error::{
 #[cfg(feature = "rtd")]
 pub use rtd::RtdCallContext;
 pub use shutdown::{CleanupIssueKind, CleanupReporter};
+#[cfg(all(not(feature = "rtd"), any(test, feature = "handles")))]
+pub(crate) use subscription_owner::IntoRtdSubscription;
+#[cfg(not(feature = "rtd"))]
+pub(crate) use subscription_owner::RtdSubscription;
+#[cfg(feature = "rtd")]
 pub use subscription_owner::{IntoRtdSubscription, RtdSubscription};
 
 mod ingress;

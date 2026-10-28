@@ -11,11 +11,9 @@ function. To keep calculations easily testable without mock Excel environments,
 keep the core computation in pure Rust functions:
 
 ```rust
-# #[xlfn::excel_addin(name = "Guide example", id = "guide-example", category = "Guide")]
 # pub struct GuideAddin;
+# #[xlfn::excel_addin(name = "Guide example", id = "guide-example", category = "Guide")]
 # impl xlfn::Addin for GuideAddin {
-#     type RtdSubscription = ();
-#     type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
 #     type SharedState = ();
 #     type LifecycleState = ();
 #     type Error = xlfn::XllError;

@@ -60,11 +60,10 @@ Replace `src/lib.rs` with:
 ```rust
 use xlfn::prelude::*;
 
-#[excel_addin(name = "Example Add-in", id = "example-addin", category = "Example")]
 pub struct ExampleAddin;
 
+#[excel_addin(name = "Example Add-in", id = "example-addin", category = "Example")]
 impl Addin for ExampleAddin {
-    type RtdSubscription = ();
     type SharedState = ();
     type LifecycleState = ();
     type Error = XllError;
@@ -81,6 +80,10 @@ pub fn add(left: f64, right: f64) -> f64 {
     left + right
 }
 ```
+
+Place `#[excel_addin]` once on the `Addin` implementation at crate root.
+An add-in without RTD sources needs no RTD type declarations, including when
+the `rtd` feature is enabled or `handles` uses the internal RTD transport.
 
 Build the XLL:
 

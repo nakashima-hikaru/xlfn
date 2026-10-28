@@ -1,5 +1,4 @@
 # use xlfn::prelude::*;
-# #[excel_addin(name = "Guide service", id = "guide-service", category = "Guide")]
 # pub struct ServiceAddin;
 # pub struct Client;
 # impl Client {
@@ -8,9 +7,8 @@
 # }
 # fn main() {}
 # pub struct State { client: Client, adapter: Client }
+# #[excel_addin(name = "Guide service", id = "guide-service", category = "Guide")]
 # impl Addin for ServiceAddin {
-#     type RtdSubscription = ();
-#     type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
 #     type SharedState = State;
 #     type LifecycleState = ();
 #     type Error = XllError;

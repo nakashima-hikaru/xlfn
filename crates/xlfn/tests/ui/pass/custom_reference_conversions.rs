@@ -2,12 +2,10 @@ use xlfn::prelude::*;
 use xlfn::reference::{ExcelReference, FromExcelReference, ReferenceArea, SheetId};
 use xlfn::value::XlValueRef;
 
-#[excel_addin(name = "Reference Conversion", id = "reference-conversion", category = "Test")]
 struct App;
 
+#[excel_addin(name = "Reference Conversion", id = "reference-conversion", category = "Test")]
 impl Addin for App {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();
     type Error = XllError;

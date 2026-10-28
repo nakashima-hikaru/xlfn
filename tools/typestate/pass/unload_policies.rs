@@ -3,8 +3,7 @@ use super::{LogicalUnload, PhysicalUnload, Runtime, UnloadPolicy};
 
 struct PhysicalAddin;
 impl crate::Addin for PhysicalAddin {
-    type RtdSubscription = ();
-    type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
+    crate::__private::v1::__xlfn_addin_rtd_types!(@default);
     type SharedState = ();
     type LifecycleState = ();
     type Error = crate::XllError;

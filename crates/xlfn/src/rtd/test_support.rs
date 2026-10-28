@@ -78,7 +78,9 @@ impl TestNotifierState {
 /// Typed add-in fixture for tests that install concrete subscription owners.
 pub(crate) struct TestRtdAddin<E>(std::marker::PhantomData<fn() -> E>);
 impl<E: crate::RtdSubscription> crate::Addin for TestRtdAddin<E> {
+    #[cfg(feature = "rtd")]
     type RtdSubscription = E;
+    #[cfg(feature = "rtd")]
     type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();

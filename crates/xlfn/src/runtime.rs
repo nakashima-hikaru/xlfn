@@ -379,7 +379,10 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
         opening: OpeningTxn<'runtime, A, Begun<A>>,
         state: A::SharedState,
         layers: A::Layers,
-        sources: crate::subscription::SourceArena<A::RtdSubscription, A::RtdSources>,
+        sources: crate::subscription::SourceArena<
+            crate::addin::AddinSubscription<A>,
+            crate::addin::AddinSources<A>,
+        >,
     ) -> OpeningTxn<'runtime, A, LifecycleInstalled<A>>
     where
         A::LifecycleState: Default,
@@ -421,7 +424,10 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
         state: A::SharedState,
         lifecycle_state: A::LifecycleState,
         layers: A::Layers,
-        sources: crate::subscription::SourceArena<A::RtdSubscription, A::RtdSources>,
+        sources: crate::subscription::SourceArena<
+            crate::addin::AddinSubscription<A>,
+            crate::addin::AddinSources<A>,
+        >,
     ) -> OpeningTxn<'runtime, A, LifecycleInstalled<A>> {
         let access = self
             .bind_addin_lifecycle()
@@ -681,7 +687,9 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
     #[cfg(any(feature = "bench-internals", all(test, feature = "rtd")))]
     pub(crate) fn with_generation_services<R>(
         &self,
-        operation: impl FnOnce(&GenerationServices<A::RtdSubscription, A::RtdSources>) -> R,
+        operation: impl FnOnce(
+            &GenerationServices<crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>>,
+        ) -> R,
     ) -> XllResult<R> {
         self.lifecycle
             .with_generation_services(operation)
@@ -741,7 +749,10 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
     pub(crate) fn with_subscriptions<R>(
         &self,
         operation: impl FnOnce(
-            &crate::subscription::SubscriptionRuntime<A::RtdSubscription, A::RtdSources>,
+            &crate::subscription::SubscriptionRuntime<
+                crate::addin::AddinSubscription<A>,
+                crate::addin::AddinSources<A>,
+            >,
         ) -> R,
     ) -> XllResult<R> {
         self.with_generation_services(|services| {
@@ -920,7 +931,11 @@ impl<A: crate::Addin> CallGuard<'_, A> {
     #[must_use]
     pub(crate) fn rtd_call_access(
         &self,
-    ) -> crate::rtd::RtdGenerationAccess<'_, A::RtdSubscription, A::RtdSources> {
+    ) -> crate::rtd::RtdGenerationAccess<
+        '_,
+        crate::addin::AddinSubscription<A>,
+        crate::addin::AddinSources<A>,
+    > {
         self.admission.services().rtd_call_access()
     }
 
@@ -944,7 +959,9 @@ pub(crate) mod tests {
     struct TestU32Addin;
 
     impl crate::Addin for TestU32Addin {
+        #[cfg(feature = "rtd")]
         type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
         type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = u32;
         type LifecycleState = ();
@@ -1051,7 +1068,9 @@ pub(crate) mod tests {
     }
 
     impl crate::Addin for DrainPreparationAddin {
+        #[cfg(feature = "rtd")]
         type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
         type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = RetainedState;
         type LifecycleState = RetainedState;
@@ -1881,7 +1900,9 @@ pub(crate) mod tests {
         }
         struct ProbeAddin;
         impl crate::Addin for ProbeAddin {
+            #[cfg(feature = "rtd")]
             type RtdSubscription = ();
+            #[cfg(feature = "rtd")]
             type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
             type SharedState = ProbeState;
             type LifecycleState = ProbeState;
@@ -1987,7 +2008,9 @@ pub(crate) mod tests {
 
     #[cfg(feature = "async")]
     impl crate::Addin for AsyncStopFailureAddin {
+        #[cfg(feature = "rtd")]
         type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
         type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = RetainedState;
         type LifecycleState = RetainedState;
@@ -2055,7 +2078,9 @@ pub(crate) mod tests {
 
     #[cfg(feature = "async-builtin")]
     impl crate::Addin for AsyncCalculationAddin {
+        #[cfg(feature = "rtd")]
         type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
         type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = ();

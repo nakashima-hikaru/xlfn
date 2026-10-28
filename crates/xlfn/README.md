@@ -4,4 +4,8 @@ The `xlfn` crate provides the framework for building native Rust Microsoft Excel
 
 Most add-in projects should depend on this crate. It exposes typed worksheet functions, execution-aware contexts, value conversion, handles, native async UDFs, RTD subscriptions, and packaging integration through the `cargo-xlfn` CLI.
 
+Place `#[excel_addin]` on the crate-root `impl Addin for MyAddin`. Add-ins without
+RTD sources omit RTD associated types; the macro supplies the framework's empty
+configuration when needed.
+
 To learn more, read the [User Guide](https://nakashima-hikaru.github.io/xlfn/). See the [API docs](https://docs.rs/xlfn) or [crates.io](https://crates.io/crates/xlfn) for the published crate.

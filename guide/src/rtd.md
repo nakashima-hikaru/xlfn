@@ -76,6 +76,18 @@ Keep the source handle in add-in state and subscribe from a main-thread function
 {{#include ../../examples/rtd-source/src/lib.rs}}
 ```
 
+Place `#[excel_addin]` on the `Addin` implementation and declare both
+`RtdSubscription` and `RtdSources` there when registering sources. The macro
+checks the feature enabled in `xlfn` itself; do not put a consumer-side
+`#[cfg(feature = "rtd")]` on these associated types. Explicit RTD configuration
+requires enabling the dependency's `rtd` feature.
+
+Add-ins with no RTD sources omit both declarations. This remains true when
+`rtd` is enabled for the framework, including through Cargo feature unification.
+The macro supplies empty types as needed. With `rtd` disabled, the RTD
+associated types and public RTD API are absent. `handles` alone uses an internal
+RTD transport and requires no application RTD configuration.
+
 The source handle is the opaque RTD identity. Clone a handle when multiple
 functions should refer to the same source; registering a new source creates a
 distinct identity even when its value is equivalent. The runtime owns the
@@ -351,7 +363,8 @@ The macro generates direct enum construction and delegates each barrier to
 its concrete variant. A custom conversion must implement the unsafe
 `IntoRtdSubscription<E>` contract; an ordinary `From` implementation is not
 sufficient because it could lose or retain a separate sink owner, or panic
-before the barrier. `()` selects an add-in with no registered RTD sources.
+before the barrier. Omit both RTD associated types for an add-in with no
+registered RTD sources.
 
 An enum occupies enough space for its largest variant. This affects server
 entries and the cleanup queue, so keep unusually large producer data in the

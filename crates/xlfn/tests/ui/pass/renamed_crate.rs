@@ -14,12 +14,10 @@ pub struct CustomHandle {
     pub id: u64,
 }
 
-#[excel_addin(crate = "my_xlfn")]
 pub struct RenamedAddin;
 
+#[excel_addin(crate = "my_xlfn")]
 impl Addin for RenamedAddin {
-    type RtdSubscription = ();
-    type RtdSources = my_xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();
     type Error = XllError;

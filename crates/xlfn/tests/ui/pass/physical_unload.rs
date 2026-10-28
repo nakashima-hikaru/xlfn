@@ -2,17 +2,15 @@ use xlfn::prelude::*;
 
 struct State;
 
+struct PhysicalUnloadAddin;
+
 #[excel_addin(
     name = "Physical Unload",
     id = "physical-unload",
     category = "Test",
     physical_unload
 )]
-struct PhysicalUnloadAddin;
-
 impl Addin for PhysicalUnloadAddin {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;

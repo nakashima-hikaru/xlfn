@@ -242,7 +242,9 @@ fn external_executor_polls_native_async_task_and_delivers_exactly_once() {
     }
     struct NativeAddin;
     impl crate::Addin for NativeAddin {
+        #[cfg(feature = "rtd")]
         type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
         type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = ();

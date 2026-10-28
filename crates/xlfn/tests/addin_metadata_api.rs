@@ -4,14 +4,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use xlfn::prelude::*;
 use xlfn_sys::{XLOPER12, XLTYPE_ERR, XLTYPE_STR};
 
-#[excel_addin(name = "仕様🚀")]
 struct MetadataAddin;
 
 static OPEN_CALLS: AtomicUsize = AtomicUsize::new(0);
 
+#[excel_addin(name = "仕様🚀")]
 impl Addin for MetadataAddin {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();
     type Layers = ();

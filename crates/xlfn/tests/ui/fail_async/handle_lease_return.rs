@@ -2,12 +2,10 @@ use xlfn::prelude::*;
 
 struct State;
 
-#[excel_addin(name = "Returned Handle Lease", id = "returned-handle-lease", category = "Test")]
 struct ReturnedHandleLeaseAddin;
 
+#[excel_addin(name = "Returned Handle Lease", id = "returned-handle-lease", category = "Test")]
 impl Addin for ReturnedHandleLeaseAddin {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;

@@ -5,11 +5,9 @@
 #     fn total(&self) -> f64 { 42.0 }
 #     fn evaluate(&self, time: f64) -> XllResult<f64> { Ok(self.total() * time) }
 # }
-# #[excel_addin(name = "Guide dataset", id = "guide-dataset", category = "Guide")]
 # pub struct DatasetAddin;
+# #[excel_addin(name = "Guide dataset", id = "guide-dataset", category = "Guide")]
 # impl Addin for DatasetAddin {
-#     type RtdSubscription = ();
-#     type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
 #     type SharedState = ();
 #     type LifecycleState = ();
 #     type Error = XllError;

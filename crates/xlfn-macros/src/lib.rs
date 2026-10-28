@@ -77,11 +77,26 @@ pub fn excel_function(attributes: TokenStream, item: TokenStream) -> TokenStream
 
 /// Defines the one Add-in for an XLL crate and emits its lifecycle exports.
 ///
-/// This attribute must be placed on a struct declared at the crate root.
+/// Place this attribute on `impl Addin for MyAddin` at the crate root. The
+/// macro supplies empty RTD settings when they are omitted. An RTD add-in
+/// declares both `RtdSubscription` and `RtdSources` inside that implementation;
+/// the framework checks its own `rtd` feature before including those types.
+///
+/// The struct form is also accepted and only emits exports; its separate
+/// `Addin` implementation supplies every feature-required associated type.
+/// Apply the attribute once, on either the implementation or the struct.
 #[proc_macro_attribute]
 pub fn excel_addin(attributes: TokenStream, item: TokenStream) -> TokenStream {
-    let item = parse_macro_input!(item as ItemStruct);
-    match expand_excel_addin(attributes.into(), item) {
+    let item = parse_macro_input!(item as syn::Item);
+    let result = match item {
+        syn::Item::Struct(item) => expand_excel_addin(attributes.into(), item),
+        syn::Item::Impl(item) => expand_excel_addin_impl(attributes.into(), item),
+        item => Err(syn::Error::new_spanned(
+            item,
+            "expected an `impl Addin for MyAddin` block or an add-in struct",
+        )),
+    };
+    match result {
         Ok(tokens) => tokens.into(),
         Err(error) => error.into_compile_error().into(),
     }
@@ -127,6 +142,124 @@ fn expand_excel_function(
     let spec = model::analyze(parsed)?;
     let plan = model::lower(spec);
     Ok(codegen::emit_excel_function(&plan))
+}
+
+fn expand_excel_addin_impl(
+    attributes: proc_macro2::TokenStream,
+    mut implementation: syn::ItemImpl,
+) -> syn::Result<proc_macro2::TokenStream> {
+    implementation.modifiers.require_empty()?;
+    let Some((path, _)) = &implementation.trait_ else {
+        return Err(syn::Error::new_spanned(
+            &implementation,
+            "expected an `impl Addin for MyAddin` block",
+        ));
+    };
+    if path
+        .segments
+        .last()
+        .is_none_or(|segment| segment.ident != "Addin")
+    {
+        return Err(syn::Error::new_spanned(
+            path,
+            "expected an `Addin` implementation",
+        ));
+    }
+    if !implementation.generics.params.is_empty() || implementation.generics.where_clause.is_some()
+    {
+        return Err(syn::Error::new_spanned(
+            &implementation.generics,
+            "Add-in implementations cannot be generic",
+        ));
+    }
+    let syn::Type::Path(self_type) = implementation.self_ty.as_ref() else {
+        return Err(syn::Error::new_spanned(
+            &implementation.self_ty,
+            "the add-in type must be a simple type name declared at the crate root",
+        ));
+    };
+    let Some(ident) = self_type
+        .path
+        .get_ident()
+        .filter(|_| self_type.qself.is_none())
+    else {
+        return Err(syn::Error::new_spanned(
+            self_type,
+            "the add-in type must be a simple type name declared at the crate root",
+        ));
+    };
+    let ident = ident.clone();
+    let mut subscription = None;
+    let mut sources = None;
+    let mut ordinary_items = Vec::with_capacity(implementation.items.len());
+    for item in implementation.items {
+        if let syn::ImplItem::Type(associated) = &item {
+            let slot = match associated.ident.to_string().as_str() {
+                "RtdSubscription" => Some(&mut subscription),
+                "RtdSources" => Some(&mut sources),
+                _ => None,
+            };
+            if let Some(slot) = slot {
+                associated.modifiers.require_empty()?;
+                if !associated.generics.params.is_empty()
+                    || associated.generics.where_clause.is_some()
+                {
+                    return Err(syn::Error::new_spanned(
+                        associated,
+                        "RTD associated types cannot be generic",
+                    ));
+                }
+                if slot.is_some() {
+                    return Err(syn::Error::new_spanned(
+                        associated,
+                        "duplicate RTD associated type",
+                    ));
+                }
+                if associated.attrs.iter().any(|attribute| {
+                    attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr")
+                }) {
+                    return Err(syn::Error::new_spanned(
+                        associated,
+                        "RTD associated types are gated by the framework; remove their cfg attributes",
+                    ));
+                }
+                *slot = Some(associated.ty.clone());
+                continue;
+            }
+        }
+        ordinary_items.push(item);
+    }
+    let options = parse_addin_options(attributes.clone())?;
+    let krate = resolve_crate_path(options.krate.as_ref());
+    let rtd_types: syn::ImplItem = match (subscription, sources) {
+        (None, None) => syn::parse_quote! {
+            #krate::__private::v1::__xlfn_addin_rtd_types!(@default);
+        },
+        (Some(subscription), Some(sources)) => syn::parse_quote! {
+            #krate::__private::v1::__xlfn_addin_rtd_types!(
+                @configured subscription: #subscription, sources: #sources
+            );
+        },
+        _ => {
+            return Err(syn::Error::new_spanned(
+                &implementation.self_ty,
+                "declare both `RtdSubscription` and `RtdSources`, or omit both for an add-in without RTD sources",
+            ));
+        }
+    };
+    ordinary_items.push(rtd_types);
+    implementation.items = ordinary_items;
+
+    // Use the same metadata/ABI emitter for both supported declaration forms.
+    // The temporary struct is replaced before anything reaches the consumer.
+    let impl_attributes = &implementation.attrs;
+    let declaration: ItemStruct = syn::parse_quote! {
+        #(#impl_attributes)*
+        struct #ident;
+    };
+    let mut expanded: syn::File = syn::parse2(expand_excel_addin(attributes, declaration)?)?;
+    expanded.items[0] = syn::Item::Impl(implementation);
+    Ok(quote!(#expanded))
 }
 
 fn expand_excel_addin(
@@ -1825,6 +1958,102 @@ mod tests {
         assert!(!expanded.contains("fn __xlfn_calculation_canceled"));
         assert!(expanded.contains("LogicalUnload"));
         assert!(!expanded.contains("PhysicalUnload"));
+    }
+
+    #[test]
+    fn addin_implementation_defaults_rtd_without_consumer_feature_cfg() {
+        let implementation = syn::parse2(quote! {
+            #[cfg(target_os = "windows")]
+            impl xlfn::Addin for BasicAddin {
+                type SharedState = ();
+                fn open(context: &OpenContext<Self>) -> OpenResult<Self> { todo!() }
+            }
+        })
+        .unwrap();
+        let expanded = expand_excel_addin_impl(quote!(name = "Basic"), implementation).unwrap();
+        let file: syn::File = syn::parse2(expanded.clone()).unwrap();
+        let syn::Item::Impl(implementation) = &file.items[0] else {
+            panic!("the declaration must remain an impl, not the temporary metadata struct");
+        };
+        assert!(
+            implementation.items.iter().any(
+                |item| matches!(item, syn::ImplItem::Fn(method) if method.sig.ident == "open")
+            )
+        );
+        let text = expanded.to_string();
+        assert!(text.contains("__xlfn_addin_rtd_types ! (@ default)"));
+        assert!(text.contains("fn xlAutoOpen"));
+        assert!(!text.contains("feature = \"rtd\""));
+        assert!(!text.contains("struct BasicAddin"));
+        assert!(text.contains("cfg (target_os = \"windows\")"));
+    }
+
+    #[test]
+    fn addin_implementation_forwards_explicit_rtd_types_through_framework_helper() {
+        let implementation = syn::parse2(quote! {
+            impl Addin for FeedAddin {
+                type RtdSubscription = FeedSubscription;
+                type RtdSources = (FeedSource,);
+                type SharedState = State;
+            }
+        })
+        .unwrap();
+        let expanded =
+            expand_excel_addin_impl(quote!(crate = custom_xlfn), implementation).unwrap();
+        let file: syn::File = syn::parse2(expanded.clone()).unwrap();
+        let syn::Item::Impl(implementation) = &file.items[0] else {
+            unreachable!()
+        };
+        assert_eq!(implementation.items.len(), 2);
+        assert!(
+            matches!(&implementation.items[0], syn::ImplItem::Type(ty) if ty.ident == "SharedState")
+        );
+        let text = expanded.to_string();
+        assert!(text.contains("custom_xlfn :: __private :: v1 :: __xlfn_addin_rtd_types"));
+        assert!(
+            text.contains(
+                "@ configured subscription : FeedSubscription , sources : (FeedSource ,)"
+            )
+        );
+        assert!(!text.contains("type RtdSubscription"));
+        assert!(!text.contains("type RtdSources"));
+    }
+
+    #[test]
+    fn addin_implementation_rejects_partial_or_conditional_rtd_configuration() {
+        for implementation in [
+            quote! { impl Addin for Feed { type RtdSubscription = Subscription; } },
+            quote! { impl Addin for Feed { type RtdSources = (Source,); } },
+        ] {
+            let error = expand_excel_addin_impl(quote!(), syn::parse2(implementation).unwrap())
+                .unwrap_err();
+            assert!(error.to_string().contains("declare both"));
+        }
+        let conditional = quote! {
+            impl Addin for Feed {
+                #[cfg(feature = "rtd")]
+                type RtdSubscription = Subscription;
+                type RtdSources = (Source,);
+            }
+        };
+        let error =
+            expand_excel_addin_impl(quote!(), syn::parse2(conditional).unwrap()).unwrap_err();
+        assert!(error.to_string().contains("remove their cfg attributes"));
+    }
+
+    #[test]
+    fn addin_implementation_rejects_generic_or_qualified_self_types() {
+        for implementation in [
+            quote! { impl<T> Addin for Feed<T> {} },
+            quote! { impl Addin for module::Feed {} },
+            quote! { impl Addin for Feed<u32> {} },
+            quote! { impl Feed {} },
+            quote! { impl AnotherTrait for Feed {} },
+        ] {
+            assert!(
+                expand_excel_addin_impl(quote!(), syn::parse2(implementation).unwrap()).is_err()
+            );
+        }
     }
 
     #[test]

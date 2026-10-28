@@ -21,8 +21,8 @@ type OpenCoreParts<A> = (
     crate::module_runtime::ModuleOpening,
     Option<
         crate::runtime_components::GenerationServiceInputs<
-            <A as crate::Addin>::RtdSubscription,
-            <A as crate::Addin>::RtdSources,
+            crate::addin::AddinSubscription<A>,
+            crate::addin::AddinSources<A>,
         >,
     >,
 );
@@ -32,7 +32,10 @@ pub(crate) struct OpenCore<A: crate::Addin> {
     attempt_id: OpenAttemptId,
     module_opening: crate::module_runtime::ModuleOpening,
     service_inputs: Option<
-        crate::runtime_components::GenerationServiceInputs<A::RtdSubscription, A::RtdSources>,
+        crate::runtime_components::GenerationServiceInputs<
+            crate::addin::AddinSubscription<A>,
+            crate::addin::AddinSources<A>,
+        >,
     >,
 }
 
@@ -55,8 +58,8 @@ impl<A: crate::Addin> OpenCore<A> {
     fn install_service_inputs(
         &mut self,
         inputs: crate::runtime_components::GenerationServiceInputs<
-            A::RtdSubscription,
-            A::RtdSources,
+            crate::addin::AddinSubscription<A>,
+            crate::addin::AddinSources<A>,
         >,
     ) {
         if self.service_inputs.replace(inputs).is_some() {
@@ -497,8 +500,8 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Initializing<A>> {
         self,
         lifecycle: A::LifecycleState,
         service_inputs: crate::runtime_components::GenerationServiceInputs<
-            A::RtdSubscription,
-            A::RtdSources,
+            crate::addin::AddinSubscription<A>,
+            crate::addin::AddinSources<A>,
         >,
     ) -> OpeningTxn<'runtime, A, Initialized<A>> {
         let mut transaction = self;
@@ -745,8 +748,8 @@ fn publish_generation<A: crate::Addin>(
     control: &mut LifecycleAccess<'_, A>,
     module_opening: &mut Option<crate::module_runtime::ModuleOpening>,
     service_inputs: crate::runtime_components::GenerationServiceInputs<
-        A::RtdSubscription,
-        A::RtdSources,
+        crate::addin::AddinSubscription<A>,
+        crate::addin::AddinSources<A>,
     >,
 ) -> XllResult<()> {
     let generation = attempt_id.into_runtime_generation();

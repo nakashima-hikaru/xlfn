@@ -12,12 +12,10 @@ fn array() -> xlfn::XllResult<XlArrayOutput> {
 
 struct State;
 
-#[excel_addin(name = "Output Array", id = "output-array", category = "Test")]
 struct OutputArrayAddin;
 
+#[excel_addin(name = "Output Array", id = "output-array", category = "Test")]
 impl Addin for OutputArrayAddin {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;

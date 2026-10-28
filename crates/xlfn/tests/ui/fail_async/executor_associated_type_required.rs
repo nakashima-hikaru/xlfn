@@ -3,8 +3,7 @@ use xlfn::prelude::*;
 struct MissingExecutor;
 
 impl Addin for MissingExecutor {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
+    xlfn::__private::v1::__xlfn_addin_rtd_types!(@default);
     type SharedState = ();
     type LifecycleState = ();
     type Error = XllError;

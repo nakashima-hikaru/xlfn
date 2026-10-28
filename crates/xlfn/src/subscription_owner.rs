@@ -66,12 +66,21 @@ unsafe impl RtdSubscription for () {
 /// If conversion unwinds, all of those sink users must have stopped before
 /// control leaves the conversion. Merely dropping `self` is insufficient
 /// unless its destructor establishes that same barrier.
+#[cfg(any(test, feature = "rtd", feature = "handles"))]
+#[cfg_attr(
+    not(feature = "rtd"),
+    allow(
+        unreachable_pub,
+        reason = "Conversion is internal to handle transport and protocol tests without the RTD API"
+    )
+)]
 pub unsafe trait IntoRtdSubscription<E: RtdSubscription>: RtdSubscription {
     /// Moves every subscription obligation into the returned common owner.
     fn into_rtd_subscription(self) -> E;
 }
 
 // SAFETY: identity moves the exact owner without invoking any user code.
+#[cfg(any(test, feature = "rtd", feature = "handles"))]
 unsafe impl<T: RtdSubscription> IntoRtdSubscription<T> for T {
     fn into_rtd_subscription(self) -> T {
         self
@@ -95,6 +104,7 @@ unsafe impl<T: RtdSubscription> IntoRtdSubscription<T> for T {
 /// }
 /// ```
 #[macro_export]
+#[cfg(any(test, feature = "rtd"))]
 macro_rules! rtd_subscriptions {
     (
         $(#[$attribute:meta])*

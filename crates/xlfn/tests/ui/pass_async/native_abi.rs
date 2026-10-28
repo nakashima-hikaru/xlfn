@@ -1,11 +1,9 @@
 use xlfn::prelude::*;
 
-#[excel_addin(name = "Native ABI", id = "native-abi-async", category = "Test")]
 struct TestAddin;
 
+#[excel_addin(name = "Native ABI", id = "native-abi-async", category = "Test")]
 impl Addin for TestAddin {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();
     type Error = XllError;

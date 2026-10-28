@@ -2,12 +2,10 @@ use xlfn::prelude::*;
 
 struct State;
 
-#[excel_addin(name = "Case Test", id = "case-test", category = "Test")]
 struct CaseAddin;
 
+#[excel_addin(name = "Case Test", id = "case-test", category = "Test")]
 impl Addin for CaseAddin {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;

@@ -3,12 +3,10 @@ use xlfn::value::XlArrayRef;
 
 type BorrowedArray<'call> = XlArrayRef<'call>;
 
-#[excel_addin(name = "Borrowed Async Alias", id = "borrowed-async-alias", category = "Test")]
 struct BorrowedAsyncAliasAddin;
 
+#[excel_addin(name = "Borrowed Async Alias", id = "borrowed-async-alias", category = "Test")]
 impl Addin for BorrowedAsyncAliasAddin {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();
     type Error = XllError;

@@ -2,12 +2,10 @@ use xlfn::prelude::*;
 
 struct State;
 
-#[excel_addin(name = "Borrowed Async Inputs", id = "borrowed-async-inputs", category = "Test")]
 struct BorrowedAsyncInputsAddin;
 
+#[excel_addin(name = "Borrowed Async Inputs", id = "borrowed-async-inputs", category = "Test")]
 impl Addin for BorrowedAsyncInputsAddin {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;

@@ -14,16 +14,14 @@ example. It keeps its shared state immutable:
 ```rust
 use xlfn::prelude::*;
 
-#[excel_addin(name = "Service Add-in", id = "service-addin", category = "Service")]
 pub struct ServiceAddin;
 
 pub struct State {
     scale: f64,
 }
 
+#[excel_addin(name = "Service Add-in", id = "service-addin", category = "Service")]
 impl Addin for ServiceAddin {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;
@@ -46,9 +44,10 @@ fn scale(
 # fn main() {}
 ```
 
-Use the `Addin` implementation on the type declared by your project's
-`#[excel_addin]` attribute. Each successful open creates a fresh state instance;
-worksheet calls borrow that instance until the generation is closed.
+Apply `#[excel_addin]` once to the crate-root `Addin` implementation. The
+macro emits the XLL lifecycle exports for its ordinary struct type. Each
+successful open creates a fresh state instance; worksheet calls borrow that
+instance until the generation is closed.
 
 `OpenResult<Self>` uses the state, layers, and error types declared by this
 implementation. `type Error` implements `IntoXllError`; `XllError` is a convenient starting

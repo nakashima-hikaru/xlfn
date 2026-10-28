@@ -1,0 +1,17 @@
+[package]
+name = "xlfn-rtd-api-fixture"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+publish = false
+
+[workspace]
+
+[features]
+default = []
+# Deliberately differ from xlfn's feature names.
+streaming = ["framework/rtd"]
+objects = ["framework/handles"]
+
+[dependencies]
+framework = { package = "xlfn", path = "../../crates/xlfn" }

@@ -39,12 +39,10 @@ Replace `src/lib.rs` with:
 ```rust
 use xlfn::prelude::*;
 
-#[excel_addin(name = "Hello Xll", id = "hello-xlfn", category = "Hello")]
 pub struct HelloXll;
 
+#[excel_addin(name = "Hello Xll", id = "hello-xlfn", category = "Hello")]
 impl Addin for HelloXll {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();
     type Error = XllError;
@@ -68,6 +66,12 @@ pub fn add(left: f64, right: f64) -> f64 {
 - `HelloXll` defines the add-in entry point and its metadata.
 - `#[excel_function]` exposes the `add` function as `=HELLO.ADD` in Excel.
 - The `thread_safe` flag enables concurrent evaluation on Excel's worker threads.
+
+Place `#[excel_addin]` once on the `Addin` implementation at crate root. The
+struct itself needs no attribute. Add-ins without RTD sources omit
+`RtdSubscription` and `RtdSources`, including when another dependency enables
+the framework's `rtd` feature. Enabling `handles` also needs no RTD settings;
+its internal transport is managed by the framework.
 
 ## 3. Build the XLL
 

@@ -3,12 +3,10 @@ use xlfn::prelude::*;
 
 struct State;
 
-#[excel_addin(name = "Numeric Return", id = "numeric-return", category = "Test")]
 struct NumericReturnAddin;
 
+#[excel_addin(name = "Numeric Return", id = "numeric-return", category = "Test")]
 impl Addin for NumericReturnAddin {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;

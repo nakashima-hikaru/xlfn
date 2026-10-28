@@ -39,9 +39,9 @@ pub struct State {
     metrics: RtdSourceHandle<MetricSource>,
 }
 
-#[excel_addin(name = "RTD Source Example", id = "rtd-source", category = "Examples")]
 pub struct RtdSourceExample;
 
+#[excel_addin(name = "RTD Source Example", id = "rtd-source", category = "Examples")]
 impl Addin for RtdSourceExample {
     type RtdSubscription = <MetricSource as xlfn::rtd::RtdSource>::Subscription;
     type RtdSources = (MetricSource,);

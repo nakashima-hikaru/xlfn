@@ -73,7 +73,10 @@ pub struct OpenContext<A: Addin = ()> {
     module_directory: PathBuf,
     build_info: BuildInfo,
     #[cfg(feature = "rtd")]
-    source_registration: crate::subscription::SourceRegistration<A::RtdSubscription, A::RtdSources>,
+    source_registration: crate::subscription::SourceRegistration<
+        crate::addin::AddinSubscription<A>,
+        crate::addin::AddinSources<A>,
+    >,
 }
 
 impl<A: Addin> std::fmt::Debug for OpenContext<A> {
@@ -134,7 +137,9 @@ impl<A: Addin> OpenContext<A> {
     /// Provides the RTD source-registration capability for this open.
     #[cfg(feature = "rtd")]
     #[must_use]
-    pub fn rtd(&self) -> RtdOpenContext<'_, A::RtdSubscription, A::RtdSources> {
+    pub fn rtd(
+        &self,
+    ) -> RtdOpenContext<'_, crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>> {
         RtdOpenContext {
             registration: &self.source_registration,
         }
@@ -142,7 +147,10 @@ impl<A: Addin> OpenContext<A> {
 
     pub(crate) fn into_service_inputs(
         self,
-    ) -> crate::runtime_components::GenerationServiceInputs<A::RtdSubscription, A::RtdSources> {
+    ) -> crate::runtime_components::GenerationServiceInputs<
+        crate::addin::AddinSubscription<A>,
+        crate::addin::AddinSources<A>,
+    > {
         #[cfg(feature = "rtd")]
         {
             crate::runtime_components::GenerationServiceInputs::with_rtd_sources(
@@ -611,11 +619,18 @@ impl<S, L, U, E> Opened<S, L, U, E> {
 /// [`Self::quiesce`] must synchronously stop every execution source before
 /// best-effort lifecycle cleanup begins. The shared state is dropped only
 /// after quiescence; lifecycle cleanup receives the dedicated lifecycle state.
+///
+/// Apply [`crate::excel_addin`] to the implementation to generate the exports
+/// and supply empty RTD configuration when these types are omitted. The RTD
+/// associated types exist only with the `rtd` feature; add-ins using sources
+/// specify both concrete types in that attributed implementation.
 pub trait Addin: Sized + Send + Sync + 'static {
     /// Concrete subscription owner, or `()` when this add-in has no RTD sources.
     /// Use [`crate::rtd_subscriptions!`] to combine multiple source subscription types.
+    #[cfg(feature = "rtd")]
     type RtdSubscription: crate::RtdSubscription;
     /// Concrete source catalog, or DynamicRtdSources for incremental registration.
+    #[cfg(feature = "rtd")]
     type RtdSources: crate::RtdSourceCatalog<Self::RtdSubscription>;
     /// State shared by worksheet calls in this open generation.
     type SharedState: Send + Sync + 'static;
@@ -677,6 +692,29 @@ pub trait Addin: Sized + Send + Sync + 'static {
     fn cleanup(_lifecycle: &mut Self::LifecycleState, _reporter: &mut CleanupReporter<'_>) {}
 }
 
+/// Resolves the framework's transport types without requiring RTD configuration
+/// from add-ins when that public capability is disabled.
+#[doc(hidden)]
+pub trait AddinRtdTypes {
+    type Subscription: crate::subscription_owner::RtdSubscription;
+    type Sources: crate::source_catalog::RtdSourceCatalog<Self::Subscription>;
+}
+
+#[cfg(feature = "rtd")]
+impl<A: Addin> AddinRtdTypes for A {
+    type Subscription = A::RtdSubscription;
+    type Sources = A::RtdSources;
+}
+
+#[cfg(not(feature = "rtd"))]
+impl<A: Addin> AddinRtdTypes for A {
+    type Subscription = ();
+    type Sources = crate::source_catalog::DynamicRtdSources<()>;
+}
+
+pub(crate) type AddinSubscription<A> = <A as AddinRtdTypes>::Subscription;
+pub(crate) type AddinSources<A> = <A as AddinRtdTypes>::Sources;
+
 /// Explicit unsafe contract for Add-ins that permit physical DLL unload.
 ///
 /// The framework can account for its own callbacks, executors, and service
@@ -721,7 +759,9 @@ pub unsafe trait PhysicallyUnloadableAddin: Addin {
 }
 
 impl Addin for () {
+    #[cfg(feature = "rtd")]
     type RtdSubscription = ();
+    #[cfg(feature = "rtd")]
     type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();
@@ -863,7 +903,7 @@ pub struct MainThreadContext<'call, A: Addin> {
     state: &'call A::SharedState,
     diagnostics: &'call crate::diagnostics::DiagnosticHistory,
     #[cfg(feature = "rtd")]
-    rtd: RtdCallContext<'call, A::RtdSubscription, A::RtdSources>,
+    rtd: RtdCallContext<'call, crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>>,
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
@@ -970,7 +1010,11 @@ impl<A: Addin> MainThreadContext<'_, A> {
     pub(crate) fn new<'ctx>(
         state: &'ctx A::SharedState,
         diagnostics: &'ctx crate::diagnostics::DiagnosticHistory,
-        rtd: RtdCallContext<'ctx, A::RtdSubscription, A::RtdSources>,
+        rtd: RtdCallContext<
+            'ctx,
+            crate::addin::AddinSubscription<A>,
+            crate::addin::AddinSources<A>,
+        >,
     ) -> MainThreadContext<'ctx, A> {
         MainThreadContext {
             state,
@@ -1012,7 +1056,10 @@ impl<'call, A: Addin> MainThreadContext<'call, A> {
     #[cfg(feature = "rtd")]
     #[must_use]
     /// Returns the RTD subscription capability for this invocation.
-    pub fn rtd(&self) -> RtdCallContext<'call, A::RtdSubscription, A::RtdSources> {
+    pub fn rtd(
+        &self,
+    ) -> RtdCallContext<'call, crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>>
+    {
         self.rtd
     }
 }
@@ -1048,6 +1095,32 @@ impl<A: Addin> std::fmt::Debug for DiagnosticsSetup<'_, A> {
             .field("context", &self.context)
             .finish()
     }
+}
+
+// Expansion takes place in the consumer's impl, but feature selection takes
+// place in xlfn. Consumer feature names need not match this dependency's flags.
+#[cfg(feature = "rtd")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __xlfn_addin_rtd_types {
+    (@default) => {
+        type RtdSubscription = ();
+        type RtdSources = ();
+    };
+    (@configured subscription: $subscription:ty, sources: $sources:ty) => {
+        type RtdSubscription = $subscription;
+        type RtdSources = $sources;
+    };
+}
+
+#[cfg(not(feature = "rtd"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __xlfn_addin_rtd_types {
+    (@default) => {};
+    (@configured subscription: $subscription:ty, sources: $sources:ty) => {
+        compile_error!("RTD configuration requires the xlfn `rtd` feature");
+    };
 }
 
 #[cfg(test)]
@@ -1093,7 +1166,9 @@ mod tests {
     struct NonSendLifecycleAddin;
 
     impl crate::Addin for NonSendLifecycleAddin {
+        #[cfg(feature = "rtd")]
         type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
         type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = Rc<()>;
@@ -1115,7 +1190,9 @@ mod tests {
     struct TestU32Addin;
 
     impl crate::Addin for TestU32Addin {
+        #[cfg(feature = "rtd")]
         type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
         type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = u32;
         type LifecycleState = ();
@@ -1411,7 +1488,9 @@ mod tests {
 
     #[cfg(feature = "async")]
     impl crate::Addin for AsyncTestAddin {
+        #[cfg(feature = "rtd")]
         type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
         type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = u32;
         type LifecycleState = ();

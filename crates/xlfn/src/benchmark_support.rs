@@ -127,7 +127,9 @@ pub use sync_boundary::{SyncBenchKind, SyncBoundaryWorkerPool};
 pub(super) struct BenchmarkAddin;
 
 impl crate::Addin for BenchmarkAddin {
+    #[cfg(feature = "rtd")]
     type RtdSubscription = ();
+    #[cfg(feature = "rtd")]
     type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();

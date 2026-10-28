@@ -64,7 +64,9 @@ impl Drop for LifecycleState {
 struct ResidentEventAddin;
 
 impl Addin for ResidentEventAddin {
+    #[cfg(feature = "rtd")]
     type RtdSubscription = ();
+    #[cfg(feature = "rtd")]
     type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = SharedState;
     type LifecycleState = LifecycleState;

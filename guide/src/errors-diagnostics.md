@@ -150,9 +150,8 @@ A basic production setup installs the built-in bounded file sink during `Addin::
 
 ```rust
 {{#include ../fixtures/diagnostics.md}}
+#[excel_addin(name = "Guide diagnostics", id = "guide-diagnostics", category = "Guide")]
 impl Addin for AppTools {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;
@@ -212,9 +211,8 @@ Install the custom sink during `Addin::open`:
 # use xlfn::diagnostics::{DiagnosticEvent, DiagnosticSink};
 # struct Telemetry;
 # impl DiagnosticSink for Telemetry { fn report(&self, _: &DiagnosticEvent<'_>) {} }
+#[excel_addin(name = "Guide diagnostics", id = "guide-diagnostics", category = "Guide")]
 impl Addin for AppTools {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;

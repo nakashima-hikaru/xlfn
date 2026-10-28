@@ -1,11 +1,9 @@
 use xlfn::prelude::*;
 
-#[excel_addin(name = "Callback Authority", id = "callback-authority")]
 struct CallbackAddin;
 
+#[excel_addin(name = "Callback Authority", id = "callback-authority")]
 impl Addin for CallbackAddin {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();
     type Layers = ();

@@ -772,7 +772,9 @@ mod numeric_launch_tests {
     struct LaunchTestAddin;
 
     impl crate::Addin for LaunchTestAddin {
+        #[cfg(feature = "rtd")]
         type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
         type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = ();

@@ -1,11 +1,9 @@
 use xlfn::prelude::*;
 
-#[excel_addin(name = "Argument Defaults", id = "argument-defaults", category = "Test")]
 struct TestAddin;
 
+#[excel_addin(name = "Argument Defaults", id = "argument-defaults", category = "Test")]
 impl Addin for TestAddin {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();
     type Error = XllError;

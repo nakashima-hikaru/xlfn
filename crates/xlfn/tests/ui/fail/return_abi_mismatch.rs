@@ -2,12 +2,10 @@ use xlfn::prelude::*;
 
 struct State;
 
-#[excel_addin(name = "Return Mismatch", id = "return-mismatch", category = "Test")]
 struct ReturnMismatchAddin;
 
+#[excel_addin(name = "Return Mismatch", id = "return-mismatch", category = "Test")]
 impl Addin for ReturnMismatchAddin {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;

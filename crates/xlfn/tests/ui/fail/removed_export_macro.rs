@@ -5,8 +5,7 @@ struct State;
 struct OldExportAddin;
 
 impl Addin for OldExportAddin {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
+    xlfn::__private::v1::__xlfn_addin_rtd_types!(@default);
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;

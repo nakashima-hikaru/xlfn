@@ -2,16 +2,14 @@ use xlfn::prelude::*;
 
 struct State;
 
+struct AsyncTestAddin;
+
 #[excel_addin(
     name = "Async Compile Test",
     id = "async-compile-test",
     category = "Test"
 )]
-struct AsyncTestAddin;
-
 impl Addin for AsyncTestAddin {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;

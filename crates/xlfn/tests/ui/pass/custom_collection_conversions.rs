@@ -4,16 +4,14 @@ use xlfn::value::{
     XlValueRef, convert,
 };
 
+struct CollectionConversionAddin;
+
 #[excel_addin(
     name = "Collection Conversion",
     id = "collection-conversion",
     category = "Test"
 )]
-struct CollectionConversionAddin;
-
 impl Addin for CollectionConversionAddin {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();
     type Error = XllError;

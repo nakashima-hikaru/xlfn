@@ -2,12 +2,10 @@ use xlfn::prelude::*;
 
 pub struct State;
 
-#[excel_addin(name = "Compile Test", id = "compile-test", category = "Test")]
 pub struct TestAddin;
 
+#[excel_addin(name = "Compile Test", id = "compile-test", category = "Test")]
 impl Addin for TestAddin {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;

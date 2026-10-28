@@ -1,11 +1,9 @@
 use xlfn::prelude::*;
 
-#[excel_addin(name = "Context Async", id = "context-async", category = "Test")]
 struct TestAddin;
 
+#[excel_addin(name = "Context Async", id = "context-async", category = "Test")]
 impl Addin for TestAddin {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();
     type Error = XllError;

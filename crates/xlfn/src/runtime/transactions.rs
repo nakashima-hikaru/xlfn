@@ -49,9 +49,10 @@ where
         return Err(transaction.failure(error));
     }
     #[cfg(all(windows, any(feature = "rtd", feature = "handles")))]
-    if let Err(error) =
-        crate::excel_rtd::register_server_type::<A::RtdSubscription, A::RtdSources>()
-    {
+    if let Err(error) = crate::excel_rtd::register_server_type::<
+        crate::addin::AddinSubscription<A>,
+        crate::addin::AddinSources<A>,
+    >() {
         return Err(transaction.failure(error));
     }
     let prepare = || crate::registration::preflight_registration(descriptors);

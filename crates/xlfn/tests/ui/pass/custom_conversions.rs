@@ -5,12 +5,10 @@ use xlfn::value::{
 
 struct State;
 
-#[excel_addin(name = "Custom Conversion", id = "custom-conversion", category = "Test")]
 struct CustomConversionAddin;
 
+#[excel_addin(name = "Custom Conversion", id = "custom-conversion", category = "Test")]
 impl Addin for CustomConversionAddin {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;

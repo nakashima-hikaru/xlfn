@@ -5,12 +5,10 @@ use xlfn::reference::ExcelReference;
 
 pub struct ExampleState;
 
-#[excel_addin(name = "Example Add-in", id = "example-addin", category = "Example")]
 pub struct ExampleAddin;
 
+#[excel_addin(name = "Example Add-in", id = "example-addin", category = "Example")]
 impl Addin for ExampleAddin {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ExampleState;
     type LifecycleState = ();
     type Error = XllError;

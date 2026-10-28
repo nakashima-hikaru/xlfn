@@ -143,7 +143,9 @@ mod tests {
     struct LayersPanic;
 
     impl Addin for LayersPanic {
+        #[cfg(feature = "rtd")]
         type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
         type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = ();
@@ -262,7 +264,9 @@ mod tests {
     struct ReloadFailure;
 
     impl Addin for ReloadFailure {
+        #[cfg(feature = "rtd")]
         type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
         type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = ();
@@ -312,7 +316,9 @@ mod tests {
     }
 
     impl Addin for RetryClose {
+        #[cfg(feature = "rtd")]
         type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
         type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = RetryState;
@@ -380,7 +386,9 @@ mod tests {
     }
 
     impl Addin for CleanupPanic {
+        #[cfg(feature = "rtd")]
         type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
         type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = DropObserved;
@@ -445,7 +453,9 @@ mod tests {
     struct WrongThreadRemoval;
 
     impl Addin for WrongThreadRemoval {
+        #[cfg(feature = "rtd")]
         type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
         type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = DropObserved;
@@ -520,7 +530,9 @@ mod tests {
     struct QuiesceFailure;
 
     impl Addin for QuiesceFailure {
+        #[cfg(feature = "rtd")]
         type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
         type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = DropObserved;
@@ -655,7 +667,9 @@ mod tests {
     struct CleanClose;
 
     impl Addin for CleanClose {
+        #[cfg(feature = "rtd")]
         type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
         type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = ();
@@ -680,7 +694,9 @@ mod tests {
     struct InitializationFailure<const PANIC: bool>;
 
     impl<const PANIC: bool> Addin for InitializationFailure<PANIC> {
+        #[cfg(feature = "rtd")]
         type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
         type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = ();
@@ -895,7 +911,9 @@ mod tests {
         struct TraceCleanup;
 
         impl Addin for TraceCleanup {
+            #[cfg(feature = "rtd")]
             type RtdSubscription = TraceSubscription;
+            #[cfg(feature = "rtd")]
             type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
             type SharedState = ();
             type LifecycleState = ();
@@ -1523,7 +1541,9 @@ mod tests {
     struct AlwaysFailClose;
 
     impl Addin for AlwaysFailClose {
+        #[cfg(feature = "rtd")]
         type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
         type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = ();
@@ -1739,7 +1759,9 @@ mod tests {
         struct AsyncCloseAddin;
 
         impl Addin for AsyncCloseAddin {
+            #[cfg(feature = "rtd")]
             type RtdSubscription = ();
+            #[cfg(feature = "rtd")]
             type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
             type SharedState = ();
             type LifecycleState = ();
@@ -1890,7 +1912,9 @@ mod tests {
         impl crate::handle::ExcelHandleObject for OrderedHandle {}
 
         impl Addin for OrderedClose {
+            #[cfg(feature = "rtd")]
             type RtdSubscription = OrderedSubscription;
+            #[cfg(feature = "rtd")]
             type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
             type SharedState = ();
             type LifecycleState = OrderedState;
@@ -2000,7 +2024,9 @@ mod tests {
     struct StagedRaceAddin;
 
     impl Addin for StagedRaceAddin {
+        #[cfg(feature = "rtd")]
         type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
         type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = StagedRaceState;
@@ -2110,7 +2136,9 @@ mod tests {
     struct PanicLayersAddin;
 
     impl Addin for PanicLayersAddin {
+        #[cfg(feature = "rtd")]
         type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
         type RtdSources = crate::DynamicRtdSources<Self::RtdSubscription>;
         type SharedState = ();
         type LifecycleState = PanicLayersState;

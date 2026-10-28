@@ -2,12 +2,10 @@
 
 use xlfn::prelude::*;
 
-#[excel_addin(name = "Opaque body", id = "opaque-body")]
 struct App;
 
+#[excel_addin(name = "Opaque body", id = "opaque-body")]
 impl Addin for App {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = ();
     type LifecycleState = ();
     type Error = XllError;

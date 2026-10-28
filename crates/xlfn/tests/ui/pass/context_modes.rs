@@ -1,12 +1,10 @@
 use xlfn::prelude::*;
 use xlfn::{MacroSheetContext, MainThreadContext, ThreadSafeContext};
 
-#[excel_addin(name = "Context Modes", id = "context-modes", category = "Test")]
 pub struct TestAddin;
 
+#[excel_addin(name = "Context Modes", id = "context-modes", category = "Test")]
 impl Addin for TestAddin {
-    type RtdSubscription = ();
-    type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;
     type SharedState = i32;
     type LifecycleState = ();
     type Error = XllError;
