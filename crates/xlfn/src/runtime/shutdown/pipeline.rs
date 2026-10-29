@@ -386,7 +386,30 @@ impl AddinQuiesceFailure {
     }
 }
 
+pub(crate) enum ServiceSealFailure {
+    HandleTopics(crate::XllError),
+    Handles(crate::XllError),
+}
+
+impl ServiceSealFailure {
+    pub(crate) fn hazard(&self) -> crate::shutdown::UnloadHazard {
+        match self {
+            Self::HandleTopics(_) => crate::shutdown::UnloadHazard::RtdGitCallbackStillRegistered,
+            Self::Handles(_) => crate::shutdown::UnloadHazard::HandleStoreNotQuiescent,
+        }
+    }
+
+    pub(crate) fn into_error(self) -> crate::XllError {
+        match self {
+            Self::HandleTopics(error) | Self::Handles(error) => error,
+        }
+    }
+}
+
 /// Owns the generation service seal while the remaining shutdown stages run.
+///
+/// Handle topics have released their backend references before the seal hides
+/// the ready-only handle slot from the topic shutdown probe.
 ///
 /// The subscription certificate is consumed by `Runtime::seal_generation_services`
 /// and cannot be separated from the corresponding sealed handle service. This
@@ -561,6 +584,10 @@ impl<'runtime, A: Addin> AddinQuiesced<'runtime, A> {
             async_stopped,
             subscriptions_stopped,
         } = producers;
+        #[cfg(test)]
+        if let Err(error) = tests::ServiceSealFault::check(tests::ServiceSealPoint::Handles) {
+            return Err((error, execution.module));
+        }
         match deps.seal_generation_services(subscriptions_stopped) {
             Ok(sealed) => Ok(ServicesSealed {
                 execution,
@@ -976,7 +1003,16 @@ impl<'runtime, A: Addin> TeardownTxn<'runtime, A, super::certificate::OpenRollba
 impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, AddinQuiesced<'runtime, A>> {
     pub(crate) fn seal_services(
         self,
-    ) -> crate::XllResult<TeardownTxn<'runtime, A, K, ServicesSealed<'runtime, A>>> {
+    ) -> Result<TeardownTxn<'runtime, A, K, ServicesSealed<'runtime, A>>, ServiceSealFailure> {
+        // Keep the transaction intact until topics have detached. Failure must
+        // run its normal Drop recovery with both stage and owner still present.
+        #[cfg(test)]
+        tests::ServiceSealFault::check(tests::ServiceSealPoint::HandleTopics)
+            .map_err(ServiceSealFailure::HandleTopics)?;
+        self.owner
+            .deps()
+            .shutdown_handle_topics()
+            .map_err(ServiceSealFailure::HandleTopics)?;
         let (mut owner, stage) = self.split();
         let deps = owner.deps();
         match stage.seal_services(deps) {
@@ -986,7 +1022,7 @@ impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, AddinQuiesced<'runtime, 
                     crate::module_runtime::ModuleCleanupAuthority::Drained(module),
                 );
                 drop(owner);
-                Err(error)
+                Err(ServiceSealFailure::Handles(error))
             }
         }
     }
@@ -1083,8 +1119,8 @@ impl<A: Addin> ExecutionDrainFailure<'_, A> {
     }
 }
 
-impl<'runtime, A: Addin> RemovalOwner<'runtime, A> {
-    pub(crate) fn drain<K>(
+impl<'runtime, A: Addin, K> RemovalOwner<'runtime, A, K> {
+    pub(crate) fn drain(
         self,
     ) -> Result<TeardownTxn<'runtime, A, K, ExecutionDrained>, ExecutionDrainFailure<'runtime, A>>
     {
@@ -1113,6 +1149,47 @@ mod tests {
     use crate::runtime::{Runtime, transactions::RemovalSuccess};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    pub(super) enum ServiceSealPoint {
+        HandleTopics = 1,
+        Handles = 2,
+    }
+
+    std::thread_local! {
+        static SERVICE_SEAL_FAULT: std::cell::Cell<Option<ServiceSealPoint>> = const { std::cell::Cell::new(None) };
+        static SERVICE_SEAL_ATTEMPTS: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Thread-local injection at the actual service operations. The public
+    /// transition keeps its production signature and recovery implementation.
+    pub(super) struct ServiceSealFault;
+
+    impl ServiceSealFault {
+        fn at(point: ServiceSealPoint) -> Self {
+            SERVICE_SEAL_FAULT.with(|fault| assert!(fault.replace(Some(point)).is_none()));
+            SERVICE_SEAL_ATTEMPTS.with(|attempts| attempts.set(0));
+            Self
+        }
+
+        pub(super) fn check(point: ServiceSealPoint) -> crate::XllResult<()> {
+            SERVICE_SEAL_ATTEMPTS.with(|attempts| attempts.set(attempts.get() | point as u8));
+            SERVICE_SEAL_FAULT.with(|fault| {
+                if fault.get() == Some(point) {
+                    fault.set(None);
+                    Err(crate::XllError::Closing)
+                } else {
+                    Ok(())
+                }
+            })
+        }
+    }
+
+    impl Drop for ServiceSealFault {
+        fn drop(&mut self) {
+            SERVICE_SEAL_FAULT.with(|fault| fault.set(None));
+        }
+    }
 
     #[derive(Clone, Copy, Eq, PartialEq)]
     enum Failure {
@@ -1157,6 +1234,124 @@ mod tests {
 
         fn cleanup(failure: &mut Failure, _: &mut crate::shutdown::CleanupReporter<'_>) {
             assert!(*failure != Failure::Cleanup, "injected cleanup panic");
+        }
+    }
+
+    fn assert_service_seal_failure<'runtime, K>(
+        runtime: &'runtime Runtime<RollbackProbe>,
+        teardown: TeardownTxn<'runtime, RollbackProbe, K, AddinQuiesced<'runtime, RollbackProbe>>,
+        generation: crate::generation::RuntimeGeneration,
+        drops: &AtomicUsize,
+        point: ServiceSealPoint,
+    ) {
+        let epoch = runtime.lifecycle.access().module_epoch_id().unwrap();
+        #[cfg(feature = "handles")]
+        let service_was_ready = runtime.with_formula_handle_service(|_| ()).is_ok();
+        let _fault = ServiceSealFault::at(point);
+        let Err(failure) = teardown.seal_services() else {
+            panic!("injected service seal failure succeeded");
+        };
+        let expected_hazard = match point {
+            ServiceSealPoint::HandleTopics => {
+                crate::shutdown::UnloadHazard::RtdGitCallbackStillRegistered
+            }
+            ServiceSealPoint::Handles => crate::shutdown::UnloadHazard::HandleStoreNotQuiescent,
+        };
+        assert_eq!(failure.hazard(), expected_hazard);
+        assert!(matches!(failure.into_error(), crate::XllError::Closing));
+        SERVICE_SEAL_FAULT.with(|fault| assert!(fault.get().is_none()));
+        SERVICE_SEAL_ATTEMPTS.with(|attempts| {
+            assert_eq!(
+                attempts.get(),
+                match point {
+                    ServiceSealPoint::HandleTopics => 1,
+                    ServiceSealPoint::Handles => 3,
+                }
+            );
+        });
+        // Both failure sites preserve the published service, the quiesced
+        // shared state and the progressed module authority. The normal Drop
+        // path quarantines before releasing the cleanup claim.
+        #[cfg(feature = "handles")]
+        assert_eq!(
+            runtime.with_formula_handle_service(|_| ()).is_ok(),
+            service_was_ready,
+        );
+        assert_eq!(
+            runtime.phase(),
+            crate::lifecycle::LifecyclePhase::Quarantined
+        );
+        assert!(runtime.lifecycle.access().removal_attempt().is_none());
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert!(runtime.quarantine_snapshot().contains(&(
+            Some(generation),
+            crate::runtime_components::QuarantineReason::TeardownIncomplete,
+        )));
+        let crate::module_runtime::ModuleCleanupClaim::Ready(
+            crate::module_runtime::ModuleCleanupReady::Drained(drained),
+        ) = runtime.lifecycle_control().take_module_cleanup_authority()
+        else {
+            panic!("service seal failure did not return drained module authority");
+        };
+        assert_eq!(drained.id(), epoch);
+        runtime.lifecycle_control().retain_failed_module_cleanup(
+            crate::module_runtime::ModuleCleanupAuthority::Drained(drained),
+        );
+        assert!(runtime.begin_final_removal().is_none());
+    }
+
+    #[test]
+    fn service_seal_failures_preserve_authority_and_quarantine_for_both_purposes() {
+        for rollback in [false, true] {
+            for point in [ServiceSealPoint::HandleTopics, ServiceSealPoint::Handles] {
+                let runtime = Runtime::<RollbackProbe>::new();
+                let drops = Arc::new(AtomicUsize::new(0));
+                let opening = runtime.begin_open().unwrap();
+                let generation = opening.attempt_id().into_runtime_generation();
+                let mut opening = runtime.publish_with_lifecycle(
+                    opening,
+                    ObservedState(Arc::clone(&drops)),
+                    Failure::None,
+                    (),
+                );
+                if rollback {
+                    assert!(opening.fail_for_test().requires_rollback());
+                    let crate::runtime::orchestration::OpenRollbackAcquisition::Acquired(owner) =
+                        runtime.acquire_open_rollback()
+                    else {
+                        panic!("rollback cleanup owner unavailable");
+                    };
+                    let teardown = owner.drain().unwrap_or_else(|_| panic!("execution drain"));
+                    let teardown = teardown
+                        .stop_producers(|_| {})
+                        .unwrap_or_else(|_| panic!("producer stop"))
+                        .close_module_callbacks()
+                        .detach_host()
+                        .unwrap_or_else(|_| panic!("host detach"));
+                    let lifecycle = runtime.bind_addin_lifecycle().unwrap();
+                    let teardown = teardown
+                        .quiesce_addin(&runtime, &lifecycle, Some(generation))
+                        .unwrap_or_else(|_| panic!("addin quiesce"));
+                    assert_service_seal_failure(&runtime, teardown, generation, &drops, point);
+                } else {
+                    runtime.finish_open(&mut opening, Vec::new()).unwrap();
+                    let owner = runtime.begin_final_removal().unwrap();
+                    let teardown = owner.drain().unwrap_or_else(|_| panic!("execution drain"));
+                    let teardown = teardown
+                        .stop_producers(|_| {})
+                        .unwrap_or_else(|_| panic!("producer stop"))
+                        .close_module_callbacks()
+                        .detach_host()
+                        .unwrap_or_else(|_| panic!("host detach"));
+                    let lifecycle = runtime.bind_addin_lifecycle().unwrap();
+                    let teardown = teardown
+                        .quiesce_addin(&runtime, &lifecycle)
+                        .unwrap_or_else(|_| panic!("addin quiesce"));
+                    #[cfg(feature = "handles")]
+                    runtime.with_formula_handle_service(|_| ()).unwrap();
+                    assert_service_seal_failure(&runtime, teardown, generation, &drops, point);
+                }
+            }
         }
     }
 

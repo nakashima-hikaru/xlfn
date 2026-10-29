@@ -5,7 +5,7 @@ use crate::runtime::shutdown::{FinalRemoval, RemovalOwner};
 
 fn invalid<'runtime, A: crate::Addin>(
     deps: ShutdownDeps<'runtime, A>,
-    owner: RemovalOwner<'runtime, A>,
+    owner: RemovalOwner<'runtime, A, FinalRemoval>,
     stage: ExecutionDrained,
 ) {
     let _: TeardownTxn<'runtime, A, FinalRemoval, ExecutionDrained> =

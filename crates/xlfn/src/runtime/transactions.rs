@@ -328,7 +328,7 @@ pub(crate) enum RemovalControl {
 struct RemovalTransaction<'runtime, 'call, A: Addin> {
     deps: ShutdownDeps<'runtime, A>,
     callbacks: &'call mut HostCallbackSession,
-    attempt: Option<RemovalOwner<'runtime, A>>,
+    attempt: Option<RemovalOwner<'runtime, A, FinalRemoval>>,
 }
 
 impl<'runtime, 'call, A: Addin> RemovalTransaction<'runtime, 'call, A> {
@@ -341,7 +341,7 @@ impl<'runtime, 'call, A: Addin> RemovalTransaction<'runtime, 'call, A> {
         Some(Self {
             deps,
             callbacks,
-            attempt: Some(RemovalOwner::new(deps, claim)),
+            attempt: Some(RemovalOwner::from_claim(deps, claim)),
         })
     }
 
@@ -353,7 +353,7 @@ impl<'runtime, 'call, A: Addin> RemovalTransaction<'runtime, 'call, A> {
         self.callbacks
     }
 
-    fn take_attempt(&mut self) -> RemovalOwner<'runtime, A> {
+    fn take_attempt(&mut self) -> RemovalOwner<'runtime, A, FinalRemoval> {
         self.attempt
             .take()
             .expect("a removal transaction always owns its attempt")
@@ -419,7 +419,7 @@ where
         }
     };
 
-    let teardown = match transaction.take_attempt().drain::<FinalRemoval>() {
+    let teardown = match transaction.take_attempt().drain() {
         Ok(stage) => stage,
         Err(failure) => {
             let hazard = failure.hazard();
@@ -565,23 +565,21 @@ where
     runtime.observer().generation_unique();
     runtime.observer().addin_quiesced();
 
-    if let Err(error) = shutdown_deps.shutdown_handle_topics() {
-        return Err(handle_unload_hazard(
-            runtime,
-            crate::shutdown::UnloadHazard::RtdGitCallbackStillRegistered,
-            "xlAutoRemove RTD shutdown",
-            &error,
-        ));
-    }
-
     let teardown = match teardown.seal_services() {
         Ok(stage) => stage,
-        Err(error) => {
+        Err(failure) => {
+            let hazard = failure.hazard();
+            let boundary = match &failure {
+                super::shutdown::ServiceSealFailure::HandleTopics(_) => "xlAutoRemove RTD shutdown",
+                super::shutdown::ServiceSealFailure::Handles(_) => {
+                    "xlAutoRemove handle table shutdown"
+                }
+            };
             return Err(handle_unload_hazard(
                 runtime,
-                crate::shutdown::UnloadHazard::HandleStoreNotQuiescent,
-                "xlAutoRemove handle table shutdown",
-                &error,
+                hazard,
+                boundary,
+                &failure.into_error(),
             ));
         }
     };

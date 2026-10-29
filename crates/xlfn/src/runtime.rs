@@ -172,11 +172,12 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
 
     pub(crate) fn acquire_open_rollback(
         &self,
-    ) -> orchestration::OpenRollbackAcquisition<shutdown::RemovalOwner<'_, A>> {
+    ) -> orchestration::OpenRollbackAcquisition<shutdown::RemovalOwner<'_, A, shutdown::OpenRollback>>
+    {
         use orchestration::OpenRollbackAcquisition;
         match self.lifecycle_orchestrator().acquire_open_rollback() {
             OpenRollbackAcquisition::Acquired(claim) => OpenRollbackAcquisition::Acquired(
-                shutdown::RemovalOwner::new(self.shutdown_deps(), claim),
+                shutdown::RemovalOwner::from_claim(self.shutdown_deps(), claim),
             ),
             OpenRollbackAcquisition::ClosingOwnsCleanup => {
                 OpenRollbackAcquisition::ClosingOwnsCleanup
@@ -188,9 +189,9 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
     #[cfg(test)]
     pub(crate) fn begin_final_removal(
         &self,
-    ) -> Option<crate::runtime::shutdown::RemovalOwner<'_, A>> {
+    ) -> Option<crate::runtime::shutdown::RemovalOwner<'_, A, shutdown::FinalRemoval>> {
         let claim = self.lifecycle_orchestrator().begin_final_removal()?;
-        Some(crate::runtime::shutdown::RemovalOwner::new(
+        Some(crate::runtime::shutdown::RemovalOwner::from_claim(
             self.shutdown_deps(),
             claim,
         ))
@@ -991,7 +992,7 @@ pub(crate) mod tests {
 
     fn finish_test_close<A: crate::Addin>(
         runtime: &Runtime<A, impl UnloadPolicy<A>>,
-        removal_attempt: RemovalOwner<'_, A>,
+        removal_attempt: RemovalOwner<'_, A, FinalRemoval>,
     ) {
         let (removal_attempt, module_closing) = removal_attempt.into_test_parts();
         let drained = module_closing.seal_and_drain().unwrap();
@@ -1028,7 +1029,7 @@ pub(crate) mod tests {
 
     fn finish_test_open_rollback<'a, A: crate::Addin>(
         runtime: &'a Runtime<A, impl UnloadPolicy<A>>,
-        rollback_attempt: RemovalOwner<'a, A>,
+        rollback_attempt: RemovalOwner<'a, A, OpenRollback>,
     ) -> RemovalClaimGuard<'a, A> {
         let (rollback_attempt, module_closing) = rollback_attempt.into_test_parts();
         let drained = module_closing.seal_and_drain().unwrap();
@@ -1204,7 +1205,7 @@ pub(crate) mod tests {
         let owner = runtime.begin_final_removal().unwrap();
         runtime.observer().begin_close();
         let fault = crate::ingress::DrainPreparationFault::at(1);
-        let Err(failure) = owner.drain::<FinalRemoval>() else {
+        let Err(failure) = owner.drain() else {
             panic!("injected drain preparation succeeded");
         };
         assert_eq!(

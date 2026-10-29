@@ -21,7 +21,27 @@ pub(crate) struct OpenAttemptStart {
     pub(crate) module_opening: crate::module_runtime::ModuleOpening,
 }
 
-pub(crate) enum OpenRollbackAcquisition<T = crate::lifecycle::RemovalClaim> {
+/// A cleanup claim whose purpose is fixed at the entry point that acquired it.
+/// Only this module can issue the wrapper; downstream owners preserve `K`.
+pub(in crate::runtime) struct RemovalPurposeClaim<K> {
+    claim: crate::lifecycle::RemovalClaim,
+    _kind: std::marker::PhantomData<K>,
+}
+
+impl<K> RemovalPurposeClaim<K> {
+    fn issue(claim: crate::lifecycle::RemovalClaim) -> Self {
+        Self {
+            claim,
+            _kind: std::marker::PhantomData,
+        }
+    }
+
+    pub(in crate::runtime) fn into_claim(self) -> crate::lifecycle::RemovalClaim {
+        self.claim
+    }
+}
+
+pub(crate) enum OpenRollbackAcquisition<T> {
     Acquired(T),
     ClosingOwnsCleanup,
     Unavailable,
@@ -156,7 +176,9 @@ impl<'a, A: Addin> LifecycleOrchestrator<'a, A> {
         }
     }
 
-    pub(crate) fn begin_final_removal(&self) -> Option<crate::lifecycle::RemovalClaim> {
+    pub(in crate::runtime) fn begin_final_removal(
+        &self,
+    ) -> Option<RemovalPurposeClaim<super::shutdown::FinalRemoval>> {
         let lifecycle = self.lifecycle();
         let mut wait_guard = lifecycle.access();
         lifecycle.begin_removal_request(&mut wait_guard);
@@ -216,7 +238,7 @@ impl<'a, A: Addin> LifecycleOrchestrator<'a, A> {
             };
 
             match decision {
-                Some(Some(claim)) => return Some(claim),
+                Some(Some(claim)) => return Some(RemovalPurposeClaim::issue(claim)),
                 Some(None) => return None,
                 None => lifecycle.wait(&mut wait_guard),
             }
@@ -227,7 +249,9 @@ impl<'a, A: Addin> LifecycleOrchestrator<'a, A> {
         self.lifecycle().take_opening_for_rollback()
     }
 
-    pub(crate) fn acquire_open_rollback(&self) -> OpenRollbackAcquisition {
+    pub(in crate::runtime) fn acquire_open_rollback(
+        &self,
+    ) -> OpenRollbackAcquisition<RemovalPurposeClaim<super::shutdown::OpenRollback>> {
         let lifecycle = self.lifecycle();
         let mut wait_guard = lifecycle.access();
         loop {
@@ -242,7 +266,7 @@ impl<'a, A: Addin> LifecycleOrchestrator<'a, A> {
             }
             if let Some(claim) = lifecycle.claim_removal(&mut wait_guard) {
                 self.observer.acquire_open_rollback_owner();
-                return OpenRollbackAcquisition::Acquired(claim);
+                return OpenRollbackAcquisition::Acquired(RemovalPurposeClaim::issue(claim));
             }
             lifecycle.wait(&mut wait_guard);
         }

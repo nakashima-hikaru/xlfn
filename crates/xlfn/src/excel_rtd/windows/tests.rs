@@ -72,6 +72,9 @@ assert_not_impl_any!(ServerOperation<'static>: Send, Sync);
 assert_not_impl_any!(ServerNotificationOperation<'static>: Send, Sync);
 assert_not_impl_any!(ServerTermination<'static>: Send, Sync);
 assert_not_impl_any!(super::server_gate::ServerResourceTeardown<'static>: Send, Sync);
+assert_not_impl_any!(super::server_gate::DrainedServerOperations<'static>: Send, Sync);
+assert_not_impl_any!(super::server::QuiescentServerAccess<'static>: Send, Sync);
+assert_not_impl_any!(super::server::JoinedServerAccess<'static>: Send, Sync);
 
 struct TestComApartment {
     should_uninitialize: bool,
@@ -192,12 +195,58 @@ fn server_operation_barrier_rejects_same_thread_close_without_closing() {
 }
 
 #[test]
+fn drained_server_authority_is_bound_to_the_operation_barrier() {
+    let first = ServerOperationBarrier::default();
+    let second = ServerOperationBarrier::default();
+    let drained = first.drain().unwrap();
+    assert!(drained.belongs_to(&first));
+    assert!(!drained.belongs_to(&second));
+    assert!(first.enter().is_none());
+    assert!(second.enter().is_some());
+}
+
+#[test]
+fn server_teardown_capability_retains_its_target_through_active_release() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let ensured = ensure_server_without_handles::<(), crate::DynamicRtdSources<()>>(None).unwrap();
+    // SAFETY: ensured owns an independent reference through the complete test.
+    let server = unsafe { &*ensured.pointer() };
+    let initial_references = server.references.load(Ordering::Acquire);
+    let access = server.drain_access().unwrap();
+    assert_eq!(
+        server.references.load(Ordering::Acquire),
+        initial_references + 1
+    );
+    assert!(server.operations.enter().is_none());
+    let joined = access.join_worker().unwrap();
+    assert!(!joined.worker_panicked());
+    assert_eq!(joined.teardown_and_remove_active(false), S_OK);
+    assert!(ACTIVE_SERVER.lock().is_none());
+    // Dropping the global reference leaves our capability's reference live.
+    assert_eq!(
+        server.references.load(Ordering::Acquire),
+        initial_references
+    );
+    drop(joined);
+    assert_eq!(
+        server.references.load(Ordering::Acquire),
+        initial_references - 1
+    );
+    assert_eq!(
+        server.operations.state.lock().phase,
+        ServerPhase::Terminated
+    );
+    drop(ensured);
+}
+
+#[test]
 fn resource_teardown_remains_exclusive_after_the_terminal_phase() {
     let barrier = Arc::new(ServerOperationBarrier::default());
     drop(barrier.close_and_wait().unwrap().unwrap());
-    let first = barrier.teardown_resources().unwrap();
+    let drained = barrier.drain().unwrap();
+    let first = drained.teardown_resources().unwrap();
     assert!(matches!(
-        barrier.teardown_resources(),
+        drained.teardown_resources(),
         Err(ServerCloseError::Reentrant)
     ));
 
@@ -208,7 +257,8 @@ fn resource_teardown_remains_exclusive_after_the_terminal_phase() {
         let _apartment = TestComApartment::enter();
         assert!(other.close_and_wait().unwrap().is_none());
         started_tx.send(()).unwrap();
-        let _resources = other.teardown_resources().unwrap();
+        let drained = other.drain().unwrap();
+        let _resources = drained.teardown_resources().unwrap();
         acquired_tx.send(()).unwrap();
     });
     started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -1084,7 +1134,7 @@ fn failed_server_start_is_retired_without_server_terminate_before_retry() {
     let backends = server_ref.backends.lock();
     assert!(backends.handles.is_none());
     assert!(backends.subscriptions.is_none());
-    assert!(backends.subscription_server.is_none());
+    assert!(backends.subscription_server().is_none());
     drop(backends);
 
     // SAFETY: the replacement guard retains its independently allocated server.
@@ -1221,7 +1271,7 @@ fn shared_server_subscription_shutdown_preserves_handle_roots_until_handle_shutd
         let backends = server_ref.backends.lock();
         assert_eq!(backends.handles.is_some(), subscriptions_first);
         assert!(backends.subscriptions.is_none());
-        assert!(backends.subscription_server.is_none());
+        assert!(backends.subscription_server().is_none());
         drop(backends);
         // The subscription server must reject any fresh notifier before its
         // COM callback owner can be destroyed.
@@ -1243,7 +1293,7 @@ fn shared_server_subscription_shutdown_preserves_handle_roots_until_handle_shutd
         let backends = server_ref.backends.lock();
         assert!(backends.handles.is_none());
         assert!(backends.subscriptions.is_none());
-        assert!(backends.subscription_server.is_none());
+        assert!(backends.subscription_server().is_none());
         drop(backends);
         handles.seal().map(|_| ()).unwrap();
         drop(handles);
@@ -1305,7 +1355,7 @@ fn handle_shutdown_retires_unobserved_and_other_generation_topics() {
             let backends = server_ref.backends.lock();
             assert!(backends.handles.is_none());
             assert!(backends.subscriptions.is_none());
-            assert!(backends.subscription_server.is_none());
+            assert!(backends.subscription_server().is_none());
         }
 
         assert_eq!(handles.len(), 2);
@@ -1704,7 +1754,7 @@ fn callback_subscription_attach_handshake_covers_early_empty_snapshot() {
         // no callback exists yet.
         attached_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         // SAFETY: `ensured` and the operation retain the attached server.
-        let subscription_server = unsafe { (*server).backends.lock().subscription_server }
+        let subscription_server = unsafe { (*server).backends.lock().subscription_server() }
             .expect("subscription attachment must publish its server handle");
         assert!(subscription_server.detach_update_notifier().is_none());
 

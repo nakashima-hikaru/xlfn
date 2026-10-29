@@ -4,9 +4,10 @@ use crate::runtime::capabilities::ShutdownDeps;
 
 /// The initial removal claim and its unique, undrained module capability.
 /// Draining consumes this value, so a caller cannot drain the same claim twice.
-pub(crate) struct RemovalOwner<'runtime, A: crate::Addin> {
+pub(crate) struct RemovalOwner<'runtime, A: crate::Addin, K> {
     deps: ShutdownDeps<'runtime, A>,
     state: Option<(RemovalClaimGuard<'runtime, A>, ModuleClosing)>,
+    _kind: std::marker::PhantomData<K>,
 }
 
 /// Keeps cleanup ownership until the terminal callback has returned. The
@@ -32,11 +33,12 @@ impl<A: crate::Addin> Drop for RemovalClaimGuard<'_, A> {
     }
 }
 
-impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
-    pub(crate) fn new(
+impl<'runtime, A: crate::Addin, K> RemovalOwner<'runtime, A, K> {
+    pub(in crate::runtime) fn from_claim(
         deps: ShutdownDeps<'runtime, A>,
-        claim: crate::lifecycle::RemovalClaim,
+        claim: crate::runtime::orchestration::RemovalPurposeClaim<K>,
     ) -> Self {
+        let claim = claim.into_claim();
         let guard = RemovalClaimGuard {
             lifecycle: deps.lifecycle(),
             observer: deps.observer(),
@@ -46,6 +48,7 @@ impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
         Self {
             deps,
             state: Some((guard, claim.into_module_closing())),
+            _kind: std::marker::PhantomData,
         }
     }
 
@@ -67,7 +70,7 @@ impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A> {
     }
 }
 
-impl<A: crate::Addin> Drop for RemovalOwner<'_, A> {
+impl<A: crate::Addin, K> Drop for RemovalOwner<'_, A, K> {
     fn drop(&mut self) {
         if let Some((mut guard, closing)) = self.state.take() {
             guard.return_module_authority(ModuleCleanupAuthority::Closing(closing));

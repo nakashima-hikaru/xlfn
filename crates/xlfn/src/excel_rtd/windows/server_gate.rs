@@ -72,6 +72,34 @@ pub(super) struct ServerTermination<'a> {
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
+/// Closed admission and drained operations/notifications for this exact barrier.
+/// The optional termination owner publishes completion when the proof is dropped.
+pub(super) struct DrainedServerOperations<'a> {
+    barrier: &'a ServerOperationBarrier,
+    _termination: Option<ServerTermination<'a>>,
+}
+
+impl DrainedServerOperations<'_> {
+    pub(super) fn belongs_to(&self, barrier: &ServerOperationBarrier) -> bool {
+        std::ptr::eq(self.barrier, barrier)
+    }
+
+    pub(super) fn teardown_resources(
+        &self,
+    ) -> Result<ServerResourceTeardown<'_>, ServerCloseError> {
+        self.barrier.acquire_resource_teardown()
+    }
+}
+
+impl<'a> ServerTermination<'a> {
+    pub(super) fn into_drained(self) -> DrainedServerOperations<'a> {
+        DrainedServerOperations {
+            barrier: self.barrier,
+            _termination: Some(self),
+        }
+    }
+}
+
 /// Exclusive backend/callback disposal, including retries after the terminal
 /// phase was published by a deferred worker. The operation phase alone cannot
 /// serialize those retries because close_and_wait then returns no owner.
@@ -104,9 +132,7 @@ impl ServerOperationBarrier {
         })
     }
 
-    pub(super) fn teardown_resources(
-        &self,
-    ) -> Result<ServerResourceTeardown<'_>, ServerCloseError> {
+    fn acquire_resource_teardown(&self) -> Result<ServerResourceTeardown<'_>, ServerCloseError> {
         let current = std::thread::current().id();
         loop {
             {
@@ -290,6 +316,14 @@ impl ServerOperationBarrier {
                 .wait_blocking()
                 .map_err(ServerCloseError::WaitFailed)?;
         }
+    }
+
+    pub(super) fn drain(&self) -> Result<DrainedServerOperations<'_>, ServerCloseError> {
+        let termination = self.close_and_wait()?;
+        Ok(DrainedServerOperations {
+            barrier: self,
+            _termination: termination,
+        })
     }
 
     pub(super) fn close_and_wait(&self) -> Result<Option<ServerTermination<'_>>, ServerCloseError> {

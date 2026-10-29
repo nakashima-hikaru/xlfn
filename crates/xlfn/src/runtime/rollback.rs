@@ -11,7 +11,6 @@ use crate::error::IntoXllError;
 use crate::generation::RuntimeGeneration;
 use crate::host_callback::HostCallbackSession;
 use crate::registration::{HostRegistrar, RegistrationHost};
-use crate::runtime::shutdown::OpenRollback;
 use crate::runtime::{AddinLifecycleAccess, Runtime};
 
 use crate::lifecycle::lifecycle_access_error;
@@ -119,7 +118,7 @@ where
     // An opening transaction normally owns the lifecycle payload. It is only
     // safe to release the thread binding after that payload has been
     // explicitly taken and dropped below.
-    let teardown = match rollback_attempt.drain::<OpenRollback>() {
+    let teardown = match rollback_attempt.drain() {
         Ok(stage) => stage,
         Err(failure) => {
             let hazard = failure.hazard();
@@ -189,25 +188,16 @@ where
         }
     };
 
-    // The topic transport must release its backend while the handle slot is
-    // still published. Sealing first would make the ready-only shutdown probe
-    // skip the server and leave its non-owning backend pointer attached.
-    if let Err(error) = shutdown_deps.shutdown_handle_topics() {
-        report_boundary_error("xlAutoOpen RTD rollback", &error);
-        return incomplete(
-            runtime,
-            crate::shutdown::UnloadHazard::RtdGitCallbackStillRegistered,
-        );
-    }
-
     let teardown = match teardown.seal_services() {
         Ok(stage) => stage,
-        Err(error) => {
-            report_boundary_error("xlAutoOpen handle rollback", &error);
-            return incomplete(
-                runtime,
-                crate::shutdown::UnloadHazard::HandleStoreNotQuiescent,
-            );
+        Err(failure) => {
+            let hazard = failure.hazard();
+            let boundary = match &failure {
+                super::shutdown::ServiceSealFailure::HandleTopics(_) => "xlAutoOpen RTD rollback",
+                super::shutdown::ServiceSealFailure::Handles(_) => "xlAutoOpen handle rollback",
+            };
+            report_boundary_error(boundary, &failure.into_error());
+            return incomplete(runtime, hazard);
         }
     };
 

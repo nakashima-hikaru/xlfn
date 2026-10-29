@@ -3,11 +3,11 @@ use super::shutdown::{FinalRemoval, RemovalOwner};
 use super::{AddinLifecycleAccess, Runtime, UnloadPolicy};
 
 fn ordered<A: crate::Addin>(
-    owner: RemovalOwner<'_, A>,
+    owner: RemovalOwner<'_, A, FinalRemoval>,
     runtime: &Runtime<A, impl UnloadPolicy<A>>,
     lifecycle: &AddinLifecycleAccess<'_, A>,
 ) {
-    let Ok(transaction) = owner.drain::<FinalRemoval>() else { return };
+    let Ok(transaction) = owner.drain() else { return };
     let Ok(transaction) = transaction.stop_producers(|_| {}) else { return };
     let transaction = transaction.close_module_callbacks();
     let Ok(transaction) = transaction.detach_host() else { return };

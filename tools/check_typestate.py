@@ -34,6 +34,7 @@ MODULES = {
     "value": Path("crates/xlfn/src/value.rs"),
     "cache": Path("crates/xlfn/src/cache.rs"),
     "runtime": Path("crates/xlfn/src/runtime.rs"),
+    "lifecycle/state": Path("crates/xlfn/src/lifecycle/state.rs"),
     "runtime/open_txn": Path("crates/xlfn/src/runtime/open_txn.rs"),
     "runtime/shutdown/pipeline": Path("crates/xlfn/src/runtime/shutdown/pipeline.rs"),
     "excel_rtd/windows": Path("crates/xlfn/src/excel_rtd/windows.rs"),

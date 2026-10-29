@@ -12,3 +12,4 @@ pub(crate) use certificate::{ClosedWitness, FinalRemoval, OpenRollback};
 pub(crate) use owner::{RemovalClaimGuard, RemovalOwner};
 #[cfg(any(test, feature = "refinement"))]
 pub(crate) use pipeline::QuiescenceProof;
+pub(crate) use pipeline::ServiceSealFailure;

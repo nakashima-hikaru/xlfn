@@ -73,18 +73,36 @@ pub(crate) struct ModuleEpochLease {
     id: ModuleEpochId,
 }
 
-/// The single owner-side module authority retained by the runtime lifecycle.
+/// Module authority returned by an opening abort or interrupted teardown.
 ///
-/// The epoch identity is copied into generation payloads for validation, but
-/// this value is the only place where the affine mutation authority lives
-/// while the runtime is not actively tearing down through a removal owner.
+/// Lifecycle installation classifies this affine value into claimable or
+/// unavailable authority before exposing an operation on its concrete state.
+/// The epoch identity remains available for runtime ownership validation.
 pub(crate) enum ModuleAuthority {
-    Open(ModuleEpochLease),
     Closing(ModuleClosing),
     Drained(ModuleExportsDrained),
     /// Drain preparation failed. Keep the epoch and its resources resident;
     /// quarantine must not retry cleanup or manufacture a drained witness.
     RetainedUndrained(ModuleRetainedUndrained),
+}
+
+/// Module authority from which a new removal transaction can start.
+/// Already drained and retained epochs cannot be converted into this type.
+pub(crate) enum ClaimableModuleAuthority {
+    Open(ModuleEpochLease),
+    Closing(ModuleClosing),
+}
+
+/// Authority that must remain outside the removal claim path.
+pub(crate) enum UnavailableModuleAuthority {
+    Drained(ModuleExportsDrained),
+    RetainedUndrained(ModuleRetainedUndrained),
+}
+
+/// Authority that can actually execute quarantine cleanup.
+pub(crate) enum ModuleCleanupReady {
+    Closing(ModuleClosing),
+    Drained(ModuleExportsDrained),
 }
 
 /// The cleanup authority retained after a close transition has begun.
@@ -101,7 +119,7 @@ pub(crate) enum ModuleCleanupAuthority {
 /// Claiming cleanup distinguishes a deliberately retained epoch from a lost
 /// affine authority. The retained capability remains in lifecycle state.
 pub(crate) enum ModuleCleanupClaim {
-    Ready(ModuleCleanupAuthority),
+    Ready(ModuleCleanupReady),
     RetainedUndrained(ModuleEpochId),
     Missing,
 }
@@ -205,30 +223,31 @@ impl ModuleEpochLease {
 impl ModuleAuthority {
     pub(crate) fn id(&self) -> ModuleEpochId {
         match self {
-            Self::Open(lease) => lease.id(),
             Self::Closing(closing) => closing.id(),
             Self::Drained(drained) => drained.id(),
             Self::RetainedUndrained(closing) => closing.id(),
         }
     }
 
-    pub(crate) fn into_closing(self) -> ModuleClosing {
+    pub(crate) fn classify(self) -> Result<ClaimableModuleAuthority, UnavailableModuleAuthority> {
         match self {
-            Self::Open(lease) => lease.begin_close(|| {}),
-            Self::Closing(closing) => closing,
-            Self::Drained(_) | Self::RetainedUndrained(_) => xlfn_kernel::invariant::fail_stop(),
+            Self::Closing(closing) => Ok(ClaimableModuleAuthority::Closing(closing)),
+            Self::Drained(drained) => Err(UnavailableModuleAuthority::Drained(drained)),
+            Self::RetainedUndrained(retained) => {
+                Err(UnavailableModuleAuthority::RetainedUndrained(retained))
+            }
         }
     }
 
-    pub(crate) fn into_cleanup(self) -> ModuleCleanupAuthority {
+    pub(crate) fn into_cleanup(self) -> Result<ModuleCleanupReady, ModuleRetainedUndrained> {
         match self {
-            Self::Open(lease) => ModuleCleanupAuthority::Closing(lease.begin_close(|| {})),
-            Self::Closing(closing) => ModuleCleanupAuthority::Closing(closing),
-            Self::Drained(drained) => ModuleCleanupAuthority::Drained(drained),
-            Self::RetainedUndrained(closing) => ModuleCleanupAuthority::RetainedUndrained(closing),
+            Self::Closing(closing) => Ok(ModuleCleanupReady::Closing(closing)),
+            Self::Drained(drained) => Ok(ModuleCleanupReady::Drained(drained)),
+            Self::RetainedUndrained(retained) => Err(retained),
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn is_retained_undrained(&self) -> bool {
         matches!(self, Self::RetainedUndrained(_))
     }
@@ -242,26 +261,48 @@ impl ModuleCleanupAuthority {
             Self::RetainedUndrained(closing) => ModuleAuthority::RetainedUndrained(closing),
         }
     }
+}
 
-    /// Completes the module-side cleanup without minting a predecessor
-    /// capability. A progressed `Drained` authority can only close callback
-    /// admission; it cannot be converted back into `ModuleClosing`.
-    pub(crate) fn finish(self) -> Result<(), (crate::XllError, Self)> {
+impl ClaimableModuleAuthority {
+    pub(crate) fn id(&self) -> ModuleEpochId {
+        match self {
+            Self::Open(lease) => lease.id(),
+            Self::Closing(closing) => closing.id(),
+        }
+    }
+
+    pub(crate) fn into_closing(self) -> ModuleClosing {
+        match self {
+            Self::Open(lease) => lease.begin_close(|| {}),
+            Self::Closing(closing) => closing,
+        }
+    }
+}
+
+impl UnavailableModuleAuthority {
+    pub(crate) fn id(&self) -> ModuleEpochId {
+        match self {
+            Self::Drained(drained) => drained.id(),
+            Self::RetainedUndrained(retained) => retained.id(),
+        }
+    }
+}
+
+impl ModuleCleanupReady {
+    /// Completes cleanup only for authority that can still make progress.
+    /// Retained undrained epochs have no `finish` operation.
+    pub(crate) fn finish(self) -> Result<(), (crate::XllError, ModuleCleanupAuthority)> {
         match self {
             Self::Closing(closing) => {
                 let drained = match closing.seal_and_drain() {
                     Ok(drained) => drained,
-                    Err((error, closing)) => {
-                        return Err((error, Self::RetainedUndrained(closing)));
+                    Err((error, retained)) => {
+                        return Err((error, ModuleCleanupAuthority::RetainedUndrained(retained)));
                     }
                 };
                 drained.close_callbacks();
             }
             Self::Drained(drained) => drained.close_callbacks(),
-            Self::RetainedUndrained(_) => {
-                // This authority is deliberately never claimed for cleanup.
-                xlfn_kernel::invariant::fail_stop();
-            }
         }
         Ok(())
     }
@@ -436,7 +477,10 @@ pub(crate) fn ingress() -> &'static ExportIngress {
 
 #[cfg(test)]
 mod tests {
-    use super::{ModuleAuthority, ModuleCleanupAuthority, ModuleRuntime};
+    use super::{
+        ModuleAuthority, ModuleCleanupAuthority, ModuleCleanupReady, ModuleRuntime,
+        UnavailableModuleAuthority,
+    };
 
     #[test]
     fn failed_drain_retains_identity_through_cleanup_handoff_without_retry() {
@@ -453,13 +497,57 @@ mod tests {
             let authority = ModuleCleanupAuthority::RetainedUndrained(retained).into_authority();
             assert!(authority.is_retained_undrained());
             assert_eq!(authority.id(), epoch);
-            let ModuleCleanupAuthority::RetainedUndrained(retained) = authority.into_cleanup()
-            else {
+            let Err(retained) = authority.into_cleanup() else {
                 panic!("retained authority became cleanup-ready");
             };
             assert_eq!(retained.id(), epoch);
             let authority = ModuleAuthority::RetainedUndrained(retained);
             assert_eq!(authority.id(), epoch);
+            let Err(UnavailableModuleAuthority::RetainedUndrained(retained)) = authority.classify()
+            else {
+                panic!("retained authority became claimable");
+            };
+            assert_eq!(retained.id(), epoch);
+            assert_eq!(fault.attempts(), wait);
+        }
+    }
+
+    #[test]
+    fn drained_cleanup_never_restarts_the_close_or_retries_drain() {
+        let module = Box::leak(Box::new(ModuleRuntime::new()));
+        let closing = module.begin_open_internal().rollback(|| {});
+        let epoch = closing.id();
+        let drained = closing
+            .seal_and_drain()
+            .unwrap_or_else(|_| panic!("module drain preparation failed"));
+        let fault = crate::ingress::DrainPreparationFault::at(1);
+        let Err(UnavailableModuleAuthority::Drained(drained)) =
+            ModuleAuthority::Drained(drained).classify()
+        else {
+            panic!("drained authority became claimable");
+        };
+        assert_eq!(drained.id(), epoch);
+        let ready = ModuleAuthority::Drained(drained)
+            .into_cleanup()
+            .unwrap_or_else(|_| panic!("drained authority became retained"));
+        assert!(ready.finish().is_ok());
+        assert_eq!(fault.attempts(), 0);
+    }
+
+    #[test]
+    fn cleanup_failure_returns_retention_without_a_retry_capability() {
+        for wait in [1, 2] {
+            let module = Box::leak(Box::new(ModuleRuntime::new()));
+            let closing = module.begin_open_internal().rollback(|| {});
+            let epoch = closing.id();
+            let fault = crate::ingress::DrainPreparationFault::at(wait);
+            let Err((_, authority)) = ModuleCleanupReady::Closing(closing).finish() else {
+                panic!("injected cleanup preparation succeeded");
+            };
+            let Err(retained) = authority.into_authority().into_cleanup() else {
+                panic!("failed cleanup became cleanup-ready");
+            };
+            assert_eq!(retained.id(), epoch);
             assert_eq!(fault.attempts(), wait);
         }
     }

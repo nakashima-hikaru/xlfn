@@ -26,12 +26,20 @@ Executor close retains the runtime and executor through publication-reader and
 task drain. Only the drained stage exposes executor shutdown; abandoning any
 stage restores the sealed executor after releasing the registry close claim.
 
-Removal starts by consuming its owner into the teardown transaction. The
-transaction must close module callbacks, prove host detachment, and quiesce the
-add-in before sealing generation services. Fixtures reject skipping these stages,
+Removal owners retain the final-removal or open-rollback purpose issued at
+acquisition; neither raw claims nor a later `drain` call can change it. Removal
+starts by consuming that owner into the teardown transaction. The transaction
+must close module callbacks, prove host detachment, and quiesce the add-in before
+sealing generation services. The seal transition first detaches
+handle topics while the handle slot is still published, preserving separate
+topic-stop and handle-seal failures. Fixtures reject skipping these stages,
 reusing the initial owner, and reassembling an unrelated owner and drained stage.
 Interrupted teardown still returns its module authority before releasing the
 cleanup claim.
+A lifecycle match retains `AvailableClose` or `ClaimedClose` rather than rebuilding
+the broad resource enum. Only available resources can claim a removal owner;
+already drained or retained authority cannot start a new close. Cleanup-ready
+authority alone exposes `finish`, keeping retention outside its receiver type.
 An undrained module becomes a terminal retained owner without a drain or retry
 operation. A handle-registry seal carries its own registry reference, so callers
 cannot apply it to another store or pair a service with an unrelated seal.
@@ -87,3 +95,10 @@ Plain contexts cannot publish handles, formula contexts require their publisher,
 and scalar/array payload types remain concrete through the value ABI boundary.
 Channel senders also retain the actual FIFO/latest storage policy, preventing a
 sender from being constructed with the other policy's channel allocation.
+
+COM resource disposal requires a drained capability that owns a reference to its
+exact server. Only a worker-joined capability can release ACTIVE_SERVER; deferred
+workers can dispose backend/callback resources without that authority. Fixtures
+reject disposal through an undrained server/barrier, active-reference release
+before join, substitution of another server, and construction of subscription
+attachments from unrelated runtime/server handles.

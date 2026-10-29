@@ -28,7 +28,8 @@ use crate::generation::{ExecutionGeneration, OpeningGeneration, ShutdownGenerati
 use crate::generation::{OpenAttemptId, RemovalAttemptId, RuntimeGeneration};
 use crate::lifecycle::{HostLifecycleIntent, LifecyclePhase};
 use crate::module_runtime::{
-    ModuleAuthority, ModuleCleanupAuthority, ModuleCleanupClaim, ModuleEpochId, ModuleEpochLease,
+    ClaimableModuleAuthority, ModuleAuthority, ModuleCleanupAuthority, ModuleCleanupClaim,
+    ModuleCleanupReady, ModuleEpochId, ModuleEpochLease, UnavailableModuleAuthority,
 };
 use crate::runtime_components::GenerationServices;
 
@@ -159,7 +160,7 @@ pub(crate) struct OpenRetirement<A: crate::Addin> {
 }
 
 impl<A: crate::Addin> OpenGeneration<A> {
-    fn into_closing(self) -> (ClosingGeneration<A>, ModuleAuthority) {
+    fn into_closing(self) -> (ClosingGeneration<A>, ClaimableModuleAuthority) {
         let Self {
             generation,
             services,
@@ -172,7 +173,7 @@ impl<A: crate::Addin> OpenGeneration<A> {
                 services,
                 publication,
             },
-            ModuleAuthority::Open(module_epoch),
+            ClaimableModuleAuthority::Open(module_epoch),
         )
     }
 }
@@ -213,19 +214,19 @@ impl<A: crate::Addin> OpeningPayload<A> {
     fn into_close_resources(self, attempt: OpenAttemptId) -> CloseResources<A> {
         match self {
             Self::Empty => CloseResources::AwaitingOpenAbort {
-                attempt,
+                _attempt: attempt,
                 payload: OpenAbortPayload::Empty,
             },
             Self::Staged(opening) => CloseResources::AwaitingOpenAbort {
-                attempt,
+                _attempt: attempt,
                 payload: OpenAbortPayload::Staged(opening),
             },
             Self::Published(bundle) => {
                 let (closing, authority) = bundle.into_closing();
-                CloseResources::Available {
+                CloseResources::Available(AvailableClose {
                     payload: ClosePayload::Published(closing),
                     authority,
-                }
+                })
             }
         }
     }
@@ -423,132 +424,36 @@ pub(crate) struct RemovalClaimState {
     returned: Option<ModuleAuthority>,
 }
 
-/// Closing resources and their authority are one state space. Each variant
-/// contains only combinations that can actually arise from a preceding
-/// lifecycle transition.
-pub(crate) enum CloseResources<A: crate::Addin> {
-    AwaitingOpenAbort {
-        attempt: OpenAttemptId,
-        payload: OpenAbortPayload<A>,
-    },
-    Unowned {
-        payload: ClosePayload<A>,
-    },
-    Available {
-        payload: ClosePayload<A>,
-        authority: ModuleAuthority,
-    },
-    Claimed {
-        payload: ClosePayload<A>,
-        claim: RemovalClaimState,
-    },
+/// Resources eligible for a new removal claim. The authority contains only
+/// epochs whose close transition has not already been drained or retained.
+pub(crate) struct AvailableClose<A: crate::Addin> {
+    payload: ClosePayload<A>,
+    authority: ClaimableModuleAuthority,
 }
 
-impl<A: crate::Addin> CloseResources<A> {
-    fn is_published(&self) -> bool {
-        match self {
-            Self::AwaitingOpenAbort { .. } => false,
-            Self::Unowned { payload }
-            | Self::Available { payload, .. }
-            | Self::Claimed { payload, .. } => payload.is_published(),
-        }
-    }
+/// Resources whose removal authority is held by exactly one owner.
+pub(crate) struct ClaimedClose<A: crate::Addin> {
+    payload: ClosePayload<A>,
+    claim: RemovalClaimState,
+}
 
-    #[cfg(any(test, feature = "refinement"))]
-    fn has_opening_generation(&self) -> bool {
-        match self {
-            Self::AwaitingOpenAbort { payload, .. } => payload.has_opening_generation(),
-            Self::Unowned { payload }
-            | Self::Available { payload, .. }
-            | Self::Claimed { payload, .. } => payload.has_opening_generation(),
-        }
-    }
+/// Progressed or retained authority can be cleaned up or retained, but cannot
+/// start another removal transaction.
+pub(crate) struct UnavailableClose<A: crate::Addin> {
+    payload: ClosePayload<A>,
+    authority: UnavailableModuleAuthority,
+}
 
-    fn opening(&self) -> Option<&OpeningGeneration<A>> {
-        match self {
-            Self::AwaitingOpenAbort { payload, .. } => payload.opening(),
-            Self::Unowned { payload }
-            | Self::Available { payload, .. }
-            | Self::Claimed { payload, .. } => payload.opening(),
-        }
-    }
-
-    fn retiring_services(
-        &self,
-    ) -> Option<
-        &GenerationServices<crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>>,
-    > {
-        match self {
-            Self::AwaitingOpenAbort { .. } => None,
-            Self::Unowned { payload }
-            | Self::Available { payload, .. }
-            | Self::Claimed { payload, .. } => payload.retiring_services(),
-        }
-    }
-
-    fn module_epoch_id(&self) -> Option<ModuleEpochId> {
-        match self {
-            Self::Available { authority, .. } => Some(authority.id()),
-            Self::Claimed { claim, .. } => Some(claim.module_epoch),
-            Self::AwaitingOpenAbort { .. } | Self::Unowned { .. } => None,
-        }
-    }
-
-    fn removal_attempt(&self) -> Option<RemovalAttemptId> {
-        match self {
-            Self::Claimed { claim, .. } => Some(claim.attempt),
-            Self::AwaitingOpenAbort { .. } | Self::Unowned { .. } | Self::Available { .. } => None,
-        }
-    }
-
-    fn install_authority(self, authority: ModuleAuthority) -> Self {
-        match self {
-            Self::AwaitingOpenAbort { payload, .. } => Self::Available {
-                payload: payload.into_close_payload(),
-                authority,
-            },
-            Self::Unowned { payload } => Self::Available { payload, authority },
-            Self::Claimed {
-                payload,
-                claim:
-                    RemovalClaimState {
-                        attempt,
-                        module_epoch,
-                        returned: None,
-                    },
-            } => {
-                require_lifecycle_invariant(
-                    authority.id() == module_epoch,
-                    "returned module authority belongs to a different epoch",
-                );
-                Self::Claimed {
-                    payload,
-                    claim: RemovalClaimState {
-                        attempt,
-                        module_epoch,
-                        returned: Some(authority),
-                    },
-                }
-            }
-            Self::Available { .. }
-            | Self::Claimed {
-                claim:
-                    RemovalClaimState {
-                        returned: Some(_), ..
-                    },
-                ..
-            } => lifecycle_invariant_violation("module close authority was installed twice"),
-        }
-    }
-
-    fn claim(self, attempt: RemovalAttemptId) -> (Self, crate::module_runtime::ModuleClosing) {
-        let Self::Available { payload, authority } = self else {
-            lifecycle_invariant_violation("removal claim requires available module authority")
-        };
+impl<A: crate::Addin> AvailableClose<A> {
+    fn claim(
+        self,
+        attempt: RemovalAttemptId,
+    ) -> (ClaimedClose<A>, crate::module_runtime::ModuleClosing) {
+        let Self { payload, authority } = self;
         let module_epoch = authority.id();
         let closing = authority.into_closing();
         (
-            Self::Claimed {
+            ClaimedClose {
                 payload,
                 claim: RemovalClaimState {
                     attempt,
@@ -559,24 +464,173 @@ impl<A: crate::Addin> CloseResources<A> {
             closing,
         )
     }
+}
+
+impl<A: crate::Addin> ClaimedClose<A> {
+    fn release(
+        self,
+        expected_attempt: RemovalAttemptId,
+        returned: Option<ModuleAuthority>,
+    ) -> CloseResources<A> {
+        let Self {
+            payload,
+            claim:
+                RemovalClaimState {
+                    attempt,
+                    module_epoch,
+                    returned: retained,
+                },
+        } = self;
+        validate_removal_owner(attempt, expected_attempt);
+        match combine_returned_authority(retained, returned) {
+            Some(authority) => {
+                require_lifecycle_invariant(
+                    authority.id() == module_epoch,
+                    "released module authority belongs to a different epoch",
+                );
+                CloseResources::with_authority(payload, authority)
+            }
+            None => CloseResources::Unowned { payload },
+        }
+    }
+}
+
+/// Closing resources and their authority are one state space. Each variant
+/// retains the concrete receiver that permits its next operation.
+pub(crate) enum CloseResources<A: crate::Addin> {
+    AwaitingOpenAbort {
+        _attempt: OpenAttemptId,
+        payload: OpenAbortPayload<A>,
+    },
+    Unowned {
+        payload: ClosePayload<A>,
+    },
+    Available(AvailableClose<A>),
+    Claimed(ClaimedClose<A>),
+    Unavailable(UnavailableClose<A>),
+}
+
+impl<A: crate::Addin> CloseResources<A> {
+    fn with_authority(payload: ClosePayload<A>, authority: ModuleAuthority) -> Self {
+        match authority.classify() {
+            Ok(authority) => Self::Available(AvailableClose { payload, authority }),
+            Err(authority) => Self::Unavailable(UnavailableClose { payload, authority }),
+        }
+    }
+
+    fn payload(&self) -> Option<&ClosePayload<A>> {
+        match self {
+            Self::AwaitingOpenAbort { .. } => None,
+            Self::Unowned { payload }
+            | Self::Available(AvailableClose { payload, .. })
+            | Self::Claimed(ClaimedClose { payload, .. })
+            | Self::Unavailable(UnavailableClose { payload, .. }) => Some(payload),
+        }
+    }
+
+    fn is_published(&self) -> bool {
+        self.payload().is_some_and(ClosePayload::is_published)
+    }
+
+    #[cfg(any(test, feature = "refinement"))]
+    fn has_opening_generation(&self) -> bool {
+        match self {
+            Self::AwaitingOpenAbort { payload, .. } => payload.has_opening_generation(),
+            _ => self
+                .payload()
+                .is_some_and(ClosePayload::has_opening_generation),
+        }
+    }
+
+    fn opening(&self) -> Option<&OpeningGeneration<A>> {
+        match self {
+            Self::AwaitingOpenAbort { payload, .. } => payload.opening(),
+            _ => self.payload().and_then(ClosePayload::opening),
+        }
+    }
+
+    fn retiring_services(
+        &self,
+    ) -> Option<
+        &GenerationServices<crate::addin::AddinSubscription<A>, crate::addin::AddinSources<A>>,
+    > {
+        self.payload().and_then(ClosePayload::retiring_services)
+    }
+
+    fn module_epoch_id(&self) -> Option<ModuleEpochId> {
+        match self {
+            Self::Available(available) => Some(available.authority.id()),
+            Self::Claimed(claimed) => Some(claimed.claim.module_epoch),
+            Self::Unavailable(unavailable) => Some(unavailable.authority.id()),
+            Self::AwaitingOpenAbort { .. } | Self::Unowned { .. } => None,
+        }
+    }
+
+    fn removal_attempt(&self) -> Option<RemovalAttemptId> {
+        match self {
+            Self::Claimed(claimed) => Some(claimed.claim.attempt),
+            _ => None,
+        }
+    }
+
+    fn install_authority(self, authority: ModuleAuthority) -> Self {
+        match self {
+            Self::AwaitingOpenAbort { payload, .. } => {
+                Self::with_authority(payload.into_close_payload(), authority)
+            }
+            Self::Unowned { payload } => Self::with_authority(payload, authority),
+            Self::Claimed(ClaimedClose {
+                payload,
+                claim:
+                    RemovalClaimState {
+                        attempt,
+                        module_epoch,
+                        returned: None,
+                    },
+            }) => {
+                require_lifecycle_invariant(
+                    authority.id() == module_epoch,
+                    "returned module authority belongs to a different epoch",
+                );
+                Self::Claimed(ClaimedClose {
+                    payload,
+                    claim: RemovalClaimState {
+                        attempt,
+                        module_epoch,
+                        returned: Some(authority),
+                    },
+                })
+            }
+            Self::Available(_) | Self::Unavailable(_) | Self::Claimed(_) => {
+                lifecycle_invariant_violation("module close authority was installed twice")
+            }
+        }
+    }
 
     fn take_cleanup(self) -> (ModuleCleanupClaim, Self) {
         match self {
-            Self::Available { payload, authority } => {
-                if authority.is_retained_undrained() {
-                    let epoch = authority.id();
-                    (
-                        ModuleCleanupClaim::RetainedUndrained(epoch),
-                        Self::Available { payload, authority },
-                    )
-                } else {
-                    (
-                        ModuleCleanupClaim::Ready(authority.into_cleanup()),
-                        Self::Unowned { payload },
-                    )
-                }
-            }
-            Self::Claimed {
+            Self::Available(AvailableClose { payload, authority }) => (
+                ModuleCleanupClaim::Ready(ModuleCleanupReady::Closing(authority.into_closing())),
+                Self::Unowned { payload },
+            ),
+            Self::Unavailable(UnavailableClose {
+                payload,
+                authority: UnavailableModuleAuthority::Drained(drained),
+            }) => (
+                ModuleCleanupClaim::Ready(ModuleCleanupReady::Drained(drained)),
+                Self::Unowned { payload },
+            ),
+            Self::Unavailable(UnavailableClose {
+                payload,
+                authority: UnavailableModuleAuthority::RetainedUndrained(retained),
+            }) => (
+                ModuleCleanupClaim::RetainedUndrained(retained.id()),
+                Self::Unavailable(UnavailableClose {
+                    payload,
+                    authority: UnavailableModuleAuthority::RetainedUndrained(retained),
+                }),
+            ),
+            Self::Claimed(ClaimedClose {
                 payload,
                 claim:
                     RemovalClaimState {
@@ -584,33 +638,30 @@ impl<A: crate::Addin> CloseResources<A> {
                         module_epoch,
                         returned: Some(authority),
                     },
-            } => {
-                if authority.is_retained_undrained() {
-                    let epoch = authority.id();
-                    return (
-                        ModuleCleanupClaim::RetainedUndrained(epoch),
-                        Self::Claimed {
-                            payload,
-                            claim: RemovalClaimState {
-                                attempt,
-                                module_epoch,
-                                returned: Some(authority),
-                            },
-                        },
-                    );
-                }
-                (
-                    ModuleCleanupClaim::Ready(authority.into_cleanup()),
-                    Self::Claimed {
+            }) => match authority.into_cleanup() {
+                Ok(authority) => (
+                    ModuleCleanupClaim::Ready(authority),
+                    Self::Claimed(ClaimedClose {
                         payload,
                         claim: RemovalClaimState {
                             attempt,
                             module_epoch,
                             returned: None,
                         },
-                    },
-                )
-            }
+                    }),
+                ),
+                Err(retained) => (
+                    ModuleCleanupClaim::RetainedUndrained(retained.id()),
+                    Self::Claimed(ClaimedClose {
+                        payload,
+                        claim: RemovalClaimState {
+                            attempt,
+                            module_epoch,
+                            returned: Some(ModuleAuthority::RetainedUndrained(retained)),
+                        },
+                    }),
+                ),
+            },
             other => (ModuleCleanupClaim::Missing, other),
         }
     }
@@ -620,36 +671,17 @@ impl<A: crate::Addin> CloseResources<A> {
         expected_attempt: RemovalAttemptId,
         returned: Option<ModuleAuthority>,
     ) -> Self {
-        let Self::Claimed {
-            payload,
-            claim:
-                RemovalClaimState {
-                    attempt,
-                    module_epoch,
-                    returned: retained,
-                },
-        } = self
-        else {
-            lifecycle_invariant_violation(
+        match self {
+            Self::Claimed(claimed) => claimed.release(expected_attempt, returned),
+            _ => lifecycle_invariant_violation(
                 "removal owner release does not match canonical lifecycle ownership",
-            )
-        };
-        validate_removal_owner(attempt, expected_attempt);
-        match combine_returned_authority(retained, returned) {
-            Some(authority) => {
-                require_lifecycle_invariant(
-                    authority.id() == module_epoch,
-                    "released module authority belongs to a different epoch",
-                );
-                Self::Available { payload, authority }
-            }
-            None => Self::Unowned { payload },
+            ),
         }
     }
 
     fn final_removal_ready(&self, expected_attempt: RemovalAttemptId) -> Option<FinalRemovalReady> {
         match self {
-            Self::Claimed {
+            Self::Claimed(ClaimedClose {
                 payload: ClosePayload::Retiring(retirement),
                 claim:
                     RemovalClaimState {
@@ -657,7 +689,7 @@ impl<A: crate::Addin> CloseResources<A> {
                         module_epoch,
                         returned: None,
                     },
-            } if *attempt == expected_attempt
+            }) if *attempt == expected_attempt
                 && retirement.services.is_none()
                 && module_epoch.is_current() =>
             {
@@ -666,7 +698,7 @@ impl<A: crate::Addin> CloseResources<A> {
                     module_epoch: *module_epoch,
                 })
             }
-            Self::Claimed {
+            Self::Claimed(ClaimedClose {
                 payload: ClosePayload::Empty,
                 claim:
                     RemovalClaimState {
@@ -674,14 +706,14 @@ impl<A: crate::Addin> CloseResources<A> {
                         returned: None,
                         ..
                     },
-            } if *attempt == expected_attempt => Some(FinalRemovalReady::Uncommitted),
+            }) if *attempt == expected_attempt => Some(FinalRemovalReady::Uncommitted),
             _ => None,
         }
     }
 
     fn open_rollback_ready(&self, expected_attempt: RemovalAttemptId) -> Option<OpenRollbackReady> {
         match self {
-            Self::Claimed {
+            Self::Claimed(ClaimedClose {
                 payload: ClosePayload::Empty,
                 claim:
                     RemovalClaimState {
@@ -689,128 +721,69 @@ impl<A: crate::Addin> CloseResources<A> {
                         returned: None,
                         ..
                     },
-            } if *attempt == expected_attempt => Some(OpenRollbackReady { _private: () }),
+            }) if *attempt == expected_attempt => Some(OpenRollbackReady { _private: () }),
             _ => None,
         }
     }
 
     fn take_staged(&mut self) -> Option<OpeningGeneration<A>> {
-        let resources = mem::replace(
-            self,
-            Self::Unowned {
-                payload: ClosePayload::Empty,
-            },
-        );
-        match resources {
-            Self::AwaitingOpenAbort {
-                attempt,
-                mut payload,
-            } => {
-                let opening = payload.take_staged();
-                *self = Self::AwaitingOpenAbort { attempt, payload };
-                opening
-            }
-            Self::Unowned { mut payload } => {
-                let opening = payload.take_staged();
-                *self = Self::Unowned { payload };
-                opening
-            }
-            Self::Available {
-                mut payload,
-                authority,
-            } => {
-                let opening = payload.take_staged();
-                *self = Self::Available { payload, authority };
-                opening
-            }
-            Self::Claimed { mut payload, claim } => {
-                let opening = payload.take_staged();
-                *self = Self::Claimed { payload, claim };
-                opening
-            }
+        match self {
+            Self::AwaitingOpenAbort { payload, .. } => payload.take_staged(),
+            Self::Unowned { payload }
+            | Self::Available(AvailableClose { payload, .. })
+            | Self::Claimed(ClaimedClose { payload, .. })
+            | Self::Unavailable(UnavailableClose { payload, .. }) => payload.take_staged(),
         }
     }
 
     fn take_retirement(&mut self) -> Option<OpenRetirement<A>> {
-        let resources = mem::replace(
-            self,
-            Self::Unowned {
-                payload: ClosePayload::Empty,
-            },
-        );
-        match resources {
-            Self::AwaitingOpenAbort { attempt, payload } => {
-                *self = Self::AwaitingOpenAbort { attempt, payload };
-                None
-            }
-            Self::Unowned { mut payload } => {
-                let retirement = payload.take_retirement();
-                *self = Self::Unowned { payload };
-                retirement
-            }
-            Self::Available {
-                mut payload,
-                authority,
-            } => {
-                let retirement = payload.take_retirement();
-                *self = Self::Available { payload, authority };
-                retirement
-            }
-            Self::Claimed { mut payload, claim } => {
-                let retirement = payload.take_retirement();
-                *self = Self::Claimed { payload, claim };
-                retirement
-            }
+        match self {
+            Self::AwaitingOpenAbort { .. } => None,
+            Self::Unowned { payload }
+            | Self::Available(AvailableClose { payload, .. })
+            | Self::Claimed(ClaimedClose { payload, .. })
+            | Self::Unavailable(UnavailableClose { payload, .. }) => payload.take_retirement(),
         }
     }
 
     fn into_retiring(self) -> (Option<PublishedOwner<ExecutionGeneration<A>>>, Self) {
-        match self {
-            Self::AwaitingOpenAbort { .. } => (None, self),
-            Self::Unowned {
-                payload: ClosePayload::Published(closing),
-            } => {
-                let (generation, retirement) = closing.into_retirement_with_generation();
-                (
-                    Some(generation),
-                    Self::Unowned {
-                        payload: ClosePayload::Retiring(retirement),
-                    },
-                )
+        let mut generation = None;
+        let mut retire = |payload| match payload {
+            ClosePayload::Published(closing) => {
+                let (root, retirement) = closing.into_retirement_with_generation();
+                generation = Some(root);
+                ClosePayload::Retiring(retirement)
             }
-            Self::Available {
-                payload: ClosePayload::Published(closing),
-                authority,
-            } => {
-                let (generation, retirement) = closing.into_retirement_with_generation();
-                (
-                    Some(generation),
-                    Self::Available {
-                        payload: ClosePayload::Retiring(retirement),
-                        authority,
-                    },
-                )
+            other => other,
+        };
+        let resources = match self {
+            other @ Self::AwaitingOpenAbort { .. } => other,
+            Self::Unowned { payload } => Self::Unowned {
+                payload: retire(payload),
+            },
+            Self::Available(AvailableClose { payload, authority }) => {
+                Self::Available(AvailableClose {
+                    payload: retire(payload),
+                    authority,
+                })
             }
-            Self::Claimed {
-                payload: ClosePayload::Published(closing),
+            Self::Claimed(ClaimedClose { payload, claim }) => Self::Claimed(ClaimedClose {
+                payload: retire(payload),
                 claim,
-            } => {
-                let (generation, retirement) = closing.into_retirement_with_generation();
-                (
-                    Some(generation),
-                    Self::Claimed {
-                        payload: ClosePayload::Retiring(retirement),
-                        claim,
-                    },
-                )
+            }),
+            Self::Unavailable(UnavailableClose { payload, authority }) => {
+                Self::Unavailable(UnavailableClose {
+                    payload: retire(payload),
+                    authority,
+                })
             }
-            other => (None, other),
-        }
+        };
+        (generation, resources)
     }
 
     fn finish_closed(self) -> RemovalAttemptId {
         match self {
-            Self::Claimed {
+            Self::Claimed(ClaimedClose {
                 payload: ClosePayload::Empty,
                 claim:
                     RemovalClaimState {
@@ -818,7 +791,7 @@ impl<A: crate::Addin> CloseResources<A> {
                         returned: None,
                         ..
                     },
-            } => attempt,
+            }) => attempt,
             _ => lifecycle_invariant_violation(
                 "closed publication requires an empty claimed lifecycle payload",
             ),
@@ -845,7 +818,7 @@ pub(crate) enum ActiveOpeningClose<A: crate::Addin> {
     },
     Published {
         payload: PublishedClosePayload<A>,
-        authority: ModuleAuthority,
+        authority: ClaimableModuleAuthority,
     },
 }
 
@@ -940,16 +913,19 @@ impl<A: crate::Addin> ClosingState<A> {
                 attempt,
                 resources: ActiveOpeningClose::AwaitingAbort { payload },
             } => Self::Ready {
-                resources: CloseResources::AwaitingOpenAbort { attempt, payload },
+                resources: CloseResources::AwaitingOpenAbort {
+                    _attempt: attempt,
+                    payload,
+                },
             },
             Self::OpeningActive {
                 resources: ActiveOpeningClose::Published { payload, authority },
                 ..
             } => Self::Ready {
-                resources: CloseResources::Available {
+                resources: CloseResources::Available(AvailableClose {
                     payload: payload.into_close_payload(),
                     authority,
-                },
+                }),
             },
             Self::Ready { resources } => Self::Ready { resources },
         }
@@ -961,8 +937,11 @@ impl<A: crate::Addin> ClosingState<A> {
                 attempt,
                 resources: ActiveOpeningClose::AwaitingAbort { payload },
             } => Self::Ready {
-                resources: CloseResources::AwaitingOpenAbort { attempt, payload }
-                    .install_authority(authority),
+                resources: CloseResources::AwaitingOpenAbort {
+                    _attempt: attempt,
+                    payload,
+                }
+                .install_authority(authority),
             },
             Self::OpeningActive { .. } => lifecycle_invariant_violation(
                 "module authority installed while closing already owns an authority",
@@ -1052,7 +1031,7 @@ impl<A: crate::Addin> ClosingState<A> {
         );
         match state {
             Self::Ready {
-                resources: CloseResources::Available { payload, authority },
+                resources: CloseResources::Available(AvailableClose { payload, authority }),
             } => {
                 let closing = authority.into_closing();
                 *self = Self::Ready {
@@ -1268,10 +1247,7 @@ impl<A: crate::Addin> LifecycleState<A> {
         let state = mem::replace(self, Self::Closed(ClosedState::Idle));
         *self = match state {
             Self::Closed(ClosedState::Idle) => Self::Closing(ClosingState::Ready {
-                resources: CloseResources::Available {
-                    payload: ClosePayload::Empty,
-                    authority,
-                },
+                resources: CloseResources::with_authority(ClosePayload::Empty, authority),
             }),
             Self::Opening { attempt, payload } => Self::OpenRollbackPending(
                 payload
@@ -1304,10 +1280,10 @@ impl<A: crate::Addin> LifecycleState<A> {
             Self::Opening { attempt, payload } => payload.into_close_resources(attempt),
             Self::Open { bundle } => {
                 let (closing, authority) = bundle.into_closing();
-                CloseResources::Available {
+                CloseResources::Available(AvailableClose {
                     payload: ClosePayload::Published(closing),
                     authority,
-                }
+                })
             }
             Self::Closing(closing) => closing.into_quarantine_resources(),
             Self::OpenRollbackPending(resources) | Self::Quarantined(resources) => resources,
@@ -1942,10 +1918,10 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                 LifecycleState::Open { bundle } => {
                     let (closing, authority) = bundle.into_closing();
                     LifecycleState::Closing(ClosingState::Ready {
-                        resources: CloseResources::Available {
+                        resources: CloseResources::Available(AvailableClose {
                             payload: ClosePayload::Published(closing),
                             authority,
-                        },
+                        }),
                     })
                 }
                 LifecycleState::Closing(closing) => LifecycleState::Closing(closing),
@@ -1979,7 +1955,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
             let state = mem::replace(&mut core.state, LifecycleState::Closed(ClosedState::Idle));
             let (claim, state) = match state {
                 LifecycleState::Closing(ClosingState::Ready {
-                    resources: CloseResources::Available { payload, authority },
+                    resources: CloseResources::Available(available),
                 }) => {
                     let attempt =
                         RemovalAttemptId::new(core.next_removal_attempt).unwrap_or_else(|| {
@@ -1993,20 +1969,18 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                                 "lifecycle removal-attempt identity exhausted",
                             )
                         });
-                    let (resources, module_closing) =
-                        CloseResources::Available { payload, authority }.claim(attempt);
+                    let (resources, module_closing) = available.claim(attempt);
                     (
                         Some(RemovalClaim {
                             attempt,
                             module_closing,
                         }),
-                        LifecycleState::Closing(ClosingState::Ready { resources }),
+                        LifecycleState::Closing(ClosingState::Ready {
+                            resources: CloseResources::Claimed(resources),
+                        }),
                     )
                 }
-                LifecycleState::OpenRollbackPending(CloseResources::Available {
-                    payload,
-                    authority,
-                }) => {
+                LifecycleState::OpenRollbackPending(CloseResources::Available(available)) => {
                     let attempt =
                         RemovalAttemptId::new(core.next_removal_attempt).unwrap_or_else(|| {
                             lifecycle_invariant_violation(
@@ -2019,14 +1993,13 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                                 "lifecycle removal-attempt identity exhausted",
                             )
                         });
-                    let (resources, module_closing) =
-                        CloseResources::Available { payload, authority }.claim(attempt);
+                    let (resources, module_closing) = available.claim(attempt);
                     (
                         Some(RemovalClaim {
                             attempt,
                             module_closing,
                         }),
-                        LifecycleState::OpenRollbackPending(resources),
+                        LifecycleState::OpenRollbackPending(CloseResources::Claimed(resources)),
                     )
                 }
                 other => (None, other),
@@ -2305,10 +2278,10 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                     let (closing, authority) = bundle.into_closing();
                     let (generation, retirement) = closing.into_retirement_with_generation();
                     core.state = LifecycleState::Closing(ClosingState::Ready {
-                        resources: CloseResources::Available {
+                        resources: CloseResources::Available(AvailableClose {
                             payload: ClosePayload::Retiring(retirement),
                             authority,
-                        },
+                        }),
                     });
                     (Some(generation), TransitionEffect::ClearPublication)
                 }
