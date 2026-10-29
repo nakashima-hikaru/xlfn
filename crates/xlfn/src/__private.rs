@@ -110,6 +110,12 @@ pub mod v1 {
     pub use crate::input_identity::InputIdentityEncoder;
     #[doc(hidden)]
     pub use crate::registration::{ArgumentAbi, ArgumentDescriptor, ReturnAbi};
+    #[cfg(feature = "handles")]
+    #[doc(hidden)]
+    pub use crate::source_catalog::RtdSourceCatalog;
+    #[cfg(feature = "handles")]
+    #[doc(hidden)]
+    pub use crate::subscription_owner::RtdSubscription;
     /// Forwards the generated COM export to the private Excel RTD transport.
     #[cfg(any(feature = "rtd", feature = "handles"))]
     #[doc(hidden)]
@@ -298,8 +304,13 @@ pub mod v1 {
     pub fn async_context<'call, A: Addin>(
         lease: &'call crate::generation::ExecutionLease<A>,
         cancellation: &'call CancellationToken,
+        runtime: &'call MacroRuntime<A, impl UnloadPolicy<A>>,
     ) -> crate::addin::AsyncContext<'call, A> {
-        crate::addin::AsyncContext::new(lease.state(), cancellation)
+        crate::addin::AsyncContext::new(
+            lease.state(),
+            cancellation,
+            runtime.runtime().diagnostics(),
+        )
     }
 
     /// Opaque wrapper around the add-in [`Runtime`] for generated code.

@@ -21,6 +21,11 @@ pub(crate) struct GenerationLeaseBrand;
 type HandleAliasMarker<'call, T> = (&'call crate::call::CallScope<'call>, fn(T) -> T);
 
 /// Opaque identity of a registry-owned handle payload.
+///
+/// All bindings and aliases for the same live object share this identity. It
+/// is scoped to the current handle session, so it must not be persisted across
+/// workbook saves or Excel restarts. Holding an ID does not keep the object
+/// alive, and an ID cannot be used to reconstruct a handle.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct HandleObjectId {
     session: u64,
@@ -35,20 +40,10 @@ impl HandleObjectId {
         }
     }
 
-    #[cfg(test)]
-    #[allow(
-        dead_code,
-        reason = "Handle identity accessors are used by protocol tests"
-    )]
     pub(crate) const fn session(self) -> u64 {
         self.session
     }
 
-    #[cfg(test)]
-    #[allow(
-        dead_code,
-        reason = "Handle identity accessors are used by protocol tests"
-    )]
     pub(crate) const fn sequence(self) -> u64 {
         self.sequence
     }
@@ -92,9 +87,14 @@ impl<'call, T: ExcelHandleObject> Handle<'call, T> {
         self.value.addr()
     }
 
-    /// Returns the session-scoped identity used by formula input semantics.
-    pub(crate) fn object_id(&self) -> ObjectId {
-        self.binding.object().id()
+    /// Returns the session-scoped identity of the underlying object.
+    ///
+    /// Another handle obtained from an alias of this object has the same ID.
+    /// Retaining the ID does not extend the object's lifetime. See
+    /// [`HandleObjectId`] for the persistence limits.
+    #[must_use]
+    pub fn object_id(&self) -> HandleObjectId {
+        HandleObjectId::from_object_id(self.binding.object().id())
     }
 
     /// Converts this call-scoped capability into the internal pending form
@@ -138,6 +138,13 @@ impl<T: ExcelHandleObject> Deref for Handle<'_, T> {
     }
 }
 
+impl<T: ExcelHandleObject> AsRef<T> for Handle<'_, T> {
+    #[inline]
+    fn as_ref(&self) -> &T {
+        self
+    }
+}
+
 /// A generation-scoped handle lease supplied to an async UDF.
 ///
 /// The framework creates this value only after the generated task has been
@@ -152,7 +159,12 @@ pub struct HandleLease<'generation, T: ExcelHandleObject> {
 }
 
 impl<T: ExcelHandleObject> HandleLease<'_, T> {
-    /// Returns the stable session-scoped object identity.
+    /// Returns the session-scoped identity of the underlying object.
+    ///
+    /// Synchronous handles and aliases of this object share this ID. Retaining
+    /// the ID does not extend the object's lifetime. See [`HandleObjectId`] for
+    /// the persistence limits.
+    #[must_use]
     pub fn object_id(&self) -> HandleObjectId {
         HandleObjectId::from_object_id(self.object_id)
     }
@@ -166,6 +178,13 @@ impl<T: ExcelHandleObject> Deref for HandleLease<'_, T> {
         // SAFETY: `_lease` owns the raw object lease guard for the entire lifetime of this
         // lease, and `value` was created from that same object cell.
         unsafe { self.value.as_ref_unchecked() }
+    }
+}
+
+impl<T: ExcelHandleObject> AsRef<T> for HandleLease<'_, T> {
+    #[inline]
+    fn as_ref(&self) -> &T {
+        self
     }
 }
 

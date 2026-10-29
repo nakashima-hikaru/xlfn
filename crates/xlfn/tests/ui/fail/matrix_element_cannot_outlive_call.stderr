@@ -1,0 +1,7 @@
+error: lifetime may not live long enough
+ --> tests/ui/fail/matrix_element_cannot_outlive_call.rs:4:5
+  |
+3 | fn escape<'call>(matrix: MatrixRef<'call, f64>) -> Option<&'static f64> {
+  |           ----- lifetime `'call` defined here
+4 |     matrix.get(0, 0)
+  |     ^^^^^^^^^^^^^^^^ returning this value requires that `'call` must outlive `'static`

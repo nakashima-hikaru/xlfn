@@ -86,7 +86,10 @@ synchronous, call-scoped values; see [Borrow a range](#borrow-a-range-during-a-s
 
 Built-in scalar outputs are `f64`, `f32`, `bool`, `i8`, `i16`, `i32`, `u8`,
 `u16`, `u32`, exactly representable `i64`, `u64`, `isize`, and `usize`, plus
-`String`, `&str`, `ExcelSerialDate`, and `ExcelError`.
+`String`, `&str`, `Cow<'_, str>`, `ExcelSerialDate`, and `ExcelError`.
+`Cow::Owned` transfers its string during semantic conversion; `Cow::Borrowed`
+uses the borrowed text writer when encoding a return. Both obey the same
+UTF-16 limits as ordinary strings.
 Integer outputs wider than 32 bits are limited to the binary64 exact-integer
 range `-2^53..=2^53` (or `0..=2^53` for unsigned integers); larger values fail
 with overflow rather than silently rounding.
@@ -396,13 +399,50 @@ than zero.
 
 `ExcelSerialDate` retains a finite Excel serial and an
 `ExcelDateSystem::Workbook` marker. A cell alone does not say whether the
-workbook uses the 1900 or 1904 date system. Resolve that convention in
-application policy before converting to a civil date.
+workbook uses the 1900 or 1904 date system. A macro-sheet UDF can query
+`context.workbook_date_system(&reference)?`, then attach the resolved setting
+with `serial.with_date_system(system)` before converting to a civil date.
+The reference must contain an explicit nonzero sheet identity. Internal
+current-sheet references are rejected because they cannot identify the target
+workbook independently of Excel's active selection. Failed callbacks and
+unavailable settings return errors; they never select a default epoch.
+
+```rust
+{{#include ../fixtures/addin.md}}
+use xlfn::prelude::*;
+use xlfn::reference::ExcelReference;
+use xlfn::value::ExcelSerialDate;
+
+#[excel_function(name = "DATE.YEAR")]
+fn date_year(
+    context: MacroSheetContext<'_, GuideAddin>,
+    #[excel_arg(reference)] settlement: ExcelReference<'_>,
+) -> XllResult<i16> {
+    let system = context.workbook_date_system(&settlement)?;
+    let serial = context.coerce_matrix::<ExcelSerialDate>(&settlement)?;
+    let date = serial.get(0, 0).ok_or_else(||
+        XllError::input("settlement", xlfn::error::InputError::OutOfRange))?;
+    Ok(date.with_date_system(system).to_ymd_with_argument("settlement")?.0)
+}
+```
+
+The setting belongs to the referenced workbook, which may differ from the
+formula's workbook and the active workbook. It is queried on each invocation;
+changing the setting may require explicit recalculation. This operation uses
+`xlSheetNm` followed by `GET.DOCUMENT(20, workbook_name)` and requires
+[macro-sheet information-function permissions](https://learn.microsoft.com/en-us/office/client-developer/excel/xlfregister-form-1#registering-worksheet-functions-as-macro-sheet-equivalents-handling-uncalculated-cells).
+Native Excel qualification remains pending; the runnable cases and evidence
+requirements are in `tests/excel-date-system/README.md` in the repository.
 
 Use `ExcelSerialDate::from_ymd(year, month, day, system)` to construct a
 midnight serial, and `date.to_ymd()` to read its Gregorian calendar day.
 Their component types are `year: i16`, `month: i8`, and `day: i8`, matching
 Jiff's civil-date constructor and accessors.
+`to_ymd_with_argument("settlement")` and, with Jiff enabled,
+`to_jiff_with_argument("settlement")` attach a worksheet argument name to
+calendar-conversion errors; ordinary conversions retain the label `date`.
+`with_date_system` reinterprets the same serial rather than shifting it to
+preserve the calendar date across epochs.
 Calendar conversions support years `1..=9999`. They return an error for an
 unresolved `Workbook` convention or the fictitious 1900-02-29 (serial day
 60 in the 1900 system), instead of mapping it to another date. Reading a
@@ -510,6 +550,13 @@ Owned `Matrix` values iterate in row-major order. `MatrixRef` supports the same
 `[(row, column)]` indexing for reads; an owned `Matrix` also supports element
 updates. `Row`, `Column`, and `BoundedVarArgs` expose ordinary slice operations
 and iteration. Mutating their elements preserves their dimensions and limits.
+For computed coordinates, `Matrix::get` / `get_mut` and `MatrixRef::get`
+return `None` if either axis is out of bounds, including overflow-sized
+coordinates. `as_mut_slice`, `row_mut`, and the exact-size `rows_mut` iterator
+permit element changes while preserving shape. `try_map` consumes the matrix
+in row-major order, keeps its dimensions, and returns the first mapping error,
+dropping partial output and remaining input normally. `Row` / `Column` also
+support `AsMut<[T]>`, checked `TryFrom<Vec<T>>`, and conversion back to `Vec<T>`.
 
 ```rust
 use xlfn::value::Matrix;

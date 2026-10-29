@@ -23,7 +23,11 @@ fn borrowed_text(value: &str) -> f64 {
 
 #[excel_function(name = "TEST.BORROWED.MATRIX", thread_safe)]
 fn borrowed_matrix(value: MatrixRef<'_, f64>) -> f64 {
-    value.iter().copied().sum()
+    value.get(0, 0).copied().unwrap_or_default() + value.iter().skip(1).copied().sum::<f64>()
+}
+
+fn matrix_element_for_call<'call>(value: &MatrixRef<'call, f64>) -> Option<&'call f64> {
+    value.get(0, 0)
 }
 
 #[excel_function(name = "TEST.BORROWED.NUMERIC", thread_safe)]

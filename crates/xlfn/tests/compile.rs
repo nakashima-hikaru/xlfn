@@ -27,6 +27,7 @@ fn trait_driven_function_signatures_compile() {
     tests.compile_fail("tests/ui/fail/callback_*.rs");
     tests.compile_fail("tests/ui/fail/lookalike_*.rs");
     tests.compile_fail("tests/ui/fail/nested_return_array.rs");
+    tests.compile_fail("tests/ui/fail/matrix_element_cannot_outlive_call.rs");
     tests.compile_fail("tests/ui/fail/removed_export_macro.rs");
     tests.compile_fail("tests/ui/fail/return_trait_missing.rs");
     tests.compile_fail("tests/ui/fail/return_abi_mismatch.rs");

@@ -15,14 +15,14 @@ use crate::reference::ExcelReference;
 #[cfg(feature = "handles")]
 use crate::reference::FromExcelReference;
 use crate::return_abi::ExcelCallbackStatus;
-use crate::value::{ExcelValue, FromExcel, Matrix, convert};
+use crate::value::{ExcelDateSystem, ExcelValue, FromExcel, Matrix, convert};
 #[cfg(feature = "handles")]
 use crate::value::{XlValueRef, XlValueType};
 use crate::{XllError, XllResult};
 use std::ptr::NonNull;
 #[cfg(feature = "handles")]
 use xlfn_sys::{IDSHEET, XL_SHEET_ID, XLF_CALLER};
-use xlfn_sys::{XL_COERCE, XL_SHEET_NM, XLOPER12};
+use xlfn_sys::{XL_COERCE, XL_SHEET_NM, XLF_GET_DOCUMENT, XLOPER12};
 
 /// The single-cell caller identity returned by Excel's caller protocol.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -176,6 +176,62 @@ impl<'call> ExcelHost<'call> {
         )
     }
 
+    /// Uses an explicit sheet identity to name the workbook for GET.DOCUMENT.
+    /// Never omits its workbook operand or resolves an implicit current sheet.
+    pub(crate) fn workbook_date_system(
+        &self,
+        reference: &ExcelReference<'_>,
+    ) -> XllResult<ExcelDateSystem> {
+        if reference.sheet_id().is_none_or(|sheet| sheet.get() == 0) {
+            return Err(XllError::input(
+                "reference",
+                crate::error::InputError::Malformed(
+                    "workbook date system requires an explicit nonzero sheet identity",
+                ),
+            ));
+        }
+        let sheet = self.sheet_name(reference)?;
+        let workbook = workbook_name(&sheet)?;
+        let mut units =
+            crate::utf16::encode_counted(workbook, "reference", crate::utf16::EXCEL_STRING_LIMIT)?;
+        let mut name = XLOPER12 {
+            value: xlfn_sys::XLOPER12Value {
+                string: units.as_mut_ptr(),
+            },
+            xltype: xlfn_sys::XLTYPE_STR,
+        };
+        // GET.DOCUMENT(20, workbook) is TRUE for the 1904 date system.
+        let mut selector = XLOPER12::integer(20);
+        let arguments = [
+            NonNull::from_mut(&mut selector),
+            NonNull::from_mut(&mut name),
+        ];
+        self.invoke(
+            XLF_GET_DOCUMENT,
+            ExcelApiFunction::GetDocument,
+            &arguments,
+            |result| {
+                let value = result.borrow()?;
+                match value.value_type() {
+                    crate::value::XlValueType::Boolean => {
+                        Ok(if <bool as FromExcel>::from_excel(value, "reference")? {
+                            ExcelDateSystem::Mac1904
+                        } else {
+                            ExcelDateSystem::Windows1900
+                        })
+                    }
+                    crate::value::XlValueType::Error => Err(XllError::ExcelValue(
+                        <crate::ExcelError as FromExcel>::from_excel(value, "reference")?,
+                    )),
+                    _ => Err(XllError::ExcelApi {
+                        function: ExcelApiFunction::GetDocument,
+                        failure: ExcelApiFailure::UnexpectedResult,
+                    }),
+                }
+            },
+        )
+    }
+
     #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles"),))]
     pub(crate) fn module_path(&self) -> XllResult<String> {
         self.invoke(
@@ -247,6 +303,23 @@ impl<'call> ExcelHost<'call> {
     }
 }
 
+fn workbook_name(sheet: &str) -> XllResult<&str> {
+    let name = sheet
+        .strip_prefix('[')
+        .and_then(|name| name.split_once(']'));
+    match name {
+        Some((workbook, sheet))
+            if !workbook.is_empty() && !sheet.is_empty() && !workbook.contains(['[', '\0']) =>
+        {
+            Ok(workbook)
+        }
+        _ => Err(XllError::ExcelApi {
+            function: ExcelApiFunction::SheetName,
+            failure: ExcelApiFailure::UnexpectedResult,
+        }),
+    }
+}
+
 #[cfg(feature = "handles")]
 #[derive(Debug, PartialEq)]
 enum CallerLocation {
@@ -297,6 +370,275 @@ fn single_cell_caller_error() -> XllError {
         "caller",
         InputError::Malformed("handle-producing functions require a single-cell caller"),
     )
+}
+
+#[cfg(test)]
+mod date_tests {
+    use super::*;
+    use crate::reference::FromExcelReference;
+    use crate::registration::host::test_support::{
+        CallbackScript, RegisterArgument, Reply, read_registration_arguments,
+    };
+    use crate::value::XlValueRef;
+    use xlfn_sys::{XLMREF12, XLOPER12MRef, XLOPER12SRef, XLOPER12Value, XLREF12};
+
+    fn area() -> XLREF12 {
+        XLREF12 {
+            rw_first: 0,
+            rw_last: 0,
+            col_first: 0,
+            col_last: 0,
+        }
+    }
+
+    fn external(table: &mut XLMREF12, sheet_id: usize) -> XLOPER12 {
+        XLOPER12 {
+            value: XLOPER12Value {
+                mref: XLOPER12MRef {
+                    references: table,
+                    sheet_id,
+                },
+            },
+            xltype: xlfn_sys::XLTYPE_REF,
+        }
+    }
+
+    fn reference(raw: &XLOPER12) -> ExcelReference<'_> {
+        ExcelReference::from_excel_reference(XlValueRef::from_array_cell(raw).unwrap(), "reference")
+            .unwrap()
+    }
+
+    fn text(units: &mut [u16]) -> XLOPER12 {
+        XLOPER12 {
+            value: XLOPER12Value {
+                string: units.as_mut_ptr(),
+            },
+            xltype: xlfn_sys::XLTYPE_STR,
+        }
+    }
+
+    #[test]
+    fn workbook_date_system_names_the_referenced_workbook_on_every_query() {
+        // Keep one callback authority while alternating workbook identities,
+        // then changing the first workbook's setting without changing its ID.
+        let callbacks = HostCallbackSession::new();
+        let history = crate::diagnostics::DiagnosticHistory::new();
+        let context =
+            crate::MacroSheetContext::<()>::new(&(), &history, ExcelHost::new(&callbacks));
+        for (sheet_id, workbook, mac) in [
+            (42, "Book1900.xlsx", false),
+            (91, "価格 '💡.xlsx", true),
+            (42, "Book1900.xlsx", true),
+        ] {
+            let mut table = XLMREF12 {
+                count: 1,
+                reftbl: [area()],
+            };
+            let raw = external(&mut table, sheet_id);
+            let mut sheet_name =
+                crate::utf16::encode_counted(&format!("[{workbook}]Data"), "test", 32767).unwrap();
+            let script = CallbackScript::install([
+                Reply::success(XL_SHEET_NM, text(&mut sheet_name)),
+                Reply::success(XLF_GET_DOCUMENT, XLOPER12::boolean(mac)),
+            ]);
+            script.on_arguments(XL_SHEET_NM, move |arguments| {
+                assert_eq!(arguments.len(), 1);
+                // SAFETY: the script borrows the live reference operand.
+                let raw = unsafe { &*arguments[0] };
+                assert_eq!(raw.base_type(), xlfn_sys::XLTYPE_REF);
+                // SAFETY: the external-reference tag selects mref.
+                assert_eq!(unsafe { raw.value.mref.sheet_id }, sheet_id);
+            });
+            script.on_arguments(XLF_GET_DOCUMENT, move |arguments| {
+                assert_eq!(arguments.len(), 2);
+                // SAFETY: the script borrows both live callback operands.
+                let selector = unsafe { &*arguments[0] };
+                assert_eq!(selector.base_type(), xlfn_sys::XLTYPE_INT);
+                // SAFETY: the integer tag selects the selector union member.
+                assert_eq!(unsafe { selector.value.integer }, 20);
+                // SAFETY: the second operand is the live counted workbook name.
+                let names = unsafe { read_registration_arguments(&arguments[1..]) };
+                assert_eq!(names, [RegisterArgument::Text(workbook.to_owned())]);
+            });
+            assert_eq!(
+                context.workbook_date_system(&reference(&raw)).unwrap(),
+                if mac {
+                    ExcelDateSystem::Mac1904
+                } else {
+                    ExcelDateSystem::Windows1900
+                }
+            );
+            script.assert_calls(&[XL_SHEET_NM, XLF_GET_DOCUMENT]);
+        }
+    }
+
+    #[test]
+    fn workbook_date_system_rejects_ambiguous_sheet_identity_without_callbacks() {
+        let mut table = XLMREF12 {
+            count: 1,
+            reftbl: [area()],
+        };
+        let roots = [
+            external(&mut table, 0),
+            XLOPER12 {
+                value: XLOPER12Value {
+                    sref: XLOPER12SRef {
+                        count: 1,
+                        reference: area(),
+                    },
+                },
+                xltype: xlfn_sys::XLTYPE_SREF,
+            },
+        ];
+        let script = CallbackScript::install([]);
+        let callbacks = HostCallbackSession::new();
+        for raw in &roots {
+            assert!(matches!(
+                ExcelHost::new(&callbacks).workbook_date_system(&reference(raw)),
+                Err(XllError::Input {
+                    argument: "reference",
+                    ..
+                })
+            ));
+        }
+        script.assert_calls(&[]);
+    }
+
+    #[test]
+    fn workbook_date_system_rejects_unknown_settings_without_coercion_or_default() {
+        let mut table = XLMREF12 {
+            count: 1,
+            reftbl: [area()],
+        };
+        let raw = external(&mut table, 42);
+        for result in [
+            XLOPER12::number(0.0),
+            XLOPER12::integer(1),
+            XLOPER12::nil(),
+            XLOPER12::error(xlfn_sys::XLERR_REF),
+        ] {
+            let mut sheet = crate::utf16::encode_counted("[Book.xlsx]Data", "test", 32767).unwrap();
+            let script = CallbackScript::install([
+                Reply::success(XL_SHEET_NM, text(&mut sheet)),
+                Reply::success(XLF_GET_DOCUMENT, result),
+            ]);
+            let callbacks = HostCallbackSession::new();
+            let error = ExcelHost::new(&callbacks)
+                .workbook_date_system(&reference(&raw))
+                .unwrap_err();
+            if result.base_type() == xlfn_sys::XLTYPE_ERR {
+                assert!(matches!(
+                    error,
+                    XllError::ExcelValue(crate::ExcelError::Reference)
+                ));
+            } else {
+                assert!(matches!(
+                    error,
+                    XllError::ExcelApi {
+                        function: ExcelApiFunction::GetDocument,
+                        failure: ExcelApiFailure::UnexpectedResult
+                    }
+                ));
+            }
+            script.assert_calls(&[XL_SHEET_NM, XLF_GET_DOCUMENT]);
+        }
+    }
+
+    #[test]
+    fn workbook_date_system_does_not_fall_back_after_malformed_sheet_names() {
+        let mut table = XLMREF12 {
+            count: 1,
+            reftbl: [area()],
+        };
+        let raw = external(&mut table, 42);
+        for malformed in [
+            "",
+            "Data",
+            "[]Data",
+            "[Book]",
+            "[[Book]Data",
+            "[Book\0]Data",
+        ] {
+            let mut sheet = crate::utf16::encode_counted(malformed, "test", 32767).unwrap();
+            let script = CallbackScript::install([Reply::success(XL_SHEET_NM, text(&mut sheet))]);
+            let callbacks = HostCallbackSession::new();
+            assert!(
+                ExcelHost::new(&callbacks)
+                    .workbook_date_system(&reference(&raw))
+                    .is_err()
+            );
+            script.assert_calls(&[XL_SHEET_NM]);
+        }
+    }
+
+    #[test]
+    fn workbook_date_system_propagates_callback_rejection_and_terminal_suppression() {
+        let mut table = XLMREF12 {
+            count: 1,
+            reftbl: [area()],
+        };
+        let raw = external(&mut table, 42);
+        for function in [XL_SHEET_NM, XLF_GET_DOCUMENT] {
+            for status in [
+                xlfn_sys::XLRET_FAILED,
+                xlfn_sys::XLRET_ABORT,
+                xlfn_sys::XLRET_UNCALCED,
+            ] {
+                let mut sheet = crate::utf16::encode_counted("[Book]Data", "test", 32767).unwrap();
+                let mut replies = Vec::new();
+                if function == XLF_GET_DOCUMENT {
+                    replies.push(Reply::success(XL_SHEET_NM, text(&mut sheet)));
+                }
+                replies.push(Reply::success(function, XLOPER12::nil()).status(status));
+                let script = CallbackScript::install(replies);
+                let callbacks = HostCallbackSession::new();
+                let host = ExcelHost::new(&callbacks);
+                assert!(
+                    matches!(host.workbook_date_system(&reference(&raw)), Err(XllError::ExcelApi {
+                    failure: ExcelApiFailure::Status(actual), ..
+                }) if actual == ExcelCallbackStatus::from_raw(status))
+                );
+                if status != xlfn_sys::XLRET_FAILED {
+                    assert!(matches!(
+                        host.workbook_date_system(&reference(&raw)),
+                        Err(XllError::ExcelApi {
+                            failure: ExcelApiFailure::Suppressed(_),
+                            ..
+                        })
+                    ));
+                }
+                script.assert_calls(if function == XL_SHEET_NM {
+                    &[XL_SHEET_NM]
+                } else {
+                    &[XL_SHEET_NM, XLF_GET_DOCUMENT]
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn workbook_date_system_returns_cleanup_failure_instead_of_a_setting() {
+        let mut table = XLMREF12 {
+            count: 1,
+            reftbl: [area()],
+        };
+        let raw = external(&mut table, 42);
+        let mut sheet = crate::utf16::encode_counted("[Book]Data", "test", 32767).unwrap();
+        let script = CallbackScript::install([
+            Reply::success(XL_SHEET_NM, text(&mut sheet)),
+            Reply::success(XLF_GET_DOCUMENT, XLOPER12::boolean(false))
+                .release_status(xlfn_sys::XLRET_FAILED),
+        ]);
+        let callbacks = HostCallbackSession::new();
+        assert!(matches!(
+            ExcelHost::new(&callbacks).workbook_date_system(&reference(&raw)),
+            Err(XllError::ExcelApi {
+                function: ExcelApiFunction::Free,
+                ..
+            })
+        ));
+        script.assert_calls(&[XL_SHEET_NM, XLF_GET_DOCUMENT]);
+    }
 }
 
 #[cfg(all(test, feature = "handles"))]

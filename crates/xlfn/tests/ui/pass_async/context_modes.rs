@@ -23,7 +23,9 @@ use xlfn::AsyncContext;
 #[excel_function]
 async fn context(context: AsyncContext<'_, TestAddin>, value: f64) -> f64 {
     let _ = context.state();
+    let history = context.diagnostics();
     std::future::ready(()).await;
+    let _ = history.stats();
     value
 }
 

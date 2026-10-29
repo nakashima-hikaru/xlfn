@@ -38,6 +38,14 @@ fn macro_sheet(context: MacroSheetContext<'_, TestAddin>) -> i32 {
     *macro_state(context)
 }
 
+#[excel_function(name = "TEST.WORKBOOK.DATE.SYSTEM")]
+fn workbook_date_system(
+    context: MacroSheetContext<'_, TestAddin>,
+    #[excel_arg(reference)] reference: xlfn::reference::ExcelReference<'_>,
+) -> XllResult<bool> {
+    Ok(context.workbook_date_system(&reference)? == xlfn::value::ExcelDateSystem::Mac1904)
+}
+
 #[excel_function(name = "TEST.QUALIFIED.MAIN")]
 fn qualified_main(context: xlfn::MainThreadContext<'_, TestAddin>, value: f64) -> f64 {
     value + f64::from(*context.state())

@@ -75,6 +75,7 @@ pub const XLRET_INV_ASYNC_CONTEXT: i32 = 256;
 pub const XLF_SET_NAME: i32 = 88;
 pub const XLF_CALLER: i32 = 89;
 pub const XLF_REGISTER: i32 = 149;
+pub const XLF_GET_DOCUMENT: i32 = 188;
 pub const XLF_UNREGISTER: i32 = 201;
 pub const XLF_EVALUATE: i32 = 257;
 pub const XLF_RTD: i32 = 379;

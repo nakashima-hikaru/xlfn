@@ -42,6 +42,11 @@ fn custom_error() -> XllResult<f64> {
     ))
 }
 
+#[excel_function(name = "TEST.ERROR.DOMAIN", thread_safe)]
+fn domain_error() -> XllResult<f64> {
+    Err(XllError::domain(xlfn::error::DomainErrorCode::Overflow))
+}
+
 #[allow(dead_code)]
 fn inspect_framework_context(error: &XllError) -> Option<(&'static str, i32)> {
     match error {

@@ -95,6 +95,28 @@ impl<T> Matrix<T> {
         &self.data
     }
 
+    /// Returns all mutable elements in row-major order without changing shape.
+    #[must_use]
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
+        &mut self.data
+    }
+
+    /// Returns a zero-based element, or `None` if either axis is out of bounds
+    /// or the index calculation overflows.
+    #[must_use]
+    pub fn get(&self, row: usize, column: usize) -> Option<&T> {
+        let index = checked_index(self.rows, self.columns, row, column)?;
+        self.data.get(index)
+    }
+
+    /// Returns a mutable zero-based element, or `None` if either axis is out of
+    /// bounds or the index calculation overflows.
+    #[must_use]
+    pub fn get_mut(&mut self, row: usize, column: usize) -> Option<&mut T> {
+        let index = checked_index(self.rows, self.columns, row, column)?;
+        self.data.get_mut(index)
+    }
+
     /// Consumes the matrix and returns its row-major elements.
     #[must_use]
     pub fn into_vec(self) -> Vec<T> {
@@ -103,9 +125,27 @@ impl<T> Matrix<T> {
 
     /// Returns a zero-based row, or `None` when it is out of bounds.
     pub fn row(&self, row: usize) -> Option<&[T]> {
+        if row >= self.rows {
+            return None;
+        }
         let start = row.checked_mul(self.columns)?;
         let end = start.checked_add(self.columns)?;
         self.data.get(start..end)
+    }
+
+    /// Returns a mutable zero-based row, or `None` when it is out of bounds.
+    pub fn row_mut(&mut self, row: usize) -> Option<&mut [T]> {
+        if row >= self.rows {
+            return None;
+        }
+        let start = row.checked_mul(self.columns)?;
+        let end = start.checked_add(self.columns)?;
+        self.data.get_mut(start..end)
+    }
+
+    /// Iterates over disjoint mutable rows, from top to bottom.
+    pub fn rows_mut(&mut self) -> impl ExactSizeIterator<Item = &mut [T]> + '_ {
+        self.data.chunks_exact_mut(self.columns)
     }
 
     /// Iterates over a zero-based column, or returns `None` out of bounds.
@@ -121,6 +161,23 @@ impl<T> Matrix<T> {
     /// Iterates over mutable elements in row-major order.
     pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, T> {
         self.data.iter_mut()
+    }
+
+    /// Consumes the matrix, mapping elements in row-major order while keeping
+    /// its shape. Stops at the first error and drops any mapped output and
+    /// unprocessed input elements.
+    pub fn try_map<U, E>(self, f: impl FnMut(T) -> Result<U, E>) -> Result<Matrix<U>, E> {
+        let Self {
+            rows,
+            columns,
+            data,
+        } = self;
+        let data = data.into_iter().map(f).collect::<Result<Vec<_>, _>>()?;
+        Ok(Matrix {
+            rows,
+            columns,
+            data,
+        })
     }
 }
 
@@ -253,8 +310,19 @@ impl<'call, T> MatrixRef<'call, T> {
         self.data
     }
 
+    /// Returns a zero-based element borrowed for the input call lifetime, or
+    /// `None` if either axis is out of bounds or the index calculation overflows.
+    #[must_use]
+    pub fn get(&self, row: usize, column: usize) -> Option<&'call T> {
+        let index = checked_index(self.rows, self.columns, row, column)?;
+        self.data.get(index)
+    }
+
     /// Returns a zero-based borrowed row, or `None` out of bounds.
     pub fn row(&self, row: usize) -> Option<&'call [T]> {
+        if row >= self.rows {
+            return None;
+        }
         let start = row.checked_mul(self.columns)?;
         let end = start.checked_add(self.columns)?;
         self.data.get(start..end)
@@ -333,6 +401,13 @@ impl<'call, T> IntoIterator for &MatrixRef<'call, T> {
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }
+}
+
+fn checked_index(rows: usize, columns: usize, row: usize, column: usize) -> Option<usize> {
+    if row >= rows || column >= columns {
+        return None;
+    }
+    row.checked_mul(columns)?.checked_add(column)
 }
 
 fn validated_element_count(rows: usize, columns: usize) -> XllResult<usize> {
@@ -589,10 +664,187 @@ impl_sequence_traits!(Row);
 impl_sequence_traits!(Column);
 impl_sequence_traits!(BoundedVarArgs, MAX);
 
+macro_rules! impl_oriented_conversions {
+    ($name:ident) => {
+        impl<T> AsMut<[T]> for $name<T> {
+            fn as_mut(&mut self) -> &mut [T] {
+                &mut self.0
+            }
+        }
+
+        impl<T> TryFrom<Vec<T>> for $name<T> {
+            type Error = XllError;
+
+            fn try_from(values: Vec<T>) -> XllResult<Self> {
+                Self::new(values)
+            }
+        }
+
+        impl<T> From<$name<T>> for Vec<T> {
+            fn from(value: $name<T>) -> Self {
+                value.into_vec()
+            }
+        }
+    };
+}
+
+impl_oriented_conversions!(Row);
+impl_oriented_conversions!(Column);
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn checked_accessors_validate_axes_before_flattening() {
+        let mut matrix = Matrix::new(2, 3, vec![0, 1, 2, 3, 4, 5]).unwrap();
+        for row in 0..2 {
+            for column in 0..3 {
+                assert_eq!(matrix.get(row, column), Some(&(row * 3 + column)));
+                assert_eq!(matrix.get_mut(row, column), Some(&mut (row * 3 + column)));
+            }
+        }
+        for (row, column) in [
+            (0, 3),
+            (0, 4),
+            (1, 3),
+            (2, 0),
+            (usize::MAX, 0),
+            (0, usize::MAX),
+            (usize::MAX, usize::MAX),
+        ] {
+            assert_eq!(matrix.get(row, column), None);
+            assert_eq!(matrix.get_mut(row, column), None);
+            let view = MatrixRef::from_slice(2, 3, matrix.as_slice()).unwrap();
+            assert_eq!(view.get(row, column), None);
+        }
+        // Valid matrices cannot overflow their index calculation. Exercise the
+        // checked arithmetic independently to retain that defense explicitly.
+        assert_eq!(checked_index(usize::MAX, 2, usize::MAX - 1, 0), None);
+        assert_eq!(checked_index(3, usize::MAX, 1, usize::MAX - 1), None);
+        assert_eq!(matrix.as_slice(), &[0, 1, 2, 3, 4, 5]);
+        let view = MatrixRef::from_slice(2, 3, matrix.as_slice()).unwrap();
+        assert_eq!(view.get(0, 0), Some(&0));
+        assert_eq!(view.get(1, 2), Some(&5));
+    }
+
+    #[test]
+    fn borrowed_accessor_reference_uses_the_input_lifetime() {
+        let values = [1, 2, 3, 4];
+        let element = {
+            let view = MatrixRef::from_slice(2, 2, &values).unwrap();
+            view.get(1, 1).unwrap()
+        };
+        assert_eq!(*element, 4);
+    }
+
+    #[test]
+    fn mutable_slices_and_rows_preserve_shape_and_are_disjoint() {
+        let mut matrix = Matrix::new(2, 3, vec![0, 1, 2, 3, 4, 5]).unwrap();
+        let shape = matrix.shape();
+        matrix.as_mut_slice().reverse();
+        *matrix.get_mut(0, 0).unwrap() = 10;
+        matrix.row_mut(1).unwrap().copy_from_slice(&[20, 30, 40]);
+        assert_eq!(matrix.row_mut(2), None);
+        assert_eq!(matrix.row_mut(usize::MAX), None);
+        {
+            let mut rows = matrix.rows_mut();
+            assert_eq!(rows.len(), 2);
+            let first = rows.next().unwrap();
+            assert_eq!(rows.len(), 1);
+            let second = rows.next().unwrap();
+            first[1] = 50;
+            second[2] = 60;
+            assert_eq!(rows.len(), 0);
+            assert!(rows.next().is_none());
+        }
+        assert_eq!(matrix.shape(), shape);
+        assert_eq!(matrix.as_slice(), &[10, 50, 3, 20, 30, 60]);
+    }
+
+    #[test]
+    fn try_map_preserves_shape_and_row_major_order() {
+        let matrix = Matrix::new(2, 3, vec![0, 1, 2, 3, 4, 5]).unwrap();
+        let mut calls = Vec::new();
+        let mapped = matrix
+            .try_map::<_, ()>(|value| {
+                calls.push(value);
+                Ok(value.to_string())
+            })
+            .unwrap();
+        assert_eq!(calls, [0, 1, 2, 3, 4, 5]);
+        assert_eq!(
+            mapped.shape(),
+            Shape {
+                rows: 2,
+                columns: 3
+            }
+        );
+        assert_eq!(mapped.as_slice(), &["0", "1", "2", "3", "4", "5"]);
+    }
+
+    #[test]
+    fn try_map_returns_first_error_and_drops_inputs_and_partial_outputs() {
+        struct Tracked<'a> {
+            index: usize,
+            drops: &'a [Cell<usize>],
+        }
+        impl Drop for Tracked<'_> {
+            fn drop(&mut self) {
+                let count = &self.drops[self.index];
+                count.set(count.get() + 1);
+            }
+        }
+        let input_drops = [const { Cell::new(0) }; 6];
+        let output_drops = [const { Cell::new(0) }; 6];
+        let matrix = Matrix::from_fn(2, 3, |row, column| Tracked {
+            index: row * 3 + column,
+            drops: &input_drops,
+        })
+        .unwrap();
+        let mut calls = Vec::new();
+        let result = matrix.try_map(|input| {
+            calls.push(input.index);
+            if input.index >= 2 {
+                Err(input.index)
+            } else {
+                Ok(Tracked {
+                    index: input.index,
+                    drops: &output_drops,
+                })
+            }
+        });
+        assert!(matches!(result, Err(2)));
+        assert_eq!(calls, [0, 1, 2]);
+        assert_eq!(input_drops.each_ref().map(Cell::get), [1; 6]);
+        assert_eq!(output_drops.each_ref().map(Cell::get), [1, 1, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn oriented_standard_conversions_keep_length_limits_and_storage() {
+        let mut row = Row::try_from(vec![1, 2, 3]).unwrap();
+        let pointer = row.as_slice().as_ptr();
+        AsMut::<[i32]>::as_mut(&mut row).reverse();
+        let row_values = Vec::from(row);
+        assert_eq!(row_values, [3, 2, 1]);
+        assert_eq!(row_values.as_ptr(), pointer);
+
+        let mut column = Column::try_from(vec![1, 2, 3]).unwrap();
+        let pointer = column.as_slice().as_ptr();
+        AsMut::<[i32]>::as_mut(&mut column)[1] = 10;
+        let column_values = Vec::from(column);
+        assert_eq!(column_values, [1, 10, 3]);
+        assert_eq!(column_values.as_ptr(), pointer);
+
+        assert!(Row::<()>::try_from(vec![]).is_err());
+        assert!(Column::<()>::try_from(vec![]).is_err());
+        assert!(Row::try_from(vec![(); EXCEL_MAX_COLUMNS]).is_ok());
+        assert!(Row::try_from(vec![(); EXCEL_MAX_COLUMNS + 1]).is_err());
+        assert!(Column::try_from(vec![(); EXCEL_MAX_ROWS.min(MAX_ARRAY_ELEMENTS)]).is_ok());
+        assert!(Column::try_from(vec![(); EXCEL_MAX_ROWS + 1]).is_err());
+        assert!(Column::try_from(vec![(); MAX_ARRAY_ELEMENTS + 1]).is_err());
+    }
 
     #[test]
     fn factories_preserve_row_major_order_and_rectangular_shape() {

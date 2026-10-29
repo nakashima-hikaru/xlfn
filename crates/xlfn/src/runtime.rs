@@ -1750,6 +1750,11 @@ pub(crate) mod tests {
         let call = runtime.enter_async(&ingress).unwrap();
         let lease = call.try_execution_lease().unwrap();
         assert_eq!(*lease.state(), 7);
+        let (cancellation, token) = crate::cancellation::CancellationSource::new(
+            crate::cancellation::CancellationGuarantee::BestEffort,
+        );
+        let context =
+            crate::AsyncContext::<TestU32Addin>::new(lease.state(), &token, runtime.diagnostics());
 
         // Model removal winning between call admission and async launch.
         let removal = runtime.begin_final_removal().unwrap();
@@ -1761,6 +1766,7 @@ pub(crate) mod tests {
         // A lease issued before closing still owns its generation lifetime
         // even after the original call has returned.
         assert_eq!(*lease.state(), 7);
+        assert!(std::ptr::eq(context.diagnostics(), runtime.diagnostics()));
         let (reclaimed, reclaimed_result) = mpsc::channel();
         let taker = thread::spawn(move || {
             reclaimed
@@ -1773,6 +1779,11 @@ pub(crate) mod tests {
                 .is_err()
         );
         assert_eq!(*lease.state(), 7);
+        cancellation.cancel();
+        assert!(context.cancellation().is_cancelled());
+        let _ = context
+            .diagnostics()
+            .errors_since(crate::diagnostics::DiagnosticCursor::START, 1);
         drop(lease);
         assert_eq!(
             reclaimed_result

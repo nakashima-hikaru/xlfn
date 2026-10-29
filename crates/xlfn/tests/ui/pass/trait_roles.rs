@@ -76,7 +76,8 @@ fn renamed_handle(value: ObjectHandle<'_, Dataset>) -> ObjectHandleAlias<'_, Dat
 
 #[excel_function(name = "TEST.HANDLE.CONSUME")]
 fn consume_handle(value: DatasetHandle<'_>) -> f64 {
-    let _ = &*value;
+    let _: &Dataset = value.as_ref();
+    let _: xlfn::handle::HandleObjectId = value.object_id();
     1.0
 }
 

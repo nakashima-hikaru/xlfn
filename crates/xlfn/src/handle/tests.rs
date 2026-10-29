@@ -98,7 +98,7 @@ fn input_identity<T: ExcelHandleObject>(
     })
 }
 
-fn reference_handle_identity(object_id: ObjectId) -> InputFingerprint {
+fn reference_handle_identity(object_id: HandleObjectId) -> InputFingerprint {
     let mut builder = InputFingerprintBuilder::new(1);
     builder
         .with_argument(0, "handle", |encoder| {
@@ -774,6 +774,117 @@ fn object_ids_are_namespaced_by_handle_session() {
     assert_eq!(second_object.id().sequence(), 1);
     assert_ne!(first_object.id(), second_object.id());
     assert_ne!(first_object.id().session(), second_object.id().session());
+}
+
+#[test]
+fn public_handle_identity_survives_as_a_value_without_pinning_the_object() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let runtime = FormulaHandleService::new(8);
+    let key = test_topic_key("public-object-identity");
+    let token = runtime
+        .prepare(key, || Ok(CountedDataRecord(Arc::clone(&drops))))
+        .unwrap()
+        .into_token();
+
+    let identity = with_handle::<CountedDataRecord, _>(&runtime, &token, |handle| {
+        assert!(std::ptr::eq(handle.as_ref(), &*handle));
+        let identity: HandleObjectId = handle.object_id();
+        assert_eq!(identity, handle.object_id());
+        identity
+    })
+    .unwrap();
+
+    runtime
+        .store
+        .registry
+        .remove_and_drop(&token, "retire object with copied public ID");
+    runtime
+        .store
+        .registry
+        .bindings
+        .read_domain()
+        .flush_for_test();
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        with_handle::<CountedDataRecord, _>(&runtime, &token, |_| ()),
+        Err(XllError::StaleHandle)
+    ));
+
+    let replacement = runtime
+        .prepare(test_topic_key("public-object-identity-replacement"), || {
+            Ok(DataRecord(42))
+        })
+        .unwrap()
+        .into_token();
+    let replacement_id =
+        with_handle::<DataRecord, _>(&runtime, &replacement, |handle| handle.object_id()).unwrap();
+    assert_ne!(identity, replacement_id);
+    assert_eq!(identity.session(), replacement_id.session());
+}
+
+#[test]
+fn public_handle_identity_changes_after_runtime_regeneration() {
+    let slot = FormulaHandleServiceSlot::new();
+    slot.arm(crate::HandleConfig::default()).unwrap();
+    let (old_token, old_id) = {
+        let runtime = slot.read().unwrap();
+        let token = runtime
+            .prepare(test_topic_key("object-identity-generation"), || {
+                Ok(DataRecord(1))
+            })
+            .unwrap()
+            .into_token();
+        let identity =
+            with_handle::<DataRecord, _>(&runtime, &token, |handle| handle.object_id()).unwrap();
+        (token, identity)
+    };
+
+    slot.seal(Some(crate::generation::RuntimeGeneration::new(1).unwrap()))
+        .unwrap();
+    slot.arm(crate::HandleConfig::default()).unwrap();
+    let runtime = slot.read().unwrap();
+    assert!(with_handle::<DataRecord, _>(&runtime, &old_token, |_| ()).is_err());
+    let new_token = runtime
+        .prepare(test_topic_key("object-identity-generation"), || {
+            Ok(DataRecord(1))
+        })
+        .unwrap()
+        .into_token();
+    let new_id =
+        with_handle::<DataRecord, _>(&runtime, &new_token, |handle| handle.object_id()).unwrap();
+    assert_ne!(old_id, new_id);
+    assert_ne!(old_id.session(), new_id.session());
+}
+
+#[test]
+fn handle_lease_as_ref_and_identity_match_the_synchronous_handle() {
+    let runtime = FormulaHandleService::new(8);
+    let token = runtime
+        .prepare(test_topic_key("lease-public-object-identity"), || {
+            Ok(DataRecord(51))
+        })
+        .unwrap()
+        .into_token();
+    let (identity, pending) =
+        crate::call::with_excel_call_scope_and_state(&runtime, |runtime, scope| {
+            let handle = runtime.lookup::<DataRecord>(scope, &token).unwrap();
+            let identity = handle.object_id();
+            let pending = handle
+                .into_pending(crate::generation::RuntimeGeneration::new(1).unwrap())
+                .unwrap();
+            (identity, pending)
+        });
+    let lease = HandleLease {
+        object_id: pending.object_id,
+        value: pending.value,
+        _lease: pending.lease,
+        _generation: std::marker::PhantomData,
+    };
+    assert_eq!(lease.object_id(), identity);
+    assert_eq!(lease.as_ref().0, 51);
+    assert!(std::ptr::eq(lease.as_ref(), &*lease));
+
+    static_assertions::assert_not_impl_any!(HandleAlias<'_, DataRecord>: AsRef<DataRecord>, std::ops::Deref);
 }
 
 #[test]

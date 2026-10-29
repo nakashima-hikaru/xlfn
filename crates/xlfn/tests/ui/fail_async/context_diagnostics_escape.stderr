@@ -1,0 +1,7 @@
+error: lifetime may not live long enough
+ --> tests/ui/fail_async/context_diagnostics_escape.rs:5:5
+  |
+4 | fn escape(context: AsyncContext<'_, ()>) -> &'static DiagnosticHistory {
+  |           ------- has type `AsyncContext<'1, ()>`
+5 |     context.diagnostics()
+  |     ^^^^^^^^^^^^^^^^^^^^^ returning this value requires that `'1` must outlive `'static`

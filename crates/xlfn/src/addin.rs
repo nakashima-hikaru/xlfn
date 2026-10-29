@@ -845,16 +845,22 @@ impl<A: Addin> Copy for ThreadSafeContext<'_, A> {}
 pub struct AsyncContext<'call, A: Addin> {
     state: &'call A::SharedState,
     cancellation: &'call CancellationToken,
+    diagnostics: &'call crate::diagnostics::DiagnosticHistory,
 }
 
 #[cfg(feature = "async")]
 impl<'call, A: Addin> AsyncContext<'call, A> {
     #[doc(hidden)]
     #[must_use]
-    pub const fn new(state: &'call A::SharedState, cancellation: &'call CancellationToken) -> Self {
+    pub const fn new(
+        state: &'call A::SharedState,
+        cancellation: &'call CancellationToken,
+        diagnostics: &'call crate::diagnostics::DiagnosticHistory,
+    ) -> Self {
         Self {
             state,
             cancellation,
+            diagnostics,
         }
     }
 
@@ -868,6 +874,17 @@ impl<'call, A: Addin> AsyncContext<'call, A> {
     /// Returns this invocation's cooperative cancellation token.
     pub const fn cancellation(&self) -> &'call CancellationToken {
         self.cancellation
+    }
+
+    /// Returns this add-in runtime's bounded failure history.
+    ///
+    /// The borrow is limited to this asynchronous invocation, even though the
+    /// runtime retains its history across logical close and reopening. Reading
+    /// history pages synchronizes with writers and allocates snapshots; avoid
+    /// frequent history reads on an async poller.
+    #[must_use]
+    pub const fn diagnostics(&self) -> &'call crate::diagnostics::DiagnosticHistory {
+        self.diagnostics
     }
 
     /// Returns `#N/A` when this invocation has been cancelled.
@@ -1030,6 +1047,26 @@ impl<'call, A: Addin> MacroSheetContext<'call, A> {
     /// Returns Excel's sheet name for the referenced sheet.
     pub fn sheet_name(&self, reference: &ExcelReference<'_>) -> XllResult<String> {
         self.host.sheet_name(reference)
+    }
+
+    /// Queries the date system of the workbook containing `reference`.
+    ///
+    /// Requires an external reference with an explicit nonzero sheet identity.
+    /// Internal current-sheet references are rejected to avoid resolving a
+    /// different active workbook. Excel supplies the workbook name via
+    /// `xlSheetNm`, then receives it explicitly in `GET.DOCUMENT(20, name)`.
+    /// Callback rejection, unavailable settings, and unexpected results return
+    /// errors; there is no default date system. The setting is queried on each
+    /// call because it can change while the workbook remains open.
+    ///
+    /// This operation requires macro-sheet execution on Excel's calling thread.
+    /// Native Excel qualification of 1900/1904 and inactive workbooks is required
+    /// separately from mocked callback tests or Windows cross-compilation.
+    pub fn workbook_date_system(
+        &self,
+        reference: &ExcelReference<'_>,
+    ) -> XllResult<crate::value::ExcelDateSystem> {
+        self.host.workbook_date_system(reference)
     }
 }
 
@@ -1570,15 +1607,18 @@ mod tests {
             shared_state: 23_u32,
             layers: (),
         });
+        let diagnostics = crate::diagnostics::DiagnosticHistory::new();
         let context: AsyncContext<'_, AsyncTestAddin> =
-            AsyncContext::new(&generation.shared_state, &token);
+            AsyncContext::new(&generation.shared_state, &token, &diagnostics);
 
         assert_eq!(context.state(), &23);
+        assert!(std::ptr::eq(context.diagnostics(), &diagnostics));
         assert!(!context.cancellation().is_cancelled());
         assert!(context.check_cancelled().is_ok());
 
         source.cancel();
         assert!(context.cancellation().is_cancelled());
+        assert!(std::ptr::eq(context.diagnostics(), &diagnostics));
         assert!(matches!(
             context.check_cancelled(),
             Err(crate::XllError::ExcelValue(crate::ExcelError::NotAvailable))

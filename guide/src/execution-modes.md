@@ -97,7 +97,8 @@ A macro-sheet context permits Excel callback operations that are not allowed in 
 
 - `coerce` for an owned `ExcelValue`;
 - `coerce_matrix<T>` for an owned matrix;
-- `sheet_name`.
+- `sheet_name`;
+- `workbook_date_system` for the workbook identified by an explicit external reference.
 
 The `macro_sheet` flag selects macro-sheet registration for a function without
 a context. Macro-sheet mode is incompatible with `thread_safe` and asynchronous

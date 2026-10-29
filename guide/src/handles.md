@@ -62,6 +62,14 @@ call. It is not `Clone` and cannot be stored in add-in state, another handle
 object, or an async task. No `handle` argument attribute is required: the
 parameter type selects handle input conversion.
 
+Both `Handle` and async `HandleLease` implement `AsRef<T>` for ordinary Rust
+helpers. Their `object_id()` methods return the same `HandleObjectId` for the
+same live object, including objects reached through alias bindings. Use the
+ID for in-session cache keys or diagnostic correlation. Copying it does not
+keep the object alive, and it cannot reconstruct a handle. It is unsuitable
+as a persistent identifier across saved workbooks, new sessions, or Excel
+restarts. `HandleAlias` remains a republish capability without object reads.
+
 ## Re-evaluation semantics
 
 `handle_reuse = inputs` is the default and may be written explicitly.

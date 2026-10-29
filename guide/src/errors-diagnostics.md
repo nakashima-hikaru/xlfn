@@ -117,8 +117,10 @@ The reader retains its history borrow and advances its own cursor, so it cannot
 accidentally be polled against another runtime. `errors_since` and
 `DiagnosticCursor` remain available for stateless queries.
 
-`ThreadSafeContext`, `MainThreadContext`, and `MacroSheetContext` expose
-`diagnostics()` for application code. For example:
+`ThreadSafeContext`, `MainThreadContext`, `MacroSheetContext`, and
+`AsyncContext` expose `diagnostics()` for application code. Async history
+borrows last only for the task; reading pages synchronizes and allocates, so
+avoid frequent history reads on an async poller. For example:
 
 ```rust
 {{#include ../fixtures/addin.md}}

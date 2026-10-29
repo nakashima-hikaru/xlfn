@@ -2,6 +2,16 @@ use xlfn::output::{XlArrayBuilder, XlArrayOutput};
 use xlfn::prelude::*;
 use xlfn::value::XlArrayRef;
 
+#[excel_function(name = "TEST.COW.TEXT", thread_safe)]
+fn cow_text(value: &str) -> std::borrow::Cow<'_, str> {
+    std::borrow::Cow::Borrowed(value)
+}
+
+#[excel_function(name = "TEST.COW.OWNED", thread_safe)]
+fn cow_owned() -> std::borrow::Cow<'static, str> {
+    std::borrow::Cow::Owned(String::from("価格 💡"))
+}
+
 #[allow(dead_code)]
 fn array() -> xlfn::XllResult<XlArrayOutput> {
     let mut out = XlArrayBuilder::new(1, 2)?;

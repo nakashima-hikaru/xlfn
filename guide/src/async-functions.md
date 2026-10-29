@@ -70,9 +70,14 @@ Arguments are converted while Excel is making the call. The scheduled future
 owns ordinary inputs such as `String` and `Matrix<T>`; borrowed Excel memory
 cannot outlive that call and is rejected in async signatures.
 
-`AsyncContext<'_, A>` lets the invocation borrow shared state and observe
-cancellation. The framework keeps that state alive until the task ends. Do not
-move the context into a detached task that could outlive the invocation.
+`AsyncContext<'_, A>` lets the invocation borrow shared state, observe
+cancellation, and access the same runtime's bounded failure history through
+`diagnostics()`. The framework keeps that state alive until the task ends. Do
+not move the context into a detached task that could outlive the invocation.
+
+The history borrow is limited to the task's lifetime. Reading history pages
+synchronizes with writers and allocates snapshots, so avoid frequent reads on
+an async poller.
 
 ## Cancellation
 

@@ -19,9 +19,7 @@ impl Addin for AsyncHandleAddin {
     type Error = XllError;
     type Layers = ();
 
-    fn open(
-        _: &OpenContext<Self>,
-    ) -> OpenResult<Self> {
+    fn open(_: &OpenContext<Self>) -> OpenResult<Self> {
         Ok(Opened::new(State).with_async_executor(executor::Executor))
     }
 }
@@ -40,7 +38,11 @@ async fn async_handle(
     time: f64,
 ) -> XllResult<f64> {
     let _ = context.state();
+    let history = context.diagnostics();
+    let _: xlfn::handle::HandleObjectId = dataset.object_id();
     std::future::ready(()).await;
+    let _ = history.stats();
+    let dataset: &Dataset = dataset.as_ref();
     Ok(dataset.size + time)
 }
 

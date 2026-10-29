@@ -95,7 +95,11 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
         ))),
         model::ExecutionSpec::Async {
             context_ty: Some(_),
-        } => Some(quote!(#krate::__private::v1::async_context(&__lease, &__cancellation))),
+        } => Some(quote!(#krate::__private::v1::async_context(
+            &__lease,
+            &__cancellation,
+            &crate::__XLFN_RUNTIME,
+        ))),
         model::ExecutionSpec::MainThread { context_ty: None }
         | model::ExecutionSpec::ThreadSafe { context_ty: None }
         | model::ExecutionSpec::MacroSheet { context_ty: None }
@@ -413,6 +417,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
             let __generated_context = #krate::__private::v1::async_context::<#addin>(
                 &__lease,
                 &__cancellation,
+                &crate::__XLFN_RUNTIME,
             );
             let __context: #context = __generated_context;
         }

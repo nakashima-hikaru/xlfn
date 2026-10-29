@@ -48,13 +48,13 @@ error[E0277]: `xlfn::handle::HandleLease<'_, Dataset>` cannot be returned from a
    = note: return a type that implements `IntoExcel`, or implement `IntoExcel` for `xlfn::handle::HandleLease<'_, Dataset>`
    = help: the following other types implement trait `IntoExcel`:
              &str
+             Cow<'_, str>
              ExcelCellOutput
              ExcelError
              ExcelSerialDate
              bool
              f32
              f64
-             i16
            and $N others
    = note: required for `xlfn::handle::HandleLease<'_, Dataset>` to implement `xlfn::__private::v1::AsyncReturn`
 note: required by a bound in `xlfn::__private::v1::assert_async_return`
@@ -73,13 +73,13 @@ error[E0277]: `xlfn::handle::HandleLease<'_, Dataset>` cannot be converted into 
    = note: implement `IntoExcel` for `xlfn::handle::HandleLease<'_, Dataset>` or return a supported type (e.g. `f64`, `bool`, `String`, `ExcelError`, or a custom handle)
    = help: the following other types implement trait `IntoExcel`:
              &str
+             Cow<'_, str>
              ExcelCellOutput
              ExcelError
              ExcelSerialDate
              bool
              f32
              f64
-             i16
            and $N others
    = note: required for `xlfn::handle::HandleLease<'_, Dataset>` to implement `xlfn::__private::v1::ExcelReturn`
    = note: this error originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)

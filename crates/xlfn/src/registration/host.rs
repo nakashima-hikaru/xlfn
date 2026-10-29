@@ -656,7 +656,7 @@ pub(crate) mod test_support {
     };
 
     #[derive(Clone, Debug, PartialEq)]
-    pub(super) enum RegisterArgument {
+    pub(crate) enum RegisterArgument {
         Text(String),
         Number(f64),
         UnexpectedType(u32),
@@ -664,7 +664,7 @@ pub(crate) mod test_support {
 
     type RegisterHook = Box<dyn FnOnce(&[*mut XLOPER12])>;
 
-    pub(super) unsafe fn read_registration_arguments(
+    pub(crate) unsafe fn read_registration_arguments(
         arguments: &[*mut XLOPER12],
     ) -> Vec<RegisterArgument> {
         arguments
@@ -714,7 +714,6 @@ pub(crate) mod test_support {
             self
         }
 
-        #[cfg(any(not(target_os = "windows"), feature = "async", feature = "handles"))]
         pub(crate) fn release_status(mut self, status: i32) -> Self {
             self.release_status = status;
             self
@@ -732,6 +731,7 @@ pub(crate) mod test_support {
         registration_pointers: Vec<*mut XLOPER12>,
         registration_hook: Option<RegisterHook>,
         call_hook: Option<(i32, Box<dyn FnOnce()>)>,
+        argument_hooks: VecDeque<(i32, RegisterHook)>,
     }
 
     thread_local! {
@@ -772,6 +772,10 @@ pub(crate) mod test_support {
                     .collect::<Vec<_>>();
                 assert_eq!(calls, expected);
                 assert!(script.replies.is_empty(), "expected callback was skipped");
+                assert!(
+                    script.argument_hooks.is_empty(),
+                    "expected argument inspection was skipped"
+                );
                 assert_eq!(script.unexpected_calls, 0);
                 assert!(script.release_status.is_none(), "result was not released");
                 assert_eq!(
@@ -799,6 +803,16 @@ pub(crate) mod test_support {
                 script.call_hook = Some((function, Box::new(hook)));
             });
         }
+
+        pub(crate) fn on_arguments(
+            &self,
+            function: i32,
+            hook: impl FnOnce(&[*mut XLOPER12]) + 'static,
+        ) {
+            SCRIPT.with_borrow_mut(|script| {
+                script.argument_hooks.push_back((function, Box::new(hook)));
+            });
+        }
     }
 
     impl Drop for CallbackScript {
@@ -815,6 +829,24 @@ pub(crate) mod test_support {
         arguments: *mut *mut XLOPER12,
         result: *mut XLOPER12,
     ) -> i32 {
+        let argument_hook = SCRIPT.with_borrow_mut(|script| {
+            if script
+                .argument_hooks
+                .front()
+                .is_some_and(|(target, _)| *target == function)
+            {
+                script.argument_hooks.pop_front().map(|(_, hook)| hook)
+            } else {
+                None
+            }
+        });
+        if let Some(hook) = argument_hook {
+            // SAFETY: the invoking host operation keeps this many operand
+            // pointers and their payloads live throughout the callback.
+            let arguments =
+                unsafe { std::slice::from_raw_parts(arguments, argument_count as usize) };
+            hook(arguments);
+        }
         let hook = SCRIPT.with_borrow_mut(|script| {
             if script
                 .call_hook

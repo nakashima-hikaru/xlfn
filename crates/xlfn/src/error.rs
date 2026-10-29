@@ -281,6 +281,8 @@ pub enum ExcelApiFunction {
     SheetName,
     /// `xlSheetId`.
     SheetId,
+    /// `xlfGetDocument`.
+    GetDocument,
     /// `xlGetName`.
     GetName,
     /// `xlfRegister`.
@@ -309,6 +311,7 @@ impl fmt::Display for ExcelApiFunction {
             Self::Caller => "xlfCaller",
             Self::SheetName => "xlSheetNm",
             Self::SheetId => "xlSheetId",
+            Self::GetDocument => "xlfGetDocument",
             Self::GetName => "xlGetName",
             Self::Register => "xlfRegister",
             Self::Unregister => "xlfUnregister",
@@ -537,6 +540,12 @@ pub enum XllError {
 }
 
 impl XllError {
+    /// Creates a domain error with the corresponding worksheet `#NUM!` value.
+    #[must_use]
+    pub const fn domain(code: DomainErrorCode) -> Self {
+        Self::Domain { code }
+    }
+
     /// Creates a validation error associated with a worksheet argument.
     #[must_use]
     pub const fn input(argument: &'static str, reason: InputError) -> Self {

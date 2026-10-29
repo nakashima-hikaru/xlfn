@@ -495,12 +495,14 @@ impl<'call> PrepareExcel<'call> for ExcelValue {
     }
 }
 /// Validated borrowed UTF-16 input; construction remains inside preparation.
+#[doc(hidden)]
 pub struct PreparedString<'call> {
     units: &'call [u16],
     argument: &'static str,
 }
 
 /// Validated UTF-16 input to decode into its call's borrowed string storage.
+#[doc(hidden)]
 pub struct PreparedBorrowedString<'call> {
     units: &'call [u16],
     argument: &'static str,
@@ -2063,6 +2065,19 @@ impl IntoExcel for &str {
     }
 }
 
+impl IntoExcel for std::borrow::Cow<'_, str> {
+    fn into_excel(self) -> XllResult<ExcelCellOutput> {
+        Ok(ExcelCellOutput::String(self.into_owned()))
+    }
+
+    fn write_into<S: output::ExcelCellSink>(self, sink: &mut S) -> XllResult<()> {
+        match self {
+            Self::Borrowed(text) => sink.push_str(text),
+            Self::Owned(text) => sink.push_string(text),
+        }
+    }
+}
+
 impl IntoExcel for ExcelError {
     fn into_excel(self) -> XllResult<ExcelCellOutput> {
         Ok(ExcelCellOutput::Error(self))
@@ -2230,6 +2245,67 @@ mod tests {
         let mut sink = BorrowTrackingSink::default();
         "borrowed-value".write_into(&mut sink).unwrap();
         assert_eq!(sink.borrowed_string_calls, 1);
+    }
+
+    #[test]
+    fn cow_string_preserves_ownership_and_uses_the_borrowed_writer() {
+        use std::borrow::Cow;
+
+        let text = String::from("価格 💡");
+        let pointer = text.as_ptr();
+        let ExcelCellOutput::String(converted) =
+            IntoExcel::into_excel(Cow::<'_, str>::Owned(text)).unwrap()
+        else {
+            panic!("Cow must convert to text");
+        };
+        assert_eq!(converted.as_ptr(), pointer);
+        assert_eq!(converted, "価格 💡");
+        assert_eq!(
+            IntoExcel::into_excel(Cow::Borrowed("価格 💡")).unwrap(),
+            ExcelCellOutput::String(converted)
+        );
+        let mut sink = BorrowTrackingSink::default();
+        Cow::Borrowed("borrowed-value")
+            .write_into(&mut sink)
+            .unwrap();
+        assert_eq!(sink.borrowed_string_calls, 1);
+    }
+
+    #[test]
+    fn cow_string_scalar_and_array_returns_enforce_utf16_limits() {
+        use crate::return_abi::XlScalarOutput;
+        use std::borrow::Cow;
+
+        // A supplementary scalar uses two UTF-16 units, independent of UTF-8 bytes.
+        let at_limit = format!("{}a", "💡".repeat(crate::utf16::EXCEL_STRING_LIMIT / 2));
+        let too_long = format!("{at_limit}a");
+        for text in ["", "価格 💡", &at_limit, &too_long] {
+            for cow in [Cow::Borrowed(text), Cow::Owned(text.to_owned())] {
+                let scalar = XlScalarOutput::encode(cow.clone());
+                let mut array = XlArrayBuilder::new(1, 1).unwrap();
+                let write = cow.write_into(&mut array);
+                if text == too_long {
+                    for error in [scalar.err().unwrap(), write.unwrap_err()] {
+                        assert!(matches!(error, XllError::Input {
+                            reason: InputError::TooLarge { limit, actual }, ..
+                        } if limit == crate::utf16::EXCEL_STRING_LIMIT && actual == limit + 1));
+                    }
+                } else {
+                    let scalar = scalar.unwrap();
+                    assert_eq!(
+                        String::from_excel(
+                            XlValueRef::from_array_cell(scalar.as_raw()).unwrap(),
+                            "text"
+                        )
+                        .unwrap(),
+                        text
+                    );
+                    write.unwrap();
+                    // A full sink rejects the next cell and propagates its error.
+                    assert!(Cow::Borrowed(text).write_into(&mut array).is_err());
+                }
+            }
+        }
     }
 
     #[test]

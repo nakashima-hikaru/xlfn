@@ -76,6 +76,21 @@ impl ExcelSerialDate {
     /// `1..=9999` return an error.
     /// The returned component types match [`Self::from_ymd`].
     pub fn to_ymd(self) -> XllResult<(i16, i8, i8)> {
+        self.to_ymd_with_argument("date")
+    }
+
+    /// Converts the calendar day, labeling conversion errors with `argument`.
+    ///
+    /// Use this when the serial came from a named worksheet parameter. Calendar
+    /// validation and fractional-day handling are identical to [`Self::to_ymd`].
+    pub fn to_ymd_with_argument(self, argument: &'static str) -> XllResult<(i16, i8, i8)> {
+        self.calendar_day().map_err(|error| match error {
+            XllError::Input { reason, .. } => XllError::input(argument, reason),
+            error => error,
+        })
+    }
+
+    fn calendar_day(self) -> XllResult<(i16, i8, i8)> {
         let epoch = date_epoch(self.date_system)?;
         let serial_day = self.serial.floor();
         if self.is_fictitious_1900_leap_day() {
@@ -145,8 +160,17 @@ impl ExcelSerialDate {
     /// ```
     #[cfg(feature = "jiff")]
     pub fn to_jiff(self) -> XllResult<jiff::civil::Date> {
-        let (year, month, day) = self.to_ymd()?;
-        jiff::civil::Date::new(year, month, day).map_err(|_| date_out_of_range())
+        self.to_jiff_with_argument("date")
+    }
+
+    /// Converts to a Jiff civil date, labeling conversion errors with `argument`.
+    ///
+    /// The same rules as [`Self::to_jiff`] apply; no time-of-day rounding occurs.
+    #[cfg(feature = "jiff")]
+    pub fn to_jiff_with_argument(self, argument: &'static str) -> XllResult<jiff::civil::Date> {
+        let (year, month, day) = self.to_ymd_with_argument(argument)?;
+        jiff::civil::Date::new(year, month, day)
+            .map_err(|_| XllError::input(argument, InputError::OutOfRange))
     }
 
     /// Returns the original finite serial, including its fractional day.
@@ -162,6 +186,10 @@ impl ExcelSerialDate {
     }
 
     /// Attaches a date convention without changing the serial.
+    ///
+    /// This reinterprets the stored number; it does not preserve a calendar date
+    /// by shifting the serial between epochs. For a workbook setting, use
+    /// [`MacroSheetContext::workbook_date_system`](crate::MacroSheetContext::workbook_date_system).
     #[must_use]
     pub const fn with_date_system(mut self, date_system: ExcelDateSystem) -> Self {
         self.date_system = date_system;
@@ -358,6 +386,37 @@ mod tests {
                 .unwrap()
                 .to_ymd()
                 .unwrap(),
+            (1900, 3, 1)
+        );
+    }
+
+    #[test]
+    fn explicit_argument_context_labels_every_calendar_failure() {
+        for (serial, system) in [
+            (1.0, ExcelDateSystem::Workbook),
+            (60.5, ExcelDateSystem::Windows1900),
+            (f64::MAX, ExcelDateSystem::Mac1904),
+        ] {
+            let date = ExcelSerialDate::new(serial, system).unwrap();
+            assert!(matches!(
+                date.to_ymd_with_argument("settlement"),
+                Err(crate::XllError::Input {
+                    argument: "settlement",
+                    ..
+                })
+            ));
+            #[cfg(feature = "jiff")]
+            assert!(matches!(
+                date.to_jiff_with_argument("settlement"),
+                Err(crate::XllError::Input {
+                    argument: "settlement",
+                    ..
+                })
+            ));
+        }
+        let date = ExcelSerialDate::new(61.999_999, ExcelDateSystem::Windows1900).unwrap();
+        assert_eq!(
+            date.to_ymd_with_argument("settlement").unwrap(),
             (1900, 3, 1)
         );
     }

@@ -5,7 +5,9 @@ use std::ptr::NonNull;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI32, Ordering};
 use xlfn::prelude::*;
+use xlfn::reference::ExcelReference;
 use xlfn::rtd::{RtdSink, RtdSource, RtdSourceHandle, RtdSubscription, RtdTopic, RtdValue};
+use xlfn::value::ExcelDateSystem;
 
 pub struct State {
     rtd: RtdSourceHandle<RtdFixtureSource>,
@@ -37,9 +39,11 @@ impl Addin for FixtureAddin {
         let (rtd,) = context
             .rtd()
             .register_sources((RtdFixtureSource { core: core_ptr },))?;
-        Ok(Opened::new(State { rtd, core }).with_async_executor(xlfn::BuiltinAsyncExecutor::new(
-            xlfn::BuiltinExecutorConfig::new(),
-        )))
+        Ok(
+            Opened::new(State { rtd, core }).with_async_executor(xlfn::BuiltinAsyncExecutor::new(
+                xlfn::BuiltinExecutorConfig::new(),
+            )),
+        )
     }
 }
 
@@ -222,4 +226,34 @@ pub fn rtd_active(context: ThreadSafeContext<'_, FixtureAddin>) -> XllResult<i32
 #[excel_function(name = "FRAMEWORK.VERSION", thread_safe)]
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_owned()
+}
+
+/// Native qualification probe: resolve the setting of the referenced workbook.
+#[excel_function(name = "FRAMEWORK.DATE.SYSTEM", volatile)]
+pub fn workbook_date_system(
+    context: MacroSheetContext<'_, FixtureAddin>,
+    #[excel_arg(reference)] reference: ExcelReference<'_>,
+) -> XllResult<i32> {
+    match context.workbook_date_system(&reference)? {
+        ExcelDateSystem::Windows1900 => Ok(1900),
+        ExcelDateSystem::Mac1904 => Ok(1904),
+        ExcelDateSystem::Workbook => Err(XllError::input(
+            "reference",
+            xlfn::error::InputError::Malformed("workbook date system was not resolved"),
+        )),
+    }
+}
+
+/// Native qualification probe: floor the serial under the referenced setting.
+#[excel_function(name = "FRAMEWORK.DATE.YMD", volatile)]
+pub fn workbook_date_ymd(
+    context: MacroSheetContext<'_, FixtureAddin>,
+    serial: ExcelSerialDate,
+    #[excel_arg(reference)] reference: ExcelReference<'_>,
+) -> XllResult<String> {
+    let system = context.workbook_date_system(&reference)?;
+    let (year, month, day) = serial
+        .with_date_system(system)
+        .to_ymd_with_argument("serial")?;
+    Ok(format!("{year:04}-{month:02}-{day:02}"))
 }

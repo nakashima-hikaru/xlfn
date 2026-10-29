@@ -1068,6 +1068,86 @@ fn async_boundary_returns_completed_value_through_callback() {
 }
 
 #[test]
+fn async_context_history_remains_readable_during_cancellation_and_close() {
+    struct ReadHistoryOnDrop<'call> {
+        history: &'call crate::diagnostics::DiagnosticHistory,
+        read: Arc<AtomicBool>,
+    }
+    impl Drop for ReadHistoryOnDrop<'_> {
+        fn drop(&mut self) {
+            let _ = self.history.stats();
+            self.read.store(true, Ordering::Release);
+        }
+    }
+
+    for close in [false, true] {
+        let macro_runtime = Box::leak(Box::new(
+            crate::__private::v1::MacroRuntime::<TestU32Addin>::new(),
+        ));
+        let macro_runtime = &*macro_runtime;
+        let runtime = macro_runtime.runtime();
+        let _guard = test_lock_for_runtime(runtime);
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish(opening, 17_u32, ());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        runtime
+            .start_async(builtin(1), AsyncTaskLimit::DEFAULT)
+            .unwrap();
+        let _callback_guard = reset_test_callback();
+        let read = Arc::new(AtomicBool::new(false));
+        let read_on_drop = Arc::clone(&read);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let mut handle = XLOPER12 {
+            value: XLOPER12Value {
+                big_data: XLOPER12BigData {
+                    handle: XLOPER12BigDataHandle {
+                        data: std::ptr::NonNull::<u8>::dangling().as_ptr(),
+                    },
+                    byte_count: 1,
+                },
+            },
+            xltype: XLTYPE_BIG_DATA,
+        };
+        // SAFETY: the opaque async handle remains valid throughout launch.
+        unsafe {
+            async_udf_boundary_named(
+                runtime,
+                "async_context_history",
+                "ASYNC.CONTEXT.HISTORY",
+                &mut handle,
+                move |_, lease, cancellation| {
+                    Ok(async move {
+                        let context = crate::__private::v1::async_context(
+                            &lease,
+                            &cancellation,
+                            macro_runtime,
+                        );
+                        assert_eq!(*context.state(), 17);
+                        assert!(std::ptr::eq(context.diagnostics(), runtime.diagnostics()));
+                        let _read_on_drop = ReadHistoryOnDrop {
+                            history: context.diagnostics(),
+                            read: read_on_drop,
+                        };
+                        started_tx.send(()).unwrap();
+                        std::future::pending::<XllResult<f64>>().await
+                    })
+                },
+            );
+        }
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        if close {
+            assert!(runtime.close_async().unwrap().issues.is_empty());
+        } else {
+            runtime.cancel_async();
+            wait_for_executor_idle(runtime.async_runtime());
+            assert!(runtime.close_async().unwrap().issues.is_empty());
+        }
+        assert!(read.load(Ordering::Acquire));
+        let _ = runtime.diagnostics().stats();
+    }
+}
+
+#[test]
 fn async_launch_registers_and_cancels_only_at_its_admission_issuer() {
     let runtime = Box::leak(Box::new(Runtime::<TestU32Addin>::new()));
     let other = Box::leak(Box::new(Runtime::<TestU32Addin>::new()));
