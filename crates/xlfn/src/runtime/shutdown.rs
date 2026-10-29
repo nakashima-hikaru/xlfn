@@ -8,8 +8,10 @@ mod certificate;
 mod owner;
 mod pipeline;
 
-pub(crate) use certificate::{ClosedWitness, FinalRemoval, OpenRollback};
+pub(crate) use certificate::{
+    CanonicalCompletion, CertifiedRetirement, ClosedWitness, FinalRemoval, OpenRollback,
+};
 pub(crate) use owner::{RemovalClaimGuard, RemovalOwner};
 #[cfg(any(test, feature = "refinement"))]
 pub(crate) use pipeline::QuiescenceProof;
-pub(crate) use pipeline::ServiceSealFailure;
+pub(crate) use pipeline::{CompletedResources, ReclaimFailure, ServiceSealFailure};

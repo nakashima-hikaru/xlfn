@@ -337,11 +337,11 @@ impl<'runtime, 'call, A: Addin> RemovalTransaction<'runtime, 'call, A> {
         callbacks: &'call mut HostCallbackSession,
     ) -> Option<Self> {
         let deps = runtime.shutdown_deps();
-        let claim = runtime.lifecycle_orchestrator().begin_final_removal()?;
+        let attempt = RemovalOwner::acquire_final(deps)?;
         Some(Self {
             deps,
             callbacks,
-            attempt: Some(RemovalOwner::from_claim(deps, claim)),
+            attempt: Some(attempt),
         })
     }
 
@@ -622,61 +622,24 @@ where
 
     runtime.observer().handles_drained();
 
-    let diagnostics_was_running = crate::diagnostics::diagnostic_sink_running();
-    let diagnostics_stopped = match crate::diagnostics::close_diagnostic_router().map(|outcome| {
-        for issue in outcome.issues {
-            runtime.observer().cleanup_issue();
-            report_cleanup_issue(&issue);
-        }
-        outcome.certificate
-    }) {
-        Ok(certificate) => certificate,
-        Err(error) => {
-            let error = error.into_xll_error();
-            return Err(handle_unload_hazard(
-                runtime,
-                crate::shutdown::UnloadHazard::DiagnosticWorkerStillRunning,
-                "xlAutoRemove diagnostic refinement",
-                &error,
-            ));
-        }
-    };
-
-    if diagnostics_was_running {
-        runtime.observer().diagnostics_stopped();
-    }
-    runtime.observer().diagnostics_drained();
-
-    let rtd_quiescent = match crate::excel_rtd_protocol::wait_for_module_quiescence(
-        runtime.module_residency_held(),
-    ) {
-        Ok(certificate) => certificate,
-        Err(error) => {
-            let hazard = if error.missing_module_residency {
-                crate::shutdown::UnloadHazard::RtdComObjectsWithoutResidency
-            } else if error.revocation_debt != 0 {
-                crate::shutdown::UnloadHazard::RtdGitRevocationDebt
-            } else {
-                crate::shutdown::UnloadHazard::RtdGitCallbackStillRegistered
+    let teardown = match teardown.reclaim(report_cleanup_issue) {
+        Ok(teardown) => teardown,
+        Err(failure) => {
+            let hazard = failure.hazard();
+            let boundary = match &failure {
+                super::shutdown::ReclaimFailure::Diagnostics(_) => {
+                    "xlAutoRemove diagnostic refinement"
+                }
+                super::shutdown::ReclaimFailure::Rtd(_) => "xlAutoRemove RTD logical quiescence",
             };
             return Err(handle_unload_hazard(
                 runtime,
                 hazard,
-                "xlAutoRemove RTD logical quiescence",
-                &XllError::Internal {
-                    diagnostic_id: if error.missing_module_residency {
-                        crate::diagnostics::id::DiagnosticId::MODULE_RESIDENCY
-                    } else {
-                        crate::diagnostics::id::DiagnosticId::RTD_GIT_QUIESCENCE
-                    },
-                },
+                boundary,
+                &failure.into_error(),
             ));
         }
     };
-
-    runtime.observer().rtd_drained();
-
-    let teardown = teardown.reclaim(rtd_quiescent, diagnostics_stopped);
     let certificate = match teardown.certify() {
         Ok(certificate) => certificate,
         Err(error) => {

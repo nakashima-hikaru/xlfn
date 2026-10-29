@@ -340,10 +340,52 @@ impl ModuleExportsDrained {
         self.module.close_callbacks_internal();
     }
 
-    pub(crate) fn certify(self) -> (ModuleQuiescent, ExportsDrained) {
+    pub(crate) fn certify(
+        self,
+        resources: crate::runtime::CompletedResources,
+    ) -> (ModuleQuiescent, ExportsDrained) {
+        if self.id != resources.module_epoch() || !self.id.is_current() {
+            xlfn_kernel::invariant::fail_stop();
+        }
         self.close_callbacks();
-        self.module.certify_logical_quiescence_internal();
+        #[cfg(any(feature = "rtd", feature = "handles"))]
+        self.module
+            .rtd
+            .certify_logical_quiescence(LogicalQuiescencePublication {
+                epoch: self.id,
+                _resources: resources,
+            });
+        #[cfg(not(any(feature = "rtd", feature = "handles")))]
+        let _completed = resources;
         (ModuleQuiescent { id: self.id }, self.exports)
+    }
+
+    /// Isolated module tests intentionally do not model generation resources.
+    #[cfg(test)]
+    pub(crate) fn certify_for_test(self) -> (ModuleQuiescent, ExportsDrained) {
+        self.close_callbacks();
+        #[cfg(any(feature = "rtd", feature = "handles"))]
+        self.module.rtd.certify_for_test();
+        (ModuleQuiescent { id: self.id }, self.exports)
+    }
+}
+
+/// Only module certification can issue this affine publication authority.
+#[cfg(any(feature = "rtd", feature = "handles"))]
+pub(crate) struct LogicalQuiescencePublication {
+    epoch: ModuleEpochId,
+    _resources: crate::runtime::CompletedResources,
+}
+
+#[cfg(any(feature = "rtd", feature = "handles"))]
+impl LogicalQuiescencePublication {
+    pub(crate) fn belongs_to(&self, rtd: &RtdModuleState) -> bool {
+        self.epoch.is_current()
+            && self
+                .epoch
+                .module
+                .rtd()
+                .is_some_and(|owner| std::ptr::eq(owner, rtd))
     }
 }
 
@@ -431,11 +473,6 @@ impl ModuleRuntime {
     fn seal_and_drain_internal(&'static self) -> crate::XllResult<ExportsDrained> {
         self.ingress.seal_and_drain()
     }
-
-    fn certify_logical_quiescence_internal(&'static self) {
-        #[cfg(any(feature = "rtd", feature = "handles"))]
-        self.rtd.certify_logical_quiescence();
-    }
 }
 
 static MODULE_RUNTIME: LazyLock<ModuleRuntime> = LazyLock::new(ModuleRuntime::new);
@@ -466,7 +503,7 @@ pub(crate) fn certify_quiescence_for_test() {
     let drained = closing
         .seal_and_drain()
         .unwrap_or_else(|_| panic!("test module drain preparation failed"));
-    let _ = drained.certify();
+    let _ = drained.certify_for_test();
 }
 
 /// Read/admission capability for the module ingress owned by the singleton

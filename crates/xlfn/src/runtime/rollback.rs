@@ -4,10 +4,8 @@
 //! loaded into the runtime recovery domain; the lifecycle root retains only
 //! canonical state and ownership types.
 
-use crate::XllError;
 use crate::addin::Addin;
 use crate::boundary::{report_boundary_error, report_cleanup_issue};
-use crate::error::IntoXllError;
 use crate::generation::RuntimeGeneration;
 use crate::host_callback::HostCallbackSession;
 use crate::registration::{HostRegistrar, RegistrationHost};
@@ -227,48 +225,18 @@ where
         }
     };
 
-    let diagnostics_stopped = match crate::diagnostics::close_diagnostic_router() {
-        Ok(outcome) => {
-            for issue in outcome.issues {
-                report_cleanup_issue(&issue);
-            }
-            outcome.certificate
-        }
-        Err(error) => {
-            let error = error.into_xll_error();
-            report_boundary_error("xlAutoOpen diagnostic rollback", &error);
-            return incomplete(
-                runtime,
-                crate::shutdown::UnloadHazard::DiagnosticWorkerStillRunning,
-            );
-        }
-    };
-
-    let rtd_quiescent = match crate::excel_rtd_protocol::wait_for_module_quiescence(
-        runtime.module_residency_held(),
-    ) {
-        Ok(certificate) => certificate,
+    let teardown = match teardown.reclaim(report_cleanup_issue) {
+        Ok(teardown) => teardown,
         Err(failure) => {
-            let error = XllError::Internal {
-                diagnostic_id: if failure.missing_module_residency {
-                    crate::diagnostics::id::DiagnosticId::MODULE_RESIDENCY
-                } else {
-                    crate::diagnostics::id::DiagnosticId::RTD_GIT_QUIESCENCE
-                },
+            let hazard = failure.hazard();
+            let boundary = match &failure {
+                super::shutdown::ReclaimFailure::Diagnostics(_) => "xlAutoOpen diagnostic rollback",
+                super::shutdown::ReclaimFailure::Rtd(_) => "xlAutoOpen RTD quiescence rollback",
             };
-            report_boundary_error("xlAutoOpen RTD quiescence rollback", &error);
-            let hazard = if failure.missing_module_residency {
-                crate::shutdown::UnloadHazard::RtdComObjectsWithoutResidency
-            } else if failure.revocation_debt != 0 {
-                crate::shutdown::UnloadHazard::RtdGitRevocationDebt
-            } else {
-                crate::shutdown::UnloadHazard::RtdGitCallbackStillRegistered
-            };
+            report_boundary_error(boundary, &failure.into_error());
             return incomplete(runtime, hazard);
         }
     };
-
-    let teardown = teardown.reclaim(rtd_quiescent, diagnostics_stopped);
     let certificate = match teardown.certify() {
         Ok(certificate) => certificate,
         Err(error) => {

@@ -5,6 +5,9 @@
 //! does not own a `Runtime` reference; composition-root wiring happens in
 //! `Runtime` itself.
 
+#[cfg(test)]
+use crate::XllError;
+use crate::XllResult;
 use crate::addin::Addin;
 use crate::generation::{
     ExecutionGeneration, OpenAttemptId, OpeningGeneration, RemovalEpoch, RuntimeGeneration,
@@ -12,33 +15,12 @@ use crate::generation::{
 use crate::lifecycle::{LifecycleControl, LifecyclePhase, OpenFailureDisposition};
 use crate::runtime::capabilities::OpenDeps;
 use crate::runtime_components::QuarantineReason;
-use crate::{XllError, XllResult};
 
 /// The result of beginning an open attempt. The composition root turns this
 /// into an `OpeningTxn` by attaching the operation-scoped open capability.
 pub(crate) struct OpenAttemptStart {
     pub(crate) attempt: OpenAttemptId,
     pub(crate) module_opening: crate::module_runtime::ModuleOpening,
-}
-
-/// A cleanup claim whose purpose is fixed at the entry point that acquired it.
-/// Only this module can issue the wrapper; downstream owners preserve `K`.
-pub(in crate::runtime) struct RemovalPurposeClaim<K> {
-    claim: crate::lifecycle::RemovalClaim,
-    _kind: std::marker::PhantomData<K>,
-}
-
-impl<K> RemovalPurposeClaim<K> {
-    fn issue(claim: crate::lifecycle::RemovalClaim) -> Self {
-        Self {
-            claim,
-            _kind: std::marker::PhantomData,
-        }
-    }
-
-    pub(in crate::runtime) fn into_claim(self) -> crate::lifecycle::RemovalClaim {
-        self.claim
-    }
 }
 
 pub(crate) enum OpenRollbackAcquisition<T> {
@@ -176,99 +158,7 @@ impl<'a, A: Addin> LifecycleOrchestrator<'a, A> {
         }
     }
 
-    pub(in crate::runtime) fn begin_final_removal(
-        &self,
-    ) -> Option<RemovalPurposeClaim<super::shutdown::FinalRemoval>> {
-        let lifecycle = self.lifecycle();
-        let mut wait_guard = lifecycle.access();
-        lifecycle.begin_removal_request(&mut wait_guard);
-        self.returns.close_admission();
-        let mut request_recorded = false;
-
-        'retry: loop {
-            let decision = 'decision: {
-                match wait_guard.phase() {
-                    LifecyclePhase::Closed => {
-                        if wait_guard.removal_attempt().is_none()
-                            && self.returns.returns_are_quiescent()
-                        {
-                            self.observer.request_final_close(&mut request_recorded);
-                            break 'decision Some(None);
-                        }
-                        if wait_guard.removal_attempt().is_none() {
-                            drop(wait_guard);
-                            self.returns.wait_for_returns();
-                            wait_guard = lifecycle.access();
-                            continue 'retry;
-                        }
-                    }
-                    LifecyclePhase::Closing => {}
-                    LifecyclePhase::Opening
-                    | LifecyclePhase::Open
-                    | LifecyclePhase::OpenRollbackPending => {
-                        lifecycle.request_closing(&mut wait_guard);
-                    }
-                    LifecyclePhase::Quarantined => break 'decision Some(None),
-                }
-
-                if !request_recorded {
-                    if !matches!(
-                        wait_guard.phase(),
-                        LifecyclePhase::Closed | LifecyclePhase::Closing
-                    ) {
-                        crate::boundary::fail_stop_invariant(
-                            "xlAutoRemove close-request postcondition",
-                            &XllError::Internal {
-                                diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_WAIT,
-                            },
-                        );
-                    }
-                    self.observer.request_final_close(&mut request_recorded);
-                }
-
-                if wait_guard.phase() != LifecyclePhase::Closed
-                    && wait_guard.open_attempt().is_none()
-                    && let Some(claim) = lifecycle.claim_removal(&mut wait_guard)
-                {
-                    self.observer.acquire_final_close_owner();
-                    Some(Some(claim))
-                } else {
-                    None
-                }
-            };
-
-            match decision {
-                Some(Some(claim)) => return Some(RemovalPurposeClaim::issue(claim)),
-                Some(None) => return None,
-                None => lifecycle.wait(&mut wait_guard),
-            }
-        }
-    }
-
     pub(crate) fn take_opening_for_rollback(&self) -> Option<OpeningGeneration<A>> {
         self.lifecycle().take_opening_for_rollback()
-    }
-
-    pub(in crate::runtime) fn acquire_open_rollback(
-        &self,
-    ) -> OpenRollbackAcquisition<RemovalPurposeClaim<super::shutdown::OpenRollback>> {
-        let lifecycle = self.lifecycle();
-        let mut wait_guard = lifecycle.access();
-        loop {
-            match wait_guard.phase() {
-                LifecyclePhase::Closed | LifecyclePhase::Closing => {
-                    return OpenRollbackAcquisition::ClosingOwnsCleanup;
-                }
-                LifecyclePhase::OpenRollbackPending => {}
-                LifecyclePhase::Opening | LifecyclePhase::Open | LifecyclePhase::Quarantined => {
-                    return OpenRollbackAcquisition::Unavailable;
-                }
-            }
-            if let Some(claim) = lifecycle.claim_removal(&mut wait_guard) {
-                self.observer.acquire_open_rollback_owner();
-                return OpenRollbackAcquisition::Acquired(RemovalPurposeClaim::issue(claim));
-            }
-            lifecycle.wait(&mut wait_guard);
-        }
     }
 }

@@ -12,7 +12,7 @@ fn with_terminal_context(
     crate::diagnostics::reset_diagnostic_router().unwrap();
     before_close();
     let drained = opening.rollback(|| {}).seal_and_drain().unwrap();
-    let (module, _exports) = drained.certify();
+    let (module, _exports) = drained.certify_for_test();
     // Deliberately inject retained resources after the test certificate was
     // issued, to verify the observer does not replace live state with zeros.
     let proof = QuiescenceProof::for_test(None, module.id());

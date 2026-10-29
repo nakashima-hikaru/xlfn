@@ -598,11 +598,10 @@ impl RawArgumentIngressBenchmark {
         let ingress = benchmark_ingress();
         let call = self
             .runtime
-            .enter(&ingress)
+            .enter_async(&ingress)
             .expect("benchmark runtime must be open");
-        let lease = self
-            .runtime
-            .execution_lease(&call)
+        let lease = call
+            .try_execution_lease()
             .expect("benchmark execution generation must be open");
         crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
             let mut arguments =

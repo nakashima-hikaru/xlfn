@@ -385,6 +385,13 @@ pub(super) struct AttachedSubscriptions<
     server: BackendSubscriptionServer<E, C>,
 }
 
+impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Copy for AttachedSubscriptions<E, C> {}
+impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Clone for AttachedSubscriptions<E, C> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
 impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> AttachedSubscriptions<E, C> {
     #[cfg(test)]
     pub(super) fn is_runtime(&self, runtime: &SubscriptionRuntime<E, C>) -> bool {
@@ -803,7 +810,7 @@ fn ensure_server_impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
             // instance: Excel need not issue ServerTerminate after a failed start.
             // SAFETY: ACTIVE_SERVER owns a live server reference while locked.
             let operations = unsafe { (*server).operations.as_ref() };
-            let phase = operations.state.lock().phase;
+            let phase = operations.phase();
             // SAFETY: the same global reference keeps the start-state atomic live.
             let failed_start =
                 unsafe { (*server).start_state.load(Ordering::Acquire) } == SERVER_START_FAILED;
@@ -1325,17 +1332,10 @@ unsafe fn connect_data_inner<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
         return E_INVALIDARG;
     };
 
-    let (handles, subscriptions, subscription_server) = {
+    let (handles, subscriptions) = {
         // SAFETY: `this` was validated as non-null and COM retains the server during ConnectData.
         let backends = unsafe { (*this).backends.lock() };
-        (
-            backends.handles,
-            backends
-                .subscriptions
-                .as_ref()
-                .map(|attached| attached.runtime),
-            backends.subscription_server(),
-        )
+        (backends.handles, backends.subscriptions)
     };
 
     // SAFETY: `this` remains valid for the duration of ConnectData.
@@ -1366,16 +1366,13 @@ unsafe fn connect_data_inner<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
             }
         }
     } else if let Ok(sub_key) = crate::subscription::SubscriptionKey::parse_transport(&key) {
-        let Some(subscription_server) = subscription_server.as_ref() else {
+        let Some(subscriptions) = subscriptions.as_ref() else {
             return E_FAIL;
         };
-        if subscriptions.is_none() {
-            return E_FAIL;
-        }
         // SAFETY: COM admission retains this adapter and runtime. It resolves
         // the key and completes its typed connection before returning.
         unsafe {
-            subscription_server.connect_data(
+            subscriptions.server.connect_data(
                 crate::subscription::TopicId(topic_id),
                 sub_key,
                 result,
@@ -1819,7 +1816,7 @@ impl<'server, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
     }
 
     pub(super) fn join_worker(self) -> Result<JoinedServerAccess<'server, E, C>, ServerCloseError> {
-        let worker_panicked = match self.server.termination_worker.join() {
+        let worker_panicked = match self.server.termination_worker.seal_and_join() {
             Ok(()) => false,
             // join has consumed the thread even when its result was a panic.
             Err(ServerCloseError::WorkerPanicked) => true,

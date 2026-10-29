@@ -26,8 +26,10 @@ Executor close retains the runtime and executor through publication-reader and
 task drain. Only the drained stage exposes executor shutdown; abandoning any
 stage restores the sealed executor after releasing the registry close claim.
 
-Removal owners retain the final-removal or open-rollback purpose issued at
-acquisition; neither raw claims nor a later `drain` call can change it. Removal
+Removal owners retain their issuing coordinator and observer from acquisition,
+so abandoning either purpose returns its module authority to that issuer. The
+private claim assembly cannot combine a claim with another runtime's dependencies;
+neither acquisition nor a later `drain` can change its purpose. Removal
 starts by consuming that owner into the teardown transaction. The transaction
 must close module callbacks, prove host detachment, and quiesce the add-in before
 sealing generation services. The seal transition first detaches
@@ -102,3 +104,20 @@ workers can dispose backend/callback resources without that authority. Fixtures
 reject disposal through an undrained server/barrier, active-reference release
 before join, substitution of another server, and construction of subscription
 attachments from unrelated runtime/server handles.
+
+Async execution leases are issued through process-lifetime async admission.
+The admission retains its exact publication owner; callers supply neither a
+second runtime nor a generation pointer, and short-lived ordinary call guards
+cannot launch owned execution. Closing rejects fresh leases while existing
+leases still block generation reclamation.
+
+Reclaim owns diagnostics shutdown and RTD waiting instead of accepting detached
+certificates. Module logical quiescence requires the complete non-module proof
+bundle and exact module epoch; exports alone cannot publish it. Canonical
+retirement and completion consume private, purpose-specific authorizations and
+revalidate their coordinator, attempt, generation and epoch under the mutation
+lock. Failed resource certification returns the progressed module authority.
+
+COM gate phase/counters are read-only outside the gate module. Terminal worker
+join seals future starts, including an idle worker and a rolled-back reservation;
+start reservations are thread-affine and reject waiting on themselves.

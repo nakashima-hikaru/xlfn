@@ -196,6 +196,10 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
         }
     }
 
+    pub(in crate::runtime) fn returns(&self) -> &'a ReturnProtocol {
+        self.returns
+    }
+
     pub(in crate::runtime) fn lifecycle(&self) -> &'a LifecycleCoordinator<A> {
         self.lifecycle
     }

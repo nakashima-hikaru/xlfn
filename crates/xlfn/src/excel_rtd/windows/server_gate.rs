@@ -18,10 +18,10 @@ pub(super) enum ServerPhase {
 }
 
 #[derive(Default)]
-pub(super) struct ServerOperationState {
-    pub(super) phase: ServerPhase,
+struct ServerOperationState {
+    phase: ServerPhase,
     termination_coordinator: Option<ThreadId>,
-    pub(super) in_flight: usize,
+    in_flight: usize,
     notifications_in_flight: usize,
     in_flight_by_thread: FxHashMap<ThreadId, usize>,
     notifications_in_flight_by_thread: FxHashMap<ThreadId, usize>,
@@ -29,7 +29,7 @@ pub(super) struct ServerOperationState {
 }
 
 pub(super) struct ServerOperationBarrier {
-    pub(super) state: Mutex<ServerOperationState>,
+    state: Mutex<ServerOperationState>,
     quiescent: ManualResetEvent,
     termination_finished: ManualResetEvent,
     resources_finished: ManualResetEvent,
@@ -123,6 +123,20 @@ pub(super) struct DeferredTerminationReservation<'a> {
 }
 
 impl ServerOperationBarrier {
+    pub(super) fn phase(&self) -> ServerPhase {
+        self.state.lock().phase
+    }
+
+    #[cfg(test)]
+    pub(super) fn try_phase(&self) -> Option<ServerPhase> {
+        self.state.try_lock().map(|state| state.phase)
+    }
+
+    #[cfg(test)]
+    pub(super) fn in_flight(&self) -> usize {
+        self.state.lock().in_flight
+    }
+
     pub(super) fn new() -> Result<Self, Win32EventError> {
         Ok(Self {
             state: Mutex::new(ServerOperationState::default()),
@@ -640,10 +654,12 @@ pub(super) enum TerminationWorkerStatus {
 }
 
 #[derive(Default)]
-enum TerminationWorkerState {
+enum TerminationWorkerPhase {
     #[default]
     Idle,
-    Starting,
+    Starting {
+        owner: ThreadId,
+    },
     Running(std::thread::JoinHandle<()>),
     // The joiner owns the handle outside the lock. Keep its worker identity
     // here so that worker cannot wait for the joiner that is waiting for it.
@@ -651,6 +667,13 @@ enum TerminationWorkerState {
         worker_thread: ThreadId,
     },
     Joined,
+}
+
+#[derive(Default)]
+struct TerminationWorkerState {
+    phase: TerminationWorkerPhase,
+    // Closed before joining, including when no worker has ever started.
+    sealed: bool,
 }
 
 #[derive(Default)]
@@ -662,19 +685,31 @@ pub(super) struct TerminationWorker {
 pub(super) struct TerminationWorkerStart<'a> {
     worker: &'a TerminationWorker,
     committed: bool,
+    _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
 impl TerminationWorker {
     pub(super) fn reserve_start(&self) -> Result<TerminationWorkerStart<'_>, ServerCloseError> {
         let mut state = self.state.lock();
-        if !matches!(*state, TerminationWorkerState::Idle) {
+        if state.sealed || !matches!(state.phase, TerminationWorkerPhase::Idle) {
             return Err(ServerCloseError::Reentrant);
         }
-        *state = TerminationWorkerState::Starting;
+        state.phase = TerminationWorkerPhase::Starting {
+            owner: std::thread::current().id(),
+        };
         Ok(TerminationWorkerStart {
             worker: self,
             committed: false,
+            _not_send_or_sync: PhantomData,
         })
+    }
+
+    /// Prevent any later reservation before checking or joining the worker.
+    /// A pre-existing Starting reservation must still commit or roll back; join
+    /// waits for it, and rollback cannot reopen this sealed worker.
+    pub(super) fn seal_and_join(&self) -> Result<(), ServerCloseError> {
+        self.state.lock().sealed = true;
+        self.join()
     }
 
     pub(super) fn join(&self) -> Result<(), ServerCloseError> {
@@ -682,35 +717,42 @@ impl TerminationWorker {
         loop {
             let handle = {
                 let mut state = self.state.lock();
-                let worker_thread = match &*state {
-                    TerminationWorkerState::Running(handle) => Some(handle.thread().id()),
-                    TerminationWorkerState::Joining { worker_thread } => Some(*worker_thread),
+                let worker_thread = match &state.phase {
+                    // The thread-affine reservation must commit or roll back
+                    // before its owner can wait for Starting to finish.
+                    TerminationWorkerPhase::Starting { owner } => Some(*owner),
+                    TerminationWorkerPhase::Running(handle) => Some(handle.thread().id()),
+                    TerminationWorkerPhase::Joining { worker_thread } => Some(*worker_thread),
                     _ => None,
                 };
                 if worker_thread == Some(current) {
                     return Err(ServerCloseError::Reentrant);
                 }
 
-                match &*state {
-                    TerminationWorkerState::Idle | TerminationWorkerState::Joined => {
+                match &state.phase {
+                    TerminationWorkerPhase::Idle => {
+                        if state.sealed {
+                            state.phase = TerminationWorkerPhase::Joined;
+                        }
                         return Ok(());
                     }
-                    TerminationWorkerState::Starting => {
+                    TerminationWorkerPhase::Joined => return Ok(()),
+                    TerminationWorkerPhase::Starting { .. } => {
                         self.changed.wait(&mut state);
                         continue;
                     }
-                    TerminationWorkerState::Running(handle) => {
-                        let joining = TerminationWorkerState::Joining {
+                    TerminationWorkerPhase::Running(handle) => {
+                        let joining = TerminationWorkerPhase::Joining {
                             worker_thread: handle.thread().id(),
                         };
-                        let TerminationWorkerState::Running(handle) =
-                            std::mem::replace(&mut *state, joining)
+                        let TerminationWorkerPhase::Running(handle) =
+                            std::mem::replace(&mut state.phase, joining)
                         else {
                             xlfn_kernel::invariant::fail_stop();
                         };
                         handle
                     }
-                    TerminationWorkerState::Joining { .. } => {
+                    TerminationWorkerPhase::Joining { .. } => {
                         self.changed.wait(&mut state);
                         continue;
                     }
@@ -719,7 +761,7 @@ impl TerminationWorker {
 
             let outcome = crate::panic_boundary::contain_panic(handle.join());
             let mut state = self.state.lock();
-            *state = TerminationWorkerState::Joined;
+            state.phase = TerminationWorkerPhase::Joined;
             self.changed.notify_all();
             return outcome.map_err(|_| ServerCloseError::WorkerPanicked);
         }
@@ -727,19 +769,24 @@ impl TerminationWorker {
 
     pub(super) fn is_idle_or_joined(&self) -> bool {
         matches!(
-            *self.state.lock(),
-            TerminationWorkerState::Idle | TerminationWorkerState::Joined
+            self.state.lock().phase,
+            TerminationWorkerPhase::Idle | TerminationWorkerPhase::Joined
         )
     }
 
     #[cfg(test)]
+    pub(super) fn is_sealed(&self) -> bool {
+        self.state.lock().sealed
+    }
+
+    #[cfg(test)]
     pub(super) fn phase(&self) -> TerminationWorkerStatus {
-        match &*self.state.lock() {
-            TerminationWorkerState::Idle => TerminationWorkerStatus::Idle,
-            TerminationWorkerState::Starting => TerminationWorkerStatus::Starting,
-            TerminationWorkerState::Running(_) => TerminationWorkerStatus::Running,
-            TerminationWorkerState::Joining { .. } => TerminationWorkerStatus::Joining,
-            TerminationWorkerState::Joined => TerminationWorkerStatus::Joined,
+        match &self.state.lock().phase {
+            TerminationWorkerPhase::Idle => TerminationWorkerStatus::Idle,
+            TerminationWorkerPhase::Starting { .. } => TerminationWorkerStatus::Starting,
+            TerminationWorkerPhase::Running(_) => TerminationWorkerStatus::Running,
+            TerminationWorkerPhase::Joining { .. } => TerminationWorkerStatus::Joining,
+            TerminationWorkerPhase::Joined => TerminationWorkerStatus::Joined,
         }
     }
 }
@@ -747,8 +794,11 @@ impl TerminationWorker {
 impl TerminationWorkerStart<'_> {
     pub(super) fn commit(mut self, handle: std::thread::JoinHandle<()>) {
         let mut state = self.worker.state.lock();
-        debug_assert!(matches!(*state, TerminationWorkerState::Starting));
-        *state = TerminationWorkerState::Running(handle);
+        debug_assert!(matches!(
+            state.phase,
+            TerminationWorkerPhase::Starting { .. }
+        ));
+        state.phase = TerminationWorkerPhase::Running(handle);
         self.committed = true;
         self.worker.changed.notify_all();
     }
@@ -760,8 +810,11 @@ impl Drop for TerminationWorkerStart<'_> {
             return;
         }
         let mut state = self.worker.state.lock();
-        debug_assert!(matches!(*state, TerminationWorkerState::Starting));
-        *state = TerminationWorkerState::Idle;
+        debug_assert!(matches!(
+            state.phase,
+            TerminationWorkerPhase::Starting { .. }
+        ));
+        state.phase = TerminationWorkerPhase::Idle;
         self.worker.changed.notify_all();
     }
 }

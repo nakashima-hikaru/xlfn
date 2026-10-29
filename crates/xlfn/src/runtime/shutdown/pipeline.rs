@@ -9,6 +9,7 @@
 use super::certificate::TerminalCertificateKind;
 use super::owner::{RemovalClaimGuard, RemovalOwner};
 use crate::addin::Addin;
+use crate::error::IntoXllError;
 use crate::panic_boundary::catch_no_unwind;
 use crate::runtime::capabilities::ShutdownDeps;
 use std::marker::PhantomData;
@@ -682,6 +683,61 @@ impl ServicesQuiescent {
     }
 }
 
+/// A complete, affine collection of all non-module teardown certificates.
+/// Only the teardown pipeline can construct this value.
+pub(crate) struct CompletedResources {
+    module_epoch: crate::module_runtime::ModuleEpochId,
+    _certificates: (
+        crate::shutdown::ReturnsQuiescent,
+        crate::shutdown::AsyncStopped,
+        crate::shutdown::SubscriptionsStopped,
+        crate::shutdown::HandlesQuiescent,
+        crate::excel_rtd_protocol::RtdQuiescent,
+        crate::shutdown::GenerationCallbacksDetached,
+        crate::diagnostics::DiagnosticsStopped,
+        crate::shutdown::AddinQuiesced,
+        crate::shutdown::GenerationReclaimed,
+    ),
+}
+
+impl CompletedResources {
+    pub(crate) fn module_epoch(&self) -> crate::module_runtime::ModuleEpochId {
+        self.module_epoch
+    }
+}
+
+pub(crate) enum ReclaimFailure {
+    Diagnostics(crate::XllError),
+    Rtd(crate::excel_rtd_protocol::RtdQuiescenceError),
+}
+
+impl ReclaimFailure {
+    pub(crate) fn hazard(&self) -> crate::shutdown::UnloadHazard {
+        use crate::shutdown::UnloadHazard;
+        match self {
+            Self::Diagnostics(_) => UnloadHazard::DiagnosticWorkerStillRunning,
+            Self::Rtd(error) if error.missing_module_residency => {
+                UnloadHazard::RtdComObjectsWithoutResidency
+            }
+            Self::Rtd(error) if error.revocation_debt != 0 => UnloadHazard::RtdGitRevocationDebt,
+            Self::Rtd(_) => UnloadHazard::RtdGitCallbackStillRegistered,
+        }
+    }
+
+    pub(crate) fn into_error(self) -> crate::XllError {
+        match self {
+            Self::Diagnostics(error) => error,
+            Self::Rtd(error) => crate::XllError::Internal {
+                diagnostic_id: if error.missing_module_residency {
+                    crate::diagnostics::id::DiagnosticId::MODULE_RESIDENCY
+                } else {
+                    crate::diagnostics::id::DiagnosticId::RTD_GIT_QUIESCENCE
+                },
+            },
+        }
+    }
+}
+
 impl ResourcesReclaimed {
     pub(crate) fn new(
         services: ServicesQuiescent,
@@ -695,7 +751,10 @@ impl ResourcesReclaimed {
         }
     }
 
-    pub(crate) fn into_proof(self) -> crate::XllResult<QuiescenceProof> {
+    pub(crate) fn into_proof(
+        self,
+    ) -> Result<QuiescenceProof, (crate::XllError, crate::module_runtime::ModuleExportsDrained)>
+    {
         let Self {
             services,
             rtd,
@@ -718,26 +777,31 @@ impl ResourcesReclaimed {
                 subscriptions_generation
             }
             _ => {
-                return Err(crate::XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_CERTIFICATE,
-                });
+                return Err((
+                    crate::XllError::Internal {
+                        diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_CERTIFICATE,
+                    },
+                    module,
+                ));
             }
         };
-        let (module_quiescent, exports) = module.certify();
+        let completion = CompletedResources {
+            module_epoch: module.id(),
+            _certificates: (
+                returns,
+                async_stopped,
+                subscriptions_stopped,
+                handles,
+                rtd,
+                host_callbacks,
+                diagnostics,
+                addin,
+                generation,
+            ),
+        };
+        let (module_quiescent, exports) = module.certify(completion);
         let module_epoch = module_quiescent.id();
-        let _terminal_resources = (
-            exports,
-            module_quiescent,
-            returns,
-            async_stopped,
-            subscriptions_stopped,
-            handles,
-            rtd,
-            host_callbacks,
-            diagnostics,
-            addin,
-            generation,
-        );
+        let _terminal_resources = (exports, module_quiescent);
         Ok(QuiescenceProof {
             services_generation,
             module_epoch,
@@ -1066,15 +1130,44 @@ impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ServicesCleaned> {
     }
 }
 
-impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ServicesQuiescent> {
+impl<'runtime, A: Addin, K: TerminalCertificateKind>
+    TeardownTxn<'runtime, A, K, ServicesQuiescent>
+{
     pub(crate) fn reclaim(
         self,
-        rtd: crate::excel_rtd_protocol::RtdQuiescent,
-        diagnostics: crate::diagnostics::DiagnosticsStopped,
-    ) -> TeardownTxn<'runtime, A, K, ResourcesReclaimed> {
+        mut report_issue: impl FnMut(&crate::shutdown::CleanupIssue),
+    ) -> Result<TeardownTxn<'runtime, A, K, ResourcesReclaimed>, ReclaimFailure> {
+        let deps = self.owner.deps();
+        let diagnostics_was_running = crate::diagnostics::diagnostic_sink_running();
+        #[cfg(test)]
+        tests::check_reclaim_fault(false)?;
+        let outcome = crate::diagnostics::close_diagnostic_router()
+            .map_err(|error| ReclaimFailure::Diagnostics(error.into_xll_error()))?;
+        for issue in outcome.issues {
+            if K::RECORD_RECLAIM {
+                deps.observer().cleanup_issue();
+            }
+            report_issue(&issue);
+        }
+        if K::RECORD_RECLAIM {
+            if diagnostics_was_running {
+                deps.observer().diagnostics_stopped();
+            }
+            deps.observer().diagnostics_drained();
+        }
+        #[cfg(test)]
+        tests::check_reclaim_fault(true)?;
+        let rtd = crate::excel_rtd_protocol::wait_for_module_quiescence(deps.residency().is_held())
+            .map_err(ReclaimFailure::Rtd)?;
+        if K::RECORD_RECLAIM {
+            deps.observer().rtd_drained();
+        }
+        // Keep owner and stage intact throughout both fallible operations.
         let (owner, services) = self.split();
-        let stage = ResourcesReclaimed::new(services, rtd, diagnostics);
-        TeardownTxn::from_parts(owner, stage)
+        Ok(TeardownTxn::from_parts(
+            owner,
+            ResourcesReclaimed::new(services, rtd, outcome.certificate),
+        ))
     }
 }
 
@@ -1085,11 +1178,19 @@ impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ResourcesReclaimed> {
     where
         K: TerminalCertificateKind,
     {
-        let proof = self
+        let resources = self
             .stage
             .take()
-            .expect("teardown transaction owns one current stage")
-            .into_proof()?;
+            .expect("teardown transaction owns one current stage");
+        let proof = match resources.into_proof() {
+            Ok(proof) => proof,
+            Err((error, module)) => {
+                self.owner.return_module_authority(
+                    crate::module_runtime::ModuleCleanupAuthority::Drained(module),
+                );
+                return Err(error);
+            }
+        };
         let deps = self.owner.deps();
         let owner = self.owner.take();
         match owner.certify::<K>(proof, deps) {
@@ -1149,6 +1250,185 @@ mod tests {
     use crate::runtime::{Runtime, transactions::RemovalSuccess};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Clone, Copy)]
+    enum ReclaimFault {
+        Diagnostics,
+        Cookies,
+        Debt,
+        Residency,
+    }
+
+    std::thread_local! {
+        static RECLAIM_FAULT: std::cell::Cell<Option<ReclaimFault>> = const { std::cell::Cell::new(None) };
+    }
+
+    pub(super) fn check_reclaim_fault(rtd: bool) -> Result<(), ReclaimFailure> {
+        RECLAIM_FAULT.with(|fault| match fault.get() {
+            Some(ReclaimFault::Diagnostics) if !rtd => {
+                fault.set(None);
+                Err(ReclaimFailure::Diagnostics(crate::XllError::Closing))
+            }
+            Some(point) if rtd => {
+                fault.set(None);
+                Err(ReclaimFailure::Rtd(
+                    crate::excel_rtd_protocol::RtdQuiescenceError {
+                        outstanding_git_cookies: usize::from(matches!(
+                            point,
+                            ReclaimFault::Cookies
+                        )),
+                        revocation_debt: usize::from(matches!(point, ReclaimFault::Debt)),
+                        missing_module_residency: matches!(point, ReclaimFault::Residency),
+                    },
+                ))
+            }
+            _ => Ok(()),
+        })
+    }
+
+    #[test]
+    fn mismatched_resource_generations_return_module_authority() {
+        let runtime = Runtime::<RollbackProbe>::new();
+        let opening = runtime.begin_open().unwrap();
+        let generation = opening.attempt_id().into_runtime_generation();
+        let mut opening = runtime.publish_with_lifecycle(
+            opening,
+            ObservedState(Arc::new(AtomicUsize::new(0))),
+            Failure::None,
+            (),
+        );
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let epoch = runtime.lifecycle.access().module_epoch_id().unwrap();
+        let owner = runtime.begin_final_removal().unwrap();
+        let teardown = owner
+            .drain()
+            .unwrap_or_else(|_| panic!("drain"))
+            .stop_producers(|_| {})
+            .unwrap_or_else(|_| panic!("stop"))
+            .close_module_callbacks()
+            .detach_host()
+            .unwrap_or_else(|_| panic!("detach"));
+        let lifecycle = runtime.bind_addin_lifecycle().unwrap();
+        let teardown = teardown
+            .quiesce_addin(&runtime, &lifecycle)
+            .unwrap_or_else(|_| panic!("quiesce"))
+            .seal_services()
+            .unwrap_or_else(|_| panic!("seal"));
+        let mut report = crate::shutdown::CloseReport::default();
+        let teardown = teardown
+            .cleanup_addin(&lifecycle, &mut report)
+            .unwrap_or_else(|_| panic!("cleanup"))
+            .finish_services()
+            .unwrap_or_else(|_| panic!("finish"));
+        let mut teardown = teardown
+            .reclaim(|_| {})
+            .unwrap_or_else(|_| panic!("reclaim"));
+        let other = crate::generation::RuntimeGeneration::new(generation.get() + 1).unwrap();
+        teardown
+            .stage
+            .as_mut()
+            .unwrap()
+            .services
+            .subscriptions_stopped = crate::shutdown::SubscriptionsStopped::issue(Some(other));
+        assert!(teardown.certify().is_err());
+        assert_eq!(
+            runtime.phase(),
+            crate::lifecycle::LifecyclePhase::Quarantined
+        );
+        assert!(runtime.lifecycle.access().removal_attempt().is_none());
+        let crate::module_runtime::ModuleCleanupClaim::Ready(
+            crate::module_runtime::ModuleCleanupReady::Drained(drained),
+        ) = runtime.lifecycle_control().take_module_cleanup_authority()
+        else {
+            panic!("lost module");
+        };
+        assert_eq!(drained.id(), epoch);
+        runtime.lifecycle_control().retain_failed_module_cleanup(
+            crate::module_runtime::ModuleCleanupAuthority::Drained(drained),
+        );
+    }
+
+    #[test]
+    fn reclaim_failures_retain_generation_and_module_before_certification() {
+        for point in [
+            ReclaimFault::Diagnostics,
+            ReclaimFault::Cookies,
+            ReclaimFault::Debt,
+            ReclaimFault::Residency,
+        ] {
+            let runtime = Runtime::<RollbackProbe>::new();
+            let drops = Arc::new(AtomicUsize::new(0));
+            let opening = runtime.begin_open().unwrap();
+            let mut opening = runtime.publish_with_lifecycle(
+                opening,
+                ObservedState(Arc::clone(&drops)),
+                Failure::None,
+                (),
+            );
+            runtime.finish_open(&mut opening, Vec::new()).unwrap();
+            let owner = runtime.begin_final_removal().unwrap();
+            let epoch = runtime.lifecycle.access().module_epoch_id().unwrap();
+            let teardown = owner
+                .drain()
+                .unwrap_or_else(|_| panic!("drain"))
+                .stop_producers(|_| {})
+                .unwrap_or_else(|_| panic!("stop"))
+                .close_module_callbacks()
+                .detach_host()
+                .unwrap_or_else(|_| panic!("detach"));
+            let lifecycle = runtime.bind_addin_lifecycle().unwrap();
+            let teardown = teardown
+                .quiesce_addin(&runtime, &lifecycle)
+                .unwrap_or_else(|_| panic!("quiesce"))
+                .seal_services()
+                .unwrap_or_else(|_| panic!("seal"));
+            let mut report = crate::shutdown::CloseReport::default();
+            let teardown = teardown
+                .cleanup_addin(&lifecycle, &mut report)
+                .unwrap_or_else(|_| panic!("cleanup"))
+                .finish_services()
+                .unwrap_or_else(|_| panic!("finish"));
+            RECLAIM_FAULT.with(|fault| fault.set(Some(point)));
+            let Err(failure) = teardown.reclaim(|_| {}) else {
+                panic!("fault did not fire");
+            };
+            assert_eq!(
+                failure.hazard(),
+                match point {
+                    ReclaimFault::Diagnostics =>
+                        crate::shutdown::UnloadHazard::DiagnosticWorkerStillRunning,
+                    ReclaimFault::Cookies =>
+                        crate::shutdown::UnloadHazard::RtdGitCallbackStillRegistered,
+                    ReclaimFault::Debt => crate::shutdown::UnloadHazard::RtdGitRevocationDebt,
+                    ReclaimFault::Residency =>
+                        crate::shutdown::UnloadHazard::RtdComObjectsWithoutResidency,
+                }
+            );
+            RECLAIM_FAULT.with(|fault| assert!(fault.get().is_none()));
+            assert_eq!(
+                runtime.phase(),
+                crate::lifecycle::LifecyclePhase::Quarantined
+            );
+            assert!(runtime.lifecycle.access().removal_attempt().is_none());
+            // Addin cleanup already reclaimed the shared state, while terminal
+            // canonical retirement and module authority remain recoverable.
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            // Only transport-enabled builds have the RTD publication flag;
+            // feature-off builds project just the already-drained ingress.
+            #[cfg(any(feature = "rtd", feature = "handles"))]
+            assert!(!crate::excel_rtd_protocol::logical_quiescence_certified());
+            let crate::module_runtime::ModuleCleanupClaim::Ready(
+                crate::module_runtime::ModuleCleanupReady::Drained(drained),
+            ) = runtime.lifecycle_control().take_module_cleanup_authority()
+            else {
+                panic!("lost module");
+            };
+            assert_eq!(drained.id(), epoch);
+            runtime.lifecycle_control().retain_failed_module_cleanup(
+                crate::module_runtime::ModuleCleanupAuthority::Drained(drained),
+            );
+        }
+    }
 
     #[derive(Clone, Copy, Eq, PartialEq)]
     pub(super) enum ServiceSealPoint {

@@ -57,8 +57,13 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
         control.open_rollback_ready(attempt)
     }
 
-    pub(crate) fn clear_certified_retirement(&self, control: &mut LifecycleAccess<'_, A>) -> bool {
-        self.coordinator.clear_certified_retirement(control)
+    pub(crate) fn clear_certified_retirement(
+        &self,
+        control: &mut LifecycleAccess<'_, A>,
+        authorization: crate::runtime::CertifiedRetirement<'_, A>,
+    ) -> bool {
+        self.coordinator
+            .clear_certified_retirement(control, authorization)
     }
 
     pub(crate) fn begin_open_state(
@@ -124,17 +129,19 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
     pub(crate) fn finish_final_removal(
         &self,
         control: &mut LifecycleAccess<'_, A>,
-        attempt: RemovalAttemptId,
+        authorization: crate::runtime::CanonicalCompletion<'_, A, crate::runtime::FinalRemoval>,
     ) -> XllResult<()> {
-        self.coordinator.finish_final_removal(control, attempt)
+        self.coordinator
+            .finish_final_removal(control, authorization)
     }
 
     pub(crate) fn finish_open_rollback(
         &self,
         control: &mut LifecycleAccess<'_, A>,
-        attempt: RemovalAttemptId,
+        authorization: crate::runtime::CanonicalCompletion<'_, A, crate::runtime::OpenRollback>,
     ) -> XllResult<()> {
-        self.coordinator.finish_open_rollback(control, attempt)
+        self.coordinator
+            .finish_open_rollback(control, authorization)
     }
 
     pub(crate) fn complete_open_abort(&self, closing: ModuleClosing) {

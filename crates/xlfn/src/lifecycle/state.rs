@@ -82,6 +82,59 @@ unsafe impl<A: crate::Addin> Send for PublishedGeneration<A> {}
 // SAFETY: same invariant as Send; concurrent reads are synchronized by admission.
 unsafe impl<A: crate::Addin> Sync for PublishedGeneration<A> {}
 
+/// Explicit open-generation lifetime lease for call-scoped and asynchronous
+/// UDF executions.
+pub struct ExecutionLease<A: crate::Addin> {
+    generation: NonNull<ExecutionGeneration<A>>,
+    _permit: xlfn_kernel::drain_gate::StripedOwnedDrainPermit<
+        { xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT },
+    >,
+}
+
+impl<A: crate::Addin> ExecutionLease<A> {
+    /// Creates a temporal lease over the uniquely owned generation root.
+    ///
+    /// # Safety
+    ///
+    /// `generation` must remain valid until `permit` is dropped, and the gate
+    /// that issued `permit` must be drained before the generation is reclaimed.
+    #[cfg(feature = "async")]
+    unsafe fn new(
+        generation: NonNull<ExecutionGeneration<A>>,
+        permit: xlfn_kernel::drain_gate::StripedOwnedDrainPermit<
+            { xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT },
+        >,
+    ) -> Self {
+        Self {
+            generation,
+            _permit: permit,
+        }
+    }
+
+    #[must_use]
+    /// Borrows shared state while this execution lease retains the generation.
+    pub fn state(&self) -> &A::SharedState {
+        // SAFETY: construction couples the pointer to the owned drain permit.
+        &unsafe { self.generation.as_ref() }.shared_state
+    }
+
+    /// Returns the published runtime-generation identity carried by this
+    /// execution lease. This is consumed only by the hidden async-handle
+    /// launch boundary when it creates its compile-time scope brand.
+    #[cfg(all(feature = "async", feature = "handles"))]
+    pub(crate) fn generation(&self) -> RuntimeGeneration {
+        // SAFETY: the execution lease's owned drain permit keeps the
+        // generation root alive for the duration of this borrow.
+        unsafe { self.generation.as_ref() }.id()
+    }
+}
+
+// SAFETY: the generation payload is Send + Sync by the Addin contract and the
+// owned permit prevents reclamation while the pointer crosses threads.
+unsafe impl<A: crate::Addin> Send for ExecutionLease<A> {}
+// SAFETY: same invariant as Send; shared borrows access immutable shared_state.
+unsafe impl<A: crate::Addin> Sync for ExecutionLease<A> {}
+
 /// A non-owning read lease that permits one call from the published generation.
 ///
 /// The lease holds a non-owning pointer to the root published by the current
@@ -92,6 +145,8 @@ unsafe impl<A: crate::Addin> Sync for PublishedGeneration<A> {}
 pub(crate) struct GenerationAdmission<'lifecycle, A: crate::Addin> {
     publication: NonNull<PublishedGeneration<A>>,
     _permit: StripedDrainPermit<'lifecycle, DEFAULT_STRIPE_COUNT>,
+    #[cfg(feature = "async")]
+    execution_issuer: Option<&'static LifecycleCoordinator<A>>,
 }
 
 impl<'lifecycle, A: crate::Addin> GenerationAdmission<'lifecycle, A> {
@@ -102,6 +157,8 @@ impl<'lifecycle, A: crate::Addin> GenerationAdmission<'lifecycle, A> {
         Self {
             publication,
             _permit: permit,
+            #[cfg(feature = "async")]
+            execution_issuer: None,
         }
     }
 
@@ -116,8 +173,21 @@ impl<'lifecycle, A: crate::Addin> GenerationAdmission<'lifecycle, A> {
     }
 
     #[cfg(feature = "async")]
-    pub(crate) fn generation_pointer(&self) -> NonNull<ExecutionGeneration<A>> {
-        self.publication().root
+    pub(crate) fn try_execution_lease(
+        &self,
+    ) -> crate::XllResult<crate::generation::ExecutionLease<A>> {
+        let issuer = self.execution_issuer.ok_or(crate::XllError::Closing)?;
+        // Admission's original permit keeps its publication/root alive while
+        // trying a fresh admission on the exact process-lifetime issuer. A
+        // close that already sealed the gate must reject this new launch.
+        let permit = issuer
+            .publication_readers
+            .try_enter_owned_current()
+            .map_err(|_| crate::XllError::Closing)?;
+        // SAFETY: the static issuer was installed by try_admit_async on the
+        // same coordinator that issued this admission and owns its root. Its
+        // publication gate drains before that root can be reclaimed.
+        Ok(unsafe { crate::generation::ExecutionLease::new(self.publication().root, permit) })
     }
 
     pub(crate) fn services(
@@ -1640,8 +1710,24 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     pub(in crate::lifecycle) fn clear_certified_retirement(
         &self,
         access: &mut LifecycleAccess<'_, A>,
+        authorization: crate::runtime::CertifiedRetirement<'_, A>,
     ) -> bool {
+        // Neither a stale ready observation nor another coordinator's mutex
+        // guard can authorize disposal of these canonical resources.
+        if !std::ptr::eq(access.coordinator, self) {
+            return false;
+        }
         access.transition(|core| {
+            let Some(FinalRemovalReady::Committed {
+                generation,
+                module_epoch,
+            }) = core.final_removal_ready(authorization.attempt())
+            else {
+                return (false, TransitionEffect::Keep);
+            };
+            if !authorization.matches(self, authorization.attempt(), generation, module_epoch) {
+                return (false, TransitionEffect::Keep);
+            }
             let Some(retirement) = core.state.take_retirement() else {
                 return (false, TransitionEffect::Keep);
             };
@@ -1680,22 +1766,15 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         Ok(GenerationAdmission::new(publication, permit))
     }
 
+    /// Async admission records its process-lifetime issuer before returning it.
+    /// There is no API accepting an independently supplied generation pointer.
     #[cfg(feature = "async")]
-    pub(crate) fn acquire_execution_lease(
+    pub(crate) fn try_admit_async(
         &'static self,
-        generation: NonNull<ExecutionGeneration<A>>,
-    ) -> crate::XllResult<crate::generation::ExecutionLease<A>> {
-        // A call admitted before closing can still be preparing its async
-        // launch after the publication gate is sealed. Its existing lease
-        // keeps the generation alive, but a new launch must fail normally.
-        let permit = self
-            .publication_readers
-            .try_enter_owned_current()
-            .map_err(|_| crate::XllError::Closing)?;
-        // SAFETY: the publication gate is owned by this process-lifetime
-        // coordinator and is drained before the published generation owner
-        // converts back into a Box for reclamation.
-        Ok(unsafe { crate::generation::ExecutionLease::new(generation, permit) })
+    ) -> crate::XllResult<GenerationAdmission<'static, A>> {
+        let mut admission = self.try_admit()?;
+        admission.execution_issuer = Some(self);
+        Ok(admission)
     }
 
     pub(in crate::lifecycle) fn set_host_intent(&self, intent: HostLifecycleIntent) {
@@ -2051,11 +2130,11 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     pub(in crate::lifecycle) fn finish_final_removal(
         &self,
         core: &mut LifecycleAccess<'_, A>,
-        attempt: RemovalAttemptId,
+        authorization: crate::runtime::CanonicalCompletion<'_, A, crate::runtime::FinalRemoval>,
     ) -> crate::XllResult<()> {
         self.finish_closed(
             core,
-            attempt,
+            authorization,
             false,
             crate::diagnostics::id::DiagnosticId::CLOSE_RUNTIME,
         )
@@ -2064,23 +2143,45 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     pub(in crate::lifecycle) fn finish_open_rollback(
         &self,
         core: &mut LifecycleAccess<'_, A>,
-        attempt: RemovalAttemptId,
+        authorization: crate::runtime::CanonicalCompletion<'_, A, crate::runtime::OpenRollback>,
     ) -> crate::XllResult<()> {
         self.finish_closed(
             core,
-            attempt,
+            authorization,
             true,
             crate::diagnostics::id::DiagnosticId::OPEN_ROLLBACK_PHASE,
         )
     }
 
-    fn finish_closed(
+    fn finish_closed<K>(
         &self,
         core: &mut LifecycleAccess<'_, A>,
-        expected_attempt: RemovalAttemptId,
+        authorization: crate::runtime::CanonicalCompletion<'_, A, K>,
         allow_open_rollback: bool,
         diagnostic_id: crate::diagnostics::id::DiagnosticId,
     ) -> crate::XllResult<()> {
+        if !std::ptr::eq(core.coordinator, self)
+            || !authorization.matches(
+                self,
+                core.removal_attempt(),
+                core.module_epoch_id(),
+                core.last_committed_generation(),
+            )
+        {
+            return Err(crate::XllError::Internal { diagnostic_id });
+        }
+        let expected_attempt = authorization.attempt();
+        let ready = if allow_open_rollback {
+            core.open_rollback_ready(expected_attempt).is_some()
+        } else {
+            matches!(
+                core.final_removal_ready(expected_attempt),
+                Some(FinalRemovalReady::Uncommitted)
+            )
+        };
+        if !ready {
+            return Err(crate::XllError::Internal { diagnostic_id });
+        }
         core.transition(|core| {
             let state = mem::replace(&mut core.state, LifecycleState::Closed(ClosedState::Idle));
             let (resources, open_rollback_state) = match state {

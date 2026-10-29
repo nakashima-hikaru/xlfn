@@ -71,6 +71,7 @@ type ChannelOwnerAddin =
 assert_not_impl_any!(ServerOperation<'static>: Send, Sync);
 assert_not_impl_any!(ServerNotificationOperation<'static>: Send, Sync);
 assert_not_impl_any!(ServerTermination<'static>: Send, Sync);
+assert_not_impl_any!(super::server_gate::TerminationWorkerStart<'static>: Send, Sync);
 assert_not_impl_any!(super::server_gate::ServerResourceTeardown<'static>: Send, Sync);
 assert_not_impl_any!(super::server_gate::DrainedServerOperations<'static>: Send, Sync);
 assert_not_impl_any!(super::server::QuiescentServerAccess<'static>: Send, Sync);
@@ -146,7 +147,7 @@ fn server_operation_barrier_waits_and_rejects_new_com_work() {
     });
 
     let deadline = Instant::now() + Duration::from_secs(2);
-    while barrier.state.lock().phase == ServerPhase::Open {
+    while barrier.phase() == ServerPhase::Open {
         assert!(
             Instant::now() < deadline,
             "timed out waiting for RTD COM shutdown"
@@ -175,7 +176,7 @@ fn server_operation_barrier_rejects_same_thread_close_without_closing() {
         barrier.close_and_wait(),
         Err(ServerCloseError::Reentrant)
     ));
-    assert_eq!(barrier.state.lock().phase, ServerPhase::Open);
+    assert_eq!(barrier.phase(), ServerPhase::Open);
     assert!(barrier.enter().is_some());
 
     drop(nested);
@@ -183,14 +184,14 @@ fn server_operation_barrier_rejects_same_thread_close_without_closing() {
     let termination = barrier.close_and_wait().unwrap().unwrap();
     assert!(barrier.enter().is_none());
     assert_eq!(
-        barrier.state.lock().phase,
+        barrier.phase(),
         ServerPhase::Terminating {
             owner: std::thread::current().id(),
             deferred: false,
         }
     );
     drop(termination);
-    assert_eq!(barrier.state.lock().phase, ServerPhase::Terminated);
+    assert_eq!(barrier.phase(), ServerPhase::Terminated);
     assert!(barrier.close_and_wait().unwrap().is_none());
 }
 
@@ -220,6 +221,8 @@ fn server_teardown_capability_retains_its_target_through_active_release() {
     assert!(server.operations.enter().is_none());
     let joined = access.join_worker().unwrap();
     assert!(!joined.worker_panicked());
+    assert!(server.termination_worker.is_sealed());
+    assert!(server.termination_worker.reserve_start().is_err());
     assert_eq!(joined.teardown_and_remove_active(false), S_OK);
     assert!(ACTIVE_SERVER.lock().is_none());
     // Dropping the global reference leaves our capability's reference live.
@@ -232,10 +235,7 @@ fn server_teardown_capability_retains_its_target_through_active_release() {
         server.references.load(Ordering::Acquire),
         initial_references - 1
     );
-    assert_eq!(
-        server.operations.state.lock().phase,
-        ServerPhase::Terminated
-    );
+    assert_eq!(server.operations.phase(), ServerPhase::Terminated);
     drop(ensured);
 }
 
@@ -277,12 +277,12 @@ fn terminal_close_rejects_same_thread_notification_without_closing() {
         barrier.close_and_wait(),
         Err(ServerCloseError::Reentrant)
     ));
-    assert_eq!(barrier.state.lock().phase, ServerPhase::Open);
+    assert_eq!(barrier.phase(), ServerPhase::Open);
 
     drop(notification);
     let termination = barrier.close_and_wait().unwrap().unwrap();
     drop(termination);
-    assert_eq!(barrier.state.lock().phase, ServerPhase::Terminated);
+    assert_eq!(barrier.phase(), ServerPhase::Terminated);
 }
 
 #[test]
@@ -298,7 +298,7 @@ fn server_termination_defers_cross_thread_notification_without_waiting() {
     .join()
     .unwrap();
 
-    assert_eq!(barrier.state.lock().phase, ServerPhase::Open);
+    assert_eq!(barrier.phase(), ServerPhase::Open);
     drop(notification);
 
     let termination = match barrier.request_termination().unwrap() {
@@ -333,7 +333,7 @@ fn terminal_close_waits_for_notification_quiescence() {
     });
 
     let deadline = Instant::now() + Duration::from_secs(2);
-    while barrier.state.lock().phase == ServerPhase::Open {
+    while barrier.phase() == ServerPhase::Open {
         assert!(
             Instant::now() < deadline,
             "timed out waiting for terminal RTD close"
@@ -349,7 +349,7 @@ fn terminal_close_waits_for_notification_quiescence() {
     drop(notification);
     closed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     closing.join().unwrap();
-    assert_eq!(barrier.state.lock().phase, ServerPhase::Terminated);
+    assert_eq!(barrier.phase(), ServerPhase::Terminated);
 }
 
 #[test]
@@ -403,7 +403,7 @@ fn secondary_terminal_close_waits_for_termination_completion() {
         .unwrap();
     secondary.join().unwrap();
     owner.join().unwrap();
-    assert_eq!(barrier.state.lock().phase, ServerPhase::Terminated);
+    assert_eq!(barrier.phase(), ServerPhase::Terminated);
 }
 
 #[test]
@@ -425,7 +425,7 @@ fn terminal_wait_failure_reopens_the_operation_gate() {
 
     let error = match barrier.close_and_wait_with(|_| {
         assert!(
-            barrier.state.try_lock().is_some(),
+            barrier.try_phase().is_some(),
             "COM wait must run without the barrier mutex"
         );
         Err(E_FAIL)
@@ -434,7 +434,7 @@ fn terminal_wait_failure_reopens_the_operation_gate() {
         Ok(_) => panic!("injected COM wait failure must be returned"),
     };
     assert_eq!(error, ServerCloseError::WaitFailed(E_FAIL));
-    assert_eq!(barrier.state.lock().phase, ServerPhase::Open);
+    assert_eq!(barrier.phase(), ServerPhase::Open);
 
     let accepted_after_rollback = barrier.enter().unwrap();
     drop(accepted_after_rollback);
@@ -443,7 +443,7 @@ fn terminal_wait_failure_reopens_the_operation_gate() {
 
     let termination = barrier.close_and_wait().unwrap().unwrap();
     drop(termination);
-    assert_eq!(barrier.state.lock().phase, ServerPhase::Terminated);
+    assert_eq!(barrier.phase(), ServerPhase::Terminated);
 }
 
 // These tests mutate process-global RTD, COM-module, and ingress state.
@@ -802,7 +802,7 @@ fn final_remove_retains_com_shells_without_blocking_close_or_reviving_on_reopen(
     assert!(ACTIVE_SERVER.lock().is_none());
     assert_eq!(
         // SAFETY: `ensured` retains the terminal server throughout inspection.
-        unsafe { (*server).operations.as_ref().state.lock().phase },
+        unsafe { (*server).operations.as_ref().phase() },
         ServerPhase::Terminated
     );
     assert_eq!(runtime.resident_event_count(), 0);
@@ -1126,10 +1126,7 @@ fn failed_server_start_is_retired_without_server_terminate_before_retry() {
     assert!(replacement.newly_created);
     assert_ne!(replacement.active.pointer, failed.active.pointer);
     assert_ne!(replacement.active.generation, failed.active.generation);
-    assert_eq!(
-        server_ref.operations.state.lock().phase,
-        ServerPhase::Terminated
-    );
+    assert_eq!(server_ref.operations.phase(), ServerPhase::Terminated);
     assert_eq!(callback_drops.load(Ordering::Acquire), 1);
     let backends = server_ref.backends.lock();
     assert!(backends.handles.is_none());
@@ -1164,7 +1161,7 @@ fn ensure_server_waits_for_terminating_server_and_concurrent_reapers_share_repla
     let status = unsafe { server_terminate(server) };
     assert_eq!(status, S_OK);
     assert!(matches!(
-        server_ref.operations.state.lock().phase,
+        server_ref.operations.phase(),
         ServerPhase::Terminating { .. }
     ));
 
@@ -1387,7 +1384,7 @@ fn server_terminate_reentry_is_deferred_and_idempotent() {
     // A duplicate request observes the linearized phase and is idempotent.
     // SAFETY: `server_ref` proves that the raw server remains live.
     assert_eq!(unsafe { server_terminate(server) }, S_OK);
-    let phase = server_ref.operations.state.lock().phase;
+    let phase = server_ref.operations.phase();
     assert!(matches!(
         phase,
         ServerPhase::Terminating { deferred: true, .. }
@@ -1399,10 +1396,7 @@ fn server_terminate_reentry_is_deferred_and_idempotent() {
     // has signaled the terminal phase, then joins the actual thread.
     assert!(server_ref.operations.close_and_wait().unwrap().is_none());
     server_ref.termination_worker.join().unwrap();
-    assert_eq!(
-        server_ref.operations.state.lock().phase,
-        ServerPhase::Terminated
-    );
+    assert_eq!(server_ref.operations.phase(), ServerPhase::Terminated);
 
     assert!(server_ref.backends.lock().handles.is_none());
     assert_eq!(
@@ -1492,7 +1486,7 @@ fn deferred_termination_spawn_failure_rolls_back_atomically() {
     FAIL_DEFERRED_TERMINATION_SPAWN.store(true, Ordering::Release);
     // SAFETY: `server_ref` proves that the raw server remains live.
     assert_eq!(unsafe { server_terminate(server) }, E_FAIL);
-    assert_eq!(server_ref.operations.state.lock().phase, ServerPhase::Open);
+    assert_eq!(server_ref.operations.phase(), ServerPhase::Open);
     assert_eq!(
         server_ref.termination_worker.phase(),
         TerminationWorkerStatus::Idle
@@ -1504,6 +1498,56 @@ fn deferred_termination_spawn_failure_rolls_back_atomically() {
 
     shutdown(&handles).unwrap();
     drop(ensured);
+}
+
+#[test]
+fn terminal_worker_join_seals_an_idle_worker() {
+    let worker = TerminationWorker::default();
+    worker.join().unwrap();
+    drop(worker.reserve_start().unwrap());
+    worker.seal_and_join().unwrap();
+    assert_eq!(worker.phase(), TerminationWorkerStatus::Joined);
+    assert!(worker.reserve_start().is_err());
+    worker.seal_and_join().unwrap();
+    assert!(worker.reserve_start().is_err());
+}
+
+#[test]
+fn terminal_worker_join_rejects_its_own_start_reservation() {
+    let worker = TerminationWorker::default();
+    let start = worker.reserve_start().unwrap();
+    assert!(matches!(
+        worker.seal_and_join(),
+        Err(ServerCloseError::Reentrant)
+    ));
+    assert!(worker.is_sealed());
+    assert_eq!(worker.phase(), TerminationWorkerStatus::Starting);
+    drop(start);
+    worker.seal_and_join().unwrap();
+    assert_eq!(worker.phase(), TerminationWorkerStatus::Joined);
+    assert!(worker.reserve_start().is_err());
+}
+
+#[test]
+fn terminal_worker_join_keeps_an_abandoned_start_sealed() {
+    let worker = Arc::new(TerminationWorker::default());
+    let start = worker.reserve_start().unwrap();
+    std::thread::scope(|scope| {
+        let joining = scope.spawn(|| worker.seal_and_join());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !worker.is_sealed() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "joiner did not seal worker"
+            );
+            std::thread::yield_now();
+        }
+        assert!(worker.reserve_start().is_err());
+        drop(start);
+        joining.join().unwrap().unwrap();
+    });
+    assert_eq!(worker.phase(), TerminationWorkerStatus::Joined);
+    assert!(worker.reserve_start().is_err());
 }
 
 #[test]
@@ -1520,7 +1564,7 @@ fn termination_worker_can_finish_before_handle_registration() {
     let joining_worker = Arc::clone(&worker);
     let (joined_tx, joined_rx) = mpsc::sync_channel(1);
     let joining = std::thread::spawn(move || {
-        joining_worker.join().unwrap();
+        joining_worker.seal_and_join().unwrap();
         joined_tx.send(()).unwrap();
     });
     assert_eq!(joined_rx.try_recv(), Err(TryRecvError::Empty));
@@ -1544,14 +1588,14 @@ fn termination_worker_rejects_self_join_while_another_caller_owns_handle() {
         attempt_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         result_tx
             .send(matches!(
-                worker_thread.join(),
+                worker_thread.seal_and_join(),
                 Err(ServerCloseError::Reentrant)
             ))
             .unwrap();
     }));
 
     std::thread::scope(|scope| {
-        let joining = scope.spawn(|| worker.join());
+        let joining = scope.spawn(|| worker.seal_and_join());
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while worker.phase() != TerminationWorkerStatus::Joining {
             assert!(
@@ -1566,6 +1610,7 @@ fn termination_worker_rejects_self_join_while_another_caller_owns_handle() {
     });
     assert_eq!(worker.phase(), TerminationWorkerStatus::Joined);
     worker.join().unwrap();
+    assert!(worker.reserve_start().is_err());
 }
 
 #[cfg(feature = "handles")]
@@ -1588,10 +1633,7 @@ fn deferred_cleanup_panic_signals_phase_and_is_detected_by_join() {
         server_ref.termination_worker.join(),
         Err(ServerCloseError::WorkerPanicked)
     ));
-    assert_eq!(
-        server_ref.operations.state.lock().phase,
-        ServerPhase::Terminated
-    );
+    assert_eq!(server_ref.operations.phase(), ServerPhase::Terminated);
 
     // The coordinator has exited, so ordinary shutdown can safely perform
     // the idempotent cleanup that the injected panic skipped.
@@ -1664,7 +1706,7 @@ fn retired_callback_drop_can_reenter_terminate_after_quiescence() {
             // SAFETY: `ensured` retains the server until after the outer
             // termination and this hook have both returned.
             let server = unsafe { &*server_ptr };
-            let in_flight = server.operations.state.lock().in_flight;
+            let in_flight = server.operations.in_flight();
             if in_flight != 0 {
                 dropped_while_active.store(true, Ordering::Release);
                 return;
@@ -2019,12 +2061,13 @@ fn termination_worker_join_retains_panicking_payload_and_completes() {
     let payload = crate::panic_boundary::tests::PanickingPayload(Arc::clone(&dropped));
     start.commit(std::thread::spawn(move || std::panic::panic_any(payload)));
     assert!(matches!(
-        worker.join(),
+        worker.seal_and_join(),
         Err(ServerCloseError::WorkerPanicked)
     ));
     assert_eq!(worker.phase(), TerminationWorkerStatus::Joined);
     assert_eq!(dropped.load(Ordering::Acquire), 0);
-    assert!(worker.join().is_ok());
+    assert!(worker.seal_and_join().is_ok());
+    assert!(worker.reserve_start().is_err());
 }
 
 #[cfg(feature = "handles")]
@@ -3574,14 +3617,14 @@ fn sta_disconnect_returns_before_notification_dispatch_and_termination_drains_cl
         assert_eq!(handle.pending_update_count(), 0);
         assert_eq!(
             // SAFETY: the same retained reference keeps the admission state live.
-            unsafe { (*server).operations.as_ref().state.lock().in_flight },
+            unsafe { (*server).operations.as_ref().in_flight() },
             1
         );
         // SAFETY: the retained server is live; cleanup admission makes this
         // termination deferred while the fake STA dispatch is still pending.
         assert_eq!(unsafe { server_terminate(server) }, S_OK);
         // SAFETY: the server remains retained until teardown completes.
-        let phase = unsafe { (*server).operations.as_ref().state.lock().phase };
+        let phase = unsafe { (*server).operations.as_ref().phase() };
         assert!(matches!(
             phase,
             ServerPhase::Terminating { deferred: true, .. }
@@ -3592,7 +3635,7 @@ fn sta_disconnect_returns_before_notification_dispatch_and_termination_drains_cl
         assert_eq!(
             // SAFETY: close joined every deferred worker and retained reference;
             // the original ensured reference still keeps the server alive here.
-            unsafe { (*server).operations.as_ref().state.lock().in_flight },
+            unsafe { (*server).operations.as_ref().in_flight() },
             0
         );
         drop(ensured);
@@ -4382,10 +4425,7 @@ fn failed_observation_before_server_start_releases_global_owner_and_backends() {
     // SAFETY: retained owns the last COM reference after rollback.
     let server = unsafe { &*(retained.pointer()) };
     assert_eq!(server.references.load(Ordering::Acquire), 1);
-    assert_eq!(
-        server.operations.state.lock().phase,
-        ServerPhase::Terminated
-    );
+    assert_eq!(server.operations.phase(), ServerPhase::Terminated);
     assert!(server.backends.lock().subscriptions.is_none());
     let replacement =
         ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))).unwrap();
@@ -4444,7 +4484,7 @@ fn failed_observation_during_server_start_defers_teardown_until_com_call_exits()
     drop(observation);
     assert!(ACTIVE_SERVER.lock().is_some());
     assert!(matches!(
-        server.operations.state.lock().phase,
+        server.operations.phase(),
         ServerPhase::Terminating { .. }
     ));
     assert!(server.backends.lock().subscriptions.is_some());
@@ -4529,7 +4569,7 @@ fn observation_rollback_racing_shutdown_releases_server_reference_once() {
     let server = unsafe { &*(retained.pointer()) };
     thread::scope(|scope| {
         let worker = scope.spawn(|| shutdown_subscriptions(&subscriptions));
-        while server.operations.state.lock().phase == ServerPhase::Open {
+        while server.operations.phase() == ServerPhase::Open {
             thread::yield_now();
         }
         drop(observation);

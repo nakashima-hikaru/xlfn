@@ -16,5 +16,7 @@ fn ordered<A: crate::Addin>(
     let mut report = crate::shutdown::CloseReport::default();
     let Ok(transaction) = transaction.cleanup_addin(lifecycle, &mut report) else { return };
     let Ok(transaction) = transaction.finish_services() else { return };
-    drop(transaction);
+    let Ok(transaction) = transaction.reclaim(|_| {}) else { return };
+    let Ok(certificate) = transaction.certify() else { return };
+    let _ = certificate.finish();
 }

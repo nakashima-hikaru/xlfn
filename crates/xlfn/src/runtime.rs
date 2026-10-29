@@ -31,6 +31,9 @@ mod orchestration;
 mod recovery;
 mod rollback;
 mod shutdown;
+pub(crate) use shutdown::{
+    CanonicalCompletion, CertifiedRetirement, CompletedResources, FinalRemoval, OpenRollback,
+};
 mod transactions;
 mod unload;
 
@@ -174,27 +177,14 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
         &self,
     ) -> orchestration::OpenRollbackAcquisition<shutdown::RemovalOwner<'_, A, shutdown::OpenRollback>>
     {
-        use orchestration::OpenRollbackAcquisition;
-        match self.lifecycle_orchestrator().acquire_open_rollback() {
-            OpenRollbackAcquisition::Acquired(claim) => OpenRollbackAcquisition::Acquired(
-                shutdown::RemovalOwner::from_claim(self.shutdown_deps(), claim),
-            ),
-            OpenRollbackAcquisition::ClosingOwnsCleanup => {
-                OpenRollbackAcquisition::ClosingOwnsCleanup
-            }
-            OpenRollbackAcquisition::Unavailable => OpenRollbackAcquisition::Unavailable,
-        }
+        shutdown::RemovalOwner::acquire_rollback(self.shutdown_deps())
     }
 
     #[cfg(test)]
     pub(crate) fn begin_final_removal(
         &self,
     ) -> Option<crate::runtime::shutdown::RemovalOwner<'_, A, shutdown::FinalRemoval>> {
-        let claim = self.lifecycle_orchestrator().begin_final_removal()?;
-        Some(crate::runtime::shutdown::RemovalOwner::from_claim(
-            self.shutdown_deps(),
-            claim,
-        ))
+        shutdown::RemovalOwner::acquire_final(self.shutdown_deps())
     }
 }
 
@@ -290,6 +280,12 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
         P::quiesce(shared, lifecycle).map_err(crate::error::IntoXllError::into_xll_error)
     }
 
+    #[cfg(any(
+        test,
+        feature = "rtd",
+        feature = "handles",
+        feature = "lifecycle-diagnostics"
+    ))]
     pub(crate) fn module_residency_held(&self) -> bool {
         self.residency.is_held()
     }
@@ -569,12 +565,20 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
     }
 
     #[cfg(feature = "async")]
-    pub(crate) fn execution_lease(
+    pub(crate) fn enter_async<'call>(
         &'static self,
-        call: &CallGuard<'_, A>,
-    ) -> XllResult<ExecutionLease<A>> {
-        self.lifecycle
-            .acquire_execution_lease(call.admission.generation_pointer())
+        ingress: &'call AdmittedExport<'call>,
+    ) -> XllResult<AsyncCallGuard<'call, A>> {
+        ingress.assert_active();
+        let admission = self.lifecycle.try_admit_async()?;
+        Ok(AsyncCallGuard {
+            call: CallGuard {
+                diagnostics: &self.diagnostics,
+                admission,
+                _ingress: ingress,
+                _observation: self.observer().observe_call(),
+            },
+        })
     }
 
     #[inline]
@@ -900,6 +904,29 @@ pub(crate) mod test_support {
     };
 }
 
+/// Async admission is available only from a process-lifetime runtime. Its
+/// private constructor retains the matching issuer inside the call admission.
+#[cfg(feature = "async")]
+pub(crate) struct AsyncCallGuard<'call, A: crate::Addin> {
+    call: CallGuard<'call, A>,
+}
+
+#[cfg(feature = "async")]
+impl<A: crate::Addin> AsyncCallGuard<'_, A> {
+    pub(crate) fn try_execution_lease(&self) -> XllResult<ExecutionLease<A>> {
+        self.call.admission.try_execution_lease()
+    }
+}
+
+#[cfg(feature = "async")]
+impl<'call, A: crate::Addin> std::ops::Deref for AsyncCallGuard<'call, A> {
+    type Target = CallGuard<'call, A>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.call
+    }
+}
+
 pub struct CallGuard<'runtime, A: crate::Addin> {
     diagnostics: &'runtime crate::diagnostics::DiagnosticHistory,
     _ingress: &'runtime AdmittedExport<'runtime>,
@@ -996,7 +1023,7 @@ pub(crate) mod tests {
     ) {
         let (removal_attempt, module_closing) = removal_attempt.into_test_parts();
         let drained = module_closing.seal_and_drain().unwrap();
-        let (module_quiescent, _exports) = drained.certify();
+        let (module_quiescent, _exports) = drained.certify_for_test();
         let module_epoch = module_quiescent.id();
         let subscriptions_stopped = runtime
             .close_subscriptions()
@@ -1033,7 +1060,7 @@ pub(crate) mod tests {
     ) -> RemovalClaimGuard<'a, A> {
         let (rollback_attempt, module_closing) = rollback_attempt.into_test_parts();
         let drained = module_closing.seal_and_drain().unwrap();
-        let (module_quiescent, _exports) = drained.certify();
+        let (module_quiescent, _exports) = drained.certify_for_test();
         let module_epoch = module_quiescent.id();
         let certificate = rollback_attempt
             .certify::<OpenRollback>(
@@ -1514,7 +1541,7 @@ pub(crate) mod tests {
 
         let (removal_attempt, module_closing) = removal_attempt.into_test_parts();
         let drained = module_closing.seal_and_drain().unwrap();
-        let (module_quiescent, _exports) = drained.certify();
+        let (module_quiescent, _exports) = drained.certify_for_test();
         let module_epoch = module_quiescent.id();
         runtime.disable_trace_for_test();
         let _rtd =
@@ -1637,7 +1664,7 @@ pub(crate) mod tests {
         runtime.finish_generation_services(sealed).unwrap();
         let (removal_attempt, module_closing) = removal_attempt.into_test_parts();
         let drained = module_closing.seal_and_drain().unwrap();
-        let (module_quiescent, _exports) = drained.certify();
+        let (module_quiescent, _exports) = drained.certify_for_test();
         let module_epoch = module_quiescent.id();
         let _rtd =
             crate::excel_rtd_protocol::wait_for_module_quiescence(runtime.module_residency_held())
@@ -1713,16 +1740,13 @@ pub(crate) mod tests {
         runtime.finish_open(&mut opening, Vec::new()).unwrap();
 
         let ingress = admitted_export();
-        let call = runtime.enter(&ingress).unwrap();
-        let lease = runtime.execution_lease(&call).unwrap();
+        let call = runtime.enter_async(&ingress).unwrap();
+        let lease = call.try_execution_lease().unwrap();
         assert_eq!(*lease.state(), 7);
 
         // Model removal winning between call admission and async launch.
         let removal = runtime.begin_final_removal().unwrap();
-        assert!(matches!(
-            runtime.execution_lease(&call),
-            Err(XllError::Closing)
-        ));
+        assert!(matches!(call.try_execution_lease(), Err(XllError::Closing)));
         assert_eq!(*call.state(), 7);
         drop(call);
         drop(ingress);
@@ -1730,8 +1754,26 @@ pub(crate) mod tests {
         // A lease issued before closing still owns its generation lifetime
         // even after the original call has returned.
         assert_eq!(*lease.state(), 7);
+        let (reclaimed, reclaimed_result) = mpsc::channel();
+        let taker = thread::spawn(move || {
+            reclaimed
+                .send(runtime.take_current_generation().unwrap().shared_state)
+                .unwrap();
+        });
+        assert!(
+            reclaimed_result
+                .recv_timeout(Duration::from_millis(20))
+                .is_err()
+        );
+        assert_eq!(*lease.state(), 7);
         drop(lease);
-        assert_eq!(runtime.take_current_generation().unwrap().shared_state, 7);
+        assert_eq!(
+            reclaimed_result
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap(),
+            7
+        );
+        taker.join().unwrap();
         finish_test_close(runtime, removal);
     }
 

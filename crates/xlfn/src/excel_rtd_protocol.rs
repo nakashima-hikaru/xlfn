@@ -46,7 +46,19 @@ impl RtdModuleState {
     }
 
     #[cfg(any(feature = "rtd", feature = "handles"))]
-    pub(crate) fn certify_logical_quiescence(&self) {
+    pub(crate) fn certify_logical_quiescence(
+        &self,
+        publication: crate::module_runtime::LogicalQuiescencePublication,
+    ) {
+        if !publication.belongs_to(self) {
+            xlfn_kernel::invariant::fail_stop();
+        }
+        self.logical_quiescence_certified
+            .store(true, Ordering::Release);
+    }
+
+    #[cfg(all(test, any(feature = "rtd", feature = "handles")))]
+    pub(crate) fn certify_for_test(&self) {
         self.logical_quiescence_certified
             .store(true, Ordering::Release);
     }

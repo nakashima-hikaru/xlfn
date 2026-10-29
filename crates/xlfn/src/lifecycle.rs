@@ -7,6 +7,7 @@ mod state;
 
 pub(crate) use authority::LifecycleControl;
 pub(crate) use phase::{HostLifecycleIntent, LifecyclePhase};
+pub use state::ExecutionLease;
 pub(crate) use state::{
     FinalRemovalReady, GenerationAdmission, LifecycleAccess, LifecycleCoordinator,
     OpenFailureDisposition, OpenRollbackReady, RemovalClaim,

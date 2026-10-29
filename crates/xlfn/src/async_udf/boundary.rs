@@ -136,7 +136,7 @@ pub(crate) unsafe fn async_udf_boundary_named<A, Start, Fut, T>(
     };
     let _external = runtime.observer().observe_external();
 
-    let call = match runtime.enter(&ingress) {
+    let call = match runtime.enter_async(&ingress) {
         Ok(call) => call,
         Err(_) => return,
     };
@@ -157,7 +157,7 @@ pub(crate) unsafe fn async_udf_boundary_named<A, Start, Fut, T>(
 
 pub(crate) unsafe fn async_udf_boundary_named_inner<A, Start, Fut, T>(
     runtime: &'static Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
-    guard: &crate::runtime::CallGuard<'_, A>,
+    guard: &crate::runtime::AsyncCallGuard<'_, A>,
     udf_id: &'static str,
     excel_name: &'static str,
     raw_handle: *mut XLOPER12,
@@ -196,7 +196,7 @@ pub(crate) unsafe fn async_udf_boundary_named_inner<A, Start, Fut, T>(
 
 unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
     runtime: &'static Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
-    guard: &crate::runtime::CallGuard<'_, A>,
+    guard: &crate::runtime::AsyncCallGuard<'_, A>,
     udf_id: &'static str,
     excel_name: &'static str,
     raw_handle: *mut XLOPER12,
@@ -269,7 +269,7 @@ unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
     };
     let future = catch_no_unwind(AssertUnwindSafe(|| {
         runtime.async_runtime().preflight_snapshot(&calculation)?;
-        start(guard, runtime.execution_lease(guard)?, token)
+        start(guard, guard.try_execution_lease()?, token)
     }))
     .unwrap_or(Err(XllError::Panic));
     match future {
@@ -313,7 +313,7 @@ unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
 
 unsafe fn async_udf_boundary_uninstrumented<A, Start, Fut, T>(
     runtime: &'static Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
-    guard: &crate::runtime::CallGuard<'_, A>,
+    guard: &crate::runtime::AsyncCallGuard<'_, A>,
     udf_id: &'static str,
     raw_handle: *mut XLOPER12,
     start: Start,
@@ -344,7 +344,7 @@ unsafe fn async_udf_boundary_uninstrumented<A, Start, Fut, T>(
     };
     let future = catch_no_unwind(AssertUnwindSafe(|| {
         runtime.async_runtime().preflight_snapshot(&calculation)?;
-        start(guard, runtime.execution_lease(guard)?, token)
+        start(guard, guard.try_execution_lease()?, token)
     }))
     .unwrap_or(Err(XllError::Panic));
     match future {
@@ -417,7 +417,7 @@ pub(crate) unsafe fn async_udf_boundary_named_handle<A, Start, Build, T>(
     };
     let _external = runtime.observer().observe_external();
 
-    let call = match runtime.enter(&ingress) {
+    let call = match runtime.enter_async(&ingress) {
         Ok(call) => call,
         Err(_) => return,
     };
@@ -441,7 +441,7 @@ pub(crate) unsafe fn async_udf_boundary_named_handle<A, Start, Build, T>(
 #[cfg(feature = "handles")]
 unsafe fn async_udf_boundary_named_handle_inner<A, Start, Build, T>(
     runtime: &'static Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
-    guard: &crate::runtime::CallGuard<'_, A>,
+    guard: &crate::runtime::AsyncCallGuard<'_, A>,
     udf_id: &'static str,
     excel_name: &'static str,
     raw_handle: *mut XLOPER12,
@@ -481,7 +481,7 @@ unsafe fn async_udf_boundary_named_handle_inner<A, Start, Build, T>(
 #[cfg(feature = "handles")]
 unsafe fn async_udf_boundary_instrumented_handle<A, Start, Build, T>(
     runtime: &'static Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
-    guard: &crate::runtime::CallGuard<'_, A>,
+    guard: &crate::runtime::AsyncCallGuard<'_, A>,
     udf_id: &'static str,
     excel_name: &'static str,
     raw_handle: *mut XLOPER12,
@@ -553,7 +553,7 @@ unsafe fn async_udf_boundary_instrumented_handle<A, Start, Build, T>(
     };
     let prepared = catch_no_unwind(AssertUnwindSafe(|| {
         runtime.async_runtime().preflight_snapshot(&calculation)?;
-        let lease = runtime.execution_lease(guard)?;
+        let lease = guard.try_execution_lease()?;
         let generation = lease.generation();
         start(guard, lease, token).map(|build| (generation, build))
     }))
@@ -603,7 +603,7 @@ unsafe fn async_udf_boundary_instrumented_handle<A, Start, Build, T>(
 #[cfg(feature = "handles")]
 unsafe fn async_udf_boundary_uninstrumented_handle<A, Start, Build, T>(
     runtime: &'static Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
-    guard: &crate::runtime::CallGuard<'_, A>,
+    guard: &crate::runtime::AsyncCallGuard<'_, A>,
     udf_id: &'static str,
     raw_handle: *mut XLOPER12,
     start: Start,
@@ -634,7 +634,7 @@ unsafe fn async_udf_boundary_uninstrumented_handle<A, Start, Build, T>(
     };
     let prepared = catch_no_unwind(AssertUnwindSafe(|| {
         runtime.async_runtime().preflight_snapshot(&calculation)?;
-        let lease = runtime.execution_lease(guard)?;
+        let lease = guard.try_execution_lease()?;
         let generation = lease.generation();
         start(guard, lease, token).map(|build| (generation, build))
     }))

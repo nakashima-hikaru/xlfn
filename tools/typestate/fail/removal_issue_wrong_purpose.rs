@@ -1,7 +1,7 @@
 // module: runtime
-use super::orchestration::RemovalPurposeClaim;
-use super::shutdown::OpenRollback;
+use super::capabilities::ShutdownDeps;
+use super::shutdown::{OpenRollback, RemovalOwner};
 
-fn invalid(claim: crate::lifecycle::RemovalClaim) {
-    let _ = RemovalPurposeClaim::<OpenRollback>::issue(claim); // error: E0624
+fn invalid<A: crate::Addin>(deps: ShutdownDeps<'_, A>, claim: crate::lifecycle::RemovalClaim) {
+    let _ = RemovalOwner::<A, OpenRollback>::new(deps, claim); // error: E0624
 }

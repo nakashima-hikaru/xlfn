@@ -1,10 +1,4 @@
-#![allow(
-    unsafe_code,
-    reason = "ExecutionLease is the audited temporal lifetime capability for a uniquely owned generation"
-)]
-
 use std::num::NonZeroU64;
-use std::ptr::NonNull;
 
 /// Identity of one published or staged runtime service generation.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -60,58 +54,8 @@ pub(crate) enum ShutdownGeneration<A: crate::Addin> {
     Open(Box<ExecutionGeneration<A>>),
 }
 
-/// Explicit open-generation lifetime lease for call-scoped and asynchronous
-/// UDF executions.
-pub struct ExecutionLease<A: crate::Addin> {
-    generation: NonNull<ExecutionGeneration<A>>,
-    _permit: xlfn_kernel::drain_gate::StripedOwnedDrainPermit<
-        { xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT },
-    >,
-}
-
-impl<A: crate::Addin> ExecutionLease<A> {
-    /// Creates a temporal lease over the uniquely owned generation root.
-    ///
-    /// # Safety
-    ///
-    /// `generation` must remain valid until `permit` is dropped, and the gate
-    /// that issued `permit` must be drained before the generation is reclaimed.
-    #[cfg(feature = "async")]
-    pub(crate) unsafe fn new(
-        generation: NonNull<ExecutionGeneration<A>>,
-        permit: xlfn_kernel::drain_gate::StripedOwnedDrainPermit<
-            { xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT },
-        >,
-    ) -> Self {
-        Self {
-            generation,
-            _permit: permit,
-        }
-    }
-
-    #[must_use]
-    /// Borrows shared state while this execution lease retains the generation.
-    pub fn state(&self) -> &A::SharedState {
-        // SAFETY: construction couples the pointer to the owned drain permit.
-        &unsafe { self.generation.as_ref() }.shared_state
-    }
-
-    /// Returns the published runtime-generation identity carried by this
-    /// execution lease. This is consumed only by the hidden async-handle
-    /// launch boundary when it creates its compile-time scope brand.
-    #[cfg(all(feature = "async", feature = "handles"))]
-    pub(crate) fn generation(&self) -> RuntimeGeneration {
-        // SAFETY: the execution lease's owned drain permit keeps the
-        // generation root alive for the duration of this borrow.
-        unsafe { self.generation.as_ref() }.id()
-    }
-}
-
-// SAFETY: the generation payload is Send + Sync by the Addin contract and the
-// owned permit prevents reclamation while the pointer crosses threads.
-unsafe impl<A: crate::Addin> Send for ExecutionLease<A> {}
-// SAFETY: same invariant as Send; shared borrows access immutable shared_state.
-unsafe impl<A: crate::Addin> Sync for ExecutionLease<A> {}
+// Construction remains private to the publication/admission issuer module.
+pub use crate::lifecycle::ExecutionLease;
 
 /// Identity of an in-flight open transaction. It is distinct from the
 /// published generation even though both participate in lifecycle state.
