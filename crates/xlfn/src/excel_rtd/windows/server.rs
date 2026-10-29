@@ -8,9 +8,9 @@ use super::global_interface_table::get_git;
 use super::module_state::{ComObjectKind, ComObjectLease};
 use super::registration::guid_compact;
 use super::server_gate::{
-    DrainedServerOperations, OwnedServerCall, OwnedServerObservationCall, ServerCloseError,
-    ServerOperationBarrier, ServerPhase, ServerResourceTeardown, ServerTermination,
-    ServerTerminationRequest, TerminationWorker,
+    DeferredTerminationTicket, DrainedServerOperations, OwnedServerCall,
+    OwnedServerObservationCall, ServerCloseError, ServerOperationBarrier, ServerPhase,
+    ServerResourceTeardown, ServerTermination, ServerTerminationRequest, TerminationWorker,
 };
 use super::subscription_backend::{
     BackendSubscriptionServer, BackendSubscriptions, finish_connect_data,
@@ -40,7 +40,6 @@ use std::ptr::{self, NonNull};
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
-use std::thread::ThreadId;
 use triomphe::Arc;
 
 pub(super) const IID_IDISPATCH: GUID = crate::win32::IID_IDispatch;
@@ -232,7 +231,7 @@ pub(super) struct RtdServer<
 > {
     pub(super) vtable: *const RtdServerVtable<E, C>,
     pub(super) references: AtomicU32,
-    pub(super) start_state: AtomicU8,
+    start_state: AtomicU8,
     observations: Mutex<ObservationState>,
     pub(super) generation: ServerGeneration,
     // Notification workers own a clone so the barrier stays independently
@@ -245,19 +244,27 @@ pub(super) struct RtdServer<
     pub(super) _module_lease: ComObjectLease,
 }
 
-/// Exclusive ServerStart reservation before a callback has been published.
-pub(super) struct ServerStartReservation<'a> {
-    state: Option<&'a AtomicU8>,
+/// Exclusive ServerStart reservation bound to its server before publication.
+pub(super) struct ServerStartReservation<
+    'a,
+    E: RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+> {
+    server: Option<&'a RtdServer<E, C>>,
 }
 
-/// A server-owned callback has been installed; failure is now terminal.
-pub(super) struct PublishedServerStart<'a> {
-    state: Option<&'a AtomicU8>,
+/// A callback has been installed on the reserved server; failure is terminal.
+pub(super) struct PublishedServerStart<
+    'a,
+    E: RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+> {
+    server: Option<&'a RtdServer<E, C>>,
 }
 
-impl<'a> ServerStartReservation<'a> {
-    pub(super) fn acquire(state: &'a AtomicU8) -> Option<Self> {
-        state
+impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> RtdServer<E, C> {
+    pub(super) fn reserve_start(&self) -> Option<ServerStartReservation<'_, E, C>> {
+        self.start_state
             .compare_exchange(
                 SERVER_NOT_STARTED,
                 SERVER_STARTING,
@@ -265,44 +272,58 @@ impl<'a> ServerStartReservation<'a> {
                 Ordering::Acquire,
             )
             .ok()
-            .map(|_| ServerStartReservation { state: Some(state) })
+            .map(|_| ServerStartReservation { server: Some(self) })
     }
 
-    pub(super) fn publish_callback(
-        mut self,
-        callbacks: &Mutex<ServerCallbacks>,
-        callback: Box<RetainedUpdateCallback>,
-    ) -> (PublishedServerStart<'a>, CallbackPtr) {
-        let callback = install_callback(callbacks, callback);
-        // Once a GIT cookie is server-owned, a later failure must be terminal
-        // for this server instance. Allowing another ServerStart would retain
-        // one more external COM reference on every failed retry.
-        let state = self.state.take();
-        (PublishedServerStart { state }, callback)
+    pub(super) fn start_state(&self) -> u8 {
+        self.start_state.load(Ordering::Acquire)
     }
 }
 
-impl PublishedServerStart<'_> {
+impl<'a, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> ServerStartReservation<'a, E, C> {
+    pub(super) fn publish_callback(
+        mut self,
+        callback: Box<RetainedUpdateCallback>,
+    ) -> (PublishedServerStart<'a, E, C>, CallbackPtr) {
+        let server = self.server.expect("ServerStart owns its target");
+        let callback = install_callback(&server.callbacks, callback);
+        let server = self.server.take().expect("ServerStart owns its target");
+        // Once the callback is server-owned, retry on this server is terminal.
+        (
+            PublishedServerStart {
+                server: Some(server),
+            },
+            callback,
+        )
+    }
+}
+
+impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> PublishedServerStart<'_, E, C> {
     pub(super) fn commit(mut self) {
-        self.state
+        self.server
             .take()
-            .expect("published ServerStart owns its reservation")
+            .expect("published ServerStart owns its target")
+            .start_state
             .store(SERVER_STARTED, Ordering::Release);
     }
 }
 
-impl Drop for ServerStartReservation<'_> {
+impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Drop for ServerStartReservation<'_, E, C> {
     fn drop(&mut self) {
-        if let Some(state) = self.state.take() {
-            state.store(SERVER_NOT_STARTED, Ordering::Release);
+        if let Some(server) = self.server.take() {
+            server
+                .start_state
+                .store(SERVER_NOT_STARTED, Ordering::Release);
         }
     }
 }
 
-impl Drop for PublishedServerStart<'_> {
+impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Drop for PublishedServerStart<'_, E, C> {
     fn drop(&mut self) {
-        if let Some(state) = self.state.take() {
-            state.store(SERVER_START_FAILED, Ordering::Release);
+        if let Some(server) = self.server.take() {
+            server
+                .start_state
+                .store(SERVER_START_FAILED, Ordering::Release);
         }
     }
 }
@@ -1201,8 +1222,7 @@ unsafe fn server_start_inner<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
     // Reserve that transition atomically so automation clients cannot grow an
     // unbounded set of retained GIT cookies through repeated ServerStart calls.
     // SAFETY: `this` remains live for the complete COM method.
-    let start_state = unsafe { &(*this).start_state };
-    let Some(start_reservation) = ServerStartReservation::acquire(start_state) else {
+    let Some(start_reservation) = unsafe { &*this }.reserve_start() else {
         return E_FAIL;
     };
 
@@ -1256,10 +1276,7 @@ unsafe fn server_start_inner<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
         }
     };
 
-    // SAFETY: `this` was validated as non-null and COM keeps the server alive
-    // for the duration of ServerStart.
-    let (start_reservation, callback_ptr) =
-        start_reservation.publish_callback(unsafe { &(*this).callbacks }, callback);
+    let (start_reservation, callback_ptr) = start_reservation.publish_callback(callback);
 
     // SAFETY: `this` remains live through the COM call. Re-reading backends
     // after installing the callback closes the race with a concurrently
@@ -1658,8 +1675,20 @@ unsafe fn finish_termination_request<E: RtdSubscription, C: crate::RtdSourceCata
             // SAFETY: COM owns a live reference. This additional reference is
             // transferred into the coordinator closure (or dropped on failure).
             let reference = unsafe { OwnedServerReference::acquire(this) };
-            let owner = reservation.owner;
-            match spawn_deferred_termination::<E, C>(reference, owner) {
+            // The issuing reservation verifies the server's exact barrier
+            // before producing its one transferable completion ticket.
+            // SAFETY: this COM call retains the server while cloning its barrier.
+            let operations = unsafe { Arc::clone(&(*this).operations) };
+            let (reservation, ticket) = match reservation.prepare(operations) {
+                Ok(prepared) => prepared,
+                Err(_) => return E_FAIL,
+            };
+            let work = DeferredTerminationWork::<E, C> {
+                reference,
+                ticket,
+                _catalog: std::marker::PhantomData,
+            };
+            match spawn_deferred_termination(work) {
                 Ok(handle) => {
                     worker_start.commit(handle);
                     reservation.commit();
@@ -1671,9 +1700,16 @@ unsafe fn finish_termination_request<E: RtdSubscription, C: crate::RtdSourceCata
     }
 }
 
-fn spawn_deferred_termination<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+/// The worker receives the server lifetime and its exact completion ticket as
+/// one private payload; it cannot substitute a target while waiting.
+struct DeferredTerminationWork<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> {
     reference: OwnedServerReference,
-    owner: ThreadId,
+    ticket: DeferredTerminationTicket,
+    _catalog: std::marker::PhantomData<fn() -> (E, C)>,
+}
+
+fn spawn_deferred_termination<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+    work: DeferredTerminationWork<E, C>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     #[cfg(test)]
     if FAIL_DEFERRED_TERMINATION_SPAWN.swap(false, Ordering::AcqRel) {
@@ -1684,61 +1720,59 @@ fn spawn_deferred_termination<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
 
     std::thread::Builder::new()
         .name("xlfn-rtd-termination".to_owned())
-        .spawn(move || deferred_termination_worker::<E, C>(reference, owner))
+        .spawn(move || deferred_termination_worker(work))
 }
 
 fn deferred_termination_worker<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(
-    reference: OwnedServerReference,
-    owner: ThreadId,
+    work: DeferredTerminationWork<E, C>,
 ) {
+    let DeferredTerminationWork {
+        reference, ticket, ..
+    } = work;
     let this = reference.pointer as *mut RtdServer<E, C>;
     // Keep the internal reference outside the unwind boundary. It remains live
     // until all cleanup and phase signaling have completed.
     let outcome = catch_unwind(AssertUnwindSafe(|| {
-        // SAFETY: `reference` owns one live server reference.
-        let termination = match unsafe { (*this).operations.wait_for_deferred_termination(owner) } {
-            Ok(termination) => termination,
-            Err(error) => {
+        let result = ticket.with_completion(|termination| {
+            #[cfg(test)]
+            if PANIC_DEFERRED_TERMINATION_CLEANUP.swap(false, Ordering::AcqRel) {
+                panic!("injected deferred RTD cleanup panic");
+            }
+
+            // Deferred cleanup intentionally retains ACTIVE_SERVER. The next
+            // xlAutoRemove or ensure_server joins this worker before removing that
+            // final module-lifetime reference.
+            // SAFETY: the worker's reference retains this exact server.
+            let access = QuiescentServerAccess::from_termination(unsafe { &*this }, termination);
+            let status = access.teardown_resources();
+            if status != S_OK {
                 crate::diagnostics::report_no_unwind(
-                    "IRtdServer::deferred termination wait",
-                    &XllError::Internal {
-                        diagnostic_id: match error {
-                            ServerCloseError::WaitFailed(status) => {
-                                crate::diagnostics::id::DiagnosticId::RTD_WINDOW_STATUS
-                                    .with_low_u32(status as u32)
-                            }
-                            _ => crate::diagnostics::id::DiagnosticId::RTD_WINDOW_FAILURE,
-                        },
+                    "IRtdServer::deferred termination",
+                    &XllError::WindowsApi {
+                        function: "IRtdServer::ServerTerminate",
+                        code: status,
                     },
                 );
-                // A live owned event cannot fail under normal operation. Once
-                // ServerTerminate returned S_OK, reopening would strand a
-                // completed JoinHandle on a reusable server.
-                std::process::abort();
             }
-        };
-
-        #[cfg(test)]
-        if PANIC_DEFERRED_TERMINATION_CLEANUP.swap(false, Ordering::AcqRel) {
-            panic!("injected deferred RTD cleanup panic");
-        }
-
-        // Deferred cleanup intentionally retains ACTIVE_SERVER. The next
-        // xlAutoRemove or ensure_server joins this worker before removing that
-        // final module-lifetime reference.
-        // SAFETY: the worker's reference retains this exact server.
-        let access = QuiescentServerAccess::from_termination(unsafe { &*this }, termination);
-        let status = access.teardown_resources();
-        if status != S_OK {
+            drop(access);
+        });
+        if let Err(error) = result {
             crate::diagnostics::report_no_unwind(
-                "IRtdServer::deferred termination",
-                &XllError::WindowsApi {
-                    function: "IRtdServer::ServerTerminate",
-                    code: status,
+                "IRtdServer::deferred termination wait",
+                &XllError::Internal {
+                    diagnostic_id: match error {
+                        ServerCloseError::WaitFailed(status) => {
+                            crate::diagnostics::id::DiagnosticId::RTD_WINDOW_STATUS
+                                .with_low_u32(status as u32)
+                        }
+                        _ => crate::diagnostics::id::DiagnosticId::RTD_WINDOW_FAILURE,
+                    },
                 },
             );
+            // Reopening after a committed spawn would strand a completed
+            // worker handle on a reusable server. A live event cannot fail.
+            std::process::abort();
         }
-        drop(access);
     }));
 
     if let Err(payload) = outcome {

@@ -80,8 +80,10 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_PHASE,
             });
         }
-        self.coordinator.prepare_open(control);
+        // Exhaustion must leave even the closed state's host intent intact.
+        // Allocation is the only fallible step before a started owner exists.
         let attempt = self.coordinator.allocate_open_attempt(control)?;
+        self.coordinator.prepare_open(control);
         self.coordinator.begin_opening(control, attempt);
         Ok(attempt)
     }

@@ -15,7 +15,6 @@ use crate::ingress::ExportIngress;
 use crate::subscription::{RtdValue, SubscriptionRuntime};
 use crate::value::ExcelValue;
 use std::ptr::NonNull;
-use std::sync::atomic::Ordering;
 use xlfn_sys::{XLF_RTD, XLOPER12};
 
 #[cfg(feature = "handles")]
@@ -34,8 +33,7 @@ pub(crate) fn observe<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
 
     // SAFETY: ACTIVE_SERVER owns a live server reference and `ensured` holds a
     // separate temporary reference throughout `observe`.
-    let registration = if unsafe { (*server).start_state.load(Ordering::Acquire) } == SERVER_STARTED
-    {
+    let registration = if unsafe { (*server).start_state() } == SERVER_STARTED {
         None
     } else {
         let module_path = module_path(host)?;
@@ -92,8 +90,7 @@ pub(crate) fn observe_subscription<E: crate::RtdSubscription, C: crate::RtdSourc
 
     // SAFETY: ACTIVE_SERVER owns a live server reference and `ensured` holds a
     // separate temporary reference throughout this function.
-    let registration = if unsafe { (*server).start_state.load(Ordering::Acquire) } == SERVER_STARTED
-    {
+    let registration = if unsafe { (*server).start_state() } == SERVER_STARTED {
         None
     } else {
         let module_path = module_path(host)?;

@@ -13,6 +13,60 @@ use crate::runtime_components::{
 };
 use xlfn_kernel::thread_affine::{ThreadAffineInstallError, ThreadAffineSlot};
 
+/// Source-bound recovery operations. The target is installed only by the
+/// composition root and cannot be replaced while an opening owner is alive.
+pub(crate) struct OpenRecovery<'a, A: Addin> {
+    target: &'a dyn OpenRecoveryTarget<A>,
+}
+
+impl<A: Addin> Copy for OpenRecovery<'_, A> {}
+impl<A: Addin> Clone for OpenRecovery<'_, A> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+trait OpenRecoveryTarget<A: Addin>: Sync {
+    fn rollback(
+        &self,
+        lifecycle: &AddinLifecycleAccess<'_, A>,
+        callbacks: &mut crate::host_callback::HostCallbackSession,
+        generation: Option<crate::generation::RuntimeGeneration>,
+    ) -> super::rollback::OpenRollbackOutcome;
+    fn quarantine(&self, hazard: Option<crate::shutdown::UnloadHazard>);
+}
+
+impl<A: Addin, P: super::UnloadPolicy<A>> OpenRecoveryTarget<A> for Runtime<A, P> {
+    fn rollback(
+        &self,
+        lifecycle: &AddinLifecycleAccess<'_, A>,
+        callbacks: &mut crate::host_callback::HostCallbackSession,
+        generation: Option<crate::generation::RuntimeGeneration>,
+    ) -> super::rollback::OpenRollbackOutcome {
+        super::rollback::rollback_open(self, lifecycle, callbacks, generation)
+    }
+    fn quarantine(&self, hazard: Option<crate::shutdown::UnloadHazard>) {
+        match hazard {
+            Some(hazard) => super::recovery::quarantine_for_hazard(self, hazard),
+            None => super::recovery::quarantine_runtime(self),
+        }
+    }
+}
+
+impl<A: Addin> OpenRecovery<'_, A> {
+    pub(in crate::runtime) fn rollback(
+        &self,
+        lifecycle: &AddinLifecycleAccess<'_, A>,
+        callbacks: &mut crate::host_callback::HostCallbackSession,
+        generation: Option<crate::generation::RuntimeGeneration>,
+    ) -> super::rollback::OpenRollbackOutcome {
+        self.target.rollback(lifecycle, callbacks, generation)
+    }
+    pub(in crate::runtime) fn quarantine(&self, hazard: Option<crate::shutdown::UnloadHazard>) {
+        self.target.quarantine(hazard);
+    }
+}
+
 /// Facilities needed by one open transaction.
 ///
 /// The fields remain private so callers can only use the operation-specific
@@ -29,6 +83,7 @@ pub(crate) struct OpenDeps<'a, A: Addin> {
     async_runtime: &'a crate::async_udf::AsyncRuntime<A::AsyncExecutor>,
     quarantine: &'a QuarantineVault<A>,
     observer: &'a RuntimeObserver,
+    recovery: OpenRecovery<'a, A>,
 }
 
 impl<A: Addin> Copy for OpenDeps<'_, A> {}
@@ -54,7 +109,12 @@ impl<'a, A: Addin> OpenDeps<'a, A> {
             async_runtime: &runtime.async_runtime,
             quarantine: &runtime.quarantine,
             observer: &runtime.observer,
+            recovery: OpenRecovery { target: runtime },
         }
+    }
+
+    pub(in crate::runtime) fn recovery(&self) -> OpenRecovery<'a, A> {
+        self.recovery
     }
 
     pub(in crate::runtime) fn lifecycle(&self) -> &'a LifecycleCoordinator<A> {

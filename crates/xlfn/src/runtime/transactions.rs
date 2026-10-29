@@ -1,15 +1,14 @@
 use crate::XllError;
 use crate::addin::{Addin, BuildInfo, OpenContext, RuntimeConfig};
 use crate::error::IntoXllError;
-use crate::generation::RuntimeGeneration;
 use crate::host_callback::HostCallbackSession;
 use crate::panic_boundary::catch_no_unwind;
 use crate::registration::RegistrationDescriptor;
 use crate::registration::{HostRegistrar, RegistrationHost};
 use crate::runtime::capabilities::ShutdownDeps;
-use crate::runtime::open_txn::{
-    GenerationStaged, HostAttached, OpeningState, OpeningTxn, RollbackState,
-};
+#[cfg(test)]
+use crate::runtime::open_txn::RollbackState;
+use crate::runtime::open_txn::{GenerationStaged, HostAttached, OpeningState, OpeningTxn};
 use crate::runtime::shutdown::{ClosedWitness, FinalRemoval, RemovalClaimGuard, RemovalOwner};
 use crate::runtime::{AddinLifecycleAccess, Runtime};
 use std::panic::AssertUnwindSafe;
@@ -18,7 +17,6 @@ use crate::boundary::{report_boundary_error, report_cleanup_issue};
 use crate::lifecycle::lifecycle_access_error;
 use crate::runtime::open;
 use crate::runtime::recovery::{commit_removal_control, handle_unload_hazard, quarantine_runtime};
-use crate::runtime::rollback::rollback_open;
 
 type StagedOpenResult<'runtime, A> = Result<
     (
@@ -130,68 +128,16 @@ where
     Ok((transaction, registrations))
 }
 
+#[cfg(test)]
 pub(crate) fn rollback_active_open<'runtime, A, S>(
-    runtime: &'runtime Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     lifecycle: &AddinLifecycleAccess<'_, A>,
     attempt: Option<OpeningTxn<'runtime, A, S>>,
 ) where
     A: Addin,
     S: RollbackState<A>,
 {
-    let Some(attempt) = attempt else {
-        return;
-    };
-    let (core, host, lifecycle_ownership) = attempt.into_rollback_parts().into_parts();
-    let (callbacks, journal) = host.into_parts();
-    let mut callbacks = callbacks;
-    if let crate::runtime::open_txn::LifecycleOwnership::Owned(lifecycle_state) =
-        lifecycle_ownership
-        && let Err(error) = runtime.install_addin_lifecycle(lifecycle, lifecycle_state)
-    {
-        let (lifecycle_state, reason) = error.into_parts();
-        #[allow(
-            clippy::mem_forget,
-            reason = "failed rollback installation; leaking untrusted lifecycle state is safer than running its destructor"
-        )]
-        std::mem::forget(lifecycle_state);
-        let error = lifecycle_access_error(reason);
-        report_boundary_error("xlAutoOpen rollback lifecycle installation", &error);
-        let closing = core.into_parts().1.rollback(|| {});
-        runtime.lifecycle_control().complete_open_abort(closing);
-        quarantine_runtime(runtime);
-        return;
-    }
-    runtime.host.merge(journal);
-    let (attempt_id, module_opening, _service_inputs) = core.into_parts();
-    let generation = Some(
-        RuntimeGeneration::new(attempt_id.get())
-            .expect("an active open attempt has a runtime generation"),
-    );
-    let disposition = runtime
-        .lifecycle_orchestrator()
-        .mark_open_failed(attempt_id);
-    runtime
-        .lifecycle_control()
-        .complete_open_abort(module_opening.rollback(|| {}));
-    if disposition.requires_rollback() {
-        match catch_no_unwind(AssertUnwindSafe(|| {
-            rollback_open::<A>(runtime, lifecycle, &mut callbacks, generation)
-        })) {
-            Ok(outcome) if outcome.is_finalized() || outcome.cleanup_owned_elsewhere() => {}
-            Ok(outcome) => {
-                let error = XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_ROLLBACK_FAILURE,
-                };
-                report_boundary_error("xlAutoOpen rollback", &error);
-                if let Some(hazard) = outcome.failure_hazard() {
-                    super::recovery::quarantine_for_hazard(runtime, hazard);
-                }
-            }
-            Err(_) => {
-                report_boundary_error("xlAutoOpen rollback", &XllError::Panic);
-                quarantine_runtime(runtime);
-            }
-        }
+    if let Some(attempt) = attempt {
+        attempt.into_rollback().run(lifecycle);
     }
 }
 

@@ -1068,6 +1068,106 @@ fn async_boundary_returns_completed_value_through_callback() {
 }
 
 #[test]
+fn async_launch_registers_and_cancels_only_at_its_admission_issuer() {
+    let runtime = Box::leak(Box::new(Runtime::<TestU32Addin>::new()));
+    let other = Box::leak(Box::new(Runtime::<TestU32Addin>::new()));
+    let _guard = test_lock_for_runtime(runtime);
+    let opening = runtime.begin_open().unwrap();
+    let mut opening = runtime.publish(opening, 17_u32, ());
+    runtime.finish_open(&mut opening, Vec::new()).unwrap();
+    runtime
+        .start_async(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
+    // A second task registry does not need an open generation to demonstrate
+    // that cancellation at another runtime cannot affect the admitted task.
+    other
+        .start_async(builtin(1), AsyncTaskLimit::DEFAULT)
+        .unwrap();
+    let _callback_guard = reset_test_callback();
+    let ingress = crate::module_runtime::ingress()
+        .enter_udf_with(|| {})
+        .into_admitted()
+        .unwrap();
+    let call = runtime.enter_async(&ingress).unwrap();
+    assert!(std::ptr::eq(call.async_runtime(), runtime.async_runtime()));
+    assert!(!std::ptr::eq(call.async_runtime(), other.async_runtime()));
+    let mut handle = XLOPER12 {
+        value: XLOPER12Value {
+            big_data: XLOPER12BigData {
+                handle: XLOPER12BigDataHandle {
+                    data: std::ptr::NonNull::<u8>::dangling().as_ptr(),
+                },
+                byte_count: 1,
+            },
+        },
+        xltype: XLTYPE_BIG_DATA,
+    };
+    let lease_dropped = Arc::new(AtomicBool::new(false));
+    struct RetainedLease {
+        _lease: crate::generation::ExecutionLease<TestU32Addin>,
+        dropped: Arc<AtomicBool>,
+    }
+    impl Drop for RetainedLease {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::Release);
+        }
+    }
+    let dropped = Arc::clone(&lease_dropped);
+    // SAFETY: the opaque handle is live until launch copies its bytes.
+    unsafe {
+        super::boundary::async_udf_boundary_named_inner(
+            &call,
+            "issuer",
+            "ISSUER",
+            &mut handle,
+            |_, lease, _| {
+                let retained = RetainedLease {
+                    _lease: lease,
+                    dropped,
+                };
+                Ok(async move {
+                    let _retained = retained;
+                    std::future::pending::<XllResult<f64>>().await
+                })
+            },
+        );
+    }
+    assert_eq!(
+        runtime
+            .async_runtime()
+            .registry()
+            .active_tasks
+            .load(Ordering::Acquire),
+        1
+    );
+    assert_eq!(
+        other
+            .async_runtime()
+            .registry()
+            .active_tasks
+            .load(Ordering::Acquire),
+        0
+    );
+    other.cancel_async();
+    assert_eq!(
+        runtime
+            .async_runtime()
+            .registry()
+            .active_tasks
+            .load(Ordering::Acquire),
+        1
+    );
+    assert!(!lease_dropped.load(Ordering::Acquire));
+    runtime.cancel_async();
+    wait_for_executor_idle(runtime.async_runtime());
+    assert!(lease_dropped.load(Ordering::Acquire));
+    assert!(runtime.close_async().unwrap().issues.is_empty());
+    assert!(other.close_async().unwrap().issues.is_empty());
+    drop(call);
+    drop(ingress);
+}
+
+#[test]
 fn saturated_async_boundary_skips_owned_input_preparation_and_recovers() {
     struct EnabledSubscriber;
     impl tracing::Subscriber for EnabledSubscriber {

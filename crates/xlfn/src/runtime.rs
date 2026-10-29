@@ -52,9 +52,7 @@ use observer::RuntimeObserver;
 use open_txn::LifecycleInstalled;
 use open_txn::{Begun, OpeningTxn};
 use shutdown::ClosedWitness;
-use xlfn_kernel::thread_affine::{
-    ThreadAffineAccess, ThreadAffineError, ThreadAffineInstallError, ThreadAffineSlot,
-};
+use xlfn_kernel::thread_affine::{ThreadAffineAccess, ThreadAffineError, ThreadAffineSlot};
 
 pub struct Runtime<A: crate::Addin, P: UnloadPolicy<A> = LogicalUnload> {
     lifecycle: LifecycleCoordinator<A>,
@@ -158,14 +156,7 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
         &self,
         expected_removal_epoch: RemovalEpoch,
     ) -> XllResult<OpeningTxn<'_, A, Begun<A>>> {
-        let start = self
-            .lifecycle_orchestrator()
-            .begin_open_if_epoch(expected_removal_epoch)?;
-        Ok(OpeningTxn::new_begun(
-            self.open_deps(),
-            start.attempt,
-            start.module_opening,
-        ))
+        OpeningTxn::acquire(self.open_deps(), expected_removal_epoch)
     }
 
     #[cfg(test)]
@@ -462,14 +453,6 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
         self.addin_lifecycle.bind_current()
     }
 
-    pub(in crate::runtime) fn install_addin_lifecycle(
-        &self,
-        access: &AddinLifecycleAccess<'_, A>,
-        state: A::LifecycleState,
-    ) -> Result<(), ThreadAffineInstallError<A::LifecycleState>> {
-        self.addin_lifecycle.install(access, state)
-    }
-
     pub(in crate::runtime) fn with_addin_lifecycle<R>(
         &self,
         access: &AddinLifecycleAccess<'_, A>,
@@ -572,6 +555,8 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
         ingress.assert_active();
         let admission = self.lifecycle.try_admit_async()?;
         Ok(AsyncCallGuard {
+            async_runtime: &self.async_runtime,
+            returns: &self.return_protocol,
             call: CallGuard {
                 diagnostics: &self.diagnostics,
                 admission,
@@ -909,10 +894,24 @@ pub(crate) mod test_support {
 #[cfg(feature = "async")]
 pub(crate) struct AsyncCallGuard<'call, A: crate::Addin> {
     call: CallGuard<'call, A>,
+    async_runtime: &'static crate::async_udf::AsyncRuntime<A::AsyncExecutor>,
+    returns: &'static crate::runtime_components::ReturnProtocol,
 }
 
 #[cfg(feature = "async")]
 impl<A: crate::Addin> AsyncCallGuard<'_, A> {
+    /// Task registration/cancellation and generation admission share the issuer
+    /// installed by enter_async; callers cannot substitute another registry.
+    pub(crate) fn async_runtime(
+        &self,
+    ) -> &'static crate::async_udf::AsyncRuntime<A::AsyncExecutor> {
+        self.async_runtime
+    }
+
+    pub(crate) fn next_call_id(&self) -> u64 {
+        self.returns.next_call_id()
+    }
+
     pub(crate) fn try_execution_lease(&self) -> XllResult<ExecutionLease<A>> {
         self.call.admission.try_execution_lease()
     }
@@ -1638,12 +1637,16 @@ pub(crate) mod tests {
     fn lifecycle_attempt_counter_refuses_exhaustion() {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let runtime = Runtime::<()>::new();
+        runtime.request_explicit_removal();
+        let intent = runtime.host_intent();
         runtime
             .lifecycle
             .access()
             .set_next_lifecycle_attempt_for_test(u64::MAX);
         assert!(runtime.begin_open().is_err());
         assert_eq!(runtime.phase(), LifecyclePhase::Closed);
+        assert_eq!(runtime.host_intent(), intent);
+        assert!(runtime.return_protocol.returns_closed_and_quiescent());
     }
 
     #[test]
@@ -2007,10 +2010,7 @@ pub(crate) mod tests {
                     transaction.failure(XllError::Overloaded)
                 }
             };
-            assert!(matches!(
-                failure.recover(&runtime, &lifecycle),
-                XllError::Overloaded
-            ));
+            assert!(matches!(failure.recover(&lifecycle), XllError::Overloaded));
             assert!(runtime.async_runtime().is_stopped());
             assert_eq!(runtime.phase(), LifecyclePhase::Closed);
             assert_eq!(COUNTS.starts.load(Ordering::Relaxed), 1);

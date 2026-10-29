@@ -1,4 +1,4 @@
-use crate::generation::{OpenAttemptId, OpeningGeneration};
+use crate::generation::{OpenAttemptId, OpeningGeneration, RemovalEpoch};
 use crate::host_callback::HostCallbackSession;
 use crate::lifecycle::LifecycleAccess;
 #[cfg(test)]
@@ -164,14 +164,6 @@ pub(crate) struct RollbackParts<A: crate::Addin> {
     core: RollbackOpenCore<A>,
     host: HostOpeningState,
     lifecycle: LifecycleOwnership<A>,
-}
-
-impl<A: crate::Addin> RollbackParts<A> {
-    pub(crate) fn into_parts(
-        self,
-    ) -> (RollbackOpenCore<A>, HostOpeningState, LifecycleOwnership<A>) {
-        (self.core, self.host, self.lifecycle)
-    }
 }
 
 /// States that still own the host-side rollback session.
@@ -394,6 +386,148 @@ impl<A: crate::Addin> HasHost for HostMutated<A> {
     }
 }
 
+/// Owns the canonical lock until acquisition has either issued a transaction or
+/// restored terminal quarantine. No independent attempt/module pair escapes.
+struct OpenAcquisition<'runtime, A: crate::Addin> {
+    deps: OpenDeps<'runtime, A>,
+    control: Option<LifecycleAccess<'runtime, A>>,
+    module: Option<crate::module_runtime::ModuleOpening>,
+}
+
+impl<A: crate::Addin> Drop for OpenAcquisition<'_, A> {
+    fn drop(&mut self) {
+        let Some(control) = self.control.as_mut() else {
+            return;
+        };
+        self.deps.returns().close_admission();
+        let lifecycle = self.deps.lifecycle_control();
+        if let Some(module) = self.module.take() {
+            lifecycle.complete_open_abort_locked(control, module.rollback(|| {}));
+        }
+        lifecycle.quarantine_state(control);
+        lifecycle.notify_all();
+    }
+}
+
+/// Rollback retains its issuer and responsibility across lifecycle installation,
+/// failure publication and the complete cleanup operation.
+pub(crate) struct OpenRollbackOwner<'runtime, A: crate::Addin> {
+    deps: OpenDeps<'runtime, A>,
+    core: Option<RollbackOpenCore<A>>,
+    host: Option<HostOpeningState>,
+    lifecycle: Option<LifecycleOwnership<A>>,
+    armed: bool,
+}
+
+impl<A: crate::Addin> Drop for OpenRollbackOwner<'_, A> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Some(host) = self.host.take() {
+            let (_, journal) = host.into_parts();
+            self.deps.merge_host(journal);
+        }
+        let ownership = self
+            .lifecycle
+            .take()
+            .unwrap_or(LifecycleOwnership::Installed);
+        if let Some(core) = self.core.take() {
+            abandon_open(&self.deps, core, ownership);
+        } else {
+            let lifecycle = self.deps.lifecycle_control();
+            let mut control = lifecycle.access();
+            self.deps.returns().close_admission();
+            lifecycle.quarantine_state(&mut control);
+            lifecycle.notify_all();
+            if let LifecycleOwnership::Owned(state) = ownership {
+                forget_untrusted_lifecycle_state::<A>(state);
+            }
+        }
+    }
+}
+
+impl<A: crate::Addin> OpenRollbackOwner<'_, A> {
+    pub(crate) fn run(mut self, lifecycle: &AddinLifecycleAccess<'_, A>) {
+        use crate::boundary::report_boundary_error;
+        let recovery = self.deps.recovery();
+        if let Some(LifecycleOwnership::Owned(state)) = self.lifecycle.take()
+            && let Err(error) = self.deps.install_addin_lifecycle(lifecycle, state)
+        {
+            let (state, reason) = error.into_parts();
+            self.lifecycle = Some(LifecycleOwnership::Owned(state));
+            report_boundary_error(
+                "xlAutoOpen rollback lifecycle installation",
+                &crate::lifecycle::lifecycle_access_error(reason),
+            );
+            drop(self);
+            recovery.quarantine(None);
+            return;
+        }
+        let (mut callbacks, journal) = self
+            .host
+            .take()
+            .expect("rollback owns host session")
+            .into_parts();
+        self.deps.merge_host(journal);
+        let attempt = self.core.as_ref().unwrap().attempt_id();
+        let generation = Some(attempt.into_runtime_generation());
+        let disposition =
+            super::orchestration::LifecycleOrchestrator::new(self.deps).mark_open_failed(attempt);
+        let (_, module, _service_inputs) = self.core.take().unwrap().into_parts();
+        self.deps
+            .lifecycle_control()
+            .complete_open_abort(module.rollback(|| {}));
+        #[cfg(test)]
+        check_rollback_fault();
+        if disposition.requires_rollback() {
+            match crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
+                recovery.rollback(lifecycle, &mut callbacks, generation)
+            })) {
+                Ok(outcome) if outcome.is_finalized() || outcome.cleanup_owned_elsewhere() => {}
+                Ok(outcome) => {
+                    let error = XllError::Internal {
+                        diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_ROLLBACK_FAILURE,
+                    };
+                    report_boundary_error("xlAutoOpen rollback", &error);
+                    if let Some(hazard) = outcome.failure_hazard() {
+                        recovery.quarantine(Some(hazard));
+                    }
+                }
+                Err(_) => {
+                    report_boundary_error("xlAutoOpen rollback", &XllError::Panic);
+                    recovery.quarantine(None);
+                }
+            }
+        }
+        self.armed = false;
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static FAIL_OPEN_ACQUIRE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    static PANIC_ROLLBACK_TRANSFER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+#[cfg(test)]
+fn check_open_acquire_fault(point: u8) -> XllResult<()> {
+    FAIL_OPEN_ACQUIRE.with(|fault| {
+        if fault.get() == point {
+            fault.set(0);
+            Err(XllError::Closing)
+        } else {
+            Ok(())
+        }
+    })
+}
+#[cfg(test)]
+fn check_rollback_fault() {
+    assert!(
+        !PANIC_ROLLBACK_TRANSFER.with(|fault| fault.replace(false)),
+        "injected rollback transfer panic"
+    );
+}
+
 pub(crate) struct OpeningTxn<'runtime, A: crate::Addin, S: OpeningState<A>> {
     deps: OpenDeps<'runtime, A>,
     state: Option<S>,
@@ -435,28 +569,67 @@ impl<'runtime, A: crate::Addin, S: OpeningState<A>> OpeningTxn<'runtime, A, S> {
         self.deps
     }
 
-    pub(crate) fn into_rollback_parts(self) -> RollbackParts<A>
+    pub(crate) fn into_rollback(mut self) -> OpenRollbackOwner<'runtime, A>
     where
         S: RollbackState<A>,
     {
-        let mut transaction = self;
-        let state = transaction.take_state();
-        state.into_rollback_parts()
+        let parts = self.take_state().into_rollback_parts();
+        OpenRollbackOwner {
+            deps: self.deps,
+            core: Some(parts.core),
+            host: Some(parts.host),
+            lifecycle: Some(parts.lifecycle),
+            armed: true,
+        }
     }
 }
 
 impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Begun<A>> {
-    pub(crate) fn new_begun(
+    pub(crate) fn acquire(
         deps: OpenDeps<'runtime, A>,
-        attempt_id: OpenAttemptId,
-        module_opening: crate::module_runtime::ModuleOpening,
-    ) -> Self {
-        Self::new_state(
+        expected_removal_epoch: RemovalEpoch,
+    ) -> XllResult<Self> {
+        #[cfg(test)]
+        let test_module_lease = crate::ingress::acquire_test_module_lease();
+        let lifecycle = crate::lifecycle::LifecycleControl::new(deps.lifecycle());
+        let mut control = lifecycle.access();
+        let attempt = lifecycle.begin_open_state(&mut control, expected_removal_epoch)?;
+        // From the first successful canonical mutation, this guard owns both
+        // the original lock and the responsibility for an incomplete start.
+        let mut acquisition = OpenAcquisition {
+            deps,
+            control: Some(control),
+            module: None,
+        };
+        #[cfg(test)]
+        check_open_acquire_fault(1)?;
+        deps.returns().reopen_admission()?;
+        acquisition.module = Some(crate::module_runtime::begin_open());
+        #[cfg(test)]
+        {
+            *deps.lifecycle().test_module_lease.lock() = Some(test_module_lease);
+        }
+        #[cfg(test)]
+        check_open_acquire_fault(2)?;
+        deps.observer().begin_open(
+            acquisition.control.as_ref().unwrap(),
+            deps.returns(),
+            expected_removal_epoch.get(),
+            attempt,
+        );
+        let module = acquisition
+            .module
+            .take()
+            .expect("acquisition owns its module");
+        let transaction = Self::new_state(
             deps,
             Begun {
-                core: OpenCore::new(attempt_id, module_opening),
+                core: OpenCore::new(attempt, module),
             },
-        )
+        );
+        // No fallible operation separates responsibility transfer from unlock.
+        acquisition.control.take();
+        Ok(transaction)
     }
 
     pub(crate) fn attach_host(
@@ -828,4 +1001,149 @@ fn opening_publication_lost() -> ! {
             diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
         },
     )
+}
+
+#[cfg(test)]
+mod owner_tests {
+    use super::*;
+    use crate::lifecycle::LifecyclePhase;
+    use crate::module_runtime::{ModuleCleanupAuthority, ModuleCleanupClaim, ModuleCleanupReady};
+    use crate::runtime::Runtime;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct RetainedLifecycle(Arc<AtomicUsize>);
+    impl Drop for RetainedLifecycle {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    struct Probe;
+    impl crate::Addin for Probe {
+        #[cfg(feature = "rtd")]
+        type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
+        type RtdSources = crate::DynamicRtdSources<()>;
+        type SharedState = ();
+        type LifecycleState = RetainedLifecycle;
+        type Layers = ();
+        type Error = XllError;
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
+        fn open(_: &crate::OpenContext<Self>) -> crate::OpenResult<Self> {
+            unreachable!("test initializes state directly")
+        }
+    }
+
+    #[test]
+    fn acquisition_failure_retains_responsibility_before_and_after_module_begin() {
+        for point in [1, 2] {
+            let runtime = Runtime::<()>::new();
+            let other = Runtime::<()>::new();
+            FAIL_OPEN_ACQUIRE.with(|fault| fault.set(point));
+            assert!(matches!(runtime.begin_open(), Err(XllError::Closing)));
+            FAIL_OPEN_ACQUIRE.with(|fault| assert_eq!(fault.get(), 0));
+            assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
+            assert_eq!(other.phase(), LifecyclePhase::Closed);
+            assert!(runtime.return_protocol.returns_closed_and_quiescent());
+            let authority = runtime.lifecycle_control().take_module_cleanup_authority();
+            if point == 1 {
+                assert!(matches!(authority, ModuleCleanupClaim::Missing));
+                assert!(runtime.lifecycle.access().module_epoch_id().is_none());
+            } else {
+                let ModuleCleanupClaim::Ready(ModuleCleanupReady::Closing(closing)) = authority
+                else {
+                    panic!("module authority lost during acquisition");
+                };
+                assert!(closing.id().is_current());
+                runtime
+                    .lifecycle_control()
+                    .retain_failed_module_cleanup(ModuleCleanupAuthority::Closing(closing));
+            }
+        }
+    }
+
+    fn initialized<'a>(
+        runtime: &'a Runtime<Probe>,
+        drops: &Arc<AtomicUsize>,
+    ) -> OpeningTxn<'a, Probe, Initialized<Probe>> {
+        let transaction = runtime
+            .begin_open()
+            .unwrap()
+            .attach_host(HostCallbackSession::new());
+        let generation = transaction.attempt_id().into_runtime_generation();
+        transaction.begin_initialization().initialized(
+            RetainedLifecycle(Arc::clone(drops)),
+            crate::runtime_components::GenerationServiceInputs::empty_for_generation(generation),
+        )
+    }
+
+    #[test]
+    fn abandoned_rollback_retains_issuer_module_and_untrusted_lifecycle() {
+        let runtime = Runtime::<Probe>::new();
+        let other = Runtime::<Probe>::new();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let rollback = initialized(&runtime, &drops).into_rollback();
+        let epoch = crate::module_runtime::ingress().epoch();
+        drop(rollback);
+        assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
+        assert_eq!(other.phase(), LifecyclePhase::Closed);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        let ModuleCleanupClaim::Ready(ModuleCleanupReady::Closing(closing)) =
+            runtime.lifecycle_control().take_module_cleanup_authority()
+        else {
+            panic!("abandoned rollback lost authority");
+        };
+        assert!(closing.id().is_current());
+        assert_eq!(crate::module_runtime::ingress().epoch(), epoch);
+        runtime
+            .lifecycle_control()
+            .retain_failed_module_cleanup(ModuleCleanupAuthority::Closing(closing));
+    }
+
+    #[test]
+    fn rollback_unwind_after_module_transfer_keeps_original_authority() {
+        let runtime = Runtime::<Probe>::new();
+        let other = Runtime::<Probe>::new();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let rollback = initialized(&runtime, &drops).into_rollback();
+        let epoch = crate::module_runtime::ingress().epoch();
+        let lifecycle = runtime.bind_addin_lifecycle().unwrap();
+        PANIC_ROLLBACK_TRANSFER.with(|fault| fault.set(true));
+        assert!(
+            crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(
+                || rollback.run(&lifecycle)
+            ))
+            .is_err()
+        );
+        assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
+        assert_eq!(other.phase(), LifecyclePhase::Closed);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        let ModuleCleanupClaim::Ready(ModuleCleanupReady::Closing(closing)) =
+            runtime.lifecycle_control().take_module_cleanup_authority()
+        else {
+            panic!("unwind lost transferred authority");
+        };
+        assert!(closing.id().is_current());
+        assert_eq!(crate::module_runtime::ingress().epoch(), epoch);
+        runtime
+            .lifecycle_control()
+            .retain_failed_module_cleanup(ModuleCleanupAuthority::Closing(closing));
+    }
+
+    #[test]
+    fn rollback_foreign_lifecycle_access_quarantines_only_its_issuer() {
+        let runtime = Runtime::<Probe>::new();
+        let other = Runtime::<Probe>::new();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let rollback = initialized(&runtime, &drops).into_rollback();
+        let other_lifecycle = other.bind_addin_lifecycle().unwrap();
+        rollback.run(&other_lifecycle);
+        assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
+        assert_eq!(other.phase(), LifecyclePhase::Closed);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert!(other.lifecycle.access().module_epoch_id().is_none());
+    }
 }

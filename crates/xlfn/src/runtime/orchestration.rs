@@ -1,27 +1,17 @@
 //! Runtime-wide lifecycle orchestration.
 //!
-//! This module coordinates lifecycle-owned transitions with the small set of
-//! runtime facilities required to issue an operation claim. It deliberately
-//! does not own a `Runtime` reference; composition-root wiring happens in
-//! `Runtime` itself.
+//! This module coordinates failure and quarantine transitions with their
+//! operation-scoped runtime facilities. Opening and removal owners acquire
+//! their own affine claims; this view never returns detached acquisition parts.
+//! It does not own a `Runtime` reference.
 
 #[cfg(test)]
 use crate::XllError;
-use crate::XllResult;
 use crate::addin::Addin;
-use crate::generation::{
-    ExecutionGeneration, OpenAttemptId, OpeningGeneration, RemovalEpoch, RuntimeGeneration,
-};
+use crate::generation::{ExecutionGeneration, OpenAttemptId, OpeningGeneration, RuntimeGeneration};
 use crate::lifecycle::{LifecycleControl, LifecyclePhase, OpenFailureDisposition};
 use crate::runtime::capabilities::OpenDeps;
 use crate::runtime_components::QuarantineReason;
-
-/// The result of beginning an open attempt. The composition root turns this
-/// into an `OpeningTxn` by attaching the operation-scoped open capability.
-pub(crate) struct OpenAttemptStart {
-    pub(crate) attempt: OpenAttemptId,
-    pub(crate) module_opening: crate::module_runtime::ModuleOpening,
-}
 
 pub(crate) enum OpenRollbackAcquisition<T> {
     Acquired(T),
@@ -49,35 +39,6 @@ impl<'a, A: Addin> LifecycleOrchestrator<'a, A> {
 
     fn lifecycle(&self) -> LifecycleControl<'_, A> {
         LifecycleControl::new(self.lifecycle)
-    }
-
-    pub(crate) fn begin_open_if_epoch(
-        &self,
-        expected_removal_epoch: RemovalEpoch,
-    ) -> XllResult<OpenAttemptStart> {
-        #[cfg(test)]
-        let test_module_lease = crate::ingress::acquire_test_module_lease();
-
-        let lifecycle = self.lifecycle();
-        let mut control = lifecycle.access();
-        let attempt_id = lifecycle.begin_open_state(&mut control, expected_removal_epoch)?;
-        self.returns.reopen_admission()?;
-
-        let module_opening = crate::module_runtime::begin_open();
-        #[cfg(test)]
-        {
-            *self.lifecycle.test_module_lease.lock() = Some(test_module_lease);
-        }
-        self.observer.begin_open(
-            &control,
-            self.returns,
-            expected_removal_epoch.get(),
-            attempt_id,
-        );
-        Ok(OpenAttemptStart {
-            attempt: attempt_id,
-            module_opening,
-        })
     }
 
     pub(crate) fn mark_open_failed(&self, attempt_id: OpenAttemptId) -> OpenFailureDisposition {

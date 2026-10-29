@@ -144,7 +144,7 @@ pub(crate) unsafe fn async_udf_boundary_named<A, Start, Fut, T>(
     let result = catch_no_unwind(AssertUnwindSafe(|| {
         // SAFETY: forwarded from this function's raw-handle contract.
         unsafe {
-            async_udf_boundary_named_inner(runtime, &call, udf_id, excel_name, raw_handle, start);
+            async_udf_boundary_named_inner(&call, udf_id, excel_name, raw_handle, start);
         }
     }));
 
@@ -156,7 +156,6 @@ pub(crate) unsafe fn async_udf_boundary_named<A, Start, Fut, T>(
 }
 
 pub(crate) unsafe fn async_udf_boundary_named_inner<A, Start, Fut, T>(
-    runtime: &'static Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     guard: &crate::runtime::AsyncCallGuard<'_, A>,
     udf_id: &'static str,
     excel_name: &'static str,
@@ -177,7 +176,6 @@ pub(crate) unsafe fn async_udf_boundary_named_inner<A, Start, Fut, T>(
         // SAFETY: forwarded from this function's raw-handle contract.
         unsafe {
             async_udf_boundary_instrumented(
-                runtime,
                 guard,
                 udf_id,
                 excel_name,
@@ -189,13 +187,12 @@ pub(crate) unsafe fn async_udf_boundary_named_inner<A, Start, Fut, T>(
     } else {
         // SAFETY: forwarded from this function's raw-handle contract.
         unsafe {
-            async_udf_boundary_uninstrumented(runtime, guard, udf_id, raw_handle, start);
+            async_udf_boundary_uninstrumented(guard, udf_id, raw_handle, start);
         }
     }
 }
 
 unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
-    runtime: &'static Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     guard: &crate::runtime::AsyncCallGuard<'_, A>,
     udf_id: &'static str,
     excel_name: &'static str,
@@ -212,9 +209,9 @@ unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
     Fut: Future<Output = XllResult<T>> + Send + 'static,
     T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
 {
-    let call_id = CallId::new(runtime.next_call_id());
+    let call_id = CallId::new(guard.next_call_id());
     let timer = crate::execution::CallTimer::start();
-    let calculation = runtime.async_runtime().snapshot_calculation();
+    let calculation = guard.async_runtime().snapshot_calculation();
     let calculation_id = calculation.epoch().into();
     let concurrent_calls = crate::module_runtime::ingress().active_udfs();
     let metadata = CallMetadata {
@@ -268,13 +265,13 @@ unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
         }
     };
     let future = catch_no_unwind(AssertUnwindSafe(|| {
-        runtime.async_runtime().preflight_snapshot(&calculation)?;
+        guard.async_runtime().preflight_snapshot(&calculation)?;
         start(guard, guard.try_execution_lease()?, token)
     }))
     .unwrap_or(Err(XllError::Panic));
     match future {
         Ok(future) => {
-            let reservation = match runtime.async_runtime().reserve_snapshot(calculation) {
+            let reservation = match guard.async_runtime().reserve_snapshot(calculation) {
                 Ok(reservation) => reservation,
                 Err(error) => {
                     let _ = catch_no_unwind(AssertUnwindSafe(|| drop(future)));
@@ -312,7 +309,6 @@ unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
 }
 
 unsafe fn async_udf_boundary_uninstrumented<A, Start, Fut, T>(
-    runtime: &'static Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     guard: &crate::runtime::AsyncCallGuard<'_, A>,
     udf_id: &'static str,
     raw_handle: *mut XLOPER12,
@@ -327,7 +323,7 @@ unsafe fn async_udf_boundary_uninstrumented<A, Start, Fut, T>(
     Fut: Future<Output = XllResult<T>> + Send + 'static,
     T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
 {
-    let calculation = runtime.async_runtime().snapshot_calculation();
+    let calculation = guard.async_runtime().snapshot_calculation();
     let (cancellation, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
     // SAFETY: forwarded from this function's raw-handle contract.
     let responder = match unsafe { ExcelAsyncResponder::from_raw(udf_id, raw_handle) } {
@@ -343,13 +339,13 @@ unsafe fn async_udf_boundary_uninstrumented<A, Start, Fut, T>(
         }
     };
     let future = catch_no_unwind(AssertUnwindSafe(|| {
-        runtime.async_runtime().preflight_snapshot(&calculation)?;
+        guard.async_runtime().preflight_snapshot(&calculation)?;
         start(guard, guard.try_execution_lease()?, token)
     }))
     .unwrap_or(Err(XllError::Panic));
     match future {
         Ok(future) => {
-            let reservation = match runtime.async_runtime().reserve_snapshot(calculation) {
+            let reservation = match guard.async_runtime().reserve_snapshot(calculation) {
                 Ok(reservation) => reservation,
                 Err(error) => {
                     let _ = catch_no_unwind(AssertUnwindSafe(|| drop(future)));
@@ -425,9 +421,7 @@ pub(crate) unsafe fn async_udf_boundary_named_handle<A, Start, Build, T>(
     let result = catch_no_unwind(AssertUnwindSafe(|| {
         // SAFETY: forwarded from this function's raw-handle contract.
         unsafe {
-            async_udf_boundary_named_handle_inner(
-                runtime, &call, udf_id, excel_name, raw_handle, start,
-            );
+            async_udf_boundary_named_handle_inner(&call, udf_id, excel_name, raw_handle, start);
         }
     }));
 
@@ -440,7 +434,6 @@ pub(crate) unsafe fn async_udf_boundary_named_handle<A, Start, Build, T>(
 
 #[cfg(feature = "handles")]
 unsafe fn async_udf_boundary_named_handle_inner<A, Start, Build, T>(
-    runtime: &'static Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     guard: &crate::runtime::AsyncCallGuard<'_, A>,
     udf_id: &'static str,
     excel_name: &'static str,
@@ -461,7 +454,6 @@ unsafe fn async_udf_boundary_named_handle_inner<A, Start, Build, T>(
         // SAFETY: forwarded from this function's raw-handle contract.
         unsafe {
             async_udf_boundary_instrumented_handle(
-                runtime,
                 guard,
                 udf_id,
                 excel_name,
@@ -473,14 +465,13 @@ unsafe fn async_udf_boundary_named_handle_inner<A, Start, Build, T>(
     } else {
         // SAFETY: forwarded from this function's raw-handle contract.
         unsafe {
-            async_udf_boundary_uninstrumented_handle(runtime, guard, udf_id, raw_handle, start);
+            async_udf_boundary_uninstrumented_handle(guard, udf_id, raw_handle, start);
         }
     }
 }
 
 #[cfg(feature = "handles")]
 unsafe fn async_udf_boundary_instrumented_handle<A, Start, Build, T>(
-    runtime: &'static Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     guard: &crate::runtime::AsyncCallGuard<'_, A>,
     udf_id: &'static str,
     excel_name: &'static str,
@@ -497,9 +488,9 @@ unsafe fn async_udf_boundary_instrumented_handle<A, Start, Build, T>(
     Build: HandleScopedBuilder<T> + Send + 'static,
     T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
 {
-    let call_id = CallId::new(runtime.next_call_id());
+    let call_id = CallId::new(guard.next_call_id());
     let timer = crate::execution::CallTimer::start();
-    let calculation = runtime.async_runtime().snapshot_calculation();
+    let calculation = guard.async_runtime().snapshot_calculation();
     let calculation_id = calculation.epoch().into();
     let concurrent_calls = crate::module_runtime::ingress().active_udfs();
     let metadata = CallMetadata {
@@ -552,7 +543,7 @@ unsafe fn async_udf_boundary_instrumented_handle<A, Start, Build, T>(
         }
     };
     let prepared = catch_no_unwind(AssertUnwindSafe(|| {
-        runtime.async_runtime().preflight_snapshot(&calculation)?;
+        guard.async_runtime().preflight_snapshot(&calculation)?;
         let lease = guard.try_execution_lease()?;
         let generation = lease.generation();
         start(guard, lease, token).map(|build| (generation, build))
@@ -560,7 +551,7 @@ unsafe fn async_udf_boundary_instrumented_handle<A, Start, Build, T>(
     .unwrap_or(Err(XllError::Panic));
     match prepared {
         Ok((generation, build)) => {
-            let reservation = match runtime.async_runtime().reserve_snapshot(calculation) {
+            let reservation = match guard.async_runtime().reserve_snapshot(calculation) {
                 Ok(reservation) => reservation,
                 Err(error) => {
                     let _ = catch_no_unwind(AssertUnwindSafe(|| drop(build)));
@@ -602,7 +593,6 @@ unsafe fn async_udf_boundary_instrumented_handle<A, Start, Build, T>(
 
 #[cfg(feature = "handles")]
 unsafe fn async_udf_boundary_uninstrumented_handle<A, Start, Build, T>(
-    runtime: &'static Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     guard: &crate::runtime::AsyncCallGuard<'_, A>,
     udf_id: &'static str,
     raw_handle: *mut XLOPER12,
@@ -617,7 +607,7 @@ unsafe fn async_udf_boundary_uninstrumented_handle<A, Start, Build, T>(
     Build: HandleScopedBuilder<T> + Send + 'static,
     T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
 {
-    let calculation = runtime.async_runtime().snapshot_calculation();
+    let calculation = guard.async_runtime().snapshot_calculation();
     let (cancellation, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
     // SAFETY: forwarded from this function's raw-handle contract.
     let responder = match unsafe { ExcelAsyncResponder::from_raw(udf_id, raw_handle) } {
@@ -633,7 +623,7 @@ unsafe fn async_udf_boundary_uninstrumented_handle<A, Start, Build, T>(
         }
     };
     let prepared = catch_no_unwind(AssertUnwindSafe(|| {
-        runtime.async_runtime().preflight_snapshot(&calculation)?;
+        guard.async_runtime().preflight_snapshot(&calculation)?;
         let lease = guard.try_execution_lease()?;
         let generation = lease.generation();
         start(guard, lease, token).map(|build| (generation, build))
@@ -641,7 +631,7 @@ unsafe fn async_udf_boundary_uninstrumented_handle<A, Start, Build, T>(
     .unwrap_or(Err(XllError::Panic));
     match prepared {
         Ok((generation, build)) => {
-            let reservation = match runtime.async_runtime().reserve_snapshot(calculation) {
+            let reservation = match guard.async_runtime().reserve_snapshot(calculation) {
                 Ok(reservation) => reservation,
                 Err(error) => {
                     let _ = catch_no_unwind(AssertUnwindSafe(|| drop(build)));

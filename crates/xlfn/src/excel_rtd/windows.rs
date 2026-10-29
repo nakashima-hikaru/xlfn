@@ -27,7 +27,7 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::Ordering;
 #[cfg(test)]
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32};
+use std::sync::atomic::{AtomicBool, AtomicU32};
 
 mod automation;
 mod class_factory;
@@ -100,7 +100,7 @@ use server::{
 #[cfg(test)]
 use server::{
     IID_IDISPATCH, IID_IRTD_SERVER, PANIC_IN_REFRESH_DATA, SERVER_NOT_STARTED, SERVER_START_FAILED,
-    SERVER_STARTED, SERVER_STARTING, ServerStartReservation, ensure_server_without_handles,
+    SERVER_STARTED, SERVER_STARTING, ensure_server_without_handles,
 };
 #[cfg(test)]
 use server_gate::{

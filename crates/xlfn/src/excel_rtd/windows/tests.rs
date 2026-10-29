@@ -1048,34 +1048,49 @@ fn inert_update_callback() -> Box<RetainedUpdateCallback> {
 
 #[test]
 fn server_start_reservation_is_single_use_and_rolls_back_failure() {
-    let state = AtomicU8::new(SERVER_NOT_STARTED);
-    let callbacks = crate::sync::Mutex::new(super::update_event::ServerCallbacks::default());
-
-    let first = ServerStartReservation::acquire(&state).unwrap();
-    assert_eq!(state.load(Ordering::Acquire), SERVER_STARTING);
-    assert!(ServerStartReservation::acquire(&state).is_none());
-
+    let _guard = TEST_LOCK.lock().unwrap();
+    let ensured = ensure_server_without_handles::<(), crate::DynamicRtdSources<()>>(None).unwrap();
+    // SAFETY: ensured retains this server throughout the reservation and cleanup.
+    let server = unsafe { &*ensured.pointer() };
+    let first = server.reserve_start().unwrap();
+    assert_eq!(server.start_state(), SERVER_STARTING);
+    assert!(server.reserve_start().is_none());
     drop(first);
-    assert_eq!(state.load(Ordering::Acquire), SERVER_NOT_STARTED);
+    assert_eq!(server.start_state(), SERVER_NOT_STARTED);
 
-    let (published, callback) = ServerStartReservation::acquire(&state)
+    let (published, callback) = server
+        .reserve_start()
         .unwrap()
-        .publish_callback(&callbacks, inert_update_callback());
-    assert!(callbacks.lock().active == Some(callback));
-    assert_eq!(callbacks.lock().records.len(), 1);
+        .publish_callback(inert_update_callback());
+    assert!(server.callbacks.lock().active == Some(callback));
+    assert_eq!(server.callbacks.lock().records.len(), 1);
     published.commit();
-    assert_eq!(state.load(Ordering::Acquire), SERVER_STARTED);
-    assert!(ServerStartReservation::acquire(&state).is_none());
+    assert_eq!(server.start_state(), SERVER_STARTED);
+    assert!(server.reserve_start().is_none());
+    super::server::discard_unpublished_server::<(), crate::DynamicRtdSources<()>>(
+        ensured.active.pointer,
+        ensured.newly_created,
+    );
+    assert!(server.callbacks.lock().records.is_empty());
 
-    let failed_state = AtomicU8::new(SERVER_NOT_STARTED);
-    let failed_callbacks = crate::sync::Mutex::new(super::update_event::ServerCallbacks::default());
-    let (failed, _) = ServerStartReservation::acquire(&failed_state)
+    let failed = ensure_server_without_handles::<(), crate::DynamicRtdSources<()>>(None).unwrap();
+    // SAFETY: failed owns a reference to the replacement until cleanup completes.
+    let failed_server = unsafe { &*failed.pointer() };
+    assert_ne!(ensured.pointer(), failed.pointer());
+    let (published, _) = failed_server
+        .reserve_start()
         .unwrap()
-        .publish_callback(&failed_callbacks, inert_update_callback());
-    drop(failed);
-    assert_eq!(failed_state.load(Ordering::Acquire), SERVER_START_FAILED);
-    assert_eq!(failed_callbacks.lock().records.len(), 1);
-    assert!(ServerStartReservation::acquire(&failed_state).is_none());
+        .publish_callback(inert_update_callback());
+    drop(published);
+    assert_eq!(failed_server.start_state(), SERVER_START_FAILED);
+    assert_eq!(failed_server.callbacks.lock().records.len(), 1);
+    assert!(failed_server.reserve_start().is_none());
+    // Publishing on the replacement did not repopulate the former target.
+    assert!(server.callbacks.lock().records.is_empty());
+    super::server::discard_unpublished_server::<(), crate::DynamicRtdSources<()>>(
+        failed.active.pointer,
+        failed.newly_created,
+    );
 }
 
 #[test]
@@ -1092,18 +1107,15 @@ fn failed_server_start_is_retired_without_server_terminate_before_retry() {
     // Exercise the post-publication failure: the subscription server closes
     // after ServerStart is admitted, so notification attachment must fail.
     let operation = server_ref.operations.enter().unwrap();
-    let start = ServerStartReservation::acquire(&server_ref.start_state).unwrap();
+    let start = server_ref.reserve_start().unwrap();
     let drops = Arc::clone(&callback_drops);
-    let (start, callback) = start.publish_callback(
-        &server_ref.callbacks,
-        Box::new(RetainedUpdateCallback {
-            cookie: None,
-            pump: None,
-            drop_hook: Some(Arc::new(move || {
-                drops.fetch_add(1, Ordering::AcqRel);
-            })),
-        }),
-    );
+    let (start, callback) = start.publish_callback(Box::new(RetainedUpdateCallback {
+        cookie: None,
+        pump: None,
+        drop_hook: Some(Arc::new(move || {
+            drops.fetch_add(1, Ordering::AcqRel);
+        })),
+    }));
     failed.subscription_server.unwrap().terminate().unwrap();
     // SAFETY: `failed` retains the server and the callback is server-owned.
     let attach_result =
@@ -1136,9 +1148,10 @@ fn failed_server_start_is_retired_without_server_terminate_before_retry() {
 
     // SAFETY: the replacement guard retains its independently allocated server.
     let replacement_ref = unsafe { &*(replacement.pointer()) };
-    let start = ServerStartReservation::acquire(&replacement_ref.start_state)
+    let start = replacement_ref
+        .reserve_start()
         .expect("replacement must accept a fresh ServerStart");
-    let (start, _) = start.publish_callback(&replacement_ref.callbacks, inert_update_callback());
+    let (start, _) = start.publish_callback(inert_update_callback());
     start.commit();
     shutdown_subscriptions(&subscriptions).unwrap();
     drop(subscriptions);
@@ -1482,11 +1495,15 @@ fn deferred_termination_spawn_failure_rolls_back_atomically() {
     // SAFETY: ACTIVE_SERVER and `ensured` retain the server for this test.
     let server_ref = unsafe { &*server };
     let operation = server_ref.operations.enter().unwrap();
+    let references = server_ref.references.load(Ordering::Acquire);
 
     FAIL_DEFERRED_TERMINATION_SPAWN.store(true, Ordering::Release);
     // SAFETY: `server_ref` proves that the raw server remains live.
     assert_eq!(unsafe { server_terminate(server) }, E_FAIL);
     assert_eq!(server_ref.operations.phase(), ServerPhase::Open);
+    // Spawn failure drops both the bound work's COM reference and ticket,
+    // while the still-held reservation restores admission atomically.
+    assert_eq!(server_ref.references.load(Ordering::Acquire), references);
     assert_eq!(
         server_ref.termination_worker.phase(),
         TerminationWorkerStatus::Idle
@@ -4447,17 +4464,14 @@ fn failed_observation_after_failed_start_disposes_callback_exactly_once() {
     let server = unsafe { &*(retained.pointer()) };
     let drops = Arc::new(AtomicUsize::new(0));
     let tracked = Arc::clone(&drops);
-    let start = ServerStartReservation::acquire(&server.start_state).unwrap();
-    let (start, _) = start.publish_callback(
-        &server.callbacks,
-        Box::new(RetainedUpdateCallback {
-            cookie: None,
-            pump: None,
-            drop_hook: Some(Arc::new(move || {
-                tracked.fetch_add(1, Ordering::AcqRel);
-            })),
-        }),
-    );
+    let start = server.reserve_start().unwrap();
+    let (start, _) = start.publish_callback(Box::new(RetainedUpdateCallback {
+        cookie: None,
+        pump: None,
+        drop_hook: Some(Arc::new(move || {
+            tracked.fetch_add(1, Ordering::AcqRel);
+        })),
+    }));
     drop(start);
     drop(observation);
     assert!(ACTIVE_SERVER.lock().is_none());
@@ -4480,7 +4494,7 @@ fn failed_observation_during_server_start_defers_teardown_until_com_call_exits()
     // SAFETY: retained keeps the server live while its admitted COM method runs.
     let server = unsafe { &*(retained.pointer()) };
     let operation = server.operations.enter().unwrap();
-    let start = ServerStartReservation::acquire(&server.start_state).unwrap();
+    let start = server.reserve_start().unwrap();
     drop(observation);
     assert!(ACTIVE_SERVER.lock().is_some());
     assert!(matches!(
@@ -4510,9 +4524,10 @@ fn failed_observation_after_successful_start_preserves_com_publication_until_shu
     .unwrap();
     // SAFETY: retained keeps the server live through observation and shutdown.
     let server = unsafe { &*(retained.pointer()) };
-    let (start, _) = ServerStartReservation::acquire(&server.start_state)
+    let (start, _) = server
+        .reserve_start()
         .unwrap()
-        .publish_callback(&server.callbacks, inert_update_callback());
+        .publish_callback(inert_update_callback());
     start.commit();
     drop(observation); // Excel can return failure after a successful ServerStart.
     assert_eq!(
@@ -4606,9 +4621,10 @@ fn observation_admission_detects_reentrant_failed_start_recovery() {
     let pointer = observation.server().pointer();
     // SAFETY: observation owns a live reference and operation admission.
     let server = unsafe { &*pointer };
-    let (start, _) = ServerStartReservation::acquire(&server.start_state)
+    let (start, _) = server
+        .reserve_start()
         .unwrap()
-        .publish_callback(&server.callbacks, inert_update_callback());
+        .publish_callback(inert_update_callback());
     drop(start);
     assert!(matches!(
         ensure_server_without_handles(Some(BackendSubscriptions::new(&subscriptions))),

@@ -194,7 +194,7 @@ mod tests {
         let owner = runtime.begin_open().unwrap();
         let lifecycle = lifecycle_access(&runtime);
 
-        rollback_active_open::<LayersPanic, HostAttached<LayersPanic>>(&runtime, &lifecycle, None);
+        rollback_active_open::<LayersPanic, HostAttached<LayersPanic>>(&lifecycle, None);
         assert_eq!(runtime.phase(), crate::lifecycle::LifecyclePhase::Opening);
 
         let mut owner = runtime.publish(owner, (), ());
@@ -220,13 +220,13 @@ mod tests {
             match initialize_addin::<LayersPanic>(test_open_context(), transaction) {
                 Ok(result) => result,
                 Err(failure) => {
-                    let error = failure.recover(&runtime, &lifecycle);
+                    let error = failure.recover(&lifecycle);
                     panic!("unexpected add-in initialization failure: {error}");
                 }
             };
         assert!(runtime.has_opening_generation());
         assert!(!runtime.has_current_generation());
-        rollback_active_open(&runtime, &lifecycle, Some(transaction));
+        rollback_active_open(&lifecycle, Some(transaction));
         assert_eq!(LAYERS_PANIC_QUIESCES.load(Ordering::Acquire), 1);
         assert_eq!(LAYERS_PANIC_CLOSES.load(Ordering::Acquire), 1);
     }
@@ -748,10 +748,7 @@ mod tests {
             match initialize_addin::<InitializationFailure<PANIC>>(context, transaction) {
                 Ok(_) => panic!("injected initialization failure must fail"),
                 Err(failure) => {
-                    assert!(matches!(
-                        failure.recover(&runtime, &lifecycle),
-                        XllError::Overloaded
-                    ));
+                    assert!(matches!(failure.recover(&lifecycle), XllError::Overloaded));
                 }
             }
         }));

@@ -11,7 +11,7 @@ use crate::runtime::open_txn::{
     GenerationStaged, HostAttached, Initialized, Initializing, OpeningTxn,
 };
 use crate::runtime::rollback::{active_runtime_generation, rollback_open};
-use crate::runtime::transactions::{open_addin_inner, rollback_active_open};
+use crate::runtime::transactions::open_addin_inner;
 use crate::runtime::{AddinLifecycleAccess, Runtime};
 
 pub(crate) enum OpenFailure<'runtime, A: Addin> {
@@ -34,33 +34,27 @@ pub(crate) enum OpenFailure<'runtime, A: Addin> {
 }
 
 impl<'runtime, A: Addin> OpenFailure<'runtime, A> {
-    pub(crate) fn recover(
-        self,
-        runtime: &'runtime Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
-        lifecycle: &AddinLifecycleAccess<'_, A>,
-    ) -> XllError {
+    pub(crate) fn recover(self, lifecycle: &AddinLifecycleAccess<'_, A>) -> XllError {
         match self {
             Self::HostAttached { transaction, error } => {
-                rollback_active_open(runtime, lifecycle, Some(*transaction));
+                transaction.into_rollback().run(lifecycle);
                 error
             }
             Self::Initializing { transaction, error } => {
                 // There is no application state on which to invoke quiesce.
                 // Abandoning this transaction quarantines it without issuing
                 // the empty-addin rollback certificate or permitting unload.
+                let recovery = transaction.deps().recovery();
                 drop(transaction);
-                crate::runtime::recovery::quarantine_for_hazard(
-                    runtime,
-                    crate::shutdown::UnloadHazard::AddinQuiesceFailed,
-                );
+                recovery.quarantine(Some(crate::shutdown::UnloadHazard::AddinQuiesceFailed));
                 error
             }
             Self::Initialized { transaction, error } => {
-                rollback_active_open(runtime, lifecycle, Some(*transaction));
+                transaction.into_rollback().run(lifecycle);
                 error
             }
             Self::GenerationStaged { transaction, error } => {
-                rollback_active_open(runtime, lifecycle, Some(*transaction));
+                transaction.into_rollback().run(lifecycle);
                 error
             }
         }
@@ -174,13 +168,13 @@ where
         ) {
             Ok(()) => transaction,
             Err(error) => {
-                rollback_active_open(runtime, lifecycle, Some(transaction));
+                transaction.into_rollback().run(lifecycle);
                 return Err(error);
             }
         };
         if runtime.host_intent() == crate::lifecycle::HostLifecycleIntent::ExplicitRemovalRequested
         {
-            rollback_active_open(runtime, lifecycle, Some(transaction));
+            transaction.into_rollback().run(lifecycle);
             return Err(XllError::Closing);
         }
         let (transaction, registrations) = open_addin_inner::<A>(
@@ -189,13 +183,13 @@ where
             descriptors,
             transaction,
         )
-        .map_err(|failure| failure.recover(runtime, lifecycle))?;
+        .map_err(|failure| failure.recover(lifecycle))?;
         let transaction = match transaction.install_lifecycle(lifecycle) {
             Ok(transaction) => transaction,
             Err((reason, transaction)) => {
                 return Err(transaction
                     .failure(crate::lifecycle::lifecycle_access_error(reason))
-                    .recover(runtime, lifecycle));
+                    .recover(lifecycle));
             }
         };
         transaction.stage_host_mutations(registrations).commit()

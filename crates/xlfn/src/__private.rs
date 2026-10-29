@@ -1525,10 +1525,7 @@ pub mod v1 {
                     Ok(_) => panic!("application initialization must fail"),
                     Err(failure) => failure,
                 };
-                assert!(matches!(
-                    failure.recover(runtime, &lifecycle),
-                    XllError::Overloaded
-                ));
+                assert!(matches!(failure.recover(&lifecycle), XllError::Overloaded));
                 assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
                 assert_eq!(QUIESCE_CALLS.load(Ordering::Relaxed), quiesces_before);
 
@@ -1560,10 +1557,7 @@ pub mod v1 {
                 .attach_host(crate::host_callback::HostCallbackSession::new());
             let lifecycle = runtime.bind_addin_lifecycle().unwrap();
             let failure = transaction.failure(XllError::Overloaded);
-            assert!(matches!(
-                failure.recover(runtime, &lifecycle),
-                XllError::Overloaded
-            ));
+            assert!(matches!(failure.recover(&lifecycle), XllError::Overloaded));
             assert_eq!(runtime.phase(), LifecyclePhase::Closed);
             release_open_residency_after_failure(&macro_runtime, newly_acquired);
             assert!(!runtime.module_residency_held());

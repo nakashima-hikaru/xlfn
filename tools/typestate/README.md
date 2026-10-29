@@ -121,3 +121,23 @@ lock. Failed resource certification returns the progressed module authority.
 COM gate phase/counters are read-only outside the gate module. Terminal worker
 join seals future starts, including an idle worker and a rolled-back reservation;
 start reservations are thread-affine and reject waiting on themselves.
+
+Opening acquisition retains its issuer and recovery responsibility immediately
+after the canonical start mutation, across return-admission reopening and module
+opening. There is no detached start descriptor or public raw-pair constructor.
+Rollback conversion retains its issuer and unfinished Drop recovery; neither
+failure recovery nor rollback execution accepts a separate runtime. Interrupted
+rollback returns its host journal and keeps untrusted lifecycle state quarantined.
+
+Async launch uses the registry and return protocol retained by its admission
+rather than accepting another runtime alongside the guard. ServerStart likewise
+reserves and publishes through one retained target; publication cannot select a
+different callback store, and the start atomic is read-only outside its module.
+
+Deferred termination transfers one affine ticket from its reservation into a
+server-owned worker payload. The ticket retains its barrier and attempt, and is
+consumed once to obtain the completion owner. A rolled-back ticket cannot finish
+a later attempt by the same thread. The startup reservation keeps the gate lock
+until spawn succeeds, and an uncommitted Drop reopens admission. Same-thread wait
+before commit is rejected, while another worker can wait for the commit. These
+restrictions do not limit repeated terminal drain observations or resource reapers.
