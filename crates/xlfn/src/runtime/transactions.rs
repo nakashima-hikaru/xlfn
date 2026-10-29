@@ -32,7 +32,6 @@ type InitializedOpenResult<'runtime, A> = Result<
 >;
 
 pub(crate) fn open_addin_inner<'runtime, A>(
-    runtime: &'runtime Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     build_info: BuildInfo,
     descriptors: &[RegistrationDescriptor],
     mut transaction: OpeningTxn<'runtime, A, HostAttached<A>>,
@@ -40,6 +39,7 @@ pub(crate) fn open_addin_inner<'runtime, A>(
 where
     A: Addin,
 {
+    let deps = transaction.deps();
     #[cfg(test)]
     let _diagnostic_test_guard = crate::diagnostics::DIAGNOSTIC_TEST_MUTEX.lock();
     if let Err(error) = crate::diagnostics::reset_diagnostic_router() {
@@ -73,10 +73,10 @@ where
             return Err(transaction.failure(error));
         }
     };
-    if runtime.host_intent() == crate::lifecycle::HostLifecycleIntent::ExplicitRemovalRequested {
+    if deps.host_intent() == crate::lifecycle::HostLifecycleIntent::ExplicitRemovalRequested {
         return Err(transaction.failure(XllError::Closing));
     }
-    let generation = runtime.protocol_generation().ok_or(XllError::Internal {
+    let generation = deps.protocol_generation().ok_or(XllError::Internal {
         diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_STATE,
     });
     let generation = match generation {
@@ -85,7 +85,7 @@ where
     };
     let context = OpenContext::new(registrar.module_path().clone(), build_info, generation);
     let (mut transaction, _runtime_config) = initialize_addin::<A>(context, transaction)?;
-    if runtime.host_intent() == crate::lifecycle::HostLifecycleIntent::ExplicitRemovalRequested {
+    if deps.host_intent() == crate::lifecycle::HostLifecycleIntent::ExplicitRemovalRequested {
         return Err(transaction.failure(XllError::Closing));
     }
     let has_async_functions = prepared_set
@@ -94,14 +94,14 @@ where
     if !prepared_set.as_slice().is_empty() {
         let event_result = {
             let host = RegistrationHost::new(transaction.callbacks_mut());
-            runtime.ensure_calculation_events(&host, has_async_functions)
+            deps.ensure_calculation_events(&host, has_async_functions)
         };
         match event_result {
             Ok(()) => {}
             Err(error) => return Err(transaction.failure(error)),
         }
     }
-    if runtime.host_intent() == crate::lifecycle::HostLifecycleIntent::ExplicitRemovalRequested {
+    if deps.host_intent() == crate::lifecycle::HostLifecycleIntent::ExplicitRemovalRequested {
         return Err(transaction.failure(XllError::Closing));
     }
     let registration_result = {
@@ -115,7 +115,7 @@ where
             return Err(transaction.failure(error));
         }
     };
-    if runtime.host_intent() == crate::lifecycle::HostLifecycleIntent::ExplicitRemovalRequested {
+    if deps.host_intent() == crate::lifecycle::HostLifecycleIntent::ExplicitRemovalRequested {
         // A successful Excel mutation still belongs to this transaction when
         // a nested close requested rollback. Preserve every ID so recovery
         // unregisters it using the original callback session.

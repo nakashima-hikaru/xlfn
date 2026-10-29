@@ -126,7 +126,7 @@ pub(super) struct DeferredTerminationReservation<'a> {
 }
 
 /// Holds the reservation lock until the worker handle has been installed.
-pub(super) struct PreparedDeferredTermination<'a> {
+struct PreparedDeferredTermination<'a> {
     reservation: DeferredTerminationReservation<'a>,
     committed: triomphe::Arc<AtomicBool>,
 }
@@ -141,6 +141,10 @@ pub(super) struct DeferredTerminationTicket {
 }
 
 impl DeferredTerminationTicket {
+    pub(super) fn belongs_to(&self, barrier: &ServerOperationBarrier) -> bool {
+        std::ptr::eq(self.barrier.as_ref(), barrier)
+    }
+
     pub(super) fn with_completion<R>(
         self,
         complete: impl FnOnce(ServerTermination<'_>) -> R,
@@ -158,7 +162,7 @@ impl DeferredTerminationTicket {
 }
 
 impl PreparedDeferredTermination<'_> {
-    pub(super) fn commit(self) {
+    fn commit(self) {
         self.reservation.commit();
         // The mutex guard is gone before same-thread completion is enabled.
         self.committed.store(true, Ordering::Release);
@@ -521,8 +525,67 @@ impl ServerOperationBarrier {
     }
 }
 
+/// One owner for reservation, fixed worker transfer and startup commit.
+/// Dropping it before spawning restores both the worker and the gate.
+pub(super) struct DeferredTerminationStart<
+    'reservation,
+    'server,
+    E: crate::RtdSubscription = (),
+    C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+> {
+    // Reset Starting before the gate can become Open on abandonment.
+    worker_start: TerminationWorkerStart<'server>,
+    prepared: PreparedDeferredTermination<'reservation>,
+    work: super::server::DeferredTerminationWork<E, C>,
+}
+
+impl<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>
+    DeferredTerminationStart<'_, '_, E, C>
+{
+    pub(super) fn spawn(self) -> std::io::Result<()> {
+        let Self {
+            worker_start,
+            prepared,
+            work,
+        } = self;
+        // Failure drops the prepared reservation without committing the phase.
+        // The only entrypoint available to work executes its owned ticket.
+        match work.spawn() {
+            Ok(handle) => {
+                worker_start.commit(handle);
+                prepared.commit();
+                Ok(())
+            }
+            Err(error) => {
+                // Restore the worker before reopening COM admission, just as
+                // an unspawned owner's field destruction does.
+                drop(worker_start);
+                drop(prepared);
+                Err(error)
+            }
+        }
+    }
+}
+
 impl<'a> DeferredTerminationReservation<'a> {
-    pub(super) fn prepare(
+    pub(super) fn start<'server, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>(
+        self,
+        server: &'server super::server::RtdServer<E, C>,
+    ) -> Result<DeferredTerminationStart<'a, 'server, E, C>, ServerCloseError> {
+        if !std::ptr::eq(self.barrier, server.operations.as_ref()) {
+            return Err(ServerCloseError::Reentrant);
+        }
+        let worker_start = server.termination_worker.reserve_start()?;
+        let (prepared, ticket) = self.prepare(triomphe::Arc::clone(&server.operations))?;
+        let work = server.deferred_termination_work(ticket);
+        Ok(DeferredTerminationStart {
+            worker_start,
+            prepared,
+            work,
+        })
+    }
+
+    fn prepare(
         self,
         barrier: triomphe::Arc<ServerOperationBarrier>,
     ) -> Result<(PreparedDeferredTermination<'a>, DeferredTerminationTicket), ServerCloseError>

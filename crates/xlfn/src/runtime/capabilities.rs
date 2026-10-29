@@ -76,7 +76,6 @@ pub(crate) struct OpenDeps<'a, A: Addin> {
     lifecycle: &'a LifecycleCoordinator<A>,
     addin_lifecycle: &'a ThreadAffineSlot<A::LifecycleState>,
     host: &'a HostLedger,
-    #[cfg(any(test, feature = "refinement"))]
     residency: &'a ModuleResidency,
     returns: &'a ReturnProtocol,
     #[cfg(feature = "async")]
@@ -102,7 +101,6 @@ impl<'a, A: Addin> OpenDeps<'a, A> {
             lifecycle: &runtime.lifecycle,
             addin_lifecycle: &runtime.addin_lifecycle,
             host: &runtime.host,
-            #[cfg(any(test, feature = "refinement"))]
             residency: &runtime.residency,
             returns: &runtime.return_protocol,
             #[cfg(feature = "async")]
@@ -190,6 +188,19 @@ impl<'a, A: Addin> OpenDeps<'a, A> {
         &self,
     ) -> Option<crate::generation::RuntimeGeneration> {
         self.lifecycle.access().protocol_generation()
+    }
+
+    pub(in crate::runtime) fn host_intent(&self) -> crate::lifecycle::HostLifecycleIntent {
+        self.lifecycle.access().host_intent()
+    }
+
+    pub(in crate::runtime) fn ensure_calculation_events(
+        &self,
+        host: &crate::registration::RegistrationHost<'_>,
+        has_async_functions: bool,
+    ) -> crate::XllResult<()> {
+        self.residency
+            .ensure_calculation_events(host, has_async_functions)
     }
 
     pub(in crate::runtime) fn merge_host(&self, journal: crate::registration::HostMutationJournal) {
@@ -460,5 +471,56 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
     #[cfg(test)]
     pub(in crate::runtime) fn release_test_module_lease(&self) {
         drop(self.lifecycle.test_module_lease.lock().take());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host_callback::HostCallbackSession;
+    use crate::lifecycle::{HostLifecycleIntent, LifecyclePhase};
+    use crate::registration::RegistrationHost;
+    use crate::registration::host::test_support::{CallbackScript, Reply};
+
+    #[test]
+    fn opening_operations_remain_at_the_transaction_issuer() {
+        let issuer = Runtime::<()>::new();
+        let other = Runtime::<()>::new();
+        let transaction = issuer.begin_open().unwrap();
+        let generation = transaction.attempt_id().into_runtime_generation();
+        let mut transaction = transaction.attach_host(HostCallbackSession::new());
+        let deps = transaction.deps();
+        let other_control = other.lifecycle_control();
+        other_control.request_explicit_removal();
+
+        assert_eq!(deps.host_intent(), HostLifecycleIntent::None);
+        assert_eq!(deps.protocol_generation(), Some(generation));
+        assert_eq!(other.protocol_generation(), None);
+        assert_eq!(
+            other.host_intent(),
+            HostLifecycleIntent::ExplicitRemovalRequested
+        );
+
+        let script = CallbackScript::install([Reply::success(
+            xlfn_sys::XL_EVENT_REGISTER,
+            xlfn_sys::XLOPER12::integer(7),
+        )]);
+        let host = RegistrationHost::new(transaction.callbacks_mut());
+        deps.ensure_calculation_events(&host, false).unwrap();
+        deps.ensure_calculation_events(&host, false).unwrap();
+        script.assert_calls(&[xlfn_sys::XL_EVENT_REGISTER]);
+        assert_eq!(issuer.resident_event_count(), 1);
+        assert_eq!(other.resident_event_count(), 0);
+        assert!(issuer.module_residency_held());
+        assert!(!other.module_residency_held());
+
+        drop(transaction);
+        assert_eq!(issuer.phase(), LifecyclePhase::Quarantined);
+        assert_eq!(other.phase(), LifecyclePhase::Closed);
+        assert_eq!(
+            other.host_intent(),
+            HostLifecycleIntent::ExplicitRemovalRequested
+        );
+        assert_eq!(other.resident_event_count(), 0);
     }
 }

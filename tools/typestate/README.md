@@ -141,3 +141,16 @@ a later attempt by the same thread. The startup reservation keeps the gate lock
 until spawn succeeds, and an uncommitted Drop reopens admission. Same-thread wait
 before commit is rejected, while another worker can wait for the commit. These
 restrictions do not limit repeated terminal drain observations or resource reapers.
+
+Deferred worker startup is one consuming transaction. Its private fields keep the
+gate reservation, worker-start reservation, completion ticket and COM reference
+together. Only `spawn(self)` can use the fixed worker entrypoint, register its
+handle and commit the gate. Sibling callers cannot prepare a detached ticket or
+commit a termination without its worker. Failed or abandoned startup restores
+the worker before reopening the gate.
+
+Open initialization obtains host intent, generation and calculation-event
+registration/residency from its transaction's issuer. The internal entrypoint
+has no independent runtime parameter. Production-only feature combinations must
+also compile with warnings denied; all-features tests alone do not detect dead
+APIs whose only callers are tests or internal instrumentation.

@@ -245,6 +245,7 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
         self.residency.release()
     }
 
+    #[cfg(test)]
     pub(crate) fn ensure_calculation_events(
         &self,
         host: &crate::registration::RegistrationHost<'_>,
@@ -806,7 +807,10 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
         self.async_runtime.close()
     }
 
-    #[cfg(feature = "async")]
+    #[cfg(all(
+        feature = "async",
+        any(test, all(feature = "bench-internals", feature = "async-builtin"))
+    ))]
     pub(crate) fn async_runtime(&self) -> &crate::async_udf::AsyncRuntime<A::AsyncExecutor> {
         &self.async_runtime
     }

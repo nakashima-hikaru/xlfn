@@ -1485,6 +1485,118 @@ fn deferred_termination_drains_callbacks_and_rejects_worker_self_close() {
     drop(ensured);
 }
 
+#[test]
+fn deferred_start_abandonment_restores_gate_worker_and_reference() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let ensured = ensure_server_without_handles::<(), crate::DynamicRtdSources<()>>(None).unwrap();
+    // SAFETY: ensured owns a COM reference throughout the operation and reap.
+    let server = unsafe { &*ensured.pointer() };
+    let operation = server.operations.enter().unwrap();
+    let references = server.references.load(Ordering::Acquire);
+    let ServerTerminationRequest::Deferred(reservation) =
+        server.operations.request_termination().unwrap()
+    else {
+        panic!("admitted operation must defer termination");
+    };
+    let start = reservation.start(server).unwrap();
+    assert!(server.operations.try_phase().is_none());
+    assert_eq!(
+        server.termination_worker.phase(),
+        TerminationWorkerStatus::Starting
+    );
+    assert_eq!(server.references.load(Ordering::Acquire), references + 1);
+    drop(start);
+    assert_eq!(server.operations.phase(), ServerPhase::Open);
+    assert_eq!(
+        server.termination_worker.phase(),
+        TerminationWorkerStatus::Idle
+    );
+    assert_eq!(server.references.load(Ordering::Acquire), references);
+    drop(operation);
+    super::server::discard_unpublished_server::<(), crate::DynamicRtdSources<()>>(
+        ensured.active.pointer,
+        ensured.newly_created,
+    );
+}
+
+#[test]
+fn deferred_start_rejects_another_server_without_changing_its_worker() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let retired = ensure_server_without_handles::<(), crate::DynamicRtdSources<()>>(None).unwrap();
+    // SAFETY: retired keeps the old target allocated after removing its active ref.
+    let other = unsafe { &*retired.pointer() };
+    super::server::discard_unpublished_server::<(), crate::DynamicRtdSources<()>>(
+        retired.active.pointer,
+        retired.newly_created,
+    );
+    let references = other.references.load(Ordering::Acquire);
+    let ensured = ensure_server_without_handles::<(), crate::DynamicRtdSources<()>>(None).unwrap();
+    // SAFETY: ensured retains the new source through reservation rollback.
+    let source = unsafe { &*ensured.pointer() };
+    assert_ne!(retired.pointer(), ensured.pointer());
+    let operation = source.operations.enter().unwrap();
+    let ServerTerminationRequest::Deferred(reservation) =
+        source.operations.request_termination().unwrap()
+    else {
+        panic!("admitted operation must defer termination");
+    };
+    assert!(matches!(
+        reservation.start(other),
+        Err(ServerCloseError::Reentrant)
+    ));
+    assert_eq!(source.operations.phase(), ServerPhase::Open);
+    assert_eq!(
+        source.termination_worker.phase(),
+        TerminationWorkerStatus::Idle
+    );
+    assert_eq!(other.operations.phase(), ServerPhase::Terminated);
+    assert_eq!(
+        other.termination_worker.phase(),
+        TerminationWorkerStatus::Joined
+    );
+    assert_eq!(other.references.load(Ordering::Acquire), references);
+    drop(operation);
+    super::server::discard_unpublished_server::<(), crate::DynamicRtdSources<()>>(
+        ensured.active.pointer,
+        ensured.newly_created,
+    );
+}
+
+#[test]
+fn deferred_start_spawn_registers_worker_before_gate_commit() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let ensured = ensure_server_without_handles::<(), crate::DynamicRtdSources<()>>(None).unwrap();
+    // SAFETY: ensured retains this exact server through worker join and reap.
+    let server = unsafe { &*ensured.pointer() };
+    let operation = server.operations.enter().unwrap();
+    let references = server.references.load(Ordering::Acquire);
+    let ServerTerminationRequest::Deferred(reservation) =
+        server.operations.request_termination().unwrap()
+    else {
+        panic!("admitted operation must defer termination");
+    };
+    reservation.start(server).unwrap().spawn().unwrap();
+    assert_eq!(
+        server.termination_worker.phase(),
+        TerminationWorkerStatus::Running
+    );
+    assert!(matches!(
+        server.operations.phase(),
+        ServerPhase::Terminating { deferred: true, .. }
+    ));
+    assert_eq!(server.references.load(Ordering::Acquire), references + 1);
+    drop(operation);
+    assert!(server.operations.close_and_wait().unwrap().is_none());
+    server.termination_worker.seal_and_join().unwrap();
+    assert_eq!(server.operations.phase(), ServerPhase::Terminated);
+    assert_eq!(server.references.load(Ordering::Acquire), references);
+    assert!(ACTIVE_SERVER.lock().is_some());
+    super::server::discard_unpublished_server::<(), crate::DynamicRtdSources<()>>(
+        ensured.active.pointer,
+        ensured.newly_created,
+    );
+}
+
 #[cfg(feature = "handles")]
 #[test]
 fn deferred_termination_spawn_failure_rolls_back_atomically() {

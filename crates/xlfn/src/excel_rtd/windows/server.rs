@@ -1664,36 +1664,16 @@ unsafe fn finish_termination_request<E: RtdSubscription, C: crate::RtdSourceCata
             joined.teardown_and_remove_active(false)
         }
         ServerTerminationRequest::Deferred(reservation) => {
-            // The reservation retains the barrier mutex across worker startup,
-            // so a duplicate ServerTerminate cannot observe an in-progress
-            // phase that will subsequently roll back after spawn failure.
-            // SAFETY: `this` remains live through this COM call.
-            let worker_start = match unsafe { (*this).termination_worker.reserve_start() } {
+            // The consuming startup owner holds the gate lock through spawn,
+            // handle registration and commit. No detached ticket can be lost
+            // before a separate caller commits the termination phase.
+            // SAFETY: COM retains this server through the complete request.
+            let start = match reservation.start(unsafe { &*this }) {
                 Ok(start) => start,
                 Err(_) => return E_FAIL,
             };
-            // SAFETY: COM owns a live reference. This additional reference is
-            // transferred into the coordinator closure (or dropped on failure).
-            let reference = unsafe { OwnedServerReference::acquire(this) };
-            // The issuing reservation verifies the server's exact barrier
-            // before producing its one transferable completion ticket.
-            // SAFETY: this COM call retains the server while cloning its barrier.
-            let operations = unsafe { Arc::clone(&(*this).operations) };
-            let (reservation, ticket) = match reservation.prepare(operations) {
-                Ok(prepared) => prepared,
-                Err(_) => return E_FAIL,
-            };
-            let work = DeferredTerminationWork::<E, C> {
-                reference,
-                ticket,
-                _catalog: std::marker::PhantomData,
-            };
-            match spawn_deferred_termination(work) {
-                Ok(handle) => {
-                    worker_start.commit(handle);
-                    reservation.commit();
-                    S_OK
-                }
+            match start.spawn() {
+                Ok(()) => S_OK,
                 Err(_) => E_FAIL,
             }
         }
@@ -1702,10 +1682,38 @@ unsafe fn finish_termination_request<E: RtdSubscription, C: crate::RtdSourceCata
 
 /// The worker receives the server lifetime and its exact completion ticket as
 /// one private payload; it cannot substitute a target while waiting.
-struct DeferredTerminationWork<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> {
+pub(super) struct DeferredTerminationWork<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> {
     reference: OwnedServerReference,
     ticket: DeferredTerminationTicket,
     _catalog: std::marker::PhantomData<fn() -> (E, C)>,
+}
+
+impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> RtdServer<E, C> {
+    pub(super) fn deferred_termination_work(
+        &self,
+        ticket: DeferredTerminationTicket,
+    ) -> DeferredTerminationWork<E, C> {
+        // This constructor is used only by the gate's startup transaction,
+        // which verifies reservation ownership before issuing the ticket.
+        if !ticket.belongs_to(self.operations.as_ref()) {
+            xlfn_kernel::invariant::fail_stop();
+        }
+        // SAFETY: the borrowed server remains retained by the requesting COM
+        // call. The new reference covers its one fixed deferred worker.
+        let reference =
+            unsafe { OwnedServerReference::acquire(std::ptr::from_ref(self).cast_mut()) };
+        DeferredTerminationWork {
+            reference,
+            ticket,
+            _catalog: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> DeferredTerminationWork<E, C> {
+    pub(super) fn spawn(self) -> std::io::Result<std::thread::JoinHandle<()>> {
+        spawn_deferred_termination(self)
+    }
 }
 
 fn spawn_deferred_termination<E: RtdSubscription, C: crate::RtdSourceCatalog<E>>(

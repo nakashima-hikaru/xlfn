@@ -178,7 +178,6 @@ where
             return Err(XllError::Closing);
         }
         let (transaction, registrations) = open_addin_inner::<A>(
-            runtime,
             BuildInfo::new(addin_id.clone(), version, target),
             descriptors,
             transaction,

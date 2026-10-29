@@ -5,6 +5,7 @@ use std::num::NonZeroU64;
 pub(crate) struct RuntimeGeneration(NonZeroU64);
 
 impl RuntimeGeneration {
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) const fn new(raw: u64) -> Option<Self> {
         match NonZeroU64::new(raw) {
             Some(raw) => Some(Self(raw)),
@@ -70,6 +71,7 @@ impl OpenAttemptId {
         }
     }
 
+    #[cfg(any(test, feature = "refinement"))]
     pub(crate) const fn get(self) -> u64 {
         self.0.get()
     }
