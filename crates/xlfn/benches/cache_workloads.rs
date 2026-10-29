@@ -29,7 +29,7 @@ fn measure_small_budget_misses() {
             let started = Instant::now();
             for key in 0..10_000_u64 {
                 let value = cache
-                    .get_or_try_insert_with(black_box(key), |_| 1, || Ok(key))
+                    .get_or_try_insert_with(black_box(key), || Ok(key))
                     .unwrap();
                 black_box(*value);
             }
@@ -113,27 +113,25 @@ fn main() {
     ];
 
     for trace in traces {
-        let cache = CalculationCache::<u64, Box<[u64]>>::new(trace.budget);
+        let cache = CalculationCache::<u64, Box<[u64]>>::with_weigher(trace.budget, |payload| {
+            payload.len() * size_of::<u64>()
+        });
         for phase in ["cold", "repeat"] {
             let computes = Cell::new(0_usize);
             let computed_bytes = Cell::new(0_usize);
             let started = Instant::now();
             for &key in &trace.keys {
                 let lease = cache
-                    .get_or_try_insert_with(
-                        key,
-                        |payload| payload.len() * size_of::<u64>(),
-                        || {
-                            computes.set(computes.get() + 1);
-                            let bytes = (trace.weight)(key);
-                            computed_bytes.set(computed_bytes.get() + bytes);
-                            let payload = (0..bytes / size_of::<u64>())
-                                .map(|index| mix(black_box(key) ^ index as u64))
-                                .collect::<Vec<_>>()
-                                .into_boxed_slice();
-                            Ok(payload)
-                        },
-                    )
+                    .get_or_try_insert_with(key, || {
+                        computes.set(computes.get() + 1);
+                        let bytes = (trace.weight)(key);
+                        computed_bytes.set(computed_bytes.get() + bytes);
+                        let payload = (0..bytes / size_of::<u64>())
+                            .map(|index| mix(black_box(key) ^ index as u64))
+                            .collect::<Vec<_>>()
+                            .into_boxed_slice();
+                        Ok(payload)
+                    })
                     .unwrap();
                 black_box(&*lease);
             }

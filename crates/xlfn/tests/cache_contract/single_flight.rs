@@ -60,7 +60,7 @@ impl Eq for WitnessKey {}
 
 fn concurrent_initialization(budget: usize, weight: usize) {
     const THREADS: usize = 16;
-    let cache = CalculationCache::<WitnessKey, u32>::new(budget);
+    let cache = CalculationCache::<WitnessKey, usize>::with_weigher(budget, |value| *value);
     let calls = AtomicUsize::new(0);
     let (matched_tx, matched_rx) = mpsc::sync_channel(THREADS);
     let witness = Arc::new(FlightWitness {
@@ -81,18 +81,14 @@ fn concurrent_initialization(budget: usize, weight: usize) {
         let leader_calls = &calls;
         s.spawn(move || {
             let lease = leader_cache
-                .get_or_try_insert_with(
-                    leader_key,
-                    |_| weight,
-                    || {
-                        leader_calls.fetch_add(1, Ordering::SeqCst);
-                        started_tx.send(()).unwrap();
-                        release_rx.recv().expect("driver releases pending leader");
-                        Ok(49)
-                    },
-                )
+                .get_or_try_insert_with(leader_key, || {
+                    leader_calls.fetch_add(1, Ordering::SeqCst);
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().expect("driver releases pending leader");
+                    Ok(weight)
+                })
                 .unwrap();
-            assert_eq!(*lease, 49);
+            assert_eq!(*lease, weight);
         });
         started_rx
             .recv_timeout(Duration::from_secs(10))
@@ -107,13 +103,11 @@ fn concurrent_initialization(budget: usize, weight: usize) {
             let cache = &cache;
             s.spawn(move || {
                 let lease = cache
-                    .get_or_try_insert_with(
-                        key,
-                        |_| weight,
-                        || unreachable!("an enrolled follower must reuse its pending flight"),
-                    )
+                    .get_or_try_insert_with(key, || {
+                        unreachable!("an enrolled follower must reuse its pending flight")
+                    })
                     .unwrap();
-                assert_eq!(*lease, 49);
+                assert_eq!(*lease, weight);
             });
         }
         let enrolled =

@@ -50,8 +50,7 @@ fn post_compute_hash_panic_must_not_leak_the_creator_pin() {
 
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         let result = cache.get_or_try_insert_with(
-            key,
-            |_| 1, // Resident insertion executes user hashing after computation.
+            key, // Resident insertion executes user hashing after computation.
             || {
                 // Initial lookups succeeded; the next hash now fails after
                 // an application value has been created.
@@ -76,9 +75,9 @@ fn post_compute_hash_panic_must_not_leak_the_creator_pin() {
 #[test]
 fn a_usize_budget_must_not_silently_shrink_to_u32_max() {
     let budget = (u32::MAX as usize) + 1;
-    let cache = CalculationCache::<u8, ()>::new(budget);
+    let cache = CalculationCache::<u8, ()>::with_weigher(budget, |_| u32::MAX as usize + 1);
     let lease = cache
-        .get_or_try_insert_with(7, |_| budget, || Ok(()))
+        .get_or_try_insert_with(7, || Ok(()))
         .expect("computation succeeds");
     drop(lease);
 

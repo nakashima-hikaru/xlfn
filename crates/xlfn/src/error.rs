@@ -141,7 +141,8 @@ impl From<crate::diagnostics::DiagnosticInitError> for XllError {
         use crate::diagnostics::DiagnosticInitError;
         match error {
             DiagnosticInitError::Io(error) => error.into(),
-            error @ DiagnosticInitError::WorkerSpawn(_) => {
+            error @ (DiagnosticInitError::WorkerSpawn(_)
+            | DiagnosticInitError::AlreadyInstalled) => {
                 Self::custom(ExcelError::Value, error.to_string())
             }
             DiagnosticInitError::ReentrantMutation => Self::ReentrantCall,
@@ -671,6 +672,10 @@ mod tests {
     #[test]
     fn diagnostic_initialization_conversion_retains_lifecycle_and_worker_context() {
         use crate::diagnostics::DiagnosticInitError;
+        assert_eq!(
+            XllError::from(DiagnosticInitError::AlreadyInstalled).excel_error(),
+            ExcelError::Value
+        );
         assert!(matches!(
             DiagnosticInitError::ReentrantMutation.into_xll_error(),
             XllError::ReentrantCall

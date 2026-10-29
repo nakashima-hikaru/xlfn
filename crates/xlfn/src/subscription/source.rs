@@ -12,6 +12,7 @@ use crate::sync::Mutex;
 use crate::{XllError, XllResult};
 use std::marker::PhantomData;
 use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use crate::subscription_owner::{IntoRtdSubscription, RtdSubscription};
 
@@ -19,6 +20,11 @@ pub use crate::subscription_owner::{IntoRtdSubscription, RtdSubscription};
 mod lifecycle_tests;
 #[cfg(all(test, feature = "rtd"))]
 mod ticket_tests;
+
+// RuntimeGeneration belongs to an add-in's lifecycle coordinator. Distinct
+// coordinators can have the same generation, so source identities also bind
+// the registration authority that issued them.
+static NEXT_SOURCE_REGISTRATION_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Mutable source-registration authority available only during add-in open.
 ///
@@ -29,6 +35,7 @@ pub(crate) struct SourceRegistration<
     C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
 > {
     generation: RuntimeGeneration,
+    registration_id: Option<u64>,
     sources: Mutex<Option<C>>,
     marker: PhantomData<fn() -> E>,
 }
@@ -46,9 +53,14 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> std::fmt::Debug
     }
 }
 impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> SourceRegistration<E, C> {
-    pub(crate) const fn new(generation: RuntimeGeneration) -> Self {
+    pub(crate) fn new(generation: RuntimeGeneration) -> Self {
         Self {
             generation,
+            registration_id: NEXT_SOURCE_REGISTRATION_ID
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    current.checked_add(1)
+                })
+                .ok(),
             sources: Mutex::new(None),
             marker: PhantomData,
         }
@@ -61,13 +73,19 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> SourceRegistration<E, C>
                 "RTD source catalog is already registered",
             ));
         }
-        let handles = catalog.handles(self.generation);
+        let handles = catalog.handles(self.generation, self.registration_id()?);
         *sources = Some(catalog);
         Ok(handles)
+    }
+    fn registration_id(&self) -> XllResult<u64> {
+        self.registration_id.ok_or(XllError::Internal {
+            diagnostic_id: crate::diagnostics::id::DiagnosticId::RTD_SUBSCRIPTION_ID_OVERFLOW,
+        })
     }
     pub(crate) fn finish(self) -> SourceArena<E, C> {
         SourceArena {
             generation: self.generation,
+            registration_id: self.registration_id,
             sources: self.sources.into_inner().map(C::store),
             marker: PhantomData,
         }
@@ -79,6 +97,7 @@ impl<E: RtdSubscription> SourceRegistration<E> {
         S: RtdSource,
         S::Subscription: IntoRtdSubscription<E>,
     {
+        let registration_id = self.registration_id()?;
         let mut registration = self.sources.lock();
         let sources = &mut registration
             .get_or_insert_with(crate::DynamicRtdSources::default)
@@ -95,8 +114,46 @@ impl<E: RtdSubscription> SourceRegistration<E> {
         }));
         Ok(RtdSourceHandle::from_id(SourceHandleId {
             generation: self.generation,
+            registration: registration_id,
             sequence,
         }))
+    }
+}
+
+#[cfg(feature = "rtd")]
+impl SourceRegistration<crate::BoxedRtdSubscription> {
+    pub(crate) fn register_erased<S: RtdSource>(&self, source: S) -> XllResult<RtdSourceHandle> {
+        self.register(BoxedSubscriptionSource(source))
+            .map(RtdSourceHandle::erase)
+    }
+}
+
+#[cfg(feature = "rtd")]
+struct BoxedSubscriptionSource<S>(S);
+
+// SAFETY: sink transfer and source shutdown delegate to the original source.
+// Boxing the successful subscription moves its complete barrier obligation.
+#[cfg(feature = "rtd")]
+unsafe impl<S: RtdSource> RtdSource for BoxedSubscriptionSource<S> {
+    type Value = S::Value;
+    type Subscription = crate::BoxedRtdSubscription;
+
+    fn subscribe(
+        &self,
+        topic: &RtdTopic,
+        sink: RtdSink<Self::Value>,
+    ) -> XllResult<Self::Subscription> {
+        self.0
+            .subscribe(topic, sink)
+            .map(crate::BoxedRtdSubscription::new)
+    }
+
+    fn request_stop(&self) {
+        self.0.request_stop();
+    }
+
+    fn shutdown_and_wait(&self) -> XllResult<()> {
+        self.0.shutdown_and_wait()
     }
 }
 
@@ -107,6 +164,7 @@ pub(crate) struct SourceArena<
     C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
 > {
     generation: RuntimeGeneration,
+    registration_id: Option<u64>,
     sources: Option<C::Stored>,
     marker: PhantomData<fn() -> E>,
 }
@@ -120,12 +178,16 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> SourceArena<E, C> {
     pub(crate) fn empty(generation: RuntimeGeneration) -> Self {
         Self {
             generation,
+            registration_id: None,
             sources: None,
             marker: PhantomData,
         }
     }
     pub(crate) fn resolve(&self, id: SourceHandleId) -> Option<ResolvedSource<'_, E, C>> {
-        if id.generation != self.generation || id.sequence == 0 {
+        if id.generation != self.generation
+            || Some(id.registration) != self.registration_id
+            || id.sequence == 0
+        {
             return None;
         }
         let index = usize::try_from(id.sequence - 1).ok()?;
@@ -286,29 +348,35 @@ pub unsafe trait RtdSource: Send + Sync + 'static {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct SourceHandleId {
     pub(crate) generation: RuntimeGeneration,
+    pub(crate) registration: u64,
     pub(crate) sequence: u64,
 }
 
-/// Opaque identity returned by `RtdOpenContext::register_source`.
+/// Opaque identity returned by RTD source registration.
 ///
 /// Copies refer to the same registered source. Registering another source
 /// creates a distinct identity, even if it has the same type or configuration.
 /// The runtime owns source storage; this handle does not extend its lifetime
-/// and cannot be used in a later add-in open generation.
-pub struct RtdSourceHandle<S: RtdSource> {
+/// and cannot be used by another registration or a later add-in generation.
+/// Registration identities remain distinct even when two add-ins have the
+/// same lifecycle generation number and source sequence.
+///
+/// The default form hides the source implementation. Typed registration also
+/// returns `RtdSourceHandle<S>`, which can be converted with [`Self::erase`].
+pub struct RtdSourceHandle<S = ()> {
     pub(crate) id: SourceHandleId,
     _source: PhantomData<fn() -> S>,
 }
 
-impl<S: RtdSource> Copy for RtdSourceHandle<S> {}
+impl<S> Copy for RtdSourceHandle<S> {}
 
-impl<S: RtdSource> Clone for RtdSourceHandle<S> {
+impl<S> Clone for RtdSourceHandle<S> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<S: RtdSource> std::fmt::Debug for RtdSourceHandle<S> {
+impl<S> std::fmt::Debug for RtdSourceHandle<S> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("RtdSourceHandle")
@@ -317,7 +385,14 @@ impl<S: RtdSource> std::fmt::Debug for RtdSourceHandle<S> {
     }
 }
 
-impl<S: RtdSource> RtdSourceHandle<S> {
+impl<S> RtdSourceHandle<S> {
+    /// Hides the source's concrete type while preserving the exact registered
+    /// identity and generation. This does not allocate or extend its lifetime.
+    #[must_use]
+    pub const fn erase(self) -> RtdSourceHandle {
+        RtdSourceHandle::from_id(self.id)
+    }
+
     pub(crate) const fn from_id(id: SourceHandleId) -> Self {
         Self {
             id,

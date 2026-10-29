@@ -28,6 +28,8 @@ pub(super) struct ParsedFunctionOptions {
     pub(super) description: Option<String>,
     pub(super) help_topic: Option<String>,
     pub(super) return_abi: Option<String>,
+    pub(super) input_semantics: Option<String>,
+    pub(super) handle_reuse: Option<String>,
     pub(super) thread_safe: bool,
     pub(super) macro_sheet: bool,
     pub(super) volatile: bool,
@@ -212,6 +214,21 @@ pub(super) fn parse_function_options(tokens: TokenStream) -> syn::Result<ParsedF
                 }
                 options.return_abi = Some(string_value(&value.value, "return_abi")?);
             }
+            Meta::NameValue(value) if value.path.is_ident("input_semantics") => {
+                if options.input_semantics.is_some() {
+                    return Err(syn::Error::new_spanned(
+                        value,
+                        "duplicate `input_semantics`",
+                    ));
+                }
+                options.input_semantics = Some(policy_value(&value.value, "input_semantics")?);
+            }
+            Meta::NameValue(value) if value.path.is_ident("handle_reuse") => {
+                if options.handle_reuse.is_some() {
+                    return Err(syn::Error::new_spanned(value, "duplicate `handle_reuse`"));
+                }
+                options.handle_reuse = Some(policy_value(&value.value, "handle_reuse")?);
+            }
             Meta::NameValue(value) if value.path.is_ident("crate") => {
                 if options.krate.is_some() {
                     return Err(syn::Error::new_spanned(value, "duplicate `crate`"));
@@ -221,7 +238,7 @@ pub(super) fn parse_function_options(tokens: TokenStream) -> syn::Result<ParsedF
             other => {
                 return Err(syn::Error::new_spanned(
                     other,
-                    "expected `name`, `id`, `category`, `description`, `help_topic`, `return_abi`, `thread_safe`, `macro_sheet`, `volatile`, `hidden`, or `crate`",
+                    "expected `name`, `id`, `category`, `description`, `help_topic`, `return_abi`, `input_semantics`, `handle_reuse`, `thread_safe`, `macro_sheet`, `volatile`, `hidden`, or `crate`",
                 ));
             }
         }

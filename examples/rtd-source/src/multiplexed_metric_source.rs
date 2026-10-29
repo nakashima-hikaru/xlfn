@@ -5,19 +5,15 @@ use xlfn::{
     prelude::*,
     rtd::{
         RtdLatest, RtdMultiplexedSource, RtdProducerErrorPolicy, RtdSendError, RtdSender,
-        RtdSourceContext, RtdSourceEvent, RtdSubscriptionId, RtdTopic, RtdValue,
+        RtdSource, RtdSourceContext, RtdSourceEvent, RtdSubscriptionId, RtdTopic, RtdValue,
     },
 };
 
 use super::Client;
 
-type MetricProducer = fn(RtdSourceContext<RtdValue, RtdLatest>) -> XllResult<()>;
-type MetricValidator = fn(&RtdTopic) -> XllResult<()>;
-pub(crate) type MetricSource = RtdMultiplexedSource<RtdValue, MetricProducer, MetricValidator, RtdLatest>;
-
-pub(crate) fn metric_source() -> MetricSource {
-    RtdMultiplexedSource::new(RtdLatest, produce_metrics as MetricProducer)
-        .with_topic_validator(validate_topic as MetricValidator)
+pub(crate) fn metric_source() -> impl RtdSource<Value = RtdValue> {
+    RtdMultiplexedSource::new(RtdLatest, produce_metrics)
+        .with_topic_validator(validate_topic)
         .with_error_policy(RtdProducerErrorPolicy::PublishError(
             ExcelError::NotAvailable,
         ))

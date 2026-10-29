@@ -76,8 +76,19 @@ Keep the source handle in add-in state and subscribe from a main-thread function
 {{#include ../../examples/rtd-source/src/lib.rs}}
 ```
 
-Place `#[excel_addin]` on the `Addin` implementation and declare both
-`RtdSubscription` and `RtdSources` there when registering sources. The macro
+Place `#[excel_addin]` on the `Addin` implementation. The example selects
+`type RtdSubscription = BoxedRtdSubscription;` and calls
+`context.rtd().register(source)`. The returned `RtdSourceHandle` hides the
+producer, closure, value and subscription implementation types from state.
+The macro supplies the dynamic catalog when `RtdSources` is omitted.
+
+Each registered source has one boxed adapter; each boxed subscription has
+one allocation and delegates cancellation and its consuming shutdown barrier
+to the original subscription. Sources keep their existing bounded queues,
+worker limits and backpressure policies. This type erasure changes dispatch,
+not lifecycle ownership.
+
+The macro
 checks the feature enabled in `xlfn` itself; do not put a consumer-side
 `#[cfg(feature = "rtd")]` on these associated types. Explicit RTD configuration
 requires enabling the dependency's `rtd` feature.
@@ -92,6 +103,8 @@ The source handle is the opaque RTD identity. Clone a handle when multiple
 functions should refer to the same source; registering a new source creates a
 distinct identity even when its value is equivalent. The runtime owns the
 source and subscription identity; handles do not extend its lifetime.
+The runtime checks both the registration identity and lifecycle generation,
+so a handle from another add-in cannot resolve a coincidentally numbered source.
 
 Declare one to sixteen known source types with
 `Addin::RtdSources = (SourceA, SourceB)` and
@@ -104,8 +117,12 @@ source. A one-source catalog uses `(Source,)`, including the trailing comma.
 For a source set assembled incrementally, or source types containing captured
 closures that cannot be named in an associated type, select
 `type RtdSources = xlfn::DynamicRtdSources<Self::RtdSubscription>;`.
-This mode retains `register_source(source)` and owns a boxed adapter per source.
-Both modes use the same typed subscription owners and shutdown barriers.
+This mode also retains `register_source(source)` for typed handles and common
+subscription owners. It owns a boxed adapter per source. A typed handle can
+be stored without its concrete source type by calling `.erase()`; the erased
+handle keeps the exact source identity and generation. Both forms can be
+passed to `subscribe`. Erasure cannot issue a source identity or transfer a
+handle to another generation.
 
 `context.rtd().subscribe(&source, &topic)` accepts an existing `RtdTopic`
 directly. Arrays, slices, and vectors of `String` or string references are

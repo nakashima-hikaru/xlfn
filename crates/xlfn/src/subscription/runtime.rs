@@ -13,7 +13,7 @@ use super::server::{
     OwnedServerOperation, SubscriptionServer, SubscriptionServerHandle, TerminationAdmission,
     cleanup_catalog_binding_and_pending,
 };
-use super::source::{RtdSource, RtdSourceHandle, RtdSubscription, SourceArena, SourceSubscription};
+use super::source::{RtdSourceHandle, RtdSubscription, SourceArena, SourceSubscription};
 use super::termination::{TerminationClaim, TerminationCoordinator};
 use super::topic::{
     BorrowedTopicParts, RtdLimits, SourceId, SubscriptionId, SubscriptionKey, TopicId,
@@ -230,10 +230,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         &self,
         source: &RtdSourceHandle<S>,
         topic: BorrowedTopicParts<'_, Part>,
-    ) -> XllResult<PreparedSubscription<'_, H, E, C>>
-    where
-        S: RtdSource,
-    {
+    ) -> XllResult<PreparedSubscription<'_, H, E, C>> {
         let _operation = self
             .services
             .runtime_gate

@@ -51,6 +51,59 @@ unsafe impl RtdSubscription for () {
     }
 }
 
+/// An owned subscription whose concrete implementation is hidden.
+///
+/// Use this as `Addin::RtdSubscription` with incremental RTD registration when
+/// source implementations should not appear in the add-in's state or type
+/// declarations. Each subscription adds one allocation and dynamic dispatch;
+/// typed subscription owners remain available for static catalogs.
+#[cfg(feature = "rtd")]
+pub struct BoxedRtdSubscription {
+    owner: Box<dyn SubscriptionOwner>,
+}
+
+#[cfg(feature = "rtd")]
+impl BoxedRtdSubscription {
+    /// Transfers a concrete subscription's complete cancellation and barrier
+    /// obligations into this owner.
+    #[must_use]
+    pub fn new<S: RtdSubscription>(subscription: S) -> Self {
+        Self {
+            owner: Box::new(subscription),
+        }
+    }
+}
+
+#[cfg(feature = "rtd")]
+trait SubscriptionOwner: Send {
+    fn cancel_owner(&self);
+    fn disconnect_owner(self: Box<Self>) -> XllResult<()>;
+}
+
+#[cfg(feature = "rtd")]
+impl<S: RtdSubscription> SubscriptionOwner for S {
+    fn cancel_owner(&self) {
+        RtdSubscription::request_cancel(self);
+    }
+
+    fn disconnect_owner(self: Box<Self>) -> XllResult<()> {
+        RtdSubscription::disconnect_and_wait(*self)
+    }
+}
+
+// SAFETY: the box exclusively owns the original subscription and delegates
+// both operations, including the consuming worker/callback barrier, to it.
+#[cfg(feature = "rtd")]
+unsafe impl RtdSubscription for BoxedRtdSubscription {
+    fn request_cancel(&self) {
+        self.owner.cancel_owner();
+    }
+
+    fn disconnect_and_wait(self) -> XllResult<()> {
+        self.owner.disconnect_owner()
+    }
+}
+
 /// Transfers a concrete subscription into an add-in's common subscription owner.
 ///
 /// A single subscription type already implements this conversion to itself.
@@ -270,6 +323,46 @@ mod tests {
         let counts = Arc::new(Counts::default());
         let subscription: Probe = Probe::new(&counts).into_rtd_subscription();
         subscription.disconnect_and_wait().unwrap();
+        assert_eq!(counts.disconnected.load(Ordering::Relaxed), 1);
+        assert_eq!(counts.dropped.load(Ordering::Relaxed), 1);
+    }
+
+    #[cfg(feature = "rtd")]
+    #[test]
+    fn miri_boxed_subscription_preserves_non_sync_owner_and_consuming_barrier() {
+        static_assertions::assert_impl_all!(BoxedRtdSubscription: Send);
+        static_assertions::assert_not_impl_any!(BoxedRtdSubscription: Sync, Clone, Copy);
+        let counts = Arc::new(Counts::default());
+        let subscription = BoxedRtdSubscription::new(Probe::new(&counts));
+        subscription.request_cancel();
+        subscription.disconnect_and_wait().unwrap();
+        assert_eq!(counts.cancelled.load(Ordering::Relaxed), 1);
+        assert_eq!(counts.disconnected.load(Ordering::Relaxed), 1);
+        assert_eq!(counts.dropped.load(Ordering::Relaxed), 1);
+    }
+
+    #[cfg(feature = "rtd")]
+    #[test]
+    fn miri_boxed_subscription_preserves_owner_after_cancel_panic() {
+        let counts = Arc::new(Counts::default());
+        let mut probe = Probe::new(&counts);
+        probe.cancel_panics = true;
+        let subscription = BoxedRtdSubscription::new(probe);
+        assert!(catch_no_unwind(AssertUnwindSafe(|| subscription.request_cancel())).is_err());
+        assert_eq!(counts.dropped.load(Ordering::Relaxed), 0);
+        subscription.disconnect_and_wait().unwrap();
+        assert_eq!(counts.disconnected.load(Ordering::Relaxed), 1);
+        assert_eq!(counts.dropped.load(Ordering::Relaxed), 1);
+    }
+
+    #[cfg(feature = "rtd")]
+    #[test]
+    fn miri_boxed_subscription_consuming_panic_drops_owner_once() {
+        let counts = Arc::new(Counts::default());
+        let mut probe = Probe::new(&counts);
+        probe.disconnect_panics = true;
+        let subscription = BoxedRtdSubscription::new(probe);
+        assert!(catch_no_unwind(AssertUnwindSafe(|| subscription.disconnect_and_wait())).is_err());
         assert_eq!(counts.disconnected.load(Ordering::Relaxed), 1);
         assert_eq!(counts.dropped.load(Ordering::Relaxed), 1);
     }

@@ -118,16 +118,12 @@ fn batch<const PROBE: bool>(
         let value = match operation {
             Operation::Cache => {
                 let lease = cache
-                    .get_or_try_insert_with(
-                        key,
-                        |_| VALUE_BYTES,
-                        || {
-                            if PROBE {
-                                report.computes += 1;
-                            }
-                            Ok(compute.evaluate(key, input))
-                        },
-                    )
+                    .get_or_try_insert_with(key, || {
+                        if PROBE {
+                            report.computes += 1;
+                        }
+                        Ok(compute.evaluate(key, input))
+                    })
                     .expect("cache miss batch returned a value");
                 black_box(*lease)
             }
@@ -163,7 +159,9 @@ impl Pool {
     fn new(workers: usize, keys: Keys, compute: Compute, operation: Operation) -> Self {
         assert!(workers != 0);
         assert!(REQUESTS_PER_WORKER * workers * VALUE_BYTES < BUDGET_BYTES);
-        let cache = Arc::new(CalculationCache::new(BUDGET_BYTES));
+        let cache = Arc::new(CalculationCache::with_weigher(BUDGET_BYTES, |_| {
+            VALUE_BYTES
+        }));
         // This is a representative numerical reduction, not an Excel call or
         // input-conversion measurement. The fixed source is allocated once.
         let input: Arc<[f64]> = (0..NUMERIC_ELEMENTS)

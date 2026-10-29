@@ -311,12 +311,12 @@ pub(crate) fn log_directory(addin_id: &super::AddinId) -> io::Result<PathBuf> {
 pub(crate) fn install_file_diagnostic_sink_at(
     path: PathBuf,
 ) -> Result<PathBuf, DiagnosticInitError> {
-    // Construct the replacement completely before touching the router. If file
-    // creation or worker startup fails, the current healthy sink remains active.
+    // Construct the sink before touching the router. Installation rejects an
+    // existing process-wide sink rather than implicitly replacing its owner.
     let sink = FileDiagnosticSink {
         log: Mutex::new(RotatingLog::open(path.clone())?),
     };
-    super::set_diagnostic_sink(sink)?;
+    super::install_diagnostic_sink(sink)?;
     Ok(path)
 }
 

@@ -10,6 +10,7 @@ fn trait_driven_function_signatures_compile() {
     tests.pass("tests/ui/pass/custom_collection_conversions.rs");
     tests.pass("tests/ui/pass/custom_reference_conversions.rs");
     tests.pass("tests/ui/pass/excel_enum.rs");
+    tests.pass("tests/ui/pass/eager_input_derives.rs");
     tests.pass("tests/ui/pass/error_conversions.rs");
     tests.pass("tests/ui/pass/macro_hygiene.rs");
     tests.pass("tests/ui/pass/opaque_udf_body.rs");
@@ -20,6 +21,7 @@ fn trait_driven_function_signatures_compile() {
     tests.pass("tests/ui/pass/udf_layers_tuple.rs");
     tests.compile_fail("tests/ui/fail/argument_trait_missing.rs");
     tests.compile_fail("tests/ui/fail/enum_legacy_variant.rs");
+    tests.compile_fail("tests/ui/fail/eager_identity_missing.rs");
     tests.compile_fail("tests/ui/fail/framework_error_construction.rs");
     tests.compile_fail("tests/ui/fail/context_*.rs");
     tests.compile_fail("tests/ui/fail/callback_*.rs");
@@ -64,6 +66,7 @@ fn trait_driven_function_signatures_compile() {
     {
         tests.pass("tests/ui/pass_async/owned_matrix.rs");
         tests.pass("tests/ui/pass_async/native_abi.rs");
+        tests.pass("tests/ui/pass_async/numeric_return_abi.rs");
         tests.pass("tests/ui/pass_async/context_modes.rs");
         tests.compile_fail("tests/ui/fail_async/context_*.rs");
         tests.compile_fail("tests/ui/fail_async/executor_*.rs");

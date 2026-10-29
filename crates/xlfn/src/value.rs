@@ -16,6 +16,7 @@ use xlfn_sys::XLOPER12Array;
 pub mod convert;
 /// Excel serial-date policy and value types.
 mod date;
+mod identity;
 /// Input conversion traits and presence/default handling.
 #[cfg(feature = "serde")]
 fn serialize_finite_number<S: serde::Serializer>(

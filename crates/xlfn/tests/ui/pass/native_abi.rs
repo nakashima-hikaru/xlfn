@@ -8,8 +8,6 @@ impl Addin for TestAddin {
     type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
-    #[cfg(feature = "async")]
-    type AsyncExecutor = xlfn::NoAsyncExecutor;
 
     fn open(_: &OpenContext<Self>) -> OpenResult<Self> {
         Ok(Opened::new(()))
@@ -57,6 +55,11 @@ macro_rules! forward_type {
 }
 forward_type!(::core::primitive::f64);
 
+#[excel_function(input_semantics = strict)]
+fn strict_function(number: NumberAlias, scalar: f64, text: String, values: NumericMatrixRef<'_>) -> f64 {
+    number + scalar + text.len() as f64 + values.iter().sum::<f64>()
+}
+
 fn main() {
     use xlfn::__private::v1::XLOPER12;
     type Value = *mut XLOPER12;
@@ -65,4 +68,5 @@ fn main() {
     let _: unsafe extern "system" fn(Value, Value, Value, Value) -> Value = xll_presence;
     let _: unsafe extern "system" fn(Value, Value, Value) -> Value = xll_fallback;
     let _: unsafe extern "system" fn(f64) -> Value = xll_forwarded;
+    let _: unsafe extern "system" fn(Value, Value, Value, *const xlfn::__private::v1::FP12) -> Value = xll_strict_function;
 }

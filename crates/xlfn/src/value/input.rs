@@ -2407,3 +2407,111 @@ mod preparation_tests {
         });
     }
 }
+
+#[cfg(test)]
+mod eager_derive_tests {
+    use super::*;
+    use crate::input_identity::{InputFingerprint, InputFingerprintBuilder};
+    use crate::value::Matrix;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static CONVERSIONS: AtomicUsize = AtomicUsize::new(0);
+    #[derive(crate::ExcelInputIdentity, crate::ExcelPrepare)]
+    struct Positive(f64);
+    impl<'call> FromExcel<'call> for Positive {
+        fn from_excel(value: XlValueRef<'call>, argument: &'static str) -> XllResult<Self> {
+            CONVERSIONS.fetch_add(1, Ordering::Relaxed);
+            let value = f64::from_excel(value, argument)?;
+            if value < 0.0 {
+                return Err(XllError::input(
+                    argument,
+                    crate::error::InputError::OutOfRange,
+                ));
+            }
+            Ok(Self(value))
+        }
+    }
+    #[derive(crate::ExcelInputIdentity)]
+    struct Shaped(Matrix<f64>);
+    #[derive(crate::ExcelInputIdentity)]
+    enum Variant {
+        First(f64),
+        Second(f64),
+    }
+
+    fn fingerprint(value: &impl ExcelInputIdentity) -> InputFingerprint {
+        let mut builder = InputFingerprintBuilder::new(1);
+        builder
+            .with_argument(0, "value", |encoder| {
+                value.encode_input_identity(encoder);
+                Ok(())
+            })
+            .unwrap();
+        builder.finish().unwrap()
+    }
+
+    #[test]
+    fn derive_delegates_canonical_float_and_container_encoding() {
+        assert_eq!(fingerprint(&Positive(-0.0)), fingerprint(&-0.0));
+        assert_ne!(fingerprint(&Positive(-0.0)), fingerprint(&Positive(0.0)));
+        let row = Matrix::new(1, 2, vec![1.0, 2.0]).unwrap();
+        let column = Matrix::new(2, 1, vec![1.0, 2.0]).unwrap();
+        assert_eq!(fingerprint(&Shaped(row.clone())), fingerprint(&row));
+        assert_ne!(fingerprint(&Shaped(row)), fingerprint(&Shaped(column)));
+        assert_ne!(
+            fingerprint(&Variant::First(1.0)),
+            fingerprint(&Variant::Second(1.0))
+        );
+    }
+
+    #[test]
+    fn container_field_identity_matches_formula_conversion() {
+        let mut cells = [XLOPER12::number(1.0), XLOPER12::nil()];
+        let root = XLOPER12 {
+            value: xlfn_sys::XLOPER12Value {
+                array: xlfn_sys::XLOPER12Array {
+                    rows: 1,
+                    columns: 2,
+                    values: cells.as_mut_ptr(),
+                },
+            },
+            xltype: xlfn_sys::XLTYPE_MULTI,
+        };
+        crate::call::with_excel_call_scope_and_state(&root, |root, scope| {
+            let raw = XlValueRef::from_array_cell(root).unwrap();
+            macro_rules! compare {
+                ($ty:ty) => {{
+                    let mut arguments = ArgumentContext::<FormulaInputMode>::from_scope(scope, 1);
+                    let converted = arguments.decode::<$ty>(0, "value", raw).unwrap();
+                    assert_eq!(
+                        Some(*fingerprint(&converted).as_bytes()),
+                        arguments.finish().unwrap()
+                    );
+                }};
+            }
+            compare!(Matrix<Option<f64>>);
+            compare!(Vec<crate::value::OptionalExcelValue<f64>>);
+            compare!(crate::value::Row<Option<f64>>);
+            compare!(Option<Matrix<Option<f64>>>);
+            compare!(crate::value::OptionalExcelValue<Matrix<Option<f64>>>);
+        });
+    }
+
+    #[test]
+    fn eager_derive_validates_before_lookup_and_materializes_without_conversion() {
+        CONVERSIONS.store(0, Ordering::Relaxed);
+        for (value, valid) in [(2.0, true), (-2.0, false)] {
+            let raw = xlfn_sys::XLOPER12::number(value);
+            let view = XlValueRef::from_array_cell(&raw).unwrap();
+            let mut encoder = InputIdentityEncoder::new("value");
+            let prepared = <Positive as PrepareExcel>::prepare(view, "value", &mut encoder);
+            assert_eq!(prepared.is_ok(), valid);
+            if let Ok(prepared) = prepared {
+                assert_eq!(CONVERSIONS.load(Ordering::Relaxed), 1);
+                assert_eq!(Positive::materialize(prepared).unwrap().0, value);
+                assert_eq!(CONVERSIONS.load(Ordering::Relaxed), 1);
+            }
+        }
+        assert_eq!(CONVERSIONS.load(Ordering::Relaxed), 2);
+    }
+}

@@ -9,13 +9,16 @@ features deliberately differ from the dependency's names:
 
 The normal library declares `#[excel_addin]` on its `impl Addin` and supplies
 no RTD associated types. It must compile with every combination of these flags.
-The three extra source cases verify explicit RTD configuration, public RTD
-exports, and `OpenContext::rtd` respectively. They compile only when `streaming`
+The four extra source cases verify explicit RTD configuration, public RTD
+exports, `OpenContext::rtd`, and erased source registration respectively.
+The erased case retains two sources with capturing closures and different
+value/subscription types in non-generic state handles, with only the common
+boxed owner selected in the add-in. They compile only when `streaming`
 is enabled. The disabled configurations must fail with the intended framework
 feature error, privacy/import errors, or missing capability method, rather than
 an unrelated Addin implementation error.
 
-Run all sixteen checks from the repository root:
+Run all twenty checks from the repository root:
 
 ```sh
 python3 -B tests/rtd-api-fixture/check.py

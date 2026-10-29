@@ -12,7 +12,7 @@ fn different_endpoint_markers_remain_distinct() {
     let ep_b = CacheEndpoint::<String, String, MarkerB>::new("endpoint");
 
     registry
-        .get_or_try_insert(&ep_a, "k1".to_string(), |_| 1, || Ok("val_a".to_string()))
+        .get_or_try_insert(&ep_a, "k1".to_string(), || Ok("val_a".to_string()))
         .unwrap();
 
     assert_eq!(
@@ -29,7 +29,7 @@ fn versioned_endpoint_ids_are_distinct() {
     let ep2 = CacheEndpoint::<String, String, MarkerA>::new("v2");
 
     registry
-        .get_or_try_insert(&ep1, "k1".to_string(), |_| 1, || Ok("val1".to_string()))
+        .get_or_try_insert(&ep1, "k1".to_string(), || Ok("val1".to_string()))
         .unwrap();
 
     assert_eq!(
@@ -46,10 +46,10 @@ fn registry_clear_clears_all_endpoints() {
     let ep_b = CacheEndpoint::<String, String, MarkerB>::new("ep_b");
 
     registry
-        .get_or_try_insert(&ep_a, "k1".to_string(), |_| 1, || Ok("val_a".to_string()))
+        .get_or_try_insert(&ep_a, "k1".to_string(), || Ok("val_a".to_string()))
         .unwrap();
     registry
-        .get_or_try_insert(&ep_b, "k2".to_string(), |_| 1, || Ok("val_b".to_string()))
+        .get_or_try_insert(&ep_b, "k2".to_string(), || Ok("val_b".to_string()))
         .unwrap();
 
     assert!(registry.get(&ep_a, &"k1".to_string()).unwrap().is_some());
@@ -59,6 +59,44 @@ fn registry_clear_clears_all_endpoints() {
 
     assert!(registry.get(&ep_a, &"k1".to_string()).unwrap().is_none());
     assert!(registry.get(&ep_b, &"k2".to_string()).unwrap().is_none());
+}
+
+#[test]
+fn endpoint_fixes_resource_units_for_all_callers_and_rejects_conflicts() {
+    static BYTES: CacheEndpoint<u32, String> =
+        CacheEndpoint::new("accounting-v1").with_weigher(String::len);
+    let registry = CacheRegistry::new(4);
+    drop(
+        registry
+            .get_or_try_insert(&BYTES, 1, || Ok("four".into()))
+            .unwrap(),
+    );
+    // A second caller uses the same policy, even for a different key. Five
+    // bytes exceed the fixed budget and must not become resident.
+    let oversized = registry
+        .get_or_try_insert(&BYTES, 2, || Ok("large".into()))
+        .unwrap();
+    assert_eq!(&*oversized, "large");
+    assert!(registry.get(&BYTES, &2).unwrap().is_none());
+
+    let units = CacheEndpoint::<u32, String>::new("accounting-v1");
+    // Warm TLS resolution must still reject a conflicting descriptor.
+    assert!(registry.get(&units, &1).is_err());
+    assert!(
+        registry
+            .get_or_try_insert(&units, 3, || Ok("other".into()))
+            .is_err()
+    );
+    std::thread::scope(|scope| {
+        // A fresh thread also checks policy on its cold shared-index path.
+        scope
+            .spawn(|| assert!(registry.get(&units, &1).is_err()))
+            .join()
+            .unwrap();
+    });
+    registry.clear();
+    assert!(registry.get(&units, &1).is_err());
+    assert!(registry.get(&BYTES, &1).unwrap().is_none());
 }
 
 #[test]

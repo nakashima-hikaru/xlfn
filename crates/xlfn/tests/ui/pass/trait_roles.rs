@@ -10,8 +10,6 @@ impl Addin for TestAddin {
     type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
-    #[cfg(feature = "async")]
-    type AsyncExecutor = xlfn::NoAsyncExecutor;
 
     fn open(
         _: &OpenContext<Self>,
@@ -41,7 +39,7 @@ mod reexported {
 
 use xlfn::handle::{Handle as ObjectHandle, HandleAlias as ObjectHandleAlias};
 
-#[excel_function(name = "TEST.HANDLE.DIRECT")]
+#[excel_function(name = "TEST.HANDLE.DIRECT", handle_reuse = inputs)]
 fn direct_handle() -> Dataset {
     Dataset
 }
@@ -61,7 +59,7 @@ fn result_handle() -> XllResult<Dataset> {
     Ok(Dataset)
 }
 
-#[excel_function(name = "TEST.HANDLE.RESULT.ALIASES")]
+#[excel_function(name = "TEST.HANDLE.RESULT.ALIASES", handle_reuse = never)]
 fn aliased_result_handle() -> FunctionResult<DatasetObject> {
     Ok(Dataset)
 }

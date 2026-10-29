@@ -2459,6 +2459,40 @@ mod tests {
     }
 
     #[test]
+    fn fallible_scalar_and_numeric_containers_preserve_selected_worksheet_errors() {
+        use crate::call_return::ExcelReturn;
+        use crate::value::{Column, PlainInputMode, Row};
+        static RUNTIME: Runtime<()> = Runtime::new();
+        let _test = test_lock();
+        let fixture = open_test_runtime(crate::runtime::StaticTestRuntime::from_static(&RUNTIME));
+        let runtime = fixture.runtime();
+        fn check<T: ExcelReturn<InputMode = PlainInputMode>>(runtime: &'static Runtime<()>) {
+            for error in [
+                ExcelError::NotAvailable,
+                ExcelError::Value,
+                ExcelError::DivisionByZero,
+            ] {
+                let pointer = udf_boundary_named(runtime, "preserved", "PRESERVED", |_, _| {
+                    ExcelReturn::into_excel(
+                        Err::<T, _>(XllError::custom(error, "application-selected error")),
+                        &mut ReturnContext::new(),
+                    )
+                });
+                // SAFETY: this is the latest live Q root returned by the boundary.
+                let value = unsafe { &*pointer };
+                assert_eq!(value.xltype, XLTYPE_ERR);
+                // SAFETY: the error tag selects the initialized error field.
+                assert_eq!(unsafe { value.value.error }, error.code());
+            }
+        }
+        check::<f64>(runtime);
+        check::<Matrix<f64>>(runtime);
+        check::<Row<f64>>(runtime);
+        check::<Column<f64>>(runtime);
+        assert_eq!(crate::boundary::host::host_auto_remove(runtime), 1);
+    }
+
+    #[test]
     fn miri_fp12_nested_in_q_and_logical_close_preserve_published_arrays() {
         static RUNTIME: Runtime<()> = Runtime::new();
         let _test = test_lock();

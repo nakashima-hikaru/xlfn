@@ -26,7 +26,7 @@ fn clear_and_final_lease_release_defer_reclamation_while_reading() {
         let drops = counters(1);
         let cache = CalculationCache::new(1);
         let lease = cache
-            .get_or_try_insert_with(
+            .get_or_try_insert_weighted(
                 0,
                 |_| 1,
                 || {
@@ -64,7 +64,7 @@ fn eviction_preserves_live_leases_and_drops_every_value_once() {
     let drops = counters(count);
     let cache = CalculationCache::new(2);
     let lease = cache
-        .get_or_try_insert_with(
+        .get_or_try_insert_weighted(
             0,
             |_| 1,
             || {
@@ -78,7 +78,7 @@ fn eviction_preserves_live_leases_and_drops_every_value_once() {
     for id in 1..count {
         drop(
             cache
-                .get_or_try_insert_with(
+                .get_or_try_insert_weighted(
                     id,
                     |_| 1,
                     || {
@@ -116,7 +116,7 @@ fn clear_races_concurrent_lookup_and_initialization() {
                 for round in 0..rounds {
                     let key = (round + worker) % 4;
                     let lease = cache
-                        .get_or_try_insert_with(key, |_| 1, || Ok(key))
+                        .get_or_try_insert_weighted(key, |_| 1, || Ok(key))
                         .unwrap();
                     assert_eq!(*lease, key);
                     if let Some(hit) = cache.get(&key) {
@@ -144,7 +144,7 @@ fn generation_rollover_cannot_publish_an_old_initializer_as_current() {
         let cache_ref = &cache;
         let old = scope.spawn(move || {
             let old = cache_ref
-                .get_or_try_insert_with(
+                .get_or_try_insert_weighted(
                     1,
                     |_| 1,
                     || {
@@ -158,7 +158,11 @@ fn generation_rollover_cannot_publish_an_old_initializer_as_current() {
         });
         started_rx.recv().unwrap();
         cache.clear();
-        drop(cache.get_or_try_insert_with(1, |_| 1, || Ok(22)).unwrap());
+        drop(
+            cache
+                .get_or_try_insert_weighted(1, |_| 1, || Ok(22))
+                .unwrap(),
+        );
         resume_tx.send(()).unwrap();
         old.join().unwrap();
     });
@@ -179,7 +183,7 @@ fn duplicate_initializers_share_a_single_computation() {
         let computes_ref = &computes;
         let leader = scope.spawn(move || {
             let lease = cache_ref
-                .get_or_try_insert_with(
+                .get_or_try_insert_weighted(
                     7,
                     |_| 1,
                     || {
@@ -198,7 +202,7 @@ fn duplicate_initializers_share_a_single_computation() {
             .map(|_| {
                 scope.spawn(|| {
                     let lease = cache
-                        .get_or_try_insert_with(
+                        .get_or_try_insert_weighted(
                             7,
                             |_| 1,
                             || {
@@ -225,14 +229,22 @@ fn duplicate_initializers_share_a_single_computation() {
 #[test]
 fn reentrant_miss_is_rejected_but_hits_and_clear_remain_safe() {
     let cache = CalculationCache::new(16);
-    drop(cache.get_or_try_insert_with(1, |_| 1, || Ok(10)).unwrap());
+    drop(
+        cache
+            .get_or_try_insert_weighted(1, |_| 1, || Ok(10))
+            .unwrap(),
+    );
     let outer = cache
-        .get_or_try_insert_with(
+        .get_or_try_insert_weighted(
             2,
             |_| 1,
             || {
                 assert_eq!(*cache.get(&1).unwrap(), 10);
-                assert!(cache.get_or_try_insert_with(3, |_| 1, || Ok(30)).is_err());
+                assert!(
+                    cache
+                        .get_or_try_insert_weighted(3, |_| 1, || Ok(30))
+                        .is_err()
+                );
                 cache.clear();
                 Ok(20)
             },
@@ -254,7 +266,7 @@ fn weighted_capacity_zero_oversized_and_drop_cleanup() {
         for id in 0..count {
             let weight = id % 23 + 1;
             let lease = cache
-                .get_or_try_insert_with(
+                .get_or_try_insert_weighted(
                     id,
                     |_| weight,
                     || {
@@ -292,7 +304,7 @@ fn heavy_concurrent_read_write_drains_retirement_debt() {
                 for round in 0..rounds {
                     let key = worker * rounds + round;
                     let lease = cache
-                        .get_or_try_insert_with(key, |_| 1, || Ok(key))
+                        .get_or_try_insert_weighted(key, |_| 1, || Ok(key))
                         .unwrap();
                     if let Some(hit) = cache.get(&key) {
                         assert_eq!(*hit, key);
@@ -316,17 +328,19 @@ fn failed_and_panicking_initializers_do_not_leave_pending_flights() {
     let cache = CalculationCache::<u32, u32>::new(16);
     assert!(
         cache
-            .get_or_try_insert_with(1, |_| 1, || Err(XllError::Closing))
+            .get_or_try_insert_weighted(1, |_| 1, || Err(XllError::Closing))
             .is_err()
     );
     assert!(
         catch_no_unwind(AssertUnwindSafe(|| {
-            let _ = cache.get_or_try_insert_with(1, |_| 1, || panic!("initializer fixture"));
+            let _ = cache.get_or_try_insert_weighted(1, |_| 1, || panic!("initializer fixture"));
         }))
         .is_err()
     );
     assert_eq!(
-        *cache.get_or_try_insert_with(1, |_| 1, || Ok(9)).unwrap(),
+        *cache
+            .get_or_try_insert_weighted(1, |_| 1, || Ok(9))
+            .unwrap(),
         9
     );
 }
@@ -345,12 +359,12 @@ fn panicking_initializers_drain_retired_values_after_unwinding() {
         let drops = Arc::new(AtomicUsize::new(0));
         let cache = CalculationCache::new(capacity);
         let previous = cache
-            .get_or_try_insert_with(1, |_| 1, || Ok(DeferredDrop(Arc::clone(&drops))))
+            .get_or_try_insert_weighted(1, |_| 1, || Ok(DeferredDrop(Arc::clone(&drops))))
             .unwrap();
         cache.clear();
         assert!(
             catch_no_unwind(AssertUnwindSafe(|| {
-                let _ = cache.get_or_try_insert_with(
+                let _ = cache.get_or_try_insert_weighted(
                     2,
                     |_| 1,
                     || {
@@ -373,7 +387,7 @@ fn panicking_initializers_do_not_wait_for_active_readers() {
         let drops = counters(1);
         let cache = CalculationCache::new(capacity);
         let previous = cache
-            .get_or_try_insert_with(
+            .get_or_try_insert_weighted(
                 0,
                 |_| 1,
                 || {
@@ -391,7 +405,7 @@ fn panicking_initializers_do_not_wait_for_active_readers() {
             let cache = &cache;
             let worker = scope.spawn(move || {
                 let panicked = catch_no_unwind(AssertUnwindSafe(|| {
-                    let _ = cache.get_or_try_insert_with(
+                    let _ = cache.get_or_try_insert_weighted(
                         1,
                         |_| 1,
                         || {

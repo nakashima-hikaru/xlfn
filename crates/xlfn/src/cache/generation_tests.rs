@@ -17,7 +17,7 @@ fn follower_receiving_result_across_clear_does_not_pollute_new_epoch() {
         let cache_ref = &cache;
         let leader = scope.spawn(move || {
             cache_ref
-                .get_or_try_insert_with(
+                .get_or_try_insert_weighted(
                     "k1".to_owned(),
                     |_| 1,
                     || {
@@ -32,7 +32,11 @@ fn follower_receiving_result_across_clear_does_not_pollute_new_epoch() {
         let flight = super::observe_pending_flight(&cache, "k1".to_owned());
         let follower = scope.spawn(|| {
             cache
-                .get_or_try_insert_with("k1".to_owned(), |_| 1, || panic!("follower must coalesce"))
+                .get_or_try_insert_weighted(
+                    "k1".to_owned(),
+                    |_| 1,
+                    || panic!("follower must coalesce"),
+                )
                 .unwrap()
         });
         let enrolled = super::followers_enrolled(&flight, 1);
@@ -54,7 +58,7 @@ fn follower_receiving_result_across_clear_does_not_pollute_new_epoch() {
     assert!(cache.get(&"k1".to_owned()).is_none());
     assert_eq!(cache.len(), 0);
     let fresh = cache
-        .get_or_try_insert_with("k1".to_owned(), |_| 1, || Ok("v2_fresh".to_owned()))
+        .get_or_try_insert_weighted("k1".to_owned(), |_| 1, || Ok("v2_fresh".to_owned()))
         .unwrap();
     assert_eq!(&*fresh, "v2_fresh");
     assert_eq!(cache.len(), 1);

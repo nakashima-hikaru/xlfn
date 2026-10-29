@@ -7,7 +7,6 @@ use std::thread::{self, JoinHandle};
 const HOT_KEY: u64 = 42;
 const LOOKUP_WEIGHT_BUDGET: usize = 64;
 const EVICTION_WEIGHT_BUDGET: usize = 1;
-const ENTRY_WEIGHT: u32 = 1;
 
 #[derive(Clone, Copy, Debug)]
 pub enum CacheLookupBenchCase {
@@ -103,7 +102,7 @@ fn warmed_calculation_cache(
     let cache = Arc::new(CalculationCache::<u64, u64>::new(LOOKUP_WEIGHT_BUDGET));
     for key in case.warm_keys(worker_count) {
         cache
-            .get_or_try_insert_with(key, |_| ENTRY_WEIGHT as usize, move || Ok(key))
+            .get_or_try_insert_with(key, move || Ok(key))
             .expect("cache benchmark warm seed failed");
     }
     cache
@@ -224,12 +223,7 @@ fn visit_registry_marker<const INDEX: usize, const SETUP: bool>(registry: &Cache
     if SETUP {
         drop(
             registry
-                .get_or_try_insert(
-                    &endpoint,
-                    HOT_KEY,
-                    |_| ENTRY_WEIGHT as usize,
-                    || Ok(INDEX as u64),
-                )
+                .get_or_try_insert(&endpoint, HOT_KEY, || Ok(INDEX as u64))
                 .expect("registry marker benchmark warm seed failed"),
         );
     }
@@ -373,12 +367,7 @@ impl RegistryCacheBenchmark {
         for (value, endpoint) in endpoints.iter().enumerate() {
             drop(
                 registry
-                    .get_or_try_insert(
-                        endpoint,
-                        HOT_KEY,
-                        |_| ENTRY_WEIGHT as usize,
-                        || Ok(value as u64),
-                    )
+                    .get_or_try_insert(endpoint, HOT_KEY, || Ok(value as u64))
                     .expect("registry cache benchmark warm seed failed"),
             );
         }
@@ -448,14 +437,14 @@ impl CurrentCacheEvictionBenchmark {
         for _ in 0..self.iterations {
             let lease_a = self
                 .cache
-                .get_or_try_insert_with(0, |_| ENTRY_WEIGHT as usize, || Ok(0))
+                .get_or_try_insert_with(0, || Ok(0))
                 .expect("current cache eviction seed A failed");
             // Clear retires A deterministically; relying only on admission would make
             // the measured retirement depend on capacity-one admission policy.
             self.cache.clear();
             let lease_b = self
                 .cache
-                .get_or_try_insert_with(1, |_| ENTRY_WEIGHT as usize, || Ok(1))
+                .get_or_try_insert_with(1, || Ok(1))
                 .expect("current cache eviction seed B failed");
             std::hint::black_box(&*lease_a);
             drop(lease_b);

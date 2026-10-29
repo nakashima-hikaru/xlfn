@@ -75,6 +75,9 @@ impl DiagnosticEvent<'_> {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum DiagnosticInitError {
+    /// A process-wide sink is already installed; replacement must be explicit.
+    #[error("a process-wide diagnostic sink is already installed")]
+    AlreadyInstalled,
     /// The diagnostic file or another sink resource could not be initialized.
     #[error(transparent)]
     Io(#[from] io::Error),

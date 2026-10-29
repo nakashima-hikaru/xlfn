@@ -621,6 +621,7 @@ mod typestate_tests {
         let mut entry = SubscriptionEntry {
             source_id: SourceId(SourceHandleId {
                 generation: RuntimeGeneration::new(1).unwrap(),
+                registration: 1,
                 sequence: 1,
             }),
             topic: RtdTopic::single("ticket-generation").unwrap(),

@@ -23,11 +23,6 @@ pub struct State {
 #[excel_addin(name = "Service Add-in", id = "service-addin", category = "Service")]
 impl Addin for ServiceAddin {
     type SharedState = State;
-    type LifecycleState = ();
-    type Error = XllError;
-    type Layers = ();
-    #[cfg(feature = "async")]
-    type AsyncExecutor = xlfn::NoAsyncExecutor;
 
     fn open(_: &OpenContext<Self>) -> OpenResult<Self> {
         Ok(Opened::new(State { scale: 2.0 }))
@@ -47,7 +42,11 @@ fn scale(
 Apply `#[excel_addin]` once to the crate-root `Addin` implementation. The
 macro emits the XLL lifecycle exports for its ordinary struct type. Each
 successful open creates a fresh state instance; worksheet calls borrow that
-instance until the generation is closed.
+instance until the generation is closed. The macro defaults `LifecycleState`
+and `Layers` to `()`, `Error` to `XllError`, and `AsyncExecutor` to
+`NoAsyncExecutor`. Declare those types only when changing these choices.
+Configured RTD and async associated types use xlfn's dependency features;
+remove consumer-side `#[cfg(feature = "async")]` from `AsyncExecutor`.
 
 `OpenResult<Self>` uses the state, layers, and error types declared by this
 implementation. `type Error` implements `IntoXllError`; `XllError` is a convenient starting

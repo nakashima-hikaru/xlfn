@@ -115,7 +115,7 @@ fn seed(registry: &CacheRegistry, endpoints: &[CacheEndpoint<u64, u64>]) {
     for (index, endpoint) in endpoints.iter().enumerate() {
         let value = index as u64;
         let lease = registry
-            .get_or_try_insert(endpoint, 1, |_| size_of::<u64>(), || Ok(value))
+            .get_or_try_insert(endpoint, 1, || Ok(value))
             .expect("registry allocation probe seeds an endpoint");
         assert_eq!(*lease, value);
         black_box(&*lease);
@@ -129,6 +129,7 @@ fn main() {
             CacheEndpoint::<u64, u64>::new(
                 std::str::from_utf8(name).expect("generated endpoint names are ASCII"),
             )
+            .with_weigher(|_| size_of::<u64>())
         })
         .collect();
 

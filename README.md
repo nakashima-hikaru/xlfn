@@ -65,9 +65,6 @@ pub struct ExampleAddin;
 #[excel_addin(name = "Example Add-in", id = "example-addin", category = "Example")]
 impl Addin for ExampleAddin {
     type SharedState = ();
-    type LifecycleState = ();
-    type Error = XllError;
-    type Layers = ();
 
     fn open(_: &OpenContext<Self>) -> OpenResult<Self> {
         Ok(Opened::new(()))

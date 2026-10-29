@@ -25,7 +25,7 @@ impl Dataset {
     }
 }
 
-#[excel_function(name = "DATASET.CREATE")]
+#[excel_function(name = "DATASET.CREATE", handle_reuse = inputs)]
 fn create_dataset(values: Row<f64>) -> XllResult<Dataset> {
     let values = values.into_vec();
     if values.is_empty() {
@@ -64,6 +64,7 @@ parameter type selects handle input conversion.
 
 ## Re-evaluation semantics
 
+`handle_reuse = inputs` is the default and may be written explicitly.
 The producing cell keeps an object for its current formula and converted
 inputs. Recalculating that same formula reuses the object without calling the
 producer again. Changing an input creates a new object and token. Renaming a
@@ -79,8 +80,40 @@ When the object depends on external data, add a version or snapshot ID as a
 formula argument. For example, a `DATASET.LOAD` function could accept a
 snapshot ID from `A1`; updating `A1` then creates a new object.
 
+Use `handle_reuse = never` when every Excel invocation must run the producer,
+for example to refresh an external snapshot:
+
+```rust
+{{#include ../fixtures/addin.md}}
+use xlfn::prelude::*;
+#[derive(ExcelHandleObject)]
+pub struct Snapshot { values: Vec<f64> }
+#[excel_function(name = "DATASET.RELOAD", handle_reuse = never)]
+fn reload_dataset(values: Row<f64>) -> Snapshot {
+    Snapshot { values: values.into_vec() }
+}
+```
+
+Each invocation publishes a fresh revision through the same transaction as an
+input change. A failed invocation leaves earlier bindings valid until Excel
+disconnects their topics. Successful publication does not synchronously revoke
+old tokens: Excel's `DisconnectData` retires the old binding; active calls and
+async leases may continue reading it until they finish. This policy does not
+make a function volatile, and volatile handle producers remain forbidden.
+
 If a custom argument type is used by a handle producer, implement
-`ExcelInputIdentity` and `PrepareExcel` alongside `FromExcel`.
+`ExcelInputIdentity` and `PrepareExcel` alongside `FromExcel`. For ordinary
+owned inputs, derive both contracts with `#[derive(ExcelInputIdentity,
+ExcelPrepare)]`. Implement only `FromExcel` to validate and convert the input.
+`ExcelPrepare` validates eagerly before the handle lookup, retains the converted
+value, and returns it on a miss. A hit drops that value without materialization.
+
+`ExcelInputIdentity` delegates to fields in declaration order, preserving the
+built-in floating-point bit representation, collection shape, and presence
+framing. Enum identities include the variant's declaration-order tag. Custom
+fields must implement the identity trait too; this is independent of `Hash`.
+For expensive inputs, implement `PrepareExcel` directly to defer allocation
+until a miss while completing all validation and identity in `prepare`.
 
 ## Handle alias functions
 

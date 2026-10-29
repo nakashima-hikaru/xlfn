@@ -85,9 +85,10 @@ output, and custom `IntoExcel` conversions. These output errors carry no
 worksheet argument name. A non-finite numeric input remains
 `InputError::NonFinite`, with the supplied argument name, and maps to `#VALUE!`.
 
-Synchronous numeric arrays default to FP12 (`K%`). Every FP12 failure returns
-null (`#NUM!`), including `ExcelValue` errors. Use
-`#[excel_function(return_abi = "xloper12")]` to preserve Q error distinctions.
+Ordinary numeric matrices, rows, and columns default to Q, including fallible
+returns. `NumericArrayOutput` and `return_abi = "fp12"` explicitly select FP12
+(`K%`). Every FP12 failure returns null (`#NUM!`), including `ExcelValue`
+errors. `return_abi = "xloper12"` overrides a numeric output type to Q.
 A diagnostic record cannot restore `IFNA` or other Excel formula semantics.
 If Excel fails native argument coercion before calling Rust, xlfn receives no
 call and cannot record that failure.
@@ -101,17 +102,20 @@ execution or shutdown state.
 
 ```rust
 # fn read_history(diagnostics: &xlfn::diagnostics::DiagnosticHistory) {
-use xlfn::diagnostics::DiagnosticCursor;
-let mut cursor = DiagnosticCursor::START;
-let page = diagnostics.errors_since(cursor, 100);
+let mut reader = diagnostics.history_reader();
+let page = reader.next_page(100);
 for error in &page.errors {
     println!("{}: {}", error.udf_id, error.message);
 }
-cursor = page.next_cursor;
 let missed = page.missed_events;
-# let _ = (cursor, missed);
+let next = reader.next_page(100);
+# let _ = (next, missed);
 # }
 ```
+
+The reader retains its history borrow and advances its own cursor, so it cannot
+accidentally be polled against another runtime. `errors_since` and
+`DiagnosticCursor` remain available for stateless queries.
 
 `ThreadSafeContext`, `MainThreadContext`, and `MacroSheetContext` expose
 `diagnostics()` for application code. For example:
@@ -146,7 +150,8 @@ retrying. Sink queue losses are counted separately.
 
 ## Install the file sink
 
-A basic production setup installs the built-in bounded file sink during `Addin::open`:
+A basic production setup installs the shared built-in bounded file sink during
+`Addin::open`. Installation fails if a process-wide sink already exists:
 
 ```rust
 {{#include ../fixtures/diagnostics.md}}
@@ -156,8 +161,6 @@ impl Addin for AppTools {
     type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
-    #[cfg(feature = "async")]
-    type AsyncExecutor = xlfn::NoAsyncExecutor;
 
     fn open(context: &OpenContext<Self>) -> XllResult<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>> {
         let path = context.diagnostics().install_file_sink()?;
@@ -204,7 +207,11 @@ impl DiagnosticSink for Telemetry {
 }
 ```
 
-Install the custom sink during `Addin::open`:
+Install the custom sink during `Addin::open`. The sink belongs to the shared
+process router; it is independent of each add-in runtime's failure history.
+`install_sink` returns `DiagnosticInitError::AlreadyInstalled` if a sink already
+exists. Use `replace_sink` when deliberately taking ownership of that shared
+configuration; replacement flushes and joins the previous worker.
 
 ```rust
 {{#include ../fixtures/diagnostics.md}}
@@ -217,11 +224,9 @@ impl Addin for AppTools {
     type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
-    #[cfg(feature = "async")]
-    type AsyncExecutor = xlfn::NoAsyncExecutor;
 
     fn open(context: &OpenContext<Self>) -> XllResult<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>> {
-        context.diagnostics().set_sink(Telemetry)?;
+        context.diagnostics().install_sink(Telemetry)?;
         Ok(Opened::new(State::new()))
     }
 }

@@ -1,3 +1,6 @@
+#[path = "../async_executor.rs"]
+mod executor;
+
 use xlfn::prelude::*;
 use xlfn::value::XlArrayRef;
 
@@ -7,15 +10,14 @@ struct BorrowedAsyncAliasAddin;
 
 #[excel_addin(name = "Borrowed Async Alias", id = "borrowed-async-alias", category = "Test")]
 impl Addin for BorrowedAsyncAliasAddin {
+    type AsyncExecutor = executor::Executor;
     type SharedState = ();
     type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
-    #[cfg(feature = "async")]
-    type AsyncExecutor = xlfn::NoAsyncExecutor;
 
-    fn open(_: &OpenContext<Self>) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
-        Ok(Opened::new(()))
+    fn open(_: &OpenContext<Self>) -> OpenResult<Self> {
+        Ok(Opened::new(()).with_async_executor(executor::Executor))
     }
 }
 

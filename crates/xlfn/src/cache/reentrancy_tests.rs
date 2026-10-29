@@ -88,7 +88,7 @@ impl Drop for DropProbe {
         let (done_tx, done_rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
             let result =
-                cache.get_or_try_insert_with(Key::plain(key), |_| 1, || Ok(DropProbe(None)));
+                cache.get_or_try_insert_weighted(Key::plain(key), |_| 1, || Ok(DropProbe(None)));
             let expected = if expect_error {
                 matches!(result, Err(XllError::Overloaded))
             } else {
@@ -112,7 +112,7 @@ fn double_checked_hit_reclaims_after_singleflight_unlock() {
     let cache = StdArc::new(CalculationCache::new(8));
     let reentry = Reentry::new(&cache, 3, false);
     let previous = cache
-        .get_or_try_insert_with(
+        .get_or_try_insert_weighted(
             Key::plain(0),
             |_| 1,
             || Ok(DropProbe(Some(StdArc::clone(&reentry)))),
@@ -138,7 +138,7 @@ fn double_checked_hit_reclaims_after_singleflight_unlock() {
             })),
         };
         worker_cache
-            .get_or_try_insert_with(
+            .get_or_try_insert_weighted(
                 key,
                 |_| 1,
                 || {
@@ -206,7 +206,7 @@ fn failed_follower_reclaims_after_flight_state_unlock() {
     let cache = StdArc::new(CalculationCache::new(8));
     let reentry = Reentry::new(&cache, 1, true);
     let previous = cache
-        .get_or_try_insert_with(
+        .get_or_try_insert_weighted(
             Key::plain(0),
             |_| 1,
             || Ok(DropProbe(Some(StdArc::clone(&reentry)))),
@@ -238,8 +238,11 @@ fn failed_follower_reclaims_after_flight_state_unlock() {
     drop(reader);
     assert_eq!(cache.reclamation_stats().pending_nodes, 1);
 
-    let result =
-        cache.get_or_try_insert_with(Key::plain(1), |_| 1, || panic!("must join failed flight"));
+    let result = cache.get_or_try_insert_weighted(
+        Key::plain(1),
+        |_| 1,
+        || panic!("must join failed flight"),
+    );
     assert!(matches!(result, Err(XllError::Overloaded)));
     reentry.assert_completed();
     assert_eq!(cache.reclamation_stats().pending_nodes, 0);
@@ -252,7 +255,7 @@ fn eviction_drops_values_outside_the_cache_lock() {
     let reentry = Reentry::new(&cache, 100, false);
     drop(
         cache
-            .get_or_try_insert_with(
+            .get_or_try_insert_weighted(
                 Key::plain(0),
                 |_| 1,
                 || Ok(DropProbe(Some(StdArc::clone(&reentry)))),
@@ -263,7 +266,7 @@ fn eviction_drops_values_outside_the_cache_lock() {
     for key in 1..16 {
         drop(
             cache
-                .get_or_try_insert_with(Key::plain(key), |_| 1, || Ok(DropProbe(None)))
+                .get_or_try_insert_weighted(Key::plain(key), |_| 1, || Ok(DropProbe(None)))
                 .unwrap(),
         );
         cache.maintenance();

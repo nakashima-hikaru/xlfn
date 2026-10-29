@@ -12,7 +12,7 @@ Apply `#[excel_function]` to a safe, non-generic free function:
 {{#include ../fixtures/addin.md}}
 use xlfn::prelude::*;
 
-#[excel_function(name = "MATH.HYPOT", thread_safe)]
+#[excel_function(name = "MATH.HYPOT", thread_safe, input_semantics = strict)]
 pub fn hypot(x: f64, y: f64) -> f64 {
     x.hypot(y)
 }
@@ -28,6 +28,19 @@ prefix for distributed functions, such as `ACME.MATH.HYPOT`, to avoid collisions
 with other add-ins. Registration rejects conflicting names.
 The macro rejects names longer than 255 UTF-16 code units, invalid name
 characters such as spaces or hyphens, and cell references such as `A1` or `R1C1`.
+
+## Select input conversion
+
+`input_semantics = strict` applies the declared type's `FromExcel` conversion
+to every ordinary parameter. Both `type Spot = f64` and a directly spelled
+`f64` then receive the original XLOPER12 value (`Q`), avoiding differences in
+Excel coercion caused by type aliases. `#[excel_arg(strict)]` remains useful
+for one parameter. Presence and default policies continue to apply.
+
+Without this option, recognized native scalar and string spellings retain
+Excel's native coercion. `NumericMatrixRef` still uses its explicit FP12 input
+ABI, and `#[excel_arg(reference)]` still uses the reference ABI; function-wide
+strictness does not change these specialized contracts.
 
 ## Return an expected error
 

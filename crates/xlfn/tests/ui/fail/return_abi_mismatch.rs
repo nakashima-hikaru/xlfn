@@ -10,8 +10,6 @@ impl Addin for ReturnMismatchAddin {
     type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
-    #[cfg(feature = "async")]
-    type AsyncExecutor = xlfn::NoAsyncExecutor;
 
     fn open(_: &OpenContext<Self>) -> Result<Opened<State, (), ()>, XllError> {
         Ok(Opened::new(State))

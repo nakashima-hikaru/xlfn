@@ -1,0 +1,121 @@
+{
+  "base_commit": "0dcac7c652a82c8ad55ccc0adacedbece7001650",
+  "command": "cargo bench -p xlfn --bench array_numeric_output --features bench-internals --locked -- '^array_numeric_output/(matrix_build_return|matrix_build_return_q|numeric_slice_convert_return|numeric_slice_convert_return_q)/(100|100000)$' --warm-up-time 1 --measurement-time 2 --sample-size 20",
+  "exit_code": 0,
+  "host": "macOS-27.2-arm64-arm-64bit-Mach-O",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-apple-darwin\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "binary_sha256": "48c3390fa869a6bcf858afcecb1f631d82cc6de625d88d5416d81150768648ac",
+  "source_sha256": {
+    "Cargo.lock": "e4ba36433a41d6422233692eba7472acfce585dee8ec6747bf29dd399ff4ccbd",
+    "crates/xlfn/benches/array_numeric_output.rs": "833c078e7a9caa6fb83e47bf1282da72f7b51c9d05e7d9765291569ed683ef96",
+    "crates/xlfn/src/benchmark_support/output.rs": "2f566b6f6fb448380d2059a2b41530e350dc8c9fbb75f406ff4476719ac2de63",
+    "crates/xlfn/src/return_abi/numeric.rs": "6ce7e583140769eb43c5c75625663cff51b7dc45232262f0cb797ab965f53e5b",
+    "crates/xlfn/src/return_abi.rs": "d948e24801fc44ab8c3dabbf82276182624774de228b0fc9d56718a627416f86"
+  },
+  "limitations": [
+    "Local macOS production return-path microbenchmark; no Excel invocation, Windows qualification, or full worksheet timing.",
+    "Development and other compilation work ran concurrently; intervals are exploratory and noisy.",
+    "Existing benchmark helper sets measurement time to 10 seconds, overriding CLI request of 2 seconds.",
+    "Return ABI runtime source snapshot includes new tests; production return implementation unchanged."
+  ],
+  "results": [
+    {
+      "case": "matrix_build_return/100",
+      "mean_ns": {
+        "confidence_interval": {
+          "confidence_level": 0.95,
+          "lower_bound": 205.90207300839887,
+          "upper_bound": 208.6534638085958
+        },
+        "point_estimate": 207.310996209648,
+        "standard_error": 0.7038869075187627
+      }
+    },
+    {
+      "case": "matrix_build_return/100000",
+      "mean_ns": {
+        "confidence_interval": {
+          "confidence_level": 0.95,
+          "lower_bound": 63546.75965929071,
+          "upper_bound": 67858.51236318477
+        },
+        "point_estimate": 65684.13237799802,
+        "standard_error": 1106.7096521675799
+      }
+    },
+    {
+      "case": "matrix_build_return_q/100",
+      "mean_ns": {
+        "confidence_interval": {
+          "confidence_level": 0.95,
+          "lower_bound": 176.6902670768011,
+          "upper_bound": 178.35536301568348
+        },
+        "point_estimate": 177.4439692853045,
+        "standard_error": 0.42776815611715313
+      }
+    },
+    {
+      "case": "matrix_build_return_q/100000",
+      "mean_ns": {
+        "confidence_interval": {
+          "confidence_level": 0.95,
+          "lower_bound": 91288.6094096112,
+          "upper_bound": 107147.7565754553
+        },
+        "point_estimate": 98943.73372804522,
+        "standard_error": 4072.618456936156
+      }
+    },
+    {
+      "case": "numeric_slice_convert_return/100",
+      "mean_ns": {
+        "confidence_interval": {
+          "confidence_level": 0.95,
+          "lower_bound": 173.0364357114058,
+          "upper_bound": 175.2831254864533
+        },
+        "point_estimate": 174.21700261400767,
+        "standard_error": 0.5744353508631136
+      }
+    },
+    {
+      "case": "numeric_slice_convert_return/100000",
+      "mean_ns": {
+        "confidence_interval": {
+          "confidence_level": 0.95,
+          "lower_bound": 34335.61654144883,
+          "upper_bound": 48991.542535782304
+        },
+        "point_estimate": 41525.32047716898,
+        "standard_error": 3754.621936970815
+      }
+    },
+    {
+      "case": "numeric_slice_convert_return_q/100",
+      "mean_ns": {
+        "confidence_interval": {
+          "confidence_level": 0.95,
+          "lower_bound": 127.287436935311,
+          "upper_bound": 144.39340040837655
+        },
+        "point_estimate": 133.80287911771433,
+        "standard_error": 4.677447021770113
+      }
+    },
+    {
+      "case": "numeric_slice_convert_return_q/100000",
+      "mean_ns": {
+        "confidence_interval": {
+          "confidence_level": 0.95,
+          "lower_bound": 62330.58137740879,
+          "upper_bound": 66390.69022169402
+        },
+        "point_estimate": 64227.62579810098,
+        "standard_error": 1043.7630423801158
+      }
+    }
+  ],
+  "source_snapshot_phase": "After measurement; only tests changed in return_abi.rs, production helper/benchmark unchanged.",
+  "log_normalization": "Trailing blank lines removed; measurement text unchanged."
+}

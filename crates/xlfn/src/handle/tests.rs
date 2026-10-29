@@ -1023,6 +1023,91 @@ fn explicit_handle_argument_conversion_resolves_a_typed_token() {
 }
 
 #[test]
+fn fresh_handle_revisions_run_factory_and_keep_old_leases_until_disconnect() {
+    let runtime = FormulaHandleService::new(8);
+    let inputs = crate::input_identity::InputFingerprint::from_bytes([42; 32]);
+    let caller = FormulaCaller {
+        sheet_id: 0,
+        row: 1,
+        column: 2,
+    };
+    let key = |inputs| HandleTopicKey::Formula(FormulaRevisionKey::new(caller, "RELOAD", inputs));
+    let first_key = key(super::fresh_invocation_inputs(inputs).unwrap());
+    let second_key = key(super::fresh_invocation_inputs(inputs).unwrap());
+    assert_ne!(first_key, second_key);
+    let calls = AtomicUsize::new(0);
+    let first = runtime
+        .prepare_observed(
+            first_key,
+            || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Ok(DataRecord(1))
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap()
+        .into_token();
+    runtime
+        .connect(lifetime_generation(1), 41, &first_key.format_lifetime_key())
+        .unwrap();
+
+    // A failed new invocation leaves the previous binding live.
+    let failed_key = key(super::fresh_invocation_inputs(inputs).unwrap());
+    assert!(
+        runtime
+            .prepare_observed::<DataRecord, _>(
+                failed_key,
+                || Err(XllError::custom(
+                    crate::ExcelError::NotAvailable,
+                    "unavailable"
+                )),
+                |_, _| Ok(())
+            )
+            .is_err()
+    );
+    assert_eq!(
+        with_handle::<DataRecord, _>(&runtime, &first, |value| value.0).unwrap(),
+        1
+    );
+
+    let second = runtime
+        .prepare_observed(
+            second_key,
+            || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Ok(DataRecord(2))
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap()
+        .into_token();
+    runtime
+        .connect(
+            lifetime_generation(1),
+            42,
+            &second_key.format_lifetime_key(),
+        )
+        .unwrap();
+    assert_ne!(first, second);
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+    with_handle::<DataRecord, _>(&runtime, &first, |old| {
+        runtime.disconnect(lifetime_generation(1), 41);
+        assert_eq!(old.0, 1);
+        assert_eq!(
+            with_handle::<DataRecord, _>(&runtime, &second, |new| new.0).unwrap(),
+            2
+        );
+    })
+    .unwrap();
+    assert!(matches!(
+        with_handle::<DataRecord, _>(&runtime, &first, |_| ()),
+        Err(XllError::StaleHandle)
+    ));
+    runtime.disconnect(lifetime_generation(1), 42);
+    assert_eq!(runtime.len(), 0);
+}
+
+#[test]
 fn pending_handle_argument_conversion_leases_the_payload() {
     let (_slot, handles) = armed_handle_slot();
     let token = handles

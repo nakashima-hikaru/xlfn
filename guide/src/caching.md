@@ -15,15 +15,14 @@ use xlfn::cache::{
 
 ## One typed cache
 
-`CalculationCache<K, V>` is a concurrent weighted cache with a bounded resident budget and caller-defined entry weights:
+`CalculationCache<K, V>` is a concurrent weighted cache with a bounded resident budget and one weight policy fixed at construction:
 
 ```rust
 # use xlfn::cache::CalculationCache;
 # fn example() -> xlfn::XllResult<()> {
-let cache = CalculationCache::<String, String>::new(1024);
+let cache = CalculationCache::<String, String>::with_weigher(1024, String::len);
 let value = cache.get_or_try_insert_with(
     "abc".to_owned(),
-    String::len,
     || Ok("ABC".to_owned()),
 )?;
 assert_eq!(&*value, "ABC");
@@ -33,12 +32,11 @@ assert_eq!(&*value, "ABC");
 ```
 
 This small example uses string length as weight. In an application, replace
-the closure with an expensive deterministic calculation and use one
-consistent weight measure throughout that cache.
+the compute closure with an expensive deterministic calculation. The `String::len` weigher belongs to the cache and cannot vary between callers.
 
 The returned value is `CacheLease<'_, V>`, which implements `Deref<Target = V>`. Concurrent initializations for the same key are coalesced. A failed initialization is returned to its caller and is not cached.
 
-The weight budget is an abstract integer. It can represent approximate bytes, external-resource units, or another monotone cost, but every call site for a cache must use one consistent definition. Zero is normalized to a minimum positive cache weight. A value heavier than the entire budget is returned but not retained.
+The weight budget is an abstract integer. It can represent approximate bytes, external-resource units, or another monotone cost, and the cache applies its construction-time policy to every insertion. `new(budget)` uses unit weights. Zero is normalized to a minimum positive cache weight. A value heavier than the entire budget is returned but not retained.
 
 `len()` and `used_weight()` report current residency. A live `CacheLease` keeps
 its value readable even after eviction or `clear()`.
@@ -56,7 +54,7 @@ collection indices and admission-domain counters retain their existing types.
 ```rust
 # use xlfn::prelude::*;
 # use xlfn::cache::{CacheEndpoint, CacheLease, CacheRegistry};
-static UPPERCASE: CacheEndpoint<String, String> = CacheEndpoint::new("uppercase-v1");
+static UPPERCASE: CacheEndpoint<String, String> = CacheEndpoint::new("uppercase-v1").with_weigher(String::len);
 
 struct State {
     caches: CacheRegistry,
@@ -72,7 +70,6 @@ fn uppercase<'a>(state: &'a State, text: String) -> XllResult<CacheLease<'a, Str
     state.caches.get_or_try_insert(
         &UPPERCASE,
         text.clone(),
-        String::len,
         || Ok(text.to_uppercase()),
     )
 }
@@ -82,6 +79,8 @@ fn uppercase<'a>(state: &'a State, text: String) -> XllResult<CacheLease<'a, Str
 registry, so it can be a `static` while each add-in state owns a `CacheRegistry`.
 
 An endpoint identity includes its marker type, key type, value type, and static ID. By default, `Marker = ()`. When multiple endpoints share key and value types, an optional marker type (e.g. `CacheEndpoint<DatasetKey, Dataset, LookupMarker>`) provides semantic disambiguation.
+
+Declare a custom weigher once on the shared endpoint. A conflicting policy for the same endpoint identity returns an error, including on warm lookup paths; use another marker or ID for a different budget measure. Reuse the same descriptor rather than independently constructing descriptors with function pointers.
 
 A registry keeps its endpoint caches for its own lifetime. Clearing values
 does not change endpoint identity. Endpoints in different registries do not

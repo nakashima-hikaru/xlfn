@@ -150,6 +150,10 @@ fn destruction_deferred() -> bool {
 
 type Invariant<T> = PhantomData<fn(T) -> T>;
 
+fn unit_weight<V>(_: &V) -> usize {
+    1
+}
+
 /// A reusable typed descriptor for one cache in a [`CacheRegistry`].
 ///
 /// Identity includes `K`, `V`, `Marker`, and the static ID. Descriptors with
@@ -158,6 +162,7 @@ type Invariant<T> = PhantomData<fn(T) -> T>;
 /// are invariant because endpoint memoization pairs them with concrete caches.
 pub struct CacheEndpoint<K, V, Marker = ()> {
     id: &'static str,
+    weigher: Option<fn(&V) -> usize>,
     _key: Invariant<K>,
     _value: Invariant<V>,
     _marker: Invariant<Marker>,
@@ -338,10 +343,21 @@ impl<K, V, Marker> CacheEndpoint<K, V, Marker> {
     pub const fn new(id: &'static str) -> Self {
         Self {
             id,
+            weigher: None,
             _key: PhantomData,
             _value: PhantomData,
             _marker: PhantomData,
         }
+    }
+
+    /// Fixes the resource accounting policy for this endpoint.
+    ///
+    /// Without a policy each entry weighs one. Reuse the same descriptor for
+    /// every caller; a conflicting policy for the same identity is rejected.
+    #[must_use]
+    pub const fn with_weigher(mut self, weigher: fn(&V) -> usize) -> Self {
+        self.weigher = Some(weigher);
+        self
     }
 
     #[must_use]
@@ -364,6 +380,7 @@ where
     V: Send + Sync + 'static,
 {
     cache: CalculationCache<K, V>,
+    weigher: Option<fn(&V) -> usize>,
     _marker: Invariant<(Marker, K, V)>,
 }
 
@@ -434,11 +451,38 @@ impl CacheRegistry {
             // The memoized pointer was downcast with this exact endpoint type
             // and belongs to this live registry's never-removed allocation.
             // Registry identities are never reused, including after a move/drop.
-            return Ok(cache);
+            return self.check_weigher(endpoint, cache);
         }
         let cache = self.resolve_cache_uncached(endpoint)?;
         endpoint_cache::remember(self.identity, endpoint, cache);
-        Ok(cache)
+        self.check_weigher(endpoint, cache)
+    }
+
+    fn check_weigher<K, V, Marker>(
+        &self,
+        endpoint: &CacheEndpoint<K, V, Marker>,
+        cache: NonNull<StoredCache<Marker, K, V>>,
+    ) -> XllResult<NonNull<StoredCache<Marker, K, V>>>
+    where
+        Marker: 'static,
+        K: Clone + Eq + Hash + Send + Sync + 'static,
+        V: Send + Sync + 'static,
+    {
+        // SAFETY: resolution returned the exact boxed type retained by this registry.
+        let stored = unsafe { cache.as_ref() };
+        let matches = match (endpoint.weigher, stored.weigher) {
+            (None, None) => true,
+            (Some(a), Some(b)) => std::ptr::fn_addr_eq(a, b),
+            _ => false,
+        };
+        if matches {
+            Ok(cache)
+        } else {
+            Err(XllError::custom(
+                crate::ExcelError::Value,
+                "cache endpoint weight policy conflicts with the registered policy",
+            ))
+        }
     }
 
     fn resolve_cache_uncached<Marker, K, V>(
@@ -466,7 +510,11 @@ impl CacheRegistry {
             return Self::downcast_cache::<Marker, K, V>(entry);
         }
         let cache = Box::new(StoredCache::<Marker, K, V> {
-            cache: CalculationCache::new(self.weight_budget_per_endpoint),
+            cache: CalculationCache::with_weigher(
+                self.weight_budget_per_endpoint,
+                endpoint.weigher.unwrap_or(unit_weight::<V>),
+            ),
+            weigher: endpoint.weigher,
             _marker: PhantomData,
         });
         let erased: Box<dyn ErasedCache> = cache;
@@ -481,10 +529,29 @@ impl CacheRegistry {
 
     /// Resolves an endpoint and returns or initializes a pinned value.
     ///
-    /// All callers for the endpoint must use the same weight measure. The
+    /// The endpoint fixes the weight measure for every caller. The
     /// compute, reentry, generation, and retention rules are those of
     /// [`CalculationCache::get_or_try_insert_with`].
-    pub fn get_or_try_insert<'a, K, V, Marker, F, W>(
+    pub fn get_or_try_insert<'a, K, V, Marker, F>(
+        &'a self,
+        endpoint: &CacheEndpoint<K, V, Marker>,
+        key: K,
+        compute: F,
+    ) -> XllResult<CacheLease<'a, V>>
+    where
+        Marker: 'static,
+        K: Clone + Eq + Hash + Send + Sync + 'static,
+        V: Send + Sync + 'static,
+        F: FnOnce() -> XllResult<V>,
+    {
+        let cache = self.resolve_cache(endpoint)?;
+        // SAFETY: self.caches retains the boxed cache for 'a (&'a self).
+        let stored: &'a StoredCache<Marker, K, V> = unsafe { cache.as_ref() };
+        stored.cache.get_or_try_insert_with(key, compute)
+    }
+
+    #[cfg(test)]
+    fn get_or_try_insert_weighted<'a, K, V, Marker, F, W>(
         &'a self,
         endpoint: &CacheEndpoint<K, V, Marker>,
         key: K,
@@ -499,9 +566,11 @@ impl CacheRegistry {
         W: FnOnce(&V) -> usize,
     {
         let cache = self.resolve_cache(endpoint)?;
-        // SAFETY: self.caches retains the boxed cache for 'a (&'a self).
+        // SAFETY: this registry retains the resolved cache for the lease lifetime.
         let stored: &'a StoredCache<Marker, K, V> = unsafe { cache.as_ref() };
-        stored.cache.get_or_try_insert_with(key, weight, compute)
+        stored
+            .cache
+            .get_or_try_insert_weighted(key, weight, compute)
     }
 
     /// Resolves an endpoint and looks up a value in its current generation.
@@ -1415,6 +1484,7 @@ where
     V: Send + Sync + 'static,
 {
     weight_budget: usize,
+    weigher: fn(&V) -> usize,
     generation: CacheGeneration,
     flights: FlightRegistry<K, V>,
     domain: xlfn_kernel::published_owner::PublishedOwner<CacheLookupDomain<V>>,
@@ -1431,16 +1501,28 @@ where
 {
     /// Creates a concurrent weighted cache with a bounded resident budget.
     ///
-    /// Weight is supplied with each initialization. Values heavier than the
+    /// Every entry has unit weight. Use [`Self::with_weigher`] to fix a different
+    /// resource measure at construction. Values heavier than the
     /// configured budget are returned to the caller but are not retained.
     /// One global weight budget allows a single value to use the entire cache.
     /// Cache misses cannot start another cache initialization from inside an
     /// initializer. Existing cached values may still be read normally.
     #[must_use]
     pub fn new(weight_budget: usize) -> Self {
+        Self::with_weigher(weight_budget, unit_weight::<V>)
+    }
+
+    /// Creates a cache whose immutable weigher determines every stored weight.
+    ///
+    /// The policy must use consistent units for the budget and all values.
+    /// A returned zero is normalized to one. The callback may panic, subject
+    /// to the same cleanup and reentry rules as initialization.
+    #[must_use]
+    pub fn with_weigher(weight_budget: usize, weigher: fn(&V) -> usize) -> Self {
         let capacity = u64::try_from(weight_budget).unwrap_or(u64::MAX);
         Self {
             weight_budget,
+            weigher,
             generation: CacheGeneration::new(),
             flights: FlightRegistry::new(),
             domain: xlfn_kernel::published_owner::PublishedOwner::new(CacheLookupDomain::new()),
@@ -1647,7 +1729,22 @@ where
     /// advances the generation while computation is in progress, the result will be returned
     /// to the caller and its single-flight peers, but will not be retained in the post-clear
     /// generation.
-    pub fn get_or_try_insert_with<'a, F, W>(
+    pub fn get_or_try_insert_with<'a, F>(
+        &'a self,
+        key: K,
+        compute: F,
+    ) -> XllResult<CacheLease<'a, V>>
+    where
+        F: FnOnce() -> XllResult<V>,
+    {
+        let epoch = self.generation.snapshot();
+        self.get_or_try_insert_at_epoch(key, self.weigher, compute, epoch)
+    }
+
+    // Unit tests exercise callback/unwind interleavings independently of the
+    // immutable public policy. This hook is never part of the public API.
+    #[cfg(test)]
+    fn get_or_try_insert_weighted<'a, F, W>(
         &'a self,
         key: K,
         weight: W,
@@ -1657,8 +1754,7 @@ where
         F: FnOnce() -> XllResult<V>,
         W: FnOnce(&V) -> usize,
     {
-        let epoch = self.generation.snapshot();
-        self.get_or_try_insert_at_epoch(key, weight, compute, epoch)
+        self.get_or_try_insert_at_epoch(key, weight, compute, self.generation.snapshot())
     }
 
     fn get_or_try_insert_at_epoch<'a, F, W>(
@@ -1952,13 +2048,13 @@ mod tests {
 
         assert_eq!(
             *registry
-                .get_or_try_insert(&NUMBERS, 1, |_| 4, || Ok(7))
+                .get_or_try_insert_weighted(&NUMBERS, 1, |_| 4, || Ok(7))
                 .unwrap(),
             7
         );
         assert_eq!(
             registry
-                .get_or_try_insert(&TEXT, String::from("key"), String::len, || Ok(
+                .get_or_try_insert_weighted(&TEXT, String::from("key"), String::len, || Ok(
                     String::from("value")
                 ),)
                 .unwrap()
@@ -1972,7 +2068,7 @@ mod tests {
     fn zero_weight_entries_still_consume_budget() {
         let cache = CalculationCache::new(1);
         cache
-            .get_or_try_insert_with("first", |_| 0, || Ok::<_, XllError>(1_u32))
+            .get_or_try_insert_weighted("first", |_| 0, || Ok::<_, XllError>(1_u32))
             .unwrap();
         cache.index.maintenance();
         assert_eq!(cache.used_weight(), 1);
@@ -1988,7 +2084,9 @@ mod tests {
         };
 
         assert_eq!(
-            *cache.get_or_try_insert_with(key, |_| 1, || Ok(7)).unwrap(),
+            *cache
+                .get_or_try_insert_weighted(key, |_| 1, || Ok(7))
+                .unwrap(),
             7
         );
 
@@ -2010,7 +2108,9 @@ mod tests {
             value: 1,
             clones: Arc::clone(&clones),
         };
-        let lease = cache.get_or_try_insert_with(key, |_| 1, || Ok(7)).unwrap();
+        let lease = cache
+            .get_or_try_insert_weighted(key, |_| 1, || Ok(7))
+            .unwrap();
         assert_eq!(*lease, 7);
         // The cache takes ownership of the caller's key for retry/invalidation;
         // only the resident key needs a copy, including heap-backed keys.
@@ -2028,7 +2128,11 @@ mod tests {
             value: 1,
             clones: Arc::clone(&clones),
         };
-        drop(cache.get_or_try_insert_with(key1, |_| 1, || Ok(7)).unwrap());
+        drop(
+            cache
+                .get_or_try_insert_weighted(key1, |_| 1, || Ok(7))
+                .unwrap(),
+        );
         assert_eq!(clones.load(Ordering::SeqCst), 1);
 
         let key2 = CloneCountedKey {
@@ -2036,7 +2140,7 @@ mod tests {
             clones: Arc::clone(&clones),
         };
         let lease = cache
-            .get_or_try_insert_with(key2, |_| 1, || unreachable!())
+            .get_or_try_insert_weighted(key2, |_| 1, || unreachable!())
             .unwrap();
         assert_eq!(*lease, 7);
         assert_eq!(clones.load(Ordering::SeqCst), 1);
@@ -2058,7 +2162,7 @@ mod tests {
                     clones: Arc::clone(clones_ref),
                 };
                 let lease = cache_ref
-                    .get_or_try_insert_with(
+                    .get_or_try_insert_weighted(
                         key,
                         |_| 1,
                         || {
@@ -2086,7 +2190,7 @@ mod tests {
                     clones: Arc::clone(clones_ref),
                 };
                 let lease = cache_ref
-                    .get_or_try_insert_with(key, |_| 1, || unreachable!())
+                    .get_or_try_insert_weighted(key, |_| 1, || unreachable!())
                     .unwrap();
                 assert_eq!(*lease, 7);
             });
@@ -2112,7 +2216,9 @@ mod tests {
             value: 1,
             clones: Arc::clone(&clones),
         };
-        let lease = cache.get_or_try_insert_with(key, |_| 1, || Ok(7)).unwrap();
+        let lease = cache
+            .get_or_try_insert_weighted(key, |_| 1, || Ok(7))
+            .unwrap();
         assert_eq!(*lease, 7);
         assert_eq!(clones.load(Ordering::SeqCst), 0);
     }
@@ -2126,7 +2232,7 @@ mod tests {
             clones: Arc::clone(&clones),
         };
         let lease = cache
-            .get_or_try_insert_with(key, |_| 100, || Ok(7))
+            .get_or_try_insert_weighted(key, |_| 100, || Ok(7))
             .unwrap();
         assert_eq!(*lease, 7);
         assert_eq!(clones.load(Ordering::SeqCst), 0);
@@ -2315,10 +2421,10 @@ mod tests {
     fn eviction_is_bounded_by_approximate_bytes() {
         let cache = CalculationCache::new(8);
         cache
-            .get_or_try_insert_with(1, |_| 8, || Ok(10_u32))
+            .get_or_try_insert_weighted(1, |_| 8, || Ok(10_u32))
             .unwrap();
         cache
-            .get_or_try_insert_with(2, |_| 8, || Ok(20_u32))
+            .get_or_try_insert_weighted(2, |_| 8, || Ok(20_u32))
             .unwrap();
         assert!(cache.used_weight() <= 8);
         assert!(cache.len() <= 1);
@@ -2329,7 +2435,7 @@ mod tests {
     fn panicking_computation_does_not_leave_a_stuck_singleflight() {
         let cache = CalculationCache::<u32, u32>::new(8);
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = cache.get_or_try_insert_with(
+            let _ = cache.get_or_try_insert_weighted(
                 1,
                 |_| 4,
                 || -> XllResult<u32> { panic!("injected computation panic") },
@@ -2337,7 +2443,9 @@ mod tests {
         }));
         assert!(panic.is_err());
         assert_eq!(
-            *cache.get_or_try_insert_with(1, |_| 4, || Ok(7)).unwrap(),
+            *cache
+                .get_or_try_insert_weighted(1, |_| 4, || Ok(7))
+                .unwrap(),
             7
         );
     }
@@ -2346,11 +2454,13 @@ mod tests {
     fn panicking_weight_does_not_leave_a_stuck_singleflight() {
         let cache = CalculationCache::<u32, u32>::new(8);
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = cache.get_or_try_insert_with(1, |_| panic!("weight panic"), || Ok(7));
+            let _ = cache.get_or_try_insert_weighted(1, |_| panic!("weight panic"), || Ok(7));
         }));
         assert!(panic.is_err());
         assert_eq!(
-            *cache.get_or_try_insert_with(1, |_| 4, || Ok(8)).unwrap(),
+            *cache
+                .get_or_try_insert_weighted(1, |_| 4, || Ok(8))
+                .unwrap(),
             8
         );
     }
@@ -2359,7 +2469,9 @@ mod tests {
     fn oversized_values_are_returned_without_being_cached() {
         let cache = CalculationCache::<u32, u32>::new(4);
         assert_eq!(
-            *cache.get_or_try_insert_with(1, |_| 8, || Ok(7)).unwrap(),
+            *cache
+                .get_or_try_insert_weighted(1, |_| 8, || Ok(7))
+                .unwrap(),
             7
         );
         assert!(cache.is_empty());
@@ -2374,7 +2486,7 @@ mod tests {
         std::thread::scope(|s| {
             let handle = s.spawn(move || {
                 let lease = cache_ref
-                    .get_or_try_insert_with(
+                    .get_or_try_insert_weighted(
                         1,
                         |_| 4,
                         || {
@@ -2414,7 +2526,9 @@ mod tests {
         let cache = CalculationCache::<u32, u32>::new(8);
         let current_epoch = cache.generation.advance();
         assert_eq!(
-            *cache.get_or_try_insert_with(1, |_| 4, || Ok(9)).unwrap(),
+            *cache
+                .get_or_try_insert_weighted(1, |_| 4, || Ok(9))
+                .unwrap(),
             9
         );
 
@@ -2426,10 +2540,14 @@ mod tests {
     #[test]
     fn recursive_same_key_is_rejected_instead_of_deadlocking() {
         let cache = CalculationCache::<u32, u32>::new(8);
-        let result = cache.get_or_try_insert_with(
+        let result = cache.get_or_try_insert_weighted(
             1,
             |_| 4,
-            || cache.get_or_try_insert_with(1, |_| 4, || Ok(2)).map(|v| *v),
+            || {
+                cache
+                    .get_or_try_insert_weighted(1, |_| 4, || Ok(2))
+                    .map(|v| *v)
+            },
         );
         assert!(matches!(result, Err(XllError::Internal { .. })));
         assert!(cache.get(&1).is_none());
@@ -2438,12 +2556,12 @@ mod tests {
     #[test]
     fn reentrant_initialization_on_another_key_is_rejected() {
         let cache = CalculationCache::<u32, u32>::new(8);
-        let result = cache.get_or_try_insert_with(
+        let result = cache.get_or_try_insert_weighted(
             1,
             |_| 4,
             || {
                 cache
-                    .get_or_try_insert_with(2, |_| 4, || Ok(20))
+                    .get_or_try_insert_weighted(2, |_| 4, || Ok(20))
                     .map(|v| *v)
             },
         );
@@ -2456,12 +2574,12 @@ mod tests {
     fn initialization_of_a_different_cache_is_rejected_instead_of_deadlocking() {
         let first = CalculationCache::<u32, u32>::new(8);
         let second = CalculationCache::<u32, u32>::new(8);
-        let result = first.get_or_try_insert_with(
+        let result = first.get_or_try_insert_weighted(
             1,
             |_| 4,
             || {
                 second
-                    .get_or_try_insert_with(2, |_| 4, || Ok(20))
+                    .get_or_try_insert_weighted(2, |_| 4, || Ok(20))
                     .map(|value| *value + 1)
             },
         );
@@ -2473,9 +2591,11 @@ mod tests {
     #[test]
     fn initializer_may_read_an_already_cached_value() {
         let cache = CalculationCache::<u32, u32>::new(8);
-        cache.get_or_try_insert_with(2, |_| 4, || Ok(20)).unwrap();
+        cache
+            .get_or_try_insert_weighted(2, |_| 4, || Ok(20))
+            .unwrap();
         let result = cache
-            .get_or_try_insert_with(1, |_| 4, || Ok(*cache.get(&2).unwrap() + 1))
+            .get_or_try_insert_weighted(1, |_| 4, || Ok(*cache.get(&2).unwrap() + 1))
             .unwrap();
         assert_eq!(*result, 21);
     }
@@ -2493,13 +2613,13 @@ mod tests {
 
         assert_eq!(
             *registry
-                .get_or_try_insert(&FIRST, 1, |_| 4, || Ok(7))
+                .get_or_try_insert_weighted(&FIRST, 1, |_| 4, || Ok(7))
                 .unwrap(),
             7
         );
         assert_eq!(
             registry
-                .get_or_try_insert(&SECOND, 1, String::len, || Ok("seven".to_owned()))
+                .get_or_try_insert_weighted(&SECOND, 1, String::len, || Ok("seven".to_owned()))
                 .unwrap()
                 .as_str(),
             "seven"
@@ -2532,13 +2652,13 @@ mod tests {
         let tracked = CacheEndpoint::<u32, TrackedValue, Numbers>::new("shared-name");
         let drops = Arc::new(AtomicUsize::new(0));
         let number_lease = registry
-            .get_or_try_insert(&numbers, 1, |_| 1, || Ok(7))
+            .get_or_try_insert_weighted(&numbers, 1, |_| 1, || Ok(7))
             .unwrap();
         let text_lease = registry
-            .get_or_try_insert(&text, "key".into(), String::len, || Ok("old".into()))
+            .get_or_try_insert_weighted(&text, "key".into(), String::len, || Ok("old".into()))
             .unwrap();
         let tracked_lease = registry
-            .get_or_try_insert(
+            .get_or_try_insert_weighted(
                 &tracked,
                 1,
                 |_| 1,
@@ -2576,13 +2696,13 @@ mod tests {
         assert_eq!(drops.load(Ordering::Relaxed), 0);
         assert_eq!(
             *registry
-                .get_or_try_insert(&numbers, 1, |_| 1, || Ok(9))
+                .get_or_try_insert_weighted(&numbers, 1, |_| 1, || Ok(9))
                 .unwrap(),
             9
         );
         assert_eq!(
             &*registry
-                .get_or_try_insert(&text, "key".into(), String::len, || Ok("new".into()))
+                .get_or_try_insert_weighted(&text, "key".into(), String::len, || Ok("new".into()))
                 .unwrap(),
             "new"
         );
@@ -2606,7 +2726,7 @@ mod tests {
         std::thread::scope(|s| {
             let worker = s.spawn(move || {
                 let lease = reg
-                    .get_or_try_insert(
+                    .get_or_try_insert_weighted(
                         &ENDPOINT,
                         1,
                         |_| 4,
@@ -2629,7 +2749,7 @@ mod tests {
 
         assert_eq!(
             *registry
-                .get_or_try_insert(&ENDPOINT, 1, |_| 4, || Ok(9))
+                .get_or_try_insert_weighted(&ENDPOINT, 1, |_| 4, || Ok(9))
                 .unwrap(),
             9
         );
@@ -2644,7 +2764,7 @@ mod tests {
         std::thread::scope(|s| {
             let handle_a = s.spawn(move || {
                 let lease = cache_ref
-                    .get_or_try_insert_with(
+                    .get_or_try_insert_weighted(
                         1,
                         |_| 4,
                         || {
@@ -2665,7 +2785,7 @@ mod tests {
 
             let handle_b = s.spawn(move || {
                 let lease = cache_ref
-                    .get_or_try_insert_with(1, |_| 4, || Ok("epoch_1_value"))
+                    .get_or_try_insert_weighted(1, |_| 4, || Ok("epoch_1_value"))
                     .unwrap();
                 *lease
             });
@@ -3021,10 +3141,10 @@ mod tests {
         static ENDPOINT_B: CacheEndpoint<u32, u32, MarkerB> = CacheEndpoint::new("SHARED_ID");
         let registry = CacheRegistry::new(64);
         registry
-            .get_or_try_insert(&ENDPOINT_A, 1, |_| 1, || Ok(10))
+            .get_or_try_insert_weighted(&ENDPOINT_A, 1, |_| 1, || Ok(10))
             .unwrap();
         registry
-            .get_or_try_insert(&ENDPOINT_B, 1, |_| 1, || Ok(20))
+            .get_or_try_insert_weighted(&ENDPOINT_B, 1, |_| 1, || Ok(20))
             .unwrap();
         assert_eq!(registry.endpoint_count(), 2);
         assert_eq!(*registry.get(&ENDPOINT_A, &1).unwrap().unwrap(), 10);
@@ -3039,7 +3159,7 @@ mod tests {
 
         assert_eq!(
             *registry
-                .get_or_try_insert(&ENDPOINT, 1, |_| 1, || Ok(100))
+                .get_or_try_insert_weighted(&ENDPOINT, 1, |_| 1, || Ok(100))
                 .unwrap(),
             100
         );
@@ -3053,7 +3173,7 @@ mod tests {
         // New value can be inserted in the new generation
         assert_eq!(
             *registry
-                .get_or_try_insert(&ENDPOINT, 1, |_| 1, || Ok(200))
+                .get_or_try_insert_weighted(&ENDPOINT, 1, |_| 1, || Ok(200))
                 .unwrap(),
             200
         );
@@ -3075,7 +3195,7 @@ mod tests {
         DROPPED.store(false, Ordering::SeqCst);
         let cache = CalculationCache::<u32, TrackDrop>::new(1024);
         let lease = cache
-            .get_or_try_insert_with(1, |_| 1, || Ok(TrackDrop))
+            .get_or_try_insert_weighted(1, |_| 1, || Ok(TrackDrop))
             .unwrap();
 
         let (clear_started_tx, clear_started_rx) = std::sync::mpsc::channel();
@@ -3123,10 +3243,10 @@ mod tests {
         DROPPED_B.store(false, Ordering::SeqCst);
         let cache = CalculationCache::<u32, TrackDrop>::new(1024);
         let lease_a = cache
-            .get_or_try_insert_with(1, |_| 1, || Ok(TrackDrop(&DROPPED_A)))
+            .get_or_try_insert_weighted(1, |_| 1, || Ok(TrackDrop(&DROPPED_A)))
             .unwrap();
         let lease_b = cache
-            .get_or_try_insert_with(2, |_| 1, || Ok(TrackDrop(&DROPPED_B)))
+            .get_or_try_insert_weighted(2, |_| 1, || Ok(TrackDrop(&DROPPED_B)))
             .unwrap();
         drop(lease_b);
 
@@ -3147,7 +3267,7 @@ mod tests {
         let cache = CalculationCache::<u32, String>::new(1024);
         assert_eq!(
             *cache
-                .get_or_try_insert_with(1, |_| 10, || Ok("initial".to_string()))
+                .get_or_try_insert_weighted(1, |_| 10, || Ok("initial".to_string()))
                 .unwrap(),
             "initial"
         );
@@ -3157,7 +3277,7 @@ mod tests {
             for i in 0..20 {
                 let t1 = s.spawn(move || {
                     for j in 0..50 {
-                        if let Ok(lease) = cache_ref.get_or_try_insert_with(
+                        if let Ok(lease) = cache_ref.get_or_try_insert_weighted(
                             1,
                             |_| 10,
                             || Ok(format!("val_{i}_{j}")),
@@ -3168,7 +3288,7 @@ mod tests {
                 });
                 let t2 = s.spawn(move || {
                     for j in 0..50 {
-                        if let Ok(lease) = cache_ref.get_or_try_insert_with(
+                        if let Ok(lease) = cache_ref.get_or_try_insert_weighted(
                             1,
                             |_| 10,
                             || Ok(format!("val2_{i}_{j}")),
@@ -3210,7 +3330,7 @@ mod tests {
 
         drop(
             cache
-                .get_or_try_insert_with(
+                .get_or_try_insert_weighted(
                     1,
                     |_| 1,
                     move || {
@@ -3241,7 +3361,7 @@ mod tests {
 
         let cache = CalculationCache::<u32, PanickingDrop>::new(10);
         let lease = cache
-            .get_or_try_insert_with(1, |_| 1, || Ok(PanickingDrop { _unused: 42 }))
+            .get_or_try_insert_weighted(1, |_| 1, || Ok(PanickingDrop { _unused: 42 }))
             .unwrap();
 
         // Evict/clear the cache entry while lease is held
@@ -3276,7 +3396,7 @@ mod tests {
             let expected_address = Arc::new(AtomicUsize::new(0));
             let cache = CalculationCache::new(capacity);
             let lease = cache
-                .get_or_try_insert_with(
+                .get_or_try_insert_weighted(
                     1_u32,
                     |_| 8192,
                     || {
@@ -3501,7 +3621,7 @@ mod tests {
         for key in 0..4096 {
             drop(
                 cache
-                    .get_or_try_insert_with(key, |_| 1, || Ok(DropProbe(Arc::clone(&drops))))
+                    .get_or_try_insert_weighted(key, |_| 1, || Ok(DropProbe(Arc::clone(&drops))))
                     .unwrap(),
             );
             // These are observations only: neither accessor can maintain the index or
@@ -3526,7 +3646,7 @@ mod tests {
         let cache = CalculationCache::new(4);
         drop(
             cache
-                .get_or_try_insert_with(1, |_| 3, || Ok(DropProbe(Arc::clone(&drops))))
+                .get_or_try_insert_weighted(1, |_| 3, || Ok(DropProbe(Arc::clone(&drops))))
                 .unwrap(),
         );
         cache.index.clear();
@@ -3553,7 +3673,7 @@ mod tests {
         let cache = CalculationCache::new(0);
         for key in 0..128 {
             let lease = cache
-                .get_or_try_insert_with(key, |_| 1, || Ok(DropProbe(Arc::clone(&drops))))
+                .get_or_try_insert_weighted(key, |_| 1, || Ok(DropProbe(Arc::clone(&drops))))
                 .unwrap();
             assert!(cache.get(&key).is_none());
             assert_eq!(drops.load(Ordering::Relaxed), key as usize);
@@ -3578,9 +3698,9 @@ mod tests {
             let drops = Arc::new(AtomicUsize::new(0));
             let cache = CalculationCache::new(0);
             let previous = cache
-                .get_or_try_insert_with(1, |_| 1, || Ok(DropProbe(Arc::clone(&drops))))
+                .get_or_try_insert_weighted(1, |_| 1, || Ok(DropProbe(Arc::clone(&drops))))
                 .unwrap();
-            let initialized = cache.get_or_try_insert_with(
+            let initialized = cache.get_or_try_insert_weighted(
                 2,
                 |_| 1,
                 || {
@@ -3624,7 +3744,7 @@ mod tests {
             let payload_drops = Arc::new(AtomicUsize::new(0));
             let cache = CalculationCache::new(capacity);
             let previous = cache
-                .get_or_try_insert_with(
+                .get_or_try_insert_weighted(
                     1,
                     |_| 1,
                     || {
@@ -3638,7 +3758,7 @@ mod tests {
             cache.clear();
 
             let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                let _ = cache.get_or_try_insert_with(
+                let _ = cache.get_or_try_insert_weighted(
                     2,
                     |_| 1,
                     || {
@@ -3678,7 +3798,7 @@ mod tests {
                 let (finished_tx, finished_rx) = mpsc::channel();
                 let worker = std::thread::spawn(move || {
                     let initialized =
-                        cache.get_or_try_insert_with(2, |_| 1, || Ok(DropProbe(None)));
+                        cache.get_or_try_insert_weighted(2, |_| 1, || Ok(DropProbe(None)));
                     let _ = finished_tx.send(initialized.is_ok());
                 });
                 action.workers.lock().push(worker);
@@ -3695,7 +3815,7 @@ mod tests {
         let completed = Arc::new(AtomicBool::new(false));
         let workers = Arc::new(Mutex::new(Vec::new()));
         let previous = cache
-            .get_or_try_insert_with(
+            .get_or_try_insert_weighted(
                 1,
                 |_| 1,
                 || {
@@ -3710,7 +3830,7 @@ mod tests {
         cache.clear();
         assert!(
             catch_no_unwind(AssertUnwindSafe(|| {
-                let _ = cache.get_or_try_insert_with(
+                let _ = cache.get_or_try_insert_weighted(
                     2,
                     |_| 1,
                     || {
@@ -3756,18 +3876,18 @@ mod tests {
         let drops = Arc::new(AtomicUsize::new(0));
         let cache = CalculationCache::new(8);
         let previous = cache
-            .get_or_try_insert_with(key(1), |_| 1, || Ok(DropProbe(Arc::clone(&drops))))
+            .get_or_try_insert_weighted(key(1), |_| 1, || Ok(DropProbe(Arc::clone(&drops))))
             .unwrap();
         cache.clear();
         let initialized = cache
-            .get_or_try_insert_with(
+            .get_or_try_insert_weighted(
                 key(2),
                 |_| 1,
                 || {
                     drop(previous);
                     assert!(
                         catch_no_unwind(AssertUnwindSafe(|| {
-                            let _ = cache.get_or_try_insert_with(
+                            let _ = cache.get_or_try_insert_weighted(
                                 Key {
                                     value: 3,
                                     panic_on_hash: true,
@@ -3806,7 +3926,7 @@ mod tests {
     fn oversized_weight_is_checked_before_weight_saturation() {
         let cache = CalculationCache::<u32, u32>::new(u32::MAX as usize);
         let value = cache
-            .get_or_try_insert_with(1, |_| u32::MAX as usize + 1, || Ok(7))
+            .get_or_try_insert_weighted(1, |_| u32::MAX as usize + 1, || Ok(7))
             .unwrap();
         assert_eq!(*value, 7);
         assert!(cache.get(&1).is_none());
@@ -3833,7 +3953,7 @@ mod tests {
         for key in 0..3 {
             drop(
                 cache
-                    .get_or_try_insert_with(
+                    .get_or_try_insert_weighted(
                         key,
                         |_| 1,
                         || {
@@ -3864,15 +3984,15 @@ mod tests {
         let drops = Arc::new(AtomicUsize::new(0));
         let cache = CalculationCache::new(8);
         let final_lease = cache
-            .get_or_try_insert_with(1, |_| 1, || Ok(DropProbe(Arc::clone(&drops))))
+            .get_or_try_insert_weighted(1, |_| 1, || Ok(DropProbe(Arc::clone(&drops))))
             .unwrap();
         drop(
             cache
-                .get_or_try_insert_with(2, |_| 1, || Ok(DropProbe(Arc::clone(&drops))))
+                .get_or_try_insert_weighted(2, |_| 1, || Ok(DropProbe(Arc::clone(&drops))))
                 .unwrap(),
         );
         cache
-            .get_or_try_insert_with(
+            .get_or_try_insert_weighted(
                 3,
                 |_| 1,
                 || {
@@ -3901,7 +4021,7 @@ mod tests {
                 scope.spawn(|| {
                     start.wait();
                     let lease = registry
-                        .get_or_try_insert(
+                        .get_or_try_insert_weighted(
                             &ENDPOINT,
                             7,
                             |_| 1,
@@ -3932,13 +4052,13 @@ mod tests {
         let registry = CacheRegistry::new(64);
         let primary = CacheEndpoint::<u64, DropProbe>::new("registry-growth-primary");
         let lease = registry
-            .get_or_try_insert(&primary, 1, |_| 1, || Ok(DropProbe(Arc::clone(&drops))))
+            .get_or_try_insert_weighted(&primary, 1, |_| 1, || Ok(DropProbe(Arc::clone(&drops))))
             .unwrap();
         for length in 1..=NAMES.len() {
             let endpoint = CacheEndpoint::<u64, u64>::new(&NAMES[..length]);
             drop(
                 registry
-                    .get_or_try_insert(&endpoint, 1, |_| 1, || Ok(length as u64))
+                    .get_or_try_insert_weighted(&endpoint, 1, |_| 1, || Ok(length as u64))
                     .unwrap(),
             );
         }
@@ -3979,7 +4099,7 @@ mod tests {
                         let value = worker * 16 + offset;
                         let endpoint = CacheEndpoint::<u64, DropProbe>::new(&NAMES[..value + 1]);
                         let lease = registry
-                            .get_or_try_insert(
+                            .get_or_try_insert_weighted(
                                 &endpoint,
                                 1,
                                 |_| 1,
@@ -4016,7 +4136,7 @@ mod tests {
         let registry = CacheRegistry::new(64);
         let first = CacheEndpoint::<u64, u64>::new("registry-reentrant-first");
         let second = CacheEndpoint::<u64, u64>::new("registry-reentrant-second");
-        let lease = registry.get_or_try_insert(&first, 1,
+        let lease = registry.get_or_try_insert_weighted(&first, 1,
                 |_| 1,
                 || {
                     // Binding a new cache may take the registry owner lock, so
@@ -4025,7 +4145,7 @@ mod tests {
                     // Nested value initialization retains the existing typed
                     // rejection contract even across different endpoints.
                     assert!(matches!(
-                        registry.get_or_try_insert(&second, 2, |_| 1, || Ok(9)),
+                        registry.get_or_try_insert_weighted(&second, 2, |_| 1, || Ok(9)),
                         Err(XllError::Internal { diagnostic_id })
                             if diagnostic_id == crate::diagnostics::id::DiagnosticId::CACHE_REENTRANT
                     ));
@@ -4035,7 +4155,7 @@ mod tests {
             .unwrap();
         assert_eq!(*lease, 7);
         let other = registry
-            .get_or_try_insert(&second, 2, |_| 1, || Ok(9))
+            .get_or_try_insert_weighted(&second, 2, |_| 1, || Ok(9))
             .unwrap();
         assert_eq!(*other, 9);
         assert_eq!(registry.endpoint_count(), 2);
@@ -4058,7 +4178,7 @@ mod tests {
                 assert!(registry.insertions.try_lock().is_some());
                 drop(
                     registry
-                        .get_or_try_insert(&NEW, 2, |_| 1, || Ok(9))
+                        .get_or_try_insert_weighted(&NEW, 2, |_| 1, || Ok(9))
                         .unwrap(),
                 );
                 self.completed.store(true, Ordering::Release);
@@ -4068,7 +4188,7 @@ mod tests {
         let completed = Arc::new(AtomicBool::new(false));
         drop(
             registry
-                .get_or_try_insert(
+                .get_or_try_insert_weighted(
                     &EXISTING,
                     1,
                     |_| 1,

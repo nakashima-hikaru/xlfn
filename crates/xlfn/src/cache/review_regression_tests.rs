@@ -22,7 +22,7 @@ fn populated_cache(
     let cache = CalculationCache::new(1);
     drop(
         cache
-            .get_or_try_insert_with(
+            .get_or_try_insert_weighted(
                 1,
                 |_| 1,
                 || {
@@ -46,7 +46,7 @@ fn clearing_or_dropping_another_cache_inside_initializer_preserves_owned_retirem
         let outer = CalculationCache::<u32, u32>::new(1);
         drop(
             outer
-                .get_or_try_insert_with(
+                .get_or_try_insert_weighted(
                     0,
                     |_| 1,
                     || {
@@ -98,11 +98,15 @@ fn detached_keys_outlive_their_cache_when_dropped_inside_an_initializer() {
             during_initializer: Arc::clone(&during_initializer),
         }),
     };
-    drop(other.get_or_try_insert_with(key, |_| 1, || Ok(1)).unwrap());
+    drop(
+        other
+            .get_or_try_insert_weighted(key, |_| 1, || Ok(1))
+            .unwrap(),
+    );
     let outer = CalculationCache::<u32, u32>::new(1);
     drop(
         outer
-            .get_or_try_insert_with(
+            .get_or_try_insert_weighted(
                 0,
                 |_| 1,
                 || {
@@ -173,7 +177,7 @@ fn thread_local_cache_reclaims_after_reader_tls_teardown() {
                 drop(
                     cache
                         .0
-                        .get_or_try_insert_with("key".to_owned(), |_| 1, || Ok(1))
+                        .get_or_try_insert_weighted("key".to_owned(), |_| 1, || Ok(1))
                         .unwrap(),
                 );
             });

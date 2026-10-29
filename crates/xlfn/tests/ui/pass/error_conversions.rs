@@ -12,11 +12,9 @@ impl Addin for ErrorConversions {
     type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
-    #[cfg(feature = "async")]
-    type AsyncExecutor = xlfn::NoAsyncExecutor;
 
     fn open(context: &OpenContext<Self>) -> xlfn::OpenResult<Self> {
-        context.diagnostics().set_sink(Discard)?;
+        context.diagnostics().install_sink(Discard)?;
         Ok(Opened::new(()))
     }
 }

@@ -10,8 +10,6 @@ impl Addin for App {
     type LifecycleState = ();
     type Error = XllError;
     type Layers = ();
-    #[cfg(feature = "async")]
-    type AsyncExecutor = xlfn::NoAsyncExecutor;
 
     fn open(_: &OpenContext<Self>) -> OpenResult<Self> {
         Ok(Opened::new(()))

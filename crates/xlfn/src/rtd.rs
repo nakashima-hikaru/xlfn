@@ -7,6 +7,8 @@
     )
 )]
 
+#[cfg(feature = "rtd")]
+pub use crate::BoxedRtdSubscription;
 use crate::XllResult;
 use crate::host_api::ExcelHost;
 #[cfg(feature = "rtd")]
@@ -84,10 +86,7 @@ impl<'call, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> RtdCallCon
         &self,
         source: &crate::subscription::RtdSourceHandle<Source>,
         parts: &Parts,
-    ) -> XllResult<crate::subscription::RtdValue>
-    where
-        Source: crate::subscription::RtdSource,
-    {
+    ) -> XllResult<crate::subscription::RtdValue> {
         let subscriptions = self.generation.read()?;
         let topic = parts.prepare_parts()?;
         let prepared = subscriptions.prepare(source, topic)?;

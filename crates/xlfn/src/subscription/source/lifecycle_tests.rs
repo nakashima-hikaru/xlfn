@@ -361,6 +361,11 @@ fn static_catalog_rejects_repeated_registration_and_foreign_source_ids() {
     assert!(registration.register_sources((source(),)).is_err());
     let arena = registration.finish();
     assert!(arena.resolve(handle.id).is_some());
+    let other = SourceRegistration::<LifecycleSubscription, (LifecycleSource,)>::new(generation);
+    let (foreign,) = other.register_sources((source(),)).unwrap();
+    assert_eq!(foreign.id.sequence, handle.id.sequence);
+    assert_eq!(foreign.id.generation, handle.id.generation);
+    assert!(arena.resolve(foreign.id).is_none());
     for (generation, sequence) in [
         (RuntimeGeneration::new(2).unwrap(), 1),
         (generation, 0),
@@ -371,6 +376,7 @@ fn static_catalog_rejects_repeated_registration_and_foreign_source_ids() {
             arena
                 .resolve(super::SourceHandleId {
                     generation,
+                    registration: handle.id.registration,
                     sequence
                 })
                 .is_none()
@@ -381,4 +387,97 @@ fn static_catalog_rejects_repeated_registration_and_foreign_source_ids() {
     assert!(unregistered.is_empty());
     unregistered.request_stop().unwrap();
     unregistered.shutdown_and_wait().unwrap();
+}
+
+#[test]
+fn erased_sources_share_identity_without_weakening_generation_or_shutdown_barriers() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let generation = RuntimeGeneration::new(1).unwrap();
+    let registration = SourceRegistration::<crate::BoxedRtdSubscription>::new(generation);
+    let source = || LifecycleSource {
+        id: 0,
+        events: Arc::clone(&events),
+        failure: Failure::None,
+    };
+    let handle: super::RtdSourceHandle = registration.register_erased(source()).unwrap();
+    let other = registration.register_erased(source()).unwrap();
+    assert_ne!(handle.id, other.id);
+    let runtime =
+        crate::subscription::SubscriptionRuntime::with_sources_for_internal(registration.finish());
+    let server = runtime.register_test_server(1);
+    let topic = RtdTopic::single("erased").unwrap();
+    let prepared = runtime.prepare(&handle, topic.borrowed()).unwrap();
+    let id = prepared.id();
+    let alias = handle.erase();
+    let same = runtime.prepare(&alias, topic.borrowed()).unwrap();
+    assert_eq!(same.id(), id);
+    same.rollback();
+    prepared.commit();
+    runtime
+        .connect_transaction(&server, TopicId(1), id)
+        .unwrap()
+        .commit()
+        .unwrap();
+    // A different add-in may have the same lifecycle generation and source
+    // sequence. Registration identity must still prevent cross-runtime use.
+    let foreign = SourceRegistration::<crate::BoxedRtdSubscription>::new(generation)
+        .register_erased(source())
+        .unwrap();
+    assert!(matches!(
+        runtime.prepare(&foreign, topic.borrowed()),
+        Err(XllError::StaleHandle)
+    ));
+    runtime.close().unwrap();
+    let events = events.lock();
+    let disconnect = events
+        .iter()
+        .position(|event| *event == Event::Disconnect(0))
+        .unwrap();
+    assert!(events[..disconnect].contains(&Event::Cancel(0)));
+    assert!(events[disconnect + 1..].contains(&Event::Join(0)));
+}
+
+#[test]
+fn typed_source_handle_erasure_preserves_catalog_identity() {
+    let generation = RuntimeGeneration::new(1).unwrap();
+    let registration =
+        SourceRegistration::<LifecycleSubscription, (LifecycleSource,)>::new(generation);
+    let (typed,) = registration
+        .register_sources((LifecycleSource {
+            id: 0,
+            events: Arc::new(Mutex::new(Vec::new())),
+            failure: Failure::None,
+        },))
+        .unwrap();
+    let erased: super::RtdSourceHandle = typed.erase();
+    assert_eq!(typed.id, erased.id);
+    let runtime =
+        crate::subscription::SubscriptionRuntime::with_sources_for_internal(registration.finish());
+    let topic = RtdTopic::single("typed-erased").unwrap();
+    let typed_prepared = runtime.prepare(&typed, topic.borrowed()).unwrap();
+    let erased_prepared = runtime.prepare(&erased, topic.borrowed()).unwrap();
+    assert_eq!(typed_prepared.id(), erased_prepared.id());
+    typed_prepared.rollback();
+    erased_prepared.rollback();
+    runtime.close().unwrap();
+}
+
+#[test]
+fn exhausted_source_registration_identity_fails_before_retaining_sources() {
+    let mut dynamic =
+        SourceRegistration::<crate::BoxedRtdSubscription>::new(RuntimeGeneration::new(1).unwrap());
+    dynamic.registration_id = None;
+    let source = || LifecycleSource {
+        id: 0,
+        events: Arc::new(Mutex::new(Vec::new())),
+        failure: Failure::None,
+    };
+    assert!(dynamic.register_erased(source()).is_err());
+    assert!(dynamic.finish().is_empty());
+    let mut typed = SourceRegistration::<LifecycleSubscription, (LifecycleSource,)>::new(
+        RuntimeGeneration::new(1).unwrap(),
+    );
+    typed.registration_id = None;
+    assert!(typed.register_sources((source(),)).is_err());
+    assert!(typed.finish().is_empty());
 }

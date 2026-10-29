@@ -246,7 +246,33 @@ pub struct DiagnosticHistory {
     state: Mutex<HistoryState>,
 }
 
+/// A cursor bound to one runtime's history for its entire lifetime.
+///
+/// Each reader advances independently; polling never consumes the stored records.
+pub struct DiagnosticHistoryReader<'a> {
+    history: &'a DiagnosticHistory,
+    cursor: DiagnosticCursor,
+}
+
+impl DiagnosticHistoryReader<'_> {
+    /// Reads the next page and advances by exactly the returned cursor, including gaps.
+    #[must_use]
+    pub fn next_page(&mut self, limit: usize) -> DiagnosticPage {
+        let page = self.history.errors_since(self.cursor, limit);
+        self.cursor = page.next_cursor;
+        page
+    }
+}
+
 impl DiagnosticHistory {
+    /// Creates an independent reader starting at the oldest available record.
+    #[must_use]
+    pub const fn history_reader(&self) -> DiagnosticHistoryReader<'_> {
+        DiagnosticHistoryReader {
+            history: self,
+            cursor: DiagnosticCursor::START,
+        }
+    }
     /// Constructs the default history: at most 1024 records and 4 MiB.
     #[must_use]
     pub const fn new() -> Self {
@@ -475,6 +501,32 @@ mod tests {
             error,
             None,
         );
+    }
+
+    #[test]
+    fn readers_remain_bound_to_their_history_and_advance_independently() {
+        let first = DiagnosticHistory::with_limits(DiagnosticHistoryLimits {
+            max_records: 1,
+            max_bytes: 4096,
+        });
+        let second = DiagnosticHistory::new();
+        record(&first, 1, &XllError::Panic);
+        record(&first, 2, &XllError::Closing);
+        record(&second, 10, &XllError::Overloaded);
+        let mut a = first.history_reader();
+        let mut b = first.history_reader();
+        let mut other = second.history_reader();
+        assert!(a.next_page(0).errors.is_empty());
+        let page = a.next_page(1);
+        assert_eq!(page.errors[0].diagnostic_id.as_u64(), 2);
+        assert_eq!(page.missed_events, 1);
+        assert_eq!(b.next_page(1).errors[0].diagnostic_id.as_u64(), 2);
+        assert_eq!(other.next_page(1).errors[0].diagnostic_id.as_u64(), 10);
+        let page = a.next_page(10);
+        assert!(page.errors.is_empty());
+        assert_eq!(page.missed_events, 0);
+        record(&first, 3, &XllError::Panic);
+        assert_eq!(a.next_page(10).errors[0].diagnostic_id.as_u64(), 3);
     }
 
     #[test]

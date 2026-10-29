@@ -1,0 +1,23 @@
+error[E0277]: `Opaque` cannot be hashed as a formula-revision input identity
+ --> tests/ui/fail/eager_identity_missing.rs:3:10
+  |
+3 | #[derive(ExcelInputIdentity)]
+  |          ^^^^^^^^^^^^^^^^^^ `Opaque` does not implement `ExcelInputIdentity`
+  |
+help: the trait `ExcelInputIdentity` is not implemented for `Opaque`
+ --> tests/ui/fail/eager_identity_missing.rs:2:1
+  |
+2 | struct Opaque;
+  | ^^^^^^^^^^^^^
+  = note: implement `ExcelInputIdentity` for `Opaque` to support formula revision tracking
+  = help: the following other types implement trait `ExcelInputIdentity`:
+            Column<T>
+            Custom
+            ExcelCellRef<'call>
+            ExcelCellValue
+            ExcelError
+            ExcelSerialDate
+            Matrix<T>
+            MatrixRef<'_, T>
+          and $N others
+  = note: this error originates in the derive macro `ExcelInputIdentity` (in Nightly builds, run with -Z macro-backtrace for more info)

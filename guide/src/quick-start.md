@@ -44,11 +44,6 @@ pub struct HelloXll;
 #[excel_addin(name = "Hello Xll", id = "hello-xlfn", category = "Hello")]
 impl Addin for HelloXll {
     type SharedState = ();
-    type LifecycleState = ();
-    type Error = XllError;
-    type Layers = ();
-    #[cfg(feature = "async")]
-    type AsyncExecutor = xlfn::NoAsyncExecutor;
 
     fn open(_: &OpenContext<Self>) -> XllResult<Opened<(), (), ()>> {
         Ok(Opened::new(()))

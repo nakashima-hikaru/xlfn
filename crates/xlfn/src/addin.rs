@@ -187,6 +187,16 @@ impl<E: crate::RtdSubscription> RtdOpenContext<'_, E> {
 }
 
 #[cfg(feature = "rtd")]
+impl RtdOpenContext<'_, crate::BoxedRtdSubscription> {
+    /// Registers a source while hiding its concrete source and subscription
+    /// types. The runtime retains its original cancellation and shutdown
+    /// barriers. Use `BoxedRtdSubscription` as the add-in's subscription owner.
+    pub fn register<S: RtdSource>(&self, source: S) -> XllResult<RtdSourceHandle> {
+        self.registration.register_erased(source)
+    }
+}
+
+#[cfg(feature = "rtd")]
 impl<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> RtdOpenContext<'_, E, C> {
     /// Registers the complete typed catalog once and returns its typed handles.
     pub fn register_sources(&self, sources: C) -> XllResult<C::Handles> {
@@ -194,23 +204,43 @@ impl<E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>> RtdOpenContext<'_
     }
 }
 
-/// Diagnostic sink configuration capability available during add-in open.
+/// Process-wide diagnostic sink configuration capability available during add-in open.
+///
+/// This shared router is independent of each runtime's [`crate::diagnostics::DiagnosticHistory`].
 pub struct DiagnosticsSetup<'a, A: Addin = ()> {
     context: &'a OpenContext<A>,
 }
 
 impl<A: Addin> DiagnosticsSetup<'_, A> {
-    /// Installs a basic failure log at `%LOCALAPPDATA%/<addin-id>/logs/diagnostics.log`.
+    /// Installs a process-wide failure log at `%LOCALAPPDATA%/<addin-id>/logs/diagnostics.log`.
+    /// Returns [`DiagnosticInitError::AlreadyInstalled`] if another sink exists.
     pub fn install_file_sink(&self) -> Result<PathBuf, DiagnosticInitError> {
         crate::diagnostics::install_file_diagnostic_sink(&self.context.build_info.addin_id)
     }
 
-    /// Installs or replaces the process-wide diagnostic sink with a custom implementation.
-    pub fn set_sink<S>(&self, sink: S) -> Result<(), DiagnosticInitError>
+    /// Installs the process-wide sink, failing if another sink is already installed.
+    pub fn install_sink<S>(&self, sink: S) -> Result<(), DiagnosticInitError>
+    where
+        S: DiagnosticSink,
+    {
+        crate::diagnostics::install_diagnostic_sink(sink)
+    }
+
+    /// Explicitly replaces the process-wide sink, flushing and joining the previous worker.
+    pub fn replace_sink<S>(&self, sink: S) -> Result<(), DiagnosticInitError>
     where
         S: DiagnosticSink,
     {
         crate::diagnostics::set_diagnostic_sink(sink)
+    }
+
+    /// Installs or replaces the process-wide diagnostic sink with a custom implementation.
+    #[deprecated(note = "use install_sink or replace_sink to make shared ownership explicit")]
+    pub fn set_sink<S>(&self, sink: S) -> Result<(), DiagnosticInitError>
+    where
+        S: DiagnosticSink,
+    {
+        self.replace_sink(sink)
     }
 }
 
@@ -1105,7 +1135,7 @@ impl<A: Addin> std::fmt::Debug for DiagnosticsSetup<'_, A> {
 macro_rules! __xlfn_addin_rtd_types {
     (@default) => {
         type RtdSubscription = ();
-        type RtdSources = ();
+        type RtdSources = $crate::DynamicRtdSources<Self::RtdSubscription>;
     };
     (@configured subscription: $subscription:ty, sources: $sources:ty) => {
         type RtdSubscription = $subscription;
@@ -1120,6 +1150,29 @@ macro_rules! __xlfn_addin_rtd_types {
     (@default) => {};
     (@configured subscription: $subscription:ty, sources: $sources:ty) => {
         compile_error!("RTD configuration requires the xlfn `rtd` feature");
+    };
+}
+
+// Like RTD settings, executor configuration follows the dependency's features.
+#[cfg(feature = "async")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __xlfn_addin_async_type {
+    (@default) => {
+        type AsyncExecutor = $crate::NoAsyncExecutor;
+    };
+    (@configured $executor:ty) => {
+        type AsyncExecutor = $executor;
+    };
+}
+
+#[cfg(not(feature = "async"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __xlfn_addin_async_type {
+    (@default) => {};
+    (@configured $executor:ty) => {
+        compile_error!("async executor configuration requires the xlfn `async` feature");
     };
 }
 

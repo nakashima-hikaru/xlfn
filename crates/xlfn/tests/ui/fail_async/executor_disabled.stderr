@@ -1,0 +1,27 @@
+error[E0080]: evaluation panicked: async UDFs require an enabled Addin::AsyncExecutor; configure an executor and return it with Opened::with_async_executor
+ --> tests/ui/fail_async/executor_disabled.rs:8:1
+  |
+8 | #[excel_function]
+  | ^^^^^^^^^^^^^^^^^ evaluation of `xll_value::{closure#0}::{constant#0}` failed inside this call
+  |
+note: inside `xlfn::__private::v1::assert_async_executor::<TestAddin, xlfn::__private::v1::LogicalUnload>`
+ --> $RUST/core/src/panic.rs
+  |
+  |           $crate::panicking::panic_fmt($crate::const_format_args!($($t)+));
+  |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the failure occurred here
+  |
+ ::: src/__private.rs
+  |
+  | / ...   assert!(
+  | | ...       <A::AsyncExecutor as crate::AsyncExecutor>::ENABLED,
+  | | ...       "async UDFs require an enabled Addin::AsyncExecutor; configure an executor and return it with Opened::with_async_execut...
+  | | ...   );
+  | |_______- in this macro invocation
+
+note: erroneous constant encountered
+ --> tests/ui/fail_async/executor_disabled.rs:8:1
+  |
+8 | #[excel_function]
+  | ^^^^^^^^^^^^^^^^^
+  |
+  = note: this note originates in the attribute macro `excel_function` (in Nightly builds, run with -Z macro-backtrace for more info)

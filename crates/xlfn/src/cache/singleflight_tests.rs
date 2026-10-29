@@ -62,7 +62,7 @@ fn abandoned_leader_detaches_before_follower_retries() {
         let (finished_tx, finished_rx) = mpsc::sync_channel(1);
         let cache_ref = &cache;
         let follower = scope.spawn(move || {
-            let result = cache_ref.get_or_try_insert_with(7, |_| 1, || Ok(19));
+            let result = cache_ref.get_or_try_insert_weighted(7, |_| 1, || Ok(19));
             finished_tx.send(result.map(|value| *value)).unwrap();
         });
         // This observer and the table hold two Arcs. A third proves that
@@ -100,7 +100,7 @@ fn success_and_error_completion_do_not_reenter_key_callbacks() {
             let cache = CalculationCache::new(0);
             let dropped = StdArc::new(AtomicUsize::new(0));
             let first = catch_no_unwind(AssertUnwindSafe(|| {
-                cache.get_or_try_insert_with(
+                cache.get_or_try_insert_weighted(
                     key.clone(),
                     |_| 1,
                     || {
@@ -130,7 +130,7 @@ fn success_and_error_completion_do_not_reenter_key_callbacks() {
             let recomputed = AtomicBool::new(false);
             drop(
                 cache
-                    .get_or_try_insert_with(
+                    .get_or_try_insert_weighted(
                         key,
                         |_| 1,
                         || {
@@ -233,7 +233,7 @@ fn unrelated_coordination_shard_does_not_block_a_cold_miss() {
         let (finished_tx, finished_rx) = mpsc::sync_channel(1);
         let cache = &cache;
         let worker = scope.spawn(move || {
-            let result = cache.get_or_try_insert_with(free_key, |_| 8, || Ok(free_key));
+            let result = cache.get_or_try_insert_weighted(free_key, |_| 8, || Ok(free_key));
             finished_tx.send(result.map(|lease| *lease)).unwrap();
         });
         let result = finished_rx.recv_timeout(Duration::from_secs(5));
@@ -262,7 +262,7 @@ fn clear_keeps_old_followers_and_new_epoch_flights_independent() {
         let cache_ref = &cache;
         let leader = scope.spawn(move || {
             let lease = cache_ref
-                .get_or_try_insert_with(
+                .get_or_try_insert_weighted(
                     7,
                     |_| 8,
                     || {
@@ -285,7 +285,7 @@ fn clear_keeps_old_followers_and_new_epoch_flights_independent() {
         );
         let follower = scope.spawn(|| {
             let lease = cache
-                .get_or_try_insert_with(7, |_| 8, || panic!("old follower must coalesce"))
+                .get_or_try_insert_weighted(7, |_| 8, || panic!("old follower must coalesce"))
                 .unwrap();
             assert_eq!(*lease, 1);
         });
@@ -306,7 +306,7 @@ fn clear_keeps_old_followers_and_new_epoch_flights_independent() {
         let (fresh_tx, fresh_rx) = mpsc::sync_channel(1);
         let cache_ref = &cache;
         let fresh = scope.spawn(move || {
-            let result = cache_ref.get_or_try_insert_with(7, |_| 8, || Ok(2));
+            let result = cache_ref.get_or_try_insert_weighted(7, |_| 8, || Ok(2));
             fresh_tx.send(result.map(|lease| *lease)).unwrap();
         });
         // The new epoch must complete while the old leader remains pending.
@@ -340,7 +340,7 @@ fn unwind_cleanup_does_not_call_faulting_keys_again() {
         // Inspect the fixed string payload to distinguish the original panic
         // from any new panic raised while cleaning up the registered flight.
         let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            cache.get_or_try_insert_with(
+            cache.get_or_try_insert_weighted(
                 key.clone(),
                 |_| 1,
                 || {
@@ -357,7 +357,9 @@ fn unwind_cleanup_does_not_call_faulting_keys_again() {
         );
         assert!(cache.flights.is_empty());
         assert_eq!(
-            *cache.get_or_try_insert_with(key, |_| 1, || Ok(9)).unwrap(),
+            *cache
+                .get_or_try_insert_weighted(key, |_| 1, || Ok(9))
+                .unwrap(),
             9
         );
         return;

@@ -257,6 +257,7 @@ pub(super) struct UdfSpec {
     pub(super) arguments: Vec<ArgumentSpec>,
     pub(super) return_type: Type,
     pub(super) return_abi: xlfn_common::ReturnAbi,
+    pub(super) handle_reuse: Option<bool>,
     pub(super) volatile: bool,
     pub(super) hidden: bool,
     pub(super) gating: Vec<Attribute>,
@@ -290,6 +291,7 @@ pub(super) struct UdfPlan {
     pub(super) arguments: Vec<ArgumentPlan>,
     pub(super) return_type: Type,
     pub(super) return_abi: xlfn_common::ReturnAbi,
+    pub(super) handle_reuse: Option<bool>,
     pub(super) volatile: bool,
     pub(super) hidden: bool,
     pub(super) gating: Vec<Attribute>,
@@ -474,7 +476,36 @@ pub(super) fn analyze(parsed: ParsedUdf) -> syn::Result<UdfSpec> {
         &execution,
         &crate_path,
     )?;
-    let arguments = analyze_arguments(arguments, &execution, &function)?;
+    let strict_inputs = match options.input_semantics.as_deref() {
+        None => false,
+        Some("strict") => true,
+        Some(_) => {
+            return Err(syn::Error::new_spanned(
+                &function.sig,
+                "`input_semantics` must be `strict`",
+            ));
+        }
+    };
+    let handle_reuse = match options.handle_reuse.as_deref() {
+        None => None,
+        Some("inputs") => Some(true),
+        Some("never") => Some(false),
+        Some(_) => {
+            return Err(syn::Error::new_spanned(
+                &function.sig,
+                "`handle_reuse` must be `inputs` or `never`",
+            ));
+        }
+    };
+    if handle_reuse.is_some()
+        && (execution.is_async() || return_abi != xlfn_common::ReturnAbi::Value12)
+    {
+        return Err(syn::Error::new_spanned(
+            &function.sig,
+            "`handle_reuse` requires a synchronous handle return using XLOPER12",
+        ));
+    }
+    let arguments = analyze_arguments(arguments, &execution, &function, strict_inputs)?;
     let metadata = UdfMetadata {
         id,
         excel_name,
@@ -500,6 +531,7 @@ pub(super) fn analyze(parsed: ParsedUdf) -> syn::Result<UdfSpec> {
         arguments,
         return_type,
         return_abi,
+        handle_reuse,
         volatile: options.volatile,
         hidden: options.hidden,
         gating,
@@ -533,8 +565,8 @@ fn analyze_return_abi(
     }
 }
 
-/// Type aliases and associated types require Rust name resolution and therefore
-/// keep the Q default. Only standard framework spellings select FP12 by syntax.
+/// Ordinary containers and aliases keep Q semantics. Only the dedicated
+/// numeric output type opts into FP12, including when wrapped in Result.
 fn is_numeric_array_return(ty: &Type, crate_path: &Path) -> bool {
     match ty {
         Type::Paren(paren) => return is_numeric_array_return(&paren.elem, crate_path),
@@ -583,14 +615,6 @@ fn is_numeric_array_return(ty: &Type, crate_path: &Path) -> bool {
     };
     match name.as_str() {
         "NumericArrayOutput" if framework_path(&["output"]) => arguments.is_none(),
-        "Matrix" | "Row" | "Column" if framework_path(&["value", "prelude"]) => {
-            let Some(arguments) = arguments else {
-                return false;
-            };
-            arguments.len() == 1
-                && matches!(arguments.first(), Some(GenericArgument::Type(element))
-                    if native_argument_abi(element) == xlfn_common::ArgumentAbi::Float64)
-        }
         "XllResult" if framework_path(&["", "error", "prelude"]) => {
             let Some(arguments) = arguments else {
                 return false;
@@ -671,6 +695,7 @@ fn analyze_arguments(
     arguments: Vec<ParsedArgument>,
     execution: &ExecutionSpec,
     function: &UdfFunction,
+    strict_inputs: bool,
 ) -> syn::Result<Vec<ArgumentSpec>> {
     let maximum_visible = xlfn_common::max_excel_function_arguments(execution.kind());
     if arguments.len() > maximum_visible {
@@ -791,7 +816,8 @@ fn analyze_arguments(
             ArgumentConversion::NumericMatrix => xlfn_common::ArgumentAbi::NumericArray12,
             ArgumentConversion::HandleLease { .. } => xlfn_common::ArgumentAbi::Value12,
             ArgumentConversion::Value(_) => {
-                if argument.options.strict
+                if strict_inputs
+                    || argument.options.strict
                     || argument.options.default.is_some()
                     || argument.options.blank.is_some()
                     || argument.options.missing.is_some()
@@ -1093,6 +1119,7 @@ pub(super) fn lower(spec: UdfSpec) -> UdfPlan {
         arguments,
         return_type: spec.return_type,
         return_abi: spec.return_abi,
+        handle_reuse: spec.handle_reuse,
         volatile: spec.volatile,
         hidden: spec.hidden,
         gating: spec.gating,

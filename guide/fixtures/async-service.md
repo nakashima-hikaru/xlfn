@@ -10,10 +10,6 @@
 # #[excel_addin(name = "Guide service", id = "guide-service", category = "Guide")]
 # impl Addin for ServiceAddin {
 #     type SharedState = State;
-#     type LifecycleState = ();
-#     type Error = XllError;
-#     type Layers = ();
-#     #[cfg(feature = "async")]
 #     type AsyncExecutor = xlfn::BuiltinAsyncExecutor;
 #     fn open(_: &OpenContext<Self>) -> xlfn::OpenResult<Self> {
 #         Ok(Opened::new(State { client: Client, adapter: Client })

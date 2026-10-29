@@ -2,13 +2,13 @@ use xlfn::cache::CalculationCache;
 
 #[test]
 fn lease_survives_eviction() {
-    let cache = CalculationCache::<u32, String>::new(8);
+    let cache = CalculationCache::<u32, String>::with_weigher(8, |_| 8);
 
     let lease1 = cache
-        .get_or_try_insert_with(1, |_| 8, || Ok("val1".to_string()))
+        .get_or_try_insert_with(1, || Ok("val1".to_string()))
         .unwrap();
     let lease2 = cache
-        .get_or_try_insert_with(2, |_| 8, || Ok("val2".to_string()))
+        .get_or_try_insert_with(2, || Ok("val2".to_string()))
         .unwrap();
 
     // With total weight capacity 8, at most one item of weight 8 can remain resident.

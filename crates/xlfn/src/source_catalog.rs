@@ -67,7 +67,11 @@ mod sealed {
         #[cfg(any(feature = "rtd", feature = "handles"))]
         fn len(&self) -> usize;
         #[cfg(any(feature = "rtd", feature = "handles"))]
-        fn handles(&self, generation: RuntimeGeneration) -> <Self as RtdSourceCatalog<E>>::Handles
+        fn handles(
+            &self,
+            generation: RuntimeGeneration,
+            registration: u64,
+        ) -> <Self as RtdSourceCatalog<E>>::Handles
         where
             Self: RtdSourceCatalog<E>;
         #[cfg(any(feature = "rtd", feature = "handles"))]
@@ -87,7 +91,7 @@ mod sealed {
             0
         }
         #[cfg(any(feature = "rtd", feature = "handles"))]
-        fn handles(&self, _: RuntimeGeneration) -> <Self as RtdSourceCatalog<E>>::Handles {}
+        fn handles(&self, _: RuntimeGeneration, _: u64) -> <Self as RtdSourceCatalog<E>>::Handles {}
         #[cfg(any(feature = "rtd", feature = "handles"))]
         fn subscribe(&self, _: usize, _: &RtdTopic, _: PublishSink) -> XllResult<E> {
             unreachable!("empty catalog")
@@ -120,7 +124,7 @@ mod sealed {
             self.sources.len()
         }
         #[cfg(any(feature = "rtd", feature = "handles"))]
-        fn handles(&self, _: RuntimeGeneration) -> <Self as RtdSourceCatalog<E>>::Handles {}
+        fn handles(&self, _: RuntimeGeneration, _: u64) -> <Self as RtdSourceCatalog<E>>::Handles {}
         #[cfg(any(feature = "rtd", feature = "handles"))]
         fn subscribe(&self, index: usize, topic: &RtdTopic, sink: PublishSink) -> XllResult<E> {
             self.sources[index].subscribe(topic, sink)
@@ -159,8 +163,8 @@ mod tuples {
                 type Stored = xlfn_kernel::published_owner::PublishedOwner<Self>;
                 fn store(self) -> Self::Stored { xlfn_kernel::published_owner::PublishedOwner::new(self) }
                 fn len(&self) -> usize { [$(stringify!($S)),+].len() }
-                fn handles(&self, generation: RuntimeGeneration) -> <Self as RtdSourceCatalog<E>>::Handles {
-                    ($(RtdSourceHandle::from_id(SourceHandleId { generation, sequence: $index + 1 }),)+)
+                fn handles(&self, generation: RuntimeGeneration, registration: u64) -> <Self as RtdSourceCatalog<E>>::Handles {
+                    ($(RtdSourceHandle::from_id(SourceHandleId { generation, registration, sequence: $index + 1 }),)+)
                 }
                 fn subscribe(&self,index:usize,topic:&RtdTopic,sink:PublishSink)->XllResult<E> {
                     match index { $($index => subscribe_typed(&self.$index, topic, sink),)+ _ => unreachable!("validated catalog index") }

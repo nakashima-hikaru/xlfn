@@ -2,6 +2,55 @@ use crate::XllResult;
 use crate::host_api::ExcelHost;
 use crate::input_identity::InputFingerprint;
 use core::fmt::NumBuffer;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+// Shared by every producer in this loaded framework instance. Exhaustion is
+// terminal for fresh revisions; the counter must never wrap and reuse an ID.
+static NEXT_INVOCATION: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn fresh_invocation_inputs(inputs: InputFingerprint) -> XllResult<InputFingerprint> {
+    fresh_inputs_with_counter(inputs, &NEXT_INVOCATION)
+}
+
+fn fresh_inputs_with_counter(
+    inputs: InputFingerprint,
+    counter: &AtomicU64,
+) -> XllResult<InputFingerprint> {
+    let nonce = counter
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .map_err(|_| {
+            crate::XllError::custom(
+                crate::ExcelError::Number,
+                "handle invocation identity exhausted",
+            )
+        })?;
+    // Retain the existing collision-resistant topic protocol, with a separate
+    // domain for fresh invocations so it cannot alias an input-only revision.
+    let mut identity = blake3::Hasher::new_derive_key("xlfn.handle-invocation.v1");
+    identity.update(inputs.as_bytes());
+    identity.update(&nonce.to_le_bytes());
+    Ok(InputFingerprint::from_bytes(
+        *identity.finalize().as_bytes(),
+    ))
+}
+
+#[cfg(test)]
+mod invocation_tests {
+    use super::*;
+
+    #[test]
+    fn fresh_identity_never_wraps_or_reuses_the_input_identity() {
+        let inputs = InputFingerprint::from_bytes([7; 32]);
+        let counter = AtomicU64::new(u64::MAX - 1);
+        let first = fresh_inputs_with_counter(inputs, &counter).unwrap();
+        assert_ne!(first, inputs);
+        assert!(fresh_inputs_with_counter(inputs, &counter).is_err());
+        assert!(fresh_inputs_with_counter(inputs, &counter).is_err());
+        assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct FormulaCaller {

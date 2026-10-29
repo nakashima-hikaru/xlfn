@@ -9,13 +9,7 @@
 # #[excel_addin(name = "Guide dataset", id = "guide-dataset", category = "Guide")]
 # impl Addin for DatasetAddin {
 #     type SharedState = ();
-#     type LifecycleState = ();
-#     type Error = XllError;
-#     type Layers = ();
-#     #[cfg(feature = "async-builtin")]
 #     type AsyncExecutor = xlfn::BuiltinAsyncExecutor;
-#     #[cfg(all(feature = "async", not(feature = "async-builtin")))]
-#     type AsyncExecutor = xlfn::NoAsyncExecutor;
 #     fn open(_: &OpenContext<Self>) -> xlfn::OpenResult<Self> {
 #         let opened = Opened::new(());
 #         #[cfg(feature = "async-builtin")]

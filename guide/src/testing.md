@@ -18,8 +18,6 @@ keep the core computation in pure Rust functions:
 #     type LifecycleState = ();
 #     type Error = xlfn::XllError;
 #     type Layers = ();
-#     #[cfg(feature = "async")]
-#     type AsyncExecutor = xlfn::NoAsyncExecutor;
 #     fn open(_: &xlfn::OpenContext<Self>) -> xlfn::XllResult<xlfn::Opened<()>> {
 #         Ok(xlfn::Opened::new(()))
 #     }

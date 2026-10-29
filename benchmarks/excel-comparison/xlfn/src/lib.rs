@@ -135,7 +135,7 @@ pub fn matrix_sum(values: NumericMatrixRef<'_>) -> f64 {
     values.iter().copied().sum()
 }
 
-#[excel_function(name = "BENCH.MAT.MAKE", thread_safe)]
+#[excel_function(name = "BENCH.MAT.MAKE", thread_safe, return_abi = "fp12")]
 pub fn matrix_make(rows: i32, columns: i32, seed: f64) -> XllResult<NumericArrayOutput> {
     let rows =
         usize::try_from(rows).map_err(|_| XllError::input("rows", InputError::OutOfRange))?;
@@ -157,7 +157,7 @@ pub fn matrix_make_q(rows: i32, columns: i32, seed: f64) -> XllResult<NumericArr
     matrix_make(rows, columns, seed)
 }
 
-#[excel_function(name = "BENCH.MAT.COPY", thread_safe)]
+#[excel_function(name = "BENCH.MAT.COPY", thread_safe, return_abi = "fp12")]
 pub fn matrix_copy(values: NumericMatrixRef<'_>) -> XllResult<XlArrayOutput> {
     XlArrayBuilder::from_f64(values.rows(), values.columns(), values.as_slice())?.finish()
 }

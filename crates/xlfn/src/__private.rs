@@ -54,8 +54,6 @@ pub mod v1 {
     #[cfg(feature = "async")]
     use std::future::Future;
 
-    #[doc(hidden)]
-    pub use crate::__xlfn_addin_rtd_types;
     use crate::addin::{Addin, PhysicallyUnloadableAddin};
     use crate::boundary::host::{host_auto_close, host_auto_open, host_auto_remove};
     pub use crate::call::{CallScope, with_excel_call_scope, with_excel_call_scope_and_state};
@@ -80,6 +78,8 @@ pub mod v1 {
     };
     #[doc(hidden)]
     pub use crate::value::output::ExcelCellSink;
+    #[doc(hidden)]
+    pub use crate::{__xlfn_addin_async_type, __xlfn_addin_rtd_types};
 
     #[doc(hidden)]
     pub const BUILD_TARGET: &str = if cfg!(all(
@@ -281,6 +281,16 @@ pub mod v1 {
     #[cfg(all(feature = "async", feature = "handles"))]
     #[doc(hidden)]
     pub use crate::handle::PendingHandleLease;
+
+    /// Rejects async registration when an add-in retained the disabled executor.
+    #[cfg(feature = "async")]
+    #[doc(hidden)]
+    pub const fn assert_async_executor<A: Addin>(_runtime: &MacroRuntime<A, impl UnloadPolicy<A>>) {
+        assert!(
+            <A::AsyncExecutor as crate::AsyncExecutor>::ENABLED,
+            "async UDFs require an enabled Addin::AsyncExecutor; configure an executor and return it with Opened::with_async_executor",
+        );
+    }
 
     /// Instantiates an [`AsyncContext`](crate::addin::AsyncContext) for generated UDFs.
     #[cfg(feature = "async")]

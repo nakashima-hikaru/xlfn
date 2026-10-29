@@ -22,6 +22,7 @@ use syn::ext::IdentExt;
 use syn::{DeriveInput, ItemStruct, parse_macro_input};
 mod codegen;
 mod function;
+mod input_derive;
 
 use function::UdfFunction;
 mod model;
@@ -39,13 +40,15 @@ use validation::validate_addin_metadata;
 /// trait implementations. Recognized `f64`, `bool`, `i32`, `String`, and
 /// synchronous `&str` arguments use Excel's native scalar ABIs and accept Excel's
 /// coercion rules. `#[excel_arg(strict)]` selects XLOPER12 with the type's strict
-/// conversion instead. Explicit blank, missing, or default policies also select
+/// conversion instead. `input_semantics = strict` selects this conversion for
+/// every ordinary argument, including scalar aliases. Explicit numeric views
+/// and reference parameters retain their specialized ABI. Explicit blank, missing, or default policies also select
 /// XLOPER12 so the original input's presence is available. Other types and
 /// unrecognized aliases use their ordinary conversion.
-/// Synchronous `Matrix<f64>`, `Row<f64>`, `Column<f64>`, and
-/// `NumericArrayOutput` results use the FP12 (`K%`) result ABI; `Result<T, E>`
-/// and `XllResult<T>` inherit this choice. Unrecognized return aliases use
-/// XLOPER12 (`Q`). `return_abi = "fp12"` explicitly selects FP12 for a numeric
+/// Ordinary `Matrix<f64>`, `Row<f64>`, and `Column<f64>` results use
+/// XLOPER12 (`Q`), preserving Excel errors in `Result` and `XllResult`.
+/// `NumericArrayOutput` explicitly opts into FP12 (`K%`), including when
+/// wrapped in a result. Unrecognized return aliases use XLOPER12 (`Q`). `return_abi = "fp12"` explicitly selects FP12 for a numeric
 /// array alias; incompatible resolved types fail to compile.
 /// `return_abi = "xloper12"` preserves individual Excel error values such as
 /// `#N/A`. FP12 failures return `#NUM!`, with details in the runtime's diagnostic
@@ -63,6 +66,11 @@ use validation::validate_addin_metadata;
 /// `#[excel_arg(default = expression)]` defaults omitted arguments; blank cells
 /// keep the parameter type's ordinary conversion unless `blank = default` is
 /// selected. Explicit `missing` policies override this inferred default.
+/// Handle producers reuse the formula and converted inputs by default;
+/// `handle_reuse = inputs` makes this explicit, and `handle_reuse = never`
+/// invokes the producer with a fresh revision on each call. Excel disconnects
+/// older bindings through the existing RTD protocol; active leases remain live.
+/// Handle policies require a synchronous handle return and do not permit volatility.
 /// Both identifier policies (`blank = error`) and string policies are accepted.
 /// Use `missing = convert` to keep the declared type's ordinary conversion,
 /// including `None` for an omitted `Option<T>` input.
@@ -78,9 +86,12 @@ pub fn excel_function(attributes: TokenStream, item: TokenStream) -> TokenStream
 /// Defines the one Add-in for an XLL crate and emits its lifecycle exports.
 ///
 /// Place this attribute on `impl Addin for MyAddin` at the crate root. The
-/// macro supplies empty RTD settings when they are omitted. An RTD add-in
-/// declares both `RtdSubscription` and `RtdSources` inside that implementation;
-/// the framework checks its own `rtd` feature before including those types.
+/// macro supplies `LifecycleState = ()`, `Error = XllError`, `Layers = ()`,
+/// and `AsyncExecutor = NoAsyncExecutor` when omitted. RTD defaults to an empty
+/// dynamic catalog with unit subscriptions. Declaring `RtdSubscription` alone
+/// selects a dynamic catalog for that owner; static catalogs also declare
+/// `RtdSources`. Feature selection happens in xlfn, so configured RTD and async
+/// associated types must not carry consumer-side `cfg` attributes.
 ///
 /// The struct form is also accepted and only emits exports; its separate
 /// `Addin` implementation supplies every feature-required associated type.
@@ -124,6 +135,29 @@ pub fn derive_excel_enum(item: TokenStream) -> TokenStream {
         Ok(tokens) => tokens.into(),
         Err(error) => error.into_compile_error().into(),
     }
+}
+
+/// Derives canonical semantic identity by delegating to each field's
+/// `ExcelInputIdentity` implementation in declaration order. Enum variants
+/// include a declaration-order tag. Container fields retain their standard
+/// shape/presence framing and floating-point fields retain their Rust bits.
+#[proc_macro_derive(ExcelInputIdentity)]
+pub fn derive_excel_input_identity(item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as DeriveInput);
+    input_derive::identity(input)
+        .unwrap_or_else(|error| error.into_compile_error())
+        .into()
+}
+
+/// Derives eager handle-input preparation through `FromExcel` and
+/// `ExcelInputIdentity`. Conversion and validation happen before lookup;
+/// materialization simply returns the retained converted value.
+#[proc_macro_derive(ExcelPrepare)]
+pub fn derive_excel_prepare(item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as DeriveInput);
+    input_derive::prepare(input)
+        .unwrap_or_else(|error| error.into_compile_error())
+        .into()
 }
 
 fn expand_excel_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
@@ -191,12 +225,14 @@ fn expand_excel_addin_impl(
     let ident = ident.clone();
     let mut subscription = None;
     let mut sources = None;
+    let mut executor = None;
     let mut ordinary_items = Vec::with_capacity(implementation.items.len());
     for item in implementation.items {
         if let syn::ImplItem::Type(associated) = &item {
             let slot = match associated.ident.to_string().as_str() {
                 "RtdSubscription" => Some(&mut subscription),
                 "RtdSources" => Some(&mut sources),
+                "AsyncExecutor" => Some(&mut executor),
                 _ => None,
             };
             if let Some(slot) = slot {
@@ -206,13 +242,13 @@ fn expand_excel_addin_impl(
                 {
                     return Err(syn::Error::new_spanned(
                         associated,
-                        "RTD associated types cannot be generic",
+                        "framework associated types cannot be generic",
                     ));
                 }
                 if slot.is_some() {
                     return Err(syn::Error::new_spanned(
                         associated,
-                        "duplicate RTD associated type",
+                        "duplicate framework associated type",
                     ));
                 }
                 if associated.attrs.iter().any(|attribute| {
@@ -220,7 +256,7 @@ fn expand_excel_addin_impl(
                 }) {
                     return Err(syn::Error::new_spanned(
                         associated,
-                        "RTD associated types are gated by the framework; remove their cfg attributes",
+                        "RTD and async associated types are gated by the framework; remove their cfg attributes",
                     ));
                 }
                 *slot = Some(associated.ty.clone());
@@ -235,6 +271,12 @@ fn expand_excel_addin_impl(
         (None, None) => syn::parse_quote! {
             #krate::__private::v1::__xlfn_addin_rtd_types!(@default);
         },
+        (Some(subscription), None) => syn::parse_quote! {
+            #krate::__private::v1::__xlfn_addin_rtd_types!(
+                @configured subscription: #subscription,
+                sources: #krate::DynamicRtdSources<Self::RtdSubscription>
+            );
+        },
         (Some(subscription), Some(sources)) => syn::parse_quote! {
             #krate::__private::v1::__xlfn_addin_rtd_types!(
                 @configured subscription: #subscription, sources: #sources
@@ -243,11 +285,33 @@ fn expand_excel_addin_impl(
         _ => {
             return Err(syn::Error::new_spanned(
                 &implementation.self_ty,
-                "declare both `RtdSubscription` and `RtdSources`, or omit both for an add-in without RTD sources",
+                "`RtdSources` requires an explicit `RtdSubscription`",
             ));
         }
     };
     ordinary_items.push(rtd_types);
+    let executor_type: syn::ImplItem = match executor {
+        None => syn::parse_quote! {
+            #krate::__private::v1::__xlfn_addin_async_type!(@default);
+        },
+        Some(executor) => syn::parse_quote! {
+            #krate::__private::v1::__xlfn_addin_async_type!(@configured #executor);
+        },
+    };
+    ordinary_items.push(executor_type);
+    for (name, default) in [
+        ("LifecycleState", quote!(())),
+        ("Error", quote!(#krate::XllError)),
+        ("Layers", quote!(())),
+    ] {
+        if !ordinary_items
+            .iter()
+            .any(|item| matches!(item, syn::ImplItem::Type(associated) if associated.ident == name))
+        {
+            let name = syn::Ident::new(name, proc_macro2::Span::call_site());
+            ordinary_items.push(syn::parse_quote!(type #name = #default;));
+        }
+    }
     implementation.items = ordinary_items;
 
     // Use the same metadata/ABI emitter for both supported declaration forms.
@@ -495,7 +559,7 @@ mod tests {
             ),
             (
                 quote!(
-                    fn value() -> Matrix<f64> {
+                    fn value() -> NumericArrayOutput {
                         unreachable!()
                     }
                 ),
@@ -574,32 +638,26 @@ mod tests {
     fn numeric_return_abi_is_selected_only_from_recognizable_numeric_array_types() {
         use xlfn_common::ReturnAbi;
         for (ty, abi) in [
-            (quote!(Matrix<f64>), ReturnAbi::NumericArray12),
-            (quote!(Matrix<(f64)>), ReturnAbi::NumericArray12),
-            (quote!(Row<f64>), ReturnAbi::NumericArray12),
-            (quote!(Column<f64>), ReturnAbi::NumericArray12),
+            (quote!(Matrix<f64>), ReturnAbi::Value12),
+            (quote!(Matrix<(f64)>), ReturnAbi::Value12),
+            (quote!(Row<f64>), ReturnAbi::Value12),
+            (quote!(Column<f64>), ReturnAbi::Value12),
             (
                 quote!(xlfn::value::Matrix<::core::primitive::f64>),
-                ReturnAbi::NumericArray12,
+                ReturnAbi::Value12,
             ),
-            (quote!(xlfn::prelude::Row<f64>), ReturnAbi::NumericArray12),
+            (quote!(xlfn::prelude::Row<f64>), ReturnAbi::Value12),
             (quote!(NumericArrayOutput), ReturnAbi::NumericArray12),
             (
                 quote!(xlfn::output::NumericArrayOutput),
                 ReturnAbi::NumericArray12,
             ),
-            (quote!(XllResult<Matrix<f64>>), ReturnAbi::NumericArray12),
-            (
-                quote!(xlfn::error::XllResult<Row<f64>>),
-                ReturnAbi::NumericArray12,
-            ),
-            (
-                quote!(Result<Column<f64>, CustomError>),
-                ReturnAbi::NumericArray12,
-            ),
+            (quote!(XllResult<Matrix<f64>>), ReturnAbi::Value12),
+            (quote!(xlfn::error::XllResult<Row<f64>>), ReturnAbi::Value12),
+            (quote!(Result<Column<f64>, CustomError>), ReturnAbi::Value12),
             (
                 quote!(std::result::Result<Matrix<f64>, CustomError>),
-                ReturnAbi::NumericArray12,
+                ReturnAbi::Value12,
             ),
             (quote!(f64), ReturnAbi::Value12),
             (quote!(bool), ReturnAbi::Value12),
@@ -628,7 +686,7 @@ mod tests {
     #[test]
     fn numeric_wrapper_and_registration_choose_the_same_return_abi() {
         let expanded = expand_excel_function(
-            quote!(thread_safe),
+            quote!(thread_safe, return_abi = "fp12"),
             function(quote!(
                 fn prices(spot: f64, strikes: NumericMatrixRef<'_>) -> XllResult<Matrix<f64>> {
                     unreachable!()
@@ -683,8 +741,8 @@ mod tests {
         )
         .unwrap()
         .to_string();
-        assert!(expanded.contains("framework :: __private :: v1 :: sync_udf_fp12"));
-        assert!(expanded.contains("ReturnAbi :: NumericArray12"));
+        assert!(expanded.contains("framework :: __private :: v1 :: sync_udf"));
+        assert!(expanded.contains("ReturnAbi :: Value12"));
     }
 
     #[test]
@@ -1989,6 +2047,127 @@ mod tests {
     }
 
     #[test]
+    fn addin_defaults_and_explicit_async_are_framework_gated() {
+        let implementation = syn::parse_quote! {
+            impl Addin for BasicAddin {
+                type SharedState = ();
+                type AsyncExecutor = MyExecutor;
+            }
+        };
+        let text = expand_excel_addin_impl(quote!(), implementation)
+            .unwrap()
+            .to_string();
+        for expected in [
+            "type LifecycleState = ()",
+            "type Error = :: xlfn :: XllError",
+            "type Layers = ()",
+            "__xlfn_addin_async_type ! (@ configured MyExecutor)",
+        ] {
+            assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+        assert!(!text.contains("feature ="));
+        let error = expand_excel_addin_impl(
+            quote!(),
+            syn::parse_quote! {
+                impl Addin for BasicAddin {
+                    #[cfg(feature = "async")]
+                    type AsyncExecutor = MyExecutor;
+                }
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("remove their cfg attributes"));
+        let text = expand_excel_addin_impl(
+            quote!(),
+            syn::parse_quote! {
+                impl Addin for BasicAddin { type RtdSubscription = Owner; }
+            },
+        )
+        .unwrap()
+        .to_string();
+        assert!(text.contains("DynamicRtdSources < Self :: RtdSubscription >"));
+    }
+
+    #[test]
+    fn strict_function_semantics_preserve_special_abis() {
+        let text = expand_excel_function(quote!(input_semantics = strict, macro_sheet), function(quote! {
+            fn strict(a: f64, b: i32, c: bool, d: String, e: Spot,
+                values: NumericMatrixRef<'_>, #[excel_arg(reference)] r: ExcelReference<'_>) -> f64 { a }
+        })).unwrap().to_string();
+        assert!(!text.contains("prepare_native_f64"));
+        assert!(!text.contains("prepare_native_i32"));
+        assert!(!text.contains("prepare_native_bool"));
+        assert!(!text.contains("prepare_native_string"));
+        assert!(text.contains("NumericMatrixRef"));
+        assert!(text.contains("FP12"));
+        assert!(text.contains("ArgumentAbi :: Reference12"));
+        for options in [
+            quote!(input_semantics = native),
+            quote!(input_semantics = strict, input_semantics = strict),
+        ] {
+            assert!(
+                expand_excel_function(
+                    options,
+                    function(quote!(
+                        fn value(a: f64) -> f64 {
+                            a
+                        }
+                    ))
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn handle_reuse_policies_are_explicit_and_validated() {
+        for (policy, expected) in [
+            (quote!(inputs), "set_handle_reuse (true)"),
+            (quote!(never), "set_handle_reuse (false)"),
+        ] {
+            let text = expand_excel_function(
+                quote!(handle_reuse = #policy),
+                function(quote!(
+                    fn object() -> Model {
+                        unreachable!()
+                    }
+                )),
+            )
+            .unwrap()
+            .to_string();
+            assert!(text.contains(expected));
+        }
+        for options in [
+            quote!(handle_reuse = global),
+            quote!(handle_reuse = inputs, handle_reuse = never),
+            quote!(handle_reuse = never, return_abi = "fp12"),
+        ] {
+            assert!(
+                expand_excel_function(
+                    options,
+                    function(quote!(
+                        fn object() -> Model {
+                            unreachable!()
+                        }
+                    ))
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            expand_excel_function(
+                quote!(handle_reuse = never),
+                function(quote!(
+                    async fn object() -> Model {
+                        unreachable!()
+                    }
+                ))
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn addin_implementation_forwards_explicit_rtd_types_through_framework_helper() {
         let implementation = syn::parse2(quote! {
             impl Addin for FeedAddin {
@@ -2004,7 +2183,7 @@ mod tests {
         let syn::Item::Impl(implementation) = &file.items[0] else {
             unreachable!()
         };
-        assert_eq!(implementation.items.len(), 2);
+        assert_eq!(implementation.items.len(), 6);
         assert!(
             matches!(&implementation.items[0], syn::ImplItem::Type(ty) if ty.ident == "SharedState")
         );
@@ -2021,14 +2200,10 @@ mod tests {
 
     #[test]
     fn addin_implementation_rejects_partial_or_conditional_rtd_configuration() {
-        for implementation in [
-            quote! { impl Addin for Feed { type RtdSubscription = Subscription; } },
-            quote! { impl Addin for Feed { type RtdSources = (Source,); } },
-        ] {
-            let error = expand_excel_addin_impl(quote!(), syn::parse2(implementation).unwrap())
-                .unwrap_err();
-            assert!(error.to_string().contains("declare both"));
-        }
+        let implementation = quote! { impl Addin for Feed { type RtdSources = (Source,); } };
+        let error =
+            expand_excel_addin_impl(quote!(), syn::parse2(implementation).unwrap()).unwrap_err();
+        assert!(error.to_string().contains("requires an explicit"));
         let conditional = quote! {
             impl Addin for Feed {
                 #[cfg(feature = "rtd")]

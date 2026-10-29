@@ -198,9 +198,10 @@ Read dimensions with `shape()`, `rows()`, and `columns()`, and access elements
 with `as_slice()`, `iter()`, `row()`, or checked `get(row, column)`. The buffer
 exists only during the synchronous call and cannot be an async argument.
 Return ABI selection depends on the Rust return type, independently of input ABI.
-Synchronous `Matrix<f64>`, `Row<f64>`, `Column<f64>`, and `NumericArrayOutput`
-return `FP12*` (`K%`) by default. `Result<T, E>` inherits `T`'s ABI.
-Other types, including scalars and mixed arrays, use `XLOPER12*` (`Q`).
+Ordinary `Matrix`, `Row`, and `Column` results use `XLOPER12*` (`Q`),
+including `Result` and `XllResult`, so the selected Excel error survives.
+`NumericArrayOutput` explicitly opts into `FP12*` (`K%`), including inside
+`Result<T, E>`. Scalars and mixed arrays also use Q.
 Unrecognized type aliases default to Q; `return_abi = "fp12"` can select the
 numeric ABI explicitly and requires a compatible numeric return type.
 Asynchronous functions keep the `xlAsyncReturn` completion path.
@@ -225,19 +226,20 @@ fn prices(spot: f64, strikes: NumericMatrixRef<'_>) -> XllResult<NumericArrayOut
 }
 ```
 
-This registers `K%BK%$`. Existing numeric matrices and vectors use the same
-FP12 publication path with a final copy into contiguous return storage.
+This registers `K%BK%$`. Use `return_abi = "fp12"` on an ordinary numeric matrix or vector to select
+the FP12 publication path with a final copy into contiguous return storage.
 All FP12 failures, including input errors, `ExcelValue`, panics, non-finite
 numbers, and exceeded limits, return null, which Excel displays as `#NUM!`.
 The runtime records details synchronously in its bounded diagnostic history.
 
-Choose Q when worksheet error distinctions such as `#N/A` and `IFNA` matter:
+Ordinary matrices preserve worksheet error distinctions such as `#N/A`
+and `IFNA` by default:
 
 ```rust
 {{#include ../fixtures/addin.md}}
 use xlfn::prelude::*;
 
-#[excel_function(name = "ARRAY.STRICT", thread_safe, return_abi = "xloper12")]
+#[excel_function(name = "ARRAY.STRICT", thread_safe)]
 fn strict_prices() -> Result<Matrix<f64>, ExcelError> {
     Err(ExcelError::NotAvailable)
 }

@@ -35,7 +35,7 @@ impl Hash for Key {
         {
             let cache = nested.cache.upgrade().unwrap();
             let result = catch_no_unwind(AssertUnwindSafe(|| {
-                drop(cache.get_or_try_insert_with(
+                drop(cache.get_or_try_insert_weighted(
                     Key::plain(2),
                     |_| 1,
                     || {
@@ -114,7 +114,11 @@ fn insert_owned_key(
         })),
         on_hash: None,
     };
-    drop(cache.get_or_try_insert_with(key, |_| 1, || Ok(id)).unwrap());
+    drop(
+        cache
+            .get_or_try_insert_weighted(key, |_| 1, || Ok(id))
+            .unwrap(),
+    );
 }
 
 fn assert_reentered(observed: &Observation, expected: usize) {
@@ -151,7 +155,7 @@ fn eviction_destroys_keys_after_releasing_all_cache_locks() {
     // one request; every evicted key must still be destroyed lock-free.
     drop(
         cache
-            .get_or_try_insert_with(Key::plain(8), |_| 4, || Ok(8))
+            .get_or_try_insert_weighted(Key::plain(8), |_| 4, || Ok(8))
             .unwrap(),
     );
     assert_reentered(&observed, 4);

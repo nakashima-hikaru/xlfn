@@ -180,15 +180,11 @@ where
             .checked_add(key_stride)
             .expect("benchmark key space exhausted");
         let lease = cache
-            .get_or_try_insert_with(
-                make_key(serial),
-                |value| value.0.len(),
-                || {
-                    let mut bytes = vec![serial as u8; payload_bytes].into_boxed_slice();
-                    bytes[..size_of::<u64>()].copy_from_slice(&serial.to_le_bytes());
-                    Ok(Payload(bytes))
-                },
-            )
+            .get_or_try_insert_with(make_key(serial), || {
+                let mut bytes = vec![serial as u8; payload_bytes].into_boxed_slice();
+                bytes[..size_of::<u64>()].copy_from_slice(&serial.to_le_bytes());
+                Ok(Payload(bytes))
+            })
             .expect("reclamation benchmark initialization succeeds");
         assert_eq!(lease.0.len(), payload_bytes);
         let actual = u64::from_le_bytes(lease.0[..size_of::<u64>()].try_into().unwrap());
@@ -254,7 +250,10 @@ where
     where
         F: Fn(u64) -> K + Copy + Send + 'static,
     {
-        let cache = Arc::new(CalculationCache::new(RESIDENT_ENTRIES * payload_bytes));
+        let cache = Arc::new(CalculationCache::with_weigher(
+            RESIDENT_ENTRIES * payload_bytes,
+            |value: &Payload| value.0.len(),
+        ));
         let barrier = Arc::new(Barrier::new(worker_count + 1));
         let (done_tx, done) = std::sync::mpsc::sync_channel(worker_count);
         let mut start = Vec::with_capacity(worker_count);
@@ -439,16 +438,10 @@ where
 fn reclamation_benchmarks(c: &mut Criterion) {
     // Isolate entry storage from policy allocation and payload backing
     // buffers. Warm TLS first and keep final-drop maintenance outside the probe.
-    let zero_capacity = CalculationCache::<u64, u64>::new(0);
-    drop(
-        zero_capacity
-            .get_or_try_insert_with(0, |_| 8, || Ok(42))
-            .unwrap(),
-    );
+    let zero_capacity = CalculationCache::<u64, u64>::with_weigher(0, |_| 8);
+    drop(zero_capacity.get_or_try_insert_with(0, || Ok(42)).unwrap());
     let allocation_probe = AllocationProbe::start();
-    let value = zero_capacity
-        .get_or_try_insert_with(1, |_| 8, || Ok(42))
-        .unwrap();
+    let value = zero_capacity.get_or_try_insert_with(1, || Ok(42)).unwrap();
     black_box(&*value);
     let allocations = allocation_probe.finish();
     println!(
@@ -479,9 +472,7 @@ fn reclamation_benchmarks(c: &mut Criterion) {
     nonresident.measurement_time(benchmark_measurement_time());
     nonresident.bench_function("roundtrip", |b| {
         b.iter(|| {
-            let lease = zero_capacity
-                .get_or_try_insert_with(1, |_| 8, || Ok(42))
-                .unwrap();
+            let lease = zero_capacity.get_or_try_insert_with(1, || Ok(42)).unwrap();
             black_box(*lease);
             drop(lease);
         });
@@ -535,7 +526,8 @@ where
     // Owner construction includes resident policy and the retirement queue for
     // Drop-bearing keys. Final cache destruction stays outside the probe.
     let probe = AllocationProbe::start();
-    let cache = CalculationCache::<K, Payload>::new(RESIDENT_ENTRIES * 64);
+    let cache =
+        CalculationCache::<K, Payload>::with_weigher(RESIDENT_ENTRIES * 64, |value| value.0.len());
     let counts = probe.finish();
     println!(
         "cache_owner_allocation_probe {}",
@@ -582,7 +574,7 @@ fn deferred_queue_churn<K>(
 ) where
     K: Clone + Eq + Hash + Send + Sync + 'static,
 {
-    let cache = CalculationCache::<K, u64>::new(RESIDENT_ENTRIES * 8);
+    let cache = CalculationCache::<K, u64>::with_weigher(RESIDENT_ENTRIES * 8, |_| 8);
     // Keep decimal key width fixed throughout practical timing runs, so a
     // faster variant does not pay for longer strings merely by doing more work.
     let mut next_key = 1_u64 << 60;
@@ -595,7 +587,7 @@ fn deferred_queue_churn<K>(
         // loop. Its clones and retirement can produce additional deferred
         // batches, unlike the Copy-key control.
         let lease = cache
-            .get_or_try_insert_with(make_key(value), |_| 8, || Ok(value))
+            .get_or_try_insert_with(make_key(value), || Ok(value))
             .expect("deferred queue benchmark initialization succeeds");
         black_box(*lease);
         drop(lease);

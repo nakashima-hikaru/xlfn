@@ -11,15 +11,11 @@ fn pre_clear_computation_cannot_republish_stale_value() {
     thread::scope(|s| {
         let handle = s.spawn(|| {
             let lease = cache
-                .get_or_try_insert_with(
-                    "k1".to_string(),
-                    |_| 1,
-                    || {
-                        start_compute.wait();
-                        finish_compute.wait();
-                        Ok("stale_v1".to_string())
-                    },
-                )
+                .get_or_try_insert_with("k1".to_string(), || {
+                    start_compute.wait();
+                    finish_compute.wait();
+                    Ok("stale_v1".to_string())
+                })
                 .expect("computation should succeed");
 
             assert_eq!(&*lease, "stale_v1");
@@ -46,7 +42,7 @@ fn pre_clear_computation_cannot_republish_stale_value() {
 
     // Subsequent request for the same key computes afresh.
     let fresh_lease = cache
-        .get_or_try_insert_with("k1".to_string(), |_| 1, || Ok("fresh_v2".to_string()))
+        .get_or_try_insert_with("k1".to_string(), || Ok("fresh_v2".to_string()))
         .expect("fresh compute should succeed");
     assert_eq!(&*fresh_lease, "fresh_v2");
     assert_eq!(cache.len(), 1);
@@ -79,15 +75,11 @@ fn follower_retrying_after_leader_panic_across_clear_does_not_pollute_new_epoch(
         let leader = scope.spawn(move || {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 cache_ref
-                    .get_or_try_insert_with(
-                        leader_key,
-                        |_| 1,
-                        || {
-                            started_tx.send(()).unwrap();
-                            panic_rx.recv().unwrap();
-                            panic!("injected leader compute panic");
-                        },
-                    )
+                    .get_or_try_insert_with(leader_key, || {
+                        started_tx.send(()).unwrap();
+                        panic_rx.recv().unwrap();
+                        panic!("injected leader compute panic");
+                    })
                     .map(|lease| (*lease).clone())
             }))
         });
@@ -95,15 +87,11 @@ fn follower_retrying_after_leader_panic_across_clear_does_not_pollute_new_epoch(
         let follower_key = key(1);
         let follower = scope.spawn(move || {
             cache_ref
-                .get_or_try_insert_with(
-                    follower_key,
-                    |_| 1,
-                    || {
-                        computing_tx.send(()).unwrap();
-                        finish_rx.recv().unwrap();
-                        Ok("v1_follower_stale".to_owned())
-                    },
-                )
+                .get_or_try_insert_with(follower_key, || {
+                    computing_tx.send(()).unwrap();
+                    finish_rx.recv().unwrap();
+                    Ok("v1_follower_stale".to_owned())
+                })
                 .unwrap()
         });
         let enrolled = matched_rx.recv_timeout(Duration::from_secs(10)).is_ok();
@@ -121,7 +109,7 @@ fn follower_retrying_after_leader_panic_across_clear_does_not_pollute_new_epoch(
     assert!(cache.get(&key(0)).is_none());
     assert_eq!(cache.len(), 0);
     let fresh = cache
-        .get_or_try_insert_with(key(0), |_| 1, || Ok("v2_fresh".to_owned()))
+        .get_or_try_insert_with(key(0), || Ok("v2_fresh".to_owned()))
         .unwrap();
     assert_eq!(&*fresh, "v2_fresh");
     assert_eq!(cache.len(), 1);

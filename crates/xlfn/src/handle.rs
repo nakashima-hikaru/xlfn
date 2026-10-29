@@ -50,6 +50,7 @@ pub(crate) use formula::FormulaRevisionKey;
 pub(crate) use formula::HandleTopicKey;
 #[cfg(feature = "handles")]
 pub(crate) use formula::formula_revision_key;
+pub(crate) use formula::fresh_invocation_inputs;
 #[cfg(feature = "bench-internals")]
 pub(crate) use formula::resolve_formula_caller;
 #[cfg(all(test, feature = "handles"))]

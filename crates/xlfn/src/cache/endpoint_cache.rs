@@ -235,7 +235,7 @@ mod tests {
             let worker = scope.spawn(move || {
                 drop(
                     registry
-                        .get_or_try_insert(&endpoint, 1, |_| 1, || Ok(7))
+                        .get_or_try_insert_weighted(&endpoint, 1, |_| 1, || Ok(7))
                         .unwrap(),
                 );
                 ready_tx.send(()).unwrap();
@@ -290,7 +290,7 @@ mod tests {
         let first = CacheRegistry::new(64);
         drop(
             first
-                .get_or_try_insert(&endpoint, 1, String::len, || Ok("old".into()))
+                .get_or_try_insert_weighted(&endpoint, 1, String::len, || Ok("old".into()))
                 .unwrap(),
         );
         let identity = first.identity;
@@ -302,7 +302,7 @@ mod tests {
         assert!(registry.get(&endpoint, &1).unwrap().is_none());
         drop(
             registry
-                .get_or_try_insert(&endpoint, 1, String::len, || Ok("new".into()))
+                .get_or_try_insert_weighted(&endpoint, 1, String::len, || Ok("new".into()))
                 .unwrap(),
         );
         assert_eq!(&*registry.get(&endpoint, &1).unwrap().unwrap(), "new");
@@ -314,7 +314,7 @@ mod tests {
         assert!(registry.get(&endpoint, &1).unwrap().is_none());
         drop(
             registry
-                .get_or_try_insert(&endpoint, 1, String::len, || Ok("replacement".into()))
+                .get_or_try_insert_weighted(&endpoint, 1, String::len, || Ok("replacement".into()))
                 .unwrap(),
         );
         assert_eq!(
@@ -333,22 +333,22 @@ mod tests {
         let strings = CacheEndpoint::<u64, String>::new("same-name");
         drop(
             first
-                .get_or_try_insert(&numbers, 1, |_| 1, || Ok(7))
+                .get_or_try_insert_weighted(&numbers, 1, |_| 1, || Ok(7))
                 .unwrap(),
         );
         drop(
             second
-                .get_or_try_insert(&numbers, 1, |_| 1, || Ok(9))
+                .get_or_try_insert_weighted(&numbers, 1, |_| 1, || Ok(9))
                 .unwrap(),
         );
         drop(
             first
-                .get_or_try_insert(&marked, 1, |_| 1, || Ok(11))
+                .get_or_try_insert_weighted(&marked, 1, |_| 1, || Ok(11))
                 .unwrap(),
         );
         drop(
             first
-                .get_or_try_insert(&strings, 1, String::len, || Ok("text".into()))
+                .get_or_try_insert_weighted(&strings, 1, String::len, || Ok("text".into()))
                 .unwrap(),
         );
         for _ in 0..3 {
@@ -369,7 +369,7 @@ mod tests {
             let endpoint = CacheEndpoint::<u64, u64>::new(id);
             drop(
                 registry
-                    .get_or_try_insert(&endpoint, 1, |_| 1, || Ok(value as u64))
+                    .get_or_try_insert_weighted(&endpoint, 1, |_| 1, || Ok(value as u64))
                     .unwrap(),
             );
         }
@@ -397,7 +397,7 @@ mod tests {
         let second = CacheEndpoint::<u64, u64>::new(second_name);
         drop(
             registry
-                .get_or_try_insert(&first, 1, |_| 1, || Ok(7))
+                .get_or_try_insert_weighted(&first, 1, |_| 1, || Ok(7))
                 .unwrap(),
         );
         assert_eq!(*registry.get(&second, &1).unwrap().unwrap(), 7);

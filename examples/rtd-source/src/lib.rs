@@ -1,7 +1,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use xlfn::prelude::*;
-use xlfn::rtd::{RtdSourceHandle, RtdValue};
+use xlfn::rtd::{BoxedRtdSubscription, RtdSourceHandle, RtdValue};
 
 #[allow(
     dead_code,
@@ -10,7 +10,7 @@ use xlfn::rtd::{RtdSourceHandle, RtdValue};
 mod metric_source;
 mod multiplexed_metric_source;
 
-use multiplexed_metric_source::{MetricSource, metric_source};
+use multiplexed_metric_source::metric_source;
 
 #[derive(Default)]
 pub(crate) struct Client;
@@ -36,26 +36,20 @@ impl Client {
 }
 
 pub struct State {
-    metrics: RtdSourceHandle<MetricSource>,
+    metrics: RtdSourceHandle,
 }
 
 pub struct RtdSourceExample;
 
 #[excel_addin(name = "RTD Source Example", id = "rtd-source", category = "Examples")]
 impl Addin for RtdSourceExample {
-    type RtdSubscription = <MetricSource as xlfn::rtd::RtdSource>::Subscription;
-    type RtdSources = (MetricSource,);
+    type RtdSubscription = BoxedRtdSubscription;
     type SharedState = State;
-    type LifecycleState = ();
-    type Error = XllError;
-    type Layers = ();
-    #[cfg(feature = "async")]
-    type AsyncExecutor = xlfn::NoAsyncExecutor;
 
     fn open(
         context: &OpenContext<Self>,
     ) -> Result<Opened<Self::SharedState, Self::LifecycleState, Self::Layers>, Self::Error> {
-        let (metrics,) = context.rtd().register_sources((metric_source(),))?;
+        let metrics = context.rtd().register(metric_source())?;
         Ok(Opened::new(State { metrics }))
     }
 }

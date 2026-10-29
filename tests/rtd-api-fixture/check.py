@@ -28,7 +28,7 @@ def main() -> int:
     evidence.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, CARGO_INCREMENTAL="0")
     combos = [(), ("objects",), ("streaming",), ("objects", "streaming")]
-    cases = [("basic", ROOT / "src/lib.rs"), *[(name, ROOT / f"cases/{name}.rs") for name in ("configured", "rtd_exports", "rtd_access")]]
+    cases = [("basic", ROOT / "src/lib.rs"), *[(name, ROOT / f"cases/{name}.rs") for name in ("configured", "rtd_exports", "rtd_access", "erased")]]
     report = {
         "rustc": subprocess.check_output(["rustc", "-Vv"], text=True).strip(),
         "environment": {"CARGO_INCREMENTAL": "0"},
@@ -70,8 +70,10 @@ def main() -> int:
                         passed &= sorted(codes) == sorted(expected_codes)
                     elif name == "rtd_access":
                         passed &= len(errors) == 1 and errors[0].get("code", {}).get("code") == "E0599" and "rtd" in errors[0]["message"]
+                    elif name == "erased":
+                        passed &= any("RTD configuration requires the xlfn `rtd` feature" in error["message"] for error in errors)
                 log = evidence / f"{label}.log"
-                log.write_text(run.stderr + "\n" + "\n".join(error.get("rendered", error["message"]) for error in errors))
+                log.write_text((run.stderr + "\n" + "\n".join(error.get("rendered", error["message"]) for error in errors)).rstrip() + "\n")
                 report["checks"].append({"case": name, "consumer_features": list(features), "expected_success": expected_success, "exit_code": run.returncode, "passed": passed, "command": command, "diagnostics": [{"message": error["message"], "code": (error.get("code") or {}).get("code")} for error in errors], "log": log.name, "log_sha256": digest(log)})
                 print(f"{'PASS' if passed else 'FAIL'} {label}", flush=True)
                 (evidence / "verification.json").write_text(json.dumps(report, indent=2) + "\n")

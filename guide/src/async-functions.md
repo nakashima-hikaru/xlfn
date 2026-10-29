@@ -13,7 +13,11 @@ xlfn = { version = "0.2", features = ["async-builtin"] }
 
 `async` provides native Excel transport, task lifecycle, cancellation, and the
 executor extension API. `async-builtin` additionally provides the polling pool.
-Choose only `async` when supplying an external executor.
+Choose only `async` when supplying an external executor. Declare
+`type AsyncExecutor = YourExecutor` in the attributed `Addin` implementation
+without a consumer-side `cfg` attribute. The macro checks xlfn's features.
+An omitted executor defaults to `NoAsyncExecutor`; registering an async UDF
+with that disabled executor is a compile-time error.
 
 The project uses Excel 2010 or later as the operational baseline for this capability. Qualify the exact Excel versions and channels that you distribute to.
 

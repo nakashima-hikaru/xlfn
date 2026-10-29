@@ -19,6 +19,10 @@ use std::future::Future;
 /// returning success. It is also called after a partially failed `start`.
 /// A shutdown error retains the executor and prevents a stopped certificate.
 pub trait AsyncExecutor: Send + Sync + 'static {
+    /// Whether this executor accepts registered async worksheet functions.
+    /// The framework checks this when compiling generated async entry points.
+    const ENABLED: bool = true;
+
     /// Owned publication capability issued before a task is registered.
     type Reservation: Send + 'static;
 
@@ -45,6 +49,8 @@ pub trait AsyncExecutor: Send + Sync + 'static {
 }
 
 impl AsyncExecutor for NoAsyncExecutor {
+    const ENABLED: bool = false;
+
     type Reservation = std::convert::Infallible;
 
     fn start(&self) -> XllResult<()> {

@@ -48,7 +48,7 @@ pub use event::{
 };
 pub use history::{
     DiagnosticCursor, DiagnosticErrorKind, DiagnosticHistory, DiagnosticHistoryLimits,
-    DiagnosticHistoryStats, DiagnosticPage, DiagnosticRecord,
+    DiagnosticHistoryReader, DiagnosticHistoryStats, DiagnosticPage, DiagnosticRecord,
 };
 use worker::{AsyncDiagnosticSink, DiagnosticEventMetadata, DiagnosticObserver};
 
@@ -157,6 +157,27 @@ impl DiagnosticRouter {
         F: FnOnce() -> Result<Box<AsyncDiagnosticSink>, DiagnosticInitError>,
         H: FnOnce(bool) -> Result<(), DiagnosticInitError>,
     {
+        self.configure_with(true, make_sink, on_published)
+    }
+
+    fn install_with<F, H>(&self, make_sink: F, on_published: H) -> Result<(), DiagnosticInitError>
+    where
+        F: FnOnce() -> Result<Box<AsyncDiagnosticSink>, DiagnosticInitError>,
+        H: FnOnce(bool) -> Result<(), DiagnosticInitError>,
+    {
+        self.configure_with(false, make_sink, on_published)
+    }
+
+    fn configure_with<F, H>(
+        &self,
+        replace: bool,
+        make_sink: F,
+        on_published: H,
+    ) -> Result<(), DiagnosticInitError>
+    where
+        F: FnOnce() -> Result<Box<AsyncDiagnosticSink>, DiagnosticInitError>,
+        H: FnOnce(bool) -> Result<(), DiagnosticInitError>,
+    {
         if self.caller_is_worker() {
             return Err(DiagnosticInitError::ReentrantMutation);
         }
@@ -168,6 +189,9 @@ impl DiagnosticRouter {
         }
         if *phase != DiagnosticPhase::Open {
             return Err(DiagnosticInitError::RouterClosed);
+        }
+        if !replace && self.sink.read_if_ready().is_some() {
+            return Err(DiagnosticInitError::AlreadyInstalled);
         }
         let sink = make_sink()?;
         let previous = crate::ingress::with_diagnostic_linearization(|| {
@@ -414,6 +438,19 @@ fn admit_published_sink(
 /// fully constructed and installed before the previous worker is flushed and
 /// joined, so a terminal previous worker is never restored over a healthy sink.
 pub(crate) fn set_diagnostic_sink(sink: impl DiagnosticSink) -> Result<(), DiagnosticInitError> {
+    configure_diagnostic_sink(sink, true)
+}
+
+pub(crate) fn install_diagnostic_sink(
+    sink: impl DiagnosticSink,
+) -> Result<(), DiagnosticInitError> {
+    configure_diagnostic_sink(sink, false)
+}
+
+fn configure_diagnostic_sink(
+    sink: impl DiagnosticSink,
+    replace: bool,
+) -> Result<(), DiagnosticInitError> {
     let router = router();
     if router.caller_is_worker() {
         return Err(DiagnosticInitError::ReentrantMutation);
@@ -424,16 +461,20 @@ pub(crate) fn set_diagnostic_sink(sink: impl DiagnosticSink) -> Result<(), Diagn
     if !admitted {
         return Err(DiagnosticInitError::RouterClosed);
     }
-    router.replace_with(
-        || {
-            let sink = Box::new(AsyncDiagnosticSink::new(sink)?);
-            if let Some(trace) = router.trace_handle() {
-                sink.set_trace_sink(trace);
-            }
-            Ok(sink)
-        },
-        |had_sink| admit_published_sink(router, crate::module_runtime::ingress(), had_sink),
-    )
+    let make_sink = || {
+        let sink = Box::new(AsyncDiagnosticSink::new(sink)?);
+        if let Some(trace) = router.trace_handle() {
+            sink.set_trace_sink(trace);
+        }
+        Ok(sink)
+    };
+    let on_published =
+        |had_sink| admit_published_sink(router, crate::module_runtime::ingress(), had_sink);
+    if replace {
+        router.replace_with(make_sink, on_published)
+    } else {
+        router.install_with(make_sink, on_published)
+    }
 }
 
 /// Flushes queued diagnostics, stops the logger worker, and releases its sink.
@@ -921,6 +962,88 @@ mod tests {
 
         assert!(matches!(result, Err(DiagnosticInitError::RouterClosed)));
         assert!(!router.sink.is_active());
+    }
+
+    #[test]
+    fn install_rejects_existing_sink_before_starting_a_worker_and_replace_is_explicit() {
+        let router = DiagnosticRouter {
+            sink: ReplaceableServiceSlot::new(),
+            transition: Mutex::new(DiagnosticPhase::Open),
+            retiring_workers: Mutex::new(Vec::new()),
+            observer: DiagnosticObserver::new(),
+        };
+        let make =
+            || AsyncDiagnosticSink::new(CountingSink(Arc::new(AtomicUsize::new(0)))).map(Box::new);
+        router
+            .install_with(make, |had_previous| {
+                assert!(!had_previous);
+                Ok(())
+            })
+            .unwrap();
+        let original_worker = router.sink.read_if_ready().unwrap().worker_thread_id;
+        let called = std::cell::Cell::new(false);
+        let result = router.install_with(
+            || {
+                called.set(true);
+                make()
+            },
+            |_| Ok(()),
+        );
+        assert!(matches!(result, Err(DiagnosticInitError::AlreadyInstalled)));
+        assert!(!called.get());
+        assert_eq!(
+            router.sink.read_if_ready().unwrap().worker_thread_id,
+            original_worker
+        );
+        router
+            .replace_with(make, |had_previous| {
+                assert!(had_previous);
+                Ok(())
+            })
+            .unwrap();
+        assert_ne!(
+            router.sink.read_if_ready().unwrap().worker_thread_id,
+            original_worker
+        );
+        router.drain_reopenable().unwrap();
+    }
+
+    #[test]
+    fn concurrent_sink_installation_has_one_owner() {
+        let router = DiagnosticRouter {
+            sink: ReplaceableServiceSlot::new(),
+            transition: Mutex::new(DiagnosticPhase::Open),
+            retiring_workers: Mutex::new(Vec::new()),
+            observer: DiagnosticObserver::new(),
+        };
+        let started = AtomicUsize::new(0);
+        let barrier = std::sync::Barrier::new(2);
+        let install = || {
+            barrier.wait();
+            router.install_with(
+                || {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    AsyncDiagnosticSink::new(CountingSink(Arc::new(AtomicUsize::new(0))))
+                        .map(Box::new)
+                },
+                |_| Ok(()),
+            )
+        };
+        let outcomes = std::thread::scope(|scope| {
+            let first = scope.spawn(install);
+            let second = scope.spawn(install);
+            [first.join().unwrap(), second.join().unwrap()]
+        });
+        assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|result| matches!(result, Err(DiagnosticInitError::AlreadyInstalled)))
+                .count(),
+            1
+        );
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+        router.drain_reopenable().unwrap();
     }
 
     #[test]

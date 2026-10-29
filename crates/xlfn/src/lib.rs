@@ -166,7 +166,7 @@ pub(crate) use subscription_owner::IntoRtdSubscription;
 #[cfg(not(feature = "rtd"))]
 pub(crate) use subscription_owner::RtdSubscription;
 #[cfg(feature = "rtd")]
-pub use subscription_owner::{IntoRtdSubscription, RtdSubscription};
+pub use subscription_owner::{BoxedRtdSubscription, IntoRtdSubscription, RtdSubscription};
 
 mod ingress;
 
@@ -302,7 +302,7 @@ pub mod output {
 
 #[cfg(feature = "handles")]
 pub use xlfn_macros::ExcelHandleObject;
-pub use xlfn_macros::{ExcelEnum, excel_addin, excel_function};
+pub use xlfn_macros::{ExcelEnum, ExcelInputIdentity, ExcelPrepare, excel_addin, excel_function};
 
 /// Common imports for authoring an add-in.
 pub mod prelude {
@@ -325,5 +325,5 @@ pub mod prelude {
     pub use crate::{AsyncExecutor, AsyncTask};
     #[cfg(feature = "async-builtin")]
     pub use crate::{AsyncPollerCount, BuiltinAsyncExecutor, BuiltinExecutorConfig};
-    pub use crate::{ExcelEnum, excel_addin, excel_function};
+    pub use crate::{ExcelEnum, ExcelInputIdentity, ExcelPrepare, excel_addin, excel_function};
 }

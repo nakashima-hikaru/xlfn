@@ -97,6 +97,15 @@ impl<'call, 'scope, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>
 impl<'call, 'scope, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>
     ReturnContext<'call, 'scope, crate::value::FormulaInputMode, E, C>
 {
+    /// Selects the formula revision before invoking a handle producer.
+    #[doc(hidden)]
+    pub fn set_handle_reuse(&mut self, reuse_inputs: bool) -> XllResult<()> {
+        if !reuse_inputs {
+            self.state.inputs = crate::handle::fresh_invocation_inputs(self.state.inputs)?;
+        }
+        Ok(())
+    }
+
     #[doc(hidden)]
     pub fn publish_existing_alias<'handle, T: crate::handle::ExcelHandleObject>(
         &mut self,

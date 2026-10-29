@@ -1,0 +1,47 @@
+    Checking xlfn-rtd-api-fixture v0.1.0 (/var/folders/4r/_58mxm_d5zl1kvcz77gl1njr0000gn/T/xlfn-rtd-api-consumer-d58gn4uj)
+error: could not compile `xlfn-rtd-api-fixture` (lib) due to 5 previous errors
+
+error: RTD configuration requires the xlfn `rtd` feature
+  --> src/lib.rs:15:1
+   |
+15 | #[excel_addin(name = "Erased RTD consumer", id = "erased-rtd-consumer")]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `::framework::__private::v1::__xlfn_addin_rtd_types` which comes from the expansion of the attribute macro `excel_addin` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+
+error[E0432]: unresolved import `framework::rtd`
+   --> src/lib.rs:2:16
+    |
+  2 | use framework::rtd::{
+    |                ^^^ could not find `rtd` in `framework`
+    |
+note: found an item that was configured out
+   --> /Users/nakashimahikaru/forge/repo/xlfn/crates/xlfn/src/lib.rs:123:9
+    |
+121 | #[cfg(feature = "rtd")]
+    |       --------------- the item is gated behind the `rtd` feature
+122 | /// Typed real-time subscriptions, producers, and bounded delivery policies.
+123 | pub mod rtd;
+    |         ^^^
+
+
+error[E0599]: no method named `rtd` found for reference `&xlfn::OpenContext<ErasedAddin>` in the current scope
+  --> src/lib.rs:22:32
+   |
+22 |         let blocking = context.rtd().register(RtdChannelSource::new(
+   |                                ^^^ method not found in `&xlfn::OpenContext<ErasedAddin>`
+
+
+error[E0599]: no method named `rtd` found for reference `&xlfn::OpenContext<ErasedAddin>` in the current scope
+  --> src/lib.rs:30:30
+   |
+30 |         let shared = context.rtd().register(RtdMultiplexedSource::new(
+   |                              ^^^ method not found in `&xlfn::OpenContext<ErasedAddin>`
+
+
+error[E0599]: no method named `rtd` found for struct `xlfn::MainThreadContext<'call, A>` in the current scope
+  --> src/lib.rs:45:13
+   |
+45 |     context.rtd().subscribe(handle, &["value"])
+   |             ^^^ method not found in `xlfn::MainThreadContext<'_, ErasedAddin>`
