@@ -172,12 +172,13 @@ test-async-builtin:
         --test-threads=1
 
 # Exercise production feature selections without benchmark/refinement helpers.
-test-features:
+test-features partition="1/1":
     cargo hack test \
         --package xlfn \
         --feature-powerset \
         --keep-going \
         --exclude-features default,bench-internals,refinement \
+        --partition {{partition}} \
         --lib \
         --locked \
         -- \

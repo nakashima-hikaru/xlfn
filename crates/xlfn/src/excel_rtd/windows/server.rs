@@ -414,7 +414,7 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> Clone for AttachedSubscr
 }
 
 impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> AttachedSubscriptions<E, C> {
-    #[cfg(test)]
+    #[cfg(all(test, feature = "handles"))]
     pub(super) fn is_runtime(&self, runtime: &SubscriptionRuntime<E, C>) -> bool {
         self.runtime.is_runtime(runtime)
     }

@@ -100,8 +100,6 @@ jobs:
                       command: just features
                     - name: tests
                       command: just test-ci
-                    - name: production feature tests
-                      command: just test-features
                     - name: lifecycle typestate contracts
                       command: just typestate
                     - name: handle publication interleavings
@@ -129,6 +127,38 @@ jobs:
 
             - name: Run ${{ matrix.check.name }}
               run: ${{ matrix.check.command }}
+
+    production-feature-tests:
+        name: Rust production feature tests shard ${{ matrix.shard }}/8 (windows-latest)
+        runs-on: windows-latest
+        strategy:
+            fail-fast: false
+            matrix:
+                shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        steps:
+            - name: Check out repository
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+            - name: Install development tools
+              uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
+              with:
+                  tool: just,cargo-hack
+                  fallback: none
+
+            - name: Run production feature tests
+              run: just test-features ${{ matrix.shard }}/8
+
+    production-feature-tests-required:
+        # Preserve the existing required check while requiring every shard.
+        name: Rust production feature tests (windows-latest)
+        runs-on: ubuntu-latest
+        needs: production-feature-tests
+        if: always()
+        steps:
+            - name: Require every production feature shard to pass
+              env:
+                  SHARD_RESULT: ${{ needs.production-feature-tests.result }}
+              run: test "$SHARD_RESULT" = success
 
     standalone-consumers:
         name: Standalone consumers (windows-latest)

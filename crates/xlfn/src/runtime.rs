@@ -245,7 +245,10 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
         self.residency.release()
     }
 
-    #[cfg(test)]
+    #[cfg(all(
+        test,
+        any(not(target_os = "windows"), feature = "async", feature = "handles")
+    ))]
     pub(crate) fn ensure_calculation_events(
         &self,
         host: &crate::registration::RegistrationHost<'_>,

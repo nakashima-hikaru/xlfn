@@ -157,9 +157,27 @@ pub fn matrix_make_q(rows: i32, columns: i32, seed: f64) -> XllResult<NumericArr
     matrix_make(rows, columns, seed)
 }
 
-#[excel_function(name = "BENCH.MAT.COPY", thread_safe, return_abi = "fp12")]
+#[excel_function(name = "BENCH.MAT.COPY", thread_safe, return_abi = "xloper12")]
 pub fn matrix_copy(values: NumericMatrixRef<'_>) -> XllResult<XlArrayOutput> {
     XlArrayBuilder::from_f64(values.rows(), values.columns(), values.as_slice())?.finish()
+}
+
+#[cfg(test)]
+mod numeric_abi_tests {
+    use super::*;
+
+    #[test]
+    fn numeric_benchmarks_preserve_the_documented_return_abis() {
+        type Fp12 = xlfn::__private::v1::FP12;
+        type Xloper12 = xlfn::__private::v1::XLOPER12;
+
+        // M02/M06 have numeric FP12 and explicit Q producer controls. M03
+        // copies through XlArrayBuilder and must retain its measured Q output
+        // path rather than silently switching its storage and error policy.
+        let _: unsafe extern "system" fn(i32, i32, f64) -> *mut Fp12 = xll_matrix_make;
+        let _: unsafe extern "system" fn(i32, i32, f64) -> *mut Xloper12 = xll_matrix_make_q;
+        let _: unsafe extern "system" fn(*const Fp12) -> *mut Xloper12 = xll_matrix_copy;
+    }
 }
 
 #[excel_function(name = "BENCH.MAT.MIXED", thread_safe)]
