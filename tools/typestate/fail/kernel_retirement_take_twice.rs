@@ -1,6 +1,6 @@
 // module: kernel/rotating_read_domain
-use super::RetiredQueue;
-fn invalid(retired: RetiredQueue<'_, 1, usize>) {
-    retired.take(|_| ());
-    retired.take(|_| ()); // error: E0382
+use super::DisposableBatch;
+fn invalid(retired: DisposableBatch<'_, 1, Vec<usize>>) {
+    retired.into_inner();
+    retired.into_inner(); // error: E0382
 }

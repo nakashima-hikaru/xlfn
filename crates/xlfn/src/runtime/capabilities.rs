@@ -12,8 +12,61 @@ use crate::runtime_components::{
     GenerationServices, HostLedger, ModuleResidency, QuarantineVault, ReturnProtocol,
 };
 use xlfn_kernel::thread_affine::{
-    BindingState, ThreadAffineError, ThreadAffineInstallError, ThreadAffineSlot,
+    BindingEmpty, BindingOccupied, BindingState, BindingTxn, ThreadAffineError,
+    ThreadAffineInstallError, ThreadAffineSlot,
 };
+
+/// Occupancy authority retained from installation through commit or rollback.
+#[must_use = "retain lifecycle installation authority through commit or rollback"]
+pub(crate) struct InstalledLifecycle<'runtime, A: Addin> {
+    binding: BindingTxn<'runtime, A::LifecycleState, BindingOccupied>,
+}
+
+/// The extracted value and its exact empty binding remain one responsibility.
+#[must_use = "dispose the lifecycle before releasing its exact binding"]
+pub(crate) struct TakenLifecycle<'runtime, A: Addin> {
+    // Field order retains the claim through ordinary Drop and unwinding of value.
+    value: A::LifecycleState,
+    empty: EmptyLifecycle<'runtime, A>,
+}
+
+#[must_use = "retain the empty binding until terminal release"]
+pub(crate) struct EmptyLifecycle<'runtime, A: Addin> {
+    binding: BindingTxn<'runtime, A::LifecycleState, BindingEmpty>,
+}
+
+impl<'runtime, A: Addin> InstalledLifecycle<'runtime, A> {
+    pub(in crate::runtime) fn take(self) -> Result<TakenLifecycle<'runtime, A>, ThreadAffineError> {
+        self.binding
+            .take()
+            .map(|(value, binding)| TakenLifecycle {
+                value,
+                empty: EmptyLifecycle { binding },
+            })
+            .map_err(|error| error.reason)
+    }
+}
+
+impl<'runtime, A: Addin> TakenLifecycle<'runtime, A> {
+    pub(in crate::runtime) fn dispose(
+        self,
+    ) -> Result<EmptyLifecycle<'runtime, A>, crate::XllError> {
+        let Self { value, empty } = self;
+        // The empty claim remains live while application destruction can reenter.
+        crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| drop(value)))
+            .map_err(|_| crate::XllError::Panic)?;
+        Ok(empty)
+    }
+}
+
+impl<A: Addin> EmptyLifecycle<'_, A> {
+    pub(in crate::runtime) fn release(self) -> Result<(), ThreadAffineError> {
+        self.binding
+            .release()
+            .map(|_| ())
+            .map_err(|error| error.reason)
+    }
+}
 
 /// Source-bound recovery operations. The target is installed only by the
 /// composition root and cannot be replaced while an opening owner is alive.
@@ -34,6 +87,7 @@ trait OpenRecoveryTarget<A: Addin>: Sync {
         lifecycle: &AddinLifecycleAccess<'_, A>,
         callbacks: &mut crate::host_callback::HostCallbackSession,
         generation: Option<crate::generation::RuntimeGeneration>,
+        binding: Option<InstalledLifecycle<'_, A>>,
     ) -> super::rollback::OpenRollbackOutcome;
     fn quarantine(&self, hazard: Option<crate::shutdown::UnloadHazard>);
 }
@@ -44,8 +98,9 @@ impl<A: Addin, P: super::UnloadPolicy<A>> OpenRecoveryTarget<A> for Runtime<A, P
         lifecycle: &AddinLifecycleAccess<'_, A>,
         callbacks: &mut crate::host_callback::HostCallbackSession,
         generation: Option<crate::generation::RuntimeGeneration>,
+        binding: Option<InstalledLifecycle<'_, A>>,
     ) -> super::rollback::OpenRollbackOutcome {
-        super::rollback::rollback_open(self, lifecycle, callbacks, generation)
+        super::rollback::rollback_open_with_binding(self, lifecycle, callbacks, generation, binding)
     }
     fn quarantine(&self, hazard: Option<crate::shutdown::UnloadHazard>) {
         match hazard {
@@ -61,8 +116,10 @@ impl<A: Addin> OpenRecovery<'_, A> {
         lifecycle: &AddinLifecycleAccess<'_, A>,
         callbacks: &mut crate::host_callback::HostCallbackSession,
         generation: Option<crate::generation::RuntimeGeneration>,
+        binding: Option<InstalledLifecycle<'_, A>>,
     ) -> super::rollback::OpenRollbackOutcome {
-        self.target.rollback(lifecycle, callbacks, generation)
+        self.target
+            .rollback(lifecycle, callbacks, generation, binding)
     }
     pub(in crate::runtime) fn quarantine(&self, hazard: Option<crate::shutdown::UnloadHazard>) {
         self.target.quarantine(hazard);
@@ -221,17 +278,15 @@ impl<'a, A: Addin> OpenDeps<'a, A> {
         &self,
         access: &AddinLifecycleAccess<'_, A>,
         state: A::LifecycleState,
-    ) -> Result<(), ThreadAffineInstallError<A::LifecycleState>> {
+    ) -> Result<InstalledLifecycle<'a, A>, ThreadAffineInstallError<A::LifecycleState>> {
         match self.addin_lifecycle.binding(access) {
-            Ok(BindingState::Empty(transaction)) => {
-                transaction
-                    .install(state)
-                    .map(drop)
-                    .map_err(|error| ThreadAffineInstallError {
-                        value: error.value,
-                        reason: error.reason,
-                    })
-            }
+            Ok(BindingState::Empty(transaction)) => transaction
+                .install(state)
+                .map(|binding| InstalledLifecycle { binding })
+                .map_err(|error| ThreadAffineInstallError {
+                    value: error.value,
+                    reason: error.reason,
+                }),
             Ok(BindingState::Occupied(_transaction)) => Err(ThreadAffineInstallError {
                 value: state,
                 reason: ThreadAffineError::Occupied,
@@ -391,16 +446,20 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
     pub(in crate::runtime) fn take_addin_lifecycle(
         &self,
         access: &AddinLifecycleAccess<'_, A>,
-    ) -> Result<A::LifecycleState, xlfn_kernel::thread_affine::ThreadAffineError> {
+    ) -> Result<TakenLifecycle<'a, A>, ThreadAffineError> {
         match self.addin_lifecycle.binding(access)? {
-            BindingState::Occupied(transaction) => transaction
-                .take()
-                .map(|(value, empty)| {
-                    drop(empty);
-                    value
-                })
-                .map_err(|error| error.reason),
+            BindingState::Occupied(binding) => InstalledLifecycle { binding }.take(),
             BindingState::Empty(_transaction) => Err(ThreadAffineError::MissingValue),
+        }
+    }
+
+    pub(in crate::runtime) fn empty_addin_lifecycle(
+        &self,
+        access: &AddinLifecycleAccess<'_, A>,
+    ) -> Result<EmptyLifecycle<'a, A>, ThreadAffineError> {
+        match self.addin_lifecycle.binding(access)? {
+            BindingState::Empty(binding) => Ok(EmptyLifecycle { binding }),
+            BindingState::Occupied(_) => Err(ThreadAffineError::Occupied),
         }
     }
 
@@ -557,5 +616,120 @@ mod tests {
             HostLifecycleIntent::ExplicitRemovalRequested
         );
         assert_eq!(other.resident_event_count(), 0);
+    }
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    struct OnDrop(Box<dyn Fn()>);
+    impl Drop for OnDrop {
+        fn drop(&mut self) {
+            (self.0)();
+        }
+    }
+    struct Probe;
+    impl Addin for Probe {
+        #[cfg(feature = "rtd")]
+        type RtdSubscription = ();
+        #[cfg(feature = "rtd")]
+        type RtdSources = crate::DynamicRtdSources<()>;
+        type SharedState = ();
+        type LifecycleState = OnDrop;
+        type Layers = ();
+        type Error = crate::XllError;
+        #[cfg(feature = "async")]
+        type AsyncExecutor = crate::NoAsyncExecutor;
+        fn open(_: &crate::OpenContext<Self>) -> crate::OpenResult<Self> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn lifecycle_disposal_panic_keeps_binding_bound_for_recovery() {
+        let slot = ThreadAffineSlot::<OnDrop>::new();
+        let access = slot.bind_current().unwrap();
+        let BindingState::Empty(empty) = slot.binding(&access).unwrap() else {
+            panic!("empty")
+        };
+        let binding = empty
+            .install(OnDrop(Box::new(|| panic!("injected lifecycle destructor"))))
+            .unwrap_or_else(|_| panic!("install"));
+        let taken = InstalledLifecycle::<Probe> { binding }
+            .take()
+            .unwrap_or_else(|_| panic!("take"));
+        assert!(taken.dispose().is_err());
+        // Disposition failed, so no successful release proof escaped. Recovery
+        // can still observe and handle the same bound, empty slot.
+        assert_eq!(slot.has_value(&access), Ok(false));
+        let BindingState::Empty(binding) = slot.binding(&access).unwrap() else {
+            panic!("empty")
+        };
+        binding.release().unwrap();
+    }
+
+    #[cfg(not(miri))]
+    #[test]
+    #[allow(
+        clippy::mem_forget,
+        reason = "adversarial forgotten capability must retain payload and occupancy claim"
+    )]
+    fn forgotten_taken_lifecycle_retains_payload_and_excludes_rebinding() {
+        let slot = ThreadAffineSlot::<OnDrop>::new();
+        let access = slot.bind_current().unwrap();
+        let BindingState::Empty(empty) = slot.binding(&access).unwrap() else {
+            panic!("empty")
+        };
+        let destroyed = Rc::new(Cell::new(false));
+        let observed = Rc::clone(&destroyed);
+        let binding = empty
+            .install(OnDrop(Box::new(move || observed.set(true))))
+            .unwrap_or_else(|_| panic!("install"));
+        let taken = InstalledLifecycle::<Probe> { binding }
+            .take()
+            .unwrap_or_else(|_| panic!("take"));
+        std::mem::forget(taken);
+        assert!(!destroyed.get());
+        assert!(matches!(
+            slot.binding(&access),
+            Err(ThreadAffineError::ReentrantAccess)
+        ));
+    }
+
+    #[test]
+    fn lifecycle_disposal_retains_exact_empty_claim_through_reentrant_destructor() {
+        let slot = Rc::new(ThreadAffineSlot::<OnDrop>::new());
+        let access = slot.bind_current().unwrap();
+        let BindingState::Empty(empty) = slot.binding(&access).unwrap() else {
+            panic!("empty")
+        };
+        let observed = Rc::new(Cell::new(false));
+        let reentrant = Rc::clone(&slot);
+        let observed_in_drop = Rc::clone(&observed);
+        let value = OnDrop(Box::new(move || {
+            let sibling = reentrant.bind_current().unwrap();
+            observed_in_drop.set(matches!(
+                reentrant.binding(&sibling),
+                Err(ThreadAffineError::ReentrantAccess)
+            ));
+        }));
+        let binding = empty.install(value).unwrap_or_else(|_| panic!("install"));
+        let installed = InstalledLifecycle::<Probe> { binding };
+        let taken = installed.take().unwrap_or_else(|_| panic!("take"));
+        assert!(!observed.get());
+        let empty = taken.dispose().unwrap_or_else(|_| panic!("dispose"));
+        assert!(observed.get());
+        assert!(matches!(
+            slot.binding(&access),
+            Err(ThreadAffineError::ReentrantAccess)
+        ));
+        empty.release().unwrap();
+        assert!(matches!(
+            slot.has_value(&access),
+            Err(ThreadAffineError::Unbound)
+        ));
     }
 }

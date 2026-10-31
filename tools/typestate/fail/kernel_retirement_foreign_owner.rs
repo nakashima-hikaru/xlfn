@@ -1,5 +1,5 @@
 // module: kernel/rotating_read_domain
-use super::{RetiredQueue, RotatingRetirementDomain};
-fn invalid<'a>(mut retired: RetiredQueue<'a, 1, usize>, other: &'a RotatingRetirementDomain<1, usize>) {
+use super::{DisposableBatch, RotatingRetirementDomain};
+fn invalid<'a>(mut retired: DisposableBatch<'a, 1, Vec<usize>>, other: &'a RotatingRetirementDomain<1, Vec<usize>>) {
     retired.owner = other; // error: E0616
 }

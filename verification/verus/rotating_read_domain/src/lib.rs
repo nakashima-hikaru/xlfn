@@ -414,7 +414,7 @@ pub mod locked_detachment;
 pub mod queue_preparation;
 
 #[allow(unused_macros)]
-#[path = "../../../../crates/xlfn/src/retirement_queue.rs"]
+#[path = "../../../../crates/xlfn-kernel/src/rotating_read_domain/queue.rs"]
 pub(crate) mod queue_transitions;
 
 pub mod current_authority;

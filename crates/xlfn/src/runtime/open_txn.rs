@@ -5,15 +5,16 @@ use crate::lifecycle::LifecycleAccess;
 use crate::lifecycle::OpenFailureDisposition;
 use crate::registration::{HostMutationJournal, RegistrationId};
 use crate::runtime::AddinLifecycleAccess;
-use crate::runtime::capabilities::OpenDeps;
+use crate::runtime::capabilities::{InstalledLifecycle, OpenDeps};
 use crate::runtime_components::GenerationServices;
 use crate::{XllError, XllResult};
 use xlfn_kernel::thread_affine::ThreadAffineError;
 
 /// A state payload in the open transaction protocol.
 pub(crate) trait OpeningState<A: crate::Addin>: Sized {
+    type Binding<'runtime>;
     fn attempt_id(&self) -> OpenAttemptId;
-    fn abandon(self, deps: &OpenDeps<'_, A>);
+    fn abandon(self, deps: &OpenDeps<'_, A>, binding: Self::Binding<'_>);
 }
 
 type ServiceInputs<A> = crate::runtime_components::GenerationServiceInputs<
@@ -155,20 +156,24 @@ impl HostOpeningState {
 /// Lifecycle ownership while an opening transaction is being rolled back.
 /// The enum is a recovery projection, not an independent state machine: the
 /// production transaction states above determine which variant can be made.
-pub(crate) enum LifecycleOwnership<A: crate::Addin> {
+pub(crate) enum LifecycleOwnership<'runtime, A: crate::Addin> {
     Owned(A::LifecycleState),
-    Installed,
+    Installed(InstalledLifecycle<'runtime, A>),
+    Uninstalled,
 }
 
-pub(crate) struct RollbackParts<A: crate::Addin> {
+pub(crate) struct RollbackParts<'runtime, A: crate::Addin> {
     core: RollbackOpenCore<A>,
     host: HostOpeningState,
-    lifecycle: LifecycleOwnership<A>,
+    lifecycle: LifecycleOwnership<'runtime, A>,
 }
 
 /// States that still own the host-side rollback session.
 pub(crate) trait RollbackState<A: crate::Addin>: OpeningState<A> {
-    fn into_rollback_parts(self) -> RollbackParts<A>;
+    fn into_rollback_parts<'runtime>(
+        self,
+        binding: Self::Binding<'runtime>,
+    ) -> RollbackParts<'runtime, A>;
 }
 
 fn forget_untrusted_lifecycle_state<A: crate::Addin>(state: A::LifecycleState) {
@@ -182,7 +187,7 @@ fn forget_untrusted_lifecycle_state<A: crate::Addin>(state: A::LifecycleState) {
 fn abandon_open<A: crate::Addin, I>(
     deps: &OpenDeps<'_, A>,
     core: OpenCore<A, I>,
-    lifecycle: LifecycleOwnership<A>,
+    lifecycle: LifecycleOwnership<'_, A>,
 ) {
     let (_, module_opening, _service_inputs) = core.into_parts();
     deps.lifecycle_control()
@@ -198,33 +203,36 @@ fn abandon_open<A: crate::Addin, I>(
 }
 
 impl<A: crate::Addin> OpeningState<A> for Begun<A> {
+    type Binding<'runtime> = ();
     fn attempt_id(&self) -> OpenAttemptId {
         self.core.attempt_id()
     }
 
-    fn abandon(self, deps: &OpenDeps<'_, A>) {
+    fn abandon(self, deps: &OpenDeps<'_, A>, _binding: Self::Binding<'_>) {
         let Self { core } = self;
-        abandon_open(deps, core, LifecycleOwnership::Installed);
+        abandon_open(deps, core, LifecycleOwnership::Uninstalled);
     }
 }
 
 impl<A: crate::Addin> OpeningState<A> for HostAttached<A> {
+    type Binding<'runtime> = ();
     fn attempt_id(&self) -> OpenAttemptId {
         self.core.attempt_id()
     }
 
-    fn abandon(self, deps: &OpenDeps<'_, A>) {
+    fn abandon(self, deps: &OpenDeps<'_, A>, _binding: Self::Binding<'_>) {
         let Self { core, host: _ } = self;
-        abandon_open(deps, core, LifecycleOwnership::Installed);
+        abandon_open(deps, core, LifecycleOwnership::Uninstalled);
     }
 }
 
 impl<A: crate::Addin> OpeningState<A> for Initializing<A> {
+    type Binding<'runtime> = ();
     fn attempt_id(&self) -> OpenAttemptId {
         self.core.attempt_id()
     }
 
-    fn abandon(self, deps: &OpenDeps<'_, A>) {
+    fn abandon(self, deps: &OpenDeps<'_, A>, _binding: Self::Binding<'_>) {
         let Self { core, host: _ } = self;
         let attempt = core.attempt_id();
         let reason = if std::thread::panicking() {
@@ -232,17 +240,18 @@ impl<A: crate::Addin> OpeningState<A> for Initializing<A> {
         } else {
             crate::shutdown_trace::ShutdownFailure::AddinShutdownFailed
         };
-        abandon_open(deps, core, LifecycleOwnership::Installed);
+        abandon_open(deps, core, LifecycleOwnership::Uninstalled);
         deps.observer().quarantine_open(attempt, reason);
     }
 }
 
 impl<A: crate::Addin> OpeningState<A> for Initialized<A> {
+    type Binding<'runtime> = ();
     fn attempt_id(&self) -> OpenAttemptId {
         self.core.attempt_id()
     }
 
-    fn abandon(self, deps: &OpenDeps<'_, A>) {
+    fn abandon(self, deps: &OpenDeps<'_, A>, _binding: Self::Binding<'_>) {
         let Self {
             core,
             host: _,
@@ -253,11 +262,12 @@ impl<A: crate::Addin> OpeningState<A> for Initialized<A> {
 }
 
 impl<A: crate::Addin> OpeningState<A> for GenerationStaged<A> {
+    type Binding<'runtime> = ();
     fn attempt_id(&self) -> OpenAttemptId {
         self.core.attempt_id()
     }
 
-    fn abandon(self, deps: &OpenDeps<'_, A>) {
+    fn abandon(self, deps: &OpenDeps<'_, A>, _binding: Self::Binding<'_>) {
         let Self {
             core,
             host: _,
@@ -268,40 +278,48 @@ impl<A: crate::Addin> OpeningState<A> for GenerationStaged<A> {
 }
 
 impl<A: crate::Addin> OpeningState<A> for LifecycleInstalled<A> {
+    type Binding<'runtime> = InstalledLifecycle<'runtime, A>;
     fn attempt_id(&self) -> OpenAttemptId {
         self.core.attempt_id()
     }
 
-    fn abandon(self, deps: &OpenDeps<'_, A>) {
+    fn abandon(self, deps: &OpenDeps<'_, A>, _binding: Self::Binding<'_>) {
         let Self { core, host: _ } = self;
-        abandon_open(deps, core, LifecycleOwnership::Installed);
+        abandon_open(deps, core, LifecycleOwnership::Installed(_binding));
     }
 }
 
 impl<A: crate::Addin> OpeningState<A> for HostMutated<A> {
+    type Binding<'runtime> = InstalledLifecycle<'runtime, A>;
     fn attempt_id(&self) -> OpenAttemptId {
         self.core.attempt_id()
     }
 
-    fn abandon(self, deps: &OpenDeps<'_, A>) {
+    fn abandon(self, deps: &OpenDeps<'_, A>, _binding: Self::Binding<'_>) {
         let Self { core, host: _ } = self;
-        abandon_open(deps, core, LifecycleOwnership::Installed);
+        abandon_open(deps, core, LifecycleOwnership::Installed(_binding));
     }
 }
 
 impl<A: crate::Addin> RollbackState<A> for HostAttached<A> {
-    fn into_rollback_parts(self) -> RollbackParts<A> {
+    fn into_rollback_parts<'runtime>(
+        self,
+        _binding: Self::Binding<'runtime>,
+    ) -> RollbackParts<'runtime, A> {
         let Self { core, host } = self;
         RollbackParts {
             core: core.into_rollback(),
             host,
-            lifecycle: LifecycleOwnership::Installed,
+            lifecycle: LifecycleOwnership::Uninstalled,
         }
     }
 }
 
 impl<A: crate::Addin> RollbackState<A> for Initialized<A> {
-    fn into_rollback_parts(self) -> RollbackParts<A> {
+    fn into_rollback_parts<'runtime>(
+        self,
+        _binding: Self::Binding<'runtime>,
+    ) -> RollbackParts<'runtime, A> {
         let Self {
             core,
             host,
@@ -316,7 +334,10 @@ impl<A: crate::Addin> RollbackState<A> for Initialized<A> {
 }
 
 impl<A: crate::Addin> RollbackState<A> for GenerationStaged<A> {
-    fn into_rollback_parts(self) -> RollbackParts<A> {
+    fn into_rollback_parts<'runtime>(
+        self,
+        _binding: Self::Binding<'runtime>,
+    ) -> RollbackParts<'runtime, A> {
         let Self {
             core,
             host,
@@ -331,23 +352,29 @@ impl<A: crate::Addin> RollbackState<A> for GenerationStaged<A> {
 }
 
 impl<A: crate::Addin> RollbackState<A> for LifecycleInstalled<A> {
-    fn into_rollback_parts(self) -> RollbackParts<A> {
+    fn into_rollback_parts<'runtime>(
+        self,
+        _binding: Self::Binding<'runtime>,
+    ) -> RollbackParts<'runtime, A> {
         let Self { core, host } = self;
         RollbackParts {
             core: core.into_rollback(),
             host,
-            lifecycle: LifecycleOwnership::Installed,
+            lifecycle: LifecycleOwnership::Installed(_binding),
         }
     }
 }
 
 impl<A: crate::Addin> RollbackState<A> for HostMutated<A> {
-    fn into_rollback_parts(self) -> RollbackParts<A> {
+    fn into_rollback_parts<'runtime>(
+        self,
+        _binding: Self::Binding<'runtime>,
+    ) -> RollbackParts<'runtime, A> {
         let Self { core, host } = self;
         RollbackParts {
             core: core.into_rollback(),
             host,
-            lifecycle: LifecycleOwnership::Installed,
+            lifecycle: LifecycleOwnership::Installed(_binding),
         }
     }
 }
@@ -415,7 +442,7 @@ pub(crate) struct OpenRollbackOwner<'runtime, A: crate::Addin> {
     deps: OpenDeps<'runtime, A>,
     core: Option<RollbackOpenCore<A>>,
     host: Option<HostOpeningState>,
-    lifecycle: Option<LifecycleOwnership<A>>,
+    lifecycle: Option<LifecycleOwnership<'runtime, A>>,
     armed: bool,
 }
 
@@ -431,7 +458,7 @@ impl<A: crate::Addin> Drop for OpenRollbackOwner<'_, A> {
         let ownership = self
             .lifecycle
             .take()
-            .unwrap_or(LifecycleOwnership::Installed);
+            .unwrap_or(LifecycleOwnership::Uninstalled);
         if let Some(core) = self.core.take() {
             abandon_open(&self.deps, core, ownership);
         } else {
@@ -451,19 +478,26 @@ impl<A: crate::Addin> OpenRollbackOwner<'_, A> {
     pub(crate) fn run(mut self, lifecycle: &AddinLifecycleAccess<'_, A>) {
         use crate::boundary::report_boundary_error;
         let recovery = self.deps.recovery();
-        if let Some(LifecycleOwnership::Owned(state)) = self.lifecycle.take()
-            && let Err(error) = self.deps.install_addin_lifecycle(lifecycle, state)
-        {
-            let (state, reason) = error.into_parts();
-            self.lifecycle = Some(LifecycleOwnership::Owned(state));
-            report_boundary_error(
-                "xlAutoOpen rollback lifecycle installation",
-                &crate::lifecycle::lifecycle_access_error(reason),
-            );
-            drop(self);
-            recovery.quarantine(None);
-            return;
-        }
+        let installed = match self.lifecycle.take() {
+            Some(LifecycleOwnership::Installed(binding)) => Some(binding),
+            Some(LifecycleOwnership::Owned(state)) => {
+                match self.deps.install_addin_lifecycle(lifecycle, state) {
+                    Ok(binding) => Some(binding),
+                    Err(error) => {
+                        let (state, reason) = error.into_parts();
+                        self.lifecycle = Some(LifecycleOwnership::Owned(state));
+                        report_boundary_error(
+                            "xlAutoOpen rollback lifecycle installation",
+                            &crate::lifecycle::lifecycle_access_error(reason),
+                        );
+                        drop(self);
+                        recovery.quarantine(None);
+                        return;
+                    }
+                }
+            }
+            Some(LifecycleOwnership::Uninstalled) | None => None,
+        };
         let (mut callbacks, journal) = self
             .host
             .take()
@@ -482,7 +516,7 @@ impl<A: crate::Addin> OpenRollbackOwner<'_, A> {
         check_rollback_fault();
         if disposition.requires_rollback() {
             match crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
-                recovery.rollback(lifecycle, &mut callbacks, generation)
+                recovery.rollback(lifecycle, &mut callbacks, generation, installed)
             })) {
                 Ok(outcome) if outcome.is_finalized() || outcome.cleanup_owned_elsewhere() => {}
                 Ok(outcome) => {
@@ -531,6 +565,7 @@ fn check_rollback_fault() {
 pub(crate) struct OpeningTxn<'runtime, A: crate::Addin, S: OpeningState<A>> {
     deps: OpenDeps<'runtime, A>,
     state: Option<S>,
+    binding: Option<S::Binding<'runtime>>,
 }
 
 type OpeningStageFailure<'runtime, A> = (
@@ -545,17 +580,23 @@ type LifecycleInstallFailure<'runtime, A> = (
 );
 
 impl<'runtime, A: crate::Addin, S: OpeningState<A>> OpeningTxn<'runtime, A, S> {
-    fn new_state(deps: OpenDeps<'runtime, A>, state: S) -> Self {
+    fn new_state(deps: OpenDeps<'runtime, A>, state: S, binding: S::Binding<'runtime>) -> Self {
         Self {
             deps,
             state: Some(state),
+            binding: Some(binding),
         }
     }
 
-    fn take_state(&mut self) -> S {
-        self.state
-            .take()
-            .expect("opening transaction state already consumed")
+    fn take_state(&mut self) -> (S, S::Binding<'runtime>) {
+        (
+            self.state
+                .take()
+                .expect("opening transaction state already consumed"),
+            self.binding
+                .take()
+                .expect("opening transaction retains its binding authority"),
+        )
     }
 
     pub(crate) fn attempt_id(&self) -> OpenAttemptId {
@@ -573,7 +614,8 @@ impl<'runtime, A: crate::Addin, S: OpeningState<A>> OpeningTxn<'runtime, A, S> {
     where
         S: RollbackState<A>,
     {
-        let parts = self.take_state().into_rollback_parts();
+        let (state, binding) = self.take_state();
+        let parts = state.into_rollback_parts(binding);
         OpenRollbackOwner {
             deps: self.deps,
             core: Some(parts.core),
@@ -626,6 +668,7 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Begun<A>> {
             Begun {
                 core: OpenCore::new(attempt, module),
             },
+            (),
         );
         // No fallible operation separates responsibility transfer from unlock.
         acquisition.control.take();
@@ -637,13 +680,14 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Begun<A>> {
         callbacks: HostCallbackSession,
     ) -> OpeningTxn<'runtime, A, HostAttached<A>> {
         let mut transaction = self;
-        let Begun { core } = transaction.take_state();
+        let (Begun { core }, binding) = transaction.take_state();
         OpeningTxn::new_state(
             transaction.deps,
             HostAttached {
                 core,
                 host: HostOpeningState::new(callbacks),
             },
+            binding,
         )
     }
 
@@ -654,7 +698,7 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Begun<A>> {
         let disposition =
             crate::runtime::orchestration::LifecycleOrchestrator::new(transaction.deps)
                 .mark_open_failed(attempt_id);
-        let Begun { core } = transaction.take_state();
+        let (Begun { core }, _binding) = transaction.take_state();
         let (_, module_opening, _service_inputs) = core.into_parts();
         transaction
             .deps
@@ -667,8 +711,8 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Begun<A>> {
 impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, HostAttached<A>> {
     pub(crate) fn begin_initialization(self) -> OpeningTxn<'runtime, A, Initializing<A>> {
         let mut transaction = self;
-        let HostAttached { core, host } = transaction.take_state();
-        OpeningTxn::new_state(transaction.deps, Initializing { core, host })
+        let (HostAttached { core, host }, binding) = transaction.take_state();
+        OpeningTxn::new_state(transaction.deps, Initializing { core, host }, binding)
     }
 }
 
@@ -682,7 +726,7 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Initializing<A>> {
         >,
     ) -> OpeningTxn<'runtime, A, Initialized<A>> {
         let mut transaction = self;
-        let Initializing { core, host } = transaction.take_state();
+        let (Initializing { core, host }, binding) = transaction.take_state();
         let core = core.initialized(service_inputs);
         OpeningTxn::new_state(
             transaction.deps,
@@ -691,6 +735,7 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Initializing<A>> {
                 host,
                 lifecycle,
             },
+            binding,
         )
     }
 }
@@ -708,11 +753,14 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Initialized<A>> {
             .stage_opening_generation(transaction.attempt_id(), opening);
         match result {
             Ok(()) => {
-                let Initialized {
-                    core,
-                    host,
-                    lifecycle,
-                } = transaction.take_state();
+                let (
+                    Initialized {
+                        core,
+                        host,
+                        lifecycle,
+                    },
+                    binding,
+                ) = transaction.take_state();
                 Ok(OpeningTxn::new_state(
                     transaction.deps,
                     GenerationStaged {
@@ -720,6 +768,7 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Initialized<A>> {
                         host,
                         lifecycle,
                     },
+                    binding,
                 ))
             }
             Err((error, opening)) => Err((error, Box::new(transaction), Box::new(opening))),
@@ -734,17 +783,22 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, GenerationStaged<A>> {
     ) -> Result<OpeningTxn<'runtime, A, LifecycleInstalled<A>>, LifecycleInstallFailure<'runtime, A>>
     {
         let mut transaction = self;
-        let GenerationStaged {
-            core,
-            host,
-            lifecycle,
-        } = transaction.take_state();
+        let (
+            GenerationStaged {
+                core,
+                host,
+                lifecycle,
+            },
+            _binding,
+        ) = transaction.take_state();
         match transaction.deps.install_addin_lifecycle(access, lifecycle) {
-            Ok(()) => Ok(OpeningTxn::new_state(
+            Ok(binding) => Ok(OpeningTxn::new_state(
                 transaction.deps,
                 LifecycleInstalled { core, host },
+                binding,
             )),
             Err(error) => {
+                transaction.binding = Some(());
                 transaction.state = Some(GenerationStaged {
                     core,
                     host,
@@ -762,9 +816,9 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, LifecycleInstalled<A>> {
         registrations: Vec<RegistrationId>,
     ) -> OpeningTxn<'runtime, A, HostMutated<A>> {
         let mut transaction = self;
-        let LifecycleInstalled { core, mut host } = transaction.take_state();
+        let (LifecycleInstalled { core, mut host }, binding) = transaction.take_state();
         host.stage_registrations(registrations);
-        OpeningTxn::new_state(transaction.deps, HostMutated { core, host })
+        OpeningTxn::new_state(transaction.deps, HostMutated { core, host }, binding)
     }
 
     #[cfg(test)]
@@ -774,7 +828,7 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, LifecycleInstalled<A>> {
         let disposition =
             crate::runtime::orchestration::LifecycleOrchestrator::new(transaction.deps)
                 .mark_open_failed(attempt_id);
-        let LifecycleInstalled { core, host: _ } = transaction.take_state();
+        let (LifecycleInstalled { core, host: _ }, _binding) = transaction.take_state();
         let (_, module_opening, _service_inputs) = core.into_parts();
         transaction
             .deps
@@ -785,8 +839,8 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, LifecycleInstalled<A>> {
 
     #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn finish_in_place(&mut self, registrations: Vec<RegistrationId>) -> XllResult<()> {
-        let state = self.take_state();
-        OpeningTxn::new_state(self.deps, state)
+        let (state, binding) = self.take_state();
+        OpeningTxn::new_state(self.deps, state, binding)
             .stage_host_mutations(registrations)
             .commit()
     }
@@ -796,7 +850,7 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, HostMutated<A>> {
     pub(crate) fn commit(self) -> XllResult<()> {
         let mut transaction = self;
         validate_commit_preconditions(&transaction)?;
-        let HostMutated { core, host } = transaction.take_state();
+        let (HostMutated { core, host }, _binding) = transaction.take_state();
         let (_callbacks, mut journal) = host.into_parts();
         commit_inner(transaction.deps, core, &mut journal)
     }
@@ -988,7 +1042,10 @@ fn recover_uncommitted_module<A: crate::Addin>(
 impl<A: crate::Addin, S: OpeningState<A>> Drop for OpeningTxn<'_, A, S> {
     fn drop(&mut self) {
         if let Some(state) = self.state.take() {
-            state.abandon(&self.deps);
+            state.abandon(
+                &self.deps,
+                self.binding.take().expect("opening owns binding phase"),
+            );
         }
     }
 }
@@ -1035,6 +1092,50 @@ mod owner_tests {
         fn open(_: &crate::OpenContext<Self>) -> crate::OpenResult<Self> {
             unreachable!("test initializes state directly")
         }
+    }
+
+    #[test]
+    fn installed_opening_retains_binding_until_commit_and_rollback_transfer() {
+        let runtime = Runtime::<Probe>::new();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let opening = runtime.begin_open().unwrap();
+        let opening =
+            runtime.publish_with_lifecycle(opening, (), RetainedLifecycle(Arc::clone(&drops)), ());
+        let access = runtime.bind_addin_lifecycle().unwrap();
+        assert!(matches!(
+            runtime.addin_lifecycle.binding(&access),
+            Err(ThreadAffineError::ReentrantAccess)
+        ));
+        let rollback = opening.into_rollback();
+        assert!(matches!(
+            runtime.addin_lifecycle.binding(&access),
+            Err(ThreadAffineError::ReentrantAccess)
+        ));
+        rollback.run(&access);
+        assert_eq!(runtime.phase(), LifecyclePhase::Closed);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+
+        let opening = runtime.begin_open().unwrap();
+        let opening = runtime
+            .publish_with_lifecycle(opening, (), RetainedLifecycle(Arc::clone(&drops)), ())
+            .stage_host_mutations(Vec::new());
+        let access = runtime.bind_addin_lifecycle().unwrap();
+        assert!(matches!(
+            runtime.addin_lifecycle.binding(&access),
+            Err(ThreadAffineError::ReentrantAccess)
+        ));
+        opening.commit().unwrap();
+        // Normal running does not retain the exclusive occupancy claim.
+        assert!(runtime.addin_lifecycle.binding(&access).is_ok());
+        runtime
+            .shutdown_deps()
+            .take_addin_lifecycle(&access)
+            .unwrap_or_else(|_| panic!("take"))
+            .dispose()
+            .unwrap_or_else(|_| panic!("dispose"))
+            .release()
+            .unwrap();
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
     }
 
     #[test]

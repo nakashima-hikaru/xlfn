@@ -14,9 +14,10 @@ fn ordered<A: crate::Addin>(
     let Ok(transaction) = transaction.quiesce_addin(runtime, lifecycle) else { return };
     let Ok(transaction) = transaction.seal_services() else { return };
     let mut report = crate::shutdown::CloseReport::default();
-    let Ok(transaction) = transaction.cleanup_addin(lifecycle, &mut report) else { return };
+    let Ok((transaction, empty_binding)) = transaction.cleanup_addin(lifecycle, &mut report, None) else { return };
     let Ok(transaction) = transaction.finish_services() else { return };
     let Ok(transaction) = transaction.reclaim(|_| {}) else { return };
     let Ok(certificate) = transaction.certify() else { return };
-    let _ = certificate.finish();
+    let Ok(_completion) = certificate.finish() else { return };
+    let _ = empty_binding.release();
 }

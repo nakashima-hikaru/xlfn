@@ -8,6 +8,7 @@ PROTOCOL = Path("crates/xlfn/src/handle/domain/protocol.rs")
 COUNTERS = Path("crates/xlfn/src/handle/domain/counters.rs")
 
 DEPENDENCIES = (
+    Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"),
     Path("crates/xlfn/src/retirement_queue.rs"),
     PROTOCOL, COUNTERS,
     Path("crates/xlfn/src/handle/binding/protocol.rs"),

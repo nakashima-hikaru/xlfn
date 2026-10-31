@@ -15,10 +15,13 @@ use crate::sync::{Mutex, MutexGuard};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 mod protocol;
+mod queue;
 mod retirement;
 mod transition;
 use protocol::protocol_expr;
-pub use retirement::{ClosedRetirement, RetiredQueue};
+pub use retirement::{
+    ClosedRetirement, DisposableBatch, RetirementRegistration, RetirementStorage,
+};
 
 // Share the publication order with the Loom adapter. In particular, a reused
 // generation must not admit a delayed reader before it becomes current.
@@ -227,18 +230,18 @@ impl<const N: usize> Default for RotatingReadDomain<N> {
 /// Registration, publication barriers, and certified withdrawal use these
 /// same queue fields. Moving this owner moves the domain and queues together;
 /// callers cannot substitute another queue array during a certified take.
-pub struct RotatingRetirementDomain<const N: usize, Q> {
+pub struct RotatingRetirementDomain<const N: usize, Q: RetirementStorage> {
     domain: RotatingReadDomain<N>,
     queues: [Mutex<Q>; 2],
 }
 
-impl<const N: usize, Q: Default> Default for RotatingRetirementDomain<N, Q> {
+impl<const N: usize, Q: RetirementStorage> Default for RotatingRetirementDomain<N, Q> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<const N: usize, Q: Default> RotatingRetirementDomain<N, Q> {
+impl<const N: usize, Q: RetirementStorage> RotatingRetirementDomain<N, Q> {
     /// Creates an open domain with one empty queue for each generation.
     #[must_use]
     pub fn new() -> Self {
@@ -249,25 +252,33 @@ impl<const N: usize, Q: Default> RotatingRetirementDomain<N, Q> {
     }
 }
 
-impl<const N: usize, Q> RotatingRetirementDomain<N, Q> {
-    /// Reads one queue while holding its lock without exposing a mutable guard.
-    pub fn inspect_queue<R>(&self, index: usize, inspect: impl FnOnce(&Q) -> R) -> R {
+impl<const N: usize, Q: RetirementStorage> RotatingRetirementDomain<N, Q> {
+    /// Observes only the queue length while keeping its lock through the callback.
+    pub fn observe_queue_len<R>(&self, index: usize, observe: impl FnOnce(usize) -> R) -> R {
         let queue = self.queues[index].lock();
-        inspect(&queue)
+        observe(queue.len())
     }
 
-    /// Reads both queues if neither lock is busy, without exposing their guards.
-    pub fn try_inspect_both<R>(&self, inspect: impl FnOnce(&Q, &Q) -> R) -> Option<R> {
+    pub fn queue_len(&self, index: usize) -> usize {
+        self.observe_queue_len(index, |len| len)
+    }
+
+    /// Serializes accounting with registration without exposing payload storage.
+    pub fn try_observe_queue_lengths<R>(&self, observe: impl FnOnce([usize; 2]) -> R) -> Option<R> {
         let first = self.queues[0].try_lock()?;
         let second = self.queues[1].try_lock()?;
-        Some(inspect(&first, &second))
+        Some(observe([first.len(), second.len()]))
     }
 
-    /// Registers one payload under the selected queue lock, then rechecks the
-    /// selected generation before invoking the callback.
+    pub fn try_queue_lens(&self) -> Option<[usize; 2]> {
+        self.try_observe_queue_lengths(|lengths| lengths)
+    }
+
+    /// Registers payloads under the selected queue lock. The callback can only
+    /// append or observe a count; it cannot remove any registered owner.
     pub fn register_retired<R>(
         &self,
-        register: impl FnOnce(GenerationIndex, MutexGuard<'_, Q>) -> R,
+        register: impl FnOnce(GenerationIndex, RetirementRegistration<'_, Q>) -> R,
     ) -> R {
         self.register_retired_with_hook(|_| {}, register)
     }
@@ -277,14 +288,14 @@ impl<const N: usize, Q> RotatingRetirementDomain<N, Q> {
     pub fn register_retired_with_hook<R>(
         &self,
         after_selection: impl Fn(GenerationIndex),
-        register: impl FnOnce(GenerationIndex, MutexGuard<'_, Q>) -> R,
+        register: impl FnOnce(GenerationIndex, RetirementRegistration<'_, Q>) -> R,
     ) -> R {
         self.domain.register_retired(
             |generation| {
                 after_selection(generation);
                 self.queues[generation.index()].lock()
             },
-            register,
+            |generation, queue| register(generation, RetirementRegistration::new(queue)),
         )
     }
 
@@ -301,7 +312,7 @@ impl<const N: usize, Q> RotatingRetirementDomain<N, Q> {
     }
 }
 
-impl<Q> RotatingRetirementDomain<DEFAULT_STRIPE_COUNT, Q> {
+impl<Q: RetirementStorage> RotatingRetirementDomain<DEFAULT_STRIPE_COUNT, Q> {
     /// Conservatively checks whether this thread may hold a reader permit.
     pub fn current_thread_may_be_reading(&self) -> bool {
         self.domain.current_thread_may_be_reading()
@@ -349,50 +360,30 @@ pub struct RotatingReadOwnedPermit<const N: usize> {
 mod tests {
     #[test]
     fn scoped_retirement_keeps_its_issuing_queue_and_terminal_owner() {
-        let issuing = super::RotatingRetirementDomain::<1, usize>::new();
-        let foreign = super::RotatingRetirementDomain::<1, usize>::new();
-        issuing.register_retired(|generation, mut queue| {
+        let issuing = super::RotatingRetirementDomain::<1, Vec<usize>>::new();
+        let foreign = super::RotatingRetirementDomain::<1, Vec<usize>>::new();
+        issuing.register_retired(|generation, mut registration| {
             assert_eq!(generation.index(), 0);
-            *queue = 7;
+            registration.append(7);
         });
-        issuing
-            .quiesce(|retired| {
-                assert_eq!(retired.generation().index(), 0);
-                assert!(retired.belongs_to(&issuing));
-                assert!(!retired.belongs_to(&foreign));
-                assert_eq!(
-                    retired.take(|mut queue| std::mem::replace(&mut *queue, 70)),
-                    7
-                );
-            })
-            .unwrap();
-        assert_eq!(issuing.inspect_queue(0, |queue| *queue), 70);
-        issuing.register_retired(|_, mut queue| *queue = 9);
-        issuing
-            .quiesce(|retired| {
-                assert_eq!(retired.generation().index(), 1);
-                assert_eq!(
-                    retired.take(|mut queue| std::mem::replace(&mut *queue, 90)),
-                    9
-                );
-            })
-            .unwrap();
+        let batches = issuing.quiesce().unwrap();
+        let batch = batches.into_iter().flatten().next().unwrap();
+        assert!(batch.belongs_to(&issuing));
+        assert!(!batch.belongs_to(&foreign));
+        assert_eq!(batch.into_inner(), vec![7]);
+        assert_eq!(issuing.queue_len(0), 0);
+        issuing.register_retired(|_, mut registration| registration.append(9));
         let closed = issuing.seal_and_wait();
         assert!(closed.belongs_to(&issuing));
         assert!(!closed.belongs_to(&foreign));
-        assert_eq!(
-            closed.take_queues(|first, second| [*first, *second]),
-            [70, 90]
-        );
-        // Re-observation of permanent closure remains valid. Emptying a queue
-        // and a repeated observation do not duplicate any payload ownership.
-        closed.take_queues(|mut first, mut second| {
-            *first = 0;
-            *second = 0;
-        });
-        assert_eq!(
-            closed.take_queues(|first, second| [*first, *second]),
-            [0, 0]
+        let [first, second] = closed.take_queues();
+        assert_eq!(first.into_inner(), Vec::<usize>::new());
+        assert_eq!(second.into_inner(), vec![9]);
+        assert!(
+            closed
+                .take_queues()
+                .into_iter()
+                .all(|batch| batch.is_empty())
         );
     }
 

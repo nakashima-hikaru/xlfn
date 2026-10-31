@@ -34,7 +34,7 @@ use triomphe::Arc;
 use xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT;
 use xlfn_kernel::published_owner::PublishedOwner;
 use xlfn_kernel::rotating_read_domain::{
-    RetiredQueue, RotatingReadPermit, RotatingRetirementDomain,
+    DisposableBatch, RotatingReadPermit, RotatingRetirementDomain,
 };
 
 #[repr(u8)]
@@ -265,7 +265,7 @@ impl TopicTable {
         // queue lock before publishing its next generation, establishing the
         // ordering needed by readers of copied, non-owning topic pointers.
         self.read_domain.register_retired(|_, mut queue| {
-            queue.push(topic);
+            queue.append(topic);
             self.queued
                 .try_update(Ordering::Relaxed, Ordering::Relaxed, |queued| {
                     queued.checked_add(1)
@@ -276,12 +276,12 @@ impl TopicTable {
 
     fn drain_generation(
         &self,
-        generation: RetiredQueue<'_, DEFAULT_STRIPE_COUNT, RetiredTopics>,
+        generation: DisposableBatch<'_, DEFAULT_STRIPE_COUNT, RetiredTopics>,
     ) -> RetiredTopics {
         if !generation.belongs_to(&self.read_domain) {
             xlfn_kernel::invariant::fail_stop();
         }
-        let retired = generation.take(|mut queue| std::mem::take(&mut *queue));
+        let retired = generation.into_inner();
         xlfn_kernel::invariant::checked_atomic_sub_relaxed(&self.queued, retired.len());
         retired
     }
@@ -293,7 +293,8 @@ impl TopicTable {
         }
         let Some(result) = self
             .read_domain
-            .poll_quiesce(|generation| self.drain_generation(generation))
+            .poll_quiesce()
+            .map(|result| result.map(|batch| self.drain_generation(batch)))
         else {
             return SmallVec::new();
         };
@@ -329,7 +330,8 @@ impl TopicTable {
             while self.queued.load(Ordering::Relaxed) != 0 {
                 let Some(Ok(retired)) = self
                     .read_domain
-                    .poll_quiesce(|generation| self.drain_generation(generation))
+                    .poll_quiesce()
+                    .map(|result| result.map(|batch| self.drain_generation(batch)))
                 else {
                     break;
                 };
@@ -348,12 +350,10 @@ impl TopicTable {
 
     pub(crate) fn seal_and_drain(&self) -> RetiredTopics {
         let closed = self.read_domain.seal_and_wait();
-        closed.take_queues(|mut first, mut second| {
-            let mut all = std::mem::take(&mut *first);
-            all.append(&mut *second);
-            xlfn_kernel::invariant::checked_atomic_sub_relaxed(&self.queued, all.len());
-            all
-        })
+        let [first, second] = closed.take_queues();
+        let mut all = self.drain_generation(first);
+        all.append(&mut self.drain_generation(second));
+        all
     }
 
     #[cfg(test)]
@@ -920,16 +920,18 @@ mod tests {
             "lifetime".to_owned(),
         )));
         let generation = table.read_domain.current_generation();
-        let (worker, outcome) = table.read_domain.inspect_queue(generation.index(), |_| {
-            let (sent, received) = mpsc::sync_channel(1);
-            let worker_table = Arc::clone(&table);
-            let worker = std::thread::spawn(move || {
-                let drained = worker_table.try_quiesce_and_drain();
-                sent.send((drained.len(), worker_table.read_domain.current_generation()))
-                    .unwrap();
+        let (worker, outcome) = table
+            .read_domain
+            .observe_queue_len(generation.index(), |_| {
+                let (sent, received) = mpsc::sync_channel(1);
+                let worker_table = Arc::clone(&table);
+                let worker = std::thread::spawn(move || {
+                    let drained = worker_table.try_quiesce_and_drain();
+                    sent.send((drained.len(), worker_table.read_domain.current_generation()))
+                        .unwrap();
+                });
+                (worker, received.recv_timeout(Duration::from_secs(5)))
             });
-            (worker, received.recv_timeout(Duration::from_secs(5)))
-        });
         // The inspection lock is released before joining the worker.
         worker.join().unwrap();
         let (count, observed_generation) =
@@ -975,7 +977,7 @@ mod tests {
             runtime
                 .topics
                 .read_domain
-                .try_inspect_both(|first, second| first.is_empty() && second.is_empty())
+                .try_observe_queue_lengths(|lengths| lengths == [0, 0])
                 .unwrap()
         );
     }

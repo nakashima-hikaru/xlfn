@@ -15,7 +15,7 @@ def main() -> None:
         for source in (PROOF, Path("verification/verus/drain_gate")):
             shutil.copytree(ROOT / source, tree / source)
         for source in (
-            Path("crates/xlfn/src/retirement_queue.rs"),
+            Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"),
             Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
             Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
             Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),

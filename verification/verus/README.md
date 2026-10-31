@@ -34,8 +34,19 @@ allocations on abandonment; quarantined owners have no ordinary payload Drop.
 Normal slot and retirement-domain destruction drains before releasing queued
 payloads. Gate management uses a separate exclusive claim, and admission uses
 borrowed or lifetime-contracted detached permits. Rotating transactions alone
-mint scoped generation/queue recovery capabilities. Binding changes are unique
-transactions; quota counts remain capacity accounting, not destruction barriers.
+mint scoped generation/queue recovery capabilities. Retirement registration
+exposes append and count operations over sealed Vec/SmallVec storage. Queue
+extraction stays non-dropping until kernel queue/transition guards end; only
+then does the owning retirement domain return a disposable batch. This
+certifies its own guards, not arbitrary caller-held table locks. Handle
+destruction debt remains attached to the downstream batch until payload Drop
+completes. The table publication/registration pairing remains a small native
+trusted boundary.
+
+Binding changes are unique transactions; runtime opening retains the installed
+claim through commit or rollback, and teardown retains the empty claim through
+lifecycle disposal and binding release. Quota counts remain capacity accounting,
+not destruction barriers.
 
 The private-API compile checks enforce these Rust interface restrictions. The
 Verus targets retain their stated abstract/shared-expression scopes; they do not

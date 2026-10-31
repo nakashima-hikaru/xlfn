@@ -12,6 +12,7 @@ description = "Implementation-only ownership and concurrency primitives for xlfn
 crossbeam-utils.workspace = true
 parking_lot.workspace = true
 triomphe.workspace = true
+smallvec.workspace = true
 
 [dev-dependencies]
 static_assertions.workspace = true

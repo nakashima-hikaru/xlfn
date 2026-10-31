@@ -394,6 +394,9 @@ mod counters;
 
 mod counter_refinement;
 
+#[path = "../../../../crates/xlfn/src/retirement_queue.rs"]
+mod batch_transitions;
+
 mod batches;
 
 #[path = "../../rotating_read_domain/src/lib.rs"]

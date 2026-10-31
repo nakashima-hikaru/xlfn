@@ -2,55 +2,10 @@
 //! cannot pair a foreign owner or drain gate with a reclamation capability.
 use super::*;
 use crate::sync::MutexGuard;
-use std::mem::ManuallyDrop;
-
-// Published/withdrawn/quarantined owners deliberately do not destroy their
-// allocation on field Drop. Only a drained or exclusively destroyed slot may
-// recover it. Forgetting any intermediate capability therefore retains data.
-pub(super) struct PublishedServiceOwner<R>(ManuallyDrop<PublishedOwner<R>>);
-struct WithdrawnServiceOwner<R>(ManuallyDrop<PublishedOwner<R>>);
-struct QuiescedServiceOwner<R>(PublishedOwner<R>);
-pub(super) struct QuarantinedServiceOwner<R>(ManuallyDrop<PublishedOwner<R>>);
-
-impl<R> PublishedServiceOwner<R> {
-    fn publish(owner: PublishedOwner<R>) -> Self {
-        Self(ManuallyDrop::new(owner))
-    }
-    pub(super) fn as_ptr(&self) -> *mut R {
-        self.0.as_ptr()
-    }
-    fn withdraw(self) -> WithdrawnServiceOwner<R> {
-        WithdrawnServiceOwner(self.0)
-    }
-}
-impl<R> WithdrawnServiceOwner<R> {
-    fn as_ref(&self) -> &R {
-        self.0.as_ref()
-    }
-    fn after_drain(self) -> QuiescedServiceOwner<R> {
-        QuiescedServiceOwner(ManuallyDrop::into_inner(self.0))
-    }
-    fn quarantine(self) -> QuarantinedServiceOwner<R> {
-        QuarantinedServiceOwner(self.0)
-    }
-}
-impl<R> QuiescedServiceOwner<R> {
-    fn reclaim(self) -> Box<R> {
-        self.0.into_box()
-    }
-}
-impl<R> QuarantinedServiceOwner<R> {
-    fn retain(self) {
-        // Intentionally end only the wrapper's ownership bookkeeping. The
-        // ManuallyDrop field never runs arbitrary quarantined payload Drop.
-        let _retained = self.0;
-    }
-
-    #[cfg(test)]
-    pub(super) fn recover_for_test(self) -> PublishedOwner<R> {
-        ManuallyDrop::into_inner(self.0)
-    }
-}
+mod reclamation;
+pub(super) use reclamation::{
+    DrainedReplacement, PublishedServiceOwner, QuarantinedServiceOwner, QuiescedTxn, SealingTxn,
+};
 
 trait Rollback {
     fn rollback(self);
@@ -169,82 +124,6 @@ impl<'slot, C, R, E: Clone> InitializingTxn<'slot, C, R, E> {
     }
 }
 
-struct Sealing<'slot, C, R, E: Clone> {
-    slot: &'slot GenerationServiceSlot<C, R, E>,
-    runtime: WithdrawnServiceOwner<R>,
-}
-
-impl<C, R, E: Clone> Sealing<'_, C, R, E> {
-    fn retain(self, fault: Arc<ServiceFault<E>>) {
-        let mut state = self.slot.state.lock();
-        if !matches!(&*state, GenerationServiceState::Sealing) {
-            crate::invariant::fail_stop();
-        }
-        *state = GenerationServiceState::TeardownFaulted {
-            fault,
-            runtime: self.runtime.quarantine(),
-        };
-        self.slot.changed.notify_all();
-    }
-}
-
-impl<C, R, E: Clone> Rollback for Sealing<'_, C, R, E> {
-    fn rollback(self) {
-        // Also valid BEFORE reader drain: retain, never destroy, the owner.
-        self.retain(Arc::new(ServiceFault::Panicked));
-    }
-}
-
-#[must_use = "wait for this service's readers before finishing shutdown"]
-pub(super) struct SealingTxn<'slot, C, R, E: Clone> {
-    recovery: AbortGuard<Sealing<'slot, C, R, E>>,
-}
-
-#[must_use = "finish shutdown or retain the quiesced owner as a fault"]
-pub(super) struct QuiescedTxn<'slot, C, R, E: Clone> {
-    recovery: AbortGuard<Sealing<'slot, C, R, E>>,
-}
-
-impl<'slot, C, R, E: Clone> SealingTxn<'slot, C, R, E> {
-    pub(super) fn wait(self) -> QuiescedTxn<'slot, C, R, E> {
-        // [SS-4]: the owner and the gate originate from the SAME withdrawal.
-        drop(self.recovery.state().slot.readers.control().seal().wait());
-        QuiescedTxn {
-            recovery: self.recovery,
-        }
-    }
-}
-
-impl<C, R, E: Clone> QuiescedTxn<'_, C, R, E> {
-    pub(super) fn finish<S>(
-        self,
-        shutdown: impl FnOnce(&R) -> Result<S, E>,
-    ) -> Result<ServiceSeal<R, S>, ServiceSlotError<E>> {
-        let result = shutdown(self.recovery.state().runtime.as_ref());
-        match result {
-            Ok(sealed) => {
-                let slot = self.recovery.state().slot;
-                let mut state = slot.state.lock();
-                *state = GenerationServiceState::Closed;
-                slot.changed.notify_all();
-                drop(state);
-                let Sealing { runtime, .. } = self.recovery.complete();
-                // Only this consuming, quiesced state may recover the Box.
-                Ok(ServiceSeal::Present {
-                    runtime: runtime.after_drain().reclaim(),
-                    sealed,
-                })
-            }
-            Err(error) => {
-                // Clone stays outside the lock AND under the recovery guard.
-                let fault = Arc::new(ServiceFault::Error(error.clone()));
-                self.recovery.complete().retain(fault);
-                Err(ServiceSlotError::Fault(ServiceFault::Error(error)))
-            }
-        }
-    }
-}
-
 struct Transition<'slot, R> {
     // Unlock before dropping an unpublished candidate in a following field.
     _guard: MutexGuard<'slot, ()>,
@@ -281,10 +160,6 @@ pub(super) struct PreparedReplacement<'slot, R> {
 }
 #[must_use]
 pub(super) struct RetiringReplacement<'slot, R> {
-    transition: Transition<'slot, R>,
-}
-#[must_use]
-pub(super) struct DrainedReplacement<'slot, R> {
     transition: Transition<'slot, R>,
 }
 #[must_use]
@@ -375,39 +250,6 @@ impl<'slot, R> ClosingTxn<'slot, R> {
         }
     }
 }
-impl<'slot, R> RetiringReplacement<'slot, R> {
-    pub(super) fn wait(self) -> DrainedReplacement<'slot, R> {
-        if let Some(index) = self.transition.previous {
-            drop(
-                self.transition.slot.lanes[index]
-                    .readers
-                    .control()
-                    .seal()
-                    .wait(),
-            );
-        }
-        DrainedReplacement {
-            transition: self.transition,
-        }
-    }
-}
-impl<R> DrainedReplacement<'_, R> {
-    pub(super) fn reclaim(self) -> Option<RetiredService<R>> {
-        self.transition.previous.map(|index| {
-            let lane = &self.transition.slot.lanes[index];
-            // Delayed admitted readers must see this pointer until drain ends.
-            lane.published
-                .store(std::ptr::null_mut(), Ordering::Release);
-            let owner = lane
-                .owner
-                .lock()
-                .take()
-                .unwrap_or_else(|| crate::invariant::fail_stop());
-            RetiredService::new(owner.withdraw().after_drain().reclaim())
-        })
-    }
-}
-
 impl<C, R, E: Clone> GenerationServiceSlot<C, R, E> {
     #[cold]
     pub(super) fn read_slow(
@@ -485,54 +327,6 @@ impl<C, R, E: Clone> GenerationServiceSlot<C, R, E> {
             Some(transaction) => transaction.wait().finish(shutdown),
             None => Ok(ServiceSeal::Empty(empty())),
         }
-    }
-
-    fn begin_seal(&self) -> Result<Option<SealingTxn<'_, C, R, E>>, ServiceSlotError<E>> {
-        let mut state = self.state.lock();
-        while matches!(
-            *state,
-            GenerationServiceState::Initializing | GenerationServiceState::Sealing
-        ) {
-            self.changed.wait(&mut state);
-        }
-
-        if let GenerationServiceState::TeardownFaulted { fault, .. } = &*state {
-            let fault = Arc::clone(fault);
-            drop(state);
-            return Err(ServiceSlotError::Fault(fault.as_ref().clone()));
-        }
-
-        Ok(
-            match std::mem::replace(&mut *state, GenerationServiceState::Sealing) {
-                GenerationServiceState::Ready { runtime } => {
-                    // Formal theorem [SS-3]: Withdraw publication and seal readers gate
-                    // before waiting for drain, preventing any late reader admission.
-                    drop(self.readers.control().seal());
-                    self.published
-                        .store(std::ptr::null_mut(), Ordering::Release);
-                    Some(SealingTxn {
-                        recovery: AbortGuard::new(Sealing {
-                            slot: self,
-                            runtime: runtime.withdraw(),
-                        }),
-                    })
-                }
-                retired @ (GenerationServiceState::Cold { .. }
-                | GenerationServiceState::InitFaulted { .. }
-                | GenerationServiceState::Closed) => {
-                    *state = GenerationServiceState::Closed;
-                    self.changed.notify_all();
-                    drop(state);
-                    drop(retired);
-                    return Ok(None);
-                }
-                GenerationServiceState::Initializing
-                | GenerationServiceState::Sealing
-                | GenerationServiceState::TeardownFaulted { .. } => {
-                    unreachable!()
-                }
-            },
-        )
     }
 }
 
@@ -654,42 +448,6 @@ mod tests {
         // slot destruction drains and releases it exactly once.
         drop(slot);
         assert_eq!(drops.load(Ordering::Relaxed), 1);
-    }
-}
-
-impl<C, R, E> Drop for GenerationServiceSlot<C, R, E> {
-    fn drop(&mut self) {
-        let state = {
-            let _drained = self.readers.control().seal().wait();
-            self.published
-                .store(std::ptr::null_mut(), Ordering::Release);
-            std::mem::replace(self.state.get_mut(), GenerationServiceState::Closed)
-        };
-        // Exclusive slot destruction supplies the lifetime/issuer authority;
-        // user payload and config/error destructors run outside all locks.
-        match state {
-            GenerationServiceState::Ready { runtime } => {
-                drop(runtime.withdraw().after_drain().reclaim())
-            }
-            GenerationServiceState::TeardownFaulted { runtime, .. } => runtime.retain(),
-            retired => drop(retired),
-        }
-    }
-}
-impl<R> Drop for ReplaceableServiceSlot<R> {
-    fn drop(&mut self) {
-        self.active.store(NO_ACTIVE_LANE, Ordering::Release);
-        for lane in &mut self.lanes {
-            let owner = {
-                let _drained = lane.readers.control().seal().wait();
-                lane.published
-                    .store(std::ptr::null_mut(), Ordering::Release);
-                lane.owner.get_mut().take()
-            };
-            if let Some(owner) = owner {
-                drop(owner.withdraw().after_drain().reclaim());
-            }
-        }
     }
 }
 

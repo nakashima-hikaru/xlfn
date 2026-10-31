@@ -530,7 +530,7 @@ where
         }
     };
 
-    let teardown = match teardown.cleanup_addin(lifecycle, &mut report) {
+    let (teardown, empty_binding) = match teardown.cleanup_addin(lifecycle, &mut report, None) {
         Ok(stage) => stage,
         Err(error) => {
             for issue in report.issues() {
@@ -609,7 +609,7 @@ where
         }
     };
 
-    if let Err(error) = shutdown_deps.release_empty_addin_lifecycle(lifecycle) {
+    if let Err(error) = empty_binding.release() {
         let error = lifecycle_access_error(error);
         return Err(handle_unload_hazard(
             runtime,

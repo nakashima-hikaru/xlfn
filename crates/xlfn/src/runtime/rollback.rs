@@ -75,6 +75,16 @@ pub(crate) fn rollback_open<A>(
 where
     A: Addin,
 {
+    rollback_open_with_binding(runtime, lifecycle, callbacks, generation, None)
+}
+
+pub(in crate::runtime) fn rollback_open_with_binding<A: Addin>(
+    runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+    lifecycle: &AddinLifecycleAccess<'_, A>,
+    callbacks: &mut HostCallbackSession,
+    generation: Option<RuntimeGeneration>,
+    binding: Option<super::capabilities::InstalledLifecycle<'_, A>>,
+) -> OpenRollbackOutcome {
     #[cfg(test)]
     let _diagnostic_test_guard = crate::diagnostics::DIAGNOSTIC_TEST_MUTEX.lock();
     let rollback_attempt = match runtime.acquire_open_rollback() {
@@ -200,16 +210,17 @@ where
     };
 
     let mut cleanup_report = crate::shutdown::CloseReport::default();
-    let teardown = match teardown.cleanup_addin(lifecycle, &mut cleanup_report) {
-        Ok(stage) => stage,
-        Err(error) => {
-            for issue in cleanup_report.issues() {
-                report_cleanup_issue(issue);
+    let (teardown, empty_binding) =
+        match teardown.cleanup_addin(lifecycle, &mut cleanup_report, binding) {
+            Ok(stage) => stage,
+            Err(error) => {
+                for issue in cleanup_report.issues() {
+                    report_cleanup_issue(issue);
+                }
+                report_boundary_error("xlAutoOpen rollback cleanup", &error);
+                return incomplete(runtime, crate::shutdown::UnloadHazard::AddinCleanupFailed);
             }
-            report_boundary_error("xlAutoOpen rollback cleanup", &error);
-            return incomplete(runtime, crate::shutdown::UnloadHazard::AddinCleanupFailed);
-        }
-    };
+        };
     for issue in cleanup_report.issues() {
         report_cleanup_issue(issue);
     }
@@ -257,7 +268,7 @@ where
             );
         }
     };
-    if let Err(error) = shutdown_deps.release_empty_addin_lifecycle(lifecycle) {
+    if let Err(error) = empty_binding.release() {
         report_boundary_error(
             "xlAutoOpen lifecycle binding release",
             &lifecycle_access_error(error),

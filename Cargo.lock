@@ -1542,6 +1542,7 @@ dependencies = [
  "crossbeam-utils",
  "loom",
  "parking_lot 0.13.0",
+ "smallvec",
  "static_assertions",
  "triomphe",
 ]

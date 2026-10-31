@@ -8,7 +8,7 @@ use super::*;
 /// The certificate borrows the transition state, preventing it from escaping
 /// the callback and authorizing reclamation after a later generation reuse.
 /// Retirement subsystems receive this proof bundled with the issuing queues
-/// through [`RetiredQueue::take`], without re-pairing a domain and certificate.
+/// through [`DisposableBatch`], without re-pairing a domain and certificate.
 ///
 /// ```compile_fail
 /// use xlfn_kernel::rotating_read_domain::RotatingReadDomain;
@@ -23,10 +23,6 @@ pub struct DrainedGeneration<'drain> {
 }
 
 impl DrainedGeneration<'_> {
-    pub(super) fn generation(&self) -> GenerationIndex {
-        self.index
-    }
-
     /// Locks and takes a generation queue only after checking the issuing domain.
     /// The supplied array must be this domain's retirement queues. The
     /// certificate selects and locks the authorized array element itself;

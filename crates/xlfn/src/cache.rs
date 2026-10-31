@@ -39,7 +39,8 @@ use std::time::Instant;
 use triomphe::Arc;
 use xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT;
 use xlfn_kernel::rotating_read_domain::{
-    ClosedRetirement, GenerationIndex, RetiredQueue, RotatingReadPermit, RotatingRetirementDomain,
+    ClosedRetirement, DisposableBatch, GenerationIndex, RotatingReadPermit,
+    RotatingRetirementDomain,
 };
 
 trait EpochAtomic {
@@ -1230,11 +1231,8 @@ impl<V> CacheLookupDomain<V> {
         if !self.pending_weight_saturated.load(Ordering::Relaxed) {
             return;
         }
-        let _ = self.domain.try_inspect_both(|first, second| {
-            if first.is_empty()
-                && second.is_empty()
-                && self.pending_nodes.load(Ordering::Relaxed) == 0
-            {
+        let _ = self.domain.try_observe_queue_lengths(|lengths| {
+            if lengths == [0, 0] && self.pending_nodes.load(Ordering::Relaxed) == 0 {
                 self.pending_weight.store(0, Ordering::Relaxed);
                 self.pending_weight_saturated
                     .store(false, Ordering::Relaxed);
@@ -1273,7 +1271,7 @@ impl<V> CacheLookupDomain<V> {
                     after_generation_load,
                     |_, mut queue| {
                         let weight = entry.weight;
-                        crate::retirement_queue::append_retired!(&mut *queue, entry);
+                        queue.append(entry);
                         let _nodes = self
                             .pending_nodes
                             .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -1307,10 +1305,11 @@ impl<V> CacheLookupDomain<V> {
         let start = Instant::now();
         let batches = self
             .domain
-            .quiesce(|generation| self.drain_generation(generation))
+            .quiesce()
             .unwrap_or_default()
             .into_iter()
-            .flatten();
+            .flatten()
+            .map(|batch| self.drain_generation(batch));
         // Preserve an existing batch allocation when only one generation has
         // debt, instead of allocating and copying a new flattened Vec.
         let entries = merge_reclaims(self, batches);
@@ -1343,7 +1342,8 @@ impl<V> CacheLookupDomain<V> {
             while self.pending_nodes.load(Ordering::Relaxed) != 0 {
                 let Some(Ok(batch)) = self
                     .domain
-                    .poll_quiesce(|generation| self.drain_generation(generation))
+                    .poll_quiesce()
+                    .map(|result| result.map(|batch| self.drain_generation(batch)))
                 else {
                     break;
                 };
@@ -1368,33 +1368,34 @@ impl<V> CacheLookupDomain<V> {
 
     fn drain_generation(
         &self,
-        generation: RetiredQueue<'_, DEFAULT_STRIPE_COUNT, PendingEntries<V>>,
+        generation: DisposableBatch<'_, DEFAULT_STRIPE_COUNT, PendingEntries<V>>,
     ) -> ReclaimEntries<'_, V> {
         if !generation.belongs_to(&self.domain) {
             xlfn_kernel::invariant::fail_stop();
         }
-        generation.take(|mut queue| {
-            let entries = crate::retirement_queue::take_retired!(&mut *queue);
-            self.pending_nodes
+        let entries = generation.into_inner();
+        // Keep detached entries counted until their weight accounting completes.
+        // A concurrent empty-queue observer may reset saturation only after
+        // this final pending_nodes subtraction makes the whole domain empty.
+        if !self.pending_weight_saturated.load(Ordering::Relaxed) {
+            let weight = entries
+                .iter()
+                .fold(0_u64, |sum, entry| sum.saturating_add(entry.weight));
+            self.pending_weight
                 .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                    current.checked_sub(entries.len())
+                    current.checked_sub(weight)
                 })
                 .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
-            if !self.pending_weight_saturated.load(Ordering::Relaxed) {
-                let weight = entries
-                    .iter()
-                    .fold(0_u64, |sum, entry| sum.saturating_add(entry.weight));
-                self.pending_weight
-                    .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                        current.checked_sub(weight)
-                    })
-                    .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
-            }
-            ReclaimEntries {
-                domain: self,
-                entries,
-            }
-        })
+        }
+        self.pending_nodes
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_sub(entries.len())
+            })
+            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+        ReclaimEntries {
+            domain: self,
+            entries,
+        }
     }
 
     #[cfg(any(test, feature = "bench-internals"))]
@@ -1437,17 +1438,9 @@ impl<V> CacheLookupDomain<V> {
         if !closed.belongs_to(&self.domain) {
             xlfn_kernel::invariant::fail_stop();
         }
-        let batches = closed.take_queues(|mut first, mut second| {
-            [
-                ReclaimEntries {
-                    domain: self,
-                    entries: crate::retirement_queue::take_retired!(&mut *first),
-                },
-                ReclaimEntries {
-                    domain: self,
-                    entries: crate::retirement_queue::take_retired!(&mut *second),
-                },
-            ]
+        let batches = closed.take_queues().map(|batch| ReclaimEntries {
+            domain: self,
+            entries: batch.into_inner(),
         });
         merge_reclaims(self, batches)
     }
@@ -2332,7 +2325,8 @@ mod tests {
         assert!(
             domain
                 .domain
-                .poll_quiesce(|generation| domain.drain_generation(generation))
+                .poll_quiesce()
+                .map(|result| result.map(|batch| domain.drain_generation(batch)))
                 .is_none()
         );
         assert_eq!(domain.domain.current_generation().index(), 1);
@@ -2341,7 +2335,8 @@ mod tests {
 
         let first = domain
             .domain
-            .poll_quiesce(|generation| domain.drain_generation(generation))
+            .poll_quiesce()
+            .map(|result| result.map(|batch| domain.drain_generation(batch)))
             .unwrap()
             .unwrap();
         assert_eq!(first.len(), 1);
@@ -2390,8 +2385,8 @@ mod tests {
         enqueuer.join().unwrap();
         rotator.join().unwrap();
 
-        assert!(domain.domain.inspect_queue(0, |queue| queue.is_empty()));
-        assert_eq!(domain.domain.inspect_queue(1, |queue| queue.len()), 1);
+        assert!(domain.domain.queue_len(0) == 0);
+        assert_eq!(domain.domain.queue_len(1), 1);
         let _ = domain.drain_all(domain.seal());
     }
 
@@ -2401,7 +2396,7 @@ mod tests {
         domain.enqueue_reclaim(ReclaimEntry::sentinel(&domain, 7));
         let generation = domain.domain.current_generation();
         let (worker, result, observed_generation) =
-            domain.domain.inspect_queue(generation.index(), |_| {
+            domain.domain.observe_queue_len(generation.index(), |_| {
                 let (done_tx, done_rx) = mpsc::channel();
                 let worker_domain = Arc::clone(&domain);
                 let worker = std::thread::spawn(move || {

@@ -154,8 +154,9 @@ fn double_checked_hit_reclaims_after_singleflight_unlock() {
     // have reached its second lookup yet.
     let deadline = Instant::now() + DEADLINE;
     loop {
-        if let Some(result) = cache.domain.domain.try_quiesce_if_idle(|_| ()) {
-            result.unwrap();
+        if let Some(result) = cache.domain.domain.try_quiesce_if_idle() {
+            let retired = cache.domain.drain_generation(result.unwrap());
+            reclaim_cache_entries(retired);
             break;
         }
         assert!(Instant::now() < deadline, "first lookup did not finish");

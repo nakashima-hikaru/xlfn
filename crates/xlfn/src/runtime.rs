@@ -469,7 +469,7 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
     pub(in crate::runtime) fn take_addin_lifecycle(
         &self,
         access: &AddinLifecycleAccess<'_, A>,
-    ) -> Result<A::LifecycleState, ThreadAffineError> {
+    ) -> Result<capabilities::TakenLifecycle<'_, A>, ThreadAffineError> {
         self.shutdown_deps().take_addin_lifecycle(access)
     }
 
@@ -1355,9 +1355,10 @@ pub(crate) mod tests {
             .expect("test runtime lifecycle remains bound to the test thread");
         runtime
             .take_addin_lifecycle(&lifecycle)
-            .expect("test close must release its lifecycle state");
-        runtime
-            .release_empty_addin_lifecycle(&lifecycle)
+            .expect("test close must release its lifecycle state")
+            .dispose()
+            .expect("test lifecycle disposal")
+            .release()
             .expect("test close must release its lifecycle binding");
 
         let open_attempt = runtime.begin_open().unwrap();

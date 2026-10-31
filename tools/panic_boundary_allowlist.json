@@ -406,5 +406,21 @@
     "count": 1,
     "category": "implementation",
     "reason": "Captures at most 16 KiB of standard panic text before applying contain_panic to the payload; arbitrary payload destructors never run."
+  },
+  {
+    "path": "crates/xlfn-kernel/src/rotating_read_domain/retirement.rs",
+    "context": "# [ cfg ( test ) ] mod tests / # [ test ] fn miri_registration_capacity_panic_retains_incoming_owners",
+    "code": "let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {",
+    "count": 1,
+    "category": "test",
+    "reason": "Observes the deliberate capacity-overflow panic and verifies append-only admission retains incoming owners before any queue mutation."
+  },
+  {
+    "path": "crates/xlfn-kernel/src/rotating_read_domain/retirement.rs",
+    "context": "# [ cfg ( test ) ] mod tests / # [ test ] fn miri_registration_panic_retains_all_registered_owners",
+    "code": "let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {",
+    "count": 1,
+    "category": "test",
+    "reason": "Observes a deliberate fixed-string registration callback panic and checks that already registered owners remain queued until drained disposal."
   }
 ]

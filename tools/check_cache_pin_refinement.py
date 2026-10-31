@@ -10,7 +10,7 @@ if __name__ == "__main__":
     check_mutations(
         Path("verification/verus/cache_lease"),
         Path("crates/xlfn/src/cache/pin_transitions.rs"),
-        (Path("crates/xlfn/src/cache/node_layout.rs"), Path("crates/xlfn/src/retirement_queue.rs"), Path("verification/verus/published_owner/src/heap_permission.rs"), *tuple(Path("verification/verus/drain_gate/src").glob("*.rs")), Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"), Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
+        (Path("crates/xlfn/src/cache/node_layout.rs"), Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"), Path("verification/verus/published_owner/src/heap_permission.rs"), *tuple(Path("verification/verus/drain_gate/src").glob("*.rs")), Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"), Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
          *tuple(Path("verification/verus/rotating_read_domain/src").glob("*.rs")), Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),),
         {
             "lookup accepts an ineligible observation": ("if !$eligible {", "if false {"),
