@@ -93,7 +93,7 @@ pub fn shared_reader_entry(reader: &mut Reader) -> (result: Result<bool, ()>)
             Err(_) => final(reader).admitted.is_none() && final(reader).closure_seen,
         },
 {
-    enter_reader!(selected;
+    enter_reader!(selected, _admission;
         reader.is_closed(), reader.select(), (), reader.acquire(selected),
         reader.permit(selected), (), ();
         invariant reader.inv(), reader.admitted.is_none(),

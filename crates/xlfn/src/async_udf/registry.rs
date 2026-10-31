@@ -18,7 +18,7 @@ use xlfn_kernel::published_owner::PublishedOwner;
 /// retains this registry. `activity` additionally drains the final release
 /// tail before its unique owner can reclaim the registry.
 pub(crate) struct TaskRegistry {
-    pub(crate) active_tasks: AtomicUsize,
+    pub(super) active_tasks: AtomicUsize,
     pub(crate) next_id: AtomicU64,
     limit: AtomicUsize,
     closing: AtomicBool,
@@ -30,9 +30,9 @@ pub(crate) struct TaskRegistry {
     publication: Mutex<()>,
     transition: Mutex<()>,
     pub(super) control: Mutex<RegistryControl>,
-    pub(crate) activity: DrainGate,
-    pub(crate) idle_lock: Mutex<()>,
-    pub(crate) idle: Condvar,
+    pub(super) activity: DrainGate,
+    pub(super) idle_lock: Mutex<()>,
+    pub(super) idle: Condvar,
     pub(crate) observer: crate::shutdown_trace::ObservationSink,
     #[cfg(test)]
     pub(crate) after_publish_hook: Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
@@ -296,9 +296,13 @@ impl TaskRegistry {
         self.publish_current(pointer, epoch);
         self.limit.store(limit.get(), Ordering::Relaxed);
         self.closing.store(false, Ordering::Release);
-        self.activity
-            .reopen()
-            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+        drop(
+            self.activity
+                .control()
+                .wait_if_sealed()
+                .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop())
+                .reopen(),
+        );
         control.start();
         Ok(())
     }
@@ -505,7 +509,7 @@ impl TaskRegistry {
         let mut control = self.control.lock();
         claim.attempt = Some(control.begin_close()?);
         self.closing.store(true, Ordering::Release);
-        self.activity.seal();
+        drop(self.activity.control().seal());
         for state in control.calculations.values() {
             state.seal_admission();
         }
@@ -526,7 +530,7 @@ impl TaskRegistry {
             self.idle.wait(&mut lock);
         }
         drop(lock);
-        self.activity.wait_until_idle();
+        drop(self.activity.control().wait_idle());
     }
 
     #[cfg(all(test, feature = "async-builtin"))]
@@ -541,7 +545,7 @@ impl TaskRegistry {
             self.idle.wait_for(&mut lock, deadline - now);
         }
         drop(lock);
-        self.activity.wait_until_idle();
+        drop(self.activity.control().wait_idle());
         true
     }
 

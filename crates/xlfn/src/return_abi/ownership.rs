@@ -105,13 +105,17 @@ impl ReturnTracker {
                 diagnostic_id: crate::diagnostics::id::DiagnosticId::RETURN_REOPEN,
             });
         }
-        self.gate.reopen().map_err(|_| XllError::Internal {
-            diagnostic_id: crate::diagnostics::id::DiagnosticId::RETURN_REOPEN,
-        })
+        self.gate
+            .control()
+            .wait_if_sealed()
+            .map(|closed| drop(closed.reopen()))
+            .map_err(|_| XllError::Internal {
+                diagnostic_id: crate::diagnostics::id::DiagnosticId::RETURN_REOPEN,
+            })
     }
 
     pub(crate) fn close_admission(&self) {
-        self.gate.seal();
+        drop(self.gate.control().seal());
     }
 
     pub(crate) fn try_enter_producer(&self) -> Option<ReturnProducerGuard<'_>> {
@@ -135,7 +139,7 @@ impl ReturnTracker {
 
     pub(crate) fn wait_for_quiescence(&self) {
         debug_assert!(self.admission_closed());
-        self.gate.wait_until_idle();
+        drop(self.gate.control().wait_idle());
     }
 
     #[cfg(any(test, feature = "refinement"))]

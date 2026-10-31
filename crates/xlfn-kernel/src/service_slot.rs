@@ -6,16 +6,16 @@
 //! the teardown owner. No read capability participates in shared ownership.
 //! Internal consuming transactions bind each recovery to its slot or lane.
 //! Generation shutdown cannot finish before reader quiescence; lane recovery
-//! additionally borrows the transition lock until the exact owner is extracted.
+//! additionally retains the transition lock until the exact owner is extracted.
 
 use crate::drain_gate::{DEFAULT_STRIPE_COUNT, StripedDrainGate, StripedDrainPermit};
 use crate::published_owner::PublishedOwner;
 use crate::sync::{Condvar, Mutex};
 use std::marker::PhantomData;
-use std::mem::ManuallyDrop;
 use std::ops::Deref;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
+use transaction::{PublishedServiceOwner, QuarantinedServiceOwner};
 use triomphe::Arc;
 
 /// Number of reader stripes for the generation service slot.
@@ -34,14 +34,14 @@ pub enum ServiceSlotError<E> {
 }
 
 /// Shared lifecycle vocabulary for one generation-scoped lazy service.
-pub enum GenerationServiceState<C, R, E> {
+enum GenerationServiceState<C, R, E> {
     Closed,
     Cold {
         config: C,
     },
     Initializing,
     Ready {
-        runtime: PublishedOwner<R>,
+        runtime: PublishedServiceOwner<R>,
     },
     Sealing,
     InitFaulted {
@@ -52,7 +52,7 @@ pub enum GenerationServiceState<C, R, E> {
     },
     TeardownFaulted {
         fault: Arc<ServiceFault<E>>,
-        runtime: ManuallyDrop<PublishedOwner<R>>,
+        runtime: QuarantinedServiceOwner<R>,
     },
 }
 
@@ -240,15 +240,15 @@ impl<R> Deref for RetiredService<R> {
 }
 
 /// One lane in a 2-lane replaceable service slot.
-pub struct ReplaceableLane<R> {
+struct ReplaceableLane<R> {
     published: AtomicPtr<R>,
     readers: StripedDrainGate<SERVICE_READER_STRIPES>,
-    owner: Mutex<Option<PublishedOwner<R>>>,
+    owner: Mutex<Option<PublishedServiceOwner<R>>>,
     _runtime: PhantomData<R>,
 }
 
 impl<R> ReplaceableLane<R> {
-    pub const fn new() -> Self {
+    const fn new() -> Self {
         Self {
             published: AtomicPtr::new(std::ptr::null_mut()),
             readers: StripedDrainGate::new_sealed(),
@@ -355,18 +355,6 @@ impl<R> ReplaceableServiceSlot<R> {
 impl<R> Default for ReplaceableServiceSlot<R> {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl<R> Drop for ReplaceableServiceSlot<R> {
-    fn drop(&mut self) {
-        self.active.store(NO_ACTIVE_LANE, Ordering::Release);
-        for lane in &self.lanes {
-            lane.readers.seal();
-            lane.readers.wait_until_idle();
-            lane.published
-                .store(std::ptr::null_mut(), Ordering::Release);
-        }
     }
 }
 

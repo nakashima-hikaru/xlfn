@@ -11,7 +11,9 @@ use crate::runtime::observer::RuntimeObserver;
 use crate::runtime_components::{
     GenerationServices, HostLedger, ModuleResidency, QuarantineVault, ReturnProtocol,
 };
-use xlfn_kernel::thread_affine::{ThreadAffineInstallError, ThreadAffineSlot};
+use xlfn_kernel::thread_affine::{
+    BindingState, ThreadAffineError, ThreadAffineInstallError, ThreadAffineSlot,
+};
 
 /// Source-bound recovery operations. The target is installed only by the
 /// composition root and cannot be replaced while an opening owner is alive.
@@ -220,7 +222,25 @@ impl<'a, A: Addin> OpenDeps<'a, A> {
         access: &AddinLifecycleAccess<'_, A>,
         state: A::LifecycleState,
     ) -> Result<(), ThreadAffineInstallError<A::LifecycleState>> {
-        self.addin_lifecycle.install(access, state)
+        match self.addin_lifecycle.binding(access) {
+            Ok(BindingState::Empty(transaction)) => {
+                transaction
+                    .install(state)
+                    .map(drop)
+                    .map_err(|error| ThreadAffineInstallError {
+                        value: error.value,
+                        reason: error.reason,
+                    })
+            }
+            Ok(BindingState::Occupied(_transaction)) => Err(ThreadAffineInstallError {
+                value: state,
+                reason: ThreadAffineError::Occupied,
+            }),
+            Err(reason) => Err(ThreadAffineInstallError {
+                value: state,
+                reason,
+            }),
+        }
     }
 }
 
@@ -372,7 +392,16 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
         &self,
         access: &AddinLifecycleAccess<'_, A>,
     ) -> Result<A::LifecycleState, xlfn_kernel::thread_affine::ThreadAffineError> {
-        self.addin_lifecycle.take(access)
+        match self.addin_lifecycle.binding(access)? {
+            BindingState::Occupied(transaction) => transaction
+                .take()
+                .map(|(value, empty)| {
+                    drop(empty);
+                    value
+                })
+                .map_err(|error| error.reason),
+            BindingState::Empty(_transaction) => Err(ThreadAffineError::MissingValue),
+        }
     }
 
     pub(in crate::runtime) fn has_addin_lifecycle(
@@ -386,7 +415,13 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
         &self,
         access: &AddinLifecycleAccess<'_, A>,
     ) -> Result<(), xlfn_kernel::thread_affine::ThreadAffineError> {
-        self.addin_lifecycle.release_empty_binding(access)
+        match self.addin_lifecycle.binding(access)? {
+            BindingState::Empty(transaction) => transaction
+                .release()
+                .map(|_| ())
+                .map_err(|error| error.reason),
+            BindingState::Occupied(_transaction) => Err(ThreadAffineError::Occupied),
+        }
     }
 
     pub(in crate::runtime) fn wait_for_return_quiescence(

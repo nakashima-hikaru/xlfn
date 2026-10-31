@@ -92,7 +92,7 @@ impl<'a, E: AsyncExecutor> ExecutorClose<'a, E, PublicationsSealed> {
         let runtime = owner.runtime;
         // Readers include reserve/submit calls. Keep the executor available
         // to cancellation wakes until every admitted task has been destroyed.
-        runtime.spawn_admission.wait_until_idle();
+        drop(runtime.spawn_admission.control().wait_idle());
         let registry = runtime.registry().request_close()?.cancel();
         Ok(ExecutorClose {
             state: AwaitingTasks { registry },
@@ -282,9 +282,13 @@ impl<E: AsyncExecutor> AsyncRuntime<E> {
         let pointer = NonNull::from(executor.as_ref());
         *state = ExecutorSlot::Running(executor);
         self.publication.store(pointer.as_ptr(), Ordering::Release);
-        self.spawn_admission
-            .reopen()
-            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+        drop(
+            self.spawn_admission
+                .control()
+                .wait_if_sealed()
+                .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop())
+                .reopen(),
+        );
         self.state_changed.notify_all();
         drop(state);
         self.registry()
@@ -457,7 +461,7 @@ impl<E: AsyncExecutor> AsyncRuntime<E> {
             match &*state {
                 ExecutorSlot::Stopped => return None,
                 ExecutorSlot::Running(_) | ExecutorSlot::Closing(Some(_)) => {
-                    self.spawn_admission.seal();
+                    drop(self.spawn_admission.control().seal());
                     self.publication
                         .store(std::ptr::null_mut(), Ordering::Release);
                     let old = std::mem::replace(&mut *state, ExecutorSlot::Closing(None));

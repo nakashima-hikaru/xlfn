@@ -4,7 +4,7 @@ Run `python3 tools/check_typestate.py` from any directory. The checker copies th
 current tracked and nonignored working files into a temporary workspace, injects
 each fixture as an internal module, and runs an offline, locked `cargo check`
 against its owning package. Facade fixtures check `xlfn` with
-`async,rtd,handles,cache`; `kernel/service_slot` fixtures check `xlfn-kernel`
+`async,rtd,handles,cache`; `kernel/*` fixtures check `xlfn-kernel`
 without facade features. The default target is the rustc host. Windows COM
 fixtures run on Windows and are explicitly reported as skipped on other hosts.
 `--target x86_64-pc-windows-msvc` includes them in a cross-target check when the
@@ -31,10 +31,26 @@ different owner to lane reclamation. Sibling callers cannot construct drained
 capabilities or replace their private recovery owner or lane. The positive
 control checks both those internal sequences and the public slot APIs.
 Separate `kernel/service_slot/transaction` fixtures run inside the transaction
-module to check the actual lock borrow: reclaim succeeds while its transition
-guard remains alive, but a retirement cannot escape that guard or outlive its
-early destruction. The sibling fixtures above keep testing the private
-construction boundary independently of these borrow checks.
+module to check owning lock authority: an unprepared replacement cannot publish,
+publication consumes the prepared transaction, and retirement retains the guard
+through drain/reclaim. These capabilities cannot outlive their issuing slot.
+Sibling fixtures independently check their private construction and owner fields.
+
+Gate controllers hold a unique management claim, separate from the notification
+mutex. Only sealed/drained stages expose reopen. Admission returns non-Clone
+borrowed or explicitly unsafe detached permits; facade callers cannot access raw
+counter storage, release, or reopen. OperationGate terminal observations are
+repeatable facts and grant no arbitrary allocation recovery.
+
+Rotating transactions preserve shared pending state across polls and callback
+panics. Only drained transactions mint generation certificates, and scoped
+retirement queue capabilities retain their issuing queues. Terminal observations
+may repeat, while each scoped queue withdrawal is consumed once.
+
+Thread-affine access is use-only; unique binding transactions change occupancy.
+Fixtures reject empty take, occupied release, double install, and foreign claims.
+Quota borrowed permits retain the quota lifetime. Detached acquisition requires
+an unsafe owner-lifetime contract; observing capacity zero is not a drain proof.
 
 Open transactions carry mandatory service inputs after initialization. Fixtures
 reject missing or repeated initialization inputs, commit before initialization

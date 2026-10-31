@@ -668,7 +668,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
         {
             // SAFETY: `active_quota` is the quota coupled to this core at
             // construction, and the runtime reclaims it after its servers.
-            let permit = unsafe { Quota::try_acquire(self.active_quota()) }
+            let permit = unsafe { Quota::try_acquire_detached(self.active_quota()) }
                 .map_err(|_| XllError::Overloaded)?;
             topic_entry.insert(topic_id);
             shard.active_by_topic.insert(
@@ -918,7 +918,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
                 indexmap::map::Entry::Vacant(entry) => {
                     // SAFETY: the runtime-owned queue quota outlives this
                     // publish core and every queued-update permit.
-                    let permit = unsafe { Quota::try_acquire(self.queued_update_quota()) }
+                    let permit = unsafe { Quota::try_acquire_detached(self.queued_update_quota()) }
                         .map_err(|_| XllError::Overloaded)?;
                     entry.insert(QueuedUpdate {
                         connection_generation: conn_gen,

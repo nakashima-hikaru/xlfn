@@ -5,14 +5,13 @@
     reason = "owned operation guards are audited non-owning shutdown capabilities"
 )]
 
-use crate::drain_gate::{DrainGate, DrainPermit};
-use std::ptr::NonNull;
+use crate::drain_gate::{DetachedDrainPermit, DrainPermit, TerminalDrainGate};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GateClosed;
 
 pub struct OperationGate {
-    drain: DrainGate,
+    drain: TerminalDrainGate,
 }
 
 impl Default for OperationGate {
@@ -24,7 +23,7 @@ impl Default for OperationGate {
 impl OperationGate {
     pub const fn new() -> Self {
         Self {
-            drain: DrainGate::new_open(),
+            drain: TerminalDrainGate::new(),
         }
     }
 
@@ -41,19 +40,10 @@ impl OperationGate {
     /// Begins closing the gate to prevent new admissions.
     ///
     /// Formal theorem [OG-1]: After this linearization point (`drain.seal()`),
-    /// all future `acquire` and `enter` attempts will return `Err(GateClosed)`.
+    /// all future `enter` and `enter_owned` attempts will return `Err(GateClosed)`.
     #[inline]
     pub fn begin_close(&self) {
         self.drain.seal();
-    }
-
-    /// Acquires admission into an active operation.
-    ///
-    /// Formal theorem [OG-1], [OG-5]: Atomically increments active count if open.
-    /// Linearization point: `self.drain.try_acquire()`.
-    #[inline]
-    pub fn acquire(&self) -> Result<(), GateClosed> {
-        self.drain.try_acquire().map_err(|_| GateClosed)
     }
 
     /// Enters an operation producing an RAII-scoped [`OperationGuard`].
@@ -77,10 +67,9 @@ impl OperationGate {
     ///
     /// Formal theorem [OG-4]: Owned guard establishes a reclamation barrier until release.
     pub unsafe fn enter_owned(&self) -> Result<OwnedOperationGuard, GateClosed> {
-        self.acquire()?;
-        Ok(OwnedOperationGuard {
-            gate: NonNull::from(self),
-        })
+        // SAFETY: the caller retains this gate through final release and drain.
+        let permit = unsafe { self.drain.try_enter_detached() }.map_err(|_| GateClosed)?;
+        Ok(OwnedOperationGuard { _permit: permit })
     }
 
     /// Seals the gate and prepares to wait for all active operations to quiesce.
@@ -90,18 +79,6 @@ impl OperationGate {
         self.begin_close();
         TerminationWaitGuard { gate: self }
     }
-
-    /// Releases a count acquired with [`OperationGate::acquire`].
-    ///
-    /// This is used when an acquired operation cannot store an [`OperationGuard`]
-    /// bound to the gate lifetime and manages the drain permit release manually.
-    ///
-    /// Formal theorem [OG-5]: Atomically decrements active count by 1.
-    /// Linearization point: `self.drain.release()`.
-    #[inline]
-    pub fn release(&self) {
-        self.drain.release();
-    }
 }
 
 pub struct OperationGuard<'a> {
@@ -109,53 +86,48 @@ pub struct OperationGuard<'a> {
 }
 
 pub struct OwnedOperationGuard {
-    gate: NonNull<OperationGate>,
+    _permit: DetachedDrainPermit,
 }
 
 impl OwnedOperationGuard {
-    /// Releases the operation permit from the gate without going through implicit drop.
-    ///
-    /// Formal theorem [OG-4], [OG-5]: projects the inner drain gate and releases
-    /// the owned count, satisfying the reclamation barrier.
-    #[inline]
-    pub(crate) unsafe fn release_inner(&mut self) {
-        // SAFETY: guaranteed by `OperationGate::enter_owned`; this guard is
-        // itself the outstanding operation that delays owner reclamation.
-        // Project the drain field without passing &OperationGate across its
-        // final release: a waiter may reclaim the owner immediately after it.
-        let drain = unsafe { std::ptr::addr_of_mut!((*self.gate.as_ptr()).drain) };
-        // SAFETY: a field of the live, non-null gate is itself non-null.
-        let drain = unsafe { NonNull::new_unchecked(drain) };
-        // SAFETY: this guard owns the live count for the projected gate.
-        unsafe { DrainGate::release_owned(drain) };
+    /// Explicit consuming counterpart of Drop. The exact gate is retained in
+    /// the permit; callers cannot release an unrelated operation count.
+    pub fn release(self) {
+        drop(self);
     }
 }
 
-impl Drop for OwnedOperationGuard {
-    #[inline]
-    fn drop(&mut self) {
-        // Rule 4: Drop is a thin wrapper over release_inner.
-        // SAFETY: this guard owns the live count for the projected gate.
-        unsafe { self.release_inner() };
+impl OperationGuard<'_> {
+    pub fn release(self) {
+        drop(self);
     }
 }
 
-// SAFETY: OperationGate is thread-safe and may release an operation from any
-// thread; temporal validity is guaranteed by the constructor contract.
-unsafe impl Send for OwnedOperationGuard {}
-// SAFETY: OperationGate is thread-safe and immutable borrows can be shared.
-unsafe impl Sync for OwnedOperationGuard {}
-
+#[must_use = "call wait to observe terminal operation drain"]
 pub struct TerminationWaitGuard<'a> {
     gate: &'a OperationGate,
 }
 
-impl TerminationWaitGuard<'_> {
+impl<'a> TerminationWaitGuard<'a> {
     /// Waits until all operations admitted before or during close have finished.
     ///
     /// Formal theorem [OG-2]: Upon return, `active == 0` and quiescence is certified.
-    pub fn wait(self) {
-        self.gate.drain.wait_until_idle();
+    pub fn wait(self) -> OperationsDrained<'a> {
+        self.gate.drain.wait();
+        OperationsDrained { gate: self.gate }
+    }
+}
+
+/// A persistent terminal observation, not exclusive ownership of any protected
+/// allocation. OperationGate never reopens; this fact may be copied/reobserved.
+#[derive(Clone, Copy)]
+pub struct OperationsDrained<'a> {
+    gate: &'a OperationGate,
+}
+
+impl OperationsDrained<'_> {
+    pub fn belongs_to(&self, gate: &OperationGate) -> bool {
+        std::ptr::eq(self.gate, gate)
     }
 }
 
@@ -164,13 +136,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn manual_acquisition_is_drained_by_the_close_wait() {
+    fn explicit_permit_release_is_drained_by_the_close_wait() {
         let gate = OperationGate::new();
-        gate.acquire().unwrap();
+        let permit = gate.enter().unwrap();
         let wait = gate.close_and_wait_begin();
-        assert!(gate.acquire().is_err());
-        gate.release();
+        assert!(gate.enter().is_err());
+        permit.release();
         wait.wait();
+    }
+
+    #[test]
+    fn miri_terminal_drain_observation_is_repeatable_and_bound_to_its_gate() {
+        let gate = OperationGate::new();
+        let other = OperationGate::new();
+        let drained = gate.close_and_wait_begin().wait();
+        let repeated = gate.close_and_wait_begin().wait();
+        assert!(drained.belongs_to(&gate));
+        assert!(repeated.belongs_to(&gate));
+        assert!(!drained.belongs_to(&other));
+        assert!(gate.enter().is_err());
     }
 
     #[test]

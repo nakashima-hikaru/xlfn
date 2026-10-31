@@ -28,20 +28,30 @@ impl Quota {
         }
     }
 
-    /// Acquires a non-owning permit.
-    ///
-    /// # Safety
-    ///
-    /// The quota must outlive the returned permit. Its owner must drain or
-    /// destroy every permit-bearing object before reclaiming the quota.
-    pub unsafe fn try_acquire(&self) -> Result<QuotaPermit, QuotaExceeded> {
+    fn acquire_count(&self) -> Result<(), QuotaExceeded> {
         self.used
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
                 (used < self.limit).then(|| used + 1)
             })
             .map_err(|_| QuotaExceeded)?;
 
-        Ok(QuotaPermit {
+        Ok(())
+    }
+
+    /// Borrows the quota for the full lifetime of a non-cloneable permit.
+    pub fn try_acquire(&self) -> Result<QuotaPermit<'_>, QuotaExceeded> {
+        self.acquire_count()?;
+        Ok(QuotaPermit { quota: self })
+    }
+
+    /// Acquires a permit stored in an object retained by the quota's owner.
+    ///
+    /// # Safety
+    /// The owner must outlive every permit, including its release operation.
+    /// `used() == 0` is capacity accounting and is not a destruction barrier.
+    pub unsafe fn try_acquire_detached(&self) -> Result<DetachedQuotaPermit, QuotaExceeded> {
+        self.acquire_count()?;
+        Ok(DetachedQuotaPermit {
             quota: NonNull::from(self),
         })
     }
@@ -52,13 +62,27 @@ impl Quota {
     }
 }
 
-pub struct QuotaPermit {
+#[must_use = "retain the permit for the capacity reservation"]
+pub struct QuotaPermit<'quota> {
+    quota: &'quota Quota,
+}
+
+impl Drop for QuotaPermit<'_> {
+    fn drop(&mut self) {
+        let _ = checked_atomic_dec_relaxed(&self.quota.used);
+    }
+}
+
+/// Lifetime-erased reservation whose owner must satisfy the unsafe acquisition
+/// contract. There is deliberately no safe conversion from a borrowed permit.
+#[must_use = "retain the detached permit until its owner-bound operation ends"]
+pub struct DetachedQuotaPermit {
     quota: NonNull<Quota>,
 }
 
-impl Drop for QuotaPermit {
+impl Drop for DetachedQuotaPermit {
     fn drop(&mut self) {
-        // SAFETY: guaranteed by `Quota::try_acquire`'s owner-lifetime
+        // SAFETY: guaranteed by `Quota::try_acquire_detached`'s owner-lifetime
         // contract. Dropping the permit ends the capability before reclaim.
         let _ = checked_atomic_dec_relaxed(&unsafe { self.quota.as_ref() }.used);
     }
@@ -66,9 +90,9 @@ impl Drop for QuotaPermit {
 
 // SAFETY: Quota is thread-safe and the lifetime contract is independent of
 // the thread on which a permit is dropped.
-unsafe impl Send for QuotaPermit {}
+unsafe impl Send for DetachedQuotaPermit {}
 // SAFETY: Quota is thread-safe and immutable borrows can be shared across threads.
-unsafe impl Sync for QuotaPermit {}
+unsafe impl Sync for DetachedQuotaPermit {}
 
 #[cfg(test)]
 mod tests {
@@ -78,27 +102,33 @@ mod tests {
     fn exhausted_maximum_quota_does_not_overflow() {
         let quota = Quota::new(usize::MAX);
         quota.used.store(usize::MAX, Ordering::Relaxed);
-        // SAFETY: the quota stays alive through the attempt. No permit is
-        // created for the synthetic exhausted state.
-        assert!(unsafe { quota.try_acquire() }.is_err());
+        // No permit is created for the synthetic exhausted state.
+        assert!(quota.try_acquire().is_err());
         assert_eq!(quota.used(), usize::MAX);
+    }
+
+    #[test]
+    fn miri_detached_quota_reservation_requires_explicit_owner_retention() {
+        let quota = Quota::new(1);
+        // SAFETY: this stack-owned quota is retained until its detached permit
+        // is explicitly destroyed. No zero-count reclamation is used.
+        let permit = unsafe { quota.try_acquire_detached() }.unwrap();
+        assert_eq!(quota.used(), 1);
+        drop(permit);
+        assert_eq!(quota.used(), 0);
     }
 
     #[test]
     fn miri_quota_enforces_zero_and_bounded_limits_and_reuses_released_capacity() {
         let zero = Quota::new(0);
-        // SAFETY: both quota owners outlive every permit in this test.
-        assert!(unsafe { zero.try_acquire() }.is_err());
+        assert!(zero.try_acquire().is_err());
         let quota = Quota::new(1);
-        // SAFETY: the permit is explicitly dropped before quota.
-        let permit = unsafe { quota.try_acquire() }.unwrap();
+        let permit = quota.try_acquire().unwrap();
         assert_eq!(quota.used(), 1);
-        // SAFETY: the owner outlives this rejected attempt.
-        assert!(unsafe { quota.try_acquire() }.is_err());
+        assert!(quota.try_acquire().is_err());
         drop(permit);
         assert_eq!(quota.used(), 0);
-        // SAFETY: the temporary permit is dropped before quota.
-        drop(unsafe { quota.try_acquire() }.unwrap());
+        drop(quota.try_acquire().unwrap());
         assert_eq!(quota.used(), 0);
     }
 }

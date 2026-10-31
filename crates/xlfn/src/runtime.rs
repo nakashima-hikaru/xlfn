@@ -470,14 +470,14 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
         &self,
         access: &AddinLifecycleAccess<'_, A>,
     ) -> Result<A::LifecycleState, ThreadAffineError> {
-        self.addin_lifecycle.take(access)
+        self.shutdown_deps().take_addin_lifecycle(access)
     }
 
     pub(in crate::runtime) fn release_empty_addin_lifecycle(
         &self,
         access: &AddinLifecycleAccess<'_, A>,
     ) -> Result<(), ThreadAffineError> {
-        self.addin_lifecycle.release_empty_binding(access)
+        self.shutdown_deps().release_empty_addin_lifecycle(access)
     }
 
     #[cfg(test)]

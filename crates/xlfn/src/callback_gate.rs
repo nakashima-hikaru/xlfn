@@ -61,9 +61,13 @@ impl ModuleCallbackAdmission {
         // Repeating reset on an already open, idle gate requires no counter
         // reset and preserves reservations that start after the active check.
         if self.callbacks.is_sealed() {
-            self.callbacks
-                .reopen()
-                .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+            drop(
+                self.callbacks
+                    .control()
+                    .wait_if_sealed()
+                    .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop())
+                    .reopen(),
+            );
         }
         self.phase
             .store(ModuleCallbackLifecycle::Open as u8, Ordering::Release);
@@ -76,7 +80,7 @@ impl ModuleCallbackAdmission {
         // enter and either retained as an admitted callback or released there.
         self.phase
             .store(ModuleCallbackLifecycle::Closing as u8, Ordering::Release);
-        self.callbacks.seal();
+        drop(self.callbacks.control().seal());
     }
 
     #[inline]

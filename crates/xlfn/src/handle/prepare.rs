@@ -16,12 +16,12 @@ impl HandlePrepareState {
     }
 
     pub(crate) fn close_admission(&self) {
-        self.admission.seal();
+        drop(self.admission.control().seal());
     }
 
     pub(crate) fn wait_for_idle(&self) {
         // Counter registration synchronizes the final release with parking.
-        self.admission.wait_until_idle();
+        drop(self.admission.control().wait_idle());
     }
 }
 

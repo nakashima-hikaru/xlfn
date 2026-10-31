@@ -1,9 +1,6 @@
 // module: kernel/service_slot/transaction
-use super::{LaneTransition, ReplaceableServiceSlot, NO_ACTIVE_LANE};
-
-fn retire(slot: &ReplaceableServiceSlot<u32>) {
-    let transition = LaneTransition::new(slot);
-    if let Some(retirement) = transition.withdraw_to(NO_ACTIVE_LANE) {
-        let _retired = retirement.wait().reclaim();
-    }
+use super::{ReplacementTxn, ReplaceableServiceSlot};
+fn replace(slot: &ReplaceableServiceSlot<u32>) {
+    let prepared = ReplacementTxn::new(slot, Box::new(8)).prepare(|_, _| Ok::<_, ()>(())).unwrap();
+    let _retired = prepared.publish().wait().reclaim();
 }

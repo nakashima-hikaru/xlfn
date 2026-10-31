@@ -13,7 +13,7 @@ use crate::generation::ConnectionGeneration;
 use crate::{XllError, XllResult};
 use rustc_hash::FxHashMap;
 use std::ptr::NonNull;
-use xlfn_kernel::quota::QuotaPermit;
+use xlfn_kernel::quota::DetachedQuotaPermit;
 
 #[cfg(feature = "rtd")]
 pub(crate) type PublishBatch = smallvec::SmallVec<[StoredRtdValue; 32]>;
@@ -115,7 +115,7 @@ pub(crate) struct ActiveSubscription {
     /// Index (0 or 1) of the latest value slot for exact publication dedup.
     pub(crate) latest_slot: Option<u8>,
     pub(crate) next_sequence: u64,
-    pub(crate) _permit: QuotaPermit,
+    pub(crate) _permit: DetachedQuotaPermit,
 }
 
 impl ActiveSubscription {
@@ -146,7 +146,7 @@ impl ActiveSubscription {
 pub(crate) struct QueuedUpdate {
     pub(crate) connection_generation: ConnectionGeneration,
     pub(crate) sequence: u64,
-    pub(crate) _permit: QuotaPermit,
+    pub(crate) _permit: DetachedQuotaPermit,
 }
 
 pub(crate) struct RtdUpdate {

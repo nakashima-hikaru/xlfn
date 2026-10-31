@@ -29,8 +29,8 @@ MUTATIONS = {
         "match $acquire {", "match Ok::<(), ()>(()) {",
     ),
     "reader returns permit for other generation": (
-        "Ok(()) => return Ok($permit),",
-        "Ok(()) => { let $generation = !$generation; return Ok($permit); },",
+        "Ok($admission) => return Ok($permit),",
+        "Ok($admission) => { let $generation = !$generation; return Ok($permit); },",
     ),
 
     "registration skips generation recheck": (

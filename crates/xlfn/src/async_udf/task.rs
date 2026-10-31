@@ -8,6 +8,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::Ordering;
 use std::task::{Context, Poll};
+use xlfn_kernel::drain_gate::DetachedDrainPermit;
 
 /// Opaque framework task transferred to an application-selected executor.
 ///
@@ -121,13 +122,14 @@ pub(crate) type TaskControlBatch = SmallVec<[TaskControl; 4]>;
 
 pub(crate) struct ActiveReservation<'a> {
     registry: Option<&'a TaskRegistry>,
+    activity: Option<RegistryActivity>,
 }
 
 impl<'a> ActiveReservation<'a> {
     pub(crate) fn try_acquire(registry: &'a TaskRegistry) -> Option<Self> {
         // This tail permit protects notification after the authority reaches
         // zero. It never substitutes for active_tasks in the shutdown proof.
-        registry.activity.try_acquire().ok()?;
+        let activity = RegistryActivity::try_acquire(registry)?;
         if registry
             .active_tasks
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |active| {
@@ -135,18 +137,19 @@ impl<'a> ActiveReservation<'a> {
             })
             .is_err()
         {
-            registry.activity.release();
+            drop(activity);
             return None;
         }
         Some(Self {
             registry: Some(registry),
+            activity: Some(activity),
         })
     }
 
     pub(crate) fn commit(mut self, calculation: CalculationPin, id: u64) -> CompletionGuard {
-        let registry = self.registry.take().expect("reservation owns active count");
+        self.registry.take().expect("reservation owns active count");
         CompletionGuard {
-            registry: RegistryPtr::from_ref(registry),
+            activity: self.activity.take(),
             calculation: Some(calculation),
             id,
             observation: CompletionObservation::new(),
@@ -156,8 +159,11 @@ impl<'a> ActiveReservation<'a> {
 
 impl Drop for ActiveReservation<'_> {
     fn drop(&mut self) {
-        if let Some(registry) = self.registry.take() {
-            release_active(registry);
+        if self.registry.take().is_some() {
+            self.activity
+                .take()
+                .expect("reservation owns its activity permit")
+                .release();
         }
     }
 }
@@ -175,21 +181,55 @@ macro_rules! release_task_activity {
     }};
 }
 
-fn release_active(registry: &TaskRegistry) {
-    release_task_activity!(
-        xlfn_kernel::invariant::checked_atomic_dec_release(&registry.active_tasks),
-        {
-            let _lock = registry.idle_lock.lock();
-            registry.idle.notify_all();
-        },
-        // Final registry access. Its owner waits the authority count and this
-        // notification tail before reclaiming the stable allocation.
-        registry.activity.release()
-    );
+/// Exact registry/notification-tail pairing, never assembled by a caller from
+/// independently supplied owner and gate arguments.
+struct RegistryActivity {
+    registry: RegistryPtr,
+    permit: DetachedDrainPermit,
+}
+
+impl RegistryActivity {
+    fn try_acquire(registry: &TaskRegistry) -> Option<Self> {
+        // SAFETY: the reservation borrows this live registry. Once committed,
+        // task accounting and this exact tail permit retain it until close
+        // seals and drains both before allocation reclamation.
+        let permit = unsafe { registry.activity.try_enter_detached() }.ok()?;
+        Some(Self {
+            registry: RegistryPtr::from_ref(registry),
+            permit,
+        })
+    }
+
+    fn release(self) {
+        let Self {
+            registry,
+            permit: activity,
+        } = self;
+        // Do not pass &TaskRegistry across final release. A waiter may reclaim
+        // the allocation immediately afterwards; all reference-bearing helper
+        // calls and notification guards must have returned before that point.
+        release_task_activity!(
+            {
+                // SAFETY: this activity permit retains the exact registry through
+                // the count update and subsequent notification tail.
+                let registry = unsafe { registry.get() };
+                xlfn_kernel::invariant::checked_atomic_dec_release(&registry.active_tasks)
+            },
+            {
+                // SAFETY: activity remains live until after this block unlocks.
+                let registry = unsafe { registry.get() };
+                let _lock = registry.idle_lock.lock();
+                registry.idle.notify_all();
+            },
+            // Final registry access. Its owner waits the authority count and this
+            // notification tail before reclaiming the stable allocation.
+            activity.release()
+        );
+    }
 }
 
 pub(crate) struct CompletionGuard {
-    registry: RegistryPtr,
+    activity: Option<RegistryActivity>,
     calculation: Option<CalculationPin>,
     id: u64,
     observation: CompletionObservation,
@@ -201,12 +241,16 @@ impl Drop for CompletionGuard {
             .calculation
             .take()
             .expect("completion owns calculation pin");
-        // SAFETY: active_tasks retains the registry, with activity protecting
-        // the terminal notification tail after the last authority release.
-        let registry = unsafe { self.registry.get() };
-        let calculation = scopeguard::guard(calculation, |calculation| {
+        let activity = self
+            .activity
+            .take()
+            .expect("completion owns its activity permit");
+        // SAFETY: active_tasks and the exact RegistryActivity pair retain the
+        // registry through observer updates, before final activity release.
+        let registry = unsafe { activity.registry.get() };
+        let calculation = scopeguard::guard(calculation, move |calculation| {
             drop(calculation);
-            release_active(registry);
+            activity.release();
         });
         calculation.get().remove_task(self.id);
         registry
@@ -318,5 +362,38 @@ mod loom_tests {
             drop(tail);
             task.join().unwrap();
         });
+    }
+}
+
+#[cfg(test)]
+mod release_owner_tests {
+    use super::*;
+    use xlfn_kernel::published_owner::PublishedOwner;
+
+    #[test]
+    fn miri_registry_final_tail_allows_immediate_owner_reclamation() {
+        for _ in 0..16 {
+            let owner = PublishedOwner::new(TaskRegistry::new());
+            owner
+                .start(crate::addin::AsyncTaskLimit::new(1).unwrap())
+                .unwrap();
+            let reservation = owner.reserve(owner.current_epoch()).unwrap();
+            let (cancellation, _token) =
+                CancellationSource::new(crate::cancellation::CancellationGuarantee::BestEffort);
+            let task = reservation.commit(std::future::ready(()), cancellation);
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let dropping = std::sync::Arc::clone(&barrier);
+            let worker = std::thread::spawn(move || {
+                dropping.wait();
+                drop(task);
+            });
+            let closing = owner.request_close().unwrap().cancel();
+            barrier.wait();
+            closing.wait().finish();
+            // Joining the worker must not be the hidden lifetime barrier.
+            // Close's authority and final notification tail are sufficient.
+            drop(owner);
+            worker.join().unwrap();
+        }
     }
 }

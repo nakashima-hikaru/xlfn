@@ -22,7 +22,7 @@ pub use transitions::ReleaseOutcome;
 /// This type deliberately knows nothing about lifecycle phases, generations,
 /// or the resource represented by a permit.  It only provides the mechanical
 /// acquire/seal/release/reopen protocol used by higher-level domains.
-pub struct SealableCounter {
+pub(crate) struct SealableCounter {
     state: AtomicUsize,
 }
 
@@ -98,13 +98,13 @@ fn reopen_update(state: usize) -> Option<usize> {
 }
 
 impl SealableCounter {
-    pub const fn new_open() -> Self {
+    pub(crate) const fn new_open() -> Self {
         Self {
             state: AtomicUsize::new(0),
         }
     }
 
-    pub const fn new_sealed() -> Self {
+    pub(crate) const fn new_sealed() -> Self {
         Self {
             state: AtomicUsize::new(SEALED_BIT),
         }
@@ -113,7 +113,7 @@ impl SealableCounter {
     /// Linearization Point: RMW update with `acquire_update`.
     /// Guaranteed by Verus: [SC-2] increments active by 1; [SC-3] rejects if sealed.
     #[inline]
-    pub fn try_acquire(&self) -> Result<(), Sealed> {
+    pub(crate) fn try_acquire(&self) -> Result<(), Sealed> {
         // Acquire a reopen's publication even if a delayed reader selected
         // this gate in an older generation. The count itself publishes no data.
         self.state
@@ -125,7 +125,7 @@ impl SealableCounter {
     /// Linearization Point: RMW update with `release_update`.
     /// Guaranteed by Verus: [SC-4] requires active > 0; [SC-5] decrements active by 1; [SC-6] BecameIdle iff active == 1.
     #[inline]
-    pub fn release(&self) -> ReleaseOutcome {
+    pub(crate) fn release(&self) -> ReleaseOutcome {
         // Publish protected accesses to an acquiring idle observer. Every
         // state update is an RMW, so intermediate admissions/releases preserve
         // the release sequence without acquiring earlier holders' accesses.
@@ -165,7 +165,7 @@ impl SealableCounter {
     /// Linearization Point: atomic fetch_or setting SEALED_BIT.
     /// Guaranteed by Verus: [SC-3] ensures all subsequent try_acquire calls observe sealed.
     #[inline]
-    pub fn seal(&self) {
+    pub(crate) fn seal(&self) {
         // Publish closure to is_sealed/admission observers. Sealing is not a
         // drain: mark_waiting/active/try_seal_if_idle acquire completed releases.
         self.state.fetch_or(SEALED_BIT, Ordering::Release);
@@ -194,7 +194,7 @@ impl SealableCounter {
     ///
     /// Linearization Point: RMW update with `reopen_update`.
     /// Guaranteed by Verus: [SC-7] requires sealed && active == 0; [SC-8] resets to !sealed && !waiting && active == 0.
-    pub fn reopen(&self) -> Result<(), ReopenError> {
+    pub(crate) fn reopen(&self) -> Result<(), ReopenError> {
         self.state
             .try_update(Ordering::AcqRel, Ordering::Acquire, reopen_update)
             .map(|_| ())
@@ -202,12 +202,12 @@ impl SealableCounter {
     }
 
     #[inline]
-    pub fn is_sealed(&self) -> bool {
+    pub(crate) fn is_sealed(&self) -> bool {
         self.state.load(Ordering::Acquire) & SEALED_BIT != 0
     }
 
     #[inline]
-    pub fn active(&self) -> usize {
+    pub(crate) fn active(&self) -> usize {
         self.state.load(Ordering::Acquire) & ACTIVE_COUNT_MASK
     }
 }

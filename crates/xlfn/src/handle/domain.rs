@@ -26,7 +26,7 @@ mod protocol;
 use crate::{XllError, XllResult};
 use xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT;
 use xlfn_kernel::rotating_read_domain::{
-    DrainedGeneration, RotatingReadOwnedPermit, RotatingRetirementDomain,
+    RetiredQueue, RotatingReadOwnedPermit, RotatingRetirementDomain,
 };
 
 #[cfg(test)]
@@ -265,13 +265,15 @@ impl HandleReadDomain {
         }
     }
 
-    fn take_generation(&self, generation: DrainedGeneration<'_>) -> DrainedBindings<'_> {
-        let records = self
-            .domain
-            .take_queue(&generation, |mut queue| {
-                crate::retirement_queue::take_retired!(&mut *queue)
-            })
-            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+    fn take_generation(
+        &self,
+        generation: RetiredQueue<'_, DEFAULT_STRIPE_COUNT, PendingBindings>,
+    ) -> DrainedBindings<'_> {
+        if !generation.belongs_to(&self.domain) {
+            xlfn_kernel::invariant::fail_stop();
+        }
+        let records =
+            generation.take(|mut queue| crate::retirement_queue::take_retired!(&mut *queue));
         update_count(
             &self.queued,
             records.len(),
@@ -390,35 +392,32 @@ impl HandleReadDomain {
     /// Protocol obligation [HD-5]: Destruction barrier: waits for domain drain and flushes remaining debt before arena teardown.
     pub(crate) fn seal(&self) {
         let closed = self.domain.seal_and_wait();
-        let [mut records, remaining] = self
-            .domain
-            .take_queues(&closed, |mut first, mut second| {
-                let records = crate::retirement_queue::take_retired!(&mut *first);
-                update_count(
-                    &self.queued,
-                    records.len(),
-                    Ordering::Relaxed,
-                    counters::subtract,
-                );
-                let remaining = crate::retirement_queue::take_retired!(&mut *second);
-                update_count(
-                    &self.queued,
-                    remaining.len(),
-                    Ordering::Relaxed,
-                    counters::subtract,
-                );
-                [
-                    DrainedBindings {
-                        domain: self,
-                        records,
-                    },
-                    DrainedBindings {
-                        domain: self,
-                        records: remaining,
-                    },
-                ]
-            })
-            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+        let [mut records, remaining] = closed.take_queues(|mut first, mut second| {
+            let records = crate::retirement_queue::take_retired!(&mut *first);
+            update_count(
+                &self.queued,
+                records.len(),
+                Ordering::Relaxed,
+                counters::subtract,
+            );
+            let remaining = crate::retirement_queue::take_retired!(&mut *second);
+            update_count(
+                &self.queued,
+                remaining.len(),
+                Ordering::Relaxed,
+                counters::subtract,
+            );
+            [
+                DrainedBindings {
+                    domain: self,
+                    records,
+                },
+                DrainedBindings {
+                    domain: self,
+                    records: remaining,
+                },
+            ]
+        });
         records.extend(remaining);
         records.reclaim();
         if !self.is_reclaiming_here() {

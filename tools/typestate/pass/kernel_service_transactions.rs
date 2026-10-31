@@ -1,5 +1,5 @@
 // module: kernel/service_slot
-use super::transaction::{InitializingTxn, SealingTxn, LaneRetirement};
+use super::transaction::{InitializingTxn, SealingTxn, RetiringReplacement};
 use super::{GenerationServiceSlot, ReplaceableServiceSlot};
 
 fn initialize(transaction: InitializingTxn<'_, (), u32, ()>) {
@@ -14,7 +14,7 @@ fn seal(transaction: SealingTxn<'_, (), u32, ()>) {
     let _sealed = transaction.wait().finish(|_| Ok(()));
 }
 
-fn retire(transaction: LaneRetirement<'_, u32>) {
+fn retire(transaction: RetiringReplacement<'_, u32>) {
     let _retired = transaction.wait().reclaim();
 }
 

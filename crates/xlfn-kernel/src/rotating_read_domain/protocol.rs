@@ -101,7 +101,7 @@ pub(crate) use register_retired;
 // Select again after rejected admission: the selected generation can become
 // stale before the gate RMW. Construct a permit only on successful acquisition.
 macro_rules! enter_reader {
-    ($generation:ident;
+    ($generation:ident, $admission:ident;
      $closed:expr, $select:expr, $after_select:expr, $acquire:expr,
      $permit:expr, $closed_error:expr, $retry:expr;
      $($annotations:tt)*) => { protocol_expr!({
@@ -112,7 +112,7 @@ macro_rules! enter_reader {
             let $generation = $select;
             $after_select;
             match $acquire {
-                Ok(()) => return Ok($permit),
+                Ok($admission) => return Ok($permit),
                 Err(_) => {
                     if $closed { return Err($closed_error); }
                     $retry;

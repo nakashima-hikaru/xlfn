@@ -39,7 +39,7 @@ use std::time::Instant;
 use triomphe::Arc;
 use xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT;
 use xlfn_kernel::rotating_read_domain::{
-    ClosedDomain, DrainedGeneration, GenerationIndex, RotatingReadPermit, RotatingRetirementDomain,
+    ClosedRetirement, GenerationIndex, RetiredQueue, RotatingReadPermit, RotatingRetirementDomain,
 };
 
 trait EpochAtomic {
@@ -1366,31 +1366,35 @@ impl<V> CacheLookupDomain<V> {
         entries
     }
 
-    fn drain_generation(&self, generation: DrainedGeneration<'_>) -> ReclaimEntries<'_, V> {
-        self.domain
-            .take_queue(&generation, |mut queue| {
-                let entries = crate::retirement_queue::take_retired!(&mut *queue);
-                self.pending_nodes
+    fn drain_generation(
+        &self,
+        generation: RetiredQueue<'_, DEFAULT_STRIPE_COUNT, PendingEntries<V>>,
+    ) -> ReclaimEntries<'_, V> {
+        if !generation.belongs_to(&self.domain) {
+            xlfn_kernel::invariant::fail_stop();
+        }
+        generation.take(|mut queue| {
+            let entries = crate::retirement_queue::take_retired!(&mut *queue);
+            self.pending_nodes
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    current.checked_sub(entries.len())
+                })
+                .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+            if !self.pending_weight_saturated.load(Ordering::Relaxed) {
+                let weight = entries
+                    .iter()
+                    .fold(0_u64, |sum, entry| sum.saturating_add(entry.weight));
+                self.pending_weight
                     .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                        current.checked_sub(entries.len())
+                        current.checked_sub(weight)
                     })
                     .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
-                if !self.pending_weight_saturated.load(Ordering::Relaxed) {
-                    let weight = entries
-                        .iter()
-                        .fold(0_u64, |sum, entry| sum.saturating_add(entry.weight));
-                    self.pending_weight
-                        .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                            current.checked_sub(weight)
-                        })
-                        .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
-                }
-                ReclaimEntries {
-                    domain: self,
-                    entries,
-                }
-            })
-            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop())
+            }
+            ReclaimEntries {
+                domain: self,
+                entries,
+            }
+        })
     }
 
     #[cfg(any(test, feature = "bench-internals"))]
@@ -1422,26 +1426,29 @@ impl<V> CacheLookupDomain<V> {
         }
     }
 
-    fn seal(&self) -> ClosedDomain<'_> {
+    fn seal(&self) -> ClosedRetirement<'_, DEFAULT_STRIPE_COUNT, PendingEntries<V>> {
         self.domain.seal_and_wait()
     }
 
-    fn drain_all(&self, closed: ClosedDomain<'_>) -> ReclaimEntries<'_, V> {
-        let batches = self
-            .domain
-            .take_queues(&closed, |mut first, mut second| {
-                [
-                    ReclaimEntries {
-                        domain: self,
-                        entries: crate::retirement_queue::take_retired!(&mut *first),
-                    },
-                    ReclaimEntries {
-                        domain: self,
-                        entries: crate::retirement_queue::take_retired!(&mut *second),
-                    },
-                ]
-            })
-            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+    fn drain_all(
+        &self,
+        closed: ClosedRetirement<'_, DEFAULT_STRIPE_COUNT, PendingEntries<V>>,
+    ) -> ReclaimEntries<'_, V> {
+        if !closed.belongs_to(&self.domain) {
+            xlfn_kernel::invariant::fail_stop();
+        }
+        let batches = closed.take_queues(|mut first, mut second| {
+            [
+                ReclaimEntries {
+                    domain: self,
+                    entries: crate::retirement_queue::take_retired!(&mut *first),
+                },
+                ReclaimEntries {
+                    domain: self,
+                    entries: crate::retirement_queue::take_retired!(&mut *second),
+                },
+            ]
+        });
         merge_reclaims(self, batches)
     }
 }

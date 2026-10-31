@@ -99,7 +99,7 @@ impl RunnableQueue {
     }
 
     pub(crate) fn seal_and_wake_all(&self) {
-        self.schedule_admission.seal_and_wait();
+        drop(self.schedule_admission.control().seal().wait());
         self.wake_all();
     }
 

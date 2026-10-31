@@ -4,6 +4,10 @@
 //! payload lives in thread-local storage, while the slot records which thread
 //! owns the current binding. Access is represented by a non-`Send` capability,
 //! so lifecycle code must explicitly carry the owner-thread witness.
+//! Access alone cannot install, take or release the payload. Those operations
+//! require a unique [`BindingTxn`] whose occupancy state remains valid until
+//! consumed or abandoned. Abandonment keeps the TLS payload; forgetting the
+//! transaction also retains its exclusive claim.
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -102,6 +106,7 @@ fn with_values<R>(
 struct AffinityControl {
     owner: Option<ThreadId>,
     binding: u64,
+    modifying: bool,
 }
 
 /// A cross-thread-safe root for one thread-affine payload type.
@@ -125,6 +130,7 @@ impl<T: 'static> ThreadAffineSlot<T> {
             affinity: Mutex::new(AffinityControl {
                 owner: None,
                 binding: 0,
+                modifying: false,
             }),
             _marker: PhantomData,
         }
@@ -141,6 +147,9 @@ impl<T: 'static> ThreadAffineSlot<T> {
             Some(owner) if owner != current => return Err(ThreadAffineError::WrongThread),
             Some(_) => {}
             None => {
+                if affinity.modifying {
+                    return Err(ThreadAffineError::ReentrantAccess);
+                }
                 affinity.binding = affinity.binding.checked_add(1).unwrap_or_else(|| {
                     std::process::abort();
                 });
@@ -168,7 +177,7 @@ impl<T: 'static> ThreadAffineSlot<T> {
         }
     }
 
-    pub fn install(
+    fn install(
         &self,
         access: &ThreadAffineAccess<'_, T>,
         value: T,
@@ -232,7 +241,7 @@ impl<T: 'static> ThreadAffineSlot<T> {
         with_values(|values| Ok(values.iter().any(|entry| entry.slot_id == slot_id)))
     }
 
-    pub fn take(&self, access: &ThreadAffineAccess<'_, T>) -> Result<T, ThreadAffineError> {
+    fn take(&self, access: &ThreadAffineAccess<'_, T>) -> Result<T, ThreadAffineError> {
         self.verify_access(access)?;
         let slot_id = self.id();
         with_values(|values| {
@@ -240,6 +249,13 @@ impl<T: 'static> ThreadAffineSlot<T> {
                 .iter()
                 .position(|entry| entry.slot_id == slot_id)
                 .ok_or(ThreadAffineError::MissingValue)?;
+            let value = values[index]
+                .value
+                .as_ref()
+                .ok_or(ThreadAffineError::MissingValue)?;
+            if !value.is::<T>() {
+                return Err(ThreadAffineError::TypeMismatch);
+            }
             let mut entry = values.swap_remove(index);
             let value = entry.value.take().ok_or(ThreadAffineError::MissingValue)?;
             #[allow(
@@ -261,7 +277,7 @@ impl<T: 'static> ThreadAffineSlot<T> {
         })
     }
 
-    pub fn release_empty_binding(
+    fn release_empty_binding(
         &self,
         access: &ThreadAffineAccess<'_, T>,
     ) -> Result<(), ThreadAffineError> {
@@ -292,6 +308,12 @@ impl<T: 'static> Default for ThreadAffineSlot<T> {
         Self::new()
     }
 }
+
+mod binding;
+pub use binding::{
+    BindingEmpty, BindingInstallError, BindingOccupied, BindingReleased, BindingState,
+    BindingTransitionError, BindingTxn,
+};
 
 #[cfg(test)]
 mod tests {

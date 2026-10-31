@@ -1833,7 +1833,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         match effect {
             TransitionEffect::Keep => {}
             TransitionEffect::ClearPublication => {
-                self.publication_readers.seal();
+                drop(self.publication_readers.control().seal());
                 self.publication
                     .store(std::ptr::null_mut(), Ordering::Release);
             }
@@ -1846,9 +1846,17 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                 );
                 self.publication
                     .store(publication.as_ptr(), Ordering::Release);
-                self.publication_readers.reopen().unwrap_or_else(|_| {
-                    lifecycle_invariant_violation("generation publication gate failed to reopen")
-                });
+                drop(
+                    self.publication_readers
+                        .control()
+                        .wait_if_sealed()
+                        .unwrap_or_else(|_| {
+                            lifecycle_invariant_violation(
+                                "generation publication gate failed to reopen",
+                            )
+                        })
+                        .reopen(),
+                );
             }
         }
         self.phase.store(access.phase() as u8, Ordering::Release);
@@ -2423,7 +2431,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
             }
         });
         if generation.is_some() {
-            self.publication_readers.wait_until_idle();
+            drop(self.publication_readers.control().wait_idle());
         }
         // Only restore Box's exclusive ownership after every raw publication
         // lease has drained. Moving a Box earlier would invalidate those

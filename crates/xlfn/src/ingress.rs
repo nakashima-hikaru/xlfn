@@ -303,9 +303,13 @@ impl ExportIngress {
                 epoch.checked_add(1)
             })
             .unwrap_or_else(|_| std::process::abort());
-        self.exports
-            .reopen()
-            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+        drop(
+            self.exports
+                .control()
+                .wait_if_sealed()
+                .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop())
+                .reopen(),
+        );
         self.phase.store(PHASE_OPENING, Ordering::Release);
     }
 
@@ -499,7 +503,7 @@ impl ExportIngress {
     }
 
     fn wait_for_quiescence(&self) {
-        self.exports.wait_until_idle();
+        drop(self.exports.control().wait_idle());
     }
 
     fn drain_exports(&self, wait: impl FnOnce() + Send) -> crate::XllResult<()> {
@@ -546,7 +550,7 @@ impl ExportIngress {
             "ingress sealed before begin_close"
         );
         let mut before_close = Some(before_close);
-        self.drain_exports(|| self.exports.wait_until_idle())?;
+        self.drain_exports(|| drop(self.exports.control().wait_idle()))?;
 
         if let Some(before_close) = before_close.take() {
             before_close();
@@ -555,7 +559,7 @@ impl ExportIngress {
         // Closing entries may have started after the zero observation. Seal
         // every stripe to prevent a late reservation from being missed by the
         // terminal CLOSED transition, then drain those reservations.
-        self.drain_exports(|| self.exports.seal_and_wait())?;
+        self.drain_exports(|| drop(self.exports.control().seal().wait()))?;
 
         match self.phase.compare_exchange(
             PHASE_CLOSING,

@@ -1,7 +1,7 @@
 // module: kernel/service_slot
-use super::transaction::LaneRetirement;
+use super::transaction::RetiringReplacement;
 
-fn drain_twice(transaction: LaneRetirement<'_, u32>) {
+fn drain_twice(transaction: RetiringReplacement<'_, u32>) {
     let _first = transaction.wait();
     let _second = transaction.wait(); // error: E0382
 }

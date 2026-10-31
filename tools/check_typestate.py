@@ -24,6 +24,13 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULES = {
+    "kernel/lib": Path("crates/xlfn-kernel/src/lib.rs"),
+    "kernel/drain_gate": Path("crates/xlfn-kernel/src/drain_gate.rs"),
+    "kernel/operation_gate": Path("crates/xlfn-kernel/src/operation_gate.rs"),
+    "kernel/rotating_read_domain": Path("crates/xlfn-kernel/src/rotating_read_domain.rs"),
+    "kernel/rotating_read_domain/transition": Path("crates/xlfn-kernel/src/rotating_read_domain/transition.rs"),
+    "kernel/thread_affine": Path("crates/xlfn-kernel/src/thread_affine.rs"),
+    "kernel/quota": Path("crates/xlfn-kernel/src/quota.rs"),
     "kernel/service_slot": Path("crates/xlfn-kernel/src/service_slot.rs"),
     "kernel/service_slot/transaction": Path("crates/xlfn-kernel/src/service_slot/transaction.rs"),
     "async_udf": Path("crates/xlfn/src/async_udf.rs"),

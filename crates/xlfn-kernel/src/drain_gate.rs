@@ -9,7 +9,9 @@ use crossbeam_utils::CachePadded;
 
 use crate::sealable_counter::{ReleaseOutcome, ReopenError, SealableCounter, Sealed};
 
+mod control;
 mod protocol;
+pub use control::*;
 use protocol::protocol_expr;
 
 /// Synchronization surface shared by the production protocol and its Loom
@@ -137,6 +139,8 @@ pub fn current_thread_stripe() -> usize {
 pub struct DrainGate {
     counter: SealableCounter,
     idle: IdleNotification,
+    // Exclusive management authority. Never touched by admission or release.
+    control: Mutex<()>,
 }
 
 impl DrainGate {
@@ -144,6 +148,7 @@ impl DrainGate {
         Self {
             counter: SealableCounter::new_open(),
             idle: IdleNotification::new(),
+            control: Mutex::new(()),
         }
     }
 
@@ -151,6 +156,7 @@ impl DrainGate {
         Self {
             counter: SealableCounter::new_sealed(),
             idle: IdleNotification::new(),
+            control: Mutex::new(()),
         }
     }
 
@@ -160,6 +166,28 @@ impl DrainGate {
     pub fn try_enter(&self) -> Result<DrainPermit<'_>, Sealed> {
         self.counter.try_acquire()?;
         Ok(DrainPermit { gate: self })
+    }
+
+    /// Acquires a lifetime-erased permit for an owner-managed shutdown path.
+    ///
+    /// # Safety
+    /// The owner must retain this exact gate until the permit's final release
+    /// and notification tail finish. Counting zero is not a substitute for
+    /// sealing and waiting for the same gate before reclaiming its owner.
+    #[inline]
+    pub unsafe fn try_enter_detached(&self) -> Result<DetachedDrainPermit, Sealed> {
+        // SAFETY: forwards the caller's exact owner-lifetime contract.
+        unsafe { DetachedDrainPermit::acquire(self) }
+    }
+
+    /// Claims this gate's unique administration authority.
+    pub fn control(&self) -> GateControl<'_, GateUnknown> {
+        GateControl::claim(self)
+    }
+
+    /// Nonblocking counterpart for polling lifecycle transitions.
+    pub fn try_control(&self) -> Option<GateControl<'_, GateUnknown>> {
+        GateControl::try_claim(self)
     }
 
     /// Acquires an owned permit from a process-lifetime gate.
@@ -180,7 +208,8 @@ impl DrainGate {
     ///
     /// Callers using this form must pair it with [`DrainGate::release`].
     #[inline]
-    pub fn try_acquire(&self) -> Result<(), Sealed> {
+    #[cfg(test)]
+    fn try_acquire(&self) -> Result<(), Sealed> {
         self.counter.try_acquire()
     }
 
@@ -189,7 +218,7 @@ impl DrainGate {
     /// [DG-1] Decrements outstanding active count.
     /// [DG-5] Fast-path succeeds only when no waiter is pending on final count.
     #[inline]
-    pub fn release(&self) -> ReleaseOutcome {
+    fn release(&self) -> ReleaseOutcome {
         let counter = &self.counter;
         if let Some(outcome) = counter.try_release_without_notification() {
             // No gate access is allowed after this final-count CAS: an owner
@@ -209,7 +238,7 @@ impl DrainGate {
     /// Guaranteed by Verus:
     /// [DG-5] / [SC-9] The fast-path rejects when `waiting && active == 1`, guaranteeing
     /// that the final count is held until the slow path acquires `idle.lock`.
-    pub(crate) unsafe fn release_owned(gate: NonNull<Self>) -> ReleaseOutcome {
+    unsafe fn release_owned(gate: NonNull<Self>) -> ReleaseOutcome {
         let gate = gate.as_ptr();
         // SAFETY: the caller's active count retains every field until this
         // release publishes zero. Only interior-mutable fields are borrowed.
@@ -228,25 +257,18 @@ impl DrainGate {
 
     /// [DG-2] Once sealed, all subsequent admission attempts fail.
     #[inline]
-    pub fn seal(&self) {
+    fn seal(&self) {
         self.counter.seal();
     }
 
     /// Waits for an idle observation. Seal admission first when that
     /// observation must remain valid for reclamation or shutdown.
-    pub fn wait_until_idle(&self) {
+    fn wait_until_idle(&self) {
         wait_for_idle(&self.idle, || self.counter.mark_waiting());
     }
 
-    /// [DG-3] Quiescence on Drain: establishes sealed && active == 0 && outstanding == 0.
-    /// [DG-4] Reclamation Precondition: safe to reclaim protected resources after return.
-    pub fn seal_and_wait(&self) {
-        self.seal();
-        self.wait_until_idle();
-    }
-
     #[inline]
-    pub fn reopen(&self) -> Result<(), ReopenError> {
+    fn reopen(&self) -> Result<(), ReopenError> {
         let _guard = self.idle.lock();
         self.counter.reopen()
     }
@@ -278,6 +300,12 @@ pub struct DrainPermit<'a> {
     gate: &'a DrainGate,
 }
 
+impl DrainPermit<'_> {
+    pub fn release(self) {
+        drop(self);
+    }
+}
+
 impl Drop for DrainPermit<'_> {
     fn drop(&mut self) {
         self.gate.release();
@@ -300,6 +328,8 @@ impl Drop for OwnedDrainPermit {
 pub struct StripedDrainGate<const N: usize> {
     counters: [CachePadded<SealableCounter>; N],
     idle: IdleNotification,
+    // Exclusive management authority. Never touched by admission or release.
+    control: Mutex<()>,
 }
 
 impl<const N: usize> StripedDrainGate<N> {
@@ -307,6 +337,7 @@ impl<const N: usize> StripedDrainGate<N> {
         Self {
             counters: [const { CachePadded::new(SealableCounter::new_open()) }; N],
             idle: IdleNotification::new(),
+            control: Mutex::new(()),
         }
     }
 
@@ -314,6 +345,7 @@ impl<const N: usize> StripedDrainGate<N> {
         Self {
             counters: [const { CachePadded::new(SealableCounter::new_sealed()) }; N],
             idle: IdleNotification::new(),
+            control: Mutex::new(()),
         }
     }
 
@@ -329,16 +361,30 @@ impl<const N: usize> StripedDrainGate<N> {
         Ok(StripedDrainPermit { gate: self, stripe })
     }
 
-    /// Acquires one count on the given stripe without retaining an RAII permit.
+    /// Acquires a stripe-bound permit for an owner-managed shutdown path.
     ///
-    /// Callers using this form must pair it with [`StripedDrainGate::release`].
+    /// # Safety
+    /// This exact gate must remain alive through the permit's final release
+    /// notification. Its owner must seal and drain every stripe before reclaim.
     #[inline]
-    pub fn try_acquire(&self, stripe: usize) -> Result<(), Sealed> {
-        self.counter(stripe).try_acquire()
+    pub unsafe fn try_enter_detached(
+        &self,
+        stripe: usize,
+    ) -> Result<DetachedStripedDrainPermit<N>, Sealed> {
+        // SAFETY: forwards the caller's exact owner-lifetime contract.
+        unsafe { DetachedStripedDrainPermit::acquire(self, stripe) }
+    }
+
+    pub fn control(&self) -> StripedGateControl<'_, GateUnknown, N> {
+        StripedGateControl::claim(self)
+    }
+
+    pub fn try_control(&self) -> Option<StripedGateControl<'_, GateUnknown, N>> {
+        StripedGateControl::try_claim(self)
     }
 
     #[inline]
-    pub fn release(&self, stripe: usize) -> ReleaseOutcome {
+    fn release(&self, stripe: usize) -> ReleaseOutcome {
         let counter = self.counter(stripe);
         if let Some(outcome) = counter.try_release_without_notification() {
             // Do not inspect another stripe or notification state after
@@ -355,7 +401,7 @@ impl<const N: usize> StripedDrainGate<N> {
     /// # Safety
     /// The caller must own one count on `stripe` in this live gate. The owner
     /// may reclaim the gate only after sealing and waiting for all stripes.
-    pub(crate) unsafe fn release_owned(gate: NonNull<Self>, stripe: usize) -> ReleaseOutcome {
+    unsafe fn release_owned(gate: NonNull<Self>, stripe: usize) -> ReleaseOutcome {
         let gate = gate.as_ptr();
         // SAFETY: the active count retains the allocation. Deref projects
         // through CachePadded before release; no borrow of its padding is
@@ -372,7 +418,7 @@ impl<const N: usize> StripedDrainGate<N> {
         release_and_notify(&idle, || counter.release())
     }
 
-    pub fn seal(&self) {
+    fn seal(&self) {
         // Serialize whole-gate administrative changes with reopen. Otherwise
         // a concurrent seal could reseal an early stripe during partial reopen.
         let _guard = self.idle.lock();
@@ -382,7 +428,7 @@ impl<const N: usize> StripedDrainGate<N> {
     /// Seals every stripe only if each is idle, without waiting for readers.
     /// The caller must serialize this operation with other seal/reopen calls.
     /// On failure, stripes sealed by this attempt are reopened before return.
-    pub(crate) fn try_seal_if_idle(&self) -> bool {
+    fn try_seal_if_idle(&self) -> bool {
         protocol::seal_stripes!(index, rollback;
             N, self.counters[index].try_seal_if_idle(),
             self.counters[rollback].undo_idle_seal()
@@ -393,7 +439,7 @@ impl<const N: usize> StripedDrainGate<N> {
 
     /// Waits until every stripe is observed idle. Seal all stripes first when
     /// an owner needs a stable grace period rather than an open-gate snapshot.
-    pub(crate) fn try_wait_until_idle(&self) -> bool {
+    fn try_wait_until_idle(&self) -> bool {
         let Some(_guard) = self.idle.lock.try_lock() else {
             return false;
         };
@@ -404,7 +450,7 @@ impl<const N: usize> StripedDrainGate<N> {
 
     /// Waits until every stripe is observed idle. Seal all stripes first when
     /// an owner needs a stable grace period rather than an open-gate snapshot.
-    pub fn wait_until_idle(&self) {
+    fn wait_until_idle(&self) {
         wait_for_idle(&self.idle, || usize::from(!self.observe_stripes_idle()));
     }
 
@@ -414,12 +460,7 @@ impl<const N: usize> StripedDrainGate<N> {
         )
     }
 
-    pub fn seal_and_wait(&self) {
-        self.seal();
-        self.wait_until_idle();
-    }
-
-    pub fn reopen(&self) -> Result<(), ReopenError> {
+    fn reopen(&self) -> Result<(), ReopenError> {
         let _guard = self.idle.lock();
         if self
             .counters
@@ -506,6 +547,12 @@ pub struct StripedDrainPermit<'a, const N: usize> {
     stripe: usize,
 }
 
+impl<const N: usize> StripedDrainPermit<'_, N> {
+    pub fn release(self) {
+        drop(self);
+    }
+}
+
 impl<const N: usize> Drop for StripedDrainPermit<'_, N> {
     fn drop(&mut self) {
         self.gate.release(self.stripe);
@@ -525,11 +572,88 @@ impl<const N: usize> Drop for StripedOwnedDrainPermit<N> {
     }
 }
 
+/// Kernel adapter for permanent closure. It deliberately exposes no reopen or
+/// reusable management claim, so repeated terminal observations never expire.
+pub(crate) struct TerminalDrainGate {
+    gate: DrainGate,
+}
+
+impl TerminalDrainGate {
+    pub(crate) const fn new() -> Self {
+        Self {
+            gate: DrainGate::new_open(),
+        }
+    }
+    #[inline]
+    pub(crate) fn is_sealed(&self) -> bool {
+        self.gate.is_sealed()
+    }
+    #[inline]
+    pub(crate) fn active(&self) -> usize {
+        self.gate.active()
+    }
+    pub(crate) fn seal(&self) {
+        self.gate.seal();
+    }
+    #[inline]
+    pub(crate) fn try_enter(&self) -> Result<DrainPermit<'_>, Sealed> {
+        self.gate.try_enter()
+    }
+    #[inline]
+    pub(crate) unsafe fn try_enter_detached(&self) -> Result<DetachedDrainPermit, Sealed> {
+        // SAFETY: the adapter is retained by the caller's owner contract.
+        unsafe { self.gate.try_enter_detached() }
+    }
+    pub(crate) fn wait(&self) {
+        self.gate.seal();
+        self.gate.wait_until_idle();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[test]
+    fn miri_management_claim_is_exclusive_and_reopen_requires_drained_admission() {
+        let gate = DrainGate::new_open();
+        let control = gate.control();
+        assert!(gate.try_control().is_none());
+        let control = control
+            .try_drained()
+            .err()
+            .expect("open admission has no stable drain proof");
+        let permit = gate.try_enter().unwrap();
+        let sealed = control.seal();
+        assert!(gate.try_enter().is_err());
+        drop(permit);
+        let opened = sealed.wait().reopen();
+        assert!(gate.try_control().is_none());
+        assert!(gate.try_enter().is_ok());
+        drop(opened);
+        assert!(gate.try_control().is_some());
+    }
+
+    #[test]
+    fn miri_abandoned_striped_management_leaves_admission_sealed() {
+        let gate = StripedDrainGate::<2>::new_open();
+        let control = gate.control().seal();
+        drop(control);
+        assert!(gate.try_enter(0).is_err());
+        assert!(gate.try_enter(1).is_err());
+        let drained = gate
+            .control()
+            .wait_if_sealed()
+            .ok()
+            .expect("sealed gate can be drained");
+        // The reusable proof keeps the unique management claim, so no second
+        // controller can reopen or invalidate it while it remains live.
+        assert!(gate.try_control().is_none());
+        drop(drained.reopen());
+        assert!(gate.try_enter(0).is_ok());
+    }
 
     #[test]
     fn drain_gate_waits_for_the_last_permit() {

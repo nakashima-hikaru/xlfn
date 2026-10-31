@@ -28,12 +28,20 @@ The verification layers have distinct scopes:
 | `cache_lease` | Pin/observation resources, shared lookup, retirement and heap-permission recovery | Native pin field, resident index, queue cutoff and allocation recovery |
 | `handle_domain` | Retained observations, publication, batch recovery and post-destructor debt accounting | Native binding/debt fields, queue history and Drop |
 
-Native service-slot transactions bind each owner to its own reader gate and
-permit recovery only through consuming drained states. Replaceable-lane
-recovery also borrows the transition lock. The private-API compile checks
-enforce these Rust sequencing restrictions; the `service_slot` Verus target
-remains an abstract phase model and does not mechanically prove that native
-capability wiring or Box recovery.
+Native consuming service transactions bind publication and recovery to one
+slot/lane and retain its transition lock. Published/withdrawn owners retain their
+allocations on abandonment; quarantined owners have no ordinary payload Drop.
+Normal slot and retirement-domain destruction drains before releasing queued
+payloads. Gate management uses a separate exclusive claim, and admission uses
+borrowed or lifetime-contracted detached permits. Rotating transactions alone
+mint scoped generation/queue recovery capabilities. Binding changes are unique
+transactions; quota counts remain capacity accounting, not destruction barriers.
+
+The private-API compile checks enforce these Rust interface restrictions. The
+Verus targets retain their stated abstract/shared-expression scopes; they do not
+mechanically prove all native capability wiring, allocation identity or Box/Drop
+recovery. Detached owner lifetime remains a caller obligation even in types with
+terminal-draining destructors.
 
 Cache pins use `AtomicU32` in production; admission counters remain `usize`.
 Both-width arithmetic proofs alone do not establish this mixed-width native

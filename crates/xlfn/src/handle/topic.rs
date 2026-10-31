@@ -34,7 +34,7 @@ use triomphe::Arc;
 use xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT;
 use xlfn_kernel::published_owner::PublishedOwner;
 use xlfn_kernel::rotating_read_domain::{
-    DrainedGeneration, RotatingReadPermit, RotatingRetirementDomain,
+    RetiredQueue, RotatingReadPermit, RotatingRetirementDomain,
 };
 
 #[repr(u8)]
@@ -274,11 +274,14 @@ impl TopicTable {
         });
     }
 
-    fn drain_generation(&self, generation: DrainedGeneration<'_>) -> RetiredTopics {
-        let retired = self
-            .read_domain
-            .take_queue(&generation, |mut queue| std::mem::take(&mut *queue))
-            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+    fn drain_generation(
+        &self,
+        generation: RetiredQueue<'_, DEFAULT_STRIPE_COUNT, RetiredTopics>,
+    ) -> RetiredTopics {
+        if !generation.belongs_to(&self.read_domain) {
+            xlfn_kernel::invariant::fail_stop();
+        }
+        let retired = generation.take(|mut queue| std::mem::take(&mut *queue));
         xlfn_kernel::invariant::checked_atomic_sub_relaxed(&self.queued, retired.len());
         retired
     }
@@ -345,14 +348,12 @@ impl TopicTable {
 
     pub(crate) fn seal_and_drain(&self) -> RetiredTopics {
         let closed = self.read_domain.seal_and_wait();
-        self.read_domain
-            .take_queues(&closed, |mut first, mut second| {
-                let mut all = std::mem::take(&mut *first);
-                all.append(&mut *second);
-                xlfn_kernel::invariant::checked_atomic_sub_relaxed(&self.queued, all.len());
-                all
-            })
-            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop())
+        closed.take_queues(|mut first, mut second| {
+            let mut all = std::mem::take(&mut *first);
+            all.append(&mut *second);
+            xlfn_kernel::invariant::checked_atomic_sub_relaxed(&self.queued, all.len());
+            all
+        })
     }
 
     #[cfg(test)]
