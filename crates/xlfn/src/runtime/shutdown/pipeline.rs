@@ -11,7 +11,9 @@ use super::owner::{RemovalClaimGuard, RemovalOwner};
 use crate::addin::Addin;
 use crate::error::IntoXllError;
 use crate::panic_boundary::catch_no_unwind;
-use crate::runtime::capabilities::{EmptyLifecycle, InstalledLifecycle, ShutdownDeps};
+use crate::runtime::capabilities::{
+    EmptyLifecycle, InstalledLifecycle, LifecycleFailure, RollbackRequest, ShutdownDeps,
+};
 use std::marker::PhantomData;
 use std::panic::AssertUnwindSafe;
 
@@ -174,17 +176,17 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
         }
     }
 
-    pub(crate) fn cleanup(
+    fn cleanup(
         mut self,
         lifecycle: &crate::runtime::AddinLifecycleAccess<'_, A>,
         report: &mut crate::shutdown::CloseReport,
         installed: Option<InstalledLifecycle<'runtime, A>>,
-    ) -> Result<(CleanedAddin, EmptyLifecycle<'runtime, A>), crate::XllError> {
+    ) -> Result<(CleanedAddin, EmptyLifecycle<'runtime, A>), LifecycleFailure<'runtime, A>> {
         let Some(shared_state) = self.shared_state.take() else {
             let empty = self
                 .deps
                 .empty_addin_lifecycle(lifecycle)
-                .map_err(crate::lifecycle::lifecycle_access_error)?;
+                .map_err(LifecycleFailure::access)?;
             return Ok((CleanedAddin::issued(), empty));
         };
 
@@ -206,7 +208,7 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
                 shared_state,
                 crate::runtime_components::QuarantineReason::AddinCleanupPanicked,
             );
-            return Err(crate::XllError::Panic);
+            return Err(LifecycleFailure::retain(crate::XllError::Panic, installed));
         }
 
         let taken = match installed {
@@ -220,7 +222,7 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
                     report.push(
                         "Addin::LifecycleState::drop",
                         crate::shutdown::CleanupIssueKind::DisposalPanicked,
-                        error.clone(),
+                        error.error().clone(),
                     );
                     self.quarantine_shared_state(
                         shared_state,
@@ -233,15 +235,13 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
                 report.push(
                     "Addin::LifecycleState",
                     crate::shutdown::CleanupIssueKind::DisposalPanicked,
-                    crate::lifecycle::lifecycle_access_error(error),
+                    error.error().clone(),
                 );
                 self.quarantine_shared_state(
                     shared_state,
                     crate::runtime_components::QuarantineReason::TeardownIncomplete,
                 );
-                return Err(crate::XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::LIFECYCLE_SLOT,
-                });
+                return Err(error);
             }
         };
         let shared_state_dropped = catch_no_unwind(AssertUnwindSafe(|| drop(shared_state))).is_ok();
@@ -253,9 +253,12 @@ impl<'runtime, A: Addin> QuiescedAddin<'runtime, A> {
             );
         }
         if !shared_state_dropped {
-            return Err(crate::XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::LIFECYCLE_SLOT,
-            });
+            return Err(LifecycleFailure::disposed(
+                crate::XllError::Internal {
+                    diagnostic_id: crate::diagnostics::id::DiagnosticId::LIFECYCLE_SLOT,
+                },
+                empty_binding,
+            ));
         }
         Ok((CleanedAddin::issued(), empty_binding))
     }
@@ -612,14 +615,17 @@ impl<'runtime, A: Addin> AddinQuiesced<'runtime, A> {
 }
 
 impl<'runtime, A: Addin> ServicesSealed<'runtime, A> {
-    pub(crate) fn cleanup(
+    fn cleanup(
         self,
         lifecycle: &crate::runtime::AddinLifecycleAccess<'_, A>,
         report: &mut crate::shutdown::CloseReport,
         installed: Option<InstalledLifecycle<'runtime, A>>,
     ) -> Result<
         (ServicesCleaned, EmptyLifecycle<'runtime, A>),
-        (crate::XllError, crate::module_runtime::ModuleExportsDrained),
+        (
+            LifecycleFailure<'runtime, A>,
+            crate::module_runtime::ModuleExportsDrained,
+        ),
     > {
         let Self {
             execution,
@@ -645,7 +651,7 @@ impl<'runtime, A: Addin> ServicesSealed<'runtime, A> {
 }
 
 impl ServicesCleaned {
-    pub(crate) fn finish(
+    fn finish(
         self,
     ) -> Result<ServicesQuiescent, (crate::XllError, crate::module_runtime::ModuleExportsDrained)>
     {
@@ -895,7 +901,14 @@ pub(crate) struct TeardownTxn<'runtime, A: Addin, K, S: ModuleAuthorityRecovery>
     _kind: PhantomData<K>,
 }
 
+#[allow(dead_code, reason = "failed binding remains owned until quarantine")]
+enum BindingResponsibility<'runtime, A: Addin> {
+    Installed(InstalledLifecycle<'runtime, A>),
+    Empty(EmptyLifecycle<'runtime, A>),
+    Failed(LifecycleFailure<'runtime, A>),
+}
 struct TeardownOwner<'runtime, A: Addin> {
+    binding: Option<BindingResponsibility<'runtime, A>>,
     owner: Option<RemovalClaimGuard<'runtime, A>>,
     deps: ShutdownDeps<'runtime, A>,
 }
@@ -903,6 +916,7 @@ struct TeardownOwner<'runtime, A: Addin> {
 impl<'runtime, A: Addin> TeardownOwner<'runtime, A> {
     fn new(deps: ShutdownDeps<'runtime, A>, owner: RemovalClaimGuard<'runtime, A>) -> Self {
         Self {
+            binding: None,
             owner: Some(owner),
             deps,
         }
@@ -915,7 +929,11 @@ impl<'runtime, A: Addin> TeardownOwner<'runtime, A> {
     }
 
     fn empty(deps: ShutdownDeps<'runtime, A>) -> Self {
-        Self { owner: None, deps }
+        Self {
+            binding: None,
+            owner: None,
+            deps,
+        }
     }
 
     fn deps(&self) -> ShutdownDeps<'runtime, A> {
@@ -1112,18 +1130,25 @@ impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ServicesSealed<'runtime,
         self,
         lifecycle: &crate::runtime::AddinLifecycleAccess<'_, A>,
         report: &mut crate::shutdown::CloseReport,
-        installed: Option<InstalledLifecycle<'runtime, A>>,
-    ) -> crate::XllResult<(
-        TeardownTxn<'runtime, A, K, ServicesCleaned>,
-        EmptyLifecycle<'runtime, A>,
-    )> {
+    ) -> crate::XllResult<TeardownTxn<'runtime, A, K, ServicesCleaned>> {
         let (mut owner, stage) = self.split();
+        let installed = match owner.binding.take() {
+            Some(BindingResponsibility::Installed(binding)) => Some(binding),
+            None => None,
+            _ => xlfn_kernel::invariant::fail_stop(),
+        };
         match stage.cleanup(lifecycle, report, installed) {
-            Ok((stage, empty)) => Ok((TeardownTxn::from_parts(owner, stage), empty)),
-            Err((error, module)) => {
+            Ok((stage, empty)) => {
+                owner.binding = Some(BindingResponsibility::Empty(empty));
+                Ok(TeardownTxn::from_parts(owner, stage))
+            }
+            Err((failure, module)) => {
+                let error = failure.error().clone();
+                owner.binding = Some(BindingResponsibility::Failed(failure));
                 owner.return_module_authority(
                     crate::module_runtime::ModuleCleanupAuthority::Drained(module),
                 );
+                // Quarantine is published before either binding or removal claim drops.
                 drop(owner);
                 Err(error)
             }
@@ -1193,7 +1218,7 @@ impl<'runtime, A: Addin, K: TerminalCertificateKind>
 impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ResourcesReclaimed> {
     pub(crate) fn certify(
         mut self,
-    ) -> crate::XllResult<<K as TerminalCertificateKind>::Certificate<'runtime, A>>
+    ) -> crate::XllResult<super::finalization::CompletionPendingBinding<'runtime, A, K>>
     where
         K: TerminalCertificateKind,
     {
@@ -1213,9 +1238,18 @@ impl<'runtime, A: Addin, K> TeardownTxn<'runtime, A, K, ResourcesReclaimed> {
         let deps = self.owner.deps();
         let owner = self.owner.take();
         match owner.certify::<K>(proof, deps) {
-            Ok(certificate) => Ok(certificate),
-            Err((error, owner)) => {
-                drop(TeardownOwner::new(deps, owner));
+            Ok(certificate) => {
+                let Some(BindingResponsibility::Empty(empty)) = self.owner.binding.take() else {
+                    xlfn_kernel::invariant::fail_stop();
+                };
+                Ok(super::finalization::CompletionPendingBinding::new(
+                    deps,
+                    certificate,
+                    empty,
+                ))
+            }
+            Err((error, claim)) => {
+                self.owner.owner = Some(claim);
                 Err(error)
             }
         }
@@ -1244,8 +1278,31 @@ impl<'runtime, A: Addin, K> RemovalOwner<'runtime, A, K> {
         self,
     ) -> Result<TeardownTxn<'runtime, A, K, ExecutionDrained>, ExecutionDrainFailure<'runtime, A>>
     {
+        self.drain_inner(None)
+    }
+    fn drain_inner(
+        self,
+        request: Option<RollbackRequest<'runtime, A>>,
+    ) -> Result<TeardownTxn<'runtime, A, K, ExecutionDrained>, ExecutionDrainFailure<'runtime, A>>
+    {
         let (deps, claim, module) = self.into_parts();
         let mut owner = TeardownOwner::new(deps, claim);
+        if let Some(request) = request {
+            match request.inherit(deps) {
+                Ok(binding) => owner.binding = binding.map(BindingResponsibility::Installed),
+                Err(failure) => {
+                    let error = failure.error().clone();
+                    owner.binding = Some(BindingResponsibility::Failed(failure));
+                    owner.return_module_authority(
+                        crate::module_runtime::ModuleCleanupAuthority::Closing(module),
+                    );
+                    return Err(ExecutionDrainFailure {
+                        error: ExecutionDrainError::Preparation(error),
+                        _owner: Box::new(owner),
+                    });
+                }
+            }
+        }
         match ExecutionDrained::begin(deps, module) {
             Ok(stage) => Ok(TeardownTxn::from_parts(owner, stage)),
             Err((error, module)) => {
@@ -1259,6 +1316,18 @@ impl<'runtime, A: Addin, K> RemovalOwner<'runtime, A, K> {
                 })
             }
         }
+    }
+}
+
+impl<'runtime, A: Addin> RemovalOwner<'runtime, A, super::certificate::OpenRollback> {
+    pub(in crate::runtime) fn drain_opening(
+        self,
+        request: RollbackRequest<'runtime, A>,
+    ) -> Result<
+        TeardownTxn<'runtime, A, super::certificate::OpenRollback, ExecutionDrained>,
+        ExecutionDrainFailure<'runtime, A>,
+    > {
+        self.drain_inner(Some(request))
     }
 }
 
@@ -1335,9 +1404,8 @@ mod tests {
             .unwrap_or_else(|_| panic!("seal"));
         let mut report = crate::shutdown::CloseReport::default();
         let teardown = teardown
-            .cleanup_addin(&lifecycle, &mut report, None)
+            .cleanup_addin(&lifecycle, &mut report)
             .unwrap_or_else(|_| panic!("cleanup"))
-            .0
             .finish_services()
             .unwrap_or_else(|_| panic!("finish"));
         let mut teardown = teardown
@@ -1404,9 +1472,8 @@ mod tests {
                 .unwrap_or_else(|_| panic!("seal"));
             let mut report = crate::shutdown::CloseReport::default();
             let teardown = teardown
-                .cleanup_addin(&lifecycle, &mut report, None)
+                .cleanup_addin(&lifecycle, &mut report)
                 .unwrap_or_else(|_| panic!("cleanup"))
-                .0
                 .finish_services()
                 .unwrap_or_else(|_| panic!("finish"));
             RECLAIM_FAULT.with(|fault| fault.set(Some(point)));

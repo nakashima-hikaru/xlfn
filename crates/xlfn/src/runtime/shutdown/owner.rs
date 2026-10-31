@@ -21,6 +21,7 @@ pub(crate) struct RemovalClaimGuard<'runtime, A: crate::Addin> {
     observer: &'runtime crate::runtime::observer::RuntimeObserver,
     attempt: RemovalAttemptId,
     returned: Option<Box<ModuleCleanupAuthority>>,
+    finalization_failed: bool,
 }
 
 impl<A: crate::Addin> Drop for RemovalClaimGuard<'_, A> {
@@ -31,7 +32,12 @@ impl<A: crate::Addin> Drop for RemovalClaimGuard<'_, A> {
             .returned
             .take()
             .map(|authority| authority.into_authority());
-        lifecycle.release_removal_claim(&mut control, self.attempt, returned);
+        lifecycle.release_removal_claim(
+            &mut control,
+            self.attempt,
+            returned,
+            self.finalization_failed,
+        );
         self.observer.release_cleanup_owner();
         lifecycle.notify_all();
     }
@@ -44,6 +50,7 @@ impl<'runtime, A: crate::Addin, K> RemovalOwner<'runtime, A, K> {
             observer: deps.observer(),
             attempt: claim.attempt(),
             returned: None,
+            finalization_failed: false,
         };
         Self {
             deps,
@@ -79,6 +86,13 @@ impl<A: crate::Addin, K> Drop for RemovalOwner<'_, A, K> {
 }
 
 impl<A: crate::Addin> RemovalClaimGuard<'_, A> {
+    pub(super) fn mark_finalization_failed(&mut self) {
+        self.finalization_failed = true;
+    }
+    pub(super) fn complete_finalization(&mut self) {
+        self.finalization_failed = false;
+    }
+
     pub(super) fn belongs_to(&self, lifecycle: &crate::lifecycle::LifecycleCoordinator<A>) -> bool {
         std::ptr::eq(self.lifecycle, lifecycle)
     }

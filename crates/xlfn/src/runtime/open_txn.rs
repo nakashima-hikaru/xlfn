@@ -505,7 +505,16 @@ impl<A: crate::Addin> OpenRollbackOwner<'_, A> {
             .into_parts();
         self.deps.merge_host(journal);
         let attempt = self.core.as_ref().unwrap().attempt_id();
-        let generation = Some(attempt.into_runtime_generation());
+        let request = match self.deps.rollback_request(attempt, installed) {
+            Ok(request) => request,
+            Err(failure) => {
+                report_boundary_error("xlAutoOpen rollback issuer", failure.error());
+                // Publish quarantine before the retained claim can be released.
+                recovery.quarantine(None);
+                drop(failure);
+                return;
+            }
+        };
         let disposition =
             super::orchestration::LifecycleOrchestrator::new(self.deps).mark_open_failed(attempt);
         let (_, module, _service_inputs) = self.core.take().unwrap().into_parts();
@@ -516,7 +525,7 @@ impl<A: crate::Addin> OpenRollbackOwner<'_, A> {
         check_rollback_fault();
         if disposition.requires_rollback() {
             match crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
-                recovery.rollback(lifecycle, &mut callbacks, generation, installed)
+                request.run(lifecycle, &mut callbacks)
             })) {
                 Ok(outcome) if outcome.is_finalized() || outcome.cleanup_owned_elsewhere() => {}
                 Ok(outcome) => {

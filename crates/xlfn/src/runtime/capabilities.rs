@@ -35,37 +35,158 @@ pub(crate) struct EmptyLifecycle<'runtime, A: Addin> {
     binding: BindingTxn<'runtime, A::LifecycleState, BindingEmpty>,
 }
 
-impl<'runtime, A: Addin> InstalledLifecycle<'runtime, A> {
-    pub(in crate::runtime) fn take(self) -> Result<TakenLifecycle<'runtime, A>, ThreadAffineError> {
-        self.binding
-            .take()
-            .map(|(value, binding)| TakenLifecycle {
-                value,
-                empty: EmptyLifecycle { binding },
-            })
-            .map_err(|error| error.reason)
+/// A terminal failure retains the precise phase already reached. In particular,
+/// disposal panic retains only the empty binding, never an already-dropped value.
+pub(crate) struct LifecycleFailure<'runtime, A: Addin> {
+    error: crate::XllError,
+    _authority: RetainedLifecycle<'runtime, A>,
+}
+#[allow(
+    dead_code,
+    reason = "retained phase fields own rollback obligations until quarantine"
+)]
+enum RetainedLifecycle<'runtime, A: Addin> {
+    None,
+    Occupied(InstalledLifecycle<'runtime, A>),
+    Empty(EmptyLifecycle<'runtime, A>),
+}
+impl<A: Addin> std::fmt::Debug for LifecycleFailure<'_, A> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LifecycleFailure")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
     }
 }
-
+impl<'runtime, A: Addin> LifecycleFailure<'runtime, A> {
+    pub(in crate::runtime) fn error(&self) -> &crate::XllError {
+        &self.error
+    }
+    pub(in crate::runtime) fn disposed(
+        error: crate::XllError,
+        empty: EmptyLifecycle<'runtime, A>,
+    ) -> Self {
+        Self {
+            error,
+            _authority: RetainedLifecycle::Empty(empty),
+        }
+    }
+    pub(in crate::runtime) fn access(reason: ThreadAffineError) -> Self {
+        Self {
+            error: crate::lifecycle::lifecycle_access_error(reason),
+            _authority: RetainedLifecycle::None,
+        }
+    }
+    pub(in crate::runtime) fn retain(
+        error: crate::XllError,
+        binding: Option<InstalledLifecycle<'runtime, A>>,
+    ) -> Self {
+        Self {
+            error,
+            _authority: binding.map_or(RetainedLifecycle::None, RetainedLifecycle::Occupied),
+        }
+    }
+}
+impl<'runtime, A: Addin> InstalledLifecycle<'runtime, A> {
+    pub(in crate::runtime) fn take(
+        self,
+    ) -> Result<TakenLifecycle<'runtime, A>, LifecycleFailure<'runtime, A>> {
+        match self.binding.take() {
+            Ok((value, binding)) => Ok(TakenLifecycle {
+                value,
+                empty: EmptyLifecycle { binding },
+            }),
+            Err(error) => Err(LifecycleFailure {
+                error: crate::lifecycle::lifecycle_access_error(error.reason),
+                _authority: RetainedLifecycle::Occupied(Self {
+                    binding: error.transaction,
+                }),
+            }),
+        }
+    }
+}
 impl<'runtime, A: Addin> TakenLifecycle<'runtime, A> {
     pub(in crate::runtime) fn dispose(
         self,
-    ) -> Result<EmptyLifecycle<'runtime, A>, crate::XllError> {
+    ) -> Result<EmptyLifecycle<'runtime, A>, LifecycleFailure<'runtime, A>> {
         let Self { value, empty } = self;
-        // The empty claim remains live while application destruction can reenter.
-        crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| drop(value)))
-            .map_err(|_| crate::XllError::Panic)?;
-        Ok(empty)
+        match crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| drop(value))) {
+            Ok(()) => Ok(empty),
+            Err(_) => Err(LifecycleFailure {
+                error: crate::XllError::Panic,
+                _authority: RetainedLifecycle::Empty(empty),
+            }),
+        }
+    }
+}
+impl<'runtime, A: Addin> EmptyLifecycle<'runtime, A> {
+    pub(in crate::runtime) fn release(self) -> Result<(), LifecycleFailure<'runtime, A>> {
+        #[cfg(test)]
+        PANIC_BINDING_RELEASE
+            .with(|fail| assert!(!fail.replace(false), "injected binding release unwind"));
+        #[cfg(test)]
+        if FAIL_BINDING_RELEASE.with(|fail| fail.replace(false)) {
+            return Err(LifecycleFailure::disposed(crate::XllError::Panic, self));
+        }
+        match self.binding.release() {
+            Ok(_) => Ok(()),
+            Err(error) => Err(LifecycleFailure {
+                error: crate::lifecycle::lifecycle_access_error(error.reason),
+                _authority: RetainedLifecycle::Empty(Self {
+                    binding: error.transaction,
+                }),
+            }),
+        }
     }
 }
 
-impl<A: Addin> EmptyLifecycle<'_, A> {
-    pub(in crate::runtime) fn release(self) -> Result<(), ThreadAffineError> {
-        self.binding
-            .release()
-            .map(|_| ())
-            .map_err(|error| error.reason)
+/// Created from an opening's own dependencies, after issuer and attempt checks.
+/// Its dispatch target is carried inside; callers cannot supply another runtime.
+pub(crate) struct RollbackRequest<'runtime, A: Addin> {
+    deps: OpenDeps<'runtime, A>,
+    generation: crate::generation::RuntimeGeneration,
+    installed: Option<InstalledLifecycle<'runtime, A>>,
+}
+impl<'runtime, A: Addin> RollbackRequest<'runtime, A> {
+    pub(in crate::runtime) fn run(
+        self,
+        lifecycle: &AddinLifecycleAccess<'_, A>,
+        callbacks: &mut crate::host_callback::HostCallbackSession,
+    ) -> super::rollback::OpenRollbackOutcome {
+        let recovery = self.deps.recovery();
+        recovery.target.rollback(lifecycle, callbacks, self)
     }
+    pub(in crate::runtime) fn generation(&self) -> crate::generation::RuntimeGeneration {
+        self.generation
+    }
+    pub(in crate::runtime) fn matches(&self, deps: ShutdownDeps<'_, A>) -> bool {
+        std::ptr::eq(self.deps.lifecycle, deps.lifecycle)
+            && deps
+                .lifecycle
+                .access()
+                .matches_latest_open_attempt(self.generation)
+            && self
+                .installed
+                .as_ref()
+                .is_none_or(|installed| installed.binding.belongs_to(deps.addin_lifecycle))
+    }
+    pub(in crate::runtime) fn inherit(
+        self,
+        deps: ShutdownDeps<'_, A>,
+    ) -> Result<Option<InstalledLifecycle<'runtime, A>>, LifecycleFailure<'runtime, A>> {
+        if !self.matches(deps) {
+            return Err(LifecycleFailure::retain(
+                crate::lifecycle::lifecycle_access_error(ThreadAffineError::StaleAccess),
+                self.installed,
+            ));
+        }
+        Ok(self.installed)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(in crate::runtime) static PANIC_BINDING_RELEASE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(in crate::runtime) static FAIL_BINDING_RELEASE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Source-bound recovery operations. The target is installed only by the
@@ -86,8 +207,7 @@ trait OpenRecoveryTarget<A: Addin>: Sync {
         &self,
         lifecycle: &AddinLifecycleAccess<'_, A>,
         callbacks: &mut crate::host_callback::HostCallbackSession,
-        generation: Option<crate::generation::RuntimeGeneration>,
-        binding: Option<InstalledLifecycle<'_, A>>,
+        request: RollbackRequest<'_, A>,
     ) -> super::rollback::OpenRollbackOutcome;
     fn quarantine(&self, hazard: Option<crate::shutdown::UnloadHazard>);
 }
@@ -97,10 +217,9 @@ impl<A: Addin, P: super::UnloadPolicy<A>> OpenRecoveryTarget<A> for Runtime<A, P
         &self,
         lifecycle: &AddinLifecycleAccess<'_, A>,
         callbacks: &mut crate::host_callback::HostCallbackSession,
-        generation: Option<crate::generation::RuntimeGeneration>,
-        binding: Option<InstalledLifecycle<'_, A>>,
+        request: RollbackRequest<'_, A>,
     ) -> super::rollback::OpenRollbackOutcome {
-        super::rollback::rollback_open_with_binding(self, lifecycle, callbacks, generation, binding)
+        super::rollback::rollback_open_request(self, lifecycle, callbacks, request)
     }
     fn quarantine(&self, hazard: Option<crate::shutdown::UnloadHazard>) {
         match hazard {
@@ -111,16 +230,6 @@ impl<A: Addin, P: super::UnloadPolicy<A>> OpenRecoveryTarget<A> for Runtime<A, P
 }
 
 impl<A: Addin> OpenRecovery<'_, A> {
-    pub(in crate::runtime) fn rollback(
-        &self,
-        lifecycle: &AddinLifecycleAccess<'_, A>,
-        callbacks: &mut crate::host_callback::HostCallbackSession,
-        generation: Option<crate::generation::RuntimeGeneration>,
-        binding: Option<InstalledLifecycle<'_, A>>,
-    ) -> super::rollback::OpenRollbackOutcome {
-        self.target
-            .rollback(lifecycle, callbacks, generation, binding)
-    }
     pub(in crate::runtime) fn quarantine(&self, hazard: Option<crate::shutdown::UnloadHazard>) {
         self.target.quarantine(hazard);
     }
@@ -168,6 +277,28 @@ impl<'a, A: Addin> OpenDeps<'a, A> {
             observer: &runtime.observer,
             recovery: OpenRecovery { target: runtime },
         }
+    }
+
+    pub(in crate::runtime) fn rollback_request(
+        &self,
+        attempt: crate::generation::OpenAttemptId,
+        installed: Option<InstalledLifecycle<'a, A>>,
+    ) -> Result<RollbackRequest<'a, A>, LifecycleFailure<'a, A>> {
+        if self.lifecycle.access().open_attempt() != Some(attempt)
+            || installed
+                .as_ref()
+                .is_some_and(|binding| !binding.binding.belongs_to(self.addin_lifecycle))
+        {
+            return Err(LifecycleFailure::retain(
+                crate::lifecycle::lifecycle_access_error(ThreadAffineError::StaleAccess),
+                installed,
+            ));
+        }
+        Ok(RollbackRequest {
+            deps: *self,
+            generation: attempt.into_runtime_generation(),
+            installed,
+        })
     }
 
     pub(in crate::runtime) fn recovery(&self) -> OpenRecovery<'a, A> {
@@ -446,10 +577,16 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
     pub(in crate::runtime) fn take_addin_lifecycle(
         &self,
         access: &AddinLifecycleAccess<'_, A>,
-    ) -> Result<TakenLifecycle<'a, A>, ThreadAffineError> {
-        match self.addin_lifecycle.binding(access)? {
+    ) -> Result<TakenLifecycle<'a, A>, LifecycleFailure<'a, A>> {
+        match self
+            .addin_lifecycle
+            .binding(access)
+            .map_err(LifecycleFailure::access)?
+        {
             BindingState::Occupied(binding) => InstalledLifecycle { binding }.take(),
-            BindingState::Empty(_transaction) => Err(ThreadAffineError::MissingValue),
+            BindingState::Empty(_transaction) => {
+                Err(LifecycleFailure::access(ThreadAffineError::MissingValue))
+            }
         }
     }
 
@@ -577,6 +714,72 @@ mod tests {
     use crate::registration::host::test_support::{CallbackScript, Reply};
 
     #[test]
+    fn rollback_request_rejects_foreign_installed_binding_before_side_effects() {
+        let issuer = Runtime::<()>::new();
+        let other = Runtime::<()>::new();
+        let opening = issuer.begin_open().unwrap();
+        let attempt = opening.attempt_id();
+        let access = other.bind_addin_lifecycle().unwrap();
+        let installed = other
+            .open_deps()
+            .install_addin_lifecycle(&access, ())
+            .unwrap();
+        let failure = issuer
+            .open_deps()
+            .rollback_request(attempt, Some(installed))
+            .err()
+            .expect("foreign issuer");
+        assert_eq!(issuer.phase(), LifecyclePhase::Opening);
+        assert_eq!(other.phase(), LifecyclePhase::Closed);
+        assert_eq!(other.shutdown_deps().has_addin_lifecycle(&access), Ok(true));
+        assert!(
+            other.addin_lifecycle.binding(&access).is_err(),
+            "failure retains occupied claim"
+        );
+        drop(failure);
+        other
+            .shutdown_deps()
+            .take_addin_lifecycle(&access)
+            .unwrap()
+            .dispose()
+            .unwrap()
+            .release()
+            .unwrap();
+        drop(opening);
+    }
+
+    #[test]
+    fn rollback_request_from_a_previous_open_cannot_consume_a_later_attempt() {
+        let runtime = Runtime::<()>::new();
+        let opening = runtime.begin_open().unwrap();
+        let request = runtime
+            .open_deps()
+            .rollback_request(opening.attempt_id(), None)
+            .unwrap();
+        let mut opening = runtime.publish(opening, (), ());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let access = runtime.bind_addin_lifecycle().unwrap();
+        runtime.remove_addin(&access, &mut HostCallbackSession::new());
+        assert_eq!(runtime.phase(), LifecyclePhase::Closed);
+        let later = runtime.begin_open().unwrap();
+        assert!(!request.matches(runtime.shutdown_deps()));
+        let access = runtime.bind_addin_lifecycle().unwrap();
+        let outcome = super::super::rollback::rollback_open_request(
+            &runtime,
+            &access,
+            &mut HostCallbackSession::new(),
+            request,
+        );
+        assert!(!outcome.is_finalized());
+        assert_eq!(runtime.phase(), LifecyclePhase::Opening);
+        assert_eq!(
+            runtime.lifecycle.access().open_attempt(),
+            Some(later.attempt_id())
+        );
+        drop(later);
+    }
+
+    #[test]
     fn opening_operations_remain_at_the_transaction_issuer() {
         let issuer = Runtime::<()>::new();
         let other = Runtime::<()>::new();
@@ -661,7 +864,12 @@ mod binding_tests {
         let taken = InstalledLifecycle::<Probe> { binding }
             .take()
             .unwrap_or_else(|_| panic!("take"));
-        assert!(taken.dispose().is_err());
+        let failure = taken.dispose().err().expect("destructor panic");
+        assert!(matches!(
+            slot.binding(&access),
+            Err(ThreadAffineError::ReentrantAccess)
+        ));
+        drop(failure);
         // Disposition failed, so no successful release proof escaped. Recovery
         // can still observe and handle the same bound, empty slot.
         assert_eq!(slot.has_value(&access), Ok(false));

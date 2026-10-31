@@ -75,15 +75,32 @@ pub(crate) fn rollback_open<A>(
 where
     A: Addin,
 {
-    rollback_open_with_binding(runtime, lifecycle, callbacks, generation, None)
+    rollback_open_inner(runtime, lifecycle, callbacks, generation, None)
 }
 
-pub(in crate::runtime) fn rollback_open_with_binding<A: Addin>(
-    runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+pub(in crate::runtime) fn rollback_open_request<'runtime, A: Addin>(
+    runtime: &'runtime Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+    lifecycle: &AddinLifecycleAccess<'_, A>,
+    callbacks: &mut HostCallbackSession,
+    request: super::capabilities::RollbackRequest<'runtime, A>,
+) -> OpenRollbackOutcome {
+    if !request.matches(runtime.shutdown_deps()) {
+        return OpenRollbackOutcome {
+            status: OpenRollbackStatus::Incomplete(
+                crate::shutdown::UnloadHazard::CloseInvariantViolation,
+            ),
+        };
+    }
+    let generation = Some(request.generation());
+    rollback_open_inner(runtime, lifecycle, callbacks, generation, Some(request))
+}
+
+fn rollback_open_inner<'runtime, A: Addin>(
+    runtime: &'runtime Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     lifecycle: &AddinLifecycleAccess<'_, A>,
     callbacks: &mut HostCallbackSession,
     generation: Option<RuntimeGeneration>,
-    binding: Option<super::capabilities::InstalledLifecycle<'_, A>>,
+    request: Option<super::capabilities::RollbackRequest<'runtime, A>>,
 ) -> OpenRollbackOutcome {
     #[cfg(test)]
     let _diagnostic_test_guard = crate::diagnostics::DIAGNOSTIC_TEST_MUTEX.lock();
@@ -91,6 +108,7 @@ pub(in crate::runtime) fn rollback_open_with_binding<A: Addin>(
         crate::runtime::orchestration::OpenRollbackAcquisition::Acquired(attempt) => attempt,
         crate::runtime::orchestration::OpenRollbackAcquisition::ClosingOwnsCleanup => {
             let finalized = runtime.phase() == crate::lifecycle::LifecyclePhase::Closed
+                && runtime.lifecycle.access().removal_attempt().is_none()
                 && runtime.host.generation_callbacks_detached()
                 && !runtime.host.registration_state_unknown()
                 && runtime.residency.callbacks_retained_safely()
@@ -126,7 +144,11 @@ pub(in crate::runtime) fn rollback_open_with_binding<A: Addin>(
     // An opening transaction normally owns the lifecycle payload. It is only
     // safe to release the thread binding after that payload has been
     // explicitly taken and dropped below.
-    let teardown = match rollback_attempt.drain() {
+    let drain = match request {
+        Some(request) => rollback_attempt.drain_opening(request),
+        None => rollback_attempt.drain(),
+    };
+    let teardown = match drain {
         Ok(stage) => stage,
         Err(failure) => {
             let hazard = failure.hazard();
@@ -210,17 +232,16 @@ pub(in crate::runtime) fn rollback_open_with_binding<A: Addin>(
     };
 
     let mut cleanup_report = crate::shutdown::CloseReport::default();
-    let (teardown, empty_binding) =
-        match teardown.cleanup_addin(lifecycle, &mut cleanup_report, binding) {
-            Ok(stage) => stage,
-            Err(error) => {
-                for issue in cleanup_report.issues() {
-                    report_cleanup_issue(issue);
-                }
-                report_boundary_error("xlAutoOpen rollback cleanup", &error);
-                return incomplete(runtime, crate::shutdown::UnloadHazard::AddinCleanupFailed);
+    let teardown = match teardown.cleanup_addin(lifecycle, &mut cleanup_report) {
+        Ok(stage) => stage,
+        Err(error) => {
+            for issue in cleanup_report.issues() {
+                report_cleanup_issue(issue);
             }
-        };
+            report_boundary_error("xlAutoOpen rollback cleanup", &error);
+            return incomplete(runtime, crate::shutdown::UnloadHazard::AddinCleanupFailed);
+        }
+    };
     for issue in cleanup_report.issues() {
         report_cleanup_issue(issue);
     }
@@ -258,9 +279,10 @@ pub(in crate::runtime) fn rollback_open_with_binding<A: Addin>(
             );
         }
     };
-    let rollback_attempt = match certificate.finish() {
-        Ok(attempt) => attempt,
-        Err((error, _certificate)) => {
+    let finalized = match certificate.finish() {
+        Ok(finalized) => finalized,
+        Err(failure) => {
+            let error = failure.quarantine();
             report_boundary_error("xlAutoOpen rollback completion", &error);
             return incomplete(
                 runtime,
@@ -268,18 +290,7 @@ pub(in crate::runtime) fn rollback_open_with_binding<A: Addin>(
             );
         }
     };
-    if let Err(error) = empty_binding.release() {
-        report_boundary_error(
-            "xlAutoOpen lifecycle binding release",
-            &lifecycle_access_error(error),
-        );
-        drop(rollback_attempt);
-        return incomplete(
-            runtime,
-            crate::shutdown::UnloadHazard::CloseInvariantViolation,
-        );
-    }
-    drop(rollback_attempt);
+    drop(finalized);
     OpenRollbackOutcome {
         status: OpenRollbackStatus::Finalized,
     }

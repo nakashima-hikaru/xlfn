@@ -73,11 +73,36 @@ fn close_certificate_error() -> XllError {
     }
 }
 
-pub(crate) trait TerminalCertificateKind {
+pub(crate) type LogicalCompletionResult<'runtime, A, K> = Result<
+    <K as TerminalCertificateKind>::Completed<'runtime, A>,
+    (
+        XllError,
+        Box<<K as TerminalCertificateKind>::Certificate<'runtime, A>>,
+    ),
+>;
+
+pub(crate) trait TerminalCertificateKind: Sized {
     const RECORD_RECLAIM: bool;
     type Certificate<'runtime, A: crate::Addin>
     where
         A: 'runtime;
+
+    type Completed<'runtime, A: crate::Addin>
+    where
+        A: 'runtime;
+    fn arm_finalization<'runtime, A: crate::Addin>(
+        certificate: &mut Self::Certificate<'runtime, A>,
+    );
+    fn complete_finalization<'runtime, A: crate::Addin>(
+        completed: &mut Self::Completed<'runtime, A>,
+    );
+    fn mark_finalization_failed<'runtime, A: crate::Addin>(
+        completed: &mut Self::Completed<'runtime, A>,
+    );
+
+    fn finish<'runtime, A: crate::Addin>(
+        certificate: Self::Certificate<'runtime, A>,
+    ) -> LogicalCompletionResult<'runtime, A, Self>;
 
     fn certify<'runtime, A>(
         owner: RemovalClaimGuard<'runtime, A>,
@@ -94,6 +119,34 @@ impl TerminalCertificateKind for FinalRemoval {
         = FinalRemovalCertificate<'runtime, A>
     where
         A: 'runtime;
+
+    type Completed<'runtime, A: crate::Addin> = (ClosedWitness, RemovalClaimGuard<'runtime, A>);
+    fn arm_finalization<'runtime, A: crate::Addin>(
+        certificate: &mut Self::Certificate<'runtime, A>,
+    ) {
+        match certificate {
+            FinalRemovalCertificate::Committed { owner, .. }
+            | FinalRemovalCertificate::Uncommitted { owner, .. } => {
+                owner.mark_finalization_failed()
+            }
+        };
+    }
+    fn complete_finalization<'runtime, A: crate::Addin>(
+        completed: &mut Self::Completed<'runtime, A>,
+    ) {
+        completed.1.complete_finalization();
+    }
+    fn mark_finalization_failed<'runtime, A: crate::Addin>(
+        completed: &mut Self::Completed<'runtime, A>,
+    ) {
+        completed.1.mark_finalization_failed();
+    }
+
+    fn finish<'runtime, A: crate::Addin>(
+        certificate: Self::Certificate<'runtime, A>,
+    ) -> LogicalCompletionResult<'runtime, A, Self> {
+        certificate.finish()
+    }
 
     fn certify<'runtime, A>(
         owner: RemovalClaimGuard<'runtime, A>,
@@ -113,6 +166,29 @@ impl TerminalCertificateKind for OpenRollback {
         = OpenRollbackCertificate<'runtime, A>
     where
         A: 'runtime;
+
+    type Completed<'runtime, A: crate::Addin> = RemovalClaimGuard<'runtime, A>;
+    fn arm_finalization<'runtime, A: crate::Addin>(
+        certificate: &mut Self::Certificate<'runtime, A>,
+    ) {
+        certificate.owner.mark_finalization_failed();
+    }
+    fn complete_finalization<'runtime, A: crate::Addin>(
+        completed: &mut Self::Completed<'runtime, A>,
+    ) {
+        completed.complete_finalization();
+    }
+    fn mark_finalization_failed<'runtime, A: crate::Addin>(
+        completed: &mut Self::Completed<'runtime, A>,
+    ) {
+        completed.mark_finalization_failed();
+    }
+
+    fn finish<'runtime, A: crate::Addin>(
+        certificate: Self::Certificate<'runtime, A>,
+    ) -> LogicalCompletionResult<'runtime, A, Self> {
+        certificate.finish()
+    }
 
     fn certify<'runtime, A>(
         owner: RemovalClaimGuard<'runtime, A>,

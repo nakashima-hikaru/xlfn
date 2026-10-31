@@ -51,7 +51,6 @@ use observer::RuntimeObserver;
 #[cfg(any(test, feature = "bench-internals"))]
 use open_txn::LifecycleInstalled;
 use open_txn::{Begun, OpeningTxn};
-use shutdown::ClosedWitness;
 use xlfn_kernel::thread_affine::{ThreadAffineAccess, ThreadAffineError, ThreadAffineSlot};
 
 pub struct Runtime<A: crate::Addin, P: UnloadPolicy<A> = LogicalUnload> {
@@ -469,7 +468,7 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
     pub(in crate::runtime) fn take_addin_lifecycle(
         &self,
         access: &AddinLifecycleAccess<'_, A>,
-    ) -> Result<capabilities::TakenLifecycle<'_, A>, ThreadAffineError> {
+    ) -> Result<capabilities::TakenLifecycle<'_, A>, capabilities::LifecycleFailure<'_, A>> {
         self.shutdown_deps().take_addin_lifecycle(access)
     }
 
@@ -604,14 +603,6 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
     #[cfg(test)]
     pub(crate) fn disable_trace_for_test(&self) {
         self.observer().disable_for_test();
-    }
-
-    pub(crate) fn record_returned_success(&self, witness: ClosedWitness) {
-        self.observer().mark_returned_success();
-        if witness.is_committed() {
-            self.observer().retire_committed_shutdown();
-        }
-        self.observer().mark_return_pending();
     }
 
     #[cfg(test)]

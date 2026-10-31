@@ -59,6 +59,11 @@ pub struct BindingInstallError<'slot, T: 'static> {
 }
 
 impl<'slot, T: 'static, State> BindingTxn<'slot, T, State> {
+    /// Observes the issuer without exposing or transferring mutation authority.
+    pub fn belongs_to(&self, slot: &ThreadAffineSlot<T>) -> bool {
+        std::ptr::eq(self.claim.access.slot, slot)
+    }
+
     fn next<Next>(self) -> BindingTxn<'slot, T, Next> {
         BindingTxn {
             claim: self.claim,

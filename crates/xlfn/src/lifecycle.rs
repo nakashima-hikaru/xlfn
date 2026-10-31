@@ -1520,15 +1520,10 @@ mod tests {
         let success =
             remove_addin_inner::<CleanClose>(&runtime, &lifecycle, &mut HostCallbackSession::new());
         assert!(runtime.begin_open().is_err());
-        let RemovalSuccess::Closed {
-            witness,
-            removal_attempt,
-        } = success
-        else {
+        let RemovalSuccess::Closed { finalized } = success else {
             panic!("test close must own the close attempt");
         };
-        runtime.record_returned_success(witness);
-        drop(removal_attempt);
+        finalized.record_return();
 
         let reopened = runtime.begin_open().unwrap();
         let mut reopened = runtime.publish(reopened, (), ());

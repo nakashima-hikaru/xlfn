@@ -43,9 +43,13 @@ destruction debt remains attached to the downstream batch until payload Drop
 completes. The table publication/registration pairing remains a small native
 trusted boundary.
 
-Binding changes are unique transactions; runtime opening retains the installed
-claim through commit or rollback, and teardown retains the empty claim through
-lifecycle disposal and binding release. Quota counts remain capacity accounting,
+Binding changes are unique transactions. A checked rollback request binds the
+opening issuer, attempt and installed claim before dispatch; cleanup accepts no
+independent installed binding. Teardown owns the empty binding through resource
+certification and logical commit. Only the final consuming completion can issue
+boundary success after releasing that binding. Terminal failures retain their
+progressed phase and claim; claim return and quarantine are one canonical
+transition if binding release fails after logical close. Quota counts remain capacity accounting,
 not destruction barriers.
 
 The private-API compile checks enforce these Rust interface restrictions. The

@@ -1547,6 +1547,10 @@ impl<A: crate::Addin> LifecycleAccess<'_, A> {
         self.core.removal_epoch()
     }
 
+    pub(crate) fn matches_latest_open_attempt(&self, generation: RuntimeGeneration) -> bool {
+        generation.get().checked_add(1) == Some(self.core.next_lifecycle_attempt)
+    }
+
     pub(crate) fn open_attempt(&self) -> Option<OpenAttemptId> {
         self.canonical_state().open_attempt()
     }
@@ -2101,6 +2105,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         core: &mut LifecycleAccess<'_, A>,
         attempt: RemovalAttemptId,
         returned: Option<ModuleAuthority>,
+        finalization_failed: bool,
     ) {
         core.transition(|core| {
             let state = mem::replace(&mut core.state, LifecycleState::Closed(ClosedState::Idle));
@@ -2114,15 +2119,31 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
                         returned.is_none(),
                         "finalizing removal owner returned module authority",
                     );
-                    LifecycleState::Closed(ClosedState::Idle)
+                    // Commit terminal failure and claim return atomically: no
+                    // unclaimed Closed state is observable on release failure.
+                    if finalization_failed {
+                        LifecycleState::Quarantined(CloseResources::Unowned {
+                            payload: ClosePayload::Empty,
+                        })
+                    } else {
+                        LifecycleState::Closed(ClosedState::Idle)
+                    }
                 }
                 LifecycleState::Closing(ClosingState::Ready { resources }) => {
-                    LifecycleState::Closing(ClosingState::Ready {
-                        resources: resources.release(attempt, returned),
-                    })
+                    let resources = resources.release(attempt, returned);
+                    if finalization_failed {
+                        LifecycleState::Quarantined(resources)
+                    } else {
+                        LifecycleState::Closing(ClosingState::Ready { resources })
+                    }
                 }
                 LifecycleState::OpenRollbackPending(resources) => {
-                    LifecycleState::OpenRollbackPending(resources.release(attempt, returned))
+                    let resources = resources.release(attempt, returned);
+                    if finalization_failed {
+                        LifecycleState::Quarantined(resources)
+                    } else {
+                        LifecycleState::OpenRollbackPending(resources)
+                    }
                 }
                 LifecycleState::Quarantined(resources) => {
                     LifecycleState::Quarantined(resources.release(attempt, returned))

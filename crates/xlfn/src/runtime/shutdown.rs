@@ -5,13 +5,17 @@
 //! removal transaction, quiescence proof, and terminal certificate logic.
 
 mod certificate;
+mod finalization;
+pub(crate) use finalization::FinalizedRemoval;
 mod owner;
 mod pipeline;
 
 pub(crate) use certificate::{
-    CanonicalCompletion, CertifiedRetirement, ClosedWitness, FinalRemoval, OpenRollback,
+    CanonicalCompletion, CertifiedRetirement, FinalRemoval, OpenRollback,
 };
-pub(crate) use owner::{RemovalClaimGuard, RemovalOwner};
+#[cfg(test)]
+pub(crate) use owner::RemovalClaimGuard;
+pub(crate) use owner::RemovalOwner;
 #[cfg(any(test, feature = "refinement"))]
 pub(crate) use pipeline::QuiescenceProof;
 pub(crate) use pipeline::{CompletedResources, ReclaimFailure, ServiceSealFailure};

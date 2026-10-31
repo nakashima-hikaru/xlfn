@@ -9,7 +9,7 @@ use crate::runtime::capabilities::ShutdownDeps;
 #[cfg(test)]
 use crate::runtime::open_txn::RollbackState;
 use crate::runtime::open_txn::{GenerationStaged, HostAttached, OpeningState, OpeningTxn};
-use crate::runtime::shutdown::{ClosedWitness, FinalRemoval, RemovalClaimGuard, RemovalOwner};
+use crate::runtime::shutdown::{FinalRemoval, FinalizedRemoval, RemovalOwner};
 use crate::runtime::{AddinLifecycleAccess, Runtime};
 use std::panic::AssertUnwindSafe;
 
@@ -241,11 +241,8 @@ where
             1
         }
         RemovalSuccess::Quarantined => 1,
-        RemovalSuccess::Closed {
-            witness,
-            removal_attempt: _removal_attempt,
-        } => {
-            runtime.record_returned_success(witness);
+        RemovalSuccess::Closed { finalized } => {
+            finalized.record_return();
             1
         }
     }
@@ -255,8 +252,7 @@ pub(crate) enum RemovalSuccess<'runtime, A: Addin> {
     AlreadyClosed,
     Quarantined,
     Closed {
-        witness: ClosedWitness,
-        removal_attempt: RemovalClaimGuard<'runtime, A>,
+        finalized: FinalizedRemoval<'runtime, A>,
     },
 }
 
@@ -530,7 +526,7 @@ where
         }
     };
 
-    let (teardown, empty_binding) = match teardown.cleanup_addin(lifecycle, &mut report, None) {
+    let teardown = match teardown.cleanup_addin(lifecycle, &mut report) {
         Ok(stage) => stage,
         Err(error) => {
             for issue in report.issues() {
@@ -597,30 +593,17 @@ where
             ));
         }
     };
-    let (closed_witness, removal_attempt) = match certificate.finish() {
-        Ok(result) => result,
-        Err((error, _certificate)) => {
+    let finalized = match certificate.finish() {
+        Ok(finalized) => finalized,
+        Err(failure) => {
+            let error = failure.quarantine();
             return Err(handle_unload_hazard(
                 runtime,
                 crate::shutdown::UnloadHazard::CloseInvariantViolation,
-                "xlAutoRemove removal completion",
+                "xlAutoRemove finalization",
                 &error,
             ));
         }
     };
-
-    if let Err(error) = empty_binding.release() {
-        let error = lifecycle_access_error(error);
-        return Err(handle_unload_hazard(
-            runtime,
-            crate::shutdown::UnloadHazard::CloseInvariantViolation,
-            "xlAutoRemove lifecycle binding release",
-            &error,
-        ));
-    }
-
-    Ok(RemovalSuccess::Closed {
-        witness: closed_witness,
-        removal_attempt,
-    })
+    Ok(RemovalSuccess::Closed { finalized })
 }

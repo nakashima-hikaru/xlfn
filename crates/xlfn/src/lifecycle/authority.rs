@@ -123,9 +123,10 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
         control: &mut LifecycleAccess<'_, A>,
         attempt: RemovalAttemptId,
         returned: Option<ModuleAuthority>,
+        finalization_failed: bool,
     ) {
         self.coordinator
-            .release_removal_claim(control, attempt, returned);
+            .release_removal_claim(control, attempt, returned, finalization_failed);
     }
 
     pub(crate) fn finish_final_removal(
