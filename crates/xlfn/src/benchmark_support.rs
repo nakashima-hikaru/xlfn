@@ -41,10 +41,6 @@ use crate::handle::{
 use crate::host_callback::HostCallbackSession;
 use crate::input_identity::InputFingerprint;
 
-#[cfg(feature = "async-builtin")]
-mod async_admission;
-#[cfg(feature = "async-builtin")]
-mod async_admission_concurrent;
 mod async_spawn;
 #[cfg(feature = "cache")]
 mod cache;
@@ -62,42 +58,19 @@ mod registration;
 mod rtd;
 mod sync_boundary;
 
-pub use crate::diagnostics::benchmark::{
-    DiagnosticBenchCase, DiagnosticBenchmark, DiagnosticProbeResult,
-};
-
-pub use crate::handle::{
-    handle_removal_probe, handle_retirement_debt_probe, token_cache_associativity_probe,
-};
-#[cfg(feature = "rtd")]
-pub use crate::subscription::{
-    RtdChannelEnqueueBenchmark, RtdChannelStorageBenchmark, channel_protocol_probe,
-};
-
 #[cfg(feature = "async")]
 pub use crate::handle::{ObjectFinalPinRelease, ObjectLeaseBenchCase, ObjectLeaseBenchmark};
-pub use crate::handle::{ObjectPayloadKind, ObjectStorageBenchmark, object_storage_layout};
 
 #[cfg(feature = "async-builtin")]
 pub use crate::async_udf::AsyncPendingTaskBenchmark;
 #[cfg(feature = "async")]
 pub use crate::async_udf::AsyncTaskDrainBenchmark;
-#[cfg(all(feature = "async-builtin", feature = "handles"))]
-pub use crate::async_udf::HandleScopedDeliveryBenchmark;
 #[cfg(feature = "async")]
 pub use crate::cancellation::benchmark::CancellationLifecycleBenchmark;
-pub use crate::value::prepared_probe::InputKind as TwoPhaseInputKind;
-#[cfg(feature = "async-builtin")]
-pub use async_admission::AsyncAdmissionBenchmark;
-#[cfg(feature = "async-builtin")]
-pub use async_admission_concurrent::ConcurrentAsyncAdmissionBenchmark;
 #[cfg(feature = "async-builtin")]
 pub use async_spawn::{AsyncSpawnBenchmark, AsyncSpawnKind, RescheduleFuture, SpawnBatchResult};
 #[cfg(feature = "cache")]
-pub use cache::{
-    CacheLookupBenchCase, CurrentCacheBenchmark, CurrentCacheEvictionBenchmark,
-    RegistryCacheBenchmark,
-};
+pub use cache::RegistryCacheBenchmark;
 pub use call_resolution::{ConcurrentHandleResolutionBenchmark, MultiHandleCallBenchmark};
 pub use formula::{
     BenchmarkInputIdentity, FormulaRevisionBenchmark, SemanticIdentityBenchmark,
@@ -108,7 +81,7 @@ pub use handle::{
     BenchHandleObject, HandleColdBatch, HandleColdGrowthBenchmark, HandleRevisionChurnBenchmark,
     HandleWarmBenchmark,
 };
-pub use ingress::{OptionalNumericInputKind, RawArgumentIngressBenchmark, TwoPhaseBenchmark};
+pub use ingress::{OptionalNumericInputKind, RawArgumentIngressBenchmark};
 pub use lookup::{HandleDistinctKeyBenchmark, HandleLookupBenchCase, HandleLookupBenchmark};
 pub use native_ingress::NativeArgumentIngressBenchmark;
 pub use numeric_ingress::NumericMatrixIngressBenchmark;
@@ -120,9 +93,8 @@ pub use registration::RegistrationBenchmark;
 pub use rtd::{
     RTD_REFRESH_SCALING_CASES, RtdChannelPipelineBenchmark, RtdPrepareBenchmark,
     RtdPublishNumberBenchmark, RtdPublishStringBenchmark, RtdRefreshScalingBenchmark,
-    RtdRefreshScalingCase, RtdRefreshValueKind, rtd_pipeline_probe,
-    rtd_source_catalog_allocation_probe, rtd_topology_probe, with_rtd_connection_benchmark,
-    with_rtd_connection_memory_benchmark,
+    RtdRefreshScalingCase, RtdRefreshValueKind, rtd_source_catalog_allocation_probe,
+    with_rtd_connection_benchmark, with_rtd_connection_memory_benchmark,
 };
 pub use sync_boundary::{SyncBenchKind, SyncBoundaryWorkerPool};
 

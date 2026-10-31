@@ -3,8 +3,6 @@
 #![allow(linker_messages)]
 
 mod native_abi;
-#[cfg(feature = "abi-semantics")]
-mod native_abi_semantics;
 mod rtd_source;
 use rtd_source::{BenchRtdSource, RtdShared};
 
@@ -51,10 +49,7 @@ impl Addin for BenchAddin {
     type SharedState = State;
     type LifecycleState = ();
     type Error = XllError;
-    #[cfg(not(feature = "abi-semantics"))]
     type Layers = ();
-    #[cfg(feature = "abi-semantics")]
-    type Layers = (native_abi_semantics::SemanticLayer,);
     type AsyncExecutor = BuiltinAsyncExecutor;
 
     fn open(context: &OpenContext<Self>) -> OpenResult<Self> {
@@ -78,8 +73,6 @@ impl Addin for BenchAddin {
         })
         .with_runtime_config(config)
         .with_async_executor(executor);
-        #[cfg(feature = "abi-semantics")]
-        let opened = opened.with_layers((native_abi_semantics::SemanticLayer,));
         Ok(opened)
     }
 }

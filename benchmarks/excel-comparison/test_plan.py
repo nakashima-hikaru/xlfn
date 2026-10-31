@@ -23,7 +23,7 @@ from run import (XL_AUTOMATIC, XL_MANUAL, XL_ERR_NUM, AsyncControl, ComObject, C
                  check_final_values, check_scalar, close_worker_session, formula, register_xll,
                  registration_diagnostics, run_async, reap_excel_process, run_scalar, run_text, allocation_snapshot,
                  recover_worker_record, run_async_cancel, run_async_gate, run_async_repeated, run_matrix, run_numeric_output_pair,
-                 native_abi_formula, run_native_abi_pair, classify_abi_semantics, run_native_abi_semantics, artifact)
+                 native_abi_formula, run_native_abi_pair, artifact)
 from run import main as benchmark_main
 from summarize import PRIMARY, summarize
 from workloads import IDS, Case, cases
@@ -865,7 +865,7 @@ class PlanTest(unittest.TestCase):
         expected |= {f"L{i:02}" for i in range(1, 4)}
         expected |= {f"N{i:02}" for i in range(1, 6)}
         self.assertEqual(set(IDS), expected)
-        self.assertEqual(set(PRIMARY), expected | {"N06"})
+        self.assertEqual(set(PRIMARY), expected)
         for profile in ("full", "smoke"):
             plan = cases(profile)
             self.assertEqual(len(plan), len({case.key for case in plan}))
@@ -1008,44 +1008,13 @@ class PlanTest(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "unexpected worksheet result"):
             run_native_abi_pair(session, case, 1)
 
-    def test_semantics_profile_is_separate_from_performance_workloads(self):
-        self.assertEqual([case.id for case in cases("semantics")], ["N06"])
-        case = cases("semantics")[0]
-        self.assertEqual(artifact(Path("root"), "xlfn", case), Path("root/xlfn/abi-semantics.xll"))
-        for profile in ("full", "smoke"):
-            self.assertNotIn("N06", {case.id for case in cases(profile)})
-        with self.assertRaisesRegex(AssertionError, "instrumented XLL"):
-            session = Mock(implementation="xlfn")
-            session.app.Evaluate.return_value = 0
-            run_native_abi_semantics(session)
-
-    def test_semantics_distinguishes_input_rejection_from_unobserved_admission(self):
-        counts = {"entered": 0, "body": 0, "input_errors": 0, "other_errors": 0}
-        self.assertEqual(classify_abi_semantics(counts, XL_ERR_NUM), "no_observed_layer_entry")
-        counts.update(entered=1, input_errors=1)
-        self.assertEqual(classify_abi_semantics(counts, XL_ERR_NUM), "rust_input_rejection")
-        counts.update(input_errors=0, body=1)
-        self.assertEqual(classify_abi_semantics(counts, 42.0), "rust_body_completed")
-        counts.update(other_errors=1)
-        with self.assertRaisesRegex(AssertionError, "unexpected instrumented outcome"):
-            classify_abi_semantics(counts, XL_ERR_NUM)
-        with self.assertRaisesRegex(AssertionError, "without observed layer"):
-            classify_abi_semantics({key: 0 for key in counts}, 42.0)
-
-    def test_native_abi_summaries_preserve_signed_change_and_semantics(self):
-        records = [
-            {"id": "N01", "variant": "f64-1", "implementation": "xlfn", "status": "ok",
-             "metrics": {"q_p50_s": 1.0, "native_p50_s": 1.25,
-                         "native_over_q_ratio": 1.25, "native_change_percent": 25.0}},
-            {"id": "N06", "variant": "input-semantics", "implementation": "xlfn", "status": "ok",
-             "metrics": {"checks": 152}},
-        ]
-        timing, qualification = summarize(records)
+    def test_native_abi_summary_preserves_signed_change(self):
+        records = [{"id": "N01", "variant": "f64-1", "implementation": "xlfn", "status": "ok",
+                    "metrics": {"q_p50_s": 1.0, "native_p50_s": 1.25,
+                                "native_over_q_ratio": 1.25, "native_change_percent": 25.0}}]
+        timing, = summarize(records)
         self.assertEqual(timing["native_change_percent"], 25.0)
         self.assertFalse(timing["comparable"])
-        self.assertEqual(qualification["comparison"], "input_semantics")
-        self.assertEqual(qualification["checks"], 152)
-        self.assertNotIn("q_p50_s", qualification)
 
     def test_repeat_observations_include_first_recalculation_and_phase_times(self):
         for tracking in (False, True):

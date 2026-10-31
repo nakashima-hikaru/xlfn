@@ -54,8 +54,8 @@ mod matrix;
 mod numeric;
 /// Output conversion traits and return-cell representations.
 pub(crate) mod output;
-#[cfg(feature = "bench-internals")]
-pub(crate) mod prepared_probe;
+#[cfg(test)]
+mod prepared_tests;
 /// Raw, borrowed views over Excel's XLOPER12 input representation.
 #[allow(unsafe_code, reason = "Raw XLOPER12 views are the value ABI leaf")]
 mod raw;

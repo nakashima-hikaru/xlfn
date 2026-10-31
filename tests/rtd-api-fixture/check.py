@@ -20,8 +20,8 @@ def digest(path: Path) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--target-dir", type=Path, default=Path("/private/tmp/xlfn-rtd-api-consumer-target"))
-    parser.add_argument("--report-dir", type=Path, default=ROOT / "evidence")
+    parser.add_argument("--target-dir", type=Path, default=ROOT.parents[1] / "target" / "rtd-api-fixture")
+    parser.add_argument("--report-dir", type=Path, default=ROOT.parents[1] / "target" / "rtd-api-fixture" / "reports")
     args = parser.parse_args()
     target = args.target_dir.resolve()
     evidence = args.report_dir.resolve()

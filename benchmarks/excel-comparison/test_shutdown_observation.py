@@ -14,7 +14,6 @@ from shutdown_observation import (ProcessExitObserver, atomic_json, await_observ
                                   collect_lifecycle_trace, prepare_lifecycle_trace, summarize_exit)
 from shutdown_diagnostics import process_creation_ticks
 from run import ExcelSession
-from summarize_shutdown import summarize_record
 
 
 class ExitObservationTest(unittest.TestCase):
@@ -202,31 +201,6 @@ class LifecycleTraceTest(unittest.TestCase):
             atomic_json(control, config | {"token": "replacement"})
             collect_lifecycle_trace(config, None)
             self.assertTrue(control.exists())
-
-
-class ShutdownSummaryTest(unittest.TestCase):
-    def test_failed_run_stays_visible_and_forced_exit_is_not_natural_latency(self):
-        row = summarize_record({"id": "C02", "variant": "10", "implementation": "xlfn",
-            "status": "error", "process_exit_observation": {"termination": "forced", "quit_to_exit_s": 7},
-            "lifecycle_trace": {"auto_close": "entered_without_return", "events": [
-                {"event": "xlAutoClose.enter", "since_quit_s": 0.1},
-                {"event": "shutdown.checkpoint", "details": {"checkpoint": "StopAsyncExecutor"}}]}})
-        self.assertEqual(row["status"], "error")
-        self.assertEqual(row["quit_to_exit_s"], 7)
-        self.assertIsNone(row["quit_to_natural_exit_s"])
-        self.assertEqual(row["last_shutdown_checkpoint"], "StopAsyncExecutor")
-        self.assertNotIn("last_auto_close_return_to_exit_s", row)
-
-    def test_total_includes_time_after_callback_return_and_reference_release(self):
-        row = summarize_record({"implementation": "excel_dna", "shutdown_timing": {
-            "references_release_begin": {"qpc_ticks": 10, "qpc_frequency": 10},
-            "gc_finished": {"qpc_ticks": 610, "qpc_frequency": 10}},
-            "process_exit_observation": {"quit_to_natural_exit_s": 60, "exit_filetime_ticks": 700_000_000},
-            "lifecycle_trace": {"auto_close": "returned", "boundary_scope": "managed_callback_only", "events": [
-                {"event": "IExcelAddIn.AutoClose.return", "since_quit_s": 1, "filetime_ticks": 110_000_000}]}})
-        self.assertEqual(row["references_release_s"], 60)
-        self.assertEqual(row["last_auto_close_return_to_exit_s"], 59)
-        self.assertEqual(row["boundary_scope"], "managed_callback_only")
 
 
 if __name__ == "__main__":

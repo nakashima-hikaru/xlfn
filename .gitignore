@@ -9,6 +9,10 @@ target/
 .cache
 __pycache__/
 *.py[cod]
+.ruff_cache/
+
+# Keep machine-specific benchmark measurements out of the source tree.
+**/criterion/
 
 formal/.lake/
 

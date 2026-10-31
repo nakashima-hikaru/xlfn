@@ -22,8 +22,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 use xlfn_kernel::service_slot::ReplaceableServiceSlot;
 
-#[cfg(feature = "bench-internals")]
-pub(crate) mod benchmark;
 /// Public diagnostic events, sink configuration, and observable statistics.
 pub(crate) mod event;
 /// Private file-sink and startup-log integration.
@@ -1806,56 +1804,6 @@ mod tests {
         sink.report(&XllError::Panic, || {
             panic!("the restored capacity must now be fully reserved")
         });
-        release_tx.send(()).unwrap();
-        sink.shutdown().unwrap();
-    }
-
-    #[test]
-    #[ignore = "manual release-mode diagnostic overload performance measurement"]
-    fn benchmark_full_diagnostic_queue() {
-        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
-        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
-        let sink = Box::new(
-            AsyncDiagnosticSink::new(BlockingSink {
-                first: AtomicBool::new(true),
-                started: started_tx,
-                release: Mutex::new(release_rx),
-            })
-            .unwrap(),
-        );
-        let event = || DiagnosticEventMetadata {
-            udf_id: "overload benchmark",
-            argument: None,
-            diagnostic_id: DiagnosticId::from_u64(1),
-            timestamp: SystemTime::now(),
-        };
-        sink.report(&XllError::Panic, event);
-        started_rx.recv().unwrap();
-        for _ in 0..DIAGNOSTIC_QUEUE_CAPACITY {
-            sink.report(&XllError::Panic, event);
-        }
-        for bytes in [0, 65_536, 1_048_576] {
-            let error = XllError::Native {
-                code: 1,
-                message: "x".repeat(bytes),
-            };
-            let mut samples = Vec::new();
-            for sample in 0..12 {
-                let start = std::time::Instant::now();
-                for _ in 0..256 {
-                    sink.report(std::hint::black_box(&error), event);
-                }
-                let elapsed = start.elapsed().as_nanos();
-                if sample != 0 {
-                    samples.push(elapsed / 256);
-                }
-            }
-            samples.sort_unstable();
-            eprintln!(
-                "diagnostic_full_queue bytes={bytes} median_ns={}",
-                samples[5]
-            );
-        }
         release_tx.send(()).unwrap();
         sink.shutdown().unwrap();
     }

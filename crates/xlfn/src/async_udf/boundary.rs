@@ -40,18 +40,6 @@ impl<Build, O: CompletionObserver, T> HandleTask<Build, O, T> {
     }
 }
 
-#[cfg(all(
-    feature = "handles",
-    feature = "bench-internals",
-    feature = "async-builtin"
-))]
-mod scoped_bench;
-#[cfg(all(
-    feature = "handles",
-    feature = "bench-internals",
-    feature = "async-builtin"
-))]
-pub use scoped_bench::HandleScopedDeliveryBenchmark;
 #[cfg(all(test, feature = "handles", feature = "async-builtin"))]
 mod scoped_tests;
 

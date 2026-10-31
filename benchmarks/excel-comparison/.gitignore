@@ -1,8 +1,10 @@
 __pycache__/
 artifacts/
-semantics-artifacts/
-results*.jsonl
-results*.csv
+*.jsonl
+*.csv
+*.diagnostics/
+*.dmp
+*.etl
 excel_dna/GeneratedRegistration.cs
 excel_dna/bin/
 excel_dna/obj/

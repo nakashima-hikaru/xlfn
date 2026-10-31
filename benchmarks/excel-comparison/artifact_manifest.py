@@ -17,7 +17,7 @@ FILES = tuple(
     f"{implementation}/{name}"
     for implementation in ("xlfn", "excel_dna")
     for name in ("benchmark.xll", *(f"registration-{count}.xll" for count in REGISTRATION_COUNTS))
-) + ("event_probe/event-probe.xll",)
+)
 
 
 def sha256(path: Path) -> str:
@@ -115,8 +115,7 @@ def verify(root: Path, *, run_id: str | None = None, commit: str | None = None) 
 def verify_symbols(root: Path, manifest: dict, *, required: tuple[str, ...] = ()) -> None:
     """Verify optional symbols, bound to the baseline XLL from the same CI build.
 
-    Ordinary runs still accept older artifact sets. Memory attribution requires
-    symbols explicitly and never substitutes PDBs from another build.
+    Symbols must come from the same build as the measured XLL.
     """
     symbols = manifest.get("symbols", {})
     if not isinstance(symbols, dict):

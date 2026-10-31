@@ -785,10 +785,7 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
         }
     }
 
-    #[cfg(all(
-        feature = "async",
-        any(test, all(feature = "bench-internals", feature = "async-builtin"))
-    ))]
+    #[cfg(all(test, feature = "async"))]
     pub(crate) fn start_async(
         &self,
         executor: A::AsyncExecutor,
@@ -810,10 +807,7 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
         self.async_runtime.close()
     }
 
-    #[cfg(all(
-        feature = "async",
-        any(test, all(feature = "bench-internals", feature = "async-builtin"))
-    ))]
+    #[cfg(all(test, feature = "async"))]
     pub(crate) fn async_runtime(&self) -> &crate::async_udf::AsyncRuntime<A::AsyncExecutor> {
         &self.async_runtime
     }

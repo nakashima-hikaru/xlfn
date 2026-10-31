@@ -58,12 +58,6 @@ pub(crate) use task_scope::HandleScopedTaskBuilder;
 #[cfg(feature = "handles")]
 pub use task_scope::{AsyncTaskScope, HandleScopedBuilder};
 
-#[cfg(all(
-    feature = "bench-internals",
-    feature = "handles",
-    feature = "async-builtin"
-))]
-pub use boundary::HandleScopedDeliveryBenchmark;
 #[cfg(feature = "bench-internals")]
 pub use calculation::AsyncTaskDrainBenchmark;
 

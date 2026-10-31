@@ -258,10 +258,6 @@ impl VerifiedTokenCache {
     }
 }
 
-#[cfg(feature = "bench-internals")]
-pub(super) const VERIFIED_TOKEN_CACHE_STORAGE_BYTES: usize =
-    std::mem::size_of::<RefCell<VerifiedTokenCache>>();
-
 struct VerifiedTokenCacheEntry {
     registry_address: usize,
     session: u64,

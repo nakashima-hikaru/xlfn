@@ -1,4 +1,4 @@
-use crate::cache::{CacheEndpoint, CacheRegistry, CalculationCache};
+use crate::cache::{CacheEndpoint, CacheRegistry};
 
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, SyncSender};
@@ -6,36 +6,6 @@ use std::thread::{self, JoinHandle};
 
 const HOT_KEY: u64 = 42;
 const LOOKUP_WEIGHT_BUDGET: usize = 64;
-const EVICTION_WEIGHT_BUDGET: usize = 1;
-
-#[derive(Clone, Copy, Debug)]
-pub enum CacheLookupBenchCase {
-    HotKey,
-    DisjointKeys,
-}
-
-impl CacheLookupBenchCase {
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::HotKey => "hot_key",
-            Self::DisjointKeys => "disjoint_keys",
-        }
-    }
-
-    fn keys(self, worker_count: usize) -> Vec<u64> {
-        match self {
-            Self::HotKey => vec![HOT_KEY; worker_count],
-            Self::DisjointKeys => (0..worker_count).map(|worker| worker as u64).collect(),
-        }
-    }
-
-    fn warm_keys(self, worker_count: usize) -> Vec<u64> {
-        match self {
-            Self::HotKey => vec![HOT_KEY],
-            Self::DisjointKeys => self.keys(worker_count),
-        }
-    }
-}
 
 struct WorkerPool {
     worker_count: usize,
@@ -92,67 +62,6 @@ impl Drop for WorkerPool {
         for worker in self.workers.drain(..) {
             let _ = crate::panic_boundary::contain_panic(worker.join());
         }
-    }
-}
-
-fn warmed_calculation_cache(
-    case: CacheLookupBenchCase,
-    worker_count: usize,
-) -> Arc<CalculationCache<u64, u64>> {
-    let cache = Arc::new(CalculationCache::<u64, u64>::new(LOOKUP_WEIGHT_BUDGET));
-    for key in case.warm_keys(worker_count) {
-        cache
-            .get_or_try_insert_with(key, move || Ok(key))
-            .expect("cache benchmark warm seed failed");
-    }
-    cache
-}
-
-/// Measures the current raw-pointer cache ownership path with persistent workers.
-pub struct CurrentCacheBenchmark {
-    workers: WorkerPool,
-    total_iterations: usize,
-}
-
-impl CurrentCacheBenchmark {
-    pub fn new(
-        case: CacheLookupBenchCase,
-        worker_count: usize,
-        iterations_per_worker: usize,
-    ) -> Self {
-        assert!(worker_count != 0);
-        assert!(iterations_per_worker != 0);
-
-        let cache = warmed_calculation_cache(case, worker_count);
-
-        let keys = Arc::new(case.keys(worker_count));
-        let worker_cache = Arc::clone(&cache);
-        let workers = WorkerPool::new(worker_count, move |worker, receiver, done| {
-            let key = keys[worker];
-            while receiver.recv().is_ok() {
-                for _ in 0..iterations_per_worker {
-                    let lease = worker_cache
-                        .get(&key)
-                        .expect("current cache benchmark warm hit failed");
-                    std::hint::black_box(&*lease);
-                }
-                done.send(())
-                    .expect("current cache benchmark driver received completion signal");
-            }
-        });
-
-        Self {
-            workers,
-            total_iterations: worker_count * iterations_per_worker,
-        }
-    }
-
-    pub fn run(&self) {
-        self.workers.run();
-    }
-
-    pub const fn total_iterations(&self) -> usize {
-        self.total_iterations
     }
 }
 
@@ -415,44 +324,5 @@ impl RegistryCacheBenchmark {
 
     pub const fn total_iterations(&self) -> usize {
         self.total_iterations
-    }
-}
-
-/// Measures a deterministic live-lease retirement on the current cache.
-pub struct CurrentCacheEvictionBenchmark {
-    cache: CalculationCache<u64, u64>,
-    iterations: usize,
-}
-
-impl CurrentCacheEvictionBenchmark {
-    pub fn new(iterations: usize) -> Self {
-        assert!(iterations != 0);
-        Self {
-            cache: CalculationCache::new(EVICTION_WEIGHT_BUDGET),
-            iterations,
-        }
-    }
-
-    pub fn run(&self) {
-        for _ in 0..self.iterations {
-            let lease_a = self
-                .cache
-                .get_or_try_insert_with(0, || Ok(0))
-                .expect("current cache eviction seed A failed");
-            // Clear retires A deterministically; relying only on admission would make
-            // the measured retirement depend on capacity-one admission policy.
-            self.cache.clear();
-            let lease_b = self
-                .cache
-                .get_or_try_insert_with(1, || Ok(1))
-                .expect("current cache eviction seed B failed");
-            std::hint::black_box(&*lease_a);
-            drop(lease_b);
-            drop(lease_a);
-        }
-    }
-
-    pub const fn total_iterations(&self) -> usize {
-        self.iterations
     }
 }

@@ -74,7 +74,6 @@ pub(crate) struct HandleReadDomain {
     // Also a destruction-completion counter: release decrements synchronize
     // with seal/flush Acquire loads, even before a reclaimer locks completion.
     debt: AtomicUsize,
-    peak_debt: AtomicUsize,
     maintenance_requests: AtomicUsize,
     completion: Mutex<()>,
     changed: Condvar,
@@ -185,7 +184,6 @@ impl HandleReadDomain {
             domain: RotatingRetirementDomain::new(),
             queued: AtomicUsize::new(0),
             debt: AtomicUsize::new(0),
-            peak_debt: AtomicUsize::new(0),
             maintenance_requests: AtomicUsize::new(0),
             completion: Mutex::new(()),
             changed: Condvar::new(),
@@ -238,19 +236,9 @@ impl HandleReadDomain {
     pub(crate) fn enqueue_reclaim(&self, record: PublishedOwner<BindingRecord>) {
         self.domain.register_retired(|_, mut queue| {
             crate::retirement_queue::append_retired!(&mut *queue, record);
-            let debt = update_count(&self.debt, 1, Ordering::Relaxed, counters::add);
-            self.peak_debt.fetch_max(debt, Ordering::Relaxed);
+            update_count(&self.debt, 1, Ordering::Relaxed, counters::add);
             update_count(&self.queued, 1, Ordering::Relaxed, counters::add);
         });
-    }
-
-    #[cfg(feature = "bench-internals")]
-    pub(crate) fn debt_snapshot(&self) -> (usize, usize, usize) {
-        (
-            self.queued.load(Ordering::Relaxed),
-            self.debt(),
-            self.peak_debt.load(Ordering::Relaxed),
-        )
     }
 
     pub(crate) fn debt(&self) -> usize {

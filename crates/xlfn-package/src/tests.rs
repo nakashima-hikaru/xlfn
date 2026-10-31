@@ -2,44 +2,6 @@ use super::*;
 
 use proptest::prelude::*;
 
-/// Measures repeated verification against an already-owned, immutable artifact.
-/// Run explicitly in release mode with `--ignored --nocapture`.
-#[test]
-#[ignore = "manual performance measurement; run serially in release mode"]
-fn benchmark_verified_artifact_contents() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("engine.dll");
-    for size in [1024 * 1024, 64 * 1024 * 1024] {
-        let bytes = vec![0x53; size];
-        fs::write(&path, &bytes).unwrap();
-        let artifact = VerifiedArtifact::new(
-            PathBuf::from("engine.dll"),
-            bytes.into(),
-            fs::metadata(&path).unwrap().permissions(),
-        );
-        let mut elapsed = Vec::new();
-        for round in 0..12 {
-            let started = std::time::Instant::now();
-            std::hint::black_box(
-                verify_staged_artifact("benchmark", &path, &artifact, ExpectedIdentity::Any)
-                    .unwrap(),
-            );
-            if round != 0 {
-                elapsed.push(started.elapsed().as_nanos());
-            }
-        }
-        elapsed.sort_unstable();
-        println!(
-            "{}",
-            serde_json::json!({
-                "bytes": size,
-                "median_ns": elapsed[elapsed.len() / 2],
-                "samples_ns": elapsed,
-            })
-        );
-    }
-}
-
 fn synthetic_xll() -> Vec<u8> {
     let base = synthetic_export_pe(1, &[SyntheticExportTarget::Direct], &[]);
     let mut bytes = vec![0; 0xc00];

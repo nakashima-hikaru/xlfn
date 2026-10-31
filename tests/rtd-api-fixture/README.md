@@ -29,7 +29,6 @@ a separate target directory and `CARGO_INCREMENTAL=0`. It does not edit the
 fixture's source while checking failure cases. Override `--target-dir` or
 `--report-dir` to choose other output directories.
 
-The saved [verification](evidence/verification.json) records all commands,
-expected results, diagnostics, source/log hashes and compiler details. Positive
-and negative outputs are retained under `evidence/`. These are external compile
-checks; they do not execute Excel or Windows COM.
+Generated reports and logs are written under `target/rtd-api-fixture/reports/`
+and are not committed. These checks compile external consumers; they do not
+execute Excel or Windows COM.

@@ -6,14 +6,8 @@ mod formula;
 mod object;
 #[cfg(all(feature = "bench-internals", feature = "async"))]
 pub use object::{ObjectFinalPinRelease, ObjectLeaseBenchCase, ObjectLeaseBenchmark};
-#[cfg(feature = "bench-internals")]
-pub use object::{ObjectPayloadKind, ObjectStorageBenchmark, object_storage_layout};
 mod prepare;
-#[cfg(feature = "bench-internals")]
-mod protocol_bench;
 mod publication;
-#[cfg(feature = "bench-internals")]
-pub use protocol_bench::{handle_removal_probe, handle_retirement_debt_probe};
 #[cfg(any(test, feature = "refinement"))]
 mod refinement;
 mod refinement_hooks;
@@ -26,10 +20,6 @@ mod registry;
 mod runtime;
 mod store;
 mod token;
-#[cfg(feature = "bench-internals")]
-mod token_cache_bench;
-#[cfg(feature = "bench-internals")]
-pub use token_cache_bench::token_cache_associativity_probe;
 mod topic;
 #[allow(
     unsafe_code,

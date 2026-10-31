@@ -81,6 +81,9 @@ jobs:
             - name: Check private lifecycle typestate contracts
               run: just typestate
 
+            - name: Check RTD consumer feature boundaries
+              run: python3 -B tests/rtd-api-fixture/check.py
+
             - name: Verify release metadata and crate archives without publishing
               run: just package-check
 

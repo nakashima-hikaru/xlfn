@@ -20,8 +20,6 @@ class Case:
 
 
 def cases(profile: str = "full") -> list[Case]:
-    if profile == "semantics":
-        return [Case("N06", "input-semantics", {})]
     if profile not in ("full", "smoke"):
         raise ValueError(profile)
     smoke = profile == "smoke"

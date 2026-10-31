@@ -1,26 +1,9 @@
-param([switch]$Smoke, [switch]$AbiSemantics)
+param([switch]$Smoke)
 
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $artifactRoot = Join-Path $here 'artifacts'
 $counts = if ($Smoke) { @(10) } else { @(10, 100, 1000, 5000) }
-
-if ($AbiSemantics) {
-    # Instrumented layer-entry evidence uses a separate XLL and directory;
-    # the ordinary timing fixture keeps Layers=() and has no counter overhead.
-    $previousExtras = $env:BENCH_EXTRA_FUNCTIONS
-    try {
-        $env:BENCH_EXTRA_FUNCTIONS = '0'
-        cargo build --manifest-path (Join-Path $here 'xlfn\Cargo.toml') --release --target x86_64-pc-windows-msvc --features abi-semantics --locked
-        if ($LASTEXITCODE -ne 0) { throw 'ABI semantics XLL build failed' }
-        $semanticsOut = Join-Path $here 'semantics-artifacts\xlfn'
-        New-Item -ItemType Directory -Force -Path $semanticsOut | Out-Null
-        Copy-Item (Join-Path $here 'xlfn\target\x86_64-pc-windows-msvc\release\xlfn_excel_comparison.dll') (Join-Path $semanticsOut 'abi-semantics.xll') -Force
-        Write-Host "Instrumented ABI semantics XLL built in $semanticsOut"
-    }
-    finally { $env:BENCH_EXTRA_FUNCTIONS = $previousExtras }
-    return
-}
 
 function Build-Pair([int]$extras, [string]$outputName) {
     $env:BENCH_EXTRA_FUNCTIONS = "$extras"
@@ -71,11 +54,6 @@ function Build-Pair([int]$extras, [string]$outputName) {
 
 Build-Pair 0 'benchmark.xll'
 foreach ($count in $counts) { Build-Pair $count "registration-$count.xll" }
-cargo build --manifest-path (Join-Path $here 'event-qualification\probe\Cargo.toml') --release --target x86_64-pc-windows-msvc --locked
-if ($LASTEXITCODE -ne 0) { throw 'Event qualification probe build failed' }
-$probeOut = Join-Path $artifactRoot 'event_probe'
-New-Item -ItemType Directory -Force -Path $probeOut | Out-Null
-Copy-Item (Join-Path $here 'event-qualification\probe\target\x86_64-pc-windows-msvc\release\xlfn_event_probe.dll') (Join-Path $probeOut 'event-probe.xll') -Force
 python (Join-Path $here 'generate_registration.py') 0
 if ($LASTEXITCODE -ne 0) { throw 'Could not restore baseline generated source' }
 Write-Host "Paired add-ins built in $artifactRoot"

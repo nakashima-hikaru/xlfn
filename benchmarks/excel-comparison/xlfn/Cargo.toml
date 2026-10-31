@@ -7,9 +7,6 @@ publish = false
 [lib]
 crate-type = ["cdylib"]
 
-[features]
-abi-semantics = []
-
 [dependencies]
 xlfn = { path = "../../../crates/xlfn", features = ["async-builtin", "rtd", "lifecycle-diagnostics"] }
 futures-timer = "3.0.4"
@@ -17,6 +14,6 @@ futures-channel = "0.3.34"
 
 [workspace]
 
-# Preserve optimized code while shipping its matching native PDB for WPR/WPA.
+# Preserve optimized code while shipping matching native debugging symbols.
 [profile.release]
 debug = 2

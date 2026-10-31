@@ -519,7 +519,7 @@ impl<T, D: RtdDeliveryPolicy> RtdSender<T, D> {
         // Any latest-mode prefix is caller-owned until admission commits,
         // and is discarded outside the channel lock after successful coalescing.
         drop(batch);
-        #[cfg(any(test, feature = "bench-internals"))]
+        #[cfg(test)]
         if _wake_waiters {
             self.channel.changed.notify_one();
         }
@@ -567,7 +567,7 @@ impl<T, D: RtdDeliveryPolicy> RtdSender<T, D> {
             was_empty
         };
         if wake_publisher {
-            #[cfg(any(test, feature = "bench-internals"))]
+            #[cfg(test)]
             self.channel.changed.notify_one();
             // Recheck scheduling after releasing admission. This gives the
             // publisher a chance to drain between the two critical sections;
@@ -882,7 +882,7 @@ pub struct Channel<D: RtdDeliveryPolicy = RtdFifo> {
     state: Mutex<ChannelState<D>>,
     // The state and its stored payloads are drained before these owners drop.
     budgets: BudgetPair,
-    #[cfg(any(test, feature = "bench-internals"))]
+    #[cfg(test)]
     changed: Condvar,
     // Cancellation waiters must never consume a publisher wakeup.
     closed: Condvar,
@@ -891,7 +891,7 @@ pub struct Channel<D: RtdDeliveryPolicy = RtdFifo> {
 }
 
 impl Channel<RtdFifo> {
-    #[cfg(any(test, feature = "bench-internals"))]
+    #[cfg(test)]
     fn new(capacity: NonZeroUsize) -> Self {
         Self::with_budgets(
             RtdFifo::new(capacity),
@@ -923,7 +923,7 @@ impl<D: RtdDeliveryPolicy> Channel<D> {
                 scheduled: false,
             }),
             budgets,
-            #[cfg(any(test, feature = "bench-internals"))]
+            #[cfg(test)]
             changed: Condvar::new(),
             closed: Condvar::new(),
             accepting: AtomicBool::new(true),
@@ -931,7 +931,7 @@ impl<D: RtdDeliveryPolicy> Channel<D> {
         }
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
+    #[cfg(test)]
     fn sender<T>(this: &Arc<Self>) -> RtdSender<T, D> {
         RtdSender {
             channel: Arc::clone(this),
@@ -1023,12 +1023,12 @@ impl<D: RtdDeliveryPolicy> Channel<D> {
         let mut state = this.state.lock();
         state.scheduled = false;
         let requeue = this.reserve_schedule(&mut state);
-        #[cfg(any(test, feature = "bench-internals"))]
+        #[cfg(test)]
         this.changed.notify_all();
         requeue
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
+    #[cfg(test)]
     fn producer_finished(&self) {
         {
             let mut state = self.state.lock();
@@ -1060,7 +1060,7 @@ impl<D: RtdDeliveryPolicy> Channel<D> {
                 state.terminal_error = Some(error);
             }
         }
-        #[cfg(any(test, feature = "bench-internals"))]
+        #[cfg(test)]
         this.changed.notify_all();
         this.closed.notify_all();
         Self::schedule(this);
@@ -1087,13 +1087,13 @@ impl<D: RtdDeliveryPolicy> Channel<D> {
             let permit = state.buffered.take_all(&self.budgets);
             (values, permit)
         };
-        #[cfg(any(test, feature = "bench-internals"))]
+        #[cfg(test)]
         self.changed.notify_all();
         self.closed.notify_all();
         drop(pending);
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
+    #[cfg(test)]
     fn receive_batch(&self, batch: &mut smallvec::SmallVec<[StoredRtdValue; 32]>) -> bool {
         debug_assert!(batch.is_empty());
         let mut state = self.state.lock();
@@ -1336,191 +1336,6 @@ fn spawn_error(error: std::io::Error) -> XllError {
     XllError::Native {
         code: error.raw_os_error().unwrap_or(0),
         message: format!("failed to start RTD worker: {error}"),
-    }
-}
-
-/// Warm queue-only comparison of 32 single admissions and one batch admission.
-/// The common receive/drain is included; no publisher, sink, thread, or notifier
-/// participates in this microbenchmark. Construction and queue growth are cold.
-#[cfg(feature = "bench-internals")]
-pub struct RtdChannelEnqueueBenchmark {
-    channel: Arc<Channel>,
-    sender: RtdSender<i32>,
-}
-
-#[cfg(feature = "bench-internals")]
-impl RtdChannelEnqueueBenchmark {
-    /// Builds and warms the source/runtime budgets and retained FIFO storage.
-    #[must_use]
-    pub fn new() -> Self {
-        let channel = Arc::new(Channel::new(NonZeroUsize::new(32).unwrap()));
-        let sender = Channel::sender(&channel);
-        let fixture = Self { channel, sender };
-        fixture.run_individual();
-        fixture.run_batch();
-        fixture
-    }
-
-    /// Converts/enqueues 32 values individually, then drains the common batch.
-    pub fn run_individual(&self) {
-        for value in 0..32 {
-            self.sender.try_send(std::hint::black_box(value)).unwrap();
-        }
-        self.drain();
-    }
-
-    /// Converts/enqueues the same 32 values atomically, then drains them.
-    pub fn run_batch(&self) {
-        self.sender
-            .try_send_batch(std::hint::black_box(0..32))
-            .unwrap();
-        self.drain();
-    }
-
-    fn drain(&self) {
-        let mut batch = smallvec::SmallVec::new();
-        assert!(self.channel.receive_batch(&mut batch));
-        assert_eq!(batch.len(), 32);
-        std::hint::black_box(batch);
-    }
-}
-
-#[cfg(feature = "bench-internals")]
-impl Default for RtdChannelEnqueueBenchmark {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Queue-only probe: conversion, enqueue, wakeup, and receive; no RTD sink.
-#[cfg(feature = "bench-internals")]
-pub fn channel_protocol_probe(
-    producers: usize,
-    capacity: usize,
-    operations: usize,
-) -> serde_json::Value {
-    use std::time::Instant;
-    assert!(producers > 0 && operations > 0);
-    let mut rounds = Vec::new();
-    let mut overloaded = 0;
-    for round in 0..7 {
-        let channel = Arc::new(Channel::new(NonZeroUsize::new(capacity).unwrap()));
-        let barrier = Arc::new(std::sync::Barrier::new(producers + 2));
-        let receiver_channel = Arc::clone(&channel);
-        let receiver_barrier = Arc::clone(&barrier);
-        let receiver = std::thread::spawn(move || {
-            receiver_barrier.wait();
-            let mut count = 0;
-            let mut batch = smallvec::SmallVec::new();
-            while receiver_channel.receive_batch(&mut batch) {
-                for value in batch.drain(..) {
-                    if receiver_channel.stopping.load(Ordering::Acquire) {
-                        break;
-                    }
-                    std::hint::black_box(value);
-                    count += 1;
-                }
-            }
-            count
-        });
-        let mut workers = Vec::new();
-        for _ in 0..producers {
-            let sender = Channel::sender::<i32>(&channel);
-            let barrier = Arc::clone(&barrier);
-            workers.push(std::thread::spawn(move || {
-                barrier.wait();
-                let mut retries = 0;
-                for value in 0..operations {
-                    loop {
-                        match sender.try_send(value as i32) {
-                            Ok(()) => break,
-                            Err(RtdSendError::Full(_)) => {
-                                retries += 1;
-                                std::thread::yield_now();
-                            }
-                            Err(error) => panic!("unexpected send error: {error}"),
-                        }
-                    }
-                }
-                retries
-            }));
-        }
-        let started = Instant::now();
-        barrier.wait();
-        let retries: usize = workers
-            .into_iter()
-            .map(|worker| worker.join().unwrap())
-            .sum();
-        channel.producer_finished();
-        assert_eq!(receiver.join().unwrap(), producers * operations);
-        let elapsed = started.elapsed().as_nanos() as u64;
-        if round > 0 {
-            rounds.push(elapsed);
-            overloaded += retries;
-        }
-    }
-    rounds.sort_unstable();
-    serde_json::json!({
-        "producers": producers, "capacity": capacity, "values_per_round": producers * operations,
-        "measured_rounds": rounds.len(), "median_round_ns": (rounds[2] + rounds[3]) / 2,
-        "min_round_ns": rounds[0], "max_round_ns": rounds[5], "overloaded_retries": overloaded,
-    })
-}
-
-/// Queue storage probe without publisher threads; keeps the concrete policy.
-#[cfg(feature = "bench-internals")]
-pub struct RtdChannelStorageBenchmark<D: RtdDeliveryPolicy> {
-    sender: RtdSender<i32, D>,
-}
-#[cfg(feature = "bench-internals")]
-impl<D: RtdDeliveryPolicy> RtdChannelStorageBenchmark<D> {
-    /// Builds empty queue storage with no workers or warmup.
-    pub fn new(delivery: D) -> Self {
-        let channel = Arc::new(Channel::with_budgets(
-            delivery,
-            BudgetPair::new(
-                Arc::new(ChannelBudget::source(RtdSourceLimits::standard())),
-                Arc::new(ChannelBudget::runtime(super::topic::RtdLimits::standard())),
-            ),
-        ));
-        Self {
-            sender: Channel::sender_with_policy(&channel, delivery),
-        }
-    }
-    /// Enqueues one integer for allocation measurements.
-    pub fn send_one(&self, value: i32) {
-        self.sender.try_send(std::hint::black_box(value)).unwrap();
-    }
-    /// Enqueues 32 integers and drains the retained values.
-    pub fn run_cycle(&self) {
-        for value in 0..32 {
-            self.send_one(value);
-        }
-        self.drain();
-    }
-    /// Drains the queue after the final accepted value 31.
-    pub fn drain(&self) {
-        let mut batch = smallvec::SmallVec::new();
-        assert!(self.sender.channel.receive_batch(&mut batch));
-        assert_eq!(batch.last(), Some(&StoredRtdValue::Integer(31)));
-        std::hint::black_box(batch);
-    }
-    /// Returns concrete storage and ownership-wrapper sizes in bytes.
-    pub fn layout(&self) -> serde_json::Value {
-        let (state_bytes, buffer_bytes) = {
-            let state = self.sender.channel.state.lock();
-            (
-                std::mem::size_of_val(&*state),
-                std::mem::size_of_val(&state.values),
-            )
-        };
-        serde_json::json!({
-            "channel": std::mem::size_of_val(&*self.sender.channel),
-            "channel_state": state_bytes,
-            "buffer": buffer_bytes,
-            "sender": std::mem::size_of_val(&self.sender),
-            "subscription": std::mem::size_of::<RtdChannelSubscription>(),
-        })
     }
 }
 

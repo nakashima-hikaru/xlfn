@@ -43,32 +43,7 @@ harness = false
 required-features = ["bench-internals", "async-builtin"]
 
 [[bench]]
-name = "async_handle_scoped"
-harness = false
-required-features = ["bench-internals", "async-builtin"]
-
-[[bench]]
-name = "async_handle_scoped_allocations"
-harness = false
-required-features = ["bench-internals", "async-builtin"]
-
-[[bench]]
 name = "async_pending_allocations"
-harness = false
-required-features = ["bench-internals", "async-builtin"]
-
-[[bench]]
-name = "async_admission"
-harness = false
-required-features = ["bench-internals", "async-builtin"]
-
-[[bench]]
-name = "async_admission_concurrent"
-harness = false
-required-features = ["bench-internals", "async-builtin"]
-
-[[bench]]
-name = "async_admission_allocations"
 harness = false
 required-features = ["bench-internals", "async-builtin"]
 
@@ -93,22 +68,7 @@ harness = false
 required-features = ["bench-internals"]
 
 [[bench]]
-name = "cache_lookup"
-harness = false
-required-features = ["bench-internals", "cache"]
-
-[[bench]]
 name = "cache_registry"
-harness = false
-required-features = ["bench-internals", "cache"]
-
-[[bench]]
-name = "cache_registry_allocations"
-harness = false
-required-features = ["cache"]
-
-[[bench]]
-name = "cache_workloads"
 harness = false
 required-features = ["bench-internals", "cache"]
 
@@ -116,11 +76,6 @@ required-features = ["bench-internals", "cache"]
 name = "cache_reclamation"
 harness = false
 required-features = ["cache"]
-
-[[bench]]
-name = "input_identity"
-harness = false
-required-features = ["bench-internals"]
 
 [[bench]]
 name = "formula_caller"
@@ -148,27 +103,7 @@ harness = false
 required-features = ["bench-internals", "rtd"]
 
 [[bench]]
-name = "rtd_connection"
-harness = false
-required-features = ["bench-internals", "rtd"]
-
-[[bench]]
 name = "rtd_connection_allocations"
-harness = false
-required-features = ["bench-internals", "rtd"]
-
-[[bench]]
-name = "rtd_channel_allocations"
-harness = false
-required-features = ["rtd"]
-
-[[bench]]
-name = "rtd_channel_enqueue"
-harness = false
-required-features = ["bench-internals", "rtd"]
-
-[[bench]]
-name = "protocol_costs"
 harness = false
 required-features = ["bench-internals", "rtd"]
 
@@ -247,26 +182,6 @@ loom.workspace = true
 workspace = true
 
 [[bench]]
-name = "handle_memory"
-harness = false
-required-features = ["bench-internals"]
-
-[[bench]]
-name = "handle_object_allocations"
-harness = false
-required-features = ["bench-internals"]
-
-[[bench]]
-name = "handle_object_storage"
-harness = false
-required-features = ["bench-internals"]
-
-[[bench]]
-name = "two_phase_ingress"
-harness = false
-required-features = ["bench-internals"]
-
-[[bench]]
 name = "array_numeric_output"
 harness = false
 required-features = ["bench-internals"]
@@ -280,13 +195,3 @@ required-features = ["bench-internals", "cache"]
 name = "object_lease"
 harness = false
 required-features = ["bench-internals", "async"]
-
-[[bench]]
-name = "diagnostics_queue"
-harness = false
-required-features = ["bench-internals"]
-
-[[bench]]
-name = "diagnostics_queue_allocations"
-harness = false
-required-features = ["bench-internals"]

@@ -866,109 +866,6 @@ def run_native_abi_pair(session: ExcelSession, case: Case, repeat: int) -> dict[
     }
 
 
-def classify_abi_semantics(counts: dict[str, int], result: Any) -> str:
-    if counts["entered"] == 0:
-        if any(counts.values()):
-            raise AssertionError(f"inconsistent layer instrumentation: {counts}")
-        if type(result) is int and result < -2_000_000_000:
-            return "no_observed_layer_entry"
-        raise AssertionError(f"result without observed layer entry: {describe_value(result)}")
-    if counts["input_errors"] == counts["entered"] and counts["body"] == 0 and counts["other_errors"] == 0:
-        return "rust_input_rejection"
-    if counts["body"] == counts["entered"] and counts["input_errors"] == counts["other_errors"] == 0:
-        return "rust_body_completed"
-    raise AssertionError(f"unexpected instrumented outcome: {counts}; {describe_value(result)}")
-
-
-def run_native_abi_semantics(session: ExcelSession) -> dict[str, Any]:
-    if session.implementation != "xlfn":
-        raise UnsupportedCase("N06 requires xlfn's separate abi-semantics feature build")
-    if session.app.Evaluate("BENCH.ABI.SEM.ENABLED()") != 1:
-        raise AssertionError("N06 requires the abi-semantics instrumented XLL")
-    sheet = session.new_book()
-    source, target = sheet.Range("B1"), sheet.Range("A1")
-    names = ("entered", "body", "input_errors", "other_errors")
-
-    def snapshot() -> dict[str, int]:
-        return {name: int(session.app.Evaluate(f"BENCH.ABI.SEM.COUNT({index})"))
-                for index, name in enumerate(names)}
-
-    inputs = [
-        ("number", 42.0, None), ("numeric_text", "42", None),
-        ("true", True, None), ("false", False, None), ("zero", 0.0, None),
-        ("fraction", 1.75, None), ("negative_fraction", -1.75, None),
-        ("i32_max", 2_147_483_647.0, None), ("i32_min", -2_147_483_648.0, None),
-        ("i32_overflow", 2_147_483_648.0, None), ("i32_underflow", -2_147_483_649.0, None),
-        ("large_finite", 1e308, None), ("unicode", "日😀", None),
-        ("empty_text", "", None), ("embedded_nul", "a\0b", None),
-        ("blank", None, None), ("missing", None, None),
-        ("na_error", None, "=NA()"), ("value_error", None, '=1+"text"'),
-    ]
-    observations = []
-    # Leave no other semantic formula in the workbook while observing one call.
-    for label, value, input_formula in inputs:
-        target.ClearContents()
-        source.ClearContents()
-        source.NumberFormat = "General"
-        if input_formula is not None:
-            source.Formula = input_formula
-        elif label == "empty_text":
-            source.Formula = '=""'
-        elif value is not None:
-            if isinstance(value, str):
-                source.NumberFormat = "@"
-            try:
-                source.Value2 = value
-            except Exception as error:
-                if label != "embedded_nul":
-                    raise
-                observations.append({"input": label, "phase": "excel_source_submission_rejected",
-                                     "source_preserved": False, "error": str(error)})
-                continue
-        session.calculate(source)
-        observed_input = source.Value2
-        for kind in ("F64", "BOOL", "I32", "STR"):
-            for abi in ("Q", "NATIVE"):
-                target.ClearContents()
-                before = snapshot()
-                argument = "" if label == "missing" else "B1"
-                target.Formula = f"=BENCH.ABI.SEM.{kind}.{abi}({argument})"
-                session.calculate(target)
-                result = target.Value2
-                after = snapshot()
-                counts = {name: after[name] - before[name] for name in names}
-                phase = classify_abi_semantics(counts, result)
-                observations.append({"input": label, "kind": kind, "abi": abi,
-                                     "source_value": observed_input, "source_description": describe_value(observed_input),
-                                     "result": result, "result_description": describe_value(result),
-                                     "counts": counts, "phase": phase,
-                                     "unobserved_entry_cause": "Excel preprocessing or Rust pre-admission rejection"
-                                         if phase == "no_observed_layer_entry" else None,
-                                     "source_preserved": observed_input == value if input_formula is None else None})
-                # Assert the unambiguous same-type examples, and leave Excel's
-                # conversion and rounding rules as measured observations.
-                expected = {("number", "F64"): 42.0, ("true", "BOOL"): 1.0,
-                            ("i32_max", "I32"): 2_147_483_647.0,
-                            ("unicode", "STR"): 2.0}.get((label, kind))
-                if expected is not None and (phase != "rust_body_completed" or result != expected):
-                    raise AssertionError(f"valid {label}/{kind}/{abi}: {observations[-1]}")
-                if abi == "Q" and input_formula is None and label not in ("blank", "missing") and observed_input == value:
-                    numeric = type(observed_input) in (int, float)
-                    accepted = {
-                        "F64": numeric,
-                        "BOOL": type(observed_input) is bool,
-                        "I32": numeric and observed_input == math.trunc(observed_input)
-                               and -2_147_483_648 <= observed_input <= 2_147_483_647,
-                        "STR": isinstance(observed_input, str),
-                    }[kind]
-                    expected_phase = "rust_body_completed" if accepted else "rust_input_rejection"
-                    if phase != expected_phase:
-                        raise AssertionError(f"strict contract {label}/{kind}: {observations[-1]}")
-    return {"checks": len(observations), "observations": observations,
-            "admission_note": "entered counts UdfLayer entry before conversion, not the outer C wrapper. Errors with zero layer entries can come from Excel preprocessing or an earlier runtime/ingress rejection; successful marker/counter calls support, but do not prove, the Excel-preprocessing interpretation.",
-            "timing_note": "Instrumented qualification only; do not use this XLL for performance comparisons. source_preserved records whether Excel retained the supplied value, including embedded NUL."}
-
-
 def run_async(session: ExcelSession, case: Case, repeat: int) -> dict[str, Any]:
     sheet = session.new_book()
     count = case.params["cells"]
@@ -1611,8 +1508,6 @@ def run_tail(session: ExcelSession, case: Case, repeat: int) -> dict[str, Any]:
 
 
 def execute(session: ExcelSession, case: Case, repeat: int) -> dict[str, Any]:
-    if case.id == "N06":
-        return run_native_abi_semantics(session)
     if case.id.startswith("N"):
         return run_native_abi_pair(session, case, repeat)
     if case.id in ("S01", "S02", "S03", "S04", "P01", "P02", "P03", "P04", "W03", "L02"):
@@ -1645,8 +1540,7 @@ def execute(session: ExcelSession, case: Case, repeat: int) -> dict[str, Any]:
 
 
 def artifact(root: Path, implementation: str, case: Case) -> Path:
-    filename = ("abi-semantics.xll" if case.id == "N06" else
-                f"registration-{case.params['registrations']}.xll" if case.id == "C02" else "benchmark.xll")
+    filename = (f"registration-{case.params['registrations']}.xll" if case.id == "C02" else "benchmark.xll")
     return root / implementation / filename
 
 
@@ -1810,7 +1704,7 @@ def worker(args: argparse.Namespace, case: Case) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--profile", choices=("full", "smoke", "semantics"), default="full")
+    parser.add_argument("--profile", choices=("full", "smoke"), default="full")
     parser.add_argument("--artifacts", default=str(ROOT / "artifacts"))
     parser.add_argument("--allow-local-artifacts", action="store_true",
                         help="development only: run locally built XLLs without a CI manifest")

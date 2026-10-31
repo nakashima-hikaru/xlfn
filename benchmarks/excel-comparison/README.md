@@ -1,37 +1,27 @@
 # Excel comparison benchmark
 
-This suite runs the same worksheet workloads in separate Excel processes with
-either xlfn or Excel-DNA loaded. It produces one JSON record per case and a
-paired CSV. It needs **64-bit Excel for Windows (Microsoft 365 with dynamic
-arrays)** to run. The smoke profile checks the harness; use `full` for a
-comparison.
+This suite runs matching worksheet workloads in separate Excel processes with
+xlfn or Excel-DNA loaded. It writes one JSON record per case and a paired CSV.
+Running it requires **64-bit Excel for Windows with dynamic arrays**, Python
+3.11+, `pywin32`, and `psutil`. CI builds and checks the fixtures; it does not
+run Excel. The `smoke` profile checks the harness, while `full` supplies the
+comparison workloads.
 
-The separate [lifecycle terminal-status record](lifecycle-terminal.md) covers
-callback suppression during reload and rollback. The
-[calculation-event qualification record](event-qualification/README.md) preserves
-the observed nil-procedure removal failure and the current module-lifetime
-registration design. Production keeps the native handlers and DLL resident;
-logical close drains and reclaims the generation behind closed admission.
-The revised close/reopen behavior still needs matching-build live-Excel
-qualification. Worksheet comparison results do not establish that behavior
-or physical DLL unload.
+Results depend on the Excel build and machine. Keep generated measurements,
+traces, and dumps outside version control. Compare both implementations on the
+same computer, Excel build, power mode, calculation settings, and trust settings.
+Repeat independent sessions and reverse implementation order when evaluating a
+performance change.
 
-## Build in CI, run on the Windows Excel machine
+## Build and run
 
-The [Excel comparison XLLs workflow](../../.github/workflows/excel-comparison-xll.yml)
-builds **x86_64** xlfn and Excel-DNA **NativeAOT** XLLs for the same commit. It
-uploads `excel-comparison-x86_64`, containing both `benchmark.xll` files,
-four registration variants per implementation, the standalone event probe,
-matching baseline PDBs under `symbols/`, and a manifest with SHA-256
-digests. A second CI job downloads and verifies that artifact. CI does not
-run Excel.
+The [XLL workflow](../../.github/workflows/excel-comparison-xll.yml) builds x86_64
+xlfn and Excel-DNA NativeAOT XLLs for the same commit. Its
+`excel-comparison-x86_64` artifact contains a baseline and four registration
+variants per implementation, matching baseline PDBs, and a SHA-256 manifest.
+A second job downloads and verifies the artifact.
 
-On the Excel machine, install Python 3.11+, `pywin32`,
-`psutil`, and GitHub CLI (`gh`). Use the same Excel build, computer, power
-mode, and trust settings for both add-ins. Run from an ordinary interactive
-desktop session with a trusted add-in location; Excel COM automation is not
-suitable for a Windows service. Check out the revision used by the CI run,
-then download its artifact by **run ID**:
+From this directory on the Windows Excel machine:
 
 ```powershell
 py -m pip install pywin32 psutil
@@ -42,623 +32,102 @@ py ./run.py --profile full --out ./results-full.jsonl
 py ./summarize.py ./results-full.jsonl
 ```
 
-Replace `123456789` with a completed workflow run ID. `fetch-ci.ps1` rejects
-an existing destination so artifacts from different runs cannot be mixed;
-`-Repository OWNER/REPO` and `-Destination PATH` are available if needed. If
-you choose another destination, pass the same path to `run.py --artifacts`.
-An explicit relative `-Destination` is resolved against your current PowerShell
-location; the default remains the `artifacts` directory beside `fetch-ci.ps1`.
-The runner verifies the CI manifest (including Excel-DNA's NativeAOT build mode), all eleven XLL digests, the x86_64 PE
-machine type, and the checkout commit before opening Excel. For a PR artifact,
-check out the CI run's merge commit; `--allow-commit-mismatch` is available
-only for runner-only changes that remain compatible with the artifact's
-worksheet functions. Changes to either XLL require new artifacts. Records include
-the CI commit and run ID, and pairing requires the same run. Each case starts
-a fresh Excel process;
-the parent kills a timed-out process and records a failed case. `--id S01
---id S02`, `--variant 1000`, and `--implementation xlfn` narrow a run.
-`py ./run.py --plan` lists cases without opening Excel and also works on a
-Mac. Choose a new `--out` path for each run; use `--append` only when
-intentionally adding cases to an existing JSONL file.
+Use a completed workflow run ID and check out its source commit before running.
+For a PR artifact, use the CI merge commit. `fetch-ci.ps1` refuses an existing
+destination to avoid mixing artifacts. Its optional `-Repository OWNER/REPO`
+and `-Destination PATH` select another repository or destination; pass the same
+destination to `run.py --artifacts`.
 
-The runner loads the selected XLL with `Application.RegisterXLL` and stops
-if Excel reports a load failure. Formula checks report Excel errors such as
-`#NAME?` explicitly. Scalar checks compare every cell with its expected value;
-S04 checks both the location and type of each intended `#NUM!` result.
-Scalar results from runner revisions through `2c06039` must be rerun: those
-revisions could mistakenly accept Excel error codes as numeric results outside S04.
+The runner verifies all ten XLL digests, PE architecture, artifact provenance,
+and checkout commit before opening Excel. `--allow-commit-mismatch` permits a
+runner-only change compatible with older XLLs and records both revisions.
+Changes to fixture functions require fresh XLLs. Run from an interactive desktop
+session with a trusted add-in location and resolve Excel security prompts first.
 
-For development without CI, install the Rust x86_64 MSVC target, .NET 10
-SDK, and the Visual Studio C++ toolchain needed by NativeAOT; run
-`./build.ps1`, then pass `--allow-local-artifacts` to `run.py`.
-`build.ps1 -Smoke` creates only the 10-extra registration variant. Local
-artifacts are labeled `local-unverified` and do not enter the normal CI path.
+Each case starts a fresh Excel process. The runner requires successful XLL
+loading, validates worksheet outputs, and treats timeout, cleanup failure, or
+forced process termination as failure. It retains errors in the JSONL output.
+Use a new output path for each run; `--append` explicitly adds to an existing
+file. Filter with `--id S01 --id S02`, `--variant 1000`, or
+`--implementation xlfn`. Preview workloads on any platform:
 
-The two packed XLLs use identical `BENCH.*` worksheet names and are **never
-loaded together**. The Excel-DNA fixture uses the 1.10.0-preview5 NativeAOT
-package on .NET 10; its
-Task UDF uses Excel-DNA's built-in **RTD-backed** async registration, and its streaming UDF
-uses `ExcelAsyncUtil.Observe`. The xlfn fixture uses xlfn's async and RTD
-paths. The worksheet function bodies do only the stated work. C02 generates
-the same number of extra one-argument identity functions for each add-in;
-the ordinary fixture functions remain registered too. Async measurements compare
-xlfn native async delivery with Excel-DNA RTD-backed Task delivery, including
-Excel's RTD throttle; they do not isolate native async framework overhead.
+```sh
+python run.py --profile smoke --plan
+```
 
-The synchronous paths have different representation costs. xlfn automatically
-registers `f64` as `B`, `bool` as `A`, `i32` as `J`, and `String`/`&str` as
-`D%`. Excel coerces these inputs before calling Rust; explicit
-`#[excel_arg(strict)]` inputs use `Q` and xlfn's strict value validation.
-The numeric-range fixture
-uses `NumericMatrixRef` for M01/M03/M04: Excel supplies a dense FP12 buffer
-through the `K%` argument ABI, and xlfn borrows its validated doubles. This is
-an explicit numeric-coercion API: Excel converts blanks to zero and rejects
-incompatible input before invoking Rust. It does not change the strict
-`Matrix<f64>` API. These cases contain only numeric cells, so their values and
-function bodies retain the same workload.
+For local fixture development, install the Rust x86_64 MSVC target, .NET 10 SDK,
+and Visual Studio C++ tools required by NativeAOT. Run `./build.ps1`, then pass
+`--allow-local-artifacts`. `./build.ps1 -Smoke` builds only the 10-extra-function
+registration variant. Local artifacts are recorded as `local-unverified`.
 
-M02 builds numeric output directly with `NumericArrayBuilder` and returns FP12.
-M03 encodes the borrowed numeric slice with `XlArrayBuilder::from_f64`. Both
-avoid an intermediate owned matrix. M03 uses Q and preserves worksheet error
-distinctions; M02 failures display #NUM! and retain details in runtime history.
-M06 compares both return ABIs with the same numeric builder. M05 uses
-`MatrixRef<ExcelCellRef>` to classify the same five cell types without owning
-each string. Strings still require validated UTF-16 to UTF-8 decoding into
-call-local scratch.
+## Workloads
 
-Primitive numeric, Boolean, and Excel-error returns reuse one process-owned
-32-byte root per producing thread and loaded module instance, without an
-`xlAutoFree12` obligation. Those roots remain allocated until process exit.
-Strings and arrays retain their owned return storage and cleanup callback.
-S04 returns intentional `Result<f64, ExcelError>` errors, like Excel-DNA's
-worksheet error values, instead of framework failures that produce a failure
-diagnostic. The periodic positions and `#NUM!` validation remain the same.
-
-Excel-DNA uses typed numeric and string marshaling; its numeric-array path can
-use dense FP12 storage. Rust strings require conversion back to UTF-16 on output.
-T01 counts Unicode scalar values in Rust but reads the UTF-16 length in C#;
-the current ASCII and Japanese BMP inputs have the same expected count.
-These cases compare the exposed APIs, including those costs. They do not
-isolate equivalent host ABI paths or the function body alone.
-
-These fixture changes preserve formulas, range shapes, operation counts,
-timing boundaries, polling, and expected results. Local tests and benchmarks
-validate the Rust paths; their effect on the Excel-DNA comparison remains
-unverified until newly built XLLs are run in live Excel. Keep earlier records
-with their original artifact digests rather than treating them as results for
-the updated fixtures.
-
-## Workloads and measurement
-
-Matrix cases time one formula per recalculation, including COM dispatch and
-Excel's dependency handling, coercion, spill, and completion queries.
-`ns_per_element` therefore includes fixed costs; it is not an isolated UDF
-conversion or allocation measurement. `recalculation_samples` retains each
-measured sample (excluding warmup), split into `calculate_call_s` and
-`completion_wait_s`, with `completion_polls`. The first component still includes
-both COM dispatch and Excel execution; the second includes `CalculationState`
-queries and any polling sleeps. No component is subtracted from the total.
-M01/100x100 and M04/100x100 execute the same formula and input and provide a
-useful check for session variability. For a performance comparison, repeat
-independent Excel sessions and reverse the implementation order; five
-recalculations in one session do not establish statistical significance.
-
-T01–T03 likewise retain each measured Calculate/completion-query breakdown and
-validate every output cell after warmup and after the final measured iteration,
-outside the timer. Their `ns_per_char` divides whole recalculation time by the
-requested Unicode code-point count, including all formulas. C02 measures one
-fresh `RegisterXLL` operation per process; `--repeat` does not repeat DLL loading.
-Compare startup using multiple fresh sessions and reverse implementation order.
-
-For C02 attribution, `--shutdown-diagnostics` also captures
-`registration.preflight` and `registration.transaction` during startup. They
-report descriptor preparation, conflict checks, registration argument encoding
-plus callback/result cleanup, and remaining transaction work. Counts and outcomes
-remain available on failed transactions. The transaction scope excludes DLL
-loading, module-name lookup, user `Addin::open`, and native event registration.
-These are aggregate Rust/host-operation timings, including synchronous reentry;
-they do not isolate Excel's internal processing time. Each phase excludes its
-own diagnostic write, but `registration_load_s` includes those writes. Collect
-separate runs without diagnostics for startup performance comparisons.
-
-| IDs | What the harness does | Main observed value |
+| IDs | Workload | Measurements |
 | --- | --- | --- |
-| S01–S04 | Identity, 2/4/8 args, timed busy loop, periodic `#NUM!` | Dirty-range recalculation distribution and throughput; S03 has a 0-µs baseline |
-| M01–M05 | Numeric input/output/copy, equal-element tall/wide/square, mixed Excel cell types | Recalculation time per element; M05 also records add-in allocation counters |
-| T01–T03 | ASCII/Japanese input/output/copy, 8–4096 characters | Recalculation time per character |
-| P01–P04 | 1/2/4/8/16 Excel calculation threads; CPU/light/heavy/contended atomic UDF | Throughput, speedup versus one thread, parallel efficiency, batch tails |
-| A01–A04 | Immediate/delayed async; gated 100/1k/4096 fan-out and 4096 simultaneous completions | Submission and completion throughput, COM-observed cell-arrival tails |
-| A05 | Excel-DNA pending result invalidation by replacing arguments, clearing cells, or closing a workbook; native cancellation requires interactive qualification | Drain after deliberate old-task release, final-result correctness; native COM status is `unsupported` |
-| A06 | Repeated argument replacement and recalculation | Final-result correctness and stale result count; overlapping pending generations are not established |
-| R01–R03 | Unique/shared/grouped topics, including 100k unique | Subscribe time, incremental RSS, pulse update time |
-| R04–R07 | 1–2000 requested updates/topic/s, burst, churn, 30-minute run | Source emissions, observed cell updates, tail, RSS/latency drift |
-| C01–C04 | Fresh Excel/add-in load, extra registrations, first call, warm workbook open | Startup/registration/first-call/open-to-complete time |
-| W01–W03 | Mixed/finance-like/10k–100k formula books | End-to-end settle, Excel CPU, peak RSS |
-| L01–L03 | Representative peak memory, 100/1000 recalculations, scalar/async/RTD tails | Peak RSS per cell, latency/RSS drift, p50/p95/p99/max |
-| N01–N05 | Within-xlfn `Q` versus `B` (1/2/4/8 arguments), `A`, `J`, `D%` (short/long Unicode), and `K%` | ABBA/BAAB samples, native/Q median ratio, signed percentage change |
+| S01–S04 | Identity, argument counts, CPU delay, periodic `#NUM!` | Recalculation distribution and throughput |
+| M01–M05 | Numeric input/output/copy, array shapes, mixed cell types | Recalculation per element, allocation observations |
+| M06 | Within-xlfn Q versus FP12 numeric returns | Balanced timing samples and full-spill validation |
+| T01–T03 | ASCII/Japanese input/output/copy | Recalculation per character |
+| P01–P04 | Calculation thread counts, CPU work, shared and contended atomics | Throughput, parallel efficiency, tails |
+| A01–A04 | Immediate/delayed async, gated fan-out, simultaneous completions | Submission and completion throughput, arrival tails |
+| A05–A06 | Pending result invalidation and repeated argument replacement | Final correctness, drain, stale results |
+| R01–R07 | Unique/shared topics, update rates, bursts, churn, sustained updates | Subscription, observed delivery, memory and latency drift |
+| C01–C04 | Fresh load, extra registrations, first call, workbook open | Startup and registration times |
+| W01–W03 | Mixed and finance-like workbooks | End-to-end completion, CPU and peak RSS |
+| L01–L03 | Peak memory, repeated calculations, scalar/async/RTD tails | RSS and private-commit observations, latency drift |
+| N01–N05 | Within-xlfn Q versus native numeric, Boolean, integer, string and range inputs | Balanced timing samples and native/Q ratios |
 
-### Native input ABI controls
+The implementations use identical `BENCH.*` worksheet names and must be loaded
+in separate processes. Excel-DNA uses its .NET 10 NativeAOT fixture. Its Task
+UDF delivery is RTD-backed, while xlfn uses native async. The comparison includes
+Excel's RTD throttle and does not isolate native async framework overhead.
 
-Run the N-series on a newly built xlfn XLL using the same artifact verification
-as other workloads:
+Synchronous workloads use manual calculation. Async, RTD, and mixed workloads
+use automatic calculation so RTD completions can reach cells. Gated async cases
+arm a file-based control channel once using `Application.Run`; a separate
+controller releases work without calling Excel. Full A03/A04 batches fit xlfn's
+4096 pending-task limit. A05 native cancellation cannot be established through
+COM programmatic recalculation and is reported as unsupported; Excel-DNA's case
+measures drain after deliberate release, rather than cancellation of its Task.
 
-```powershell
-py ./run.py --profile full --implementation xlfn --id N01 --id N02 --id N03 --id N04 --id N05 --repeat 10 --out ./results-native-abi.jsonl
-py ./summarize.py ./results-native-abi.jsonl
-```
+Matrix, string, and synchronous timings include COM dispatch, Excel dependency
+handling, coercion, spills, and completion queries. They are not isolated Rust
+conversion times. Recalculation samples retain Calculate/completion breakdowns;
+explicit memory reads occur outside the timer. Async/RTD tails are COM arrival
+observations sampled around 10 ms apart. Excel can coalesce RTD updates, so
+observed cell changes are a lower bound on publication frequency. The full R07
+case runs for 30 minutes.
 
-Each case uses identical Rust bodies and inputs, with an explicit `strict` Q
-baseline and the automatically selected native ABI. N05 uses strict
-`MatrixRef<f64>` for Q and `NumericMatrixRef` for K%. Q and native formulas
-occupy distinct ranges in the same workbook. After both ranges are warmed,
-the runner dirties only the measured range and alternates Q/native/native/Q
-and native/Q/Q/native blocks. Each block contributes two samples per ABI.
-Every output is checked, and the record retains the order and timing breakdown
-for every recalculation. `native_change_percent` preserves improvements and
-regressions; negative values mean the native median was lower.
-
-These are comparisons within xlfn, so Excel-DNA is `unsupported` for N01–N05
-and its cross-framework ratio is left empty. The CSV carries the Q/native
-medians and ratio from the xlfn record. Use multiple independent sessions and
-inspect both directions; repeated blocks in one process do not establish a
-universal speedup. These controls use valid inputs. They do not establish
-Excel's behavior for coercion failures, omitted arguments, or fractional J
-conversion. Those require live worksheet qualification, separately from the
-Rust malformed-buffer and strict conversion tests. An Excel error cell alone
-cannot prove whether Excel rejected an input before calling the wrapper.
-
-N06 provides separate instrumented worksheet qualification. Build its optional
-`abi-semantics` feature on Windows and run the dedicated profile:
+The numeric input fixture uses explicit `NumericMatrixRef` coercion; strict Q
+and native input paths are also compared within xlfn by N01–N05. M06 builds the
+same numeric output under Q and FP12. Both comparisons alternate ABBA and BAAB
+blocks, validate outputs, retain timing vectors, and report signed changes.
+They are within-xlfn controls and have no Excel-DNA performance ratio. For example:
 
 ```powershell
-./build.ps1 -AbiSemantics
-py ./run.py --profile semantics --implementation xlfn --artifacts ./semantics-artifacts --allow-local-artifacts --out ./results-abi-semantics.jsonl
-py ./summarize.py ./results-abi-semantics.jsonl
+py ./run.py --id M06 --implementation xlfn --repeat 10 --out ./results-returns.jsonl
+py ./run.py --id N01 --id N04 --implementation xlfn --repeat 10 --out ./results-inputs.jsonl
 ```
 
-This build is marked `local-unverified` and has its own `abi-semantics.xll`;
-it is not part of the paired timing artifact. Its optional `UdfLayer` counts
-admitted layer entry before input conversion and classifies completion. The test
-functions also count entry into the Rust body. N06 records those counter
-deltas for Q and native f64/Boolean/i32/string arguments, covering numbers,
-numeric text, TRUE/FALSE, fractional values, i32 bounds and overflows, a large
-finite value, Unicode, empty text, embedded NUL, blank cells, omitted
-arguments, `#N/A`, and `#VALUE!`. It verifies unambiguous same-type examples
-and retains Excel's coercion/rounding results as observations rather than
-assuming undocumented conversion outcomes. `source_preserved` reports whether
-Excel retained the COM-supplied source, so an embedded-NUL result is not
-mistaken for testing bytes that Excel discarded.
+The paired summarizer requires successful results with matching settings,
+runner sources, Excel build, and CI artifacts. A ratio above 1 indicates an
+xlfn advantage. Raw Rust allocator counts and Excel-DNA managed allocation
+counts have different scopes; compare cross-framework timing and process memory
+instead. RSS growth alone does not establish a leak. FP12 process-heap buffers
+also bypass the Rust allocator counters.
 
-An Excel error with zero observed layer entries is recorded as
-`no_observed_layer_entry`; an observed layer with an input-error
-completion and no body entry is `rust_input_rejection`. Successful body entry
-is recorded separately. Zero layer entries do not prove that the outer C
-wrapper was never called: ingress/runtime rejection also precedes layer entry.
-Successful marker and counter calls support an Excel-preprocessing inference
-while the runtime is open, but the record preserves that uncertainty.
-Unexpected instrumented errors fail qualification. Invalid
-UTF-16 cannot reliably be constructed in a worksheet and is covered by direct
-Rust boundary tests instead. Never use the instrumented feature build for
-performance measurements: the default fixture has `Layers=()` and compiles out
-this instrumentation entirely.
+M05 enables allocation tracking after warmup and disables it in `finally`.
+Other ordinary workloads run with Rust allocation tracking disabled. The
+optional `--repeat-diagnostics` enables it for L02; those instrumented timings
+are excluded from comparison ratios. `--shutdown-diagnostics` captures lifecycle
+and exit observations, while `--dump-on-failure` captures a surviving process
+only after failure. `--full-memory-dumps` adds heap memory to either dump mode.
+These troubleshooting modes write local artifacts and may affect timing;
+full lifecycle diagnostics are excluded from performance ratios.
 
-The SDK ABI probe additionally calls a Rust `extern "system"` receiver from
-C++ with `double`, 16-bit `short`, 32-bit `long`, a counted UTF-16 pointer,
-and XLOPER12 pointers. It checks both Boolean values, signed integer extrema,
-an embedded NUL, and an astral character. Run the probe on native Windows x86
-and x64 with the Microsoft SDK header; local Rust checks cannot replace that
-calling-convention evidence. No Windows/Excel results are checked in for this
-ABI redesign yet, so no Excel speed or coercion claim is made here.
+## Local checks
 
-Async, RTD, and mixed workloads use automatic calculation for both add-ins so
-RTD completions can update cells. Synchronous workloads use manual calculation.
-The result records `calculation_mode` and, for async workloads, `async_delivery`.
-A01/A02 timing starts before formula entry because automatic calculation may
-begin while formulas are being submitted. No extra recalculation is requested
-while async results are pending, including the A03/A04 gated calls. Before
-submission, those cases arm `BENCH.ASYNC.ARM(control_dir, expected_count)`.
-The main COM thread invokes ARM once with `Application.Run`, passing the
-directory and count as separate arguments. ARM must not use formula evaluation:
-`Application.Evaluate` can evaluate a UDF twice, which makes the second call
-reject an already initialized gate. See the [Evaluate behavior investigation](https://fastexcel.wordpress.com/2011/11/02/evaluate-functions-and-formulas-fun-how-to-make-excels-evaluate-method-twice-as-fast/)
-and Microsoft's [XLL invocation support in Application.Run](https://learn.microsoft.com/en-us/office/vba/api/excel.application.run).
-Arming failures retain the return value/type or COM error and any existing
-fixture state in `async_control`; the runner does not retry initialization.
-A fixture worker publishes `ready.json` once all requested calls are active;
-an independent runner thread writes `release`, and the fixture acknowledges
-`released.json`. Pending-state observation and release use files, so they can
-progress while Excel blocks the main COM caller in formula entry. No Excel
-call is made from the controller thread. Both fixtures use the same protocol.
-Failure to reach readiness triggers an emergency release and an error result.
-The full profile uses A03 variants `100`, `1000`, and `4096`, and A04 variant
-`burst-4096`. Both implementations receive the same counts, which fit xlfn's
-4096 simultaneously pending native async tasks. Earlier A03/`10000` and
-A04/`burst` full-profile results used 10,000 gated tasks; that count exceeds
-xlfn's capacity and cannot reach the all-active condition. Keep those historical
-rows separate from the new variants. This measures a single simultaneous batch;
-it does not release tasks in waves. The smoke profile still uses 20 tasks.
-
-A05 reports native xlfn COM runs as `unsupported` and makes the runner exit
-nonzero. Microsoft documents that calculation events are not raised during
-[programmatic recalculation](https://learn.microsoft.com/en-us/office/client-developer/excel/handling-events),
-and native async formula entry may wait for task completion. Increasing the
-delay or releasing old work before the action cannot establish cancellation.
-For Excel-DNA, A05 verifies file-based pending evidence, applies the requested
-worksheet/workbook action, deliberately releases the old tasks, and checks
-their drain and resulting cells. `task_drain_after_release_s` measures that
-deliberate drain; it does not prove cancellation of the underlying Task.
-The summary preserves the native unsupported reason and emits no paired ratio.
-
-Native A05 needs a fresh interactive Excel process and an instrumented XLL,
-following the [calculation-event qualification procedure](event-qualification/README.md).
-Arm the gate while idle, then enter the gated formulas through Excel's UI.
-After `ready.json` confirms all calls are pending, use the UI to change the
-arguments/recalculate, clear the cells, or close the workbook in separate runs.
-Capture CalculationCanceled/CalculationEnded entries with generation IDs,
-then release any surviving old work through the file channel. Verify that
-late old results cannot replace the new values or repopulate cleared cells;
-for close, retain task/handle traces because worksheet cells no longer exist.
-Keep the native cancellation result unverified until these observations exist.
-
-Synchronous timing starts after formula creation and `Range.Dirty()` and ends
-when Excel reports calculation done. The explicit RSS read after each
-recalculation happens after the timer stops; the background RSS sampler still
-runs throughout the case. Older runners also included that explicit
-process-information read in each recalculation sample. Matrix output is checked at its bottom
-right spill cell. Async timing checks the **actual cell values**, not just
-Excel's calculation state. A03/A04 wait until the requested number of calls
-is active before releasing a shared gate, and verify every cell in a final
-snapshot after sampled latency timing stops. A06 also rejects any incorrect
-value in its final complete snapshot. RTD timing waits for subscription
-count, then checks cell values after a pulse. RTD update-rate results include
-both the source's actual emission rate and the values observed in a cell; the
-latter is a lower bound because Excel can coalesce updates. The runner sets
-`RTD.ThrottleInterval` to 100 ms by default and restores the prior value when
-it closes the Excel process. Async and RTD tails are sampled through COM at
-about 10 ms intervals, so they are **arrival observations**, not precise
-in-process callback latency. `R07` is 30 minutes in the full profile.
-
-R02/R03/R05 issue each pulse once through `Application.Run`, without adding a
-control formula or explicitly recalculating during delivery. Arrival percentiles
-remain sampled, but a pulse succeeds only when the entire cell snapshot matches
-its sequence. This prevents a regular sampling stride from hiding stalled topics.
-On failure, `rtd_pulse_failed` preserves the sequence, error, and traceback before
-diagnostic calls. `rtd_pulse_diagnostics` records the source emission counter before
-and after the pulse and their difference as `source_publish_returns`. That counter
-counts completed publication attempts, including failures; it does not establish
-Excel delivery. A partial count shows that the source has not returned from all
-publication attempts; a full count still requires checking publication errors
-and Excel's notification or refresh path.
-
-R04 samples one representative cell for every topic. `observed_updates_per_s`
-counts numeric changes after the initial snapshot, while
-`observed_distinct_values` retains the distinct-value count. The initial value
-zero does not qualify a publication; a first positive sequence does. Each topic
-must show observed progress when the window accommodates a source period plus
-the configured throttle; a shorter window without progress is unsupported.
-Source emissions alone cannot qualify delivery. Per-topic changes, last values,
-and time since the last change expose partial or stalled delivery.
-`weak_progress` marks sparse observation, such as two distinct values over ten
-seconds at 1 Hz, without requiring Excel to match the requested cadence.
-
-A02's 100-µs case uses a timed CPU wait in both fixtures, since ordinary
-async timers need not resolve 100 µs. Delays of 1 ms and above use async
-timers. Treat the 100-µs point as a different delay mechanism.
-
-`results-full.jsonl` is the evidence record: case parameters, Excel
-version/build, thread setting, RTD throttle, add-in SHA-256, individual
-metrics, errors, and peak Excel RSS. `summarize.py` compares only successful
-records with matching settings and reports an xlfn advantage ratio greater
-than 1 when xlfn wins. It also derives P-series speedup and efficiency. Raw
-M05 allocation counts have different scope: xlfn counts Rust allocator requests
-in the add-in and Excel-DNA counts managed allocations. Use timing and
-RSS for cross-framework comparison; inspect raw allocations only within an
-implementation. `R07` RSS growth is observational and affected by Excel's
-own caching and garbage collection.
-
-Teardown closes both benchmark and bootstrap workbooks, requests Excel quit,
-then drops the runner's workbook/Application references and collects Python
-wrapper cycles before reporting completion. Failed cleanup steps are retained
-as errors while subsequent steps still run. This applies to both implementations;
-it changes no workload, polling interval, or process-exit acceptance criterion.
-The parent still requires the dedicated Excel process to exit and treats forced
-termination as failure. COM-reference cleanup tests do not establish that a
-particular live Excel shutdown failure has been resolved.
-
-Workers save metadata, execution stages, and the completed/error record before
-teardown. An outer timeout preserves the last saved stage and original error,
-including hangs in workbook close or Excel quit. Explicit COM call-rejected
-and retry-later responses are retried for at most 10 seconds per call;
-`com_retry` records their counts, wait time, operation, and HRESULT. Other
-COM errors propagate immediately. Rejection waits remain part of the measured
-end-to-end time. xlfn failures also retain only startup-log bytes written since
-that worker started, so failed/rolled-back registration can be diagnosed.
-Teardown failures remain errors even when a fallback Quit succeeds. The parent
-checks the recorded PID and process creation time after every worker, waits
-briefly for normal exit, and reaps a surviving dedicated Excel process. A
-forced termination cannot preserve an `ok` result; PID reuse never authorizes
-terminating a different process. Execution and cleanup errors are retained
-separately when both occur.
-
-Cases classified as `unsupported` also receive the normal five-second
-post-worker exit grace. If teardown fails, their final status is `error` while
-`execution_status: "unsupported"` and `unsupported_reason` retain the original
-classification. Inspect `cleanup_error` and `excel_process_cleanup`; the console
-prints a distinct cleanup error alongside the execution explanation. Runner
-revisions through `84817da` instead used zero exit grace for unsupported cases,
-so an A05 `error` with only the interactive-cancellation explanation on screen
-requires checking its raw JSONL cleanup fields.
-
-For intermittent exit failures, `--dump-on-failure` keeps lifecycle tracing and
-the passive exit observer disabled. It records native process identity once at
-startup, then captures the surviving Excel process only after worker failure or
-the existing five-second post-worker exit deadline, before forced termination.
-Use the same option for both implementations. The extra identity lookup is part
-of startup time; this mode does not claim zero overhead. It adds no UDF tracing
-or allocation counters. A failed capture is recorded and cannot prevent reaping
-or turn the failed case into a success.
-
-```powershell
-python .\run.py --profile smoke --id S01 --id M01 --id T01 `
-  --artifacts .\artifacts --repeat 3 --threads 1 `
-  --dump-on-failure --out smoke-exit-repro.jsonl
-```
-
-Preserve the original case order when repeating a flaky batch. Keep every JSONL
-and its matching `.diagnostics` directory, including unsuccessful dump attempts.
-A successful repeat does not resolve an earlier exit failure. This mode can
-capture blocking stacks without the opt-in lifecycle trace, but it does not
-guarantee that one dump identifies the root cause. A later diagnostic run may
-still be needed after inspecting it. `--shutdown-diagnostics` remains the option
-for full lifecycle and common-clock exit observations below.
-
-When an ordinary dump locates a wait but omits the lock object's memory, add
-`--full-memory-dumps` to either diagnostic mode. It requests
-[`MiniDumpWithFullMemory` and `MiniDumpWithFullMemoryInfo`](https://learn.microsoft.com/en-us/windows/win32/api/minidumpapiset/ne-minidumpapiset-minidump_type),
-including readable Excel memory (and workbook data). Files can be large. Capture
-is still restricted to the worker's creation-time-verified Excel process and
-only starts when the existing teardown deadline has failed. The helper has a
-60-second limit in this mode (15 seconds for ordinary dumps); capture failure
-does not suppress process cleanup or change the failed result. JSONL dump
-metadata records the mode and capture limit. No XLL rebuild is needed.
-
-For a flaky full batch, keep the case order and paired implementations:
-
-```powershell
-python .\run.py --profile full --artifacts .\artifacts `
-  --shutdown-diagnostics --full-memory-dumps --out full-lock-diagnostic.jsonl
-```
-
-Repeat with distinct output paths as needed. This captures a single snapshot,
-not lock ownership history, and does not guarantee owner attribution for every
-lock type. It also does not capture a slow COM release that eventually exits
-before the parent starts its post-worker grace period; use the lifecycle and
-process-exit timing fields to distinguish that case. A `Closed` lifecycle return
-and a long `quit_to_natural_exit_s` must not be reported as a stuck XLL callback.
-
-Records include the diagnostic mode flags and SHA-256 hashes of the runner sources.
-The paired summarizer requires matching modes and source hashes and excludes
-full lifecycle-instrumented shutdown runs from performance ratios. No XLL
-rebuild is needed for the dump-only runner option.
-
-For a result with `execution_status: "ok"`, `stage: "closed"`, and
-`excel_process_cleanup.forced_kill: true`, the worker completed its Python
-cleanup but Excel did not exit within the parent's five-second deadline.
-`closed` does not establish that Excel called or completed `xlAutoClose`.
-It also does not identify a string-length defect or distinguish a shutdown
-deadlock from a slow exit. Capture the surviving process before it is killed:
-
-```powershell
-python benchmarks/excel-comparison/run.py --profile full --id T02 --variant ascii-512 `
-  --implementation xlfn --artifacts .\artifacts `
-  --shutdown-diagnostics --out t02-ascii512-diagnostic.jsonl
-```
-
-Use your artifact directory; add `--allow-commit-mismatch` when intentionally
-diagnosing an older CI XLL with a newer runner. Process timing and dumps work
-with older XLLs, but the native lifecycle trace below requires rebuilding both
-fixtures with this instrumentation. An empty trace is reported as
-`instrumentation_unverified`, never as proof that Excel skipped `xlAutoClose`.
-`--shutdown-diagnostics` records the native process creation time at startup
-and saves a stack/module/handle dump in a unique directory beneath
-`<out-stem>.diagnostics/` only if Excel survives teardown. The JSONL result's
-`excel_process_cleanup.shutdown_dump` records its path or capture error.
-Keep the JSONL, dump, and exact manifest/XLL together for analysis. A dump
-contains thread stacks and may contain workbook data from those stacks; it
-does not request a full heap dump and is not uploaded automatically.
-
-The dump uses Windows
-[MiniDumpWriteDump](https://learn.microsoft.com/en-us/windows/win32/api/minidumpapiset/nf-minidumpapiset-minidumpwritedump)
-in a separate helper with a 15-second timeout. The helper validates native
-creation time on the same process handle it dumps, so PID reuse cannot capture
-another process. Dump errors cannot skip reaping. `exit_timeout_s` preserves
-the missed deadline even if Excel exits naturally during capture; such a run
-remains failed. This diagnostic option does not extend the five-second exit
-acceptance window. Successful non-hanging runs produce no dump. In WinDbg,
-`~* kb` shows all captured thread stacks; use matching symbols where available
-to identify the wait inside Excel, the XLL, or Windows.
-
-### Comparing shutdown from the same starting point
-
-`--shutdown-diagnostics` also enables a passive parent observer for **both**
-implementations. Before `RegisterXLL`, the parent acquires a process handle and
-checks its native creation time; the worker waits for that acknowledgement.
-The parent retains the handle while the worker calls `Quit`, releases COM
-references, and collects Python cycles. Once the handle is signaled,
-`GetProcessTimes` provides the actual exit timestamp, even if Excel exited
-while the worker was still blocked. This avoids starting the measurement only
-when the worker exits. Normal runs without the diagnostic option do not start
-this observer or record these timestamps.
-
-The JSONL result contains:
-
-- `shutdown_timing`: the first `Quit` attempt, the final Quit call completion,
-  each COM-reference release, and completion of `gc.collect()`. The start is
-  persisted immediately before attempting the COM call; retries/fallback Quit
-  do not reset it. A call completion can also be an exception, retained by the
-  existing cleanup error reporting.
-- `process_exit_observation.quit_to_exit_s`: first Quit attempt to kernel exit
-  time, including any time spent inside COM cleanup. `termination` and
-  `exit_code` distinguish runner-forced death, unforced zero-code exit, and
-  unforced nonzero-code exit. Only unforced zero-code exits receive
-  `quit_to_natural_exit_s`; this label does not exclude an external terminator.
-- `quit_to_exit_observed_s`: QPC time until the observer saw the process signal.
-  It includes observer scheduling delay. The kernel exit duration uses FILETIME;
-  inspect the independent QPC timeline if a system-clock adjustment is suspected.
-- `lifecycle_trace`: identity-checked events with native thread IDs, QPC and
-  FILETIME clocks, and times relative to Quit. The complete trace file is also
-  kept beneath `<out-stem>.diagnostics/`, including on successful runs.
-
-The xlfn fixture enables the `lifecycle-diagnostics` feature. It records entry,
-normal body return (status and lifecycle phase), and abnormal scope exit for
-`xlAutoOpen`, `xlAutoRemove`, and `xlAutoClose`. Sparse internal checkpoints
-include call/return drains, async executor stop, subscriptions/RTD, callback
-detachment, add-in cleanup, and final close. Individual UDF calls and thousands
-of registration operations are not logged. Invocation IDs prevent a nested
-close's return from hiding an unfinished outer close. A return with phase
-`Quarantined` is not successful teardown.
-
-The Excel-DNA fixture records `IExcelAddIn.AutoOpen`/`AutoClose` and its RTD/async
-cleanup stages. These are **managed add-in callbacks**, not the full native
-Excel-DNA `xlAutoClose` wrapper; `boundary_scope` preserves that distinction.
-Both writers use a process-creation-time-bound control file under
-`%LOCALAPPDATA%/xlfn/lifecycle-diagnostics/`, installed before registration and
-removed after collection. This does not rely on COM-launched Excel inheriting
-the worker's environment. Trace writes are synchronous and opt-in; use these
-runs for diagnosis rather than publishing performance results.
-
-With freshly rebuilt/downloaded paired XLLs, collect all four C02 variants:
-
-```powershell
-python benchmarks/excel-comparison/run.py --profile full --id C02 `
-  --artifacts .\artifacts --shutdown-diagnostics --out c02-shutdown.jsonl
-python benchmarks/excel-comparison/summarize_shutdown.py c02-shutdown.jsonl `
-  --csv c02-shutdown.csv
-```
-
-For a local build, run `./benchmarks/excel-comparison/build.ps1` first, use
-`--artifacts benchmarks/excel-comparison/artifacts`, and add
-`--allow-local-artifacts` if that directory has no CI manifest. Do not mix an
-old CI manifest with newly built binaries. For a short check, add
-`--variant 10`; omit `--implementation` to run both. `--repeat` does not repeat
-C02 process launches. To assess reproducibility, run again into new output
-files, alternate implementation order with separate `--implementation` runs,
-and pass all result files to `summarize_shutdown.py`; it retains every row,
-including failures and repetitions.
-
-Interpret the trace together with the exit observation:
-
-| Observation | What it establishes |
-|---|---|
-| Trace unavailable | Instrumentation has not been verified; check fixture version and activation. |
-| `entered_without_return` | The outer close body did not record normal completion; inspect its last checkpoint and dump. |
-| `scope_exit_without_return` | An early return/unwind was observed; this is not a close-completion certificate. |
-| xlfn return with `Closed`, followed by a long process-exit interval | Logical xlfn close finished before the later wait; investigate the remaining Office wait/handle and any indirect effects. |
-| Excel-DNA callback returned, followed by a long interval | Its managed callback finished; native loader/Office work remains outside that callback's scope. |
-| Long `application_release_s` or `gc_s` | The worker spent time in that COM-release interval; the parent observer still measured Excel's exit independently. |
-
-The existing **five seconds after worker exit** remains the acceptance rule.
-It is not redefined as five seconds after Quit. Diagnostics neither extend that
-rule nor turn a forced kill into success. These additions localize a difference;
-they do not establish a shutdown fix without a Windows Excel rerun.
-
-Rust allocation counting is disabled by default. M05 enables it after warmup
-with `BENCH.ALLOC.TRACK(TRUE)` and disables it in a `finally` block after the
-counter reads and recalculations. These control calls are outside the timed
-recalculations. The matching Excel-DNA control is a no-op because its CLR
-allocation counter is already available. M05 timing includes Rust's counting
-overhead; other workloads only check the disabled flag when allocating or
-freeing, unless L02 diagnostics below are explicitly enabled.
-Earlier fixtures incremented a shared atomic counter on every Rust allocation
-and reallocation throughout every workload. Those historical results include
-that instrumentation cost and should be rerun with newly built XLLs before
-attributing the differences to the frameworks.
-
-### Repeated calculation and unregister diagnostics
-
-For allocation-owner attribution after reproducing growth, use the
-[Windows memory probe](memory-probe.md). It captures PID-scoped WPR heap
-snapshots and VirtualAlloc stacks before, during and after repeated calculation,
-with an Excel-only control. It requires elevated Windows x64 and a matching
-symbol-bearing CI artifact; ordinary L02 counters do not provide allocation
-stacks. Its traces are diagnostic evidence, not performance measurements.
-
-For interactive event removal observations, use the separate
-[event qualification probe](event-qualification/README.md#runnable-interactive-probe).
-It ships in the same CI artifact set and guides F9/Esc operations; the COM-only
-L02 runner cannot establish whether event callbacks stop after removal. This
-probe preserves the historical removal experiment; current production retains
-native events and needs the separate logical-close/reopen qualification.
-
-L02 retains every measured iteration in `recalculation_samples`: total time,
-the `CalculateFull` COM call, completion-state polling, Excel RSS and, on
-Windows, private committed bytes. L02 uses one `CalculateFull` warmup before
-the baseline and measured iterations; `warmup_calculation` records this choice.
-Older records without that field used a range calculation for warmup and
-`CalculateFull` for measurement, so their first-iteration growth can include
-initialization of the full-calculation path. Memory reads are outside the calculation
-timer. `post_warmup_memory` is taken **before** the first measured iteration;
-`post_warmup_rss_bytes_growth` and `post_warmup_private_bytes_growth` include
-that iteration. The historical `rss_growth_bytes` still measures first-to-last
-post-calculation RSS. `recalculation_blocks` reports p50/p99 over consecutive
-blocks (about ten blocks); inspect the samples and block sizes before treating
-a tail percentile or first/last ratio as sustained latency drift.
-
-For allocation attribution, rebuild/fetch XLLs from the same revision as the
-runner and run a separate diagnostic observation:
-
-```powershell
-python .\run.py --id L02 --artifacts .\artifacts --repeat-diagnostics --shutdown-diagnostics --out l02-diagnostic.jsonl
-```
-
-Run the same command without `--repeat-diagnostics` to collect normal timings
-into a different output file. L02 uses its variant's `repetitions`, not
-`--repeat`. The diagnostic option enables the Rust fixture allocator only
-after warmup and disables it in `finally`, including on failures. Boundary
-`Evaluate` calls and counter atomics affect this observation; do not mix these
-timings with normal results. `fixture_allocation_window` reports successful
-requested allocation bytes and released bytes (including successful reallocs).
-The CSV summarizer marks instrumented L02 runs non-comparable and omits their
-framework advantage ratio.
-Failed allocations/reallocations are not counted. Releases may refer to
-allocations made before the observation window, so `net_requested_bytes` can
-be negative and **is not total live heap size**. Native process-heap allocations
-(including scalar return roots), Excel allocations, allocator overhead and
-fragmentation are outside these Rust counters. Excel-DNA supplies only its
-managed cumulative allocation delta; the counter scopes are not comparable.
-RSS alone cannot establish a leak; compare private commit, window balance and
-the shape of the repeated observations.
-
-With `--shutdown-diagnostics`, the xlfn lifecycle trace also contains
-`registration.removal` records for failed `xlfUnregister` calls. Historical
-builds also emitted these records for event removal attempts; current production
-retains calculation-event registrations across logical close and does not
-attempt their removal. Records identify the operation and numeric registration
-ID (or historical event selector), callback status, inline scalar result type/value, decoder
-error and cleanup outcome. Suppressed callbacks are marked `invoked: false`;
-non-success callback statuses have no decoded raw result. Pointer payloads
-are never followed. This stream is capped at 64 records per loaded module,
-followed by one truncation marker. No record formatting occurs without an
-active trace sink.
-
-These records distinguish function removal rejection and callback suppression,
-and preserve historical event acknowledgement failures behind
-`Quarantine(UnregisterFailed)`. They do not prove unload safety: a successful
-`xlAutoClose` return or natural Excel exit does not turn a quarantined phase
-into `Closed`. In particular, signed event registration tokens do not by
-themselves qualify the separate nil-procedure removal convention; see
-[`event-qualification/README.md`](event-qualification/README.md).
-
-The Rust RTD fixture starts its source worker at the first subscription and
-waits when there is no periodic or pulse work. Earlier fixtures started a
-worker during add-in open and woke it every millisecond even in synchronous
-workloads. That background activity is another reason to rerun the historical
-CSV with newly built XLLs; its effect on the recorded timings is unmeasured.
-
-## Local harness checks
-
-From the repository root, these checks exercise planning, observations,
-diagnostics, and both fixture control channels without opening Excel:
+From the repository root:
 
 ```sh
 python -B -m unittest discover -s benchmarks/excel-comparison -p 'test_*.py'
@@ -667,62 +136,6 @@ dotnet run --project benchmarks/excel-comparison/control-tests/ControlTests.cspr
 dotnet run --project benchmarks/excel-comparison/control-tests/ControlTests.csproj --no-build -- emergency
 ```
 
-They do not establish native Windows XLL loading, Excel RTD delivery, or
-interactive native cancellation. The XLL artifact workflow runs the same
-fixture checks before building the comparison artifacts.
-
-C01 starts a new Excel process, but the operating system may still cache add-in
-files between cases. For storage-cold startup, reboot or flush the machine's
-file cache under a controlled protocol and record that condition separately.
-
-The Windows run must be checked manually for Excel security prompts, XLL
-load errors, dynamic-array spill errors, and add-in shutdown behavior before
-interpreting performance. This repository's Mac checks cannot establish
-Windows compilation or live Excel correctness.
-
-Relevant API references: [Excel-DNA NativeAOT support](https://excel-dna.net/docs/guides-basic/dotnet-native-aot-support/),
-[Excel-DNA extended registration](https://excel-dna.net/docs/guides-basic/extended-registration/),
-[Excel-DNA packed add-in build properties](https://excel-dna.net/docs/guides-basic/sdk-style-project-properties/),
-[Excel `Range.Dirty`](https://learn.microsoft.com/en-us/office/vba/api/excel.range.dirty),
-and [Excel RTD throttle](https://learn.microsoft.com/en-us/office/vba/api/excel.rtd.throttleinterval).
-
-
-## Q versus FP12 numeric returns
-
-M06 compares the same numeric builder under default FP12 and explicit Q in one
-xlfn XLL. Each ABBA/BAAB block verifies the complete spill, including the 100,000
-cell workload. It records both timing vectors and their ratio. Run on Windows:
-
-```powershell
-python run.py --id M06 --implementation xlfn --repeat 10 --out fp12-results.jsonl
-```
-
-Repeat across independent Excel sessions and thread counts. Process-heap FP12
-allocations bypass Rust allocator counters. Module retention metrics reset on
-physical reload, while process accounting survives reloads for all images using
-the same accounting protocol. `numeric_return_memory_metrics()?` exposes process
-reserved and published bytes, buffer counts, and byte peaks as well as the
-current thread and module published retention. It can fail if the shared
-operating-system accounting state cannot be initialized or attached, and its
-fields are sampled independently during concurrent execution.
-
-The provisional limits are 16 MiB per result, 64 MiB published per thread,
-256 MiB published per module, and 512 MiB reserved per process. The process
-budget includes allocation headers and both unpublished and published buffers;
-dropped unpublished buffers and safely reclaimed published buffers release it.
-Final buffers left by unloaded images remain charged until process exit. Each
-process retains one shared-state mapping and handle, without adding a retained
-mapping or handle on every reload. Incompatible accounting headers or limits
-fail instead of creating a separate budget. Older xlfn versions
-that did not use the shared protocol cannot have their allocations counted
-retrospectively.
-
-Use process RSS, the fallible metrics API, and repeated physical reload sessions
-to qualify retention and limit failures together. At the process cap, new FP12
-returns must fail with `#NUM!` and a diagnostic while existing published results
-stay valid. This harness has not yet established live Excel speed or
-physical-unload safety evidence.
-The standalone [process quota reload probe](../../probes/fp12-process-quota/README.md)
-provides native Windows checks for persistent accounting, physical DLL reloads,
-and aggregate quota rejection without requiring Excel.
-Existing CI regressions must be investigated separately.
+These checks maintain the runner, output validation, process cleanup, and fixture
+control protocols. Native Windows XLL loading and live Excel delivery require
+running the benchmarks on Windows with Excel installed.

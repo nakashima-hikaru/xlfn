@@ -36,7 +36,7 @@ impl CallScratch {
         }
     }
 
-    #[cfg(all(test, feature = "bench-internals"))]
+    #[cfg(test)]
     pub(crate) fn allocated_bytes(&self) -> usize {
         self.arena.allocated_bytes()
             + self

@@ -30,10 +30,6 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/nakashima-hikaru/xlfn"
 publish = true
 
-[profile.profiling]
-inherits = "release"
-debug = true
-
 [workspace.dependencies]
 # Member crates
 xlfn-common = { version = "=0.1.0", path = "crates/xlfn-common" }
