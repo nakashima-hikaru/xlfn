@@ -10,7 +10,7 @@ recovery. No project-owned trusted adapter is authorized to assume that result.
 | `CacheNode.pins: AtomicU32` | Shared allocation layout plus a separately constructed vstd pin atomic | Pin tokens must describe the actual field; account for 32-bit pins with `usize` admission counters |
 | Cache observations and bookkeeping | Reader-owned `Ticket` and erased `AtomicInvariant` ledger | Place ghost updates at matching native resident-index, admission, pin and queue events |
 | `SealableCounter.state: AtomicUsize` | Independent vstd atomic and lifecycle instance | Bind permissions and operations to the actual state field and history |
-| `HandleReadDomain.{debt, queued}` | Shared checked counters and completion ordering with modeled debt resources | Connect enqueue, detachment, concurrent destruction and final debt discharge to the actual fields |
+| `RetirementAccounting.{debt, queued}` | Shared checked counters and completion ordering with modeled debt resources | Connect enqueue, detachment, concurrent destruction and final debt discharge to the actual fields |
 | Idle rotation and retirement queues | vstd transition handle, current atomic, stripe leases and exact withdrawn records | Connect the native owner, guards, callback and restored state to those resources |
 | `parking_lot` guards and wait/notify | Executable wait models and vstd locks | Preserve object identity, unlock/relock, lost-wakeup discipline, RAII and unwind exits |
 | Box conversion and Drop | `HeapPermission` supplied at initialization and recovered after drain | Transfer matching layout/provenance/allocator rights exactly once and destroy inline payloads in place |
@@ -37,12 +37,20 @@ recovery. No project-owned trusted adapter is authorized to assume that result.
 
 ## Handle completion interval
 
-`enqueue_reclaim` appends under the selected queue lock, then increments debt
-and queued counts. Detachment subtracts queued counts while preserving debt.
-`DrainedBindings::drop` destroys the detached records before discharging debt
+`HandleReadDomain::enqueue_reclaim` delegates to the private retirement adapter,
+whose `register` appends under the selected queue lock, then increments debt
+and queued counts. The table writer guard spans withdrawal and registration.
+Only that adapter unwraps its embedded kernel domain's batches, subtracting
+queued counts while preserving debt. Parent orchestration receives an opaque
+`ReclaimBatch` with no independent payload or counter transfer operations.
+`ReclaimBatch::drop` destroys the detached records before discharging debt
 with Release ordering and notifying waiters under the completion lock. The
 shared completion expression models that order; native field histories and
-matching batch identity remain obligations across concurrent reclaimers.
+matching batch identity remain obligations across concurrent reclaimers. The
+completion owner is now the `RetirementAccounting` instance; its embedded
+rotation domain has a separate address. Both batch merging and the reentrant
+destruction guard use the accounting owner's identity. Forgetting a batch
+retains its payload and debt, so terminal completion remains blocked.
 
 ## Windows teardown boundary
 

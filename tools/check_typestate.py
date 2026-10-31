@@ -40,6 +40,7 @@ MODULES = {
     "subscription/channel": Path("crates/xlfn/src/subscription/channel.rs"),
     "subscription/runtime": Path("crates/xlfn/src/subscription/runtime.rs"),
     "handle": Path("crates/xlfn/src/handle.rs"),
+    "handle/domain": Path("crates/xlfn/src/handle/domain.rs"),
     "registration/host": Path("crates/xlfn/src/registration/host.rs"),
     "value": Path("crates/xlfn/src/value.rs"),
     "cache": Path("crates/xlfn/src/cache.rs"),

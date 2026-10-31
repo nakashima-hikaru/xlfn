@@ -22,120 +22,24 @@
 
 mod counters;
 mod protocol;
+mod retirement;
 
 use crate::{XllError, XllResult};
+use retirement::RetirementAccounting;
 use xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT;
-use xlfn_kernel::rotating_read_domain::{
-    DisposableBatch, RotatingReadOwnedPermit, RotatingRetirementDomain,
-};
+use xlfn_kernel::rotating_read_domain::RotatingReadOwnedPermit;
 
 #[cfg(test)]
 use xlfn_kernel::rotating_read_domain::RotatingReadPermit;
 
 use super::binding::BindingRecord;
-use crate::sync::{Condvar, Mutex};
-use smallvec::SmallVec;
-use std::cell::RefCell;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use xlfn_kernel::published_owner::PublishedOwner;
 
-// Atomic semantics remain the primitive boundary. Both the update closure and
-// returned value use the same checked, side-effect-free transition kernel.
-#[inline]
-fn update_count(
-    counter: &AtomicUsize,
-    amount: usize,
-    ordering: Ordering,
-    step: impl Fn(usize, usize) -> counters::CountStep<usize>,
-) -> usize {
-    let previous = counter
-        .try_update(ordering, Ordering::Relaxed, |state| {
-            match step(state, amount) {
-                counters::CountStep::Success(next) => Some(next),
-                counters::CountStep::FailStop => None,
-            }
-        })
-        .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
-    match step(previous, amount) {
-        counters::CountStep::Success(next) => next,
-        counters::CountStep::FailStop => xlfn_kernel::invariant::fail_stop(),
-    }
-}
-
-// Single-cell deletion and ordinary revision replacement should not allocate
-// a heap queue. Larger retirement batches retain their allocation when drained.
-type PendingBindings = SmallVec<[PublishedOwner<BindingRecord>; 4]>;
-
 pub(crate) struct HandleReadDomain {
-    domain: RotatingRetirementDomain<DEFAULT_STRIPE_COUNT, PendingBindings>,
-    // Maintenance hint; pending queue locks and the driver handoff publish work.
-    queued: AtomicUsize,
-    // Also a destruction-completion counter: release decrements synchronize
-    // with seal/flush Acquire loads, even before a reclaimer locks completion.
-    debt: AtomicUsize,
+    retirement: RetirementAccounting,
     maintenance_requests: AtomicUsize,
-    completion: Mutex<()>,
-    changed: Condvar,
-}
-
-/// Owns only records removed through a drained/closed domain certificate.
-/// The domain borrow fixes both destruction-completion accounting and lifetime.
-#[must_use = "drained bindings retain destruction debt until dropped"]
-struct DrainedBindings<'domain> {
-    domain: &'domain HandleReadDomain,
-    records: PendingBindings,
-}
-
-impl<'domain> DrainedBindings<'domain> {
-    fn empty(domain: &'domain HandleReadDomain) -> Self {
-        Self {
-            domain,
-            records: SmallVec::new(),
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.records.is_empty()
-    }
-
-    fn extend(&mut self, mut other: Self) {
-        crate::retirement_queue::append_owned_batch!(
-            std::ptr::from_ref(self.domain), std::ptr::from_ref(other.domain);
-            xlfn_kernel::invariant::fail_stop(),
-            self.records.append(&mut other.records)
-        );
-    }
-
-    fn reclaim(self) {
-        drop(self);
-    }
-}
-
-impl Drop for DrainedBindings<'_> {
-    fn drop(&mut self) {
-        // Taking empties the wrapper before user code, so even a nested cleanup
-        // cannot discharge this batch twice. Merging leaves the source empty.
-        let records = std::mem::take(&mut self.records);
-        if records.is_empty() {
-            return;
-        }
-        let domain = self.domain;
-        let count = records.len();
-        let address = std::ptr::from_ref(domain).addr();
-        RECLAIMING.with(|stack| stack.borrow_mut().push(address));
-        let _guard = scopeguard::guard(address, |address| {
-            RECLAIMING.with(|stack| assert_eq!(stack.borrow_mut().pop(), Some(address)));
-        });
-        // Call sites drop batches after table, queue and transition guards end.
-        protocol::complete_reclamation!(_destroyed, completion;
-            drop(records),
-            update_count(&domain.debt, count, Ordering::Release, counters::subtract),
-            domain.completion.lock(),
-            domain.changed.notify_all(),
-            drop(completion)
-        );
-    }
 }
 
 pub(crate) struct HandleDomainPermit {
@@ -181,19 +85,15 @@ impl Drop for HandleBindingDomainPermit<'_> {
 impl HandleReadDomain {
     pub(crate) fn new() -> Self {
         Self {
-            domain: RotatingRetirementDomain::new(),
-            queued: AtomicUsize::new(0),
-            debt: AtomicUsize::new(0),
+            retirement: RetirementAccounting::new(),
             maintenance_requests: AtomicUsize::new(0),
-            completion: Mutex::new(()),
-            changed: Condvar::new(),
         }
     }
 
     #[cfg(test)]
     #[inline]
     pub(crate) fn enter(&self) -> XllResult<HandleBindingDomainPermit<'_>> {
-        self.domain
+        self.retirement
             .enter_current_thread()
             .map(|permit| HandleBindingDomainPermit {
                 domain: self,
@@ -215,7 +115,7 @@ impl HandleReadDomain {
         // SAFETY: guaranteed by caller's owner-lifetime contract;
         // self outlives the returned permit and will be drained before reclamation.
         unsafe {
-            self.domain
+            self.retirement
                 .enter_owned_current_thread()
                 .map(|permit| HandleDomainPermit {
                     domain: NonNull::from(self),
@@ -234,20 +134,15 @@ impl HandleReadDomain {
     ///
     /// Protocol obligation [HD-2]: Retired bindings enter generation-bound queue; immediate drop is forbidden.
     pub(super) fn enqueue_reclaim(&self, record: PublishedOwner<BindingRecord>) {
-        self.domain.register_retired(|_, mut queue| {
-            queue.append(record);
-            update_count(&self.debt, 1, Ordering::Relaxed, counters::add);
-            update_count(&self.queued, 1, Ordering::Relaxed, counters::add);
-        });
+        self.retirement.register(record);
     }
 
     pub(crate) fn debt(&self) -> usize {
-        self.debt.load(Ordering::Acquire)
+        self.retirement.debt()
     }
 
     pub(crate) fn is_reclaiming_here(&self) -> bool {
-        let address = std::ptr::from_ref(self).addr();
-        RECLAIMING.with(|stack| stack.borrow().contains(&address))
+        self.retirement.is_reclaiming_here()
     }
 
     pub(crate) fn maintain_after_removal(&self) {
@@ -258,30 +153,10 @@ impl HandleReadDomain {
         // CallScope is !Send and all handle permits use the acquiring thread's
         // default stripe. Looking at both generations therefore excludes an
         // own permit without changing lookup/permit-entry bookkeeping.
-        if debt >= HARD_DEBT_LIMIT && !self.domain.current_thread_may_be_reading() {
+        if debt >= HARD_DEBT_LIMIT && !self.retirement.current_thread_may_be_reading() {
             self.quiesce();
         } else {
             self.maintain();
-        }
-    }
-
-    fn take_generation(
-        &self,
-        generation: DisposableBatch<'_, DEFAULT_STRIPE_COUNT, PendingBindings>,
-    ) -> DrainedBindings<'_> {
-        if !generation.belongs_to(&self.domain) {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        let records = generation.into_inner();
-        update_count(
-            &self.queued,
-            records.len(),
-            Ordering::Relaxed,
-            counters::subtract,
-        );
-        DrainedBindings {
-            domain: self,
-            records,
         }
     }
 
@@ -293,7 +168,7 @@ impl HandleReadDomain {
         // and handles the drain. A queue load without this fence can lose the
         // final reader notification on weakly ordered hosts.
         std::sync::atomic::fence(Ordering::Acquire);
-        if self.queued.load(Ordering::Relaxed) != 0 {
+        if self.retirement.queued() != 0 {
             self.maintain();
         }
     }
@@ -345,12 +220,8 @@ impl HandleReadDomain {
     }
 
     fn poll_maintenance(&self) {
-        while self.queued.load(Ordering::Relaxed) != 0 {
-            let Some(Ok(records)) = self
-                .domain
-                .poll_quiesce()
-                .map(|result| result.map(|batch| self.take_generation(batch)))
-            else {
+        while self.retirement.queued() != 0 {
+            let Some(records) = self.retirement.poll_reclaim() else {
                 break;
             };
             records.reclaim();
@@ -361,30 +232,14 @@ impl HandleReadDomain {
     ///
     /// Protocol obligation [HD-3]: Generational quiescence ensures all readers of the retired generation have drained.
     pub(crate) fn quiesce(&self) {
-        let records = self
-            .domain
-            .quiesce()
-            .unwrap_or_default()
-            .into_iter()
-            .flatten()
-            .map(|batch| self.take_generation(batch))
-            .filter(|batch| !batch.is_empty())
-            .reduce(|mut records, next| {
-                records.extend(next);
-                records
-            })
-            .unwrap_or_else(|| DrainedBindings::empty(self));
-        records.reclaim();
+        self.retirement.quiesce_reclaim().reclaim();
         self.maintain();
     }
 
     #[cfg(test)]
     pub(crate) fn flush_for_test(&self) {
         self.quiesce();
-        let mut completion = self.completion.lock();
-        while self.debt() != 0 {
-            self.changed.wait(&mut completion);
-        }
+        self.retirement.wait_for_completion();
     }
 
     /// Final drain closes reader admission and waits for destruction already
@@ -392,25 +247,14 @@ impl HandleReadDomain {
     ///
     /// Protocol obligation [HD-5]: Destruction barrier: waits for domain drain and flushes remaining debt before arena teardown.
     pub(crate) fn seal(&self) {
-        let closed = self.domain.seal_and_wait();
-        let [first, second] = closed.take_queues();
-        let mut records = self.take_generation(first);
-        let remaining = self.take_generation(second);
-        records.extend(remaining);
-        records.reclaim();
+        self.retirement.close_reclaim().reclaim();
         if !self.is_reclaiming_here() {
-            let mut completion = self.completion.lock();
-            while self.debt() != 0 {
-                self.changed.wait(&mut completion);
-            }
+            self.retirement.wait_for_completion();
         }
     }
 }
 
 pub(crate) const HARD_DEBT_LIMIT: usize = 256;
-thread_local! {
-    static RECLAIMING: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
-}
 
 #[cfg(test)]
 mod tests {
@@ -523,137 +367,6 @@ mod tests {
     }
 
     #[test]
-    fn miri_blocking_quiescence_drives_retirement_queued_in_the_new_generation() {
-        struct Counted(Arc<AtomicUsize>);
-        impl Drop for Counted {
-            fn drop(&mut self) {
-                self.0.fetch_add(1, Ordering::Release);
-            }
-        }
-        let registry = Arc::new(HandleRegistry::from_entropy(1, [7; 40]));
-        let drops = Arc::new(AtomicUsize::new(0));
-        let token = registry
-            .insert_pending(&mut Some(Counted(Arc::clone(&drops))))
-            .unwrap();
-        let domain = registry.bindings.read_domain();
-        // Hold an initially empty generation across a blocking quiescence.
-        // Use the kernel permit so its drop supplies no handle-level retry:
-        // the blocking writer must itself service the new generation's debt.
-        let permit = domain.domain.enter(0).unwrap();
-        let initial = domain.domain.current_generation();
-        let worker_registry = Arc::clone(&registry);
-        let worker = std::thread::spawn(move || worker_registry.bindings.read_domain().quiesce());
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while domain.domain.current_generation() == initial && std::time::Instant::now() < deadline
-        {
-            std::thread::yield_now();
-        }
-        let rotated = domain.domain.current_generation() != initial;
-        if rotated {
-            registry.remove::<Counted>(&token).unwrap();
-            assert_eq!(domain.debt(), 1);
-            assert_eq!(drops.load(Ordering::Acquire), 0);
-        }
-        drop(permit);
-        worker.join().unwrap();
-        assert!(
-            rotated,
-            "the blocking writer must publish its next generation"
-        );
-        assert_eq!(domain.debt(), 0);
-        assert_eq!(drops.load(Ordering::Acquire), 1);
-    }
-
-    #[test]
-    fn miri_disposable_bindings_keep_debt_during_reentrant_destruction() {
-        struct Reenter {
-            registry: std::sync::Weak<HandleRegistry>,
-            drops: Arc<AtomicUsize>,
-        }
-        impl Drop for Reenter {
-            fn drop(&mut self) {
-                let registry = self.registry.upgrade().unwrap();
-                let domain = registry.bindings.read_domain();
-                assert_eq!(domain.debt(), 1, "destruction still owns its debt");
-                assert!(registry.bindings.try_read_state().is_some());
-                assert!(domain.domain.try_queue_lens().is_some());
-                assert!(domain.domain.try_quiesce_if_idle().is_some());
-                domain.maintain();
-                self.drops.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        let registry = Arc::new(HandleRegistry::from_entropy(1, [7; 40]));
-        let drops = Arc::new(AtomicUsize::new(0));
-        let token = registry
-            .insert_pending(&mut Some(Reenter {
-                registry: Arc::downgrade(&registry),
-                drops: Arc::clone(&drops),
-            }))
-            .unwrap();
-        let domain = registry.bindings.read_domain();
-        let reader = domain.domain.enter(0).unwrap();
-        registry.remove::<Reenter>(&token).unwrap();
-        assert_eq!(drops.load(Ordering::Relaxed), 0);
-        drop(reader);
-        let batches = domain.domain.quiesce().unwrap();
-        let batch = batches
-            .into_iter()
-            .flatten()
-            .map(|batch| domain.take_generation(batch))
-            .reduce(|mut first, second| {
-                first.extend(second);
-                first
-            })
-            .unwrap();
-        assert_eq!(domain.queued.load(Ordering::Relaxed), 0);
-        assert_eq!(domain.debt(), 1);
-        assert_eq!(drops.load(Ordering::Relaxed), 0);
-        drop(batch);
-        assert_eq!(drops.load(Ordering::Relaxed), 1);
-        assert_eq!(domain.debt(), 0);
-    }
-
-    #[test]
-    fn miri_drained_binding_batches_merge_without_discharging_early() {
-        struct Counted(Arc<AtomicUsize>);
-        impl Drop for Counted {
-            fn drop(&mut self) {
-                self.0.fetch_add(1, Ordering::Release);
-            }
-        }
-        let registry = HandleRegistry::from_entropy(2, [7; 40]);
-        let drops = Arc::new(AtomicUsize::new(0));
-        let first = registry
-            .insert_pending(&mut Some(Counted(Arc::clone(&drops))))
-            .unwrap();
-        let second = registry
-            .insert_pending(&mut Some(Counted(Arc::clone(&drops))))
-            .unwrap();
-        let domain = registry.bindings.read_domain();
-        // This kernel permit does not perform Handle maintenance on drop.
-        let permit = domain.domain.enter(0).unwrap();
-        registry.remove::<Counted>(&first).unwrap();
-        registry.remove::<Counted>(&second).unwrap();
-        drop(permit);
-        let [first, second] = domain.domain.quiesce().unwrap();
-        let mut batch = domain.take_generation(first.expect("previous pending generation"));
-        let next = domain.take_generation(second.expect("current generation"));
-        assert_eq!(domain.queued.load(Ordering::Relaxed), 0);
-        assert_eq!(domain.debt(), 2);
-        batch.extend(next);
-        assert_eq!(
-            domain.debt(),
-            2,
-            "the emptied source batch owns no completion debt"
-        );
-        assert_eq!(drops.load(Ordering::Acquire), 0);
-        // RAII completion must work even without calling reclaim explicitly.
-        drop(batch);
-        assert_eq!(domain.debt(), 0);
-        assert_eq!(drops.load(Ordering::Acquire), 2);
-    }
-
-    #[test]
     fn miri_last_old_reader_reclaims_while_a_later_reader_remains() {
         // Object payloads are static; keep the observation outside the arena.
         struct Counted(Arc<AtomicUsize>);
@@ -708,7 +421,7 @@ mod tests {
                         if removing
                             .bindings
                             .read_domain()
-                            .domain
+                            .retirement
                             .current_thread_may_be_reading()
                         {
                             started_tx.send(false).unwrap();

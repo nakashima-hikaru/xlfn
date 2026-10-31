@@ -52,7 +52,7 @@ pub fn bind_withdrawal<'domain, P>(owner: &'domain DomainOwner,
     LockedBatch { batch: Batch { owner, records }, source: Ghost(source), index: Ghost(index) }
 }
 
-/// Same identity expression as native DrainedBindings::extend. Vec ownership
+/// Same identity expression as native ReclaimBatch::extend. Vec ownership
 /// moves each payload once; the emptied source contains no destruction work.
 pub fn append<P>(left: &mut Batch<'_, P>, right: &mut Batch<'_, P>) -> (accepted: bool)
     ensures final(left).owner() == old(left).owner(), final(right).owner() == old(right).owner(),
