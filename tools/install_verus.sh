@@ -42,7 +42,7 @@ fi
 
 # The manifest is reviewed with the installer. A version override cannot bypass
 # verification: new versions/platforms require a committed trusted digest.
-EXPECTED_SHA256="$(python3 -B - "${SCRIPT_DIR}/verus_release_sha256.json" "${VERUS_VERSION}" "${ASSET_NAME}" <<'PYHASH'
+EXPECTED_SHA256="$(uv run --project "${SCRIPT_DIR}" --locked python -B - "${SCRIPT_DIR}/verus_release_sha256.json" "${VERUS_VERSION}" "${ASSET_NAME}" <<'PYHASH'
 import json
 from pathlib import Path
 import re
@@ -66,7 +66,7 @@ echo "==> Downloading Verus ${VERUS_VERSION} (${ASSET_NAME})..."
 curl -fsSL --retry 3 "${DOWNLOAD_URL}" -o "${TMP_DIR}/${ASSET_NAME}"
 
 echo "==> Verifying release SHA-256..."
-python3 -B - "${TMP_DIR}/${ASSET_NAME}" "${EXPECTED_SHA256}" <<'PYHASH'
+uv run --project "${SCRIPT_DIR}" --locked python -B - "${TMP_DIR}/${ASSET_NAME}" "${EXPECTED_SHA256}" <<'PYHASH'
 import hashlib
 from pathlib import Path
 import sys
@@ -92,7 +92,7 @@ fi
 # workspace toolchain. Read the release's own metadata so VERUS_VERSION overrides
 # also install the matching compiler. The toolchain string can contain a rustup
 # annotation after its exact name, e.g. "1.98.1-x86_64-unknown-linux-gnu (default)".
-VERUS_RUST_TOOLCHAIN="$(python3 -B - "${VERUS_EXTRACTED_DIR}/version.json" "${VERUS_VERSION}" <<'PY'
+VERUS_RUST_TOOLCHAIN="$(uv run --project "${SCRIPT_DIR}" --locked python -B - "${VERUS_EXTRACTED_DIR}/version.json" "${VERUS_VERSION}" <<'PY'
 import json
 from pathlib import Path
 import re

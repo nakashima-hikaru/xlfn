@@ -10,17 +10,16 @@ Each negative line declares the exact Rust error it must produce.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
-
+from dataclasses import dataclass
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULES = {
@@ -28,7 +27,9 @@ MODULES = {
     "kernel/drain_gate": Path("crates/xlfn-kernel/src/drain_gate.rs"),
     "kernel/operation_gate": Path("crates/xlfn-kernel/src/operation_gate.rs"),
     "kernel/rotating_read_domain": Path("crates/xlfn-kernel/src/rotating_read_domain.rs"),
-    "kernel/rotating_read_domain/transition": Path("crates/xlfn-kernel/src/rotating_read_domain/transition.rs"),
+    "kernel/rotating_read_domain/transition": Path(
+        "crates/xlfn-kernel/src/rotating_read_domain/transition.rs"
+    ),
     "kernel/thread_affine": Path("crates/xlfn-kernel/src/thread_affine.rs"),
     "kernel/quota": Path("crates/xlfn-kernel/src/quota.rs"),
     "kernel/service_slot": Path("crates/xlfn-kernel/src/service_slot.rs"),
@@ -84,10 +85,14 @@ def fixtures(root: Path) -> list[Fixture]:
 
 
 def copy_sources(root: Path, destination: Path) -> str:
-    paths = subprocess.check_output(
-        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-        cwd=root,
-    ).decode("utf-8").split("\0")
+    paths = (
+        subprocess.check_output(
+            ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+            cwd=root,
+        )
+        .decode("utf-8")
+        .split("\0")
+    )
     digest = hashlib.sha256()
     for name in sorted(set(paths) - {""}):
         source = root / name
@@ -106,8 +111,12 @@ def error_spans(message: dict) -> list[dict]:
 
 
 def check_fixture(
-    fixture: Fixture, overlay: Path, originals: dict[Path, str], target: Path,
-    compile_target: str | None = None, extra_features: tuple[str, ...] = (),
+    fixture: Fixture,
+    overlay: Path,
+    originals: dict[Path, str],
+    target: Path,
+    compile_target: str | None = None,
+    extra_features: tuple[str, ...] = (),
 ) -> dict:
     for relative, source in originals.items():
         (overlay / relative).write_text(source, encoding="utf-8")
@@ -117,13 +126,18 @@ def check_fixture(
     path_literal = json.dumps(str(overlay / fixture.path), ensure_ascii=False)
     with injected.open("a", encoding="utf-8") as source:
         source.write(
-            f"\n#[allow(dead_code)]\n#[path = {path_literal}]\n"
-            "mod typestate_compile_fixture;\n"
+            f"\n#[allow(dead_code)]\n#[path = {path_literal}]\nmod typestate_compile_fixture;\n"
         )
     package = "xlfn-kernel" if fixture.module.startswith("kernel/") else "xlfn"
     features = (*FEATURES, *extra_features) if package == "xlfn" else ()
     command = [
-        "cargo", "check", "-p", package, "--lib", "--locked", "--offline",
+        "cargo",
+        "check",
+        "-p",
+        package,
+        "--lib",
+        "--locked",
+        "--offline",
         "--no-default-features",
     ]
     if features:
@@ -132,7 +146,11 @@ def check_fixture(
     if compile_target:
         command.extend(["--target", compile_target])
     completed = subprocess.run(
-        command, cwd=overlay, text=True, encoding="utf-8", capture_output=True,
+        command,
+        cwd=overlay,
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
         env={**os.environ, "CARGO_TERM_COLOR": "never"},
     )
     errors = []
@@ -165,11 +183,15 @@ def check_fixture(
         else completed.returncode != 0 and observed == expected and not unexpected
     )
     return {
-        "fixture": str(fixture.path), "target": compile_target or "host", "passed": passed,
-        "package": package, "features": list(features),
+        "fixture": str(fixture.path),
+        "target": compile_target or "host",
+        "passed": passed,
+        "package": package,
+        "features": list(features),
         "command": command,
         "exit_code": completed.returncode,
-        "expected": sorted(expected), "observed": sorted(observed),
+        "expected": sorted(expected),
+        "observed": sorted(observed),
         "unexpected_errors": unexpected,
         "diagnostics": [error.get("rendered", error["message"]) for error in errors],
         "stderr": completed.stderr if not passed else "",
@@ -180,43 +202,62 @@ def main() -> int:
     # Windows CI may inherit a legacy console code page even though repository
     # files and Cargo's JSON diagnostics are UTF-8. Preserve their text in logs.
     for stream in (sys.stdout, sys.stderr):
-        if hasattr(stream, "reconfigure"):
-            stream.reconfigure(encoding="utf-8")
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target-dir", type=Path, default=ROOT / "target/typestate-check")
     parser.add_argument("--report", type=Path)
     parser.add_argument("--target", help="Cargo compile target; defaults to the rustc host")
-    parser.add_argument("--extra-features", default="", help="Additional comma-separated Cargo features")
+    parser.add_argument(
+        "--extra-features", default="", help="Additional comma-separated Cargo features"
+    )
     args = parser.parse_args()
     cases = fixtures(ROOT)
     target = args.target_dir.resolve()
     rustc = subprocess.check_output(["rustc", "-Vv"], text=True, encoding="utf-8").strip()
-    host = next(line.removeprefix("host: ") for line in rustc.splitlines() if line.startswith("host: "))
+    host = next(
+        line.removeprefix("host: ") for line in rustc.splitlines() if line.startswith("host: ")
+    )
     compile_target = args.target or host
     skipped = [
-        fixture for fixture in cases
+        fixture
+        for fixture in cases
         if fixture.module in WINDOWS_MODULES and "-windows-" not in compile_target
     ]
     cases = [fixture for fixture in cases if fixture not in skipped]
     extra_features = tuple(filter(None, args.extra_features.split(",")))
     environment_keys = (
-        "SDKROOT", "CC", "CFLAGS", "AR",
+        "SDKROOT",
+        "CC",
+        "CFLAGS",
+        "AR",
         *(f"{prefix}_{compile_target.replace('-', '_')}" for prefix in ("CC", "CFLAGS", "AR")),
     )
     report = {
-        "rustc": rustc, "target": compile_target,
+        "rustc": rustc,
+        "target": compile_target,
         "git_head": subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, encoding="utf-8",
+            ["git", "rev-parse", "HEAD"],
+            cwd=ROOT,
+            text=True,
+            encoding="utf-8",
         ).strip(),
-        "features": [*FEATURES, *extra_features], "fixtures": [],
-        "build_environment": {key: os.environ[key] for key in environment_keys if key in os.environ},
+        "features": [*FEATURES, *extra_features],
+        "fixtures": [],
+        "build_environment": {
+            key: os.environ[key] for key in environment_keys if key in os.environ
+        },
         "skipped_fixtures": [
             {"fixture": str(fixture.path), "reason": "requires a Windows target"}
             for fixture in skipped
         ],
     }
     if skipped:
-        print(f"SKIP {len(skipped)} Windows fixtures on {compile_target}; run on Windows or use --target", flush=True)
+        print(
+            f"SKIP {len(skipped)} Windows fixtures on {compile_target}; run on Windows or use --target",
+            flush=True,
+        )
     with tempfile.TemporaryDirectory(prefix="xlfn-typestate-") as directory:
         overlay = Path(directory)
         report["source_sha256"] = copy_sources(ROOT, overlay)
@@ -238,7 +279,9 @@ def main() -> int:
     )
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        args.report.write_text(
+            json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
     return 0 if report["passed"] else 1
 
 

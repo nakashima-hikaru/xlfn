@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-from contextlib import redirect_stderr, redirect_stdout
 import io
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 import check_verus_tcb
-
 from check_verus_tcb import audit_verus_files
 
 
@@ -55,9 +54,11 @@ class TestCheckVerusTcb(unittest.TestCase):
     def test_assumption_words_in_literals_are_not_code(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "test.rs"
-            path.write_text('const TEXT: &str = r###"assume_specification axiom fn external_type_specification"###;\n'
-                            '/* axiom fn fake(); /* assume(false) */ */\n'
-                            'fn assume_specification_helper() {}')
+            path.write_text(
+                'const TEXT: &str = r###"assume_specification axiom fn external_type_specification"###;\n'
+                "/* axiom fn fake(); /* assume(false) */ */\n"
+                "fn assume_specification_helper() {}"
+            )
             self.assertEqual(audit_verus_files([Path(tmpdir)], set()), ([], []))
 
     def test_ignores_assume_in_comments(self):
@@ -129,7 +130,7 @@ class TestCheckVerusTcb(unittest.TestCase):
                 self.assertTrue(assumptions)
 
     def test_extern_crate_aliases_allow_ordinary_references_and_ignore_literals(self):
-        source = r'''
+        source = r"""
             extern crate vstd as renamed;
             extern crate unrelated as ordinary;
             use renamed::prelude::*;
@@ -141,7 +142,7 @@ class TestCheckVerusTcb(unittest.TestCase):
             // extern crate vstd as disguised;
             const TEXT: &str = "extern crate vstd as disguised;";
             disguised::check(false);
-        '''
+        """
         self.assertEqual(self.audit_source(source), ([], []))
 
     def test_module_qualified_aliases_do_not_hide_primitives(self):
@@ -173,7 +174,7 @@ class TestCheckVerusTcb(unittest.TestCase):
                 self.assertTrue(assumptions)
 
     def test_qualified_primitive_names_are_reserved_even_in_unrelated_modules(self):
-        source = r'''
+        source = r"""
             mod first { use vstd as same; }
             mod second {
                 use unrelated as same;
@@ -186,7 +187,7 @@ class TestCheckVerusTcb(unittest.TestCase):
                 crate::second::same::assume(false);
             }
             mod inner { fn f() { super::ordinary::assume(false); } }
-        '''
+        """
         assumptions, externals = self.audit_source(source)
         self.assertEqual(len(assumptions), 6)
         self.assertEqual(externals, [])
@@ -199,16 +200,20 @@ class TestCheckVerusTcb(unittest.TestCase):
 
     def test_cross_file_reexports_cannot_hide_trust_primitives(self):
         cases = [
-            ("pub extern crate vstd as renamed;",
-             "crate::bridge::renamed::pervasive::assume(false);"),
-            ("pub use vstd as renamed;",
-             "crate::bridge::renamed::pervasive::admit();"),
-            ("pub use vstd::pervasive as api;",
-             "use crate::bridge::api::{assume as trusted}; trusted(false);"),
-            ("pub use verus_builtin as api;",
-             "let trusted = crate::bridge::api::assume;"),
-            ("pub use verus_builtin as api;",
-             "crate::bridge::api::assume_specification[foreign]() ensures false;"),
+            (
+                "pub extern crate vstd as renamed;",
+                "crate::bridge::renamed::pervasive::assume(false);",
+            ),
+            ("pub use vstd as renamed;", "crate::bridge::renamed::pervasive::admit();"),
+            (
+                "pub use vstd::pervasive as api;",
+                "use crate::bridge::api::{assume as trusted}; trusted(false);",
+            ),
+            ("pub use verus_builtin as api;", "let trusted = crate::bridge::api::assume;"),
+            (
+                "pub use verus_builtin as api;",
+                "crate::bridge::api::assume_specification[foreign]() ensures false;",
+            ),
         ]
         for bridge, expression in cases:
             with self.subTest(expression=expression), tempfile.TemporaryDirectory() as tmpdir:
@@ -241,7 +246,10 @@ class TestCheckVerusTcb(unittest.TestCase):
                     output, errors = io.StringIO(), io.StringIO()
                     with (
                         patch.object(check_verus_tcb, "ROOT", root),
-                        patch("sys.argv", ["check_verus_tcb.py", "--allowlist", str(root / "allowlist.json")]),
+                        patch(
+                            "sys.argv",
+                            ["check_verus_tcb.py", "--allowlist", str(root / "allowlist.json")],
+                        ),
                         redirect_stdout(output),
                         redirect_stderr(errors),
                     ):
@@ -257,21 +265,21 @@ class TestCheckVerusTcb(unittest.TestCase):
         for declaration in ("use {root} as renamed;", "extern crate {root} as renamed;"):
             for roots in (("vstd", "unrelated"), ("unrelated", "vstd")):
                 source = (
-                    '#[cfg(feature = "first")] ' + declaration.format(root=roots[0]) + '\n'
-                    '#[cfg(not(feature = "first"))] ' + declaration.format(root=roots[1]) + '\n'
-                    'proof fn fake() ensures false { crate::renamed::pervasive::assume(false); }'
+                    '#[cfg(feature = "first")] ' + declaration.format(root=roots[0]) + "\n"
+                    '#[cfg(not(feature = "first"))] ' + declaration.format(root=roots[1]) + "\n"
+                    "proof fn fake() ensures false { crate::renamed::pervasive::assume(false); }"
                 )
                 with self.subTest(declaration=declaration, roots=roots):
                     assumptions, _ = self.audit_source(source)
                     self.assertTrue(assumptions)
 
     def test_alias_cycle_does_not_hide_a_conditional_trust_target(self):
-        source = r'''
+        source = r"""
             #[cfg(feature = "first")] use crate::b as a;
             #[cfg(not(feature = "first"))] use vstd as a;
             use crate::a as b;
             proof fn fake() ensures false { crate::b::pervasive::assume(false); }
-        '''
+        """
         assumptions, _ = self.audit_source(source)
         self.assertTrue(assumptions)
 
@@ -295,7 +303,7 @@ class TestCheckVerusTcb(unittest.TestCase):
                 self.assertEqual(len(external), 1)
 
     def test_unrelated_identifiers_and_literals_are_not_boundaries(self):
-        source = r'''
+        source = r"""
             // admit(); #[verifier::external]
             /* assume(false); /* admit() */ */
             const A: &str = "admit(); #[verifier::external_body]";
@@ -311,14 +319,16 @@ class TestCheckVerusTcb(unittest.TestCase):
                 let external = verifier::external;
             }
             use unrelated::check as ordinary;
-        '''
+        """
         self.assertEqual(self.audit_source(source), ([], []))
 
     def test_bare_primitive_calls_are_reserved_even_with_local_shadowing(self):
         # The audit is deliberately conservative about unqualified proof
         # primitive names; qualified references are reserved as well.
-        for source in ("fn assume(_: bool) {} fn f() { assume(true); }",
-                       "fn admit() {} fn f() { admit(); }"):
+        for source in (
+            "fn assume(_: bool) {} fn f() { assume(true); }",
+            "fn admit() {} fn f() { admit(); }",
+        ):
             with self.subTest(source=source):
                 assumptions, _ = self.audit_source(source)
                 self.assertEqual(len(assumptions), 1)

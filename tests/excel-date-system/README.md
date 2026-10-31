@@ -37,7 +37,7 @@ and the value Excel actually stored, and derives its expected day from the latte
 
 ## Run on Windows
 
-Use desktop Excel and Python with `pywin32` installed. Build/package the fixture
+Use desktop Excel and uv-managed Python 3.15. The native command below adds `pywin32` to its environment. Build/package the fixture
 for the installed Excel architecture; for 64-bit Excel, run from the repository
 root in PowerShell:
 
@@ -47,7 +47,7 @@ cargo run --locked --package cargo-xlfn -- package `
   --target x86_64-pc-windows-msvc `
   --out tests/xlfn-e2e-fixture/package --locked
 
-python tests/excel-date-system/run.py `
+uv run --project tools --locked --with pywin32 python tests/excel-date-system/run.py `
   --xll <path-to-packaged-FrameworkFixture.xll> `
   --output <new-path-for-date-system-evidence.jsonl>
 ```
@@ -68,7 +68,7 @@ formula workbook names and settings, observed values, expected values, and resul
 When the XLL was built elsewhere, pass its builder's source provenance explicitly:
 
 ```powershell
-python tests/excel-date-system/run.py `
+uv run --project tools --locked --with pywin32 python tests/excel-date-system/run.py `
   --xll <path-to-packaged-FrameworkFixture.xll> `
   --output <new-evidence.jsonl> `
   --source-revision <artifact-build-revision> `
@@ -93,7 +93,7 @@ exit; neither is a physical DLL-unload or memory-leak qualification.
 ## Local preparation checks
 
 ```sh
-python3 -m py_compile tests/excel-date-system/run.py
+uv run --project tools --locked python -m py_compile tests/excel-date-system/run.py
 cargo check --manifest-path tests/xlfn-e2e-fixture/Cargo.toml --locked
 cargo clippy --manifest-path tests/xlfn-e2e-fixture/Cargo.toml --all-targets --locked
 ```

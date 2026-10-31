@@ -3,7 +3,7 @@
 This suite runs matching worksheet workloads in separate Excel processes with
 xlfn or Excel-DNA loaded. It writes one JSON record per case and a paired CSV.
 Running it requires **64-bit Excel for Windows with dynamic arrays**, Python
-3.11+, `pywin32`, and `psutil`. CI builds and checks the fixtures; it does not
+3.15, `pywin32`, and `psutil` (provided by the uv commands below). CI builds and checks the fixtures; it does not
 run Excel. The `smoke` profile checks the harness, while `full` supplies the
 comparison workloads.
 
@@ -24,12 +24,11 @@ A second job downloads and verifies the artifact.
 From this directory on the Windows Excel machine:
 
 ```powershell
-py -m pip install pywin32 psutil
 gh auth login
 ./fetch-ci.ps1 -RunId 123456789
-py ./run.py --profile smoke --out ./results-smoke.jsonl
-py ./run.py --profile full --out ./results-full.jsonl
-py ./summarize.py ./results-full.jsonl
+uv run --project ../../tools --locked --with pywin32 --with psutil python ./run.py --profile smoke --out ./results-smoke.jsonl
+uv run --project ../../tools --locked --with pywin32 --with psutil python ./run.py --profile full --out ./results-full.jsonl
+uv run --project ../../tools --locked python ./summarize.py ./results-full.jsonl
 ```
 
 Use a completed workflow run ID and check out its source commit before running.
@@ -52,7 +51,7 @@ file. Filter with `--id S01 --id S02`, `--variant 1000`, or
 `--implementation xlfn`. Preview workloads on any platform:
 
 ```sh
-python run.py --profile smoke --plan
+uv run --project ../../tools --locked python run.py --profile smoke --plan
 ```
 
 For local fixture development, install the Rust x86_64 MSVC target, .NET 10 SDK,
@@ -105,8 +104,8 @@ blocks, validate outputs, retain timing vectors, and report signed changes.
 They are within-xlfn controls and have no Excel-DNA performance ratio. For example:
 
 ```powershell
-py ./run.py --id M06 --implementation xlfn --repeat 10 --out ./results-returns.jsonl
-py ./run.py --id N01 --id N04 --implementation xlfn --repeat 10 --out ./results-inputs.jsonl
+uv run --project ../../tools --locked --with pywin32 --with psutil python ./run.py --id M06 --implementation xlfn --repeat 10 --out ./results-returns.jsonl
+uv run --project ../../tools --locked --with pywin32 --with psutil python ./run.py --id N01 --id N04 --implementation xlfn --repeat 10 --out ./results-inputs.jsonl
 ```
 
 The paired summarizer requires successful results with matching settings,
@@ -130,7 +129,7 @@ full lifecycle diagnostics are excluded from performance ratios.
 From the repository root:
 
 ```sh
-python -B -m unittest discover -s benchmarks/excel-comparison -p 'test_*.py'
+uv run --project tools --locked python -B -m unittest discover -s benchmarks/excel-comparison -p 'test_*.py'
 cargo test --manifest-path benchmarks/excel-comparison/xlfn/Cargo.toml --locked --lib
 dotnet run --project benchmarks/excel-comparison/control-tests/ControlTests.csproj -- normal
 dotnet run --project benchmarks/excel-comparison/control-tests/ControlTests.csproj --no-build -- emergency

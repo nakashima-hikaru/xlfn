@@ -1,18 +1,17 @@
 """Exercise isolation and failure handling without depending on an installed verifier."""
 
-from contextlib import redirect_stdout
 import copy
 import io
-from pathlib import Path
-from subprocess import CompletedProcess, TimeoutExpired
 import tempfile
 import threading
 import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
+from subprocess import CompletedProcess, TimeoutExpired
 from unittest.mock import patch
 
 import verus_mutations as gate
 from check_verus_reports import check_reports
-
 
 GOOD = "verification results:: 3 verified, 0 errors"
 BAD = "error: assertion failed\nverification results:: 2 verified, 1 errors"
@@ -31,11 +30,18 @@ class RunnerTests(unittest.TestCase):
         patch.object(gate, "ROOT", self.root).start()
 
     def group(self, plan, mutations=None):
-        plan.add_group(Path("proof"), Path("protocol.rs"), (Path("dependency.rs"),),
-                       mutations or {"alpha": ("alpha", "ALPHA")})
+        plan.add_group(
+            Path("proof"),
+            Path("protocol.rs"),
+            (Path("dependency.rs"),),
+            mutations or {"alpha": ("alpha", "ALPHA")},
+        )
 
     def run_plan(self, plan, invoke, jobs=2):
-        with patch.object(gate.subprocess, "run", side_effect=invoke), redirect_stdout(io.StringIO()):
+        with (
+            patch.object(gate.subprocess, "run", side_effect=invoke),
+            redirect_stdout(io.StringIO()),
+        ):
             return gate.MutationRunner(jobs, threads=1).run(plan)
 
     def test_groups_share_only_identical_baselines(self):
@@ -59,7 +65,9 @@ class RunnerTests(unittest.TestCase):
             return CompletedProcess(command, 1, BAD, "")
 
         report = self.run_plan(plan, invoke)
-        self.assertEqual(baseline_inputs, ["dependency", "changed dependency", "changed dependency"])
+        self.assertEqual(
+            baseline_inputs, ["dependency", "changed dependency", "changed dependency"]
+        )
         self.assertEqual(len(report["baselines"]), 3)
         self.assertEqual(len(report["mutations"]), 4)
 
@@ -117,8 +125,11 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(calls, ["alpha beta"])
 
     def test_compile_failure_or_unexpected_success_cannot_pass(self):
-        for code, output in ((1, "error[E0308]: mismatched types"), (0, GOOD),
-                             (1, "error: assertion failed")):
+        for code, output in (
+            (1, "error[E0308]: mismatched types"),
+            (0, GOOD),
+            (1, "error: assertion failed"),
+        ):
             with self.subTest(code=code, output=output):
                 plan = gate.MutationPlan()
                 self.group(plan)
@@ -134,16 +145,19 @@ class RunnerTests(unittest.TestCase):
     def test_invariant_diagnostic_casing_still_requires_failed_proof_summary(self):
         # Verus 0.2026.10.26 lowercases this diagnostic; the previous pin did not.
         summary = "verification results:: 316 verified, 2 errors"
-        for diagnostic in ("Cannot show invariant holds at end of block",
-                           "cannot show invariant holds at end of block"):
+        for diagnostic in (
+            "Cannot show invariant holds at end of block",
+            "cannot show invariant holds at end of block",
+        ):
             with self.subTest(diagnostic=diagnostic):
                 output = summary + "\nerror: " + diagnostic
                 self.assertTrue(gate.is_verification_failure(1, output))
                 self.assertFalse(gate.is_verification_failure(0, output))
                 self.assertFalse(gate.is_verification_failure(1, diagnostic))
                 self.assertFalse(gate.is_verification_failure(1, GOOD + "\n" + diagnostic))
-        self.assertFalse(gate.is_verification_failure(
-            1, summary + "\nerror[E0308]: mismatched types"))
+        self.assertFalse(
+            gate.is_verification_failure(1, summary + "\nerror[E0308]: mismatched types")
+        )
 
     def test_timeout_cannot_pass(self):
         plan = gate.MutationPlan()
@@ -159,13 +173,20 @@ class RunnerTests(unittest.TestCase):
 
     def test_ownership_exception_stays_case_specific(self):
         plan = gate.MutationPlan()
-        plan.add_group(Path("proof"), Path("protocol.rs"), (),
-                       {"ownership": ("alpha", "ALPHA")}, frozenset({"ownership"}))
+        plan.add_group(
+            Path("proof"),
+            Path("protocol.rs"),
+            (),
+            {"ownership": ("alpha", "ALPHA")},
+            frozenset({"ownership"}),
+        )
 
         def invoke(command, cwd, **_kwargs):
             if (cwd / "protocol.rs").read_text() == "alpha beta":
                 return CompletedProcess(command, 0, GOOD, "")
-            return CompletedProcess(command, 1, "error[E0382]: borrow of moved value: `detached`", "")
+            return CompletedProcess(
+                command, 1, "error[E0382]: borrow of moved value: `detached`", ""
+            )
 
         self.assertEqual(len(self.run_plan(plan, invoke)["mutations"]), 1)
         ordinary = gate.MutationPlan()
@@ -174,22 +195,31 @@ class RunnerTests(unittest.TestCase):
             self.run_plan(ordinary, invoke)
 
     def test_input_validation_happens_before_verification(self):
-        for mutations, message in (({"missing": ("absent", "broken")}, "mutation anchor changed"),
-                                   ({"noop": ("alpha", "alpha")}, "does not change source")):
+        for mutations, message in (
+            ({"missing": ("absent", "broken")}, "mutation anchor changed"),
+            ({"noop": ("alpha", "alpha")}, "does not change source"),
+        ):
             with self.subTest(mutations=mutations), patch.object(gate.subprocess, "run") as invoke:
                 with self.assertRaisesRegex(SystemExit, message):
                     self.group(gate.MutationPlan(), mutations)
                 invoke.assert_not_called()
         with self.assertRaisesRegex(SystemExit, "names have no mutation"):
-            gate.MutationPlan().add_group(Path("proof"), Path("protocol.rs"), (),
-                                         {"a": ("alpha", "A")}, frozenset({"unknown"}))
+            gate.MutationPlan().add_group(
+                Path("proof"),
+                Path("protocol.rs"),
+                (),
+                {"a": ("alpha", "A")},
+                frozenset({"unknown"}),
+            )
 
     def test_collection_does_not_invoke_verifier_and_restores_on_failure(self):
         plan = gate.MutationPlan()
         with patch.object(gate.subprocess, "run") as invoke:
             with self.assertRaisesRegex(RuntimeError, "probe"):
                 with gate.collect_mutations(plan):
-                    gate.check_mutations(Path("proof"), Path("protocol.rs"), (), {"a": ("alpha", "A")})
+                    gate.check_mutations(
+                        Path("proof"), Path("protocol.rs"), (), {"a": ("alpha", "A")}
+                    )
                     raise RuntimeError("probe")
             invoke.assert_not_called()
         self.assertEqual(len(plan.mutations), 1)
@@ -225,12 +255,21 @@ class RunnerTests(unittest.TestCase):
     def test_ci_reports_require_complete_exact_inputs(self):
         plan = gate.MutationPlan()
         self.group(plan, {str(i): ("alpha", str(i)) for i in range(7)})
-        snapshots = [{"proof": str(s.proof), "sha256": s.digest, "verified": 3}
-                     for s in plan.snapshots.values()]
-        reports = [{"shard_index": i, "shard_count": 4, "total_mutations": 7,
-                    "verus_version": "test-version", "baselines": snapshots,
-                    "mutations": [{**m.describe(), "seconds": 1.0} for m in plan.shard(i, 4).mutations]}
-                   for i in range(4)]
+        snapshots = [
+            {"proof": str(s.proof), "sha256": s.digest, "verified": 3}
+            for s in plan.snapshots.values()
+        ]
+        reports = [
+            {
+                "shard_index": i,
+                "shard_count": 4,
+                "total_mutations": 7,
+                "verus_version": "test-version",
+                "baselines": snapshots,
+                "mutations": [{**m.describe(), "seconds": 1.0} for m in plan.shard(i, 4).mutations],
+            }
+            for i in range(4)
+        ]
         check_reports(plan, reports, 4)
         with self.assertRaisesRegex(ValueError, "expected 4 shard reports"):
             check_reports(plan, reports[:-1], 4)
@@ -244,7 +283,10 @@ class RunnerTests(unittest.TestCase):
             (lambda r: r[0]["mutations"].pop(), "mutation inputs"),
             (lambda r: r[0]["mutations"].append(r[0]["mutations"][0]), "mutation inputs"),
             (lambda r: r[0]["mutations"][0].update(rejection="compiler-error"), "mutation inputs"),
-            (lambda r: r[0]["mutations"][0].update(changed_source_sha256="wrong"), "mutation inputs"),
+            (
+                lambda r: r[0]["mutations"][0].update(changed_source_sha256="wrong"),
+                "mutation inputs",
+            ),
         )
         for change, message in changes:
             with self.subTest(message=message):

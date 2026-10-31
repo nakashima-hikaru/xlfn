@@ -9,13 +9,13 @@ visible. This is an introduction guard and review inventory, not a Rust proof.
 from __future__ import annotations
 
 import argparse
-from collections import Counter
-from dataclasses import dataclass
 import json
-from pathlib import Path
 import re
 import subprocess
 import sys
+from collections import Counter
+from dataclasses import dataclass
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 INVENTORY = ROOT / "tools/panic_boundary_allowlist.json"
@@ -63,7 +63,7 @@ def rust_code(source: str) -> str:
                 if end == -1:
                     raise ValueError("unterminated raw string")
                 index = end + len(closing)
-            elif source[index] == '"' or source[index:index + 2] in {'b"', 'c"'}:
+            elif source[index] == '"' or source[index : index + 2] in {'b"', 'c"'}:
                 index += 1 if source[index] == '"' else 2
                 while index < size:
                     if source[index] == "\\":
@@ -114,7 +114,9 @@ def references(path: str, source: str) -> list[Reference]:
             attrs = attributes(pending)
             if attrs:
                 context.append(attrs)
-            found.append(Reference(path, " / ".join(context) or "module root", " ".join(lines[line].split())))
+            found.append(
+                Reference(path, " / ".join(context) or "module root", " ".join(lines[line].split()))
+            )
         if token == "{":
             declaration = " ".join(pending)
             named = re.search(r"\b(fn|mod)\s+([A-Za-z_][A-Za-z_0-9]*)", declaration)
@@ -139,10 +141,16 @@ def references(path: str, source: str) -> list[Reference]:
 def repository_references(root: Path) -> Counter[Reference]:
     # Include new source files as well as tracked ones, excluding build output
     # according to the repository's normal ignore policy.
-    listing = subprocess.run(
-        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "*.rs"],
-        cwd=root, check=True, capture_output=True,
-    ).stdout.decode().split("\0")
+    listing = (
+        subprocess.run(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "*.rs"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        )
+        .stdout.decode()
+        .split("\0")
+    )
     found: Counter[Reference] = Counter()
     for path in sorted(set(filter(None, listing))):
         source = root / path
@@ -168,27 +176,48 @@ def check(actual: Counter[Reference], entries: list[dict]) -> list[str]:
             continue
         expected[reference] = count
     for reference, count in sorted((actual - expected).items()):
-        errors.append(f"unreviewed catch_unwind ({count}): {reference.path}: {reference.context}: {reference.code}")
+        errors.append(
+            f"unreviewed catch_unwind ({count}): {reference.path}: {reference.context}: {reference.code}"
+        )
     for reference, count in sorted((expected - actual).items()):
-        errors.append(f"stale allowance ({count}): {reference.path}: {reference.context}: {reference.code}")
+        errors.append(
+            f"stale allowance ({count}): {reference.path}: {reference.context}: {reference.code}"
+        )
     return errors
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--list", action="store_true", help="print references for manual audit; never rewrites the allowlist")
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="print references for manual audit; never rewrites the allowlist",
+    )
     args = parser.parse_args()
     actual = repository_references(ROOT)
     if args.list:
-        print(json.dumps([{**reference.__dict__, "count": count} for reference, count in sorted(actual.items())], indent=2))
+        print(
+            json.dumps(
+                [
+                    {**reference.__dict__, "count": count}
+                    for reference, count in sorted(actual.items())
+                ],
+                indent=2,
+            )
+        )
         return 0
     entries = json.loads(INVENTORY.read_text(encoding="utf-8"))
     errors = check(actual, entries)
     if errors:
         print("\n".join(errors), file=sys.stderr)
-        print("Use catch_no_unwind/contain_panic for consumed payloads; review any intentional resume/test exception.", file=sys.stderr)
+        print(
+            "Use catch_no_unwind/contain_panic for consumed payloads; review any intentional resume/test exception.",
+            file=sys.stderr,
+        )
         return 1
-    print(f"Panic boundaries: {sum(actual.values())} reviewed direct references; no unreviewed catch_unwind.")
+    print(
+        f"Panic boundaries: {sum(actual.values())} reviewed direct references; no unreviewed catch_unwind."
+    )
     return 0
 
 

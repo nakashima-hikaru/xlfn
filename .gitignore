@@ -10,6 +10,7 @@ target/
 __pycache__/
 *.py[cod]
 .ruff_cache/
+.venv/
 
 # Keep machine-specific benchmark measurements out of the source tree.
 **/criterion/

@@ -1,13 +1,13 @@
 """Exercise the typestate checker's UTF-8 contract on a legacy-code-page host."""
 
-from contextlib import ExitStack
 import io
 import json
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import ExitStack
+from pathlib import Path
 from unittest.mock import patch
 
 import check_typestate as checker
@@ -30,8 +30,12 @@ class PackageRoutingTests(unittest.TestCase):
                 completed = subprocess.CompletedProcess([], 0, "", "")
                 with patch.object(checker.subprocess, "run", return_value=completed) as run:
                     result = checker.check_fixture(
-                        fixture, overlay, {relative: "// original\n"}, overlay / "target",
-                        "x86_64-pc-windows-msvc", ("blake3/pure",),
+                        fixture,
+                        overlay,
+                        {relative: "// original\n"},
+                        overlay / "target",
+                        "x86_64-pc-windows-msvc",
+                        ("blake3/pure",),
                     )
                 command = run.call_args.args[0]
                 self.assertEqual(command[:5], ["cargo", "check", "-p", package, "--lib"])
@@ -56,11 +60,13 @@ class Utf8TypestateTests(unittest.TestCase):
             negative = Path("tools/typestate/fail/不正あ.rs")
             windows = Path("tools/typestate/pass/windowsあ.rs")
             sources = {relative: source_text for relative in checker.MODULES.values()}
-            sources.update({
-                positive: "// module: registration/host\n// 正常あ\nfn valid() {}\n",
-                negative: "// module: registration/host\n// 不正あ\nfn invalid() {} // error: E0308\n",
-                windows: "// module: excel_rtd/windows\n// Windowsあ\nfn valid() {}\n",
-            })
+            sources.update(
+                {
+                    positive: "// module: registration/host\n// 正常あ\nfn valid() {}\n",
+                    negative: "// module: registration/host\n// 不正あ\nfn invalid() {} // error: E0308\n",
+                    windows: "// module: excel_rtd/windows\n// Windowsあ\nfn valid() {}\n",
+                }
+            )
             for relative, content in sources.items():
                 path = root / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -82,11 +88,16 @@ class Utf8TypestateTests(unittest.TestCase):
 
             def command_output(command, **kwargs):
                 if command == ["rustc", "-Vv"]:
-                    content = "rustc 1.99.1\nhost: x86_64-unknown-linux-gnu\nnote: 診断あ\n".encode("utf-8")
+                    content = (
+                        "rustc 1.99.1\nhost: x86_64-unknown-linux-gnu\nnote: 診断あ\n".encode()
+                    )
                 elif command == ["git", "rev-parse", "HEAD"]:
                     content = b"0123456789abcdef\n"
                 else:
-                    self.assertEqual(command, ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"])
+                    self.assertEqual(
+                        command,
+                        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+                    )
                     content = ("\0".join(map(str, sources)) + "\0").encode("utf-8")
                 if kwargs.get("text"):
                     return content.decode(kwargs.get("encoding") or "cp1252")
@@ -104,26 +115,41 @@ class Utf8TypestateTests(unittest.TestCase):
                 for relative in checker.MODULES.values():
                     text = (overlay / relative).read_bytes().decode("utf-8")
                     self.assertEqual(text.splitlines()[:1], source_text.splitlines())
-                    injections.extend(line for line in text.splitlines() if line.startswith("#[path = "))
+                    injections.extend(
+                        line for line in text.splitlines() if line.startswith("#[path = ")
+                    )
                 # Restoring each original must leave exactly one current fixture.
                 self.assertEqual(len(injections), 1)
-                literal = injections[0][len("#[path = "):-1]
-                self.assertIn("あ", literal, "Rust path literals must retain Unicode instead of JSON escapes")
+                literal = injections[0][len("#[path = ") : -1]
+                self.assertIn(
+                    "あ", literal, "Rust path literals must retain Unicode instead of JSON escapes"
+                )
                 fixture = Path(json.loads(literal)).relative_to(overlay)
                 compiled.append(fixture)
                 events = []
                 if fixture == negative:
-                    events.append({
-                        "reason": "compiler-message",
-                        "message": {
-                            "level": "error", "message": "型が違いますあ",
-                            "rendered": "error: 型が違いますあ\n",
-                            "code": {"code": "E0425" if wrong_error else "E0308"},
-                            "spans": [{"is_primary": True, "file_name": str(overlay / fixture), "line_start": 3}],
-                        },
-                    })
-                stdout = ("\n".join(json.dumps(event, ensure_ascii=False) for event in events) + "\n").encode("utf-8")
-                stderr = "コンパイラの診断あ\n".encode("utf-8")
+                    events.append(
+                        {
+                            "reason": "compiler-message",
+                            "message": {
+                                "level": "error",
+                                "message": "型が違いますあ",
+                                "rendered": "error: 型が違いますあ\n",
+                                "code": {"code": "E0425" if wrong_error else "E0308"},
+                                "spans": [
+                                    {
+                                        "is_primary": True,
+                                        "file_name": str(overlay / fixture),
+                                        "line_start": 3,
+                                    }
+                                ],
+                            },
+                        }
+                    )
+                stdout = (
+                    "\n".join(json.dumps(event, ensure_ascii=False) for event in events) + "\n"
+                ).encode("utf-8")
+                stderr = "コンパイラの診断あ\n".encode()
                 # Use actual byte pipes so missing subprocess encoding regresses
                 # even when these tests run on a UTF-8 Unix machine.
                 kwargs.setdefault("encoding", "cp1252")
@@ -138,20 +164,31 @@ class Utf8TypestateTests(unittest.TestCase):
             stdout_bytes, stderr_bytes = io.BytesIO(), io.BytesIO()
             stdout = io.TextIOWrapper(stdout_bytes, encoding="cp1252")
             stderr = io.TextIOWrapper(stderr_bytes, encoding="cp1252")
-            argv = ["check_typestate.py", "--target-dir", str(root / "target"), "--report", str(report_path)]
+            argv = [
+                "check_typestate.py",
+                "--target-dir",
+                str(root / "target"),
+                "--report",
+                str(report_path),
+            ]
             if target:
                 argv.extend(["--target", target])
             with ExitStack() as stack:
-                stack.enter_context(patch.object(
-                    io, "text_encoding",
-                    lambda encoding, stacklevel=2: "cp1252" if encoding is None else encoding,
-                ))
+                stack.enter_context(
+                    patch.object(
+                        io,
+                        "text_encoding",
+                        lambda encoding, stacklevel=2: "cp1252" if encoding is None else encoding,
+                    )
+                )
                 stack.enter_context(patch.object(Path, "open", legacy_open))
                 # Prove the simulated default rejects the UTF-8 fixture bytes.
                 with self.assertRaises(UnicodeDecodeError):
                     (root / positive).read_text()
                 stack.enter_context(patch.object(checker, "ROOT", root))
-                stack.enter_context(patch.object(checker.subprocess, "check_output", command_output))
+                stack.enter_context(
+                    patch.object(checker.subprocess, "check_output", command_output)
+                )
                 stack.enter_context(patch.object(checker.subprocess, "run", cargo_run))
                 stack.enter_context(patch.object(sys, "argv", argv))
                 stack.enter_context(patch.object(sys, "stdout", stdout))
@@ -162,7 +199,7 @@ class Utf8TypestateTests(unittest.TestCase):
             output = stdout_bytes.getvalue().decode("utf-8")
             error_output = stderr_bytes.getvalue().decode("utf-8")
             raw_report = report_path.read_bytes()
-            self.assertIn("型が違いますあ".encode("utf-8"), raw_report)
+            self.assertIn("型が違いますあ".encode(), raw_report)
             report = json.loads(raw_report.decode("utf-8"))
             self.assertIn("診断あ", report["rustc"])
             return status, report, compiled, output, error_output

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Check the specific Rust lifetime fence, separately from negative SMT proofs."""
-from pathlib import Path
+
 import shutil
 import subprocess
 import tempfile
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PROOF = Path("verification/verus/rotating_read_domain")
@@ -26,15 +27,20 @@ def main() -> None:
         command = ["verus", "--crate-type=lib", str(PROOF / "src/lib.rs")]
         baseline = subprocess.run(command, cwd=tree, capture_output=True, text=True, timeout=120)
         if baseline.returncode:
-            raise SystemExit("FAIL: baseline must verify before checking lifetime rejection\n"
-                             + baseline.stdout + baseline.stderr)
+            raise SystemExit(
+                "FAIL: baseline must verify before checking lifetime rejection\n"
+                + baseline.stdout
+                + baseline.stderr
+            )
 
         path = tree / PROOF / "src/lock_ownership.rs"
         source = path.read_text()
         anchor = "                if let Some(batch) = detachment::"
         if source.count(anchor) != 1:
             raise SystemExit("FAIL: transition lifetime mutation anchor changed")
-        path.write_text(source.replace(anchor, "                release(state, handle);\n" + anchor))
+        path.write_text(
+            source.replace(anchor, "                release(state, handle);\n" + anchor)
+        )
         rejected = subprocess.run(command, cwd=tree, capture_output=True, text=True, timeout=120)
         output = rejected.stdout + rejected.stderr
         required = (
@@ -87,15 +93,25 @@ def main() -> None:
         source = path.read_text()
         start = "            let tracked mut returned = None;"
         finish = "            Tracked(returned.tracked_unwrap())"
-        restore_start = source.index("        pub fn restore(&self, Tracked(lease): Tracked<DrainLease>)")
+        restore_start = source.index(
+            "        pub fn restore(&self, Tracked(lease): Tracked<DrainLease>)"
+        )
         restore_end = source.index("        pub fn seal(&self", restore_start)
         restore = source[restore_start:restore_end]
         if restore.count(start) != 1 or restore.count(finish) != 1:
             raise SystemExit("FAIL: drain lease lifetime mutation anchor changed")
-        mutated_restore = restore.replace(start, "            let tracked active = lease.active();\n" + start)
-        mutated_restore = mutated_restore.replace(finish, "            proof { Self::use_zero(active); }\n" + finish)
-        path.write_text(source.replace("    impl Counter {", "    impl Counter {\n        proof fn use_zero(tracked active: &admission::active) requires active.value() == 0 {}")
-                        .replace(restore, mutated_restore))
+        mutated_restore = restore.replace(
+            start, "            let tracked active = lease.active();\n" + start
+        )
+        mutated_restore = mutated_restore.replace(
+            finish, "            proof { Self::use_zero(active); }\n" + finish
+        )
+        path.write_text(
+            source.replace(
+                "    impl Counter {",
+                "    impl Counter {\n        proof fn use_zero(tracked active: &admission::active) requires active.value() == 0 {}",
+            ).replace(restore, mutated_restore)
+        )
         rejected = subprocess.run(command, cwd=tree, capture_output=True, text=True, timeout=120)
         output = rejected.stdout + rejected.stderr
         required = (
@@ -104,8 +120,9 @@ def main() -> None:
         )
         if rejected.returncode == 0 or not all(marker in output for marker in required):
             raise SystemExit("FAIL: expected specific borrowed-drain-lease error\n" + output)
-        print("PASS: borrow checker rejects restoring a drain lease while zero authority is borrowed")
-
+        print(
+            "PASS: borrow checker rejects restoring a drain lease while zero authority is borrowed"
+        )
 
         path.write_text(source)
         path = tree / PROOF / "src/striped_rotation.rs"
@@ -136,12 +153,17 @@ def main() -> None:
             "borrow later used here",
         )
         if rejected.returncode == 0 or not all(marker in output for marker in required):
-            raise SystemExit("FAIL: expected specific live-collection-handoff borrow error\n" + output)
-        print("PASS: borrow checker rejects moving transition handle while collection handoff remains live")
-
+            raise SystemExit(
+                "FAIL: expected specific live-collection-handoff borrow error\n" + output
+            )
+        print(
+            "PASS: borrow checker rejects moving transition handle while collection handoff remains live"
+        )
 
         path.write_text(source)
-        from check_handle_completion_refinement import PROOF as HANDLE_PROOF, DEPENDENCIES
+        from check_handle_completion_refinement import DEPENDENCIES
+        from check_handle_completion_refinement import PROOF as HANDLE_PROOF
+
         shutil.copytree(ROOT / HANDLE_PROOF, tree / HANDLE_PROOF, dirs_exist_ok=True)
         for dependency in DEPENDENCIES:
             (tree / dependency).parent.mkdir(parents=True, exist_ok=True)
@@ -149,14 +171,19 @@ def main() -> None:
         command = ["verus", "--crate-type=lib", str(HANDLE_PROOF / "src/lib.rs")]
         baseline = subprocess.run(command, cwd=tree, capture_output=True, text=True, timeout=120)
         if baseline.returncode:
-            raise SystemExit("FAIL: Handle baseline must verify before finish-order rejection\n"
-                             + baseline.stdout + baseline.stderr)
+            raise SystemExit(
+                "FAIL: Handle baseline must verify before finish-order rejection\n"
+                + baseline.stdout
+                + baseline.stderr
+            )
         path = tree / "crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"
         source = path.read_text()
         anchor = "        let $result = $operation;\n        $clear;"
         if source.count(anchor) != 1:
             raise SystemExit("FAIL: pending finish lifetime mutation anchor changed")
-        path.write_text(source.replace(anchor, "        $clear;\n        let $result = $operation;"))
+        path.write_text(
+            source.replace(anchor, "        $clear;\n        let $result = $operation;")
+        )
         rejected = subprocess.run(command, cwd=tree, capture_output=True, text=True, timeout=120)
         output = rejected.stdout + rejected.stderr
         required = (
@@ -165,21 +192,27 @@ def main() -> None:
         )
         if rejected.returncode == 0 or not all(marker in output for marker in required):
             raise SystemExit("FAIL: expected specific collection use-after-finish error\n" + output)
-        print("PASS: borrow checker rejects clearing pending before its collection-backed recovery callback")
-
+        print(
+            "PASS: borrow checker rejects clearing pending before its collection-backed recovery callback"
+        )
 
         path.write_text(source)
         cache_proof = Path("verification/verus/cache_lease")
         shutil.copytree(ROOT / cache_proof, tree / cache_proof, dirs_exist_ok=True)
-        for dependency in (Path("crates/xlfn/src/cache/pin_transitions.rs"),
-                           Path("crates/xlfn/src/cache/node_layout.rs")):
+        for dependency in (
+            Path("crates/xlfn/src/cache/pin_transitions.rs"),
+            Path("crates/xlfn/src/cache/node_layout.rs"),
+        ):
             (tree / dependency).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / dependency, tree / dependency)
         command = ["verus", "--crate-type=lib", str(cache_proof / "src/lib.rs")]
         baseline = subprocess.run(command, cwd=tree, capture_output=True, text=True, timeout=120)
         if baseline.returncode:
-            raise SystemExit("FAIL: Cache baseline must verify before admission lifetime rejection\n"
-                             + baseline.stdout + baseline.stderr)
+            raise SystemExit(
+                "FAIL: Cache baseline must verify before admission lifetime rejection\n"
+                + baseline.stdout
+                + baseline.stderr
+            )
         path = tree / cache_proof / "src/atomic_admission.rs"
         source = path.read_text()
         anchor = "    pub fn observe<'scope, T>"
@@ -206,11 +239,16 @@ def main() -> None:
         output = rejected.stdout + rejected.stderr
         required = (
             "error[E0505]: cannot move out of `admission` because it is borrowed",
-            "atomic_admission.rs", "borrow later used here",
+            "atomic_admission.rs",
+            "borrow later used here",
         )
         if rejected.returncode == 0 or not all(marker in output for marker in required):
-            raise SystemExit("FAIL: expected specific live-Cache-observation borrow error\n" + output)
-        print("PASS: borrow checker rejects releasing atomic Cache admission before its observation ends")
+            raise SystemExit(
+                "FAIL: expected specific live-Cache-observation borrow error\n" + output
+            )
+        print(
+            "PASS: borrow checker rejects releasing atomic Cache admission before its observation ends"
+        )
 
         path.write_text(source)
         path = tree / "crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"
@@ -218,7 +256,9 @@ def main() -> None:
         anchor = "        let $result = $operation;\n        $clear;"
         if source.count(anchor) != 1:
             raise SystemExit("FAIL: Cache pending finish lifetime mutation anchor changed")
-        path.write_text(source.replace(anchor, "        $clear;\n        let $result = $operation;"))
+        path.write_text(
+            source.replace(anchor, "        $clear;\n        let $result = $operation;")
+        )
         rejected = subprocess.run(command, cwd=tree, capture_output=True, text=True, timeout=120)
         output = rejected.stdout + rejected.stderr
         required = (
@@ -226,7 +266,9 @@ def main() -> None:
             "queued_atomic.rs",
         )
         if rejected.returncode == 0 or not all(marker in output for marker in required):
-            raise SystemExit("FAIL: expected specific Cache collection use-after-finish error\n" + output)
+            raise SystemExit(
+                "FAIL: expected specific Cache collection use-after-finish error\n" + output
+            )
         print("PASS: borrow checker rejects clearing Cache pending before its recovery callback")
 
         path.write_text(source)
@@ -269,7 +311,9 @@ def main() -> None:
             "queued_atomic.rs",
         )
         if rejected.returncode == 0 or not all(marker in output for marker in required):
-            raise SystemExit("FAIL: expected specific lookup-after-admission-release error\n" + output)
+            raise SystemExit(
+                "FAIL: expected specific lookup-after-admission-release error\n" + output
+            )
         print("PASS: borrow checker rejects leaving admission before shared Cache pin acquisition")
 
         path.write_text(source)
@@ -283,11 +327,16 @@ def main() -> None:
         output = rejected.stdout + rejected.stderr
         required = (
             "error[E0505]: cannot move out of `guard` because it is borrowed",
-            "resident_index.rs", "borrow later used here",
+            "resident_index.rs",
+            "borrow later used here",
         )
         if rejected.returncode == 0 or not all(marker in output for marker in required):
-            raise SystemExit("FAIL: expected specific index-unlock-before-observation error\n" + output)
-        print("PASS: borrow checker rejects releasing the index read guard before observation transfer")
+            raise SystemExit(
+                "FAIL: expected specific index-unlock-before-observation error\n" + output
+            )
+        print(
+            "PASS: borrow checker rejects releasing the index read guard before observation transfer"
+        )
 
         path.write_text(source)
         path = tree / cache_proof / "src/queued_atomic.rs"
@@ -310,12 +359,14 @@ def main() -> None:
         output = rejected.stdout + rejected.stderr
         required = (
             "error[E0505]: cannot move out of `lease` because it is borrowed",
-            "queued_atomic.rs", "borrow later used here",
+            "queued_atomic.rs",
+            "borrow later used here",
         )
         if rejected.returncode == 0 or not all(marker in output for marker in required):
             raise SystemExit("FAIL: expected specific live-Cache-lease-reference error\n" + output)
-        print("PASS: borrow checker rejects releasing a Cache lease while its typed reference remains live")
-
+        print(
+            "PASS: borrow checker rejects releasing a Cache lease while its typed reference remains live"
+        )
 
         path.write_text(source)
         path = tree / cache_proof / "src/inline_value.rs"
@@ -338,12 +389,14 @@ def main() -> None:
         output = rejected.stdout + rejected.stderr
         required = (
             "error[E0505]: cannot move out of `lease` because it is borrowed",
-            "inline_value.rs", "borrow later used here",
+            "inline_value.rs",
+            "borrow later used here",
         )
         if rejected.returncode == 0 or not all(marker in output for marker in required):
             raise SystemExit("FAIL: expected specific live-inline-value-reference error\n" + output)
-        print("PASS: borrow checker rejects releasing the allocation while its inline value remains borrowed")
-
+        print(
+            "PASS: borrow checker rejects releasing the allocation while its inline value remains borrowed"
+        )
 
         path.write_text(source)
         path = tree / cache_proof / "src/queued_atomic.rs"
@@ -366,7 +419,6 @@ def main() -> None:
         if rejected.returncode == 0 or not all(marker in output for marker in required):
             raise SystemExit("FAIL: expected duplicate-Cache-retirement recovery error\n" + output)
         print("PASS: borrow checker rejects recovering a Cache retirement entry twice")
-
 
         path.write_text(source)
         path = tree / cache_proof / "src/queued_atomic.rs"
@@ -393,11 +445,18 @@ def main() -> None:
         path.write_text(source.replace(anchor, probe + anchor))
         rejected = subprocess.run(command, cwd=tree, capture_output=True, text=True, timeout=120)
         output = rejected.stdout + rejected.stderr
-        required = ("error[E0505]: cannot move out of `ticket` because it is borrowed",
-                    "queued_atomic.rs", "borrow later used here")
+        required = (
+            "error[E0505]: cannot move out of `ticket` because it is borrowed",
+            "queued_atomic.rs",
+            "borrow later used here",
+        )
         if rejected.returncode == 0 or not all(marker in output for marker in required):
-            raise SystemExit("FAIL: expected resident-load-after-ticket-consumption error\n" + output)
-        print("PASS: borrow checker retains the reader observation through its resident atomic load")
+            raise SystemExit(
+                "FAIL: expected resident-load-after-ticket-consumption error\n" + output
+            )
+        print(
+            "PASS: borrow checker retains the reader observation through its resident atomic load"
+        )
 
 
 if __name__ == "__main__":

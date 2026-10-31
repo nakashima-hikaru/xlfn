@@ -23,25 +23,27 @@ Generated files are written to `guide/book/` and should not be committed.
 
 ## Validate
 
-The checker uses only the Python 3.11+ standard library. Check source navigation,
-local paths, included files, and formatting without building the book:
+The checker uses the Python 3.15 standard library through the shared uv project
+in `tools/`. See the [tooling setup](../tools/README.md) for uv and environment
+requirements. Check source navigation, local paths, included files, and
+formatting without building the book:
 
 ```console
-python3 -B guide/check.py
+uv run --project tools --locked python -B guide/check.py
 ```
 
 After a build, also check rendered links, fragments, assets, and chapter coverage:
 
 ```console
 mdbook build guide
-python3 -B guide/check.py --html
-python3 -B -m unittest discover -s guide -p 'test_check.py'
+uv run --project tools --locked python -B guide/check.py --html
+uv run --project tools --locked python -B -m unittest discover -s guide -p 'test_check.py'
 ```
 
 Compile and run the Rust examples against this checkout's production features:
 
 ```console
-python3 -B guide/check_examples.py
+uv run --project tools --locked python -B guide/check_examples.py
 ```
 
 Or run all guide checks with `just guide-check`. The example checker uses the

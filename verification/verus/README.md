@@ -66,7 +66,7 @@ They do not constitute a mechanically checked cross-prover theorem. See
 
 ## Running verification
 
-The installer needs `bash`, `curl`, `unzip`, Python 3 and `rustup`:
+The installer needs `bash`, `curl`, `unzip`, `uv` and `rustup`. The uv project in `tools/` selects Python 3.15:
 
 ```bash
 ./tools/install_verus.sh
@@ -95,10 +95,10 @@ not cached between invocations or machines.
 
 ```bash
 # Inspect exact inputs and rejection criteria without invoking Verus.
-python3 -B tools/check_verus_refinement.py --list
+uv run --project tools --locked python -B tools/check_verus_refinement.py --list
 
 # Save timings locally when diagnosing verification throughput.
-python3 -B tools/check_verus_refinement.py --jobs 2 --report /tmp/verus-timings.json
+uv run --project tools --locked python -B tools/check_verus_refinement.py --jobs 2 --report /tmp/verus-timings.json
 ```
 
 CI shards mutation inputs and checks that reports cover every current case

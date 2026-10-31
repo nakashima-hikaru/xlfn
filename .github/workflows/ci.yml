@@ -20,10 +20,13 @@ jobs:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-            - name: Set up Python
-              uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+            - name: Set up uv and Python
+              uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
               with:
-                  python-version: "3.13"
+                  version: "0.13.6"
+                  python-version: "3.15"
+                  enable-cache: true
+                  cache-dependency-glob: tools/uv.lock
 
             - name: Install Just
               uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
@@ -43,19 +46,22 @@ jobs:
               with:
                   fetch-depth: 0
 
-            - name: Set up Python
-              uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+            - name: Set up uv and Python
+              uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
               with:
-                  python-version: "3.13"
-
-            - name: Test Verus installer
-              run: python3 -B -m unittest discover -s tools -p test_install_verus.py
+                  version: "0.13.6"
+                  python-version: "3.15"
+                  enable-cache: true
+                  cache-dependency-glob: tools/uv.lock
 
             - name: Install development tools
               uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
               with:
                   tool: just,cargo-semver-checks@0.50.0,cargo-deny@0.20.2,mdbook@0.5.4
                   fallback: none
+
+            - name: Check Python tooling
+              run: just python-check
 
             - name: Verify generated Windows bindings
               run: |
@@ -82,7 +88,7 @@ jobs:
               run: just typestate
 
             - name: Check RTD consumer feature boundaries
-              run: python3 -B tests/rtd-api-fixture/check.py
+              run: uv run --project tools --locked python -B tests/rtd-api-fixture/check.py
 
             - name: Verify release metadata and crate archives without publishing
               run: just package-check
@@ -115,6 +121,15 @@ jobs:
         steps:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+            - name: Set up uv and Python
+              if: matrix.check.name == 'lifecycle typestate contracts'
+              uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+              with:
+                  version: "0.13.6"
+                  python-version: "3.15"
+                  enable-cache: true
+                  cache-dependency-glob: tools/uv.lock
 
             - name: Install development tools
               uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
@@ -393,10 +408,13 @@ jobs:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-            - name: Set up Python
-              uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+            - name: Set up uv and Python
+              uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
               with:
-                  python-version: "3.13"
+                  version: "0.13.6"
+                  python-version: "3.15"
+                  enable-cache: true
+                  cache-dependency-glob: tools/uv.lock
 
             - name: Install Verus
               run: |
@@ -404,11 +422,11 @@ jobs:
                   echo "${RUNNER_TEMP}/xlfn-verus" >> "$GITHUB_PATH"
 
             - name: Test verification runner
-              run: python3 -B -m unittest discover -s tools -p 'test*refinement*.py'
+              run: uv run --project tools --locked python -B -m unittest discover -s tools -p 'test*refinement*.py'
 
             - name: Run disjoint Verus mutation shard
               run: >
-                  python3 -B tools/check_verus_refinement.py
+                  uv run --project tools --locked python -B tools/check_verus_refinement.py
                   --shard-index ${{ matrix.shard }} --shard-count 4
                   --jobs 2 --threads 2
                   --report verus-timings-${{ matrix.shard }}.json
@@ -427,10 +445,13 @@ jobs:
             - name: Check out repository
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-            - name: Set up Python
-              uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+            - name: Set up uv and Python
+              uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
               with:
-                  python-version: "3.13"
+                  version: "0.13.6"
+                  python-version: "3.15"
+                  enable-cache: true
+                  cache-dependency-glob: tools/uv.lock
 
             - name: Install Just
               uses: taiki-e/install-action@c0490f106137e0aeeac1aa8d0309826fda08c18d
@@ -448,8 +469,8 @@ jobs:
 
             - name: Check Verus and native borrow rejection
               run: |
-                  python3 -B tools/check_transition_borrows.py
-                  python3 -B tools/check_native_publication_borrow.py
+                  uv run --project tools --locked python -B tools/check_transition_borrows.py
+                  uv run --project tools --locked python -B tools/check_native_publication_borrow.py
 
             - name: Check shared Cache release ordering with Loom mutations
               run: just cache-release-ordering
@@ -471,10 +492,13 @@ jobs:
                   test "$REFINEMENT_RESULT" = success
                   test "$SUPPORT_RESULT" = success
 
-            - name: Set up Python
-              uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+            - name: Set up uv and Python
+              uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
               with:
-                  python-version: "3.13"
+                  version: "0.13.6"
+                  python-version: "3.15"
+                  enable-cache: true
+                  cache-dependency-glob: tools/uv.lock
 
             - name: Download shard timings
               uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -484,7 +508,7 @@ jobs:
                   merge-multiple: true
 
             - name: Require every mutation case exactly once
-              run: python3 -B tools/check_verus_reports.py verus-timings --shard-count 4
+              run: uv run --project tools --locked python -B tools/check_verus_reports.py verus-timings --shard-count 4
 
     lean:
         name: Lean formal models

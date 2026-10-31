@@ -9,11 +9,11 @@ Enforces:
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 import json
-from pathlib import Path
 import re
 import sys
+from dataclasses import dataclass
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ALLOWLIST_PATH = ROOT / "tools/verus_external_allowlist.json"
@@ -26,9 +26,16 @@ ASSUMPTIONS = {"assume", "admit", "assume_specification"}
 # Trait adapters and ignored private bounds are trust boundaries too, even
 # when a particular annotation does not by itself assert a new axiom.
 EXTERNALS = {
-    "external", "external_body", "external_type_specification", "external_fn_specification",
-    "external_trait_specification", "external_trait_extension", "external_trait_private_bound",
-    "external_trait_blanket", "external_derive", "trusted",
+    "external",
+    "external_body",
+    "external_type_specification",
+    "external_fn_specification",
+    "external_trait_specification",
+    "external_trait_extension",
+    "external_trait_private_bound",
+    "external_trait_blanket",
+    "external_derive",
+    "trusted",
 }
 ASSUMPTION_ATTRIBUTES = {"axiom", "assume", "assume_termination"}
 
@@ -59,7 +66,7 @@ def use_tree(tokens: list[Token], prefix: tuple[str, ...] = ()):
                 index += 1
             if depth:
                 raise ValueError("unclosed use tree")
-            yield from use_tree(tokens[begin:index - 1], tuple(path))
+            yield from use_tree(tokens[begin : index - 1], tuple(path))
         else:
             alias = None
             if index < len(tokens) and tokens[index].value == "as":
@@ -98,7 +105,7 @@ def trust_boundaries(sanitized: str) -> tuple[set[int], set[int]]:
                 raise ValueError("unterminated use declaration")
             # Flatten groups to see the original name before `as` renaming,
             # even when the exporting module is defined in another file.
-            for path, _, offset in use_tree(tokens[index + 1:end]):
+            for path, _, offset in use_tree(tokens[index + 1 : end]):
                 if path[-1] in ASSUMPTIONS:
                     assumptions.add(offset)
 
@@ -116,13 +123,21 @@ def trust_boundaries(sanitized: str) -> tuple[set[int], set[int]]:
         # Only verifier attributes are trust boundaries, not variables or
         # unrelated libraries' attributes with these same names. cfg_attr is
         # covered because the verifier path is inspected inside its token tree.
-        if attribute_depth and value in {"verifier", "verus"} and following in {"::", "("} and index + 2 < len(tokens):
+        if (
+            attribute_depth
+            and value in {"verifier", "verus"}
+            and following in {"::", "("}
+            and index + 2 < len(tokens)
+        ):
             attribute_index = index + 2
             # The verifier accepts macro-generated internal forms directly in
             # source too; handwritten internal(external_body) cannot bypass us.
-            if (value == "verus" and tokens[attribute_index].value == "internal"
-                    and attribute_index + 2 < len(tokens)
-                    and tokens[attribute_index + 1].value == "("):
+            if (
+                value == "verus"
+                and tokens[attribute_index].value == "internal"
+                and attribute_index + 2 < len(tokens)
+                and tokens[attribute_index + 1].value == "("
+            ):
                 attribute_index += 2
             attribute = tokens[attribute_index]
             if attribute.value in EXTERNALS:
@@ -132,10 +147,13 @@ def trust_boundaries(sanitized: str) -> tuple[set[int], set[int]]:
         if value not in ASSUMPTIONS or previous in {".", "fn"}:
             continue
         start = index
-        while (start >= 2 and tokens[start - 1].value == "::"
-               and tokens[start - 2].value.isidentifier()):
+        while (
+            start >= 2
+            and tokens[start - 1].value == "::"
+            and tokens[start - 2].value.isidentifier()
+        ):
             start -= 2
-        path = tuple(t.value for t in tokens[start:index + 1:2])
+        path = tuple(t.value for t in tokens[start : index + 1 : 2])
         if start and tokens[start - 1].value == "::":
             path = ("::",) + path
         # Qualified primitive references are forbidden even when used as a
@@ -271,7 +289,10 @@ def main() -> int:
 
     failed = False
     if assumes:
-        print("ERROR: Verus verification contains local assumptions, admits or axioms (must be 0):", file=sys.stderr)
+        print(
+            "ERROR: Verus verification contains local assumptions, admits or axioms (must be 0):",
+            file=sys.stderr,
+        )
         for entry in assumes:
             print(f"  {entry}", file=sys.stderr)
         failed = True
@@ -279,7 +300,10 @@ def main() -> int:
         print("PASS: 0 project-local assumptions, admits or axioms found.")
 
     if unapproved_externals:
-        print("ERROR: Unapproved external body/type/function specification found in Verus code:", file=sys.stderr)
+        print(
+            "ERROR: Unapproved external body/type/function specification found in Verus code:",
+            file=sys.stderr,
+        )
         for entry in unapproved_externals:
             print(f"  {entry}", file=sys.stderr)
         failed = True

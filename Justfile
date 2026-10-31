@@ -9,6 +9,20 @@ miri-toolchain := "nightly-2026-09-02"
 default:
     @just --list
 
+# Managed Python tooling, shared by local development and CI.
+python-setup:
+    uv sync --project tools --locked
+
+python-check:
+    uv run --project tools --locked ruff check tools
+    uv run --project tools --locked ruff format --check tools
+    uv run --project tools --locked ty check --project tools --error-on-warning
+    uv run --project tools --locked python -B -m unittest discover -s tools -p 'test_*.py'
+
+python-format:
+    uv run --project tools --locked ruff check --fix tools
+    uv run --project tools --locked ruff format tools
+
 fmt:
     cargo fmt --all -- --check
 
@@ -18,13 +32,13 @@ doc:
 
 # Audit every direct catch reference, including test and macro token streams.
 panic-boundaries:
-    python3 -B -m unittest discover -s tools -p test_check_panic_boundaries.py
-    python3 -B tools/check_panic_boundaries.py
+    uv run --project tools --locked python -B -m unittest discover -s tools -p test_check_panic_boundaries.py
+    uv run --project tools --locked python -B tools/check_panic_boundaries.py
 
 # Compile valid and invalid callers against private lifecycle typestates.
 typestate:
-    python3 -B -m unittest discover -s tools -p test_check_typestate.py
-    python3 -B tools/check_typestate.py
+    uv run --project tools --locked python -B -m unittest discover -s tools -p test_check_typestate.py
+    uv run --project tools --locked python -B tools/check_typestate.py
 
 clippy:
     cargo clippy \
@@ -110,22 +124,22 @@ miri-cache-endpoints:
 # Verus formal verification of concurrent kernel primitives.
 verus:
     just verus-refinement
-    python3 -B tools/check_transition_borrows.py
-    python3 -B tools/check_native_publication_borrow.py
+    uv run --project tools --locked python -B tools/check_transition_borrows.py
+    uv run --project tools --locked python -B tools/check_native_publication_borrow.py
 
 # One invocation-local baseline per exact input; all mutation cases remain enabled.
 verus-refinement shard-index="0" shard-count="1":
-    python3 -B -m unittest discover -s tools -p 'test*refinement*.py'
-    python3 -B tools/check_verus_refinement.py --shard-index {{shard-index}} --shard-count {{shard-count}}
+    uv run --project tools --locked python -B -m unittest discover -s tools -p 'test*refinement*.py'
+    uv run --project tools --locked python -B tools/check_verus_refinement.py --shard-index {{shard-index}} --shard-count {{shard-count}}
 
 # Weak-memory mutation gate for the shared final-pin release tail.
 cache-release-ordering:
-    python3 -B tools/check_cache_release_ordering.py
+    uv run --project tools --locked python -B tools/check_cache_release_ordering.py
 
 # Audit Verus verification TCB compliance (enforces 0 assumes and approved external_bodies).
 verus-audit:
-    python3 -B -m unittest discover -s tools -p test_check_verus_tcb.py
-    python3 -B tools/check_verus_tcb.py
+    uv run --project tools --locked python -B -m unittest discover -s tools -p test_check_verus_tcb.py
+    uv run --project tools --locked python -B tools/check_verus_tcb.py
 
 test-core:
     cargo test \
@@ -212,22 +226,22 @@ package-check: release-metadata
 
 # Keep distributable files and internal dependency pins aligned with the source.
 release-metadata:
-    python3 -B -m unittest discover -s tools -p test_check_release_metadata.py
-    python3 -B tools/check_release_metadata.py
+    uv run --project tools --locked python -B -m unittest discover -s tools -p test_check_release_metadata.py
+    uv run --project tools --locked python -B tools/check_release_metadata.py
 
 # Retain the existing check name without calling `cargo publish`.
 publish-check: package-check
 
-quick: fmt panic-boundaries typestate clippy test
+quick: fmt python-check panic-boundaries typestate clippy test
 
 # Validate the published guide and compile its examples against this checkout.
 guide-check:
-    python3 -B -m unittest discover -s guide -p 'test_*.py'
+    uv run --project tools --locked python -B -m unittest discover -s guide -p 'test_*.py'
     mdbook build guide
-    python3 -B guide/check.py --html
-    python3 -B guide/check_examples.py
+    uv run --project tools --locked python -B guide/check.py --html
+    uv run --project tools --locked python -B guide/check_examples.py
 
-check: fmt panic-boundaries typestate clippy features test test-features bench-check deny semver doc guide-check package-check
+check: fmt python-check panic-boundaries typestate clippy features test test-features bench-check deny semver doc guide-check package-check
 
 # --- Benchmark recipes ---
 

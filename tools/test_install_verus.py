@@ -3,14 +3,13 @@
 import hashlib
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 import zipfile
-
+from pathlib import Path
 
 INSTALLER = Path(__file__).with_name("install_verus.sh")
 VERSION = "0.2026.10.26.d17fbd0"
@@ -26,6 +25,12 @@ import sys
 
 name = Path(sys.argv[0]).name
 args = sys.argv[1:]
+if name == "uv":
+    expected = ["run", "--project", str(Path(sys.argv[0]).parent.parent), "--locked", "python", "-B", "-"]
+    if args[:len(expected)] != expected:
+        raise SystemExit("unexpected uv interpreter selection: " + repr(args))
+    # Exercise the selected test interpreter without downloading dependencies.
+    os.execv(sys.executable, [sys.executable, *args[5:]])
 if name == "uname":
     print(os.environ.get("MOCK_OS", "Linux") if args == ["-s"] else os.environ.get("MOCK_ARCH", "x86_64"))
     raise SystemExit(0)
@@ -57,8 +62,9 @@ else:
 """
 
 
-@unittest.skipUnless(shutil.which("bash") and shutil.which("unzip"),
-                     "installer requires bash and unzip")
+@unittest.skipUnless(
+    shutil.which("bash") and shutil.which("unzip"), "installer requires bash and unzip"
+)
 class InstallVerusTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix="xlfn install verus ")
@@ -67,7 +73,7 @@ class InstallVerusTests(unittest.TestCase):
         self.bin = self.root / "mock commands"
         self.bin.mkdir()
         self.script = "#!" + sys.executable + "\n" + MOCK_COMMAND
-        for name in ("uname", "curl", "rustup", "xattr"):
+        for name in ("uname", "curl", "rustup", "xattr", "uv"):
             path = self.bin / name
             path.write_text(self.script)
             path.chmod(0o755)
@@ -81,24 +87,31 @@ class InstallVerusTests(unittest.TestCase):
         self.destination = self.root / "installed verus"
         self.workspace = self.root / "workspace"
         self.workspace.mkdir()
-        (self.workspace / "rust-toolchain.toml").write_text(
-            '[toolchain]\nchannel = "1.99.1"\n')
+        (self.workspace / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.99.1"\n')
         self.env = os.environ.copy()
-        for name in ("VERUS_VERSION", "CURL_EXIT", "RUSTUP_EXIT", "VERUS_EXIT", "MOCK_OS", "MOCK_ARCH"):
+        for name in (
+            "VERUS_VERSION",
+            "CURL_EXIT",
+            "RUSTUP_EXIT",
+            "VERUS_EXIT",
+            "MOCK_OS",
+            "MOCK_ARCH",
+        ):
             self.env.pop(name, None)
-        self.env.update({
-            "PATH": str(self.bin) + os.pathsep + self.env["PATH"],
-            "INSTALLER_LOG": str(self.log),
-            "INSTALLER_ARCHIVE": str(self.archive),
-            "INSTALLED_TOOLCHAINS": str(self.toolchains),
-            "REQUIRED_TOOLCHAIN": TOOLCHAIN,
-            "RELEASE_VERSION": VERSION,
-            "RUSTUP_TOOLCHAIN": "1.99.1",
-        })
+        self.env.update(
+            {
+                "PATH": str(self.bin) + os.pathsep + self.env["PATH"],
+                "INSTALLER_LOG": str(self.log),
+                "INSTALLER_ARCHIVE": str(self.archive),
+                "INSTALLED_TOOLCHAINS": str(self.toolchains),
+                "REQUIRED_TOOLCHAIN": TOOLCHAIN,
+                "RELEASE_VERSION": VERSION,
+                "RUSTUP_TOOLCHAIN": "1.99.1",
+            }
+        )
         self.write_archive()
 
-    def write_archive(self, version=VERSION, toolchain=TOOLCHAIN,
-                      *, include_metadata=True):
+    def write_archive(self, version=VERSION, toolchain=TOOLCHAIN, *, include_metadata=True):
         with zipfile.ZipFile(self.archive, "w") as archive:
             platform = "arm64-macos" if self.env.get("MOCK_OS") == "Darwin" else "x86-linux"
             folder = "verus-" + platform
@@ -107,32 +120,58 @@ class InstallVerusTests(unittest.TestCase):
             executable.external_attr = 0o100755 << 16
             archive.writestr(executable, self.script)
             if include_metadata:
-                archive.writestr(folder + "/version.json", json.dumps({
-                    "verus": {"version": version, "toolchain": toolchain},
-                }))
+                archive.writestr(
+                    folder + "/version.json",
+                    json.dumps(
+                        {
+                            "verus": {"version": version, "toolchain": toolchain},
+                        }
+                    ),
+                )
 
             extension = "dylib" if platform.endswith("macos") else "so"
-            for name in ("rust_verify", "z3", "libverus_builtin.rlib",
-                         "libverus_builtin_macros." + extension,
-                         "libverus_state_machines_macros." + extension,
-                         "libvstd.rlib", "vstd.vir", "unrelated-binary"):
+            for name in (
+                "rust_verify",
+                "z3",
+                "libverus_builtin.rlib",
+                "libverus_builtin_macros." + extension,
+                "libverus_state_machines_macros." + extension,
+                "libvstd.rlib",
+                "vstd.vir",
+                "unrelated-binary",
+            ):
                 archive.writestr(folder + "/" + name, "fixture")
         self.pin_archive(version=version, platform=platform)
 
     def pin_archive(self, *, version=VERSION, platform="x86-linux"):
-        self.digests.write_text(json.dumps({version: {
-            f"verus-{version}-{platform}.zip": hashlib.sha256(self.archive.read_bytes()).hexdigest(),
-        }}))
+        self.digests.write_text(
+            json.dumps(
+                {
+                    version: {
+                        f"verus-{version}-{platform}.zip": hashlib.sha256(
+                            self.archive.read_bytes()
+                        ).hexdigest(),
+                    }
+                }
+            )
+        )
 
     def run_installer(self):
         return subprocess.run(
             ["bash", str(self.installer), str(self.destination)],
-            cwd=self.workspace, env=self.env, text=True, capture_output=True,
+            cwd=self.workspace,
+            env=self.env,
+            text=True,
+            capture_output=True,
             timeout=30,
         )
 
     def commands(self):
-        return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
+        return (
+            [json.loads(line) for line in self.log.read_text().splitlines()]
+            if self.log.exists()
+            else []
+        )
 
     def assert_no_runtime_install(self, result):
         self.assertNotEqual(result.returncode, 0)
@@ -141,15 +180,16 @@ class InstallVerusTests(unittest.TestCase):
         self.assertFalse(self.destination.exists())
 
     def test_installs_release_compiler_with_newer_workspace_toolchain(self):
-        self.write_archive(toolchain=TOOLCHAIN +
-                           " (overridden by environment variable RUSTUP_TOOLCHAIN)")
+        self.write_archive(
+            toolchain=TOOLCHAIN + " (overridden by environment variable RUSTUP_TOOLCHAIN)"
+        )
         result = self.run_installer()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         commands = self.commands()
-        self.assertEqual([event["command"] for event in commands],
-                         ["curl", "rustup", "verus"])
-        self.assertEqual(commands[1]["args"],
-                         ["toolchain", "install", TOOLCHAIN, "--profile", "minimal"])
+        self.assertEqual([event["command"] for event in commands], ["curl", "rustup", "verus"])
+        self.assertEqual(
+            commands[1]["args"], ["toolchain", "install", TOOLCHAIN, "--profile", "minimal"]
+        )
         self.assertEqual(commands[2]["args"], ["--version"])
         self.assertIn("installed successfully", result.stdout)
 
@@ -157,24 +197,27 @@ class InstallVerusTests(unittest.TestCase):
         version = "0.2026.10.01.abcdef1"
         toolchain = "1.99.0-x86_64-unknown-linux-gnu"
         self.write_archive(version=version, toolchain=toolchain + " (default)")
-        self.env.update({"VERUS_VERSION": version, "RELEASE_VERSION": version,
-                         "REQUIRED_TOOLCHAIN": toolchain})
+        self.env.update(
+            {"VERUS_VERSION": version, "RELEASE_VERSION": version, "REQUIRED_TOOLCHAIN": toolchain}
+        )
         result = self.run_installer()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         commands = self.commands()
-        self.assertIn("https://github.com/verus-lang/verus/releases/download/"
-                      f"release/{version}/verus-{version}-x86-linux.zip",
-                      commands[0]["args"])
-        self.assertEqual(commands[1]["args"],
-                         ["toolchain", "install", toolchain, "--profile", "minimal"])
+        self.assertIn(
+            "https://github.com/verus-lang/verus/releases/download/"
+            f"release/{version}/verus-{version}-x86-linux.zip",
+            commands[0]["args"],
+        )
+        self.assertEqual(
+            commands[1]["args"], ["toolchain", "install", toolchain, "--profile", "minimal"]
+        )
 
     def test_compiler_install_failure_stops_before_copying_binaries(self):
         self.env["RUSTUP_EXIT"] = "43"
         result = self.run_installer()
         self.assertEqual(result.returncode, 43)
         self.assertNotIn("installed successfully", result.stdout)
-        self.assertEqual([event["command"] for event in self.commands()],
-                         ["curl", "rustup"])
+        self.assertEqual([event["command"] for event in self.commands()], ["curl", "rustup"])
         self.assertFalse(self.destination.exists())
 
     def test_verus_version_failure_is_not_reported_as_success(self):
@@ -182,8 +225,7 @@ class InstallVerusTests(unittest.TestCase):
         result = self.run_installer()
         self.assertEqual(result.returncode, 31)
         self.assertNotIn("installed successfully", result.stdout)
-        self.assertEqual(self.commands()[-1],
-                         {"command": "verus", "args": ["--version"]})
+        self.assertEqual(self.commands()[-1], {"command": "verus", "args": ["--version"]})
 
     def test_missing_release_metadata_fails_before_installation(self):
         self.write_archive(include_metadata=False)
@@ -267,8 +309,11 @@ class InstallVerusTests(unittest.TestCase):
 
     def test_missing_runtime_component_is_rejected_before_copy(self):
         with zipfile.ZipFile(self.archive) as source:
-            contents = {info.filename: (info, source.read(info)) for info in source.infolist()
-                        if not info.filename.endswith("/z3")}
+            contents = {
+                info.filename: (info, source.read(info))
+                for info in source.infolist()
+                if not info.filename.endswith("/z3")
+            }
         with zipfile.ZipFile(self.archive, "w") as target:
             for info, data in contents.values():
                 target.writestr(info, data)

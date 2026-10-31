@@ -21,7 +21,7 @@ an unrelated Addin implementation error.
 Run all twenty checks from the repository root:
 
 ```sh
-python3 -B tests/rtd-api-fixture/check.py
+uv run --project tools --locked python -B tests/rtd-api-fixture/check.py
 ```
 
 The checker uses temporary source projects, locked offline dependency resolution,

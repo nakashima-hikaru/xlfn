@@ -1,6 +1,8 @@
 # Private lifecycle compile checks
 
-Run `python3 tools/check_typestate.py` from any directory. The checker copies the
+From the repository root, run
+`uv run --project tools --locked python -B tools/check_typestate.py`.
+The checker copies the
 current tracked and nonignored working files into a temporary workspace, injects
 each fixture as an internal module, and runs an offline, locked `cargo check`
 against its owning package. Facade fixtures check `xlfn` with

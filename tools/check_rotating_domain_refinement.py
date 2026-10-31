@@ -5,14 +5,14 @@ from pathlib import Path
 
 from verus_mutations import check_mutations
 
-
 MUTATIONS = {
     "terminal detachment skips domain authorization": (
         "$authorize:expr, $lock_first:expr, $lock_second:expr, $take:expr) => {{\n        match $authorize {",
         "$authorize:expr, $lock_first:expr, $lock_second:expr, $take:expr) => {{\n        match Some([0usize, 1usize]) {",
     ),
     "terminal detachment locks the first queue twice": (
-        "let $second = $lock_second;", "let $second = $lock_first;",
+        "let $second = $lock_second;",
+        "let $second = $lock_first;",
     ),
     "queue detached without certificate authorization": (
         "($index:ident, $guard:ident; $authorize:expr, $lock:expr, $take:expr) => {{\n        match $authorize {",
@@ -23,24 +23,30 @@ MUTATIONS = {
         "Some($index) => {\n                let $index = 1usize - $index;\n                let $guard = $lock;",
     ),
     "drain certificate authorizes a foreign domain": (
-        "if issuer == owner", "if true",
+        "if issuer == owner",
+        "if true",
     ),
     "reader constructs permit without acquiring": (
-        "match $acquire {", "match Ok::<(), ()>(()) {",
+        "match $acquire {",
+        "match Ok::<(), ()>(()) {",
     ),
     "reader returns permit for other generation": (
         "Ok($admission) => return Ok($permit),",
         "Ok($admission) => { let $generation = !$generation; return Ok($permit); },",
     ),
-
     "registration skips generation recheck": (
-        "if $current != $generation", "if false",
+        "if $current != $generation",
+        "if false",
     ),
     "registration retries without releasing stale queue": (
-        "                $unlock;", "                ();",
+        "                $unlock;",
+        "                ();",
     ),
     "publication before seal": ("        $seal;", "        ();"),
-    "publication without pending registration": ("        $seal;\n        $pending;", "        $seal;\n        ();"),
+    "publication without pending registration": (
+        "        $seal;\n        $pending;",
+        "        $seal;\n        ();",
+    ),
     "idle publication ignores failed seal": (
         "if !$try_seal {\n            return None;",
         "if false {\n            return None;",
@@ -66,8 +72,12 @@ if __name__ == "__main__":
     check_mutations(
         Path("verification/verus/rotating_read_domain"),
         Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
-        (Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"), Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
-         *tuple(Path("verification/verus/drain_gate/src").glob("*.rs")), Path("crates/xlfn-kernel/src/drain_gate/protocol.rs")),
+        (
+            Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"),
+            Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
+            *tuple(Path("verification/verus/drain_gate/src").glob("*.rs")),
+            Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
+        ),
         MUTATIONS,
         ownership_rejections=frozenset({"clear pending before callback"}),
     )
@@ -75,16 +85,21 @@ if __name__ == "__main__":
     check_mutations(
         Path("verification/verus/rotating_read_domain"),
         Path("verification/verus/rotating_read_domain/src/refinement.rs"),
-        (Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"), Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
-         Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
-         *tuple(Path("verification/verus/drain_gate/src").glob("*.rs")), Path("crates/xlfn-kernel/src/drain_gate/protocol.rs")),
+        (
+            Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"),
+            Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
+            Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
+            *tuple(Path("verification/verus/drain_gate/src").glob("*.rs")),
+            Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
+        ),
         {
             "reader receives the other generation ledger permit": (
                 "permit = Some(ledgers.one.acquire(&mut ledgers.active_one));",
                 "permit = Some(ledgers.zero.acquire(&mut ledgers.active_zero));",
             ),
             "release decrements the other generation counter": (
-                "self.reader_release(selected);", "self.reader_release(!selected);",
+                "self.reader_release(selected);",
+                "self.reader_release(!selected);",
             ),
             "release accepts a foreign generation permit": (
                 "permit.instance_id() == old(ledgers).selected_id(selected),",
@@ -96,10 +111,13 @@ if __name__ == "__main__":
     check_mutations(
         Path("verification/verus/rotating_read_domain"),
         Path("verification/verus/rotating_read_domain/src/registration.rs"),
-        (Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"), Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
-         Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
-         Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
-         *tuple(Path("verification/verus/drain_gate/src").glob("*.rs"))),
+        (
+            Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"),
+            Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
+            Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
+            Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
+            *tuple(Path("verification/verus/drain_gate/src").glob("*.rs")),
+        ),
         {
             "registration loses held-state authority before append": (
                 "model.append(selected, guard, payload);",
@@ -110,7 +128,8 @@ if __name__ == "__main__":
                 "if selected { super::queue_transitions::append_retired!(&mut self.zero, payload); } else { super::queue_transitions::append_retired!(&mut self.one, payload); }",
             ),
             "retirement payload dropped instead of queued": (
-                "super::queue_transitions::append_retired!(&mut self.one, payload);", "();",
+                "super::queue_transitions::append_retired!(&mut self.one, payload);",
+                "();",
             ),
         },
     )
@@ -118,10 +137,13 @@ if __name__ == "__main__":
     check_mutations(
         Path("verification/verus/rotating_read_domain"),
         Path("verification/verus/rotating_read_domain/src/identity.rs"),
-        (Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"), Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
-         Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
-         Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
-         *tuple(Path("verification/verus/drain_gate/src").glob("*.rs"))),
+        (
+            Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"),
+            Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
+            Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
+            Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
+            *tuple(Path("verification/verus/drain_gate/src").glob("*.rs")),
+        ),
         {
             "terminal certificate issued before both generations drain": (
                 "state.sealed(false), state.sealed(true), state.idle(false), state.idle(true),",
@@ -153,16 +175,21 @@ if __name__ == "__main__":
     check_mutations(
         Path("verification/verus/rotating_read_domain"),
         Path("verification/verus/rotating_read_domain/src/lock_ownership.rs"),
-        (Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"), Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
-         Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
-         Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
-         *tuple(Path("verification/verus/drain_gate/src").glob("*.rs"))),
+        (
+            Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"),
+            Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
+            Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
+            Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
+            *tuple(Path("verification/verus/drain_gate/src").glob("*.rs")),
+        ),
         {
             "exclusive path issues a certificate for active readers": (
-                "if raw & $mask == 0 {", "if true {",
+                "if raw & $mask == 0 {",
+                "if true {",
             ),
             "transition release returns state under another domain": (
-                "state.domain == handle.rwlock().pred().domain,", "true,",
+                "state.domain == handle.rwlock().pred().domain,",
+                "true,",
             ),
         },
     )
@@ -170,10 +197,13 @@ if __name__ == "__main__":
     check_mutations(
         Path("verification/verus/rotating_read_domain"),
         Path("verification/verus/rotating_read_domain/src/barrier_ownership.rs"),
-        (Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"), Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
-         Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
-         Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
-         *tuple(Path("verification/verus/drain_gate/src").glob("*.rs"))),
+        (
+            Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"),
+            Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
+            Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
+            Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
+            *tuple(Path("verification/verus/drain_gate/src").glob("*.rs")),
+        ),
         {
             "barrier certificate borrows a different queue lock": (
                 "requires handle.rwlock() == *lock, lock.inv(*queue),",
@@ -197,10 +227,13 @@ if __name__ == "__main__":
     check_mutations(
         Path("verification/verus/rotating_read_domain"),
         Path("verification/verus/rotating_read_domain/src/refinement.rs"),
-        (Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"), Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
-         Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
-         Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
-         *tuple(Path("verification/verus/drain_gate/src").glob("*.rs"))),
+        (
+            Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"),
+            Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
+            Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
+            Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
+            *tuple(Path("verification/verus/drain_gate/src").glob("*.rs")),
+        ),
         {
             "transition model releases barrier before publication": (
                 "begin_rotation!(model.seal_current(), model.mark_pending(),\n        publish_release!(\n            publish_reopen!(model.publish(), model.publication_window(), model.reopen()),\n            model.release_barrier()))",
@@ -220,22 +253,29 @@ if __name__ == "__main__":
     check_mutations(
         Path("verification/verus/rotating_read_domain"),
         Path("verification/verus/rotating_read_domain/src/locked_detachment.rs"),
-        (Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"), Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
-         Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
-         Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
-         *tuple(Path("verification/verus/drain_gate/src").glob("*.rs"))),
+        (
+            Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"),
+            Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
+            Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
+            Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
+            *tuple(Path("verification/verus/drain_gate/src").glob("*.rs")),
+        ),
         {
             "locked detach accepts a different queue generation": (
-                "requires index < 2, lock.pred().index == (index == 1),", "requires index < 2,",
+                "requires index < 2, lock.pred().index == (index == 1),",
+                "requires index < 2,",
             ),
             "locked detach loses the protected payload": (
-                "let (mut queue, handle) = held;\n    let records = super::queue_transitions::take_retired!(&mut queue.records);", "let (mut queue, handle) = held;\n    let mut records = Vec::new();",
+                "let (mut queue, handle) = held;\n    let records = super::queue_transitions::take_retired!(&mut queue.records);",
+                "let (mut queue, handle) = held;\n    let mut records = Vec::new();",
             ),
             "locked terminal detach exchanges queue payloads": (
-                "[zero_records, one_records]", "[one_records, zero_records]",
+                "[zero_records, one_records]",
+                "[one_records, zero_records]",
             ),
             "locked terminal detach accepts another domain second queue": (
-                "zero.pred().domain == owner, one.pred().domain == owner,", "zero.pred().domain == owner,",
+                "zero.pred().domain == owner, one.pred().domain == owner,",
+                "zero.pred().domain == owner,",
             ),
         },
     )
@@ -243,16 +283,21 @@ if __name__ == "__main__":
     check_mutations(
         Path("verification/verus/rotating_read_domain"),
         Path("verification/verus/rotating_read_domain/src/locked_detachment.rs"),
-        (Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"), Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
-         Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
-         Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
-         *tuple(Path("verification/verus/drain_gate/src").glob("*.rs"))),
+        (
+            Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"),
+            Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
+            Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
+            Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
+            *tuple(Path("verification/verus/drain_gate/src").glob("*.rs")),
+        ),
         {
             "withdrawal receipt omits a protected record": (
-                "let ghost source = held.0.records@;", "let ghost source = held.0.records@.drop_last();",
+                "let ghost source = held.0.records@;",
+                "let ghost source = held.0.records@.drop_last();",
             ),
             "terminal receipt stamps the wrong generation": (
-                "owner: Ghost(owner), index: Ghost(true) }", "owner: Ghost(owner), index: Ghost(false) }",
+                "owner: Ghost(owner), index: Ghost(true) }",
+                "owner: Ghost(owner), index: Ghost(false) }",
             ),
         },
     )
@@ -260,19 +305,25 @@ if __name__ == "__main__":
     check_mutations(
         Path("verification/verus/rotating_read_domain"),
         Path("verification/verus/rotating_read_domain/src/queue_preparation.rs"),
-        (Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"), Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
-         Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
-         Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
-         *tuple(Path("verification/verus/drain_gate/src").glob("*.rs"))),
+        (
+            Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"),
+            Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
+            Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
+            Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
+            *tuple(Path("verification/verus/drain_gate/src").glob("*.rs")),
+        ),
         {
             "preparation leaves the protected queue phase open": (
-                "remove ready -= Some(()); update state = Some(bound);", "remove ready -= Some(()); update state = None;",
+                "remove ready -= Some(()); update state = Some(bound);",
+                "remove ready -= Some(()); update state = None;",
             ),
             "reset leaves the protected queue phase prepared": (
-                "remove prepared -= Some(bound); update state = None;", "remove prepared -= Some(bound); update state = Some(bound);",
+                "remove prepared -= Some(bound); update state = None;",
+                "remove prepared -= Some(bound); update state = Some(bound);",
             ),
             "preparation authority disagrees with protected state": (
-                "self.prepared == self.state && self.ready.is_some() == self.state.is_none()", "true",
+                "self.prepared == self.state && self.ready.is_some() == self.state.is_none()",
+                "true",
             ),
         },
     )
@@ -280,13 +331,17 @@ if __name__ == "__main__":
     check_mutations(
         Path("verification/verus/rotating_read_domain"),
         Path("verification/verus/rotating_read_domain/src/locked_detachment.rs"),
-        (Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"), Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
-         Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
-         Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
-         *tuple(Path("verification/verus/drain_gate/src").glob("*.rs"))),
+        (
+            Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"),
+            Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
+            Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
+            Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
+            *tuple(Path("verification/verus/drain_gate/src").glob("*.rs")),
+        ),
         {
             "prepared detachment accepts another queue ticket": (
-                "prepared.instance_id() == lock.pred().preparation.id(),", "true,",
+                "prepared.instance_id() == lock.pred().preparation.id(),",
+                "true,",
             ),
             "prepared detachment resets before emptying queue": (
                 "let records = super::queue_transitions::take_retired!(&mut queue.records);\n    let ready = super::barrier_ownership::reset_empty(&mut queue, lock, Tracked(prepared));",
@@ -296,105 +351,147 @@ if __name__ == "__main__":
     )
 
     check_mutations(
-        Path("verification/verus/rotating_read_domain"), Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"),
-        (Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
-         Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
-         Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
-         *tuple(Path("verification/verus/drain_gate/src").glob("*.rs"))),
+        Path("verification/verus/rotating_read_domain"),
+        Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"),
+        (
+            Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
+            Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
+            Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
+            *tuple(Path("verification/verus/drain_gate/src").glob("*.rs")),
+        ),
         {
-            "production append discards retirement": ("($queue).push($payload);", "let _payload = $payload;"),
-            "production take omits the ownership transfer": ("core::mem::swap($queue, &mut records);", "let _queue = $queue;"),
+            "production append discards retirement": (
+                "($queue).push($payload);",
+                "let _payload = $payload;",
+            ),
+            "production take omits the ownership transfer": (
+                "core::mem::swap($queue, &mut records);",
+                "let _queue = $queue;",
+            ),
         },
     )
 
     check_mutations(
-        Path("verification/verus/rotating_read_domain"), Path("verification/verus/rotating_read_domain/src/current_atomic.rs"),
-        (Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"), Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
-         Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"), Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
-         *tuple(Path("verification/verus/drain_gate/src").glob("*.rs"))),
+        Path("verification/verus/rotating_read_domain"),
+        Path("verification/verus/rotating_read_domain/src/current_atomic.rs"),
+        (
+            Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"),
+            Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
+            Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
+            Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
+            *tuple(Path("verification/verus/drain_gate/src").glob("*.rs")),
+        ),
         {
             "atomic current ready authority belongs to another queue": (
-                "&& (g.ready.is_some() ==> g.ready.unwrap().instance_id() == if value { k.1 } else { k.0 })", "&& true",
+                "&& (g.ready.is_some() ==> g.ready.unwrap().instance_id() == if value { k.1 } else { k.0 })",
+                "&& true",
             ),
             "atomic preparation custody loses its queue identity": (
-                "&& (g.held.is_some() ==> g.held.unwrap().instance_id() == if value { k.1 } else { k.0 })", "&& true",
+                "&& (g.held.is_some() ==> g.held.unwrap().instance_id() == if value { k.1 } else { k.0 })",
+                "&& true",
             ),
             "current recheck treats another queue as open": ("if value == selected {", "if true {"),
             "publication installs old queue readiness for new generation": (
-                "next_ready.instance_id() == self.gate(!reserved.index()),", "next_ready.instance_id() == self.gate(reserved.index()),",
+                "next_ready.instance_id() == self.gate(!reserved.index()),",
+                "next_ready.instance_id() == self.gate(reserved.index()),",
             ),
             "publication reservation loses its selected generation": (
-                "self.reservation@.instance_id() == current.authority@.id() && self.reservation@.value() == self.index", "self.reservation@.instance_id() == current.authority@.id()",
+                "self.reservation@.instance_id() == current.authority@.id() && self.reservation@.value() == self.index",
+                "self.reservation@.instance_id() == current.authority@.id()",
             ),
         },
     )
 
     check_mutations(
-        Path("verification/verus/rotating_read_domain"), Path("verification/verus/rotating_read_domain/src/atomic_rotation.rs"),
-        (Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"), Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
-         Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"), Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
-         *tuple(Path("verification/verus/drain_gate/src").glob("*.rs"))),
+        Path("verification/verus/rotating_read_domain"),
+        Path("verification/verus/rotating_read_domain/src/atomic_rotation.rs"),
+        (
+            Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"),
+            Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
+            Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
+            Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
+            *tuple(Path("verification/verus/drain_gate/src").glob("*.rs")),
+        ),
         {
             "atomic rotation accepts an unrelated transition handle": (
                 "requires transition.inv(*old(state)), handle.rwlock() == *transition, old(state).pending().is_none(),",
                 "requires transition.inv(*old(state)), old(state).pending().is_none(),",
             ),
             "atomic rotation loses pending sealed authority": (
-                "&& (state.pending.is_some() ==> state.sealed(state.pending.unwrap()))", "&& true",
+                "&& (state.pending.is_some() ==> state.sealed(state.pending.unwrap()))",
+                "&& true",
             ),
             "atomic rotation seals a different counter instance": (
                 "zero.inv(), one.inv(), transition.pred().zero == zero.authority_id(), transition.pred().one == one.authority_id(),",
                 "zero.inv(), one.inv(), transition.pred().one == one.authority_id(),",
             ),
             "atomic rotation reserves a different generation": (
-                "reserved.inv(current, queue_lock), reserved.index() == index,", "reserved.inv(current, queue_lock),",
+                "reserved.inv(current, queue_lock), reserved.index() == index,",
+                "reserved.inv(current, queue_lock),",
             ),
         },
     )
 
     check_mutations(
-        Path("verification/verus/rotating_read_domain"), Path("verification/verus/rotating_read_domain/src/striped_rotation.rs"),
-        (Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"), Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
-         Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"), Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
-         *tuple(Path("verification/verus/drain_gate/src").glob("*.rs"))),
+        Path("verification/verus/rotating_read_domain"),
+        Path("verification/verus/rotating_read_domain/src/striped_rotation.rs"),
+        (
+            Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"),
+            Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
+            Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
+            Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
+            *tuple(Path("verification/verus/drain_gate/src").glob("*.rs")),
+        ),
         {
             "striped rotation accepts a foreign transition handle": (
                 "requires transition.inv(*old(state)), handle.rwlock() == *transition, old(state).pending().is_none(),",
                 "requires transition.inv(*old(state)), old(state).pending().is_none(),",
             ),
             "striped rotation loses pending sealed controllers": (
-                "&& (state.pending.is_some() ==> state.sealed(self.counters(state.pending.unwrap()), state.pending.unwrap()))", "&& true",
+                "&& (state.pending.is_some() ==> state.sealed(self.counters(state.pending.unwrap()), state.pending.unwrap()))",
+                "&& true",
             ),
             "striped rotation seals a different generation vector": (
-                "zero@ == transition.pred().zero, one@ == transition.pred().one,", "one@ == transition.pred().one,",
+                "zero@ == transition.pred().zero, one@ == transition.pred().one,",
+                "one@ == transition.pred().one,",
             ),
             "striped rotation publishes a different reserved generation": (
-                "reserved.inv(current, queue), reserved.index() == index,", "reserved.inv(current, queue),",
+                "reserved.inv(current, queue), reserved.index() == index,",
+                "reserved.inv(current, queue),",
             ),
             "striped rotation reserves coverage for another stripe set": (
-                "reserved.bound() == stripes::gate_ids(transition.pred().counters(index)),", "true,",
+                "reserved.bound() == stripes::gate_ids(transition.pred().counters(index)),",
+                "true,",
             ),
             "striped rotation returns after partial reopen": (
-                "if opened != len { loop {} }", "",
+                "if opened != len { loop {} }",
+                "",
             ),
         },
     )
 
     check_mutations(
-        Path("verification/verus/rotating_read_domain"), Path("verification/verus/rotating_read_domain/src/striped_rotation.rs"),
-        (Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"), Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
-         Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"), Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
-         *tuple(Path("verification/verus/drain_gate/src").glob("*.rs"))),
+        Path("verification/verus/rotating_read_domain"),
+        Path("verification/verus/rotating_read_domain/src/striped_rotation.rs"),
+        (
+            Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"),
+            Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
+            Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
+            Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
+            *tuple(Path("verification/verus/drain_gate/src").glob("*.rs")),
+        ),
         {
             "collection handoff accepts a foreign transition handle": (
                 "requires transition.inv(state), handle.rwlock() == *transition, state.pending().is_none(),\n            next@ == transition.pred().counters(!index)",
                 "requires transition.inv(state), state.pending().is_none(),\n            next@ == transition.pred().counters(!index)",
             ),
             "collection handoff restores an unrelated controller map": (
-                "requires self.inv(), stripes::controls_match(self.next(), controls),", "requires self.inv(),",
+                "requires self.inv(), stripes::controls_match(self.next(), controls),",
+                "requires self.inv(),",
             ),
             "collection handoff drains the wrong generation vector": (
-                "next@ == transition.pred().counters(!index), state.sealed(next@, !index),", "state.sealed(next@, !index),",
+                "next@ == transition.pred().counters(!index), state.sealed(next@, !index),",
+                "state.sealed(next@, !index),",
             ),
             "collection handoff swaps old and next controllers": (
                 "let (old_controls, next_controls) = if index { (one, zero) } else { (zero, one) };",
@@ -404,13 +501,19 @@ if __name__ == "__main__":
     )
 
     check_mutations(
-        Path("verification/verus/rotating_read_domain"), Path("verification/verus/rotating_read_domain/src/striped_rotation.rs"),
-        (Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"), Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
-         Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"), Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
-         *tuple(Path("verification/verus/drain_gate/src").glob("*.rs"))),
+        Path("verification/verus/rotating_read_domain"),
+        Path("verification/verus/rotating_read_domain/src/striped_rotation.rs"),
+        (
+            Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"),
+            Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
+            Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
+            Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
+            *tuple(Path("verification/verus/drain_gate/src").glob("*.rs")),
+        ),
         {
             "collection cancellation skips actual lease restoration": (
-                "collection.restore_all(counters);\n            let controllers", "let controllers",
+                "collection.restore_all(counters);\n            let controllers",
+                "let controllers",
             ),
             "collection cancellation restores another generation": (
                 "requires self.inv(), counters@ == self.next(), collection.inv(counters@),",
@@ -420,10 +523,15 @@ if __name__ == "__main__":
     )
 
     check_mutations(
-        Path("verification/verus/rotating_read_domain"), Path("verification/verus/rotating_read_domain/src/striped_rotation.rs"),
-        (Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"), Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
-         Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"), Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
-         *tuple(Path("verification/verus/drain_gate/src").glob("*.rs"))),
+        Path("verification/verus/rotating_read_domain"),
+        Path("verification/verus/rotating_read_domain/src/striped_rotation.rs"),
+        (
+            Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"),
+            Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
+            Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
+            Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
+            *tuple(Path("verification/verus/drain_gate/src").glob("*.rs")),
+        ),
         {
             "idle handoff accepts a foreign transition handle": (
                 "requires transition.inv(state), handle.rwlock() == *transition, state.pending().is_none(),\n            counters@ == transition.pred().counters(index)",
@@ -473,10 +581,15 @@ if __name__ == "__main__":
     )
 
     check_mutations(
-        Path("verification/verus/rotating_read_domain"), Path("verification/verus/rotating_read_domain/src/striped_rotation.rs"),
-        (Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"), Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
-         Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"), Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
-         *tuple(Path("verification/verus/drain_gate/src").glob("*.rs"))),
+        Path("verification/verus/rotating_read_domain"),
+        Path("verification/verus/rotating_read_domain/src/striped_rotation.rs"),
+        (
+            Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"),
+            Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
+            Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
+            Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
+            *tuple(Path("verification/verus/drain_gate/src").glob("*.rs")),
+        ),
         {
             "pending collection accepts the wrong pending state": (
                 "requires transition.inv(state), handle.rwlock() == *transition, state.pending() == Some(index),",
@@ -487,15 +600,26 @@ if __name__ == "__main__":
                 "if index { State { zero: live_controls, one: Tracked(controls), pending: None } }",
             ),
             "pending restoration accepts another controller set": (
-                "requires self.inv(), stripes::controls_match(self.counters(), controls),", "requires self.inv(),",
+                "requires self.inv(), stripes::controls_match(self.counters(), controls),",
+                "requires self.inv(),",
             ),
         },
     )
 
     check_mutations(
-        Path("verification/verus/rotating_read_domain"), Path("verification/verus/rotating_read_domain/src/striped_rotation.rs"),
-        (Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"), Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
-         Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"), Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
-         *tuple(Path("verification/verus/drain_gate/src").glob("*.rs"))),
-        {"completed pending callback never clears its state": ("            state.pending = None;", "")},
+        Path("verification/verus/rotating_read_domain"),
+        Path("verification/verus/rotating_read_domain/src/striped_rotation.rs"),
+        (
+            Path("crates/xlfn-kernel/src/rotating_read_domain/queue.rs"),
+            Path("crates/xlfn-kernel/src/rotating_read_domain/protocol.rs"),
+            Path("crates/xlfn-kernel/src/sealable_counter/transitions.rs"),
+            Path("crates/xlfn-kernel/src/drain_gate/protocol.rs"),
+            *tuple(Path("verification/verus/drain_gate/src").glob("*.rs")),
+        ),
+        {
+            "completed pending callback never clears its state": (
+                "            state.pending = None;",
+                "",
+            )
+        },
     )
