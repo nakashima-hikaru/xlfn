@@ -28,6 +28,13 @@ The verification layers have distinct scopes:
 | `cache_lease` | Pin/observation resources, shared lookup, retirement and heap-permission recovery | Native pin field, resident index, queue cutoff and allocation recovery |
 | `handle_domain` | Retained observations, publication, batch recovery and post-destructor debt accounting | Native binding/debt fields, queue history and Drop |
 
+Native service-slot transactions bind each owner to its own reader gate and
+permit recovery only through consuming drained states. Replaceable-lane
+recovery also borrows the transition lock. The private-API compile checks
+enforce these Rust sequencing restrictions; the `service_slot` Verus target
+remains an abstract phase model and does not mechanically prove that native
+capability wiring or Box recovery.
+
 Cache pins use `AtomicU32` in production; admission counters remain `usize`.
 Both-width arithmetic proofs alone do not establish this mixed-width native
 composition. Verus objects and vstd atomics are separate from the production

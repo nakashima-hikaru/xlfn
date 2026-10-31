@@ -24,6 +24,8 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULES = {
+    "kernel/service_slot": Path("crates/xlfn-kernel/src/service_slot.rs"),
+    "kernel/service_slot/transaction": Path("crates/xlfn-kernel/src/service_slot/transaction.rs"),
     "async_udf": Path("crates/xlfn/src/async_udf.rs"),
     "async_udf/runtime": Path("crates/xlfn/src/async_udf/runtime.rs"),
     "subscription": Path("crates/xlfn/src/subscription.rs"),
@@ -111,11 +113,15 @@ def check_fixture(
             f"\n#[allow(dead_code)]\n#[path = {path_literal}]\n"
             "mod typestate_compile_fixture;\n"
         )
+    package = "xlfn-kernel" if fixture.module.startswith("kernel/") else "xlfn"
+    features = (*FEATURES, *extra_features) if package == "xlfn" else ()
     command = [
-        "cargo", "check", "-p", "xlfn", "--lib", "--locked", "--offline",
-        "--no-default-features", "--features", ",".join((*FEATURES, *extra_features)),
-        "--target-dir", str(target), "--message-format=json",
+        "cargo", "check", "-p", package, "--lib", "--locked", "--offline",
+        "--no-default-features",
     ]
+    if features:
+        command.extend(["--features", ",".join(features)])
+    command.extend(["--target-dir", str(target), "--message-format=json"])
     if compile_target:
         command.extend(["--target", compile_target])
     completed = subprocess.run(
@@ -153,6 +159,7 @@ def check_fixture(
     )
     return {
         "fixture": str(fixture.path), "target": compile_target or "host", "passed": passed,
+        "package": package, "features": list(features),
         "command": command,
         "exit_code": completed.returncode,
         "expected": sorted(expected), "observed": sorted(observed),

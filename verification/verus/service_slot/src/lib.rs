@@ -192,7 +192,7 @@ pub open spec fn step_seal_withdraw(s: ServiceSlotState) -> Option<ServiceSlotSt
     }
 }
 
-/// seal() Step 2: SealingTxn::finish on success (extract Box<R> after wait_until_idle).
+/// seal() Step 2: QuiescedTxn::finish on success, after SealingTxn::wait.
 pub open spec fn step_seal_finish_success(s: ServiceSlotState) -> Option<ServiceSlotState> {
     match s.phase {
         SlotPhase::Sealing { alloc_id } => {
@@ -211,7 +211,7 @@ pub open spec fn step_seal_finish_success(s: ServiceSlotState) -> Option<Service
     }
 }
 
-/// seal() Step 2: SealingTxn::finish on error/panic.
+/// SealingTxn/QuiescedTxn recovery on abandonment or shutdown error/panic.
 pub open spec fn step_seal_finish_fault(s: ServiceSlotState) -> Option<ServiceSlotState> {
     match s.phase {
         SlotPhase::Sealing { alloc_id } => {

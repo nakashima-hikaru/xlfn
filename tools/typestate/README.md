@@ -3,7 +3,9 @@
 Run `python3 tools/check_typestate.py` from any directory. The checker copies the
 current tracked and nonignored working files into a temporary workspace, injects
 each fixture as an internal module, and runs an offline, locked `cargo check`
-with `async,rtd,handles,cache`. The default target is the rustc host. Windows COM
+against its owning package. Facade fixtures check `xlfn` with
+`async,rtd,handles,cache`; `kernel/service_slot` fixtures check `xlfn-kernel`
+without facade features. The default target is the rustc host. Windows COM
 fixtures run on Windows and are explicitly reported as skipped on other hosts.
 `--target x86_64-pc-windows-msvc` includes them in a cross-target check when the
 Windows native dependency toolchain is configured; `--extra-features` can enable
@@ -12,11 +14,27 @@ CI runs the suite on both Linux and Windows. These are compile checks, not live
 Excel execution tests. The original source tree is never edited. An optional
 `--report PATH` retains toolchain, input hash, targets, commands, build settings,
 skipped fixtures, and diagnostics.
+Each result records its package and actual features; `--extra-features` applies
+only to the facade fixtures.
 
 Positive callers run first. Negative callers must produce the exact error code
 at each line marked `// error: E....`; unrelated errors fail the check. Internal
 injection verifies the actual method and field restrictions without publishing
 test APIs or accepting an ancestor-module privacy error as typestate evidence.
+
+Kernel service-slot callers are injected beside the private transaction module.
+Initialization completion consumes its transaction once. Sealing must consume
+the pending reader drain before shutdown can finish; lane retirement must drain
+before reclaiming its retained owner. Negative callers reject skipping or
+repeating those steps, completing initialization after failure, and passing a
+different owner to lane reclamation. Sibling callers cannot construct drained
+capabilities or replace their private recovery owner or lane. The positive
+control checks both those internal sequences and the public slot APIs.
+Separate `kernel/service_slot/transaction` fixtures run inside the transaction
+module to check the actual lock borrow: reclaim succeeds while its transition
+guard remains alive, but a retirement cannot escape that guard or outlive its
+early destruction. The sibling fixtures above keep testing the private
+construction boundary independently of these borrow checks.
 
 Open transactions carry mandatory service inputs after initialization. Fixtures
 reject missing or repeated initialization inputs, commit before initialization

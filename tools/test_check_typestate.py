@@ -13,6 +13,39 @@ from unittest.mock import patch
 import check_typestate as checker
 
 
+class PackageRoutingTests(unittest.TestCase):
+    def test_kernel_and_facade_compile_the_owning_package(self):
+        for module, package, features in (
+            ("kernel/service_slot", "xlfn-kernel", ()),
+            ("kernel/service_slot/transaction", "xlfn-kernel", ()),
+            ("registration/host", "xlfn", (*checker.FEATURES, "blake3/pure")),
+        ):
+            with self.subTest(module=module), tempfile.TemporaryDirectory() as directory:
+                overlay = Path(directory)
+                relative = checker.MODULES[module]
+                source = overlay / relative
+                source.parent.mkdir(parents=True)
+                source.write_text("// original\n", encoding="utf-8")
+                fixture = checker.Fixture(Path("tools/typestate/pass/control.rs"), module, ())
+                completed = subprocess.CompletedProcess([], 0, "", "")
+                with patch.object(checker.subprocess, "run", return_value=completed) as run:
+                    result = checker.check_fixture(
+                        fixture, overlay, {relative: "// original\n"}, overlay / "target",
+                        "x86_64-pc-windows-msvc", ("blake3/pure",),
+                    )
+                command = run.call_args.args[0]
+                self.assertEqual(command[:5], ["cargo", "check", "-p", package, "--lib"])
+                self.assertEqual(command[-2:], ["--target", "x86_64-pc-windows-msvc"])
+                if features:
+                    self.assertEqual(command[command.index("--features") + 1], ",".join(features))
+                else:
+                    self.assertNotIn("--features", command)
+                self.assertTrue(result["passed"])
+                self.assertEqual(result["package"], package)
+                self.assertEqual(result["features"], list(features))
+                self.assertIn("mod typestate_compile_fixture;", source.read_text(encoding="utf-8"))
+
+
 class Utf8TypestateTests(unittest.TestCase):
     def run_checker(self, *, target=None, wrong_error=False):
         with tempfile.TemporaryDirectory(prefix="xlfn-typestate-test-") as directory:
