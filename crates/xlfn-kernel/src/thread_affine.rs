@@ -113,7 +113,9 @@ struct AffinityControl {
 pub struct ThreadAffineSlot<T: 'static> {
     id: OnceLock<ThreadAffineSlotId>,
     affinity: Mutex<AffinityControl>,
-    _marker: PhantomData<fn() -> T>,
+    // TLS erases the payload type. Keep the exact concrete T invariant even
+    // when T has subtypes, without requiring the slot root's T to be Send/Sync.
+    _marker: PhantomData<fn(T) -> T>,
 }
 
 /// A non-copyable witness that the current thread owns one slot binding.
