@@ -3725,18 +3725,41 @@ fn miri_object_arena_lifecycle() {
 }
 
 #[test]
-fn rejects_object_binding_from_foreign_registry() {
-    let first = HandleRegistry::new(2);
-    let second = HandleRegistry::new(2);
+fn miri_pending_publication_uses_its_original_registry() {
+    let first = HandleRegistry::from_entropy(2, [7; 40]);
+    let second = HandleRegistry::from_entropy(2, [9; 40]);
     let pending = first.new_object(DataRecord(42)).unwrap();
-    assert_eq!(
-        pending.arena(),
-        std::ptr::NonNull::from(first.objects.as_ref())
-    );
+    assert!(pending.belongs_to(&first));
+    assert!(!pending.belongs_to(&second));
+    let (token, ..) = pending.publish().unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(second.len(), 0);
+    crate::call::with_excel_call_scope_and_state(&first, |first, scope| {
+        assert_eq!(
+            first.lookup_handle::<DataRecord>(scope, &token).unwrap().0,
+            42
+        );
+    });
+    assert!(second.remove::<DataRecord>(&token).is_err());
+    first.remove::<DataRecord>(&token).unwrap();
+    first.bindings.read_domain().flush_for_test();
+}
+
+#[test]
+fn miri_pending_publication_rejects_foreign_store_before_publication() {
+    let first = HandleStore::try_new(2).unwrap();
+    let second = HandleStore::try_new(2).unwrap();
+    let drops = Arc::new(AtomicUsize::new(0));
+    let pending = first.erase(CountedDataRecord(Arc::clone(&drops))).unwrap();
     assert!(matches!(
-        pending.publish(&second),
+        second.insert_pending(pending),
         Err(XllError::StaleHandle)
     ));
+    assert_eq!(first.len(), 0);
+    assert_eq!(second.len(), 0);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+    first.seal().unwrap().finish_quiescence().unwrap();
+    second.seal().unwrap().finish_quiescence().unwrap();
 }
 
 #[test]
@@ -3991,9 +4014,7 @@ fn miri_deferred_removal_keeps_borrows_across_slot_reuse_and_batches() {
             let pending = registry
                 .new_object(CountedDataRecord(Arc::clone(&drops)))
                 .unwrap();
-            let (token, ..) = registry
-                .publish_pending::<CountedDataRecord>(pending)
-                .unwrap();
+            let (token, ..) = pending.publish().unwrap();
             borrows.push(
                 registry
                     .lookup_handle::<CountedDataRecord>(scope, &token)
@@ -4029,9 +4050,7 @@ fn miri_deferred_seal_racing_removal_cannot_miss_queued_records() {
         let pending = registry
             .new_object(CountedDataRecord(Arc::clone(&drops)))
             .unwrap();
-        let (token, ..) = registry
-            .publish_pending::<CountedDataRecord>(pending)
-            .unwrap();
+        let (token, ..) = pending.publish().unwrap();
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let removing = Arc::clone(&registry);
         let removing_barrier = Arc::clone(&barrier);
@@ -4057,9 +4076,7 @@ fn miri_deferred_seal_drains_debt_below_batch_threshold() {
     let pending = registry
         .new_object(CountedDataRecord(Arc::clone(&drops)))
         .unwrap();
-    let (token, ..) = registry
-        .publish_pending::<CountedDataRecord>(pending)
-        .unwrap();
+    let (token, ..) = pending.publish().unwrap();
     assert!(
         registry
             .remove_and_drop_with_observer(&token, "deferred test", |_| {})

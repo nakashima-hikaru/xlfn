@@ -26,16 +26,15 @@ mod retirement;
 
 use crate::{XllError, XllResult};
 use retirement::RetirementAccounting;
+pub(super) use retirement::UnlinkedBindingOwner;
 use xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT;
 use xlfn_kernel::rotating_read_domain::RotatingReadOwnedPermit;
 
 #[cfg(test)]
 use xlfn_kernel::rotating_read_domain::RotatingReadPermit;
 
-use super::binding::BindingRecord;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use xlfn_kernel::published_owner::PublishedOwner;
 
 pub(crate) struct HandleReadDomain {
     retirement: RetirementAccounting,
@@ -133,7 +132,7 @@ impl HandleReadDomain {
     /// not exclude new readers observing a stale withdrawn pointer.
     ///
     /// Protocol obligation [HD-2]: Retired bindings enter generation-bound queue; immediate drop is forbidden.
-    pub(super) fn enqueue_reclaim(&self, record: PublishedOwner<BindingRecord>) {
+    pub(super) fn enqueue_reclaim(&self, record: UnlinkedBindingOwner) {
         self.retirement.register(record);
     }
 
@@ -379,7 +378,7 @@ mod tests {
         let registry = HandleRegistry::from_entropy(1, [7; 40]);
         let drops = Arc::new(AtomicUsize::new(0));
         let pending = registry.new_object(Counted(Arc::clone(&drops))).unwrap();
-        let token = registry.publish_pending::<Counted>(pending).unwrap().0;
+        let token = pending.publish().unwrap().0;
         let domain = registry.bindings.read_domain();
         let old = domain.enter().unwrap();
         registry.remove::<Counted>(&token).unwrap();
@@ -398,7 +397,7 @@ mod tests {
         let registry = Arc::new(HandleRegistry::from_entropy(1, [7; 40]));
         let publish = || {
             let pending = registry.new_object(Payload).unwrap();
-            registry.publish_pending::<Payload>(pending).unwrap().0
+            pending.publish().unwrap().0
         };
         let first = publish();
         let (remover, finished) =

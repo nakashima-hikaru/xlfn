@@ -6,5 +6,5 @@ fn invalid<'registry>(
     registry: &'registry HandleRegistry,
     pending: PendingObjectBinding<'registry, u32>,
 ) {
-    let _ = pending.publish::<u64>(registry); // error: E0107
+    let _ = pending.publish::<u64>(); // error: E0107
 }

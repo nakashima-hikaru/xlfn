@@ -52,6 +52,19 @@ rotation domain has a separate address. Both batch merging and the reentrant
 destruction guard use the accounting owner's identity. Forgetting a batch
 retains its payload and debt, so terminal completion remains blocked.
 
+Published binding slots now retain a non-dropping `PublishedBindingOwner`.
+The private binding transaction performs actual withdrawal before transferring
+an `UnlinkedBindingOwner` to the same table's accounting adapter under its writer
+guard. Queue batches retain that non-dropping owner through grace; only private
+post-grace destruction recovers its allocation, before debt discharge. Bulk
+retirement remains outside deferred-queue accounting: its transaction retains
+protected owners and its exact table, releases the writer guard, waits for that
+domain, and returns an opaque `BulkBindingsDrained`. Abandonment can retain
+allocations or locks but cannot create that drained result. Ordinary table Drop
+seals its domain before explicitly destroying protected live slots. These native
+ownership boundaries narrow misuse; the atomic history and allocation/Drop
+connections above remain open refinement obligations.
+
 ## Windows teardown boundary
 
 COM export-drain preparation failure retains the affine `ModuleClosing`

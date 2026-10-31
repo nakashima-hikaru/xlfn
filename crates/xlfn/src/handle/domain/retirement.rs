@@ -9,6 +9,7 @@ use crate::handle::binding::BindingRecord;
 use crate::sync::{Condvar, Mutex};
 use smallvec::SmallVec;
 use std::cell::RefCell;
+use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT;
 use xlfn_kernel::published_owner::PublishedOwner;
@@ -20,7 +21,18 @@ use xlfn_kernel::rotating_read_domain::{
 
 // Single-cell deletion and ordinary revision replacement should not allocate
 // a heap queue. Larger retirement batches retain their allocation when drained.
-type PendingBindings = SmallVec<[PublishedOwner<BindingRecord>; 4]>;
+type PendingBindings = SmallVec<[UnlinkedBindingOwner; 4]>;
+
+/// A withdrawn allocation still protected by its reader generation. Only this
+/// adapter can recover it after its embedded domain returns a disposable batch.
+pub(crate) struct UnlinkedBindingOwner {
+    owner: ManuallyDrop<PublishedOwner<BindingRecord>>,
+}
+impl UnlinkedBindingOwner {
+    pub(in crate::handle) fn retain(owner: ManuallyDrop<PublishedOwner<BindingRecord>>) -> Self {
+        Self { owner }
+    }
+}
 
 pub(super) struct RetirementAccounting {
     domain: RotatingRetirementDomain<DEFAULT_STRIPE_COUNT, PendingBindings>,
@@ -79,7 +91,11 @@ impl Drop for ReclaimBatch<'_> {
         // Kernel locks ended before batch construction. The caller must also
         // end its table writer guard before polling or dropping this batch.
         protocol::complete_reclamation!(_destroyed, completion;
-            drop(records),
+            {
+                for record in records {
+                    drop(ManuallyDrop::into_inner(record.owner));
+                }
+            },
             update_count(&owner.debt, count, Ordering::Release, counters::subtract),
             owner.completion.lock(),
             owner.changed.notify_all(),
@@ -124,7 +140,7 @@ impl RetirementAccounting {
     /// The table writer holds publication withdrawal through this operation.
     /// The selected queue lock covers append and both accounting updates, so a
     /// rotation cannot detach a record whose registration is not yet charged.
-    pub(super) fn register(&self, record: PublishedOwner<BindingRecord>) {
+    pub(super) fn register(&self, record: UnlinkedBindingOwner) {
         self.domain.register_retired(|_, mut queue| {
             queue.append(record);
             update_count(&self.debt, 1, Ordering::Relaxed, counters::add);

@@ -137,6 +137,10 @@ impl<'domain> BindingReadLease<'domain> {
 }
 
 mod protocol;
+mod transaction;
+
+use transaction::PublishedBindingOwner;
+pub(crate) use transaction::{BindingRemoval, BindingReservation};
 
 const BINDINGS_PER_PAGE: usize = 256;
 type BindingPage = [AtomicPtr<BindingRecord>; BINDINGS_PER_PAGE];
@@ -221,7 +225,7 @@ impl PublicationWriter<'_, '_> {
 
 pub(crate) struct BindingSlot {
     pub(crate) next_generation: BindingGeneration,
-    pub(crate) record: Option<PublishedOwner<BindingRecord>>,
+    pub(crate) record: Option<PublishedBindingOwner>,
 }
 
 pub(crate) struct RegistryState {
@@ -308,53 +312,7 @@ impl BindingTable {
     }
 
     pub(crate) fn reserve(&self) -> XllResult<BindingReservation<'_>> {
-        let mut state = self.state.write();
-        // A remover may itself hold a call permit and must not wait for it.
-        // Stop new publication at hard debt even in that case. With the live
-        // binding cap this bounds total records by maximum_bindings + 256,
-        // including batches whose arbitrary destructors are still running.
-        if self.read_domain.debt() >= super::domain::HARD_DEBT_LIMIT {
-            return Err(XllError::Overloaded);
-        }
-        if state.live_bindings >= self.maximum_bindings {
-            return Err(XllError::Domain {
-                code: DomainErrorCode::Overflow,
-            });
-        }
-        let (index, slot, reused, appended) = match state.free.pop() {
-            Some(slot) => (slot as usize, slot, true, false),
-            None => {
-                let index = state.slots.len();
-                // Exhausted generations permanently consume their slot. Do
-                // not treat padding in the last publication page as capacity.
-                if index >= self.maximum_bindings as usize {
-                    return Err(XllError::Domain {
-                        code: DomainErrorCode::Overflow,
-                    });
-                }
-                let slot = u32::try_from(index).map_err(|_| XllError::Domain {
-                    code: DomainErrorCode::Overflow,
-                })?;
-                state.slots.push(BindingSlot {
-                    next_generation: BindingGeneration::ONE,
-                    record: None,
-                });
-                (index, slot, false, true)
-            }
-        };
-        let id = HandleId {
-            slot,
-            generation: state.slots[index].next_generation,
-        };
-        Ok(BindingReservation {
-            table: self,
-            state: Some(state),
-            index,
-            id,
-            reused,
-            appended,
-            active: true,
-        })
+        BindingReservation::acquire(self)
     }
 
     #[cfg(test)]
@@ -373,176 +331,11 @@ impl BindingTable {
     }
 
     pub(crate) fn begin_removal(&self, id: HandleId) -> XllResult<BindingRemoval<'_>> {
-        let state = self.state.write();
-        let record = state
-            .slots
-            .get(id.slot as usize)
-            .and_then(|slot| slot.record.as_deref())
-            .filter(|record| record.id == id)
-            .map(BindingPtr::from_ref)
-            .ok_or(XllError::StaleHandle)?;
-        Ok(BindingRemoval {
-            table: self,
-            state: Some(state),
-            id,
-            record,
-            active: true,
-        })
+        BindingRemoval::acquire(self, id)
     }
 
-    pub(crate) fn retire_all(&self) -> (u32, Vec<PublishedOwner<BindingRecord>>) {
-        let mut state = self.state.write();
-        let live_bindings = state.live_bindings;
-        let mut retired = Vec::with_capacity(live_bindings as usize);
-        state.free.clear();
-        for index in 0..state.slots.len() {
-            if let Some(record) = state.slots[index].record.take() {
-                // Touch only live publications, independent of page capacity.
-                self.publication_writer(&mut state)
-                    .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop())
-                    .remove(record.id, BindingPtr::from_ref(&record));
-                record
-                    .state
-                    .store(BindingState::Retired as u8, Ordering::Release);
-                retired.push(record);
-            }
-            let slot = &mut state.slots[index];
-            if let Some(next) = slot.next_generation.next() {
-                slot.next_generation = next;
-                state
-                    .free
-                    .push(u32::try_from(index).expect("allocated slot fits u32"));
-            }
-        }
-        state.live_bindings = 0;
-        drop(state);
-        self.read_domain.quiesce();
-        (live_bindings, retired)
-    }
-}
-
-pub(crate) struct BindingReservation<'table> {
-    pub(super) table: &'table BindingTable,
-    pub(super) state: Option<RwLockWriteGuard<'table, RegistryState>>,
-    pub(super) index: usize,
-    pub(super) id: HandleId,
-    pub(super) reused: bool,
-    pub(super) appended: bool,
-    pub(super) active: bool,
-}
-
-impl BindingReservation<'_> {
-    pub(crate) fn publish(mut self, object: ObjectBinding) -> (HandleId, bool) {
-        let mut state = self
-            .state
-            .take()
-            .expect("binding reservation owns the table write lock");
-        let record = PublishedOwner::new(BindingRecord::new(self.id, object));
-        let slot = &mut state.slots[self.index];
-        slot.record = Some(record);
-        let pointer = BindingPtr::from_ref(slot.record.as_ref().unwrap().as_ref());
-        self.table
-            .publication_writer(&mut state)
-            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop())
-            .insert(self.id, pointer);
-        state.live_bindings = state
-            .live_bindings
-            .checked_add(1)
-            .expect("binding capacity was checked before commit");
-        self.active = false;
-        drop(state);
-        (self.id, self.reused)
-    }
-}
-
-impl Drop for BindingReservation<'_> {
-    fn drop(&mut self) {
-        if !self.active {
-            return;
-        }
-        let mut state = self
-            .state
-            .take()
-            .expect("binding reservation owns the table write lock");
-        if self.appended {
-            let slot = state.slots.pop().expect("reservation owns the final slot");
-            debug_assert!(slot.record.is_none());
-        } else if self.reused {
-            state.free.push(self.id.slot);
-        }
-    }
-}
-
-pub(crate) struct BindingRemoval<'table> {
-    pub(super) table: &'table BindingTable,
-    pub(super) state: Option<RwLockWriteGuard<'table, RegistryState>>,
-    pub(super) id: HandleId,
-    pub(super) record: BindingPtr,
-    pub(super) active: bool,
-}
-
-impl BindingRemoval<'_> {
-    #[cfg(test)]
-    pub(crate) fn object(&self) -> &ObjectCell {
-        // SAFETY: self owns the table write lock and the slot holds the live record.
-        unsafe { self.record.0.as_ref() }.object()
-    }
-
-    pub(crate) fn commit(mut self) -> bool {
-        let mut state = self
-            .state
-            .take()
-            .expect("binding removal owns the table write lock");
-        let slot = state
-            .slots
-            .get_mut(self.id.slot as usize)
-            .expect("binding slot was validated");
-        let retired = slot.record.take().expect("binding record was validated");
-        if BindingPtr::from_ref(retired.as_ref()) != self.record {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        retired
-            .state
-            .store(BindingState::Retired as u8, Ordering::Release);
-        self.table
-            .publication_writer(&mut state)
-            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop())
-            .remove(self.id, self.record);
-        let slot = &mut state.slots[self.id.slot as usize];
-        let reusable = if let Some(next) = slot.next_generation.next() {
-            slot.next_generation = next;
-            true
-        } else {
-            false
-        };
-        state.live_bindings = state
-            .live_bindings
-            .checked_sub(1)
-            .expect("binding removal cannot underflow");
-        if reusable {
-            state.free.push(self.id.slot);
-        }
-        self.active = false;
-        // Enqueue before releasing the table lock: seal's retire_all must
-        // not pass this removal and drain the domain before it is registered.
-        self.table.read_domain.enqueue_reclaim(retired);
-        drop(state);
-        self.table.read_domain.maintain_after_removal();
-        reusable
-    }
-}
-
-impl Drop for BindingRemoval<'_> {
-    fn drop(&mut self) {
-        debug_assert_eq!(self.state.is_some(), self.active);
-    }
-}
-
-impl Drop for BindingTable {
-    fn drop(&mut self) {
-        // All reclamation runs under a borrowing call/writer capability, and
-        // its final access must finish before the unique domain is destroyed.
-        self.read_domain.seal();
+    pub(crate) fn retire_all(&self) -> (u32, transaction::BulkBindingsDrained) {
+        transaction::retire_all(self)
     }
 }
 

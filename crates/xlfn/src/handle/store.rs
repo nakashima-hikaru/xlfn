@@ -49,7 +49,10 @@ impl HandleStore {
         &'store self,
         value: PendingObjectBinding<'store, T>,
     ) -> XllResult<(String, HandleId, ObjectId, bool)> {
-        value.publish(&self.registry)
+        if !value.belongs_to(&self.registry) {
+            return Err(crate::XllError::StaleHandle);
+        }
+        value.publish()
     }
 
     pub(crate) fn lookup<'call, T: ExcelHandleObject>(

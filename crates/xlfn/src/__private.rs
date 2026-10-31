@@ -1264,7 +1264,7 @@ pub mod v1 {
 
             pub fn insert_object<T: ExcelHandleObject>(&self, value: T) -> XllResult<String> {
                 let pending = self.0.new_object(value)?;
-                let (token, ..) = self.0.publish_pending::<T>(pending)?;
+                let (token, ..) = crate::handle::HandleRegistry::publish_pending(pending)?;
                 Ok(token)
             }
 

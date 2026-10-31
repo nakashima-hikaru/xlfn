@@ -239,19 +239,18 @@ impl HandleRegistry {
     {
         let object = self.new_object(value.take().expect("pending handle value is armed"))?;
         object
-            .publish(self)
+            .publish()
             .map(|(token, _binding_id, _object_id, _reused)| token)
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
-    pub(crate) fn publish_pending<'registry, T>(
-        &'registry self,
-        pending: PendingObjectBinding<'registry, T>,
+    #[cfg(feature = "bench-internals")]
+    pub(crate) fn publish_pending<T>(
+        pending: PendingObjectBinding<'_, T>,
     ) -> XllResult<(String, HandleId, ObjectId, bool)>
     where
         T: Send + Sync + 'static,
     {
-        pending.publish(self)
+        pending.publish()
     }
 
     // Only the typed PendingObjectBinding publication path calls this final

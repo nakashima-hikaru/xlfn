@@ -634,7 +634,7 @@ impl ObjectBinding {
 /// Type invariance prevents subtyping from changing the cached TypeId authority.
 pub(crate) struct PendingObjectBinding<'registry, T: Send + Sync + 'static> {
     binding: ObjectBinding,
-    _registry: PhantomData<&'registry super::registry::HandleRegistry>,
+    registry: &'registry super::registry::HandleRegistry,
     _type: PhantomData<fn(T) -> T>,
 }
 
@@ -650,7 +650,7 @@ impl<'registry, T: Send + Sync + 'static> PendingObjectBinding<'registry, T> {
         let binding = unsafe { ObjectArena::insert(&registry.objects, id, value) }?;
         Ok(Self {
             binding,
-            _registry: PhantomData,
+            registry,
             _type: PhantomData,
         })
     }
@@ -671,21 +671,22 @@ impl<'registry, T: Send + Sync + 'static> PendingObjectBinding<'registry, T> {
         }
         Ok(Self {
             binding,
-            _registry: PhantomData,
+            registry,
             _type: PhantomData,
         })
     }
 
     /// Publishes the exact typed capability, consuming its registry anchor.
     #[inline]
-    pub(super) fn publish(
-        self,
-        registry: &'registry super::registry::HandleRegistry,
-    ) -> XllResult<(String, super::token::HandleId, ObjectId, bool)> {
+    pub(super) fn publish(self) -> XllResult<(String, super::token::HandleId, ObjectId, bool)> {
         // Erase only at the final binding-table insertion. The registry borrow
         // remains live for the entire call; no bare binding escapes this method.
         let mut binding = Some(self.binding);
-        registry.insert_pending_object(&mut binding)
+        self.registry.insert_pending_object(&mut binding)
+    }
+
+    pub(super) fn belongs_to(&self, registry: &super::registry::HandleRegistry) -> bool {
+        std::ptr::eq(self.registry, registry)
     }
 
     #[cfg(test)]
