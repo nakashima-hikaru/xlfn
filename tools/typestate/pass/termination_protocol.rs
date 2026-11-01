@@ -19,7 +19,7 @@ fn coordinate(coordinator: &TerminationCoordinator) -> crate::XllResult<()> {
 
 fn fail(coordinator: &TerminationCoordinator) -> crate::XllResult<()> {
     match coordinator.begin() {
-        TerminationClaim::Owner(owner) => owner.fail(crate::XllError::Panic),
+        TerminationClaim::Owner(owner) => Err(owner.fail(crate::XllError::Panic)),
         TerminationClaim::Waiter(waiter) => waiter.wait(),
         TerminationClaim::Complete(completed) => completed.result(),
     }

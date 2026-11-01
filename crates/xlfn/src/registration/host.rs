@@ -366,11 +366,8 @@ fn mutation_from_invocation<O: RegistrationOperation>(
                 failure: ExcelApiFailure::Suppressed(status),
             },
         },
-        HostInvocation::Completed {
-            status,
-            decoded,
-            cleanup,
-        } => {
+        HostInvocation::Failed { status, cleanup } => {
+            let status = status.status();
             if status.is_terminal() {
                 return RegistrationMutation::Indeterminate {
                     status,
@@ -380,35 +377,31 @@ fn mutation_from_invocation<O: RegistrationOperation>(
                     }),
                 };
             }
-            if status != ExcelCallbackStatus::Success {
-                return RegistrationMutation::Rejected {
-                    error: cleanup.err().unwrap_or(XllError::ExcelApi {
-                        function,
-                        failure: ExcelApiFailure::Status(status),
-                    }),
-                };
-            }
-            match decoded {
-                Some(Ok(value)) => RegistrationMutation::Applied { value, cleanup },
-                Some(Err(error)) => {
-                    let error = if matches!(decode_failure, DecodeFailureDisposition::Indeterminate)
-                    {
-                        cleanup.err().unwrap_or(error)
-                    } else {
-                        error
-                    };
-                    if matches!(decode_failure, DecodeFailureDisposition::Indeterminate) {
-                        RegistrationMutation::Indeterminate {
-                            status: ExcelCallbackStatus::Success,
-                            error,
-                        }
-                    } else {
-                        RegistrationMutation::Rejected { error }
-                    }
-                }
-                None => unreachable!("successful host callbacks always run their decoder"),
+            RegistrationMutation::Rejected {
+                error: cleanup.err().unwrap_or(XllError::ExcelApi {
+                    function,
+                    failure: ExcelApiFailure::Status(status),
+                }),
             }
         }
+        HostInvocation::Decoded { decoded, cleanup } => match decoded {
+            Ok(value) => RegistrationMutation::Applied { value, cleanup },
+            Err(error) => {
+                let error = if matches!(decode_failure, DecodeFailureDisposition::Indeterminate) {
+                    cleanup.err().unwrap_or(error)
+                } else {
+                    error
+                };
+                if matches!(decode_failure, DecodeFailureDisposition::Indeterminate) {
+                    RegistrationMutation::Indeterminate {
+                        status: ExcelCallbackStatus::Success,
+                        error,
+                    }
+                } else {
+                    RegistrationMutation::Rejected { error }
+                }
+            }
+        },
     }
 }
 
@@ -1192,9 +1185,8 @@ mod tests {
 
     #[test]
     fn successful_decode_failure_is_indeterminate_for_mutations() {
-        let invocation = HostInvocation::<RegistrationId>::Completed {
-            status: ExcelCallbackStatus::Success,
-            decoded: Some(Err(XllError::Closing)),
+        let invocation = HostInvocation::<RegistrationId>::Decoded {
+            decoded: Err(XllError::Closing),
             cleanup: Ok(()),
         };
         assert!(matches!(
@@ -1211,20 +1203,19 @@ mod tests {
 
     #[test]
     fn terminal_invocation_is_indeterminate_even_when_cleanup_succeeds() {
-        let invocation = HostInvocation::<()>::Completed {
-            status: ExcelCallbackStatus::Abort,
-            decoded: None,
-            cleanup: Ok(()),
-        };
+        use super::test_support::{CallbackScript, Reply};
+        let script =
+            CallbackScript::install([Reply::success(XLF_UNREGISTER, XLOPER12::boolean(true))
+                .status(xlfn_sys::XLRET_ABORT)]);
+        let callbacks = HostCallbackSession::new();
+        let invocation = invoke_operation(ExcelHost::new(&callbacks), Unregister, &[]);
         assert!(matches!(
-            mutation_from_invocation(RegistrationInvocation::<Unregister> {
-                evidence: invocation,
-                operation: std::marker::PhantomData,
-            }),
+            mutation_from_invocation(invocation),
             RegistrationMutation::Indeterminate {
                 status: ExcelCallbackStatus::Abort,
                 ..
             }
         ));
+        script.assert_calls(&[XLF_UNREGISTER]);
     }
 }

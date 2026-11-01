@@ -67,14 +67,8 @@ impl<'runtime, H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatal
     }
 
     fn fail(self, error: XllError) -> XllError {
-        self.runtime.record_cleanup_result(Err(error));
-        self.owner
-            .fail(
-                self.runtime
-                    .cleanup_result()
-                    .expect_err("cleanup failure recorded"),
-            )
-            .expect_err("failed termination cannot report success")
+        let first = self.runtime.services.record_cleanup_failure(error);
+        self.owner.fail(first)
     }
 }
 

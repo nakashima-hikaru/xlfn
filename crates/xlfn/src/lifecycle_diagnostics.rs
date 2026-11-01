@@ -267,9 +267,8 @@ pub(crate) fn registration_removal<T>(
     if operation == "xlfUnregister"
         && matches!(
             invocation,
-            HostInvocation::Completed {
-                status: crate::return_abi::ExcelCallbackStatus::Success,
-                decoded: Some(Ok(_)),
+            HostInvocation::Decoded {
+                decoded: Ok(_),
                 cleanup: Ok(())
             }
         )
@@ -301,14 +300,16 @@ fn removal_details<T>(
     match invocation {
         HostInvocation::Suppressed { status } => json!({"operation": operation, "target": target,
             "invoked": false, "status": format!("{status:?}")}),
-        HostInvocation::Completed {
-            status,
-            decoded,
-            cleanup,
-        } => json!({
+        HostInvocation::Decoded { decoded, cleanup } => json!({
             "operation": operation, "target": target, "invoked": true,
-            "status": format!("{status:?}"), "raw_result": raw_result,
-            "decoded": decoded.as_ref().map(|r| r.as_ref().map(|_| ()).map_err(|e| e.to_string())),
+            "status": "Success", "raw_result": raw_result,
+            "decoded": decoded.as_ref().map(|_| ()).map_err(|e| e.to_string()),
+            "cleanup": cleanup.as_ref().map_err(|e| e.to_string()),
+        }),
+        HostInvocation::Failed { status, cleanup } => json!({
+            "operation": operation, "target": target, "invoked": true,
+            "status": format!("{:?}", status.status()), "raw_result": raw_result,
+            "decoded": Value::Null,
             "cleanup": cleanup.as_ref().map_err(|e| e.to_string()),
         }),
     }
@@ -588,12 +589,11 @@ mod tests {
             ExcelCallbackValue::from_raw_for_test(xlfn_sys::XLOPER12::integer(-1_657_274_367));
         let raw = scalar_result(&value).unwrap();
         assert_eq!(raw["value"], -1_657_274_367);
-        let invocation: HostInvocation<()> = HostInvocation::Completed {
-            status: ExcelCallbackStatus::Success,
-            decoded: Some(Err(XllError::ExcelApi {
+        let invocation: HostInvocation<()> = HostInvocation::Decoded {
+            decoded: Err(XllError::ExcelApi {
                 function: ExcelApiFunction::EventRegister,
                 failure: ExcelApiFailure::InvalidRegistrationId(-1_657_274_367),
-            })),
+            }),
             cleanup: Ok(()),
         };
         let details = removal_details("xlEventRegister.remove", 1.0, &invocation, Some(raw));

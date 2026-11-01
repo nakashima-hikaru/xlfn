@@ -19,7 +19,7 @@ pub(super) struct DeferredDisconnect<
     E: RtdSubscription,
     C: crate::RtdSourceCatalog<E>,
 > {
-    subscription: Option<SourceSubscription<E>>,
+    subscription: SourceSubscription<E>,
     // The connection reserved this capacity before any source sink escaped.
     _reservation: DisconnectReservation<H, E, C>,
     // Drop the external server/module lease before releasing runtime admission.
@@ -37,18 +37,18 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         operation: OwnedServerOperation<H, E, C>,
     ) -> Self {
         Self {
-            subscription: Some(subscription),
+            subscription,
             _reservation: reservation,
             _completion: completion,
             operation,
         }
     }
 
-    fn finish(mut self) {
-        let mut subscription = self
-            .subscription
-            .take()
-            .expect("cleanup owns a subscription");
+    fn finish(self) {
+        // Moving only the subscription leaves the remaining fields in their
+        // declared drop order: completion releases its external lease before
+        // operation releases runtime admission.
+        let mut subscription = self.subscription;
         let cancel = catch_no_unwind(AssertUnwindSafe(|| subscription.request_cancel()))
             .map_err(|_| XllError::Panic);
         // Even a panicking cancellation must finish the sink-user barrier.

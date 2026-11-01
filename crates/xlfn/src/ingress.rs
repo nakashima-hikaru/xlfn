@@ -167,7 +167,7 @@ pub(crate) struct ExportsDrained {
         dead_code,
         reason = "Linear proof token tracking epoch for ingress drain"
     )]
-    pub(crate) epoch: u64,
+    epoch: u64,
 }
 
 /// Global ingress manager tracking all external DLL export calls entering the XLL.
@@ -364,7 +364,6 @@ impl ExportIngress {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
         });
-        let mut on_accepted = Some(on_accepted);
         if self.phase.load(Ordering::Acquire) == PHASE_CLOSED {
             return ExportEntry::Rejected(self.rejected_guard());
         }
@@ -387,12 +386,7 @@ impl ExportIngress {
             udf: false,
         };
         if accepted {
-            let hook = on_accepted
-                .take()
-                .expect("ingress acceptance hook called once");
-            hook();
-        }
-        if accepted {
+            on_accepted();
             ExportEntry::Admitted(AdmittedExport { guard: entry })
         } else {
             ExportEntry::Rejected(RejectedExport { _guard: entry })
@@ -411,7 +405,6 @@ impl ExportIngress {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
         });
-        let mut on_accepted = Some(on_accepted);
         if self.phase.load(Ordering::Acquire) == PHASE_CLOSED {
             return ExportEntry::Rejected(self.rejected_guard());
         }
@@ -436,12 +429,7 @@ impl ExportIngress {
             udf: true,
         };
         if accepted {
-            let hook = on_accepted
-                .take()
-                .expect("ingress acceptance hook called once");
-            hook();
-        }
-        if accepted {
+            on_accepted();
             ExportEntry::Admitted(AdmittedExport { guard: entry })
         } else {
             ExportEntry::Rejected(RejectedExport { _guard: entry })
@@ -479,7 +467,6 @@ impl ExportIngress {
                 .unwrap_or_else(|error| error.into_inner())
         });
         with_diagnostic_linearization(|| {
-            let mut on_closed = Some(on_closed);
             let mut observed = self.phase.load(Ordering::Acquire);
             loop {
                 if !matches!(observed, PHASE_OPEN | PHASE_OPENING) {
@@ -492,8 +479,7 @@ impl ExportIngress {
                     Ordering::Acquire,
                 ) {
                     Ok(_) => {
-                        let hook = on_closed.take().expect("ingress close hook called once");
-                        hook();
+                        on_closed();
                         return;
                     }
                     Err(current) => observed = current,

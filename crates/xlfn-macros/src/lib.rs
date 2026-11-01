@@ -355,10 +355,8 @@ fn expand_excel_addin(
     } else {
         quote!(#krate::__private::v1::LogicalUnload)
     };
-    validate_addin_metadata(&display_name, &id, &category, &item)?;
-    let name_units: Vec<_> = display_name.encode_utf16().collect();
-    let name_length =
-        u16::try_from(name_units.len()).expect("validated Excel metadata string length");
+    let metadata = validate_addin_metadata(&display_name, &id, &category, &item)?;
+    let (name_length, name_units) = metadata.name();
     Ok(quote! {
         #item
 
@@ -486,7 +484,7 @@ fn expand_excel_addin(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use quote::quote;
+    use quote::{ToTokens, quote};
 
     fn function(source: proc_macro2::TokenStream) -> UdfFunction {
         syn::parse2(source).unwrap()
@@ -816,9 +814,9 @@ mod tests {
             )
             .unwrap();
             let analyzed = model::analyze(parsed).unwrap();
-            assert_eq!(analyzed.arguments[0].abi, abi, "{ty}");
+            assert_eq!(analyzed.arguments[0].abi(), abi, "{ty}");
             let lowered = model::lower(analyzed);
-            assert_eq!(lowered.arguments[0].abi, abi, "{ty}");
+            assert_eq!(lowered.arguments[0].abi(), abi, "{ty}");
         }
     }
 
@@ -843,7 +841,10 @@ mod tests {
             )
             .unwrap();
             let analyzed = model::analyze(parsed).unwrap();
-            assert_eq!(analyzed.arguments[0].abi, xlfn_common::ArgumentAbi::Value12);
+            assert_eq!(
+                analyzed.arguments[0].abi(),
+                xlfn_common::ArgumentAbi::Value12
+            );
         }
     }
 
@@ -859,7 +860,10 @@ mod tests {
         )
         .unwrap();
         let analyzed = model::analyze(parsed).unwrap();
-        assert_eq!(analyzed.arguments[0].abi, xlfn_common::ArgumentAbi::Float64);
+        assert_eq!(
+            analyzed.arguments[0].abi(),
+            xlfn_common::ArgumentAbi::Float64
+        );
     }
 
     #[test]
@@ -1481,9 +1485,42 @@ mod tests {
             .unwrap();
             let spec = model::analyze(parsed).unwrap();
             assert_eq!(spec.execution.kind(), kind);
-            assert!(spec.execution.context_type().is_some());
+            let context = spec.execution.context().unwrap();
+            let addin = context.addin();
+            assert_eq!(quote!(#addin).to_string(), "State");
+            assert_eq!(
+                context.ty().to_token_stream().to_string(),
+                spec.execution
+                    .context_type()
+                    .unwrap()
+                    .to_token_stream()
+                    .to_string()
+            );
             assert_eq!(spec.arguments.len(), 1);
             assert_eq!(spec.arguments[0].excel_name, "input");
+        }
+    }
+
+    #[test]
+    fn validated_addin_metadata_keeps_the_exact_utf16_count_with_its_payload() {
+        let span: syn::ItemStruct = syn::parse_quote!(
+            struct State;
+        );
+        for name in ["école", "価格", "😀", &"a".repeat(255)] {
+            let metadata = validate_addin_metadata(name, "state", "category", &span).unwrap();
+            let (length, units) = metadata.name();
+            assert_eq!(usize::from(length), units.len());
+            assert_eq!(String::from_utf16(units).unwrap(), name);
+        }
+        for name in [String::new(), "a".repeat(256), "😀".repeat(128)] {
+            let error = match validate_addin_metadata(&name, "state", "category", &span) {
+                Ok(_) => panic!("invalid metadata unexpectedly produced a count owner"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error.to_string(),
+                "add-in `name` must contain 1..=255 UTF-16 code units"
+            );
         }
     }
 

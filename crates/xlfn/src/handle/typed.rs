@@ -152,10 +152,10 @@ impl<T: ExcelHandleObject> AsRef<T> for Handle<'_, T> {
 /// cannot be returned from the UDF, stored in a `'static` location, or moved
 /// into an independently spawned thread.
 pub struct HandleLease<'generation, T: ExcelHandleObject> {
-    pub(crate) object_id: ObjectId,
-    pub(crate) value: TypedObjectProjection<T>,
-    pub(crate) _lease: RawObjectLeaseGuard,
-    pub(crate) _generation: PhantomData<&'generation GenerationLeaseBrand>,
+    object_id: ObjectId,
+    value: TypedObjectProjection<T>,
+    _lease: RawObjectLeaseGuard,
+    _generation: PhantomData<&'generation GenerationLeaseBrand>,
 }
 
 impl<T: ExcelHandleObject> HandleLease<'_, T> {
@@ -205,25 +205,43 @@ unsafe impl<T: ExcelHandleObject> Sync for HandleLease<'_, T> {}
     reason = "The pending fields are consumed by the async scoped path"
 )]
 pub struct PendingHandleLease<T: ExcelHandleObject> {
-    pub(crate) object_id: ObjectId,
-    pub(crate) value: TypedObjectProjection<T>,
-    pub(crate) lease: RawObjectLeaseGuard,
-    pub(crate) generation: RuntimeGeneration,
+    object_id: ObjectId,
+    value: TypedObjectProjection<T>,
+    lease: RawObjectLeaseGuard,
+    generation: RuntimeGeneration,
+}
+
+#[cfg(test)]
+impl<T: ExcelHandleObject> PendingHandleLease<T> {
+    pub(super) fn value_for_test(&self) -> &T {
+        // SAFETY: this test observation borrows the pending owner and its
+        // original raw pin; no field or ownership-transfer permission escapes.
+        unsafe { self.value.as_ref_unchecked() }
+    }
 }
 
 #[cfg(all(feature = "async", feature = "handles"))]
 impl<T: ExcelHandleObject> PendingHandleLease<T> {
+    pub(crate) fn object_id(&self) -> ObjectId {
+        self.object_id
+    }
+
     pub(crate) fn bind<'generation>(
         self,
         scope: crate::async_udf::AsyncTaskScope<'generation>,
-    ) -> HandleLease<'generation, T> {
-        debug_assert_eq!(self.generation, scope.generation());
-        HandleLease {
+    ) -> XllResult<HandleLease<'generation, T>> {
+        // A borrowed lifetime brand identifies a scope, not the originating
+        // runtime generation of an independently obtained pending pin. Reject
+        // the join before exposing a typed borrow or invoking user task code.
+        if self.generation != scope.generation() {
+            return Err(XllError::StaleHandle);
+        }
+        Ok(HandleLease {
             object_id: self.object_id,
             value: self.value,
             _lease: self.lease,
             _generation: PhantomData,
-        }
+        })
     }
 }
 

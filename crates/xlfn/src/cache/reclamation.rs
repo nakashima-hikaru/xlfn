@@ -1,6 +1,10 @@
 //! Post-grace batches and allocation recovery; raw retirement entries alone
 //! grant no safe destruction API. Kernel-issued batches fix the grace domain.
 use super::*;
+use xlfn_kernel::rotating_read_domain::{ClosedRetirement, DisposableBatch};
+
+#[cfg(test)]
+mod tests;
 
 pub(super) fn reclaim_unpublished<V>(entry: ReclaimEntry<V>) {
     // SAFETY: final-pin ownership retains this allocation; inspect its actual
@@ -66,21 +70,7 @@ impl<'domain, V> ReclaimEntries<'domain, V> {
     pub(super) fn belongs_to(&self, domain: &CacheLookupDomain<V>) -> bool {
         std::ptr::eq(self.domain, domain)
     }
-    pub(super) fn from_closed(
-        domain: &'domain CacheLookupDomain<V>,
-        closed: ClosedRetirement<'_, DEFAULT_STRIPE_COUNT, PendingEntries<V>>,
-    ) -> Self {
-        if !closed.belongs_to(&domain.domain) {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        let batches = closed.take_queues().map(|batch| Self {
-            domain,
-            entries: batch.into_inner(),
-        });
-        merge_reclaims(domain, batches)
-    }
-
-    pub(super) fn from_disposable(
+    fn from_disposable(
         domain: &'domain CacheLookupDomain<V>,
         generation: DisposableBatch<'_, DEFAULT_STRIPE_COUNT, PendingEntries<V>>,
     ) -> ReclaimEntries<'domain, V> {
@@ -111,13 +101,13 @@ impl<'domain, V> ReclaimEntries<'domain, V> {
         ReclaimEntries { domain, entries }
     }
 
-    pub(super) fn new(domain: &'domain CacheLookupDomain<V>) -> Self {
+    fn new(domain: &'domain CacheLookupDomain<V>) -> Self {
         Self {
             domain,
             entries: PendingEntries::new(),
         }
     }
-    pub(super) fn extend(&mut self, mut other: Self) {
+    fn extend(&mut self, mut other: Self) {
         crate::retirement_queue::append_owned_batch!(
             std::ptr::from_ref(self.domain), std::ptr::from_ref(other.domain);
             xlfn_kernel::invariant::fail_stop(),
@@ -132,7 +122,7 @@ impl<V> std::ops::Deref for ReclaimEntries<'_, V> {
     }
 }
 
-pub(super) fn merge_reclaims<'domain, V>(
+fn merge_reclaims<'domain, V>(
     domain: &'domain CacheLookupDomain<V>,
     batches: impl IntoIterator<Item = ReclaimEntries<'domain, V>>,
 ) -> ReclaimEntries<'domain, V> {
@@ -148,4 +138,124 @@ pub(super) fn merge_reclaims<'domain, V>(
         std::ptr::from_ref(entries.domain), std::ptr::from_ref(domain);
         xlfn_kernel::invariant::fail_stop(), entries
     )
+}
+
+/// Terminal admission belongs to this cache domain. Closing and detaching stay
+/// separate because cache destruction must release index residency in between.
+/// The caller cannot substitute another domain when detaching the queues.
+pub(super) struct ClosedCacheDomain<'domain, V> {
+    domain: &'domain CacheLookupDomain<V>,
+    closed: ClosedRetirement<'domain, DEFAULT_STRIPE_COUNT, PendingEntries<V>>,
+}
+
+impl<'domain, V> ClosedCacheDomain<'domain, V> {
+    pub(super) fn drain(self) -> ReclaimEntries<'domain, V> {
+        let Self { domain, closed } = self;
+        let batches = closed.take_queues().map(|batch| ReclaimEntries {
+            domain,
+            entries: batch.into_inner(),
+        });
+        merge_reclaims(domain, batches)
+    }
+}
+
+impl<V> CacheLookupDomain<V> {
+    pub(super) fn quiesce_and_drain(&self) -> ReclaimEntries<'_, V> {
+        // Initializers/unwind cleanup must not wait for a caller blocked on
+        // this operation. Advance nonblocking quiescence in those cases. A
+        // synchronous writer also must not await its own lookup admission.
+        if ACTIVE_CACHE_INITIALIZATION_DEPTH.get() != 0 || std::thread::panicking() {
+            return self.try_quiesce_and_drain();
+        }
+        if self.current_thread_is_reading() {
+            return ReclaimEntries::new(self);
+        }
+        #[cfg(any(test, feature = "bench-internals"))]
+        let start = Instant::now();
+        let batches = self
+            .domain
+            .quiesce()
+            .unwrap_or_default()
+            .into_iter()
+            .flatten()
+            .map(|batch| self.drain_generation(batch));
+        // Preserve an existing batch allocation when only one generation has
+        // debt, instead of allocating and copying a new flattened Vec.
+        let entries = merge_reclaims(self, batches);
+        self.clear_saturated_weight_if_empty();
+        #[cfg(any(test, feature = "bench-internals"))]
+        self.record_batch(&entries, start);
+        entries
+    }
+
+    pub(super) fn try_quiesce_and_drain(&self) -> ReclaimEntries<'_, V> {
+        if self.pending_nodes.load(Ordering::Relaxed) == 0 {
+            return ReclaimEntries::new(self);
+        }
+        // Every poll participates in one request handoff. A departing reader
+        // racing a driver's failed idle check forces that driver to poll again.
+        let previous = self
+            .maintenance_requests
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |requests| {
+                requests.checked_add(1)
+            })
+            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+        if previous != 0 {
+            return ReclaimEntries::new(self);
+        }
+        #[cfg(any(test, feature = "bench-internals"))]
+        let start = Instant::now();
+        let mut entries = ReclaimEntries::new(self);
+        let mut consumed = 1;
+        loop {
+            while self.pending_nodes.load(Ordering::Relaxed) != 0 {
+                let Some(Ok(batch)) = self
+                    .domain
+                    .poll_quiesce()
+                    .map(|result| result.map(|batch| self.drain_generation(batch)))
+                else {
+                    break;
+                };
+                entries.extend(batch);
+            }
+            let requested = self
+                .maintenance_requests
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |requests| {
+                    requests.checked_sub(consumed)
+                })
+                .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+            if requested == consumed {
+                break;
+            }
+            consumed = requested - consumed;
+        }
+        self.clear_saturated_weight_if_empty();
+        #[cfg(any(test, feature = "bench-internals"))]
+        self.record_batch(&entries, start);
+        entries
+    }
+
+    fn drain_generation(
+        &self,
+        generation: DisposableBatch<'_, DEFAULT_STRIPE_COUNT, PendingEntries<V>>,
+    ) -> ReclaimEntries<'_, V> {
+        ReclaimEntries::from_disposable(self, generation)
+    }
+
+    #[cfg(test)]
+    pub(super) fn try_idle_and_drain(
+        &self,
+    ) -> Option<Result<ReclaimEntries<'_, V>, xlfn_kernel::rotating_read_domain::DomainClosed>>
+    {
+        self.domain
+            .try_quiesce_if_idle()
+            .map(|result| result.map(|batch| self.drain_generation(batch)))
+    }
+
+    pub(super) fn seal(&self) -> ClosedCacheDomain<'_, V> {
+        ClosedCacheDomain {
+            domain: self,
+            closed: self.domain.seal_and_wait(),
+        }
+    }
 }

@@ -1,10 +1,10 @@
 use super::object::PendingObjectBinding;
-use super::publication::{InsertedPublication, ObjectAllocation, PublicationReservation};
+use super::publication::{ObjectAllocation, PublicationReservation};
 use super::registry::HandleRegistrySealed;
 use super::{
     ExcelHandleObject, Handle, HandleAlias, HandlePrepareState, HandleRefinementHooks, HandleStore,
-    HandleTopicKey, Initialization, InitializationPtr, PrepareDecision, PublishedTopic,
-    PublishedTopicPtr, PublishedTopicState, TopicRemoval, TopicTable,
+    HandleTopicKey, Initialization, InitializationPtr, PrepareDecision, PublishedTopicPtr,
+    PublishedTopicState, TopicRemoval, TopicTable,
 };
 #[cfg(any(target_os = "windows", test))]
 use super::{FormulaLifetimeGeneration, FormulaObserverId};
@@ -327,13 +327,9 @@ impl FormulaHandleService {
         let publication_reservation =
             PublicationReservation::new(self, key, generation, initialization);
         let prepared = create()?;
-        let InsertedPublication {
-            transaction: publication_txn,
-            token,
-            allocation,
-        } = publication_reservation.insert_object::<T>(prepared)?;
-        let parsed = self.refinement_token(&token);
-        if allocation == ObjectAllocation::Reused {
+        let publication_txn = publication_reservation.insert_object::<T>(prepared)?;
+        let parsed = self.refinement_token(publication_txn.token());
+        if publication_txn.allocation() == &ObjectAllocation::Reused {
             self.refinement.observe_insert_pending_reuse(
                 &key,
                 initialization_id,
@@ -344,24 +340,21 @@ impl FormulaHandleService {
             self.refinement
                 .observe_insert_pending_fresh(&key, initialization_id);
         }
-        let lifetime_key = key.format_lifetime_key();
-        let publication = PublishedTopic::new(token.clone(), lifetime_key.clone());
+        let publication_token = parsed;
         let publication_txn = publication_txn.publish_and_observe(
-            publication,
-            &lifetime_key,
             observe
                 .take()
                 .expect("the cold path owns the observation closure"),
-            |_publication| {
+            |_publication, lifetime_key| {
                 self.refinement.observe_publish_and_install(
                     &key,
                     initialization_id,
-                    self.refinement_token(&token),
-                    &lifetime_key,
+                    publication_token,
+                    lifetime_key,
                 );
             },
         )?;
-        publication_txn.commit()?;
+        let token = publication_txn.commit()?;
         Ok(HandlePreparation::Published { token })
     }
 

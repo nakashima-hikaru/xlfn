@@ -155,12 +155,9 @@ impl<'domain, const N: usize> LockedDomain<'domain, N> {
     ) {
         let new = match self.classify() {
             RotationStart::Pending(pending) => {
-                let (authority, result) = pending.wait().run(&mut operation);
+                let (next, result) = pending.wait().run(&mut operation);
                 results[0] = Some(result);
-                match authority.classify() {
-                    RotationStart::New(new) => new,
-                    RotationStart::Pending(_) => crate::invariant::fail_stop(),
-                }
+                next
             }
             RotationStart::New(new) => new,
         };
@@ -277,10 +274,16 @@ impl<'domain, const N: usize> DrainedRotation<'domain, N> {
     pub(super) fn run<R>(
         mut self,
         operation: impl for<'drain> FnOnce(DrainedGeneration<'drain>) -> R,
-    ) -> (LockedDomain<'domain, N>, R) {
+    ) -> (NewRotation<'domain, N>, R) {
         let result = protocol::finish_rotation!(result;
             operation(self.certificate()), *self.authority.pending = None);
-        (self.authority, result)
+        // Retirement completed and cleared pending under this same lock.
+        // Transfer that exact result rather than reclassifying broad storage.
+        let next = NewRotation {
+            old: self.authority.domain.current_generation(),
+            authority: self.authority,
+        };
+        (next, result)
     }
 }
 

@@ -9,22 +9,39 @@ pub(super) fn validate_registration_string(
         .map_err(|error| syn::Error::new_spanned(span, format!("invalid {field}: {error}")))
 }
 
+pub(super) struct ValidatedAddinMetadata {
+    name_units: Vec<u16>,
+    name_length: u8,
+}
+
+impl ValidatedAddinMetadata {
+    pub(super) fn name(&self) -> (u16, &[u16]) {
+        (u16::from(self.name_length), &self.name_units)
+    }
+}
+
+fn validate_addin_text(field: &str, value: &str, span: &impl quote::ToTokens) -> syn::Result<u8> {
+    let length = u8::try_from(value.encode_utf16().count())
+        .ok()
+        .filter(|&length| length != 0)
+        .ok_or_else(|| {
+            syn::Error::new_spanned(
+                span,
+                format!("add-in `{field}` must contain 1..=255 UTF-16 code units"),
+            )
+        })?;
+    validate_registration_string(&format!("add-in `{field}`"), value, span)?;
+    Ok(length)
+}
+
 pub(super) fn validate_addin_metadata(
     display_name: &str,
     id: &str,
     category: &str,
     span: &impl quote::ToTokens,
-) -> syn::Result<()> {
-    for (field, value) in [("name", display_name), ("category", category)] {
-        let length = value.encode_utf16().count();
-        if value.is_empty() || length > 255 {
-            return Err(syn::Error::new_spanned(
-                span,
-                format!("add-in `{field}` must contain 1..=255 UTF-16 code units"),
-            ));
-        }
-        validate_registration_string(&format!("add-in `{field}`"), value, span)?;
-    }
+) -> syn::Result<ValidatedAddinMetadata> {
+    let name_length = validate_addin_text("name", display_name, span)?;
+    validate_addin_text("category", category, span)?;
 
     let valid_slug = !id.is_empty()
         && id.len() <= 64
@@ -41,7 +58,10 @@ pub(super) fn validate_addin_metadata(
             "add-in `id` must be a non-reserved ASCII slug beginning with a letter and containing only letters, digits, `-`, or `_`",
         ));
     }
-    Ok(())
+    Ok(ValidatedAddinMetadata {
+        name_units: display_name.encode_utf16().collect(),
+        name_length,
+    })
 }
 
 pub(super) fn validate_export_id(id: &str, span: &impl quote::ToTokens) -> syn::Result<()> {

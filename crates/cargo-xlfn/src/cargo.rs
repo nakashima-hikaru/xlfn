@@ -78,14 +78,13 @@ fn read_build_messages(
     if !build_succeeded {
         bail!("cargo build did not report successful completion");
     }
-    if libraries.len() != 1 {
-        bail!(
+    let [mut built]: [BuiltLibrary; 1] = libraries.try_into().map_err(|libraries: Vec<_>| {
+        anyhow!(
             "cargo build reported {} matching cdylib artifacts for {}, expected exactly one",
             libraries.len(),
             metadata.package_name
-        );
-    }
-    let mut built = libraries.pop().expect("exactly one library artifact");
+        )
+    })?;
     built.features.sort_unstable();
     built.features.dedup();
     Ok(built)

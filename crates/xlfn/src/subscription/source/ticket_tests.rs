@@ -119,7 +119,7 @@ fn miri_source_ticket_survives_arena_and_runtime_moves() {
     let publish_runtime = Box::new(ProbeRuntime::new());
     let server = publish_runtime.register_test_server(1);
     let adapter = arena.resolve(handle.id).unwrap();
-    let adapter_address = NonNull::from(adapter.catalog.sources[adapter.index].as_ref());
+    let adapter_address = NonNull::from(arena.sources.as_ref().unwrap().sources[0].as_ref());
     let topic = RtdTopic::single("move-source-owner").unwrap();
     let mut tickets = Vec::new();
     for _ in 0..65 {
@@ -406,7 +406,7 @@ fn miri_static_catalog_subscription_retains_source_address_across_owner_moves() 
     let publish_runtime = Box::new(ProbeRuntime::new());
     let server = publish_runtime.register_test_server(1);
     let source = arena.resolve(handle.id).unwrap();
-    let address = NonNull::from(&source.catalog.0.disconnected);
+    let address = NonNull::from(&arena.sources.as_ref().unwrap().0.disconnected);
     let topic = RtdTopic::single("static owner relocation").unwrap();
     // SAFETY: the boxed tuple allocation and independent publish root outlive
     // this owner even while their containing SourceArena and Runtime move.
@@ -418,10 +418,11 @@ fn miri_static_catalog_subscription_retains_source_address_across_owner_moves() 
     for _ in 0..3 {
         runtimes.push(Runtime::new());
     }
-    let source = runtimes[0].sources.resolve(handle.id).unwrap();
-    assert_eq!(NonNull::from(&source.catalog.0.disconnected), address);
+    assert!(runtimes[0].sources.resolve(handle.id).is_some());
+    let stored = runtimes[0].sources.sources.as_ref().unwrap();
+    assert_eq!(NonNull::from(&stored.0.disconnected), address);
     subscription.disconnect_and_wait().unwrap();
-    assert_eq!(source.catalog.0.disconnected.load(Ordering::Acquire), 1);
+    assert_eq!(stored.0.disconnected.load(Ordering::Acquire), 1);
     for runtime in &runtimes {
         runtime.close().unwrap();
     }

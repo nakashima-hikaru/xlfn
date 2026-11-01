@@ -519,7 +519,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
                 resources.runtime.record_cleanup_result(Err(error.clone()));
                 let owner = resources.owner.take().expect("live termination owner");
                 drop(resources);
-                return owner.fail(error);
+                return Err(owner.fail(error));
             }
         };
 

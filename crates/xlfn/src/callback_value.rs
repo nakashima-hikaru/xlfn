@@ -42,6 +42,7 @@ fn record_callback_value_debt(debt: CallbackCleanupDebt) {
 #[cfg(test)]
 type ReleaseCallback = unsafe fn(&mut XLOPER12) -> i32;
 
+#[cfg(test)]
 fn state_after_call(
     callback_invoked: bool,
     status: ExcelCallbackStatus,
@@ -85,6 +86,7 @@ pub(crate) struct CleanupOnlyValue<'session> {
     owner: ExcelCallbackValue<'session>,
 }
 impl<'session> CallbackResult<'session> {
+    #[cfg(test)]
     fn classify(owner: ExcelCallbackValue<'session>) -> Self {
         match owner.state {
             CallbackValueReleaseState::Live => Self::Readable(owner),
@@ -203,26 +205,34 @@ impl<'session> ExcelCallbackValue<'session> {
         let (status, raw, callback_invoked) =
             unsafe { excel12_with_invocation(function, arguments) };
         let callback_status = ExcelCallbackStatus::from_raw(status);
-        let module_permit = if callback_invoked {
-            Some(callback_admission)
-        } else {
+        if !callback_invoked {
             drop(callback_admission);
-            None
-        };
-        let state = state_after_call(callback_invoked, callback_status);
-        let owner = Self {
+            return Ok((status, CallbackResult::Empty));
+        }
+        // Classification constructs the fresh owner itself. A value whose
+        // cleanup already started cannot be supplied to this issuing path.
+        let make_owner = |state| Self {
             raw,
-            release_required: callback_invoked,
+            release_required: true,
             #[cfg(test)]
             audit_failures: true,
             #[cfg(test)]
             release_callback: excel_free,
             state,
             session: Some(session),
-            module_permit,
+            module_permit: Some(callback_admission),
             _not_send_or_sync: PhantomData,
         };
-        Ok((status, CallbackResult::classify(owner)))
+        let result = if callback_status.is_terminal() {
+            CallbackResult::CleanupOnly(CleanupOnlyValue {
+                owner: make_owner(CallbackValueReleaseState::TerminalSuppressed {
+                    status: callback_status,
+                }),
+            })
+        } else {
+            CallbackResult::Readable(make_owner(CallbackValueReleaseState::Live))
+        };
+        Ok((status, result))
     }
 
     fn ensure_live(&self) -> XllResult<()> {

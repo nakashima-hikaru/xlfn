@@ -41,26 +41,7 @@ windows_link::link!("kernel32.dll" "system" fn GetLastError() -> u32);
 
 pub(super) fn attach() -> XllResult<&'static ProcessState> {
     let name = mapping_name()?;
-    let mut mapping = Mapping::open(&name)?;
-    let pointer = mapping.view().cast::<ProcessState>();
-    if !pointer
-        .as_ptr()
-        .addr()
-        .is_multiple_of(align_of::<ProcessState>())
-    {
-        return Err(invalid_state("unaligned accounting view"));
-    }
-    // SAFETY: MapViewOfFile mapped sizeof(ProcessState) writable zero-backed
-    // bytes, aligned above. Every field is an AtomicU64 with all bit patterns
-    // valid; initialize uses only atomics, including on concurrent attachments.
-    let state = unsafe { pointer.as_ref() };
-    state.initialize()?;
-    // Only this image's MapViewOfFile result is turned into a reference.
-    // Close the handle, then retain the view for outstanding process-owned
-    // return buffers even if this image is later unloaded.
-    mapping.retain_view()?;
-    // SAFETY: The owned view has just been retained until process exit.
-    Ok(unsafe { pointer.as_ref() })
+    Mapping::open(&name)?.initialize_and_retain()
 }
 
 fn mapping_name() -> XllResult<Vec<u16>> {
@@ -87,9 +68,37 @@ fn mapping_name() -> XllResult<Vec<u16>> {
         .collect())
 }
 
+/// The handle's Option only disarms successful CloseHandle during Drop.
+/// An unmapped handle can never be used as a Mapping view.
+struct MappingHandle {
+    pointer: Option<NonNull<c_void>>,
+}
+
+impl MappingHandle {
+    fn close(&mut self) -> XllResult<()> {
+        if let Some(handle) = self.pointer {
+            // SAFETY: this is the unique owned handle. A mapped view keeps
+            // the section alive independently after successful close.
+            if unsafe { CloseHandle(handle.as_ptr()) } == 0 {
+                return Err(os_error("CloseHandle"));
+            }
+            self.pointer = None;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for MappingHandle {
+    fn drop(&mut self) {
+        let _ = self.close();
+    }
+}
+
+/// A complete mapped view. Partial construction is owned by MappingHandle;
+/// every value of this type has a real view, including during error cleanup.
 struct Mapping {
-    handle: Option<NonNull<c_void>>,
-    view: Option<NonNull<c_void>>,
+    handle: MappingHandle,
+    view: NonNull<c_void>,
 }
 
 impl Mapping {
@@ -100,8 +109,7 @@ impl Mapping {
         let security = security::Descriptor::private()?;
         let attributes = security.attributes();
         // SAFETY: INVALID_HANDLE_VALUE selects pagefile-backed memory. The name
-        // is NUL-terminated and remains live during the call; attributes and its
-        // descriptor remain live, and bytes covers the fixed shared structure.
+        // and security descriptor remain live for this call.
         let handle = unsafe {
             CreateFileMappingW(
                 invalid_handle,
@@ -112,77 +120,65 @@ impl Mapping {
                 name.as_ptr(),
             )
         };
-        let handle = NonNull::new(handle).ok_or_else(|| os_error("CreateFileMappingW"))?;
-        let mut owner = Self {
-            handle: Some(handle),
-            view: None,
+        let pointer = NonNull::new(handle).ok_or_else(|| os_error("CreateFileMappingW"))?;
+        let handle = MappingHandle {
+            pointer: Some(pointer),
         };
-        security.validate_mapping(handle.as_ptr())?;
-        // SAFETY: handle is an owned mapping handle. Offset zero maps exactly
-        // ProcessState bytes with coherent read/write access.
+        security.validate_mapping(pointer.as_ptr())?;
+        // SAFETY: the unique handle owns a readable/writable mapping covering
+        // the complete fixed-layout ProcessState at offset zero.
         let view = unsafe {
             MapViewOfFile(
-                handle.as_ptr(),
+                pointer.as_ptr(),
                 FILE_MAP_WRITE,
                 0,
                 0,
                 size_of::<ProcessState>(),
             )
         };
-        owner.view = Some(NonNull::new(view).ok_or_else(|| os_error("MapViewOfFile"))?);
-        Ok(owner)
+        let view = NonNull::new(view).ok_or_else(|| os_error("MapViewOfFile"))?;
+        Ok(Self { handle, view })
     }
 
     fn view(&self) -> NonNull<c_void> {
-        self.view.expect("an opened accounting mapping has a view")
+        self.view
     }
 
-    fn retain_view(&mut self) -> XllResult<()> {
-        if let Some(handle) = self.handle {
-            // SAFETY: The mapped view keeps the section alive after closing
-            // this owned handle. No other code can close this handle.
-            if unsafe { CloseHandle(handle.as_ptr()) } == 0 {
-                return Err(os_error("CloseHandle"));
-            }
-            self.handle = None;
+    /// Initialization, handle release, and permanent view transfer are one
+    /// consuming operation. No reference escapes a failed initialization or
+    /// CloseHandle; error Drop unmaps the view before retrying handle cleanup.
+    #[allow(
+        clippy::mem_forget,
+        reason = "published FP12 blocks retain the initialized OS view until process exit"
+    )]
+    fn initialize_and_retain(mut self) -> XllResult<&'static ProcessState> {
+        let pointer = self.view().cast::<ProcessState>();
+        if !pointer
+            .as_ptr()
+            .addr()
+            .is_multiple_of(align_of::<ProcessState>())
+        {
+            return Err(invalid_state("unaligned accounting view"));
         }
-        self.view = None;
-        Ok(())
-    }
-
-    fn close(&mut self) -> XllResult<()> {
-        let mut failure = None;
-        if let Some(view) = self.view {
-            // SAFETY: This owner still holds the view, and no reference escapes
-            // on an error path. Successful attachments retain their own view.
-            if unsafe { UnmapViewOfFile(view.as_ptr()) } == 0 {
-                failure = Some(os_error("UnmapViewOfFile"));
-            } else {
-                self.view = None;
-            }
-        }
-        if let Some(handle) = self.handle {
-            // SAFETY: This is the owned mapping handle; closing it does not
-            // unmap any view or affect other images' handles.
-            if unsafe { CloseHandle(handle.as_ptr()) } == 0 {
-                let error = os_error("CloseHandle");
-                if failure.is_none() {
-                    failure = Some(error);
-                }
-            } else {
-                self.handle = None;
-            }
-        }
-        failure.map_or(Ok(()), Err)
+        // SAFETY: the view owns sizeof(ProcessState) writable bytes, aligned
+        // above. Its atomic fields accept all bit patterns; initialization
+        // never resets live accounting from another attachment.
+        unsafe { pointer.as_ref() }.initialize()?;
+        self.handle.close()?;
+        // Retained FP12 blocks may outlive this DLL. Retain exactly this view
+        // until process exit; its section is independent of the closed handle.
+        std::mem::forget(self);
+        // SAFETY: the exact initialized view was just permanently retained.
+        Ok(unsafe { pointer.as_ref() })
     }
 }
 
 impl Drop for Mapping {
     fn drop(&mut self) {
-        // On construction/validation errors, best-effort cleanup does not
-        // replace the original failure. Explicit duplicate cleanup propagates
-        // failure and never returns a usable accounting state in that case.
-        let _ = self.close();
+        // SAFETY: this owner retains its view and has issued no escaping
+        // reference. Failed unmapping conservatively retains the OS view;
+        // the handle field still performs its independent best-effort close.
+        let _ = unsafe { UnmapViewOfFile(self.view.as_ptr()) };
     }
 }
 

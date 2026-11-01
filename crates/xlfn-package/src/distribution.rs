@@ -304,7 +304,7 @@ fn sync_rename_parents(
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 fn retryable_windows_path_error(error: &io::Error) -> bool {
     matches!(
         error.kind(),
@@ -313,22 +313,36 @@ fn retryable_windows_path_error(error: &io::Error) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn retry_windows_path_operation(mut operation: impl FnMut() -> io::Result<()>) -> io::Result<()> {
+fn retry_windows_path_operation(operation: impl FnMut() -> io::Result<()>) -> io::Result<()> {
+    retry_path_operation(operation, std::thread::sleep)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn retry_path_operation(
+    mut operation: impl FnMut() -> io::Result<()>,
+    mut sleep: impl FnMut(std::time::Duration),
+) -> io::Result<()> {
     const ATTEMPTS: usize = 24;
     let mut delay = std::time::Duration::from_millis(10);
-    for attempt in 0..ATTEMPTS {
-        match operation() {
-            Ok(()) => return Ok(()),
-            Err(error) if attempt + 1 < ATTEMPTS && retryable_windows_path_error(&error) => {
-                std::thread::sleep(delay);
+    let mut result = operation();
+    // Every iteration owns the preceding attempt's actual outcome. The final
+    // outcome is returned directly, even when the retry budget is exhausted.
+    for _ in 1..ATTEMPTS {
+        match result {
+            Err(error) if retryable_windows_path_error(&error) => {
+                sleep(delay);
                 delay = delay
                     .saturating_mul(2)
                     .min(std::time::Duration::from_millis(500));
+                // Preserve the original attempt's resource/error drop order:
+                // finish backoff and release it before starting another I/O.
+                drop(error);
             }
-            Err(error) => return Err(error),
+            result => return result,
         }
+        result = operation();
     }
-    unreachable!("bounded path-operation loop always returns")
+    result
 }
 
 #[cfg(target_os = "windows")]

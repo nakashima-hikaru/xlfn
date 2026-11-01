@@ -42,6 +42,47 @@ impl<E: RtdSubscription> RtdSourceCatalog<E> for () {
     type Handles = ();
 }
 
+/// An index checked against and retained with its exact immutable catalog.
+/// Raw catalog dispatch accepts this owner instead of independently supplied
+/// receivers and indices. Its fields are private to this trusted boundary.
+#[cfg(any(feature = "rtd", feature = "handles"))]
+pub(crate) struct CatalogEntry<'a, E: RtdSubscription, C: RtdSourceCatalog<E>> {
+    catalog: &'a C,
+    index: usize,
+    marker: PhantomData<fn() -> E>,
+}
+
+#[cfg(any(feature = "rtd", feature = "handles"))]
+impl<'a, E: RtdSubscription, C: RtdSourceCatalog<E>> CatalogEntry<'a, E, C> {
+    pub(crate) fn acquire(catalog: &'a C, index: usize) -> Option<Self> {
+        (index < catalog.len()).then_some(Self {
+            catalog,
+            index,
+            marker: PhantomData,
+        })
+    }
+    pub(crate) fn all(catalog: &'a C) -> impl Iterator<Item = Self> {
+        (0..catalog.len()).map(move |index| Self {
+            catalog,
+            index,
+            marker: PhantomData,
+        })
+    }
+    pub(crate) fn subscribe(
+        &self,
+        topic: &crate::subscription::RtdTopic,
+        sink: crate::subscription::PublishSink,
+    ) -> crate::XllResult<E> {
+        C::subscribe(self, topic, sink)
+    }
+    pub(crate) fn request_stop(&self) {
+        C::request_stop(self);
+    }
+    pub(crate) fn shutdown_and_wait(&self) -> crate::XllResult<()> {
+        C::shutdown_and_wait(self)
+    }
+}
+
 // The sealing module is private. Its methods cannot be called downstream to
 // forge handles or transfer a sink outside the runtime's admission barrier.
 #[allow(
@@ -75,11 +116,21 @@ mod sealed {
         where
             Self: RtdSourceCatalog<E>;
         #[cfg(any(feature = "rtd", feature = "handles"))]
-        fn subscribe(&self, index: usize, topic: &RtdTopic, sink: PublishSink) -> XllResult<E>;
+        fn subscribe(
+            entry: &CatalogEntry<'_, E, Self>,
+            topic: &RtdTopic,
+            sink: PublishSink,
+        ) -> XllResult<E>
+        where
+            Self: RtdSourceCatalog<E>;
         #[cfg(any(feature = "rtd", feature = "handles"))]
-        fn request_stop(&self, index: usize);
+        fn request_stop(entry: &CatalogEntry<'_, E, Self>)
+        where
+            Self: RtdSourceCatalog<E>;
         #[cfg(any(feature = "rtd", feature = "handles"))]
-        fn shutdown_and_wait(&self, index: usize) -> XllResult<()>;
+        fn shutdown_and_wait(entry: &CatalogEntry<'_, E, Self>) -> XllResult<()>
+        where
+            Self: RtdSourceCatalog<E>;
     }
     impl<E: RtdSubscription> Catalog<E> for () {
         type Stored = xlfn_kernel::published_owner::PublishedOwner<Self>;
@@ -93,15 +144,15 @@ mod sealed {
         #[cfg(any(feature = "rtd", feature = "handles"))]
         fn handles(&self, _: RuntimeGeneration, _: u64) -> <Self as RtdSourceCatalog<E>>::Handles {}
         #[cfg(any(feature = "rtd", feature = "handles"))]
-        fn subscribe(&self, _: usize, _: &RtdTopic, _: PublishSink) -> XllResult<E> {
+        fn subscribe(_: &CatalogEntry<'_, E, Self>, _: &RtdTopic, _: PublishSink) -> XllResult<E> {
             unreachable!("empty catalog")
         }
         #[cfg(any(feature = "rtd", feature = "handles"))]
-        fn request_stop(&self, _: usize) {
+        fn request_stop(_: &CatalogEntry<'_, E, Self>) {
             unreachable!("empty catalog")
         }
         #[cfg(any(feature = "rtd", feature = "handles"))]
-        fn shutdown_and_wait(&self, _: usize) -> XllResult<()> {
+        fn shutdown_and_wait(_: &CatalogEntry<'_, E, Self>) -> XllResult<()> {
             unreachable!("empty catalog")
         }
     }
@@ -126,16 +177,20 @@ mod sealed {
         #[cfg(any(feature = "rtd", feature = "handles"))]
         fn handles(&self, _: RuntimeGeneration, _: u64) -> <Self as RtdSourceCatalog<E>>::Handles {}
         #[cfg(any(feature = "rtd", feature = "handles"))]
-        fn subscribe(&self, index: usize, topic: &RtdTopic, sink: PublishSink) -> XllResult<E> {
-            self.sources[index].subscribe(topic, sink)
+        fn subscribe(
+            entry: &CatalogEntry<'_, E, Self>,
+            topic: &RtdTopic,
+            sink: PublishSink,
+        ) -> XllResult<E> {
+            entry.catalog.sources[entry.index].subscribe(topic, sink)
         }
         #[cfg(any(feature = "rtd", feature = "handles"))]
-        fn request_stop(&self, index: usize) {
-            self.sources[index].request_stop();
+        fn request_stop(entry: &CatalogEntry<'_, E, Self>) {
+            entry.catalog.sources[entry.index].request_stop();
         }
         #[cfg(any(feature = "rtd", feature = "handles"))]
-        fn shutdown_and_wait(&self, index: usize) -> XllResult<()> {
-            self.sources[index].shutdown_and_wait()
+        fn shutdown_and_wait(entry: &CatalogEntry<'_, E, Self>) -> XllResult<()> {
+            entry.catalog.sources[entry.index].shutdown_and_wait()
         }
     }
 }
@@ -166,14 +221,14 @@ mod tuples {
                 fn handles(&self, generation: RuntimeGeneration, registration: u64) -> <Self as RtdSourceCatalog<E>>::Handles {
                     ($(RtdSourceHandle::from_id(SourceHandleId { generation, registration, sequence: $index + 1 }),)+)
                 }
-                fn subscribe(&self,index:usize,topic:&RtdTopic,sink:PublishSink)->XllResult<E> {
-                    match index { $($index => subscribe_typed(&self.$index, topic, sink),)+ _ => unreachable!("validated catalog index") }
+                fn subscribe(entry:&CatalogEntry<'_,E,Self>,topic:&RtdTopic,sink:PublishSink)->XllResult<E> {
+                    match entry.index { $($index => subscribe_typed(&entry.catalog.$index, topic, sink),)+ _ => unreachable!("validated catalog index") }
                 }
-                fn request_stop(&self,index:usize) {
-                    match index { $($index => self.$index.request_stop(),)+ _ => unreachable!("validated catalog index") }
+                fn request_stop(entry:&CatalogEntry<'_,E,Self>) {
+                    match entry.index { $($index => entry.catalog.$index.request_stop(),)+ _ => unreachable!("validated catalog index") }
                 }
-                fn shutdown_and_wait(&self,index:usize)->XllResult<()> {
-                    match index { $($index => self.$index.shutdown_and_wait(),)+ _ => unreachable!("validated catalog index") }
+                fn shutdown_and_wait(entry:&CatalogEntry<'_,E,Self>)->XllResult<()> {
+                    match entry.index { $($index => entry.catalog.$index.shutdown_and_wait(),)+ _ => unreachable!("validated catalog index") }
                 }
             }
         }
@@ -194,4 +249,55 @@ mod tuples {
     tuple_catalog!(S0:0, S1:1, S2:2, S3:3, S4:4, S5:5, S6:6, S7:7, S8:8, S9:9, S10:10, S11:11, S12:12, S13:13);
     tuple_catalog!(S0:0, S1:1, S2:2, S3:3, S4:4, S5:5, S6:6, S7:7, S8:8, S9:9, S10:10, S11:11, S12:12, S13:13, S14:14);
     tuple_catalog!(S0:0, S1:1, S2:2, S3:3, S4:4, S5:5, S6:6, S7:7, S8:8, S9:9, S10:10, S11:11, S12:12, S13:13, S14:14, S15:15);
+}
+
+#[cfg(all(test, feature = "rtd"))]
+mod tests {
+    #![allow(unsafe_code, reason = "test sources never retain a supplied sink")]
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountedSource(Arc<AtomicUsize>);
+    // SAFETY: no sink is retained and no worker or callback escapes.
+    unsafe impl crate::subscription::RtdSource for CountedSource {
+        type Value = i32;
+        type Subscription = ();
+        fn subscribe(
+            &self,
+            _: &crate::subscription::RtdTopic,
+            _: crate::subscription::RtdSink<i32>,
+        ) -> crate::XllResult<()> {
+            Ok(())
+        }
+        fn request_stop(&self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+        fn shutdown_and_wait(&self) -> crate::XllResult<()> {
+            self.0.fetch_add(10, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn miri_catalog_entry_retains_its_issuer_and_rejects_invalid_indices() {
+        let first = Arc::new(AtomicUsize::new(0));
+        let second = Arc::new(AtomicUsize::new(0));
+        let a = (CountedSource(Arc::clone(&first)),);
+        let b = (CountedSource(Arc::clone(&second)),);
+        assert!(CatalogEntry::<(), _>::acquire(&a, 1).is_none());
+        assert!(CatalogEntry::<(), _>::acquire(&a, usize::MAX).is_none());
+        assert!(CatalogEntry::<(), _>::acquire(&(), 0).is_none());
+        assert_eq!(CatalogEntry::<(), _>::all(&()).count(), 0);
+        let entry = CatalogEntry::<(), _>::acquire(&a, 0).unwrap();
+        entry.request_stop();
+        entry.shutdown_and_wait().unwrap();
+        assert_eq!(first.load(Ordering::Relaxed), 11);
+        assert_eq!(second.load(Ordering::Relaxed), 0);
+        for entry in CatalogEntry::<(), _>::all(&b) {
+            entry.request_stop();
+            entry.shutdown_and_wait().unwrap();
+        }
+        assert_eq!(second.load(Ordering::Relaxed), 11);
+    }
 }

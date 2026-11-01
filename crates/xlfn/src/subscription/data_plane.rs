@@ -1096,20 +1096,19 @@ impl<H: SubscriptionHost> PublishCore<H> {
                 }
                 let active_gen = active.generation;
                 let d0 = queued_0.connection_generation == active_gen;
-                let d1 = queued_1.is_some_and(|q1| q1.connection_generation == active_gen);
+                let deliverable_1 = queued_1.filter(|q1| q1.connection_generation == active_gen);
 
-                let selected = match (d0, d1) {
-                    (true, true) => {
-                        let q1 = queued_1.expect("d1 implies queued_1 is Some");
+                let selected = match (d0, deliverable_1) {
+                    (true, Some(q1)) => {
                         if q1.sequence > queued_0.sequence {
                             (1, q1)
                         } else {
                             (0, queued_0)
                         }
                     }
-                    (true, false) => (0, queued_0),
-                    (false, true) => (1, queued_1.expect("d1 implies queued_1 is Some")),
-                    (false, false) => continue,
+                    (true, None) => (0, queued_0),
+                    (false, Some(q1)) => (1, q1),
+                    (false, None) => continue,
                 };
 
                 let (buffer, queued) = selected;

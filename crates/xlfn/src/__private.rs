@@ -598,7 +598,7 @@ pub mod v1 {
     > {
         marker: std::marker::PhantomData<CallFrameTypes<E, C, X>>,
         #[cfg(feature = "rtd")]
-        rtd: Option<crate::rtd::RtdGenerationAccess<'call, E, C>>,
+        rtd: crate::rtd::RtdGenerationAccess<'call, E, C>,
         callbacks: &'call crate::host_callback::HostCallbackSession,
         diagnostics: &'call crate::diagnostics::DiagnosticHistory,
     }
@@ -609,7 +609,6 @@ pub mod v1 {
         #[cfg(feature = "rtd")]
         pub(crate) fn rtd_access(&self) -> crate::rtd::RtdGenerationAccess<'call, E, C> {
             self.rtd
-                .expect("an admitted call has RTD generation access")
         }
     }
 
@@ -652,7 +651,7 @@ pub mod v1 {
                 environment: CallEnvironment {
                     marker: std::marker::PhantomData,
                     #[cfg(feature = "rtd")]
-                    rtd: Some(call.rtd_call_access()),
+                    rtd: call.rtd_call_access(),
                     callbacks,
                     diagnostics: call.diagnostics(),
                 },
@@ -989,7 +988,7 @@ pub mod v1 {
     pub fn bind_handle_lease<'generation, T>(
         pending: crate::handle::PendingHandleLease<T>,
         scope: AsyncTaskScope<'generation>,
-    ) -> crate::handle::HandleLease<'generation, T>
+    ) -> XllResult<crate::handle::HandleLease<'generation, T>>
     where
         T: crate::handle::ExcelHandleObject,
     {
@@ -1400,27 +1399,14 @@ pub mod v1 {
         fn miri_native_async_string_owns_bytes_after_excel_input_is_released() {
             fn convert<M: InputMode>() -> String {
                 let text = "価格\0💡";
-                let state = (
-                    crate::utf16::encode_counted(text, "label", 32_767).unwrap(),
-                    crate::host_callback::HostCallbackSession::new(),
-                    crate::diagnostics::DiagnosticHistory::new(),
-                );
+                let state = crate::utf16::encode_counted(text, "label", 32_767).unwrap();
                 with_excel_call_scope_and_state(&state, |state, scope| {
-                    let mut frame = CallFrame::<M> {
-                        environment: CallEnvironment {
-                            marker: std::marker::PhantomData,
-                            #[cfg(feature = "rtd")]
-                            rtd: None,
-                            callbacks: &state.1,
-                            diagnostics: &state.2,
-                        },
-                        arguments: ArgumentContext::from_scope(scope, 1),
-                    };
+                    let mut arguments = ArgumentContext::<M>::from_scope(scope, 1);
                     // SAFETY: state owns the complete immutable counted input
                     // while admission copies it into the returned String.
                     let value =
-                        unsafe { frame.native_string(0, "label", state.0.as_ptr()) }.unwrap();
-                    let _ = frame.finish_arguments().unwrap();
+                        unsafe { arguments.native_string(0, "label", state.as_ptr()) }.unwrap();
+                    let _ = arguments.finish_typed().unwrap();
                     value
                 })
             }

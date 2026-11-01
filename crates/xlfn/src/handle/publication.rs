@@ -85,8 +85,9 @@ impl<'runtime> ProvisionalPublication<'runtime> {
         }
     }
 
-    fn commit(mut self) {
+    fn commit(mut self) -> String {
         self.active = false;
+        std::mem::take(&mut self.token)
     }
 }
 
@@ -136,9 +137,8 @@ pub(crate) enum ObjectAllocation {
 }
 
 pub(crate) struct InsertedPublication<'runtime> {
-    pub(super) transaction: ProvisionalPublicationTxn<'runtime>,
-    pub(super) token: String,
-    pub(super) allocation: ObjectAllocation,
+    transaction: ProvisionalPublicationTxn<'runtime>,
+    allocation: ObjectAllocation,
 }
 
 pub(super) struct ProvisionalPublicationTxn<'runtime> {
@@ -193,7 +193,7 @@ impl<'runtime> PublicationReservation<'runtime> {
         let provisional = ProvisionalPublication::new(
             self.runtime,
             self.key,
-            token.clone(),
+            token,
             self.reservation.initialization.refinement_id,
         );
         let Self {
@@ -210,7 +210,6 @@ impl<'runtime> PublicationReservation<'runtime> {
                 provisional,
                 reservation,
             },
-            token,
             allocation: if reused {
                 ObjectAllocation::Reused
             } else {
@@ -220,37 +219,50 @@ impl<'runtime> PublicationReservation<'runtime> {
     }
 }
 
-impl<'runtime> ProvisionalPublicationTxn<'runtime> {
+impl<'runtime> InsertedPublication<'runtime> {
+    pub(super) fn token(&self) -> &str {
+        &self.transaction.provisional.token
+    }
+
+    pub(super) fn allocation(&self) -> &ObjectAllocation {
+        &self.allocation
+    }
+
     pub(super) fn publish_and_observe(
         self,
-        publication: PublishedTopic,
-        lifetime_key: &str,
         observe: impl FnOnce(&str, &str) -> XllResult<()>,
-        on_linearized: impl FnOnce(PublishedTopicPtr),
+        on_linearized: impl FnOnce(PublishedTopicPtr, &str),
     ) -> XllResult<ObservedPublicationTxn<'runtime>> {
-        let token = &self.provisional.token;
-        let publication = self.runtime.topics.insert_provisional(
-            self.key,
-            self.generation,
+        let transaction = self.transaction;
+        let token = &transaction.provisional.token;
+        let lifetime_key = transaction.key.format_lifetime_key();
+        // Publication identity comes from this binding and topic reservation;
+        // callers cannot inject a different token, key or allocation owner.
+        let publication = PublishedTopic::new(token.clone(), lifetime_key.clone());
+        let publication = transaction.runtime.topics.insert_provisional(
+            transaction.key,
+            transaction.generation,
             publication,
-            on_linearized,
+            |pointer| on_linearized(pointer, &lifetime_key),
         )?;
-        self.runtime
+        transaction
+            .runtime
             .topics
-            .is_current(self.key, self.generation, token)?;
+            .is_current(transaction.key, transaction.generation, token)?;
         // The caller owns this key independently of the topic, which observation
         // may remove reentrantly.
-        observe(lifetime_key, token)?;
-        self.runtime
+        observe(&lifetime_key, token)?;
+        transaction
+            .runtime
             .topics
-            .is_current(self.key, self.generation, token)?;
-        let Self {
+            .is_current(transaction.key, transaction.generation, token)?;
+        let ProvisionalPublicationTxn {
             runtime,
             key,
             generation,
             provisional,
             reservation,
-        } = self;
+        } = transaction;
         Ok(ObservedPublicationTxn {
             runtime,
             key,
@@ -263,7 +275,7 @@ impl<'runtime> ProvisionalPublicationTxn<'runtime> {
 }
 
 impl ObservedPublicationTxn<'_> {
-    pub(super) fn commit(self) -> XllResult<()> {
+    pub(super) fn commit(self) -> XllResult<String> {
         let Self {
             runtime,
             key,
@@ -279,8 +291,8 @@ impl ObservedPublicationTxn<'_> {
             publication,
             &provisional.token,
         )?;
-        provisional.commit();
+        let token = provisional.commit();
         reservation.commit();
-        Ok(())
+        Ok(token)
     }
 }

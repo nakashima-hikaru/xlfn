@@ -89,7 +89,31 @@ impl DrainedServerOperations<'_> {
     pub(super) fn teardown_resources(
         &self,
     ) -> Result<ServerResourceTeardown<'_>, ServerCloseError> {
-        self.barrier.acquire_resource_teardown()
+        let current = std::thread::current().id();
+        loop {
+            {
+                let mut state = self.barrier.state.lock();
+                match state.resource_teardown_owner {
+                    Some(owner) if owner == current => return Err(ServerCloseError::Reentrant),
+                    Some(_) => {}
+                    None => {
+                        self.barrier
+                            .resources_finished
+                            .reset()
+                            .map_err(ServerCloseError::Event)?;
+                        state.resource_teardown_owner = Some(current);
+                        return Ok(ServerResourceTeardown {
+                            barrier: self.barrier,
+                            _not_send_or_sync: PhantomData,
+                        });
+                    }
+                }
+            }
+            self.barrier
+                .resources_finished
+                .wait_with_com_pumping()
+                .map_err(ServerCloseError::WaitFailed)?;
+        }
     }
 }
 
@@ -191,33 +215,6 @@ impl ServerOperationBarrier {
             termination_finished: ManualResetEvent::new(false)?,
             resources_finished: ManualResetEvent::new(true)?,
         })
-    }
-
-    fn acquire_resource_teardown(&self) -> Result<ServerResourceTeardown<'_>, ServerCloseError> {
-        let current = std::thread::current().id();
-        loop {
-            {
-                let mut state = self.state.lock();
-                debug_assert_ne!(state.phase, ServerPhase::Open);
-                match state.resource_teardown_owner {
-                    Some(owner) if owner == current => return Err(ServerCloseError::Reentrant),
-                    Some(_) => {}
-                    None => {
-                        self.resources_finished
-                            .reset()
-                            .map_err(ServerCloseError::Event)?;
-                        state.resource_teardown_owner = Some(current);
-                        return Ok(ServerResourceTeardown {
-                            barrier: self,
-                            _not_send_or_sync: PhantomData,
-                        });
-                    }
-                }
-            }
-            self.resources_finished
-                .wait_with_com_pumping()
-                .map_err(ServerCloseError::WaitFailed)?;
-        }
     }
 
     pub(super) fn enter(&self) -> Option<ServerOperation<'_>> {

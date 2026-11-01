@@ -162,3 +162,95 @@ fn journal_reader_rejects_symlinks() {
     let error = read_transaction_journal(&path).unwrap_err();
     assert!(error.to_string().contains("symlink"), "{error}");
 }
+#[test]
+fn retry_budget_returns_the_final_error_without_an_unreachable_endpoint() {
+    let mut attempts = 0;
+    let mut delays = Vec::new();
+    let error = super::retry_path_operation(
+        || {
+            attempts += 1;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("attempt {attempts}"),
+            ))
+        },
+        |delay| delays.push(delay.as_millis()),
+    )
+    .unwrap_err();
+    assert_eq!(attempts, 24);
+    assert_eq!(error.to_string(), "attempt 24");
+    assert_eq!(delays.len(), 23);
+    assert_eq!(&delays[..7], &[10, 20, 40, 80, 160, 320, 500]);
+    assert!(delays[7..].iter().all(|&delay| delay == 500));
+}
+
+#[test]
+fn retry_stops_on_the_first_success_or_nonretryable_error() {
+    let mut attempts = 0;
+    let mut sleeps = 0;
+    super::retry_path_operation(
+        || {
+            attempts += 1;
+            if attempts == 3 {
+                Ok(())
+            } else {
+                Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))
+            }
+        },
+        |_| sleeps += 1,
+    )
+    .unwrap();
+    assert_eq!((attempts, sleeps), (3, 2));
+
+    let mut attempts = 0;
+    let error = super::retry_path_operation(
+        || {
+            attempts += 1;
+            Err(std::io::Error::from(std::io::ErrorKind::InvalidInput))
+        },
+        |_| panic!("a permanent path error must not sleep"),
+    )
+    .unwrap_err();
+    assert_eq!(attempts, 1);
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn retry_releases_the_previous_error_after_backoff_before_the_next_operation() {
+    use std::sync::{Arc, Mutex};
+    #[derive(Debug)]
+    struct ObservedError(Arc<Mutex<Vec<&'static str>>>);
+    impl std::fmt::Display for ObservedError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("retryable operation")
+        }
+    }
+    impl std::error::Error for ObservedError {}
+    impl Drop for ObservedError {
+        fn drop(&mut self) {
+            self.0.lock().unwrap().push("drop error");
+        }
+    }
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut attempts = 0;
+    super::retry_path_operation(
+        || {
+            events.lock().unwrap().push("attempt");
+            attempts += 1;
+            if attempts == 1 {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    ObservedError(Arc::clone(&events)),
+                ))
+            } else {
+                Ok(())
+            }
+        },
+        |_| events.lock().unwrap().push("sleep"),
+    )
+    .unwrap();
+    assert_eq!(
+        *events.lock().unwrap(),
+        ["attempt", "sleep", "drop error", "attempt"]
+    );
+}

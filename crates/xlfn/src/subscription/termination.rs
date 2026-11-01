@@ -94,12 +94,12 @@ impl TerminationOwner<'_> {
     }
 
     /// Cleanup could not finish; callers must retain the affected resources.
-    pub(super) fn fail(mut self, error: XllError) -> XllResult<()> {
+    pub(super) fn fail(mut self, error: XllError) -> XllError {
         self.coordinator
             .expect("live termination owner")
             .publish(TerminationState::Failed(error.clone()));
         self.coordinator = None;
-        Err(error)
+        error
     }
 }
 
@@ -247,7 +247,7 @@ mod tests {
         let waiter = waiter(&coordinator);
         assert!(matches!(
             owner.fail(XllError::Overloaded),
-            Err(XllError::Overloaded)
+            XllError::Overloaded
         ));
         assert!(matches!(waiter.wait(), Err(XllError::Overloaded)));
         assert_eq!(coordinator.phase(), TerminationPhase::Failed);

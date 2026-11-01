@@ -3,20 +3,8 @@ use super::FormulaHandleService;
 use super::FormulaLifetimeGeneration;
 #[cfg(any(target_os = "windows", test))]
 use super::HandleTopicKey;
-use super::PublishedTopic;
 #[cfg(any(target_os = "windows", test))]
 use crate::XllResult;
-use xlfn_kernel::published_owner::PublishedOwner;
-
-pub(crate) struct Topic {
-    /// Heap-allocated publication. Non-owning PublishedTopicPtr references this.
-    pub(crate) publication: PublishedOwner<PublishedTopic>,
-    #[cfg(any(target_os = "windows", test))]
-    pub(crate) lifetime_generation: Option<FormulaLifetimeGeneration>,
-    pub(crate) observer: Option<FormulaObserverId>,
-    #[cfg(any(target_os = "windows", test))]
-    pub(crate) observer_committed: bool,
-}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct FormulaObserverId {

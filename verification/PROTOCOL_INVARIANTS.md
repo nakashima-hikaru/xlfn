@@ -14,10 +14,10 @@ coverage; this file is not an execution report or Windows/Excel qualification.
 
 ## Enrolled boundary
 
-The gate covers `lifecycle.rs`, all lifecycle children, `runtime.rs`, all runtime
-children including opening/rollback/shutdown/finalization, the shutdown proof
-definitions, `runtime_components/return_protocol.rs`, and
-`return_abi/ownership.rs`. Recursive source globs include newly added child files.
+The gate covers every `crates/*/src/**/*.rs` source, including kernel primitives,
+the runtime and return ABI, subscription/COM, cache, handles, diagnostics,
+registration, macro generation, shared validation, raw ABI resolution, packaging
+and the CLI. Recursive source globs include newly added crates and child files.
 It covers production-feature branches, including `refinement`, regardless of the
 features selected on the auditing host.
 
@@ -96,9 +96,8 @@ The live ledger groups exact source sites under these semantic decisions:
 | `LC-OBSERVE`, `OBSERVATIONS`, `REFINEMENT` | Read-only projections and feature-gated diagnostic/refinement backend assumptions |
 | `RECOVERY-HAZARD` | Fail-stop endpoint for an already classified unsafe unload invariant; ordinary external cleanup failure quarantines |
 
-The broader subsystem work below remains explicitly unresolved. Passing this
-inventory certifies classification of its enrolled named references, rather than
-proving the absence of all protocol debt. New debt must be recorded with its
+Passing this inventory certifies classification of its enrolled named references,
+rather than proving the absence of all protocol debt. New debt must be recorded with its
 current owner, exact source sites, concrete replacement receiver, and relevant
 regressions. Removing a check requires updating its semantic decision and adding
 a test for the formerly permitted misuse; deleting the inventory reference alone
@@ -144,26 +143,45 @@ or manufacture success. Merely hiding `reclaim()` is insufficient if field Drop
 would still destroy an undrained payload. The relevant source owners and runtime
 regressions, rather than this lexical audit, enforce those rules.
 
-## Cross-subsystem survey and remaining scope
+## Cross-subsystem dispositions
 
-`--all` has been used to survey the other crate source trees. These concrete
-sites are follow-up work, not silently included in the completed lifecycle gate.
-They need semantic enrollment with their own negative callers and runtime
-regressions before the project can claim the same coverage there.
+The former follow-up table is now enrolled occurrence by occurrence. The JSON
+records both removed premises and retained dynamic boundaries; the rows below
+identify what changed and why the remaining checks stay. The inventory includes
+benchmark/refinement code and conservative test-file inclusions, so its total is
+not a count of shipping runtime checks.
 
-| Follow-up sources / operations | Initial classification and remaining work |
+| Sources / operations | Implementation and retained boundary |
 | --- | --- |
-| `cache/reclamation.rs::{extend,from_closed}`, `cache/resident_index.rs::{get,drop}` | Distinguish cross-domain drain acceptance, retirement capacity assumptions, and private payload disarm. Preserve initializer/TLS destruction deferral; do not infer grace period from a final pin alone |
-| `subscription/runtime/termination.rs::drain_sink_users`, `subscription/budget.rs::worker_limit`, source/disconnect workers | Separate runtime termination outcome accumulation from fixed-budget construction assumptions and external worker/join barriers; verify every source is attempted after hook errors |
-| `excel_rtd/windows/server_gate.rs::acquire_resource_teardown`, `server.rs::shutdown`, `event.rs::drain_with_com_dispatch` | Audit remaining server-phase assertions and join/event failure endpoints against COM apartment, reentry, and event completion contracts; Windows cross-compilation cannot validate live COM behavior |
-| `async_udf/boundary/launch.rs::{fail,into_parts,drop}`, `async_udf/boundary.rs::build_task` | Distinguish private launch/body delivery disarm from source/generation/registry joining and user-future destructor panic; keep cancellation atomic races dynamic |
-| `registration/host.rs::mutation_from_invocation`, `registration/ledger.rs::new` | Decoder-executed `unreachable!` and uniquely owned normalization assumptions need narrow observed-result/normalization owners or explicit local recovery classification; retain host Applied/Rejected/Indeterminate outcomes |
-| `diagnostics/worker.rs::{drop,shutdown}` | Classify observer/worker lifetime invariant separately from self-join and worker-panic outcomes; preserve consuming queue/delivery credits |
-| `return_abi/numeric/process.rs`, `numeric/process/windows.rs::{attach,view}` | Fixed 64-byte ABI layout assertions and mapped-view validity belong to shared/raw ABI validation; private mapped-resource disarm and FP12 charge transfer need separate ownership review |
-| `xlfn-package/src/distribution.rs::retry_windows_path_operation` and journal helpers | Bound-loop `unreachable!` is a local proof candidate; durable namespace/journal transitions and filesystem identity/content checks remain dynamic and require recovery tests |
-| `xlfn-macros/src/codegen/udf.rs::emit_excel_function`, `model.rs::analyze` | Validated-IR expectations can move into constructor-limited IR; parser/type/content rejection remains dynamic. Quoted output must also be checked in emitted-code fixtures |
-| `xlfn-kernel/src/drain_gate.rs::active` and counter/quota primitives | Overflow/underflow and raw atomic representations remain low-level checks. Do not replace shared atomic state with a static whole-object phase |
-| Remaining handle, callback, ingress, package staging/PE, and benchmark/refinement support source | Surveyed by the lexical command only; not yet given occurrence-specific semantic reviews. External/raw input validation and benchmark-only assumptions must be separated before enrollment |
+| Cache reclamation and resident index | `ClosedCacheDomain::drain(self)` derives its own domain and returns an opaque batch; callers cannot combine another domain/certificate/batch or extract raw disposable storage. Index snapshots remain non-owning, resident/flight pins remain affine, and initializer/TLS disposal deferral is preserved. Capacity and raw atomic conservation stay inside the backend. |
+| Subscription termination and source/disconnect workers | Failure recording returns `XllError` directly and preserves the first failure under one mutex. Stop/join continues across hook errors; preflight-not-executed and barrier-executed-with-error remain distinct. `CatalogEntry` retains its arena and validated index. Channel sources retain the nonzero worker budget directly. Shared worker outcomes and external barriers remain dynamic. |
+| COM server teardown and event dispatch | Resource teardown consumes `DrainedServerOperations` instead of asserting phase on a broad gate. The same owned server reference retains COM lifetime across the staged operation. Apartment/message dispatch, self-join, event completion, and external COM failure are still checked at their actual boundaries. |
+| Async launch/task construction and cancellation | Consuming launch/task owners already retain source, generation and response responsibility. Private body/registration `Option`s are move-out/Drop recovery, not issuer selectors. Cancellation/delivery CAS and user-future destructor outcomes remain dynamic. |
+| Registration result decoding and ledger normalization | `HostInvocation::Decoded` requires a decoder result; `Failed` requires private failure status. Success without a decoded payload cannot be built. Cleanup still preserves Applied/Rejected/Indeterminate. Fresh `ExcelNameKey` normalization keeps its local unique-Arc check: it is construction bookkeeping, not host cleanup evidence. |
+| Diagnostic worker lifetime | Private `DiagnosticWorker` keeps observer allocation and join handle together; consuming join produces the joined owner before observer extraction. Ordinary Drop joins, while forget retains both. Self-join and worker panic remain runtime results. Queue/delivery credits retain their existing consuming transfer. |
+| FP12 accounting and Windows mapping | `Mapping` contains a non-null view after successful map. `initialize_and_retain(self)` validates/initializes the exact view before a process-lifetime reference escapes; failure runs mapping/handle cleanup. The old optional-view expectation is gone. Shared `ProcessState` remains a 64-byte data-only ABI, and publication still consumes its charge. |
+| Package retry, journal, staging and PE | Retry retains its actual last result instead of reconstructing loop completion with `unreachable!`; regression fixes retry count and error Drop ordering. Journal recovery still re-reads durable state, namespace identity/content and external filesystem results. Caller-supplied validation bypass remains closed. |
+| Macro validated IR and emitted wrappers | Validated context bundles Addin/type, and `NativeValueAbi` couples conversion to its native ABI. Codegen uses validated payloads rather than reconstructing boolean/Option premises. Metadata length derives from its owner. Parsing and source-content rejection remain dynamic; emitted wrapper fixtures cover the generated boundary. |
+| Kernel gates, rotating domains and service slots | Shared atomic counts, notification tails, finite overflow and issuer acceptance stay inside audited primitives. Service-slot initialization/sealing now classifies owned state once under the lock and moves FnOnce callbacks directly; callback return/panic still reacquires the canonical recipient. |
+| Handle publication, topic retirement and pending leases | Publication consumes its own reservation/token. Topic owners cannot undergo ordinary payload Drop before grace; table destruction and bulk retirement drain their own domain before producing `DrainedTopics`. A pending lease binds only after release-build generation validation, and its pin/issuer fields are private. |
+| Callback results, ingress and argument finalization | Fresh callback status directly issues readable/cleanup-only ownership; release remains consuming and disarms before FFI. Ingress invokes FnOnce hooks directly and its drain proof cannot be forged by sibling callers. Scope-only formula arguments return an explicit missing-admission error; admitted frames retain required RTD access directly. Raw external operands and the separate atomic ingress publication/CAS remain checked. |
+| Common names, raw ABI, input identity and benchmark/refinement support | Naming, UTF16, matrix bounds, PE and external pointer checks validate actual data, not lifecycle stages. Pure encoder representation checks remain local. Benchmark setup/simulated completion and conservatively included test files are explicitly labelled, without treating them as shipping cleanup checks. |
+
+Compile-fail fixtures test privacy and invalid phase/owner combinations from the
+consumer side, with exact diagnostics and positive controls. Runtime regressions
+cover live-reader abandonment, panic and forget retention, unlock-before-payload
+destruction, worker/observer lifetime, callback cleanup, and retry error ordering.
+These tests complement the semantic inventory; a passing lexical audit alone
+does not establish them.
+
+Pending-lease binding checks generation-value equality before exposing the
+payload. That comparison alone does not prove runtime-instance identity;
+provenance is retained by the checked decoder/launch ownership path. Neither a
+shared lifetime parameter nor equal numeric generations independently supplies
+that proof. The check runs at the beginning of the generated async body, before
+context construction and user code. Unpolled cancellation retains the pending
+pins until future destruction. This does not establish zero layout/performance
+cost for the generated coroutine.
 
 The broad survey is reproducible from source; its generated JSON belongs under
 `target`, rather than a machine-specific tracked report. The enrolled JSON is a

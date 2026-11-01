@@ -7,15 +7,20 @@
 
 use super::{DiagnosticEvent, DiagnosticInitError, DiagnosticShutdownError, DiagnosticSink};
 use crate::diagnostics::event::DROPPED_EVENTS;
-use crate::panic_boundary::{catch_no_unwind, contain_panic};
-use std::io;
-use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 #[cfg(any(test, feature = "refinement"))]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, SyncSender};
-use std::thread::JoinHandle;
+use std::sync::mpsc::SyncSender;
+
+mod lifetime;
+use lifetime::DiagnosticWorker;
+
+#[cfg(test)]
+use std::panic::AssertUnwindSafe;
+#[cfg(test)]
+use std::sync::mpsc;
+#[cfg(test)]
 use xlfn_kernel::published_owner::PublishedOwner;
 
 pub(crate) struct DiagnosticEventMetadata {
@@ -47,10 +52,9 @@ impl OwnedDiagnosticEvent {
 }
 
 pub(crate) struct AsyncDiagnosticSink {
-    sender: Option<SyncSender<QueuedDiagnosticEvent>>,
-    worker: Option<JoinHandle<()>>,
-    worker_thread_id: std::thread::ThreadId,
-    observer: PublishedOwner<DiagnosticObserver>,
+    // Declaration-order destruction closes input before the worker joins.
+    sender: SyncSender<QueuedDiagnosticEvent>,
+    worker: DiagnosticWorker,
 }
 
 #[derive(Clone, Copy)]
@@ -241,15 +245,16 @@ impl AsyncDiagnosticSink {
         let (sender, _receiver) = mpsc::sync_channel(1);
         let worker = std::thread::spawn(|| panic!("injected diagnostic worker panic"));
         Self {
-            worker_thread_id: worker.thread().id(),
-            sender: Some(sender),
-            worker: Some(worker),
-            observer: PublishedOwner::from_box(DiagnosticObserver::new()),
+            sender,
+            worker: DiagnosticWorker::from_parts_for_test(
+                PublishedOwner::from_box(DiagnosticObserver::new()),
+                worker,
+            ),
         }
     }
 
     pub(crate) fn worker_thread_id(&self) -> std::thread::ThreadId {
-        self.worker_thread_id
+        self.worker.thread_id()
     }
 
     pub(crate) fn new<S: DiagnosticSink>(sink: S) -> Result<Self, DiagnosticInitError> {
@@ -260,53 +265,21 @@ impl AsyncDiagnosticSink {
         sink: S,
         worker_name: &str,
     ) -> Result<Self, DiagnosticInitError> {
-        if worker_name.as_bytes().contains(&0) {
-            return Err(DiagnosticInitError::WorkerSpawn(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "diagnostic worker name contains NUL",
-            )));
-        }
-        let (sender, receiver) =
-            mpsc::sync_channel::<QueuedDiagnosticEvent>(super::DIAGNOSTIC_QUEUE_CAPACITY);
-        let observer = PublishedOwner::from_box(DiagnosticObserver::new());
-        let observer_ptr = DiagnosticObserverPtr(NonNull::from(&*observer));
-        let worker = std::thread::Builder::new()
-            .name(worker_name.to_owned())
-            .spawn(move || {
-                let worker_observer = observer_ptr;
-                while let Ok(queued) = receiver.recv() {
-                    let credit = queued.credit.dequeue();
-                    queued.event.deliver(&sink);
-                    drop(credit);
-                    crate::ingress::with_diagnostic_linearization(|| {
-                        // SAFETY: the observer lives until the worker thread joins in shutdown or drop
-                        let observer_ref = unsafe { worker_observer.0.as_ref() };
-                        observer_ref.record(crate::shutdown_trace::ShutdownEvent::FlushDiagnostic);
-                        observer_ref.decrement_pending();
-                    });
-                }
-            })
-            .map_err(DiagnosticInitError::WorkerSpawn)?;
-        let worker_thread_id = worker.thread().id();
-        Ok(Self {
-            sender: Some(sender),
-            worker: Some(worker),
-            worker_thread_id,
-            observer,
-        })
+        let (sender, worker) = DiagnosticWorker::spawn(sink, worker_name)?;
+        Ok(Self { sender, worker })
     }
 
     pub(crate) fn set_trace_sink(&self, trace: crate::shutdown_trace::ShutdownTraceHandle) {
-        self.observer.set_trace_sink(trace);
+        self.worker.observer().set_trace_sink(trace);
     }
 
     #[cfg(any(test, feature = "refinement"))]
     pub(crate) fn pending(&self) -> u64 {
-        self.observer.pending()
+        self.worker.observer().pending()
     }
 
     pub(crate) fn is_current_thread_worker(&self) -> bool {
-        std::thread::current().id() == self.worker_thread_id
+        self.worker.is_current_thread()
     }
 
     pub(crate) fn report(
@@ -314,11 +287,8 @@ impl AsyncDiagnosticSink {
         error: &crate::XllError,
         build: impl FnOnce() -> DiagnosticEventMetadata,
     ) {
-        let Some(sender) = self.sender.as_ref() else {
-            DROPPED_EVENTS.fetch_add(1, Ordering::Relaxed);
-            return;
-        };
-        let Some(reservation) = self.observer.reserve(error) else {
+        let sender = &self.sender;
+        let Some(reservation) = self.worker.observer().reserve(error) else {
             DROPPED_EVENTS.fetch_add(1, Ordering::Relaxed);
             return;
         };
@@ -334,13 +304,14 @@ impl AsyncDiagnosticSink {
         };
         let queued = reservation.commit(event);
         let result = crate::ingress::with_diagnostic_linearization(|| {
-            self.observer.increment_pending();
+            self.worker.observer().increment_pending();
             let result = sender.try_send(queued);
             if result.is_err() {
-                self.observer.decrement_pending();
+                self.worker.observer().decrement_pending();
             }
             if result.is_ok() {
-                self.observer
+                self.worker
+                    .observer()
                     .record(crate::shutdown_trace::ShutdownEvent::EnqueueDiagnostic);
             }
             result.err()
@@ -354,46 +325,26 @@ impl AsyncDiagnosticSink {
         clippy::boxed_local,
         reason = "Explicit Box<Self> represents unique retired ownership transferred from service slot"
     )]
-    pub(crate) fn shutdown(mut self: Box<Self>) -> Result<(), DiagnosticShutdownError> {
+    pub(crate) fn shutdown(self: Box<Self>) -> Result<(), DiagnosticShutdownError> {
         if self.is_current_thread_worker() {
             return Err(DiagnosticShutdownError::ReentrantShutdown);
         }
-        crate::ingress::with_diagnostic_linearization(|| {
-            self.sender.take();
-        });
-        let worker = self.worker.take();
-        if let Some(worker) = worker {
-            let result = contain_panic(worker.join());
-            if result.is_err() {
-                let discarded = self.observer.take_pending();
-                if discarded != 0 {
-                    crate::ingress::with_diagnostic_linearization(|| {
-                        for _ in 0..discarded {
-                            self.observer
-                                .record(crate::shutdown_trace::ShutdownEvent::DiscardDiagnostic);
-                        }
-                    });
-                }
-                return Err(DiagnosticShutdownError::WorkerPanicked);
+        let Self { sender, worker } = *self;
+        crate::ingress::with_diagnostic_linearization(|| drop(sender));
+        let joined = worker.join();
+        if joined.panicked() {
+            let observer = joined.observer();
+            let discarded = observer.take_pending();
+            if discarded != 0 {
+                crate::ingress::with_diagnostic_linearization(|| {
+                    for _ in 0..discarded {
+                        observer.record(crate::shutdown_trace::ShutdownEvent::DiscardDiagnostic);
+                    }
+                });
             }
+            return Err(DiagnosticShutdownError::WorkerPanicked);
         }
         Ok(())
-    }
-}
-
-impl Drop for AsyncDiagnosticSink {
-    fn drop(&mut self) {
-        if self.is_current_thread_worker() {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        self.sender.take();
-        if let Some(worker) = self.worker.take()
-            && contain_panic(worker.join()).is_err()
-        {
-            let _ = catch_no_unwind(AssertUnwindSafe(|| {
-                tracing::error!("diagnostic logger worker panicked during drop");
-            }));
-        }
     }
 }
 
@@ -421,6 +372,44 @@ mod budget_tests {
             diagnostic_id: metadata.diagnostic_id,
             timestamp: metadata.timestamp,
         }
+    }
+
+    #[test]
+    fn miri_worker_owner_drop_waits_for_delivery_before_observer_release() {
+        struct Blocked {
+            started: mpsc::SyncSender<()>,
+            release: crate::sync::Mutex<mpsc::Receiver<()>>,
+        }
+        impl DiagnosticSink for Blocked {
+            fn report(&self, _: &DiagnosticEvent<'_>) {
+                self.started.send(()).unwrap();
+                self.release.lock().recv().unwrap();
+            }
+        }
+        let (started, receiving) = mpsc::sync_channel(1);
+        let (release, wait) = mpsc::sync_channel(1);
+        let sink = AsyncDiagnosticSink::new(Blocked {
+            started,
+            release: crate::sync::Mutex::new(wait),
+        })
+        .unwrap();
+        sink.report(&crate::XllError::Panic, metadata);
+        receiving.recv().unwrap();
+        let (dropping, entered) = mpsc::sync_channel(1);
+        let (dropped, finished) = mpsc::sync_channel(1);
+        let closer = std::thread::spawn(move || {
+            dropping.send(()).unwrap();
+            drop(sink);
+            dropped.send(()).unwrap();
+        });
+        entered.recv().unwrap();
+        assert!(matches!(
+            finished.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        release.send(()).unwrap();
+        finished.recv().unwrap();
+        closer.join().unwrap();
     }
 
     #[test]
@@ -512,15 +501,18 @@ mod budget_tests {
             }))
             .is_err()
         );
-        assert_eq!(sink.observer.reserved_payload_bytes(), 0);
-        assert_eq!(sink.observer.reserved.load(Ordering::Relaxed), 0);
-        sink.observer.payload_bytes.store(
+        assert_eq!(sink.worker.observer().reserved_payload_bytes(), 0);
+        assert_eq!(sink.worker.observer().reserved.load(Ordering::Relaxed), 0);
+        sink.worker.observer().payload_bytes.store(
             super::super::DIAGNOSTIC_PAYLOAD_MAX_BYTES,
             Ordering::Relaxed,
         );
         sink.report(&error, || panic!("over-budget event must not be built"));
-        assert_eq!(sink.observer.reserved.load(Ordering::Relaxed), 0);
-        sink.observer.payload_bytes.store(0, Ordering::Relaxed);
+        assert_eq!(sink.worker.observer().reserved.load(Ordering::Relaxed), 0);
+        sink.worker
+            .observer()
+            .payload_bytes
+            .store(0, Ordering::Relaxed);
         let oversized = crate::XllError::Native {
             code: 1,
             message: "x".repeat(super::super::DIAGNOSTIC_PAYLOAD_MAX_BYTES + 1),
@@ -528,8 +520,8 @@ mod budget_tests {
         sink.report(&oversized, || {
             panic!("an oversize error must not be cloned")
         });
-        assert_eq!(sink.observer.reserved_payload_bytes(), 0);
-        assert_eq!(sink.observer.reserved.load(Ordering::Relaxed), 0);
+        assert_eq!(sink.worker.observer().reserved_payload_bytes(), 0);
+        assert_eq!(sink.worker.observer().reserved.load(Ordering::Relaxed), 0);
         sink.shutdown().unwrap();
     }
 
@@ -574,15 +566,15 @@ mod budget_tests {
         };
         sink.report(&error, metadata);
         started_rx.recv().unwrap();
-        assert_eq!(sink.observer.reserved_payload_bytes(), 1024 * 1024);
+        assert_eq!(sink.worker.observer().reserved_payload_bytes(), 1024 * 1024);
         for _ in 1..16 {
             sink.report(&error, metadata);
         }
         assert_eq!(
-            sink.observer.reserved_payload_bytes(),
+            sink.worker.observer().reserved_payload_bytes(),
             super::super::DIAGNOSTIC_PAYLOAD_MAX_BYTES
         );
-        assert_eq!(sink.observer.reserved.load(Ordering::Relaxed), 15);
+        assert_eq!(sink.worker.observer().reserved.load(Ordering::Relaxed), 15);
         sink.report(&error, || {
             panic!("processing bytes must count toward the limit")
         });
@@ -590,7 +582,7 @@ mod budget_tests {
         sink.report(&crate::XllError::Panic, metadata);
         release_tx.send(()).unwrap();
         drained_rx.recv().unwrap();
-        assert_eq!(sink.observer.reserved_payload_bytes(), 0);
+        assert_eq!(sink.worker.observer().reserved_payload_bytes(), 0);
         assert_eq!(reports.load(Ordering::Relaxed), 16);
         sink.shutdown().unwrap();
     }
@@ -606,12 +598,9 @@ mod budget_tests {
             std::hint::black_box(&queued);
             panic!("injected worker failure with queued payloads");
         });
-        let worker_thread_id = worker.thread().id();
         let mut sink = Box::new(AsyncDiagnosticSink {
-            sender: Some(sender),
-            worker: Some(worker),
-            worker_thread_id,
-            observer,
+            sender,
+            worker: DiagnosticWorker::from_parts_for_test(observer, worker),
         });
         let error = crate::XllError::Native {
             code: 1,
@@ -620,11 +609,11 @@ mod budget_tests {
         for _ in 0..3 {
             sink.report(&error, metadata);
         }
-        assert_eq!(sink.observer.reserved_payload_bytes(), 15);
+        assert_eq!(sink.worker.observer().reserved_payload_bytes(), 15);
         release_tx.send(()).unwrap();
-        assert!(sink.worker.take().unwrap().join().is_err());
-        assert_eq!(sink.observer.reserved_payload_bytes(), 0);
-        assert_eq!(sink.observer.reserved.load(Ordering::Relaxed), 0);
+        assert!(sink.worker.join_for_test());
+        assert_eq!(sink.worker.observer().reserved_payload_bytes(), 0);
+        assert_eq!(sink.worker.observer().reserved.load(Ordering::Relaxed), 0);
         sink.shutdown().unwrap();
     }
 }

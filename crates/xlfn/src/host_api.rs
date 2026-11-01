@@ -48,11 +48,24 @@ pub(crate) enum HostInvocation<T> {
     Suppressed {
         status: ExcelCallbackStatus,
     },
-    Completed {
-        status: ExcelCallbackStatus,
-        decoded: Option<XllResult<T>>,
+    Decoded {
+        decoded: XllResult<T>,
         cleanup: XllResult<()>,
     },
+    Failed {
+        status: HostFailureStatus,
+        cleanup: XllResult<()>,
+    },
+}
+
+/// Only the callback issuer can classify an invoked, unsuccessful callback.
+/// A successful callback instead carries its mandatory read/decode outcome.
+pub(crate) struct HostFailureStatus(ExcelCallbackStatus);
+
+impl HostFailureStatus {
+    pub(crate) const fn status(&self) -> ExcelCallbackStatus {
+        self.0
+    }
 }
 
 impl<'call> ExcelHost<'call> {
@@ -88,16 +101,16 @@ impl<'call> ExcelHost<'call> {
             }
         };
 
-        let decoded = if status == ExcelCallbackStatus::Success {
-            Some(result.readable().and_then(decode))
+        if status == ExcelCallbackStatus::Success {
+            let decoded = result.readable().and_then(decode);
+            let cleanup = result.release();
+            HostInvocation::Decoded { decoded, cleanup }
         } else {
-            None
-        };
-        let cleanup = result.release();
-        HostInvocation::Completed {
-            status,
-            decoded,
-            cleanup,
+            let cleanup = result.release();
+            HostInvocation::Failed {
+                status: HostFailureStatus(status),
+                cleanup,
+            }
         }
     }
 
@@ -119,33 +132,24 @@ impl<'call> ExcelHost<'call> {
                 function,
                 failure: ExcelApiFailure::Suppressed(status),
             }),
-            HostInvocation::Completed {
-                status,
-                decoded: _,
-                cleanup,
-            } if status != ExcelCallbackStatus::Success => {
+            HostInvocation::Failed { status, cleanup } => {
                 Err(cleanup.err().unwrap_or(XllError::ExcelApi {
                     function,
-                    failure: ExcelApiFailure::Status(status),
+                    failure: ExcelApiFailure::Status(status.status()),
                 }))
             }
-            HostInvocation::Completed {
-                decoded: Some(Err(error)),
+            HostInvocation::Decoded {
+                decoded: Err(error),
                 ..
             } => Err(error),
-            HostInvocation::Completed {
-                decoded: Some(Ok(_value)),
+            HostInvocation::Decoded {
+                decoded: Ok(_value),
                 cleanup: Err(error),
-                ..
             } => Err(error),
-            HostInvocation::Completed {
-                decoded: Some(Ok(value)),
+            HostInvocation::Decoded {
+                decoded: Ok(value),
                 cleanup: Ok(()),
-                ..
             } => Ok(value),
-            HostInvocation::Completed { decoded: None, .. } => {
-                unreachable!("successful host callbacks always run their decoder")
-            }
         }
     }
 
@@ -381,6 +385,81 @@ mod date_tests {
     };
     use crate::value::XlValueRef;
     use xlfn_sys::{XLMREF12, XLOPER12MRef, XLOPER12SRef, XLOPER12Value, XLREF12};
+
+    #[test]
+    fn successful_invocation_carries_one_mandatory_decoder_result() {
+        let script = CallbackScript::install([Reply::success(
+            xlfn_sys::XLF_EVALUATE,
+            XLOPER12::number(7.0),
+        )]);
+        let callbacks = HostCallbackSession::new();
+        let decodes = std::cell::Cell::new(0);
+        let result =
+            ExcelHost::new(&callbacks).invoke_protocol(xlfn_sys::XLF_EVALUATE, &[], |_| {
+                decodes.set(decodes.get() + 1);
+                Ok(7_u32)
+            });
+        assert!(matches!(
+            result,
+            HostInvocation::Decoded {
+                decoded: Ok(7),
+                cleanup: Ok(())
+            }
+        ));
+        assert_eq!(decodes.get(), 1);
+        script.assert_calls(&[xlfn_sys::XLF_EVALUATE]);
+    }
+
+    #[test]
+    fn failed_invocation_cannot_run_a_decoder_and_terminal_status_still_suppresses() {
+        for status in [xlfn_sys::XLRET_FAILED, xlfn_sys::XLRET_ABORT] {
+            let script = CallbackScript::install([Reply::success(
+                xlfn_sys::XLF_EVALUATE,
+                XLOPER12::number(7.0),
+            )
+            .status(status)]);
+            let callbacks = HostCallbackSession::new();
+            let host = ExcelHost::new(&callbacks);
+            let result: HostInvocation<()> =
+                host.invoke_protocol(xlfn_sys::XLF_EVALUATE, &[], |_| {
+                    panic!("an unsuccessful callback has no readable result")
+                });
+            assert!(matches!(result, HostInvocation::Failed {
+                status: ref observed, cleanup: Ok(())
+            } if observed.status() == ExcelCallbackStatus::from_raw(status)));
+            if status == xlfn_sys::XLRET_ABORT {
+                let suppressed: HostInvocation<()> =
+                    host.invoke_protocol(xlfn_sys::XLF_EVALUATE, &[], |_| {
+                        panic!("a suppressed callback has no result")
+                    });
+                assert!(matches!(
+                    suppressed,
+                    HostInvocation::Suppressed {
+                        status: ExcelCallbackStatus::Abort
+                    }
+                ));
+            }
+            script.assert_calls(&[xlfn_sys::XLF_EVALUATE]);
+        }
+    }
+
+    #[test]
+    fn decoder_error_keeps_precedence_over_result_cleanup_failure() {
+        let script = CallbackScript::install([Reply::success(
+            xlfn_sys::XLF_EVALUATE,
+            XLOPER12::number(7.0),
+        )
+        .release_status(xlfn_sys::XLRET_FAILED)]);
+        let callbacks = HostCallbackSession::new();
+        let result: XllResult<()> = ExcelHost::new(&callbacks).invoke(
+            xlfn_sys::XLF_EVALUATE,
+            ExcelApiFunction::Evaluate,
+            &[],
+            |_| Err(XllError::Closing),
+        );
+        assert!(matches!(result, Err(XllError::Closing)));
+        script.assert_calls(&[xlfn_sys::XLF_EVALUATE]);
+    }
 
     fn area() -> XLREF12 {
         XLREF12 {

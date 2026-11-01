@@ -220,11 +220,6 @@ impl ChannelBudget {
         self.state.lock().limit.workers = limit.get();
     }
 
-    pub(super) fn worker_limit(&self) -> NonZeroUsize {
-        NonZeroUsize::new(self.state.lock().limit.workers)
-            .expect("source producer limits are nonzero")
-    }
-
     fn acquire(&self, amount: Usage) -> bool {
         let mut state = self.state.lock();
         let add = |used: usize, amount: usize, limit: usize| {

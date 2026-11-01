@@ -29,7 +29,7 @@ mod typed;
 
 pub(crate) use crate::call::HandleDomainWitness;
 pub(crate) use crate::formula_lifetime::FormulaLifetimeGeneration;
-pub(crate) use connection::{FormulaObserverId, Topic};
+pub(crate) use connection::FormulaObserverId;
 pub(crate) use domain::{HandleDomainPermit, HandleReadDomain};
 #[cfg(any(feature = "bench-internals", all(test, feature = "handles")))]
 pub(crate) use formula::FormulaCaller;

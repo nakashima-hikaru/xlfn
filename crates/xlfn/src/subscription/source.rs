@@ -192,19 +192,16 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> SourceArena<E, C> {
         }
         let index = usize::try_from(id.sequence - 1).ok()?;
         let catalog = self.sources.as_ref()?.as_ref();
-        (index < catalog.len()).then_some(ResolvedSource {
-            catalog,
-            index,
-            marker: PhantomData,
-        })
+        crate::source_catalog::CatalogEntry::acquire(catalog, index)
+            .map(|entry| ResolvedSource { entry })
     }
     /// Catch each source independently so a panic cannot skip later stop hooks.
     pub(crate) fn request_stop(&self) -> XllResult<()> {
         let mut first_error = None;
         if let Some(storage) = &self.sources {
             let catalog = storage.as_ref();
-            for index in 0..catalog.len() {
-                if catch_no_unwind(AssertUnwindSafe(|| catalog.request_stop(index))).is_err()
+            for entry in crate::source_catalog::CatalogEntry::all(catalog) {
+                if catch_no_unwind(AssertUnwindSafe(|| entry.request_stop())).is_err()
                     && first_error.is_none()
                 {
                     first_error = Some(XllError::Panic);
@@ -217,8 +214,8 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> SourceArena<E, C> {
         let mut first_error = None;
         if let Some(storage) = &self.sources {
             let catalog = storage.as_ref();
-            for index in 0..catalog.len() {
-                let result = catch_no_unwind(AssertUnwindSafe(|| catalog.shutdown_and_wait(index)))
+            for entry in crate::source_catalog::CatalogEntry::all(catalog) {
+                let result = catch_no_unwind(AssertUnwindSafe(|| entry.shutdown_and_wait()))
                     .unwrap_or(Err(XllError::Panic));
                 if let Err(error) = result
                     && first_error.is_none()
@@ -257,21 +254,19 @@ impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> std::fmt::Debug for Sour
     }
 }
 pub(crate) struct ResolvedSource<'a, E: RtdSubscription, C: crate::RtdSourceCatalog<E>> {
-    catalog: &'a C,
-    index: usize,
-    marker: PhantomData<fn() -> E>,
+    entry: crate::source_catalog::CatalogEntry<'a, E, C>,
 }
 impl<E: RtdSubscription, C: crate::RtdSourceCatalog<E>> ErasedRtdSource<E>
     for ResolvedSource<'_, E, C>
 {
     fn subscribe(&self, topic: &RtdTopic, sink: PublishSink) -> XllResult<E> {
-        self.catalog.subscribe(self.index, topic, sink)
+        self.entry.subscribe(topic, sink)
     }
     fn request_stop(&self) {
-        self.catalog.request_stop(self.index);
+        self.entry.request_stop();
     }
     fn shutdown_and_wait(&self) -> XllResult<()> {
-        self.catalog.shutdown_and_wait(self.index)
+        self.entry.shutdown_and_wait()
     }
 }
 

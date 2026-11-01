@@ -57,6 +57,7 @@ pub enum RtdProducerErrorPolicy {
 pub struct RtdChannelSource<T, F, D: RtdDeliveryPolicy = RtdFifo> {
     delivery: D,
     limits: RtdSourceLimits,
+    max_producers: NonZeroUsize,
     budget: Arc<ChannelBudget>,
     factory: F,
     _value: PhantomData<fn(T)>,
@@ -91,12 +92,12 @@ impl<T: IntoRtdValue + Send + 'static, F, D: RtdDeliveryPolicy> RtdChannelSource
         P: FnOnce(RtdSender<T, D>) -> XllResult<()> + Send + 'static,
     {
         let budget = ChannelBudget::source(RtdSourceLimits::standard());
-        budget.configure_worker_limit(
-            NonZeroUsize::new(64).expect("default producer limit is nonzero"),
-        );
+        let max_producers = NonZeroUsize::new(64).expect("default producer limit is nonzero");
+        budget.configure_worker_limit(max_producers);
         Self {
             delivery,
             limits: RtdSourceLimits::standard(),
+            max_producers,
             budget: Arc::new(budget),
             factory,
             _value: PhantomData,
@@ -137,8 +138,9 @@ impl<T: IntoRtdValue + Send + 'static, F, D: RtdDeliveryPolicy> RtdChannelSource
     /// The runtime's producer-worker limit additionally applies across sources.
     /// All sources in a generation additionally share one publisher thread.
     #[must_use]
-    pub fn with_max_producers(self, limit: NonZeroUsize) -> Self {
+    pub fn with_max_producers(mut self, limit: NonZeroUsize) -> Self {
         self.budget.configure_worker_limit(limit);
+        self.max_producers = limit;
         self
     }
 
@@ -154,7 +156,7 @@ impl<T: IntoRtdValue + Send + 'static, F, D: RtdDeliveryPolicy> RtdChannelSource
     /// Returns the configured maximum number of retained producer workers.
     #[must_use]
     pub fn max_producers(&self) -> NonZeroUsize {
-        self.budget.worker_limit()
+        self.max_producers
     }
 
     /// Returns the configured behavior after a producer failure.

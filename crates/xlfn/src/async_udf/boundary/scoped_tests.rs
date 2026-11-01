@@ -77,7 +77,11 @@ impl HandleScopedBuilder<f64> for Builder {
         }
         assert_ne!(self.mode, Mode::BuildPanic, "injected scoped builder panic");
         let inner = Inner {
-            lease: Some(self.pending.bind(scope)),
+            lease: Some(
+                self.pending
+                    .bind(scope)
+                    .expect("matching fixture generation"),
+            ),
             mode: self.mode,
             polls: self.polls,
             drops: self.drops,

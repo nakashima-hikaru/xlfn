@@ -62,4 +62,17 @@ impl RuntimeServices {
             .as_ref()
             .map_or(Ok(()), |error| Err(error.clone()))
     }
+
+    /// Record a terminal failure and carry the first failure forward without
+    /// converting it to a success-capable result and rechecking that result.
+    pub(super) fn record_cleanup_failure(&self, error: XllError) -> XllError {
+        let mut failure = self.cleanup_failure.lock();
+        match &*failure {
+            Some(first) => first.clone(),
+            None => {
+                *failure = Some(error.clone());
+                error
+            }
+        }
+    }
 }

@@ -16,7 +16,7 @@
 )]
 #[cfg(any(target_os = "windows", test))]
 use super::FormulaLifetimeGeneration;
-use super::{FormulaObserverId, HandleTopicKey, Topic};
+use super::{FormulaObserverId, HandleTopicKey};
 use crate::generation::TopicGeneration;
 use crate::sync::{Condvar, Mutex, RwLock};
 #[cfg(test)]
@@ -32,10 +32,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::thread::ThreadId;
 use triomphe::Arc;
 use xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT;
-use xlfn_kernel::published_owner::PublishedOwner;
-use xlfn_kernel::rotating_read_domain::{
-    DisposableBatch, RotatingReadPermit, RotatingRetirementDomain,
-};
+use xlfn_kernel::rotating_read_domain::{RotatingReadPermit, RotatingRetirementDomain};
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -61,7 +58,7 @@ impl PublishedTopicState {
 pub(crate) struct PublishedTopic {
     pub(crate) token: String,
     pub(crate) lifetime_key: String,
-    pub(crate) state: AtomicU8,
+    state: AtomicU8,
 }
 
 impl PublishedTopic {
@@ -224,8 +221,24 @@ impl Default for TopicTableState {
     }
 }
 
-// Match binding retirement: the common single-topic disconnect stays inline.
-type RetiredTopics = SmallVec<[PublishedOwner<PublishedTopic>; 4]>;
+mod ownership;
+use ownership::{PublishedTopicOwner, RetiredTopics};
+
+pub(crate) struct Topic {
+    publication: PublishedTopicOwner,
+    #[cfg(any(target_os = "windows", test))]
+    lifetime_generation: Option<FormulaLifetimeGeneration>,
+    observer: Option<FormulaObserverId>,
+    #[cfg(any(target_os = "windows", test))]
+    observer_committed: bool,
+}
+
+#[cfg(test)]
+impl Topic {
+    pub(super) fn publication(&self) -> &PublishedTopic {
+        &self.publication
+    }
+}
 
 pub(crate) struct TopicTable {
     state: RwLock<TopicTableState>,
@@ -259,7 +272,7 @@ impl TopicTable {
         })
     }
 
-    fn enqueue_reclaim(&self, topic: PublishedOwner<PublishedTopic>) {
+    fn enqueue_reclaim(&self, topic: PublishedTopicOwner) {
         // Map withdrawal and retirement registration share the table writer
         // lock with close. Rotation takes this
         // queue lock before publishing its next generation, establishing the
@@ -272,88 +285,6 @@ impl TopicTable {
                 })
                 .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
         });
-    }
-
-    fn drain_generation(
-        &self,
-        generation: DisposableBatch<'_, DEFAULT_STRIPE_COUNT, RetiredTopics>,
-    ) -> RetiredTopics {
-        if !generation.belongs_to(&self.read_domain) {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        let retired = generation.into_inner();
-        xlfn_kernel::invariant::checked_atomic_sub_relaxed(&self.queued, retired.len());
-        retired
-    }
-
-    #[cfg(test)]
-    pub(crate) fn try_quiesce_and_drain(&self) -> RetiredTopics {
-        if self.queued.load(Ordering::Relaxed) == 0 {
-            return SmallVec::new();
-        }
-        let Some(result) = self
-            .read_domain
-            .poll_quiesce()
-            .map(|result| result.map(|batch| self.drain_generation(batch)))
-        else {
-            return SmallVec::new();
-        };
-        result.unwrap_or_default()
-    }
-
-    fn maintain_after_reader(&self) {
-        // Acquire the seal's Release sequence after the permit's Release
-        // RMW. If departure preceded seal, the writer observes the idle gate
-        // and drains; otherwise this fence makes its queued work visible.
-        // This is the same final-reader handoff as HandleReadDomain.
-        std::sync::atomic::fence(Ordering::Acquire);
-        if self.queued.load(Ordering::Relaxed) != 0 {
-            self.maintain();
-        }
-    }
-
-    fn maintain(&self) {
-        // One requester drives each poll. A departing reader that encounters
-        // its transition/queue lock registers a further pass before returning,
-        // so the active driver cannot discard the final-reader notification.
-        let previous = self
-            .maintenance_requests
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |requests| {
-                requests.checked_add(1)
-            })
-            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
-        if previous != 0 {
-            return;
-        }
-        let mut consumed = 1;
-        loop {
-            while self.queued.load(Ordering::Relaxed) != 0 {
-                let Some(Ok(retired)) = self
-                    .read_domain
-                    .poll_quiesce()
-                    .map(|result| result.map(|batch| self.drain_generation(batch)))
-                else {
-                    break;
-                };
-                // Only framework-owned strings are destroyed here. The queue,
-                // transition and topic-table guards have all ended.
-                drop(retired);
-            }
-            let requested =
-                xlfn_kernel::invariant::checked_atomic_sub(&self.maintenance_requests, consumed);
-            if requested == consumed {
-                return;
-            }
-            consumed = requested - consumed;
-        }
-    }
-
-    pub(crate) fn seal_and_drain(&self) -> RetiredTopics {
-        let closed = self.read_domain.seal_and_wait();
-        let [first, second] = closed.take_queues();
-        let mut all = self.drain_generation(first);
-        all.append(&mut self.drain_generation(second));
-        all
     }
 
     #[cfg(test)]
@@ -573,7 +504,7 @@ impl TopicTable {
             });
         }
         let lifetime_key = publication.lifetime_key.clone();
-        let publication = PublishedOwner::new(publication);
+        let publication = PublishedTopicOwner::new(publication);
         state.by_key.insert(
             key,
             Topic {
@@ -662,7 +593,7 @@ impl TopicTable {
         &self,
         state: &mut TopicTableState,
         key: HandleTopicKey,
-    ) -> Option<(TopicRemoval, PublishedOwner<PublishedTopic>)> {
+    ) -> Option<(TopicRemoval, PublishedTopicOwner)> {
         let topic = state.by_key.get(&key)?;
         let was_provisional = topic.publication.state() == PublishedTopicState::Provisional;
         let initialization_id = state
@@ -903,19 +834,18 @@ pub(crate) enum PrepareDecision {
 
 #[cfg(test)]
 mod tests {
-    use super::{PublishedTopic, TopicTable};
+    use super::{PublishedTopic, TopicTable, ownership};
     use crate::XllError;
     use crate::handle::runtime::FormulaHandleService;
     use crate::handle::{ExcelHandleObject, formula::test_topic_key};
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, mpsc};
     use std::time::Duration;
-    use xlfn_kernel::published_owner::PublishedOwner;
 
     #[test]
     fn topic_reclamation_skips_busy_registration_without_publishing() {
         let table = Arc::new(TopicTable::new());
-        table.enqueue_reclaim(PublishedOwner::new(PublishedTopic::new(
+        table.enqueue_reclaim(ownership::PublishedTopicOwner::new(PublishedTopic::new(
             "token".to_owned(),
             "lifetime".to_owned(),
         )));

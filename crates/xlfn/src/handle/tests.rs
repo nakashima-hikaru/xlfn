@@ -284,10 +284,10 @@ fn published_topic_keeps_identity_and_rtd_reverse_maps_consistent() {
         .get(&identity)
         .expect("reverse map identity must resolve to a topic");
     assert_eq!(
-        topic.publication.lifetime_key.as_str(),
+        topic.publication().lifetime_key.as_str(),
         lifetime_key.as_str()
     );
-    assert_eq!(topic.publication.token, token);
+    assert_eq!(topic.publication().token, token);
     assert!(topics.by_observer_id.is_empty());
     drop(topics);
 
@@ -372,7 +372,7 @@ fn publication_rejects_lifetime_key_collision_without_overwriting_existing_topic
             topics
                 .by_key
                 .get(&first_key)
-                .map(|topic| &topic.publication.token),
+                .map(|topic| &topic.publication().token),
             Some(&first_token)
         );
         assert!(!topics.by_key.contains_key(&second_key));
@@ -856,6 +856,7 @@ fn public_handle_identity_changes_after_runtime_regeneration() {
     assert_ne!(old_id.session(), new_id.session());
 }
 
+#[cfg(all(feature = "async", feature = "handles"))]
 #[test]
 fn handle_lease_as_ref_and_identity_match_the_synchronous_handle() {
     let runtime = FormulaHandleService::new(8);
@@ -874,12 +875,12 @@ fn handle_lease_as_ref_and_identity_match_the_synchronous_handle() {
                 .unwrap();
             (identity, pending)
         });
-    let lease = HandleLease {
-        object_id: pending.object_id,
-        value: pending.value,
-        _lease: pending.lease,
-        _generation: std::marker::PhantomData,
-    };
+    let brand = GenerationLeaseBrand;
+    let scope = crate::async_udf::AsyncTaskScope::new(
+        crate::generation::RuntimeGeneration::new(1).unwrap(),
+        &brand,
+    );
+    let lease = pending.bind(scope).unwrap();
     assert_eq!(lease.object_id(), identity);
     assert_eq!(lease.as_ref().0, 51);
     assert!(std::ptr::eq(lease.as_ref(), &*lease));
@@ -1236,8 +1237,7 @@ fn pending_handle_argument_conversion_leases_the_payload() {
         .store
         .registry
         .remove_and_drop(&token, "test remove async argument");
-    // SAFETY: resolved holds an active decoded lease anchoring the object cell.
-    assert_eq!(unsafe { resolved.value.as_ref_unchecked() }.0, 29);
+    assert_eq!(resolved.value_for_test().0, 29);
     drop(resolved);
 }
 
@@ -1950,13 +1950,7 @@ fn handle_lease_keeps_payload_alive_after_binding_retirement() {
         .remove_and_drop(&token, "test remove while pinned");
 
     assert_eq!(drops.load(Ordering::SeqCst), 0);
-    assert_eq!(
-        // SAFETY: pinned holds an active pin lease on the object cell.
-        unsafe { pinned.value.as_ref_unchecked() }
-            .0
-            .load(Ordering::SeqCst),
-        0
-    );
+    assert_eq!(pinned.value_for_test().0.load(Ordering::SeqCst), 0);
     drop(pinned);
     runtime
         .store
@@ -1988,7 +1982,10 @@ fn scoped_handle_task_drain_releases_pin_before_handle_quiescence() {
             self,
             scope: crate::async_udf::AsyncTaskScope<'generation>,
         ) -> (impl Future<Output = ()> + Send + 'generation, ()) {
-            let lease = self.pending.bind(scope);
+            let lease = self
+                .pending
+                .bind(scope)
+                .expect("matching fixture generation");
             (
                 async move {
                     self.started.send(()).unwrap();
@@ -2084,13 +2081,7 @@ fn handle_lease_survives_terminal_runtime_close() {
     let sealed = runtime.seal().unwrap();
 
     assert_eq!(drops.load(Ordering::SeqCst), 0);
-    assert_eq!(
-        // SAFETY: pinned holds an active pin lease on the object cell.
-        unsafe { pinned.value.as_ref_unchecked() }
-            .0
-            .load(Ordering::SeqCst),
-        0
-    );
+    assert_eq!(pinned.value_for_test().0.load(Ordering::SeqCst), 0);
     assert!(matches!(
         sealed.finish_quiescence(),
         Err(XllError::Internal { diagnostic_id })
@@ -2164,13 +2155,7 @@ fn pin_promotion_keeps_a_snapshot_owned_payload_without_a_binding() {
     });
 
     assert_eq!(drops.load(Ordering::SeqCst), 0);
-    assert_eq!(
-        // SAFETY: pinned holds an active pin lease on the object cell.
-        unsafe { pinned.value.as_ref_unchecked() }
-            .0
-            .load(Ordering::SeqCst),
-        0
-    );
+    assert_eq!(pinned.value_for_test().0.load(Ordering::SeqCst), 0);
     drop(pinned);
     runtime
         .store
@@ -4101,4 +4086,46 @@ fn sealed_registry_finishes_its_owner_while_another_store_stays_open() {
     second.insert_pending(pending).unwrap();
     assert_eq!(second.len(), 1);
     second.seal().unwrap().finish_quiescence().unwrap();
+}
+
+#[cfg(all(feature = "async", feature = "handles"))]
+#[test]
+fn miri_pending_handle_lease_rejects_foreign_generation_before_exposing_value() {
+    use crate::async_udf::AsyncTaskScope;
+    use crate::generation::RuntimeGeneration;
+    for scope_generation in [1, 2] {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let handles = FormulaHandleService::try_new(1).unwrap();
+        let token = handles
+            .prepare(test_topic_key("pending generation join"), || {
+                Ok(CountedDataRecord(Arc::clone(&drops)))
+            })
+            .unwrap()
+            .into_token();
+        let pending = with_handle::<CountedDataRecord, _>(&handles, &token, |handle| {
+            handle.into_pending(RuntimeGeneration::new(1).unwrap())
+        })
+        .unwrap()
+        .unwrap();
+        handles.terminate_all_topics();
+        assert_eq!(drops.load(Ordering::Acquire), 0);
+        let brand = GenerationLeaseBrand;
+        let scope = AsyncTaskScope::new(RuntimeGeneration::new(scope_generation).unwrap(), &brand);
+        let mut accesses = 0;
+        let outcome = pending.bind(scope).map(|lease| {
+            accesses += 1;
+            drop(lease);
+        });
+        if scope_generation == 1 {
+            assert!(outcome.is_ok());
+            assert_eq!(accesses, 1);
+        } else {
+            assert!(matches!(outcome, Err(XllError::StaleHandle)));
+            assert_eq!(accesses, 0);
+        }
+        // Rejection consumes and releases exactly the original raw pin; it
+        // neither returns a retryable pending owner nor exposes a typed borrow.
+        assert_eq!(drops.load(Ordering::Acquire), 1);
+        handles.seal().unwrap();
+    }
 }

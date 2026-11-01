@@ -26,7 +26,24 @@ pub(super) struct ParsedUdf {
 
 pub(super) struct ParsedContext {
     kind: ContextKind,
-    pub(super) ty: Type,
+    context: ValidatedContext,
+}
+
+/// The parser has checked both the context syntax and its add-in argument.
+/// Code generation observes the pair without parsing the type a second time.
+#[derive(Clone)]
+pub(super) struct ValidatedContext {
+    ty: Type,
+    addin: Type,
+}
+
+impl ValidatedContext {
+    pub(super) fn ty(&self) -> &Type {
+        &self.ty
+    }
+    pub(super) fn addin(&self) -> &Type {
+        &self.addin
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -71,7 +88,7 @@ fn is_context_value_path(ty: &Type) -> bool {
     }
 }
 
-pub(super) fn context_addin_type(ty: &Type) -> syn::Result<&Type> {
+fn context_addin_type(ty: &Type) -> syn::Result<&Type> {
     let arguments = context_type_path(ty)
         .and_then(|path| path.path.segments.last())
         .and_then(|segment| match &segment.arguments {
@@ -137,10 +154,18 @@ pub(super) struct ParsedArgument {
 /// A single normalized execution capability. Its variants make incompatible
 /// mode/context combinations unrepresentable after semantic analysis.
 pub(super) enum ExecutionSpec {
-    MainThread { context_ty: Option<Type> },
-    ThreadSafe { context_ty: Option<Type> },
-    MacroSheet { context_ty: Option<Type> },
-    Async { context_ty: Option<Type> },
+    MainThread {
+        context_ty: Option<ValidatedContext>,
+    },
+    ThreadSafe {
+        context_ty: Option<ValidatedContext>,
+    },
+    MacroSheet {
+        context_ty: Option<ValidatedContext>,
+    },
+    Async {
+        context_ty: Option<ValidatedContext>,
+    },
 }
 
 impl ExecutionSpec {
@@ -162,6 +187,10 @@ impl ExecutionSpec {
     }
 
     pub(super) fn context_type(&self) -> Option<&Type> {
+        self.context().map(ValidatedContext::ty)
+    }
+
+    pub(super) fn context(&self) -> Option<&ValidatedContext> {
         match self {
             Self::MainThread { context_ty }
             | Self::ThreadSafe { context_ty }
@@ -190,9 +219,41 @@ impl PresenceAction {
 /// lease conversion.
 pub(super) enum ArgumentConversion {
     Value(Box<ValueConversion>),
+    Native(NativeValueAbi),
     Reference,
     NumericMatrix,
     HandleLease { object: Box<Type> },
+}
+
+/// Only native value representations supported by the generated conversion API.
+#[derive(Clone, Copy)]
+pub(super) enum NativeValueAbi {
+    Float64,
+    Boolean16,
+    Integer32,
+    BorrowedUtf16,
+    OwnedUtf16,
+}
+
+impl NativeValueAbi {
+    pub(super) const fn abi(self) -> xlfn_common::ArgumentAbi {
+        use xlfn_common::ArgumentAbi;
+        match self {
+            Self::Float64 => ArgumentAbi::Float64,
+            Self::Boolean16 => ArgumentAbi::Boolean16,
+            Self::Integer32 => ArgumentAbi::Integer32,
+            Self::BorrowedUtf16 | Self::OwnedUtf16 => ArgumentAbi::CountedUtf16,
+        }
+    }
+    pub(super) const fn method_suffix(self) -> &'static str {
+        match self {
+            Self::Float64 => "f64",
+            Self::Boolean16 => "bool",
+            Self::Integer32 => "i32",
+            Self::BorrowedUtf16 => "str",
+            Self::OwnedUtf16 => "string",
+        }
+    }
 }
 
 pub(super) struct ValueConversion {
@@ -201,6 +262,15 @@ pub(super) struct ValueConversion {
 }
 
 impl ArgumentConversion {
+    pub(super) const fn abi(&self) -> xlfn_common::ArgumentAbi {
+        use xlfn_common::ArgumentAbi;
+        match self {
+            Self::Value(_) | Self::HandleLease { .. } => ArgumentAbi::Value12,
+            Self::Native(native) => native.abi(),
+            Self::Reference => ArgumentAbi::Reference12,
+            Self::NumericMatrix => ArgumentAbi::NumericArray12,
+        }
+    }
     pub(super) const fn is_reference(&self) -> bool {
         matches!(self, Self::Reference)
     }
@@ -209,12 +279,15 @@ impl ArgumentConversion {
         matches!(self, Self::HandleLease { .. })
     }
 
-    pub(super) const fn requires_presence_check(&self) -> bool {
+    pub(super) fn checked_presence(&self) -> Option<&ValueConversion> {
         match self {
-            Self::Reference | Self::NumericMatrix | Self::HandleLease { .. } => false,
-            Self::Value(value) => {
-                value.blank.requires_presence_check() || value.missing.requires_presence_check()
+            Self::Value(value)
+                if value.blank.requires_presence_check()
+                    || value.missing.requires_presence_check() =>
+            {
+                Some(value)
             }
+            _ => None,
         }
     }
 }
@@ -224,8 +297,14 @@ pub(super) struct ArgumentSpec {
     pub(super) ty: Type,
     pub(super) excel_name: String,
     pub(super) description: String,
-    pub(super) abi: xlfn_common::ArgumentAbi,
     pub(super) conversion: ArgumentConversion,
+}
+
+#[cfg(test)]
+impl ArgumentSpec {
+    pub(super) const fn abi(&self) -> xlfn_common::ArgumentAbi {
+        self.conversion.abi()
+    }
 }
 
 pub(super) struct UdfId(String);
@@ -288,8 +367,13 @@ pub(super) struct ArgumentPlan {
     pub(super) description: String,
     pub(super) raw_ident: Ident,
     pub(super) local_ident: Ident,
-    pub(super) abi: xlfn_common::ArgumentAbi,
     pub(super) conversion: ArgumentConversion,
+}
+
+impl ArgumentPlan {
+    pub(super) const fn abi(&self) -> xlfn_common::ArgumentAbi {
+        self.conversion.abi()
+    }
 }
 
 /// Code-generation-oriented IR. It contains generated symbols, but still no
@@ -367,7 +451,7 @@ pub(super) fn parse_udf(
                     "injected contexts cannot use qualified associated type paths",
                 ));
             }
-            context_addin_type(&argument.ty)?;
+            let addin = context_addin_type(&argument.ty)?.clone();
             if matches!(kind, ContextKind::Async) {
                 normalize_async_context_lifetime(&mut argument.ty);
             }
@@ -394,7 +478,10 @@ pub(super) fn parse_udf(
             }
             context = Some(ParsedContext {
                 kind,
-                ty: argument.ty.as_ref().clone(),
+                context: ValidatedContext {
+                    ty: argument.ty.as_ref().clone(),
+                    addin,
+                },
             });
         } else {
             let Pat::Ident(pattern) = argument.pat.as_ref() else {
@@ -701,7 +788,7 @@ fn analyze_execution(
             "an async Excel function cannot be marked thread_safe",
         ));
     }
-    let context_ty = context.map(|context| context.ty.clone());
+    let context_ty = context.map(|context| context.context.clone());
     Ok(if is_async {
         ExecutionSpec::Async { context_ty }
     } else if options.macro_sheet || matches!(context_kind, Some(ContextKind::MacroSheet)) {
@@ -833,22 +920,18 @@ fn analyze_arguments(
             ArgumentConversion::Value(Box::new(ValueConversion { blank, missing }))
         };
 
-        let abi = match &conversion {
-            ArgumentConversion::Reference => xlfn_common::ArgumentAbi::Reference12,
-            ArgumentConversion::NumericMatrix => xlfn_common::ArgumentAbi::NumericArray12,
-            ArgumentConversion::HandleLease { .. } => xlfn_common::ArgumentAbi::Value12,
-            ArgumentConversion::Value(_) => {
-                if strict_inputs
-                    || argument.options.strict
-                    || argument.options.default.is_some()
-                    || argument.options.blank.is_some()
-                    || argument.options.missing.is_some()
-                {
-                    xlfn_common::ArgumentAbi::Value12
-                } else {
-                    native_argument_abi(&argument.ty)
-                }
-            }
+        let conversion = if matches!(conversion, ArgumentConversion::Value(_))
+            && !strict_inputs
+            && !argument.options.strict
+            && argument.options.default.is_none()
+            && argument.options.blank.is_none()
+            && argument.options.missing.is_none()
+        {
+            native_argument_abi(&argument.ty)
+                .map(ArgumentConversion::Native)
+                .unwrap_or(conversion)
+        } else {
+            conversion
         };
         let description = argument.options.description.unwrap_or_default();
         validate_registration_string(
@@ -860,7 +943,6 @@ fn analyze_arguments(
             ty: argument.ty,
             excel_name,
             description,
-            abi,
             conversion,
         });
     }
@@ -897,8 +979,7 @@ fn analyze_arguments(
 
 /// Only recognized standard Rust spellings select a native ABI. In particular,
 /// aliases and user-defined qualified types keep their FromExcel contract.
-fn native_argument_abi(ty: &Type) -> xlfn_common::ArgumentAbi {
-    use xlfn_common::ArgumentAbi;
+fn native_argument_abi(ty: &Type) -> Option<NativeValueAbi> {
     match ty {
         Type::Paren(paren) => native_argument_abi(&paren.elem),
         Type::Group(group) => native_argument_abi(&group.elem),
@@ -908,24 +989,24 @@ fn native_argument_abi(ty: &Type) -> xlfn_common::ArgumentAbi {
                 "str",
                 &["core::primitive", "std::primitive"],
             ) {
-                ArgumentAbi::CountedUtf16
+                Some(NativeValueAbi::BorrowedUtf16)
             } else {
-                ArgumentAbi::Value12
+                None
             }
         }
         _ if is_standard_path(ty, "f64", &["core::primitive", "std::primitive"]) => {
-            ArgumentAbi::Float64
+            Some(NativeValueAbi::Float64)
         }
         _ if is_standard_path(ty, "bool", &["core::primitive", "std::primitive"]) => {
-            ArgumentAbi::Boolean16
+            Some(NativeValueAbi::Boolean16)
         }
         _ if is_standard_path(ty, "i32", &["core::primitive", "std::primitive"]) => {
-            ArgumentAbi::Integer32
+            Some(NativeValueAbi::Integer32)
         }
         _ if is_standard_path(ty, "String", &["std::string", "alloc::string"]) => {
-            ArgumentAbi::CountedUtf16
+            Some(NativeValueAbi::OwnedUtf16)
         }
-        _ => ArgumentAbi::Value12,
+        _ => None,
     }
 }
 
@@ -1130,7 +1211,6 @@ pub(super) fn lower(spec: UdfSpec) -> UdfPlan {
             description: argument.description,
             raw_ident: format_ident!("__raw_{index}"),
             local_ident: format_ident!("__argument_{index}"),
-            abi: argument.abi,
             conversion: argument.conversion,
         })
         .collect();

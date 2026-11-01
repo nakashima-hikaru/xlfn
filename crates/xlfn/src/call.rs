@@ -57,10 +57,13 @@ impl CallScratch {
         if decoder.utf8_len() <= INLINE_TEXT_CAPACITY && self.inline_text.get().is_none() {
             let mut buffer = [std::mem::MaybeUninit::uninit(); INLINE_TEXT_CAPACITY];
             let text = decoder.decode_into(&mut buffer, argument)?;
-            self.inline_text
-                .set(ManuallyDrop::new(smol_str::SmolStr::new_inline(text)))
-                .expect("the first inline text slot is empty");
-            return Ok(self.inline_text.get().unwrap().as_str());
+            // Decode is pure and this call-local cell is non-Sync. Retain the
+            // inserted borrow directly rather than discarding initialization
+            // and reconstructing its success with another get/unwrap.
+            let stored = self
+                .inline_text
+                .get_or_init(|| ManuallyDrop::new(smol_str::SmolStr::new_inline(text)));
+            return Ok(stored.as_str());
         }
         // Scalar and small collection text share the primary arena. A large
         // typed collection can fill a matrix-sized chunk before its first

@@ -42,6 +42,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
     );
     let execution = &plan.execution;
     let is_async = execution.is_async();
+    let context = execution.context();
     let context_type = execution.context_type();
     let arguments = &plan.arguments;
     let has_handle_lease = arguments
@@ -51,7 +52,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
         .iter()
         .map(|argument| {
             let raw = &argument.raw_ident;
-            let ty = match argument.abi {
+            let ty = match argument.abi() {
                 ArgumentAbi::Value12 | ArgumentAbi::Reference12 => {
                     quote!(*mut #krate::__private::v1::XLOPER12)
                 }
@@ -77,36 +78,31 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
         .map(|argument| argument.description.clone())
         .collect::<Vec<_>>();
     let argument_count = arguments.len();
-    let generated_context_expression = match execution {
-        model::ExecutionSpec::ThreadSafe {
-            context_ty: Some(_),
-        } => {
-            Some(quote!(#krate::__private::v1::thread_safe_context(__frame.environment(), __state)))
-        }
-        model::ExecutionSpec::MainThread {
-            context_ty: Some(_),
-        } => Some(quote!(#krate::__private::v1::main_thread_context(
-            __frame.environment(),
-            __state,
-        ))),
-        model::ExecutionSpec::MacroSheet {
-            context_ty: Some(_),
-        } => Some(quote!(#krate::__private::v1::macro_sheet_context(
-            __frame.environment(),
-            __state,
-        ))),
-        model::ExecutionSpec::Async {
-            context_ty: Some(_),
-        } => Some(quote!(#krate::__private::v1::async_context(
-            &__lease,
-            &__cancellation,
-            &crate::__XLFN_RUNTIME,
-        ))),
-        model::ExecutionSpec::MainThread { context_ty: None }
-        | model::ExecutionSpec::ThreadSafe { context_ty: None }
-        | model::ExecutionSpec::MacroSheet { context_ty: None }
-        | model::ExecutionSpec::Async { context_ty: None } => None,
-    };
+    let generated_context_expression = context.map(|context| {
+        let expression = match execution {
+            model::ExecutionSpec::ThreadSafe { .. } => {
+                quote!(#krate::__private::v1::thread_safe_context(__frame.environment(), __state))
+            }
+            model::ExecutionSpec::MainThread { .. } => {
+                quote!(#krate::__private::v1::main_thread_context(
+                    __frame.environment(),
+                    __state,
+                ))
+            }
+            model::ExecutionSpec::MacroSheet { .. } => {
+                quote!(#krate::__private::v1::macro_sheet_context(
+                    __frame.environment(),
+                    __state,
+                ))
+            }
+            model::ExecutionSpec::Async { .. } => quote!(#krate::__private::v1::async_context(
+                &__lease,
+                &__cancellation,
+                &crate::__XLFN_RUNTIME,
+            )),
+        };
+        (context.ty(), expression)
+    });
     let hidden = plan.hidden;
     let invocation = if generated_context_expression.is_some() {
         quote!(#function_ident(__context, #(#converted_names),*))
@@ -117,10 +113,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
         let __result = #invocation.await;
         ::core::result::Result::Ok(__result)
     };
-    let context_setup = generated_context_expression.map(|expression| {
-        let ty = context_type
-            .as_ref()
-            .expect("context expression always has a declared type");
+    let context_setup = generated_context_expression.map(|(ty, expression)| {
         quote! {
             let __generated_context = #expression;
             let __context: #ty = __generated_context;
@@ -191,18 +184,11 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                     // SAFETY: Excel supplies a live FP12 numeric-array argument.
                     unsafe { __frame.prepare_numeric_matrix(#index, #argument_name, #raw) }
                 },
-                model::ArgumentConversion::Value(_) if argument.abi != ArgumentAbi::Value12 => {
-                    let suffix = match argument.abi {
-                        ArgumentAbi::Float64 => "f64",
-                        ArgumentAbi::Boolean16 => "bool",
-                        ArgumentAbi::Integer32 => "i32",
-                        ArgumentAbi::CountedUtf16 if model::is_borrowed_string(ty) => "str",
-                        ArgumentAbi::CountedUtf16 => "string",
-                        _ => unreachable!("validated native value ABI"),
-                    };
+                model::ArgumentConversion::Native(native) => {
+                    let suffix = native.method_suffix();
                     let method = format_ident!("{}native_{suffix}", if is_async { "" } else { "prepare_" });
                     let convert = quote!(__frame.#method(#index, #argument_name, #raw));
-                    let convert = if argument.abi == ArgumentAbi::CountedUtf16 {
+                    let convert = if native.abi() == ArgumentAbi::CountedUtf16 {
                         quote! {
                             // SAFETY: Excel supplies a live length-prefixed UTF-16 buffer for this call.
                             unsafe { #convert }
@@ -255,11 +241,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                 },
             };
 
-            if argument.conversion.requires_presence_check() {
-                let model::ArgumentConversion::Value(value) = &argument.conversion
-                else {
-                    unreachable!("reference conversion does not inspect cell presence");
-                };
+            if let Some(value) = argument.conversion.checked_presence() {
                 let blank = &value.blank;
                 let missing = &value.missing;
                 let blank_arm = match blank {
@@ -348,7 +330,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                 let #converted = #krate::__private::v1::bind_handle_lease(
                     #converted,
                     __scope,
-                );
+                )?;
             })
         })
         .collect::<Vec<_>>();
@@ -366,9 +348,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
             };
         builder_struct_fields.push(quote!(#name: #field_type,));
     }
-    let context_addin_type = context_type.map(|context| {
-        model::context_addin_type(context).expect("context syntax was validated by the analyzer")
-    });
+    let context_addin_type = context.map(model::ValidatedContext::addin);
     let builder_lease_field = context_addin_type
         .map(|addin| quote!(__lease: #krate::__private::v1::ExecutionLease<#addin>,));
     if let Some(field) = builder_lease_field {
@@ -406,8 +386,9 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
     if context_type.is_some() {
         builder_initializers.push(quote!(__cancellation: __cancellation,));
     }
-    let builder_context_setup = context_type.map(|context| {
-        let addin = context_addin_type.expect("an injected context has an add-in type");
+    let builder_context_setup = context.map(|context| {
+        let addin = context.addin();
+        let context = context.ty();
         quote! {
             let __generated_context = #krate::__private::v1::async_context::<#addin>(
                 &__lease,
@@ -437,8 +418,8 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                     #(#builder_argument_moves)*
                     #builder_lease_move
                     #builder_cancellation_move
-                    #(#handle_bindings)*
                     async move {
+                        #(#handle_bindings)*
                         #builder_context_setup
                         #return_assertion
                         #async_result_expression
@@ -564,7 +545,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
     };
 
     let argument_abi_tokens = arguments.iter().map(|argument| {
-        let variant = match argument.abi {
+        let variant = match argument.abi() {
             ArgumentAbi::Value12 => quote!(Value12),
             ArgumentAbi::Reference12 => quote!(Reference12),
             ArgumentAbi::Float64 => quote!(Float64),

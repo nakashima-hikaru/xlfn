@@ -257,55 +257,50 @@ impl<C, R, E: Clone> GenerationServiceSlot<C, R, E> {
         initialize: impl FnOnce(C) -> Result<Box<R>, E>,
         on_initialized: impl FnOnce(&R),
     ) -> Result<GenerationServiceRead<'_, R>, ServiceSlotError<E>> {
-        let mut initialize = Some(initialize);
-        let mut on_initialized = Some(on_initialized);
         let mut state = self.state.lock();
 
         loop {
-            match &*state {
-                GenerationServiceState::Ready { .. } => {
+            match std::mem::replace(&mut *state, GenerationServiceState::Closed) {
+                ready @ GenerationServiceState::Ready { .. } => {
+                    *state = ready;
                     drop(state);
                     if let Some(read) = self.read_if_ready() {
                         return Ok(read);
                     }
                     state = self.state.lock();
                 }
-                GenerationServiceState::InitFaulted { fault }
-                | GenerationServiceState::TeardownFaulted { fault, .. } => {
-                    let fault = Arc::clone(fault);
+                GenerationServiceState::InitFaulted { fault } => {
+                    let observed = Arc::clone(&fault);
+                    *state = GenerationServiceState::InitFaulted { fault };
                     drop(state);
-                    return Err(ServiceSlotError::Fault(fault.as_ref().clone()));
+                    return Err(ServiceSlotError::Fault(observed.as_ref().clone()));
                 }
-                GenerationServiceState::Initializing | GenerationServiceState::Sealing => {
+                GenerationServiceState::TeardownFaulted { fault, runtime } => {
+                    let observed = Arc::clone(&fault);
+                    *state = GenerationServiceState::TeardownFaulted { fault, runtime };
+                    drop(state);
+                    return Err(ServiceSlotError::Fault(observed.as_ref().clone()));
+                }
+                waiting @ (GenerationServiceState::Initializing
+                | GenerationServiceState::Sealing) => {
+                    *state = waiting;
                     #[cfg(test)]
                     if let Some(observed) = self.before_read_wait.lock().take() {
                         observed.send(()).unwrap();
                     }
                     self.changed.wait(&mut state);
                 }
-                GenerationServiceState::Cold { .. } => {
-                    let GenerationServiceState::Cold { config } =
-                        std::mem::replace(&mut *state, GenerationServiceState::Closed)
-                    else {
-                        unreachable!("the service state remains Cold while holding its lock");
-                    };
+                GenerationServiceState::Cold { config } => {
                     *state = GenerationServiceState::Initializing;
                     drop(state);
 
                     let transaction = InitializingTxn {
                         recovery: AbortGuard::new(Initialization { slot: self }),
                     };
-                    let candidate = initialize
-                        .take()
-                        .expect("a service initializer is consumed exactly once")(
-                        config
-                    );
+                    let candidate = initialize(config);
 
                     match candidate {
                         Ok(runtime) => {
-                            let on_initialized = on_initialized
-                                .take()
-                                .expect("a service initializer callback is consumed once");
                             return Ok(transaction.commit(runtime, on_initialized));
                         }
                         Err(error) => return Err(transaction.fail(error)),

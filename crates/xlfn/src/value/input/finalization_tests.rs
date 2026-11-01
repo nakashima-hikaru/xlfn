@@ -79,6 +79,31 @@ fn miri_typed_finalization_rejects_missing_or_failed_arguments() {
     });
 }
 
+#[test]
+#[cfg(feature = "handles")]
+fn miri_scope_only_formula_return_rejects_missing_publication_access() {
+    let callbacks = crate::host_callback::HostCallbackSession::new();
+    crate::call::with_excel_call_scope_and_state(&callbacks, |callbacks, scope| {
+        let arguments = ArgumentContext::<FormulaInputMode>::from_scope(scope, 0);
+        let finished = arguments.finish_typed().unwrap();
+        let result = finished.return_context::<(), crate::DynamicRtdSources<()>>(
+            crate::call_return::ReturnFrameAccess {
+                udf_id: "scope-only-formula",
+                callbacks,
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(XllError::Input {
+                reason: crate::error::InputError::Malformed(
+                    "formula return requires admitted handle access"
+                ),
+                ..
+            })
+        ));
+    });
+}
+
 thread_local! {
     static PREPARED_COUNTS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
 }

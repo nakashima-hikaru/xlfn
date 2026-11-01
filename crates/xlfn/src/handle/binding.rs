@@ -48,7 +48,7 @@ impl BindingState {
 pub(crate) struct BindingRecord {
     pub(crate) id: HandleId,
     object: ObjectBinding,
-    pub(crate) state: AtomicU8,
+    state: AtomicU8,
 }
 
 // SAFETY: BindingRecord is uniquely owned by BindingTable and transferred across threads.

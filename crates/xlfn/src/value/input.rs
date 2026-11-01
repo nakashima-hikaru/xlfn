@@ -162,17 +162,25 @@ impl sealed::InputModeSealed for FormulaInputMode {
         let state = {
             let mut call = call;
             crate::call_return::FormulaPublisher::new(
-                call.take_handle_access()
-                    .expect("formula arguments retain their handle access"),
+                call.take_handle_access().ok_or_else(|| {
+                    XllError::input(
+                        "<formula return>",
+                        crate::error::InputError::Malformed(
+                            "formula return requires admitted handle access",
+                        ),
+                    )
+                })?,
                 access.udf_id,
                 inputs,
                 access.callbacks,
             )
         };
         #[cfg(not(feature = "handles"))]
-        let state = {
+        {
             let _ = (call, inputs, access);
-        };
+            Ok(crate::call_return::ReturnContext::from_state(()))
+        }
+        #[cfg(feature = "handles")]
         Ok(crate::call_return::ReturnContext::from_state(state))
     }
 }
@@ -1195,8 +1203,8 @@ impl<'call, M: InputMode> ArgumentContext<'call, M> {
                 argument,
                 |token| call.resolve_pending_handle::<T>(token, generation),
             )?;
-            M::u64(identity, pending.object_id.session());
-            M::u64(identity, pending.object_id.sequence());
+            M::u64(identity, pending.object_id().session());
+            M::u64(identity, pending.object_id().sequence());
             Ok(pending)
         })
     }

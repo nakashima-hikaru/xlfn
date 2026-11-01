@@ -3,7 +3,7 @@ use crate::panic_boundary::catch_no_unwind;
 use crate::{XllError, XllResult};
 mod deferred_drop;
 mod reclamation;
-use reclamation::{ReclaimEntries, merge_reclaims, reclaim_cache_entries, reclaim_unpublished};
+use reclamation::{reclaim_cache_entries, reclaim_unpublished};
 mod endpoint_cache;
 #[cfg(test)]
 mod generation_tests;
@@ -43,8 +43,7 @@ use std::time::Instant;
 use triomphe::Arc;
 use xlfn_kernel::drain_gate::DEFAULT_STRIPE_COUNT;
 use xlfn_kernel::rotating_read_domain::{
-    ClosedRetirement, DisposableBatch, GenerationIndex, RotatingReadPermit,
-    RotatingRetirementDomain,
+    GenerationIndex, RotatingReadPermit, RotatingRetirementDomain,
 };
 
 trait EpochAtomic {
@@ -1186,88 +1185,6 @@ impl<V> CacheLookupDomain<V> {
         );
     }
 
-    fn quiesce_and_drain(&self) -> ReclaimEntries<'_, V> {
-        // Initializers/unwind cleanup must not wait for a caller blocked on
-        // this operation. Advance nonblocking quiescence in those cases. A
-        // synchronous writer also must not await its own lookup admission.
-        if ACTIVE_CACHE_INITIALIZATION_DEPTH.get() != 0 || std::thread::panicking() {
-            return self.try_quiesce_and_drain();
-        }
-        if self.current_thread_is_reading() {
-            return ReclaimEntries::new(self);
-        }
-        #[cfg(any(test, feature = "bench-internals"))]
-        let start = Instant::now();
-        let batches = self
-            .domain
-            .quiesce()
-            .unwrap_or_default()
-            .into_iter()
-            .flatten()
-            .map(|batch| self.drain_generation(batch));
-        // Preserve an existing batch allocation when only one generation has
-        // debt, instead of allocating and copying a new flattened Vec.
-        let entries = merge_reclaims(self, batches);
-        self.clear_saturated_weight_if_empty();
-        #[cfg(any(test, feature = "bench-internals"))]
-        self.record_batch(&entries, start);
-        entries
-    }
-
-    fn try_quiesce_and_drain(&self) -> ReclaimEntries<'_, V> {
-        if self.pending_nodes.load(Ordering::Relaxed) == 0 {
-            return ReclaimEntries::new(self);
-        }
-        // Every poll participates in one request handoff. A departing reader
-        // racing a driver's failed idle check forces that driver to poll again.
-        let previous = self
-            .maintenance_requests
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |requests| {
-                requests.checked_add(1)
-            })
-            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
-        if previous != 0 {
-            return ReclaimEntries::new(self);
-        }
-        #[cfg(any(test, feature = "bench-internals"))]
-        let start = Instant::now();
-        let mut entries = ReclaimEntries::new(self);
-        let mut consumed = 1;
-        loop {
-            while self.pending_nodes.load(Ordering::Relaxed) != 0 {
-                let Some(Ok(batch)) = self
-                    .domain
-                    .poll_quiesce()
-                    .map(|result| result.map(|batch| self.drain_generation(batch)))
-                else {
-                    break;
-                };
-                entries.extend(batch);
-            }
-            let requested = self
-                .maintenance_requests
-                .try_update(Ordering::AcqRel, Ordering::Acquire, |requests| {
-                    requests.checked_sub(consumed)
-                })
-                .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
-            if requested == consumed {
-                break;
-            }
-            consumed = requested - consumed;
-        }
-        self.clear_saturated_weight_if_empty();
-        #[cfg(any(test, feature = "bench-internals"))]
-        self.record_batch(&entries, start);
-        entries
-    }
-
-    fn drain_generation(
-        &self,
-        generation: DisposableBatch<'_, DEFAULT_STRIPE_COUNT, PendingEntries<V>>,
-    ) -> ReclaimEntries<'_, V> {
-        ReclaimEntries::from_disposable(self, generation)
-    }
-
     #[cfg(any(test, feature = "bench-internals"))]
     fn record_batch(&self, entries: &[ReclaimEntry<V>], start: Instant) {
         if !entries.is_empty() {
@@ -1295,17 +1212,6 @@ impl<V> CacheLookupDomain<V> {
             largest_batch: self.metrics.largest_batch.load(Ordering::Relaxed),
             grace_period_nanos: self.metrics.grace_period_nanos.load(Ordering::Relaxed),
         }
-    }
-
-    fn seal(&self) -> ClosedRetirement<'_, DEFAULT_STRIPE_COUNT, PendingEntries<V>> {
-        self.domain.seal_and_wait()
-    }
-
-    fn drain_all(
-        &self,
-        closed: ClosedRetirement<'_, DEFAULT_STRIPE_COUNT, PendingEntries<V>>,
-    ) -> ReclaimEntries<'_, V> {
-        ReclaimEntries::from_closed(self, closed)
     }
 }
 
@@ -1823,7 +1729,7 @@ where
         // residency pins before key maintenance and the final node drain.
         self.index.clear();
         self.maintain_keys();
-        let retired = self.domain.drain_all(closed);
+        let retired = closed.drain();
         reclaim_cache_entries::<V>(retired);
     }
 }
@@ -2103,70 +2009,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(miri))]
-    fn foreign_cache_reclaim_batch_is_fail_stop() {
-        const CASE: &str = "XLFN_TEST_FOREIGN_CACHE_RECLAIM_BATCH";
-        if let Ok(case) = std::env::var(CASE) {
-            let owner = CacheLookupDomain::<()>::new();
-            let foreign = CacheLookupDomain::<()>::new();
-            if case == "register" {
-                owner.enqueue_reclaim_with_hook(ReclaimEntry::sentinel(&foreign, 1), |_| {
-                    std::process::exit(86); // A distinct failure if registration is reached.
-                });
-                return;
-            }
-            foreign.enqueue_reclaim(ReclaimEntry::sentinel(&foreign, 1));
-            let foreign_batch = foreign.quiesce_and_drain();
-            match case.as_str() {
-                "first" => {
-                    let _ = merge_reclaims(&owner, [foreign_batch]);
-                }
-                "append" => {
-                    owner.enqueue_reclaim(ReclaimEntry::sentinel(&owner, 2));
-                    let own_batch = owner.quiesce_and_drain();
-                    let _ = merge_reclaims(&owner, [own_batch, foreign_batch]);
-                }
-                _ => panic!("unknown foreign-batch test case"),
-            }
-            return;
-        }
-        for case in ["first", "append", "register"] {
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "cache::tests::foreign_cache_reclaim_batch_is_fail_stop",
-                ])
-                .env(CASE, case)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .unwrap();
-            assert!(!status.success(), "foreign batch must fail-stop: {case}");
-            assert_ne!(status.code(), Some(86), "registration ran before rejection");
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::ExitStatusExt;
-                assert_eq!(status.signal(), Some(6), "expected SIGABRT: {case}");
-            }
-        }
-    }
-
-    #[test]
-    fn drained_cache_batches_keep_owner_and_all_entries_when_merged() {
-        let domain = CacheLookupDomain::<()>::new();
-        domain.enqueue_reclaim(ReclaimEntry::sentinel(&domain, 11));
-        let first = domain.quiesce_and_drain();
-        domain.enqueue_reclaim(ReclaimEntry::sentinel(&domain, 17));
-        let second = domain.quiesce_and_drain();
-        let batch = merge_reclaims(&domain, [first, second]);
-        assert!(batch.belongs_to(&domain));
-        assert_eq!(batch.len(), 2);
-        assert_eq!(batch.iter().map(|entry| entry.weight).sum::<u64>(), 28);
-        assert_eq!(domain.pending_nodes.load(Ordering::Relaxed), 0);
-        // Sentinel entries exercise queue ownership only, never destruction.
-    }
-
-    #[test]
     fn large_retirement_weights_do_not_interrupt_registration_or_drain() {
         let domain = CacheLookupDomain::<()>::new();
         domain.enqueue_reclaim(ReclaimEntry::sentinel(&domain, u64::MAX));
@@ -2179,38 +2021,6 @@ mod tests {
         assert_eq!(domain.stats().pending_nodes, 0);
         assert_eq!(domain.stats().pending_weight, 0);
         // Sentinel entries exercise queue accounting only, never destruction.
-    }
-
-    #[test]
-    fn saturated_pending_weight_keeps_backpressure_until_both_queues_empty() {
-        let domain = CacheLookupDomain::<()>::new();
-        let reader = domain.domain.enter(0).unwrap();
-        domain.enqueue_reclaim(ReclaimEntry::sentinel(&domain, u64::MAX));
-        assert!(
-            domain
-                .domain
-                .poll_quiesce()
-                .map(|result| result.map(|batch| domain.drain_generation(batch)))
-                .is_none()
-        );
-        assert_eq!(domain.domain.current_generation().index(), 1);
-        domain.enqueue_reclaim(ReclaimEntry::sentinel(&domain, u64::MAX));
-        drop(reader);
-
-        let first = domain
-            .domain
-            .poll_quiesce()
-            .map(|result| result.map(|batch| domain.drain_generation(batch)))
-            .unwrap()
-            .unwrap();
-        assert_eq!(first.len(), 1);
-        assert_eq!(domain.stats().pending_nodes, 1);
-        assert_eq!(domain.pending_weight(), u64::MAX);
-
-        let second = domain.quiesce_and_drain();
-        assert_eq!(second.len(), 1);
-        assert_eq!(domain.stats().pending_nodes, 0);
-        assert_eq!(domain.pending_weight(), 0);
     }
 
     #[test]
@@ -2251,7 +2061,7 @@ mod tests {
 
         assert!(domain.domain.queue_len(0) == 0);
         assert_eq!(domain.domain.queue_len(1), 1);
-        let _ = domain.drain_all(domain.seal());
+        let _ = domain.seal().drain();
     }
 
     #[test]
@@ -3367,7 +3177,7 @@ mod tests {
                 drop(creator.into_lease());
                 index.clear();
                 let closed = domain.seal();
-                reclaim_cache_entries::<DropProbe>(domain.drain_all(closed));
+                reclaim_cache_entries::<DropProbe>(closed.drain());
                 assert_eq!(drops.load(Ordering::Acquire), 1);
             }
         }

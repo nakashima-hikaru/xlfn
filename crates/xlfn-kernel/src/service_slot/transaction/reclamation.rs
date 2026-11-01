@@ -197,33 +197,33 @@ impl<C, R, E: Clone> GenerationServiceSlot<C, R, E> {
         &self,
     ) -> Result<Option<super::SealingTxn<'_, C, R, E>>, ServiceSlotError<E>> {
         let mut state = self.state.lock();
-        while matches!(
-            *state,
-            GenerationServiceState::Initializing | GenerationServiceState::Sealing
-        ) {
-            self.changed.wait(&mut state);
-        }
-
-        if let GenerationServiceState::TeardownFaulted { fault, .. } = &*state {
-            let fault = Arc::clone(fault);
-            drop(state);
-            return Err(ServiceSlotError::Fault(fault.as_ref().clone()));
-        }
-
-        Ok(
+        loop {
+            // Classify the owned payload once under this lock. Waiting restores
+            // its exact state before releasing the mutex; ready withdrawal and
+            // fault retention cannot pass through an unchecked second match.
             match std::mem::replace(&mut *state, GenerationServiceState::Sealing) {
+                waiting @ (GenerationServiceState::Initializing
+                | GenerationServiceState::Sealing) => {
+                    *state = waiting;
+                    self.changed.wait(&mut state);
+                }
+                GenerationServiceState::TeardownFaulted { fault, runtime } => {
+                    let observed = Arc::clone(&fault);
+                    *state = GenerationServiceState::TeardownFaulted { fault, runtime };
+                    drop(state);
+                    return Err(ServiceSlotError::Fault(observed.as_ref().clone()));
+                }
                 GenerationServiceState::Ready { runtime } => {
-                    // Formal theorem [SS-3]: Withdraw publication and seal readers gate
-                    // before waiting for drain, preventing any late reader admission.
+                    // [SS-3]: seal and withdraw before releasing the state lock.
                     drop(self.readers.control().seal());
                     self.published
                         .store(std::ptr::null_mut(), Ordering::Release);
-                    Some(SealingTxn {
+                    return Ok(Some(SealingTxn {
                         recovery: AbortGuard::new(Sealing {
                             slot: self,
                             runtime: runtime.withdraw(),
                         }),
-                    })
+                    }));
                 }
                 retired @ (GenerationServiceState::Cold { .. }
                 | GenerationServiceState::InitFaulted { .. }
@@ -234,12 +234,7 @@ impl<C, R, E: Clone> GenerationServiceSlot<C, R, E> {
                     drop(retired);
                     return Ok(None);
                 }
-                GenerationServiceState::Initializing
-                | GenerationServiceState::Sealing
-                | GenerationServiceState::TeardownFaulted { .. } => {
-                    unreachable!()
-                }
-            },
-        )
+            }
+        }
     }
 }

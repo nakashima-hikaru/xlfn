@@ -254,12 +254,9 @@ impl HandleBindingLimit {
     /// Validates a nonzero limit no greater than [`HandleConfig::MAX_SUPPORTED_BINDINGS`].
     #[must_use]
     pub const fn new(value: u32) -> Option<Self> {
-        if value == 0 || value > HandleConfig::MAX_SUPPORTED_BINDINGS {
-            None
-        } else {
-            Some(Self(
-                NonZeroU32::new(value).expect("binding limit is non-zero"),
-            ))
+        match NonZeroU32::new(value) {
+            Some(value) if value.get() <= HandleConfig::MAX_SUPPORTED_BINDINGS => Some(Self(value)),
+            _ => None,
         }
     }
 
