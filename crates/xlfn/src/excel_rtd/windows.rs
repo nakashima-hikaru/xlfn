@@ -45,11 +45,11 @@ mod subscription_backend;
 mod update_event;
 #[cfg(test)]
 use crate::win32::{
-    CoCreateGuid, DISPPARAMS, E_FAIL, E_INVALIDARG, VARIANT, VARIANT_FALSE, VARIANT_TRUE,
-    VariantClear,
+    CoCreateGuid, DISPPARAMS, E_FAIL, E_INVALIDARG, E_POINTER, VARIANT, VARIANT_FALSE,
+    VARIANT_TRUE, VariantClear,
 };
 #[cfg(all(test, feature = "handles"))]
-use crate::win32::{DISP_E_BADINDEX, E_NOTIMPL, E_POINTER, EXCEPINFO};
+use crate::win32::{DISP_E_BADINDEX, E_NOTIMPL, EXCEPINFO};
 #[cfg(test)]
 use crate::win32::{HKEY_CURRENT_USER, RegDeleteTreeW};
 #[cfg(all(test, feature = "handles"))]

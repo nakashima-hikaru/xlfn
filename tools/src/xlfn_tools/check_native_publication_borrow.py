@@ -51,20 +51,35 @@ def main():
         command.append("--offline")
         path = tree / BINDING
         source = path.read_text()
-        before = """        self.table
-            .publication_writer(&mut state)
-            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop())
-            .insert(self.id, pointer);"""
-        after = """        let mut writer = self.table
-            .publication_writer(&mut state)
-            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
-        drop(state);
-        writer.insert(self.id, pointer);"""
-        if source.count(before) != 1:
-            raise SystemExit("FAIL: native publication mutation anchor changed")
-        duplicate = after.replace(
-            "        drop(state);",
-            "        let _other_writer = self.table.publication_writer(&mut state);",
+        # Reservation transactions retain their guard internally. Exercise the
+        # actual writer API with an owned guard rather than relying on that
+        # orchestration's layout (or accidentally dropping only an &mut guard).
+        probe = """
+#[allow(dead_code, reason = "Compile-only publication capability probe")]
+fn publication_guard_probe(table: &BindingTable, id: HandleId, pointer: BindingPtr) {
+    let mut state = table.state.write();
+    let mut writer = table.publication_writer(&mut state)
+        .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+    writer.insert(id, pointer);
+    drop(state);
+}
+"""
+        path.write_text(source + probe)
+        accepted = check()
+        if accepted.returncode:
+            raise SystemExit(
+                "FAIL: valid native publication caller does not compile\n"
+                + accepted.stdout
+                + accepted.stderr
+            )
+        after = probe.replace(
+            "    writer.insert(id, pointer);\n    drop(state);",
+            "    drop(state);\n    writer.insert(id, pointer);",
+        )
+        duplicate = probe.replace(
+            "    writer.insert(id, pointer);",
+            "    let _other_writer = table.publication_writer(&mut state);\n"
+            "    writer.insert(id, pointer);",
         )
         cases = [
             (
@@ -85,7 +100,7 @@ def main():
             ),
         ]
         for name, mutation, expected in cases:
-            path.write_text(source.replace(before, mutation))
+            path.write_text(source + mutation)
             result = check()
             output = result.stdout + result.stderr
             if result.returncode == 0 or not all(marker in output for marker in expected):
@@ -149,6 +164,10 @@ fn borrowed_cache_lease_probe<V>(lease: CacheLease<'_, V>) {
         )
 
         cache_path.write_text(cache_source)
+        # Raw recovery is private to this child module; a probe in cache.rs
+        # would test privacy rather than consumption of the retirement owner.
+        reclaim_path = tree / "crates/xlfn/src/cache/reclamation.rs"
+        reclaim_source = reclaim_path.read_text()
         anchor = "unsafe fn reclaim_cache_node<V>(entry: ReclaimEntry<V>) {"
         probe = """
 unsafe fn duplicate_cache_reclamation_probe<V>(entry: ReclaimEntry<V>) {
@@ -156,12 +175,12 @@ unsafe fn duplicate_cache_reclamation_probe<V>(entry: ReclaimEntry<V>) {
     unsafe { reclaim_cache_node(entry); }
 }
 """
-        if cache_source.count(anchor) != 1:
+        if reclaim_source.count(anchor) != 1:
             raise SystemExit("FAIL: native Cache reclamation ownership anchor changed")
-        cache_path.write_text(cache_source.replace(anchor, probe + anchor))
+        reclaim_path.write_text(reclaim_source.replace(anchor, probe + anchor))
         rejected = check()
         output = rejected.stdout + rejected.stderr
-        required = ("error[E0382]: use of moved value: `entry`", "cache.rs")
+        required = ("error[E0382]: use of moved value: `entry`", "reclamation.rs")
         if rejected.returncode == 0 or not all(marker in output for marker in required):
             raise SystemExit(
                 "FAIL: expected native duplicate-reclamation ownership error\n" + output
@@ -171,8 +190,7 @@ unsafe fn duplicate_cache_reclamation_probe<V>(entry: ReclaimEntry<V>) {
             flush=True,
         )
 
-        cache_path.write_text(cache_source)
-        anchor = "unsafe fn reclaim_cache_node<V>(entry: ReclaimEntry<V>) {"
+        reclaim_path.write_text(reclaim_source)
         probe = """
 fn release_cache_domain_before_batch_probe() {
     let domain = CacheLookupDomain::<u8>::new();
@@ -181,13 +199,13 @@ fn release_cache_domain_before_batch_probe() {
     reclaim_cache_entries(batch);
 }
 """
-        cache_path.write_text(cache_source.replace(anchor, probe + anchor))
+        reclaim_path.write_text(reclaim_source.replace(anchor, probe + anchor))
         rejected = check()
         output = rejected.stdout + rejected.stderr
         required = (
             "error[E0505]: cannot move out of `domain` because it is borrowed",
             "borrow later used here",
-            "cache.rs",
+            "reclamation.rs",
         )
         if rejected.returncode == 0 or not all(marker in output for marker in required):
             raise SystemExit("FAIL: expected native Cache domain-before-batch error\n" + output)

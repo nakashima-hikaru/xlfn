@@ -251,7 +251,6 @@ fn registration_release_failure(
 mod tests {
     use super::*;
     use crate::host_callback::HostCallbackSession;
-    use crate::registration::RegistrationCleanupState;
     use crate::registration::preflight::preflight_registration;
     use crate::registration::schema::{ArgumentAbi, RegistrationDescriptor, RegistrationSignature};
     use crate::return_abi::ExcelCallbackStatus;
@@ -489,6 +488,7 @@ mod tests {
     #[cfg(any(not(target_os = "windows"), feature = "async", feature = "handles"))]
     mod name_cleanup {
         use super::*;
+        use crate::registration::RegistrationCleanupState;
         use crate::registration::host::test_support::{CallbackScript, Reply};
         use xlfn_sys::{
             XLF_EVALUATE, XLF_SET_NAME, XLF_UNREGISTER, XLOPER12, XLRET_ABORT, XLRET_FAILED,

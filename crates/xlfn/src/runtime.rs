@@ -1808,16 +1808,23 @@ pub(crate) mod tests {
 
     #[test]
     fn module_residency_is_independent_from_logical_close() {
+        let _test_guard = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _module = crate::ingress::acquire_test_module_lease();
+        // Windows identifies the resident image from an actual code address.
+        // Serialize with COM tests so their references cannot retain the lease.
+        #[inline(never)]
+        fn residency_anchor() {}
+        let anchor = residency_anchor as *const ();
         let runtime = Runtime::<()>::new();
         assert!(!runtime.module_residency_held());
-        assert!(runtime.ensure_module_residency(std::ptr::null()).unwrap());
+        assert!(runtime.ensure_module_residency(anchor).unwrap());
         assert!(runtime.module_residency_held());
-        assert!(!runtime.ensure_module_residency(std::ptr::null()).unwrap());
+        assert!(!runtime.ensure_module_residency(anchor).unwrap());
 
         runtime.lifecycle_orchestrator().quarantine();
         assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
         assert!(runtime.module_residency_held());
-        runtime.test_release_module_residency().unwrap();
+        assert!(runtime.test_release_module_residency().unwrap());
         assert!(!runtime.module_residency_held());
     }
 
