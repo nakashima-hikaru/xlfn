@@ -14,8 +14,8 @@ just python-check
 ```
 
 `python-check` runs Ruff lint and format checks, ty, every `tools/tests/test_*.py`
-unit test, and the enrolled protocol-premise inventory. The same recipe runs in
-CI. Native Rust/Verus checks remain separate recipes.
+unit test. The same recipe runs in CI. Native Rust/Verus checks remain separate
+recipes.
 
 `uv run` installs the package before executing a module. Run an individual tool
 from the repository root:
@@ -23,26 +23,12 @@ from the repository root:
 ```sh
 uv run --project tools --locked python -B -m xlfn_tools.check_panic_boundaries
 uv run --project tools --locked python -B -m xlfn_tools.check_typestate
-uv run --project tools --locked python -B -m xlfn_tools.check_protocol_invariants
 ```
 
 From another directory, select this checkout's `tools` project by its absolute
 path. Editable installs find the checkout from the package location, so checks
 do not depend on the working directory or a manually modified `PYTHONPATH`.
 Allowlist files and typestate fixtures remain under `tools` as checkout data.
-
-`just protocol-invariants` compares the lifecycle/opening/shutdown/return checks
-with semantic reviews in `protocol_invariants.json`. New or removed references,
-statement changes, and moves to another path or named context require review;
-the tool never approves new references automatically. Reordering identical
-statements inside one function still needs runtime/formal review. It distinguishes
-observations, dynamic acquisitions, revalidations, exhaustion checks, low-level
-invariants, private recovery state,
-and remaining protocol debt. See
-[`verification/PROTOCOL_INVARIANTS.md`](../verification/PROTOCOL_INVARIANTS.md) for
-the audit scope, maintenance procedure, and remaining work. `--list` prints the
-enrolled candidates; `--all` surveys other Rust subsystems without expanding the
-gate or certifying them.
 
 The equivalent individual quality checks are:
 
