@@ -440,22 +440,24 @@ impl CacheRegistry {
         }
         let _insertions = self.insertions.lock();
         let caches = self.caches.pin();
-        // One operation owns vacancy selection and publication. A later
-        // initializer cannot turn a separately checked vacancy into failure.
-        let entry = caches.get_or_insert_with(cache_key, || {
-            let cache = Box::new(StoredCache::<Marker, K, V> {
-                cache: CalculationCache::with_weigher(
-                    self.weight_budget_per_endpoint,
-                    endpoint.weigher.unwrap_or(unit_weight::<V>),
-                ),
-                weigher: endpoint.weigher,
-                _marker: PhantomData,
-            });
-            let erased: Box<dyn ErasedCache> = cache;
+        // One operation owns vacancy selection and publication. Eager insertion
+        // also helps Papaya's incremental resize; lazy compute insertion can
+        // leave read-only endpoint traffic walking a chain of older tables.
+        let cache = Box::new(StoredCache::<Marker, K, V> {
+            cache: CalculationCache::with_weigher(
+                self.weight_budget_per_endpoint,
+                endpoint.weigher.unwrap_or(unit_weight::<V>),
+            ),
+            weigher: endpoint.weigher,
+            _marker: PhantomData,
+        });
+        let erased: Box<dyn ErasedCache> = cache;
+        let entry = caches.get_or_insert(
+            cache_key,
             CacheEntry {
                 cache: xlfn_kernel::published_owner::PublishedOwner::from_box(erased),
-            }
-        });
+            },
+        );
         Self::downcast_cache::<Marker, K, V>(entry)
     }
 
