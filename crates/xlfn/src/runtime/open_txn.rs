@@ -3,7 +3,9 @@ use crate::host_callback::HostCallbackSession;
 use crate::lifecycle::LifecycleAccess;
 #[cfg(test)]
 use crate::lifecycle::OpenFailureDisposition;
-use crate::registration::{HostMutationJournal, RegistrationId};
+use crate::registration::HostMutationJournal;
+#[cfg(any(test, feature = "bench-internals"))]
+use crate::registration::RegistrationId;
 use crate::runtime::AddinLifecycleAccess;
 use crate::runtime::capabilities::{InstalledLifecycle, OpenDeps};
 use crate::runtime_components::GenerationServices;
@@ -143,13 +145,6 @@ impl HostOpeningState {
 
     pub(crate) fn into_parts(self) -> (HostCallbackSession, HostMutationJournal) {
         (self.callbacks, self.journal)
-    }
-
-    fn stage_registrations(&mut self, registrations: Vec<RegistrationId>) {
-        self.journal.pending_registrations = registrations
-            .into_iter()
-            .map(crate::registration::PendingRegistration::from)
-            .collect();
     }
 }
 
@@ -822,11 +817,18 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, GenerationStaged<A>> {
 impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, LifecycleInstalled<A>> {
     pub(crate) fn stage_host_mutations(
         self,
-        registrations: Vec<RegistrationId>,
+        registrations: crate::registration::SuccessfulRegistrations,
+    ) -> OpeningTxn<'runtime, A, HostMutated<A>> {
+        self.stage_host_journal(registrations.into_journal())
+    }
+
+    fn stage_host_journal(
+        self,
+        journal: HostMutationJournal,
     ) -> OpeningTxn<'runtime, A, HostMutated<A>> {
         let mut transaction = self;
         let (LifecycleInstalled { core, mut host }, binding) = transaction.take_state();
-        host.stage_registrations(registrations);
+        host.journal.merge(journal);
         OpeningTxn::new_state(transaction.deps, HostMutated { core, host }, binding)
     }
 
@@ -850,7 +852,7 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, LifecycleInstalled<A>> {
     pub(crate) fn finish_in_place(&mut self, registrations: Vec<RegistrationId>) -> XllResult<()> {
         let (state, binding) = self.take_state();
         OpeningTxn::new_state(self.deps, state, binding)
-            .stage_host_mutations(registrations)
+            .stage_host_journal(HostMutationJournal::from_registrations(registrations))
             .commit()
     }
 }
@@ -905,12 +907,6 @@ fn commit_inner<A: crate::Addin>(
 ) -> XllResult<()> {
     let (attempt_id, module_opening, service_inputs) = core.into_parts();
     let mut control = deps.lifecycle_access();
-    let registration_ids = journal
-        .pending_registrations
-        .iter()
-        .map(|entry| entry.registration)
-        .collect::<Vec<_>>();
-    deps.clear_metadata_debt_for_registrations(&registration_ids);
     deps.merge_host(std::mem::take(journal));
 
     if control.phase() == crate::lifecycle::LifecyclePhase::Opening {
@@ -1127,7 +1123,7 @@ mod owner_tests {
         let opening = runtime.begin_open().unwrap();
         let opening = runtime
             .publish_with_lifecycle(opening, (), RetainedLifecycle(Arc::clone(&drops)), ())
-            .stage_host_mutations(Vec::new());
+            .stage_host_journal(HostMutationJournal::default());
         let access = runtime.bind_addin_lifecycle().unwrap();
         assert!(matches!(
             runtime.addin_lifecycle.binding(&access),

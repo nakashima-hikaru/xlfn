@@ -1,10 +1,13 @@
+mod startup;
 use super::calculation::CalculationEpoch;
 use super::executor::AsyncExecutor;
 use super::registry::{
     CalculationSnapshot, RegistryClose, TaskRegistry, TaskReservation, TasksCancelled,
     TasksDrained, cancel_tasks,
 };
+#[cfg(any(test, all(feature = "bench-internals", feature = "async-builtin")))]
 use crate::cancellation::CancellationSource;
+use crate::cancellation::TaskCancellationOwner;
 use crate::sync::{Condvar, Mutex};
 use crate::{XllError, XllResult};
 use std::future::Future;
@@ -182,6 +185,22 @@ pub(crate) struct RuntimeReservation<'a, E: AsyncExecutor> {
 }
 
 impl<E: AsyncExecutor> RuntimeReservation<'_, E> {
+    pub(super) fn commit_owned<F>(self, future: F, cancellation: TaskCancellationOwner)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let task = self.task.commit_owned(future, cancellation);
+        #[cfg(test)]
+        {
+            let hook = self.runtime.before_submit.lock().clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        self.executor.submit(self.permit, task);
+    }
+
+    #[cfg(any(test, all(feature = "bench-internals", feature = "async-builtin")))]
     pub(crate) fn commit<F>(self, future: F, cancellation: CancellationSource)
     where
         F: Future<Output = ()> + Send + 'static,
@@ -197,7 +216,7 @@ impl<E: AsyncExecutor> RuntimeReservation<'_, E> {
         self.executor.submit(self.permit, task);
     }
 
-    #[cfg(feature = "handles")]
+    #[cfg(all(feature = "handles", test))]
     pub(crate) fn commit_handle_scoped<B>(
         self,
         generation: crate::generation::RuntimeGeneration,
@@ -245,56 +264,7 @@ impl<E: AsyncExecutor> AsyncRuntime<E> {
     }
 
     pub(crate) fn start(&self, executor: E, limit: crate::addin::AsyncTaskLimit) -> XllResult<()> {
-        {
-            let mut state = self.state.lock();
-            if !matches!(*state, ExecutorSlot::Stopped) {
-                return Err(XllError::Closing);
-            }
-            *state = ExecutorSlot::Starting;
-        }
-        let executor = PublishedOwner::new(executor);
-        // Executor callbacks run without framework locks. Even a partially
-        // failed start retains its affine resource until rollback succeeds.
-        let started = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
-            executor.start()
-        }))
-        .unwrap_or(Err(XllError::Panic));
-        let started = started.and_then(|()| self.registry().start(limit));
-        if let Err(error) = started {
-            let stopped =
-                crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
-                    executor.shutdown()
-                }))
-                .unwrap_or(Err(XllError::Panic));
-            if stopped.is_ok() {
-                let _ =
-                    crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
-                        drop(executor)
-                    }));
-                *self.state.lock() = ExecutorSlot::Stopped;
-            } else {
-                *self.state.lock() = ExecutorSlot::Closing(Some(executor));
-            }
-            self.state_changed.notify_all();
-            return Err(error);
-        }
-        let mut state = self.state.lock();
-        let pointer = NonNull::from(executor.as_ref());
-        *state = ExecutorSlot::Running(executor);
-        self.publication.store(pointer.as_ptr(), Ordering::Release);
-        drop(
-            self.spawn_admission
-                .control()
-                .wait_if_sealed()
-                .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop())
-                .reopen(),
-        );
-        self.state_changed.notify_all();
-        drop(state);
-        self.registry()
-            .observer
-            .record(crate::shutdown_trace::ShutdownEvent::StartAsyncExecutor);
-        Ok(())
+        startup::StartupClaim::acquire(self, executor)?.publish(limit)
     }
 
     pub(crate) fn current_epoch(&self) -> CalculationEpoch {

@@ -12,7 +12,7 @@ pub(crate) mod schema;
 pub(crate) use host::{RegistrationHost, RegistrationMutation};
 pub(crate) use ledger::{
     ExcelNameKey, HostMutationJournal, MetadataDebt, MetadataDebtRetryResult, PendingRegistration,
-    RegistrationCertainty, RegistrationCleanupState, RegistrationTransactionError,
+    RegistrationCleanupState, RegistrationTransactionError, SuccessfulRegistrations,
     UnknownRegistrationState, UnregisterResult,
 };
 pub(crate) use preflight::preflight_registration;

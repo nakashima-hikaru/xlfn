@@ -727,104 +727,99 @@ pub(super) unsafe fn write_value_variant(result: *mut VARIANT, value: &StoredRtd
     S_OK
 }
 
+/// Raw Automation primitives used only by the private refresh ownership core.
+/// These functions do not issue batch delivery authority.
+pub(crate) enum WindowsRefreshArrayApi {}
+impl WindowsRefreshArrayApi {
+    pub(crate) fn create(count: u32) -> Result<NonNull<SAFEARRAY>, i32> {
+        let Some(cells) = (count as usize).checked_mul(2) else {
+            return Err(E_INVALIDARG);
+        };
+        if std::alloc::Layout::array::<VARIANT>(cells).is_err() {
+            return Err(E_INVALIDARG);
+        }
+        let mut bounds = [
+            SAFEARRAYBOUND {
+                cElements: 2,
+                lLbound: 0,
+            },
+            SAFEARRAYBOUND {
+                cElements: count,
+                lLbound: 0,
+            },
+        ];
+        // SAFETY: bounds remain live and describe a two-dimensional VARIANT array.
+        NonNull::new(unsafe { SafeArrayCreate(VT_VARIANT, 2, bounds.as_mut_ptr()) })
+            .ok_or(E_OUTOFMEMORY)
+    }
+
+    pub(crate) unsafe fn access(array: NonNull<SAFEARRAY>) -> Result<*mut VARIANT, i32> {
+        let mut data = ptr::null_mut();
+        // SAFETY: the ownership core retains this fresh, unlocked array.
+        let status = unsafe { SafeArrayAccessData(array.as_ptr(), &mut data) };
+        if status < 0 {
+            Err(status)
+        } else {
+            Ok(data.cast())
+        }
+    }
+
+    pub(crate) unsafe fn fill(data: *mut VARIANT, updates: &[RtdUpdate]) -> Result<(), i32> {
+        if data.is_null() {
+            return Err(E_FAIL);
+        }
+        // SAFETY: AccessData locked the validated 2*updates.len VARIANT cells.
+        let cells = unsafe { std::slice::from_raw_parts_mut(data, updates.len() * 2) };
+        for (column, update) in cells.as_chunks_mut::<2>().0.iter_mut().zip(updates) {
+            let mut topic = VARIANT::default();
+            topic.Anonymous.Anonymous.vt = VT_I4;
+            topic.Anonymous.Anonymous.Anonymous.lVal = update.topic_id;
+            column[0] = topic;
+            // SAFETY: each array-owned VARIANT is initialized and writable;
+            // successful conversion transfers its BSTR directly into the cell.
+            let status = unsafe { write_value_variant(&mut column[1], &update.value) };
+            if status != S_OK {
+                return Err(status);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) unsafe fn unaccess(array: NonNull<SAFEARRAY>) -> Result<(), i32> {
+        // SAFETY: this is the one data access retained by the ownership core.
+        let status = unsafe { SafeArrayUnaccessData(array.as_ptr()) };
+        if status < 0 { Err(status) } else { Ok(()) }
+    }
+
+    pub(crate) unsafe fn destroy(array: NonNull<SAFEARRAY>) {
+        // SAFETY: the ownership core destroys only its untransferred unlocked array.
+        if unsafe { SafeArrayDestroy(array.as_ptr()) } < 0 {
+            xlfn_kernel::invariant::fail_stop();
+        }
+    }
+
+    pub(crate) fn retained(_array: NonNull<SAFEARRAY>, status: i32) {
+        // Unlike the old fail-stop unlock guard, an unsuccessful unlock now
+        // retains the allocation without a second unlock or destruction attempt.
+        crate::diagnostics::report_no_unwind(
+            "RTD SafeArrayUnaccessData retained array",
+            &XllError::WindowsApi {
+                function: "SafeArrayUnaccessData",
+                code: status,
+            },
+        );
+    }
+}
+
+#[cfg(test)]
 pub(super) unsafe fn write_refresh_data(
     topic_count: *mut i32,
     result: *mut *mut SAFEARRAY,
     updates: &[RtdUpdate],
 ) -> i32 {
-    // SAFETY: the caller validated both output pointers as non-null and writable.
-    unsafe {
-        *topic_count = 0;
-        *result = ptr::null_mut();
-    }
-
-    if updates.is_empty() {
-        return S_OK;
-    }
-
-    let count = match i32::try_from(updates.len()) {
-        Ok(count) => count,
-        Err(_) => return E_INVALIDARG,
-    };
-    let Some(cells) = updates.len().checked_mul(2) else {
-        return E_INVALIDARG;
-    };
-    if std::alloc::Layout::array::<VARIANT>(cells).is_err() {
-        return E_INVALIDARG;
-    }
-
-    let mut bounds = [
-        SAFEARRAYBOUND {
-            cElements: 2,
-            lLbound: 0,
-        },
-        SAFEARRAYBOUND {
-            cElements: count as u32,
-            lLbound: 0,
-        },
-    ];
-
-    // SAFETY: `bounds` describes a valid two-dimensional SAFEARRAY of VARIANTs
-    // and remains readable for the duration of SafeArrayCreate.
-    let array = unsafe { SafeArrayCreate(VT_VARIANT, 2, bounds.as_mut_ptr()) };
-
-    if array.is_null() {
-        return E_OUTOFMEMORY;
-    }
-
-    let owner = scopeguard::guard(array, |array| {
-        // SAFETY: the guard exclusively owns the untransferred array; any data
-        // access guard is dropped first. Destroy clears all initialized VARIANTs.
-        if unsafe { SafeArrayDestroy(array) } < 0 {
-            xlfn_kernel::invariant::fail_stop();
-        }
-    });
-    let mut data = ptr::null_mut();
-    // SAFETY: the fresh array is exclusively owned and data is a writable out pointer.
-    let status = unsafe { SafeArrayAccessData(array, &mut data) };
-    if status < 0 {
-        return status;
-    }
-    let access = scopeguard::guard(array, |array| {
-        // SAFETY: this guard owns the sole successful data access above. It is
-        // always released before transferring or destroying the array.
-        if unsafe { SafeArrayUnaccessData(array) } < 0 {
-            xlfn_kernel::invariant::fail_stop();
-        }
-    });
-    if data.is_null() {
-        return E_FAIL;
-    }
-    // SAFETY: SafeArrayCreate initialized `cells` contiguous VARIANT elements.
-    // AccessData keeps their allocation locked, and the checked layout fits
-    // Rust's slice size limit. The array has no aliases outside these guards.
-    let cells = unsafe { std::slice::from_raw_parts_mut(data.cast::<VARIANT>(), cells) };
-    // Automation arrays are column-major: [row, column] maps to row + 2*column.
-    // Write directly into each empty array-owned VARIANT so BSTR ownership is
-    // transferred once without SafeArrayPutElement's extra deep copy.
-    for (column, update) in cells.as_chunks_mut::<2>().0.iter_mut().zip(updates) {
-        let mut topic = VARIANT::default();
-        topic.Anonymous.Anonymous.vt = VT_I4;
-        topic.Anonymous.Anonymous.Anonymous.lVal = update.topic_id;
-        column[0] = topic;
-        // SAFETY: the second element is fresh initialized writable VARIANT
-        // storage. On success the array owns any BSTR written into it.
-        let status = unsafe { write_value_variant(&mut column[1], &update.value) };
-        if status != S_OK {
-            return status;
-        }
-    }
-    drop(access);
-    let array = scopeguard::ScopeGuard::into_inner(owner);
-
-    // SAFETY: both output pointers were validated as writable. Ownership of the
-    // fully initialized SAFEARRAY transfers to Excel through `result`.
-    unsafe {
-        *topic_count = count;
-        *result = array;
-    }
-
-    S_OK
+    // SAFETY: this test-only compatibility entry uses the same concrete array
+    // builder and output handoff core as production, without any batch completion.
+    unsafe { crate::subscription::write_refresh_data_for_test(topic_count, result, updates) }
 }
 
 pub(super) const MAX_RTD_TOPIC_PARTS: usize = 253;

@@ -200,13 +200,13 @@ fn batched_publish_preserves_dedup_sequences_and_older_refresh_completion() {
     assert_eq!(notifier.calls.load(Ordering::Acquire), 1);
     assert_eq!(server.test_server().publish.queued_update_count(), 1);
     let first = server.begin_refresh().unwrap();
-    assert_eq!(first.updates[0].sequence, 2);
-    assert_eq!(first.updates[0].value, StoredRtdValue::Integer(3));
+    assert_eq!(first.updates()[0].sequence, 2);
+    assert_eq!(first.updates()[0].value, StoredRtdValue::Integer(3));
     publish(&[4, 4, 5]);
     first.complete(RefreshOutcome::Delivered).unwrap();
     let second = server.begin_refresh().unwrap();
-    assert_eq!(second.updates[0].sequence, 4);
-    assert_eq!(second.updates[0].value, StoredRtdValue::Integer(5));
+    assert_eq!(second.updates()[0].sequence, 4);
+    assert_eq!(second.updates()[0].value, StoredRtdValue::Integer(5));
     second.complete(RefreshOutcome::Delivered).unwrap();
     assert_eq!(server.test_server().publish.queued_update_count(), 0);
     stopping.store(true, Ordering::Release);
@@ -236,8 +236,8 @@ fn batched_publish_rechecks_epoch_after_refresh_during_notification() {
     for value in [1, 2] {
         entered_rx.recv().unwrap();
         let refresh = server.begin_refresh().unwrap();
-        assert_eq!(refresh.updates.len(), 1);
-        assert_eq!(refresh.updates[0].value, StoredRtdValue::Integer(value));
+        assert_eq!(refresh.updates().len(), 1);
+        assert_eq!(refresh.updates()[0].value, StoredRtdValue::Integer(value));
         refresh.complete(RefreshOutcome::Delivered).unwrap();
         release_tx.send(()).unwrap();
     }
@@ -270,8 +270,8 @@ fn batched_publish_overflow_keeps_the_accepted_prefix_deliverable() {
         })
     ));
     let batch = server.begin_refresh().unwrap();
-    assert_eq!(batch.updates[0].sequence, u64::MAX - 1);
-    assert_eq!(batch.updates[0].value, StoredRtdValue::Integer(1));
+    assert_eq!(batch.updates()[0].sequence, u64::MAX - 1);
+    assert_eq!(batch.updates()[0].value, StoredRtdValue::Integer(1));
     batch.complete(RefreshOutcome::Delivered).unwrap();
     assert_eq!(server.test_server().publish.queued_update_count(), 0);
 }
@@ -419,7 +419,7 @@ fn server_locality_refresh_lock_independence() {
     let server_b_clone = server_b;
     let handle = std::thread::spawn(move || {
         let batch = server_b_clone.begin_refresh().unwrap();
-        let observed = (batch.updates.len(), batch.updates[0].value.clone());
+        let observed = (batch.updates().len(), batch.updates()[0].value.clone());
         batch.complete(RefreshOutcome::Delivered).unwrap();
         tx.send(observed).unwrap();
     });
@@ -439,7 +439,7 @@ fn refresh_batch_borrows_server_lifetime() {
     let server = runtime.register_test_server(1);
 
     let batch = server.begin_refresh().unwrap();
-    assert!(batch.updates.is_empty());
+    assert!(batch.updates().is_empty());
     batch.complete(RefreshOutcome::Delivered).unwrap();
 }
 
@@ -559,8 +559,8 @@ fn server_termination_clears_pending_and_allows_reconnect() {
     sink.publish(20.0).unwrap();
 
     let batch = server_b.begin_refresh().unwrap();
-    assert_eq!(batch.updates.len(), 1);
-    assert_eq!(batch.updates[0].value, StoredRtdValue::Number(20.0));
+    assert_eq!(batch.updates().len(), 1);
+    assert_eq!(batch.updates()[0].value, StoredRtdValue::Number(20.0));
     batch.complete(RefreshOutcome::Delivered).unwrap();
 }
 
@@ -671,7 +671,7 @@ fn deliverable_pending_accounting_tracks_connection_lifecycle() {
     assert_eq!(server.pending_update_count(), 1);
 
     let batch = server.begin_refresh().unwrap();
-    assert_eq!(batch.updates.len(), 1);
+    assert_eq!(batch.updates().len(), 1);
     batch.complete(RefreshOutcome::Delivered).unwrap();
     assert_eq!(server.test_server().publish.queued_update_count(), 0);
     assert_eq!(server.pending_update_count(), 0);
@@ -693,8 +693,8 @@ fn first_empty_publish_is_deliverable() {
     assert_eq!(server.test_server().publish.queued_update_count(), 1);
     assert_eq!(server.pending_update_count(), 1);
     let batch = server.begin_refresh().unwrap();
-    assert_eq!(batch.updates.len(), 1);
-    assert_eq!(batch.updates[0].value, StoredRtdValue::Empty);
+    assert_eq!(batch.updates().len(), 1);
+    assert_eq!(batch.updates()[0].value, StoredRtdValue::Empty);
     batch.complete(RefreshOutcome::Delivered).unwrap();
     assert_eq!(server.test_server().publish.queued_update_count(), 0);
 }
@@ -709,8 +709,8 @@ fn repeated_empty_publish_is_suppressed() {
     assert_eq!(server.test_server().publish.queued_update_count(), 1);
     assert_eq!(server.pending_update_count(), 1);
     let batch = server.begin_refresh().unwrap();
-    assert_eq!(batch.updates.len(), 1);
-    assert_eq!(batch.updates[0].sequence, 0);
+    assert_eq!(batch.updates().len(), 1);
+    assert_eq!(batch.updates()[0].sequence, 0);
     batch.complete(RefreshOutcome::Delivered).unwrap();
 }
 
@@ -724,9 +724,9 @@ fn repeated_number_publish_is_suppressed() {
     assert_eq!(server.test_server().publish.queued_update_count(), 1);
     assert_eq!(server.pending_update_count(), 1);
     let batch = server.begin_refresh().unwrap();
-    assert_eq!(batch.updates.len(), 1);
-    assert_eq!(batch.updates[0].value, StoredRtdValue::Number(12.5));
-    assert_eq!(batch.updates[0].sequence, 0);
+    assert_eq!(batch.updates().len(), 1);
+    assert_eq!(batch.updates()[0].value, StoredRtdValue::Number(12.5));
+    assert_eq!(batch.updates()[0].sequence, 0);
     batch.complete(RefreshOutcome::Delivered).unwrap();
 }
 
@@ -740,12 +740,12 @@ fn repeated_string_publish_is_suppressed() {
     assert_eq!(server.test_server().publish.queued_update_count(), 1);
     assert_eq!(server.pending_update_count(), 1);
     let batch = server.begin_refresh().unwrap();
-    assert_eq!(batch.updates.len(), 1);
+    assert_eq!(batch.updates().len(), 1);
     assert_eq!(
-        batch.updates[0].value,
+        batch.updates()[0].value,
         StoredRtdValue::String("same-value".into()),
     );
-    assert_eq!(batch.updates[0].sequence, 0);
+    assert_eq!(batch.updates()[0].sequence, 0);
     batch.complete(RefreshOutcome::Delivered).unwrap();
 }
 
@@ -755,7 +755,7 @@ fn changed_value_after_same_value_is_delivered() {
 
     sink.publish(10.0).unwrap();
     let first = server.begin_refresh().unwrap();
-    assert_eq!(first.updates.len(), 1);
+    assert_eq!(first.updates().len(), 1);
     first.complete(RefreshOutcome::Delivered).unwrap();
 
     sink.publish(10.0).unwrap();
@@ -763,8 +763,8 @@ fn changed_value_after_same_value_is_delivered() {
     sink.publish(11.0).unwrap();
 
     let changed = server.begin_refresh().unwrap();
-    assert_eq!(changed.updates.len(), 1);
-    assert_eq!(changed.updates[0].value, StoredRtdValue::Number(11.0));
+    assert_eq!(changed.updates().len(), 1);
+    assert_eq!(changed.updates()[0].value, StoredRtdValue::Number(11.0));
     changed.complete(RefreshOutcome::Delivered).unwrap();
 }
 
@@ -781,7 +781,7 @@ fn same_value_after_successful_refresh_is_suppressed() {
     assert_eq!(server.test_server().publish.queued_update_count(), 0);
     assert_eq!(server.pending_update_count(), 0);
     let empty = server.begin_refresh().unwrap();
-    assert!(empty.updates.is_empty());
+    assert!(empty.updates().is_empty());
     empty.complete(RefreshOutcome::Delivered).unwrap();
 }
 
@@ -828,7 +828,7 @@ fn reconnect_does_not_inherit_previous_generation_latest() {
     sink.publish(100.0).unwrap();
     assert_eq!(server_b.test_server().publish.queued_update_count(), 0);
     let second = server_b.begin_refresh().unwrap();
-    assert!(second.updates.is_empty());
+    assert!(second.updates().is_empty());
     second.complete(RefreshOutcome::Delivered).unwrap();
 }
 
@@ -855,14 +855,14 @@ fn old_buffer_update_is_not_redelivered_after_newer_update() {
 
     sink.publish(11.0).unwrap();
     let latest = server.begin_refresh().unwrap();
-    assert_eq!(latest.updates.len(), 1);
-    assert_eq!(latest.updates[0].value, StoredRtdValue::Number(11.0));
+    assert_eq!(latest.updates().len(), 1);
+    assert_eq!(latest.updates()[0].value, StoredRtdValue::Number(11.0));
     latest.complete(RefreshOutcome::Delivered).unwrap();
 
     assert_eq!(server.test_server().publish.queued_update_count(), 0);
     assert_eq!(server.pending_update_count(), 0);
     let empty = server.begin_refresh().unwrap();
-    assert!(empty.updates.is_empty());
+    assert!(empty.updates().is_empty());
     empty.complete(RefreshOutcome::Delivered).unwrap();
 }
 
@@ -892,9 +892,9 @@ fn two_buffer_string_refresh_picks_newer_sequence_and_cleans_both() {
 
     sink.publish("second-update".to_string()).unwrap();
     let latest = server.begin_refresh().unwrap();
-    assert_eq!(latest.updates.len(), 1);
+    assert_eq!(latest.updates().len(), 1);
     assert_eq!(
-        latest.updates[0].value,
+        latest.updates()[0].value,
         StoredRtdValue::String("second-update".into())
     );
     latest.complete(RefreshOutcome::Delivered).unwrap();
@@ -902,7 +902,7 @@ fn two_buffer_string_refresh_picks_newer_sequence_and_cleans_both() {
     assert_eq!(server.test_server().publish.queued_update_count(), 0);
     assert_eq!(server.pending_update_count(), 0);
     let empty = server.begin_refresh().unwrap();
-    assert!(empty.updates.is_empty());
+    assert!(empty.updates().is_empty());
     empty.complete(RefreshOutcome::Delivered).unwrap();
 }
 
@@ -934,8 +934,8 @@ fn newer_update_survives_completion_of_older_refresh() {
     assert_eq!(server.test_server().publish.queued_update_count(), 1);
     assert_eq!(server.pending_update_count(), 1);
     let newer = server.begin_refresh().unwrap();
-    assert_eq!(newer.updates.len(), 1);
-    assert_eq!(newer.updates[0].value, StoredRtdValue::Number(11.0));
+    assert_eq!(newer.updates().len(), 1);
+    assert_eq!(newer.updates()[0].value, StoredRtdValue::Number(11.0));
     newer.complete(RefreshOutcome::Delivered).unwrap();
 }
 
@@ -961,14 +961,14 @@ fn failed_refresh_keeps_pending_update() {
 
     sink.publish(10.0).unwrap();
     let failed = server.begin_refresh().unwrap();
-    let sequence = failed.updates[0].sequence;
+    let sequence = failed.updates()[0].sequence;
     failed.complete(RefreshOutcome::Failed).unwrap();
 
     assert_eq!(server.test_server().publish.queued_update_count(), 1);
     assert_eq!(server.pending_update_count(), 1);
     let retry = server.begin_refresh().unwrap();
-    assert_eq!(retry.updates.len(), 1);
-    assert_eq!(retry.updates[0].sequence, sequence);
+    assert_eq!(retry.updates().len(), 1);
+    assert_eq!(retry.updates()[0].sequence, sequence);
     retry.complete(RefreshOutcome::Delivered).unwrap();
 }
 
@@ -1001,8 +1001,8 @@ fn concurrent_publish_after_refresh_snapshot_is_delivered_later() {
     snapshot.complete(RefreshOutcome::Delivered).unwrap();
 
     let later = server.begin_refresh().unwrap();
-    assert_eq!(later.updates.len(), 1);
-    assert_eq!(later.updates[0].value, StoredRtdValue::Number(11.0));
+    assert_eq!(later.updates().len(), 1);
+    assert_eq!(later.updates()[0].value, StoredRtdValue::Number(11.0));
     later.complete(RefreshOutcome::Delivered).unwrap();
 }
 
@@ -1028,7 +1028,7 @@ fn refresh_collection_skips_shards_without_deliverable_updates() {
     let (tx, rx) = std::sync::mpsc::channel();
     let handle = std::thread::spawn(move || {
         let batch = server_clone.begin_refresh().unwrap();
-        let count = batch.updates.len();
+        let count = batch.updates().len();
         batch.complete(RefreshOutcome::Delivered).unwrap();
         tx.send(count).unwrap();
     });
@@ -1093,11 +1093,11 @@ fn sparse_refresh_after_dense_drain_reuses_storage_and_preserves_retries() {
             slot.lock().as_ref().unwrap().publish(value).unwrap();
         }
         let batch = server.begin_refresh().unwrap();
-        assert_eq!(batch.updates.len(), 64);
+        assert_eq!(batch.updates().len(), 64);
         if let Some(previous) = allocation {
-            assert_eq!(batch.updates.as_ptr(), previous);
+            assert_eq!(batch.updates().as_ptr(), previous);
         }
-        allocation = Some(batch.updates.as_ptr());
+        allocation = Some(batch.updates().as_ptr());
         batch.complete(RefreshOutcome::Delivered).unwrap();
     }
 
@@ -1113,16 +1113,16 @@ fn sparse_refresh_after_dense_drain_reuses_storage_and_preserves_retries() {
     }
     runtime.disconnect(&server, TopicId(21 * 32)).unwrap();
     let failed = server.begin_refresh().unwrap();
-    assert_eq!(failed.updates.len(), 2);
-    assert_eq!(Some(failed.updates.as_ptr()), allocation);
+    assert_eq!(failed.updates().len(), 2);
+    assert_eq!(Some(failed.updates().as_ptr()), allocation);
     drop(failed);
     assert_eq!(server.pending_update_count(), 2);
 
     sources[3].1.lock().as_ref().unwrap().publish(103).unwrap();
     let retry = server.begin_refresh().unwrap();
-    assert_eq!(Some(retry.updates.as_ptr()), allocation);
+    assert_eq!(Some(retry.updates().as_ptr()), allocation);
     let mut values = retry
-        .updates
+        .updates()
         .iter()
         .map(|update| (update.topic_id, update.value.clone()))
         .collect::<Vec<_>>();
@@ -1170,7 +1170,7 @@ fn refresh_preserves_latest_update_for_each_topic() {
 
     let batch = server.begin_refresh().unwrap();
     let mut actual = batch
-        .updates
+        .updates()
         .iter()
         .map(|update| (update.topic_id, update.value.clone()))
         .collect::<Vec<_>>();
@@ -2793,12 +2793,12 @@ fn refresh_state_attach_prepare_commit_lifecycle() {
     assert_eq!(state.attach_notifier(100), None);
 
     let prepared = state.prepare_notification(true).unwrap().unwrap();
-    assert_eq!(prepared.ticket, 0);
-    assert_eq!(prepared.notifier, 100);
+    assert_eq!(prepared.ticket(), 0);
+    assert_eq!(*prepared.notifier(), 100);
 
     let attempt = state.commit_notification(prepared);
-    assert_eq!(attempt.ticket, 0);
-    assert_eq!(attempt.notifier, 100);
+    assert_eq!(attempt.ticket(), 0);
+    assert_eq!(*attempt.notifier(), 100);
 
     // While Calling, prepare_notification returns None
     assert!(state.prepare_notification(true).unwrap().is_none());
@@ -2867,8 +2867,8 @@ fn heartbeat_retries_accepted_notification_without_a_refresh() {
     assert_eq!(state.calls.load(Ordering::SeqCst), 2);
 
     let batch = server.begin_refresh().unwrap();
-    assert_eq!(batch.updates.len(), 1);
-    assert_eq!(batch.updates[0].value, StoredRtdValue::Number(2.0));
+    assert_eq!(batch.updates().len(), 1);
+    assert_eq!(batch.updates()[0].value, StoredRtdValue::Number(2.0));
     batch.complete(RefreshOutcome::Delivered).unwrap();
     server.pulse_notification().unwrap();
     assert_eq!(state.calls.load(Ordering::SeqCst), 2);
@@ -2909,7 +2909,7 @@ fn heartbeat_recovers_updates_published_during_an_earlier_refresh() {
         .publish(1_000_000.0)
         .unwrap();
     let first = server.begin_refresh().unwrap();
-    assert_eq!(first.updates.len(), 1);
+    assert_eq!(first.updates().len(), 1);
     for (_, sink, _) in &sources[1..] {
         sink.lock().as_ref().unwrap().publish(1_000_000.0).unwrap();
     }
@@ -2922,8 +2922,8 @@ fn heartbeat_recovers_updates_published_during_an_earlier_refresh() {
     server.pulse_notification().unwrap();
     assert_eq!(state.calls.load(Ordering::SeqCst), 3);
     let remaining = server.begin_refresh().unwrap();
-    assert_eq!(remaining.updates.len(), 9);
-    for update in &remaining.updates {
+    assert_eq!(remaining.updates().len(), 9);
+    for update in remaining.updates() {
         assert!((2..=10).contains(&update.topic_id));
         assert_eq!(update.value, StoredRtdValue::Number(1_000_000.0));
     }
@@ -2986,8 +2986,8 @@ fn server_notification_heartbeat_recovers_after_bounded_retries() {
     assert_eq!(state.calls.load(Ordering::SeqCst), 8);
 
     let batch = server.begin_refresh().unwrap();
-    assert_eq!(batch.updates.len(), 1);
-    assert_eq!(batch.updates[0].value, StoredRtdValue::Number(3.0));
+    assert_eq!(batch.updates().len(), 1);
+    assert_eq!(batch.updates()[0].value, StoredRtdValue::Number(3.0));
     batch.complete(RefreshOutcome::Delivered).unwrap();
     assert_eq!(server.pending_update_count(), 0);
     server.pulse_notification().unwrap();
@@ -3193,7 +3193,7 @@ fn quota_permit_releases_on_drain() {
     assert_eq!(runtime.services.queued_update_quota.used(), 1);
 
     let batch = server.begin_refresh().unwrap();
-    assert_eq!(batch.updates.len(), 1);
+    assert_eq!(batch.updates().len(), 1);
     batch
         .complete(crate::subscription::RefreshOutcome::Delivered)
         .unwrap();
@@ -3470,18 +3470,18 @@ fn refresh_failure_preserves_pending_and_values_for_retry() {
 
     sink.publish("retry-value".to_owned()).unwrap();
     let batch = server.begin_refresh().unwrap();
-    assert_eq!(batch.updates.len(), 1);
+    assert_eq!(batch.updates().len(), 1);
     assert_eq!(
-        batch.updates[0].value,
+        batch.updates()[0].value,
         StoredRtdValue::String("retry-value".into())
     );
     batch.complete(RefreshOutcome::Failed).unwrap();
 
     // After failure, retry succeeds with identical value and sequence!
     let retry_batch = server.begin_refresh().unwrap();
-    assert_eq!(retry_batch.updates.len(), 1);
+    assert_eq!(retry_batch.updates().len(), 1);
     assert_eq!(
-        retry_batch.updates[0].value,
+        retry_batch.updates()[0].value,
         StoredRtdValue::String("retry-value".into())
     );
     retry_batch.complete(RefreshOutcome::Delivered).unwrap();
@@ -3505,7 +3505,7 @@ fn successful_refresh_retains_latest_value_for_exact_dedup() {
     assert_eq!(server.pending_update_count(), 1);
     let batch2 = server.begin_refresh().unwrap();
     assert_eq!(
-        batch2.updates[0].value,
+        batch2.updates()[0].value,
         StoredRtdValue::String("changed-target".into())
     );
     batch2.complete(RefreshOutcome::Delivered).unwrap();
@@ -3566,8 +3566,11 @@ fn inflight_refresh_batch_leases_value_without_double_ownership() {
     }
 
     let batch = server.begin_refresh().unwrap();
-    assert_eq!(batch.updates.len(), 1);
-    assert_eq!(batch.updates[0].value, StoredRtdValue::String("v1".into()));
+    assert_eq!(batch.updates().len(), 1);
+    assert_eq!(
+        batch.updates()[0].value,
+        StoredRtdValue::String("v1".into())
+    );
 
     // While batch is held, the slot in the shard MUST be InFlight, NOT Resident!
     {
@@ -3576,8 +3579,8 @@ fn inflight_refresh_batch_leases_value_without_double_ownership() {
         assert_eq!(
             active.values[0],
             ValueSlot::InFlight {
-                generation: batch.updates[0].connection_generation,
-                sequence: batch.updates[0].sequence,
+                generation: batch.updates()[0].connection_generation,
+                sequence: batch.updates()[0].sequence,
             }
         );
         assert!(!matches!(active.values[0], ValueSlot::Resident(_)));
@@ -3598,7 +3601,7 @@ fn publish_during_inflight_refresh_treats_same_value_conservatively() {
 
     let batch = server.begin_refresh().unwrap();
     assert_eq!(
-        batch.updates[0].value,
+        batch.updates()[0].value,
         StoredRtdValue::String("same-value".into())
     );
 
@@ -3626,9 +3629,9 @@ fn publish_during_inflight_refresh_treats_same_value_conservatively() {
 
     // Next batch collects the conservatively published update
     let next_batch = server.begin_refresh().unwrap();
-    assert_eq!(next_batch.updates.len(), 1);
+    assert_eq!(next_batch.updates().len(), 1);
     assert_eq!(
-        next_batch.updates[0].value,
+        next_batch.updates()[0].value,
         StoredRtdValue::String("same-value".into())
     );
     next_batch.complete(RefreshOutcome::Delivered).unwrap();
@@ -3648,9 +3651,9 @@ fn delivered_refresh_restores_resident_value_for_subsequent_dedup() {
     let shard_idx = shard_index(topic_id);
 
     let batch = server.begin_refresh().unwrap();
-    assert_eq!(batch.updates.len(), 1);
+    assert_eq!(batch.updates().len(), 1);
     assert_eq!(
-        batch.updates[0].value,
+        batch.updates()[0].value,
         StoredRtdValue::String("target-value".into())
     );
 
@@ -3698,7 +3701,7 @@ fn failed_refresh_and_batch_drop_restore_resident_value_for_retry() {
     // Retry succeeds
     let retry1 = server.begin_refresh().unwrap();
     assert_eq!(
-        retry1.updates[0].value,
+        retry1.updates()[0].value,
         StoredRtdValue::String("retry-val-1".into())
     );
     retry1.complete(RefreshOutcome::Delivered).unwrap();
@@ -3707,7 +3710,7 @@ fn failed_refresh_and_batch_drop_restore_resident_value_for_retry() {
     sink.publish("retry-val-2".to_owned()).unwrap();
     let batch_drop = server.begin_refresh().unwrap();
     assert_eq!(
-        batch_drop.updates[0].value,
+        batch_drop.updates()[0].value,
         StoredRtdValue::String("retry-val-2".into())
     );
     drop(batch_drop); // aborted!
@@ -3724,7 +3727,7 @@ fn failed_refresh_and_batch_drop_restore_resident_value_for_retry() {
 
     let retry2 = server.begin_refresh().unwrap();
     assert_eq!(
-        retry2.updates[0].value,
+        retry2.updates()[0].value,
         StoredRtdValue::String("retry-val-2".into())
     );
     retry2.complete(RefreshOutcome::Delivered).unwrap();
@@ -3743,7 +3746,7 @@ fn dropped_refresh_batch_notifies_excel_to_retry() {
     drop(server.begin_refresh().unwrap());
     assert_eq!(notifier.calls.load(Ordering::Acquire), 2);
     let retry = server.begin_refresh().unwrap();
-    assert_eq!(retry.updates[0].value, StoredRtdValue::Integer(42));
+    assert_eq!(retry.updates()[0].value, StoredRtdValue::Integer(42));
     retry.complete(RefreshOutcome::Delivered).unwrap();
     sink.publish(43).unwrap();
     assert_eq!(notifier.calls.load(Ordering::Acquire), 3);
@@ -3885,7 +3888,7 @@ fn refresh_drop_contains_hostile_notifier_panic_during_unwind() {
         assert_eq!(payload_drops.load(Ordering::Acquire), 0);
         assert!(runtime.cleanup_result().is_err());
         let retry = server.begin_refresh().unwrap();
-        assert_eq!(retry.updates[0].value, StoredRtdValue::Integer(42));
+        assert_eq!(retry.updates()[0].value, StoredRtdValue::Integer(42));
         retry.complete(RefreshOutcome::Delivered).unwrap();
     }
 }
@@ -4041,8 +4044,11 @@ fn newer_different_publish_supersedes_inflight_slot() {
     let shard_idx = shard_index(topic_id);
 
     let batch = server.begin_refresh().unwrap();
-    assert_eq!(batch.updates.len(), 1);
-    assert_eq!(batch.updates[0].value, StoredRtdValue::String("v1".into()));
+    assert_eq!(batch.updates().len(), 1);
+    assert_eq!(
+        batch.updates()[0].value,
+        StoredRtdValue::String("v1".into())
+    );
 
     {
         let shard = server.test_server().publish.lock_shard_for_test(shard_idx);
@@ -4081,9 +4087,9 @@ fn newer_different_publish_supersedes_inflight_slot() {
     }
 
     let next_batch = server.begin_refresh().unwrap();
-    assert_eq!(next_batch.updates.len(), 1);
+    assert_eq!(next_batch.updates().len(), 1);
     assert_eq!(
-        next_batch.updates[0].value,
+        next_batch.updates()[0].value,
         StoredRtdValue::String("v2".into())
     );
     next_batch.complete(RefreshOutcome::Delivered).unwrap();
@@ -4100,7 +4106,10 @@ fn older_publish_is_ignored_when_slot_is_inflight() {
     let shard_idx = shard_index(topic_id);
 
     let batch = server.begin_refresh().unwrap();
-    assert_eq!(batch.updates[0].value, StoredRtdValue::String("v1".into()));
+    assert_eq!(
+        batch.updates()[0].value,
+        StoredRtdValue::String("v1".into())
+    );
 
     // Newer publish writes to slot 1
     sink.publish("v2".to_owned()).unwrap();
@@ -4124,7 +4133,7 @@ fn older_publish_is_ignored_when_slot_is_inflight() {
 
     let next_batch = server.begin_refresh().unwrap();
     assert_eq!(
-        next_batch.updates[0].value,
+        next_batch.updates()[0].value,
         StoredRtdValue::String("v3".into())
     );
     next_batch.complete(RefreshOutcome::Delivered).unwrap();
@@ -4142,7 +4151,10 @@ fn failed_refresh_does_not_overwrite_newer_published_value() {
     let shard_idx = shard_index(topic_id);
 
     let batch = server.begin_refresh().unwrap();
-    assert_eq!(batch.updates[0].value, StoredRtdValue::String("v1".into()));
+    assert_eq!(
+        batch.updates()[0].value,
+        StoredRtdValue::String("v1".into())
+    );
 
     sink.publish("v2".to_owned()).unwrap();
 
@@ -4171,9 +4183,9 @@ fn failed_refresh_does_not_overwrite_newer_published_value() {
 
     // Next refresh picks newer sequence (slot 1, v2)!
     let next_batch = server.begin_refresh().unwrap();
-    assert_eq!(next_batch.updates.len(), 1);
+    assert_eq!(next_batch.updates().len(), 1);
     assert_eq!(
-        next_batch.updates[0].value,
+        next_batch.updates()[0].value,
         StoredRtdValue::String("v2".into())
     );
     next_batch.complete(RefreshOutcome::Delivered).unwrap();
@@ -4204,7 +4216,10 @@ fn dropped_refresh_batch_preserves_newer_published_value() {
     let shard_idx = shard_index(topic_id);
 
     let batch = server.begin_refresh().unwrap();
-    assert_eq!(batch.updates[0].value, StoredRtdValue::String("v1".into()));
+    assert_eq!(
+        batch.updates()[0].value,
+        StoredRtdValue::String("v1".into())
+    );
 
     sink.publish("v2".to_owned()).unwrap();
 
@@ -4228,7 +4243,7 @@ fn dropped_refresh_batch_preserves_newer_published_value() {
     // Next refresh picks newer update v2!
     let next_batch = server.begin_refresh().unwrap();
     assert_eq!(
-        next_batch.updates[0].value,
+        next_batch.updates()[0].value,
         StoredRtdValue::String("v2".into())
     );
     next_batch.complete(RefreshOutcome::Delivered).unwrap();
@@ -4264,7 +4279,7 @@ fn runtime_close_reclaims_all_inflight_slots() {
     }
 
     let batch = server.begin_refresh().unwrap();
-    assert_eq!(batch.updates.len(), 5);
+    assert_eq!(batch.updates().len(), 5);
 
     // During active lease: all 5 topics have an InFlight slot
     let check_inflight_count = || -> usize {
@@ -4310,7 +4325,7 @@ fn runtime_close_reclaims_all_inflight_slots() {
     );
 
     let held_batch = server.begin_refresh().unwrap();
-    assert_eq!(held_batch.updates.len(), 5);
+    assert_eq!(held_batch.updates().len(), 5);
     assert_eq!(check_inflight_count(), 5);
     assert_eq!(runtime.services.queued_update_quota.used(), 5);
     let closing_runtime = Arc::clone(&runtime);
@@ -4371,7 +4386,7 @@ fn refresh_batch_drop_on_unwind_does_not_deadlock() {
 
     let res = catch_unwind(AssertUnwindSafe(|| {
         let batch = server.begin_refresh().unwrap();
-        assert_eq!(batch.updates.len(), 1);
+        assert_eq!(batch.updates().len(), 1);
         panic!("simulated failure during COM formatting / caller processing");
     }));
     assert!(res.is_err(), "closure panicked as expected");
@@ -4389,7 +4404,7 @@ fn refresh_batch_drop_on_unwind_does_not_deadlock() {
     // Subsequent refresh retry succeeds
     let retry = server.begin_refresh().unwrap();
     assert_eq!(
-        retry.updates[0].value,
+        retry.updates()[0].value,
         StoredRtdValue::String("unwind-val".into())
     );
     retry.complete(RefreshOutcome::Delivered).unwrap();

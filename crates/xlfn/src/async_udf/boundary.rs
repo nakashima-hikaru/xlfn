@@ -6,7 +6,8 @@ use super::instrumentation::{AsyncObservation, CompletionObserver, NoObservation
 use super::task_scope::{HandleScopedBuilder, HandleScopedTaskBuilder};
 use super::transport::ExcelAsyncResponder;
 use crate::call_return::ExcelReturn;
-use crate::cancellation::{CancellationGuarantee, CancellationSource, CancellationToken};
+use crate::cancellation::{CancellationGuarantee, CancellationToken};
+mod launch;
 use crate::execution::{CallId, CallMetadata, InstrumentationPlan};
 use crate::panic_boundary::catch_no_unwind;
 use crate::runtime::Runtime;
@@ -14,6 +15,7 @@ use crate::runtime::Runtime;
 use crate::sync::Mutex;
 use crate::{XllError, XllResult};
 use futures_util::Future;
+use launch::LaunchOwner;
 use std::panic::AssertUnwindSafe;
 use xlfn_sys::XLOPER12;
 
@@ -230,7 +232,8 @@ unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
     // Excel does not raise CalculationEnded/CalculationCanceled for every
     // programmatic recalculation, so the public token cannot promise complete
     // calculation scoping even though event-driven generations are linearized.
-    let (cancellation, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
+    let mut launch = LaunchOwner::new(guard, calculation);
+    let token = launch.token();
     let mut observation = AsyncObservation::new(
         &metadata,
         timer,
@@ -252,16 +255,13 @@ unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
             return;
         }
     };
-    let future = catch_no_unwind(AssertUnwindSafe(|| {
-        guard.async_runtime().preflight_snapshot(&calculation)?;
-        start(guard, guard.try_execution_lease()?, token)
-    }))
-    .unwrap_or(Err(XllError::Panic));
+    let future =
+        catch_no_unwind(AssertUnwindSafe(|| launch.prepare(start))).unwrap_or(Err(XllError::Panic));
     match future {
-        Ok(future) => {
-            let reservation = match guard.async_runtime().reserve_snapshot(calculation) {
+        Ok(prepared) => {
+            let reservation = match prepared.reserve() {
                 Ok(reservation) => reservation,
-                Err(error) => {
+                Err((future, error)) => {
                     let _ = catch_no_unwind(AssertUnwindSafe(|| drop(future)));
                     // SAFETY: the responder owns a copied handle valid for this call.
                     let delivery = match unsafe { responder.deliver_error(&error) } {
@@ -277,8 +277,7 @@ unsafe fn async_udf_boundary_instrumented<A, Start, Fut, T>(
                     return;
                 }
             };
-            let task = AsyncDelivery::new(responder, token, observation).task(future);
-            reservation.commit(task, cancellation);
+            reservation.commit(responder, observation);
         }
         Err(error) => {
             // SAFETY: the responder owns a copied handle valid for this call.
@@ -312,7 +311,7 @@ unsafe fn async_udf_boundary_uninstrumented<A, Start, Fut, T>(
     T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
 {
     let calculation = guard.async_runtime().snapshot_calculation();
-    let (cancellation, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
+    let mut launch = LaunchOwner::new(guard, calculation);
     // SAFETY: forwarded from this function's raw-handle contract.
     let responder = match unsafe { ExcelAsyncResponder::from_raw(udf_id, raw_handle) } {
         Ok(responder) => responder,
@@ -326,16 +325,13 @@ unsafe fn async_udf_boundary_uninstrumented<A, Start, Fut, T>(
             return;
         }
     };
-    let future = catch_no_unwind(AssertUnwindSafe(|| {
-        guard.async_runtime().preflight_snapshot(&calculation)?;
-        start(guard, guard.try_execution_lease()?, token)
-    }))
-    .unwrap_or(Err(XllError::Panic));
+    let future =
+        catch_no_unwind(AssertUnwindSafe(|| launch.prepare(start))).unwrap_or(Err(XllError::Panic));
     match future {
-        Ok(future) => {
-            let reservation = match guard.async_runtime().reserve_snapshot(calculation) {
+        Ok(prepared) => {
+            let reservation = match prepared.reserve() {
                 Ok(reservation) => reservation,
-                Err(error) => {
+                Err((future, error)) => {
                     let _ = catch_no_unwind(AssertUnwindSafe(|| drop(future)));
                     // SAFETY: the responder owns a copied handle valid for this call.
                     let delivery = match unsafe { responder.deliver_error(&error) } {
@@ -350,8 +346,7 @@ unsafe fn async_udf_boundary_uninstrumented<A, Start, Fut, T>(
                     return;
                 }
             };
-            let task = AsyncDelivery::new(responder, token, NoObservation).task(future);
-            reservation.commit(task, cancellation);
+            reservation.commit(responder, NoObservation);
         }
         Err(error) => {
             // SAFETY: the responder owns a copied handle valid for this call.
@@ -508,7 +503,8 @@ unsafe fn async_udf_boundary_instrumented_handle<A, Start, Build, T>(
     };
     // The public cancellation token remains best effort; the task drain is
     // the stronger lifetime guarantee for raw object pins.
-    let (cancellation, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
+    let mut launch = LaunchOwner::new(guard, calculation);
+    let token = launch.token();
     let mut observation = AsyncObservation::new(
         &metadata,
         timer,
@@ -530,18 +526,13 @@ unsafe fn async_udf_boundary_instrumented_handle<A, Start, Build, T>(
             return;
         }
     };
-    let prepared = catch_no_unwind(AssertUnwindSafe(|| {
-        guard.async_runtime().preflight_snapshot(&calculation)?;
-        let lease = guard.try_execution_lease()?;
-        let generation = lease.generation();
-        start(guard, lease, token).map(|build| (generation, build))
-    }))
-    .unwrap_or(Err(XllError::Panic));
+    let prepared = catch_no_unwind(AssertUnwindSafe(|| launch.prepare_scoped(start)))
+        .unwrap_or(Err(XllError::Panic));
     match prepared {
-        Ok((generation, build)) => {
-            let reservation = match guard.async_runtime().reserve_snapshot(calculation) {
+        Ok(prepared) => {
+            let reservation = match prepared.reserve() {
                 Ok(reservation) => reservation,
-                Err(error) => {
+                Err((build, error)) => {
                     let _ = catch_no_unwind(AssertUnwindSafe(|| drop(build)));
                     // SAFETY: the responder owns a copied handle valid for this call.
                     let delivery = match unsafe { responder.deliver_error(&error) } {
@@ -557,11 +548,7 @@ unsafe fn async_udf_boundary_instrumented_handle<A, Start, Build, T>(
                     return;
                 }
             };
-            reservation.commit_handle_scoped(
-                generation,
-                HandleTask::new(build, responder, token, observation),
-                cancellation,
-            );
+            reservation.commit::<T, _>(responder, observation);
         }
         Err(error) => {
             // SAFETY: the responder owns a copied handle valid for this call.
@@ -596,7 +583,7 @@ unsafe fn async_udf_boundary_uninstrumented_handle<A, Start, Build, T>(
     T: ExcelReturn<InputMode = crate::value::PlainInputMode> + Send + 'static,
 {
     let calculation = guard.async_runtime().snapshot_calculation();
-    let (cancellation, token) = CancellationSource::new(CancellationGuarantee::BestEffort);
+    let mut launch = LaunchOwner::new(guard, calculation);
     // SAFETY: forwarded from this function's raw-handle contract.
     let responder = match unsafe { ExcelAsyncResponder::from_raw(udf_id, raw_handle) } {
         Ok(responder) => responder,
@@ -610,18 +597,13 @@ unsafe fn async_udf_boundary_uninstrumented_handle<A, Start, Build, T>(
             return;
         }
     };
-    let prepared = catch_no_unwind(AssertUnwindSafe(|| {
-        guard.async_runtime().preflight_snapshot(&calculation)?;
-        let lease = guard.try_execution_lease()?;
-        let generation = lease.generation();
-        start(guard, lease, token).map(|build| (generation, build))
-    }))
-    .unwrap_or(Err(XllError::Panic));
+    let prepared = catch_no_unwind(AssertUnwindSafe(|| launch.prepare_scoped(start)))
+        .unwrap_or(Err(XllError::Panic));
     match prepared {
-        Ok((generation, build)) => {
-            let reservation = match guard.async_runtime().reserve_snapshot(calculation) {
+        Ok(prepared) => {
+            let reservation = match prepared.reserve() {
                 Ok(reservation) => reservation,
-                Err(error) => {
+                Err((build, error)) => {
                     let _ = catch_no_unwind(AssertUnwindSafe(|| drop(build)));
                     // SAFETY: the responder owns a copied handle valid for this call.
                     let delivery = match unsafe { responder.deliver_error(&error) } {
@@ -636,11 +618,7 @@ unsafe fn async_udf_boundary_uninstrumented_handle<A, Start, Build, T>(
                     return;
                 }
             };
-            reservation.commit_handle_scoped(
-                generation,
-                HandleTask::new(build, responder, token, NoObservation),
-                cancellation,
-            );
+            reservation.commit::<T, _>(responder, NoObservation);
         }
         Err(error) => {
             // SAFETY: the responder owns a copied handle valid for this call.

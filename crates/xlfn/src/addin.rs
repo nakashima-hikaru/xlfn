@@ -1562,7 +1562,7 @@ mod tests {
         });
 
         let batch = server.begin_refresh().unwrap();
-        assert!(batch.updates.is_empty());
+        assert!(batch.updates().is_empty());
         batch
             .complete(crate::subscription::RefreshOutcome::Delivered)
             .unwrap();

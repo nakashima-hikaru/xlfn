@@ -17,6 +17,10 @@ mod catalog;
 #[cfg(feature = "rtd")]
 mod channel;
 mod data_plane;
+#[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
+pub(crate) use data_plane::RefreshOutputSlots;
+#[cfg(all(test, target_os = "windows", any(feature = "rtd", feature = "handles")))]
+pub(crate) use data_plane::write_refresh_data_for_test;
 mod delivery;
 mod disconnect;
 mod host;
@@ -80,7 +84,6 @@ pub(crate) use crate::generation::{ConnectionGeneration, RuntimeGeneration};
 #[cfg(any(
     all(test, feature = "rtd"),
     all(feature = "bench-internals", feature = "rtd"),
-    all(target_os = "windows", any(feature = "rtd", feature = "handles")),
 ))]
 pub(crate) use delivery::RefreshOutcome;
 #[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles"),))]

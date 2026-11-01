@@ -19,6 +19,11 @@ class PackageRoutingTests(unittest.TestCase):
             ("kernel/service_slot", "xlfn-kernel", ()),
             ("kernel/service_slot/transaction", "xlfn-kernel", ()),
             ("registration/host", "xlfn", (*checker.FEATURES, "blake3/pure")),
+            (
+                "subscription/data_plane/refresh/windows",
+                "xlfn",
+                (*checker.FEATURES, "blake3/pure"),
+            ),
         ):
             with self.subTest(module=module), tempfile.TemporaryDirectory() as directory:
                 overlay = Path(directory)
@@ -112,7 +117,7 @@ class Utf8TypestateTests(unittest.TestCase):
                     self.assertNotIn("--target", command)
                 overlay = Path(kwargs["cwd"])
                 injections = []
-                for relative in checker.MODULES.values():
+                for relative in set(checker.MODULES.values()):
                     text = (overlay / relative).read_bytes().decode("utf-8")
                     self.assertEqual(text.splitlines()[:1], source_text.splitlines())
                     injections.extend(

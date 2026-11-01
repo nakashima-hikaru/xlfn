@@ -35,10 +35,37 @@ MODULES = {
     "kernel/service_slot": Path("crates/xlfn-kernel/src/service_slot.rs"),
     "kernel/service_slot/transaction": Path("crates/xlfn-kernel/src/service_slot/transaction.rs"),
     "async_udf": Path("crates/xlfn/src/async_udf.rs"),
+    "async_udf/boundary": Path("crates/xlfn/src/async_udf/boundary.rs"),
+    "cancellation": Path("crates/xlfn/src/cancellation.rs"),
+    "excel_rtd/windows/server": Path("crates/xlfn/src/excel_rtd/windows/server.rs"),
     "async_udf/runtime": Path("crates/xlfn/src/async_udf/runtime.rs"),
     "subscription": Path("crates/xlfn/src/subscription.rs"),
     "subscription/channel": Path("crates/xlfn/src/subscription/channel.rs"),
     "subscription/runtime": Path("crates/xlfn/src/subscription/runtime.rs"),
+    "return_abi": Path("crates/xlfn/src/return_abi.rs"),
+    "return_abi/ownership": Path("crates/xlfn/src/return_abi/ownership.rs"),
+    "return_abi/slot": Path("crates/xlfn/src/return_abi/slot.rs"),
+    "macro_abi": Path("crates/xlfn/src/__private.rs"),
+    "macros/lib": Path("crates/xlfn-macros/src/lib.rs"),
+    "subscription/data_plane": Path("crates/xlfn/src/subscription/data_plane.rs"),
+    "subscription/data_plane/refresh": Path("crates/xlfn/src/subscription/data_plane/refresh.rs"),
+    # This scope exposes Windows-only child capabilities to a sibling caller
+    # without granting that caller access to the child's private fields.
+    "subscription/data_plane/refresh/windows": Path(
+        "crates/xlfn/src/subscription/data_plane/refresh.rs"
+    ),
+    "subscription/data_plane/refresh/publication": Path(
+        "crates/xlfn/src/subscription/data_plane/refresh/publication.rs"
+    ),
+    "diagnostics": Path("crates/xlfn/src/diagnostics.rs"),
+    "diagnostics/worker": Path("crates/xlfn/src/diagnostics/worker.rs"),
+    "handle/connection": Path("crates/xlfn/src/handle/connection.rs"),
+    "host_callback": Path("crates/xlfn/src/host_callback.rs"),
+    "callback_value": Path("crates/xlfn/src/callback_value.rs"),
+    "registration": Path("crates/xlfn/src/registration.rs"),
+    "runtime_components": Path("crates/xlfn/src/runtime_components.rs"),
+    "runtime_components/host_ledger": Path("crates/xlfn/src/runtime_components/host_ledger.rs"),
+    "registration/ledger": Path("crates/xlfn/src/registration/ledger.rs"),
     "handle": Path("crates/xlfn/src/handle.rs"),
     "handle/domain": Path("crates/xlfn/src/handle/domain.rs"),
     "registration/host": Path("crates/xlfn/src/registration/host.rs"),
@@ -50,7 +77,12 @@ MODULES = {
     "runtime/shutdown/pipeline": Path("crates/xlfn/src/runtime/shutdown/pipeline.rs"),
     "excel_rtd/windows": Path("crates/xlfn/src/excel_rtd/windows.rs"),
 }
-WINDOWS_MODULES = {"excel_rtd/windows"}
+WINDOWS_MODULES = {
+    "excel_rtd/windows",
+    "excel_rtd/windows/server",
+    "subscription/data_plane/refresh/publication",
+    "subscription/data_plane/refresh/windows",
+}
 FEATURES = ("async", "rtd", "handles", "cache")
 EXPECTED = re.compile(r"// error: (E\d{4})\s*$")
 
@@ -129,7 +161,13 @@ def check_fixture(
         source.write(
             f"\n#[allow(dead_code)]\n#[path = {path_literal}]\nmod typestate_compile_fixture;\n"
         )
-    package = "xlfn-kernel" if fixture.module.startswith("kernel/") else "xlfn"
+    package = (
+        "xlfn-kernel"
+        if fixture.module.startswith("kernel/")
+        else "xlfn-macros"
+        if fixture.module.startswith("macros/")
+        else "xlfn"
+    )
     features = (*FEATURES, *extra_features) if package == "xlfn" else ()
     command = [
         "cargo",

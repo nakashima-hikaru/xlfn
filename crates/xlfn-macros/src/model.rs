@@ -251,6 +251,16 @@ pub(super) struct UdfMetadata {
 
 /// The semantic meaning of one UDF, before generated identifiers are chosen.
 pub(super) struct UdfSpec {
+    data: UdfSpecData,
+}
+impl std::ops::Deref for UdfSpec {
+    type Target = UdfSpecData;
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+/// Read-only view; it cannot itself authorize code generation.
+pub(super) struct UdfSpecData {
     pub(super) function: UdfFunction,
     pub(super) metadata: UdfMetadata,
     pub(super) execution: ExecutionSpec,
@@ -285,6 +295,16 @@ pub(super) struct ArgumentPlan {
 /// Code-generation-oriented IR. It contains generated symbols, but still no
 /// emitted tokens or semantic policy interpretation.
 pub(super) struct UdfPlan {
+    data: UdfPlanData,
+}
+impl std::ops::Deref for UdfPlan {
+    type Target = UdfPlanData;
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+/// Read-only view; it cannot itself authorize code generation.
+pub(super) struct UdfPlanData {
     pub(super) function: UdfFunction,
     pub(super) metadata: UdfMetadata,
     pub(super) execution: ExecutionSpec,
@@ -525,17 +545,19 @@ pub(super) fn analyze(parsed: ParsedUdf) -> syn::Result<UdfSpec> {
     }
 
     Ok(UdfSpec {
-        function,
-        metadata,
-        execution,
-        arguments,
-        return_type,
-        return_abi,
-        handle_reuse,
-        volatile: options.volatile,
-        hidden: options.hidden,
-        gating,
-        crate_path,
+        data: UdfSpecData {
+            function,
+            metadata,
+            execution,
+            arguments,
+            return_type,
+            return_abi,
+            handle_reuse,
+            volatile: options.volatile,
+            hidden: options.hidden,
+            gating,
+            crate_path,
+        },
     })
 }
 
@@ -1089,6 +1111,7 @@ fn analyze_presence(
 /// emitter. This pass cannot fail because all user-facing validation is done
 /// by analyze.
 pub(super) fn lower(spec: UdfSpec) -> UdfPlan {
+    let spec = spec.data;
     let udf_id = spec.metadata.id.as_str();
     let symbols = UdfSymbols {
         export_ident: format_ident!("xll_{udf_id}"),
@@ -1113,17 +1136,19 @@ pub(super) fn lower(spec: UdfSpec) -> UdfPlan {
         .collect();
 
     UdfPlan {
-        function: spec.function,
-        metadata: spec.metadata,
-        execution: spec.execution,
-        arguments,
-        return_type: spec.return_type,
-        return_abi: spec.return_abi,
-        handle_reuse: spec.handle_reuse,
-        volatile: spec.volatile,
-        hidden: spec.hidden,
-        gating: spec.gating,
-        crate_path: spec.crate_path,
-        symbols,
+        data: UdfPlanData {
+            function: spec.function,
+            metadata: spec.metadata,
+            execution: spec.execution,
+            arguments,
+            return_type: spec.return_type,
+            return_abi: spec.return_abi,
+            handle_reuse: spec.handle_reuse,
+            volatile: spec.volatile,
+            hidden: spec.hidden,
+            gating: spec.gating,
+            crate_path: spec.crate_path,
+            symbols,
+        },
     }
 }

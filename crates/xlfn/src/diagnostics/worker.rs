@@ -47,10 +47,10 @@ impl OwnedDiagnosticEvent {
 }
 
 pub(crate) struct AsyncDiagnosticSink {
-    pub(crate) sender: Option<SyncSender<QueuedDiagnosticEvent>>,
-    pub(crate) worker: Option<JoinHandle<()>>,
-    pub(crate) worker_thread_id: std::thread::ThreadId,
-    pub(crate) observer: PublishedOwner<DiagnosticObserver>,
+    sender: Option<SyncSender<QueuedDiagnosticEvent>>,
+    worker: Option<JoinHandle<()>>,
+    worker_thread_id: std::thread::ThreadId,
+    observer: PublishedOwner<DiagnosticObserver>,
 }
 
 #[derive(Clone, Copy)]
@@ -172,10 +172,12 @@ impl DiagnosticReservation<'_> {
         self.committed = true;
         QueuedDiagnosticEvent {
             event,
-            credit: DiagnosticCredit {
-                observer: DiagnosticObserverPtr(NonNull::from(self.observer)),
-                payload_bytes: self.payload_bytes,
-                queued: true,
+            credit: QueuedCredit {
+                slot: SlotCredit(DiagnosticObserverPtr(NonNull::from(self.observer))),
+                payload: DeliveryCredit {
+                    observer: DiagnosticObserverPtr(NonNull::from(self.observer)),
+                    payload_bytes: self.payload_bytes,
+                },
             },
         }
     }
@@ -194,38 +196,62 @@ impl Drop for DiagnosticReservation<'_> {
 // including channel discard, send failure and unwinding before delivery.
 pub(crate) struct QueuedDiagnosticEvent {
     event: OwnedDiagnosticEvent,
-    credit: DiagnosticCredit,
+    credit: QueuedCredit,
 }
 
-struct DiagnosticCredit {
+struct QueuedCredit {
+    // Field order returns bytes before the slot if a queued event is discarded.
+    payload: DeliveryCredit,
+    slot: SlotCredit,
+}
+
+struct SlotCredit(DiagnosticObserverPtr);
+
+struct DeliveryCredit {
     observer: DiagnosticObserverPtr,
     payload_bytes: usize,
-    queued: bool,
 }
 
-impl DiagnosticCredit {
-    fn dequeue(&mut self) {
-        // SAFETY: a credit is private to its sender or worker's channel. The
-        // AsyncDiagnosticSink retains the observer through every worker join.
-        let observer = unsafe { self.observer.0.as_ref() };
-        observer.release_slot();
-        self.queued = false;
+impl QueuedCredit {
+    fn dequeue(self) -> DeliveryCredit {
+        let Self { payload, slot } = self;
+        drop(slot);
+        payload
     }
 }
 
-impl Drop for DiagnosticCredit {
+impl Drop for SlotCredit {
     fn drop(&mut self) {
-        // SAFETY: unused sends retain the sink borrow; queued credits are
-        // destroyed by the joined receiver before the observer owner is dropped.
-        let observer = unsafe { self.observer.0.as_ref() };
-        observer.release_payload(self.payload_bytes);
-        if self.queued {
-            observer.release_slot();
-        }
+        // SAFETY: unused sends retain the sink borrow; queued/delivery credits
+        // finish before the joined worker owner releases the observer.
+        unsafe { self.0.0.as_ref() }.release_slot();
+    }
+}
+
+impl Drop for DeliveryCredit {
+    fn drop(&mut self) {
+        // SAFETY: both queue and delivery are bounded by the joined worker owner.
+        unsafe { self.observer.0.as_ref() }.release_payload(self.payload_bytes);
     }
 }
 
 impl AsyncDiagnosticSink {
+    #[cfg(test)]
+    pub(super) fn panicking_for_test() -> Self {
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        let worker = std::thread::spawn(|| panic!("injected diagnostic worker panic"));
+        Self {
+            worker_thread_id: worker.thread().id(),
+            sender: Some(sender),
+            worker: Some(worker),
+            observer: PublishedOwner::from_box(DiagnosticObserver::new()),
+        }
+    }
+
+    pub(crate) fn worker_thread_id(&self) -> std::thread::ThreadId {
+        self.worker_thread_id
+    }
+
     pub(crate) fn new<S: DiagnosticSink>(sink: S) -> Result<Self, DiagnosticInitError> {
         Self::new_named(sink, "xlfn-diagnostics")
     }
@@ -248,10 +274,10 @@ impl AsyncDiagnosticSink {
             .name(worker_name.to_owned())
             .spawn(move || {
                 let worker_observer = observer_ptr;
-                while let Ok(mut queued) = receiver.recv() {
-                    queued.credit.dequeue();
+                while let Ok(queued) = receiver.recv() {
+                    let credit = queued.credit.dequeue();
                     queued.event.deliver(&sink);
-                    drop(queued.credit);
+                    drop(credit);
                     crate::ingress::with_diagnostic_linearization(|| {
                         // SAFETY: the observer lives until the worker thread joins in shutdown or drop
                         let observer_ref = unsafe { worker_observer.0.as_ref() };
@@ -395,6 +421,45 @@ mod budget_tests {
             diagnostic_id: metadata.diagnostic_id,
             timestamp: metadata.timestamp,
         }
+    }
+
+    #[test]
+    fn miri_dequeued_credit_retains_bytes_after_slot_return() {
+        let observer = DiagnosticObserver::new();
+        let error = crate::XllError::Native {
+            code: 1,
+            message: "payload".to_owned(),
+        };
+        let QueuedDiagnosticEvent { event, credit } =
+            observer.reserve(&error).unwrap().commit(event(error));
+        assert_eq!(observer.reserved.load(Ordering::Relaxed), 1);
+        let delivery = credit.dequeue();
+        assert_eq!(observer.reserved.load(Ordering::Relaxed), 0);
+        assert_eq!(observer.reserved_payload_bytes(), 7);
+        drop(event);
+        assert_eq!(observer.reserved_payload_bytes(), 7);
+        drop(delivery);
+        assert_eq!(observer.reserved_payload_bytes(), 0);
+    }
+
+    #[test]
+    #[allow(
+        clippy::mem_forget,
+        reason = "safe abandonment must retain byte credit"
+    )]
+    fn miri_forgotten_delivery_credit_cannot_discharge_bytes() {
+        let observer = DiagnosticObserver::new();
+        let error = crate::XllError::Native {
+            code: 1,
+            message: "payload".to_owned(),
+        };
+        let QueuedDiagnosticEvent { event, credit } =
+            observer.reserve(&error).unwrap().commit(event(error));
+        let delivery = credit.dequeue();
+        drop(event);
+        std::mem::forget(delivery);
+        assert_eq!(observer.reserved.load(Ordering::Relaxed), 0);
+        assert_eq!(observer.reserved_payload_bytes(), 7);
     }
 
     #[test]

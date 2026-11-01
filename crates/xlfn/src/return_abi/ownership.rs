@@ -122,10 +122,10 @@ impl ReturnTracker {
         let stripe_index = current_return_stripe();
         let permit = self.gate.try_enter(stripe_index).ok()?;
         Some(ReturnProducerGuard {
-            obligation: Some(ReturnObligation {
+            obligation: ReturnObligation {
                 _permit: permit,
                 observer: &self.observer,
-            }),
+            },
         })
     }
 
@@ -148,24 +148,42 @@ impl ReturnTracker {
     }
 }
 
+/// One admitted ownership obligation; publication consumes it exactly once.
 pub(crate) struct ReturnProducerGuard<'tracker> {
-    pub(crate) obligation: Option<ReturnObligation<'tracker>>,
-}
-
-impl<'tracker> ReturnProducerGuard<'tracker> {
-    pub(crate) fn is_armed(&self) -> bool {
-        self.obligation.is_some()
-    }
+    obligation: ReturnObligation<'tracker>,
 }
 
 impl ReturnProducerGuard<'static> {
-    pub(crate) fn transfer_to_block(&mut self) -> ReturnObligation<'static> {
-        let obligation = self
-            .obligation
-            .take()
-            .expect("return obligation is transferred exactly once");
-        obligation.observe_create_block();
-        obligation
+    pub(crate) fn transfer_to_block(self) -> ReturnObligation<'static> {
+        self.obligation.observe_create_block();
+        self.obligation
+    }
+}
+
+/// The panic boundary owns recovery, rather than borrowing a reusable producer.
+/// None means transfer has started: a second publication or fallback must stop.
+pub(super) struct ReturnPublicationTxn {
+    producer: Option<ReturnProducerGuard<'static>>,
+}
+
+impl ReturnPublicationTxn {
+    pub(super) fn new(producer: ReturnProducerGuard<'static>) -> Self {
+        Self {
+            producer: Some(producer),
+        }
+    }
+
+    pub(super) fn is_armed(&self) -> bool {
+        self.producer.is_some()
+    }
+
+    pub(super) fn prepare(&mut self, value: super::PreparedReturn) -> super::PreparedPublication {
+        // Mark transfer before allocation or other publication effects. A panic
+        // afterward cannot cause the outer boundary to publish a second value.
+        let Some(producer) = self.producer.take() else {
+            xlfn_kernel::invariant::fail_stop();
+        };
+        super::PreparedPublication { value, producer }
     }
 }
 

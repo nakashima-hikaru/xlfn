@@ -14,7 +14,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
             (
                 quote!(#krate::__private::v1::ReturnAbi::NumericArray12),
                 quote!(*mut #krate::__private::v1::FP12),
-                quote!(sync_udf_fp12),
+                quote!(sync_udf_fp12_with_mode),
                 quote!(export_numeric_boundary),
                 quote!(NumericReturn),
             )
@@ -22,7 +22,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
             (
                 quote!(#krate::__private::v1::ReturnAbi::Value12),
                 quote!(*mut #krate::__private::v1::XLOPER12),
-                quote!(sync_udf),
+                quote!(sync_udf_with_mode),
                 quote!(export_value_boundary),
                 quote!(ExcelReturn),
             )
@@ -130,20 +130,13 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
             __return_context.set_handle_reuse(#reuse_inputs)?;
         }
     });
-    let execution_kind = match execution {
-        model::ExecutionSpec::MainThread { .. } => {
-            quote!(#krate::__private::v1::ExecutionKind::MainThread)
-        }
-        model::ExecutionSpec::ThreadSafe { .. } => {
-            quote!(#krate::__private::v1::ExecutionKind::ThreadSafe)
-        }
-        model::ExecutionSpec::MacroSheet { .. } => {
-            quote!(#krate::__private::v1::ExecutionKind::MacroSheet)
-        }
-        model::ExecutionSpec::Async { .. } => {
-            quote!(#krate::__private::v1::ExecutionKind::Async)
-        }
+    let execution_mode = match execution {
+        model::ExecutionSpec::MainThread { .. } => quote!(#krate::__private::v1::MainThreadMode),
+        model::ExecutionSpec::ThreadSafe { .. } => quote!(#krate::__private::v1::ThreadSafeMode),
+        model::ExecutionSpec::MacroSheet { .. } => quote!(#krate::__private::v1::MacroSheetMode),
+        model::ExecutionSpec::Async { .. } => quote!(#krate::__private::v1::AsyncLaunchMode),
     };
+    let execution_kind = quote!(<#execution_mode as #krate::__private::v1::ExecutionMode>::KIND);
     let visibility = if hidden {
         quote!(#krate::__private::v1::FunctionVisibility::Hidden)
     } else {
@@ -221,14 +214,14 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                     quote! {
                         {
                             #async_assertion
-                            #krate::__private::v1::assert_excel_parameter::<#return_type, #ty, _, _>(__frame);
+                            #krate::__private::v1::assert_excel_parameter::<#return_type, #ty, _, _, _>(__frame);
                             #convert
                         }
                     }
                 }
                 model::ArgumentConversion::Value(_) => {
                     let convert = if is_async {
-                        quote!(#krate::__private::v1::convert_argument::<#return_type, #ty, _, _>(__frame, #index, #argument_name, #raw))
+                        quote!(#krate::__private::v1::convert_argument::<#return_type, #ty, _, _, _>(__frame, #index, #argument_name, #raw))
                     } else {
                         quote!(__frame.prepare_argument::<#ty>(#index, #argument_name, #raw))
                     };
@@ -238,7 +231,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
                     quote! {
                         {
                             #async_assertion
-                            #krate::__private::v1::assert_excel_parameter::<#return_type, #ty, _, _>(__frame);
+                            #krate::__private::v1::assert_excel_parameter::<#return_type, #ty, _, _, _>(__frame);
                             // SAFETY: Excel supplies the live XLOPER12 pointer for this ABI call.
                             unsafe {
                                 #convert
@@ -511,7 +504,7 @@ pub(crate) fn emit_excel_function(plan: &model::UdfPlan) -> proc_macro2::TokenSt
             // SAFETY: the generated wrapper is invoked by Excel using the
             // registered execution mode and starts this invocation exactly once.
             unsafe {
-                #krate::__private::v1::#sync_boundary::<_, #return_type, _>(
+                #krate::__private::v1::#sync_boundary::<_, #return_type, #execution_mode, _>(
                 &crate::__XLFN_RUNTIME,
                 #udf_id,
                 #excel_name,

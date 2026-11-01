@@ -181,7 +181,8 @@ fn double_checked_hit_reclaims_after_singleflight_unlock() {
             epoch,
             key: Key::plain(1),
         },
-        ResidentEntry::new((pointer, 1)),
+        // SAFETY: this newly allocated node's initial pin is its residency pin.
+        ResidentEntry::new(unsafe { ResidentPin::from_index(pointer) }, 1),
     );
     // Queue the old value for the caller's maintenance, without reclaiming
     // it on this setup thread.

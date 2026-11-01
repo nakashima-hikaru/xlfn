@@ -29,8 +29,6 @@ mod typed;
 
 pub(crate) use crate::call::HandleDomainWitness;
 pub(crate) use crate::formula_lifetime::FormulaLifetimeGeneration;
-#[cfg(any(target_os = "windows", test))]
-pub(crate) use connection::HandleConnection;
 pub(crate) use connection::{FormulaObserverId, Topic};
 pub(crate) use domain::{HandleDomainPermit, HandleReadDomain};
 #[cfg(any(feature = "bench-internals", all(test, feature = "handles")))]

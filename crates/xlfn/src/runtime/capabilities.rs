@@ -397,14 +397,6 @@ impl<'a, A: Addin> OpenDeps<'a, A> {
         self.host.merge(journal);
     }
 
-    pub(in crate::runtime) fn clear_metadata_debt_for_registrations(
-        &self,
-        registrations: &[crate::registration::RegistrationId],
-    ) {
-        self.host
-            .clear_metadata_debt_for_registrations(registrations);
-    }
-
     pub(in crate::runtime) fn install_addin_lifecycle(
         &self,
         access: &AddinLifecycleAccess<'_, A>,
@@ -524,10 +516,11 @@ impl<'a, A: Addin> ShutdownDeps<'a, A> {
         // external_entries remains the proof's drained-export projection:
         // raw export reservations can include the current removal boundary,
         // rather than another generation-owned activity awaiting teardown.
-        resources.registrations = self.host.registrations_snapshot().len() as u64;
+        let (registrations, registration_state_known) = self.host.registration_resources();
+        resources.registrations = registrations as u64;
         resources.resident_event_registrations = self.residency.resident_event_count() as u64;
         resources.module_residency_held = self.residency.is_held();
-        resources.registration_state_known = !self.host.registration_state_unknown();
+        resources.registration_state_known = registration_state_known;
         let callbacks = crate::module_runtime::global().callback_admission();
         resources.callback_gate_open =
             callbacks.lifecycle() == crate::callback_gate::ModuleCallbackLifecycle::Open;

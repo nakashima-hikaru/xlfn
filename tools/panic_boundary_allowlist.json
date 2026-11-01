@@ -160,20 +160,28 @@
     "reason": "The sole shared consuming implementation immediately passes the raw result to contain_panic."
   },
   {
-    "path": "crates/xlfn/src/return_abi.rs",
-    "context": "fn destroy_thread_local_return_block",
+    "path": "crates/xlfn/src/return_abi/slot.rs",
+    "context": "# [ inline ] fn destroy",
     "code": "let result = catch_unwind(AssertUnwindSafe(|| {",
     "count": 1,
     "category": "resume",
-    "reason": "destroy_thread_local_return_block poisons partially destroyed TLS storage and resumes the original payload; free_return_boundary consumes it."
+    "reason": "The consuming freeing capability poisons partially destroyed TLS storage and returns the original payload only to its resume-or-contain caller; successful destruction alone creates a reusable capability."
   },
   {
-    "path": "crates/xlfn/src/return_abi.rs",
+    "path": "crates/xlfn/src/return_abi/slot.rs",
     "context": "module root",
     "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",
     "count": 1,
     "category": "resume",
-    "reason": "Import for the audited resume-only boundary. destroy_thread_local_return_block poisons partially destroyed TLS storage and resumes the original payload; free_return_boundary consumes it."
+    "reason": "Import for the audited TLS destruction boundaries. Local destruction poisons the slot before returning the payload, and foreign destruction leaves producer TLS state untouched; both callers resume or contain it."
+  },
+  {
+    "path": "crates/xlfn/src/return_abi/slot.rs",
+    "context": "fn destroy_foreign",
+    "code": "catch_unwind(AssertUnwindSafe(|| {",
+    "count": 1,
+    "category": "resume",
+    "reason": "The defensive cross-thread free path leaves producer TLS state untouched and returns the original payload to the free boundary's resume-or-contain path."
   },
   {
     "path": "crates/xlfn/src/excel_rtd/windows.rs",
@@ -240,17 +248,17 @@
     "reason": "Observes the fixed string owner panic after the subscription joins during unwind."
   },
   {
-    "path": "crates/xlfn/src/subscription/data_plane.rs",
-    "context": "fn drive_notification",
-    "code": "let res = catch_unwind(AssertUnwindSafe(|| self.host.notify(&attempt.notifier)));",
+    "path": "crates/xlfn/src/subscription/data_plane/notification.rs",
+    "context": "fn drive",
+    "code": "let res = catch_unwind(AssertUnwindSafe(|| publish.host.notify(attempt.notifier())));",
     "count": 1,
     "category": "resume",
     "reason": "drive_notification records callback cleanup failure and resumes the original payload to the enclosing caller boundary."
   },
   {
-    "path": "crates/xlfn/src/subscription/data_plane.rs",
+    "path": "crates/xlfn/src/subscription/data_plane/notification.rs",
     "context": "module root",
-    "code": "use std::panic::{AssertUnwindSafe, catch_unwind};",
+    "code": "use std::panic::catch_unwind;",
     "count": 1,
     "category": "resume",
     "reason": "Import for the audited resume-only boundary. drive_notification records callback cleanup failure and resumes the original payload to the enclosing caller boundary."
@@ -360,7 +368,7 @@
     "reason": "Negative observer catches an injected event-builder panic and verifies that RAII returns the final diagnostic queue reservation."
   },
   {
-    "path": "crates/xlfn/src/subscription/data_plane.rs",
+    "path": "crates/xlfn/src/subscription/data_plane/refresh.rs",
     "context": "# [ cfg ( all ( test , feature = ) ) ] mod tests / # [ test ] fn partial_collection_unwind_restores_in_flight_values",
     "code": "std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {",
     "count": 1,

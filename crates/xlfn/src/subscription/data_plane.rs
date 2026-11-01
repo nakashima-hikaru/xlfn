@@ -3,10 +3,18 @@
     reason = "publish permits borrow runtime-owned quotas proven live by RTD shutdown"
 )]
 
+mod refresh;
+#[cfg(all(target_os = "windows", any(feature = "rtd", feature = "handles")))]
+pub(crate) use refresh::RefreshOutputSlots;
+pub(crate) use refresh::RtdRefreshBatch;
+#[cfg(all(test, target_os = "windows", any(feature = "rtd", feature = "handles")))]
+pub(crate) use refresh::write_refresh_data_for_test;
+mod notification;
+pub(crate) use notification::NotificationAttempt;
+
 use super::delivery::{
-    DeliveryPhase, NotificationAttempt, NotificationCompletion, QueuedUpdate, RefreshOutcome,
-    RefreshPlan, RefreshState, RtdUpdate, SERVER_LIFECYCLE_OPEN, SignalState, TopicShard,
-    ValueSlot, VersionedRtdValue, shard_index,
+    DeliveryPhase, QueuedUpdate, RefreshOutcome, RefreshPlan, RefreshState, RtdUpdate,
+    SERVER_LIFECYCLE_OPEN, SignalState, TopicShard, ValueSlot, VersionedRtdValue, shard_index,
 };
 use super::host::SubscriptionHost;
 use super::runtime_services::RuntimeServices;
@@ -17,7 +25,6 @@ use crate::sync::Mutex;
 use crate::{XllError, XllResult};
 #[cfg(test)]
 use std::cell::RefCell;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 #[cfg(test)]
@@ -562,34 +569,6 @@ impl<H: SubscriptionHost> PublishCore<H> {
         }
     }
 
-    fn prepare_notification_for_known_update(
-        &self,
-        epoch: u64,
-    ) -> XllResult<Option<NotificationAttempt<H::Notifier>>> {
-        if self.notified_epoch.load(Ordering::Acquire) == epoch {
-            return Ok(None);
-        }
-        let mut refresh = self.refresh.lock();
-        self.prepare_notification(&mut refresh, true)
-    }
-
-    /// Reserves a notification and publishes its fast-path epoch together.
-    /// The caller holds `refresh`, which also serializes epoch advancement.
-    /// A publisher may arrive with an older epoch after waiting for this lock;
-    /// cache the current epoch of the reserved notification, not that snapshot.
-    fn prepare_notification(
-        &self,
-        refresh: &mut RefreshState<H::Notifier>,
-        has_updates: bool,
-    ) -> XllResult<Option<NotificationAttempt<H::Notifier>>> {
-        let prepared = refresh.prepare_notification(has_updates)?;
-        Ok(prepared.map(|prepared| {
-            let epoch = self.publish_epoch.load(Ordering::Acquire);
-            self.notified_epoch.store(epoch, Ordering::Release);
-            refresh.commit_notification(prepared)
-        }))
-    }
-
     pub(crate) fn enter_operation(&self) -> XllResult<ScopedPublishOperation<'_, H>> {
         let mut runtime_guard = None;
         let mut server_guard = None;
@@ -731,7 +710,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
         topic_id: TopicId,
         generation: ConnectionGeneration,
         observed_sequence: Option<u64>,
-    ) -> XllResult<Option<NotificationAttempt<H::Notifier>>> {
+    ) -> XllResult<Option<NotificationAttempt<'_, H>>> {
         let shard_index = shard_index(topic_id);
         let (epoch, has_pending) = {
             let mut shard = self.shards[shard_index].lock();
@@ -871,7 +850,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
         };
 
         if committed && let Some(attempt) = self.prepare_notification_for_known_update(epoch)? {
-            self.drive_notification(attempt);
+            attempt.drive();
         }
         Ok(())
     }
@@ -994,254 +973,10 @@ impl<H: SubscriptionHost> PublishCore<H> {
                 break (epoch, notify);
             };
             if notify && let Some(attempt) = self.prepare_notification_for_known_update(epoch)? {
-                self.drive_notification(attempt);
+                attempt.drive();
             }
         }
         Ok(())
-    }
-
-    pub(crate) fn drive_notification(&self, mut attempt: NotificationAttempt<H::Notifier>) {
-        loop {
-            let _callback = ServerCallbackObservation::begin(self.services());
-            let res = catch_unwind(AssertUnwindSafe(|| self.host.notify(&attempt.notifier)));
-            let completion = match res {
-                Ok(Ok(())) => self.finish_notification_attempt(attempt.ticket, Ok(())),
-                Ok(Err(err)) => self.finish_notification_attempt(attempt.ticket, Err(err)),
-                Err(panic_payload) => {
-                    let err = XllError::Internal {
-                        diagnostic_id: crate::diagnostics::id::DiagnosticId::PANIC_NOTIFY,
-                    };
-                    self.services().record_cleanup_result(Err(err.clone()));
-                    std::panic::resume_unwind(panic_payload);
-                }
-            };
-
-            match completion {
-                NotificationCompletion::Finished => break,
-                NotificationCompletion::Retry(next) => attempt = next,
-                NotificationCompletion::Failed(err) => {
-                    self.services().record_cleanup_result(Err(err));
-                    break;
-                }
-            }
-        }
-    }
-
-    pub(crate) fn finish_notification_attempt(
-        &self,
-        ticket: u64,
-        outcome: XllResult<()>,
-    ) -> NotificationCompletion<H::Notifier> {
-        let mut refresh = self.refresh.lock();
-        let notifier = refresh.notifier.clone();
-        let Some(signal) = refresh.signal_for_ticket_mut(ticket) else {
-            return NotificationCompletion::Finished;
-        };
-
-        let attempt = match signal {
-            SignalState::Calling { ticket: t, attempt } if *t == ticket => *attempt,
-            _ => return NotificationCompletion::Finished,
-        };
-
-        match outcome {
-            Ok(()) => {
-                if let Some(signal) = refresh.signal_calling_mut(ticket) {
-                    *signal = SignalState::Signaled { ticket };
-                }
-                NotificationCompletion::Finished
-            }
-            Err(error) => {
-                if attempt < 2 {
-                    let next_attempt = attempt + 1;
-                    if let Some(signal) = refresh.signal_calling_mut(ticket) {
-                        *signal = SignalState::Calling {
-                            ticket,
-                            attempt: next_attempt,
-                        };
-                    }
-                    if let Some(notifier) = notifier {
-                        NotificationCompletion::Retry(NotificationAttempt { ticket, notifier })
-                    } else {
-                        if let DeliveryPhase::BetweenRefreshes {
-                            signal: signal @ SignalState::Suppressed { .. },
-                        } = &mut refresh.phase
-                        {
-                            *signal = SignalState::Dormant;
-                        }
-                        NotificationCompletion::Failed(error)
-                    }
-                } else {
-                    if let Some(signal) = refresh.signal_calling_mut(ticket) {
-                        *signal = SignalState::Suppressed { ticket };
-                    }
-                    NotificationCompletion::Failed(error)
-                }
-            }
-        }
-    }
-
-    pub(crate) fn complete_refresh_inner(
-        &self,
-        refresh_id: u64,
-        mut delivered_updates: Vec<RtdUpdate>,
-        outcome: RefreshOutcome,
-    ) -> XllResult<Option<NotificationAttempt<H::Notifier>>> {
-        {
-            let refresh = self.refresh.lock();
-            let DeliveryPhase::Refreshing {
-                refresh_id: active_id,
-            } = refresh.phase
-            else {
-                return Err(XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::NO_REFERENCE,
-                });
-            };
-            if active_id != refresh_id {
-                return Err(XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::REFERENCE_ID_MISMATCH,
-                });
-            }
-            refresh.ensure_notification_ticket()?;
-        }
-
-        // Collection groups each shard in dense pending-entry order. Retire
-        // backwards so the common full-buffer drain removes tail entries
-        // without moving survivors or repairing their indices.
-        let mut updates_iter = delivered_updates.drain(..).rev();
-        let mut current_opt = updates_iter.next();
-        while let Some(first_update) = current_opt {
-            let shard_idx = shard_index(TopicId(first_update.topic_id));
-            let mut shard = self.shards[shard_idx].lock();
-            let mut current = first_update;
-            loop {
-                let topic_id = TopicId(current.topic_id);
-                let slot = current.buffer as usize;
-
-                match outcome {
-                    RefreshOutcome::Delivered => {
-                        if let Some(active) = shard.active_by_topic.get_mut(&topic_id)
-                            && active.generation == current.connection_generation
-                            && let ValueSlot::InFlight {
-                                generation,
-                                sequence,
-                            } = active.values[slot]
-                            && generation == current.connection_generation
-                            && sequence == current.sequence
-                        {
-                            if active.latest_slot == Some(current.buffer) {
-                                active.values[slot] = ValueSlot::Resident(VersionedRtdValue {
-                                    generation,
-                                    sequence,
-                                    value: current.value,
-                                });
-                            } else {
-                                active.values[slot] = ValueSlot::Empty;
-                            }
-                        }
-
-                        self.retire_pending_through(
-                            &mut shard,
-                            shard_idx,
-                            topic_id,
-                            current.connection_generation,
-                            current.sequence,
-                        );
-                    }
-                    RefreshOutcome::Failed => {
-                        if let Some(active) = shard.active_by_topic.get_mut(&topic_id)
-                            && active.generation == current.connection_generation
-                            && let ValueSlot::InFlight {
-                                generation,
-                                sequence,
-                            } = active.values[slot]
-                            && generation == current.connection_generation
-                            && sequence == current.sequence
-                        {
-                            active.values[slot] = ValueSlot::Resident(VersionedRtdValue {
-                                generation,
-                                sequence,
-                                value: current.value,
-                            });
-                        }
-                    }
-                }
-
-                match updates_iter.next() {
-                    Some(next_update)
-                        if shard_index(TopicId(next_update.topic_id)) == shard_idx =>
-                    {
-                        current = next_update;
-                    }
-                    other => {
-                        current_opt = other;
-                        break;
-                    }
-                }
-            }
-        }
-
-        drop(updates_iter);
-        let mut refresh = self.refresh.lock();
-        let DeliveryPhase::Refreshing {
-            refresh_id: active_id,
-        } = refresh.phase
-        else {
-            return Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::NO_REFERENCE,
-            });
-        };
-        if active_id != refresh_id {
-            return Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::REFERENCE_ID_MISMATCH,
-            });
-        }
-        refresh.phase = DeliveryPhase::BetweenRefreshes {
-            signal: SignalState::Dormant,
-        };
-        refresh.recycled_updates = delivered_updates;
-
-        let has_updates = self.has_deliverable_updates();
-        self.prepare_notification(&mut refresh, has_updates)
-    }
-
-    pub(crate) fn abort_refresh_no_unwind(&self, refresh_id: u64, updates: Vec<RtdUpdate>) {
-        if !updates.is_empty() {
-            // An unwind during collection can leave an owned partial batch.
-            // Restore its InFlight slots before making another refresh
-            // admissible, exactly as when a collected batch is dropped.
-            if let Ok(Some(attempt)) =
-                self.complete_refresh_inner(refresh_id, updates, RefreshOutcome::Failed)
-            {
-                self.drive_notification(attempt);
-            }
-            return;
-        }
-        let attempt = {
-            let mut refresh = self.refresh.lock();
-            if let DeliveryPhase::Refreshing {
-                refresh_id: active_id,
-            } = refresh.phase
-            {
-                if active_id == refresh_id {
-                    refresh.phase = DeliveryPhase::BetweenRefreshes {
-                        signal: SignalState::Dormant,
-                    };
-                    refresh.recycled_updates = updates;
-                    let has_updates = self.has_deliverable_updates();
-                    self.prepare_notification(&mut refresh, has_updates)
-                        .ok()
-                        .flatten()
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        };
-
-        if let Some(attempt) = attempt {
-            self.drive_notification(attempt);
-        }
     }
 
     pub(crate) fn attach_update_notifier(
@@ -1258,7 +993,7 @@ impl<H: SubscriptionHost> PublishCore<H> {
             (retired, attempt)
         };
         if let Some(attempt) = attempt {
-            self.drive_notification(attempt);
+            attempt.drive();
         }
         Ok(retired)
     }
@@ -1289,53 +1024,9 @@ impl<H: SubscriptionHost> PublishCore<H> {
             self.prepare_notification(&mut refresh, has_updates)?
         };
         if let Some(attempt) = attempt {
-            self.drive_notification(attempt);
+            attempt.drive();
         }
         Ok(())
-    }
-
-    pub(crate) fn plan_refresh(&self) -> XllResult<PlannedRtdRefresh<'_, H>> {
-        let operation = self.enter_operation()?;
-        let (plan, updates) = {
-            self.ensure_open()?;
-            let mut refresh = self.refresh.lock();
-            if matches!(refresh.phase, DeliveryPhase::Refreshing { .. }) {
-                return Err(XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::OVERLAPPED_REFERENCE,
-                });
-            }
-            let refresh_id = refresh.next_refresh_id;
-            refresh.next_refresh_id = refresh_id.checked_add(1).ok_or(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::REFERENCE_OVERFLOW,
-            })?;
-
-            let previous_epoch = self
-                .publish_epoch
-                .try_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
-                    epoch.checked_add(1)
-                })
-                .map_err(|_| XllError::Internal {
-                    diagnostic_id: crate::diagnostics::id::DiagnosticId::REFERENCE_OVERFLOW,
-                })?;
-            let epoch = previous_epoch + 1;
-            refresh.phase = DeliveryPhase::Refreshing { refresh_id };
-            (
-                RefreshPlan {
-                    refresh_id,
-                    epoch,
-                    candidate_shards: self.ready_shards.load(Ordering::Acquire),
-                    estimated_updates: self.deliverable_pending.load(Ordering::Acquire),
-                },
-                std::mem::take(&mut refresh.recycled_updates),
-            )
-        };
-        Ok(PlannedRtdRefresh {
-            publish: self,
-            operation: Some(operation),
-            plan,
-            updates,
-            finished: false,
-        })
     }
 }
 
@@ -1433,18 +1124,6 @@ impl<H: SubscriptionHost> PublishCore<H> {
         }
     }
 
-    pub(crate) fn collect_refresh(&self, plan: &RefreshPlan, updates: &mut Vec<RtdUpdate>) {
-        debug_assert_eq!(self.publish_epoch.load(Ordering::Acquire), plan.epoch);
-        debug_assert!(updates.is_empty());
-        updates.reserve(plan.estimated_updates);
-        let mut shards = plan.candidate_shards;
-        while shards != 0 {
-            let index = shards.trailing_zeros() as usize;
-            shards &= shards - 1;
-            self.collect_shard_into(index, updates);
-        }
-    }
-
     pub(crate) fn begin_refresh(&self) -> XllResult<RtdRefreshBatch<'_, H>> {
         Ok(self.plan_refresh()?.collect())
     }
@@ -1471,101 +1150,6 @@ impl<H: SubscriptionHost> PublishCore<H> {
     pub(crate) fn mark_closing_for_test(&self) {
         self.lifecycle
             .store(super::delivery::SERVER_LIFECYCLE_CLOSING, Ordering::Release);
-    }
-
-    #[cfg(feature = "bench-internals")]
-    pub(crate) fn restore_refresh_updates(&self, plan: &RefreshPlan, updates: Vec<RtdUpdate>) {
-        let _ = self.complete_refresh_inner(plan.refresh_id, updates, RefreshOutcome::Failed);
-    }
-}
-
-#[must_use]
-pub(crate) struct PlannedRtdRefresh<'a, H: SubscriptionHost> {
-    pub(crate) publish: &'a PublishCore<H>,
-    pub(crate) operation: Option<ScopedPublishOperation<'a, H>>,
-    pub(crate) plan: RefreshPlan,
-    pub(crate) updates: Vec<RtdUpdate>,
-    pub(crate) finished: bool,
-}
-
-impl<'a, H: SubscriptionHost> PlannedRtdRefresh<'a, H> {
-    pub(crate) fn collect(mut self) -> RtdRefreshBatch<'a, H> {
-        self.publish.collect_refresh(&self.plan, &mut self.updates);
-        self.finished = true;
-        RtdRefreshBatch {
-            publish: self.publish,
-            operation: self.operation.take(),
-            plan: self.plan,
-            updates: std::mem::take(&mut self.updates),
-            finished: false,
-        }
-    }
-}
-
-impl<H: SubscriptionHost> Drop for PlannedRtdRefresh<'_, H> {
-    fn drop(&mut self) {
-        if self.finished {
-            return;
-        }
-        let _ = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
-            self.publish
-                .abort_refresh_no_unwind(self.plan.refresh_id, std::mem::take(&mut self.updates));
-        }));
-    }
-}
-
-#[must_use]
-pub(crate) struct RtdRefreshBatch<'a, H: SubscriptionHost> {
-    publish: &'a PublishCore<H>,
-    operation: Option<ScopedPublishOperation<'a, H>>,
-    pub(crate) plan: RefreshPlan,
-    pub(crate) updates: Vec<RtdUpdate>,
-    finished: bool,
-}
-
-impl<H: SubscriptionHost> RtdRefreshBatch<'_, H> {
-    pub(crate) fn complete(mut self, outcome: RefreshOutcome) -> XllResult<()> {
-        self.finished = true;
-        let updates = std::mem::take(&mut self.updates);
-        let attempt =
-            self.publish
-                .complete_refresh_inner(self.plan.refresh_id, updates, outcome)?;
-        if let Some(attempt) = attempt {
-            self.publish.drive_notification(attempt);
-        }
-        self.operation.take();
-        Ok(())
-    }
-}
-
-// AUDIT [Lock Safety & Self-Deadlock Prevention]:
-// `RtdRefreshBatch::drop` acquires shard mutexes during rollback (`complete_refresh_inner`).
-// Self-deadlock is structurally impossible because:
-// 1. `RtdRefreshBatch` is only constructed via `PlannedRtdRefresh::collect()`,
-//    which executes strictly after all `collect_shard` mutex guards have been dropped. No shard
-//    lock is held when `RtdRefreshBatch` is handed to the caller.
-// 2. Caller code (e.g. `IRtdServer::RefreshData`) and safe consumer APIs never acquire or hold
-//    any shard mutexes.
-// 3. Stack unwinding from panics in caller code or formatting therefore drops `RtdRefreshBatch`
-//    with zero shard mutexes held by the current thread.
-// 4. In `complete_refresh_inner`, shard mutexes are acquired sequentially and dropped
-//    immediately without holding any other shard lock or the `refresh` lock.
-impl<H: SubscriptionHost> Drop for RtdRefreshBatch<'_, H> {
-    fn drop(&mut self) {
-        if self.finished {
-            return;
-        }
-        self.finished = true;
-        let updates = std::mem::take(&mut self.updates);
-        let _ = crate::panic_boundary::catch_no_unwind(AssertUnwindSafe(|| {
-            if let Ok(Some(attempt)) = self.publish.complete_refresh_inner(
-                self.plan.refresh_id,
-                updates,
-                RefreshOutcome::Failed,
-            ) {
-                self.publish.drive_notification(attempt);
-            }
-        }));
     }
 }
 
@@ -1704,13 +1288,13 @@ mod tests {
             assert_eq!(notifier.calls.load(Ordering::Acquire), 2, "{completion}");
 
             let latest = server.begin_refresh().unwrap();
-            assert_eq!(latest.updates.len(), 1);
-            assert_eq!(latest.updates[0].value, StoredRtdValue::Integer(3));
+            assert_eq!(latest.updates().len(), 1);
+            assert_eq!(latest.updates()[0].value, StoredRtdValue::Integer(3));
             latest.complete(RefreshOutcome::Delivered).unwrap();
             sink.publish(4).unwrap();
             assert_eq!(notifier.calls.load(Ordering::Acquire), 3, "{completion}");
             let next = server.begin_refresh().unwrap();
-            assert_eq!(next.updates[0].value, StoredRtdValue::Integer(4));
+            assert_eq!(next.updates()[0].value, StoredRtdValue::Integer(4));
             next.complete(RefreshOutcome::Delivered).unwrap();
         }
     }
@@ -1744,7 +1328,7 @@ mod tests {
             .prepare_notification_for_known_update(writer_epoch)
             .unwrap()
             .unwrap();
-        publish.drive_notification(attempt);
+        attempt.drive();
         let current_epoch = publish.publish_epoch.load(Ordering::Acquire);
         assert_ne!(writer_epoch, current_epoch);
         assert_eq!(
@@ -1793,7 +1377,7 @@ mod tests {
                 sink.lock().as_ref().unwrap().publish(index as i32).unwrap();
             }
             let batch = server.begin_refresh().unwrap();
-            assert_eq!(batch.updates.len(), sources.len());
+            assert_eq!(batch.updates().len(), sources.len());
             batch.complete(RefreshOutcome::Delivered).unwrap();
             let publish = &server.test_server().publish;
             assert!(publish.refresh.lock().recycled_updates.capacity() >= sources.len());
@@ -1813,64 +1397,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn partial_collection_unwind_restores_in_flight_values() {
-        use crate::subscription::tests::SourceFixture;
-        use crate::subscription::{RefreshOutcome, RtdTopic, StoredRtdValue, TopicId};
-        let fixture = SourceFixture::new();
-        let sources = [fixture.add::<i32>(None), fixture.add::<i32>(None)];
-        let runtime =
-            SubscriptionRuntime::<crate::excel_rtd::RtdSubscriptionHost, _>::with_sources_for_internal(
-                fixture.finish(),
-            );
-        let server = runtime.register_test_server(1);
-        for (index, (source, sink, _)) in sources.iter().enumerate() {
-            let prepared = runtime
-                .prepare(
-                    source,
-                    RtdTopic::single(format!("partial-{index}"))
-                        .unwrap()
-                        .borrowed(),
-                )
-                .unwrap();
-            let id = prepared.id();
-            prepared.commit();
-            runtime
-                .connect_transaction(&server, TopicId(index as i32 + 1), id)
-                .unwrap()
-                .commit()
-                .unwrap();
-            sink.lock().as_ref().unwrap().publish(index as i32).unwrap();
-        }
-        let publish = &server.test_server().publish;
-        assert!(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let mut planned = publish.plan_refresh().unwrap();
-                publish.collect_shard_into(1, &mut planned.updates);
-                assert_eq!(planned.updates.len(), 1);
-                panic!("injected unwind between shard collections");
-            }))
-            .is_err()
-        );
-        let retry = server.begin_refresh().unwrap();
-        let mut values = retry
-            .updates
-            .iter()
-            .map(|update| (update.topic_id, update.value.clone()))
-            .collect::<Vec<_>>();
-        values.sort_by_key(|&(topic, _)| topic);
-        assert_eq!(
-            values,
-            [
-                (1, StoredRtdValue::Integer(0)),
-                (2, StoredRtdValue::Integer(1)),
-            ]
-        );
-        retry.complete(RefreshOutcome::Delivered).unwrap();
-        assert_eq!(server.pending_update_count(), 0);
-        assert_eq!(publish.queued_update_count(), 0);
     }
 
     fn assert_drop_order(run: impl FnOnce()) {

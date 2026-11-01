@@ -30,6 +30,7 @@ use std::sync::atomic::Ordering;
 use std::sync::atomic::{AtomicBool, AtomicU32};
 
 mod automation;
+pub(crate) use automation::WindowsRefreshArrayApi;
 mod class_factory;
 mod com_abi;
 mod event;

@@ -249,13 +249,38 @@ pub(crate) struct TopicShard {
 }
 
 pub(crate) struct NotificationAttempt<N> {
-    pub(crate) ticket: u64,
-    pub(crate) notifier: N,
+    ticket: u64,
+    notifier: N,
+}
+impl<N> NotificationAttempt<N> {
+    pub(super) fn ticket(&self) -> u64 {
+        self.ticket
+    }
+    pub(super) fn notifier(&self) -> &N {
+        &self.notifier
+    }
+    pub(super) fn with_notifier(self, notifier: N) -> Self {
+        Self {
+            ticket: self.ticket,
+            notifier,
+        }
+    }
 }
 
 pub(crate) struct PreparedNotification<N> {
-    pub(crate) ticket: u64,
-    pub(crate) notifier: N,
+    ticket: u64,
+    notifier: N,
+}
+
+impl<N> PreparedNotification<N> {
+    #[cfg(test)]
+    pub(super) fn ticket(&self) -> u64 {
+        self.ticket
+    }
+    #[cfg(test)]
+    pub(super) fn notifier(&self) -> &N {
+        &self.notifier
+    }
 }
 
 pub(crate) enum NotificationCompletion<N> {
@@ -414,8 +439,8 @@ mod typed_sink_tests {
         assert_eq!(sink.publish_core, expected);
         sink.publish_stored(StoredRtdValue::Integer(7)).unwrap();
         let batch = server.begin_refresh().unwrap();
-        assert_eq!(batch.updates.len(), 1);
-        assert_eq!(batch.updates[0].value, StoredRtdValue::Integer(7));
+        assert_eq!(batch.updates().len(), 1);
+        assert_eq!(batch.updates()[0].value, StoredRtdValue::Integer(7));
         batch.complete(RefreshOutcome::Delivered).unwrap();
 
         let stopping = AtomicBool::new(false);
@@ -425,8 +450,8 @@ mod typed_sink_tests {
         )
         .unwrap();
         let batch = server.begin_refresh().unwrap();
-        assert_eq!(batch.updates.len(), 1);
-        assert_eq!(batch.updates[0].value, StoredRtdValue::Integer(9));
+        assert_eq!(batch.updates().len(), 1);
+        assert_eq!(batch.updates()[0].value, StoredRtdValue::Integer(9));
         batch.complete(RefreshOutcome::Delivered).unwrap();
         assert!(notifier.calls.load(Ordering::Acquire) >= 2);
 

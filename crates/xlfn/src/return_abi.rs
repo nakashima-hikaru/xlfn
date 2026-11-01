@@ -10,9 +10,9 @@ use crate::runtime::Runtime;
 #[cfg(test)]
 use crate::value::ExcelCellOutput;
 use crate::{XllError, XllResult};
-use std::cell::{Cell, UnsafeCell};
-use std::mem::MaybeUninit;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+#[cfg(test)]
+use std::cell::Cell;
+use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 use xlfn_kernel::published_owner::PublishedOwner;
 
@@ -29,10 +29,13 @@ pub(crate) mod metadata;
 pub(crate) mod numeric;
 pub(crate) mod ownership;
 pub(crate) mod scalar;
+mod slot;
+use slot::{RETURN_BLOCK_SLOT, ReturnBlockSlot};
 pub(crate) mod storage;
 
 pub(crate) use conversion::{CallbackCleanupDebt, ExcelCallbackStatus};
 pub(crate) use ownership::ReturnFreeBoundaryGuard;
+use ownership::ReturnPublicationTxn;
 pub(crate) use ownership::{ReturnFreeGuard, ReturnObligation, ReturnProducerGuard, ReturnTracker};
 
 pub use array::{XlArrayBuilder, XlArrayOutput};
@@ -76,69 +79,9 @@ struct ReturnBlock {
     backing: ReturnBlockBacking,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ReturnBlockSlotState {
-    Vacant,
-    Occupied,
-    Poisoned,
-}
-
-struct ReturnBlockSlot {
-    state: Cell<ReturnBlockSlotState>,
-    block: UnsafeCell<MaybeUninit<ReturnBlock>>,
-}
-
-impl ReturnBlockSlot {
-    const fn new() -> Self {
-        Self {
-            state: Cell::new(ReturnBlockSlotState::Vacant),
-            block: UnsafeCell::new(MaybeUninit::uninit()),
-        }
-    }
-
-    fn try_acquire(&self) -> Option<NonNull<ReturnBlock>> {
-        if self.state.get() != ReturnBlockSlotState::Vacant {
-            return None;
-        }
-
-        self.state.set(ReturnBlockSlotState::Occupied);
-        // SAFETY: Vacant is the only state in which the slot may be acquired,
-        // so no initialized ReturnBlock is being aliased or overwritten.
-        let raw_block = unsafe { &mut *self.block.get() };
-        let block_ptr = raw_block.as_mut_ptr();
-        // SAFETY: pointer to internal UnsafeCell storage is non-null.
-        Some(unsafe { NonNull::new_unchecked(block_ptr) })
-    }
-
-    fn owns(&self, pointer: *mut ReturnBlock) -> bool {
-        self.state.get() == ReturnBlockSlotState::Occupied
-            && self.block.get().cast::<ReturnBlock>() == pointer
-    }
-
-    /// Marks the slot available after its initialized value has been dropped.
-    ///
-    /// # Safety
-    ///
-    /// `pointer` must be the pointer returned by `try_acquire`, and the value
-    /// at that pointer must already have been destroyed.
-    unsafe fn release(&self, pointer: *mut ReturnBlock) {
-        debug_assert!(self.owns(pointer));
-        self.state.set(ReturnBlockSlotState::Vacant);
-    }
-
-    fn poison(&self) {
-        debug_assert_eq!(self.state.get(), ReturnBlockSlotState::Occupied);
-        self.state.set(ReturnBlockSlotState::Poisoned);
-    }
-}
-
 // The slot contains only non-owning storage. Its TLS value must never run a
 // destructor while a cdylib is being unloaded.
 const _: () = assert!(!std::mem::needs_drop::<ReturnBlockSlot>());
-
-thread_local! {
-    static RETURN_BLOCK_SLOT: ReturnBlockSlot = const { ReturnBlockSlot::new() };
-}
 
 #[derive(Debug)]
 #[doc(hidden)]
@@ -209,7 +152,12 @@ impl PreparedReturn {
         }
     }
 
-    fn publish_excel(self, producer: &mut ReturnProducerGuard<'static>) -> ValuePublication {
+    fn publish_excel(self, producer: &mut ReturnPublicationTxn) -> ValuePublication {
+        // A committed owned block cannot be replaced by scalar panic fallback.
+        // The outer boundary must stop rather than create a second publication.
+        if !producer.is_armed() {
+            xlfn_kernel::invariant::fail_stop();
+        }
         if self.storage.is_none()
             && self.array.is_none()
             && matches!(
@@ -224,14 +172,31 @@ impl PreparedReturn {
         ValuePublication::Owned(self.publish_owned_excel(producer))
     }
 
-    fn publish_owned_excel(mut self, producer: &mut ReturnProducerGuard<'static>) -> *mut XLOPER12 {
+    fn publish_owned_excel(self, producer: &mut ReturnPublicationTxn) -> *mut XLOPER12 {
+        producer.prepare(self).commit()
+    }
+}
+
+/// Conversion and validation have completed, and this owner retains the exact
+/// admission that may be transferred once into its Excel-owned block.
+struct PreparedPublication {
+    value: PreparedReturn,
+    producer: ReturnProducerGuard<'static>,
+}
+
+impl PreparedPublication {
+    fn into_block(self) -> ReturnBlock {
+        let Self {
+            value: mut prepared,
+            producer,
+        } = self;
         let obligation = producer.transfer_to_block();
-        self.oper.xltype |= XLBIT_DLL_FREE;
+        prepared.oper.xltype |= XLBIT_DLL_FREE;
 
         let block = ReturnBlock {
-            oper: self.oper,
-            storage: self.storage,
-            array: self.array,
+            oper: prepared.oper,
+            storage: prepared.storage,
+            array: prepared.array,
             obligation: Some(obligation),
             magic: RETURN_MAGIC,
             backing: ReturnBlockBacking::Heap,
@@ -240,14 +205,14 @@ impl PreparedReturn {
         #[cfg(test)]
         LIVE_BLOCKS.fetch_add(1, Ordering::Relaxed);
 
+        block
+    }
+
+    fn commit(self) -> *mut XLOPER12 {
+        let block = self.into_block();
         RETURN_BLOCK_SLOT.with(|slot| {
-            if let Some(block_pointer) = slot.try_acquire() {
-                let mut block = block;
-                block.backing = ReturnBlockBacking::ThreadLocal;
-                // SAFETY: `try_acquire` reserved this slot and returned its
-                // uninitialized storage for exactly one ReturnBlock value.
-                unsafe { block_pointer.as_ptr().write(block) };
-                block_pointer.cast::<XLOPER12>().as_ptr()
+            if let Some(reserved) = slot.try_reserve() {
+                reserved.initialize(block).publish().into_pointer()
             } else {
                 ReturnBlock::into_non_null(Box::new(block)).as_ptr()
             }
@@ -314,17 +279,14 @@ fn enforce_return_limit(bytes: usize) -> XllResult<()> {
 #[cfg(test)]
 fn allocate_excel_owned(
     value: impl crate::call_return::EncodedReturn,
-    producer: &mut ReturnProducerGuard<'static>,
+    producer: &mut ReturnPublicationTxn,
 ) -> XllResult<*mut XLOPER12> {
     let prepared = PreparedReturn::encode(value)?;
     Ok(prepared.publish_owned_excel(producer))
 }
 
 #[cfg(test)]
-fn allocate_excel_error(
-    error: &XllError,
-    producer: &mut ReturnProducerGuard<'static>,
-) -> *mut XLOPER12 {
+fn allocate_excel_error(error: &XllError, producer: &mut ReturnPublicationTxn) -> *mut XLOPER12 {
     PreparedReturn::error(error).publish_owned_excel(producer)
 }
 
@@ -396,9 +358,10 @@ where
         Ok(call) => call,
         Err(_) => return closing_error_pointer(),
     };
-    let Some(mut producer) = runtime.enter_return_producer() else {
+    let Some(producer) = runtime.enter_return_producer() else {
         return closing_error_pointer();
     };
+    let mut producer = ReturnPublicationTxn::new(producer);
     match catch_no_unwind(AssertUnwindSafe(|| {
         let mut context = ReturnContext::new();
         let value = T::invoke(&mut context, operation)?;
@@ -449,10 +412,10 @@ trait SyncReturnAbi {
     fn rejected() -> Self::Pointer;
     fn publish(
         payload: Self::Payload,
-        producer: &mut ReturnProducerGuard<'static>,
+        producer: &mut ReturnPublicationTxn,
         numeric: &numeric::Fp12CallGuard,
     ) -> XllResult<Self::Publication>;
-    fn error(error: &XllError, producer: &mut ReturnProducerGuard<'static>) -> Self::Publication;
+    fn error(error: &XllError, producer: &mut ReturnPublicationTxn) -> Self::Publication;
     /// Final ABI handoff after all potentially reentrant call cleanup.
     fn finish(publication: Self::Publication) -> Self::Pointer;
 }
@@ -473,12 +436,12 @@ impl<P: crate::call_return::EncodedReturn> SyncReturnAbi for ValueReturnAbi<P> {
     }
     fn publish(
         payload: P,
-        producer: &mut ReturnProducerGuard<'static>,
+        producer: &mut ReturnPublicationTxn,
         _: &numeric::Fp12CallGuard,
     ) -> XllResult<Self::Publication> {
         Ok(PreparedReturn::encode(payload)?.publish_excel(producer))
     }
-    fn error(error: &XllError, producer: &mut ReturnProducerGuard<'static>) -> Self::Publication {
+    fn error(error: &XllError, producer: &mut ReturnPublicationTxn) -> Self::Publication {
         PreparedReturn::error(error).publish_excel(producer)
     }
     fn finish(publication: Self::Publication) -> Self::Pointer {
@@ -500,12 +463,12 @@ impl SyncReturnAbi for NumericReturnAbi {
     }
     fn publish(
         payload: Self::Payload,
-        _: &mut ReturnProducerGuard<'static>,
+        _: &mut ReturnPublicationTxn,
         numeric: &numeric::Fp12CallGuard,
     ) -> XllResult<Self::Pointer> {
         payload.publish(numeric)
     }
-    fn error(_: &XllError, _: &mut ReturnProducerGuard<'static>) -> Self::Pointer {
+    fn error(_: &XllError, _: &mut ReturnPublicationTxn) -> Self::Pointer {
         std::ptr::null_mut()
     }
     fn finish(publication: Self::Publication) -> Self::Pointer {
@@ -618,10 +581,11 @@ where
             return B::rejected();
         }
     };
-    let Some(mut producer) = runtime.enter_return_producer() else {
+    let Some(producer) = runtime.enter_return_producer() else {
         report_sync_failure::<A, B>(runtime, udf_id, None, calculation_id, &XllError::Closing);
         return B::rejected();
     };
+    let mut producer = ReturnPublicationTxn::new(producer);
     // Allocate correlation even without a sink, layer, or tracing subscriber.
     let call_id = CallId::new(runtime.next_call_id());
     let result = match crate::panic_boundary::catch_udf_no_unwind(AssertUnwindSafe(|| {
@@ -661,7 +625,7 @@ where
 fn sync_boundary_inner<A, B, F>(
     runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     guard: &crate::runtime::CallGuard<'_, A>,
-    producer: &mut ReturnProducerGuard<'static>,
+    producer: &mut ReturnPublicationTxn,
     numeric: &numeric::Fp12CallGuard,
     udf_id: &'static str,
     excel_name: &'static str,
@@ -853,29 +817,19 @@ fn destroy_return_block(pointer: NonNull<ReturnBlock>, backing: ReturnBlockBacki
 
 fn destroy_thread_local_return_block(pointer: *mut ReturnBlock) {
     RETURN_BLOCK_SLOT.with(|slot| {
-        // A cross-thread free remains supported defensively. In that case the
-        // producer's slot cannot be touched safely from this thread, so it is
-        // deliberately left occupied and future returns use heap fallback.
-        let owned_by_current_thread = slot.owns(pointer);
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            // SAFETY: pointer is a live ReturnBlock and its backing storage is
-            // still initialized until drop_in_place completes.
-            unsafe { std::ptr::drop_in_place(pointer) };
-        }));
-
-        match result {
-            Ok(()) => {
-                if owned_by_current_thread {
-                    // SAFETY: the initialized ReturnBlock was just destroyed.
-                    unsafe { slot.release(pointer) };
-                }
-            }
-            Err(payload) => {
-                if owned_by_current_thread {
-                    slot.poison();
-                }
-                std::panic::resume_unwind(payload);
-            }
+        // SAFETY: the caller reaches this helper only from the exact-once
+        // Excel free boundary, after all reads of this returned root ended.
+        let local = unsafe { slot.claim_free(pointer) };
+        let result = if let Some(freeing) = local {
+            freeing.destroy().map(|reusable| reusable.release())
+        } else {
+            // A defensive cross-thread free cannot touch the producer's TLS
+            // state. Its slot remains ineligible for reuse, as before.
+            // SAFETY: the same free boundary owns the foreign-thread payload.
+            unsafe { slot::destroy_foreign(pointer) }
+        };
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
         }
     });
 }
@@ -906,6 +860,11 @@ mod tests {
     use super::*;
     use crate::value::Matrix;
     use crate::{Addin, ExcelError, OpenContext};
+
+    pub(super) fn with_locked_return_test(operation: impl FnOnce()) {
+        let _test = test_lock();
+        operation();
+    }
 
     mod output_error_policy {
         use super::*;
@@ -1355,7 +1314,8 @@ mod tests {
             .into_admitted()
             .map_err(|_| XllError::Closing)?;
         let _call = runtime.enter(&ingress)?;
-        let mut producer = runtime.enter_return_producer().ok_or(XllError::Closing)?;
+        let mut producer =
+            ReturnPublicationTxn::new(runtime.enter_return_producer().ok_or(XllError::Closing)?);
         allocate_excel_owned(value, &mut producer)
     }
 
@@ -1499,7 +1459,7 @@ mod tests {
             // SAFETY: pointer is the live return produced above.
             let free_guard = unsafe { free_return_boundary(pointer) };
             RETURN_BLOCK_SLOT.with(|slot| {
-                assert_eq!(slot.state.get(), ReturnBlockSlotState::Poisoned);
+                assert!(slot.is_poisoned());
             });
 
             let fallback = ffi_boundary(runtime, || Ok(43.0));
@@ -1559,7 +1519,8 @@ mod tests {
                         <Matrix<_> as ExcelReturn>::into_excel(matrix, &mut ReturnContext::new())
                             .unwrap()
                     };
-                    let mut producer = tracker.try_enter_producer().unwrap();
+                    let mut producer =
+                        ReturnPublicationTxn::new(tracker.try_enter_producer().unwrap());
                     allocate_excel_owned(value, &mut producer).unwrap()
                 };
                 let first = matrix();
@@ -1629,7 +1590,7 @@ mod tests {
                     // before returning its separate UTF-16 payload owner.
                     ReturnPayload::scalar(source).unwrap()
                 };
-                let mut producer = tracker.try_enter_producer().unwrap();
+                let mut producer = ReturnPublicationTxn::new(tracker.try_enter_producer().unwrap());
                 allocate_excel_owned(payload, &mut producer).unwrap()
             };
             let read = |pointer: *mut XLOPER12, expected: &str| {
@@ -1854,7 +1815,7 @@ mod tests {
             // SAFETY: pointer is the live return produced above.
             let free_guard = unsafe { free_return_boundary(pointer) };
             RETURN_BLOCK_SLOT.with(|slot| {
-                assert_eq!(slot.state.get(), ReturnBlockSlotState::Poisoned);
+                assert!(slot.is_poisoned());
             });
             let next = ffi_boundary(runtime, || Ok(43.0));
             assert_eq!(backing_of(next), ReturnBlockBacking::Heap);
@@ -2236,7 +2197,7 @@ mod tests {
         let tracker: &'static ReturnTracker = Box::leak(Box::new(ReturnTracker::new_closed()));
         tracker.reopen_admission().unwrap();
 
-        let mut producer = tracker.try_enter_producer().unwrap();
+        let mut producer = ReturnPublicationTxn::new(tracker.try_enter_producer().unwrap());
         assert_eq!(tracker.outstanding_obligations(), 1);
 
         let ptr = PreparedReturn::encode(ReturnPayload::scalar(42.0).unwrap())
@@ -2262,6 +2223,70 @@ mod tests {
     }
 
     #[test]
+    fn miri_abandoned_prepared_publication_discharges_once_without_handoff() {
+        static TRACKER: ReturnTracker = ReturnTracker::new_closed();
+        let tracker = &TRACKER;
+        tracker.reopen_admission().unwrap();
+        let mut transaction = ReturnPublicationTxn::new(tracker.try_enter_producer().unwrap());
+        let publication = transaction.prepare(PreparedReturn::error(&XllError::Panic));
+        assert!(!transaction.is_armed());
+        assert_eq!(tracker.outstanding_obligations(), 1);
+        drop(publication);
+        assert_eq!(tracker.outstanding_obligations(), 0);
+        drop(transaction);
+        assert_eq!(tracker.outstanding_obligations(), 0);
+        tracker.close_admission();
+        tracker.wait_for_quiescence();
+    }
+
+    #[test]
+    fn publication_recovery_retains_the_previous_guard_storage_size() {
+        // The previous guard stored this optional obligation directly. The
+        // recovery owner must not add storage around its consuming producer.
+        assert_eq!(
+            std::mem::size_of::<ReturnPublicationTxn>(),
+            std::mem::size_of::<Option<ReturnObligation<'static>>>(),
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "requires a child process to observe fail-stop")]
+    fn committed_return_cannot_issue_scalar_panic_fallback() {
+        const CHILD: &str = "XLFN_TEST_COMMITTED_RETURN_FALLBACK";
+        if std::env::var_os(CHILD).is_some() {
+            let tracker: &'static ReturnTracker = Box::leak(Box::new(ReturnTracker::new_closed()));
+            tracker.reopen_admission().unwrap();
+            let mut transaction = ReturnPublicationTxn::new(tracker.try_enter_producer().unwrap());
+            let _owned =
+                PreparedReturn::error(&XllError::Panic).publish_owned_excel(&mut transaction);
+            // Even primitive fallback must stop after the original admission
+            // was transferred to an owned block, rather than issue value #2.
+            let _fallback = PreparedReturn::error(&XllError::Panic).publish_excel(&mut transaction);
+            panic!("a committed return must not issue a second publication");
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "return_abi::tests::committed_return_cannot_issue_scalar_panic_fallback",
+            ])
+            .env(CHILD, "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            assert_eq!(status.signal(), Some(6), "expected fail-stop SIGABRT");
+        }
+        #[cfg(not(unix))]
+        {
+            assert!(!status.success());
+            assert_ne!(status.code(), Some(101), "must fail-stop rather than panic");
+        }
+    }
+
+    #[test]
     fn return_obligation_can_be_released_on_another_thread() {
         let _test = test_lock();
         let fixture = open_static_test_runtime();
@@ -2284,7 +2309,7 @@ mod tests {
         let tracker: &'static ReturnTracker = Box::leak(Box::new(ReturnTracker::new_closed()));
         tracker.reopen_admission().unwrap();
 
-        let mut producer = tracker.try_enter_producer().unwrap();
+        let mut producer = ReturnPublicationTxn::new(tracker.try_enter_producer().unwrap());
         assert_eq!(tracker.outstanding_obligations(), 1);
 
         let err_res = ReturnPayload::scalar(ExcelCellOutput::Number(f64::NAN));

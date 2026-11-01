@@ -1785,59 +1785,30 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn registration_storage_is_replaceable() {
-        use crate::registration::{PendingRegistration, RegistrationCleanupState};
-
+    fn registration_snapshots_cannot_discharge_retained_obligations() {
+        use crate::registration::RegistrationCleanupState;
         let runtime = Runtime::<()>::new();
-        for (id, excel_name) in [(1.0, "FIRST"), (2.0, "SECOND")] {
-            runtime
-                .host
-                .merge(crate::registration::HostMutationJournal {
-                    pending_registrations: vec![RegistrationId { id, excel_name }.into()],
-                    ..Default::default()
-                });
-        }
-        let snapshot = runtime.host.registrations_snapshot();
-        assert_eq!(
-            snapshot
-                .iter()
-                .map(|pending| (
-                    pending.registration.id,
-                    pending.registration.excel_name,
-                    pending.state,
-                ))
-                .collect::<Vec<_>>(),
-            vec![
-                (1.0, "FIRST", RegistrationCleanupState::Registered),
-                (2.0, "SECOND", RegistrationCleanupState::Registered),
-            ],
+        runtime.host.merge(
+            crate::registration::HostMutationJournal::from_registrations([
+                RegistrationId {
+                    id: 1.0,
+                    excel_name: "FIRST",
+                },
+                RegistrationId {
+                    id: 2.0,
+                    excel_name: "SECOND",
+                },
+            ]),
         );
+        let mut snapshot = runtime.host.registrations_snapshot();
+        assert_eq!(snapshot.len(), 2);
+        snapshot[1].state = RegistrationCleanupState::NameDeleted;
+        snapshot.clear();
+        assert_eq!(runtime.host.registrations_snapshot().len(), 2);
         assert!(!runtime.host.generation_callbacks_detached());
         assert!(!runtime.host.is_quiescent());
-
-        // Cleanup retries replace the ledger with only unfinished work and
-        // preserve the progress already made for that registration.
-        runtime
-            .host
-            .replace_registrations(vec![PendingRegistration {
-                registration: snapshot[1].registration,
-                state: RegistrationCleanupState::Unregistered,
-            }]);
-        let remaining = runtime.host.registrations_snapshot();
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].registration.id, 2.0);
-        assert_eq!(remaining[0].registration.excel_name, "SECOND");
-        assert_eq!(remaining[0].state, RegistrationCleanupState::Unregistered);
-        assert!(!runtime.host.generation_callbacks_detached());
-        assert!(!runtime.host.is_quiescent());
-
-        runtime.host.replace_registrations(Vec::new());
-        assert!(runtime.host.registrations_snapshot().is_empty());
-        assert!(runtime.host.generation_callbacks_detached());
-        assert!(runtime.host.is_quiescent());
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
     fn module_residency_is_independent_from_logical_close() {
         let runtime = Runtime::<()>::new();

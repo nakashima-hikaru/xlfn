@@ -3,7 +3,7 @@ use super::calculation::{
 };
 use super::control::{CloseAttempt, ControlPhase, RegistryControl};
 use super::task::{ActiveReservation, AsyncTask, TaskControl, TaskControlBatch, TrackedFuture};
-use crate::cancellation::CancellationSource;
+use crate::cancellation::{CancellationSource, TaskCancellationOwner};
 use crate::sync::{Condvar, Mutex};
 use crate::{XllError, XllResult};
 use std::future::Future;
@@ -97,6 +97,7 @@ impl CalculationSnapshot<'_> {
 }
 
 impl TaskReservation<'_> {
+    #[cfg(any(test, all(feature = "bench-internals", feature = "async-builtin")))]
     pub(crate) fn commit<F>(
         self,
         future: F,
@@ -106,6 +107,30 @@ impl TaskReservation<'_> {
         F: Future<Output = ()> + Send + 'static,
     {
         let registration = cancellation.task_registration();
+        self.commit_parts(future, cancellation, registration)
+    }
+
+    pub(super) fn commit_owned<F>(
+        self,
+        future: F,
+        cancellation: TaskCancellationOwner,
+    ) -> AsyncTask<TrackedFuture<F>>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let (cancellation, registration) = cancellation.into_parts();
+        self.commit_parts(future, cancellation, registration)
+    }
+
+    fn commit_parts<F>(
+        self,
+        future: F,
+        cancellation: CancellationSource,
+        registration: crate::cancellation::TaskCancellationRegistration,
+    ) -> AsyncTask<TrackedFuture<F>>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
         self.admission
             .insert_task(self.id, TaskControl { cancellation });
         let completion = self.active.commit(self.calculation, self.id);

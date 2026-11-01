@@ -113,7 +113,7 @@ impl DiagnosticRouter {
             .sink
             .read_if_ready()
             .as_ref()
-            .is_some_and(|sink| sink.worker_thread_id == current)
+            .is_some_and(|sink| sink.worker_thread_id() == current)
         {
             return true;
         }
@@ -122,8 +122,8 @@ impl DiagnosticRouter {
 
     fn mark_retiring(&self, sink: &AsyncDiagnosticSink) {
         let mut workers = self.retiring_workers.lock();
-        if !workers.contains(&sink.worker_thread_id) {
-            workers.push(sink.worker_thread_id);
+        if !workers.contains(&sink.worker_thread_id()) {
+            workers.push(sink.worker_thread_id());
         }
     }
 
@@ -199,7 +199,7 @@ impl DiagnosticRouter {
                 }
                 if let Err(error) = on_published(had_previous) {
                     if let Some(old) = old_service {
-                        self.unmark_retiring(old.worker_thread_id);
+                        self.unmark_retiring(old.worker_thread_id());
                     }
                     return Err(error);
                 }
@@ -212,7 +212,7 @@ impl DiagnosticRouter {
         };
 
         let old_sink = previous.into_inner();
-        let old_worker_id = old_sink.worker_thread_id;
+        let old_worker_id = old_sink.worker_thread_id();
         let shutdown_result = old_sink.shutdown();
         self.unmark_retiring(old_worker_id);
 
@@ -278,7 +278,7 @@ impl DiagnosticRouter {
         *phase = DiagnosticPhase::Closing;
 
         let retiring_worker = self.sink.read_if_ready().map(|sink| {
-            let id = sink.worker_thread_id;
+            let id = sink.worker_thread_id();
             self.mark_retiring(&sink);
             id
         });
@@ -338,7 +338,7 @@ impl DiagnosticRouter {
         *phase = DiagnosticPhase::Closing;
 
         let retiring_worker = self.sink.read_if_ready().map(|sink| {
-            let id = sink.worker_thread_id;
+            let id = sink.worker_thread_id();
             self.mark_retiring(&sink);
             id
         });
@@ -978,7 +978,7 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        let original_worker = router.sink.read_if_ready().unwrap().worker_thread_id;
+        let original_worker = router.sink.read_if_ready().unwrap().worker_thread_id();
         let called = std::cell::Cell::new(false);
         let result = router.install_with(
             || {
@@ -990,7 +990,7 @@ mod tests {
         assert!(matches!(result, Err(DiagnosticInitError::AlreadyInstalled)));
         assert!(!called.get());
         assert_eq!(
-            router.sink.read_if_ready().unwrap().worker_thread_id,
+            router.sink.read_if_ready().unwrap().worker_thread_id(),
             original_worker
         );
         router
@@ -1000,7 +1000,7 @@ mod tests {
             })
             .unwrap();
         assert_ne!(
-            router.sink.read_if_ready().unwrap().worker_thread_id,
+            router.sink.read_if_ready().unwrap().worker_thread_id(),
             original_worker
         );
         router.drain_reopenable().unwrap();
@@ -1106,17 +1106,7 @@ mod tests {
 
     #[test]
     fn worker_panic_is_observable_during_shutdown() {
-        let (sender, _receiver) = std::sync::mpsc::sync_channel(1);
-        let worker = std::thread::spawn(|| panic!("injected diagnostic worker panic"));
-        let worker_thread_id = worker.thread().id();
-        let sink = Box::new(AsyncDiagnosticSink {
-            sender: Some(sender),
-            worker: Some(worker),
-            worker_thread_id,
-            observer: xlfn_kernel::published_owner::PublishedOwner::from_box(
-                DiagnosticObserver::new(),
-            ),
-        });
+        let sink = Box::new(AsyncDiagnosticSink::panicking_for_test());
         assert_eq!(
             sink.shutdown(),
             Err(DiagnosticShutdownError::WorkerPanicked)
@@ -1664,9 +1654,6 @@ mod tests {
 
     #[test]
     fn terminal_close_rejects_a_worker_panic() {
-        let worker = std::thread::spawn(|| panic!("injected diagnostic worker panic"));
-        let worker_thread_id = worker.thread().id();
-        let (sender, _receiver) = std::sync::mpsc::sync_channel(1);
         let router = DiagnosticRouter {
             sink: ReplaceableServiceSlot::new(),
             transition: Mutex::new(DiagnosticPhase::Open),
@@ -1675,16 +1662,7 @@ mod tests {
         };
         router
             .replace_with(
-                || {
-                    Ok(Box::new(AsyncDiagnosticSink {
-                        sender: Some(sender),
-                        worker: Some(worker),
-                        worker_thread_id,
-                        observer: xlfn_kernel::published_owner::PublishedOwner::from_box(
-                            DiagnosticObserver::new(),
-                        ),
-                    }))
-                },
+                || Ok(Box::new(AsyncDiagnosticSink::panicking_for_test())),
                 |_| Ok(()),
             )
             .unwrap();

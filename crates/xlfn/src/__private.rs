@@ -210,8 +210,9 @@ pub mod v1 {
         T,
         E: crate::RtdSubscription,
         C: crate::RtdSourceCatalog<E>,
+        X: ExecutionMode,
     >(
-        _: &CallFrame<'call, R::InputMode, E, C>,
+        _: &CallFrame<'call, R::InputMode, E, C, X>,
     ) where
         R: ExcelReturn,
         T: ExcelParameter<'call, R::InputMode>,
@@ -227,7 +228,7 @@ pub mod v1 {
         E: crate::RtdSubscription,
         C: crate::RtdSourceCatalog<E>,
     >(
-        frame: &CallFrame<'call, M, E, C>,
+        frame: &CallFrame<'call, M, E, C, ThreadSafeMode>,
         state: &'call A::SharedState,
     ) -> crate::addin::ThreadSafeContext<'call, A> {
         crate::addin::ThreadSafeContext::new(state, frame.diagnostics)
@@ -268,7 +269,7 @@ pub mod v1 {
         E: crate::RtdSubscription,
         C: crate::RtdSourceCatalog<E>,
     >(
-        frame: &CallFrame<'call, M, E, C>,
+        frame: &CallFrame<'call, M, E, C, MacroSheetMode>,
         state: &'call A::SharedState,
     ) -> crate::addin::MacroSheetContext<'call, A> {
         crate::addin::MacroSheetContext::new(
@@ -589,6 +590,33 @@ pub mod v1 {
         })
     }
 
+    mod execution_mode_sealed {
+        pub trait Sealed {}
+    }
+    /// Execution authority granted by one unsafe Excel entrypoint boundary.
+    #[doc(hidden)]
+    pub trait ExecutionMode: execution_mode_sealed::Sealed {
+        const KIND: ExecutionKind;
+    }
+    #[doc(hidden)]
+    pub struct MainThreadMode;
+    #[doc(hidden)]
+    pub struct ThreadSafeMode;
+    #[doc(hidden)]
+    pub struct MacroSheetMode;
+    #[doc(hidden)]
+    pub struct AsyncLaunchMode;
+    macro_rules! execution_modes {
+        ($($mode:ty => $kind:ident),* $(,)?) => { $(
+            impl execution_mode_sealed::Sealed for $mode {}
+            impl ExecutionMode for $mode { const KIND: ExecutionKind = ExecutionKind::$kind; }
+        )* };
+    }
+    execution_modes!(MainThreadMode => MainThread, ThreadSafeMode => ThreadSafe,
+        MacroSheetMode => MacroSheet, AsyncLaunchMode => Async);
+
+    type CallFrameTypes<E, C, X> = fn() -> (E, C, X);
+
     /// Calculation call frame for converted arguments and identity recording.
     #[doc(hidden)]
     pub struct CallFrame<
@@ -596,8 +624,9 @@ pub mod v1 {
         M: InputMode,
         E: crate::RtdSubscription = (),
         C: crate::RtdSourceCatalog<E> = crate::DynamicRtdSources<E>,
+        X: ExecutionMode = MainThreadMode,
     > {
-        marker: std::marker::PhantomData<fn() -> (E, C)>,
+        marker: std::marker::PhantomData<CallFrameTypes<E, C, X>>,
         #[cfg(feature = "rtd")]
         rtd: Option<crate::rtd::RtdGenerationAccess<'call, E, C>>,
         arguments: ArgumentContext<'call, M>,
@@ -605,8 +634,13 @@ pub mod v1 {
         diagnostics: &'call crate::diagnostics::DiagnosticHistory,
     }
 
-    impl<'call, M: InputMode, E: crate::RtdSubscription, C: crate::RtdSourceCatalog<E>>
-        CallFrame<'call, M, E, C>
+    impl<
+        'call,
+        M: InputMode,
+        E: crate::RtdSubscription,
+        C: crate::RtdSourceCatalog<E>,
+        X: ExecutionMode,
+    > CallFrame<'call, M, E, C, X>
     {
         #[doc(hidden)]
         pub(crate) fn new<A: Addin + crate::addin::AddinRtdTypes<Subscription = E, Sources = C>>(
@@ -918,8 +952,9 @@ pub mod v1 {
         T,
         E: crate::RtdSubscription,
         C: crate::RtdSourceCatalog<E>,
+        X: ExecutionMode,
     >(
-        frame: &mut CallFrame<'call, R::InputMode, E, C>,
+        frame: &mut CallFrame<'call, R::InputMode, E, C, X>,
         index: usize,
         name: &'static str,
         raw: *mut xlfn_sys::XLOPER12,
@@ -955,8 +990,9 @@ pub mod v1 {
         T,
         E: crate::RtdSubscription,
         C: crate::RtdSourceCatalog<E>,
+        X: ExecutionMode,
     >(
-        frame: &mut CallFrame<'call, M, E, C>,
+        frame: &mut CallFrame<'call, M, E, C, X>,
         name: &'static str,
         raw: *mut xlfn_sys::XLOPER12,
     ) -> XllResult<T>
@@ -973,9 +1009,10 @@ pub mod v1 {
     pub unsafe fn argument_presence<
         E: crate::RtdSubscription,
         C: crate::RtdSourceCatalog<E>,
+        X: ExecutionMode,
         M: InputMode,
     >(
-        frame: &CallFrame<'_, M, E, C>,
+        frame: &CallFrame<'_, M, E, C, X>,
         name: &'static str,
         raw: *mut xlfn_sys::XLOPER12,
     ) -> XllResult<CellPresence> {
@@ -983,15 +1020,14 @@ pub mod v1 {
         unsafe { frame.argument_presence(name, raw) }
     }
 
-    /// Top-level synchronous UDF execution boundary.
-    ///
+    /// Main-thread Excel entrypoint boundary.
     /// # Safety
-    /// This must be called exactly once from an actual Excel UDF entrypoint
-    /// with the registered execution mode on Excel's permitted thread. It
-    /// creates fresh callback authority and must never be called to restart
-    /// an active invocation, including after Abort or Uncalced.
+    /// Same entrypoint contract as [`sync_udf_with_mode`] with MainThread mode.
     #[doc(hidden)]
-    #[allow(unsafe_code, reason = "Generated Excel entrypoint authority boundary")]
+    #[allow(
+        unsafe_code,
+        reason = "forwards the Excel entrypoint authority contract"
+    )]
     pub unsafe fn sync_udf<A: Addin, R: ExcelReturn, F>(
         runtime: &'static MacroRuntime<A, impl UnloadPolicy<A>>,
         udf_id: &'static str,
@@ -1010,6 +1046,46 @@ pub mod v1 {
             >,
         ) -> XllResult<R::Payload>,
     {
+        // SAFETY: caller supplies the actual MainThread Excel entrypoint.
+        unsafe {
+            sync_udf_with_mode::<A, R, MainThreadMode, F>(
+                runtime,
+                udf_id,
+                excel_name,
+                argument_count,
+                execute,
+            )
+        }
+    }
+
+    /// Top-level synchronous UDF execution boundary.
+    ///
+    /// # Safety
+    /// This must be called exactly once from an actual Excel UDF entrypoint
+    /// with the registered execution mode on Excel's permitted thread. It
+    /// creates fresh callback authority and must never be called to restart
+    /// an active invocation, including after Abort or Uncalced.
+    #[doc(hidden)]
+    #[allow(unsafe_code, reason = "Generated Excel entrypoint authority boundary")]
+    pub unsafe fn sync_udf_with_mode<A: Addin, R: ExcelReturn, X: ExecutionMode, F>(
+        runtime: &'static MacroRuntime<A, impl UnloadPolicy<A>>,
+        udf_id: &'static str,
+        excel_name: &'static str,
+        argument_count: usize,
+        execute: F,
+    ) -> *mut xlfn_sys::XLOPER12
+    where
+        F: for<'call> FnOnce(
+            &'call A::SharedState,
+            &mut CallFrame<
+                'call,
+                R::InputMode,
+                crate::addin::AddinSubscription<A>,
+                crate::addin::AddinSources<A>,
+                X,
+            >,
+        ) -> XllResult<R::Payload>,
+    {
         udf_boundary_named(runtime.runtime(), udf_id, excel_name, |_, call| {
             let callbacks = crate::host_callback::HostCallbackSession::new();
             crate::call::with_excel_callback_scope_and_call(
@@ -1021,6 +1097,7 @@ pub mod v1 {
                             R::InputMode,
                             crate::addin::AddinSubscription<A>,
                             crate::addin::AddinSources<A>,
+                            X,
                         >::new(call, scope, callbacks, argument_count);
                     execute(call.state(), &mut frame)
                 },
@@ -1034,7 +1111,7 @@ pub mod v1 {
     /// The caller must satisfy the entrypoint and callback authority contract of [`sync_udf`].
     #[doc(hidden)]
     #[allow(unsafe_code, reason = "Generated Excel entrypoint authority boundary")]
-    pub unsafe fn sync_udf_fp12<A: Addin, R: NumericReturn, F>(
+    pub unsafe fn sync_udf_fp12_with_mode<A: Addin, R: NumericReturn, X: ExecutionMode, F>(
         runtime: &'static MacroRuntime<A, impl UnloadPolicy<A>>,
         udf_id: &'static str,
         excel_name: &'static str,
@@ -1049,6 +1126,7 @@ pub mod v1 {
                 R::InputMode,
                 crate::addin::AddinSubscription<A>,
                 crate::addin::AddinSources<A>,
+                X,
             >,
         ) -> XllResult<crate::output::NumericArrayOutput>,
     {
@@ -1066,6 +1144,7 @@ pub mod v1 {
                             R::InputMode,
                             crate::addin::AddinSubscription<A>,
                             crate::addin::AddinSources<A>,
+                            X,
                         >::new(
                             call, scope, callbacks, argument_count
                         );
@@ -1105,6 +1184,7 @@ pub mod v1 {
                 R::InputMode,
                 crate::addin::AddinSubscription<A>,
                 crate::addin::AddinSources<A>,
+                AsyncLaunchMode,
             >,
         ) -> XllResult<Fut>,
         Fut: Future<Output = XllResult<R>> + Send + 'static,
@@ -1126,6 +1206,7 @@ pub mod v1 {
                                 R::InputMode,
                                 crate::addin::AddinSubscription<A>,
                                 crate::addin::AddinSources<A>,
+                                AsyncLaunchMode,
                             >::new(
                                 call, scope, callbacks, argument_count
                             );
@@ -1169,6 +1250,7 @@ pub mod v1 {
                 R::InputMode,
                 crate::addin::AddinSubscription<A>,
                 crate::addin::AddinSources<A>,
+                AsyncLaunchMode,
             >,
         ) -> XllResult<Build>,
         Build: HandleScopedBuilder<R> + Send + 'static,
@@ -1190,6 +1272,7 @@ pub mod v1 {
                                 R::InputMode,
                                 crate::addin::AddinSubscription<A>,
                                 crate::addin::AddinSources<A>,
+                                AsyncLaunchMode,
                             >::new(
                                 call, scope, callbacks, argument_count
                             );
@@ -1281,6 +1364,21 @@ pub mod v1 {
     #[cfg(test)]
     mod native_input_tests {
         use super::*;
+
+        #[test]
+        fn execution_mode_preserves_call_frame_size() {
+            macro_rules! frame_bytes {
+                ($mode:ty) => {
+                    std::mem::size_of::<
+                        CallFrame<'static, PlainInputMode, (), crate::DynamicRtdSources<()>, $mode>,
+                    >()
+                };
+            }
+            let main_thread = frame_bytes!(MainThreadMode);
+            assert_eq!(frame_bytes!(ThreadSafeMode), main_thread);
+            assert_eq!(frame_bytes!(MacroSheetMode), main_thread);
+            assert_eq!(frame_bytes!(AsyncLaunchMode), main_thread);
+        }
 
         #[test]
         #[allow(

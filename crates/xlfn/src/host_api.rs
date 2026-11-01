@@ -89,11 +89,11 @@ impl<'call> ExcelHost<'call> {
         };
 
         let decoded = if status == ExcelCallbackStatus::Success {
-            Some(decode(&mut result))
+            Some(result.readable().and_then(decode))
         } else {
             None
         };
-        let cleanup = result.try_release();
+        let cleanup = result.release();
         HostInvocation::Completed {
             status,
             decoded,

@@ -217,9 +217,9 @@ impl RegistrationTiming {
                 .saturating_sub(self.register_elapsed)
                 .as_secs_f64(),
             "retained_registration_count": result.as_ref().err()
-                .map_or(0, |error| error.journal.pending_registrations.len()),
+                .map_or(0, |error| error.journal.pending_registrations().len()),
             "metadata_debt_count": result.as_ref().err()
-                .map_or(0, |error| error.journal.metadata_debt.len()),
+                .map_or(0, |error| error.journal.metadata_debt().len()),
             "host_state_unknown": result.as_ref().err()
                 .is_some_and(|error| error.journal.is_unknown()),
         })
@@ -484,8 +484,7 @@ mod tests {
     #[test]
     fn registration_timing_preserves_operation_order_results_and_partial_counts() {
         use crate::registration::{
-            PendingRegistration, RegistrationId, RegistrationTransactionError,
-            UnknownRegistrationState,
+            RegistrationId, RegistrationTransactionError, UnknownRegistrationState,
         };
         use crate::return_abi::ExcelCallbackStatus;
         use crate::{XllError, XllResult};
@@ -528,13 +527,10 @@ mod tests {
         );
 
         let mut error = RegistrationTransactionError::new(XllError::Closing);
-        error
-            .journal
-            .pending_registrations
-            .push(PendingRegistration::from(RegistrationId {
-                id: 42.0,
-                excel_name: "TEST.FIRST",
-            }));
+        error.journal.record_registrations([RegistrationId {
+            id: 42.0,
+            excel_name: "TEST.FIRST",
+        }]);
         error.journal.mark_unknown(UnknownRegistrationState {
             export_name: "second_export",
             excel_name: "TEST.SECOND",

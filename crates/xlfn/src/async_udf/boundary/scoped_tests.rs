@@ -478,3 +478,4 @@ fn miri_external_executor_retains_scoped_handle_until_opaque_task_destruction() 
     assert_eq!(payload_drops.load(Ordering::Relaxed), 1);
     assert_eq!(crate::test_callback::async_return_calls(), 1);
 }
+use crate::cancellation::CancellationSource;

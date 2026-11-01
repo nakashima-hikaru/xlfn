@@ -5,7 +5,7 @@
 //! Copied entries are non-owning: callers must use their lookup domain before
 //! dereferencing them. Notifications never reclaim nodes themselves.
 
-use super::{CacheNode, NodePtr, VersionedKey, VersionedKeyRef, retire_resident};
+use super::{CacheNode, NodePtr, ResidentPin, VersionedKey, VersionedKeyRef};
 use quick_cache::Equivalent;
 use std::borrow::Borrow;
 use std::hash::{Hash, Hasher};
@@ -105,7 +105,8 @@ unsafe impl<V: Send + Sync> Sync for ResidentEntry<V> {}
 impl<V> ResidentEntry<V> {
     const OWNS_RESIDENCY: usize = 1;
 
-    pub(super) fn new((node, weight): Entry<V>) -> Self {
+    pub(super) fn new(pin: ResidentPin<V>, weight: u64) -> Self {
+        let node = pin.into_index();
         // CacheNode contains AtomicU32, so bit zero is available for every V.
         // Keep this a per-monomorphization compile-time check if layout changes.
         const { assert!(std::mem::align_of::<CacheNode<V>>() > Self::OWNS_RESIDENCY) };
@@ -138,7 +139,8 @@ impl<V> ResidentEntry<V> {
             let node = self.node();
             self.tagged_node = node.0;
             // This releases only residency; value destruction follows grace.
-            retire_resident(node);
+            // SAFETY: clearing the tag transferred the unique index pin.
+            unsafe { ResidentPin::from_index(node) }.retire();
         }
     }
 }

@@ -225,16 +225,12 @@ fn pending_rollback_terminal_cleanup_stops_before_a_replacement_open() {
             let opening = runtime.begin_open().unwrap();
             assert!(opening.fail_for_test().requires_rollback());
             assert_eq!(runtime.phase(), LifecyclePhase::OpenRollbackPending);
-            runtime.merge_host_for_test(HostMutationJournal {
-                pending_registrations: vec![
-                    RegistrationId {
-                        id: 7.0,
-                        excel_name: "TEST.TERMINAL.RELOAD",
-                    }
-                    .into(),
-                ],
-                ..HostMutationJournal::default()
-            });
+            runtime.merge_host_for_test(HostMutationJournal::from_registrations([
+                RegistrationId {
+                    id: 7.0,
+                    excel_name: "TEST.TERMINAL.RELOAD",
+                },
+            ]));
             let evaluate = Reply::success(XLF_EVALUATE, XLOPER12::number(7.0));
             let evaluate = if terminal_during_free {
                 evaluate.release_status(status)

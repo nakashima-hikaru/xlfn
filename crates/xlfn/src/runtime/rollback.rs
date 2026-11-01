@@ -8,7 +8,7 @@ use crate::addin::Addin;
 use crate::boundary::{report_boundary_error, report_cleanup_issue};
 use crate::generation::RuntimeGeneration;
 use crate::host_callback::HostCallbackSession;
-use crate::registration::{HostRegistrar, RegistrationHost};
+use crate::registration::RegistrationHost;
 use crate::runtime::{AddinLifecycleAccess, Runtime};
 
 use crate::lifecycle::lifecycle_access_error;
@@ -167,10 +167,18 @@ fn rollback_open_inner<'runtime, A: Addin>(
         }
     };
 
-    let registrations = shutdown_deps.host().registrations_snapshot();
     let outcome = {
         let host = RegistrationHost::new(callbacks);
-        HostRegistrar::unregister_pending(&host, &registrations)
+        match shutdown_deps.host().cleanup_registrations(&host) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                report_boundary_error("xlAutoOpen registration rollback", &error);
+                return incomplete(
+                    runtime,
+                    crate::shutdown::UnloadHazard::HostCallbackStillRegistered,
+                );
+            }
+        }
     };
     for (registration, error) in &outcome.failed {
         if registration.cleanup_severity().is_unload_unsafe() {
@@ -187,13 +195,6 @@ fn rollback_open_inner<'runtime, A: Addin>(
             error: error.clone(),
         });
     }
-    shutdown_deps
-        .host()
-        .replace_registrations(outcome.failed.into_iter().map(|(entry, _)| entry).collect());
-    shutdown_deps
-        .host()
-        .retain_metadata_debt(outcome.metadata_debt);
-
     // Native calculation exports survive a failed open, including a partial
     // event-registration sequence. Their module slots prevent duplicate retry
     // and retain residency independently of this generation's rollback.

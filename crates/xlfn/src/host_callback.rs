@@ -1,4 +1,4 @@
-use crate::callback_value::ExcelCallbackValue;
+use crate::callback_value::{CallbackResult, ExcelCallbackValue};
 use crate::return_abi::ExcelCallbackStatus;
 use std::cell::Cell;
 use std::marker::PhantomData;
@@ -63,7 +63,7 @@ impl HostCallbackSession {
         &'session self,
         function: i32,
         arguments: &[NonNull<XLOPER12>],
-    ) -> Result<(ExcelCallbackStatus, ExcelCallbackValue<'session>), HostCallbackSuppressed> {
+    ) -> Result<(ExcelCallbackStatus, CallbackResult<'session>), HostCallbackSuppressed> {
         if let Some(status) = self.state.get().blocked_status() {
             return Err(HostCallbackSuppressed { status });
         }

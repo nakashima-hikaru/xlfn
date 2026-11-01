@@ -33,7 +33,8 @@ fn exercise_tag<V: PartialEq + std::fmt::Debug>(value: V) {
         generation: 0,
         domain: NonNull::dangling(),
     }));
-    let mut owner = ResidentEntry::new((NodePtr(pointer), 7));
+    // SAFETY: one of the two initial pins is the unique residency pin.
+    let mut owner = ResidentEntry::new(unsafe { ResidentPin::from_index(NodePtr(pointer)) }, 7);
     assert_eq!(owner.tagged_node.addr().get() & 1, 1);
     assert_eq!(owner.snapshot().0.0, pointer);
     assert_eq!(owner.snapshot().1, 7);
@@ -166,7 +167,9 @@ impl PinnedNode {
     }
 
     fn entry(&self, weight: u64) -> ResidentEntry<()> {
-        ResidentEntry::new((NodePtr(self.0), weight))
+        // SAFETY: each fixture transfers its initial residency pin to one entry;
+        // the second fixture pin retains the allocation until explicit cleanup.
+        ResidentEntry::new(unsafe { ResidentPin::from_index(NodePtr(self.0)) }, weight)
     }
 }
 

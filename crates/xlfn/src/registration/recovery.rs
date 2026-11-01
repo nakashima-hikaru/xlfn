@@ -21,8 +21,7 @@ pub(crate) fn retry_metadata_debt(
         return terminal_retry_error(&host).map_or(Ok(()), Err);
     }
 
-    let outcome = retry_metadata_debt_with_host(&host, &debts);
-    ledger.replace_metadata_debt(outcome.remaining);
+    let outcome = ledger.retry_metadata_cleanup(&host);
     for error in outcome.cleanup_issues {
         crate::boundary::report_cleanup_issue(&crate::shutdown::CleanupIssue {
             component: "Excel metadata debt result",
@@ -43,7 +42,7 @@ pub(crate) fn retry_metadata_debt(
     Ok(())
 }
 
-fn retry_metadata_debt_with_host(
+pub(crate) fn retry_metadata_debt_with_host(
     host: &RegistrationHost<'_>,
     debts: &BTreeMap<ExcelNameKey, Vec<MetadataDebt>>,
 ) -> MetadataDebtRetryResult {

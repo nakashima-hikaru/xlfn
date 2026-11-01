@@ -748,7 +748,7 @@ impl RtdRefreshScalingBenchmark {
         self.publish_updates();
         let mut measured = Duration::ZERO;
         for _ in 0..iterations {
-            let mut planned = self
+            let planned = self
                 .server
                 .server()
                 .expect("benchmark server remains registered")
@@ -756,16 +756,9 @@ impl RtdRefreshScalingBenchmark {
                 .plan_refresh()
                 .expect("refresh planning must succeed");
             let started = Instant::now();
-            planned
-                .publish
-                .collect_refresh(&planned.plan, &mut planned.updates);
+            let batch = planned.collect();
             measured += started.elapsed();
-            let updates = std::mem::take(&mut planned.updates);
-            planned
-                .publish
-                .restore_refresh_updates(&planned.plan, updates);
-            planned.finished = true;
-            drop(planned);
+            let _ = batch.abort();
         }
         self.drain_pending_refresh();
         measured
@@ -1033,7 +1026,7 @@ impl RtdChannelPipelineBenchmark {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let batch = self.server.begin_refresh().unwrap();
-            let final_sequence = batch.updates.iter().find_map(|update| {
+            let final_sequence = batch.updates().iter().find_map(|update| {
                 matches!(update.value, crate::subscription::StoredRtdValue::Number(value) if value == marker)
                     .then_some(update.sequence)
             });

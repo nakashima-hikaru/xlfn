@@ -50,7 +50,7 @@ impl HostRegistrar {
         &self,
         host: &RegistrationHost<'_>,
         prepared: &PreparedRegistrationSet,
-    ) -> Result<Vec<RegistrationId>, RegistrationTransactionError> {
+    ) -> Result<super::SuccessfulRegistrations, RegistrationTransactionError> {
         #[cfg(feature = "lifecycle-diagnostics")]
         let mut timing = RegistrationTiming::begin(prepared.as_slice().len());
         let result = register_all_transaction(
@@ -75,7 +75,7 @@ impl HostRegistrar {
         if let Some(timing) = timing {
             timing.finish(&result, host.terminal_status());
         }
-        result
+        result.map(super::SuccessfulRegistrations::from_applied)
     }
 
     fn register_one(
@@ -154,68 +154,6 @@ impl HostRegistrar {
             Self::unregister_pending,
         )
     }
-
-    pub(crate) fn unregister_pending(
-        host: &RegistrationHost<'_>,
-        registrations: &[PendingRegistration],
-    ) -> UnregisterResult<PendingRegistration> {
-        let mut outcome = UnregisterResult::new(registrations.len());
-        for registration in registrations.iter().rev() {
-            let mut registration = registration.clone();
-            if !host.permits_callbacks() {
-                outcome.failed.push((registration, XllError::Closing));
-                continue;
-            }
-            if registration.state == super::RegistrationCleanupState::NameDeleted {
-                outcome.succeeded.push(registration);
-                continue;
-            }
-
-            if registration.state == super::RegistrationCleanupState::Registered {
-                match host.unregister_registration(registration.registration) {
-                    RegistrationMutation::Applied { cleanup, .. } => {
-                        registration.state = super::RegistrationCleanupState::Unregistered;
-                        if let Err(error) = cleanup {
-                            outcome.cleanup_issues.push(error);
-                        }
-                    }
-                    RegistrationMutation::Rejected { error }
-                    | RegistrationMutation::Indeterminate { error, .. } => {
-                        outcome.failed.push((registration, error));
-                        continue;
-                    }
-                }
-            }
-
-            if !host.permits_callbacks() {
-                outcome.metadata_debt.push(super::MetadataDebt::new(
-                    registration.registration,
-                    XllError::Closing,
-                ));
-                continue;
-            }
-
-            match host.delete_name_if_binding_matches(
-                registration.registration.excel_name,
-                [registration.registration.id],
-            ) {
-                RegistrationMutation::Applied { cleanup, .. } => {
-                    registration.state = super::RegistrationCleanupState::NameDeleted;
-                    if let Err(error) = cleanup {
-                        outcome.cleanup_issues.push(error);
-                    }
-                    outcome.succeeded.push(registration);
-                }
-                RegistrationMutation::Rejected { error }
-                | RegistrationMutation::Indeterminate { error, .. } => {
-                    outcome
-                        .metadata_debt
-                        .push(super::MetadataDebt::new(registration.registration, error));
-                }
-            }
-        }
-        outcome
-    }
 }
 
 fn reconcile_malformed_registration_result_with(
@@ -228,7 +166,7 @@ fn reconcile_malformed_registration_result_with(
     ) -> Result<Option<RegistrationId>, RegistrationTransactionError>,
     unregister: impl FnOnce(
         &RegistrationHost<'_>,
-        &[PendingRegistration],
+        Vec<PendingRegistration>,
     ) -> UnregisterResult<PendingRegistration>,
 ) -> RegistrationTransactionError {
     match recover(host, descriptor.excel_name) {
@@ -257,7 +195,7 @@ fn register_all_transaction<T>(
     ) -> Result<RegistrationId, RegistrationTransactionError>,
     mut unregister: impl FnMut(
         &RegistrationHost<'_>,
-        &[PendingRegistration],
+        Vec<PendingRegistration>,
     ) -> UnregisterResult<PendingRegistration>,
 ) -> Result<Vec<RegistrationId>, RegistrationTransactionError> {
     let mut registered = Vec::with_capacity(descriptors.len());
@@ -271,14 +209,13 @@ fn register_all_transaction<T>(
                     .map(PendingRegistration::from)
                     .collect();
                 if !host.permits_callbacks() {
-                    error.journal.pending_registrations.extend(pending);
+                    error.journal.retain_pending(pending);
                 } else {
-                    let outcome = unregister(host, &pending);
+                    let outcome = unregister(host, pending);
                     error
                         .journal
-                        .pending_registrations
-                        .extend(outcome.failed.into_iter().map(|(entry, _)| entry));
-                    error.journal.metadata_debt.extend(outcome.metadata_debt);
+                        .retain_pending(outcome.failed.into_iter().map(|(entry, _)| entry));
+                    error.journal.retain_metadata(outcome.metadata_debt);
                 }
                 return Err(error);
             }
@@ -293,22 +230,20 @@ fn registration_release_failure(
     source: XllError,
     unregister: impl FnOnce(
         &RegistrationHost<'_>,
-        &[PendingRegistration],
+        Vec<PendingRegistration>,
     ) -> UnregisterResult<PendingRegistration>,
 ) -> RegistrationTransactionError {
-    let pending = [PendingRegistration::from(registration)];
+    let pending = vec![PendingRegistration::from(registration)];
     let mut error = RegistrationTransactionError::new(source);
     if !host.permits_callbacks() {
-        error
-            .journal
-            .pending_registrations
-            .extend_from_slice(&pending);
+        error.journal.retain_pending(pending);
         return error;
     }
-    let outcome = unregister(host, &pending);
-    error.journal.pending_registrations =
-        outcome.failed.into_iter().map(|(entry, _)| entry).collect();
-    error.journal.metadata_debt = outcome.metadata_debt;
+    let outcome = unregister(host, pending);
+    error
+        .journal
+        .retain_pending(outcome.failed.into_iter().map(|(entry, _)| entry));
+    error.journal.retain_metadata(outcome.metadata_debt);
     error
 }
 
@@ -317,7 +252,6 @@ mod tests {
     use super::*;
     use crate::host_callback::HostCallbackSession;
     use crate::registration::RegistrationCleanupState;
-    use crate::registration::ledger::CleanupSeverity;
     use crate::registration::preflight::preflight_registration;
     use crate::registration::schema::{ArgumentAbi, RegistrationDescriptor, RegistrationSignature};
     use crate::return_abi::ExcelCallbackStatus;
@@ -400,17 +334,17 @@ mod tests {
             |_host, registrations| {
                 rolled_back
                     .borrow_mut()
-                    .extend(registrations.iter().map(|entry| entry.registration.id));
+                    .extend(registrations.iter().map(|entry| entry.registration().id));
                 let mut result = UnregisterResult::new(registrations.len());
-                result.succeeded.extend_from_slice(registrations);
+                result.succeeded.extend(registrations);
                 result
             },
         )
         .unwrap_err();
 
         assert_eq!(rolled_back.borrow().as_slice(), &[1.0, 2.0]);
-        assert!(error.journal.pending_registrations.is_empty());
-        assert!(error.journal.metadata_debt.is_empty());
+        assert!(error.journal.pending_registrations().is_empty());
+        assert!(error.journal.metadata_debt().is_empty());
     }
 
     #[test]
@@ -454,9 +388,12 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(rollback_calls.get(), 0);
-        assert_eq!(error.journal.pending_registrations.len(), 1);
-        assert_eq!(error.journal.pending_registrations[0].registration.id, 1.0);
-        assert_eq!(error.journal.unknown_registrations.len(), 1);
+        assert_eq!(error.journal.pending_registrations().len(), 1);
+        assert_eq!(
+            error.journal.pending_registrations()[0].registration().id,
+            1.0
+        );
+        assert_eq!(error.journal.unknown_registrations().len(), 1);
         assert!(!host.permits_callbacks());
     }
 
@@ -476,7 +413,7 @@ mod tests {
             |_host, registrations| {
                 let mut result = UnregisterResult::new(registrations.len());
                 result.failed.push((
-                    registrations[0].clone(),
+                    registrations.into_iter().next().unwrap(),
                     XllError::ExcelApi {
                         function: crate::error::ExcelApiFunction::Unregister,
                         failure: crate::error::ExcelApiFailure::Status(
@@ -488,9 +425,9 @@ mod tests {
             },
         );
 
-        assert_eq!(result.journal.pending_registrations.len(), 1);
+        assert_eq!(result.journal.pending_registrations().len(), 1);
         assert_eq!(
-            result.journal.pending_registrations[0].registration,
+            result.journal.pending_registrations()[0].registration(),
             registration
         );
     }
@@ -513,9 +450,9 @@ mod tests {
             |_host, _registrations| panic!("unknown registration must not be unregistered"),
         );
 
-        assert_eq!(error.journal.unknown_registrations.len(), 1);
+        assert_eq!(error.journal.unknown_registrations().len(), 1);
         assert_eq!(
-            error.journal.unknown_registrations[0].excel_name,
+            error.journal.unknown_registrations()[0].excel_name,
             "TEST.EXPORT"
         );
         assert!(error.journal.is_unknown());
@@ -536,34 +473,17 @@ mod tests {
                 XllError::Closing,
                 |_host, excel_name| Ok(Some(RegistrationId { id, excel_name })),
                 |_host, registrations| {
-                    unregistered.set(Some(registrations[0].registration.id));
+                    unregistered.set(Some(registrations[0].registration().id));
                     let mut result = UnregisterResult::new(registrations.len());
-                    result.succeeded.extend_from_slice(registrations);
+                    result.succeeded.extend(registrations);
                     result
                 },
             );
 
             assert_eq!(unregistered.get(), Some(id));
-            assert!(error.journal.pending_registrations.is_empty());
+            assert!(error.journal.pending_registrations().is_empty());
             assert!(!error.journal.is_unknown());
         }
-    }
-
-    #[test]
-    fn pending_registration_cleanup_severity_matches_state() {
-        let mut registration = PendingRegistration::from(RegistrationId {
-            id: 1.0,
-            excel_name: "FOO",
-        });
-        assert_eq!(
-            registration.cleanup_severity(),
-            CleanupSeverity::UnloadUnsafe
-        );
-
-        registration.state = RegistrationCleanupState::Unregistered;
-        assert_eq!(registration.cleanup_severity(), CleanupSeverity::BestEffort);
-        registration.state = RegistrationCleanupState::NameDeleted;
-        assert_eq!(registration.cleanup_severity(), CleanupSeverity::BestEffort);
     }
 
     #[cfg(any(not(target_os = "windows"), feature = "async", feature = "handles"))]
@@ -592,7 +512,7 @@ mod tests {
             let callbacks = HostCallbackSession::new();
             let host = RegistrationHost::new(&callbacks);
 
-            let outcome = HostRegistrar::unregister_pending(&host, &[registration()]);
+            let outcome = HostRegistrar::unregister_pending(&host, vec![registration()]);
 
             assert!(outcome.failed.is_empty());
             assert!(outcome.succeeded.is_empty());
@@ -628,14 +548,14 @@ mod tests {
                 let callbacks = HostCallbackSession::new();
                 let host = RegistrationHost::new(&callbacks);
 
-                let outcome = HostRegistrar::unregister_pending(&host, &[registration()]);
+                let outcome = HostRegistrar::unregister_pending(&host, vec![registration()]);
 
                 assert!(outcome.failed.is_empty());
                 assert!(outcome.metadata_debt.is_empty());
                 assert!(outcome.cleanup_issues.is_empty());
                 assert_eq!(outcome.succeeded.len(), 1);
                 assert_eq!(
-                    outcome.succeeded[0].state,
+                    outcome.succeeded[0].snapshot().state,
                     RegistrationCleanupState::NameDeleted
                 );
                 script.assert_calls(&expected_calls);
@@ -657,7 +577,7 @@ mod tests {
                 let callbacks = HostCallbackSession::new();
                 let host = RegistrationHost::new(&callbacks);
 
-                let outcome = HostRegistrar::unregister_pending(&host, &[registration()]);
+                let outcome = HostRegistrar::unregister_pending(&host, vec![registration()]);
 
                 assert!(outcome.failed.is_empty());
                 assert!(outcome.succeeded.is_empty());
@@ -674,13 +594,13 @@ mod tests {
             callbacks.suppress_for_test(ExcelCallbackStatus::Abort);
             let host = RegistrationHost::new(&callbacks);
 
-            let outcome = HostRegistrar::unregister_pending(&host, &[registration()]);
+            let outcome = HostRegistrar::unregister_pending(&host, vec![registration()]);
 
             assert!(outcome.succeeded.is_empty());
             assert!(outcome.metadata_debt.is_empty());
             assert_eq!(outcome.failed.len(), 1);
             assert_eq!(
-                outcome.failed[0].0.state,
+                outcome.failed[0].0.snapshot().state,
                 RegistrationCleanupState::Registered
             );
             script.assert_calls(&[]);
@@ -696,7 +616,7 @@ mod tests {
             let callbacks = HostCallbackSession::new();
             let host = RegistrationHost::new(&callbacks);
 
-            let outcome = HostRegistrar::unregister_pending(&host, &[registration()]);
+            let outcome = HostRegistrar::unregister_pending(&host, vec![registration()]);
 
             assert!(outcome.succeeded.is_empty());
             assert!(outcome.failed.is_empty());
@@ -715,7 +635,7 @@ mod tests {
             let callbacks = HostCallbackSession::new();
             let host = RegistrationHost::new(&callbacks);
 
-            let outcome = HostRegistrar::unregister_pending(&host, &[registration()]);
+            let outcome = HostRegistrar::unregister_pending(&host, vec![registration()]);
 
             assert!(outcome.failed.is_empty());
             assert!(outcome.metadata_debt.is_empty());

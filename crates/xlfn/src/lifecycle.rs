@@ -1778,13 +1778,10 @@ mod tests {
             )
             .unwrap();
         let mut journal = crate::registration::HostMutationJournal::default();
-        journal.pending_registrations.push(
-            crate::registration::RegistrationId {
-                id: 1.0,
-                excel_name: "TEST.CLOSE.ORDER",
-            }
-            .into(),
-        );
+        journal.record_registrations([crate::registration::RegistrationId {
+            id: 1.0,
+            excel_name: "TEST.CLOSE.ORDER",
+        }]);
         runtime.merge_host_for_test(journal);
 
         let _callback_guard = crate::test_callback::lock();

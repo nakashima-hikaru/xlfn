@@ -65,6 +65,18 @@ seals its domain before explicitly destroying protected live slots. These native
 ownership boundaries narrow misuse; the atomic history and allocation/Drop
 connections above remain open refinement obligations.
 
+## Cache ownership boundary
+
+Cache observations remain Copy, while `ResidentPin` and `FlightAnchor` retain
+their individual release obligations. The resident index's existing tagged
+representation is a small unsafe ownership adapter: only an owning tag can
+reconstruct a resident pin. Final-pin retirement entries have no safe Box
+recovery; the private reclamation module obtains post-grace batches from the
+matching kernel-issued disposable/closed capability, or checks the allocation's
+never-published history. Existing TLS destruction deferral still applies.
+These ownership wrappers do not complete the native weak-memory and heap
+refinement obligations listed above.
+
 ## Windows teardown boundary
 
 COM export-drain preparation failure retains the affine `ModuleClosing`

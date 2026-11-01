@@ -243,7 +243,7 @@ unsafe impl Sync for CancellationSource {}
 impl CancellationSource {
     /// Claims the source's one framework task without allocating shared state.
     #[cfg(feature = "async")]
-    pub(crate) fn task_registration(&self) -> TaskCancellationRegistration {
+    fn claim_task(&self) -> TaskCancellationRegistration {
         // SAFETY: source slot allocations remain process-stable.
         let slot = unsafe { self.slot.as_ref() };
         let mut waiters = slot.waiters.lock();
@@ -256,6 +256,14 @@ impl CancellationSource {
             generation: self.generation,
             registered_waker: None,
         }
+    }
+
+    #[cfg(all(
+        feature = "async",
+        any(test, all(feature = "bench-internals", feature = "async-builtin"))
+    ))]
+    pub(crate) fn task_registration(&self) -> TaskCancellationRegistration {
+        self.claim_task()
     }
 
     pub(crate) fn new(guarantee: CancellationGuarantee) -> (Self, CancellationToken) {
@@ -285,6 +293,26 @@ impl CancellationSource {
             slot.cancel_locked(&mut waiters)
         };
         detached.wake();
+    }
+}
+
+/// The single framework-task claim issued together with its delivery token.
+/// Ordinary cancellation sources cannot issue another such claim.
+#[cfg(feature = "async")]
+pub(crate) struct TaskCancellationOwner {
+    source: CancellationSource,
+}
+
+#[cfg(feature = "async")]
+impl TaskCancellationOwner {
+    pub(crate) fn new(guarantee: CancellationGuarantee) -> (Self, CancellationToken) {
+        let (source, token) = CancellationSource::new(guarantee);
+        (Self { source }, token)
+    }
+
+    pub(crate) fn into_parts(self) -> (CancellationSource, TaskCancellationRegistration) {
+        let registration = self.source.claim_task();
+        (self.source, registration)
     }
 }
 

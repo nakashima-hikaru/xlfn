@@ -11,6 +11,7 @@ fn open<'runtime, A: crate::Addin>(
     >,
     generation: crate::generation::OpeningGeneration<A>,
     access: &super::AddinLifecycleAccess<'_, A>,
+    registrations: crate::registration::SuccessfulRegistrations,
 ) -> Option<()> {
     transaction
         .attach_host(host)
@@ -20,7 +21,7 @@ fn open<'runtime, A: crate::Addin>(
         .ok()?
         .install_lifecycle(access)
         .ok()?
-        .stage_host_mutations(Vec::new())
+        .stage_host_mutations(registrations)
         .commit()
         .ok()
 }

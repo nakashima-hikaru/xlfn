@@ -2300,12 +2300,12 @@ fn successful_refresh_acknowledges_the_notification_worker() {
 fn refresh_data_converts_panics_to_e_unexpected() {
     let _guard = TEST_LOCK.lock().unwrap();
     PANIC_IN_REFRESH_DATA.store(true, Ordering::Release);
-    let mut topic_count = 0;
-    let mut result = ptr::null_mut();
+    let mut topic_count = -1;
+    let mut result = ptr::dangling_mut();
 
     assert_eq!(
-        // SAFETY: the injected panic occurs before RefreshData reads any of the
-        // supplied COM pointers.
+        // SAFETY: both output locations are writable. The injected panic
+        // occurs after their initialization, before accessing the null server.
         unsafe {
             refresh_data::<(), crate::DynamicRtdSources<()>>(
                 ptr::null_mut(),
@@ -2315,6 +2315,29 @@ fn refresh_data_converts_panics_to_e_unexpected() {
         },
         E_UNEXPECTED
     );
+    assert_eq!(topic_count, 0);
+    assert!(result.is_null());
+}
+
+#[test]
+fn refresh_data_initializes_outputs_before_rejecting_invalid_server() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let mut topic_count = -1;
+    let mut result = ptr::dangling_mut();
+    assert_eq!(
+        // SAFETY: both output locations are writable; the null server is
+        // rejected without dereferencing it or the stale array sentinel.
+        unsafe {
+            refresh_data::<(), crate::DynamicRtdSources<()>>(
+                ptr::null_mut(),
+                &mut topic_count,
+                &mut result,
+            )
+        },
+        E_POINTER
+    );
+    assert_eq!(topic_count, 0);
+    assert!(result.is_null());
 }
 
 #[test]

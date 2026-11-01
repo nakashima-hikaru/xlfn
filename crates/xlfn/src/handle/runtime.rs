@@ -7,7 +7,7 @@ use super::{
     PublishedTopicPtr, PublishedTopicState, TopicRemoval, TopicTable,
 };
 #[cfg(any(target_os = "windows", test))]
-use super::{FormulaLifetimeGeneration, FormulaObserverId, HandleConnection};
+use super::{FormulaLifetimeGeneration, FormulaObserverId};
 use crate::generation::RuntimeGeneration;
 use crate::generation::TopicGeneration;
 use crate::sync::{Condvar, Mutex};
@@ -455,29 +455,6 @@ impl FormulaHandleService {
             return Err(error);
         }
         Ok(token)
-    }
-
-    #[cfg(any(target_os = "windows", test))]
-    pub(crate) fn connect_transaction(
-        &self,
-        lifetime_generation: FormulaLifetimeGeneration,
-        topic_id: i32,
-        lifetime_key: &str,
-    ) -> XllResult<HandleConnection<'_>> {
-        let owner = FormulaObserverId {
-            generation: lifetime_generation,
-            topic_id,
-        };
-        let (key, token, created) =
-            self.connect_inner(lifetime_generation, topic_id, lifetime_key)?;
-        Ok(HandleConnection {
-            runtime: self,
-            owner,
-            key,
-            token,
-            created,
-            finished: false,
-        })
     }
 
     #[cfg(any(target_os = "windows", test))]

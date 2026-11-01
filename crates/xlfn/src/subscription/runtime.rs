@@ -441,7 +441,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
         }
 
         if let Some(attempt) = attempt {
-            server.publish.drive_notification(attempt);
+            attempt.drive();
         }
 
         Ok(())

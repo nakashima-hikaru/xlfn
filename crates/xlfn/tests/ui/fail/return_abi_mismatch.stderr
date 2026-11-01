@@ -11,11 +11,11 @@ error[E0277]: `f64` cannot be returned using the FP12 ABI
              Result<T, E>
              Row<f64>
              xlfn::value::Matrix<f64>
-note: required by a bound in `xlfn::__private::v1::sync_udf_fp12`
+note: required by a bound in `xlfn::__private::v1::sync_udf_fp12_with_mode`
   --> src/__private.rs
    |
-   |     pub unsafe fn sync_udf_fp12<A: Addin, R: NumericReturn, F>(
-   |                                              ^^^^^^^^^^^^^ required by this bound in `sync_udf_fp12`
+   |     pub unsafe fn sync_udf_fp12_with_mode<A: Addin, R: NumericReturn, X: ExecutionMode, F>(
+   |                                                        ^^^^^^^^^^^^^ required by this bound in `sync_udf_fp12_with_mode`
 
 error[E0277]: `f64` cannot be returned using the FP12 ABI
   --> tests/ui/fail/return_abi_mismatch.rs:19:1
@@ -45,11 +45,11 @@ help: the trait `xlfn::__private::v1::NumericReturn` is implemented for `xlfn::v
    | impl NumericReturn for Matrix<f64> {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = note: required for `Result<xlfn::value::Matrix<std::string::String>, xlfn::XllError>` to implement `xlfn::__private::v1::NumericReturn`
-note: required by a bound in `xlfn::__private::v1::sync_udf_fp12`
+note: required by a bound in `xlfn::__private::v1::sync_udf_fp12_with_mode`
   --> src/__private.rs
    |
-   |     pub unsafe fn sync_udf_fp12<A: Addin, R: NumericReturn, F>(
-   |                                              ^^^^^^^^^^^^^ required by this bound in `sync_udf_fp12`
+   |     pub unsafe fn sync_udf_fp12_with_mode<A: Addin, R: NumericReturn, X: ExecutionMode, F>(
+   |                                                        ^^^^^^^^^^^^^ required by this bound in `sync_udf_fp12_with_mode`
 
 error[E0277]: `xlfn::value::Matrix<std::string::String>` cannot be returned using the FP12 ABI
   --> tests/ui/fail/return_abi_mismatch.rs:22:1

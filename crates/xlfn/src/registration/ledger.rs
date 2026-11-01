@@ -6,10 +6,10 @@ use smol_str::{SmolStr, StrExt};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub(crate) struct PendingRegistration {
-    pub(crate) registration: RegistrationId,
-    pub(crate) state: RegistrationCleanupState,
+    registration: RegistrationId,
+    state: RegistrationCleanupState,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -99,17 +99,6 @@ impl CleanupSeverity {
     }
 }
 
-impl PendingRegistration {
-    #[must_use]
-    pub(crate) fn cleanup_severity(&self) -> CleanupSeverity {
-        match self.state {
-            RegistrationCleanupState::Registered => CleanupSeverity::UnloadUnsafe,
-            RegistrationCleanupState::Unregistered => CleanupSeverity::BestEffort,
-            RegistrationCleanupState::NameDeleted => CleanupSeverity::BestEffort,
-        }
-    }
-}
-
 pub(crate) struct UnregisterResult<T> {
     pub(crate) succeeded: Vec<T>,
     pub(crate) failed: Vec<(T, XllError)>,
@@ -124,55 +113,85 @@ pub(crate) struct UnknownRegistrationState {
     pub(crate) recovery_error: XllError,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RegistrationCertainty {
-    Known,
-    Unknown,
-}
-
 /// Host mutations that belong to one registration/open transaction.
 ///
 /// The journal is the sole owner of cleanup obligations until the transaction
 /// commits them into [`HostLedger`].  Keeping registrations, metadata
 /// debt, and certainty together prevents one failure path from retaining only
 /// part of the host-side side effects.
+#[derive(Default)]
 pub(crate) struct HostMutationJournal {
-    pub(crate) pending_registrations: Vec<PendingRegistration>,
-    pub(crate) metadata_debt: Vec<MetadataDebt>,
-    pub(crate) unknown_registrations: Vec<UnknownRegistrationState>,
-    pub(crate) certainty: RegistrationCertainty,
-}
-
-impl Default for HostMutationJournal {
-    fn default() -> Self {
-        Self {
-            pending_registrations: Vec::new(),
-            metadata_debt: Vec::new(),
-            unknown_registrations: Vec::new(),
-            certainty: RegistrationCertainty::Known,
-        }
-    }
+    pending_registrations: Vec<PendingRegistration>,
+    metadata_debt: Vec<MetadataDebt>,
+    unknown_registrations: Vec<UnknownRegistrationState>,
+    superseded_metadata: Vec<ExcelNameKey>,
 }
 
 impl HostMutationJournal {
+    pub(crate) fn from_registrations(
+        registrations: impl IntoIterator<Item = RegistrationId>,
+    ) -> Self {
+        let mut journal = Self::default();
+        journal.record_registrations(registrations);
+        journal
+    }
+    pub(crate) fn record_registrations(
+        &mut self,
+        registrations: impl IntoIterator<Item = RegistrationId>,
+    ) {
+        self.pending_registrations
+            .extend(registrations.into_iter().map(PendingRegistration::from));
+    }
+    pub(super) fn retain_pending(
+        &mut self,
+        registrations: impl IntoIterator<Item = PendingRegistration>,
+    ) {
+        self.pending_registrations.extend(registrations);
+    }
+    pub(super) fn retain_metadata(&mut self, debts: Vec<MetadataDebt>) {
+        self.metadata_debt.extend(debts);
+    }
+    #[cfg(any(test, feature = "lifecycle-diagnostics"))]
+    pub(crate) fn pending_registrations(&self) -> &[PendingRegistration] {
+        &self.pending_registrations
+    }
+    #[cfg(any(test, feature = "lifecycle-diagnostics"))]
+    pub(crate) fn metadata_debt(&self) -> &[MetadataDebt] {
+        &self.metadata_debt
+    }
+    pub(crate) fn unknown_registrations(&self) -> &[UnknownRegistrationState] {
+        &self.unknown_registrations
+    }
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        Vec<PendingRegistration>,
+        Vec<MetadataDebt>,
+        bool,
+        Vec<ExcelNameKey>,
+    ) {
+        let unknown = self.is_unknown();
+        (
+            self.pending_registrations,
+            self.metadata_debt,
+            unknown,
+            self.superseded_metadata,
+        )
+    }
     pub(crate) fn mark_unknown(&mut self, unknown: UnknownRegistrationState) {
-        self.certainty = RegistrationCertainty::Unknown;
         self.unknown_registrations.push(unknown);
     }
-
     pub(crate) fn merge(&mut self, mut other: Self) {
         self.pending_registrations
             .append(&mut other.pending_registrations);
         self.metadata_debt.append(&mut other.metadata_debt);
         self.unknown_registrations
             .append(&mut other.unknown_registrations);
-        if other.certainty == RegistrationCertainty::Unknown {
-            self.certainty = RegistrationCertainty::Unknown;
-        }
+        self.superseded_metadata
+            .append(&mut other.superseded_metadata);
     }
-
     pub(crate) fn is_unknown(&self) -> bool {
-        self.certainty == RegistrationCertainty::Unknown
+        !self.unknown_registrations.is_empty()
     }
 }
 
@@ -233,5 +252,179 @@ mod tests {
             assert_eq!(hashed.get(&ExcelNameKey::new(&expected)), Some(&1));
         }
         assert_ne!(ExcelNameKey::new("é"), ExcelNameKey::new("É"));
+    }
+}
+
+/// Observation only: cloning this value does not duplicate cleanup authority.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CleanupSnapshot {
+    pub(crate) registration: RegistrationId,
+    pub(crate) state: RegistrationCleanupState,
+}
+impl CleanupSnapshot {
+    pub(crate) fn cleanup_severity(&self) -> CleanupSeverity {
+        match self.state {
+            RegistrationCleanupState::Registered => CleanupSeverity::UnloadUnsafe,
+            _ => CleanupSeverity::BestEffort,
+        }
+    }
+}
+impl PendingRegistration {
+    pub(crate) fn registration(&self) -> RegistrationId {
+        self.registration
+    }
+    pub(crate) fn snapshot(&self) -> CleanupSnapshot {
+        CleanupSnapshot {
+            registration: self.registration(),
+            state: self.state,
+        }
+    }
+}
+
+use super::host::{RegistrationHost, RegistrationMutation};
+use super::registrar::HostRegistrar;
+impl HostRegistrar {
+    pub(crate) fn unregister_pending(
+        host: &RegistrationHost<'_>,
+        registrations: Vec<PendingRegistration>,
+    ) -> UnregisterResult<PendingRegistration> {
+        let mut outcome = UnregisterResult::new(registrations.len());
+        for mut registration in registrations.into_iter().rev() {
+            if !host.permits_callbacks() {
+                outcome.failed.push((registration, XllError::Closing));
+                continue;
+            }
+            if registration.state == super::RegistrationCleanupState::NameDeleted {
+                outcome.succeeded.push(registration);
+                continue;
+            }
+
+            if registration.state == super::RegistrationCleanupState::Registered {
+                match host.unregister_registration(registration.registration) {
+                    RegistrationMutation::Applied { cleanup, .. } => {
+                        registration.state = super::RegistrationCleanupState::Unregistered;
+                        if let Err(error) = cleanup {
+                            outcome.cleanup_issues.push(error);
+                        }
+                    }
+                    RegistrationMutation::Rejected { error }
+                    | RegistrationMutation::Indeterminate { error, .. } => {
+                        outcome.failed.push((registration, error));
+                        continue;
+                    }
+                }
+            }
+
+            if !host.permits_callbacks() {
+                outcome.metadata_debt.push(super::MetadataDebt::new(
+                    registration.registration,
+                    XllError::Closing,
+                ));
+                continue;
+            }
+
+            match host.delete_name_if_binding_matches(
+                registration.registration.excel_name,
+                [registration.registration.id],
+            ) {
+                RegistrationMutation::Applied { cleanup, .. } => {
+                    registration.state = super::RegistrationCleanupState::NameDeleted;
+                    if let Err(error) = cleanup {
+                        outcome.cleanup_issues.push(error);
+                    }
+                    outcome.succeeded.push(registration);
+                }
+                RegistrationMutation::Rejected { error }
+                | RegistrationMutation::Indeterminate { error, .. } => {
+                    outcome
+                        .metadata_debt
+                        .push(super::MetadataDebt::new(registration.registration, error));
+                }
+            }
+        }
+        outcome
+    }
+}
+
+#[cfg(test)]
+mod phase_tests {
+    use super::*;
+    #[test]
+    fn pending_registration_cleanup_severity_matches_state() {
+        let mut registration = PendingRegistration::from(RegistrationId {
+            id: 1.0,
+            excel_name: "FOO",
+        });
+        assert_eq!(
+            registration.snapshot().cleanup_severity(),
+            CleanupSeverity::UnloadUnsafe
+        );
+
+        registration.state = RegistrationCleanupState::Unregistered;
+        assert_eq!(
+            registration.snapshot().cleanup_severity(),
+            CleanupSeverity::BestEffort
+        );
+        registration.state = RegistrationCleanupState::NameDeleted;
+        assert_eq!(
+            registration.snapshot().cleanup_severity(),
+            CleanupSeverity::BestEffort
+        );
+    }
+
+    #[test]
+    fn only_success_receipt_can_supersede_metadata_debt() {
+        use crate::runtime_components::HostLedger;
+        let debt = || {
+            MetadataDebt::new(
+                RegistrationId {
+                    id: 1.0,
+                    excel_name: "price",
+                },
+                XllError::Closing,
+            )
+        };
+        let id = RegistrationId {
+            id: 2.0,
+            excel_name: "PRICE",
+        };
+        let observed_only = HostLedger::new();
+        observed_only.retain_metadata_debt(vec![debt()]);
+        observed_only.merge(HostMutationJournal::from_registrations([id]));
+        assert!(
+            observed_only.has_metadata_debt(),
+            "scalar IDs carry no success receipt"
+        );
+
+        let applied = HostLedger::new();
+        applied.retain_metadata_debt(vec![debt()]);
+        applied.merge(SuccessfulRegistrations::from_applied(vec![id]).into_journal());
+        assert!(!applied.has_metadata_debt());
+        assert_eq!(applied.registrations_snapshot().len(), 1);
+    }
+}
+
+/// Only the successful host registration path constructs this receipt.
+/// It owns the same Vec as the previous scalar-ID return, with no marker cost.
+pub(crate) struct SuccessfulRegistrations(Vec<RegistrationId>);
+impl SuccessfulRegistrations {
+    pub(super) fn from_applied(registrations: Vec<RegistrationId>) -> Self {
+        Self(registrations)
+    }
+    pub(crate) fn into_journal(self) -> HostMutationJournal {
+        let superseded_metadata = self
+            .0
+            .iter()
+            .map(|id| ExcelNameKey::new(id.excel_name))
+            .collect();
+        let mut journal = HostMutationJournal::from_registrations(self.0);
+        journal.superseded_metadata = superseded_metadata;
+        journal
+    }
+}
+impl std::ops::Deref for SuccessfulRegistrations {
+    type Target = [RegistrationId];
+    fn deref(&self) -> &[RegistrationId] {
+        &self.0
     }
 }

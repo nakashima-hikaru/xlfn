@@ -109,7 +109,7 @@ fn refresh_from<E: RtdSubscription>(
     let deadline = Instant::now() + DEADLINE;
     loop {
         let batch = server.begin_refresh().unwrap();
-        for update in &batch.updates {
+        for update in batch.updates() {
             observed.insert(update.topic_id, update.value.clone());
         }
         batch.complete(RefreshOutcome::Delivered).unwrap();
@@ -276,7 +276,7 @@ fn connect_and_refresh_collect_initial_and_later_values() {
     assert_eq!(initial, StoredRtdValue::Integer(7));
 
     let batch = server.begin_refresh().unwrap();
-    assert!(batch.updates.is_empty());
+    assert!(batch.updates().is_empty());
     batch.complete(RefreshOutcome::Delivered).unwrap();
 
     sink.lock().clone().unwrap().publish(8).unwrap();

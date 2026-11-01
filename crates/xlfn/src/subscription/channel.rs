@@ -1659,7 +1659,7 @@ mod tests {
                         RtdProducerErrorPolicy::RetainLastValue => StoredRtdValue::Integer(42),
                         RtdProducerErrorPolicy::PublishError(error) => StoredRtdValue::Error(error),
                     };
-                    assert_eq!(batch.updates[0].value, expected);
+                    assert_eq!(batch.updates()[0].value, expected);
                     batch.complete(RefreshOutcome::Delivered).unwrap();
                     subscription.disconnect_and_wait().unwrap();
                 }
@@ -1702,7 +1702,7 @@ mod tests {
             let ready = queue.ready.lock().channels.pop_front().unwrap();
             queue.publish_one(ready);
             let batch = server.begin_refresh().unwrap();
-            assert_eq!(batch.updates[0].value, expected);
+            assert_eq!(batch.updates()[0].value, expected);
             batch.complete(RefreshOutcome::Delivered).unwrap();
         }
         assert!(queue.ready.lock().channels.is_empty());
@@ -1736,7 +1736,7 @@ mod tests {
             sender_rx.recv_timeout(DEADLINE).unwrap();
             subscription.disconnect_and_wait().unwrap();
             let cancelled = server.begin_refresh().unwrap();
-            assert!(cancelled.updates.is_empty());
+            assert!(cancelled.updates().is_empty());
             cancelled.complete(RefreshOutcome::Delivered).unwrap();
 
             let source = RtdChannelSource::new(capacity(), |_| {
@@ -1759,7 +1759,7 @@ mod tests {
             wait_drained_shared(&subscription.channel);
             let failure = server.begin_refresh().unwrap();
             assert_eq!(
-                failure.updates[0].value,
+                failure.updates()[0].value,
                 StoredRtdValue::Error(crate::ExcelError::NotAvailable)
             );
             failure.complete(RefreshOutcome::Delivered).unwrap();
@@ -1854,7 +1854,7 @@ mod tests {
         second.producer_finished();
         wait_drained(&second);
         let batch = server.begin_refresh().unwrap();
-        assert_eq!(batch.updates[0].value, StoredRtdValue::Integer(42));
+        assert_eq!(batch.updates()[0].value, StoredRtdValue::Integer(42));
         batch.complete(RefreshOutcome::Delivered).unwrap();
         second_sub.disconnect_and_wait().unwrap();
     }
@@ -1896,7 +1896,7 @@ mod tests {
         assert!(latest.state.lock().values.is_empty());
         let refresh = server.begin_refresh().unwrap();
         assert_eq!(
-            refresh.updates[0].value,
+            refresh.updates()[0].value,
             StoredRtdValue::Error(ExcelError::Number)
         );
         refresh.complete(RefreshOutcome::Delivered).unwrap();
@@ -1985,7 +1985,7 @@ mod tests {
         assert!(queue.ready.lock().channels.is_empty());
         assert!(!channel.state.lock().scheduled);
         let batch = server.begin_refresh().unwrap();
-        assert_eq!(batch.updates[0].value, StoredRtdValue::Integer(32));
+        assert_eq!(batch.updates()[0].value, StoredRtdValue::Integer(32));
         batch.complete(RefreshOutcome::Delivered).unwrap();
         channel.publication.lock().sink.take();
         queue.stop();
@@ -2090,7 +2090,7 @@ mod tests {
         }
         assert!(channel.state.lock().values.is_empty());
         let rejected = server.begin_refresh().unwrap();
-        assert!(rejected.updates.is_empty());
+        assert!(rejected.updates().is_empty());
         rejected.complete(RefreshOutcome::Delivered).unwrap();
 
         // The boundary counts UTF-16 units rather than UTF-8 bytes, and a
@@ -2106,9 +2106,9 @@ mod tests {
             Some(StoredRtdValue::String(valid.clone().into_boxed_str())),
         );
         let accepted = server.begin_refresh().unwrap();
-        assert_eq!(accepted.updates.len(), 1);
+        assert_eq!(accepted.updates().len(), 1);
         assert_eq!(
-            accepted.updates[0].value,
+            accepted.updates()[0].value,
             StoredRtdValue::String(valid.into_boxed_str()),
         );
         accepted.complete(RefreshOutcome::Delivered).unwrap();
@@ -2219,9 +2219,9 @@ mod tests {
             }
         }
         let batch = server.begin_refresh().unwrap();
-        assert_eq!(batch.updates.len(), 1);
-        assert_eq!(batch.updates[0].value, StoredRtdValue::Integer(64));
-        assert_eq!(batch.updates[0].sequence, 64);
+        assert_eq!(batch.updates().len(), 1);
+        assert_eq!(batch.updates()[0].value, StoredRtdValue::Integer(64));
+        assert_eq!(batch.updates()[0].sequence, 64);
         batch.complete(RefreshOutcome::Delivered).unwrap();
         subscription.disconnect_and_wait().unwrap();
     }
@@ -2250,9 +2250,9 @@ mod tests {
         drop(release_tx);
         subscription.disconnect_and_wait().unwrap();
         let batch = server.begin_refresh().unwrap();
-        assert_eq!(batch.updates.len(), 1);
-        assert_eq!(batch.updates[0].value, StoredRtdValue::Integer(0));
-        assert_eq!(batch.updates[0].sequence, 0);
+        assert_eq!(batch.updates().len(), 1);
+        assert_eq!(batch.updates()[0].value, StoredRtdValue::Integer(0));
+        assert_eq!(batch.updates()[0].sequence, 0);
         batch.complete(RefreshOutcome::Delivered).unwrap();
         assert!(channel.state.lock().values.is_empty());
     }
@@ -2273,9 +2273,9 @@ mod tests {
             .unwrap();
         wait_drained_shared(&subscription.channel);
         let batch = server.begin_refresh().unwrap();
-        assert_eq!(batch.updates.len(), 1);
-        assert_eq!(batch.updates[0].value, StoredRtdValue::Integer(3));
-        assert_eq!(batch.updates[0].sequence, 0);
+        assert_eq!(batch.updates().len(), 1);
+        assert_eq!(batch.updates()[0].value, StoredRtdValue::Integer(3));
+        assert_eq!(batch.updates()[0].sequence, 0);
         batch.complete(RefreshOutcome::Delivered).unwrap();
         subscription.disconnect_and_wait().unwrap();
     }
@@ -2299,8 +2299,8 @@ mod tests {
             }
         }
         let batch = server.begin_refresh().unwrap();
-        assert_eq!(batch.updates.len(), 1);
-        assert_eq!(batch.updates[0].value, StoredRtdValue::Integer(42));
+        assert_eq!(batch.updates().len(), 1);
+        assert_eq!(batch.updates()[0].value, StoredRtdValue::Integer(42));
         batch.complete(RefreshOutcome::Delivered).unwrap();
         subscription.disconnect_and_wait().unwrap();
     }

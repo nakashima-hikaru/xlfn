@@ -21,7 +21,7 @@ use crate::runtime::recovery::{commit_removal_control, handle_unload_hazard, qua
 type StagedOpenResult<'runtime, A> = Result<
     (
         OpeningTxn<'runtime, A, GenerationStaged<A>>,
-        Vec<crate::registration::RegistrationId>,
+        crate::registration::SuccessfulRegistrations,
     ),
     open::OpenFailure<'runtime, A>,
 >;
@@ -119,10 +119,7 @@ where
         // A successful Excel mutation still belongs to this transaction when
         // a nested close requested rollback. Preserve every ID so recovery
         // unregisters it using the original callback session.
-        transaction.retain_journal(crate::registration::HostMutationJournal {
-            pending_registrations: registrations.into_iter().map(Into::into).collect(),
-            ..Default::default()
-        });
+        transaction.retain_journal(registrations.into_journal());
         return Err(transaction.failure(XllError::Closing));
     }
     Ok((transaction, registrations))
@@ -189,7 +186,7 @@ where
     S: OpeningState<A> + crate::runtime::open_txn::HasHost,
 {
     if error.journal.is_unknown() {
-        for unknown in &error.journal.unknown_registrations {
+        for unknown in error.journal.unknown_registrations() {
             let recovery_error = unknown.recovery_error.clone();
             let _ = catch_no_unwind(AssertUnwindSafe(|| {
                 tracing::error!(
@@ -392,63 +389,61 @@ where
 
     runtime.observer().subscriptions_drained();
 
-    let registrations = shutdown_deps.host().registrations_snapshot();
-    if let Ok(outcome) = catch_no_unwind(AssertUnwindSafe(|| {
+    let cleanup = catch_no_unwind(AssertUnwindSafe(|| {
         let host = RegistrationHost::new(transaction.callbacks_mut());
-        HostRegistrar::unregister_pending(&host, &registrations)
-    })) {
-        for (registration, error) in &outcome.failed {
-            if registration.cleanup_severity().is_unload_unsafe() {
-                report_boundary_error("xlAutoRemove unregister", error);
-                if unload_failure.is_none() {
-                    unload_failure = Some((
-                        crate::shutdown::UnloadHazard::HostCallbackStillRegistered,
-                        "xlAutoRemove unregister",
-                        error.clone(),
-                    ));
+        shutdown_deps.host().cleanup_registrations(&host)
+    }))
+    .map_err(|_| XllError::Panic)
+    .and_then(std::convert::identity);
+    match cleanup {
+        Ok(outcome) => {
+            for (registration, error) in &outcome.failed {
+                if registration.cleanup_severity().is_unload_unsafe() {
+                    report_boundary_error("xlAutoRemove unregister", error);
+                    if unload_failure.is_none() {
+                        unload_failure = Some((
+                            crate::shutdown::UnloadHazard::HostCallbackStillRegistered,
+                            "xlAutoRemove unregister",
+                            error.clone(),
+                        ));
+                    }
                 }
             }
-        }
-        for debt in &outcome.metadata_debt {
-            report.push(
-                "Excel registered name",
-                crate::shutdown::CleanupIssueKind::HostMetadata,
-                debt.last_error().clone(),
-            );
-        }
-        for error in outcome.cleanup_issues {
-            report.push(
-                "Excel callback result",
-                crate::shutdown::CleanupIssueKind::HostMemoryLeak,
-                error,
-            );
-        }
-        for _ in &outcome.succeeded {
-            runtime.observer().unregister_function();
-        }
-        shutdown_deps
-            .host()
-            .replace_registrations(outcome.failed.into_iter().map(|(entry, _)| entry).collect());
-        shutdown_deps
-            .host()
-            .retain_metadata_debt(outcome.metadata_debt);
-        if shutdown_deps.host().has_metadata_debt() {
-            let debt_count = shutdown_deps.host().metadata_debt_snapshot().len();
-            let _ = catch_no_unwind(AssertUnwindSafe(|| {
-                tracing::warn!(
-                    count = debt_count,
-                    "xlAutoRemove completed with host metadata debt"
+            for debt in &outcome.metadata_debt {
+                report.push(
+                    "Excel registered name",
+                    crate::shutdown::CleanupIssueKind::HostMetadata,
+                    debt.last_error().clone(),
                 );
-            }));
+            }
+            for error in outcome.cleanup_issues {
+                report.push(
+                    "Excel callback result",
+                    crate::shutdown::CleanupIssueKind::HostMemoryLeak,
+                    error,
+                );
+            }
+            for _ in &outcome.succeeded {
+                runtime.observer().unregister_function();
+            }
+            if shutdown_deps.host().has_metadata_debt() {
+                let debt_count = shutdown_deps.host().metadata_debt_snapshot().len();
+                let _ = catch_no_unwind(AssertUnwindSafe(|| {
+                    tracing::warn!(
+                        count = debt_count,
+                        "xlAutoRemove completed with host metadata debt"
+                    );
+                }));
+            }
         }
-    } else {
-        let error = XllError::Panic;
-        report_boundary_error("xlAutoRemove unregister", &error);
-        unload_failure = Some((
-            crate::shutdown::UnloadHazard::HostCallbackStillRegistered,
-            "xlAutoRemove unregister",
-            error,
-        ));
+        Err(error) => {
+            report_boundary_error("xlAutoRemove unregister", &error);
+            unload_failure = Some((
+                crate::shutdown::UnloadHazard::HostCallbackStillRegistered,
+                "xlAutoRemove unregister",
+                error,
+            ));
+        }
     }
     if shutdown_deps.host().registration_state_unknown() && unload_failure.is_none() {
         let error = XllError::Internal {

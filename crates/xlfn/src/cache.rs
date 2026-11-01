@@ -2,6 +2,8 @@ use crate::error::InputError;
 use crate::panic_boundary::catch_no_unwind;
 use crate::{XllError, XllResult};
 mod deferred_drop;
+mod reclamation;
+use reclamation::{ReclaimEntries, merge_reclaims, reclaim_cache_entries, reclaim_unpublished};
 mod endpoint_cache;
 #[cfg(test)]
 mod generation_tests;
@@ -9,6 +11,8 @@ mod generation_tests;
 mod key_reentrancy_tests;
 mod node_layout;
 mod pin_transitions;
+mod pins;
+use pins::{FlightAnchor, ResidentPin};
 #[cfg(test)]
 mod reentrancy_tests;
 #[cfg(test)]
@@ -211,46 +215,6 @@ impl<V> std::ops::Deref for CacheLease<'_, V> {
     }
 }
 
-/// Consumes the final-pin retirement entry after all observations have ended.
-/// The caller must establish a matching grace period, or that the node was never
-/// published. Ownership of the entry alone does not establish quiescence.
-unsafe fn reclaim_cache_node<V>(entry: ReclaimEntry<V>) {
-    let ReclaimEntry { pointer: ptr, .. } = entry;
-    // SAFETY: the caller establishes quiescence; consuming entry transfers the
-    // unique retirement ownership into Box without copying the inline payload.
-    let node = unsafe { Box::from_non_null(ptr) };
-    // Drop in place: moving an inline, potentially large V onto the stack
-    // just to catch its destructor would add copies and risk stack overflow.
-    // Box's drop glue frees the node even if V's destructor unwinds. All
-    // framework locks and the grace-period callback have already been left.
-    if catch_no_unwind(AssertUnwindSafe(|| drop(node))).is_err() {
-        let error = XllError::Panic;
-        crate::diagnostics::report_no_unwind("calculation cache value final drop", &error);
-    }
-}
-
-fn reclaim_cache_entries<V>(entries: ReclaimEntries<'_, V>) {
-    fn reclaim<V>(entries: PendingEntries<V>) {
-        for entry in entries {
-            // SAFETY: detached entries have completed their domain grace period.
-            unsafe { reclaim_cache_node::<V>(entry) };
-        }
-    }
-    if destruction_deferred() && !entries.is_empty() {
-        // SAFETY: cache nodes are created only by CalculationCache with V: 'static.
-        // Detached entries own the allocations independently of the cache/domain;
-        // reclaim only consumes their pointers, never the old domain pointer.
-        unsafe { deferred_drop::defer(entries.entries, reclaim::<V>) };
-        return;
-    }
-    for entry in entries.entries {
-        // SAFETY: [TR-RECLAIM-1] entry.pointer points to an allocated CacheNode<V> whose grace period has ended.
-        unsafe {
-            reclaim_cache_node::<V>(entry);
-        }
-    }
-}
-
 /// Approximate, side-effect-free reclamation counters. Weights use the
 /// caller's estimates, not allocator or process memory measurements.
 #[cfg(any(test, feature = "bench-internals"))]
@@ -296,7 +260,7 @@ unsafe fn release_node_pin<V>(node_ptr: NonNull<CacheNode<V>>) {
         } else if ACTIVE_CACHE_INITIALIZATION_DEPTH.get() == 0 {
             // SAFETY: A never-published node was never reachable through an index snapshot.
             // Its final pin release can immediately destroy the node.
-            unsafe { reclaim_cache_node::<V>(entry) };
+            reclaim_unpublished(entry);
         } else {
             // Initializer-local drops still enter deferred reclamation so user destructors
             // never run inside the cache initialization guard.
@@ -692,26 +656,13 @@ impl<V> Clone for NodePtr<V> {
 
 impl<V> Copy for NodePtr<V> {}
 
-// SAFETY: NodePtr shares a pinned node with other readers (V: Sync), and the
-// receiving thread may retire it and eventually destroy its value (V: Send).
+// SAFETY: an observation is dereferenced only under a lookup permit or live
+// pin. Acquiring a lease can eventually transfer destruction (V: Send), while
+// concurrent shared reads require V: Sync; the pointer alone owns no pin.
 unsafe impl<V: Send + Sync> Send for NodePtr<V> {}
-// SAFETY: NodePtr is Copy, so sharing a reference also lets its recipient
-// obtain a capability whose eventual retirement can destroy V there.
+// SAFETY: copying the observation transfers no release authority. The same
+// bounds cover any subsequently acquired lease and its final destruction.
 unsafe impl<V: Send + Sync> Sync for NodePtr<V> {}
-
-// The resident index only selects entries to remove. The residency state,
-// pin release, and retirement enqueue remain owned by CalculationCache.
-fn retire_resident<V>(node_ptr: NodePtr<V>) {
-    // SAFETY: the index transfers its one outstanding residency obligation.
-    let node = unsafe { node_ptr.0.as_ref() };
-    node.resident.store(false, Ordering::Release);
-    // SAFETY: the index transfers its one residency pin exactly once.
-    if let Some(entry) = unsafe { ReclaimEntry::release_pin(node_ptr.0) } {
-        // SAFETY: the cache retains its domain until every index entry retires.
-        let domain = unsafe { node.domain.as_ref() };
-        domain.enqueue_reclaim(entry);
-    }
-}
 
 node_layout::declare_node! {
     struct CacheNode<V> {
@@ -777,7 +728,7 @@ enum FlightState<V> {
     Pending,
     // The shared Flight owns the error; followers clone its value, not its owner.
     // Keep it boxed so large error variants do not enlarge every flight.
-    Finished(Result<(NodePtr<V>, u64), Box<XllError>>),
+    Finished(Result<(FlightAnchor<V>, u64), Box<XllError>>),
     Retry,
 }
 
@@ -795,15 +746,6 @@ impl<K, V> Flight<K, V> {
             hash,
             state: Mutex::new(FlightState::Pending),
             changed: Condvar::new(),
-        }
-    }
-}
-
-impl<K, V> Drop for Flight<K, V> {
-    fn drop(&mut self) {
-        if let FlightState::Finished(Ok((node_ptr, _))) = &*self.state.get_mut() {
-            // SAFETY: node_ptr points to a valid CacheNode allocated during this flight.
-            unsafe { release_node_pin(node_ptr.0) };
         }
     }
 }
@@ -926,7 +868,7 @@ where
 {
     /// Publish before detaching the flight, consuming the only completion
     /// authority. Abandonment instead detaches before inviting a retry.
-    fn complete(mut self, result: Result<(NodePtr<V>, u64), Box<XllError>>) {
+    fn complete(mut self, result: Result<(FlightAnchor<V>, u64), Box<XllError>>) {
         {
             let mut state = self.flight.state.lock();
             *state = FlightState::Finished(result);
@@ -1050,53 +992,6 @@ unsafe impl<V: Send> Send for ReclaimEntry<V> {}
 // Vec's previous initial capacity, so larger batches also skip that allocation
 // without adding an extra growth step or a fixed reclamation limit.
 type PendingEntries<V> = SmallVec<[ReclaimEntry<V>; 4]>;
-
-/// A batch detached only after a same-domain grace-period certificate.
-/// The owner borrow keeps the allocation's domain alive through reclamation.
-struct ReclaimEntries<'domain, V> {
-    domain: &'domain CacheLookupDomain<V>,
-    entries: PendingEntries<V>,
-}
-
-impl<'domain, V> ReclaimEntries<'domain, V> {
-    fn new(domain: &'domain CacheLookupDomain<V>) -> Self {
-        Self {
-            domain,
-            entries: PendingEntries::new(),
-        }
-    }
-    fn extend(&mut self, mut other: Self) {
-        crate::retirement_queue::append_owned_batch!(
-            std::ptr::from_ref(self.domain), std::ptr::from_ref(other.domain);
-            xlfn_kernel::invariant::fail_stop(),
-            self.entries.append(&mut other.entries)
-        );
-    }
-}
-impl<V> std::ops::Deref for ReclaimEntries<'_, V> {
-    type Target = [ReclaimEntry<V>];
-    fn deref(&self) -> &Self::Target {
-        &self.entries
-    }
-}
-
-fn merge_reclaims<'domain, V>(
-    domain: &'domain CacheLookupDomain<V>,
-    batches: impl IntoIterator<Item = ReclaimEntries<'domain, V>>,
-) -> ReclaimEntries<'domain, V> {
-    let entries = batches
-        .into_iter()
-        .filter(|batch| !batch.is_empty())
-        .reduce(|mut entries, next| {
-            entries.extend(next);
-            entries
-        })
-        .unwrap_or_else(|| ReclaimEntries::new(domain));
-    crate::retirement_queue::append_owned_batch!(
-        std::ptr::from_ref(entries.domain), std::ptr::from_ref(domain);
-        xlfn_kernel::invariant::fail_stop(), entries
-    )
-}
 
 thread_local! {
     // No TLS destructor: user TLS cache destructors may still need this tracker.
@@ -1370,32 +1265,7 @@ impl<V> CacheLookupDomain<V> {
         &self,
         generation: DisposableBatch<'_, DEFAULT_STRIPE_COUNT, PendingEntries<V>>,
     ) -> ReclaimEntries<'_, V> {
-        if !generation.belongs_to(&self.domain) {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        let entries = generation.into_inner();
-        // Keep detached entries counted until their weight accounting completes.
-        // A concurrent empty-queue observer may reset saturation only after
-        // this final pending_nodes subtraction makes the whole domain empty.
-        if !self.pending_weight_saturated.load(Ordering::Relaxed) {
-            let weight = entries
-                .iter()
-                .fold(0_u64, |sum, entry| sum.saturating_add(entry.weight));
-            self.pending_weight
-                .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                    current.checked_sub(weight)
-                })
-                .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
-        }
-        self.pending_nodes
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                current.checked_sub(entries.len())
-            })
-            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
-        ReclaimEntries {
-            domain: self,
-            entries,
-        }
+        ReclaimEntries::from_disposable(self, generation)
     }
 
     #[cfg(any(test, feature = "bench-internals"))]
@@ -1435,14 +1305,7 @@ impl<V> CacheLookupDomain<V> {
         &self,
         closed: ClosedRetirement<'_, DEFAULT_STRIPE_COUNT, PendingEntries<V>>,
     ) -> ReclaimEntries<'_, V> {
-        if !closed.belongs_to(&self.domain) {
-            xlfn_kernel::invariant::fail_stop();
-        }
-        let batches = closed.take_queues().map(|batch| ReclaimEntries {
-            domain: self,
-            entries: batch.into_inner(),
-        });
-        merge_reclaims(self, batches)
+        ReclaimEntries::from_closed(self, closed)
     }
 }
 
@@ -1827,7 +1690,9 @@ where
                 let (node_ptr, _w) = loop {
                     match &*state {
                         FlightState::Pending => flight.changed.wait(&mut state),
-                        FlightState::Finished(Ok(entry)) => break *entry,
+                        FlightState::Finished(Ok((anchor, weight))) => {
+                            break (anchor.observe(), *weight);
+                        }
                         FlightState::Finished(Err(err)) => {
                             let error = (**err).clone();
                             drop(state);
@@ -1906,15 +1771,13 @@ where
                     let node_ptr = NodePtr(Box::into_non_null(node));
                     let creator_guard = CreatorPinGuard::new(node_ptr.0);
 
-                    // SAFETY: node_ptr points to the newly allocated CacheNode kept alive by creator_guard.
-                    let node_ref = unsafe { node_ptr.0.as_ref() };
-
                     // 2. Publish resident first, if eligible.
                     // ResidentEntry owns the new pin before any key code or index insertion can unwind.
                     if publish {
-                        node_ref.acquire_anchor_pin();
+                        // SAFETY: creator_guard retains the new allocation.
+                        let resident = unsafe { ResidentPin::acquire(node_ptr) };
                         self.index
-                            .insert_resident(&flight.key, ResidentEntry::new((node_ptr, w)));
+                            .insert_resident(&flight.key, ResidentEntry::new(resident, w));
 
                         self.generation.discard_if_stale(flight.key.epoch, || {
                             self.index.invalidate(&flight.key);
@@ -1923,9 +1786,10 @@ where
 
                     // 3. Publish result to followers.
                     // Increment pins for Flight, transferring 1 pin to FlightState::Finished.
-                    node_ref.acquire_anchor_pin();
+                    // SAFETY: creator_guard retains the new allocation.
+                    let anchor = unsafe { FlightAnchor::acquire(node_ptr) };
                     // 4. Completion publishes before removing registration.
-                    guard.complete(Ok((node_ptr, w)));
+                    guard.complete(Ok((anchor, w)));
 
                     drop(_active);
                     self.maintain(true);
@@ -2295,7 +2159,7 @@ mod tests {
         domain.enqueue_reclaim(ReclaimEntry::sentinel(&domain, 17));
         let second = domain.quiesce_and_drain();
         let batch = merge_reclaims(&domain, [first, second]);
-        assert!(std::ptr::eq(batch.domain, &domain));
+        assert!(batch.belongs_to(&domain));
         assert_eq!(batch.len(), 2);
         assert_eq!(batch.iter().map(|entry| entry.weight).sum::<u64>(), 28);
         assert_eq!(domain.pending_nodes.load(Ordering::Relaxed), 0);
@@ -3484,7 +3348,9 @@ mod tests {
                 let creator = CreatorPinGuard::new(node);
                 // SAFETY: creator owns the initial pin in this live allocation.
                 unsafe { node.as_ref() }.acquire_anchor_pin();
-                let entry = ResidentEntry::new((NodePtr(node), 1));
+                // SAFETY: the acquired anchor is transferred once to residency.
+                let entry =
+                    ResidentEntry::new(unsafe { ResidentPin::from_index(NodePtr(node)) }, 1);
                 let snapshot = entry.clone();
                 drop(snapshot); // A lookup clone must not discharge residency.
                 let key = VersionedKey {
