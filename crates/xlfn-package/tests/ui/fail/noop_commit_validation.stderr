@@ -1,0 +1,13 @@
+error[E0603]: module `distribution` is private
+ --> tests/ui/fail/noop_commit_validation.rs:5:27
+  |
+5 |     let _ = xlfn_package::distribution::commit_prepared_directory_with(
+  |                           ^^^^^^^^^^^^  ------------------------------ function `commit_prepared_directory_with` is not publicly re-exported
+  |                           |
+  |                           private module
+  |
+note: the module `distribution` is defined here
+ --> src/lib.rs
+  |
+  | mod distribution;
+  | ^^^^^^^^^^^^^^^^

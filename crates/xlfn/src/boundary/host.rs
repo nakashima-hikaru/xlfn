@@ -27,6 +27,13 @@ struct HostLifecycleGuard {
 }
 
 impl HostLifecycleGuard {
+    fn belongs_to<A: Addin>(
+        &self,
+        runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+    ) -> bool {
+        self.runtime == std::ptr::from_ref(runtime).cast::<()>()
+    }
+
     fn enter<A: Addin>(runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>) -> Option<Self> {
         let runtime = std::ptr::from_ref(runtime).cast::<()>();
         ACTIVE_LIFECYCLES.with_borrow_mut(|active| {
@@ -48,6 +55,29 @@ impl Drop for HostLifecycleGuard {
     }
 }
 
+/// Issued only by xlAutoClose, distinct from opening/removal reentry tracking.
+pub(crate) struct HostCloseBoundary {
+    _guard: HostLifecycleGuard,
+}
+
+impl HostCloseBoundary {
+    pub(crate) fn belongs_to<A: Addin>(
+        &self,
+        runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+    ) -> bool {
+        self._guard.belongs_to(runtime)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test<A: Addin>(
+        runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+    ) -> Self {
+        Self {
+            _guard: HostLifecycleGuard::enter(runtime).expect("test owns its close boundary"),
+        }
+    }
+}
+
 fn defer_opening_deactivation<A: Addin>(
     runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
 ) {
@@ -60,6 +90,7 @@ fn defer_opening_deactivation<A: Addin>(
 }
 
 /// Handles the generated `xlAutoOpen` boundary.
+#[cfg(test)]
 pub(crate) fn host_auto_open<A>(
     runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     addin_id: &AddinId,
@@ -70,6 +101,54 @@ pub(crate) fn host_auto_open<A>(
 where
     A: Addin,
 {
+    host_auto_open_observed(runtime, addin_id, version, target, descriptors).result()
+}
+
+/// Records the attempt claimed by this exact opening invocation.
+pub(crate) struct HostOpenOutcome {
+    result: i32,
+    attempt: Option<crate::generation::OpenAttemptId>,
+}
+
+impl HostOpenOutcome {
+    pub(crate) fn result(&self) -> i32 {
+        self.result
+    }
+    pub(crate) fn attempt(&self) -> Option<crate::generation::OpenAttemptId> {
+        self.attempt
+    }
+}
+
+pub(crate) fn host_auto_open_observed<A: Addin>(
+    runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+    addin_id: &AddinId,
+    version: &'static str,
+    target: &'static str,
+    descriptors: &[RegistrationDescriptor],
+) -> HostOpenOutcome {
+    let mut attempted = None;
+    let result = host_auto_open_inner(
+        runtime,
+        addin_id,
+        version,
+        target,
+        descriptors,
+        &mut attempted,
+    );
+    HostOpenOutcome {
+        result,
+        attempt: attempted,
+    }
+}
+
+fn host_auto_open_inner<A: Addin>(
+    runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
+    addin_id: &AddinId,
+    version: &'static str,
+    target: &'static str,
+    descriptors: &[RegistrationDescriptor],
+    attempted: &mut Option<crate::generation::OpenAttemptId>,
+) -> i32 {
     let Some(_boundary) = HostLifecycleGuard::enter(runtime) else {
         return 0;
     };
@@ -118,10 +197,13 @@ where
     let result = runtime.open_addin_boundary(
         &lifecycle,
         callbacks,
-        addin_id,
-        version,
-        target,
-        descriptors,
+        crate::runtime::OpenBoundaryRequest {
+            addin_id,
+            version,
+            target,
+            descriptors,
+        },
+        attempted,
     );
     if controlled_reload
         && result == 0
@@ -148,21 +230,20 @@ pub(crate) fn host_auto_close<A>(runtime: &Runtime<A, impl crate::runtime::Unloa
 where
     A: Addin,
 {
-    let Some(_boundary) = HostLifecycleGuard::enter(runtime) else {
+    let Some(boundary) = HostLifecycleGuard::enter(runtime) else {
         defer_opening_deactivation(runtime);
         return 1;
     };
+    let boundary = HostCloseBoundary { _guard: boundary };
     let mut callbacks = HostCallbackSession::new();
     deactivate_addin(runtime, &mut callbacks, "xlAutoClose lifecycle thread");
     if runtime.phase() == LifecyclePhase::Closed
         && runtime.host_intent() == HostLifecycleIntent::ExplicitRemovalComplete
     {
         if runtime.physical_unload_enabled() {
-            if let Err(error) = runtime.release_module_residency() {
+            if let Err(error) = runtime.release_closed_residency(&boundary) {
                 report_boundary_error("xlAutoClose module residency release", &error);
                 runtime.quarantine_runtime();
-            } else {
-                runtime.clear_host_intent();
             }
         } else {
             // A safe Addin may own executable sources outside framework

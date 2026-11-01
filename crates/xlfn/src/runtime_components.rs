@@ -15,6 +15,8 @@ mod services;
 pub(crate) use formal::FormalState;
 pub(crate) use host_ledger::HostLedger;
 pub(crate) use quarantine::{QuarantineReason, QuarantineVault};
-pub(crate) use residency::ModuleResidency;
+pub(crate) use residency::{
+    ModuleResidency, ResidencyAcquisition, ResidencyLeaseId, ResidencyReleaseOutcome,
+};
 pub(crate) use return_protocol::ReturnProtocol;
 pub(crate) use services::{GenerationServiceInputs, GenerationServices, SealedGenerationServices};

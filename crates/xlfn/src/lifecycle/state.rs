@@ -1547,6 +1547,24 @@ impl<A: crate::Addin> LifecycleAccess<'_, A> {
         self.core.removal_epoch()
     }
 
+    /// Monotonic identity boundary for residency held across an opening call.
+    pub(crate) fn next_open_sequence(&self) -> u64 {
+        self.core.next_lifecycle_attempt
+    }
+
+    /// Finish the close epilogue without unlocking between release and intent.
+    pub(crate) fn clear_completed_removal_intent(&mut self) {
+        require_lifecycle_invariant(
+            self.phase() == LifecyclePhase::Closed
+                && self.host_intent() == HostLifecycleIntent::ExplicitRemovalComplete,
+            "residency epilogue requires completed removal",
+        );
+        self.transition(|core| {
+            core.host_intent = HostLifecycleIntent::None;
+            ((), TransitionEffect::Keep)
+        });
+    }
+
     pub(crate) fn matches_latest_open_attempt(&self, generation: RuntimeGeneration) -> bool {
         generation.get().checked_add(1) == Some(self.core.next_lifecycle_attempt)
     }

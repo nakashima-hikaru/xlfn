@@ -8,16 +8,12 @@ use anyhow::{Context, anyhow, bail};
 use cargo_metadata::{CargoOpt, Metadata, MetadataCommand, Package};
 use fs_err as fs;
 use std::collections::BTreeMap;
-#[cfg(test)]
-use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 extern crate usage as usage_rs;
 
 use usage::{Args, Cli, Subcommands, ValueEnum};
 use xlfn_package::{BundleMetadata, validate_windows_basename};
-#[cfg(test)]
-use xlfn_package::{DirectoryIdentity, directory_identity};
 
 mod crt;
 

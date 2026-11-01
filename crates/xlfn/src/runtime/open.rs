@@ -111,18 +111,29 @@ impl<'runtime, A: Addin> OpeningTxn<'runtime, A, GenerationStaged<A>> {
     }
 }
 
+pub(crate) struct OpenBoundaryRequest<'a> {
+    pub(crate) addin_id: &'a AddinId,
+    pub(crate) version: &'static str,
+    pub(crate) target: &'static str,
+    pub(crate) descriptors: &'a [RegistrationDescriptor],
+}
+
 pub(super) fn open_addin_boundary<A>(
     runtime: &Runtime<A, impl crate::runtime::UnloadPolicy<A>>,
     lifecycle: &AddinLifecycleAccess<'_, A>,
     mut callbacks: HostCallbackSession,
-    addin_id: &AddinId,
-    version: &'static str,
-    target: &'static str,
-    descriptors: &[RegistrationDescriptor],
+    request: OpenBoundaryRequest<'_>,
+    attempted: &mut Option<crate::generation::OpenAttemptId>,
 ) -> i32
 where
     A: Addin,
 {
+    let OpenBoundaryRequest {
+        addin_id,
+        version,
+        target,
+        descriptors,
+    } = request;
     std::hint::black_box(crate::crt::effective_crt_policy());
     let removal_epoch = runtime.removal_epoch();
     let result = crate::panic_boundary::catch_no_unwind(std::panic::AssertUnwindSafe(|| {
@@ -159,9 +170,9 @@ where
             });
         }
 
-        let mut transaction = runtime
-            .begin_open_if_epoch(removal_epoch)?
-            .attach_host(callbacks);
+        let transaction = runtime.begin_open_if_epoch(removal_epoch)?;
+        *attempted = Some(transaction.attempt_id());
+        let mut transaction = transaction.attach_host(callbacks);
         let transaction = match crate::registration::retry_metadata_debt(
             &runtime.host,
             transaction.callbacks_mut(),

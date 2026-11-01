@@ -71,7 +71,6 @@ impl OpenAttemptId {
         }
     }
 
-    #[cfg(any(test, feature = "refinement"))]
     pub(crate) const fn get(self) -> u64 {
         self.0.get()
     }

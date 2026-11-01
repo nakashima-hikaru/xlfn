@@ -141,7 +141,7 @@ impl ProcessState {
         self.peak_published_bytes.fetch_max(next, Ordering::Relaxed);
     }
 
-    pub(super) fn release_published(&self, bytes: usize) {
+    fn release_published(&self, bytes: usize) {
         self.published_buffers.fetch_sub(1, Ordering::Relaxed);
         self.published_bytes
             .fetch_sub(bytes as u64, Ordering::Relaxed);
@@ -184,10 +184,23 @@ fn protocol_error() -> XllError {
     )
 }
 
+#[must_use]
 pub(super) struct Reservation {
     state: &'static ProcessState,
     bytes: usize,
 }
+
+/// Plain process-lifetime data stored in the retained FP12 header. Abandoning
+/// this charge never discharges it; only a successful allocation free does.
+#[repr(C)]
+#[must_use = "retain the charge with its published allocation; dropping it does not release capacity"]
+pub(super) struct PublishedCharge {
+    bytes: usize,
+    state: &'static ProcessState,
+}
+
+const _: () = assert!(!std::mem::needs_drop::<PublishedCharge>());
+const _: () = assert!(size_of::<PublishedCharge>() == 2 * size_of::<usize>());
 
 impl Reservation {
     pub(super) fn reserve(bytes: usize) -> XllResult<Self> {
@@ -195,11 +208,41 @@ impl Reservation {
         state.reserve(bytes, MAX_PROCESS_NUMERIC_RETURN_BYTES)?;
         Ok(Self { state, bytes })
     }
-    pub(super) const fn state(&self) -> &'static ProcessState {
-        self.state
+    pub(super) fn publish(self) -> PublishedCharge {
+        let reserved = std::mem::ManuallyDrop::new(self);
+        reserved.state.publish(reserved.bytes);
+        PublishedCharge {
+            bytes: reserved.bytes,
+            state: reserved.state,
+        }
     }
-    pub(super) fn publish(&self) {
-        self.state.publish(self.bytes);
+}
+
+/// Recovers the accounting from the actual detached allocation and releases it
+/// only after that allocation was freed. No caller supplies a ledger or count.
+///
+/// # Safety
+/// `pointer` is a uniquely detached, published block from an epoch which Excel
+/// no longer reads. This function is called at most once unless free failed.
+#[inline]
+pub(super) unsafe fn reclaim_detached_block(
+    pointer: std::ptr::NonNull<super::NumericBlock>,
+) -> Option<usize> {
+    // SAFETY: the epoch withdrawal contract grants exclusive ownership of this
+    // initialized published header. The charge contains only plain data.
+    let retained = unsafe { &(*pointer.as_ptr()).charge };
+    // SAFETY: publication initialized this plain charge before exposing the
+    // block. Its borrow ends here, before the allocation can be freed below.
+    let charge = unsafe { retained.assume_init_read() };
+    // SAFETY: the charge was installed with this allocation before publication
+    // and retains its exact original size and process-lifetime ledger.
+    if unsafe { super::release_block(pointer, charge.bytes) } {
+        charge.state.release_published(charge.bytes);
+        Some(charge.bytes)
+    } else {
+        // The allocation and its copied plain charge remain retained. A failed
+        // free is not evidence that any of its capacity may be reused.
+        None
     }
 }
 impl Drop for Reservation {
@@ -293,6 +336,52 @@ mod tests {
         assert_eq!(STATE.reserved_bytes.load(Ordering::Relaxed), 0);
         assert_eq!(STATE.reserved_buffers.load(Ordering::Relaxed), 0);
         assert_eq!(STATE.published_bytes.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn consumed_reservation_holds_both_charges_until_confirmed_free() {
+        static STATE: ProcessState = ProcessState::new();
+        STATE.initialize().unwrap();
+        STATE.reserve(41, 128).unwrap();
+        let charge = Reservation {
+            state: &STATE,
+            bytes: 41,
+        }
+        .publish();
+        assert_eq!(STATE.reserved_bytes.load(Ordering::Relaxed), 41);
+        assert_eq!(STATE.published_bytes.load(Ordering::Relaxed), 41);
+        // A charge has no automatic destructor: even ordinary abandonment
+        // does not claim that its corresponding payload was destroyed.
+        #[allow(
+            clippy::drop_non_drop,
+            reason = "assert abandonment of the plain retained charge never discharges it"
+        )]
+        drop(charge);
+        assert_eq!(STATE.reserved_buffers.load(Ordering::Relaxed), 1);
+        assert_eq!(STATE.published_buffers.load(Ordering::Relaxed), 1);
+        STATE.release_published(41);
+    }
+
+    #[test]
+    fn forgotten_published_charge_never_reopens_reserved_capacity() {
+        static STATE: ProcessState = ProcessState::new();
+        STATE.initialize().unwrap();
+        STATE.reserve(41, 64).unwrap();
+        #[expect(
+            clippy::forget_non_drop,
+            reason = "assert forgetting the plain retained charge never reopens capacity"
+        )]
+        std::mem::forget(
+            Reservation {
+                state: &STATE,
+                bytes: 41,
+            }
+            .publish(),
+        );
+        assert!(STATE.reserve(24, 64).is_err());
+        assert_eq!(STATE.reserved_bytes.load(Ordering::Relaxed), 41);
+        assert_eq!(STATE.published_bytes.load(Ordering::Relaxed), 41);
+        STATE.release_published(41);
     }
 
     #[test]

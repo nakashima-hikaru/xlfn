@@ -1,1 +1,1 @@
-pub(crate) use xlfn_package::distribution::*;
+pub(crate) use xlfn_package::validate_output_destination;

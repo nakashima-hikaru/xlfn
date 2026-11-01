@@ -26,9 +26,12 @@ use crate::lifecycle::{
 mod capabilities;
 mod observer;
 mod open;
+pub(crate) use open::OpenBoundaryRequest;
 mod open_txn;
 mod orchestration;
 mod recovery;
+mod residency;
+pub(crate) use residency::{OpenResidency, ResidencyRelease};
 mod rollback;
 mod shutdown;
 pub(crate) use shutdown::{
@@ -111,20 +114,10 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
         &self,
         lifecycle: &AddinLifecycleAccess<'_, A>,
         callbacks: crate::host_callback::HostCallbackSession,
-        addin_id: &crate::diagnostics::AddinId,
-        version: &'static str,
-        target: &'static str,
-        descriptors: &[crate::registration::RegistrationDescriptor],
+        request: OpenBoundaryRequest<'_>,
+        attempted: &mut Option<crate::generation::OpenAttemptId>,
     ) -> i32 {
-        open::open_addin_boundary(
-            self,
-            lifecycle,
-            callbacks,
-            addin_id,
-            version,
-            target,
-            descriptors,
-        )
+        open::open_addin_boundary(self, lifecycle, callbacks, request, attempted)
     }
 
     pub(crate) fn remove_addin(
@@ -233,15 +226,19 @@ impl<A: crate::Addin, P: UnloadPolicy<A>> Runtime<A, P> {
 
     /// Acquires the DLL's self-reference before a generated `xlAutoOpen`
     /// enters the logical opening transaction.
+    #[cfg(test)]
     pub(crate) fn ensure_module_residency(&self, anchor: *const ()) -> XllResult<bool> {
-        self.residency.ensure(anchor)
+        self.residency
+            .ensure(anchor)
+            .map(|acquisition| acquisition.is_newly_acquired())
     }
 
     /// Attempts physical release after logical removal. Returns false while
     /// a native event registration (including an uncertain one) or COM hold
     /// requires the DLL. Normal close and failed-open cleanup share this guard.
-    pub(crate) fn release_module_residency(&self) -> XllResult<bool> {
-        self.residency.release()
+    #[cfg(test)]
+    pub(crate) fn test_release_module_residency(&self) -> XllResult<bool> {
+        self.residency.test_release()
     }
 
     #[cfg(all(
@@ -1820,7 +1817,7 @@ pub(crate) mod tests {
         runtime.lifecycle_orchestrator().quarantine();
         assert_eq!(runtime.phase(), LifecyclePhase::Quarantined);
         assert!(runtime.module_residency_held());
-        runtime.release_module_residency().unwrap();
+        runtime.test_release_module_residency().unwrap();
         assert!(!runtime.module_residency_held());
     }
 

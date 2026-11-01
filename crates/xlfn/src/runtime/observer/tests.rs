@@ -53,7 +53,7 @@ fn terminal_snapshot_observes_host_and_return_obligations() {
             drop(producer);
             open.returns().returns.close_admission();
             assert!(resources.module_residency_held);
-            assert!(!runtime.release_module_residency().unwrap());
+            assert!(!runtime.test_release_module_residency().unwrap());
         },
     );
 }

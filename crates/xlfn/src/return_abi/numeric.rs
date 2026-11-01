@@ -10,7 +10,7 @@ use crate::error::{DomainErrorCode, InputError};
 use crate::{ExcelError, XllError, XllResult};
 use std::cell::Cell;
 use std::marker::PhantomData;
-use std::mem::ManuallyDrop;
+use std::mem::{ManuallyDrop, MaybeUninit};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use xlfn_sys::FP12;
@@ -30,8 +30,7 @@ pub const MAX_MODULE_NUMERIC_RETURN_BYTES: usize = 256 * 1024 * 1024;
 #[repr(C)]
 struct NumericBlock {
     next: *mut NumericBlock,
-    allocation_bytes: usize,
-    budget: &'static process::ProcessState,
+    charge: MaybeUninit<process::PublishedCharge>,
     fp: FP12,
 }
 
@@ -66,6 +65,8 @@ impl ThreadState {
 
 thread_local! {
     static THREAD_STATE: Cell<ThreadState> = const { Cell::new(ThreadState::new()) };
+    #[cfg(test)]
+    static FAIL_NEXT_BLOCK_FREE: Cell<bool> = const { Cell::new(false) };
 }
 
 // No TLS destructor may free memory still readable by Excel, or call module
@@ -187,15 +188,10 @@ unsafe fn reclaim_epoch(mut pointer: *mut NumericBlock) {
         // SAFETY: each node belongs to the preceding completed epoch and has
         // not been released; its private header is initialized at construction.
         let next = unsafe { (*pointer).next };
-        // SAFETY: the same retained header stores the original allocation size.
-        let bytes = unsafe { (*pointer).allocation_bytes };
-        // SAFETY: the original allocation retains its process-lifetime ledger.
-        let budget = unsafe { (*pointer).budget };
         let allocation = NonNull::new(pointer).expect("epoch node is non-null");
         // SAFETY: the outer entry establishes that Excel no longer reads this
         // node. No Rust owner remains after publication.
-        if unsafe { release_block(allocation, bytes) } {
-            budget.release_published(bytes);
+        if let Some(bytes) = unsafe { process::reclaim_detached_block(allocation) } {
             MODULE_BYTES.fetch_sub(bytes, Ordering::Relaxed);
             MODULE_BUFFERS.fetch_sub(1, Ordering::Relaxed);
         }
@@ -237,8 +233,7 @@ impl NumericAllocation {
         unsafe {
             pointer.as_ptr().write(NumericBlock {
                 next: std::ptr::null_mut(),
-                allocation_bytes: bytes,
-                budget: reservation.state(),
+                charge: MaybeUninit::uninit(),
                 fp: FP12 {
                     rows: rows as i32,
                     columns: columns as i32,
@@ -341,9 +336,15 @@ impl NumericArrayOutput {
 
             // From here to publication only primitive non-panicking operations
             // remain. The block becomes process owned and has no Rust drop.
-            let output = ManuallyDrop::new(self);
-            output.allocation.reservation.publish();
+            let mut output = ManuallyDrop::new(self);
+            // SAFETY: this consuming publication disarms NumericAllocation's
+            // Drop. Its unique reservation is moved once into the raw header.
+            let reservation = unsafe { ManuallyDrop::take(&mut output.allocation.reservation) };
+            let charge = reservation.publish();
             let pointer = output.allocation.pointer.as_ptr();
+            // SAFETY: this unpublished exclusive header has no initialized
+            // charge yet; install its matching charge before linking it.
+            unsafe { (*pointer).charge.write(charge) };
             // SAFETY: this is an unpublished exclusive block; changing its
             // private list link does not touch any already published FP12.
             unsafe { (*pointer).next = state.head };
@@ -536,6 +537,10 @@ fn allocate_block(bytes: usize) -> XllResult<NonNull<NumericBlock>> {
 
 #[cfg(target_os = "windows")]
 unsafe fn release_block(pointer: NonNull<NumericBlock>, _bytes: usize) -> bool {
+    #[cfg(test)]
+    if FAIL_NEXT_BLOCK_FREE.with(|fail| fail.replace(false)) {
+        return false;
+    }
     windows_link::link!("kernel32.dll" "system" fn GetProcessHeap() -> *mut core::ffi::c_void);
     windows_link::link!("kernel32.dll" "system" fn HeapFree(heap: *mut core::ffi::c_void, flags: u32, memory: *mut core::ffi::c_void) -> i32);
     // SAFETY: GetProcessHeap has no preconditions.
@@ -580,6 +585,10 @@ fn allocate_block(bytes: usize) -> XllResult<NonNull<NumericBlock>> {
 
 #[cfg(not(target_os = "windows"))]
 unsafe fn release_block(pointer: NonNull<NumericBlock>, bytes: usize) -> bool {
+    #[cfg(test)]
+    if FAIL_NEXT_BLOCK_FREE.with(|fail| fail.replace(false)) {
+        return false;
+    }
     let mut allocations = PROCESS_ALLOCATIONS
         .lock()
         .unwrap_or_else(|p| p.into_inner());
@@ -603,6 +612,44 @@ mod tests {
     // SAFETY: tests only read fully published immutable process-owned buffers,
     // and never enter another epoch on their publishing threads after transfer.
     unsafe impl Send for PublishedTestPointer {}
+
+    #[test]
+    fn miri_failed_published_free_retains_the_matching_charge_until_real_reclamation() {
+        let call = Fp12CallGuard::enter();
+        let before = numeric_return_memory_metrics().unwrap();
+        let output = NumericArrayOutput::from_f64(1, 1, &[7.0]).unwrap();
+        let block = output.allocation.pointer;
+        let bytes = output.allocation.bytes;
+        output.publish(&call).unwrap();
+        drop(call);
+        FAIL_NEXT_BLOCK_FREE.with(|fail| fail.set(true));
+        // The following entry detaches the epoch, but failed HeapFree cannot
+        // discharge its process or module accounting.
+        drop(Fp12CallGuard::enter());
+        let retained = numeric_return_memory_metrics().unwrap();
+        assert_eq!(
+            retained.process_published_bytes,
+            before.process_published_bytes + bytes
+        );
+        assert_eq!(
+            retained.process_reserved_bytes,
+            before.process_reserved_bytes + bytes
+        );
+        assert_eq!(
+            retained.module_published_bytes,
+            before.module_published_bytes + bytes
+        );
+        // SAFETY: the injected free did not release this detached single node.
+        // Excel has no reader and this test owns the sole retry.
+        unsafe { reclaim_epoch(block.as_ptr()) };
+        let after = numeric_return_memory_metrics().unwrap();
+        assert_eq!(
+            after.process_published_bytes,
+            before.process_published_bytes
+        );
+        assert_eq!(after.process_reserved_bytes, before.process_reserved_bytes);
+        assert_eq!(after.module_published_bytes, before.module_published_bytes);
+    }
 
     unsafe fn values<'a>(pointer: *mut FP12) -> &'a [f64] {
         // SAFETY: each test passes a live published FP12 from the active or

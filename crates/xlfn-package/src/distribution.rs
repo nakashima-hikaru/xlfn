@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 
 #[cfg(test)]
 mod journal_tests;
+#[cfg(test)]
+mod transaction_tests;
 
 /// File-system operations used by the distribution transaction.
 ///
@@ -68,7 +70,7 @@ struct LockFileIdentity {
 ///
 /// The lock owns the open file handle and validates that the pathname still
 /// refers to the same inode before every destructive phase.
-pub struct DistributionCommitGuard {
+struct DistributionCommitGuard {
     lock_file: std::fs::File,
     lock_path: PathBuf,
     #[cfg(unix)]
@@ -78,7 +80,7 @@ pub struct DistributionCommitGuard {
 
 impl DistributionCommitGuard {
     /// Acquires the destination lock below `parent`.
-    pub fn acquire(parent: &Path, destination_name: &str) -> PackageResult<Self> {
+    fn acquire(parent: &Path, destination_name: &str) -> PackageResult<Self> {
         let lock_path = parent.join(format!(".{destination_name}.lock"));
         let mut options = std::fs::OpenOptions::new();
         options.read(true).write(true).create(true);
@@ -139,7 +141,7 @@ impl DistributionCommitGuard {
     }
 
     /// Verifies that the held lock still refers to its original pathname.
-    pub fn ensure_held(&self) -> io::Result<()> {
+    fn ensure_held(&self) -> io::Result<()> {
         let metadata = self.lock_file.metadata()?;
         if !metadata.is_file() {
             return Err(io::Error::other(
@@ -182,7 +184,7 @@ impl DistributionCommitGuard {
 
     /// Returns the destination protected by this lock.
     #[must_use]
-    pub fn destination(&self) -> &Path {
+    fn destination(&self) -> &Path {
         &self.destination
     }
 }
@@ -203,7 +205,7 @@ fn lock_file_identity_from_metadata(metadata: &std::fs::Metadata) -> LockFileIde
 }
 
 /// Renames a path using the platform's durable, bounded-retry operation.
-pub fn rename_path(from: &Path, to: &Path) -> io::Result<()> {
+fn rename_path(from: &Path, to: &Path) -> io::Result<()> {
     #[cfg(target_os = "windows")]
     {
         // std::fs::rename can use the newer Windows rename-by-handle path when
@@ -217,7 +219,7 @@ pub fn rename_path(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 /// Atomically replaces a file and requests write-through durability on Windows.
-pub fn atomic_replace_file(from: &Path, to: &Path) -> io::Result<()> {
+fn atomic_replace_file(from: &Path, to: &Path) -> io::Result<()> {
     #[cfg(target_os = "windows")]
     {
         use crate::win32::{MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
@@ -234,7 +236,7 @@ pub fn atomic_replace_file(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 /// Flushes a directory entry where the host platform supports it.
-pub fn sync_directory(path: &Path) -> io::Result<()> {
+fn sync_directory(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         let directory = std::fs::File::open(path)?;
@@ -282,7 +284,7 @@ pub fn sync_directory(path: &Path) -> io::Result<()> {
 }
 
 /// Syncs both directory entries affected by a rename.
-pub fn sync_rename_parents(
+fn sync_rename_parents(
     from: &Path,
     to: &Path,
     file_ops: &impl DistributionFileOps,
@@ -354,16 +356,16 @@ fn move_file_ex_with_retry(from: &Path, to: &Path, flags: u32) -> io::Result<()>
     })
 }
 
-pub const TRANSACTION_JOURNAL: &str = "journal";
+const TRANSACTION_JOURNAL: &str = "journal";
 // Schema 2 uses BLAKE3 over the serialized journal with an empty checksum.
-pub const TRANSACTION_SCHEMA: u32 = 2;
+const TRANSACTION_SCHEMA: u32 = 2;
 // Journals contain only transaction metadata, never package contents. Leave
 // ample room for escaped filenames and both platform identity representations.
 const MAX_TRANSACTION_JOURNAL_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum TransactionState {
+enum TransactionState {
     Prepared,
     NoPrevious,
     PreviousSaved,
@@ -381,22 +383,22 @@ pub enum TransactionState {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct TransactionJournal {
-    pub schema: u32,
-    pub transaction_id: String,
-    pub destination_name: String,
-    pub parent_identity: DirectoryIdentity,
-    pub transaction_identity: DirectoryIdentity,
-    pub destination_identity: Option<DirectoryIdentity>,
-    pub state: TransactionState,
-    pub previous_identity: Option<DirectoryIdentity>,
-    pub installed_identity: Option<DirectoryIdentity>,
-    pub sequence: u64,
-    pub checksum: String,
+struct TransactionJournal {
+    schema: u32,
+    transaction_id: String,
+    destination_name: String,
+    parent_identity: DirectoryIdentity,
+    transaction_identity: DirectoryIdentity,
+    destination_identity: Option<DirectoryIdentity>,
+    state: TransactionState,
+    previous_identity: Option<DirectoryIdentity>,
+    installed_identity: Option<DirectoryIdentity>,
+    sequence: u64,
+    checksum: String,
 }
 
 impl TransactionJournal {
-    pub fn new(
+    fn new(
         transaction_id: String,
         destination_name: String,
         parent_identity: DirectoryIdentity,
@@ -420,14 +422,14 @@ impl TransactionJournal {
         Ok(journal)
     }
 
-    pub fn refresh_checksum(&mut self) -> PackageResult {
+    fn refresh_checksum(&mut self) -> PackageResult {
         self.checksum = journal_checksum(self)?;
         Ok(())
     }
 }
 
 /// Reads and validates a regular, non-symlink transaction journal of at most 64 KiB.
-pub fn read_transaction_journal(path: &Path) -> PackageResult<TransactionJournal> {
+fn read_transaction_journal(path: &Path) -> PackageResult<TransactionJournal> {
     crate::validate_path_components(path)?;
     let file = crate::open_staged_file_no_follow(path)?;
     let metadata = file.metadata()?;
@@ -498,7 +500,7 @@ fn read_transaction_journal_contents(
 /// Writes the next journal state with the transaction's durability protocol.
 ///
 /// Rejects encoded journals larger than 64 KiB before creating `journal.next`.
-pub fn write_transaction_state(
+fn write_transaction_state(
     journal: &Path,
     parent: &Path,
     transaction: &mut TransactionJournal,
@@ -534,7 +536,7 @@ pub fn write_transaction_state(
 }
 
 /// Returns the identity of an existing directory, or `None` when it is absent.
-pub fn optional_directory_identity(path: &Path) -> PackageResult<Option<DirectoryIdentity>> {
+fn optional_directory_identity(path: &Path) -> PackageResult<Option<DirectoryIdentity>> {
     match fs::symlink_metadata(path) {
         Ok(_) => crate::directory_identity(path).map(Some),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -543,7 +545,7 @@ pub fn optional_directory_identity(path: &Path) -> PackageResult<Option<Director
 }
 
 /// Requires a directory to retain a previously recorded identity.
-pub fn require_directory_identity(
+fn require_directory_identity(
     path: &Path,
     expected: DirectoryIdentity,
     label: &str,
@@ -556,7 +558,7 @@ pub fn require_directory_identity(
 }
 
 /// Lists transaction payloads while excluding journal control files.
-pub fn transaction_payloads(transaction: &Path) -> PackageResult<Vec<PathBuf>> {
+fn transaction_payloads(transaction: &Path) -> PackageResult<Vec<PathBuf>> {
     Ok(fs::read_dir(transaction)?
         .map(|entry| entry.map(|entry| entry.path()))
         .collect::<io::Result<Vec<_>>>()?
@@ -571,7 +573,7 @@ pub fn transaction_payloads(transaction: &Path) -> PackageResult<Vec<PathBuf>> {
 }
 
 /// Extracts a transaction identifier from its canonical directory name.
-pub fn transaction_id(transaction: &Path, prefix: &str) -> PackageResult<String> {
+fn transaction_id(transaction: &Path, prefix: &str) -> PackageResult<String> {
     let name = transaction
         .file_name()
         .and_then(|name| name.to_str())
@@ -584,7 +586,7 @@ pub fn transaction_id(transaction: &Path, prefix: &str) -> PackageResult<String>
 }
 
 /// Reports whether a transaction is still in its private pre-publication form.
-pub fn is_private_transaction(transaction: &Path, prefix: &str) -> PackageResult<bool> {
+fn is_private_transaction(transaction: &Path, prefix: &str) -> PackageResult<bool> {
     let name = transaction
         .file_name()
         .and_then(|name| name.to_str())
@@ -597,7 +599,7 @@ pub fn is_private_transaction(transaction: &Path, prefix: &str) -> PackageResult
 }
 
 /// Validates the journal's identity and destination provenance.
-pub fn validate_transaction_provenance(
+fn validate_transaction_provenance(
     parent: &Path,
     destination_name: &str,
     prefix: &str,
@@ -631,7 +633,7 @@ pub fn validate_transaction_provenance(
 }
 
 /// Requires a destination path to be absent.
-pub fn ensure_destination_absent(destination: &Path) -> PackageResult {
+fn ensure_destination_absent(destination: &Path) -> PackageResult {
     match fs::symlink_metadata(destination) {
         Ok(_) => Err(format!("destination unexpectedly exists: {}", destination.display()).into()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -640,7 +642,7 @@ pub fn ensure_destination_absent(destination: &Path) -> PackageResult {
 }
 
 /// Removes an empty transaction directory after validating its private identity.
-pub fn remove_empty_transaction(
+fn remove_empty_transaction(
     parent: &Path,
     transaction: &Path,
     file_ops: &impl DistributionFileOps,
@@ -652,7 +654,7 @@ pub fn remove_empty_transaction(
     Ok(())
 }
 
-pub fn journal_checksum(journal: &TransactionJournal) -> PackageResult<String> {
+fn journal_checksum(journal: &TransactionJournal) -> PackageResult<String> {
     let mut unsigned = journal.clone();
     unsigned.checksum.clear();
     let encoded = serde_json::to_vec(&unsigned)?;
@@ -942,15 +944,15 @@ impl fmt::Display for DistributionRecoveryQuarantineError {
 
 impl std::error::Error for DistributionRecoveryQuarantineError {}
 
-pub static TRANSACTION_COUNTER: AtomicU64 = AtomicU64::new(0);
+static TRANSACTION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-pub struct DistributionTransactionDirectory {
-    pub path: PathBuf,
-    pub capability: Option<crate::PrivateStagingDirectory>,
+struct DistributionTransactionDirectory {
+    path: PathBuf,
+    capability: Option<crate::PrivateStagingDirectory>,
 }
 
 impl DistributionTransactionDirectory {
-    pub fn create(
+    fn create(
         parent: &Path,
         destination_name: &str,
         destination_identity: Option<DirectoryIdentity>,
@@ -1022,11 +1024,11 @@ impl DistributionTransactionDirectory {
         ))
     }
 
-    pub fn path(&self) -> &Path {
+    fn path(&self) -> &Path {
         &self.path
     }
 
-    pub fn verify(&self) -> DistributionResult<()> {
+    fn verify(&self) -> DistributionResult<()> {
         self.capability
             .as_ref()
             .ok_or_else(|| {
@@ -1038,16 +1040,12 @@ impl DistributionTransactionDirectory {
         Ok(())
     }
 
-    pub fn keep(mut self) -> PathBuf {
+    fn keep(mut self) -> PathBuf {
         self.capability.take();
         std::mem::take(&mut self.path)
     }
 
-    pub fn cleanup_now(
-        mut self,
-        parent: &Path,
-        file_ops: &impl DistributionFileOps,
-    ) -> io::Result<()> {
+    fn cleanup_now(mut self, parent: &Path, file_ops: &impl DistributionFileOps) -> io::Result<()> {
         self.capability.take();
         file_ops.remove_dir_all(&self.path)?;
         file_ops.sync_directory(parent)
@@ -1058,28 +1056,13 @@ impl Drop for DistributionTransactionDirectory {
     fn drop(&mut self) {}
 }
 
-pub fn validate_commit_location(parent: &Path, destination: &Path) -> DistributionResult {
+fn validate_commit_location(parent: &Path, destination: &Path) -> DistributionResult {
     crate::validate_directory_path(parent)?;
     validate_output_destination(destination)?;
     Ok(())
 }
 
-pub fn commit_prepared_directory(
-    prepared: &crate::PreparedDirectoryCommit,
-    destination: &Path,
-    verify_source: impl Fn(&Path) -> DistributionResult,
-    verify_destination: impl Fn(&Path) -> DistributionResult,
-) -> DistributionResult<CommitOutcome> {
-    commit_prepared_directory_with(
-        prepared,
-        destination,
-        verify_source,
-        verify_destination,
-        &SystemDistributionFileOps,
-    )
-}
-
-pub fn commit_prepared_directory_with(
+fn commit_prepared_directory_with(
     prepared: &crate::PreparedDirectoryCommit,
     destination: &Path,
     verify_source: impl Fn(&Path) -> DistributionResult,
@@ -1430,7 +1413,7 @@ pub fn commit_prepared_directory_with(
 }
 
 #[derive(Debug)]
-pub struct IoErrorSource(pub DistributionError);
+struct IoErrorSource(DistributionError);
 
 impl fmt::Display for IoErrorSource {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1444,7 +1427,7 @@ impl std::error::Error for IoErrorSource {
     }
 }
 
-pub fn error_as_io<E>(error: E) -> io::Error
+fn error_as_io<E>(error: E) -> io::Error
 where
     E: Into<DistributionError>,
 {
@@ -1453,7 +1436,7 @@ where
     io::Error::other(IoErrorSource(error.into()))
 }
 
-pub fn distribution_recovery_error(
+fn distribution_recovery_error(
     transaction: DistributionTransactionDirectory,
     destination: &Path,
     commit_error: io::Error,
@@ -1468,7 +1451,7 @@ pub fn distribution_recovery_error(
     }
 }
 
-pub fn quarantine_transaction(
+fn quarantine_transaction(
     parent: &Path,
     destination_name: &str,
     prefix: &str,
@@ -1517,7 +1500,7 @@ pub fn quarantine_transaction(
     .into())
 }
 
-pub fn recover_stale_transactions(
+fn recover_stale_transactions(
     parent: &Path,
     destination_name: &str,
     commit_guard: &DistributionCommitGuard,
@@ -1929,7 +1912,7 @@ fn interrupted_distribution(
     }
 }
 
-pub fn require_original_destination(
+fn require_original_destination(
     destination: &Path,
     journal: &TransactionJournal,
 ) -> DistributionResult<()> {
@@ -1943,7 +1926,7 @@ pub fn require_original_destination(
     )?)
 }
 
-pub fn remove_installed_distribution_with(
+fn remove_installed_distribution_with(
     destination: &Path,
     journal: &TransactionJournal,
     file_ops: &impl DistributionFileOps,
@@ -1965,7 +1948,7 @@ pub fn remove_installed_distribution_with(
     Ok(())
 }
 
-pub fn restore_previous_distribution(
+fn restore_previous_distribution(
     destination: &Path,
     transaction: &Path,
     previous: &Path,
@@ -2030,7 +2013,7 @@ pub fn restore_previous_distribution(
     Ok(())
 }
 
-pub fn remove_recovery_install(
+fn remove_recovery_install(
     transaction: &Path,
     journal: &TransactionJournal,
     file_ops: &impl DistributionFileOps,

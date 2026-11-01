@@ -257,7 +257,7 @@ fn close_and_reopen_reuse_resident_events_and_reclaim_each_generation() {
         expect_reclaimed(1);
         assert_eq!(runtime.resident_event_count(), 1);
         assert!(runtime.module_residency_held());
-        assert!(!runtime.release_module_residency().unwrap());
+        assert!(!runtime.test_release_module_residency().unwrap());
         assert!(runtime.module_residency_held());
         assert_resident_traces(&runtime, 1, physical_unload);
 
@@ -311,7 +311,7 @@ fn failed_function_registration_retains_event_for_retry_without_retaining_state(
         expect_reclaimed(1);
         assert_eq!(runtime.resident_event_count(), 1);
         assert!(runtime.module_residency_held());
-        assert!(!runtime.release_module_residency().unwrap());
+        assert!(!runtime.test_release_module_residency().unwrap());
         assert!(runtime.module_residency_held());
 
         assert_eq!(open(&runtime), 1);

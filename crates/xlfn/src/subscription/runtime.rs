@@ -14,7 +14,9 @@ use super::server::{
     cleanup_catalog_binding_and_pending,
 };
 use super::source::{RtdSourceHandle, RtdSubscription, SourceArena, SourceSubscription};
-use super::termination::{TerminationClaim, TerminationCoordinator};
+use super::termination::TerminationCoordinator;
+
+mod termination;
 use super::topic::{
     BorrowedTopicParts, RtdLimits, SourceId, SubscriptionId, SubscriptionKey, TopicId,
 };
@@ -28,6 +30,7 @@ use std::ptr::NonNull;
 #[cfg(test)]
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use termination::{RuntimeTermination, RuntimeTerminationAdmission, RuntimeTerminationControl};
 use xlfn_kernel::operation_gate::OperationGuard;
 use xlfn_kernel::published_owner::PublishedOwner;
 
@@ -55,7 +58,7 @@ pub(crate) struct SubscriptionRuntime<
     pub(crate) catalog: Mutex<SubscriptionCatalog>,
     pub(crate) sources: SourceArena<E, C>,
     pub(crate) next_connection_generation: AtomicU64,
-    pub(super) termination_coordinator: TerminationCoordinator,
+    pub(super) termination_coordinator: RuntimeTerminationControl,
     // Every raw publish capability targets this independent allocation, so
     // final Drop can drain producers without invalidating their references.
     pub(crate) services: PublishedOwner<RuntimeServices>,
@@ -112,7 +115,7 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
             }),
             sources,
             next_connection_generation: AtomicU64::new(1),
-            termination_coordinator: TerminationCoordinator::default(),
+            termination_coordinator: RuntimeTerminationControl::default(),
             services: PublishedOwner::new(RuntimeServices::new(limits)),
             disconnects: super::disconnect::DisconnectPool::new(limits.max_active.get()),
             #[cfg(test)]
@@ -605,95 +608,15 @@ impl<H: SubscriptionHost, E: RtdSubscription, C: crate::RtdSourceCatalog<E>>
     }
 
     pub(crate) fn close(&self) -> XllResult<()> {
-        let owner = match self.termination_coordinator.begin() {
-            TerminationClaim::Owner(owner) => owner,
-            TerminationClaim::Waiter(waiter) => return waiter.wait(),
-            TerminationClaim::Complete(completed) => return completed.result(),
-        };
-
-        let runtime_wait = self.services.runtime_gate.close_and_wait_begin();
-
-        // Shared source workers are independent of individual subscriptions.
-        // Cancel every source before waiting for admission: a deferred
-        // disconnect may hold admission while waiting for shared work to stop.
-        // In-flight setup must synchronize with this cancellation and roll
-        // back when necessary. A panic must not skip other source callbacks.
-        self.record_cleanup_result(self.sources.request_stop());
-        runtime_wait.wait();
-
-        let server_pointers = {
-            let servers = self.servers.lock();
-            servers
-                .values()
-                .map(|server| NonNull::from(server.as_ref()))
-                .collect::<Vec<_>>()
-        };
-
-        let admissions = server_pointers
-            .iter()
-            .map(|pointer| {
-                // SAFETY: servers are retained in the runtime arena until
-                // this close operation completes and the runtime is dropped.
-                unsafe { pointer.as_ref() }.begin_termination(self)
-            })
-            .collect::<Vec<_>>();
-
-        // Consuming transitions retain each cancellation result with its owner.
-        // Complete every notification before waiting for any server.
-        let canceled = admissions
-            .into_iter()
-            .map(TerminationAdmission::request_cancel)
-            .collect::<Vec<_>>();
-
-        let mut first_error = None;
-        for admission in canceled {
-            let res = admission.finish();
-            if let Err(err) = res
-                && first_error.is_none()
-            {
-                first_error = Some(err);
-            }
+        match RuntimeTermination::begin(self) {
+            RuntimeTerminationAdmission::Owner(owner) => owner
+                .request_stop()
+                .drain_sink_users()
+                .join_workers()?
+                .finish(),
+            RuntimeTerminationAdmission::Waiter(waiter) => waiter.wait(),
+            RuntimeTerminationAdmission::Complete(completed) => completed.result(),
         }
-
-        if let Some(err) = first_error {
-            self.record_cleanup_result(Err(err));
-        }
-
-        // Every subscription has relinquished its raw sink. Join the shared
-        // source jobs before any source/service/module can be reclaimed. On
-        // Windows keep Excel's STA dispatchable while a source finishes COM
-        // work. Preparation failure leaves all join owners in their sources.
-        match self.join_sources_with_dispatch() {
-            Ok(result) => self.record_cleanup_result(result),
-            Err(error) => {
-                self.record_cleanup_result(Err(error));
-                return owner.fail(self.cleanup_result().expect_err("cleanup failure recorded"));
-            }
-        }
-
-        // Deferred jobs have drained admission and live owners have now
-        // finished their barriers. Join the worker's COM apartment teardown
-        // before any server, source, service, or module can be reclaimed.
-        if let Err(error) = self.disconnects.stop() {
-            // The dispatch preflight did not execute the worker join. Keep
-            // the runtime's worker owner intact for caller quarantine, and
-            // wake close waiters with the same terminal cleanup failure.
-            self.record_cleanup_result(Err(error));
-            return owner.fail(self.cleanup_result().expect_err("cleanup failure recorded"));
-        }
-
-        #[cfg(feature = "rtd")]
-        self.services.publishers.stop();
-
-        {
-            let mut catalog = self.catalog.lock();
-            catalog.identities.clear();
-            catalog.pending_topic_bytes = 0;
-            catalog.pending_count = 0;
-            catalog.entries.clear();
-        }
-
-        owner.complete(self.cleanup_result())
     }
 
     /// The outer result distinguishes failed dispatch preparation (no hook

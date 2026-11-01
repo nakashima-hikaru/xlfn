@@ -42,6 +42,8 @@ MODULES = {
     "subscription": Path("crates/xlfn/src/subscription.rs"),
     "subscription/channel": Path("crates/xlfn/src/subscription/channel.rs"),
     "subscription/runtime": Path("crates/xlfn/src/subscription/runtime.rs"),
+    "runtime/residency": Path("crates/xlfn/src/runtime/residency.rs"),
+    "return_abi/numeric": Path("crates/xlfn/src/return_abi/numeric.rs"),
     "return_abi": Path("crates/xlfn/src/return_abi.rs"),
     "return_abi/ownership": Path("crates/xlfn/src/return_abi/ownership.rs"),
     "return_abi/slot": Path("crates/xlfn/src/return_abi/slot.rs"),

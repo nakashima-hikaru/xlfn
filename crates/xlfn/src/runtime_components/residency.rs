@@ -20,6 +20,7 @@ struct ModuleState {
     // Dropping a runtime is not evidence that Excel detached its exports.
     // Only release(), with no retained event slot, may release this reference.
     lease: Option<ManuallyDrop<ModuleResidencyLease>>,
+    lease_sequence: u64,
     ended: EventSlot,
     #[cfg(feature = "async")]
     canceled: EventSlot,
@@ -83,11 +84,37 @@ pub(crate) struct ModuleResidency {
     state: Mutex<ModuleState>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ResidencyLeaseId(u64);
+
+#[must_use]
+pub(crate) enum ResidencyAcquisition {
+    Existing,
+    NewlyAcquired(ResidencyLeaseId),
+}
+
+impl ResidencyAcquisition {
+    #[cfg(test)]
+    pub(crate) fn is_newly_acquired(&self) -> bool {
+        matches!(self, Self::NewlyAcquired(_))
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ResidencyReleaseOutcome {
+    Released,
+    AlreadyReleased,
+    RetainedBecauseEventsRemain,
+    RetainedBecauseComRemains,
+    RetainedBecauseAcquisitionChanged,
+}
+
 impl ModuleResidency {
     pub(crate) const fn new() -> Self {
         Self {
             state: Mutex::new(ModuleState {
                 lease: None,
+                lease_sequence: 0,
                 ended: EventSlot::Absent,
                 #[cfg(feature = "async")]
                 canceled: EventSlot::Absent,
@@ -95,30 +122,65 @@ impl ModuleResidency {
         }
     }
 
-    pub(crate) fn ensure(&self, anchor: *const ()) -> crate::XllResult<bool> {
+    pub(crate) fn ensure(&self, anchor: *const ()) -> XllResult<ResidencyAcquisition> {
         let mut state = self.state.lock();
         if state.lease.is_some() {
-            return Ok(false);
+            return Ok(ResidencyAcquisition::Existing);
         }
         state.lease = Some(ManuallyDrop::new(ModuleResidencyLease::acquire(anchor)?));
-        Ok(true)
+        state.lease_sequence = state
+            .lease_sequence
+            .checked_add(1)
+            .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
+        Ok(ResidencyAcquisition::NewlyAcquired(ResidencyLeaseId(
+            state.lease_sequence,
+        )))
     }
 
     /// Returns false when native callbacks or COM references still require
     /// module residency. A late COM Release must never unmap its own code;
     /// only an explicit lifecycle release retries this self-reference.
-    pub(crate) fn release(&self) -> XllResult<bool> {
+    pub(crate) fn release_authorized<A: crate::Addin>(
+        &self,
+        authority: &crate::runtime::ResidencyRelease<'_, A>,
+    ) -> XllResult<ResidencyReleaseOutcome> {
+        if !authority.belongs_to(self) {
+            xlfn_kernel::invariant::fail_stop();
+        }
+        self.release_checked(authority.acquisition())
+    }
+
+    fn release_checked(
+        &self,
+        expected: Option<&ResidencyLeaseId>,
+    ) -> XllResult<ResidencyReleaseOutcome> {
         let mut state = self.state.lock();
-        if state.resident_event_count() != 0 || !crate::excel_rtd_protocol::physical_unload_ready()
-        {
-            return Ok(false);
+        if expected.is_some_and(|id| id.0 != state.lease_sequence) {
+            return Ok(ResidencyReleaseOutcome::RetainedBecauseAcquisitionChanged);
+        }
+        if state.resident_event_count() != 0 {
+            return Ok(ResidencyReleaseOutcome::RetainedBecauseEventsRemain);
+        }
+        if !crate::excel_rtd_protocol::physical_unload_ready() {
+            return Ok(ResidencyReleaseOutcome::RetainedBecauseComRemains);
         }
         let Some(residency) = state.lease.as_mut() else {
-            return Ok(true);
+            return Ok(ResidencyReleaseOutcome::AlreadyReleased);
         };
         residency.try_release()?;
         state.lease = None;
-        Ok(true)
+        Ok(ResidencyReleaseOutcome::Released)
+    }
+
+    /// Low-level event/COM barrier tests do not manufacture lifecycle authority.
+    #[cfg(test)]
+    pub(crate) fn test_release(&self) -> XllResult<bool> {
+        self.release_checked(None).map(|outcome| {
+            matches!(
+                outcome,
+                ResidencyReleaseOutcome::Released | ResidencyReleaseOutcome::AlreadyReleased
+            )
+        })
     }
 
     pub(crate) fn ensure_calculation_events(
@@ -161,6 +223,10 @@ impl ModuleResidency {
                 state.lease = Some(ManuallyDrop::new(ModuleResidencyLease::acquire(
                     event_residency_anchor as *const (),
                 )?));
+                state.lease_sequence = state
+                    .lease_sequence
+                    .checked_add(1)
+                    .unwrap_or_else(|| xlfn_kernel::invariant::fail_stop());
             }
             *state.event(event) = EventSlot::Registering;
         }
@@ -215,7 +281,7 @@ mod tests {
                 assert_eq!(procedure, "__xlfn_calculation_ended");
                 assert_eq!(selector, xlfn_sys::XLEVENT_CALCULATION_ENDED);
                 assert!(module.is_held());
-                assert!(!module.release().unwrap());
+                assert!(!module.test_release().unwrap());
                 assert!(
                     module
                         .ensure_event(CalculationEvent::Ended, |_, _| {
@@ -240,7 +306,7 @@ mod tests {
             EventSlot::Registered(-1_657_274_367)
         );
         assert_eq!(module.resident_event_count(), 1);
-        assert!(!module.release().unwrap());
+        assert!(!module.test_release().unwrap());
     }
 
     #[test]
@@ -262,7 +328,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(module.resident_event_count(), 1);
-        assert!(!module.release().unwrap());
+        assert!(!module.test_release().unwrap());
     }
 
     #[test]
@@ -278,7 +344,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(module.resident_event_count(), 0);
-        assert!(module.release().unwrap());
+        assert!(module.test_release().unwrap());
         assert!(!module.is_held());
 
         for status in [ExcelCallbackStatus::Success, ExcelCallbackStatus::Abort] {
@@ -301,7 +367,7 @@ mod tests {
                     .is_err()
             );
             assert_eq!(module.resident_event_count(), 1);
-            assert!(!module.release().unwrap());
+            assert!(!module.test_release().unwrap());
             assert!(module.callbacks_retained_safely());
         }
 
@@ -334,7 +400,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(module.resident_event_count(), 1);
-        assert!(!module.release().unwrap());
+        assert!(!module.test_release().unwrap());
     }
 
     #[test]
@@ -357,7 +423,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(module.resident_event_count(), 1);
-        assert!(!module.release().unwrap());
+        assert!(!module.test_release().unwrap());
 
         let retry = HostCallbackSession::new();
         module

@@ -216,7 +216,7 @@ impl<E: AsyncExecutor> RuntimeReservation<'_, E> {
         self.executor.submit(self.permit, task);
     }
 
-    #[cfg(all(feature = "handles", test))]
+    #[cfg(all(feature = "handles", test, feature = "async-builtin"))]
     pub(crate) fn commit_handle_scoped<B>(
         self,
         generation: crate::generation::RuntimeGeneration,

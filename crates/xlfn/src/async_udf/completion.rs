@@ -75,6 +75,25 @@ impl<O: CompletionObserver> AsyncDelivery<O> {
         self.observation.finish(&completion);
     }
 
+    /// Completes a launch failure using the responder retained before user
+    /// preparation. Taking it first also disarms fallback during reentry.
+    pub(super) fn fail(mut self, error: XllError) {
+        let responder = self.responder.take().expect("delivery is pending");
+        let udf_id = responder.udf_id;
+        // SAFETY: the responder owns its validated, copied Excel handle.
+        let delivery = match unsafe { responder.deliver_error(&error) } {
+            Ok(()) => OwnedDeliveryOutcome::Delivered,
+            Err(error) => OwnedDeliveryOutcome::Failed(error),
+        };
+        self.finish(
+            udf_id,
+            AsyncCompletion {
+                completion: OwnedCompletionOutcome::Error(error),
+                delivery,
+            },
+        );
+    }
+
     pub(crate) fn fallback(&mut self, panicked: bool) {
         let Some(responder) = self.responder.take() else {
             return;

@@ -806,7 +806,7 @@ fn final_remove_retains_com_shells_without_blocking_close_or_reviving_on_reopen(
         ServerPhase::Terminated
     );
     assert_eq!(runtime.resident_event_count(), 0);
-    assert!(!runtime.release_module_residency().unwrap());
+    assert!(!runtime.test_release_module_residency().unwrap());
     assert!(runtime.module_residency_held());
     assert_eq!(dll_can_unload_now(), S_FALSE);
     let mut heartbeat_result = 0;
@@ -864,7 +864,7 @@ fn final_remove_retains_com_shells_without_blocking_close_or_reviving_on_reopen(
     assert!(runtime.module_residency_held());
     assert!(module_lifetime().snapshot().is_quiescent());
     assert_eq!(dll_can_unload_now(), S_OK);
-    assert!(runtime.release_module_residency().unwrap());
+    assert!(runtime.test_release_module_residency().unwrap());
     assert!(!runtime.module_residency_held());
     let second_trace = runtime.shutdown_trace_json();
     assert!(second_trace.contains("returned_success"));

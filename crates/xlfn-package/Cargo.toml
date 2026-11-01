@@ -26,6 +26,7 @@ windows-link.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+trybuild.workspace = true
 
 [lints]
 workspace = true

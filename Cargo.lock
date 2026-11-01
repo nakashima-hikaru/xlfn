@@ -1573,6 +1573,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "triomphe",
+ "trybuild",
  "windows-link 0.100.0",
  "xlfn-common",
 ]

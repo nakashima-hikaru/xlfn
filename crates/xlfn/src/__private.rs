@@ -55,7 +55,7 @@ pub mod v1 {
     use std::future::Future;
 
     use crate::addin::{Addin, PhysicallyUnloadableAddin};
-    use crate::boundary::host::{host_auto_close, host_auto_open, host_auto_remove};
+    use crate::boundary::host::{host_auto_close, host_auto_remove};
     pub use crate::call::{CallScope, with_excel_call_scope, with_excel_call_scope_and_state};
     #[cfg(feature = "async")]
     pub use crate::cancellation::CancellationToken;
@@ -436,27 +436,6 @@ pub mod v1 {
         }
     }
 
-    /// Retains the quarantine if a newly acquired self-reference cannot be
-    /// released after an opening transaction fails.
-    fn release_open_residency_after_failure<A: Addin>(
-        runtime: &MacroRuntime<A, impl UnloadPolicy<A>>,
-        newly_acquired: bool,
-    ) {
-        // Only a failure before application initialization or a completed
-        // rollback may release this reference. A state-less Addin::open
-        // failure is quarantined even with the physical-unload opt-in.
-        if !newly_acquired
-            || !runtime.runtime().physical_unload_enabled()
-            || runtime.runtime().phase() != crate::lifecycle::LifecyclePhase::Closed
-        {
-            return;
-        }
-        if let Err(error) = runtime.runtime().release_module_residency() {
-            crate::diagnostics::report_no_unwind("xlAutoOpen module residency release", &error);
-            runtime.runtime().quarantine_runtime();
-        }
-    }
-
     /// Opens the add-in by registering all collected functions and initializing state.
     ///
     /// # Safety
@@ -480,14 +459,15 @@ pub mod v1 {
         #[cfg(feature = "lifecycle-diagnostics")]
         let diagnostic =
             crate::lifecycle_diagnostics::Boundary::enter("xlAutoOpen", runtime.runtime().phase());
-        let newly_acquired = match runtime.runtime().ensure_module_residency(module_anchor) {
-            Ok(newly_acquired) => newly_acquired,
-            Err(error) => crate::boundary::fail_stop_module_residency(&error),
-        };
+        let residency =
+            match crate::runtime::OpenResidency::acquire(runtime.runtime(), module_anchor) {
+                Ok(residency) => residency,
+                Err(error) => crate::boundary::fail_stop_module_residency(&error),
+            };
         let parsed_id = match crate::diagnostics::AddinId::parse(addin_id) {
             Ok(id) => id,
             Err(_) => {
-                release_open_residency_after_failure(runtime, newly_acquired);
+                residency.preparation_failed();
                 return 0;
             }
         };
@@ -496,20 +476,13 @@ pub mod v1 {
             match registration.descriptor(default_category) {
                 Ok(descriptor) => descriptors.push(descriptor),
                 Err(_) => {
-                    release_open_residency_after_failure(runtime, newly_acquired);
+                    residency.preparation_failed();
                     return 0;
                 }
             }
         }
         descriptors.sort_unstable_by_key(|descriptor| descriptor.excel_name);
-        let result =
-            host_auto_open::<A>(runtime.runtime(), &parsed_id, version, target, &descriptors);
-        if result == 0
-            && newly_acquired
-            && runtime.runtime().phase() != crate::lifecycle::LifecyclePhase::Quarantined
-        {
-            release_open_residency_after_failure(runtime, true);
-        }
+        let result = residency.open(&parsed_id, version, target, &descriptors);
         #[cfg(feature = "lifecycle-diagnostics")]
         diagnostic.finish(result, runtime.runtime());
         result
@@ -1541,7 +1514,7 @@ pub mod v1 {
         reason = "Tests opt into the audited physical-unload contract"
     )]
     mod open_failure_tests {
-        use super::{MacroRuntime, release_open_residency_after_failure};
+        use super::MacroRuntime;
         use crate::XllError;
         use crate::addin::{Addin, BuildInfo, OpenContext, Opened, PhysicallyUnloadableAddin};
         use crate::boundary::host::{host_auto_close, host_auto_open, host_auto_remove};
@@ -1616,10 +1589,9 @@ pub mod v1 {
             for previously_removed in [false, true] {
                 let macro_runtime = MacroRuntime::<ErrorBeforeState>::new_with_physical_unload();
                 let runtime = macro_runtime.runtime();
-                let newly_acquired = runtime
-                    .ensure_module_residency(residency_anchor as *const ())
-                    .unwrap();
-                assert!(newly_acquired);
+                let residency =
+                    crate::runtime::OpenResidency::acquire(runtime, residency_anchor as *const ())
+                        .unwrap();
 
                 if previously_removed {
                     let opening = runtime.begin_open().unwrap();
@@ -1650,7 +1622,7 @@ pub mod v1 {
 
                 // Exercise both the failed-open release path and later host
                 // removal/close hints. Neither may release unproven residency.
-                release_open_residency_after_failure(&macro_runtime, newly_acquired);
+                residency.preparation_failed();
                 assert!(runtime.module_residency_held());
                 assert_eq!(host_auto_remove(runtime), 1);
                 assert_eq!(host_auto_close(runtime), 1);
@@ -1667,18 +1639,11 @@ pub mod v1 {
         fn failure_before_application_initialization_can_release_residency() {
             let macro_runtime = MacroRuntime::<ErrorBeforeState>::new_with_physical_unload();
             let runtime = macro_runtime.runtime();
-            let newly_acquired = runtime
-                .ensure_module_residency(residency_anchor as *const ())
-                .unwrap();
-            let transaction = runtime
-                .begin_open()
-                .unwrap()
-                .attach_host(crate::host_callback::HostCallbackSession::new());
-            let lifecycle = runtime.bind_addin_lifecycle().unwrap();
-            let failure = transaction.failure(XllError::Overloaded);
-            assert!(matches!(failure.recover(&lifecycle), XllError::Overloaded));
+            let residency =
+                crate::runtime::OpenResidency::acquire(runtime, residency_anchor as *const ())
+                    .unwrap();
             assert_eq!(runtime.phase(), LifecyclePhase::Closed);
-            release_open_residency_after_failure(&macro_runtime, newly_acquired);
+            residency.preparation_failed();
             assert!(!runtime.module_residency_held());
         }
 
@@ -1696,10 +1661,9 @@ pub mod v1 {
             let macro_runtime =
                 MacroRuntime::<ErrorAfterEventRegistration>::new_with_physical_unload();
             let runtime = macro_runtime.runtime();
-            let newly_acquired = runtime
-                .ensure_module_residency(residency_anchor as *const ())
-                .unwrap();
-            assert!(newly_acquired);
+            let residency =
+                crate::runtime::OpenResidency::acquire(runtime, residency_anchor as *const ())
+                    .unwrap();
             let path = if cfg!(target_os = "windows") {
                 "C:\\test.xll"
             } else {
@@ -1737,8 +1701,7 @@ pub mod v1 {
                 arguments: &[],
             };
             assert_eq!(
-                host_auto_open(
-                    runtime,
+                residency.open(
                     &AddinId::parse("event-residency").unwrap(),
                     "0",
                     "test",
@@ -1750,9 +1713,6 @@ pub mod v1 {
             assert!(!runtime.has_current_generation());
             assert_eq!(runtime.resident_event_count(), 1);
 
-            // This is the generated xlAutoOpen failure epilogue. A fully
-            // rolled-back generation does not mean its native export is gone.
-            release_open_residency_after_failure(&macro_runtime, newly_acquired);
             assert!(runtime.module_residency_held());
             assert_eq!(host_auto_remove(runtime), 1);
             assert_eq!(host_auto_close(runtime), 1);
