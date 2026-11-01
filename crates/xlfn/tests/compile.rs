@@ -4,6 +4,7 @@ fn trait_driven_function_signatures_compile() {
     tests.pass("tests/ui/pass/argument_defaults.rs");
     tests.pass("tests/ui/pass/native_abi.rs");
     tests.pass("tests/ui/pass/borrowed_inputs.rs");
+    tests.pass("tests/ui/pass/borrowed_dynamic_value.rs");
     tests.pass("tests/ui/pass/case_distinct_udfs.rs");
     tests.pass("tests/ui/pass/cfg_gating.rs");
     tests.pass("tests/ui/pass/context_modes.rs");
@@ -28,6 +29,7 @@ fn trait_driven_function_signatures_compile() {
     tests.compile_fail("tests/ui/fail/lookalike_*.rs");
     tests.compile_fail("tests/ui/fail/nested_return_array.rs");
     tests.compile_fail("tests/ui/fail/matrix_element_cannot_outlive_call.rs");
+    tests.compile_fail("tests/ui/fail/borrowed_dynamic_value_escape.rs");
     tests.compile_fail("tests/ui/fail/removed_export_macro.rs");
     tests.compile_fail("tests/ui/fail/return_trait_missing.rs");
     tests.compile_fail("tests/ui/fail/return_abi_mismatch.rs");
@@ -74,6 +76,7 @@ fn trait_driven_function_signatures_compile() {
         tests.compile_fail("tests/ui/fail_async/borrowed_array_alias.rs");
         tests.compile_fail("tests/ui/fail_async/borrowed_array_async.rs");
         tests.compile_fail("tests/ui/fail_async/borrowed_inputs.rs");
+        tests.compile_fail("tests/ui/fail_async/borrowed_dynamic_value.rs");
 
         #[cfg(feature = "handles")]
         {

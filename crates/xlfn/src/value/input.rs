@@ -85,6 +85,13 @@ pub trait InputMode: sealed::InputModeSealed + Sized {
     fn string(identity: &mut Self::Identity, value: &str);
 
     #[doc(hidden)]
+    fn semantic_utf16(
+        identity: &mut Self::Identity,
+        units: &[u16],
+        argument: &'static str,
+    ) -> XllResult<()>;
+
+    #[doc(hidden)]
     fn prepare_native_string<'call>(
         identity: &mut Self::Identity,
         units: &'call [u16],
@@ -226,6 +233,14 @@ impl InputMode for PlainInputMode {
     fn u64(_: &mut Self::Identity, _: u64) {}
     fn string(_: &mut Self::Identity, _: &str) {}
 
+    fn semantic_utf16(_: &mut (), units: &[u16], argument: &'static str) -> XllResult<()> {
+        char::decode_utf16(units.iter().copied()).try_for_each(|scalar| {
+            scalar
+                .map(drop)
+                .map_err(|_| XllError::input(argument, crate::error::InputError::InvalidUtf16))
+        })
+    }
+
     fn prepare_native_string<'call>(
         _: &mut Self::Identity,
         units: &'call [u16],
@@ -311,6 +326,14 @@ impl InputMode for FormulaInputMode {
 
     fn string(identity: &mut Self::Identity, value: &str) {
         identity.string(value);
+    }
+
+    fn semantic_utf16(
+        identity: &mut Self::Identity,
+        units: &[u16],
+        _: &'static str,
+    ) -> XllResult<()> {
+        identity.semantic_utf16(units)
     }
 
     fn prepare_native_string<'call>(

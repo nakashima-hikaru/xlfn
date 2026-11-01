@@ -279,6 +279,36 @@ fn argument_ingress_benchmarks(c: &mut Criterion) {
         }
     }
 
+    // Dynamic input: validate all cells, decode only the accessed prefix.
+    for cells in [1_000, 100_000] {
+        let mut input = RawArgumentIngressBenchmark::mixed_matrix(cells / 1_000, 1_000, "日本語💡");
+        let expected = input.run_prepared_with_identity::<ExcelValue>();
+        assert_eq!(expected, input.run_borrowed_value_prepared(false, 0));
+        for (mode, accessed) in [("none", 0), ("first_text", 2), ("all", cells)] {
+            group.bench_function(format!("dynamic_value/{cells}/borrowed/{mode}"), |b| {
+                b.iter(|| input.run_borrowed_value_plain(accessed));
+            });
+        }
+        group.bench_function(format!("dynamic_value/{cells}/owned"), |b| {
+            b.iter(|| input.run_plain::<ExcelValue>());
+        });
+        group.bench_function(format!("dynamic_value/{cells}/matrix_ref"), |b| {
+            b.iter(|| input.run_borrowed_mixed_cells());
+        });
+        group.bench_function(format!("dynamic_value/{cells}/prepare_owned"), |b| {
+            b.iter(|| input.run_prepared_with_identity::<ExcelValue>());
+        });
+        group.bench_function(format!("dynamic_value/{cells}/prepare_borrowed"), |b| {
+            b.iter(|| input.run_borrowed_value_prepared(false, 0));
+        });
+        group.bench_function(
+            format!("dynamic_value/{cells}/materialize_first_text"),
+            |b| {
+                b.iter(|| input.run_borrowed_value_prepared(true, 2));
+            },
+        );
+    }
+
     // 11. Handle
     let mut handle_bench = RawArgumentIngressBenchmark::handle();
     group.bench_function("handle/plain", |b| {

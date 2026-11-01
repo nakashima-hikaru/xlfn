@@ -4,6 +4,8 @@ use crate::{XllError, XllResult};
 mod deferred_drop;
 mod reclamation;
 use reclamation::{reclaim_cache_entries, release_node_pin};
+#[cfg(test)]
+mod borrowed_key_tests;
 mod endpoint_cache;
 #[cfg(test)]
 mod generation_tests;
@@ -480,6 +482,29 @@ impl CacheRegistry {
         stored.cache.get_or_try_insert_with(key, compute)
     }
 
+    /// Resolves an endpoint and initializes only after a borrowed resident miss.
+    ///
+    /// A resident hit does not call [`ToOwned::to_owned`]. Misses use the same
+    /// generation snapshot and single-flight rules as the owned-key API.
+    pub fn get_or_try_insert_borrowed<'a, K, V, Marker, Q, F>(
+        &'a self,
+        endpoint: &CacheEndpoint<K, V, Marker>,
+        key: &Q,
+        compute: F,
+    ) -> XllResult<CacheLease<'a, V>>
+    where
+        Marker: 'static,
+        K: std::borrow::Borrow<Q> + Clone + Eq + Hash + Send + Sync + 'static,
+        V: Send + Sync + 'static,
+        Q: ToOwned<Owned = K> + Hash + Eq + ?Sized,
+        F: FnOnce() -> XllResult<V>,
+    {
+        let cache = self.resolve_cache(endpoint)?;
+        // SAFETY: self.caches retains the boxed cache for 'a (&'a self).
+        let stored: &'a StoredCache<Marker, K, V> = unsafe { cache.as_ref() };
+        stored.cache.get_or_try_insert_borrowed(key, compute)
+    }
+
     #[cfg(test)]
     fn get_or_try_insert_weighted<'a, K, V, Marker, F, W>(
         &'a self,
@@ -506,15 +531,16 @@ impl CacheRegistry {
     /// Resolves an endpoint and looks up a value in its current generation.
     ///
     /// Endpoint resolution can fail; absence is reported as `Ok(None)`.
-    pub fn get<'a, K, V, Marker>(
+    pub fn get<'a, K, V, Marker, Q>(
         &'a self,
         endpoint: &CacheEndpoint<K, V, Marker>,
-        key: &K,
+        key: &Q,
     ) -> XllResult<Option<CacheLease<'a, V>>>
     where
         Marker: 'static,
-        K: Clone + Eq + Hash + Send + Sync + 'static,
+        K: std::borrow::Borrow<Q> + Clone + Eq + Hash + Send + Sync + 'static,
         V: Send + Sync + 'static,
+        Q: Hash + Eq + ?Sized,
     {
         let cache = self.resolve_cache(endpoint)?;
         // SAFETY: self.caches retains the boxed cache for 'a (&'a self).
@@ -599,12 +625,12 @@ struct VersionedKey<K> {
     key: K,
 }
 
-struct VersionedKeyRef<'a, K> {
+struct VersionedKeyRef<'a, Q: ?Sized> {
     epoch: u64,
-    key: &'a K,
+    key: &'a Q,
 }
 
-impl<K: Hash> Hash for VersionedKeyRef<'_, K> {
+impl<Q: Hash + ?Sized> Hash for VersionedKeyRef<'_, Q> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.epoch.hash(state);
         self.key.hash(state);
@@ -1189,8 +1215,8 @@ pub struct CacheResidentStats {
 /// UDF invocations. Eviction is based on abstract caller-reported weights rather
 /// than physical allocations.
 ///
-/// Keys must keep their equality and hash stable while stored. `K::Hash` and
-/// `K::Eq` must not reenter this cache, directly or through a registry: they
+/// Keys must keep their equality and hash stable while stored. `Hash` and `Eq`
+/// on owned or borrowed keys must not reenter this cache, directly or through a registry: they
 /// may run while cache locks or read admission are held. `K::Clone` must
 /// preserve key identity and must not depend on starting another cache
 /// initialization on the same thread, because cloning may occur during
@@ -1397,7 +1423,15 @@ where
     }
 
     /// Returns a pinned resident value from the current cache generation.
-    pub fn get<'a>(&'a self, key: &K) -> Option<CacheLease<'a, V>> {
+    ///
+    /// For example, a cache with `String` keys accepts both `&str` and `&String`.
+    /// Borrowed and owned keys must have equivalent hashes and equality, as
+    /// required by [`std::borrow::Borrow`].
+    pub fn get<'a, Q>(&'a self, key: &Q) -> Option<CacheLease<'a, V>>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         let _operation = CacheOperationGuard::enter();
         let epoch = self.generation.snapshot();
         let lease = self.get_at_epoch(key, epoch);
@@ -1405,7 +1439,11 @@ where
         lease
     }
 
-    fn get_at_epoch<'a>(&'a self, key: &K, epoch: u64) -> Option<CacheLease<'a, V>> {
+    fn get_at_epoch<'a, Q>(&'a self, key: &Q, epoch: u64) -> Option<CacheLease<'a, V>>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         let permit = self.domain.enter().ok()?;
         let lookup = VersionedKeyRef { epoch, key };
         let (node_ptr, _) = self.index.get(&lookup)?;
@@ -1459,6 +1497,34 @@ where
     {
         let epoch = self.generation.snapshot();
         self.get_or_try_insert_at_epoch(key, self.weigher, compute, epoch)
+    }
+
+    /// Returns or initializes a value, owning the key only after a resident miss.
+    ///
+    /// Resident hits do not call [`ToOwned::to_owned`]. On a miss, the owned key
+    /// enters the existing single-flight path, which rechecks residency before
+    /// enrolling. Joining an in-progress computation can still own the key.
+    /// The initial lookup and initialization share one generation snapshot, so
+    /// `clear()` during `to_owned()` cannot promote this request to a new generation.
+    /// Panics and reentry follow [`Self::get_or_try_insert_with`]; `to_owned()`
+    /// must preserve key identity according to [`std::borrow::Borrow`].
+    pub fn get_or_try_insert_borrowed<'a, Q, F>(
+        &'a self,
+        key: &Q,
+        compute: F,
+    ) -> XllResult<CacheLease<'a, V>>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: ToOwned<Owned = K> + Hash + Eq + ?Sized,
+        F: FnOnce() -> XllResult<V>,
+    {
+        let _operation = CacheOperationGuard::enter();
+        let epoch = self.generation.snapshot();
+        if let Some(lease) = self.get_at_epoch(key, epoch) {
+            self.maintain(false);
+            return Ok(lease);
+        }
+        self.get_or_try_insert_at_epoch(key.to_owned(), self.weigher, compute, epoch)
     }
 
     // Unit tests exercise callback/unwind interleavings independently of the
@@ -2311,7 +2377,7 @@ mod tests {
 
         registry.clear();
         assert!(registry.get(&numbers, &1).unwrap().is_none());
-        assert!(registry.get(&text, &"key".into()).unwrap().is_none());
+        assert!(registry.get(&text, "key").unwrap().is_none());
         assert!(registry.get(&tracked, &1).unwrap().is_none());
         assert_eq!(*number_lease, 7);
         assert_eq!(&*text_lease, "old");

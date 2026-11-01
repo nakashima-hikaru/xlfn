@@ -36,6 +36,27 @@ the compute closure with an expensive deterministic calculation. The `String::le
 
 The returned value is `CacheLease<'_, V>`, which implements `Deref<Target = V>`. Concurrent initializations for the same key are coalesced. A failed initialization is returned to its caller and is not cached.
 
+String keys support borrowed lookup. `get` accepts either `&str` or `&String`,
+and `get_or_try_insert_borrowed` creates an owned key only after a resident miss:
+
+```rust
+# use xlfn::cache::CalculationCache;
+# fn example() -> xlfn::XllResult<()> {
+let cache = CalculationCache::<String, usize>::new(1024);
+let text: &str = "a borrowed key";
+let value = cache.get_or_try_insert_borrowed(text, || Ok(text.len()))?;
+assert_eq!(*cache.get(text).unwrap(), *value);
+# Ok(())
+# }
+# example().unwrap();
+```
+
+These methods also work with other `K: Borrow<Q>` key pairs when their hashes
+and equality agree. Insertion additionally requires `Q: ToOwned<Owned = K>`.
+The generation is captured before lookup and key ownership conversion, so a
+concurrent clear cannot promote the request into a newer generation. Joining
+an in-flight computation after a resident miss still creates an owned key.
+
 The weight budget is an abstract integer. It can represent approximate bytes, external-resource units, or another monotone cost, and the cache applies its construction-time policy to every insertion. `new(budget)` uses unit weights. Zero is normalized to a minimum positive cache weight. A value heavier than the entire budget is returned but not retained.
 
 `len()` and `used_weight()` report current residency. A live `CacheLease` keeps
@@ -66,10 +87,10 @@ fn build_state() -> State {
     }
 }
 
-fn uppercase<'a>(state: &'a State, text: String) -> XllResult<CacheLease<'a, String>> {
-    state.caches.get_or_try_insert(
+fn uppercase<'a>(state: &'a State, text: &str) -> XllResult<CacheLease<'a, String>> {
+    state.caches.get_or_try_insert_borrowed(
         &UPPERCASE,
-        text.clone(),
+        text,
         || Ok(text.to_uppercase()),
     )
 }
@@ -145,7 +166,7 @@ already-cached values is supported. Compute lower layers directly or resolve
 their cache dependencies before entering the initializer.
 
 Keys must keep equality and hashing stable while stored. `Hash`, `Eq`, and
-`Clone` must not start another cache initialization; recursive access can
+`Clone` and borrowed-key `ToOwned` must not start another cache initialization; recursive access can
 deadlock.
 
 The compute and weight functions execute application code. They must:

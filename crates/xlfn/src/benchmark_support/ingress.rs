@@ -1,6 +1,19 @@
 use super::handle::benchmark_revision_key;
 use super::*;
 
+fn observe_dynamic_value(value: crate::value::ExcelValueRef<'_>, accessed_cells: usize) {
+    if let crate::value::ExcelValueRef::Array(array) = value {
+        for index in 0..accessed_cells.min(array.len()) {
+            std::hint::black_box(
+                array
+                    .get(index / array.columns(), index % array.columns())
+                    .unwrap(),
+            );
+        }
+    }
+    std::hint::black_box(value);
+}
+
 /// Benchmark harness for measuring raw Excel argument ingress conversion costs
 /// with and without semantic identity fingerprinting.
 pub struct RawArgumentIngressBenchmark {
@@ -562,6 +575,54 @@ impl RawArgumentIngressBenchmark {
             .expect("benchmark borrowed mixed-cell ingress must succeed");
             std::hint::black_box(value);
             let _ = arguments.finish();
+        })
+    }
+
+    /// Validates a dynamic input, then decodes only the requested prefix of cells.
+    pub fn run_borrowed_value_plain(&mut self, accessed_cells: usize) {
+        let ingress = benchmark_ingress();
+        let call = self.runtime.enter(&ingress).unwrap();
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
+            let mut arguments =
+                crate::value::ArgumentContext::<crate::value::PlainInputMode>::new(call, scope, 1);
+            // SAFETY: the fixture retains its root, cells and text for the entire call.
+            let value = unsafe {
+                crate::value::argument_from_raw_with_arguments::<
+                    crate::value::PlainInputMode,
+                    crate::value::ExcelValueRef<'_>,
+                >(&mut arguments, 0, "arg", &mut self.raw)
+            }
+            .unwrap();
+            observe_dynamic_value(value, accessed_cells);
+            arguments.finish().unwrap();
+        });
+    }
+
+    /// Preparation/discard models a cache hit; optional access models a miss.
+    pub fn run_borrowed_value_prepared(
+        &mut self,
+        materialize: bool,
+        accessed_cells: usize,
+    ) -> [u8; 32] {
+        let ingress = benchmark_ingress();
+        let call = self.runtime.enter(&ingress).unwrap();
+        crate::call::with_excel_call_scope_and_call(&call, |call, scope| {
+            let mut arguments =
+                crate::value::ArgumentContext::<crate::value::FormulaInputMode>::new(
+                    call, scope, 1,
+                );
+            // SAFETY: the fixture retains its root, cells and text for the entire call.
+            let raw = unsafe { crate::value::XlValueRef::from_raw(&mut self.raw) }.unwrap();
+            let prepared = arguments
+                .prepare::<crate::value::ExcelValueRef<'_>>(0, "arg", raw)
+                .unwrap();
+            let identity = arguments.finish().unwrap().unwrap();
+            if materialize {
+                observe_dynamic_value(prepared.materialize().unwrap(), accessed_cells);
+            } else {
+                std::hint::black_box(prepared);
+            }
+            identity
         })
     }
 

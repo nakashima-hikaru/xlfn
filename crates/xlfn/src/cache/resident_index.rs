@@ -65,7 +65,11 @@ impl<K> Borrow<VersionedKey<K>> for ResidentKey<K> {
     }
 }
 
-impl<K: Eq> Equivalent<ResidentKey<K>> for VersionedKeyRef<'_, K> {
+impl<K, Q> Equivalent<ResidentKey<K>> for VersionedKeyRef<'_, Q>
+where
+    K: Borrow<Q>,
+    Q: Eq + ?Sized,
+{
     fn equivalent(&self, owned: &ResidentKey<K>) -> bool {
         self.equivalent(owned.get())
     }
@@ -160,9 +164,13 @@ impl<V> Drop for ResidentEntry<V> {
     }
 }
 
-impl<K: Eq> Equivalent<VersionedKey<K>> for VersionedKeyRef<'_, K> {
+impl<K, Q> Equivalent<VersionedKey<K>> for VersionedKeyRef<'_, Q>
+where
+    K: Borrow<Q>,
+    Q: Eq + ?Sized,
+{
     fn equivalent(&self, owned: &VersionedKey<K>) -> bool {
-        self.epoch == owned.epoch && self.key == &owned.key
+        self.epoch == owned.epoch && self.key == owned.key.borrow()
     }
 }
 
@@ -195,7 +203,11 @@ where
     }
 
     #[inline]
-    pub(super) fn get(&self, key: &VersionedKeyRef<'_, K>) -> Option<Entry<V>> {
+    pub(super) fn get<Q>(&self, key: &VersionedKeyRef<'_, Q>) -> Option<Entry<V>>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         self.index.get(key)
     }
 

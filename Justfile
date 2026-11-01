@@ -259,6 +259,7 @@ bench-ci:
     just bench-one-filter handle_lookup "^handle_lookup/(warm_same_token|distinct_tokens|rotating_65536_tokens)/(1|32)\z"
     just bench-one-filter formula_caller "^resolve_formula_caller/(ref|sref|concurrent/ref/(1|4))\z"
     just bench-one-filter argument_ingress "^argument_ingress/(f64/with_identity|string_(ascii_4k|japanese_4k)/owned|string_short/borrowed|string_unicode/borrowed|string_inline_[^/]+/borrowed|string_pair/borrowed|matrix_string_10k/(owned|borrowed)|matrix_f64_100k/(plain|with_identity|prepare_identity)|matrix_ref_f64_100k/(plain|prepare_identity|prepare_materialize)|numeric_matrix_ref_100k/plain|numeric_matrix_shape/(1000x10|100x100|10x1000)|numeric_matrix_ref_100000/with_identity|matrix_cells_100k/(ascii|unicode)/(owned|borrowed)|excel_value_matrix_100k/with_identity|handle/with_identity|optional_numeric/(option|presence|borrowed_option)/100000/(prepare|materialize))\z"
+    just bench-one-filter argument_ingress "^argument_ingress/dynamic_value/100000/"
     just bench-one-filter array_numeric_output "^(array_numeric_output/(matrix_build_return|builder_build_return|matrix_build_return_q|builder_build_return_q|matrix_convert_return|numeric_slice_convert_return|numeric_slice_convert_return_q)/100000|array_numeric_output/numeric_slice_convert_return/100|array_numeric_producer/push_f64/(10000|100000))\z"
     just bench-one-filter object_lease "^object_lease/(pin_acquire_release_serial|final_pin_release|same_object/4|distinct_objects/4)\z" "bench-internals async"
     just bench-one-filter cache_miss_concurrency "^cache_miss_concurrency/(distinct_keys/(cheap_u64|numeric_reduce_4096)/cache/workers_(1|4)|same_key/cheap_u64/cache/workers_4)\z" "bench-internals cache"
@@ -272,7 +273,7 @@ bench-ci:
     just bench-one-filter rtd_refresh "^rtd_refresh/(number/end_to_end/dense|short_string/end_to_end/dense|string_8k/(collection|completion|end_to_end)/dense)\z" "bench-internals rtd"
     just bench-one-filter handle_call_resolution "^handle_call_resolution/handles/(1|8)\z"
     just bench-one cache_registry "bench-internals cache"
-    just bench-one value_boundary_allocations "bench-internals async"
+    just bench-one value_boundary_allocations "bench-internals async cache"
     just bench-one async_task_drain_allocations "bench-internals async"
     just bench-one async_pending_allocations "bench-internals async-builtin"
 
@@ -319,7 +320,7 @@ bench-full:
     just bench-one rtd_refresh "bench-internals rtd"
     just bench-one handle_call_resolution
     just bench-one cache_registry "bench-internals cache"
-    just bench-one value_boundary_allocations "bench-internals async"
+    just bench-one value_boundary_allocations "bench-internals async cache"
 
 # Strict Q versus native B/A/J/D% admission, including handle input identity.
 bench-native-abi:

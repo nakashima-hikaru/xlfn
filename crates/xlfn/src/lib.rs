@@ -316,8 +316,8 @@ pub mod prelude {
     #[cfg(feature = "handles")]
     pub use crate::handle::{Handle, HandleAlias, HandleLease};
     pub use crate::value::{
-        Column, ExcelCellRef, ExcelSerialDate, Matrix, MatrixRef, NumericMatrixRef,
-        OptionalExcelValue, Row,
+        Column, ExcelArrayRef, ExcelCellRef, ExcelSerialDate, ExcelValueRef, Matrix, MatrixRef,
+        NumericMatrixRef, OptionalExcelValue, Row,
     };
     #[cfg(feature = "async")]
     pub use crate::{AsyncExecutor, AsyncTask};

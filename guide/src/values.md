@@ -20,6 +20,7 @@ xlfn instead.
 | `NumericMatrixRef<'_>` | `K%`: FP12 pointer | borrowed numeric array after Excel conversion |
 | `i64` | `Q`: XLOPER12 value | integral input within the exact binary64 integer range |
 | `Matrix<T>`, `MatrixRef<'_, T>` | `Q` | strict element conversion |
+| `ExcelValue`, `ExcelValueRef<'_>` | `Q` | dynamic scalar, missing value, or array; the borrowed view is call-local |
 | `Option<T>`, `OptionalExcelValue<T>` | `Q` | original missing/blank states are retained |
 | `ExcelError`, `ExcelSerialDate` | `Q` | error value or finite serial with unresolved workbook date system |
 | custom `FromExcel` types and unrecognized type aliases | `Q` | declared conversion contract |
@@ -170,6 +171,43 @@ A synchronous handle producer accepting `MatrixRef<'_, f64>` validates and
 identifies the input on every recalculation, but creates the scratch slice only
 when it needs to run the function. Reusing its cached object avoids copying the
 numeric cells into scratch.
+
+### Borrow a dynamic value
+
+Use `ExcelValueRef<'_>` when one parameter can contain a scalar, an omitted
+argument, or an array. `ExcelValue` remains available when the input must be
+owned. The borrowed type distinguishes `Missing` from
+`Scalar(ExcelCellRef::Blank)`:
+
+```rust
+{{#include ../fixtures/addin.md}}
+use xlfn::prelude::*;
+
+#[excel_function(name = "VALUE.FIRST.IS.TEXT", thread_safe)]
+fn first_is_text(value: ExcelValueRef<'_>) -> XllResult<bool> {
+    let cell = match value {
+        ExcelValueRef::Missing => return Ok(false),
+        ExcelValueRef::Scalar(cell) => cell,
+        ExcelValueRef::Array(array) => match array.get(0, 0)? {
+            Some(cell) => cell,
+            None => return Ok(false),
+        },
+    };
+    Ok(matches!(cell, ExcelCellRef::String(_)))
+}
+```
+
+`ExcelArrayRef` provides `rows()`, `columns()`, `shape()`, `len()`, and checked
+`get(row, column)`. Input validation always checks every cell, dimensions,
+size limits, and UTF-16, including cells the function never accesses. Text is
+decoded into call-local scratch only when accessed. Repeated access can decode
+the same cell again; use `MatrixRef<'_, ExcelCellRef<'_>>` when repeatedly
+traversing the whole array.
+
+Formula identity uses the same scalar/array semantics as `ExcelValue` and is
+computed before materialization. A cached handle hit therefore does not decode
+the dynamic input's strings. Borrowed dynamic values work in synchronous and
+main-thread functions and cannot outlive the call or become async inputs.
 
 ### Borrow a numeric range directly
 

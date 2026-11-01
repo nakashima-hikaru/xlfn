@@ -15,6 +15,7 @@ use quick_cache::{
     OptionsBuilder, Weighter,
     sync::{Cache, DefaultLifecycle},
 };
+use std::borrow::Borrow;
 use std::collections::hash_map::RandomState;
 use std::hash::Hash;
 
@@ -62,7 +63,11 @@ where
         }
     }
 
-    pub(super) fn get(&self, key: &VersionedKeyRef<'_, K>) -> Option<Entry<V>> {
+    pub(super) fn get<Q>(&self, key: &VersionedKeyRef<'_, Q>) -> Option<Entry<V>>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         self.cache.get(key).map(|entry| entry.snapshot())
     }
 

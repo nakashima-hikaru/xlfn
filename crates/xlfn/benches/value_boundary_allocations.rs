@@ -103,6 +103,114 @@ enum Status {
 }
 
 fn main() {
+    #[cfg(feature = "cache")]
+    {
+        use xlfn::cache::{CacheEndpoint, CacheRegistry, CalculationCache};
+        let key = "key".repeat(256);
+        let cache = CalculationCache::<String, u64>::new(8);
+        drop(
+            cache
+                .get_or_try_insert_borrowed(key.as_str(), || Ok(7))
+                .unwrap(),
+        );
+        let lookup = measure("cache/borrowed_get", || {
+            black_box(cache.get(black_box(key.as_str())).unwrap());
+        });
+        assert_runtime_allocation_free("cache borrowed get", lookup);
+        let borrowed = measure("cache/borrowed_resident_hit", || {
+            black_box(
+                cache
+                    .get_or_try_insert_borrowed(black_box(key.as_str()), || panic!("warm hit"))
+                    .unwrap(),
+            );
+        });
+        assert_runtime_allocation_free("cache borrowed resident hit", borrowed);
+        let owned = measure("cache/owned_resident_hit", || {
+            black_box(
+                cache
+                    .get_or_try_insert_with(black_box(key.clone()), || panic!("warm hit"))
+                    .unwrap(),
+            );
+        });
+        if !cfg!(feature = "refinement") {
+            assert_eq!(owned.allocations, MEASURED_CALLS);
+            assert_eq!(owned.deallocations, MEASURED_CALLS);
+            assert_eq!(owned.requested_bytes, MEASURED_CALLS * key.len());
+            assert_eq!(owned.reallocations, 0);
+        }
+        let registry = CacheRegistry::new(8);
+        let endpoint = CacheEndpoint::<String, u64>::new("borrowed_probe");
+        drop(
+            registry
+                .get_or_try_insert_borrowed(&endpoint, key.as_str(), || Ok(7))
+                .unwrap(),
+        );
+        let borrowed = measure("cache/registry_borrowed_resident_hit", || {
+            black_box(
+                registry
+                    .get_or_try_insert_borrowed(&endpoint, black_box(key.as_str()), || {
+                        panic!("warm hit")
+                    })
+                    .unwrap(),
+            );
+        });
+        assert_runtime_allocation_free("registry borrowed resident hit", borrowed);
+    }
+    for cells in [1_000, 100_000] {
+        let calls = 5;
+        let mut input = RawArgumentIngressBenchmark::mixed_matrix(cells / 1_000, 1_000, "日本語💡");
+        let owned = measure_calls(&format!("dynamic_value/{cells}/owned"), calls, || {
+            input.run_plain::<xlfn::value::ExcelValue>();
+        });
+        let lazy = measure_calls(
+            &format!("dynamic_value/{cells}/borrowed/none"),
+            calls,
+            || {
+                input.run_borrowed_value_plain(0);
+            },
+        );
+        assert_runtime_allocation_free("dynamic value with no accessed text", lazy);
+        measure_calls(
+            &format!("dynamic_value/{cells}/borrowed/first_text"),
+            calls,
+            || {
+                input.run_borrowed_value_plain(2);
+            },
+        );
+        let all = measure_calls(
+            &format!("dynamic_value/{cells}/borrowed/all"),
+            calls,
+            || {
+                input.run_borrowed_value_plain(cells);
+            },
+        );
+        let prepared_owned = measure_calls(
+            &format!("dynamic_value/{cells}/prepare_owned"),
+            calls,
+            || {
+                black_box(input.run_prepared_with_identity::<xlfn::value::ExcelValue>());
+            },
+        );
+        let prepared_borrowed = measure_calls(
+            &format!("dynamic_value/{cells}/prepare_borrowed"),
+            calls,
+            || {
+                black_box(input.run_borrowed_value_prepared(false, 0));
+            },
+        );
+        if !cfg!(feature = "refinement") {
+            assert!(
+                all.allocations < owned.allocations,
+                "scratch text must avoid per-cell owned Strings"
+            );
+            assert!(prepared_borrowed.allocations < prepared_owned.allocations);
+            assert!(
+                prepared_borrowed.allocations + prepared_borrowed.reallocations <= 2 * calls,
+                "warm preparation must retain only the identity workspace"
+            );
+            assert!(prepared_borrowed.requested_bytes <= 16 * 1024 * calls);
+        }
+    }
     for cells in [1_000, 100_000] {
         let mut control = RawArgumentIngressBenchmark::number_matrix(cells, 1);
         let control_counts = measure_calls(&format!("optional_numeric/control/{cells}"), 5, || {

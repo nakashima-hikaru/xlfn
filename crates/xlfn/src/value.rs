@@ -40,6 +40,8 @@ fn deserialize_finite_number<'de, D: serde::Deserializer<'de>>(
     Ok(number)
 }
 
+#[cfg(test)]
+mod borrowed_dynamic_tests;
 #[allow(
     unsafe_code,
     reason = "Raw XLOPER12 input conversion is isolated in this leaf"
@@ -155,6 +157,85 @@ pub enum ExcelValue {
     Missing,
     /// A row-major rectangular input array.
     Array(Matrix<ExcelCellValue>),
+}
+
+/// A dynamic input view borrowed for one synchronous or main-thread call.
+///
+/// Preparation validates every cell, including strings that are never read.
+/// Arrays decode text into the call's scratch storage only when accessed;
+/// formula-cache hits can discard preparation without decoding any text.
+#[derive(Clone, Copy, Debug)]
+pub enum ExcelValueRef<'call> {
+    /// One scalar cell, preserving a blank separately from an empty string.
+    Scalar(ExcelCellRef<'call>),
+    /// An omitted worksheet argument.
+    Missing,
+    /// A validated row-major array with lazily decoded string cells.
+    Array(ExcelArrayRef<'call>),
+}
+
+/// A validated dynamic array whose string cells are decoded on access.
+///
+/// Repeated reads of a string cell may decode it repeatedly. For complete
+/// traversal with retained decoded cells, consider [`MatrixRef`] of
+/// [`ExcelCellRef`] instead. This view and its cells cannot outlive the call.
+#[derive(Clone, Copy)]
+pub struct ExcelArrayRef<'call> {
+    raw: XlArrayRef<'call>,
+    scratch: &'call crate::call::CallScratch,
+    argument: &'static str,
+}
+
+impl std::fmt::Debug for ExcelArrayRef<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExcelArrayRef")
+            .field("shape", &self.shape())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'call> ExcelArrayRef<'call> {
+    /// Returns the number of rows.
+    #[must_use]
+    pub const fn rows(&self) -> usize {
+        self.raw.rows()
+    }
+
+    /// Returns the number of columns.
+    #[must_use]
+    pub const fn columns(&self) -> usize {
+        self.raw.columns()
+    }
+
+    /// Returns the rectangular shape.
+    #[must_use]
+    pub const fn shape(&self) -> crate::error::Shape {
+        self.raw.shape()
+    }
+
+    /// Returns the total number of cells.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.raw.len()
+    }
+
+    /// Returns whether this array has no cells.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.raw.is_empty()
+    }
+
+    /// Reads a cell at zero-based coordinates, returning `None` out of bounds.
+    ///
+    /// A string is decoded into call-local storage on each access. Previously
+    /// returned cells stay valid when later accesses allocate more storage.
+    pub fn get(&self, row: usize, column: usize) -> XllResult<Option<ExcelCellRef<'call>>> {
+        self.raw
+            .get(row, column)
+            .map(|value| decode_cell_ref(value, self.argument, self.scratch))
+            .transpose()
+    }
 }
 
 /// A single worksheet cell in the final semantic return representation.
@@ -1647,6 +1728,25 @@ impl ExcelInputIdentity for ExcelCellValue {
     }
 }
 
+fn decode_cell_ref<'call>(
+    value: XlValueRef<'call>,
+    argument: &'static str,
+    scratch: &'call crate::call::CallScratch,
+) -> XllResult<ExcelCellRef<'call>> {
+    match value.value_type() {
+        XlValueType::Number | XlValueType::Integer => {
+            f64::from_excel(value, argument).map(ExcelCellRef::Number)
+        }
+        XlValueType::Boolean => bool::from_excel(value, argument).map(ExcelCellRef::Boolean),
+        XlValueType::String => scratch
+            .decode_utf16(value.utf16(argument)?, argument)
+            .map(ExcelCellRef::String),
+        XlValueType::Error => ExcelError::from_excel(value, argument).map(ExcelCellRef::Error),
+        XlValueType::Nil => Ok(ExcelCellRef::Blank),
+        _ => Err(value.wrong_type(argument, "worksheet cell")),
+    }
+}
+
 impl<'call, M: InputMode> input::sealed::ExcelParameterSealed<'call, M> for ExcelCellRef<'call> {}
 
 impl<'call, M: InputMode> ExcelParameter<'call, M> for ExcelCellRef<'call> {
@@ -1689,28 +1789,7 @@ impl<'call, M: InputMode> ExcelParameter<'call, M> for ExcelCellRef<'call> {
         context: &CallContext<'call>,
         identity: &mut M::Identity,
     ) -> XllResult<Self> {
-        let decoded = match value.value_type() {
-            XlValueType::Number | XlValueType::Integer => {
-                let number = <f64 as FromExcel>::from_excel(value, argument)?;
-                Self::Number(number)
-            }
-            XlValueType::Boolean => {
-                let boolean = <bool as FromExcel>::from_excel(value, argument)?;
-                Self::Boolean(boolean)
-            }
-            XlValueType::String => {
-                let text = context
-                    .scratch()
-                    .decode_utf16(value.utf16(argument)?, argument)?;
-                Self::String(text)
-            }
-            XlValueType::Error => {
-                let error = <ExcelError as FromExcel>::from_excel(value, argument)?;
-                Self::Error(error)
-            }
-            XlValueType::Nil => Self::Blank,
-            _ => return Err(value.wrong_type(argument, "worksheet cell")),
-        };
+        let decoded = decode_cell_ref(value, argument, context.scratch())?;
         <Self as ExcelParameter<'call, M>>::encode_decoded(&decoded, identity);
         Ok(decoded)
     }
@@ -1758,6 +1837,184 @@ impl<'call> ExcelInputIdentity for ExcelCellRef<'call> {
                 encoder.i64(i64::from(value.code()));
             }
             Self::Blank => encoder.tag(5),
+        }
+    }
+}
+
+/// Validated dynamic input retained until a formula lookup needs its value.
+#[doc(hidden)]
+pub struct PreparedExcelValueRef<'call> {
+    value: PreparedDynamicValue<'call>,
+}
+
+enum PreparedDynamicValue<'call> {
+    Scalar {
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        scratch: &'call crate::call::CallScratch,
+    },
+    Missing,
+    Array(ExcelArrayRef<'call>),
+}
+
+impl<'call> PreparedExcelValueRef<'call> {
+    fn materialize(self) -> XllResult<ExcelValueRef<'call>> {
+        match self.value {
+            PreparedDynamicValue::Missing => Ok(ExcelValueRef::Missing),
+            PreparedDynamicValue::Array(array) => Ok(ExcelValueRef::Array(array)),
+            PreparedDynamicValue::Scalar {
+                value,
+                argument,
+                scratch,
+            } => decode_cell_ref(value, argument, scratch).map(ExcelValueRef::Scalar),
+        }
+    }
+}
+
+// Match ExcelCellValue's semantic tags without allocating decoded strings.
+fn validate_dynamic_cell<M: InputMode>(
+    value: XlValueRef<'_>,
+    argument: &'static str,
+    identity: &mut M::Identity,
+) -> XllResult<()> {
+    match value.value_type() {
+        XlValueType::Number | XlValueType::Integer => {
+            let number = f64::from_excel(value, argument)?;
+            M::tag(identity, 1);
+            M::f64(identity, number);
+        }
+        XlValueType::Boolean => {
+            let boolean = bool::from_excel(value, argument)?;
+            M::tag(identity, 2);
+            M::bool(identity, boolean);
+        }
+        XlValueType::String => {
+            let units = value.utf16(argument)?;
+            M::tag(identity, 3);
+            M::semantic_utf16(identity, units, argument)?;
+        }
+        XlValueType::Error => {
+            let error = ExcelError::from_excel(value, argument)?;
+            M::tag(identity, 4);
+            M::i64(identity, i64::from(error.code()));
+        }
+        XlValueType::Nil => M::tag(identity, 5),
+        _ => return Err(value.wrong_type(argument, "worksheet value")),
+    }
+    Ok(())
+}
+
+impl<'call, M: InputMode> input::sealed::ExcelParameterSealed<'call, M> for ExcelValueRef<'call> {}
+
+impl<'call, M: InputMode> ExcelParameter<'call, M> for ExcelValueRef<'call> {
+    type Prepared = PreparedExcelValueRef<'call>;
+    type ElementPrepared = Self::Prepared;
+    type Elements = PreparedParameterSequence<'call, Self, M>;
+
+    fn materialize_prepared(value: Self::Prepared) -> XllResult<Self> {
+        value.materialize()
+    }
+
+    fn materialize_element(value: Self::ElementPrepared) -> XllResult<Self> {
+        value.materialize()
+    }
+
+    fn prepare(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<PreparedParameter<'call, Self, M>> {
+        let value = match value.value_type() {
+            XlValueType::Missing => {
+                M::tag(identity, 2);
+                PreparedDynamicValue::Missing
+            }
+            XlValueType::Multi => {
+                // Retain the established owned dynamic-input admission policy,
+                // even though this representation allocates no cell vector.
+                let grid = convert::grid::<convert::MatrixShape>(value, argument)?;
+                let mut budget =
+                    ArrayInputBudget::new::<ExcelCellValue>(grid.cells().len(), argument)?;
+                let (rows, columns) = grid.shape();
+                M::tag(identity, 3);
+                M::u64(identity, rows as u64);
+                M::u64(identity, columns as u64);
+                for cell in grid.cells() {
+                    let cell = XlValueRef::from_array_cell(cell)?;
+                    budget.include(cell)?;
+                    validate_dynamic_cell::<M>(cell, argument, identity)?;
+                }
+                PreparedDynamicValue::Array(ExcelArrayRef {
+                    raw: XlArrayRef::from_excel(value, argument)?,
+                    scratch: context.scratch(),
+                    argument,
+                })
+            }
+            _ => {
+                M::tag(identity, 1);
+                validate_dynamic_cell::<M>(value, argument, identity)?;
+                PreparedDynamicValue::Scalar {
+                    value,
+                    argument,
+                    scratch: context.scratch(),
+                }
+            }
+        };
+        Ok(PreparedArgument::prepared(PreparedExcelValueRef { value }))
+    }
+
+    fn prepare_element(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<PreparedElement<'call, Self, M>> {
+        <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)
+            .map(PreparedArgument::with_materializer)
+    }
+
+    fn prepare_elements(
+        cells: ExcelInputCells<'call>,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<Self::Elements> {
+        cells.retain(|value, argument| {
+            <Self as ExcelParameter<'call, M>>::prepare_element(value, argument, context, identity)
+        })
+    }
+
+    fn materialize_elements(elements: Self::Elements) -> XllResult<Vec<Self>> {
+        elements.materialize()
+    }
+
+    fn decode(
+        value: XlValueRef<'call>,
+        argument: &'static str,
+        context: &CallContext<'call>,
+        identity: &mut M::Identity,
+    ) -> XllResult<Self> {
+        <Self as ExcelParameter<'call, M>>::prepare(value, argument, context, identity)?
+            .materialize()
+    }
+
+    fn encode_decoded(&self, identity: &mut M::Identity) {
+        match self {
+            Self::Missing => M::tag(identity, 2),
+            Self::Scalar(cell) => {
+                M::tag(identity, 1);
+                <ExcelCellRef<'call> as ExcelParameter<'call, M>>::encode_decoded(cell, identity);
+            }
+            Self::Array(array) => {
+                M::tag(identity, 3);
+                M::u64(identity, array.rows() as u64);
+                M::u64(identity, array.columns() as u64);
+                for cell in array.raw.cells() {
+                    // Construction already validated every immutable payload.
+                    // Formula encoders retain any encoding failure themselves.
+                    let _ = validate_dynamic_cell::<M>(cell, array.argument, identity);
+                }
+            }
         }
     }
 }
