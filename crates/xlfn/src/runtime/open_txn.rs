@@ -412,22 +412,21 @@ impl<A: crate::Addin> HasHost for HostMutated<A> {
 /// restored terminal quarantine. No independent attempt/module pair escapes.
 struct OpenAcquisition<'runtime, A: crate::Addin> {
     deps: OpenDeps<'runtime, A>,
-    control: Option<LifecycleAccess<'runtime, A>>,
+    start: Option<crate::lifecycle::OpenStart<'runtime, A>>,
     module: Option<crate::module_runtime::ModuleOpening>,
 }
 
 impl<A: crate::Addin> Drop for OpenAcquisition<'_, A> {
     fn drop(&mut self) {
-        let Some(control) = self.control.as_mut() else {
+        let Some(start) = self.start.as_mut() else {
             return;
         };
         self.deps.returns().close_admission();
-        let lifecycle = self.deps.lifecycle_control();
         if let Some(module) = self.module.take() {
-            lifecycle.complete_open_abort_locked(control, module.rollback(|| {}));
+            start.return_module(module.rollback(|| {}));
         }
-        lifecycle.quarantine_state(control);
-        lifecycle.notify_all();
+        // OpenStart retains the original lock and performs the canonical
+        // quarantine after this return/module recovery has completed.
     }
 }
 
@@ -638,13 +637,13 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Begun<A>> {
         #[cfg(test)]
         let test_module_lease = crate::ingress::acquire_test_module_lease();
         let lifecycle = crate::lifecycle::LifecycleControl::new(deps.lifecycle());
-        let mut control = lifecycle.access();
-        let attempt = lifecycle.begin_open_state(&mut control, expected_removal_epoch)?;
+        let start = lifecycle.begin_open(expected_removal_epoch)?;
+        let attempt = start.attempt();
         // From the first successful canonical mutation, this guard owns both
         // the original lock and the responsibility for an incomplete start.
         let mut acquisition = OpenAcquisition {
             deps,
-            control: Some(control),
+            start: Some(start),
             module: None,
         };
         #[cfg(test)]
@@ -658,7 +657,7 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Begun<A>> {
         #[cfg(test)]
         check_open_acquire_fault(2)?;
         deps.observer().begin_open(
-            acquisition.control.as_ref().unwrap(),
+            acquisition.start.as_ref().unwrap().access(),
             deps.returns(),
             expected_removal_epoch.get(),
             attempt,
@@ -675,7 +674,7 @@ impl<'runtime, A: crate::Addin> OpeningTxn<'runtime, A, Begun<A>> {
             (),
         );
         // No fallible operation separates responsibility transfer from unlock.
-        acquisition.control.take();
+        acquisition.start.take().unwrap().transfer_to_opening();
         Ok(transaction)
     }
 

@@ -15,6 +15,7 @@ use crate::runtime_components::QuarantineReason;
 
 pub(crate) enum OpenRollbackAcquisition<T> {
     Acquired(T),
+    AlreadyFinalized,
     ClosingOwnsCleanup,
     Unavailable,
 }
@@ -102,7 +103,7 @@ impl<'a, A: Addin> LifecycleOrchestrator<'a, A> {
             LifecyclePhase::Opening | LifecyclePhase::Open
         ) {
             self.returns.close_admission();
-            lifecycle.request_closing(&mut control);
+            control.request_closing_for_test();
             let _ = lifecycle
                 .take_module_closing_for_test(&mut control)
                 .unwrap_or_else(|| {

@@ -12,6 +12,9 @@ use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 use xlfn_kernel::drain_gate::{DEFAULT_STRIPE_COUNT, StripedDrainGate, StripedDrainPermit};
 use xlfn_kernel::published_owner::PublishedOwner;
 
+mod opening;
+pub(crate) use opening::OpenStart;
+
 #[cold]
 fn lifecycle_invariant_violation(message: &'static str) -> ! {
     super::lifecycle_invariant_violation(message)
@@ -32,6 +35,9 @@ use crate::module_runtime::{
     ModuleCleanupReady, ModuleEpochId, ModuleEpochLease, UnavailableModuleAuthority,
 };
 use crate::runtime_components::GenerationServices;
+
+mod removal;
+pub(crate) use removal::{FinalCloseDecision, IssuedRemovalClaim, RollbackDecision};
 
 /// A read-side publication of one coherent open generation.
 ///
@@ -1758,7 +1764,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         })
     }
 
-    pub(crate) fn wait<'a>(&self, access: &mut LifecycleAccess<'a, A>) {
+    fn wait<'a>(&self, access: &mut LifecycleAccess<'a, A>) {
         self.changed.wait(&mut access.core);
     }
 
@@ -1890,7 +1896,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
     }
 
     /// Clears host intent before the external module-open protocol is started.
-    pub(in crate::lifecycle) fn prepare_open(&self, access: &mut LifecycleAccess<'_, A>) {
+    fn prepare_open(&self, access: &mut LifecycleAccess<'_, A>) {
         require_lifecycle_invariant(
             access.phase() == LifecyclePhase::Closed,
             "open preparation requires the closed lifecycle phase",
@@ -1901,18 +1907,14 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         });
     }
 
-    pub(in crate::lifecycle) fn allocate_open_attempt(
+    fn allocate_open_attempt(
         &self,
         access: &mut LifecycleAccess<'_, A>,
     ) -> crate::XllResult<OpenAttemptId> {
         self.next_lifecycle_attempt_id(access)
     }
 
-    pub(in crate::lifecycle) fn begin_opening(
-        &self,
-        access: &mut LifecycleAccess<'_, A>,
-        attempt: OpenAttemptId,
-    ) {
+    fn begin_opening(&self, access: &mut LifecycleAccess<'_, A>, attempt: OpenAttemptId) {
         require_lifecycle_invariant(
             access.phase() == LifecyclePhase::Closed,
             "opening requires the closed lifecycle phase",
@@ -2010,7 +2012,7 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
 
     /// Requests closing while moving the active generation payload under the
     /// closing phase. No payload remains in a separate core field.
-    pub(in crate::lifecycle) fn request_closing(&self, core: &mut LifecycleAccess<'_, A>) {
+    fn request_closing(&self, core: &mut LifecycleAccess<'_, A>) {
         core.transition(|core| {
             let state = mem::replace(&mut core.state, LifecycleState::Closed(ClosedState::Idle));
             let next = match state {
@@ -2052,14 +2054,11 @@ impl<A: crate::Addin> LifecycleCoordinator<A> {
         });
     }
 
-    pub(in crate::lifecycle) fn begin_removal_request(&self, core: &mut LifecycleAccess<'_, A>) {
+    fn begin_removal_request(&self, core: &mut LifecycleAccess<'_, A>) {
         self.advance_removal_epoch(core);
     }
 
-    pub(in crate::lifecycle) fn claim_removal(
-        &self,
-        core: &mut LifecycleAccess<'_, A>,
-    ) -> Option<RemovalClaim> {
+    fn claim_removal(&self, core: &mut LifecycleAccess<'_, A>) -> Option<RemovalClaim> {
         core.transition(|core| {
             let state = mem::replace(&mut core.state, LifecycleState::Closed(ClosedState::Idle));
             let (claim, state) = match state {

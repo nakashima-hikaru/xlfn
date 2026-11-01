@@ -8,7 +8,7 @@ use crate::addin::Addin;
 use crate::generation::{OpenAttemptId, OpeningGeneration, RemovalAttemptId, RemovalEpoch};
 use crate::lifecycle::{
     FinalRemovalReady, HostLifecycleIntent, LifecycleAccess, LifecycleCoordinator,
-    OpenFailureDisposition, OpenRollbackReady, RemovalClaim,
+    OpenFailureDisposition, OpenRollbackReady,
 };
 use crate::module_runtime::{
     ModuleAuthority, ModuleCleanupAuthority, ModuleCleanupClaim, ModuleClosing,
@@ -66,26 +66,11 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
             .clear_certified_retirement(control, authorization)
     }
 
-    pub(crate) fn begin_open_state(
+    pub(crate) fn begin_open(
         &self,
-        control: &mut LifecycleAccess<'_, A>,
         expected_removal_epoch: RemovalEpoch,
-    ) -> XllResult<OpenAttemptId> {
-        if control.removal_epoch() != expected_removal_epoch.get()
-            || control.phase() != crate::lifecycle::LifecyclePhase::Closed
-            || control.open_attempt().is_some()
-            || control.removal_attempt().is_some()
-        {
-            return Err(XllError::Internal {
-                diagnostic_id: crate::diagnostics::id::DiagnosticId::OPEN_PHASE,
-            });
-        }
-        // Exhaustion must leave even the closed state's host intent intact.
-        // Allocation is the only fallible step before a started owner exists.
-        let attempt = self.coordinator.allocate_open_attempt(control)?;
-        self.coordinator.prepare_open(control);
-        self.coordinator.begin_opening(control, attempt);
-        Ok(attempt)
+    ) -> XllResult<super::OpenStart<'coordinator, A>> {
+        super::OpenStart::acquire(self.coordinator, expected_removal_epoch)
     }
 
     pub(crate) fn record_open_failure(
@@ -93,25 +78,6 @@ impl<'coordinator, A: Addin> LifecycleControl<'coordinator, A> {
         control: &mut LifecycleAccess<'_, A>,
     ) -> OpenFailureDisposition {
         self.coordinator.record_open_failure(control)
-    }
-
-    pub(crate) fn begin_removal_request(&self, control: &mut LifecycleAccess<'_, A>) {
-        self.coordinator.begin_removal_request(control);
-    }
-
-    pub(crate) fn request_closing(&self, control: &mut LifecycleAccess<'_, A>) {
-        self.coordinator.request_closing(control);
-    }
-
-    pub(crate) fn claim_removal(
-        &self,
-        control: &mut LifecycleAccess<'_, A>,
-    ) -> Option<RemovalClaim> {
-        self.coordinator.claim_removal(control)
-    }
-
-    pub(crate) fn wait(&self, control: &mut LifecycleAccess<'_, A>) {
-        self.coordinator.wait(control);
     }
 
     pub(crate) fn notify_all(&self) {

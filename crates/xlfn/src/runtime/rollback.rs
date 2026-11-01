@@ -106,19 +106,14 @@ fn rollback_open_inner<'runtime, A: Addin>(
     let _diagnostic_test_guard = crate::diagnostics::DIAGNOSTIC_TEST_MUTEX.lock();
     let rollback_attempt = match runtime.acquire_open_rollback() {
         crate::runtime::orchestration::OpenRollbackAcquisition::Acquired(attempt) => attempt,
-        crate::runtime::orchestration::OpenRollbackAcquisition::ClosingOwnsCleanup => {
-            let finalized = runtime.phase() == crate::lifecycle::LifecyclePhase::Closed
-                && runtime.lifecycle.access().removal_attempt().is_none()
-                && runtime.host.generation_callbacks_detached()
-                && !runtime.host.registration_state_unknown()
-                && runtime.residency.callbacks_retained_safely()
-                && crate::excel_rtd_protocol::logical_quiescence_certified();
+        crate::runtime::orchestration::OpenRollbackAcquisition::AlreadyFinalized => {
             return OpenRollbackOutcome {
-                status: if finalized {
-                    OpenRollbackStatus::Finalized
-                } else {
-                    OpenRollbackStatus::ClosingOwnsCleanup
-                },
+                status: OpenRollbackStatus::Finalized,
+            };
+        }
+        crate::runtime::orchestration::OpenRollbackAcquisition::ClosingOwnsCleanup => {
+            return OpenRollbackOutcome {
+                status: OpenRollbackStatus::ClosingOwnsCleanup,
             };
         }
         crate::runtime::orchestration::OpenRollbackAcquisition::Unavailable => {

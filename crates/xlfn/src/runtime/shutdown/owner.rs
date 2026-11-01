@@ -1,7 +1,6 @@
 use super::{FinalRemoval, OpenRollback};
-use crate::XllError;
 use crate::generation::RemovalAttemptId;
-use crate::lifecycle::{LifecycleControl, LifecyclePhase};
+use crate::lifecycle::{FinalCloseDecision, IssuedRemovalClaim, RollbackDecision};
 use crate::module_runtime::{ModuleCleanupAuthority, ModuleClosing};
 use crate::runtime::capabilities::ShutdownDeps;
 use crate::runtime::orchestration::OpenRollbackAcquisition;
@@ -44,19 +43,23 @@ impl<A: crate::Addin> Drop for RemovalClaimGuard<'_, A> {
 }
 
 impl<'runtime, A: crate::Addin, K> RemovalOwner<'runtime, A, K> {
-    fn new(deps: ShutdownDeps<'runtime, A>, claim: crate::lifecycle::RemovalClaim) -> Self {
+    fn new(
+        deps: ShutdownDeps<'runtime, A>,
+        claim: IssuedRemovalClaim<'runtime, A, K>,
+    ) -> Result<Self, IssuedRemovalClaim<'runtime, A, K>> {
+        let (attempt, closing) = claim.into_parts(deps.lifecycle())?;
         let guard = RemovalClaimGuard {
             lifecycle: deps.lifecycle(),
             observer: deps.observer(),
-            attempt: claim.attempt(),
+            attempt,
             returned: None,
             finalization_failed: false,
         };
-        Self {
+        Ok(Self {
             deps,
-            state: Some((guard, claim.into_module_closing())),
+            state: Some((guard, closing)),
             _kind: std::marker::PhantomData,
-        }
+        })
     }
 
     pub(super) fn into_parts(
@@ -110,70 +113,43 @@ impl<A: crate::Addin> RemovalClaimGuard<'_, A> {
 
 impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A, FinalRemoval> {
     pub(in crate::runtime) fn acquire_final(deps: ShutdownDeps<'runtime, A>) -> Option<Self> {
-        let lifecycle = LifecycleControl::new(deps.lifecycle());
-        let mut wait_guard = lifecycle.access();
-        lifecycle.begin_removal_request(&mut wait_guard);
+        let mut wait_guard = deps.lifecycle().access();
+        wait_guard.begin_final_removal_request();
         deps.returns().close_admission();
         let mut request_recorded = false;
 
-        'retry: loop {
-            let decision = 'decision: {
-                match wait_guard.phase() {
-                    LifecyclePhase::Closed => {
-                        if wait_guard.removal_attempt().is_none()
-                            && deps.returns().returns_are_quiescent()
-                        {
-                            deps.observer().request_final_close(&mut request_recorded);
-                            break 'decision Some(());
-                        }
-                        if wait_guard.removal_attempt().is_none() {
-                            drop(wait_guard);
-                            deps.returns().wait_for_returns();
-                            wait_guard = lifecycle.access();
-                            continue 'retry;
-                        }
+        loop {
+            match wait_guard.final_close_decision() {
+                FinalCloseDecision::ClosedIdle => {
+                    if deps.returns().returns_are_quiescent() {
+                        deps.observer().request_final_close(&mut request_recorded);
+                        return None;
                     }
-                    LifecyclePhase::Closing => {}
-                    LifecyclePhase::Opening
-                    | LifecyclePhase::Open
-                    | LifecyclePhase::OpenRollbackPending => {
-                        lifecycle.request_closing(&mut wait_guard);
-                    }
-                    LifecyclePhase::Quarantined => break 'decision Some(()),
+                    drop(wait_guard);
+                    deps.returns().wait_for_returns();
+                    wait_guard = deps.lifecycle().access();
+                    continue;
                 }
-
-                if !request_recorded {
-                    if !matches!(
-                        wait_guard.phase(),
-                        LifecyclePhase::Closed | LifecyclePhase::Closing
-                    ) {
-                        crate::boundary::fail_stop_invariant(
-                            "xlAutoRemove close-request postcondition",
-                            &XllError::Internal {
-                                diagnostic_id: crate::diagnostics::id::DiagnosticId::CLOSE_WAIT,
-                            },
-                        );
-                    }
+                FinalCloseDecision::Quarantined => return None,
+                FinalCloseDecision::Wait => {
                     deps.observer().request_final_close(&mut request_recorded);
                 }
-
-                if wait_guard.phase() != LifecyclePhase::Closed
-                    && wait_guard.open_attempt().is_none()
-                    && let Some(claim) = lifecycle.claim_removal(&mut wait_guard)
-                {
-                    let owner = Self::new(deps, claim);
-                    drop(wait_guard);
-                    deps.observer().acquire_final_close_owner();
-                    return Some(owner);
-                } else {
-                    None
+                FinalCloseDecision::Closing(closing) => {
+                    // Identity is checked before the observer records anything.
+                    if !closing.belongs_to(deps.lifecycle()) {
+                        xlfn_kernel::invariant::fail_stop();
+                    }
+                    deps.observer().request_final_close(&mut request_recorded);
+                    if let Some(claim) = closing.try_claim() {
+                        let owner = Self::new(deps, claim)
+                            .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+                        drop(wait_guard);
+                        deps.observer().acquire_final_close_owner();
+                        return Some(owner);
+                    }
                 }
-            };
-
-            match decision {
-                Some(()) => return None,
-                None => lifecycle.wait(&mut wait_guard),
             }
+            wait_guard.wait_for_change();
         }
     }
 }
@@ -182,25 +158,38 @@ impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A, OpenRollback> {
     pub(in crate::runtime) fn acquire_rollback(
         deps: ShutdownDeps<'runtime, A>,
     ) -> OpenRollbackAcquisition<Self> {
-        let lifecycle = LifecycleControl::new(deps.lifecycle());
-        let mut wait_guard = lifecycle.access();
+        let mut wait_guard = deps.lifecycle().access();
         loop {
-            match wait_guard.phase() {
-                LifecyclePhase::Closed | LifecyclePhase::Closing => {
+            match wait_guard.rollback_decision() {
+                RollbackDecision::ClosedIdle => {
+                    // These are read-side checks, not callbacks. Keep the
+                    // canonical lock until this one result is classified.
+                    let finalized = deps.host().generation_callbacks_detached()
+                        && !deps.host().registration_state_unknown()
+                        && deps.residency().callbacks_retained_safely()
+                        && crate::excel_rtd_protocol::logical_quiescence_certified();
+                    return if finalized {
+                        OpenRollbackAcquisition::AlreadyFinalized
+                    } else {
+                        OpenRollbackAcquisition::ClosingOwnsCleanup
+                    };
+                }
+                RollbackDecision::ClosingOwnsCleanup => {
                     return OpenRollbackAcquisition::ClosingOwnsCleanup;
                 }
-                LifecyclePhase::OpenRollbackPending => {}
-                LifecyclePhase::Opening | LifecyclePhase::Open | LifecyclePhase::Quarantined => {
+                RollbackDecision::Unavailable => {
                     return OpenRollbackAcquisition::Unavailable;
                 }
+                RollbackDecision::Wait => {}
+                RollbackDecision::Claim(claim) => {
+                    let owner = Self::new(deps, claim)
+                        .unwrap_or_else(|_| xlfn_kernel::invariant::fail_stop());
+                    drop(wait_guard);
+                    deps.observer().acquire_open_rollback_owner();
+                    return OpenRollbackAcquisition::Acquired(owner);
+                }
             }
-            if let Some(claim) = lifecycle.claim_removal(&mut wait_guard) {
-                let owner = Self::new(deps, claim);
-                drop(wait_guard);
-                deps.observer().acquire_open_rollback_owner();
-                return OpenRollbackAcquisition::Acquired(owner);
-            }
-            lifecycle.wait(&mut wait_guard);
+            wait_guard.wait_for_change();
         }
     }
 }
@@ -208,6 +197,7 @@ impl<'runtime, A: crate::Addin> RemovalOwner<'runtime, A, OpenRollback> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lifecycle::LifecyclePhase;
     use crate::runtime::Runtime;
 
     fn assert_drop_returns_to_issuer<K>(
@@ -289,5 +279,64 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn reject_foreign_issuer<'a, K>(
+        runtime: &'a Runtime<()>,
+        other: &'a Runtime<()>,
+        claim: IssuedRemovalClaim<'a, (), K>,
+    ) -> IssuedRemovalClaim<'a, (), K> {
+        let own_trace = runtime.composition_trace_json();
+        let other_trace = other.composition_trace_json();
+        let own_attempt = runtime.lifecycle.access().removal_attempt();
+        let Err(claim) = RemovalOwner::<(), K>::new(other.shutdown_deps(), claim) else {
+            panic!("a foreign issuer must not acquire this claim");
+        };
+        assert_eq!(runtime.composition_trace_json(), own_trace);
+        assert_eq!(other.composition_trace_json(), other_trace);
+        assert_eq!(runtime.lifecycle.access().removal_attempt(), own_attempt);
+        assert!(other.lifecycle.access().removal_attempt().is_none());
+        claim
+    }
+
+    #[test]
+    fn foreign_issuer_rejection_retains_each_purpose_for_its_original_owner() {
+        let runtime = Runtime::<()>::new();
+        let other = Runtime::<()>::new();
+        let opening = runtime.begin_open().unwrap();
+        let mut opening = runtime.publish(opening, (), ());
+        runtime.finish_open(&mut opening, Vec::new()).unwrap();
+        let mut access = runtime.lifecycle.access();
+        access.begin_final_removal_request();
+        runtime.shutdown_deps().returns().close_admission();
+        let FinalCloseDecision::Closing(closing) = access.final_close_decision() else {
+            panic!("opened runtime must enter canonical closing");
+        };
+        assert!(closing.belongs_to(&runtime.lifecycle));
+        assert!(!closing.belongs_to(&other.lifecycle));
+        runtime.observer().request_final_close(&mut false);
+        let claim = closing.try_claim().unwrap();
+        drop(access);
+        let claim = reject_foreign_issuer(&runtime, &other, claim);
+        let owner = RemovalOwner::new(runtime.shutdown_deps(), claim)
+            .unwrap_or_else(|_| panic!("original issuer rejected its own final claim"));
+        runtime.observer().acquire_final_close_owner();
+        assert_drop_returns_to_issuer(&runtime, &other, owner);
+        drop(opening);
+        drop(runtime);
+
+        let rollback_runtime = Runtime::<()>::new();
+        let opening = rollback_runtime.begin_open().unwrap();
+        assert!(opening.fail_for_test().requires_rollback());
+        let mut access = rollback_runtime.lifecycle.access();
+        let RollbackDecision::Claim(claim) = access.rollback_decision() else {
+            panic!("failed opening must issue a rollback claim");
+        };
+        drop(access);
+        let claim = reject_foreign_issuer(&rollback_runtime, &other, claim);
+        let owner = RemovalOwner::new(rollback_runtime.shutdown_deps(), claim)
+            .unwrap_or_else(|_| panic!("original issuer rejected its own rollback claim"));
+        rollback_runtime.observer().acquire_open_rollback_owner();
+        assert_drop_returns_to_issuer(&rollback_runtime, &other, owner);
     }
 }
